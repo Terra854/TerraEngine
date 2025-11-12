@@ -6,3 +6,4 @@ Object::Object(entt::registry& registry)
     id = this->registry->create();
 }
 
+

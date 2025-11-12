@@ -28,3 +28,4 @@ private:
     std::unordered_map<Object, std::string> objectMap;
     entt::registry registry;
 };
+

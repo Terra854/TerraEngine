@@ -74,17 +74,17 @@ void ThreadPool::workerThread(int threadNum)
 	std::cout << "Worker thread no. " << threadNum << " initialized and running." << std::endl;
 	std::function<void()> task;
 	while (true) {
-		{
-			std::unique_lock<std::mutex> lock(this->queue_mutex);
-			this->condition.wait(lock,
-				[this] { return this->stop || !this->tasks.empty(); });
-			if (this->stop && this->tasks.empty()) {
-				std::cout << "Worker thread no. " << threadNum << " shutting down." << std::endl;
-				return;
-			}
-			task = std::move(this->tasks.front());
-			this->tasks.pop();
-		}
-		task();
-	}
+                {
+                        std::unique_lock<std::mutex> lock(this->queue_mutex);
+                        this->condition.wait(lock,
+                                [this] { return this->stop || !this->tasks.empty(); });
+                        if (this->stop && this->tasks.empty()) {
+                                std::cout << "Worker thread no. " << threadNum << " shutting down." << std::endl;
+                                return;
+                        }
+                        task = std::move(this->tasks.front());
+                        this->tasks.pop();
+                }
+                task();
+        }
 }
