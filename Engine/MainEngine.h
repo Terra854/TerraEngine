@@ -1,7 +1,11 @@
 #pragma once
 #include <iostream>
+#include <memory>
 #include <vector>
-#include <windows.h>
+
+#ifdef _WIN32
+#    include <windows.h>
+#endif
 
 #include "SystemBase.h"
 #include "ObjectManager.h"

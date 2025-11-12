@@ -1,8 +1,11 @@
 #pragma once
+
+#include <string>
+
 class SystemsBase {
 public:
-	SystemsBase() {};
-	virtual ~SystemsBase() = default;
+        SystemsBase() {};
+        virtual ~SystemsBase() = default;
 
 	// System Initialization
 	virtual void Initialize() = 0;

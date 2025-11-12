@@ -1,6 +1,8 @@
 #include "Object.h"
 
 Object::Object(entt::registry& registry)
+    : registry(&registry)
 {
-    id = registry.create();
+    id = this->registry->create();
 }
+
