@@ -2,6 +2,10 @@
 
 #include <entt/entt.hpp>
 
+#ifdef _MSC_VER
+#    include <crtdbg.h>
+#endif
+
 //#include <windows.h>
 #include "MainEngine.h"
 
@@ -17,7 +21,7 @@ int main(int argc, char *argv[])
     freopen_s((FILE**)stdin, "CONIN$", "r", stdin);
     */
 
-#if defined(DEBUG) | defined(_DEBUG)
+#if defined(_MSC_VER) && (defined(DEBUG) || defined(_DEBUG))
 
     // Enable run-time memory check for debug builds.
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);

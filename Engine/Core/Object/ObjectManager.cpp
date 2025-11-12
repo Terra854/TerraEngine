@@ -20,3 +20,4 @@ void ObjectManager::removeObject(Object obj) {
     // Erase the object from the map
     objectMap.erase(obj);
 }
+

@@ -5,11 +5,11 @@
 
 class Transform : public Component {
 public:
-	Transform() : x(0), y(0), z(0), rotationX(0), rotationY(0), rotationZ(0), scaleX(1), scaleY(1), scaleZ(1) {}
-	// Placeholders for now, will replace with actual stuff later
-	float x, y, z;
-	float rotationX, rotationY, rotationZ;
-	float scaleX, scaleY, scaleZ;
+        Transform() : x(0), y(0), z(0), rotationX(0), rotationY(0), rotationZ(0), scaleX(1), scaleY(1), scaleZ(1) {}
+        // Placeholders for now, will replace with actual stuff later
+        float x, y, z;
+        float rotationX, rotationY, rotationZ;
+        float scaleX, scaleY, scaleZ;
 };
 
 /* Can't compile for some reason */

@@ -1,11 +1,15 @@
 #pragma once
 #include <iostream>
+#include <memory>
 #include <vector>
-#include <windows.h>
+
+#ifdef _WIN32
+#    include <windows.h>
+#endif
 
 #include "SystemBase.h"
-#include "ObjectManager.h"
-#include "ThreadPool.h"
+#include "Object/ObjectManager.h"
+#include "ThreadPool/ThreadPool.h"
 
 class Engine {
 public:
@@ -23,3 +27,4 @@ private:
     ObjectManager& objManager = ObjectManager::instance();
     ThreadPool& pool = ThreadPool::instance();
 };
+

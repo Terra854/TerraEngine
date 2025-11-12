@@ -1,7 +1,9 @@
 #pragma once
 #include <entt/entt.hpp>
-#include <unordered_map>
 #include <memory>
+#include <string>
+#include <unordered_map>
+
 #include "Object.h"
 
 class ObjectManager {
@@ -26,3 +28,4 @@ private:
     std::unordered_map<Object, std::string> objectMap;
     entt::registry registry;
 };
+

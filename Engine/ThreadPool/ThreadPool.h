@@ -1,14 +1,16 @@
 #pragma once
-#include <vector>
-#include <queue>
-#include <thread>
-#include <mutex>
+#include <atomic>
 #include <condition_variable>
 #include <functional>
-#include <memory>
-#include <atomic>
 #include <future>
 #include <iostream>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 class ThreadPool;
 
