@@ -32,7 +32,7 @@ void WindowSystem::Initialize()
     const wchar_t* className = L"TerraEngineWindow";
 
     WNDCLASSW wc{};
-    wc.lpfnWndProc = DefWindowProcW;
+    wc.lpfnWndProc = WindowProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = className;
 
@@ -59,7 +59,7 @@ void WindowSystem::Initialize()
         nullptr,
         nullptr,
         handle.instance,
-        nullptr);
+        this);
 
     if (!handle.window) {
         throw std::runtime_error("Failed to create window");
@@ -122,8 +122,8 @@ void WindowSystem::Update()
 
 #ifdef _WIN32
     MSG msg{};
-    while (PeekMessageW(&msg, handle.window, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT || msg.message == WM_CLOSE) {
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_QUIT) {
             shouldClose = true;
         }
         TranslateMessage(&msg);
@@ -174,4 +174,38 @@ void WindowSystem::shutdown()
     initialized = false;
     shouldClose = false;
 }
+
+#ifdef _WIN32
+LRESULT CALLBACK WindowSystem::WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    WindowSystem* windowSystem = nullptr;
+
+    if (msg == WM_NCCREATE) {
+        auto* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        windowSystem = static_cast<WindowSystem*>(createStruct->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(windowSystem));
+        windowSystem->handle.window = hwnd;
+        return TRUE;
+    }
+
+    windowSystem = reinterpret_cast<WindowSystem*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    if (windowSystem) {
+        switch (msg) {
+        case WM_CLOSE:
+            windowSystem->shouldClose = true;
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_DESTROY:
+            windowSystem->handle.window = nullptr;
+            PostQuitMessage(0);
+            return 0;
+        default:
+            break;
+        }
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+#endif
 

@@ -51,6 +51,8 @@ private:
 
 #ifndef _WIN32
     unsigned long deleteMessageAtom = 0;
+#else
+    static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 #endif
 };
 
