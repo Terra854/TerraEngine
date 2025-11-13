@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.22.1)
 project(TerraEngine LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -32,11 +32,49 @@ add_executable(TerraEngine-Engine
 target_include_directories(TerraEngine-Engine
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Engine
-        ${CMAKE_CURRENT_SOURCE_DIR}/External
+        ${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/External/glm
 )
+
+set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
+
+# --- RTTR --------------------------------------------------------------------
+set(BUILD_RTTR_DYNAMIC ON CACHE BOOL "Build RTTR as a shared library" FORCE)
+set(BUILD_STATIC OFF CACHE BOOL "Disable RTTR static library" FORCE)
+set(BUILD_UNIT_TESTS OFF CACHE BOOL "Disable RTTR unit tests" FORCE)
+set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable RTTR benchmarks" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "Disable RTTR examples" FORCE)
+set(BUILD_DOCUMENTATION OFF CACHE BOOL "Disable RTTR documentation" FORCE)
+set(BUILD_INSTALLER OFF CACHE BOOL "Disable RTTR installer" FORCE)
+set(BUILD_PACKAGE OFF CACHE BOOL "Disable RTTR package builder" FORCE)
+
+add_subdirectory(External/rttr)
+
+# --- GLFW --------------------------------------------------------------------
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "Disable GLFW docs" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "Disable GLFW examples" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "Disable GLFW tests" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "Disable GLFW install target" FORCE)
+set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "Disable GLFW Wayland backend" FORCE)
+set(GLFW_BUILD_X11 OFF CACHE BOOL "Disable GLFW X11 backend" FORCE)
+
+add_subdirectory(External/glfw)
+
+# --- Vulkan Headers ----------------------------------------------------------
+set(VULKAN_HEADERS_ENABLE_TESTS OFF CACHE BOOL "Disable Vulkan-Headers tests" FORCE)
+set(VULKAN_HEADERS_ENABLE_INSTALL OFF CACHE BOOL "Disable Vulkan-Headers install target" FORCE)
+set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "Disable Vulkan C++20 module" FORCE)
+
+add_subdirectory(External/Vulkan-Headers)
 
 find_package(Threads REQUIRED)
 
-target_link_libraries(TerraEngine-Engine PRIVATE Threads::Threads)
+target_link_libraries(TerraEngine-Engine
+    PRIVATE
+        Threads::Threads
+        RTTR::Core
+        glfw
+        Vulkan::Headers
+)
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
