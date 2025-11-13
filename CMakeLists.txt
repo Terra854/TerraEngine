@@ -29,6 +29,8 @@ set(ENGINE_HEADERS
     Engine/Rendering/RHI/RHICommon.h
     Engine/Rendering/RHI/Vulkan/VulkanRHI.h
     Engine/Rendering/RendererSystem.h
+    Engine/Rendering/Shaders/Generated/MeshCubeFrag.h
+    Engine/Rendering/Shaders/Generated/MeshCubeMesh.h
     Engine/ThreadPool/ThreadPool.h
     Engine/Debug.h
 )

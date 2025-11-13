@@ -20,12 +20,16 @@ public:
     std::string SystemName() override { return "RendererSystem"; }
 
 private:
+    void CreatePipelines();
     void SubmitFrameWork();
 
     WindowSystem& windowSystem;
     ThreadPool& pool;
 
     std::unique_ptr<RHI::Device> device;
+    RHI::MeshPipelineHandle meshPipeline = 0;
     bool initialized = false;
+
+    float rotationAngle = 0.0f;
 };
 

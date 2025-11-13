@@ -11,6 +11,9 @@
 #    include <windowsx.h>
 #endif
 
+WindowSystem::WindowSystem()
+    : WindowSystem(Description{}) {}
+
 WindowSystem::WindowSystem(const Description& description)
     : description(description) {}
 

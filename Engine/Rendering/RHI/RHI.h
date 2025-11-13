@@ -11,6 +11,10 @@ class Device
 public:
     virtual ~Device() = default;
 
+    virtual MeshPipelineHandle CreateMeshPipeline(const MeshPipelineDesc& desc) = 0;
+    virtual void DestroyMeshPipeline(MeshPipelineHandle handle) = 0;
+
+    virtual bool BeginFrame() = 0;
     virtual void SubmitMeshTask(const MeshTaskDesc& desc) = 0;
     virtual void SubmitComputeTask(const ComputeTaskDesc& desc) = 0;
     virtual void Present() = 0;

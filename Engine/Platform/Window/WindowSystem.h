@@ -27,7 +27,8 @@ public:
         std::uint32_t height = 720;
     };
 
-    explicit WindowSystem(const Description& description = Description());
+    WindowSystem();
+    explicit WindowSystem(const Description& description);
     ~WindowSystem() override;
 
     void Initialize() override;
