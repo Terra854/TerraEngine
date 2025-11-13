@@ -8,8 +8,10 @@
 #endif
 
 #include "SystemBase.h"
-#include "Object/ObjectManager.h"
 #include "ThreadPool/ThreadPool.h"
+
+class WindowSystem;
+class RendererSystem;
 
 class Engine {
 public:
@@ -24,7 +26,9 @@ private:
     bool running = true;
     std::vector<std::unique_ptr<SystemsBase>> systems;
 
-    ObjectManager& objManager = ObjectManager::instance();
     ThreadPool& pool = ThreadPool::instance();
+
+    WindowSystem* windowSystem = nullptr;
+    RendererSystem* rendererSystem = nullptr;
 };
 
