@@ -1,0 +1,40 @@
+include(BundleUtilities)
+set(BU_COPY_FULL_DIR_MODE ON)
+
+set(_target_file "@TARGET_FILE@")
+set(_target_dir "@TARGET_DIR@")
+set(_install_destination "@INSTALL_DESTINATION@")
+if(IS_ABSOLUTE "${_install_destination}")
+    set(_install_destination "$ENV{DESTDIR}${_install_destination}")
+else()
+    set(_install_destination "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/${_install_destination}")
+endif()
+
+file(GET_RUNTIME_DEPENDENCIES
+    RESOLVED_DEPENDENCIES_VAR _resolved_deps
+    UNRESOLVED_DEPENDENCIES_VAR _unresolved_deps
+    EXECUTABLES "${_target_file}"
+    DIRECTORIES "${_target_dir}"
+)
+
+foreach(_dep IN LISTS _resolved_deps)
+    if(_dep MATCHES [[(^|[/\\])Windows[/\\](System32|SysWOW64)[/\\]]])
+        continue()
+    endif()
+    if(_dep MATCHES [[^/usr/(lib|lib64|lib/x86_64-linux-gnu)/]])
+        continue()
+    endif()
+    if(_dep MATCHES [[^/lib(32|64)?/]])
+        continue()
+    endif()
+
+    file(INSTALL
+        DESTINATION "${_install_destination}"
+        TYPE FILE
+        FILES "${_dep}"
+    )
+endforeach()
+
+if(_unresolved_deps)
+    message(WARNING "Unresolved TerraEngine-Engine runtime dependencies: ${_unresolved_deps}")
+endif()

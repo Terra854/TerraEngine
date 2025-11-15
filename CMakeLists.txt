@@ -81,7 +81,27 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine"
 
 set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR})
 
+set(_engine_runtime_deps_script
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/install_TerraEngine-Engine_deps-$<CONFIG>.cmake"
+)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/cmake")
+
+set(TARGET_FILE "$<TARGET_FILE:TerraEngine-Engine>")
+set(TARGET_DIR "$<TARGET_FILE_DIR:TerraEngine-Engine>")
+set(INSTALL_DESTINATION "${ENGINE_INSTALL_DESTINATION}")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallRuntimeDependencies.cmake.in" _runtime_deps_template)
+string(CONFIGURE "${_runtime_deps_template}" _runtime_deps_script_content @ONLY)
+unset(TARGET_FILE)
+unset(TARGET_DIR)
+unset(INSTALL_DESTINATION)
+
+file(GENERATE
+    OUTPUT "${_engine_runtime_deps_script}"
+    CONTENT "${_runtime_deps_script_content}"
+)
+
 install(TARGETS TerraEngine-Engine
     RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
     BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
 )
+install(SCRIPT "${_engine_runtime_deps_script}")
