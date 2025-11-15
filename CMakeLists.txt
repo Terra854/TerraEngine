@@ -57,6 +57,8 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "Disable GLFW tests" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "Disable GLFW install target" FORCE)
 set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "Disable GLFW Wayland backend" FORCE)
 set(GLFW_BUILD_X11 OFF CACHE BOOL "Disable GLFW X11 backend" FORCE)
+set(GLFW_BUILD_SHARED_LIBS ON CACHE BOOL "Build GLFW as a shared library" FORCE)
+set(GLFW_BUILD_DLL ON CACHE BOOL "Enable GLFW DLL export" FORCE)
 
 add_subdirectory(External/glfw)
 
@@ -75,6 +77,12 @@ target_link_libraries(TerraEngine-Engine
         RTTR::Core
         glfw
         Vulkan::Headers
+)
+
+target_compile_definitions(TerraEngine-Engine
+    PRIVATE
+        RTTR_DLL
+        GLFW_DLL
 )
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
