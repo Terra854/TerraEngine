@@ -18,13 +18,13 @@ file(GET_RUNTIME_DEPENDENCIES
 )
 
 foreach(_dep IN LISTS _resolved_deps)
-    if(_dep MATCHES [[(^|[/\\])Windows[/\\](System32|SysWOW64)[/\\]]])
+    if(_dep MATCHES "(^|[/\\])Windows[/\\](System32|SysWOW64)[/\\]")
         continue()
     endif()
-    if(_dep MATCHES [[^/usr/(lib|lib64|lib/x86_64-linux-gnu)/]])
+    if(_dep MATCHES "^/usr/(lib|lib64|lib/x86_64-linux-gnu)/")
         continue()
     endif()
-    if(_dep MATCHES [[^/lib(32|64)?/]])
+    if(_dep MATCHES "^/lib(32|64)?/")
         continue()
     endif()
 
