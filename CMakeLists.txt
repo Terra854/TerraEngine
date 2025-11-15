@@ -81,13 +81,31 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine"
 
 set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR})
 
+set(ENGINE_HAS_RUNTIME_DEPENDENCY_SET OFF)
 if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.21")
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} --help-command install
+        OUTPUT_VARIABLE _terraengine_install_help
+        RESULT_VARIABLE _terraengine_install_help_result
+        ERROR_QUIET
+    )
+
+    if(_terraengine_install_help_result EQUAL 0 AND
+       _terraengine_install_help MATCHES "RUNTIME_DEPENDENCY_SET")
+        set(ENGINE_HAS_RUNTIME_DEPENDENCY_SET ON)
+    endif()
+
+    unset(_terraengine_install_help)
+    unset(_terraengine_install_help_result)
+endif()
+
+if(ENGINE_HAS_RUNTIME_DEPENDENCY_SET)
     set(ENGINE_RUNTIME_DEPENDENCIES_SET TerraEngineEngineRuntimeDeps)
 
     install(TARGETS TerraEngine-Engine
+        RUNTIME_DEPENDENCY_SET ${ENGINE_RUNTIME_DEPENDENCIES_SET}
         RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
         BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
-        RUNTIME_DEPENDENCY_SET ${ENGINE_RUNTIME_DEPENDENCIES_SET}
     )
 
     install(RUNTIME_DEPENDENCY_SET ${ENGINE_RUNTIME_DEPENDENCIES_SET}
