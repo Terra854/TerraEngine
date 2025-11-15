@@ -79,27 +79,9 @@ target_link_libraries(TerraEngine-Engine
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
 
-set(ENGINE_RUNTIME_DEPENDENCIES_SET TerraEngineEngineRuntimeDeps)
 set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR})
 
 install(TARGETS TerraEngine-Engine
     RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
     BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
-    RUNTIME_DEPENDENCY_SET ${ENGINE_RUNTIME_DEPENDENCIES_SET}
-)
-
-install(RUNTIME_DEPENDENCY_SET ${ENGINE_RUNTIME_DEPENDENCIES_SET}
-    DESTINATION ${ENGINE_INSTALL_DESTINATION}
-    PRE_INCLUDE_REGEXES "^.*$"
-    POST_EXCLUDE_REGEXES
-        "^api-ms-win-.*$"
-        "^ext-ms-.*$"
-        ".*/System32/.*"
-        ".*/system32/.*"
-        ".*/Windows/.*"
-        "^/System/.*"
-        "^/usr/lib/.*"
-        "^/usr/lib64/.*"
-        "^/lib/.*"
-        "^/lib64/.*"
 )
