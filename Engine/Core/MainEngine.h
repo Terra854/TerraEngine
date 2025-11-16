@@ -4,6 +4,11 @@
 #include <vector>
 
 #ifdef _WIN32
+// Ensure Windows.h doesn't inject the legacy min/max macros that break RTTR's
+// std::numeric_limits usage when building the engine on MSVC.
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
 #    include <windows.h>
 #endif
 
