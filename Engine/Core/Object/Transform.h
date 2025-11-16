@@ -1,29 +1,35 @@
 #pragma once
 
 #include "Component.h"
-//#include <rttr/registration>
 
-class Transform : public Component {
+#include <glm/gtc/quaternion.hpp>
+#include <glm/vec3.hpp>
+
+#include <string_view>
+
+// Basic spatial component that exposes TRS data via glm math types.
+class Transform : public Component<Transform> {
 public:
-        Transform() : x(0), y(0), z(0), rotationX(0), rotationY(0), rotationZ(0), scaleX(1), scaleY(1), scaleZ(1) {}
-        // Placeholders for now, will replace with actual stuff later
-        float x, y, z;
-        float rotationX, rotationY, rotationZ;
-        float scaleX, scaleY, scaleZ;
+        static constexpr std::string_view kComponentName = "Transform";
+
+        Transform()
+            : position(0.0f, 0.0f, 0.0f)
+            , rotation(1.0f, 0.0f, 0.0f, 0.0f)
+            , scale(1.0f, 1.0f, 1.0f)
+        {
+        }
+
+        glm::vec3 position;
+        glm::quat rotation;
+        glm::vec3 scale;
+
+        static void reflect(rttr::registration::class_<Transform>& registration)
+        {
+                // Register every field so editor tooling can adjust TRS values
+                // through RTTR's reflection data.
+                registration.property("Position", &Transform::position)
+                        .property("Rotation", &Transform::rotation)
+                        .property("Scale", &Transform::scale);
+        }
 };
 
-/* Can't compile for some reason */
-/*
-RTTR_REGISTRATION {
-	rttr::registration::class_<Transform>("Transform")
-		.property("x", &Transform::x)
-		.property("y", &Transform::y)
-		.property("z", &Transform::z)
-		.property("rotationX", &Transform::rotationX)
-		.property("rotationY", &Transform::rotationY)
-		.property("rotationZ", &Transform::rotationZ)
-		.property("scaleX", &Transform::scaleX)
-		.property("scaleY", &Transform::scaleY)
-		.property("scaleZ", &Transform::scaleZ);
-}
-*/

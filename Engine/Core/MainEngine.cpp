@@ -79,9 +79,11 @@ void Engine::MainEngineLoop()
 
 	Transform* transform = obj1.getComponent<Transform>();
 
-	transform->x = 90.0f;
-	transform->y = 180.0f;
-	transform->z = 270.0f;
+    // Exercise the CRTP-backed Transform component by tweaking each field with
+    // glm math types so RTTR can observe the updates at runtime.
+    transform->position = glm::vec3(90.0f, 180.0f, 270.0f);
+    transform->rotation = glm::quat(0.9238795f, 0.0f, 0.3826834f, 0.0f);
+    transform->scale = glm::vec3(2.0f, 2.0f, 2.0f);
 
 	Transform* transform2 = obj1.getComponent<Transform>();
 
