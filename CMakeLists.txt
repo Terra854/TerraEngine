@@ -103,12 +103,14 @@ install(TARGETS TerraEngine-Engine
     BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
 )
 
-# Visual Studio defaults to launching executables from the build tree, but our
-# runtime DLLs are staged exclusively in the install tree. Point the VS debugger
-# to the install directory so running the target inside the IDE behaves the same
-# as invoking it from the install tree via CMake.
+# Visual Studio defaults to launching executables from (and with a working
+# directory inside) the build tree, but our runtime DLLs are staged exclusively
+# in the install tree. Override both the debugger command and the working
+# directory so running the target inside the IDE behaves the same as invoking it
+# from the install tree via CMake.
 set_target_properties(TerraEngine-Engine
     PROPERTIES
+        VS_DEBUGGER_COMMAND "${ENGINE_INSTALL_DESTINATION}/TerraEngine-Engine.exe"
         VS_DEBUGGER_WORKING_DIRECTORY "${ENGINE_INSTALL_DESTINATION}"
 )
 
