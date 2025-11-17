@@ -1,0 +1,81 @@
+#pragma once
+#include <iostream>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+#include <atomic>
+
+// Define the log severity levels.
+enum class LogLevel {
+    DEBUG,
+    INFO,
+    WARNING,
+    ERROR,
+    CRITICAL
+};
+
+// Structure for holding a log entry.
+struct LogEntry {
+    std::chrono::system_clock::time_point timestamp;
+    LogLevel level;
+    std::string file;
+    std::string message;
+};
+
+class Logger {
+public:
+    // Retrieve the singleton instance.
+    static Logger& Instance() {
+        static Logger instance;
+        return instance;
+    }
+
+    // Delete copy constructor and assignment operator.
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
+
+    // Thread-safe log function.
+    void Log(LogLevel level, const std::string& file, const std::string& message);
+
+    // Gracefully shutdown the logger thread.
+    void Shutdown();
+
+private:
+    Logger();
+    ~Logger();
+
+    // The worker thread function: waits for and processes log entries.
+    void ProcessEntries();
+
+    std::string LogLevelToString(LogLevel level);
+    std::string GetColorCode(LogLevel level);
+
+    std::string ExtractFileName(const std::string& filePath);
+
+    std::queue<LogEntry> q;
+    std::mutex m;
+    std::condition_variable cv;
+	std::thread t; // Seperate thread for logging outside of the main thread and threadpool
+    std::atomic<bool> done;
+};
+
+// Define a macro to pick the proper function signature macro depending on the compiler.
+#if defined(__GNUC__) || defined(__clang__)
+#define LOG_FUNCTION __PRETTY_FUNCTION__
+#elif defined(_MSC_VER)
+#define LOG_FUNCTION __FUNCSIG__
+#else
+#define LOG_FUNCTION __FUNCTION__
+#endif
+
+// Macro to simplify logging while capturing source file and line information.
+//#define TERRAENGINE_LOG(level, message) Logger::Instance().Log(level, __FILE__, __LINE__, message)
+#define TERRAENGINE_LOG(level, message) do {            \
+    std::ostringstream _terraengine_os;                 \
+    _terraengine_os << message;                         \
+    Logger::Instance().Log(level, LOG_FUNCTION, _terraengine_os.str());\
+} while(0)
