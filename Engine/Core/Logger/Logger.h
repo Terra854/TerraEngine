@@ -8,6 +8,7 @@
 #include <sstream>
 #include <iomanip>
 #include <atomic>
+#include <string>
 
 // Define the log severity levels.
 enum class LogLevel {
