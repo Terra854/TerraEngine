@@ -43,7 +43,7 @@ add_library(TerraEngine-Engine SHARED
 )
 
 target_include_directories(TerraEngine-Engine
-    PUBLIC
+	PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/Engine
         ${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
         ${CMAKE_CURRENT_SOURCE_DIR}/External/glm
@@ -85,18 +85,28 @@ add_subdirectory(External/Vulkan-Headers)
 find_package(Threads REQUIRED)
 
 target_link_libraries(TerraEngine-Engine
-    PUBLIC
-        Threads::Threads
-        RTTR::Core
-        glfw
-        Vulkan::Headers
+	PUBLIC
+		Threads::Threads
+		RTTR::Core
+		glfw
+		Vulkan::Headers
 )
 
 target_compile_definitions(TerraEngine-Engine
-    PRIVATE
-        RTTR_DLL
-        GLFW_DLL
+	PUBLIC
+		TERRAENGINE_SHARED
+	PRIVATE
+		RTTR_DLL
+		GLFW_DLL
+		TERRAENGINE_ENGINE_BUILD
 )
+
+if(WIN32)
+	# Ensure Windows generates an import library even if individual symbols are
+	# not manually decorated; this pairs with the TERRAENGINE_API macro so the
+	# launcher can link against the DLL reliably.
+	set_target_properties(TerraEngine-Engine PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
 
