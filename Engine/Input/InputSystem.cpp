@@ -21,11 +21,11 @@ void InputSystem::Configure(std::unique_ptr<IInputBackend> backendInstance)
 	initialized = false;
 	
 	for (auto& state : keyStates) {
-		state = KeyState::Released;
+		state = KeyState::Idle;
 	}
-	
+
 	for (auto& state : mouseButtonStates) {
-		state = KeyState::Released;
+		state = KeyState::Idle;
 	}
 	
 	scrollDelta = {0.0, 0.0};
@@ -107,16 +107,16 @@ KeyState InputSystem::GetKeyState(Key key) const
 {
 	const auto index = static_cast<std::size_t>(key);
 	if (index >= keyStates.size()) {
-		return KeyState::Released;
+		return KeyState::Idle;
 	}
-	
+
 	return keyStates[index];
 }
 
 bool InputSystem::IsKeyPressed(Key key) const
 {
 	const auto state = GetKeyState(key);
-	return state == KeyState::Pressed || state == KeyState::Repeat;
+	return state == KeyState::Pressed || state == KeyState::Held;
 }
 
 bool InputSystem::IsMouseButtonPressed(MouseButton button) const
@@ -127,7 +127,7 @@ bool InputSystem::IsMouseButtonPressed(MouseButton button) const
 	}
 	
 	const auto state = mouseButtonStates[index];
-	return state == KeyState::Pressed || state == KeyState::Repeat;
+	return state == KeyState::Pressed || state == KeyState::Held;
 }
 
 std::pair<double, double> InputSystem::GetCursorPosition() const

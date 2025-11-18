@@ -131,13 +131,15 @@ enum class Key {
 	Count
 };
 
-// Describes the possible state transitions for keys and mouse buttons. The
-// Repeat state allows callers to differentiate between a sustained press and a
-// fresh key down event.
+// Describes the possible state transitions for keys and mouse buttons. Idle is
+// the default state before an input is interacted with, while Held represents
+// a continued press (the previous Repeat state) so callers can distinguish
+// between a fresh key down event and a long hold.
 enum class KeyState {
-	Released = 0,
-	Pressed,
-	Repeat
+Idle = 0,
+Released,
+Pressed,
+Held
 };
 
 // Enumerates the available mouse buttons in a backend agnostic format. The

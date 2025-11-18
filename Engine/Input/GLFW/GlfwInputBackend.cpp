@@ -460,8 +460,8 @@ KeyState GlfwInputBackend::TranslateStateFromGlfw(int glfwAction)
 	switch (glfwAction) {
 		case GLFW_PRESS: return KeyState::Pressed;
 		case GLFW_RELEASE: return KeyState::Released;
-		case GLFW_REPEAT: return KeyState::Repeat;
-		default: return KeyState::Released;
+		case GLFW_REPEAT: return KeyState::Held;
+		default: return KeyState::Idle;
 	}
 }
 
