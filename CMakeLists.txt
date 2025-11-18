@@ -40,6 +40,7 @@ Engine/Input/InputBackend.h
 Engine/Input/InputCodes.h
 Engine/Input/InputSystem.h
 Engine/Input/GLFW/GlfwInputBackend.h
+Engine/Utilities/UUID.h
 Engine/Window/WindowBackend.h
 Engine/Window/WindowConfig.h
 Engine/Window/WindowSystem.h
