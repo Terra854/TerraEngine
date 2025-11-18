@@ -8,9 +8,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(ENGINE_SOURCES
     Engine/Core/Launch.cpp
     Engine/Core/MainEngine.cpp
+    Engine/Core/Timer.cpp
     Engine/Core/Logger/Logger.cpp
     Engine/Core/Object/Object.cpp
     Engine/Core/Object/ObjectManager.cpp
+    Engine/Window/GlfwWindowBackend.cpp
+    Engine/Window/WindowSystem.cpp
     Engine/ThreadPool/ThreadPool.cpp
 )
 
@@ -18,10 +21,15 @@ set(ENGINE_HEADERS
     Engine/Core/MainEngine.h
     Engine/Core/Logger/Logger.h
     Engine/Core/SystemBase.h
+    Engine/Core/Timer.h
     Engine/Core/Object/Component.h
     Engine/Core/Object/Object.h
     Engine/Core/Object/ObjectManager.h
     Engine/Core/Object/Transform.h
+    Engine/Window/GlfwWindowBackend.h
+    Engine/Window/WindowBackend.h
+    Engine/Window/WindowConfig.h
+    Engine/Window/WindowSystem.h
     Engine/ThreadPool/ThreadPool.h
     Engine/Debug.h
 )
