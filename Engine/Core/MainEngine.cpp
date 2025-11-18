@@ -1,193 +1,156 @@
 #include "MainEngine.h"
 #include "SystemBase.h"
-#include "Object/Transform.h"
 #include "Logger/Logger.h"
+#include "Timer.h"
+#include "Window/GlfwWindowBackend.h"
+#include "Window/WindowSystem.h"
 
+#include <algorithm>
 #include <chrono>
-#include <stdexcept>
+#include <thread>
 
 // Example system for testing
 class TestSystem : public SystemsBase {
 public:
-	void Initialize() override {
-		// Log system initialization so startup ordering is traceable.
-		TERRAENGINE_LOG(LogLevel::Info, "Test System initialized.");
-	}
+    void Initialize() override {
+        // Log system initialization so startup ordering is traceable.
+        TERRAENGINE_LOG(LogLevel::Info, "Test System initialized.");
+    }
 
-	void Update() override {
-		// Note when the system tick runs for visibility during the main loop.
-		TERRAENGINE_LOG(LogLevel::Debug, "Test System update.");
-	}
+    void Update() override {
+        // Note when the system tick runs for visibility during the main loop.
+        TERRAENGINE_LOG(LogLevel::Debug, "Test System update.");
+    }
 
-	void Shutdown() override {
-		// Signal that the test system cleaned up.
-		TERRAENGINE_LOG(LogLevel::Info, "Test System shutdown.");
-	}
+    void Shutdown() override {
+        // Signal that the test system cleaned up.
+        TERRAENGINE_LOG(LogLevel::Info, "Test System shutdown.");
+    }
 
-	std::string SystemName() override {
-		return "TestSystem";
-	}
+    std::string SystemName() override {
+        return "TestSystem";
+    }
 };
 
 void Engine::Run()
 {
-	Initialize();
+    Initialize();
 
-	MainEngineLoop();
-	
-	Shutdown();
+    MainEngineLoop();
+
+    Shutdown();
 }
 
 void Engine::SignalShutdown()
 {
-	running = false;
+    running = false;
 }
 
 void Engine::Initialize()
 {
-	pool.initialize();
-	systems.push_back(std::make_unique<TestSystem>());
+    pool.initialize();
 
-	for (auto& system : systems) {
-		system->Initialize();
-	}
+    // The window system is initialized first so other systems can depend on
+    // a valid window context if they need one later.
+    WindowConfig windowConfig{};
+    systems.push_back(std::make_unique<WindowSystem>(std::make_unique<GlfwWindowBackend>(), windowConfig, [this]() {
+        SignalShutdown();
+    }));
 
-	// Confirm engine initialization finished so later logs have a baseline.
-	TERRAENGINE_LOG(LogLevel::Info, "Setup complete!");
-}
+    // Additional systems can be appended after the window so they update in
+    // a predictable order.
+    systems.push_back(std::make_unique<TestSystem>());
 
-void simpleTask(int& counter) {
-	std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	counter++;
-}
+    for (auto& system : systems) {
+        system->Initialize();
+    }
 
-void exceptionTask() {
-	throw std::runtime_error("Intentional exception for testing");
-}
-
-void anotherTask(){
-	std::this_thread::sleep_for(std::chrono::milliseconds(300));
-	// Mark execution of a background task to prove asynchronous work runs.
-	TERRAENGINE_LOG(LogLevel::Debug, "Another task executed");
+    // Confirm engine initialization finished so later logs have a baseline.
+    TERRAENGINE_LOG(LogLevel::Info, "Setup complete!");
 }
 
 void Engine::MainEngineLoop()
 {
-	/*
-	while (running)
-	{
-		TERRAENGINE_LOG(LogLevel::Debug, "Engine loop!");
-	}
-	*/
+    // Legacy ad hoc demos are preserved for reference but disabled so the
+    // engine loop can focus on real system updates and shutdown handling.
+    /*
+    void simpleTask(int& counter) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        counter++;
+    }
 
-	Object obj1 = objManager.createObject("Object1");
-	obj1.addComponent<Transform>();
+    void exceptionTask() {
+        throw std::runtime_error("Intentional exception for testing");
+    }
 
-	Transform* transform = obj1.getComponent<Transform>();
+    void anotherTask(){
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        // Mark execution of a background task to prove asynchronous work runs.
+        TERRAENGINE_LOG(LogLevel::Debug, "Another task executed");
+    }
 
-	// Exercise the CRTP-backed Transform component by tweaking each field with
-	// glm math types so RTTR can observe the updates at runtime.
-	transform->position = glm::vec3(90.0f, 180.0f, 270.0f);
-	transform->rotation = glm::quat(0.9238795f, 0.0f, 0.3826834f, 0.0f);
-	transform->scale = glm::vec3(2.0f, 2.0f, 2.0f);
+    Object obj1 = objManager.createObject("Object1");
+    obj1.addComponent<Transform>();
 
-	Transform* transform2 = obj1.getComponent<Transform>();
+    Transform* transform = obj1.getComponent<Transform>();
 
-	obj1.removeComponent<Transform>();
+    // Exercise the CRTP-backed Transform component by tweaking each field with
+    // glm math types so RTTR can observe the updates at runtime.
+    transform->position = glm::vec3(90.0f, 180.0f, 270.0f);
+    transform->rotation = glm::quat(0.9238795f, 0.0f, 0.3826834f, 0.0f);
+    transform->scale = glm::vec3(2.0f, 2.0f, 2.0f);
 
-	objManager.removeObject(obj1);
+    Transform* transform2 = obj1.getComponent<Transform>();
 
-	Transform* transform3 = obj1.getComponent<Transform>();
+    obj1.removeComponent<Transform>();
 
-	
-	/* START TEST THREADPOOL */
+    objManager.removeObject(obj1);
 
-	// Create a task that takes parameters and returns a value
-	auto taskA = pool.createTask([](int a, int b) -> int {
-		// Track task execution and parameters to validate the thread pool dispatch order.
-		TERRAENGINE_LOG(LogLevel::Debug, "Task A executed with parameters: " << a << ", " << b);
-		return a + b;
-		}, 5, 10);
+    Transform* transform3 = obj1.getComponent<Transform>();
 
-	// Get the future by downcasting to the appropriate Task type
-	auto futureA = std::static_pointer_cast<Task<int>>(taskA)->getFuture();
+    // START TEST THREADPOOL
+    // ...
+    */
 
-	// Create taskB but defer the use of the result from taskA
-	auto taskB = pool.createTask([&futureA]() mutable {
-		int result = futureA.get(); // This will block only within the task, not before enqueuing
-		// Show that dependent task results propagate correctly.
-		TERRAENGINE_LOG(LogLevel::Debug, "Task B executed with result: " << result);
-		});
+    FrameTimer frameTimer;
 
-	auto taskC = pool.createTask(anotherTask);
+    while (running) {
+        const double deltaSeconds = frameTimer.Tick();
 
-	//taskB->addDependency(taskA);  // Task B depends on Task A
-	taskB->addDependency(taskC);  // Task B depends on Task C
-	taskB->addDependency(taskC);  // Task B depends on Task C
+        // Run each registered system. Systems can consult the engine's
+        // state or the delta time if they need it for frame dependent
+        // calculations.
+        for (auto& system : systems) {
+            system->Update();
+        }
 
-	pool.enqueue(taskB);  // Task B will execute after Task A and Task C complete
-	
-	// Do not enqueue taskB again, it will throw an exception as the future promise is already
-	// fufilled
+        // If a system requested shutdown (e.g., the window was closed),
+        // exit the loop after this iteration.
+        if (!running) {
+            break;
+        }
 
-	// Workaround is to clone and run the cloned task
-	auto cloned_task = taskB->clone();
-	pool.enqueue(cloned_task);
-
-	// Multiple tasks to increment a counter to 10
-	int counter = 0;
-	std::mutex counter_mutex;
-
-	// Schedule a simple task multiple times
-	std::vector<std::shared_ptr<ITask>> tasks;
-	for (int i = 0; i < 10; ++i) {
-		auto task = pool.createTask([&counter, &counter_mutex] {
-			std::lock_guard<std::mutex> lock(counter_mutex);
-			simpleTask(counter);
-			});
-		tasks.push_back(task);
-		pool.enqueue(task);  // Enqueue the task to be executed by the thread pool
-	}
-
-	// Test error handling
-	try {
-		auto errorTask = pool.createTask(exceptionTask);
-		pool.enqueue(errorTask);  // Enqueue the task
-		std::static_pointer_cast<Task<void>>(errorTask)->getFuture().get(); // This should throw an exception
-	}
-	catch (const std::exception& e) {
-		// Surface the intentional error so the test scenario is easy to observe.
-		TERRAENGINE_LOG(LogLevel::Error, "Caught exception: " << e.what());
-	}
-
-	// Wait for all tasks to complete
-	for (auto& task : tasks) {
-		std::static_pointer_cast<Task<void>>(task)->getFuture().get();
-	}
-
-	// Validate that all scheduled tasks executed by logging the final counter value.
-	TERRAENGINE_LOG(LogLevel::Info, "Counter value after all tasks: " << counter); // Expecting 10
-
-	// End Multiple Tasks
-
-	/* END TEST THREADPOOL */
-
-	for (auto& system : systems) {
-		system->Update();
-	}
+        // Simple pacing to avoid a busy loop when no systems perform a
+        // blocking wait. Sleep for a tiny duration based on the measured
+        // delta time to yield time slices back to the OS.
+        const auto sleepDuration = std::chrono::duration<double>(std::max(0.0, 0.001 - deltaSeconds));
+        if (sleepDuration.count() > 0.0) {
+            std::this_thread::sleep_for(sleepDuration);
+        }
+    }
 }
 
 void Engine::Shutdown()
 {
-	for (auto& system : systems) {
-		system->Shutdown();
-	}
+    for (auto& system : systems) {
+        system->Shutdown();
+    }
 
-	pool.Shutdown();
+    pool.shutdown();
 
-	// Notify that the engine shutdown path completed and logging can be stopped soon.
-	TERRAENGINE_LOG(LogLevel::Info, "Shutdown complete!");
+    // Notify that the engine shutdown path completed and logging can be stopped soon.
+    TERRAENGINE_LOG(LogLevel::Info, "Shutdown complete!");
 
-	// Stop the logger thread so queued messages flush before the application exits.
-	Logger::Instance().Shutdown();
+    // Stop the logger thread so queued messages flush before the application exits.
+    Logger::Instance().Shutdown();
 }
