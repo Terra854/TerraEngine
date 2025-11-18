@@ -5,6 +5,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(ProcessorCount)
+ProcessorCount(TERRAENGINE_CPU_COUNT)
+if(TERRAENGINE_CPU_COUNT GREATER 0 AND NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)
+	# Default to using all detected CPU cores for builds so compilation scales with
+	# available hardware without requiring callers to remember -j/--parallel
+	# arguments manually. Especially useful for those who open the project with Visual Studio
+	set(CMAKE_BUILD_PARALLEL_LEVEL ${TERRAENGINE_CPU_COUNT} CACHE STRING "Default parallel build jobs" FORCE)
+endif()
+
 set(ENGINE_SOURCES
     Engine/Core/MainEngine.cpp
     Engine/Core/Timer.cpp
