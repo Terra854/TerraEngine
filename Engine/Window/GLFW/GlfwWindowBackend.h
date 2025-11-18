@@ -19,19 +19,21 @@
 // IWindowBackend API.
 class GlfwWindowBackend : public IWindowBackend {
 public:
-    GlfwWindowBackend();
-    ~GlfwWindowBackend() override;
+	GlfwWindowBackend();
+	~GlfwWindowBackend() override;
 
-    void Initialize(const WindowConfig& config) override;
-    void PollEvents() override;
-    void SwapBuffers() override;
-    bool ShouldClose() const override;
-    void SetCloseCallback(std::function<void()> onClose) override;
-    void Shutdown() override;
+	void Initialize(const WindowConfig& config) override;
+	void PollEvents() override;
+	void SwapBuffers() override;
+	bool ShouldClose() const override;
+	void* GetNativeHandle() const override;
+	void SetCloseCallback(std::function<void()> onClose) override;
+	void Shutdown() override;
 
 private:
-    GLFWwindow* windowHandle = nullptr;
-    std::function<void()> closeCallback;
+	GLFWwindow* windowHandle = nullptr;
+	std::function<void()> closeCallback;
 
-    void InstallCallbacks();
+	void InstallCallbacks();
 };
+

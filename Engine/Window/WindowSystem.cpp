@@ -24,16 +24,25 @@ void WindowSystem::Configure(std::unique_ptr<IWindowBackend> backendInstance, Wi
 	initialized = false;
 }
 
+void* WindowSystem::GetNativeHandle() const
+{
+	if (!backend) {
+		return nullptr;
+	}
+	
+	return backend->GetNativeHandle();
+}
+
 void WindowSystem::Initialize()
 {
 	if (!configured) {
 		throw std::runtime_error("WindowSystem must be configured before initialization.");
 	}
-
+	
 	if (!backend) {
 		throw std::runtime_error("WindowSystem requires a valid backend.");
 	}
-
+	
 	// Route the backend close request back to the engine so the main loop can
 	// exit cleanly.
 	backend->SetCloseCallback([this]() {
@@ -41,10 +50,10 @@ void WindowSystem::Initialize()
 			onShutdownRequested();
 		}
 	});
-
+	
 	backend->Initialize(windowConfig);
 	initialized = true;
-
+	
 	// Let consumers know that window creation succeeded.
 	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem initialized using backend: " << SystemName());
 }
@@ -54,16 +63,16 @@ void WindowSystem::Update()
 	if (!initialized) {
 		return;
 	}
-
+	
 	backend->PollEvents();
-
+	
 	if (backend->ShouldClose()) {
 		// Respect the request from the OS/user to close the application.
 		if (onShutdownRequested) {
 			onShutdownRequested();
 		}
 	}
-
+	
 	backend->SwapBuffers();
 }
 
@@ -72,10 +81,10 @@ void WindowSystem::Shutdown()
 	if (!backend) {
 		return;
 	}
-
+	
 	backend->Shutdown();
 	initialized = false;
-
+	
 	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem shutdown complete.");
 }
 
