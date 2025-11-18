@@ -7,12 +7,9 @@ ThreadPool& ThreadPool::instance() {
 }
 
 void ThreadPool::initialize() {
-	for (int i = 0; i < 4; ++i)
-		workers.emplace_back(
-			[this, i] {
-				this->workerThread(i);
-			}
-		);
+	for (int i = 0; i < 4; ++i) {
+		workers.emplace_back([this, i] { this->workerThread(i); });
+	}
 }
 
 void ThreadPool::shutdown()
@@ -20,14 +17,16 @@ void ThreadPool::shutdown()
 	stop = true;
 
 	condition.notify_all();
-	for (std::thread& worker : workers)
+	for (std::thread& worker : workers) {
 		worker.join();
+	}
 }
 
 // Enqueue a task; handle its dependencies automatically
 void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
-	if (task->unresolvedDependencies == -1)
+	if (task->unresolvedDependencies == -1) {
 		task->unresolvedDependencies = static_cast<int>(task->dependenciesList.size());
+	}
 
 	if (task->unresolvedDependencies == 0) {
 		{
@@ -36,7 +35,7 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
 				std::unique_lock<std::mutex> lock(queue_mutex);
 				tasks.emplace([task]() {
 					task->run();
-					});
+				});
 			} // Release the lock asap when done to minimize the chances of deadlocks
 
 			this->completeTask(task);  // Call the completion logic after task execution
@@ -71,22 +70,22 @@ void ThreadPool::completeTask(std::shared_ptr<ITask> completedTask) {
 
 void ThreadPool::workerThread(int threadNum)
 {
-        // Log that the worker thread is live so we can trace thread lifecycle events.
-        TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " initialized and running.");
-        std::function<void()> task;
-        while (true) {
-                {
-                        std::unique_lock<std::mutex> lock(this->queue_mutex);
-                        this->condition.wait(lock,
-                                [this] { return this->stop || !this->tasks.empty(); });
-                        if (this->stop && this->tasks.empty()) {
-                                // Record that the worker is exiting after processing its last job.
-                                TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " shutting down.");
-                                return;
-                        }
-                        task = std::move(this->tasks.front());
-                        this->tasks.pop();
-                }
-                task();
-        }
+	// Log that the worker thread is live so we can trace thread lifecycle events.
+	TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " initialized and running.");
+	std::function<void()> task;
+	while (true) {
+		{
+			std::unique_lock<std::mutex> lock(this->queue_mutex);
+			this->condition.wait(lock,
+				[this] { return this->stop || !this->tasks.empty(); });
+			if (this->stop && this->tasks.empty()) {
+				// Record that the worker is exiting after processing its last job.
+				TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " shutting down.");
+				return;
+			}
+			task = std::move(this->tasks.front());
+			this->tasks.pop();
+		}
+		task();
+	}
 }
