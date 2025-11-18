@@ -8,59 +8,62 @@
 #include <sstream>
 #include <iomanip>
 #include <atomic>
+#include <string>
 
 // Define the log severity levels.
 enum class LogLevel {
-    DEBUG,
-    INFO,
-    WARNING,
-    ERROR,
-    CRITICAL
+	Debug,
+	Info,
+	Warning,
+	Error,
+	Critical
 };
 
 // Structure for holding a log entry.
 struct LogEntry {
-    std::chrono::system_clock::time_point timestamp;
-    LogLevel level;
-    std::string file;
-    std::string message;
+	std::chrono::system_clock::time_point timestamp; // When the log was generated.
+	LogLevel level;                                  // Severity level of the log.
+	std::string file;                                // Source file where the log originated.
+	int line = 0;                                    // Source line where the log macro was invoked.
+	std::string functionSignature;                   // Function signature of the caller for richer context.
+	std::string message;                             // Human-readable message payload.
 };
 
 class Logger {
 public:
-    // Retrieve the singleton instance.
-    static Logger& Instance() {
-        static Logger instance;
-        return instance;
-    }
+	// Retrieve the singleton instance.
+	static Logger& Instance() {
+		static Logger instance;
+		return instance;
+	}
 
-    // Delete copy constructor and assignment operator.
-    Logger(const Logger&) = delete;
-    Logger& operator=(const Logger&) = delete;
+	// Delete copy constructor and assignment operator.
+	Logger(const Logger&) = delete;
+	Logger& operator=(const Logger&) = delete;
 
-    // Thread-safe log function.
-    void Log(LogLevel level, const std::string& file, const std::string& message);
+	// Thread-safe log function that records the call-site file, line, and function signature.
+	void Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message);
 
-    // Gracefully shutdown the logger thread.
-    void Shutdown();
+	// Gracefully shutdown the logger thread.
+	void Shutdown();
 
 private:
-    Logger();
-    ~Logger();
+	Logger();
+	~Logger();
 
-    // The worker thread function: waits for and processes log entries.
-    void ProcessEntries();
+	// The worker thread function: waits for and processes log entries.
+	void ProcessEntries();
 
-    std::string LogLevelToString(LogLevel level);
-    std::string GetColorCode(LogLevel level);
+	std::string LogLevelToString(LogLevel level);
+	std::string GetColorCode(LogLevel level);
 
-    std::string ExtractFileName(const std::string& filePath);
+	std::string ExtractFileName(const std::string& filePath);
 
-    std::queue<LogEntry> q;
-    std::mutex m;
-    std::condition_variable cv;
+	std::queue<LogEntry> q;
+	std::mutex m;
+	std::condition_variable cv;
 	std::thread t; // Seperate thread for logging outside of the main thread and threadpool
-    std::atomic<bool> done;
+	std::atomic<bool> done;
 };
 
 // Define a macro to pick the proper function signature macro depending on the compiler.
@@ -72,10 +75,9 @@ private:
 #define LOG_FUNCTION __FUNCTION__
 #endif
 
-// Macro to simplify logging while capturing source file and line information.
-//#define TERRAENGINE_LOG(level, message) Logger::Instance().Log(level, __FILE__, __LINE__, message)
-#define TERRAENGINE_LOG(level, message) do {            \
-    std::ostringstream _terraengine_os;                 \
-    _terraengine_os << message;                         \
-    Logger::Instance().Log(level, LOG_FUNCTION, _terraengine_os.str());\
+// Macro to simplify logging while capturing source file, line, and function signature.
+#define TERRAENGINE_LOG(level, message) do {                                 \
+    std::ostringstream _terraengine_os;                                      \
+    _terraengine_os << message;                                              \
+    Logger::Instance().Log(level, __FILE__, __LINE__, LOG_FUNCTION, _terraengine_os.str());\
 } while(0)
