@@ -72,7 +72,7 @@ void ThreadPool::completeTask(std::shared_ptr<ITask> completedTask) {
 void ThreadPool::workerThread(int threadNum)
 {
         // Log that the worker thread is live so we can trace thread lifecycle events.
-        TERRAENGINE_LOG(LogLevel::INFO, "Worker thread no. " << threadNum << " initialized and running.");
+        TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " initialized and running.");
         std::function<void()> task;
         while (true) {
                 {
@@ -81,7 +81,7 @@ void ThreadPool::workerThread(int threadNum)
                                 [this] { return this->stop || !this->tasks.empty(); });
                         if (this->stop && this->tasks.empty()) {
                                 // Record that the worker is exiting after processing its last job.
-                                TERRAENGINE_LOG(LogLevel::INFO, "Worker thread no. " << threadNum << " shutting down.");
+                                TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " shutting down.");
                                 return;
                         }
                         task = std::move(this->tasks.front());

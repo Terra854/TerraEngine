@@ -75,11 +75,11 @@ void Logger::ProcessEntries()
 std::string Logger::LogLevelToString(LogLevel level)
 {
     switch (level) {
-    case LogLevel::DEBUG:   return "DEBUG";
-    case LogLevel::INFO:    return "INFO";
-    case LogLevel::WARNING: return "WARNING";
-    case LogLevel::ERROR:   return "ERROR";
-    case LogLevel::CRITICAL:return "CRITICAL";
+    case LogLevel::Debug:   return "DEBUG";
+    case LogLevel::Info:    return "INFO";
+    case LogLevel::Warning: return "WARNING";
+    case LogLevel::Error:   return "ERROR";
+    case LogLevel::Critical:return "CRITICAL";
     default:                return "UNKNOWN";
     }
 }
@@ -88,11 +88,11 @@ std::string Logger::LogLevelToString(LogLevel level)
 std::string Logger::GetColorCode(LogLevel level)
 {
     switch (level) {
-    case LogLevel::DEBUG:   return "\033[97m";  // Bright White
-    case LogLevel::INFO:    return "\033[92m";  // Bright Green
-    case LogLevel::WARNING: return "\033[93m";  // Bright Yellow
-    case LogLevel::ERROR:   return "\033[91m";  // Bright Magenta
-    case LogLevel::CRITICAL:return "\033[31m";  // Bright Red
+    case LogLevel::Debug:   return "\033[97m";  // Bright White
+    case LogLevel::Info:    return "\033[92m";  // Bright Green
+    case LogLevel::Warning: return "\033[93m";  // Bright Yellow
+    case LogLevel::Error:   return "\033[91m";  // Bright Magenta
+    case LogLevel::Critical:return "\033[31m";  // Bright Red
     default:                return "\033[0m";   // Reset (default)
     }
 }

@@ -11,11 +11,11 @@
 
 // Define the log severity levels.
 enum class LogLevel {
-    DEBUG,
-    INFO,
-    WARNING,
-    ERROR,
-    CRITICAL
+    Debug,
+    Info,
+    Warning,
+    Error,
+    Critical
 };
 
 // Structure for holding a log entry.

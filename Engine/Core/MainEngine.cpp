@@ -11,17 +11,17 @@ class TestSystem : public SystemsBase {
 public:
         void Initialize() override {
                 // Log system initialization so startup ordering is traceable.
-                TERRAENGINE_LOG(LogLevel::INFO, "Test System initialized.");
+                TERRAENGINE_LOG(LogLevel::Info, "Test System initialized.");
         }
 
         void Update() override {
                 // Note when the system tick runs for visibility during the main loop.
-                TERRAENGINE_LOG(LogLevel::DEBUG, "Test System update.");
+                TERRAENGINE_LOG(LogLevel::Debug, "Test System update.");
         }
 
         void shutdown() override {
                 // Signal that the test system cleaned up.
-                TERRAENGINE_LOG(LogLevel::INFO, "Test System shutdown.");
+                TERRAENGINE_LOG(LogLevel::Info, "Test System shutdown.");
         }
 
 	std::string SystemName() override {
@@ -53,7 +53,7 @@ void Engine::Initialize()
         }
 
         // Confirm engine initialization finished so later logs have a baseline.
-        TERRAENGINE_LOG(LogLevel::INFO, "Setup complete!");
+        TERRAENGINE_LOG(LogLevel::Info, "Setup complete!");
 }
 
 void simpleTask(int& counter) {
@@ -68,7 +68,7 @@ void exceptionTask() {
 void anotherTask(){
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         // Mark execution of a background task to prove asynchronous work runs.
-        TERRAENGINE_LOG(LogLevel::DEBUG, "Another task executed");
+        TERRAENGINE_LOG(LogLevel::Debug, "Another task executed");
 }
 
 void Engine::MainEngineLoop()
@@ -76,7 +76,7 @@ void Engine::MainEngineLoop()
         /*
         while (running)
         {
-                TERRAENGINE_LOG(LogLevel::DEBUG, "Engine loop!");
+                TERRAENGINE_LOG(LogLevel::Debug, "Engine loop!");
         }
         */
 
@@ -105,7 +105,7 @@ void Engine::MainEngineLoop()
 	// Create a task that takes parameters and returns a value
         auto taskA = pool.createTask([](int a, int b) -> int {
                 // Track task execution and parameters to validate the thread pool dispatch order.
-                TERRAENGINE_LOG(LogLevel::DEBUG, "Task A executed with parameters: " << a << ", " << b);
+                TERRAENGINE_LOG(LogLevel::Debug, "Task A executed with parameters: " << a << ", " << b);
                 return a + b;
                 }, 5, 10);
 
@@ -116,7 +116,7 @@ void Engine::MainEngineLoop()
         auto taskB = pool.createTask([&futureA]() mutable {
                 int result = futureA.get(); // This will block only within the task, not before enqueuing
                 // Show that dependent task results propagate correctly.
-                TERRAENGINE_LOG(LogLevel::DEBUG, "Task B executed with result: " << result);
+                TERRAENGINE_LOG(LogLevel::Debug, "Task B executed with result: " << result);
                 });
 
 	auto taskC = pool.createTask(anotherTask);
@@ -157,7 +157,7 @@ void Engine::MainEngineLoop()
 	}
         catch (const std::exception& e) {
                 // Surface the intentional error so the test scenario is easy to observe.
-                TERRAENGINE_LOG(LogLevel::ERROR, "Caught exception: " << e.what());
+                TERRAENGINE_LOG(LogLevel::Error, "Caught exception: " << e.what());
         }
 
 	// Wait for all tasks to complete
@@ -166,7 +166,7 @@ void Engine::MainEngineLoop()
 	}
 
         // Validate that all scheduled tasks executed by logging the final counter value.
-        TERRAENGINE_LOG(LogLevel::INFO, "Counter value after all tasks: " << counter); // Expecting 10
+        TERRAENGINE_LOG(LogLevel::Info, "Counter value after all tasks: " << counter); // Expecting 10
 
 	// End Multiple Tasks
 
@@ -186,7 +186,7 @@ void Engine::Shutdown()
         pool.shutdown();
 
         // Notify that the engine shutdown path completed and logging can be stopped soon.
-        TERRAENGINE_LOG(LogLevel::INFO, "Shutdown complete!");
+        TERRAENGINE_LOG(LogLevel::Info, "Shutdown complete!");
 
         // Stop the logger thread so queued messages flush before the application exits.
         Logger::Instance().Shutdown();
