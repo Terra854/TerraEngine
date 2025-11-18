@@ -15,6 +15,8 @@
 #include "SystemBase.h"
 #include "Object/ObjectManager.h"
 #include "ThreadPool/ThreadPool.h"
+#include "Timer.h"
+#include "Window/WindowSystem.h"
 
 class Engine {
 public:
@@ -31,5 +33,10 @@ private:
 
     ObjectManager& objManager = ObjectManager::instance();
     ThreadPool& pool = ThreadPool::instance();
+
+    // Window backend is owned through the abstraction so different toolkits can be
+    // swapped in without touching the core engine logic.
+    std::unique_ptr<IWindowSystem> windowSystem;
+    Timer frameTimer;
 };
 

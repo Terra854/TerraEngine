@@ -11,6 +11,8 @@ set(ENGINE_SOURCES
     Engine/Core/Logger/Logger.cpp
     Engine/Core/Object/Object.cpp
     Engine/Core/Object/ObjectManager.cpp
+    Engine/Core/Timer.cpp
+    Engine/Window/GlfwWindowSystem.cpp
     Engine/ThreadPool/ThreadPool.cpp
 )
 
@@ -22,6 +24,9 @@ set(ENGINE_HEADERS
     Engine/Core/Object/Object.h
     Engine/Core/Object/ObjectManager.h
     Engine/Core/Object/Transform.h
+    Engine/Core/Timer.h
+    Engine/Window/GlfwWindowSystem.h
+    Engine/Window/WindowSystem.h
     Engine/ThreadPool/ThreadPool.h
     Engine/Debug.h
 )
