@@ -1,6 +1,5 @@
 #pragma once
 #include <iostream>
-#include <memory>
 #include <vector>
 
 #ifdef _WIN32
@@ -22,9 +21,9 @@
 // on Windows builds so the import library is generated correctly.
 class TERRAENGINE_API Engine {
 	public:
-		// The engine owns a set of unique system instances and singleton references,
-		// so copying would duplicate ownership semantics incorrectly. Moves stay
-		// enabled in case the engine needs to be passed between scopes.
+		// The engine owns singleton system references, so copying would duplicate
+		// ownership semantics incorrectly. Moves stay enabled in case the engine
+		// needs to be passed between scopes.
 		Engine() = default;
 		Engine(const Engine&) = delete;
 		Engine& operator=(const Engine&) = delete;
@@ -41,7 +40,9 @@ class TERRAENGINE_API Engine {
 		void Shutdown();
 
 		bool running = true;
-		std::vector<std::unique_ptr<SystemsBase>> systems;
+		// Non-owning references to systems stored as singletons elsewhere in the
+		// engine so the main loop can iterate them without heap allocations.
+		std::vector<SystemsBase*> systems;
 
 		ObjectManager& objManager = ObjectManager::instance();
 		ThreadPool& pool = ThreadPool::instance();
