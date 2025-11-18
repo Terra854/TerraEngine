@@ -1,11 +1,13 @@
 #include "Logger.h"
 
-void Logger::Log(LogLevel level, const std::string& file, const std::string& message)
+void Logger::Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message)
 {
     LogEntry entry;
     entry.timestamp = std::chrono::system_clock::now();
     entry.level = level;
     entry.file = ExtractFileName(file);
+    entry.line = line;
+    entry.functionSignature = functionSignature;
     entry.message = message;
 
     {
@@ -58,10 +60,11 @@ void Logger::ProcessEntries()
         std::stringstream timeStream;
         timeStream << std::put_time(&tm_time, "%Y-%m-%d %H:%M:%S");
 
-        // Build the final log message.
+        // Build the final log message with the originating file and line for quick debugging.
         std::stringstream logStream;
         logStream << "[" << timeStream.str() << "][" << LogLevelToString(entry.level) << "]["
-			<< entry.file << "] " << entry.message;
+                  << entry.file << ":" << entry.line << "][" << entry.functionSignature << "] "
+                  << entry.message;
 
         // Get the appropriate color code and then output the message.
         std::string color = GetColorCode(entry.level);
