@@ -9,29 +9,6 @@
 #include <chrono>
 #include <thread>
 
-// Example system for testing
-class TestSystem : public SystemsBase {
-public:
-    void Initialize() override {
-        // Log system initialization so startup ordering is traceable.
-        TERRAENGINE_LOG(LogLevel::Info, "Test System initialized.");
-    }
-
-    void Update() override {
-        // Note when the system tick runs for visibility during the main loop.
-        TERRAENGINE_LOG(LogLevel::Debug, "Test System update.");
-    }
-
-    void Shutdown() override {
-        // Signal that the test system cleaned up.
-        TERRAENGINE_LOG(LogLevel::Info, "Test System shutdown.");
-    }
-
-    std::string SystemName() override {
-        return "TestSystem";
-    }
-};
-
 void Engine::Run()
 {
     Initialize();
@@ -59,7 +36,6 @@ void Engine::Initialize()
 
     // Additional systems can be appended after the window so they update in
     // a predictable order.
-    systems.push_back(std::make_unique<TestSystem>());
 
     for (auto& system : systems) {
         system->Initialize();
