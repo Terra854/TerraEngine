@@ -136,10 +136,10 @@ enum class Key {
 // a continued press (the previous Repeat state) so callers can distinguish
 // between a fresh key down event and a long hold.
 enum class KeyState {
-Idle = 0,
-Released,
-Pressed,
-Held
+	Idle = 0,
+	Released,
+	Pressed,
+	Held
 };
 
 // Enumerates the available mouse buttons in a backend agnostic format. The
@@ -158,12 +158,12 @@ enum class MouseButton {
 };
 
 constexpr std::size_t KeyCount()
-	{
+{
 	return static_cast<std::size_t>(Key::Count);
 }
 
 constexpr std::size_t MouseButtonCount()
-	{
+{
 	return static_cast<std::size_t>(MouseButton::Count);
 }
 
