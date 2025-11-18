@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(ENGINE_SOURCES
     Engine/Core/Launch.cpp
     Engine/Core/MainEngine.cpp
+    Engine/Core/Logger/Logger.cpp
     Engine/Core/Object/Object.cpp
     Engine/Core/Object/ObjectManager.cpp
     Engine/ThreadPool/ThreadPool.cpp
@@ -15,6 +16,7 @@ set(ENGINE_SOURCES
 
 set(ENGINE_HEADERS
     Engine/Core/MainEngine.h
+    Engine/Core/Logger/Logger.h
     Engine/Core/SystemBase.h
     Engine/Core/Object/Component.h
     Engine/Core/Object/Object.h

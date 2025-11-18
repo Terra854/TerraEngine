@@ -1,6 +1,7 @@
 #include "MainEngine.h"
 #include "SystemBase.h"
 #include "Object/Transform.h"
+#include "Logger/Logger.h"
 
 #include <chrono>
 #include <stdexcept>
@@ -8,17 +9,20 @@
 // Example system for testing
 class TestSystem : public SystemsBase {
 public:
-	void Initialize() override {
-		std::cout << "Test System initialized.\n";
-	}
+        void Initialize() override {
+                // Report that the example system has finished setting up.
+                TERRAENGINE_LOG(LogLevel::INFO, "Test System initialized.");
+        }
 
-	void Update() override {
-		std::cout << "Test System update.\n";
-	}
+        void Update() override {
+                // Provide a heartbeat so developers can see the system running.
+                TERRAENGINE_LOG(LogLevel::DEBUG, "Test System update.");
+        }
 
-	void shutdown() override {
-		std::cout << "Test System shutdown.\n";
-	}
+        void shutdown() override {
+                // Confirm the system teardown executed without issues.
+                TERRAENGINE_LOG(LogLevel::INFO, "Test System shutdown.");
+        }
 
 	std::string SystemName() override {
 		return "TestSystem";
@@ -44,11 +48,12 @@ void Engine::Initialize()
 	pool.initialize();
 	systems.push_back(std::make_unique<TestSystem>());
 
-	for (auto& system : systems) {
-		system->Initialize();
-	}
+        for (auto& system : systems) {
+                system->Initialize();
+        }
 
-	std::cout << "Setup complete!\n";
+        // Log the end of initialization so startup regressions are easy to spot.
+        TERRAENGINE_LOG(LogLevel::INFO, "Setup complete!");
 }
 
 void simpleTask(int& counter) {
@@ -61,18 +66,19 @@ void exceptionTask() {
 }
 
 void anotherTask(){
-	std::this_thread::sleep_for(std::chrono::milliseconds(300));
-	std::cout << "Another task executed\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        // Indicate the auxiliary task ran to completion.
+        TERRAENGINE_LOG(LogLevel::INFO, "Another task executed");
 }
 
 void Engine::MainEngineLoop()
 {
 	/*
-	while (running)
-	{
-		std::cout << "Engine loop!\n";
-	}
-	*/
+        while (running)
+        {
+                TERRAENGINE_LOG(LogLevel::DEBUG, "Engine loop!");
+        }
+        */
 
 	Object obj1 = objManager.createObject("Object1");
 	obj1.addComponent<Transform>();
@@ -94,22 +100,24 @@ void Engine::MainEngineLoop()
 	Transform* transform3 = obj1.getComponent<Transform>();
 
 	
-	/* START TEST THREADPOOL */
+        /* START TEST THREADPOOL */
 
 	// Create a task that takes parameters and returns a value
-	auto taskA = pool.createTask([](int a, int b) -> int {
-		std::cout << "Task A executed with parameters: " << a << ", " << b << std::endl;
-		return a + b;
-		}, 5, 10);
+        auto taskA = pool.createTask([](int a, int b) -> int {
+                // Capture the parameters fed into the task for traceability during debugging.
+                TERRAENGINE_LOG(LogLevel::DEBUG, "Task A executed with parameters: " << a << ", " << b);
+                return a + b;
+                }, 5, 10);
 
 	// Get the future by downcasting to the appropriate Task type
 	auto futureA = std::static_pointer_cast<Task<int>>(taskA)->getFuture();
 
 	// Create taskB but defer the use of the result from taskA
-	auto taskB = pool.createTask([&futureA]() mutable {
-		int result = futureA.get(); // This will block only within the task, not before enqueuing
-		std::cout << "Task B executed with result: " << result << std::endl;
-		});
+        auto taskB = pool.createTask([&futureA]() mutable {
+                int result = futureA.get(); // This will block only within the task, not before enqueuing
+                // Record the dependency result to ensure ordering works as expected.
+                TERRAENGINE_LOG(LogLevel::DEBUG, "Task B executed with result: " << result);
+                });
 
 	auto taskC = pool.createTask(anotherTask);
 
@@ -142,38 +150,42 @@ void Engine::MainEngineLoop()
 	}
 
 	// Test error handling
-	try {
-		auto errorTask = pool.createTask(exceptionTask);
-		pool.enqueue(errorTask);  // Enqueue the task
-		std::static_pointer_cast<Task<void>>(errorTask)->getFuture().get(); // This should throw an exception
-	}
-	catch (const std::exception& e) {
-		std::cout << "Caught exception: " << e.what() << std::endl;
-	}
+        try {
+                auto errorTask = pool.createTask(exceptionTask);
+                pool.enqueue(errorTask);  // Enqueue the task
+                std::static_pointer_cast<Task<void>>(errorTask)->getFuture().get(); // This should throw an exception
+        }
+        catch (const std::exception& e) {
+                // Surface the intentional exception so future errors are easy to diagnose.
+                TERRAENGINE_LOG(LogLevel::ERROR, "Caught exception: " << e.what());
+        }
 
 	// Wait for all tasks to complete
-	for (auto& task : tasks) {
-		std::static_pointer_cast<Task<void>>(task)->getFuture().get();
-	}
+        for (auto& task : tasks) {
+                std::static_pointer_cast<Task<void>>(task)->getFuture().get();
+        }
 
-	std::cout << "Counter value after all tasks: " << counter << std::endl; // Expecting 10
+        // Provide the final counter so concurrency regressions are obvious in logs.
+        TERRAENGINE_LOG(LogLevel::INFO, "Counter value after all tasks: " << counter); // Expecting 10
 
 	// End Multiple Tasks
 
 	/* END TEST THREADPOOL */
 
-	for (auto& system : systems) {
-		system->Update();
-	}
+        for (auto& system : systems) {
+                system->Update();
+        }
 }
 
 void Engine::Shutdown()
 {
-	for (auto& system : systems) {
-		system->shutdown();
-	}
+        for (auto& system : systems) {
+                system->shutdown();
+        }
 
         pool.shutdown();
 
-        std::cout << "Shutdown complete!\n";
+        // Announce shutdown completion before stopping the logger thread.
+        TERRAENGINE_LOG(LogLevel::INFO, "Shutdown complete!");
+        Logger::Instance().Shutdown();
 }

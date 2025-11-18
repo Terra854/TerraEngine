@@ -1,13 +1,13 @@
 #pragma once
-#include <iostream>
-#include <queue>
-#include <mutex>
+#include <atomic>
 #include <condition_variable>
+#include <mutex>
+#include <queue>
 #include <thread>
 #include <chrono>
 #include <sstream>
 #include <iomanip>
-#include <atomic>
+#include <string>
 
 // Define the log severity levels.
 enum class LogLevel {
@@ -59,7 +59,7 @@ private:
     std::queue<LogEntry> q;
     std::mutex m;
     std::condition_variable cv;
-	std::thread t; // Seperate thread for logging outside of the main thread and threadpool
+    std::thread t; // Separate thread for logging outside of the main thread and threadpool
     std::atomic<bool> done;
 };
 

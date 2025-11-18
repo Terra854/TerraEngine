@@ -1,5 +1,5 @@
 #include "ThreadPool.h"
-#include <iostream>
+#include "Core/Logger/Logger.h"
 
 ThreadPool& ThreadPool::instance() {
 	static ThreadPool instance;
@@ -71,7 +71,8 @@ void ThreadPool::completeTask(std::shared_ptr<ITask> completedTask) {
 
 void ThreadPool::workerThread(int threadNum)
 {
-	std::cout << "Worker thread no. " << threadNum << " initialized and running." << std::endl;
+        // Log when each worker thread spins up so we know the pool size at runtime.
+        TERRAENGINE_LOG(LogLevel::INFO, "Worker thread no. " << threadNum << " initialized and running.");
 	std::function<void()> task;
 	while (true) {
                 {
@@ -79,7 +80,8 @@ void ThreadPool::workerThread(int threadNum)
                         this->condition.wait(lock,
                                 [this] { return this->stop || !this->tasks.empty(); });
                         if (this->stop && this->tasks.empty()) {
-                                std::cout << "Worker thread no. " << threadNum << " shutting down." << std::endl;
+                                // Note which worker is exiting to simplify teardown debugging.
+                                TERRAENGINE_LOG(LogLevel::INFO, "Worker thread no. " << threadNum << " shutting down.");
                                 return;
                         }
                         task = std::move(this->tasks.front());
