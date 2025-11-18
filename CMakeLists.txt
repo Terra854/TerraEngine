@@ -15,31 +15,37 @@ if(TERRAENGINE_CPU_COUNT GREATER 0 AND NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)
 endif()
 
 set(ENGINE_SOURCES
-    Engine/Core/MainEngine.cpp
-    Engine/Core/Timer.cpp
-    Engine/Core/Logger/Logger.cpp
-    Engine/Core/Object/Object.cpp
-    Engine/Core/Object/ObjectManager.cpp
-    Engine/Window/WindowSystem.cpp
-    Engine/Window/GLFW/GlfwWindowBackend.cpp
-    Engine/ThreadPool/ThreadPool.cpp
+Engine/Core/MainEngine.cpp
+Engine/Core/Timer.cpp
+Engine/Core/Logger/Logger.cpp
+Engine/Core/Object/Object.cpp
+Engine/Core/Object/ObjectManager.cpp
+Engine/Input/InputSystem.cpp
+Engine/Input/GLFW/GlfwInputBackend.cpp
+Engine/Window/WindowSystem.cpp
+Engine/Window/GLFW/GlfwWindowBackend.cpp
+Engine/ThreadPool/ThreadPool.cpp
 )
 
 set(ENGINE_HEADERS
-    Engine/Core/MainEngine.h
-    Engine/Core/Logger/Logger.h
-    Engine/Core/SystemBase.h
-    Engine/Core/Timer.h
-    Engine/Core/Object/Component.h
-    Engine/Core/Object/Object.h
-    Engine/Core/Object/ObjectManager.h
-    Engine/Core/Object/Transform.h
-    Engine/Window/WindowBackend.h
-    Engine/Window/WindowConfig.h
-    Engine/Window/WindowSystem.h
-    Engine/Window/GLFW/GlfwWindowBackend.h
-    Engine/ThreadPool/ThreadPool.h
-    Engine/Debug.h
+Engine/Core/MainEngine.h
+Engine/Core/Logger/Logger.h
+Engine/Core/SystemBase.h
+Engine/Core/Timer.h
+Engine/Core/Object/Component.h
+Engine/Core/Object/Object.h
+Engine/Core/Object/ObjectManager.h
+Engine/Core/Object/Transform.h
+Engine/Input/InputBackend.h
+Engine/Input/InputCodes.h
+Engine/Input/InputSystem.h
+Engine/Input/GLFW/GlfwInputBackend.h
+Engine/Window/WindowBackend.h
+Engine/Window/WindowConfig.h
+Engine/Window/WindowSystem.h
+Engine/Window/GLFW/GlfwWindowBackend.h
+Engine/ThreadPool/ThreadPool.h
+Engine/Debug.h
 )
 
 set(LAUNCHER_SOURCES
