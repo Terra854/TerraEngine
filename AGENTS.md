@@ -13,7 +13,7 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 3. **C++ style** – Prefer modern C++17+ constructs, RAII, and smart pointers. Keep headers minimal and avoid macros when a typed construct suffices.
 4. **Component architecture** – Every engine component must follow the CRTP pattern via `Component<Derived>` in `Engine/Core/Object/Component.h`. Provide a `static constexpr std::string_view kComponentName` and register properties through the optional `Derived::reflect` helper when reflection metadata is required.
 5. **Systems inheritance** – All engine systems must inherit from `SystemsBase` to ensure consistent lifecycle handling and extensibility across modules.
-6. **Indent requirements** – Indentation must use a single tab level or 4 spaces.
+6. **Indent requirements** – Indentation must use a single tab level.
 
 ## Repository Structure
 1. Keep engine sources under `Engine/`, third-party code in `External/`, and **all shaders in `Engine/Shaders/`** (use module-specific subdirectories beneath that folder).
