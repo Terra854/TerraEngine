@@ -12,7 +12,7 @@
 #endif
 #include <GLFW/glfw3.h>
 
-#include "WindowBackend.h"
+#include "../WindowBackend.h"
 
 // GLFW implementation of the window backend interface. All direct GLFW calls
 // live here so that the rest of the engine only depends on the abstract

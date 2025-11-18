@@ -20,8 +20,8 @@ set(ENGINE_SOURCES
     Engine/Core/Logger/Logger.cpp
     Engine/Core/Object/Object.cpp
     Engine/Core/Object/ObjectManager.cpp
-    Engine/Window/GlfwWindowBackend.cpp
     Engine/Window/WindowSystem.cpp
+    Engine/Window/GLFW/GlfwWindowBackend.cpp
     Engine/ThreadPool/ThreadPool.cpp
 )
 
@@ -34,10 +34,10 @@ set(ENGINE_HEADERS
     Engine/Core/Object/Object.h
     Engine/Core/Object/ObjectManager.h
     Engine/Core/Object/Transform.h
-    Engine/Window/GlfwWindowBackend.h
     Engine/Window/WindowBackend.h
     Engine/Window/WindowConfig.h
     Engine/Window/WindowSystem.h
+    Engine/Window/GLFW/GlfwWindowBackend.h
     Engine/ThreadPool/ThreadPool.h
     Engine/Debug.h
 )
