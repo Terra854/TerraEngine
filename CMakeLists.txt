@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(ENGINE_SOURCES
-    Engine/Core/Launch.cpp
     Engine/Core/MainEngine.cpp
     Engine/Core/Timer.cpp
     Engine/Core/Logger/Logger.cpp
@@ -34,13 +33,17 @@ set(ENGINE_HEADERS
     Engine/Debug.h
 )
 
-add_executable(TerraEngine-Engine
+set(LAUNCHER_SOURCES
+    Launcher/Launch.cpp
+)
+
+add_library(TerraEngine-Engine SHARED
     ${ENGINE_SOURCES}
     ${ENGINE_HEADERS}
 )
 
 target_include_directories(TerraEngine-Engine
-    PRIVATE
+	PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/Engine
         ${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
         ${CMAKE_CURRENT_SOURCE_DIR}/External/glm
@@ -82,20 +85,41 @@ add_subdirectory(External/Vulkan-Headers)
 find_package(Threads REQUIRED)
 
 target_link_libraries(TerraEngine-Engine
-    PRIVATE
-        Threads::Threads
-        RTTR::Core
-        glfw
-        Vulkan::Headers
+	PUBLIC
+		Threads::Threads
+		RTTR::Core
+		glfw
+		Vulkan::Headers
 )
 
 target_compile_definitions(TerraEngine-Engine
-    PRIVATE
-        RTTR_DLL
-        GLFW_DLL
+	PUBLIC
+		TERRAENGINE_SHARED
+	PRIVATE
+		RTTR_DLL
+		GLFW_DLL
+		TERRAENGINE_ENGINE_BUILD
 )
 
+if(WIN32)
+	# Ensure Windows generates an import library even if individual symbols are
+	# not manually decorated; this pairs with the TERRAENGINE_API macro so the
+	# launcher can link against the DLL reliably.
+	set_target_properties(TerraEngine-Engine PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
+
+add_executable(TerraEngine-Launcher
+    ${LAUNCHER_SOURCES}
+)
+
+target_link_libraries(TerraEngine-Launcher
+    PRIVATE
+        TerraEngine-Engine
+)
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Launcher PREFIX "TerraEngine-Launcher" FILES ${LAUNCHER_SOURCES})
 
 set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
 if(CMAKE_CONFIGURATION_TYPES)
@@ -108,12 +132,36 @@ else()
     endif()
 endif()
 
-install(TARGETS TerraEngine-Engine
+if(WIN32)
+	# Keep the Windows install tree focused on runtime files only; the import library
+	# stays in the build tree while the DLL is delivered via the runtime destination.
+	install(TARGETS TerraEngine-Engine
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
+	)
+else()
+	install(TARGETS TerraEngine-Engine
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		ARCHIVE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
+	)
+endif()
+
+install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+    DESTINATION ${ENGINE_INSTALL_DESTINATION}
+    OPTIONAL
+)
+
+install(TARGETS TerraEngine-Launcher
     RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
     BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
 )
 
-install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
     DESTINATION ${ENGINE_INSTALL_DESTINATION}
     OPTIONAL
 )

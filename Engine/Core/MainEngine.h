@@ -12,24 +12,38 @@
 #    include <windows.h>
 #endif
 
+#include "Export.h"
 #include "SystemBase.h"
 #include "Object/ObjectManager.h"
 #include "ThreadPool/ThreadPool.h"
 
-class Engine {
-public:
-    void Run();
-    void SignalShutdown();
+// Primary engine facade exposed to the launcher and other executables. The
+// TERRAENGINE_API macro ensures the class is exported from the shared library
+// on Windows builds so the import library is generated correctly.
+class TERRAENGINE_API Engine {
+	public:
+		// The engine owns a set of unique system instances and singleton references,
+		// so copying would duplicate ownership semantics incorrectly. Moves stay
+		// enabled in case the engine needs to be passed between scopes.
+		Engine() = default;
+		Engine(const Engine&) = delete;
+		Engine& operator=(const Engine&) = delete;
+		Engine(Engine&&) = default;
+		Engine& operator=(Engine&&) = default;
+		~Engine() = default;
 
-private:
-    void Initialize();
-    void MainEngineLoop();
-    void Shutdown();
+		void Run();
+		void SignalShutdown();
 
-    bool running = true;
-    std::vector<std::unique_ptr<SystemsBase>> systems;
+	private:
+		void Initialize();
+		void MainEngineLoop();
+		void Shutdown();
 
-    ObjectManager& objManager = ObjectManager::instance();
-    ThreadPool& pool = ThreadPool::instance();
+		bool running = true;
+		std::vector<std::unique_ptr<SystemsBase>> systems;
+
+		ObjectManager& objManager = ObjectManager::instance();
+		ThreadPool& pool = ThreadPool::instance();
 };
 
