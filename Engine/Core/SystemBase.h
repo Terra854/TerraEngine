@@ -14,7 +14,7 @@ public:
 	virtual void Update() = 0;
 
 	// System freeing resources
-	virtual void shutdown() = 0;
+	virtual void Shutdown() = 0;
 
 	// For debugging, getting System Name
 	virtual std::string SystemName() {

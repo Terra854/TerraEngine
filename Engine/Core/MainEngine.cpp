@@ -19,7 +19,7 @@ public:
 		TERRAENGINE_LOG(LogLevel::Debug, "Test System update.");
 	}
 
-	void shutdown() override {
+	void Shutdown() override {
 		// Signal that the test system cleaned up.
 		TERRAENGINE_LOG(LogLevel::Info, "Test System shutdown.");
 	}
@@ -180,10 +180,10 @@ void Engine::MainEngineLoop()
 void Engine::Shutdown()
 {
 	for (auto& system : systems) {
-		system->shutdown();
+		system->Shutdown();
 	}
 
-	pool.shutdown();
+	pool.Shutdown();
 
 	// Notify that the engine shutdown path completed and logging can be stopped soon.
 	TERRAENGINE_LOG(LogLevel::Info, "Shutdown complete!");
