@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(ENGINE_SOURCES
-    Engine/Core/Launch.cpp
     Engine/Core/MainEngine.cpp
     Engine/Core/Timer.cpp
     Engine/Core/Logger/Logger.cpp
@@ -34,13 +33,17 @@ set(ENGINE_HEADERS
     Engine/Debug.h
 )
 
-add_executable(TerraEngine-Engine
+set(LAUNCHER_SOURCES
+    Launcher/Launch.cpp
+)
+
+add_library(TerraEngine-Engine SHARED
     ${ENGINE_SOURCES}
     ${ENGINE_HEADERS}
 )
 
 target_include_directories(TerraEngine-Engine
-    PRIVATE
+    PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/Engine
         ${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
         ${CMAKE_CURRENT_SOURCE_DIR}/External/glm
@@ -82,7 +85,7 @@ add_subdirectory(External/Vulkan-Headers)
 find_package(Threads REQUIRED)
 
 target_link_libraries(TerraEngine-Engine
-    PRIVATE
+    PUBLIC
         Threads::Threads
         RTTR::Core
         glfw
@@ -97,6 +100,17 @@ target_compile_definitions(TerraEngine-Engine
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
 
+add_executable(TerraEngine-Launcher
+    ${LAUNCHER_SOURCES}
+)
+
+target_link_libraries(TerraEngine-Launcher
+    PRIVATE
+        TerraEngine-Engine
+)
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Launcher PREFIX "TerraEngine-Launcher" FILES ${LAUNCHER_SOURCES})
+
 set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
 if(CMAKE_CONFIGURATION_TYPES)
     set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
@@ -110,10 +124,23 @@ endif()
 
 install(TARGETS TerraEngine-Engine
     RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+    LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
+    ARCHIVE DESTINATION ${ENGINE_INSTALL_DESTINATION}
     BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+    INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
 )
 
 install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+    DESTINATION ${ENGINE_INSTALL_DESTINATION}
+    OPTIONAL
+)
+
+install(TARGETS TerraEngine-Launcher
+    RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+    BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+)
+
+install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
     DESTINATION ${ENGINE_INSTALL_DESTINATION}
     OPTIONAL
 )
