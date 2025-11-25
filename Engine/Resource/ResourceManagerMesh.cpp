@@ -11,7 +11,7 @@ namespace
 	// Parse a TEMF mesh file from disk and populate spans into the payload.
 	// This helper avoids touching global caches so it can be shared by both
 	// synchronous and asynchronous entry points.
-	std::shared_ptr<TerraEngineMeshFile> LoadMeshFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
+	std::unique_ptr<Mesh> LoadMeshFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
 		if (fileBytes.size() < sizeof(Header))
@@ -50,7 +50,7 @@ namespace
 		}
 
 		const std::size_t payloadOffset = header.headerSize;
-		auto mesh = std::make_shared<TerraEngineMeshFile>();
+		auto mesh = std::make_unique<Mesh>();
 		mesh->header = header;
 
 		mesh->storage.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset), fileBytes.end());
@@ -104,16 +104,16 @@ namespace
 	}
 }
 
-std::shared_ptr<TerraEngineMeshFile> ResourceManager::LoadMesh(const std::filesystem::path& path)
+TerraEngine::UUID ResourceManager::LoadMesh(const std::filesystem::path& path)
 {
-	return LoadOrGetCached<TerraEngineMeshFile>(path, meshCache, [this](const std::filesystem::path& resolvedPath) {
+	return LoadOrGetCached<Mesh>(path, meshCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadMeshFile(*this, resolvedPath);
 	});
 }
 
-std::shared_future<std::shared_ptr<TerraEngineMeshFile>> ResourceManager::LoadMeshAsync(const std::filesystem::path& path)
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadMeshAsync(const std::filesystem::path& path)
 {
-	return LoadOrSchedule<TerraEngineMeshFile>(path, meshCache, [this](const std::filesystem::path& resolvedPath) {
+	return LoadOrSchedule<Mesh>(path, meshCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadMeshFile(*this, resolvedPath);
 	});
 }

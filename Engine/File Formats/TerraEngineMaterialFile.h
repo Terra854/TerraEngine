@@ -110,7 +110,7 @@ struct Header
 static_assert(sizeof(Header) <= 256, "TMAT header should remain compact");
 
 // In-memory representation of a fully loaded material file.
-struct TerraEngineMaterialFile
+struct Material
 {
 	Header header{};
 	std::vector<std::uint8_t> storage;         // Owns the contiguous payload after the header

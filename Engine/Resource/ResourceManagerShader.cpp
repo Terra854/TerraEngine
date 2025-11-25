@@ -29,7 +29,7 @@ namespace
 	}
 
 	// Parse a TSPF shader stage container into a runtime-friendly structure.
-	std::shared_ptr<TerraEngineShaderFile> LoadShaderFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
+	std::unique_ptr<Shader> LoadShaderFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
 		if (fileBytes.size() < sizeof(Header))
@@ -62,7 +62,7 @@ namespace
 		}
 
 		const std::size_t payloadOffset = header.headerSize;
-		auto shader = std::make_shared<TerraEngineShaderFile>();
+		auto shader = std::make_unique<Shader>();
 		shader->header = header;
 
 		shader->storage.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset), fileBytes.end());
@@ -154,16 +154,16 @@ namespace
 	}
 }
 
-std::shared_ptr<TerraEngineShaderFile> ResourceManager::LoadShader(const std::filesystem::path& path)
+TerraEngine::UUID ResourceManager::LoadShader(const std::filesystem::path& path)
 {
-	return LoadOrGetCached<TerraEngineShaderFile>(path, shaderCache, [this](const std::filesystem::path& resolvedPath) {
+	return LoadOrGetCached<Shader>(path, shaderCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadShaderFile(*this, resolvedPath);
 	});
 }
 
-std::shared_future<std::shared_ptr<TerraEngineShaderFile>> ResourceManager::LoadShaderAsync(const std::filesystem::path& path)
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderAsync(const std::filesystem::path& path)
 {
-	return LoadOrSchedule<TerraEngineShaderFile>(path, shaderCache, [this](const std::filesystem::path& resolvedPath) {
+	return LoadOrSchedule<Shader>(path, shaderCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadShaderFile(*this, resolvedPath);
 	});
 }

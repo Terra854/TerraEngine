@@ -36,24 +36,51 @@ void ResourceManager::ClearCaches()
 	// multiple threads ever clear different caches concurrently.
 	{
 		std::unique_lock lock(materialCache.mutex);
-		materialCache.loaded.clear();
+		materialCache.pathToId.clear();
+		materialCache.resources.clear();
 		materialCache.inFlight.clear();
 	}
 	{
 		std::unique_lock lock(meshCache.mutex);
-		meshCache.loaded.clear();
+		meshCache.pathToId.clear();
+		meshCache.resources.clear();
 		meshCache.inFlight.clear();
 	}
 	{
 		std::unique_lock lock(shaderCache.mutex);
-		shaderCache.loaded.clear();
+		shaderCache.pathToId.clear();
+		shaderCache.resources.clear();
 		shaderCache.inFlight.clear();
 	}
 	{
 		std::unique_lock lock(textureCache.mutex);
-		textureCache.loaded.clear();
+		textureCache.pathToId.clear();
+		textureCache.resources.clear();
 		textureCache.inFlight.clear();
 	}
+}
+
+Material* ResourceManager::GetMaterial(const TerraEngine::UUID& id)
+{
+	// Callers can stash UUIDs from earlier load operations and pull the
+	// current instance when they need to bind resources without owning
+	// references for the entire application lifetime.
+	return GetResourceById(id, materialCache);
+}
+
+Mesh* ResourceManager::GetMesh(const TerraEngine::UUID& id)
+{
+	return GetResourceById(id, meshCache);
+}
+
+Shader* ResourceManager::GetShader(const TerraEngine::UUID& id)
+{
+	return GetResourceById(id, shaderCache);
+}
+
+Texture* ResourceManager::GetTexture(const TerraEngine::UUID& id)
+{
+	return GetResourceById(id, textureCache);
 }
 
 std::filesystem::path ResourceManager::ResolveAssetPath(const std::filesystem::path& path) const

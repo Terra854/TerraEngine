@@ -33,7 +33,7 @@ namespace
 
 	// Parse a TETF texture container, gather chunk metadata, and expose
 	// spans pointing into owned storage.
-	std::shared_ptr<TerraEngineTextureFile> LoadTextureFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
+	std::unique_ptr<Texture> LoadTextureFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
 		if (fileBytes.size() < sizeof(TETFHeader))
@@ -70,7 +70,7 @@ namespace
 			return nullptr;
 		}
 
-		auto texture = std::make_shared<TerraEngineTextureFile>();
+		auto texture = std::make_unique<Texture>();
 		texture->header = header;
 		texture->chunkTable.resize(header.chunkCount);
 
@@ -209,16 +209,16 @@ namespace
 	}
 }
 
-std::shared_ptr<TerraEngineTextureFile> ResourceManager::LoadTexture(const std::filesystem::path& path)
+TerraEngine::UUID ResourceManager::LoadTexture(const std::filesystem::path& path)
 {
-	return LoadOrGetCached<TerraEngineTextureFile>(path, textureCache, [this](const std::filesystem::path& resolvedPath) {
+	return LoadOrGetCached<Texture>(path, textureCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadTextureFile(*this, resolvedPath);
 	});
 }
 
-std::shared_future<std::shared_ptr<TerraEngineTextureFile>> ResourceManager::LoadTextureAsync(const std::filesystem::path& path)
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadTextureAsync(const std::filesystem::path& path)
 {
-	return LoadOrSchedule<TerraEngineTextureFile>(path, textureCache, [this](const std::filesystem::path& resolvedPath) {
+	return LoadOrSchedule<Texture>(path, textureCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadTextureFile(*this, resolvedPath);
 	});
 }

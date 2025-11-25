@@ -10,7 +10,7 @@ namespace
 	// Read and validate a TMAT file. This function only performs disk I/O and
 	// buffer parsing; cache management lives in ResourceManager so the same
 	// loader can be reused by synchronous and asynchronous callers.
-	std::shared_ptr<TerraEngineMaterialFile> LoadMaterialFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
+	std::unique_ptr<Material> LoadMaterialFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
 		if (fileBytes.size() < sizeof(Header))
@@ -49,7 +49,7 @@ namespace
 		}
 
 		const std::size_t payloadOffset = header.headerSize;
-		auto material = std::make_shared<TerraEngineMaterialFile>();
+		auto material = std::make_unique<Material>();
 		material->header = header;
 
 		material->storage.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset), fileBytes.end());
@@ -99,16 +99,16 @@ namespace
 	}
 }
 
-std::shared_ptr<TerraEngineMaterialFile> ResourceManager::LoadMaterial(const std::filesystem::path& path)
+TerraEngine::UUID ResourceManager::LoadMaterial(const std::filesystem::path& path)
 {
-	return LoadOrGetCached<TerraEngineMaterialFile>(path, materialCache, [this](const std::filesystem::path& resolvedPath) {
+	return LoadOrGetCached<Material>(path, materialCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadMaterialFile(*this, resolvedPath);
 	});
 }
 
-std::shared_future<std::shared_ptr<TerraEngineMaterialFile>> ResourceManager::LoadMaterialAsync(const std::filesystem::path& path)
+std::shared_future<TerraEngine::UUID> ResourceManager::LoadMaterialAsync(const std::filesystem::path& path)
 {
-	return LoadOrSchedule<TerraEngineMaterialFile>(path, materialCache, [this](const std::filesystem::path& resolvedPath) {
+	return LoadOrSchedule<Material>(path, materialCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadMaterialFile(*this, resolvedPath);
 	});
 }

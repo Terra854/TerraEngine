@@ -139,7 +139,7 @@ static_assert(sizeof(Header) <= 128, "TSPF header should remain compact");
 
 // Fully loaded representation: contiguous storage plus typed views into arrays
 // and the string table. Serialization will populate these fields.
-struct TerraEngineShaderFile
+struct Shader
 {
 	Header header{};
 	ShaderReflection reflection{};

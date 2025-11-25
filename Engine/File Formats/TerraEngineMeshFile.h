@@ -83,7 +83,7 @@ struct Header
 static_assert(sizeof(Header) <= 512, "TEMF header should remain compact");
 
 // In-memory representation of an entire .temf payload: contiguous storage plus typed views.
-struct TerraEngineMeshFile
+struct Mesh
 {
 	Header header{};
 	std::vector<std::uint8_t> storage;

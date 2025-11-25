@@ -129,7 +129,7 @@ struct TETFMipPayload {
 	std::span<const uint8_t> data; // Contains header.sliceCount slices; each sliceStride bytes.
 };
 
-struct TerraEngineTextureFile {
+struct Texture {
 	TETFHeader header{};
 	TETFDesc descriptor{};
 	std::vector<TETFChunkEntry> chunkTable;
