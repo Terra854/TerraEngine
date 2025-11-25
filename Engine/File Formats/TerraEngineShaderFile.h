@@ -9,8 +9,8 @@
 // resource system to keep shader stages, their source binaries, and reflection
 // metadata together in one place so pipelines can be built without probing SPIR-V at runtime.
 
-constexpr std::uint32_t kMagicValue = 0x46505354u; // 'TSPF' little endian
-constexpr std::uint16_t kCurrentVersion = 1;
+constexpr std::uint32_t kShaderMagicValue = 0x46505354u; // 'TSPF' little endian
+constexpr std::uint16_t kShaderCurrentVersion = 1;
 constexpr std::uint32_t kInvalidStringOffset = 0xFFFFFFFFu;
 
 enum class ShaderSourceLanguage : std::uint32_t
@@ -116,11 +116,11 @@ struct CompiledStageBinary
 };
 
 // On-disk header placed at the start of every TSPF blob.
-struct Header
+struct ShaderHeader
 {
 	char magic[4];
 	std::uint16_t version;
-	std::uint16_t headerSize;            // Always set to sizeof(Header)
+	std::uint16_t headerSize;            // Always set to sizeof(ShaderHeader)
 	std::uint32_t descriptorSetCount;
 	std::uint32_t descriptorBindingCount;
 	std::uint32_t pushConstantCount;
@@ -135,13 +135,13 @@ struct Header
 };
 #pragma pack(pop)
 
-static_assert(sizeof(Header) <= 128, "TSPF header should remain compact");
+static_assert(sizeof(ShaderHeader) <= 128, "TSPF header should remain compact");
 
 // Fully loaded representation: contiguous storage plus typed views into arrays
 // and the string table. Serialization will populate these fields.
 struct Shader
 {
-	Header header{};
+	ShaderHeader header{};
 	ShaderReflection reflection{};
 	CompiledStageBinary binary{};
 	std::vector<std::uint8_t> storage;         // Owns the contiguous payload after the header

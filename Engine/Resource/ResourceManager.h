@@ -17,9 +17,9 @@
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
 
-// Forward declarations keep this header lightweight while avoiding the
-// kMagicValue naming collisions in the file format headers. Individual
-// loader translation units include the concrete definitions they need.
+// Forward declarations keep this header lightweight and avoid forcing every
+// includer to pull the binary format structs; the concrete loaders include
+// the definitions they need inside their translation units.
 struct Material;
 struct Mesh;
 struct Shader;
@@ -40,6 +40,7 @@ public:
 
 	ResourceManager(const ResourceManager&) = delete;
 	ResourceManager& operator=(const ResourceManager&) = delete;
+	~ResourceManager();
 
 	// Configure the base directory used to resolve relative asset paths.
 	// The path is normalized immediately so lookup keys are consistent
@@ -246,8 +247,8 @@ TerraEngine::UUID ResourceManager::LoadOrGetCached(const std::filesystem::path& 
 	}
 
 	const TerraEngine::UUID id = EnsureResourceId(key, cache);
-	const auto resource = loader(resolvedPath);
-	return FinalizeLoad(key, cache, id, resource);
+	auto resource = loader(resolvedPath);
+	return FinalizeLoad(key, cache, id, std::move(resource));
 }
 
 template <typename Resource>
@@ -277,8 +278,8 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadOrSchedule(const std:
 	// Schedule the expensive file I/O work on the thread pool so callers
 	// can continue executing immediately.
 	auto task = threadPool.createTask([this, key, resolvedPath, &cache, id, loader]() -> TerraEngine::UUID {
-		const auto resource = loader(resolvedPath);
-		return FinalizeLoad(key, cache, id, resource);
+		auto resource = loader(resolvedPath);
+		return FinalizeLoad(key, cache, id, std::move(resource));
 	});
 
 	auto future = task->getFuture().share();

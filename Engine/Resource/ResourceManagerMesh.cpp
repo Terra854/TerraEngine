@@ -14,26 +14,26 @@ namespace
 	std::unique_ptr<Mesh> LoadMeshFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
-		if (fileBytes.size() < sizeof(Header))
+		if (fileBytes.size() < sizeof(MeshHeader))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF file is too small: " << resolvedPath);
 			return nullptr;
 		}
 
-		Header header{};
-		std::memcpy(&header, fileBytes.data(), sizeof(Header));
+		MeshHeader header{};
+		std::memcpy(&header, fileBytes.data(), sizeof(MeshHeader));
 
 		std::uint32_t magic = 0;
 		std::memcpy(&magic, header.magic, sizeof(magic));
-		if (magic != kMagicValue)
+		if (magic != kMeshMagicValue)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF magic mismatch in " << resolvedPath);
 			return nullptr;
 		}
 
-		if (header.version != kCurrentVersion)
+		if (header.version != kMeshCurrentVersion)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TEMF version mismatch in " << resolvedPath << " (expected " << kCurrentVersion << ")");
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF version mismatch in " << resolvedPath << " (expected " << kMeshCurrentVersion << ")");
 			return nullptr;
 		}
 

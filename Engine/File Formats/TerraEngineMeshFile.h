@@ -6,9 +6,9 @@
 #include <vector>
 
 // Versioned constants shared by the compressor and viewer when reading/writing the binary blob.
-constexpr std::uint32_t kMagicValue = 0x464d4554u; // 'TEMF' little endian
+constexpr std::uint32_t kMeshMagicValue = 0x464d4554u; // 'TEMF' little endian
 constexpr std::size_t kMaxVertexAttributes = 8;
-constexpr std::uint16_t kCurrentVersion = 1;
+constexpr std::uint16_t kMeshCurrentVersion = 1;
 
 // Vertex attribute semantics mirror typical DCC exports and describe what the data represents.
 enum class AttributeSemantic : std::uint32_t
@@ -64,7 +64,7 @@ struct QuantizationInfo
 };
 
 // Final on-disk header that prefixes every TEMF file.
-struct Header
+struct MeshHeader
 {
 	char magic[4];
 	std::uint16_t version;
@@ -80,12 +80,12 @@ struct Header
 };
 #pragma pack(pop)
 
-static_assert(sizeof(Header) <= 512, "TEMF header should remain compact");
+static_assert(sizeof(MeshHeader) <= 512, "TEMF header should remain compact");
 
 // In-memory representation of an entire .temf payload: contiguous storage plus typed views.
 struct Mesh
 {
-	Header header{};
+	MeshHeader header{};
 	std::vector<std::uint8_t> storage;
 	std::span<const std::uint8_t> vertexData;
 	std::span<const std::uint8_t> indexData;

@@ -9,8 +9,8 @@
 // Terra Material Format (TMAT) packs authored material settings so runtime code can bind
 // PBR parameters and external textures (TETF) consistently alongside meshes (TEMF).
 
-constexpr std::uint32_t kMagicValue = 0x54414d54u; // 'TMAT' little endian
-constexpr std::uint16_t kCurrentVersion = 1;
+constexpr std::uint32_t kMaterialMagicValue = 0x54414d54u; // 'TMAT' little endian
+constexpr std::uint16_t kMaterialCurrentVersion = 1;
 
 // Limits keep the header compact and predictable on disk.
 constexpr std::size_t kMaxTextureBindings = 8;
@@ -85,11 +85,11 @@ struct FloatParameter
 };
 
 // On-disk header placed at the start of every TMAT blob.
-struct Header
+struct MaterialHeader
 {
 	char magic[4];
 	std::uint16_t version;
-	std::uint16_t headerSize;           // Always set to sizeof(Header)
+	std::uint16_t headerSize;           // Always set to sizeof(MaterialHeader)
 	std::uint32_t flags;                // MaterialFlags bitmask
 	std::uint32_t shadingModel;         // ShadingModel
 	std::uint32_t alphaMode;            // AlphaMode
@@ -107,12 +107,12 @@ struct Header
 };
 #pragma pack(pop)
 
-static_assert(sizeof(Header) <= 256, "TMAT header should remain compact");
+static_assert(sizeof(MaterialHeader) <= 256, "TMAT header should remain compact");
 
 // In-memory representation of a fully loaded material file.
 struct Material
 {
-	Header header{};
+	MaterialHeader header{};
 	std::vector<std::uint8_t> storage;         // Owns the contiguous payload after the header
 	std::span<const TextureBinding> textures;  // Views into storage
 	std::span<const FloatParameter> floats;    // Views into storage

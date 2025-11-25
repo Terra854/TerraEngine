@@ -13,26 +13,26 @@ namespace
 	std::unique_ptr<Material> LoadMaterialFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
-		if (fileBytes.size() < sizeof(Header))
+		if (fileBytes.size() < sizeof(MaterialHeader))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TMAT file is too small: " << resolvedPath);
 			return nullptr;
 		}
 
-		Header header{};
-		std::memcpy(&header, fileBytes.data(), sizeof(Header));
+		MaterialHeader header{};
+		std::memcpy(&header, fileBytes.data(), sizeof(MaterialHeader));
 
 		std::uint32_t magic = 0;
 		std::memcpy(&magic, header.magic, sizeof(magic));
-		if (magic != kMagicValue)
+		if (magic != kMaterialMagicValue)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TMAT magic mismatch in " << resolvedPath);
 			return nullptr;
 		}
 
-		if (header.version != kCurrentVersion)
+		if (header.version != kMaterialCurrentVersion)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TMAT version mismatch in " << resolvedPath << " (expected " << kCurrentVersion << ")");
+			TERRAENGINE_LOG(LogLevel::Error, "TMAT version mismatch in " << resolvedPath << " (expected " << kMaterialCurrentVersion << ")");
 			return nullptr;
 		}
 

@@ -5,12 +5,22 @@
 #include <utility>
 
 #include "Core/Logger/Logger.h"
+// Concrete resource definitions are required here so the cache-owned
+// std::unique_ptr instances have complete types when the deleters compile.
+#include "File Formats/TerraEngineMaterialFile.h"
+#include "File Formats/TerraEngineMeshFile.h"
+#include "File Formats/TerraEngineShaderFile.h"
+#include "File Formats/TerraEngineTextureFile.h"
 
 ResourceManager& ResourceManager::Instance()
 {
 	static ResourceManager instance;
 	return instance;
 }
+
+// Out-of-line destructor ensures the concrete resource types are complete when
+// the cache members are destroyed, keeping unique_ptr deleters well-defined.
+ResourceManager::~ResourceManager() = default;
 
 ResourceManager::ResourceManager()
 	: threadPool(ThreadPool::instance())

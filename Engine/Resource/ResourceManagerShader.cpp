@@ -10,7 +10,7 @@ namespace
 	// Validate the range described by a file offset and size and return a
 	// pointer into the payload. Returning nullptr signals that the range
 	// would overrun the buffer.
-	const std::uint8_t* ValidateRange(const std::filesystem::path& path, const Header& header, const std::uint8_t* payload, std::size_t payloadSize, std::size_t fileOffset, std::size_t requiredSize)
+	const std::uint8_t* ValidateRange(const std::filesystem::path& path, const ShaderHeader& header, const std::uint8_t* payload, std::size_t payloadSize, std::size_t fileOffset, std::size_t requiredSize)
 	{
 		if (fileOffset < header.headerSize)
 		{
@@ -32,26 +32,26 @@ namespace
 	std::unique_ptr<Shader> LoadShaderFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
-		if (fileBytes.size() < sizeof(Header))
+		if (fileBytes.size() < sizeof(ShaderHeader))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TSPF file is too small: " << resolvedPath);
 			return nullptr;
 		}
 
-		Header header{};
-		std::memcpy(&header, fileBytes.data(), sizeof(Header));
+		ShaderHeader header{};
+		std::memcpy(&header, fileBytes.data(), sizeof(ShaderHeader));
 
 		std::uint32_t magic = 0;
 		std::memcpy(&magic, header.magic, sizeof(magic));
-		if (magic != kMagicValue)
+		if (magic != kShaderMagicValue)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TSPF magic mismatch in " << resolvedPath);
 			return nullptr;
 		}
 
-		if (header.version != kCurrentVersion)
+		if (header.version != kShaderCurrentVersion)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TSPF version mismatch in " << resolvedPath << " (expected " << kCurrentVersion << ")");
+			TERRAENGINE_LOG(LogLevel::Error, "TSPF version mismatch in " << resolvedPath << " (expected " << kShaderCurrentVersion << ")");
 			return nullptr;
 		}
 
