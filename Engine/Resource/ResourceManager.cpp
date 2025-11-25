@@ -1,0 +1,104 @@
+#include "Resource/ResourceManager.h"
+
+#include <fstream>
+#include <sstream>
+#include <utility>
+
+#include "Core/Logger/Logger.h"
+
+ResourceManager& ResourceManager::Instance()
+{
+	static ResourceManager instance;
+	return instance;
+}
+
+ResourceManager::ResourceManager()
+	: threadPool(ThreadPool::instance())
+{
+	assetRoot = std::filesystem::current_path();
+}
+
+void ResourceManager::SetAssetRoot(const std::filesystem::path& assetRootPath)
+{
+	// Normalize immediately so the cache keys stay predictable even if
+	// callers provide paths with redundant separators or relative jumps.
+	assetRoot = assetRootPath.lexically_normal();
+}
+
+std::filesystem::path ResourceManager::GetAssetRoot() const
+{
+	return assetRoot;
+}
+
+void ResourceManager::ClearCaches()
+{
+	// Acquire exclusive locks in a consistent order to avoid deadlocks if
+	// multiple threads ever clear different caches concurrently.
+	{
+		std::unique_lock lock(materialCache.mutex);
+		materialCache.loaded.clear();
+		materialCache.inFlight.clear();
+	}
+	{
+		std::unique_lock lock(meshCache.mutex);
+		meshCache.loaded.clear();
+		meshCache.inFlight.clear();
+	}
+	{
+		std::unique_lock lock(shaderCache.mutex);
+		shaderCache.loaded.clear();
+		shaderCache.inFlight.clear();
+	}
+	{
+		std::unique_lock lock(textureCache.mutex);
+		textureCache.loaded.clear();
+		textureCache.inFlight.clear();
+	}
+}
+
+std::filesystem::path ResourceManager::ResolveAssetPath(const std::filesystem::path& path) const
+{
+	if (path.is_absolute())
+	{
+		return path.lexically_normal();
+	}
+
+	return (assetRoot / path).lexically_normal();
+}
+
+std::string ResourceManager::NormalizeKey(const std::filesystem::path& path) const
+{
+	// Use generic_string to avoid mismatches between Windows backslashes and
+	// POSIX forward slashes when keys are compared across platforms.
+	return path.lexically_normal().generic_string();
+}
+
+std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::path& path) const
+{
+	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	if (!file)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to open resource file: " << path);
+		return {};
+	}
+
+	const std::streamsize length = file.tellg();
+	if (length <= 0)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Resource file is empty: " << path);
+		return {};
+	}
+
+	std::vector<std::uint8_t> buffer(static_cast<std::size_t>(length));
+
+	// Sequential read is the simplest and most cache-friendly path because
+	// each resource file is authored as a single contiguous blob.
+	file.seekg(0, std::ios::beg);
+	if (!file.read(reinterpret_cast<char*>(buffer.data()), length))
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to read resource file: " << path);
+		return {};
+	}
+
+	return buffer;
+}

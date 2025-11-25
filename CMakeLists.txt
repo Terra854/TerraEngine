@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(TerraEngine LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -20,6 +20,11 @@ Engine/Core/Timer.cpp
 Engine/Core/Logger/Logger.cpp
 Engine/Core/Object/Object.cpp
 Engine/Core/Object/ObjectManager.cpp
+Engine/Resource/ResourceManager.cpp
+Engine/Resource/ResourceManagerMaterial.cpp
+Engine/Resource/ResourceManagerMesh.cpp
+Engine/Resource/ResourceManagerShader.cpp
+Engine/Resource/ResourceManagerTexture.cpp
 Engine/Input/InputSystem.cpp
 Engine/Input/GLFW/GlfwInputBackend.cpp
 Engine/Window/WindowSystem.cpp
@@ -39,6 +44,7 @@ Engine/Core/Object/Transform.h
 Engine/Input/InputBackend.h
 Engine/Input/InputCodes.h
 Engine/Input/InputSystem.h
+Engine/Resource/ResourceManager.h
 Engine/Input/GLFW/GlfwInputBackend.h
 Engine/Utilities/UUID.h
 Engine/Window/WindowBackend.h
