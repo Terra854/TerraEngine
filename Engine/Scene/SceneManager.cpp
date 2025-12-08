@@ -8,6 +8,9 @@
 #include <nlohmann/json.hpp>
 
 #include "Core/Logger/Logger.h"
+#include "Core/Object/ObjectManager.h"
+#include "Resource/ResourceManager.h"
+#include "Scene/MeshRenderComponent.h"
 
 SceneManager& SceneManager::Instance()
 {
@@ -31,6 +34,7 @@ void SceneManager::Initialize()
 	// reload. At this stage nothing is loaded yet so the reset is cheap and
 	// keeps stale cache entries from leaking across sessions.
 	UnloadAll();
+	PreparePreviewAssets();
 }
 
 void SceneManager::Update()
@@ -232,4 +236,119 @@ std::string SceneManager::NormalizeKey(const std::filesystem::path& path) const
 	// Using generic_string keeps path separators consistent on Windows and POSIX
 	// so cache keys are stable across different callers.
 	return path.lexically_normal().generic_string();
+}
+
+void SceneManager::PreparePreviewAssets()
+{
+	ResourceManager& resources = ResourceManager::Instance();
+	resources.SetAssetRoot(sceneRoot);
+
+	// Load the authored mesh/texture assets that the editor will display by default.
+	previewMeshId = resources.LoadMesh("model.temf");
+	if (resources.GetMesh(previewMeshId) == nullptr)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Preview mesh (model.temf) failed to load; generated object will be incomplete.");
+	}
+
+	previewTextureId = resources.LoadTexture("texture.tetf");
+	if (resources.GetTexture(previewTextureId) == nullptr)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Preview texture (texture.tetf) failed to load; material will fall back to defaults.");
+	}
+
+	generatedShaders.clear();
+	const auto vs = BuildTexturedVertexShader();
+	const auto ps = BuildTexturedPixelShader();
+	generatedShaders.emplace(vs.id, vs);
+	generatedShaders.emplace(ps.id, ps);
+	previewShaderCollectionId = TerraEngine::GenerateUUID();
+
+	previewMaterialId = CreateGeneratedMaterial("GeneratedTextureMaterial", previewTextureId, previewShaderCollectionId);
+
+	// Instantiate an object with the bindings so future renderer work can query
+	// exactly which authored assets should be drawn.
+	SpawnPreviewObject(previewMeshId, previewMaterialId, previewTextureId, previewShaderCollectionId);
+}
+
+SceneManager::GeneratedShaderSource SceneManager::BuildTexturedVertexShader() const
+{
+	GeneratedShaderSource shader{};
+	shader.id = TerraEngine::GenerateUUID();
+	shader.stage = ShaderStage::Vertex;
+	shader.entryPoint = "VSMain";
+	shader.targetProfile = "vs_6_8";
+	shader.hlsl = R"(cbuffer SceneUniforms : register(b0)
+{
+	float4x4 modelViewProjection;
+};
+
+struct VSIn
+{
+	float3 position : POSITION;
+	float3 normal : NORMAL;
+	float2 uv : TEXCOORD0;
+};
+
+struct VSOut
+{
+	float4 position : SV_Position;
+	float2 uv : TEXCOORD0;
+};
+
+VSOut VSMain(VSIn input)
+{
+	VSOut output;
+	output.position = mul(modelViewProjection, float4(input.position, 1.0f));
+	output.uv = input.uv;
+	return output;
+})";
+	return shader;
+}
+
+SceneManager::GeneratedShaderSource SceneManager::BuildTexturedPixelShader() const
+{
+	GeneratedShaderSource shader{};
+	shader.id = TerraEngine::GenerateUUID();
+	shader.stage = ShaderStage::Fragment;
+	shader.entryPoint = "PSMain";
+	shader.targetProfile = "ps_6_8";
+	shader.hlsl = R"(Texture2D baseColorTex : register(t0);
+SamplerState linearClamp : register(s0);
+
+struct PSIn
+{
+	float4 position : SV_Position;
+	float2 uv : TEXCOORD0;
+};
+
+float4 PSMain(PSIn input) : SV_Target0
+{
+	return baseColorTex.Sample(linearClamp, input.uv);
+})";
+	return shader;
+}
+
+TerraEngine::UUID SceneManager::CreateGeneratedMaterial(const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)
+{
+	GeneratedMaterial material{};
+	material.id = TerraEngine::GenerateUUID();
+	material.textureId = textureId;
+	material.shaderCollectionId = shaderCollectionId;
+	material.name = name;
+	generatedMaterials[material.id] = material;
+	return material.id;
+}
+
+void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)
+{
+	ObjectManager& objects = ObjectManager::instance();
+	auto preview = objects.createObject("GeneratedPreview");
+
+	// Attach a simple render binding component so downstream renderer work can
+	// read which authored assets should be drawn together.
+	auto& renderComponent = preview.addComponent<MeshRenderComponent>();
+	renderComponent.meshId = meshId;
+	renderComponent.materialId = materialId;
+	renderComponent.textureId = textureId;
+	renderComponent.shaderCollectionId = shaderCollectionId;
 }
