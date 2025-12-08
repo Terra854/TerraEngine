@@ -11,6 +11,7 @@
 #include "File Formats/TerraEngineMeshFile.h"
 #include "File Formats/TerraEngineShaderFile.h"
 #include "File Formats/TerraEngineTextureFile.h"
+#include "Resource/ShaderCollection.h"
 
 ResourceManager& ResourceManager::Instance()
 {
@@ -65,6 +66,13 @@ void ResourceManager::ClearCaches()
 		shaderCache.inFlight.clear();
 	}
 	{
+		// Clear paired shader lookups so future installs cannot reuse stale stage combinations.
+		std::unique_lock lock(shaderCollectionCache.mutex);
+		shaderCollectionCache.pathToId.clear();
+		shaderCollectionCache.resources.clear();
+		shaderCollectionCache.inFlight.clear();
+	}
+	{
 		std::unique_lock lock(textureCache.mutex);
 		textureCache.pathToId.clear();
 		textureCache.resources.clear();
@@ -88,6 +96,13 @@ Mesh* ResourceManager::GetMesh(const TerraEngine::UUID& id)
 Shader* ResourceManager::GetShader(const TerraEngine::UUID& id)
 {
 	return GetResourceById(id, shaderCache);
+}
+
+ShaderCollection* ResourceManager::GetShaderCollection(const TerraEngine::UUID& id)
+{
+	// Shader collections keep vertex/fragment pairings consistent so render
+	// code can bind a single UUID without managing individual stages.
+	return GetResourceById(id, shaderCollectionCache);
 }
 
 Texture* ResourceManager::GetTexture(const TerraEngine::UUID& id)

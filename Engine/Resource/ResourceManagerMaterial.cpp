@@ -51,6 +51,12 @@ namespace
 		const std::size_t payloadOffset = header.headerSize;
 		auto material = std::make_unique<Material>();
 		material->header = header;
+		material->shaderCollectionId = header.shaderCollectionId;
+		if (material->shaderCollectionId == TerraEngine::EMPTY_UUID)
+		{
+			// Keep the missing shader reference visible so authored TMAT files can be fixed early.
+			TERRAENGINE_LOG(LogLevel::Warning, "TMAT file does not specify a shader collection; " << resolvedPath << " will rely on renderer defaults.");
+		}
 
 		material->storage.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset), fileBytes.end());
 

@@ -31,7 +31,7 @@ public:
 
         for (auto entity : registry.view<Components...>()) {
             Object o;
-            o.entity_id = entity;
+            o.id = entity;
             objects.push_back(o);
         }
         return objects;

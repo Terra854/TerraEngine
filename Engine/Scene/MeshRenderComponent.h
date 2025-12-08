@@ -14,6 +14,5 @@ struct MeshRenderComponent : public Component<MeshRenderComponent>
 
 	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
-	TerraEngine::UUID textureId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID shaderCollectionId = TerraEngine::EMPTY_UUID;
 };

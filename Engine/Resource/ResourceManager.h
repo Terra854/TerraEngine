@@ -17,6 +17,7 @@
 
 #include "Core/Export.h"
 #include "Core/Logger/Logger.h"
+#include "File Formats/TerraEngineShaderFile.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
 
@@ -26,7 +27,15 @@
 struct Material;
 struct Mesh;
 struct Shader;
+struct ShaderCollection;
 struct Texture;
+enum class ShaderStage : std::uint32_t;
+
+struct ShaderStagePath
+{
+	ShaderStage stage = ShaderStage::Vertex;
+	std::filesystem::path path;
+};
 
 // Centralized resource cache that understands TerraEngine's authored file
 // formats (TMAT, TEMF, TSPF, TETF). The manager resolves asset paths,
@@ -60,6 +69,7 @@ public:
 	TerraEngine::UUID LoadMaterial(const std::filesystem::path& path);
 	TerraEngine::UUID LoadMesh(const std::filesystem::path& path);
 	TerraEngine::UUID LoadShader(const std::filesystem::path& path);
+	TerraEngine::UUID LoadShaderCollection(const std::vector<ShaderStagePath>& stagePaths);
 	TerraEngine::UUID LoadTexture(const std::filesystem::path& path);
 
 	// Asynchronous load helpers. Each call schedules a background task on
@@ -69,6 +79,7 @@ public:
 	std::shared_future<TerraEngine::UUID> LoadMaterialAsync(const std::filesystem::path& path);
 	std::shared_future<TerraEngine::UUID> LoadMeshAsync(const std::filesystem::path& path);
 	std::shared_future<TerraEngine::UUID> LoadShaderAsync(const std::filesystem::path& path);
+	std::shared_future<TerraEngine::UUID> LoadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths);
 	std::shared_future<TerraEngine::UUID> LoadTextureAsync(const std::filesystem::path& path);
 
 	// Fetch a loaded resource using its UUID so callers can pass lightweight
@@ -78,6 +89,7 @@ public:
 	Material* GetMaterial(const TerraEngine::UUID& id);
 	Mesh* GetMesh(const TerraEngine::UUID& id);
 	Shader* GetShader(const TerraEngine::UUID& id);
+	ShaderCollection* GetShaderCollection(const TerraEngine::UUID& id);
 	Texture* GetTexture(const TerraEngine::UUID& id);
 
 	// Clear every cache and abandon in-flight futures. Callers should only
@@ -160,6 +172,7 @@ private:
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;
 	ResourceCache<Shader> shaderCache;
+	ResourceCache<ShaderCollection> shaderCollectionCache;
 	ResourceCache<Texture> textureCache;
 };
 

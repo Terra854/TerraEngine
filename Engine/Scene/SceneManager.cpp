@@ -10,6 +10,7 @@
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
 #include "Resource/ResourceManager.h"
+#include "Resource/ShaderCollection.h"
 #include "Scene/MeshRenderComponent.h"
 
 SceneManager& SceneManager::Instance()
@@ -277,16 +278,10 @@ void SceneManager::PreparePreviewAssets()
 
 	// Load the precompiled preview shaders that ship alongside the executable so
 	// editors do not need to generate shader source at runtime.
-	previewVertexShaderId = LoadPreviewShader(resources, "PreviewTextured.vert.tspf", ShaderStage::Vertex);
-	previewPixelShaderId = LoadPreviewShader(resources, "PreviewTextured.frag.tspf", ShaderStage::Fragment);
-	if (previewVertexShaderId == TerraEngine::EMPTY_UUID || previewPixelShaderId == TerraEngine::EMPTY_UUID)
+	previewShaderCollectionId = LoadPreviewShaderCollection(resources);
+	if (previewShaderCollectionId == TerraEngine::EMPTY_UUID)
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Preview shader collection is incomplete; rendering components will not reference a shader set.");
-		previewShaderCollectionId = TerraEngine::EMPTY_UUID;
-	}
-	else
-	{
-		previewShaderCollectionId = TerraEngine::GenerateUUID();
 	}
 
 	previewMaterialId = CreateGeneratedMaterial("GeneratedTextureMaterial", previewTextureId, previewShaderCollectionId);
@@ -296,25 +291,42 @@ void SceneManager::PreparePreviewAssets()
 	SpawnPreviewObject(previewMeshId, previewMaterialId, previewTextureId, previewShaderCollectionId);
 }
 
-TerraEngine::UUID SceneManager::LoadPreviewShader(ResourceManager& resources, const std::filesystem::path& shaderPath, ShaderStage stage) const
+TerraEngine::UUID SceneManager::LoadPreviewShaderCollection(ResourceManager& resources) const
 {
-	// Pull a precompiled TSPF stage from disk. The files live next to the executable,
-	// so the resolved asset root handles locating them without embedding HLSL strings.
-	const TerraEngine::UUID shaderId = resources.LoadShader(shaderPath);
-	Shader* shader = resources.GetShader(shaderId);
-	if (shader == nullptr)
+	// Build a validated vertex/fragment pairing so preview renders never mix mismatched shader stages.
+	std::vector<ShaderStagePath> stages = {
+		{ ShaderStage::Vertex, "PreviewTextured.vert.tspf" },
+		{ ShaderStage::Fragment, "PreviewTextured.frag.tspf" }
+	};
+	const TerraEngine::UUID shaderCollectionId = resources.LoadShaderCollection(stages);
+	ShaderCollection* shaderCollection = resources.GetShaderCollection(shaderCollectionId);
+	if (shaderCollection == nullptr)
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to load preview shader from " << shaderPath << "; verify the compiled TSPF is deployed next to the executable.");
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to create preview shader collection; verify the compiled TSPF stages are deployed next to the executable.");
 		return TerraEngine::EMPTY_UUID;
 	}
 
-	// Double-check the embedded reflection matches the stage we expect so the wrong file cannot slip through unnoticed.
-	if (shader->reflection.source.stage != static_cast<std::uint32_t>(stage))
+	bool hasVertex = false;
+	bool hasFragment = false;
+	for (const ShaderCollection::StageBinding& stage : shaderCollection->stages)
 	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Preview shader " << shaderPath << " reports stage " << shader->reflection.source.stage << " but stage " << static_cast<std::uint32_t>(stage) << " was expected.");
+		if (stage.stage == ShaderStage::Vertex)
+		{
+			hasVertex = stage.shaderId != TerraEngine::EMPTY_UUID;
+		}
+		else if (stage.stage == ShaderStage::Fragment)
+		{
+			hasFragment = stage.shaderId != TerraEngine::EMPTY_UUID;
+		}
 	}
 
-	return shaderId;
+	if (!hasVertex || !hasFragment)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Preview shader collection is missing a stage; rendering components will skip shader binding.");
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	return shaderCollectionId;
 }
 
 TerraEngine::UUID SceneManager::CreateGeneratedMaterial(const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)
@@ -343,6 +355,5 @@ void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const Ter
 	auto& renderComponent = preview.addComponent<MeshRenderComponent>();
 	renderComponent.meshId = meshId;
 	renderComponent.materialId = materialId;
-	renderComponent.textureId = textureId;
 	renderComponent.shaderCollectionId = shaderCollectionId;
 }
