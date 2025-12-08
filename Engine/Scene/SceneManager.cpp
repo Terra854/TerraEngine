@@ -35,6 +35,8 @@ void SceneManager::Initialize()
 	// keeps stale cache entries from leaking across sessions.
 	UnloadAll();
 	PreparePreviewAssets();
+	// Initialization is logged at debug level so tooling can trace startup ordering.
+	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager initialized with root " << sceneRoot);
 }
 
 void SceneManager::Update()
@@ -61,6 +63,8 @@ void SceneManager::SetSceneRoot(const std::filesystem::path& root)
 	// Normalize immediately so repeated calls with different relative forms map
 	// to the same cache keys.
 	sceneRoot = root.lexically_normal();
+	// Emit debug output so asset lookups can be traced back to the configured root.
+	TERRAENGINE_LOG(LogLevel::Debug, "Scene root set to " << sceneRoot);
 }
 
 std::filesystem::path SceneManager::GetSceneRoot() const
@@ -70,6 +74,8 @@ std::filesystem::path SceneManager::GetSceneRoot() const
 
 TerraEngine::UUID SceneManager::LoadScene(const std::filesystem::path& path)
 {
+	// Trace synchronous scene requests to help diagnose cache behavior during authoring.
+	TERRAENGINE_LOG(LogLevel::Debug, "Request to load scene " << path);
 	return LoadOrGetCached<SceneDocument>(path, sceneCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
 		return LoadSceneDocument(resolvedPath, type);
 	}, SceneFileType::Scene);
@@ -77,6 +83,8 @@ TerraEngine::UUID SceneManager::LoadScene(const std::filesystem::path& path)
 
 TerraEngine::UUID SceneManager::LoadPrefab(const std::filesystem::path& path)
 {
+	// Trace synchronous prefab requests so missing assets are obvious at debug verbosity.
+	TERRAENGINE_LOG(LogLevel::Debug, "Request to load prefab " << path);
 	return LoadOrGetCached<SceneDocument>(path, prefabCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
 		return LoadSceneDocument(resolvedPath, type);
 	}, SceneFileType::Prefab);
@@ -84,6 +92,8 @@ TerraEngine::UUID SceneManager::LoadPrefab(const std::filesystem::path& path)
 
 std::shared_future<TerraEngine::UUID> SceneManager::LoadSceneAsync(const std::filesystem::path& path)
 {
+	// Debug logging clarifies when background scene streaming is requested.
+	TERRAENGINE_LOG(LogLevel::Debug, "Scheduling async load for scene " << path);
 	return LoadOrSchedule<SceneDocument>(path, sceneCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
 		return LoadSceneDocument(resolvedPath, type);
 	}, SceneFileType::Scene);
@@ -91,6 +101,8 @@ std::shared_future<TerraEngine::UUID> SceneManager::LoadSceneAsync(const std::fi
 
 std::shared_future<TerraEngine::UUID> SceneManager::LoadPrefabAsync(const std::filesystem::path& path)
 {
+	// Debug logging clarifies when background prefab streaming is requested.
+	TERRAENGINE_LOG(LogLevel::Debug, "Scheduling async load for prefab " << path);
 	return LoadOrSchedule<SceneDocument>(path, prefabCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
 		return LoadSceneDocument(resolvedPath, type);
 	}, SceneFileType::Prefab);
@@ -112,10 +124,13 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 	// load helpers beforehand and wait on the returned future.
 	if (GetScene(id) == nullptr)
 	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Attempted to activate scene that is not loaded");
 		return false;
 	}
 
 	activeSceneId = id;
+	// Log the swap so editors can track which scene is currently bound.
+	TERRAENGINE_LOG(LogLevel::Debug, "Active scene set to id " << ToHexString(id));
 	return true;
 }
 
@@ -148,6 +163,8 @@ void SceneManager::UnloadAll()
 	}
 
 	activeSceneId = TerraEngine::EMPTY_UUID;
+	// Log cache flushes so teardown/hot-reload steps are easy to correlate in logs.
+	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager caches cleared");
 }
 
 std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesystem::path& path, SceneFileType type)
@@ -177,6 +194,8 @@ std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesy
 	document->jsonContents = *jsonText;
 	document->parsedJson = std::move(parsed);
 	document->isPrefab = type == SceneFileType::Prefab;
+	// Announce successful parse to make asset churn visible at debug verbosity.
+	TERRAENGINE_LOG(LogLevel::Debug, "Loaded " << (type == SceneFileType::Prefab ? "prefab " : "scene ") << document->name << " from " << path);
 	return document;
 }
 

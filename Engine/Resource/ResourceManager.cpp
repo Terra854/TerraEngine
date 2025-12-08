@@ -33,6 +33,8 @@ void ResourceManager::SetAssetRoot(const std::filesystem::path& assetRootPath)
 	// Normalize immediately so the cache keys stay predictable even if
 	// callers provide paths with redundant separators or relative jumps.
 	assetRoot = assetRootPath.lexically_normal();
+	// Verbose debug logging makes it obvious which asset tree subsequent loads will pull from.
+	TERRAENGINE_LOG(LogLevel::Debug, "Asset root set to " << assetRoot);
 }
 
 std::filesystem::path ResourceManager::GetAssetRoot() const
@@ -125,6 +127,9 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 		TERRAENGINE_LOG(LogLevel::Error, "Resource file is empty: " << path);
 		return {};
 	}
+
+	// Emit a debug log with the resolved size so callers can correlate reads with disk usage.
+	TERRAENGINE_LOG(LogLevel::Debug, "Reading resource file " << path << " (" << length << " bytes)");
 
 	std::vector<std::uint8_t> buffer(static_cast<std::size_t>(length));
 

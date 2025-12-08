@@ -12,8 +12,11 @@
 #include <mutex>
 #include <utility>
 #include <vector>
+#include <sstream>
+#include <iomanip>
 
 #include "Core/Export.h"
+#include "Core/Logger/Logger.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
 
@@ -160,6 +163,19 @@ private:
 	ResourceCache<Texture> textureCache;
 };
 
+// Render a UUID as a hex string for readable debug logging without adding a
+// dedicated conversion helper elsewhere in the engine.
+inline std::string ToHexString(const TerraEngine::UUID& id)
+{
+	std::ostringstream stream;
+	stream << std::hex << std::setfill('0');
+	for (std::size_t i = 0; i < id.size(); ++i)
+	{
+		stream << std::setw(2) << static_cast<int>(id[i]);
+	}
+	return stream.str();
+}
+
 inline std::shared_future<TerraEngine::UUID> ResourceManager::MakeReadyFuture(const TerraEngine::UUID& id)
 {
 	std::promise<TerraEngine::UUID> promise;
@@ -176,12 +192,16 @@ std::optional<TerraEngine::UUID> ResourceManager::ResolveCached(const std::strin
 		const TerraEngine::UUID& id = existing->second;
 		if (cache.resources.find(id) != cache.resources.end())
 		{
+			// Debug log helps trace cache reuse when resources are requested repeatedly.
+			TERRAENGINE_LOG(LogLevel::Debug, "Resource cache hit for " << key << " (id " << ToHexString(id) << ")");
 			return id;
 		}
 	}
 
 	if (auto pending = cache.inFlight.find(key); pending != cache.inFlight.end())
 	{
+		// Make it obvious when a caller piggybacks an already scheduled load instead of duplicating work.
+		TERRAENGINE_LOG(LogLevel::Debug, "Resource load already in-flight for " << key << "; joining existing future");
 		auto future = pending->second;
 		lock.unlock();
 		return future.get();
@@ -201,6 +221,8 @@ TerraEngine::UUID ResourceManager::EnsureResourceId(const std::string& key, Reso
 
 	const auto id = TerraEngine::GenerateUUID();
 	cache.pathToId.emplace(key, id);
+	// Provide debug visibility whenever a new UUID is assigned to a resource key.
+	TERRAENGINE_LOG(LogLevel::Debug, "Assigned UUID " << ToHexString(id) << " to resource key " << key);
 	return id;
 }
 
@@ -219,6 +241,9 @@ Resource* ResourceManager::GetResourceById(const TerraEngine::UUID& id, Resource
 template <typename Resource>
 TerraEngine::UUID ResourceManager::FinalizeLoad(const std::string& key, ResourceCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource)
 {
+	// Capture success before we move the resource into the cache so logging reflects the actual loader result.
+	const bool loadedSuccessfully = static_cast<bool>(resource);
+
 	std::unique_lock lock(cache.mutex);
 	cache.pathToId[key] = id;
 
@@ -232,6 +257,15 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(const std::string& key, Resource
 	}
 
 	cache.inFlight.erase(key);
+	// Log the outcome to tie disk/parsing work back to a UUID for later lookups.
+	if (loadedSuccessfully)
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Finalized load for " << key << " (id " << ToHexString(id) << ")");
+	}
+	else
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Load failed for " << key << "; cache entry cleared for id " << ToHexString(id));
+	}
 	return id;
 }
 
@@ -247,6 +281,8 @@ TerraEngine::UUID ResourceManager::LoadOrGetCached(const std::filesystem::path& 
 	}
 
 	const TerraEngine::UUID id = EnsureResourceId(key, cache);
+	// Record when a synchronous load path kicks off so noisy I/O can be traced during debugging.
+	TERRAENGINE_LOG(LogLevel::Debug, "Loading resource from " << resolvedPath << " (id " << ToHexString(id) << ")");
 	auto resource = loader(resolvedPath);
 	return FinalizeLoad(key, cache, id, std::move(resource));
 }
@@ -277,6 +313,8 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadOrSchedule(const std:
 
 	// Schedule the expensive file I/O work on the thread pool so callers
 	// can continue executing immediately.
+	// Debug logging clarifies when background work is spun up versus reused from cache.
+	TERRAENGINE_LOG(LogLevel::Debug, "Scheduling async load for " << resolvedPath << " (id " << ToHexString(id) << ")");
 	auto task = threadPool.createTask([this, key, resolvedPath, &cache, id, loader]() -> TerraEngine::UUID {
 		auto resource = loader(resolvedPath);
 		return FinalizeLoad(key, cache, id, std::move(resource));

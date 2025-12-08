@@ -2,21 +2,25 @@
 
 #include <functional>
 #include <utility>
+#include <string>
 
 #include "InputCodes.h"
 
 // Interface describing the minimal contract required for the engine's input
 // system. Concrete implementations (GLFW, platform specific, etc.) translate
 // the backend events into the engine's Key/MouseButton types so callers never
-// include library headers directly.
-class IInputBackend {
-public:
-	virtual ~IInputBackend() = default;
+	// include library headers directly.
+	class IInputBackend {
+	public:
+		virtual ~IInputBackend() = default;
 
-	// Provide a pointer to the platform specific window so the backend can
-	// subscribe to input events. The pointer is intentionally opaque here to
-	// keep higher level code agnostic of the underlying windowing library.
-	virtual void SetWindowHandle(void* windowHandle) = 0;
+		// Identify the backend for logging and diagnostics.
+		virtual std::string BackendName() const = 0;
+
+		// Provide a pointer to the platform specific window so the backend can
+		// subscribe to input events. The pointer is intentionally opaque here to
+		// keep higher level code agnostic of the underlying windowing library.
+		virtual void SetWindowHandle(void* windowHandle) = 0;
 
 	// Initialize any backend specific state such as registering callbacks.
 	virtual void Initialize() = 0;

@@ -19,6 +19,7 @@ public:
 	GlfwInputBackend() = default;
 	~GlfwInputBackend() override = default;
 
+	std::string BackendName() const override { return "GLFW"; }
 	void SetWindowHandle(void* windowHandle) override;
 	void Initialize() override;
 	void Update() override;

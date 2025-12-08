@@ -19,6 +19,8 @@ void InputSystem::Configure(std::unique_ptr<IInputBackend> backendInstance)
 	backend = std::move(backendInstance);
 	configured = true;
 	initialized = false;
+	// Capture backend selection early so later initialization failures are easier to trace.
+	TERRAENGINE_LOG(LogLevel::Debug, "InputSystem configured with backend " << (backend ? backend->BackendName() : "null"));
 	
 	for (auto& state : keyStates) {
 		state = KeyState::Idle;
@@ -70,7 +72,7 @@ void InputSystem::Initialize()
 	backend->Initialize();
 	initialized = true;
 	
-	TERRAENGINE_LOG(LogLevel::Info, "InputSystem initialized using backend: " << SystemName());
+	TERRAENGINE_LOG(LogLevel::Info, "InputSystem initialized using backend: " << backend->BackendName());
 }
 
 void InputSystem::Update()
@@ -99,7 +101,7 @@ void InputSystem::Shutdown()
 	backend->Shutdown();
 	initialized = false;
 	
-	TERRAENGINE_LOG(LogLevel::Info, "InputSystem shutdown complete.");
+	TERRAENGINE_LOG(LogLevel::Info, "InputSystem shutdown complete (backend " << backend->BackendName() << ").");
 }
 
 std::string InputSystem::SystemName()

@@ -2,6 +2,8 @@
 
 #include <stdexcept>
 
+#include "Core/Logger/Logger.h"
+
 GlfwWindowBackend::GlfwWindowBackend() = default;
 
 GlfwWindowBackend::~GlfwWindowBackend()
@@ -23,6 +25,9 @@ void GlfwWindowBackend::Initialize(const WindowConfig& config)
 		glfwTerminate();
 		throw std::runtime_error("Failed to create GLFW window.");
 	}
+
+	// Debug logging captures backend selection and window configuration for troubleshooting.
+	TERRAENGINE_LOG(LogLevel::Debug, "GLFW backend created window " << config.title << " (" << config.width << "x" << config.height << ")");
 	
 	// Link this backend instance to the GLFW window so callbacks can access it.
 	glfwSetWindowUserPointer(windowHandle, this);
@@ -66,6 +71,8 @@ void GlfwWindowBackend::Shutdown()
 	// Terminate GLFW after destroying the window. Safe to call even if GLFW was
 	// never fully initialized.
 	glfwTerminate();
+
+	TERRAENGINE_LOG(LogLevel::Debug, "GLFW backend shutdown and window destroyed");
 }
 
 void GlfwWindowBackend::InstallCallbacks()
@@ -75,6 +82,7 @@ void GlfwWindowBackend::InstallCallbacks()
 	glfwSetWindowCloseCallback(windowHandle, [](GLFWwindow* window) {
 		auto* backend = static_cast<GlfwWindowBackend*>(glfwGetWindowUserPointer(window));
 		if (backend && backend->closeCallback) {
+			TERRAENGINE_LOG(LogLevel::Debug, "GLFW backend received window close event");
 			backend->closeCallback();
 		}
 	});
