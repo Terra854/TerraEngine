@@ -13,5 +13,6 @@ The submodules track the following upstream releases:
 - [GLM 1.0.2](https://github.com/g-truc/glm/tree/1.0.2)
 - [GLFW 3.4](https://github.com/glfw/glfw/tree/3.4)
 - [Vulkan Headers 1.4.328.1](https://github.com/KhronosGroup/Vulkan-Headers/tree/vulkan-sdk-1.4.328.1)
+- [nlohmann/json (snapshot)](https://github.com/nlohmann/json) — header-only JSON parser/serializer used for authored `.tescene` and `.teprefab` validation.
 
 The engine links RTTR and GLFW dynamically and consumes the other projects as header-only dependencies.
