@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <utility>
+#include <nlohmann/json.hpp>
 
 #include "Core/Logger/Logger.h"
 
@@ -147,33 +148,47 @@ void SceneManager::UnloadAll()
 
 std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesystem::path& path, SceneFileType type)
 {
-	const std::string jsonText = ReadJsonFile(path, type);
-	if (jsonText.empty())
+	const auto jsonText = ReadJsonFile(path, type);
+	if (!jsonText)
 	{
+		return nullptr;
+	}
+
+	nlohmann::json parsed;
+	try
+	{
+		// Parse once during load so downstream systems do not need to repeat
+		// JSON work every time the scene data is accessed.
+		parsed = nlohmann::json::parse(*jsonText);
+	}
+	catch (const nlohmann::json::parse_error& parseError)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Scene file failed JSON parse at byte " << parseError.byte << ": " << parseError.what() << " Path: " << path);
 		return nullptr;
 	}
 
 	auto document = std::make_unique<SceneDocument>();
 	document->sourcePath = path;
 	document->name = path.stem().string();
-	document->jsonContents = jsonText;
+	document->jsonContents = *jsonText;
+	document->parsedJson = std::move(parsed);
 	document->isPrefab = type == SceneFileType::Prefab;
 	return document;
 }
 
-std::string SceneManager::ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const
+std::optional<std::string> SceneManager::ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const
 {
 	if (!ValidateExtension(path, type))
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Rejected load for " << path << " because the extension does not match the expected scene or prefab format.");
-		return {};
+		return std::nullopt;
 	}
 
 	std::ifstream file(path, std::ios::binary);
 	if (!file)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to open scene file: " << path);
-		return {};
+		return std::nullopt;
 	}
 
 	std::stringstream buffer;
@@ -183,34 +198,10 @@ std::string SceneManager::ReadJsonFile(const std::filesystem::path& path, SceneF
 	if (jsonText.empty())
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Scene file is empty: " << path);
-		return {};
-	}
-
-	// Lightweight validation: ensure the first non-whitespace character is a
-	// JSON container token. This avoids pulling in a full parser while still
-	// catching obvious authoring mistakes early.
-	if (!LooksLikeJson(jsonText))
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "Scene file does not appear to be JSON. Path: " << path);
-		return {};
+		return std::nullopt;
 	}
 
 	return jsonText;
-}
-
-bool SceneManager::LooksLikeJson(const std::string& text) const
-{
-	for (char ch : text)
-	{
-		if (std::isspace(static_cast<unsigned char>(ch)))
-		{
-			continue;
-		}
-
-		return ch == '{' || ch == '[';
-	}
-
-	return false;
 }
 
 bool SceneManager::ValidateExtension(const std::filesystem::path& path, SceneFileType type) const

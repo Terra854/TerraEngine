@@ -71,6 +71,7 @@ target_include_directories(TerraEngine-Engine
         ${CMAKE_CURRENT_SOURCE_DIR}/Engine
         ${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
         ${CMAKE_CURRENT_SOURCE_DIR}/External/glm
+        ${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)

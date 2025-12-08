@@ -5,7 +5,7 @@ TerraEngine uses JSON-authored data for both scenes (`.tescene`) and prefabs (`.
 ## File Types
 - `.tescene` – Full scene documents that describe world state (entities, components, environment settings, etc.).
 - `.teprefab` – Reusable authored snippets meant to be instantiated inside scenes (e.g., an enemy archetype).
-- Both formats are plain UTF-8 JSON. A minimal starting point is an object root, for example:
+- Both formats are plain UTF-8 JSON. Files are validated with the vendored [`nlohmann::json`](https://github.com/nlohmann/json) library before being cached so syntax errors are caught early. A minimal starting point is an object root, for example:
   ```json
   {
   	"name": "ExampleScene",

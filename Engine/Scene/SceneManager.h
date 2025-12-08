@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #include "Core/Export.h"
 #include "Core/SystemBase.h"
@@ -23,6 +24,8 @@ struct SceneDocument
 	std::filesystem::path sourcePath;
 	std::string name;
 	std::string jsonContents;
+	// Cached parsed representation to avoid repeating JSON work in callers.
+	nlohmann::json parsedJson;
 	bool isPrefab = false;
 };
 
@@ -120,8 +123,7 @@ private:
 	TerraEngine::UUID FinalizeLoad(const std::string& key, SceneCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource);
 
 	std::unique_ptr<SceneDocument> LoadSceneDocument(const std::filesystem::path& path, SceneFileType type);
-	std::string ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const;
-	bool LooksLikeJson(const std::string& text) const;
+	std::optional<std::string> ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const;
 	bool ValidateExtension(const std::filesystem::path& path, SceneFileType type) const;
 
 	std::filesystem::path ResolveScenePath(const std::filesystem::path& path) const;

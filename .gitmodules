@@ -13,3 +13,6 @@
 [submodule "External/Vulkan-Headers"]
 	path = External/Vulkan-Headers
 	url = https://github.com/KhronosGroup/Vulkan-Headers
+[submodule "External/json"]
+	path = External/json
+	url = https://github.com/nlohmann/json.git
