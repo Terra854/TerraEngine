@@ -275,12 +275,19 @@ void SceneManager::PreparePreviewAssets()
 		TERRAENGINE_LOG(LogLevel::Warning, "Preview texture (texture.tetf) failed to load; material will fall back to defaults.");
 	}
 
-	generatedShaders.clear();
-	const auto vs = BuildTexturedVertexShader();
-	const auto ps = BuildTexturedPixelShader();
-	generatedShaders.emplace(vs.id, vs);
-	generatedShaders.emplace(ps.id, ps);
-	previewShaderCollectionId = TerraEngine::GenerateUUID();
+	// Load the precompiled preview shaders that ship alongside the executable so
+	// editors do not need to generate shader source at runtime.
+	previewVertexShaderId = LoadPreviewShader(resources, "PreviewTextured.vert.tspf", ShaderStage::Vertex);
+	previewPixelShaderId = LoadPreviewShader(resources, "PreviewTextured.frag.tspf", ShaderStage::Fragment);
+	if (previewVertexShaderId == TerraEngine::EMPTY_UUID || previewPixelShaderId == TerraEngine::EMPTY_UUID)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Preview shader collection is incomplete; rendering components will not reference a shader set.");
+		previewShaderCollectionId = TerraEngine::EMPTY_UUID;
+	}
+	else
+	{
+		previewShaderCollectionId = TerraEngine::GenerateUUID();
+	}
 
 	previewMaterialId = CreateGeneratedMaterial("GeneratedTextureMaterial", previewTextureId, previewShaderCollectionId);
 
@@ -289,62 +296,25 @@ void SceneManager::PreparePreviewAssets()
 	SpawnPreviewObject(previewMeshId, previewMaterialId, previewTextureId, previewShaderCollectionId);
 }
 
-SceneManager::GeneratedShaderSource SceneManager::BuildTexturedVertexShader() const
+TerraEngine::UUID SceneManager::LoadPreviewShader(ResourceManager& resources, const std::filesystem::path& shaderPath, ShaderStage stage) const
 {
-	GeneratedShaderSource shader{};
-	shader.id = TerraEngine::GenerateUUID();
-	shader.stage = ShaderStage::Vertex;
-	shader.entryPoint = "VSMain";
-	shader.targetProfile = "vs_6_8";
-	shader.hlsl = R"(cbuffer SceneUniforms : register(b0)
-{
-	float4x4 modelViewProjection;
-};
+	// Pull a precompiled TSPF stage from disk. The files live next to the executable,
+	// so the resolved asset root handles locating them without embedding HLSL strings.
+	const TerraEngine::UUID shaderId = resources.LoadShader(shaderPath);
+	Shader* shader = resources.GetShader(shaderId);
+	if (shader == nullptr)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to load preview shader from " << shaderPath << "; verify the compiled TSPF is deployed next to the executable.");
+		return TerraEngine::EMPTY_UUID;
+	}
 
-struct VSIn
-{
-	float3 position : POSITION;
-	float3 normal : NORMAL;
-	float2 uv : TEXCOORD0;
-};
+	// Double-check the embedded reflection matches the stage we expect so the wrong file cannot slip through unnoticed.
+	if (shader->reflection.source.stage != static_cast<std::uint32_t>(stage))
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Preview shader " << shaderPath << " reports stage " << shader->reflection.source.stage << " but stage " << static_cast<std::uint32_t>(stage) << " was expected.");
+	}
 
-struct VSOut
-{
-	float4 position : SV_Position;
-	float2 uv : TEXCOORD0;
-};
-
-VSOut VSMain(VSIn input)
-{
-	VSOut output;
-	output.position = mul(modelViewProjection, float4(input.position, 1.0f));
-	output.uv = input.uv;
-	return output;
-})";
-	return shader;
-}
-
-SceneManager::GeneratedShaderSource SceneManager::BuildTexturedPixelShader() const
-{
-	GeneratedShaderSource shader{};
-	shader.id = TerraEngine::GenerateUUID();
-	shader.stage = ShaderStage::Fragment;
-	shader.entryPoint = "PSMain";
-	shader.targetProfile = "ps_6_8";
-	shader.hlsl = R"(Texture2D baseColorTex : register(t0);
-SamplerState linearClamp : register(s0);
-
-struct PSIn
-{
-	float4 position : SV_Position;
-	float2 uv : TEXCOORD0;
-};
-
-float4 PSMain(PSIn input) : SV_Target0
-{
-	return baseColorTex.Sample(linearClamp, input.uv);
-})";
-	return shader;
+	return shaderId;
 }
 
 TerraEngine::UUID SceneManager::CreateGeneratedMaterial(const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)

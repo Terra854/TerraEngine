@@ -5,6 +5,7 @@
 #include <unordered_map>
 
 #include "Object.h"
+#include "Transform.h"
 
 class ObjectManager {
 public:

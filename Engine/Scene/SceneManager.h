@@ -17,6 +17,8 @@
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
 
+class ResourceManager;
+
 // Lightweight holder for a scene or prefab definition. The manager stores the
 // original JSON text so higher level systems can deserialize into game-specific
 // structures without reading from disk more than once.
@@ -83,15 +85,6 @@ public:
 	void UnloadAll();
 
 private:
-	struct GeneratedShaderSource
-	{
-		TerraEngine::UUID id;
-		ShaderStage stage;
-		std::string entryPoint;
-		std::string targetProfile;
-		std::string hlsl;
-	};
-
 	struct GeneratedMaterial
 	{
 		TerraEngine::UUID id;
@@ -147,8 +140,7 @@ private:
 	std::filesystem::path ResolveScenePath(const std::filesystem::path& path) const;
 	std::string NormalizeKey(const std::filesystem::path& path) const;
 	void PreparePreviewAssets();
-	GeneratedShaderSource BuildTexturedVertexShader() const;
-	GeneratedShaderSource BuildTexturedPixelShader() const;
+	TerraEngine::UUID LoadPreviewShader(ResourceManager& resources, const std::filesystem::path& shaderPath, ShaderStage stage) const;
 	TerraEngine::UUID CreateGeneratedMaterial(const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
 	void SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
 
@@ -161,9 +153,10 @@ private:
 	TerraEngine::UUID activeSceneId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewMeshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewTextureId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID previewVertexShaderId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID previewPixelShaderId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewShaderCollectionId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewMaterialId = TerraEngine::EMPTY_UUID;
-	std::unordered_map<TerraEngine::UUID, GeneratedShaderSource> generatedShaders;
 	std::unordered_map<TerraEngine::UUID, GeneratedMaterial> generatedMaterials;
 };
 
