@@ -167,7 +167,8 @@ int main(int argc, char** argv)
 	std::vector<TETFChunkEntry> entries;
 	entries.resize(header.chunkCount);
 	entries[0] = {MakeFourCC('D', 'E', 'S', 'C'), 0, descOffset, descSize};
-	entries[1] = {MakeFourCC('M', 'I', 'P', '0'), 0, mipOffset, mipHeaderSize + static_cast<std::uint32_t>(imageData.size())};
+	// Keep the MIP chunk tag stable because the mip level lives in the payload header.
+	entries[1] = {MakeFourCC('M', 'I', 'P', ' '), 0, mipOffset, mipHeaderSize + static_cast<std::uint32_t>(imageData.size())};
 
 	const std::uint32_t totalSize = AlignUp32(mipDataOffset + static_cast<std::uint32_t>(imageData.size()), header.alignment);
 	header.totalSize = totalSize;
