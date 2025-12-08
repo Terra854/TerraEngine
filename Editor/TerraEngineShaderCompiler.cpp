@@ -132,7 +132,8 @@ namespace
 		// Rely on the vendored DXC binaries shipped with the repo so the tool stays self-contained.
 		const std::string target = args.targetProfile.empty() ? DefaultProfileForStage(args.stage) : args.targetProfile;
 		std::ostringstream cmd;
-		cmd << Quote(dxcPath) << " -spirv -fspv-target-env=vulkan1.4"
+		// Target Vulkan 1.3 to match the bundled DXC capabilities and remain portable across platforms.
+		cmd << Quote(dxcPath) << " -spirv -fspv-target-env=vulkan1.3"
 			<< " -T " << target
 			<< " -E " << args.entryPoint
 			<< " -Fo " << Quote(tempSpv)
@@ -255,11 +256,16 @@ int main(int argc, char** argv)
 	header.compiledBinarySize = binary.bytecodeSize;
 
 	std::vector<std::uint8_t> storage;
-	storage.resize(stringOffset + stringSize);
-	std::memcpy(storage.data() + reflectionOffset, &reflection, sizeof(reflection));
-	std::memcpy(storage.data() + compiledOffset, &binary, sizeof(binary));
-	std::memcpy(storage.data() + bytecodeOffset, bytecode.data(), bytecode.size());
-	std::memcpy(storage.data() + stringOffset, strings.data.data(), strings.data.size());
+	// storage only holds the payload that follows the header, so offsets must
+	// be rebased relative to the start of that payload before writing.
+	const auto payloadOffset = [headerSize](std::uint32_t fileOffset) -> std::size_t {
+		return static_cast<std::size_t>(fileOffset - headerSize);
+	};
+	storage.resize(stringOffset + stringSize - headerSize);
+	std::memcpy(storage.data() + payloadOffset(reflectionOffset), &reflection, sizeof(reflection));
+	std::memcpy(storage.data() + payloadOffset(compiledOffset), &binary, sizeof(binary));
+	std::memcpy(storage.data() + payloadOffset(bytecodeOffset), bytecode.data(), bytecode.size());
+	std::memcpy(storage.data() + payloadOffset(stringOffset), strings.data.data(), strings.data.size());
 
 	std::ofstream out(args.output, std::ios::binary);
 	if(!out)
