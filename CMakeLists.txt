@@ -58,20 +58,24 @@ Engine/Debug.h
 )
 
 set(LAUNCHER_SOURCES
-    Launcher/Launch.cpp
+	Launcher/Launch.cpp
 )
 
 add_library(TerraEngine-Engine SHARED
-    ${ENGINE_SOURCES}
-    ${ENGINE_HEADERS}
+	${ENGINE_SOURCES}
+	${ENGINE_HEADERS}
 )
 
+# Header-only dependencies stay bundled so texture decoding and OBJ parsing never
+# rely on external package managers.
 target_include_directories(TerraEngine-Engine
 	PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/Engine
-        ${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/External/glm
-        ${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
+		${CMAKE_CURRENT_SOURCE_DIR}/External/glm
+		${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
+		${CMAKE_CURRENT_SOURCE_DIR}/External/stb
+		${CMAKE_CURRENT_SOURCE_DIR}/External/tinyobjloader
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
