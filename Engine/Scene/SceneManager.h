@@ -1,0 +1,267 @@
+#pragma once
+
+#include <filesystem>
+#include <functional>
+#include <future>
+#include <memory>
+#include <optional>
+#include <shared_mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "Core/Export.h"
+#include "Core/SystemBase.h"
+#include "ThreadPool/ThreadPool.h"
+#include "Utilities/UUID.h"
+
+// Lightweight holder for a scene or prefab definition. The manager stores the
+// original JSON text so higher level systems can deserialize into game-specific
+// structures without reading from disk more than once.
+struct SceneDocument
+{
+	std::filesystem::path sourcePath;
+	std::string name;
+	std::string jsonContents;
+	bool isPrefab = false;
+};
+
+// Centralized scene manager that handles loading authored .tescene and .teprefab
+// JSON files, caches them by normalized path, and offers synchronous and
+// asynchronous APIs backed by the shared thread pool. The class participates in
+// the SystemsBase lifecycle so it can be ticked and cleaned up alongside other
+// engine systems.
+class TERRAENGINE_API SceneManager : public SystemsBase
+{
+public:
+	static SceneManager& Instance();
+
+	SceneManager(const SceneManager&) = delete;
+	SceneManager& operator=(const SceneManager&) = delete;
+	~SceneManager() override;
+
+	void Initialize() override;
+	void Update() override;
+	void Shutdown() override;
+	std::string SystemName() override;
+
+	// Configure the root directory used to resolve relative scene and prefab
+	// paths. This mirrors ResourceManager::SetAssetRoot so authored content can
+	// live under a single asset tree.
+	void SetSceneRoot(const std::filesystem::path& root);
+	std::filesystem::path GetSceneRoot() const;
+
+	// Synchronous load helpers. These block the calling thread until the JSON
+	// file is read and lightly validated, but they reuse cached data if the
+	// same path was requested earlier.
+	TerraEngine::UUID LoadScene(const std::filesystem::path& path);
+	TerraEngine::UUID LoadPrefab(const std::filesystem::path& path);
+
+	// Asynchronous load helpers that schedule disk I/O on the shared thread
+	// pool. Duplicate requests join the same future to avoid redundant work.
+	std::shared_future<TerraEngine::UUID> LoadSceneAsync(const std::filesystem::path& path);
+	std::shared_future<TerraEngine::UUID> LoadPrefabAsync(const std::filesystem::path& path);
+
+	// Accessors let callers retrieve cached data by UUID instead of passing raw
+	// filesystem paths around. Returned pointers remain valid until UnloadAll is
+	// invoked or a future reload overwrites the entry.
+	const SceneDocument* GetScene(const TerraEngine::UUID& id) const;
+	const SceneDocument* GetPrefab(const TerraEngine::UUID& id) const;
+
+	// Track a single active scene so gameplay systems can query which authored
+	// file should be instantiated. The setter returns false when the requested
+	// scene is not loaded yet.
+	bool SetActiveScene(const TerraEngine::UUID& id);
+	const SceneDocument* GetActiveScene() const;
+
+	// Clear all cached documents and abandon in-flight futures. Use during
+	// teardown to release memory when no other threads are reading scenes.
+	void UnloadAll();
+
+private:
+	enum class SceneFileType
+	{
+		Scene,
+		Prefab
+	};
+
+	SceneManager();
+
+	template <typename Resource>
+	struct SceneCache
+	{
+		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
+		std::unordered_map<TerraEngine::UUID, std::unique_ptr<Resource>> resources;
+		std::unordered_map<std::string, std::shared_future<TerraEngine::UUID>> inFlight;
+		mutable std::shared_mutex mutex;
+	};
+
+	template <typename Resource>
+	using LoaderFunction = std::function<std::unique_ptr<Resource>(const std::filesystem::path&, SceneFileType)>;
+
+	std::shared_future<TerraEngine::UUID> MakeReadyFuture(const TerraEngine::UUID& id);
+
+	template <typename Resource>
+	std::optional<TerraEngine::UUID> ResolveCached(const std::string& key, SceneCache<Resource>& cache);
+
+	template <typename Resource>
+	TerraEngine::UUID EnsureResourceId(const std::string& key, SceneCache<Resource>& cache);
+
+	template <typename Resource>
+	const Resource* GetResourceById(const TerraEngine::UUID& id, const SceneCache<Resource>& cache) const;
+
+	template <typename Resource>
+	TerraEngine::UUID LoadOrGetCached(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type);
+
+	template <typename Resource>
+	std::shared_future<TerraEngine::UUID> LoadOrSchedule(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type);
+
+	template <typename Resource>
+	TerraEngine::UUID FinalizeLoad(const std::string& key, SceneCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource);
+
+	std::unique_ptr<SceneDocument> LoadSceneDocument(const std::filesystem::path& path, SceneFileType type);
+	std::string ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const;
+	bool LooksLikeJson(const std::string& text) const;
+	bool ValidateExtension(const std::filesystem::path& path, SceneFileType type) const;
+
+	std::filesystem::path ResolveScenePath(const std::filesystem::path& path) const;
+	std::string NormalizeKey(const std::filesystem::path& path) const;
+
+	ThreadPool& threadPool;
+	std::filesystem::path sceneRoot;
+
+	SceneCache<SceneDocument> sceneCache;
+	SceneCache<SceneDocument> prefabCache;
+
+	TerraEngine::UUID activeSceneId = TerraEngine::EMPTY_UUID;
+};
+
+inline std::shared_future<TerraEngine::UUID> SceneManager::MakeReadyFuture(const TerraEngine::UUID& id)
+{
+	std::promise<TerraEngine::UUID> promise;
+	promise.set_value(id);
+	return promise.get_future().share();
+}
+
+template <typename Resource>
+std::optional<TerraEngine::UUID> SceneManager::ResolveCached(const std::string& key, SceneCache<Resource>& cache)
+{
+	std::shared_lock lock(cache.mutex);
+	if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
+	{
+		const TerraEngine::UUID& id = existing->second;
+		if (cache.resources.find(id) != cache.resources.end())
+		{
+			return id;
+		}
+	}
+
+	if (auto pending = cache.inFlight.find(key); pending != cache.inFlight.end())
+	{
+		auto future = pending->second;
+		lock.unlock();
+		return future.get();
+	}
+
+	return std::nullopt;
+}
+
+template <typename Resource>
+TerraEngine::UUID SceneManager::EnsureResourceId(const std::string& key, SceneCache<Resource>& cache)
+{
+	std::unique_lock lock(cache.mutex);
+	if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
+	{
+		return existing->second;
+	}
+
+	const auto id = TerraEngine::GenerateUUID();
+	cache.pathToId.emplace(key, id);
+	return id;
+}
+
+template <typename Resource>
+const Resource* SceneManager::GetResourceById(const TerraEngine::UUID& id, const SceneCache<Resource>& cache) const
+{
+	std::shared_lock lock(cache.mutex);
+	if (auto existing = cache.resources.find(id); existing != cache.resources.end())
+	{
+		return existing->second.get();
+	}
+
+	return nullptr;
+}
+
+template <typename Resource>
+TerraEngine::UUID SceneManager::FinalizeLoad(const std::string& key, SceneCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource)
+{
+	std::unique_lock lock(cache.mutex);
+	cache.pathToId[key] = id;
+
+	if (resource)
+	{
+		cache.resources[id] = std::move(resource);
+	}
+	else
+	{
+		cache.resources.erase(id);
+	}
+
+	cache.inFlight.erase(key);
+	return id;
+}
+
+template <typename Resource>
+TerraEngine::UUID SceneManager::LoadOrGetCached(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type)
+{
+	const std::filesystem::path resolvedPath = ResolveScenePath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+
+	if (auto cached = ResolveCached(key, cache))
+	{
+		return *cached;
+	}
+
+	const TerraEngine::UUID id = EnsureResourceId(key, cache);
+	auto resource = loader(resolvedPath, type);
+	return FinalizeLoad(key, cache, id, std::move(resource));
+}
+
+template <typename Resource>
+std::shared_future<TerraEngine::UUID> SceneManager::LoadOrSchedule(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type)
+{
+	const std::filesystem::path resolvedPath = ResolveScenePath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+
+	{
+		std::shared_lock lock(cache.mutex);
+		if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
+		{
+			if (cache.resources.find(existing->second) != cache.resources.end())
+			{
+				return MakeReadyFuture(existing->second);
+			}
+		}
+
+		if (auto pending = cache.inFlight.find(key); pending != cache.inFlight.end())
+		{
+			return pending->second;
+		}
+	}
+
+	const TerraEngine::UUID id = EnsureResourceId(key, cache);
+
+	auto task = threadPool.createTask([this, key, resolvedPath, &cache, id, loader, type]() -> TerraEngine::UUID {
+		auto resource = loader(resolvedPath, type);
+		return FinalizeLoad(key, cache, id, std::move(resource));
+	});
+
+	auto future = task->getFuture().share();
+	{
+		std::unique_lock lock(cache.mutex);
+		cache.inFlight[key] = future;
+	}
+	threadPool.enqueue(task);
+
+	return future;
+}

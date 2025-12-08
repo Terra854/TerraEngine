@@ -25,6 +25,7 @@ Engine/Resource/ResourceManagerMaterial.cpp
 Engine/Resource/ResourceManagerMesh.cpp
 Engine/Resource/ResourceManagerShader.cpp
 Engine/Resource/ResourceManagerTexture.cpp
+Engine/Scene/SceneManager.cpp
 Engine/Input/InputSystem.cpp
 Engine/Input/GLFW/GlfwInputBackend.cpp
 Engine/Window/WindowSystem.cpp
@@ -45,6 +46,7 @@ Engine/Input/InputBackend.h
 Engine/Input/InputCodes.h
 Engine/Input/InputSystem.h
 Engine/Resource/ResourceManager.h
+Engine/Scene/SceneManager.h
 Engine/Input/GLFW/GlfwInputBackend.h
 Engine/Utilities/UUID.h
 Engine/Window/WindowBackend.h
