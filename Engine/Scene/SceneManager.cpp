@@ -333,6 +333,11 @@ void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const Ter
 	ObjectManager& objects = ObjectManager::instance();
 	auto preview = objects.createObject("GeneratedPreview");
 
+	auto t = preview.getComponent<Transform>();
+	t->position = glm::vec3(0.0f, 0.0f, 0.0f);
+	t->rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+	t->scale = glm::vec3(1.0f, 1.0f, 1.0f);
+
 	// Attach a simple render binding component so downstream renderer work can
 	// read which authored assets should be drawn together.
 	auto& renderComponent = preview.addComponent<MeshRenderComponent>();
