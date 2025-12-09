@@ -107,6 +107,12 @@ enum class TETFChannelType : uint8_t {
 	FLOAT = 4
 };
 
+enum class TextureFileSemantic : uint8_t {
+	Unknown = 0,
+	Color = 1,
+	Data = 2
+};
+
 inline bool IsCompressedFormat(uint8_t fmt) {
 	return fmt == static_cast<uint8_t>(TETFFormat::BC1) ||
 		fmt == static_cast<uint8_t>(TETFFormat::BC3) ||

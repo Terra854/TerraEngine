@@ -882,8 +882,11 @@ struct VulkanContext::Impl {
 		return imageView;
 	}
 
-	VkFormat MapTextureFormat(uint8_t format, uint8_t channelType) {
+	VkFormat MapTextureFormat(uint8_t format, uint8_t channelType, uint8_t semantic) {
 		if (format == static_cast<uint8_t>(TETFFormat::RGBA8)) {
+			if (semantic == static_cast<uint8_t>(TextureFileSemantic::Color)) {
+				return VK_FORMAT_R8G8B8A8_SRGB;
+			}
 			return VK_FORMAT_R8G8B8A8_UNORM;
 		}
 		return VK_FORMAT_R8G8B8A8_UNORM;
@@ -914,7 +917,7 @@ struct VulkanContext::Impl {
 		imageInfo.extent.depth = 1;
 		imageInfo.mipLevels = 1; 
 		imageInfo.arrayLayers = 1;
-		imageInfo.format = MapTextureFormat(cpuTexture->descriptor.format, cpuTexture->descriptor.channelType);
+		imageInfo.format = MapTextureFormat(cpuTexture->descriptor.format, cpuTexture->descriptor.channelType, cpuTexture->descriptor.semantic);
 		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
