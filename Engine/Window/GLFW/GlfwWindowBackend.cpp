@@ -19,6 +19,9 @@ void GlfwWindowBackend::Initialize(const WindowConfig& config)
 		throw std::runtime_error("Failed to initialize GLFW.");
 	}
 	
+	// Explicitly disable OpenGL context creation so Vulkan can own the surface.
+	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+
 	// Create the GLFW window using the configuration provided by the engine.
 	windowHandle = glfwCreateWindow(config.width, config.height, config.title.c_str(), nullptr, nullptr);
 	if (!windowHandle) {

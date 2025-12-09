@@ -1,8 +1,10 @@
 #pragma once
 
 #include <filesystem>
+#include <vector>
 
 #include "Utilities/UUID.h"
+#include "File Formats/TerraEngineShaderFile.h"
 
 // Grouped shaders keyed by stage so render code can bind a single UUID and pull
 // every stage needed for a pipeline. Entries only store shader UUIDs; paths are
