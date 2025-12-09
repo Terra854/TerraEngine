@@ -51,6 +51,12 @@ namespace
 		const std::size_t payloadOffset = header.headerSize;
 		auto material = std::make_unique<Material>();
 		material->header = header;
+		material->shaderCollectionId = header.shaderCollectionId;
+		if (material->shaderCollectionId == TerraEngine::EMPTY_UUID)
+		{
+			// Keep the missing shader reference visible so authored TMAT files can be fixed early.
+			TERRAENGINE_LOG(LogLevel::Warning, "TMAT file does not specify a shader collection; " << resolvedPath << " will rely on renderer defaults.");
+		}
 
 		material->storage.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(payloadOffset), fileBytes.end());
 
@@ -111,4 +117,31 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadMaterialAsync(const s
 	return LoadOrSchedule<Material>(path, materialCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadMaterialFile(*this, resolvedPath);
 	});
+}
+
+TerraEngine::UUID ResourceManager::RegisterMaterial(const std::string& cacheKey, std::unique_ptr<Material> material)
+{
+	// Generated materials do not live on disk, so store them under a synthetic key and keep a stable UUID for callers.
+	const std::string normalizedKey = "generated/" + cacheKey;
+	std::unique_lock lock(materialCache.mutex);
+
+	TerraEngine::UUID id = TerraEngine::GenerateUUID();
+	if (auto existing = materialCache.pathToId.find(normalizedKey); existing != materialCache.pathToId.end())
+	{
+		id = existing->second;
+	}
+	materialCache.pathToId[normalizedKey] = id;
+
+	if (material)
+	{
+		materialCache.resources[id] = std::move(material);
+	}
+	else
+	{
+		materialCache.resources.erase(id);
+	}
+
+	// Clear any stale in-flight futures that may have been waiting on this key.
+	materialCache.inFlight.erase(normalizedKey);
+	return id;
 }

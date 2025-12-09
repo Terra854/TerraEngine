@@ -43,6 +43,15 @@ enum class ShaderStage : std::uint32_t
 	Callable = 13
 };
 
+enum class IoComponentType : std::uint32_t
+{
+	Unknown = 0,
+	Float = 1,
+	Int = 2,
+	UInt = 3,
+	Bool = 4
+};
+
 enum class DescriptorType : std::uint32_t
 {
 	UniformBuffer = 0,
@@ -70,6 +79,14 @@ struct ShaderStageSource
 	std::uint32_t pathOffset;         // String table offset to the original HLSL path
 	std::uint32_t entryPointOffset;   // String table offset to the entry point symbol
 	std::uint32_t targetProfileOffset; // String table offset to the target profile (e.g. "vs_6_8")
+};
+
+struct StageIOAttribute
+{
+	std::uint32_t location;           // Location decoration on the input/output variable
+	std::uint32_t componentCount;     // Number of scalar components (e.g. float3 -> 3)
+	std::uint32_t componentType;      // IoComponentType
+	std::uint32_t nameOffset;         // Optional string table offset with the variable name (kInvalidStringOffset when absent)
 };
 
 struct DescriptorBinding
@@ -103,6 +120,10 @@ struct ShaderReflection
 	std::uint32_t descriptorSetCount;
 	std::uint32_t pushConstantOffset;    // File-relative offset to PushConstantRange array
 	std::uint32_t pushConstantCount;
+	std::uint32_t inputOffset;           // File-relative offset to StageIOAttribute array (vertex inputs / fragment inputs)
+	std::uint32_t inputCount;
+	std::uint32_t outputOffset;          // File-relative offset to StageIOAttribute array (vertex outputs / fragment outputs)
+	std::uint32_t outputCount;
 };
 
 // Precompiled stage payload produced by the offline shader pipeline.
@@ -124,12 +145,16 @@ struct ShaderHeader
 	std::uint32_t descriptorSetCount;
 	std::uint32_t descriptorBindingCount;
 	std::uint32_t pushConstantCount;
+	std::uint32_t stageInputCount;
+	std::uint32_t stageOutputCount;
 	std::uint32_t stringTableOffset;
 	std::uint32_t stringTableSize;
 	std::uint32_t reflectionOffset;      // ShaderReflection
 	std::uint32_t descriptorSetsOffset;  // DescriptorSetLayoutDesc array
 	std::uint32_t descriptorBindingsOffset; // DescriptorBinding array
 	std::uint32_t pushConstantsOffset;   // PushConstantRange array
+	std::uint32_t stageInputsOffset;     // StageIOAttribute array (inputs)
+	std::uint32_t stageOutputsOffset;    // StageIOAttribute array (outputs)
 	std::uint32_t compiledBinaryOffset;  // CompiledStageBinary block
 	std::uint32_t compiledBinarySize;    // Bytecode size (mirrors CompiledStageBinary::bytecodeSize)
 };
@@ -148,6 +173,8 @@ struct Shader
 	std::span<const DescriptorSetLayoutDesc> descriptorSets;
 	std::span<const DescriptorBinding> descriptorBindings;
 	std::span<const PushConstantRange> pushConstants;
+	std::span<const StageIOAttribute> inputs;
+	std::span<const StageIOAttribute> outputs;
 	std::span<const std::uint8_t> bytecode;
 	std::string_view stringTable;
 };

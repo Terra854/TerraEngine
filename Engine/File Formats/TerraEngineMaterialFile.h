@@ -93,6 +93,7 @@ struct MaterialHeader
 	std::uint32_t flags;                // MaterialFlags bitmask
 	std::uint32_t shadingModel;         // ShadingModel
 	std::uint32_t alphaMode;            // AlphaMode
+	TerraEngine::UUID shaderCollectionId; // Vertex/fragment pairing used to shade this material
 	float baseColorFactor[4];
 	float emissiveFactor[3];
 	float metallicFactor;
@@ -113,6 +114,7 @@ static_assert(sizeof(MaterialHeader) <= 256, "TMAT header should remain compact"
 struct Material
 {
 	MaterialHeader header{};
+	TerraEngine::UUID shaderCollectionId = TerraEngine::EMPTY_UUID;
 	std::vector<std::uint8_t> storage;         // Owns the contiguous payload after the header
 	std::span<const TextureBinding> textures;  // Views into storage
 	std::span<const FloatParameter> floats;    // Views into storage

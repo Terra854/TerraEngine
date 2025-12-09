@@ -4,6 +4,7 @@
 #include "Timer.h"
 #include "Input/GLFW/GlfwInputBackend.h"
 #include "Input/InputSystem.h"
+#include "Scene/SceneManager.h"
 #include "Window/GLFW/GlfwWindowBackend.h"
 #include "Window/WindowSystem.h"
 
@@ -44,6 +45,11 @@ void Engine::Initialize()
 	InputSystem& inputSystem = InputSystem::Instance();
 	inputSystem.Configure(std::make_unique<GlfwInputBackend>());
 	systems.push_back(&inputSystem);
+
+	// The scene manager owns authored .tescene and .teprefab JSON documents so
+	// gameplay code can request them without re-reading disk on every access.
+	SceneManager& sceneManager = SceneManager::Instance();
+	systems.push_back(&sceneManager);
 	
 	// Additional systems can be appended after the window so they update in
 	// a predictable order.

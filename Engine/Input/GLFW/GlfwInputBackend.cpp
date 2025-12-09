@@ -3,6 +3,8 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "Core/Logger/Logger.h"
+
 namespace {
 	// Track the active backend per GLFWwindow so static callbacks can route
 	// events back to the correct instance without altering the window's user
@@ -17,6 +19,7 @@ namespace {
 void GlfwInputBackend::SetWindowHandle(void* windowHandle)
 {
 	window = static_cast<GLFWwindow*>(windowHandle);
+	TERRAENGINE_LOG(LogLevel::Debug, "GLFW input backend received window handle " << window);
 }
 
 void GlfwInputBackend::Initialize()
@@ -103,6 +106,8 @@ void GlfwInputBackend::Initialize()
 			backend->scrollCallback(xOffset, yOffset);
 		}
 	});
+
+	TERRAENGINE_LOG(LogLevel::Debug, "GLFW input backend initialized and callbacks registered");
 }
 
 void GlfwInputBackend::Update()
@@ -124,6 +129,8 @@ void GlfwInputBackend::Shutdown()
 	glfwSetScrollCallback(window, nullptr);
 	
 	window = nullptr;
+
+	TERRAENGINE_LOG(LogLevel::Debug, "GLFW input backend shutdown and callbacks cleared");
 }
 
 void GlfwInputBackend::SetKeyCallback(std::function<void(Key, KeyState)> onKeyEvent)

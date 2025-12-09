@@ -22,6 +22,8 @@ void WindowSystem::Configure(std::unique_ptr<IWindowBackend> backendInstance, Wi
 	onShutdownRequested = std::move(shutdownCallback);
 	configured = true;
 	initialized = false;
+	// Debug log makes backend selection visible before initialization runs.
+	TERRAENGINE_LOG(LogLevel::Debug, "WindowSystem configured with backend " << (backend ? backend->BackendName() : "null"));
 }
 
 void* WindowSystem::GetNativeHandle() const
@@ -53,9 +55,9 @@ void WindowSystem::Initialize()
 	
 	backend->Initialize(windowConfig);
 	initialized = true;
-	
-	// Let consumers know that window creation succeeded.
-	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem initialized using backend: " << SystemName());
+
+	// Let consumers know that window creation succeeded and which backend drove it.
+	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem initialized using backend: " << backend->BackendName());
 }
 
 void WindowSystem::Update()
@@ -63,11 +65,12 @@ void WindowSystem::Update()
 	if (!initialized) {
 		return;
 	}
-	
+
 	backend->PollEvents();
 	
 	if (backend->ShouldClose()) {
 		// Respect the request from the OS/user to close the application.
+		TERRAENGINE_LOG(LogLevel::Debug, "Window backend " << backend->BackendName() << " requested application shutdown");
 		if (onShutdownRequested) {
 			onShutdownRequested();
 		}
@@ -84,8 +87,8 @@ void WindowSystem::Shutdown()
 	
 	backend->Shutdown();
 	initialized = false;
-	
-	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem shutdown complete.");
+
+	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem shutdown complete (backend " << backend->BackendName() << ").");
 }
 
 std::string WindowSystem::SystemName()

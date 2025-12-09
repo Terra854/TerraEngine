@@ -24,7 +24,9 @@ Engine/Resource/ResourceManager.cpp
 Engine/Resource/ResourceManagerMaterial.cpp
 Engine/Resource/ResourceManagerMesh.cpp
 Engine/Resource/ResourceManagerShader.cpp
+Engine/Resource/ResourceManagerShaderCollection.cpp
 Engine/Resource/ResourceManagerTexture.cpp
+Engine/Scene/SceneManager.cpp
 Engine/Input/InputSystem.cpp
 Engine/Input/GLFW/GlfwInputBackend.cpp
 Engine/Window/WindowSystem.cpp
@@ -45,6 +47,8 @@ Engine/Input/InputBackend.h
 Engine/Input/InputCodes.h
 Engine/Input/InputSystem.h
 Engine/Resource/ResourceManager.h
+Engine/Resource/ShaderCollection.h
+Engine/Scene/SceneManager.h
 Engine/Input/GLFW/GlfwInputBackend.h
 Engine/Utilities/UUID.h
 Engine/Window/WindowBackend.h
@@ -56,19 +60,24 @@ Engine/Debug.h
 )
 
 set(LAUNCHER_SOURCES
-    Launcher/Launch.cpp
+	Launcher/Launch.cpp
 )
 
 add_library(TerraEngine-Engine SHARED
-    ${ENGINE_SOURCES}
-    ${ENGINE_HEADERS}
+	${ENGINE_SOURCES}
+	${ENGINE_HEADERS}
 )
 
+# Header-only dependencies stay bundled so texture decoding and OBJ parsing never
+# rely on external package managers.
 target_include_directories(TerraEngine-Engine
 	PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/Engine
-        ${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/External/glm
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
+		${CMAKE_CURRENT_SOURCE_DIR}/External/glm
+		${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
+		${CMAKE_CURRENT_SOURCE_DIR}/External/stb
+		${CMAKE_CURRENT_SOURCE_DIR}/External/tinyobjloader
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
@@ -141,7 +150,41 @@ target_link_libraries(TerraEngine-Launcher
         TerraEngine-Engine
 )
 
+add_dependencies(TerraEngine-Launcher
+	TerraEngineMeshCompiler
+	TerraEngineTextureCompiler
+	TerraEngineShaderCompiler
+)
+
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Launcher PREFIX "TerraEngine-Launcher" FILES ${LAUNCHER_SOURCES})
+
+# --- Editor Tools ------------------------------------------------------------
+add_executable(TerraEngineMeshCompiler
+	Editor/TerraEngineMeshCompiler.cpp
+)
+
+add_executable(TerraEngineTextureCompiler
+	Editor/TerraEngineTextureCompiler.cpp
+)
+
+add_executable(TerraEngineShaderCompiler
+	Editor/TerraEngineShaderCompiler.cpp
+)
+
+target_include_directories(TerraEngineMeshCompiler
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_include_directories(TerraEngineTextureCompiler
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_include_directories(TerraEngineShaderCompiler
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+)
 
 set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
 if(CMAKE_CONFIGURATION_TYPES)
@@ -154,46 +197,82 @@ else()
     endif()
 endif()
 
-if(WIN32)
-	# Keep the Windows install tree focused on runtime files only; the import library
-	# stays in the build tree while the DLL is delivered via the runtime destination.
-	install(TARGETS TerraEngine-Engine
+	if(WIN32)
+		# Keep the Windows install tree focused on runtime files only; the import library
+		# stays in the build tree while the DLL is delivered via the runtime destination.
+		install(TARGETS TerraEngine-Engine
+			RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
+			BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+			INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
+		)
+	else()
+		install(TARGETS TerraEngine-Engine
+			RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
+			ARCHIVE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+			BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+			INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
+		)
+	endif()
+
+	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		OPTIONAL
+	)
+
+	install(TARGETS TerraEngine-Launcher
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	)
+
+	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		OPTIONAL
+	)
+
+	install(TARGETS glfw
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
 		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
-		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
-		INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
+	)
+
+	install(TARGETS rttr_core
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	)
+
+install(TARGETS TerraEngineMeshCompiler
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+)
+install(TARGETS TerraEngineTextureCompiler
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+)
+install(TARGETS TerraEngineShaderCompiler
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+)
+
+if(WIN32)
+	install(PROGRAMS
+		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/windows/bin/x64/dxc.exe
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	)
+	install(FILES
+		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/windows/bin/x64/dxcompiler.dll
+		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/windows/bin/x64/dxil.dll
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}
 	)
 else()
-	install(TARGETS TerraEngine-Engine
-		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
-		ARCHIVE DESTINATION ${ENGINE_INSTALL_DESTINATION}
-		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
-		INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
+	install(PROGRAMS
+		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/bin/dxc
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	)
+	# Ship the DXC runtime libraries beside the compiler binary so it can run without system installs.
+	install(FILES
+		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxcompiler.so
+		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxil.so
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}
 	)
 endif()
-
-install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
-    DESTINATION ${ENGINE_INSTALL_DESTINATION}
-    OPTIONAL
-)
-
-install(TARGETS TerraEngine-Launcher
-    RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-    BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
-)
-
-install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
-    DESTINATION ${ENGINE_INSTALL_DESTINATION}
-    OPTIONAL
-)
-
-install(TARGETS glfw
-    RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-    LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
-)
-
-install(TARGETS rttr_core
-    RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-    LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
-)

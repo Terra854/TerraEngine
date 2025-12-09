@@ -5,13 +5,16 @@
 
 #include "WindowConfig.h"
 
-// An interface that isolates concrete windowing libraries from the rest of the
-// engine. Engine systems interact with this abstraction rather than with GLFW
-// directly, allowing the backend to be swapped without touching the higher
-// level code.
-class IWindowBackend {
-public:
-	virtual ~IWindowBackend() = default;
+	// An interface that isolates concrete windowing libraries from the rest of the
+	// engine. Engine systems interact with this abstraction rather than with GLFW
+	// directly, allowing the backend to be swapped without touching the higher
+	// level code.
+	class IWindowBackend {
+	public:
+		virtual ~IWindowBackend() = default;
+
+		// Identify the backend for logging and diagnostics.
+		virtual std::string BackendName() const = 0;
 
 	// Initialize the underlying windowing library and create a platform window.
 	// Throws on failure so callers cannot proceed with a partially created

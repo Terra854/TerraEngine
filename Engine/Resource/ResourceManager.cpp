@@ -11,6 +11,7 @@
 #include "File Formats/TerraEngineMeshFile.h"
 #include "File Formats/TerraEngineShaderFile.h"
 #include "File Formats/TerraEngineTextureFile.h"
+#include "Resource/ShaderCollection.h"
 
 ResourceManager& ResourceManager::Instance()
 {
@@ -33,6 +34,8 @@ void ResourceManager::SetAssetRoot(const std::filesystem::path& assetRootPath)
 	// Normalize immediately so the cache keys stay predictable even if
 	// callers provide paths with redundant separators or relative jumps.
 	assetRoot = assetRootPath.lexically_normal();
+	// Verbose debug logging makes it obvious which asset tree subsequent loads will pull from.
+	TERRAENGINE_LOG(LogLevel::Debug, "Asset root set to " << assetRoot);
 }
 
 std::filesystem::path ResourceManager::GetAssetRoot() const
@@ -63,6 +66,13 @@ void ResourceManager::ClearCaches()
 		shaderCache.inFlight.clear();
 	}
 	{
+		// Clear paired shader lookups so future installs cannot reuse stale stage combinations.
+		std::unique_lock lock(shaderCollectionCache.mutex);
+		shaderCollectionCache.pathToId.clear();
+		shaderCollectionCache.resources.clear();
+		shaderCollectionCache.inFlight.clear();
+	}
+	{
 		std::unique_lock lock(textureCache.mutex);
 		textureCache.pathToId.clear();
 		textureCache.resources.clear();
@@ -86,6 +96,13 @@ Mesh* ResourceManager::GetMesh(const TerraEngine::UUID& id)
 Shader* ResourceManager::GetShader(const TerraEngine::UUID& id)
 {
 	return GetResourceById(id, shaderCache);
+}
+
+ShaderCollection* ResourceManager::GetShaderCollection(const TerraEngine::UUID& id)
+{
+	// Shader collections keep vertex/fragment pairings consistent so render
+	// code can bind a single UUID without managing individual stages.
+	return GetResourceById(id, shaderCollectionCache);
 }
 
 Texture* ResourceManager::GetTexture(const TerraEngine::UUID& id)
@@ -125,6 +142,9 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 		TERRAENGINE_LOG(LogLevel::Error, "Resource file is empty: " << path);
 		return {};
 	}
+
+	// Emit a debug log with the resolved size so callers can correlate reads with disk usage.
+	TERRAENGINE_LOG(LogLevel::Debug, "Reading resource file " << path << " (" << length << " bytes)");
 
 	std::vector<std::uint8_t> buffer(static_cast<std::size_t>(length));
 

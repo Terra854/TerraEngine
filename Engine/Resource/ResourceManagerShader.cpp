@@ -126,6 +126,30 @@ namespace
 			shader->pushConstants = std::span<const PushConstantRange>(reinterpret_cast<const PushConstantRange*>(pushPtr), header.pushConstantCount);
 		}
 
+		if (header.stageInputCount > 0)
+		{
+			const std::size_t inputSize = header.stageInputCount * sizeof(StageIOAttribute);
+			const std::uint8_t* inputPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.stageInputsOffset, inputSize);
+			if (!inputPtr)
+			{
+				return nullptr;
+			}
+
+			shader->inputs = std::span<const StageIOAttribute>(reinterpret_cast<const StageIOAttribute*>(inputPtr), header.stageInputCount);
+		}
+
+		if (header.stageOutputCount > 0)
+		{
+			const std::size_t outputSize = header.stageOutputCount * sizeof(StageIOAttribute);
+			const std::uint8_t* outputPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.stageOutputsOffset, outputSize);
+			if (!outputPtr)
+			{
+				return nullptr;
+			}
+
+			shader->outputs = std::span<const StageIOAttribute>(reinterpret_cast<const StageIOAttribute*>(outputPtr), header.stageOutputCount);
+		}
+
 		if (header.stringTableSize > 0)
 		{
 			const std::uint8_t* stringPtr = ValidateRange(resolvedPath, header, payload, payloadSize, header.stringTableOffset, header.stringTableSize);

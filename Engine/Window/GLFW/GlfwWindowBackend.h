@@ -17,16 +17,17 @@
 // GLFW implementation of the window backend interface. All direct GLFW calls
 // live here so that the rest of the engine only depends on the abstract
 // IWindowBackend API.
-class GlfwWindowBackend : public IWindowBackend {
-public:
-	GlfwWindowBackend();
-	~GlfwWindowBackend() override;
+	class GlfwWindowBackend : public IWindowBackend {
+	public:
+		GlfwWindowBackend();
+		~GlfwWindowBackend() override;
 
-	void Initialize(const WindowConfig& config) override;
-	void PollEvents() override;
-	void SwapBuffers() override;
-	bool ShouldClose() const override;
-	void* GetNativeHandle() const override;
+		std::string BackendName() const override { return "GLFW"; }
+		void Initialize(const WindowConfig& config) override;
+		void PollEvents() override;
+		void SwapBuffers() override;
+		bool ShouldClose() const override;
+		void* GetNativeHandle() const override;
 	void SetCloseCallback(std::function<void()> onClose) override;
 	void Shutdown() override;
 
