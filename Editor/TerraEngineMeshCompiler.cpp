@@ -129,7 +129,7 @@ namespace
 		const int base = index * 2;
 		return {
 			attrib.texcoords[base + 0],
-			attrib.texcoords[base + 1]};
+			1.0f - attrib.texcoords[base + 1]};
 	}
 
 	std::uint32_t PackR10G10B10A2Snorm(const std::array<float, 3>& v)
@@ -305,7 +305,7 @@ int main(int argc, char** argv)
 	header.headerSize = static_cast<std::uint32_t>(sizeof(MeshHeader));
 	header.vertexCount = static_cast<std::uint32_t>(vertexRemap.size());
 	header.indexCount = static_cast<std::uint32_t>(indices.size());
-	header.indexFormat = indices.size() <= std::numeric_limits<std::uint16_t>::max() ? static_cast<std::uint32_t>(IndexFormat::UInt16) : static_cast<std::uint32_t>(IndexFormat::UInt32);
+	header.indexFormat = header.vertexCount <= std::numeric_limits<std::uint16_t>::max() ? static_cast<std::uint32_t>(IndexFormat::UInt16) : static_cast<std::uint32_t>(IndexFormat::UInt32);
 	header.layout.strideBytes = 12;
 	header.layout.attributeCount = 3;
 	header.layout.attributes[0] = {static_cast<std::uint32_t>(AttributeSemantic::Position), static_cast<std::uint32_t>(AttributeFormat::R10G10B10A2Snorm), 0};

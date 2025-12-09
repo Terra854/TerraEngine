@@ -32,6 +32,10 @@ Engine/Input/GLFW/GlfwInputBackend.cpp
 Engine/Window/WindowSystem.cpp
 Engine/Window/GLFW/GlfwWindowBackend.cpp
 Engine/ThreadPool/ThreadPool.cpp
+Engine/Renderer/RenderSystem.cpp
+Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
+Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
+Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp
 )
 
 set(ENGINE_HEADERS
@@ -56,6 +60,13 @@ Engine/Window/WindowConfig.h
 Engine/Window/WindowSystem.h
 Engine/Window/GLFW/GlfwWindowBackend.h
 Engine/ThreadPool/ThreadPool.h
+Engine/Renderer/RenderSystem.h
+Engine/Renderer/RenderTypes.h
+Engine/Renderer/RHI/RHIDefinitions.h
+Engine/Renderer/RHI/RHIContext.h
+Engine/Renderer/RHI/Vulkan/VulkanContext.h
+Engine/Renderer/RHI/Vulkan/VulkanCommonIncludes.h
+Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h
 Engine/Debug.h
 )
 
@@ -81,6 +92,16 @@ target_include_directories(TerraEngine-Engine
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
+
+# --- volk --------------------------------------------------------------------
+set(VOLK_INSTALL OFF CACHE BOOL "Disable volk install" FORCE)
+set(VOLK_STATIC_DEFINES "VK_NO_PROTOTYPES" CACHE STRING "Defines for volk" FORCE)
+add_subdirectory(External/volk)
+
+# --- VMA ---------------------------------------------------------------------
+set(VMA_STATIC_VULKAN_FUNCTIONS OFF CACHE BOOL "VMA: Use dynamic function pointers" FORCE)
+set(VMA_DYNAMIC_VULKAN_FUNCTIONS ON CACHE BOOL "VMA: Fetch function pointers" FORCE)
+add_subdirectory(External/VMA)
 
 # --- RTTR --------------------------------------------------------------------
 set(BUILD_RTTR_DYNAMIC ON CACHE BOOL "Build RTTR as a shared library" FORCE)
@@ -121,6 +142,8 @@ target_link_libraries(TerraEngine-Engine
 		RTTR::Core
 		glfw
 		Vulkan::Headers
+		volk
+		GPUOpen::VulkanMemoryAllocator
 )
 
 target_compile_definitions(TerraEngine-Engine
