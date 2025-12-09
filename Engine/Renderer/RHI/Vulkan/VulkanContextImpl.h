@@ -81,6 +81,10 @@ struct VulkanMesh {
 struct VulkanPipeline {
 	VkPipeline pipeline;
 	VkPipelineLayout layout;
+	std::vector<VkDescriptorSetLayout> setLayouts;
+	std::vector<std::vector<DescriptorBinding>> bindingsPerSet;
+	std::vector<VkPushConstantRange> pushConstants;
+	bool supportsDefaultPushConstants = false;
 };
 
 // Push constant payload required by the preview renderer.
@@ -117,9 +121,7 @@ struct VulkanContext::Impl {
 	VkCommandPool commandPool = VK_NULL_HANDLE;
 	std::vector<VkCommandBuffer> commandBuffers;
 
-	VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
 	VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-	VkDescriptorSet defaultDescriptorSet = VK_NULL_HANDLE;
 
 	std::vector<VkSemaphore> imageAvailableSemaphores;
 	std::vector<VkSemaphore> renderFinishedSemaphores;
@@ -136,7 +138,7 @@ struct VulkanContext::Impl {
 	std::unordered_map<TerraEngine::UUID, VulkanMesh> meshCache;
 	std::unordered_map<TerraEngine::UUID, VulkanImage> textureCache;
 	std::unordered_map<TerraEngine::UUID, VulkanPipeline> pipelineCache;
-	std::unordered_map<TerraEngine::UUID, VkDescriptorSet> materialSets;
+	std::unordered_map<TerraEngine::UUID, std::unordered_map<TerraEngine::UUID, std::vector<VkDescriptorSet>>> materialDescriptorSets;
 
 	VulkanImage defaultTexture;
 
@@ -159,9 +161,7 @@ struct VulkanContext::Impl {
 	bool CreateCommandPool();
 	bool CreateSyncObjects();
 
-	bool CreateDescriptorSetLayout();
 	bool CreateDescriptorPool();
-	bool CreateDefaultDescriptorSet();
 
 	void CreateDefaultTexture();
 	VulkanBuffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
@@ -174,9 +174,14 @@ struct VulkanContext::Impl {
 
 	VkFormat MapTextureFormat(uint8_t format, uint8_t channelType, uint8_t semantic);
 	void EnsureTexture(TerraEngine::UUID textureId);
-	VkDescriptorSet EnsureMaterialDescriptorSet(TerraEngine::UUID materialId);
+	std::vector<VkDescriptorSet> EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId);
 	void EnsureMesh(TerraEngine::UUID meshId);
 	void EnsurePipeline(TerraEngine::UUID shaderCollectionId);
+
+	VkDescriptorType MapDescriptorType(DescriptorType type);
+	VkShaderStageFlags StageVisibilityToVulkan(StageVisibilityMask visibility);
+	void DestroyPipelines();
+	bool BuildPipelineLayouts(const ShaderCollection& collection, std::vector<VkDescriptorSetLayout>& setLayouts, std::vector<std::vector<DescriptorBinding>>& bindingsPerSet, std::vector<VkPushConstantRange>& pushConstants, bool& supportsDefaultPushConstants);
 
 	bool CheckValidationLayerSupport();
 	std::vector<const char*> GetRequiredExtensions();

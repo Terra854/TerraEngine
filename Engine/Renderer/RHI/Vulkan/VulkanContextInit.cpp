@@ -39,13 +39,10 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	if (!CreateFramebuffers()) return false;
 	if (!CreateCommandPool()) return false;
 	if (!CreateSyncObjects()) return false;
-
-	if (!CreateDescriptorSetLayout()) return false;
 	if (!CreateDescriptorPool()) return false;
 
 	try {
 		CreateDefaultTexture();
-		if (!CreateDefaultDescriptorSet()) return false;
 	} catch (const std::exception& e) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create default texture: " << e.what());
 		Cleanup();
@@ -78,13 +75,8 @@ void VulkanContext::Impl::Cleanup() {
 	}
 	textureCache.clear();
 
-	for (auto& [id, pipe] : pipelineCache) {
-		if (device) {
-			vkDestroyPipeline(device, pipe.pipeline, nullptr);
-			vkDestroyPipelineLayout(device, pipe.layout, nullptr);
-		}
-	}
-	pipelineCache.clear();
+	DestroyPipelines();
+	materialDescriptorSets.clear();
 
 	if (device) {
 		vkDestroySampler(device, defaultTexture.sampler, nullptr);
@@ -108,7 +100,6 @@ void VulkanContext::Impl::Cleanup() {
 	if (device) vkDestroyCommandPool(device, commandPool, nullptr);
 
 	if (device) vkDestroyDescriptorPool(device, descriptorPool, nullptr);
-	if (device) vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 
 	if (allocator) vmaDestroyAllocator(allocator);
 
@@ -532,95 +523,34 @@ bool VulkanContext::Impl::CreateSyncObjects() {
 	return true;
 }
 
-bool VulkanContext::Impl::CreateDescriptorSetLayout() {
-	// Layout with a sampled image and sampler slot for simple textured draws.
-	VkDescriptorSetLayoutBinding textureLayoutBinding{};
-	textureLayoutBinding.binding = 0;
-	textureLayoutBinding.descriptorCount = 1;
-	textureLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	textureLayoutBinding.pImmutableSamplers = nullptr;
-	textureLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	VkDescriptorSetLayoutBinding samplerLayoutBinding{};
-	samplerLayoutBinding.binding = 1;
-	samplerLayoutBinding.descriptorCount = 1;
-	samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-	samplerLayoutBinding.pImmutableSamplers = nullptr;
-	samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	std::array<VkDescriptorSetLayoutBinding, 2> bindings = {textureLayoutBinding, samplerLayoutBinding};
-	VkDescriptorSetLayoutCreateInfo layoutInfo{};
-	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-	layoutInfo.pBindings = bindings.data();
-
-	if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "failed to create descriptor set layout!");
-		return false;
-	}
-	return true;
-}
-
 bool VulkanContext::Impl::CreateDescriptorPool() {
-	// Pool sized for a modest number of materials; grow if needed later.
-	std::array<VkDescriptorPoolSize, 2> poolSizes{};
+	// Pool sized with a mix of common descriptor types so different shaders can allocate safely.
+	std::array<VkDescriptorPoolSize, 7> poolSizes{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	poolSizes[0].descriptorCount = 100;
+	poolSizes[0].descriptorCount = 256;
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-	poolSizes[1].descriptorCount = 100;
+	poolSizes[1].descriptorCount = 256;
+	poolSizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[2].descriptorCount = 256;
+	poolSizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	poolSizes[3].descriptorCount = 256;
+	poolSizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	poolSizes[4].descriptorCount = 128;
+	poolSizes[5].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	poolSizes[5].descriptorCount = 64;
+	poolSizes[6].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+	poolSizes[6].descriptorCount = 64;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
 	poolInfo.pPoolSizes = poolSizes.data();
-	poolInfo.maxSets = 100;
+	poolInfo.maxSets = 512;
 
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create descriptor pool!");
 		return false;
 	}
-	return true;
-}
-
-bool VulkanContext::Impl::CreateDefaultDescriptorSet() {
-	// Bind the default white texture as a fallback material.
-	VkDescriptorSetAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-	allocInfo.descriptorPool = descriptorPool;
-	allocInfo.descriptorSetCount = 1;
-	allocInfo.pSetLayouts = &descriptorSetLayout;
-
-	if (vkAllocateDescriptorSets(device, &allocInfo, &defaultDescriptorSet) != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "failed to allocate descriptor set!");
-		return false;
-	}
-
-	VkDescriptorImageInfo imageInfo{};
-	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	imageInfo.imageView = defaultTexture.view;
-
-	VkDescriptorImageInfo samplerInfo{};
-	samplerInfo.sampler = defaultTexture.sampler;
-
-	std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
-
-	descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrites[0].dstSet = defaultDescriptorSet;
-	descriptorWrites[0].dstBinding = 0;
-	descriptorWrites[0].dstArrayElement = 0;
-	descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	descriptorWrites[0].descriptorCount = 1;
-	descriptorWrites[0].pImageInfo = &imageInfo;
-
-	descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrites[1].dstSet = defaultDescriptorSet;
-	descriptorWrites[1].dstBinding = 1;
-	descriptorWrites[1].dstArrayElement = 0;
-	descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-	descriptorWrites[1].descriptorCount = 1;
-	descriptorWrites[1].pImageInfo = &samplerInfo;
-
-	vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 	return true;
 }
 
@@ -801,6 +731,15 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		glfwWaitEvents();
 	}
 	vkDeviceWaitIdle(device);
+
+	DestroyPipelines();
+	materialDescriptorSets.clear();
+	if (descriptorPool) {
+		VkResult resetResult = vkResetDescriptorPool(device, descriptorPool, 0);
+		if (resetResult != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Failed to reset descriptor pool during swapchain recreation");
+		}
+	}
 
 	CleanupSwapChain();
 

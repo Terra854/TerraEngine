@@ -77,8 +77,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline);
 		
-		VkDescriptorSet materialSet = impl->EnsureMaterialDescriptorSet(command.materialId);
-		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, 1, &materialSet, 0, nullptr);
+		std::vector<VkDescriptorSet> materialSets = impl->EnsureMaterialDescriptorSets(shaderId, command.materialId);
+		if (!materialSets.empty()) {
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, static_cast<uint32_t>(materialSets.size()), materialSets.data(), 0, nullptr);
+		}
 
 		VkBuffer vertexBuffers[] = {mesh.vertexBuffer.buffer};
 		VkDeviceSize offsets[] = {0};
@@ -114,7 +116,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 			push.uvOffsetScale = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
 		}
 
-		vkCmdPushConstants(cmd, pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &push);
+		if (pipeline.supportsDefaultPushConstants) {
+			vkCmdPushConstants(cmd, pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &push);
+		}
 
 		vkCmdDrawIndexed(cmd, mesh.indexCount, 1, 0, 0, 0);
 	}
