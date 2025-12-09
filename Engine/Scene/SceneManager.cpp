@@ -6,10 +6,13 @@
 #include <fstream>
 #include <sstream>
 #include <utility>
+#include <glm/gtc/constants.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <nlohmann/json.hpp>
 
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
+#include "Input/InputSystem.h"
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/ShaderCollection.h"
@@ -44,9 +47,11 @@ void SceneManager::Initialize()
 
 void SceneManager::Update()
 {
-	// Scene loading is handled via explicit requests and shared futures, so the
-	// update step is intentionally empty. Keeping it in place preserves the
-	// SystemsBase contract for future streaming logic.
+	// Input-driven preview manipulation runs on the main thread so it can react
+	// to mouse deltas without introducing cross-thread contention. The helper
+	// keeps the loop single-threaded by design because input callbacks are
+	// already serialized through the window pump.
+	UpdatePreviewInteraction();
 }
 
 void SceneManager::Shutdown()
@@ -166,6 +171,18 @@ void SceneManager::UnloadAll()
 	}
 
 	activeSceneId = TerraEngine::EMPTY_UUID;
+	// Remove the generated preview entity so repeated initializes do not leave
+	// stray objects in the registry when the manager is reused.
+	if (previewObject)
+	{
+		ObjectManager::instance().removeObject(*previewObject);
+		previewObject.reset();
+	}
+	isDraggingPreview = false;
+	lastCursorPosition = glm::vec2(0.0f, 0.0f);
+	accumulatedYaw = 0.0f;
+	accumulatedPitch = 0.0f;
+	previewZoomOffset = 0.0f;
 	// Log cache flushes so teardown/hot-reload steps are easy to correlate in logs.
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager caches cleared");
 }
@@ -373,11 +390,11 @@ TerraEngine::UUID SceneManager::CreateGeneratedMaterial(ResourceManager& resourc
 	binding.uvOffset[0] = 0.0f;
 	binding.uvOffset[1] = 0.0f;
 
-	auto material = std::make_unique<Material>();
-	material->header = header;
-	material->shaderCollectionId = shaderCollectionId;
-	material->storage.resize(sizeof(TextureBinding));
-	std::memcpy(material->storage.data(), &binding, sizeof(TextureBinding));
+auto material = std::make_unique<Material>();
+material->header = header;
+material->shaderCollectionId = shaderCollectionId;
+material->storage.resize(sizeof(TextureBinding));
+std::memcpy(material->storage.data(), &binding, sizeof(TextureBinding));
 	material->textures = std::span<const TextureBinding>(reinterpret_cast<const TextureBinding*>(material->storage.data()), header.textureCount);
 	material->floats = std::span<const FloatParameter>();
 
@@ -387,17 +404,91 @@ TerraEngine::UUID SceneManager::CreateGeneratedMaterial(ResourceManager& resourc
 void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)
 {
 	ObjectManager& objects = ObjectManager::instance();
-	auto preview = objects.createObject("GeneratedPreview");
+	// Persist the preview object so input-driven camera controls can adjust it
+	// every frame without re-querying the registry.
+	previewObject = objects.createObject("GeneratedPreview");
 
-	auto t = preview.getComponent<Transform>();
+	auto t = previewObject->getComponent<Transform>();
 	t->position = glm::vec3(0.0f, 0.0f, 0.0f);
 	t->rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
 	t->scale = glm::vec3(1.0f, 1.0f, 1.0f);
 
 	// Attach a simple render binding component so downstream renderer work can
 	// read which authored assets should be drawn together.
-	auto& renderComponent = preview.addComponent<MeshRenderComponent>();
+	auto& renderComponent = previewObject->addComponent<MeshRenderComponent>();
 	renderComponent.meshId = meshId;
 	renderComponent.materialId = materialId;
 	renderComponent.shaderCollectionId = shaderCollectionId;
+}
+
+void SceneManager::UpdatePreviewInteraction()
+{
+	Transform* transform = GetPreviewTransform();
+	if (transform == nullptr)
+	{
+		// When the preview entity is missing (e.g., asset load failure) skip the
+		// interaction logic so we do not touch a null Transform pointer.
+		return;
+	}
+
+	InputSystem& input = InputSystem::Instance();
+	const auto cursor = input.GetCursorPosition();
+	const glm::vec2 cursorPosition = glm::vec2(static_cast<float>(cursor.first), static_cast<float>(cursor.second));
+
+	const bool leftMouseDown = input.IsMouseButtonPressed(MouseButton::Left);
+	if (leftMouseDown && !isDraggingPreview)
+	{
+		// Begin a drag when the user first depresses the mouse so subsequent
+		// deltas can accumulate into the preview rotation.
+		isDraggingPreview = true;
+		lastCursorPosition = cursorPosition;
+	}
+
+	if (!leftMouseDown)
+	{
+		// Releasing the mouse clears the drag so the next click starts a fresh
+		// delta measurement instead of reusing stale cursor positions.
+		isDraggingPreview = false;
+	}
+
+	if (isDraggingPreview)
+	{
+		const glm::vec2 cursorDelta = cursorPosition - lastCursorPosition;
+		lastCursorPosition = cursorPosition;
+
+		// Convert raw pixel motion into radians for pitch/yaw adjustments.
+		accumulatedYaw += cursorDelta.x * kPreviewRotationSpeed;
+		accumulatedPitch += cursorDelta.y * kPreviewRotationSpeed;
+
+		// Clamp the pitch so the model never inverts when dragging vertically.
+		const float maxPitch = glm::radians(89.0f);
+		accumulatedPitch = std::clamp(accumulatedPitch, -maxPitch, maxPitch);
+	}
+
+	const auto scrollDelta = input.GetScrollDelta();
+	if (scrollDelta.second != 0.0)
+	{
+		// Treat scroll wheel motion as forward/backward dolly, constraining the
+		// offset so the model cannot pass through the camera origin.
+		previewZoomOffset += static_cast<float>(scrollDelta.second) * kPreviewZoomStep;
+		previewZoomOffset = std::clamp(previewZoomOffset, kPreviewMaxZoomOut, kPreviewMaxZoomIn);
+	}
+
+	const glm::quat yawRotation = glm::angleAxis(accumulatedYaw, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::quat pitchRotation = glm::angleAxis(accumulatedPitch, glm::vec3(1.0f, 0.0f, 0.0f));
+	transform->rotation = yawRotation * pitchRotation;
+
+	// Adjust the Z offset to mimic camera zoom while keeping the model centered
+	// around the origin so it remains in view of the fixed render camera.
+	transform->position = glm::vec3(0.0f, 0.0f, previewZoomOffset);
+}
+
+Transform* SceneManager::GetPreviewTransform()
+{
+	if (!previewObject)
+	{
+		return nullptr;
+	}
+
+	return previewObject->getComponent<Transform>();
 }

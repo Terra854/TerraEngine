@@ -9,15 +9,18 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <glm/vec2.hpp>
 #include <nlohmann/json.hpp>
 
 #include "Core/Export.h"
+#include "Core/Object/Object.h"
 #include "Core/SystemBase.h"
 #include "File Formats/TerraEngineShaderFile.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
 
 class ResourceManager;
+class Transform;
 
 // Lightweight holder for a scene or prefab definition. The manager stores the
 // original JSON text so higher level systems can deserialize into game-specific
@@ -135,6 +138,8 @@ private:
 	TerraEngine::UUID LoadPreviewShaderCollection(ResourceManager& resources) const;
 	TerraEngine::UUID CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
 	void SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
+	void UpdatePreviewInteraction();
+	Transform* GetPreviewTransform();
 
 	ThreadPool& threadPool;
 	std::filesystem::path sceneRoot;
@@ -147,6 +152,20 @@ private:
 	TerraEngine::UUID previewTextureId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewShaderCollectionId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewMaterialId = TerraEngine::EMPTY_UUID;
+	// Track the generated preview object and the user's interaction state so
+	// mouse motion/scroll can manipulate the on-screen demo model.
+	std::optional<Object> previewObject;
+	glm::vec2 lastCursorPosition{0.0f, 0.0f};
+	bool isDraggingPreview = false;
+	float accumulatedYaw = 0.0f;
+	float accumulatedPitch = 0.0f;
+	float previewZoomOffset = 0.0f;
+	// Tunable interaction parameters keep drag/scroll sensitivity readable from
+	// a single location instead of scattering literals through the update loop.
+	static constexpr float kPreviewRotationSpeed = 0.005f;
+	static constexpr float kPreviewZoomStep = 0.25f;
+	static constexpr float kPreviewMaxZoomIn = 2.5f;
+	static constexpr float kPreviewMaxZoomOut = -2.5f;
 };
 
 inline std::shared_future<TerraEngine::UUID> SceneManager::MakeReadyFuture(const TerraEngine::UUID& id)
