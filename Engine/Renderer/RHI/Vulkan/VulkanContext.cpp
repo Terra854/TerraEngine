@@ -132,11 +132,12 @@ struct VulkanContext::Impl {
 	std::vector<VkFence> inFlightFences;
 
 	VmaAllocator allocator = VK_NULL_HANDLE;
+	WindowSystem* windowSystem = nullptr;
 
 	uint32_t currentFrame = 0;
 	bool framebufferResized = false;
 	bool initialized = false;
-	const int MAX_FRAMES_IN_FLIGHT = 2;
+	int MAX_FRAMES_IN_FLIGHT = 2;
 
 	// Resource Cache
 	std::unordered_map<TerraEngine::UUID, VulkanMesh> meshCache;
@@ -148,6 +149,7 @@ struct VulkanContext::Impl {
 	VulkanImage defaultTexture;
 
 	bool InitVulkan(WindowSystem& windowSystem) {
+		this->windowSystem = &windowSystem;
 		volkInitialize();
 
 		if (!CreateInstance()) return false;
@@ -461,6 +463,7 @@ struct VulkanContext::Impl {
 
 		swapchainImageFormat = surfaceFormat.format;
 		swapchainExtent = extent;
+		MAX_FRAMES_IN_FLIGHT = static_cast<int>(swapchainImages.size());
 		return true;
 	}
 
@@ -957,7 +960,7 @@ struct VulkanContext::Impl {
 		viewInfo.subresourceRange.baseMipLevel = 0;
 		viewInfo.subresourceRange.levelCount = 1;
 		viewInfo.subresourceRange.baseArrayLayer = 0;
-		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.layerCount = 1;
 
 		VkImageView imageView;
 		if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
@@ -1500,9 +1503,9 @@ struct VulkanContext::Impl {
 		swapchainImageViews.clear();
 	}
 	
-	void RecreateSwapChain(WindowSystem& windowSystem) {
+	void RecreateSwapChain() {
 		int width = 0, height = 0;
-		auto* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
+		auto* window = static_cast<GLFWwindow*>(windowSystem->GetNativeHandle());
 		glfwGetFramebufferSize(window, &width, &height);
 		while (width == 0 || height == 0) {
 			glfwGetFramebufferSize(window, &width, &height);
@@ -1515,7 +1518,7 @@ struct VulkanContext::Impl {
 		vkDestroyImageView(device, depthImageView, nullptr);
 		vmaDestroyImage(allocator, depthImage, depthImageAllocation);
 
-		CreateSwapChain(windowSystem);
+		CreateSwapChain(*windowSystem);
 		CreateImageViews();
 		CreateDepthResources();
 		CreateRenderPass();
@@ -1544,8 +1547,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 	VkResult result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX, impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &imageIndex);
 
 	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-		// Recreate swapchain? Need window system ref
-		// For now, skip
+		impl->RecreateSwapChain();
 		return;
 	} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to acquire swap chain image!");
@@ -1684,7 +1686,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 	presentInfo.pSwapchains = swapChains;
 	presentInfo.pImageIndices = &imageIndex;
 
-	vkQueuePresentKHR(impl->presentQueue, &presentInfo);
+	result = vkQueuePresentKHR(impl->presentQueue, &presentInfo);
+
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
+		impl->framebufferResized = false;
+		impl->RecreateSwapChain();
+	} else if (result != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "failed to present swap chain image!");
+	}
 
 	impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 }
