@@ -5,6 +5,7 @@
 #include "Input/GLFW/GlfwInputBackend.h"
 #include "Input/InputSystem.h"
 #include "Scene/SceneManager.h"
+#include "Renderer/RenderSystem.h"
 #include "Window/GLFW/GlfwWindowBackend.h"
 #include "Window/WindowSystem.h"
 
@@ -50,6 +51,10 @@ void Engine::Initialize()
 	// gameplay code can request them without re-reading disk on every access.
 	SceneManager& sceneManager = SceneManager::Instance();
 	systems.push_back(&sceneManager);
+	
+	// RenderSystem consumes scene data and produces frames.
+	static RenderSystem renderSystem;
+	systems.push_back(&renderSystem);
 	
 	// Additional systems can be appended after the window so they update in
 	// a predictable order.
