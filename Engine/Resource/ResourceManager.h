@@ -72,6 +72,10 @@ public:
 	TerraEngine::UUID LoadShaderCollection(const std::vector<ShaderStagePath>& stagePaths);
 	TerraEngine::UUID LoadTexture(const std::filesystem::path& path);
 
+	// Inject a generated material directly into the cache so tooling can synthesize preview materials
+	// without writing TMAT files to disk. The cacheKey should be unique and stable (e.g., "generated/preview").
+	TerraEngine::UUID RegisterMaterial(const std::string& cacheKey, std::unique_ptr<Material> material);
+
 	// Asynchronous load helpers. Each call schedules a background task on
 	// the shared thread pool and returns a shared_future that multiple
 	// callers can await safely. Duplicate requests will join the same

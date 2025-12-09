@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <utility>
@@ -9,6 +10,7 @@
 
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
+#include "File Formats/TerraEngineMaterialFile.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/ShaderCollection.h"
 #include "Scene/MeshRenderComponent.h"
@@ -284,7 +286,7 @@ void SceneManager::PreparePreviewAssets()
 		TERRAENGINE_LOG(LogLevel::Warning, "Preview shader collection is incomplete; rendering components will not reference a shader set.");
 	}
 
-	previewMaterialId = CreateGeneratedMaterial("GeneratedTextureMaterial", previewTextureId, previewShaderCollectionId);
+	previewMaterialId = CreateGeneratedMaterial(resources, "GeneratedTextureMaterial", previewTextureId, previewShaderCollectionId);
 
 	// Instantiate an object with the bindings so future renderer work can query
 	// exactly which authored assets should be drawn.
@@ -329,15 +331,57 @@ TerraEngine::UUID SceneManager::LoadPreviewShaderCollection(ResourceManager& res
 	return shaderCollectionId;
 }
 
-TerraEngine::UUID SceneManager::CreateGeneratedMaterial(const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)
+TerraEngine::UUID SceneManager::CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)
 {
-	GeneratedMaterial material{};
-	material.id = TerraEngine::GenerateUUID();
-	material.textureId = textureId;
-	material.shaderCollectionId = shaderCollectionId;
-	material.name = name;
-	generatedMaterials[material.id] = material;
-	return material.id;
+	// Build a minimal in-memory material that binds the preview texture to the base color slot so
+	// render components can reference it through the shared ResourceManager cache without writing TMAT files.
+	MaterialHeader header{};
+	std::memcpy(header.magic, "TMAT", sizeof(header.magic));
+	header.version = kMaterialCurrentVersion;
+	header.headerSize = static_cast<std::uint16_t>(sizeof(MaterialHeader));
+	header.flags = 0;
+	header.shadingModel = static_cast<std::uint32_t>(ShadingModel::Unlit);
+	header.alphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
+	header.shaderCollectionId = shaderCollectionId;
+	header.baseColorFactor[0] = 1.0f;
+	header.baseColorFactor[1] = 1.0f;
+	header.baseColorFactor[2] = 1.0f;
+	header.baseColorFactor[3] = 1.0f;
+	header.emissiveFactor[0] = 0.0f;
+	header.emissiveFactor[1] = 0.0f;
+	header.emissiveFactor[2] = 0.0f;
+	header.metallicFactor = 0.0f;
+	header.roughnessFactor = 1.0f;
+	header.normalScale = 1.0f;
+	header.occlusionStrength = 1.0f;
+	header.alphaCutoff = 0.5f;
+	header.textureCount = 1;
+	header.floatParameterCount = 0;
+	header.textureArrayOffset = header.headerSize;
+	header.floatParameterOffset = header.headerSize + static_cast<std::uint32_t>(sizeof(TextureBinding));
+
+	TextureBinding binding{};
+	binding.semantic = TextureSemantic::BaseColor;
+	binding.textureUuid = textureId;
+	binding.samplerFilter = SamplerFilter::Trilinear;
+	binding.addressU = SamplerAddressMode::Repeat;
+	binding.addressV = SamplerAddressMode::Repeat;
+	binding.addressW = SamplerAddressMode::Repeat;
+	binding.uvSetIndex = 0;
+	binding.uvScale[0] = 1.0f;
+	binding.uvScale[1] = 1.0f;
+	binding.uvOffset[0] = 0.0f;
+	binding.uvOffset[1] = 0.0f;
+
+	auto material = std::make_unique<Material>();
+	material->header = header;
+	material->shaderCollectionId = shaderCollectionId;
+	material->storage.resize(sizeof(TextureBinding));
+	std::memcpy(material->storage.data(), &binding, sizeof(TextureBinding));
+	material->textures = std::span<const TextureBinding>(reinterpret_cast<const TextureBinding*>(material->storage.data()), header.textureCount);
+	material->floats = std::span<const FloatParameter>();
+
+	return resources.RegisterMaterial(name, std::move(material));
 }
 
 void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)

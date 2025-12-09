@@ -85,14 +85,6 @@ public:
 	void UnloadAll();
 
 private:
-	struct GeneratedMaterial
-	{
-		TerraEngine::UUID id;
-		TerraEngine::UUID textureId;
-		TerraEngine::UUID shaderCollectionId;
-		std::string name;
-	};
-
 	enum class SceneFileType
 	{
 		Scene,
@@ -141,7 +133,7 @@ private:
 	std::string NormalizeKey(const std::filesystem::path& path) const;
 	void PreparePreviewAssets();
 	TerraEngine::UUID LoadPreviewShaderCollection(ResourceManager& resources) const;
-	TerraEngine::UUID CreateGeneratedMaterial(const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
+	TerraEngine::UUID CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
 	void SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
 
 	ThreadPool& threadPool;
@@ -155,7 +147,6 @@ private:
 	TerraEngine::UUID previewTextureId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewShaderCollectionId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewMaterialId = TerraEngine::EMPTY_UUID;
-	std::unordered_map<TerraEngine::UUID, GeneratedMaterial> generatedMaterials;
 };
 
 inline std::shared_future<TerraEngine::UUID> SceneManager::MakeReadyFuture(const TerraEngine::UUID& id)
