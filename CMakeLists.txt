@@ -269,4 +269,10 @@ else()
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/bin/dxc
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}
 	)
+	# Ship the DXC runtime libraries beside the compiler binary so it can run without system installs.
+	install(FILES
+		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxcompiler.so
+		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxil.so
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	)
 endif()

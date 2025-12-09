@@ -12,8 +12,13 @@
 #include <string_view>
 #include <type_traits>
 #include <vector>
+#include <functional>
 #include <cstring>
 #include <unordered_map>
+#include <system_error>
+#if defined(_WIN32)
+#include <process.h>
+#endif
 
 // Offline TSPF compiler: wraps DXC to compile HLSL into TerraEngine's shader container
 // (SPIR-V by default) so editor users do not need to install toolchains separately.
@@ -114,13 +119,23 @@ namespace
 		return std::nullopt;
 	}
 
-	std::filesystem::path DefaultDxcPath()
+	std::filesystem::path DefaultDxcPath(const std::filesystem::path& executablePath)
 	{
 #if defined(_WIN32)
-		return std::filesystem::path("External/dxc/windows/bin/x64/dxc.exe");
+		const std::filesystem::path localName = std::filesystem::path("dxc.exe");
 #else
-		return std::filesystem::path("External/dxc/linux/bin/dxc");
+		const std::filesystem::path localName = std::filesystem::path("dxc");
 #endif
+
+		// Always prefer a DXC binary that lives alongside this executable so we do not accidentally pick up a global install.
+		const std::filesystem::path sibling = executablePath.parent_path() / localName;
+		if(std::filesystem::exists(sibling))
+		{
+			return sibling;
+		}
+
+		// If the sibling copy is missing, return its expected location so the caller can emit a helpful error.
+		return sibling;
 	}
 
 	std::string Quote(const std::filesystem::path& p)
@@ -134,6 +149,63 @@ namespace
 	{
 		// Rely on the vendored DXC binaries shipped with the repo so the tool stays self-contained.
 		const std::string target = args.targetProfile.empty() ? DefaultProfileForStage(args.stage) : args.targetProfile;
+
+#if defined(_WIN32)
+		// Use spawn to avoid CMD quoting pitfalls when paths contain spaces.
+		auto ToWide = [](const std::filesystem::path& p) -> std::wstring {
+			return p.wstring();
+		};
+		auto ToWideStr = [](const std::string& s) -> std::wstring {
+			return std::wstring(s.begin(), s.end());
+		};
+
+		std::vector<std::wstring> wideArgs;
+		wideArgs.push_back(ToWide(dxcPath));
+		wideArgs.push_back(L"-spirv");
+		wideArgs.push_back(L"-fspv-target-env=vulkan1.3");
+		wideArgs.push_back(L"-T");
+		wideArgs.push_back(ToWideStr(target));
+		wideArgs.push_back(L"-E");
+		wideArgs.push_back(ToWideStr(args.entryPoint));
+		wideArgs.push_back(L"-Fo");
+		wideArgs.push_back(ToWide(tempSpv));
+		wideArgs.push_back(ToWide(args.input));
+
+		std::vector<const wchar_t*> cargs;
+		cargs.reserve(wideArgs.size() + 1);
+		for(const std::wstring& w : wideArgs)
+		{
+			cargs.push_back(w.c_str());
+		}
+		cargs.push_back(nullptr);
+
+		std::ostringstream log;
+		log << "\"" << dxcPath.string() << "\""
+			<< " -spirv -fspv-target-env=vulkan1.3"
+			<< " -T " << target
+			<< " -E " << args.entryPoint
+			<< " -Fo " << Quote(tempSpv)
+			<< " " << Quote(args.input);
+		std::cout << "Running: " << log.str() << "\n";
+
+		const intptr_t code = _wspawnv(_P_WAIT, dxcPath.wstring().c_str(), cargs.data());
+		if(code != 0)
+		{
+			std::cerr << "dxc failed with exit code " << code << "\n";
+			return false;
+		}
+		return true;
+#else
+		// Ensure the DXC shared libraries sitting next to the binary are visible without requiring a global install.
+		const std::string dxcDir = dxcPath.parent_path().string();
+		const char* prevLd = std::getenv("LD_LIBRARY_PATH");
+		std::string newLd = dxcDir;
+		if(prevLd && *prevLd)
+		{
+			newLd += ":" + std::string(prevLd);
+		}
+		setenv("LD_LIBRARY_PATH", newLd.c_str(), 1);
+
 		std::ostringstream cmd;
 		// Target Vulkan 1.3 to match the bundled DXC capabilities and remain portable across platforms.
 		cmd << Quote(dxcPath) << " -spirv -fspv-target-env=vulkan1.3"
@@ -150,6 +222,7 @@ namespace
 			return false;
 		}
 		return true;
+#endif
 	}
 
 	struct StringTableBuilder
@@ -467,7 +540,9 @@ namespace
 				i += count;
 			}
 
-			const auto resolveScalar = [&](std::uint32_t typeId) -> std::optional<std::pair<IoComponentType, std::uint32_t>> {
+			// Recursive helper to map a SPIR-V type id to the base component type and element count.
+			std::function<std::optional<std::pair<IoComponentType, std::uint32_t>>(std::uint32_t)> resolveScalar;
+			resolveScalar = [&](std::uint32_t typeId) -> std::optional<std::pair<IoComponentType, std::uint32_t>> {
 				auto iter = types.find(typeId);
 				if(iter == types.end())
 				{
@@ -672,10 +747,11 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	const std::filesystem::path dxcPath = args.dxcPathOverride.empty() ? DefaultDxcPath() : args.dxcPathOverride;
+	const std::filesystem::path exePath = std::filesystem::absolute(argv[0]);
+	const std::filesystem::path dxcPath = args.dxcPathOverride.empty() ? DefaultDxcPath(exePath) : args.dxcPathOverride;
 	if(!std::filesystem::exists(dxcPath))
 	{
-		std::cerr << "Cannot find dxc at: " << dxcPath << "\n";
+		std::cerr << "Cannot find dxc next to the compiler: " << dxcPath << "\n";
 		return 1;
 	}
 
@@ -695,7 +771,6 @@ int main(int argc, char** argv)
 	spvFile.seekg(0);
 	std::vector<std::uint8_t> bytecode(static_cast<std::size_t>(spvSize));
 	spvFile.read(reinterpret_cast<char*>(bytecode.data()), spvSize);
-	std::filesystem::remove(tempSpv);
 
 	StringTableBuilder strings;
 	// Always emit the source metadata strings first so the offsets remain stable even when reflection data grows.
@@ -853,5 +928,13 @@ int main(int argc, char** argv)
 	out.write(reinterpret_cast<const char*>(&header), sizeof(header));
 	out.write(reinterpret_cast<const char*>(storage.data()), static_cast<std::streamsize>(storage.size()));
 	std::cout << "Wrote TSPF: " << args.output << " (" << bytecode.size() << " bytes SPIR-V)\n";
+
+	// Clean up the temporary SPIR-V blob at the end of execution to avoid handle races on Windows.
+	std::error_code removeErr;
+	std::filesystem::remove(tempSpv, removeErr);
+	if(removeErr)
+	{
+		std::cerr << "Warning: failed to delete temporary SPIR-V file " << tempSpv << ": " << removeErr.message() << "\n";
+	}
 	return 0;
 }
