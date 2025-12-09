@@ -34,6 +34,7 @@ namespace
 	{
 		std::filesystem::path input;
 		std::filesystem::path output;
+		TextureFileSemantic semantic = TextureFileSemantic::Unknown;
 	};
 
 	std::uint32_t AlignUp32(std::uint32_t value, std::uint32_t alignment)
@@ -55,6 +56,23 @@ namespace
 			{
 				args.output = argv[++i];
 			}
+			else if((flag == "-s" || flag == "--semantic") && i + 1 < argc)
+			{
+				std::string_view value = argv[++i];
+				if(value == "color")
+				{
+					args.semantic = TextureFileSemantic::Color;
+				}
+				else if(value == "data")
+				{
+					args.semantic = TextureFileSemantic::Data;
+				}
+				else
+				{
+					std::cerr << "Invalid semantic: " << value << " (expected 'color' or 'data')\n";
+					return false;
+				}
+			}
 			else
 			{
 				std::cerr << "Unrecognized or incomplete argument: " << flag << "\n";
@@ -64,7 +82,7 @@ namespace
 
 		if(args.input.empty() || args.output.empty())
 		{
-			std::cerr << "Usage: TerraEngineTextureCompiler -i <input image> -o <output.tetf>\n";
+			std::cerr << "Usage: TerraEngineTextureCompiler -i <input image> -o <output.tetf> [-s <color|data>]\n";
 			return false;
 		}
 
@@ -147,7 +165,7 @@ int main(int argc, char** argv)
 	desc.blockWidth = 1;
 	desc.blockHeight = 1;
 	desc.blockBytes = 4;
-	desc.semantic = 0;
+	desc.semantic = static_cast<std::uint8_t>(args.semantic);
 	desc.mipOffsetChunk = 1;
 	desc.userMetadataChunk = TETF_INVALID_CHUNK_INDEX;
 	desc.thumbnailChunk = TETF_INVALID_CHUNK_INDEX;
