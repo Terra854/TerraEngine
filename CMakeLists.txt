@@ -34,6 +34,8 @@ Engine/Window/GLFW/GlfwWindowBackend.cpp
 Engine/ThreadPool/ThreadPool.cpp
 Engine/Renderer/RenderSystem.cpp
 Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
+Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
+Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp
 )
 
 set(ENGINE_HEADERS
@@ -63,6 +65,8 @@ Engine/Renderer/RenderTypes.h
 Engine/Renderer/RHI/RHIDefinitions.h
 Engine/Renderer/RHI/RHIContext.h
 Engine/Renderer/RHI/Vulkan/VulkanContext.h
+Engine/Renderer/RHI/Vulkan/VulkanCommonIncludes.h
+Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h
 Engine/Debug.h
 )
 
