@@ -273,6 +273,72 @@ void VulkanContext::Impl::DestroyPipelines() {
 	pipelineCache.clear();
 }
 
+void VulkanContext::Impl::DestroyWorkerPools() {
+	if (!device) return;
+	for (size_t frameIndex = 0; frameIndex < workerCommandPools.size(); ++frameIndex) {
+		auto& framePools = workerCommandPools[frameIndex];
+		std::vector<std::vector<VkCommandBuffer>> emptyBuffers;
+		auto& frameBuffers = (frameIndex < workerCommandBuffers.size()) ? workerCommandBuffers[frameIndex] : emptyBuffers;
+		for (size_t poolIndex = 0; poolIndex < framePools.size(); ++poolIndex) {
+			if (!framePools[poolIndex]) continue;
+			if (poolIndex < frameBuffers.size() && !frameBuffers[poolIndex].empty()) {
+				vkFreeCommandBuffers(device, framePools[poolIndex], static_cast<uint32_t>(frameBuffers[poolIndex].size()), frameBuffers[poolIndex].data());
+				frameBuffers[poolIndex].clear();
+			}
+			vkDestroyCommandPool(device, framePools[poolIndex], nullptr);
+		}
+	}
+	workerCommandPools.clear();
+	workerCommandBuffers.clear();
+}
+
+void VulkanContext::Impl::EnsureWorkerPools(uint32_t frameIndex, size_t workerCount) {
+	if (workerCommandPools.size() <= frameIndex) {
+		workerCommandPools.resize(frameIndex + 1);
+	}
+	if (workerCommandBuffers.size() <= frameIndex) {
+		workerCommandBuffers.resize(frameIndex + 1);
+	}
+
+	auto& framePools = workerCommandPools[frameIndex];
+	auto& frameBuffers = workerCommandBuffers[frameIndex];
+	QueueFamilyIndices indices = FindQueueFamilies(physicalDevice);
+
+	while (framePools.size() < workerCount) {
+		VkCommandPoolCreateInfo poolInfo{};
+		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		poolInfo.queueFamilyIndex = indices.graphicsFamily.value();
+
+		VkCommandPool pool = VK_NULL_HANDLE;
+		vkCreateCommandPool(device, &poolInfo, nullptr, &pool);
+		framePools.push_back(pool);
+		frameBuffers.emplace_back();
+	}
+}
+
+VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIndex, size_t workerIndex) {
+	auto& framePools = workerCommandPools[frameIndex];
+	auto& frameBuffers = workerCommandBuffers[frameIndex];
+	if (frameBuffers.size() <= workerIndex) frameBuffers.resize(workerIndex + 1);
+
+	std::vector<VkCommandBuffer>& buffers = frameBuffers[workerIndex];
+	if (!buffers.empty()) return buffers[0];
+
+	VkCommandBufferAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	allocInfo.commandPool = framePools[workerIndex];
+	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+	allocInfo.commandBufferCount = 1;
+
+	VkCommandBuffer secondary = VK_NULL_HANDLE;
+	if (vkAllocateCommandBuffers(device, &allocInfo, &secondary) != VK_SUCCESS) {
+		return VK_NULL_HANDLE;
+	}
+	buffers.push_back(secondary);
+	return secondary;
+}
+
 VkFormat VulkanContext::Impl::MapTextureFormat(uint8_t format, uint8_t channelType, uint8_t semantic) {
 	// Convert TerraEngine texture descriptors to Vulkan formats.
 	if (format == static_cast<uint8_t>(TETFFormat::RGBA8)) {

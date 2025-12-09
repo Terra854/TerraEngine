@@ -40,6 +40,8 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	if (!CreateCommandPool()) return false;
 	if (!CreateSyncObjects()) return false;
 	if (!CreateDescriptorPool()) return false;
+	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
+	workerCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 
 	try {
 		CreateDefaultTexture();
@@ -58,6 +60,7 @@ void VulkanContext::Impl::Cleanup() {
 		vkDeviceWaitIdle(device);
 	}
 
+	DestroyWorkerPools();
 	CleanupSwapChain();
 
 	for (auto& [id, mesh] : meshCache) {
@@ -103,6 +106,7 @@ void VulkanContext::Impl::Cleanup() {
 
 	if (allocator) vmaDestroyAllocator(allocator);
 
+	DestroyWorkerPools();
 	if (device) vkDestroyDevice(device, nullptr);
 
 	if (enableValidationLayers && instance) {
@@ -113,7 +117,6 @@ void VulkanContext::Impl::Cleanup() {
 		vkDestroySurfaceKHR(instance, surface, nullptr);
 		vkDestroyInstance(instance, nullptr);
 	}
-	
 	initialized = false;
 }
 
@@ -751,6 +754,7 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	CreateDepthResources();
 	CreateRenderPass();
 	CreateFramebuffers();
+	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanContext::Impl::DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {

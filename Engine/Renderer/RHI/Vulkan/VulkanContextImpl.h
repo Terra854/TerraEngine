@@ -141,6 +141,8 @@ struct VulkanContext::Impl {
 	std::unordered_map<TerraEngine::UUID, std::unordered_map<TerraEngine::UUID, std::vector<VkDescriptorSet>>> materialDescriptorSets;
 
 	VulkanImage defaultTexture;
+	std::vector<std::vector<VkCommandPool>> workerCommandPools; // Per-frame command pools for worker threads
+	std::vector<std::vector<std::vector<VkCommandBuffer>>> workerCommandBuffers; // Per-frame, per-worker secondary command buffers
 
 	bool InitVulkan(WindowSystem& windowSystem);
 	void Cleanup();
@@ -182,6 +184,9 @@ struct VulkanContext::Impl {
 	VkShaderStageFlags StageVisibilityToVulkan(StageVisibilityMask visibility);
 	void DestroyPipelines();
 	bool BuildPipelineLayouts(const ShaderCollection& collection, std::vector<VkDescriptorSetLayout>& setLayouts, std::vector<std::vector<DescriptorBinding>>& bindingsPerSet, std::vector<VkPushConstantRange>& pushConstants, bool& supportsDefaultPushConstants);
+	void EnsureWorkerPools(uint32_t frameIndex, size_t workerCount);
+	VkCommandBuffer AcquireWorkerCommandBuffer(uint32_t frameIndex, size_t workerIndex);
+	void DestroyWorkerPools();
 
 	bool CheckValidationLayerSupport();
 	std::vector<const char*> GetRequiredExtensions();
