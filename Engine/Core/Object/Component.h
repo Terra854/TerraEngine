@@ -1,89 +1,216 @@
 #pragma once
 
 #include <rttr/registration>
+#include <rttr/variant.h>
 
+#include <memory>
+#include <shared_mutex>
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <unordered_map>
+#include <functional>
+#include <string_view>
+#include <mutex>
+#include "Object.h"
 
 // Helper utilities that keep the CRTP component base lightweight while still
 // allowing each component to expose metadata to RTTR in a consistent way.
-namespace te::component_detail
+template <typename T, typename = void>
+struct component_has_custom_name : std::false_type
 {
-    template <typename T, typename = void>
-    struct has_custom_name : std::false_type
-    {
-    };
+};
 
-    template <typename T>
-    struct has_custom_name<T, std::void_t<decltype(T::kComponentName)>> : std::true_type
-    {
-    };
+template <typename T>
+struct component_has_custom_name<T, std::void_t<decltype(T::kComponentName)>> : std::true_type
+{
+};
 
-    template <typename T, typename = void>
-    struct has_reflect : std::false_type
-    {
-    };
+template <typename T, typename = void>
+struct component_has_reflect : std::false_type
+{
+};
 
-    template <typename T>
-    struct has_reflect<T, std::void_t<decltype(T::reflect(std::declval<rttr::registration::class_<T>&>()))>> : std::true_type
-    {
-    };
+template <typename T>
+struct component_has_reflect<T, std::void_t<decltype(T::reflect(std::declval<rttr::registration::class_<T>&>()))>> : std::true_type
+{
+};
 
-    template <typename T>
-    inline constexpr bool has_reflect_v = has_reflect<T>::value;
+template <typename T>
+inline constexpr bool component_has_reflect_v = component_has_reflect<T>::value;
 
-    template <typename T>
-    inline std::string component_name()
-    {
-        if constexpr (has_custom_name<T>::value)
-        {
-            return std::string(T::kComponentName);
-        }
-        else
-        {
-            return rttr::type::get<T>().get_name().to_string();
-        }
-    }
+template <typename T>
+inline std::string component_name_for()
+{
+	if constexpr (component_has_custom_name<T>::value)
+	{
+		return std::string(T::kComponentName);
+	}
+	else
+	{
+		return rttr::type::get<T>().get_name().to_string();
+	}
 }
 
-// Base component that all other components will inherit via CRTP
+// Type-erased property hooks that allow runtime access to any component
+// registered through the Component CRTP without exposing the concrete type.
+struct ComponentAccessFunctions
+{
+	std::function<rttr::variant(Object&, std::string_view)> getter;
+	std::function<bool(Object&, std::string_view, const rttr::variant&)> setter;
+};
+
+inline std::unordered_map<std::string, ComponentAccessFunctions>& ComponentAccessRegistry()
+{
+	static std::unordered_map<std::string, ComponentAccessFunctions> registry;
+	return registry;
+}
+
+inline std::mutex& ComponentAccessRegistryMutex()
+{
+	static std::mutex mutex;
+	return mutex;
+}
+
+template <typename ComponentType>
+void RegisterComponentAccess(const std::string& name)
+{
+	// Populate the access registry once per component type so callers can
+	// query by name and run the appropriate thread-safe getter/setter.
+	std::lock_guard lock(ComponentAccessRegistryMutex());
+	auto& reg = ComponentAccessRegistry();
+	if (reg.find(name) != reg.end())
+	{
+		return;
+	}
+
+	ComponentAccessFunctions functions;
+	functions.getter = [](Object& object, std::string_view property) -> rttr::variant
+	{
+		// Fetch the concrete component by type-safe API, then take a shared
+		// lock so concurrent reads remain safe while writers block.
+		ComponentType* component = object.getComponent<ComponentType>();
+		if (!component)
+		{
+			return {};
+		}
+
+		auto guard = component->acquireReadLock();
+		rttr::property prop = rttr::type::get<ComponentType>().get_property(std::string(property).c_str());
+		if (!prop.is_valid())
+		{
+			return {};
+		}
+		return prop.get_value(*component);
+	};
+
+	functions.setter = [](Object& object, std::string_view property, const rttr::variant& value) -> bool
+	{
+		// Promote to exclusive access before mutating reflected properties
+		// to keep writer updates serialized relative to readers.
+		ComponentType* component = object.getComponent<ComponentType>();
+		if (!component)
+		{
+			return false;
+		}
+
+		auto guard = component->acquireWriteLock();
+		rttr::property prop = rttr::type::get<ComponentType>().get_property(std::string(property).c_str());
+		if (!prop.is_valid())
+		{
+			return false;
+		}
+		return prop.set_value(*component, value);
+	};
+
+	reg.emplace(name, std::move(functions));
+}
+
+// Entry points for runtime property access keyed by component name.
+rttr::variant GetComponentProperty(Object& object, std::string_view componentName, std::string_view propertyName);
+bool SetComponentProperty(Object& object, std::string_view componentName, std::string_view propertyName, const rttr::variant& value);
+
+// Base component that all other components will inherit via CRTP.
 template <typename Derived>
 class Component
 {
 public:
-    Component()
-    {
-        registerType();
-    }
+	using ReadLock = std::shared_lock<std::shared_mutex>;
+	using WriteLock = std::unique_lock<std::shared_mutex>;
 
-    virtual ~Component() = default;
+	Component()
+		: access_mutex_(std::make_unique<std::shared_mutex>())
+	{
+		registerType();
+	}
 
-    Component(const Component&) = default;
-    Component(Component&&) noexcept = default;
-    Component& operator=(const Component&) = default;
-    Component& operator=(Component&&) noexcept = default;
+	Component(const Component& other)
+		: access_mutex_(std::make_unique<std::shared_mutex>())
+	{
+		// The mutex is recreated so cloned components do not share locking
+		// state, keeping per-instance read/write access independent.
+		(void)other;
+		registerType();
+	}
 
-    static void registerType()
-    {
-        ensureRegistration();
-    }
+	Component(Component&&) noexcept = default;
+	virtual ~Component() = default;
+
+	Component& operator=(const Component& other)
+	{
+		if (this != &other)
+		{
+			// Assignments also reset the mutex so a fresh component copy does
+			// not inherit lock contention from the source object.
+			access_mutex_ = std::make_unique<std::shared_mutex>();
+			registerType();
+		}
+		(void)other;
+		return *this;
+	}
+
+	Component& operator=(Component&&) noexcept = default;
+
+	static void registerType()
+	{
+		ensureRegistration();
+	}
+
+	// Read-only operations should take this guard to allow concurrent access
+	// while still blocking if any thread promotes to a write lock.
+	[[nodiscard]] ReadLock acquireReadLock() const
+	{
+		return ReadLock(*access_mutex_);
+	}
+
+	// Mutating operations should take this guard so writers have exclusive
+	// access and readers are paused until updates are complete.
+	[[nodiscard]] WriteLock acquireWriteLock() const
+	{
+		return WriteLock(*access_mutex_);
+	}
 
 protected:
-    // Ensures that the derived component registers itself with RTTR exactly
-    // once, regardless of how many instances are constructed at runtime.
-    static void ensureRegistration()
-    {
-        static bool registered = []() {
-            const std::string name = te::component_detail::component_name<Derived>();
-            auto registration = rttr::registration::class_<Derived>(name.c_str()).template constructor<>();
-            if constexpr (te::component_detail::has_reflect_v<Derived>)
-            {
-                Derived::reflect(registration);
-            }
-            return true;
-        }();
-        (void)registered;
-    }
-};
+	// Ensures that the derived component registers itself with RTTR exactly
+	// once, regardless of how many instances are constructed at runtime.
+	static void ensureRegistration()
+	{
+		static bool registered = []() {
+			const std::string name = component_name_for<Derived>();
+			auto registration = rttr::registration::class_<Derived>(name.c_str()).template constructor<>();
+			if constexpr (component_has_reflect_v<Derived>)
+			{
+				Derived::reflect(registration);
+			}
+			RegisterComponentAccess<Derived>(name);
+			return true;
+		}();
+		(void)registered;
+	}
 
+private:
+	// Shared mutex allows many readers to proceed concurrently while writers
+	// gain exclusive access when mutating component state. Each component
+	// owns its own mutex so copies do not share lock state.
+	mutable std::unique_ptr<std::shared_mutex> access_mutex_;
+};

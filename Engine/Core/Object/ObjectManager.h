@@ -1,52 +1,57 @@
 #pragma once
+
 #include <entt/entt.hpp>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include "Object.h"
 #include "Transform.h"
 
 class ObjectManager {
 public:
-    static ObjectManager& instance();
+	static ObjectManager& instance();
 
-    ObjectManager(const ObjectManager&) = delete;
-    ObjectManager& operator=(const ObjectManager&) = delete;
+	ObjectManager(const ObjectManager&) = delete;
+	ObjectManager& operator=(const ObjectManager&) = delete;
 
-    // Method to create a new Object
-    Object createObject(const std::string& name);
-    
-    // View all objects that have the following components
-    template<typename... Components>
-    void forEachObjectWithComponents(std::function<void(Components&...)> func)
-    {
-        registry.view<Components...>().each(func);
-    };
+	// Method to create a new Object.
+	Object createObject(const std::string& name);
 
-    // Get all objects that have the following components
-    template<typename... Components>
-    std::vector<Object> getObjectsWithComponents() {
-        std::vector<Object> objects;
+	// Invoke a caller-provided function for every entity that owns the given
+	// component set. The callable is perfect-forwarded so lambdas (and their
+	// captures) avoid the overhead of std::function type erasure.
+	template<typename... Components, typename Func>
+	void forEachObjectWithComponents(Func&& func)
+	{
+		registry.view<Components...>().each(std::forward<Func>(func));
+	};
 
-        for (auto entity : registry.view<Components...>()) {
-            Object o;
-            o.id = entity;
-            objects.push_back(o);
-        }
-        return objects;
-    }
+	// Get all objects that have the following components.
+	template<typename... Components>
+	std::vector<Object> getObjectsWithComponents()
+	{
+		std::vector<Object> objects;
 
-    // Method to remove an Object
-    void removeObject(Object obj);
+		for (auto entity : registry.view<Components...>())
+		{
+			Object o;
+			o.id = entity;
+			objects.push_back(o);
+		}
+		return objects;
+	}
+
+	// Method to remove an Object.
+	void removeObject(Object obj);
 
 private:
-    ObjectManager() = default;
-    ~ObjectManager() = default;
+	ObjectManager() = default;
+	~ObjectManager() = default;
 
-    friend class Object;
+	friend class Object;
 
-    std::unordered_map<Object, std::string> objectMap;
-    entt::registry registry;
+	std::unordered_map<Object, std::string> objectMap;
+	entt::registry registry;
 };
-

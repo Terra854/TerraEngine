@@ -19,6 +19,7 @@ Engine/Core/MainEngine.cpp
 Engine/Core/Timer.cpp
 Engine/Core/Logger/Logger.cpp
 Engine/Core/Object/Object.cpp
+Engine/Core/Object/ComponentPropertyAccess.cpp
 Engine/Core/Object/ObjectManager.cpp
 Engine/Resource/ResourceManager.cpp
 Engine/Resource/ResourceManagerMaterial.cpp
@@ -94,6 +95,9 @@ target_include_directories(TerraEngine-Engine
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
 
 # --- volk --------------------------------------------------------------------
+if(NOT DEFINED VULKAN_HEADERS_INSTALL_DIR)
+	set(VULKAN_HEADERS_INSTALL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/Vulkan-Headers)
+endif()
 set(VOLK_INSTALL OFF CACHE BOOL "Disable volk install" FORCE)
 set(VOLK_STATIC_DEFINES "VK_NO_PROTOTYPES" CACHE STRING "Defines for volk" FORCE)
 add_subdirectory(External/volk)
