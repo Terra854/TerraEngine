@@ -37,9 +37,22 @@ void RenderSystem::Update()
 	ObjectManager::instance().forEachObjectWithComponents<Transform, MeshRenderComponent>(
 		[&](Transform& transform, MeshRenderComponent& meshComp)
 		{
-			if (meshComp.meshId != TerraEngine::EMPTY_UUID && meshComp.materialId != TerraEngine::EMPTY_UUID)
+			const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
+			const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
+			if (meshId != TerraEngine::EMPTY_UUID && materialId != TerraEngine::EMPTY_UUID)
 			{
-				renderables.emplace_back(transform, meshComp);
+				// Capture reflected mesh bindings without touching fields directly.
+				MeshRenderComponent reflectedMesh{};
+				reflectedMesh.meshId = meshId;
+				reflectedMesh.materialId = materialId;
+				reflectedMesh.shaderCollectionId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "shaderCollectionId");
+
+				Transform reflectedTransform{};
+				reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+				reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+				reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+
+				renderables.emplace_back(reflectedTransform, reflectedMesh);
 			}
 		}
 	);

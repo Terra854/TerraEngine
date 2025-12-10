@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <utility>
+#include <rttr/variant.h>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <nlohmann/json.hpp>
@@ -408,17 +409,22 @@ void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const Ter
 	// every frame without re-querying the registry.
 	previewObject = objects.createObject("GeneratedPreview");
 
-	auto t = previewObject->getComponent<Transform>();
-	t->position = glm::vec3(0.0f, 0.0f, 0.0f);
-	t->rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-	t->scale = glm::vec3(1.0f, 1.0f, 1.0f);
+	// Initialize transform through the generic setter so locks are respected.
+	Transform* t = previewObject->getComponent<Transform>();
+	if (t)
+	{
+		SetComponentProperty(*t, "Position", glm::vec3(0.0f, 0.0f, 0.0f));
+		SetComponentProperty(*t, "Rotation", glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
+		SetComponentProperty(*t, "Scale", glm::vec3(1.0f, 1.0f, 1.0f));
+	}
 
 	// Attach a simple render binding component so downstream renderer work can
 	// read which authored assets should be drawn together.
 	auto& renderComponent = previewObject->addComponent<MeshRenderComponent>();
-	renderComponent.meshId = meshId;
-	renderComponent.materialId = materialId;
-	renderComponent.shaderCollectionId = shaderCollectionId;
+	// Bind authored assets via the reflection-based setter to ensure thread-safe writes.
+	SetComponentProperty(renderComponent, "meshId", meshId);
+	SetComponentProperty(renderComponent, "materialId", materialId);
+	SetComponentProperty(renderComponent, "shaderCollectionId", shaderCollectionId);
 }
 
 void SceneManager::UpdatePreviewInteraction()

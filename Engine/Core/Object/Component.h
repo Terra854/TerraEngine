@@ -126,9 +126,38 @@ void RegisterComponentAccess(const std::string& name)
 	reg.emplace(name, std::move(functions));
 }
 
-// Entry points for runtime property access keyed by component name.
-rttr::variant GetComponentProperty(Object& object, std::string_view componentName, std::string_view propertyName);
-bool SetComponentProperty(Object& object, std::string_view componentName, std::string_view propertyName, const rttr::variant& value);
+// Direct component-based accessor that returns the requested property as a
+// concrete type. On missing/invalid properties or type mismatch, this returns
+// a value-initialized T.
+template <typename ComponentType, typename T>
+T GetComponentProperty(ComponentType& component, std::string_view propertyName)
+{
+	auto guard = component.acquireReadLock();
+	rttr::property prop = rttr::type::get<ComponentType>().get_property(std::string(propertyName).c_str());
+	if (!prop.is_valid())
+	{
+		return T{};
+	}
+	rttr::variant value = prop.get_value(component);
+	if (!value.is_type<T>())
+	{
+		return T{};
+	}
+	return value.get_value<T>();
+}
+
+template <typename ComponentType, typename ValueType>
+void SetComponentProperty(ComponentType& component, std::string_view propertyName, ValueType&& value)
+{
+	auto guard = component.acquireWriteLock();
+	rttr::property prop = rttr::type::get<ComponentType>().get_property(std::string(propertyName).c_str());
+	if (!prop.is_valid())
+	{
+		return;
+	}
+	rttr::variant wrappedValue(std::forward<ValueType>(value));
+	prop.set_value(component, wrappedValue);
+}
 
 // Base component that all other components will inherit via CRTP.
 template <typename Derived>

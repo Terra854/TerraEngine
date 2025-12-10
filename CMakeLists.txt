@@ -19,7 +19,6 @@ Engine/Core/MainEngine.cpp
 Engine/Core/Timer.cpp
 Engine/Core/Logger/Logger.cpp
 Engine/Core/Object/Object.cpp
-Engine/Core/Object/ComponentPropertyAccess.cpp
 Engine/Core/Object/ObjectManager.cpp
 Engine/Resource/ResourceManager.cpp
 Engine/Resource/ResourceManagerMaterial.cpp
