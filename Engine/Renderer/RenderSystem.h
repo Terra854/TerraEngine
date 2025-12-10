@@ -15,6 +15,8 @@ public:
 	void Shutdown() override;
 	std::string SystemName() override;
 
+	RHIContext* GetContext() const { return rhi.get(); }
+
 private:
 	std::unique_ptr<RHIContext> rhi;
 };

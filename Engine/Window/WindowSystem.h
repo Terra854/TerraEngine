@@ -29,6 +29,8 @@ public:
 	// can register callbacks without depending on a specific backend type.
 	void* GetNativeHandle() const;
 
+	IWindowBackend* GetBackend() const { return backend.get(); }
+
 	void Initialize() override;
 	void Update() override;
 	void Shutdown() override;

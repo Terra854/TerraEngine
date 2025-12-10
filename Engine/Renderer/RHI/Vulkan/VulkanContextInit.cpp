@@ -78,6 +78,22 @@ void VulkanContext::Impl::Cleanup() {
 	}
 	textureCache.clear();
 
+	if (offscreenImage != VK_NULL_HANDLE) {
+		if (device) {
+			vkDestroySampler(device, offscreenSampler, nullptr);
+			vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr);
+			vkDestroyImageView(device, offscreenImageView, nullptr);
+			vkDestroyRenderPass(device, offscreenRenderPass, nullptr); // offscreenRenderPass is separate
+		}
+		vmaDestroyImage(allocator, offscreenImage, offscreenAllocation);
+		offscreenImage = VK_NULL_HANDLE;
+		offscreenAllocation = VK_NULL_HANDLE;
+		offscreenImageView = VK_NULL_HANDLE;
+		offscreenFramebuffer = VK_NULL_HANDLE;
+		offscreenSampler = VK_NULL_HANDLE;
+		offscreenRenderPass = VK_NULL_HANDLE;
+	}
+
 	DestroyPipelines();
 	materialDescriptorSets.clear();
 
@@ -91,6 +107,7 @@ void VulkanContext::Impl::Cleanup() {
 		if (device) {
 			vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
 			vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+			vkDestroySemaphore(device, uiSemaphores[i], nullptr);
 			vkDestroyFence(device, inFlightFences[i], nullptr);
 		}
 	}
@@ -506,6 +523,7 @@ bool VulkanContext::Impl::CreateSyncObjects() {
 	// Create semaphores and fences for every frame-in-flight slot.
 	imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
 	renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+	uiSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
 	inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
 
 	VkSemaphoreCreateInfo semaphoreInfo{};
@@ -518,6 +536,7 @@ bool VulkanContext::Impl::CreateSyncObjects() {
 	for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
 			vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
+			vkCreateSemaphore(device, &semaphoreInfo, nullptr, &uiSemaphores[i]) != VK_SUCCESS ||
 			vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to create synchronization objects for a frame!");
 			return false;
@@ -546,6 +565,7 @@ bool VulkanContext::Impl::CreateDescriptorPool() {
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 	poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
 	poolInfo.pPoolSizes = poolSizes.data();
 	poolInfo.maxSets = 512;
@@ -749,11 +769,24 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	vkDestroyImageView(device, depthImageView, nullptr);
 	vmaDestroyImage(allocator, depthImage, depthImageAllocation);
 
+	// Destroy sync objects to reset their state (e.g. clear signaled semaphores from failed frames)
+	for (size_t i = 0; i < renderFinishedSemaphores.size(); i++) {
+		vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+		vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+		vkDestroySemaphore(device, uiSemaphores[i], nullptr);
+		vkDestroyFence(device, inFlightFences[i], nullptr);
+	}
+	renderFinishedSemaphores.clear();
+	imageAvailableSemaphores.clear();
+	uiSemaphores.clear();
+	inFlightFences.clear();
+
 	CreateSwapChain(*windowSystem);
 	CreateImageViews();
 	CreateDepthResources();
 	CreateRenderPass();
 	CreateFramebuffers();
+	CreateSyncObjects(); // Recreate fresh sync objects
 	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
 }
 

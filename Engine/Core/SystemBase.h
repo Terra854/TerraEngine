@@ -1,8 +1,9 @@
 #pragma once
 
+#include "Export.h"
 #include <string>
 
-class SystemsBase {
+class TERRAENGINE_API SystemsBase {
 public:
 	SystemsBase() {};
 	virtual ~SystemsBase() = default;

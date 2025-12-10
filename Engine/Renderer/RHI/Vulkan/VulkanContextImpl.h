@@ -125,6 +125,7 @@ struct VulkanContext::Impl {
 
 	std::vector<VkSemaphore> imageAvailableSemaphores;
 	std::vector<VkSemaphore> renderFinishedSemaphores;
+	std::vector<VkSemaphore> uiSemaphores;
 	std::vector<VkFence> inFlightFences;
 
 	VmaAllocator allocator = VK_NULL_HANDLE;
@@ -134,10 +135,21 @@ struct VulkanContext::Impl {
 	bool framebufferResized = false;
 	int MAX_FRAMES_IN_FLIGHT = 2;
 	bool initialized = false;
+	bool editorMode = false;
+
+	// Editor / Offscreen Resources
+	VkImage offscreenImage = VK_NULL_HANDLE;
+	VmaAllocation offscreenAllocation = VK_NULL_HANDLE;
+	VkImageView offscreenImageView = VK_NULL_HANDLE;
+	VkSampler offscreenSampler = VK_NULL_HANDLE;
+	VkFramebuffer offscreenFramebuffer = VK_NULL_HANDLE;
+	VkDescriptorSet offscreenDescriptorSet = VK_NULL_HANDLE;
+	VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
 
 	std::unordered_map<TerraEngine::UUID, VulkanMesh> meshCache;
 	std::unordered_map<TerraEngine::UUID, VulkanImage> textureCache;
-	std::unordered_map<TerraEngine::UUID, VulkanPipeline> pipelineCache;
+	// Pipelines keyed by RenderPass then ShaderID
+	std::unordered_map<VkRenderPass, std::unordered_map<TerraEngine::UUID, VulkanPipeline>> pipelineCache;
 	std::unordered_map<TerraEngine::UUID, std::unordered_map<TerraEngine::UUID, std::vector<VkDescriptorSet>>> materialDescriptorSets;
 
 	VulkanImage defaultTexture;
@@ -146,6 +158,10 @@ struct VulkanContext::Impl {
 
 	bool InitVulkan(WindowSystem& windowSystem);
 	void Cleanup();
+
+	void InitEditorMode();
+	void CreateOffscreenResources();
+	void RecreateOffscreenResources(); // Handle resize
 
 	bool CreateInstance();
 	void PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo);
@@ -178,7 +194,7 @@ struct VulkanContext::Impl {
 	void EnsureTexture(TerraEngine::UUID textureId);
 	std::vector<VkDescriptorSet> EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId);
 	void EnsureMesh(TerraEngine::UUID meshId);
-	void EnsurePipeline(TerraEngine::UUID shaderCollectionId);
+	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass);
 
 	VkDescriptorType MapDescriptorType(DescriptorType type);
 	VkShaderStageFlags StageVisibilityToVulkan(StageVisibilityMask visibility);

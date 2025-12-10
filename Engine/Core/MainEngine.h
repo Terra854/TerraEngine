@@ -15,6 +15,7 @@
 #include "SystemBase.h"
 #include "Object/ObjectManager.h"
 #include "ThreadPool/ThreadPool.h"
+#include "Timer.h"
 
 // Primary engine facade exposed to the launcher and other executables. The
 // TERRAENGINE_API macro ensures the class is exported from the shared library
@@ -34,15 +35,29 @@ class TERRAENGINE_API Engine {
 		void Run();
 		void SignalShutdown();
 
-	private:
 		void Initialize();
-		void MainEngineLoop();
+		bool Update();
 		void Shutdown();
 
+		void AddSystem(SystemsBase* system);
+		void RegisterDefaultSystems();
+
+		template <typename T>
+		T* GetSystem() {
+			for (auto* system : systems) {
+				if (T* typedSystem = dynamic_cast<T*>(system)) {
+					return typedSystem;
+				}
+			}
+			return nullptr;
+		}
+
+	private:
 		bool running = true;
 		// Non-owning references to systems stored as singletons elsewhere in the
 		// engine so the main loop can iterate them without heap allocations.
 		std::vector<SystemsBase*> systems;
+		FrameTimer frameTimer;
 
 		ObjectManager& objManager = ObjectManager::instance();
 		ThreadPool& pool = ThreadPool::instance();

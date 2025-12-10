@@ -2,10 +2,11 @@
 
 #include "RHIDefinitions.h"
 #include "Renderer/RenderTypes.h"
+#include "Core/Export.h"
 
 class WindowSystem;
 
-class RHIContext
+class TERRAENGINE_API RHIContext
 {
 public:
 	virtual ~RHIContext() = default;

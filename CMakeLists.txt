@@ -212,93 +212,161 @@ target_include_directories(TerraEngineShaderCompiler
 		${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
-if(CMAKE_CONFIGURATION_TYPES)
-    set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
-else()
-    if(CMAKE_BUILD_TYPE)
-        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/${CMAKE_BUILD_TYPE})
-    else()
-        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
-    endif()
-endif()
+# --- ImGui -------------------------------------------------------------------
+set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/imgui)
+add_library(TerraEngine-ImGui STATIC
+	${IMGUI_DIR}/imgui.cpp
+	${IMGUI_DIR}/imgui_demo.cpp
+	${IMGUI_DIR}/imgui_draw.cpp
+	${IMGUI_DIR}/imgui_tables.cpp
+	${IMGUI_DIR}/imgui_widgets.cpp
+	${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+	${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+)
+target_include_directories(TerraEngine-ImGui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+target_link_libraries(TerraEngine-ImGui PUBLIC glfw Vulkan::Headers)
+target_compile_definitions(TerraEngine-ImGui PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES)
+
+# --- Editor ------------------------------------------------------------------
+add_executable(TerraEngine-Editor
+	Editor/TerraEngine-Editor/EditorMain.cpp
+	Editor/TerraEngine-Editor/EditorSystem.cpp
+)
+
+target_include_directories(TerraEngine-Editor
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES)
+
+target_link_libraries(TerraEngine-Editor
+	PRIVATE
+		TerraEngine-Engine
+		TerraEngine-ImGui
+)
+
+#set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
+set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
+#if(CMAKE_CONFIGURATION_TYPES)
+#    set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
+#else()
+#    if(CMAKE_BUILD_TYPE)
+#        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/${CMAKE_BUILD_TYPE})
+#    else()
+#        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
+#    endif()
+#endif()
 
 	if(WIN32)
 		# Keep the Windows install tree focused on runtime files only; the import library
 		# stays in the build tree while the DLL is delivered via the runtime destination.
 		install(TARGETS TerraEngine-Engine
-			RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
-			BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+			RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+			BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 			INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
 		)
 	else()
 		install(TARGETS TerraEngine-Engine
-			RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
-			ARCHIVE DESTINATION ${ENGINE_INSTALL_DESTINATION}
-			BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+			RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+			ARCHIVE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+			BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 			INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
 		)
 	endif()
 
 	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 		OPTIONAL
 	)
 
+	# --- Launcher Install ---
 	install(TARGETS TerraEngine-Launcher
-		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
 	)
 
 	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
+		OPTIONAL
+	)
+	
+	# Install Engine DLLs to Launcher folder so it can run
+	install(FILES $<TARGET_FILE:TerraEngine-Engine>
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
+	)
+	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
 		OPTIONAL
 	)
 
-	install(TARGETS glfw
-		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	# --- Editor Install ---
+	install(TARGETS TerraEngine-Editor
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
+	
+	# Install Engine DLLs to Editor folder so it can run
+	install(FILES $<TARGET_FILE:TerraEngine-Engine>
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	)
+	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+		OPTIONAL
+	)
+
+	# Install dependencies (glfw, rttr) to both
+	install(TARGETS glfw
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine 
+		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+	)
+	# Copy to Launcher/Editor
+	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
+	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
 
 	install(TARGETS rttr_core
-		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 	)
+	# Copy to Launcher/Editor
+	install(FILES $<TARGET_FILE:rttr_core> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
+	install(FILES $<TARGET_FILE:rttr_core> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
 
 install(TARGETS TerraEngineMeshCompiler
-	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 )
 install(TARGETS TerraEngineTextureCompiler
-	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 )
 install(TARGETS TerraEngineShaderCompiler
-	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}
-	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 )
 
 if(WIN32)
 	install(PROGRAMS
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/windows/bin/x64/dxc.exe
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
 	install(FILES
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/windows/bin/x64/dxcompiler.dll
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/windows/bin/x64/dxil.dll
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
+	# Also need DXC for Launcher? No, Launcher just runs. Editor compiles.
 else()
 	install(PROGRAMS
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/bin/dxc
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
 	# Ship the DXC runtime libraries beside the compiler binary so it can run without system installs.
 	install(FILES
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxcompiler.so
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxil.so
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
 endif()

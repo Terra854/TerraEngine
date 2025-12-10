@@ -1,7 +1,6 @@
 #include "VulkanContextImpl.h"
 
 void VulkanContext::Impl::CreateDefaultTexture() {
-	// Create a 1x1 white texture to use when materials are missing a bound texture.
 	uint32_t pixel = 0xFFFFFFFF;
 	VkDeviceSize imageSize = 4;
 	
@@ -62,7 +61,6 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 }
 
 VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage) {
-	// Allocate a buffer with the requested usage and VMA allocation properties.
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bufferInfo.size = size;
@@ -82,7 +80,6 @@ VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageF
 }
 
 void VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
-	// Copy data between buffers using a short-lived command buffer.
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
 	VkBufferCopy copyRegion{};
@@ -93,7 +90,6 @@ void VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkD
 }
 
 VkCommandBuffer VulkanContext::Impl::BeginSingleTimeCommands() {
-	// Allocate and begin a command buffer intended for a single submit.
 	VkCommandBufferAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -113,7 +109,6 @@ VkCommandBuffer VulkanContext::Impl::BeginSingleTimeCommands() {
 }
 
 void VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
-	// Submit a one-off command buffer and block until completion.
 	vkEndCommandBuffer(commandBuffer);
 
 	VkSubmitInfo submitInfo{};
@@ -128,7 +123,6 @@ void VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 }
 
 void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
-	// Insert a pipeline barrier that transitions an image between layouts.
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
 	VkImageMemoryBarrier barrier{};
@@ -182,7 +176,6 @@ void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 }
 
 void VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
-	// Copy staging buffer contents into a GPU image.
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
 	VkBufferImageCopy region{};
@@ -206,7 +199,6 @@ void VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint
 }
 
 VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags) {
-	// Wrap a raw VkImage in a view so it can be bound to shaders/framebuffers.
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	viewInfo.image = image;
@@ -227,7 +219,6 @@ VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format,
 }
 
 VkShaderStageFlags VulkanContext::Impl::StageVisibilityToVulkan(StageVisibilityMask visibility) {
-	// Convert reflection stage mask into Vulkan stage flags so layouts reflect shader usage.
 	VkShaderStageFlags flags = 0;
 	for (std::uint32_t bit = 0; bit < 32; ++bit) {
 		if ((visibility & (1u << bit)) == 0) continue;
@@ -238,14 +229,13 @@ VkShaderStageFlags VulkanContext::Impl::StageVisibilityToVulkan(StageVisibilityM
 			case ShaderStage::TessellationControl: flags |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT; break;
 			case ShaderStage::TessellationEvaluation: flags |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT; break;
 			case ShaderStage::Compute: flags |= VK_SHADER_STAGE_COMPUTE_BIT; break;
-			default: break; // Mesh/RT stages not used yet in this renderer
+			default: break;
 		}
 	}
 	return flags;
 }
 
 VkDescriptorType VulkanContext::Impl::MapDescriptorType(DescriptorType type) {
-	// Translate TerraEngine descriptor enums into Vulkan descriptor types.
 	switch (type) {
 		case DescriptorType::UniformBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		case DescriptorType::StorageBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -260,13 +250,16 @@ VkDescriptorType VulkanContext::Impl::MapDescriptorType(DescriptorType type) {
 }
 
 void VulkanContext::Impl::DestroyPipelines() {
-	// Tear down pipelines and their layouts/set layouts so they can be rebuilt safely.
-	for (auto& [id, pipe] : pipelineCache) {
-		if (device) {
-			vkDestroyPipeline(device, pipe.pipeline, nullptr);
-			vkDestroyPipelineLayout(device, pipe.layout, nullptr);
-			for (VkDescriptorSetLayout layout : pipe.setLayouts) {
-				vkDestroyDescriptorSetLayout(device, layout, nullptr);
+	for (auto& outerEntry : pipelineCache) {
+		auto& map = outerEntry.second;
+		for (auto& innerEntry : map) {
+			VulkanPipeline& pipe = innerEntry.second;
+			if (device) {
+				vkDestroyPipeline(device, pipe.pipeline, nullptr);
+				vkDestroyPipelineLayout(device, pipe.layout, nullptr);
+				for (VkDescriptorSetLayout layout : pipe.setLayouts) {
+					vkDestroyDescriptorSetLayout(device, layout, nullptr);
+				}
 			}
 		}
 	}
@@ -340,7 +333,6 @@ VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIn
 }
 
 VkFormat VulkanContext::Impl::MapTextureFormat(uint8_t format, uint8_t channelType, uint8_t semantic) {
-	// Convert TerraEngine texture descriptors to Vulkan formats.
 	if (format == static_cast<uint8_t>(TETFFormat::RGBA8)) {
 		if (semantic == static_cast<uint8_t>(TextureFileSemantic::Color)) {
 			return VK_FORMAT_R8G8B8A8_SRGB;
@@ -351,7 +343,6 @@ VkFormat VulkanContext::Impl::MapTextureFormat(uint8_t format, uint8_t channelTy
 }
 
 void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
-	// Upload the texture to the GPU if it is not already cached.
 	if (textureCache.contains(textureId)) return;
 
 	Texture* cpuTexture = ResourceManager::Instance().GetTexture(textureId);
@@ -416,23 +407,29 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 }
 
 std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId) {
-	// Allocate descriptor sets for the pipeline layouts defined by the shader collection.
-	if (!pipelineCache.contains(shaderCollectionId)) return {};
-	VulkanPipeline& pipeline = pipelineCache[shaderCollectionId];
+	VulkanPipeline* pipeline = nullptr;
+	for (auto& entry : pipelineCache) {
+		auto& map = entry.second;
+		if (map.contains(shaderCollectionId)) {
+			pipeline = &map[shaderCollectionId];
+			break;
+		}
+	}
+	if (!pipeline) return {};
 
 	auto& cacheForPipeline = materialDescriptorSets[shaderCollectionId];
 	if (cacheForPipeline.contains(materialId)) return cacheForPipeline[materialId];
 
-	if (pipeline.setLayouts.empty()) return {};
+	if (pipeline->setLayouts.empty()) return {};
 	if (descriptorPool == VK_NULL_HANDLE) return {};
 
-	std::vector<VkDescriptorSet> sets(pipeline.setLayouts.size(), VK_NULL_HANDLE);
+	std::vector<VkDescriptorSet> sets(pipeline->setLayouts.size(), VK_NULL_HANDLE);
 
 	VkDescriptorSetAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 	allocInfo.descriptorPool = descriptorPool;
-	allocInfo.descriptorSetCount = static_cast<uint32_t>(pipeline.setLayouts.size());
-	allocInfo.pSetLayouts = pipeline.setLayouts.data();
+	allocInfo.descriptorSetCount = static_cast<uint32_t>(pipeline->setLayouts.size());
+	allocInfo.pSetLayouts = pipeline->setLayouts.data();
 
 	if (vkAllocateDescriptorSets(device, &allocInfo, sets.data()) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to allocate descriptor sets for material!");
@@ -458,10 +455,9 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	std::vector<VkDescriptorImageInfo> imageInfos;
 	std::vector<VkDescriptorBufferInfo> bufferInfos;
 
-	// Pre-reserve descriptor info arrays to avoid reallocations that would invalidate pointers.
 	std::size_t imageInfoReserve = 0;
 	std::size_t bufferInfoReserve = 0;
-	for (const auto& setBindings : pipeline.bindingsPerSet) {
+	for (const auto& setBindings : pipeline->bindingsPerSet) {
 		for (const DescriptorBinding& binding : setBindings) {
 			const VkDescriptorType vkType = MapDescriptorType(static_cast<DescriptorType>(binding.type));
 			const uint32_t descriptorCount = binding.arrayCount > 0 ? binding.arrayCount : 1;
@@ -475,8 +471,8 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	imageInfos.reserve(imageInfoReserve);
 	bufferInfos.reserve(bufferInfoReserve);
 
-	for (size_t setIndex = 0; setIndex < pipeline.bindingsPerSet.size(); ++setIndex) {
-		for (const DescriptorBinding& binding : pipeline.bindingsPerSet[setIndex]) {
+	for (size_t setIndex = 0; setIndex < pipeline->bindingsPerSet.size(); ++setIndex) {
+		for (const DescriptorBinding& binding : pipeline->bindingsPerSet[setIndex]) {
 			const VkDescriptorType vkType = MapDescriptorType(static_cast<DescriptorType>(binding.type));
 			uint32_t descriptorCount = binding.arrayCount > 0 ? binding.arrayCount : 1;
 			if (vkType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || vkType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
@@ -514,7 +510,6 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 				write.pImageInfo = &imageInfos[start];
 				writes.push_back(write);
 			} else if (vkType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || vkType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-				// No CPU-side buffers are hooked up yet; bind null buffers to keep validation quiet.
 				const size_t start = bufferInfos.size();
 				for (uint32_t i = 0; i < descriptorCount; ++i) {
 					VkDescriptorBufferInfo bufferInfo{};
@@ -547,7 +542,6 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 }
 
 void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
-	// Upload mesh vertex and index buffers if they are not yet on the GPU.
 	if (meshCache.contains(meshId)) return;
 	
 	Mesh* cpuMesh = ResourceManager::Instance().GetMesh(meshId);
@@ -583,7 +577,6 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 }
 
 bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collection, std::vector<VkDescriptorSetLayout>& setLayouts, std::vector<std::vector<DescriptorBinding>>& bindingsPerSet, std::vector<VkPushConstantRange>& pushConstants, bool& supportsDefaultPushConstants) {
-	// Build descriptor set layouts and push constant ranges from shader reflection so pipelines match their shaders.
 	struct AggregatedBinding {
 		DescriptorBinding binding{};
 		VkShaderStageFlags stages = 0;
@@ -694,9 +687,8 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 	return true;
 }
 
-void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId) {
-	// Create a graphics pipeline for the supplied shader collection if missing.
-	if (pipelineCache.contains(shaderCollectionId)) return;
+void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass) {
+	if (pipelineCache.contains(renderPass) && pipelineCache[renderPass].contains(shaderCollectionId)) return;
 	
 	ShaderCollection* collection = ResourceManager::Instance().GetShaderCollection(shaderCollectionId);
 	if (!collection) return;
@@ -892,5 +884,5 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId) {
 	pipeline.pushConstants = std::move(pushConstants);
 	pipeline.supportsDefaultPushConstants = supportsDefaultPushConstants;
 
-	pipelineCache[shaderCollectionId] = std::move(pipeline);
+	pipelineCache[renderPass][shaderCollectionId] = std::move(pipeline);
 }

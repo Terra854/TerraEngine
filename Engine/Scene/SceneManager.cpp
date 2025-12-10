@@ -52,7 +52,7 @@ void SceneManager::Update()
 	// to mouse deltas without introducing cross-thread contention. The helper
 	// keeps the loop single-threaded by design because input callbacks are
 	// already serialized through the window pump.
-	UpdatePreviewInteraction();
+	//UpdatePreviewInteraction();
 }
 
 void SceneManager::Shutdown()
