@@ -247,17 +247,55 @@ target_link_libraries(TerraEngine-Editor
 		TerraEngine-ImGui
 )
 
-#set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
-set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
-#if(CMAKE_CONFIGURATION_TYPES)
-#    set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
-#else()
-#    if(CMAKE_BUILD_TYPE)
-#        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/${CMAKE_BUILD_TYPE})
-#    else()
-#        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
-#    endif()
-#endif()
+	#set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
+	set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
+	#if(CMAKE_CONFIGURATION_TYPES)
+	#    set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
+	#else()
+	#    if(CMAKE_BUILD_TYPE)
+	#        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/${CMAKE_BUILD_TYPE})
+	#    else()
+	#        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
+	#    endif()
+	#endif()
+
+	set(DEFAULT_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Default")
+	if(WIN32)
+		set(TERRAENGINE_DXC_PATH "${CMAKE_SOURCE_DIR}/External/dxc/windows/bin/x64/dxc.exe")
+	else()
+		set(TERRAENGINE_DXC_PATH "${CMAKE_SOURCE_DIR}/External/dxc/linux/bin/dxc")
+	endif()
+
+	set(SHADER_INSTALL_SCRIPT "${CMAKE_BINARY_DIR}/CMakeFiles/install_default_shaders.cmake")
+	file(GENERATE OUTPUT "${SHADER_INSTALL_SCRIPT}" CONTENT "
+set(SHADER_COMPILER \"$<TARGET_FILE:TerraEngineShaderCompiler>\")
+set(SHADER_SRC_DIR \"${DEFAULT_SHADER_SRC_DIR}\")
+set(SHADER_INSTALL_ROOT \"${ENGINE_INSTALL_DESTINATION}\")
+set(DXC_PATH \"${TERRAENGINE_DXC_PATH}\")
+
+set(out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders\")
+file(MAKE_DIRECTORY \"\${out_dir}\")
+
+execute_process(
+	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.vert.hlsl\" -o \"\${out_dir}/Default.vert.tspf\" -s vs --dxc \"\${DXC_PATH}\"
+	RESULT_VARIABLE compile_vs
+)
+if(NOT compile_vs EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile Default.vert.hlsl with TerraEngineShaderCompiler during install\")
+endif()
+
+execute_process(
+	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.frag.hlsl\" -o \"\${out_dir}/Default.frag.tspf\" -s ps --dxc \"\${DXC_PATH}\"
+	RESULT_VARIABLE compile_ps
+)
+if(NOT compile_ps EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile Default.frag.hlsl with TerraEngineShaderCompiler during install\")
+endif()
+")
+	install(SCRIPT "${SHADER_INSTALL_SCRIPT}")
+	if(TARGET install)
+		add_dependencies(install TerraEngineShaderCompiler)
+	endif()
 
 	if(WIN32)
 		# Keep the Windows install tree focused on runtime files only; the import library

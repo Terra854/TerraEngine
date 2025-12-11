@@ -26,7 +26,7 @@ SceneManager& SceneManager::Instance()
 	return instance;
 }
 
-SceneManager::~SceneManager() = default;
+	SceneManager::~SceneManager() = default;
 
 SceneManager::SceneManager()
 	: threadPool(ThreadPool::instance())
@@ -299,7 +299,8 @@ void SceneManager::PreparePreviewAssets()
 	}
 
 	// Load the precompiled preview shaders that ship alongside the executable so
-	// editors do not need to generate shader source at runtime.
+	// editors do not need to generate shader source at runtime. These come from
+	// Engine/Shaders/Default and serve as the engine's embedded fallback set.
 	previewShaderCollectionId = LoadPreviewShaderCollection(resources);
 	if (previewShaderCollectionId == TerraEngine::EMPTY_UUID)
 	{
@@ -316,15 +317,15 @@ void SceneManager::PreparePreviewAssets()
 	SpawnPreviewCamera();
 }
 
-TerraEngine::UUID SceneManager::LoadPreviewShaderCollection(ResourceManager& resources) const
-{
-	// Build a validated vertex/fragment pairing so preview renders never mix mismatched shader stages.
-	std::vector<ShaderStagePath> stages = {
-		{ ShaderStage::Vertex, "PreviewTextured.vert.tspf" },
-		{ ShaderStage::Fragment, "PreviewTextured.frag.tspf" }
-	};
-	const TerraEngine::UUID shaderCollectionId = resources.LoadShaderCollection(stages);
-	ShaderCollection* shaderCollection = resources.GetShaderCollection(shaderCollectionId);
+	TerraEngine::UUID SceneManager::LoadPreviewShaderCollection(ResourceManager& resources) const
+	{
+		// Build a validated vertex/fragment pairing so preview renders never mix mismatched shader stages.
+		std::vector<ShaderStagePath> stages = {
+			{ ShaderStage::Vertex, "Shaders/Default.vert.tspf" },
+			{ ShaderStage::Fragment, "Shaders/Default.frag.tspf" }
+		};
+		const TerraEngine::UUID shaderCollectionId = resources.LoadShaderCollection(stages);
+		ShaderCollection* shaderCollection = resources.GetShaderCollection(shaderCollectionId);
 	if (shaderCollection == nullptr)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create preview shader collection; verify the compiled TSPF stages are deployed next to the executable.");
