@@ -7,11 +7,14 @@
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Transform.h"
 #include "ThreadPool/ThreadPool.h"
+#include <entt/entt.hpp>
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <algorithm>
 #include <utility>
+#include <unordered_map>
+#include <unordered_set>
 #include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -29,11 +32,30 @@ void RenderSystem::Initialize()
 
 void RenderSystem::Update()
 {
+	ObjectManager& objManager = ObjectManager::instance();
+	// Capture all transforms first so hierarchical world transforms can be derived for cameras and renderables.
+	std::unordered_map<entt::entity, Transform> localTransforms;
+	objManager.forEachObjectWithComponents<Transform>(
+		[&](Object object, Transform& transform)
+		{
+			Transform reflectedTransform{};
+			reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+			reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+			reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+			localTransforms.emplace(object.EntityId(), reflectedTransform);
+		}
+	);
+
 	// Snapshot camera components so view/projection data is sourced from
 	// authored entities instead of the legacy hardcoded values.
-	std::vector<std::pair<Transform, CameraComponent>> cameras;
-	ObjectManager::instance().forEachObjectWithComponents<Transform, CameraComponent>(
-		[&](Transform& transform, CameraComponent& cameraComp)
+	struct CameraEntry
+	{
+		entt::entity entity;
+		CameraComponent camera;
+	};
+	std::vector<CameraEntry> cameras;
+	objManager.forEachObjectWithComponents<Transform, CameraComponent>(
+		[&](Object object, Transform& transform, CameraComponent& cameraComp)
 		{
 			CameraComponent reflectedCamera{};
 			reflectedCamera.verticalFovDegrees = GetComponentProperty<CameraComponent, float>(cameraComp, "verticalFovDegrees");
@@ -42,12 +64,15 @@ void RenderSystem::Update()
 			reflectedCamera.farPlane = GetComponentProperty<CameraComponent, float>(cameraComp, "farPlane");
 			reflectedCamera.up = GetComponentProperty<CameraComponent, glm::vec3>(cameraComp, "up");
 
-			Transform reflectedTransform{};
-			reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-			reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-			reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-
-			cameras.emplace_back(reflectedTransform, reflectedCamera);
+			cameras.push_back({ object.EntityId(), reflectedCamera });
+			if (!localTransforms.contains(object.EntityId()))
+			{
+				Transform reflectedTransform{};
+				reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+				reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+				reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+				localTransforms.emplace(object.EntityId(), reflectedTransform);
+			}
 		}
 	);
 	// Throttle warning spam so missing cameras do not flood the console every frame.
@@ -64,9 +89,14 @@ void RenderSystem::Update()
 	loggedMissingCamera = false;
 
 	// Snapshot renderable components to avoid locking the registry during parallel work.
-	std::vector<std::pair<Transform, MeshRenderComponent>> renderables;
-	ObjectManager::instance().forEachObjectWithComponents<Transform, MeshRenderComponent>(
-		[&](Transform& transform, MeshRenderComponent& meshComp)
+	struct RenderableEntry
+	{
+		entt::entity entity;
+		MeshRenderComponent mesh;
+	};
+	std::vector<RenderableEntry> renderables;
+	objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
+		[&](Object object, Transform& transform, MeshRenderComponent& meshComp)
 		{
 			const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
 			const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
@@ -78,15 +108,51 @@ void RenderSystem::Update()
 				reflectedMesh.materialId = materialId;
 				reflectedMesh.shaderCollectionId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "shaderCollectionId");
 
-				Transform reflectedTransform{};
-				reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-				reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-				reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-
-				renderables.emplace_back(reflectedTransform, reflectedMesh);
+				renderables.push_back({ object.EntityId(), reflectedMesh });
+				if (!localTransforms.contains(object.EntityId()))
+				{
+					Transform reflectedTransform{};
+					reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+					reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+					reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+					localTransforms.emplace(object.EntityId(), reflectedTransform);
+				}
 			}
 		}
 	);
+
+	// Cache of computed world transforms to avoid recomputing during traversal.
+	std::unordered_map<entt::entity, Transform> worldTransforms;
+	auto computeWorldTransform = [&](auto&& self, entt::entity entity, std::unordered_set<entt::entity>& visiting) -> Transform
+	{
+		if (auto cached = worldTransforms.find(entity); cached != worldTransforms.end())
+		{
+			return cached->second;
+		}
+		if (!localTransforms.contains(entity))
+		{
+			return Transform{};
+		}
+		// Prevent cycles from causing infinite recursion.
+		if (!visiting.insert(entity).second)
+		{
+			return localTransforms[entity];
+		}
+
+		Transform world = localTransforms[entity];
+		const entt::entity parent = objManager.getParentEntity(entity);
+		if (parent != entt::null)
+		{
+			Transform parentWorld = self(self, parent, visiting);
+			world.position = parentWorld.position + parentWorld.rotation * (parentWorld.scale * world.position);
+			world.rotation = parentWorld.rotation * world.rotation;
+			world.scale = parentWorld.scale * world.scale;
+		}
+
+		visiting.erase(entity);
+		worldTransforms[entity] = world;
+		return world;
+	};
 
 	std::vector<DrawCommand> drawCommands;
 	if (!renderables.empty())
@@ -104,13 +170,15 @@ void RenderSystem::Update()
 			if (start >= renderables.size()) break;
 			const size_t end = std::min(renderables.size(), start + chunkSize);
 
-			auto task = ThreadPool::instance().createTask([start, end, &renderables]() {
+			auto task = ThreadPool::instance().createTask([start, end, &renderables, &computeWorldTransform]() {
 				std::vector<DrawCommand> cmds;
 				cmds.reserve(end - start);
+				std::unordered_set<entt::entity> visiting;
 				for (size_t i = start; i < end; ++i)
 				{
-					const Transform& transform = renderables[i].first;
-					const MeshRenderComponent& meshComp = renderables[i].second;
+					const RenderableEntry& entry = renderables[i];
+					Transform transform = computeWorldTransform(computeWorldTransform, entry.entity, visiting);
+					const MeshRenderComponent& meshComp = entry.mesh;
 
 					DrawCommand cmd;
 					cmd.meshId = meshComp.meshId;
@@ -149,8 +217,10 @@ void RenderSystem::Update()
 	rhi->BeginFrame();
 	for (size_t cameraIndex = 0; cameraIndex < cameras.size(); ++cameraIndex)
 	{
-		const auto& cameraTransform = cameras[cameraIndex].first;
-		const auto& camera = cameras[cameraIndex].second;
+		const entt::entity cameraEntity = cameras[cameraIndex].entity;
+		const auto& camera = cameras[cameraIndex].camera;
+		std::unordered_set<entt::entity> visiting;
+		Transform cameraTransform = computeWorldTransform(computeWorldTransform, cameraEntity, visiting);
 		// Normalize the rotation so derived direction vectors remain unit length
 		// even if authoring data drifts slightly off the identity quaternion.
 		const glm::quat cameraRotation = glm::normalize(cameraTransform.rotation);

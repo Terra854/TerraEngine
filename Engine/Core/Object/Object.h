@@ -9,7 +9,11 @@
 // Object now serves as an interface to manage entities in EnTT
 class Object {
 public:
-    explicit Object(entt::registry& registry);
+	explicit Object(entt::registry& registry);
+	// Construct an Object handle that references an existing entity without
+	// creating a new one. Restricted to the ObjectManager so stray handles
+	// cannot be built without registry ownership.
+	Object(entt::registry& registry, entt::entity existingId);
 
     // Component management with EnTT
     template<typename T, typename... Args>
@@ -23,11 +27,15 @@ public:
         return registry->try_get<T>(id);
     }
 
-    // Function to remove a component
-    template<typename T>
-    void removeComponent() {
-        registry->remove<T>(id);
-    }
+	// Function to remove a component
+	template<typename T>
+	void removeComponent() {
+		registry->remove<T>(id);
+	}
+
+	// Expose the underlying entity identifier for systems that need stable IDs
+	// when building UI lists or other external bookkeeping.
+	entt::entity EntityId() const { return id; }
 
     // Needed for using Object as a key in std::unordered_map
     bool operator==(const Object& other) const {
