@@ -34,13 +34,11 @@ class TERRAENGINE_API Engine {
 
 		void Run();
 		void SignalShutdown();
+		void SetEditorMode(SystemsBase* system);
 
 		void Initialize();
 		bool Update();
 		void Shutdown();
-
-		void AddSystem(SystemsBase* system);
-		void RegisterDefaultSystems();
 
 		template <typename T>
 		T* GetSystem() {
@@ -58,6 +56,9 @@ class TERRAENGINE_API Engine {
 		// engine so the main loop can iterate them without heap allocations.
 		std::vector<SystemsBase*> systems;
 		FrameTimer frameTimer;
+
+		SystemsBase* editorSystem = nullptr;
+		bool editorMode = false;
 
 		ObjectManager& objManager = ObjectManager::instance();
 		ThreadPool& pool = ThreadPool::instance();

@@ -28,6 +28,12 @@ void Engine::SignalShutdown()
 	running = false;
 }
 
+void Engine::SetEditorMode(SystemsBase* system)
+{
+	editorSystem = system;
+	editorMode = true;
+}
+
 void Engine::Initialize()
 {
 	pool.initialize();
@@ -35,32 +41,15 @@ void Engine::Initialize()
 	// Reset the frame timer so the first tick is measured from initialization time.
 	frameTimer = FrameTimer();
 
-	if (systems.empty()) {
-		RegisterDefaultSystems();
-	}
-	
-	for (auto* system : systems) {
-		system->Initialize();
-	}
-	
-	// Confirm engine initialization finished so later logs have a baseline.
-	TERRAENGINE_LOG(LogLevel::Info, "Setup complete!");
-}
-
-void Engine::AddSystem(SystemsBase* system) {
-	systems.push_back(system);
-}
-
-void Engine::RegisterDefaultSystems() {
 	// The window system is initialized first so other systems can depend on
 	// a valid window context if they need one later.
 	WindowConfig windowConfig{};
 	WindowSystem& windowSystem = WindowSystem::Instance();
 	windowSystem.Configure(std::make_unique<GlfwWindowBackend>(), windowConfig, [this]() {
 		SignalShutdown();
-	});
+		});
 	systems.push_back(&windowSystem);
-	
+
 	// Set up the input system after the window so the backend can attach to the
 	// native window handle without duplicating platform specific code here.
 	InputSystem& inputSystem = InputSystem::Instance();
@@ -71,10 +60,21 @@ void Engine::RegisterDefaultSystems() {
 	// gameplay code can request them without re-reading disk on every access.
 	SceneManager& sceneManager = SceneManager::Instance();
 	systems.push_back(&sceneManager);
-	
+
 	// RenderSystem consumes scene data and produces frames.
 	static RenderSystem renderSystem;
 	systems.push_back(&renderSystem);
+	
+	for (auto* system : systems) {
+		system->Initialize();
+	}
+
+	if (editorMode) {
+		editorSystem->Initialize();
+	}
+	
+	// Confirm engine initialization finished so later logs have a baseline.
+	TERRAENGINE_LOG(LogLevel::Info, "Setup complete!");
 }
 
 bool Engine::Update()
@@ -92,6 +92,10 @@ bool Engine::Update()
 		system->Update();
 	}
 	
+	if (editorMode) {
+		editorSystem->Update();
+	}
+
 	// If a system requested shutdown (e.g., the window was closed),
 	// exit the loop after this iteration.
 	if (!running) {
@@ -111,6 +115,10 @@ bool Engine::Update()
 
 void Engine::Shutdown()
 {
+	if (editorMode) {
+		editorSystem->Shutdown();
+	}
+
 	for (auto it = systems.rbegin(); it != systems.rend(); ++it) {
 		(*it)->Shutdown();
 	}
