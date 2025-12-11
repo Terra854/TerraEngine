@@ -15,11 +15,12 @@ if(TERRAENGINE_CPU_COUNT GREATER 0 AND NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)
 endif()
 
 set(ENGINE_SOURCES
-Engine/Core/MainEngine.cpp
-Engine/Core/Timer.cpp
-Engine/Core/Logger/Logger.cpp
-Engine/Core/Object/Object.cpp
-Engine/Core/Object/ObjectManager.cpp
+	Engine/Core/MainEngine.cpp
+	Engine/Core/Timer.cpp
+	Engine/Core/Logger/Logger.cpp
+	Engine/Core/Object/Component.cpp
+	Engine/Core/Object/Object.cpp
+	Engine/Core/Object/ObjectManager.cpp
 Engine/Resource/ResourceManager.cpp
 Engine/Resource/ResourceManagerMaterial.cpp
 Engine/Resource/ResourceManagerMesh.cpp

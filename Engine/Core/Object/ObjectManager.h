@@ -46,7 +46,9 @@ public:
 	void forEachObjectWithComponents(Func&& func)
 	{
 		registry.view<Components...>().each([&](entt::entity entity, Components&... comps) {
-			func(makeHandle(entity), comps...);
+			if ((comps.active && ...)) {
+				func(makeHandle(entity), comps...);
+			}
 		});
 	};
 
@@ -56,9 +58,15 @@ public:
 	{
 		std::vector<Object> objects;
 
-		for (auto entity : registry.view<Components...>())
+		auto view = registry.view<Components...>();
+		for (auto entity : view)
 		{
-			objects.push_back(makeHandle(entity));
+			// Retrieve components to check their active state
+			auto tuple = view.get(entity);
+			if (std::apply([](auto&... comps) { return (comps.active && ...); }, tuple))
+			{
+				objects.push_back(makeHandle(entity));
+			}
 		}
 		return objects;
 	}

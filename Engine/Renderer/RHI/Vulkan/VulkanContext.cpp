@@ -37,6 +37,21 @@ void VulkanContext::BeginFrame() {
 	// Reset command pool so the main command buffer and any newly allocated
 	// per-camera buffers start from a clean state each frame.
 	vkResetCommandPool(impl->device, impl->commandPool, 0);
+	// Reset worker pools for this frame once so secondary buffers can be rerecorded safely.
+	if (impl->currentFrame < impl->workerCommandPools.size()) {
+		auto& framePools = impl->workerCommandPools[impl->currentFrame];
+		for (VkCommandPool pool : framePools) {
+			if (pool != VK_NULL_HANDLE) {
+				vkResetCommandPool(impl->device, pool, 0);
+			}
+		}
+	}
+	// Reset usage counts for this frame
+	if (impl->currentFrame < impl->workerBufferUsage.size()) {
+		std::fill(impl->workerBufferUsage[impl->currentFrame].begin(), impl->workerBufferUsage[impl->currentFrame].end(), 0);
+	} else if (impl->workerBufferUsage.size() <= impl->currentFrame) {
+		impl->workerBufferUsage.resize(impl->MAX_FRAMES_IN_FLIGHT);
+	}
 
 	impl->swapchainImageAcquired = false;
 	impl->skipFrame = false;
@@ -170,30 +185,61 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	vkBeginCommandBuffer(cmd, &beginInfo);
 
+	// If this is a subsequent pass targeting the swapchain (multi-camera),
+	// inject a barrier to wait for the previous pass to finish its writes.
+	if (!useMainCommandBuffer && !impl->editorMode) {
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		// Wait for previous color output
+		barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		// We will write color output
+		barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; // Previous pass ended here
+		barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; // Keep it here, RenderPass will handle transition from Initial=Undefined
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = impl->swapchainImages[imageIndex];
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = 0;
+		barrier.subresourceRange.layerCount = 1;
+
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			0,
+			0, nullptr,
+			0, nullptr,
+			1, &barrier
+		);
+	}
+
 	std::vector<VkCommandBuffer> secondaryBuffers;
 	if (!prepared.empty()) {
 		const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
 		const size_t workerCount = std::min(prepared.size(), hw);
 		const size_t chunkSize = (prepared.size() + workerCount - 1) / workerCount;
 
-		impl->EnsureWorkerPools(impl->currentFrame, workerCount);
-		auto& framePools = impl->workerCommandPools[impl->currentFrame];
-		for (size_t i = 0; i < workerCount; ++i) vkResetCommandPool(impl->device, framePools[i], 0);
+			impl->EnsureWorkerPools(impl->currentFrame, workerCount);
+			auto& framePools = impl->workerCommandPools[impl->currentFrame];
 
-		std::vector<std::future<VkCommandBuffer>> futures;
-		futures.reserve(workerCount);
+			std::vector<std::future<VkCommandBuffer>> futures;
+			futures.reserve(workerCount);
 
 		for (size_t taskIndex = 0; taskIndex < workerCount; ++taskIndex) {
 			const size_t start = taskIndex * chunkSize;
 			if (start >= prepared.size()) break;
-			const size_t end = std::min(prepared.size(), start + chunkSize);
-			VkCommandPool pool = framePools[taskIndex];
-			VkFramebuffer framebuffer = renderPassInfo.framebuffer;
-			VkRenderPass renderPass = renderPassInfo.renderPass;
+				const size_t end = std::min(prepared.size(), start + chunkSize);
+				VkCommandPool pool = framePools[taskIndex];
+				VkFramebuffer framebuffer = renderPassInfo.framebuffer;
+				VkRenderPass renderPass = renderPassInfo.renderPass;
 
-			auto task = ThreadPool::instance().createTask([pool, frameIndex = impl->currentFrame, workerIndex = taskIndex, renderPass, framebuffer, start, end, &prepared, this]() -> VkCommandBuffer {
-				VkCommandBuffer secondary = impl->AcquireWorkerCommandBuffer(frameIndex, workerIndex);
-				if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+				auto task = ThreadPool::instance().createTask([pool, frameIndex = impl->currentFrame, workerIndex = taskIndex, renderPass, framebuffer, start, end, &prepared, this]() -> VkCommandBuffer {
+					VkCommandBuffer secondary = impl->AcquireWorkerCommandBuffer(frameIndex, workerIndex);
+					if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+					vkResetCommandBuffer(secondary, 0);
 
 				VkCommandBufferInheritanceInfo inherit{};
 				inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;

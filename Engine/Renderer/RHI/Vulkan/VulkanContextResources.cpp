@@ -313,10 +313,20 @@ void VulkanContext::Impl::EnsureWorkerPools(uint32_t frameIndex, size_t workerCo
 VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIndex, size_t workerIndex) {
 	auto& framePools = workerCommandPools[frameIndex];
 	auto& frameBuffers = workerCommandBuffers[frameIndex];
+	
+	// Ensure tracking structures are sized correctly
+	if (workerBufferUsage.size() <= frameIndex) workerBufferUsage.resize(frameIndex + 1);
+	if (workerBufferUsage[frameIndex].size() <= workerIndex) workerBufferUsage[frameIndex].resize(workerIndex + 1, 0);
+
 	if (frameBuffers.size() <= workerIndex) frameBuffers.resize(workerIndex + 1);
 
+	size_t& usageIndex = workerBufferUsage[frameIndex][workerIndex];
 	std::vector<VkCommandBuffer>& buffers = frameBuffers[workerIndex];
-	if (!buffers.empty()) return buffers[0];
+
+	// reuse existing buffer if available at this usage index
+	if (usageIndex < buffers.size()) {
+		return buffers[usageIndex++];
+	}
 
 	VkCommandBufferAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -329,6 +339,7 @@ VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIn
 		return VK_NULL_HANDLE;
 	}
 	buffers.push_back(secondary);
+	usageIndex++;
 	return secondary;
 }
 

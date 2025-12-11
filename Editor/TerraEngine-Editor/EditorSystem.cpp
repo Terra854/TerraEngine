@@ -2,6 +2,8 @@
 #include <GLFW/glfw3.h>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <unordered_set>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/epsilon.hpp>
@@ -219,8 +221,6 @@ void EditorSystem::DrawHierarchyNode(const Object& object) {
 	const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
 	if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
 		selectedObject = object;
-		cachedRotationValid = false;
-		cachedRotationEntity = object.EntityId();
 	}
 	if (ImGui::BeginDragDropSource()) {
 		entt::entity id = object.EntityId();
@@ -254,8 +254,6 @@ void EditorSystem::DrawInspectorWindow() {
 
 	if (!selectedObject.has_value()) {
 		ImGui::TextUnformatted("No object selected.");
-		cachedRotationValid = false;
-		cachedRotationEntity = entt::null;
 		ImGui::End();
 		return;
 	}
@@ -263,95 +261,139 @@ void EditorSystem::DrawInspectorWindow() {
 	ObjectManager& objects = ObjectManager::instance();
 	ImGui::Text("Object: %s", objects.getObjectName(*selectedObject).c_str());
 
-	if (Transform* transform = selectedObject->getComponent<Transform>()) {
-		glm::quat currentRotation = GetComponentProperty<Transform, glm::quat>(*transform, "Rotation");
-		if (!cachedRotationValid || cachedRotationEntity != selectedObject->EntityId() ||
-			!glm::all(glm::epsilonEqual(currentRotation, cachedRotation, 0.0001f))) {
-			cachedRotation = currentRotation;
-			cachedEulerDegrees = QuaternionToEulerDegrees(currentRotation);
-			cachedRotationValid = true;
-			cachedRotationEntity = selectedObject->EntityId();
-		}
-		if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
-			DrawTransformInspector(*transform);
-		}
-	}
-	else {
-		cachedRotationValid = false;
-		cachedRotationEntity = entt::null;
-	}
+	EnsureComponentOrder(*selectedObject);
+	auto& order = inspectorComponentOrder[selectedObject->EntityId()];
+	for (size_t idx = 0; idx < order.size(); ++idx) {
+		const std::string& componentName = order[idx];
+		auto it = ComponentAccessRegistry().find(componentName);
+		if (it == ComponentAccessRegistry().end()) continue;
+		const ComponentAccessFunctions& access = it->second;
+		if (!access.hasComponent || !access.hasComponent(*selectedObject)) continue;
 
-	if (CameraComponent* camera = selectedObject->getComponent<CameraComponent>()) {
-		if (ImGui::CollapsingHeader("Camera")) {
-			DrawCameraInspector(*camera);
-		}
-	}
-
-	if (MeshRenderComponent* mesh = selectedObject->getComponent<MeshRenderComponent>()) {
-		if (ImGui::CollapsingHeader("Mesh Renderer")) {
-			DrawMeshRenderInspector(*mesh);
-		}
+		ImGui::PushID(static_cast<int>(idx));
+		DrawComponentInspector(componentName, access, static_cast<int>(idx), [&](int from, int to) {
+			ReorderComponent(order, from, to);
+		});
+		ImGui::PopID();
 	}
 
 	ImGui::End();
 }
 
-void EditorSystem::DrawTransformInspector(Transform& transform) {
-	glm::vec3 position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-	glm::vec3 scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-
-	if (ImGui::DragFloat3("Position", &position.x, 0.1f)) {
-		SetComponentProperty(transform, "Position", position);
+void EditorSystem::DrawComponentInspector(const std::string& componentName, const ComponentAccessFunctions& access, int index, std::function<void(int, int)> onReorder) {
+	rttr::type componentType = rttr::type::get_by_name(componentName);
+	if (!componentType.is_valid()) {
+		return;
 	}
 
-	glm::vec3 eulerDeg = cachedEulerDegrees;
-	if (ImGui::DragFloat3("Rotation (Euler, deg)", &eulerDeg.x, 0.5f)) {
-		cachedEulerDegrees = eulerDeg;
-		cachedRotation = EulerDegreesToQuaternion(eulerDeg);
-		cachedRotationValid = true;
-		SetComponentProperty(transform, "Rotation", cachedRotation);
-	}
-
-	if (ImGui::DragFloat3("Scale", &scale.x, 0.1f)) {
-		SetComponentProperty(transform, "Scale", scale);
-	}
-}
-
-void EditorSystem::DrawCameraInspector(CameraComponent& camera) {
-	float fov = GetComponentProperty<CameraComponent, float>(camera, "verticalFovDegrees");
-	float aspect = GetComponentProperty<CameraComponent, float>(camera, "aspectRatio");
-	float nearPlane = GetComponentProperty<CameraComponent, float>(camera, "nearPlane");
-	float farPlane = GetComponentProperty<CameraComponent, float>(camera, "farPlane");
-	glm::vec3 up = GetComponentProperty<CameraComponent, glm::vec3>(camera, "up");
-
-	if (ImGui::DragFloat("Vertical FOV", &fov, 0.1f, 1.0f, 179.0f)) {
-		SetComponentProperty(camera, "verticalFovDegrees", fov);
-	}
-	if (ImGui::DragFloat("Aspect Ratio", &aspect, 0.01f, 0.1f, 10.0f)) {
-		SetComponentProperty(camera, "aspectRatio", aspect);
-	}
-	if (ImGui::DragFloat("Near Plane", &nearPlane, 0.01f, 0.001f, farPlane - 0.001f)) {
-		SetComponentProperty(camera, "nearPlane", nearPlane);
-	}
-	if (ImGui::DragFloat("Far Plane", &farPlane, 1.0f, nearPlane + 0.01f, 10000.0f)) {
-		SetComponentProperty(camera, "farPlane", farPlane);
-	}
-	if (ImGui::DragFloat3("Up", &up.x, 0.01f)) {
-		if (glm::length(up) < 0.0001f) {
-			up = glm::vec3(0.0f, 1.0f, 0.0f);
+	const bool isTransform = (componentName == std::string(Transform::kComponentName));
+	
+	if (!isTransform) {
+		rttr::variant activeVar = access.getter(*selectedObject, "active");
+		if (activeVar.is_valid()) {
+			bool active = activeVar.get_value<bool>();
+			ImGui::PushID((componentName + "_active").c_str());
+			if (ImGui::Checkbox("##active", &active)) {
+				access.setter(*selectedObject, "active", active);
+			}
+			ImGui::PopID();
+			ImGui::SameLine();
 		}
-		SetComponentProperty(camera, "up", up);
+	}
+
+	ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_DefaultOpen;
+	bool open = ImGui::CollapsingHeader(componentName.c_str(), flags);
+
+	if (!isTransform) {
+		if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+			ImGui::SetDragDropPayload("COMPONENT_ORDER", &index, sizeof(int));
+			ImGui::Text("Move %s", componentName.c_str());
+			ImGui::EndDragDropSource();
+		}
+		if (ImGui::BeginDragDropTarget()) {
+			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("COMPONENT_ORDER")) {
+				int from = *static_cast<const int*>(payload->Data);
+				if (onReorder) {
+					onReorder(from, index);
+				}
+			}
+			ImGui::EndDragDropTarget();
+		}
+	}
+
+	if (open) {
+		for (const auto& prop : componentType.get_properties()) {
+			std::string propName = prop.get_name().to_string();
+			if (propName == "active") {
+				continue;
+			}
+			rttr::variant value = access.getter(*selectedObject, propName);
+			if (!value.is_valid()) {
+				continue;
+			}
+			ImGui::PushID(propName.c_str());
+			if (DrawPropertyEditor(propName, prop.get_type(), value)) {
+				access.setter(*selectedObject, propName, value);
+			}
+			ImGui::PopID();
+		}
 	}
 }
 
-void EditorSystem::DrawMeshRenderInspector(MeshRenderComponent& meshComponent) {
-	TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComponent, "meshId");
-	TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComponent, "materialId");
-	TerraEngine::UUID shaderId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComponent, "shaderCollectionId");
+bool EditorSystem::DrawPropertyEditor(const std::string& label, rttr::type type, rttr::variant& value) {
+	if (type == rttr::type::get<float>()) {
+		float v = value.get_value<float>();
+		if (ImGui::DragFloat(label.c_str(), &v, 0.1f)) {
+			value = v;
+			return true;
+		}
+		return false;
+	}
 
-	ImGui::Text("Mesh UUID: %s", ToHexString(meshId).c_str());
-	ImGui::Text("Material UUID: %s", ToHexString(materialId).c_str());
-	ImGui::Text("Shader Collection UUID: %s", ToHexString(shaderId).c_str());
+	if (type == rttr::type::get<int>()) {
+		int v = value.get_value<int>();
+		if (ImGui::DragInt(label.c_str(), &v, 1)) {
+			value = v;
+			return true;
+		}
+		return false;
+	}
+
+	if (type == rttr::type::get<bool>()) {
+		bool v = value.get_value<bool>();
+		if (ImGui::Checkbox(label.c_str(), &v)) {
+			value = v;
+			return true;
+		}
+		return false;
+	}
+
+	if (type == rttr::type::get<glm::vec3>()) {
+		glm::vec3 v = value.get_value<glm::vec3>();
+		if (ImGui::DragFloat3(label.c_str(), &v.x, 0.1f)) {
+			value = v;
+			return true;
+		}
+		return false;
+	}
+
+	if (type == rttr::type::get<glm::quat>()) {
+		glm::quat q = value.get_value<glm::quat>();
+		glm::vec3 eulerDeg = QuaternionToEulerDegrees(q);
+		if (ImGui::DragFloat3((label + " (Euler deg)").c_str(), &eulerDeg.x, 0.5f)) {
+			value = EulerDegreesToQuaternion(eulerDeg);
+			return true;
+		}
+		return false;
+	}
+
+	if (type == rttr::type::get<TerraEngine::UUID>()) {
+		ImGui::Text("%s: %s", label.c_str(), ToHexString(value.get_value<TerraEngine::UUID>()).c_str());
+		return false;
+	}
+
+	ImGui::Text("%s (uneditable type)", label.c_str());
+	return false;
 }
 
 glm::vec3 EditorSystem::QuaternionToEulerDegrees(const glm::quat& q) const {
@@ -362,6 +404,68 @@ glm::vec3 EditorSystem::QuaternionToEulerDegrees(const glm::quat& q) const {
 glm::quat EditorSystem::EulerDegreesToQuaternion(const glm::vec3& euler) const {
 	glm::vec3 radians = glm::radians(euler);
 	return glm::quat(radians);
+}
+
+void EditorSystem::EnsureComponentOrder(Object& object) {
+	auto& registry = ComponentAccessRegistry();
+	std::vector<std::string> available;
+	available.reserve(registry.size());
+	for (const auto& [name, access] : registry) {
+		if (access.hasComponent && access.hasComponent(object)) {
+			available.push_back(name);
+		}
+	}
+
+	auto& order = inspectorComponentOrder[object.EntityId()];
+	if (order.empty()) {
+		// Default order: Transform first (if present), then alphabetical.
+		std::sort(available.begin(), available.end());
+		for (const std::string& name : available) {
+			if (name == std::string(Transform::kComponentName)) {
+				order.insert(order.begin(), name);
+			} else {
+				order.push_back(name);
+			}
+		}
+		return;
+	}
+
+	// Remove components that no longer exist.
+	order.erase(std::remove_if(order.begin(), order.end(), [&](const std::string& name) {
+		return std::find(available.begin(), available.end(), name) == available.end();
+	}), order.end());
+
+	// Append new components at the end (except Transform, which is forced to the front).
+	for (const std::string& name : available) {
+		if (std::find(order.begin(), order.end(), name) == order.end()) {
+			order.push_back(name);
+		}
+	}
+
+	// Keep Transform at the top when present.
+	auto transformIt = std::find(order.begin(), order.end(), std::string(Transform::kComponentName));
+	if (transformIt != order.end() && transformIt != order.begin()) {
+		std::string transformName = *transformIt;
+		order.erase(transformIt);
+		order.insert(order.begin(), transformName);
+	}
+}
+
+void EditorSystem::ReorderComponent(std::vector<std::string>& order, int from, int to) {
+	if (from < 0 || to < 0 || from >= static_cast<int>(order.size()) || to >= static_cast<int>(order.size())) {
+		return;
+	}
+	// Never move Transform away from the top.
+	if (order[from] == std::string(Transform::kComponentName)) {
+		return;
+	}
+	if (order[to] == std::string(Transform::kComponentName)) {
+		to = 1;
+	}
+	if (from == to) return;
+	std::string item = order[from];
+	order.erase(order.begin() + from);
+	order.insert(order.begin() + to, item);
 }
 
 void EditorSystem::Shutdown() {

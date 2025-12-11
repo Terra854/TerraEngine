@@ -159,6 +159,7 @@ struct VulkanContext::Impl {
 	// cameras per frame so they can be freed after the frame fence completes.
 	std::vector<std::vector<VkCommandBuffer>> extraPrimaryCommandBuffers;
 	std::vector<std::vector<VkCommandBuffer>> pendingPrimaryCommandBuffers;
+	std::vector<std::vector<size_t>> workerBufferUsage; // Tracks next available secondary buffer index per worker per frame
 	bool swapchainImageAcquired = false;
 	bool skipFrame = false;
 	uint32_t acquiredImageIndex = 0;

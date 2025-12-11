@@ -12,6 +12,7 @@
 #include <functional>
 #include <string_view>
 #include <mutex>
+#include "Core/Export.h"
 #include "Object.h"
 
 // Helper utilities that keep the CRTP component base lightweight while still
@@ -58,19 +59,11 @@ struct ComponentAccessFunctions
 {
 	std::function<rttr::variant(Object&, std::string_view)> getter;
 	std::function<bool(Object&, std::string_view, const rttr::variant&)> setter;
+	std::function<bool(Object&)> hasComponent;
 };
 
-inline std::unordered_map<std::string, ComponentAccessFunctions>& ComponentAccessRegistry()
-{
-	static std::unordered_map<std::string, ComponentAccessFunctions> registry;
-	return registry;
-}
-
-inline std::mutex& ComponentAccessRegistryMutex()
-{
-	static std::mutex mutex;
-	return mutex;
-}
+TERRAENGINE_API std::unordered_map<std::string, ComponentAccessFunctions>& ComponentAccessRegistry();
+TERRAENGINE_API std::mutex& ComponentAccessRegistryMutex();
 
 template <typename ComponentType>
 void RegisterComponentAccess(const std::string& name)
@@ -121,6 +114,11 @@ void RegisterComponentAccess(const std::string& name)
 			return false;
 		}
 		return prop.set_value(*component, value);
+	};
+
+	functions.hasComponent = [](Object& object) -> bool
+	{
+		return object.getComponent<ComponentType>() != nullptr;
 	};
 
 	reg.emplace(name, std::move(functions));
@@ -205,6 +203,8 @@ public:
 		ensureRegistration();
 	}
 
+	bool active = true;
+
 	// Read-only operations should take this guard to allow concurrent access
 	// while still blocking if any thread promotes to a write lock.
 	[[nodiscard]] ReadLock acquireReadLock() const
@@ -226,7 +226,10 @@ protected:
 	{
 		static bool registered = []() {
 			const std::string name = component_name_for<Derived>();
-			auto registration = rttr::registration::class_<Derived>(name.c_str()).template constructor<>();
+			auto registration = rttr::registration::class_<Derived>(name.c_str())
+				.template constructor<>()
+				.property("active", &Derived::active);
+
 			if constexpr (component_has_reflect_v<Derived>)
 			{
 				Derived::reflect(registration);

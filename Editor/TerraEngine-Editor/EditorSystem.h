@@ -6,10 +6,13 @@
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Transform.h"
+#include "Engine/Core/Object/Component.h"
 #include "Engine/Scene/MeshRenderComponent.h"
 #include "Engine/Scene/CameraComponent.h"
 #include "Engine/Utilities/UUID.h"
 #include <entt/entt.hpp>
+#include <unordered_map>
+#include <vector>
 #include <optional>
 
 // ImGui includes
@@ -34,18 +37,16 @@ private:
 	VkDescriptorSet sceneDescriptorSet = VK_NULL_HANDLE;
 	bool initialized = false;
 	std::optional<Object> selectedObject;
-	entt::entity cachedRotationEntity = entt::null;
-	glm::vec3 cachedEulerDegrees{0.0f, 0.0f, 0.0f};
-	glm::quat cachedRotation{1.0f, 0.0f, 0.0f, 0.0f};
-	bool cachedRotationValid = false;
+	std::unordered_map<entt::entity, std::vector<std::string>> inspectorComponentOrder;
 
 	void RenderUI(void* cmdBuffer);
 	void DrawHierarchyWindow();
 	void DrawHierarchyNode(const Object& object);
 	void DrawInspectorWindow();
-	void DrawTransformInspector(Transform& transform);
-	void DrawCameraInspector(CameraComponent& camera);
-	void DrawMeshRenderInspector(MeshRenderComponent& meshComponent);
+	void DrawComponentInspector(const std::string& componentName, const ComponentAccessFunctions& access, int index, std::function<void(int, int)> onReorder);
+	void EnsureComponentOrder(Object& object);
+	void ReorderComponent(std::vector<std::string>& order, int from, int to);
+	bool DrawPropertyEditor(const std::string& label, rttr::type type, rttr::variant& value);
 	glm::vec3 QuaternionToEulerDegrees(const glm::quat& q) const;
 	glm::quat EulerDegreesToQuaternion(const glm::vec3& euler) const;
 };
