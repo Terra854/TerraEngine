@@ -58,6 +58,10 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 	if (vkCreateSampler(device, &samplerInfo, nullptr, &defaultTexture.sampler) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create texture sampler!");
 	}
+
+	// Register default texture at index 0 of bindless array
+	uint32_t idx = AllocateTextureIndex(); // Should be 0
+	UpdateGlobalTexture(idx, defaultTexture);
 }
 
 VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage) {
@@ -93,7 +97,7 @@ VkCommandBuffer VulkanContext::Impl::BeginSingleTimeCommands() {
 	VkCommandBufferAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandPool = commandPool;
+	allocInfo.commandPool = commandPools[currentFrame];
 	allocInfo.commandBufferCount = 1;
 
 	VkCommandBuffer commandBuffer;
@@ -119,7 +123,7 @@ void VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 	vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
 	vkQueueWaitIdle(graphicsQueue);
 
-	vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+	vkFreeCommandBuffers(device, commandPools[currentFrame], 1, &commandBuffer);
 }
 
 void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
@@ -257,8 +261,9 @@ void VulkanContext::Impl::DestroyPipelines() {
 			if (device) {
 				vkDestroyPipeline(device, pipe.pipeline, nullptr);
 				vkDestroyPipelineLayout(device, pipe.layout, nullptr);
-				for (VkDescriptorSetLayout layout : pipe.setLayouts) {
-					vkDestroyDescriptorSetLayout(device, layout, nullptr);
+				// Start from 1 to skip the global descriptor set layout (index 0) which is shared and destroyed in Cleanup
+				for (size_t i = 1; i < pipe.setLayouts.size(); ++i) {
+					vkDestroyDescriptorSetLayout(device, pipe.setLayouts[i], nullptr);
 				}
 			}
 		}
@@ -354,7 +359,14 @@ VkFormat VulkanContext::Impl::MapTextureFormat(uint8_t format, uint8_t channelTy
 }
 
 void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
-	if (textureCache.contains(textureId)) return;
+	if (textureCache.contains(textureId)) {
+		if (!textureIndexMap.contains(textureId)) {
+			uint32_t index = AllocateTextureIndex();
+			textureIndexMap[textureId] = index;
+			UpdateGlobalTexture(index, textureCache[textureId]);
+		}
+		return;
+	}
 
 	Texture* cpuTexture = ResourceManager::Instance().GetTexture(textureId);
 	if (!cpuTexture) return;
@@ -415,141 +427,72 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	vkCreateSampler(device, &samplerInfo, nullptr, &vImage.sampler);
 
 	textureCache[textureId] = vImage;
+
+	// Assign bindless index
+	uint32_t index = AllocateTextureIndex();
+	textureIndexMap[textureId] = index;
+	UpdateGlobalTexture(index, vImage);
 }
 
 std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId) {
-	VulkanPipeline* pipeline = nullptr;
-	for (auto& entry : pipelineCache) {
-		auto& map = entry.second;
-		if (map.contains(shaderCollectionId)) {
-			pipeline = &map[shaderCollectionId];
-			break;
-		}
-	}
-	if (!pipeline) return {};
-
-	auto& cacheForPipeline = materialDescriptorSets[shaderCollectionId];
-	if (cacheForPipeline.contains(materialId)) return cacheForPipeline[materialId];
-
-	if (pipeline->setLayouts.empty()) return {};
-	if (descriptorPool == VK_NULL_HANDLE) return {};
-
-	std::vector<VkDescriptorSet> sets(pipeline->setLayouts.size(), VK_NULL_HANDLE);
-
-	VkDescriptorSetAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-	allocInfo.descriptorPool = descriptorPool;
-	allocInfo.descriptorSetCount = static_cast<uint32_t>(pipeline->setLayouts.size());
-	allocInfo.pSetLayouts = pipeline->setLayouts.data();
-
-	if (vkAllocateDescriptorSets(device, &allocInfo, sets.data()) != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "failed to allocate descriptor sets for material!");
-		return {};
+	// No longer returns descriptor sets, but acts as an upload mechanism for material data.
+	// The return value is kept for now to minimize API breakage, but it will be empty besides the global set.
+	if (materialIndexMap.contains(materialId)) {
+		return { globalDescriptorSet };
 	}
 
 	Material* material = ResourceManager::Instance().GetMaterial(materialId);
-	TerraEngine::UUID primaryTextureId = TerraEngine::EMPTY_UUID;
-	if (material && material->header.textureCount > 0 && !material->textures.empty()) {
-		primaryTextureId = material->textures[0].textureUuid;
+	if (!material) return { globalDescriptorSet };
+	
+	MaterialData data;
+	data.BaseColorFactor = glm::vec4(
+		material->header.baseColorFactor[0],
+		material->header.baseColorFactor[1],
+		material->header.baseColorFactor[2],
+		material->header.baseColorFactor[3]
+	);
+	data.MetallicFactor = material->header.metallicFactor;
+	data.RoughnessFactor = material->header.roughnessFactor;
+	
+	TerraEngine::UUID baseColorTextureId = TerraEngine::EMPTY_UUID;
+	if (material->header.textureCount > 0 && !material->textures.empty()) {
+		// This logic might need to be more robust to find the base color texture specifically
+		baseColorTextureId = material->textures[0].textureUuid;
 	}
-
-	if (primaryTextureId != TerraEngine::EMPTY_UUID) {
-		EnsureTexture(primaryTextureId);
-	}
-
-	const VulkanImage* chosenTexture = &defaultTexture;
-	if (primaryTextureId != TerraEngine::EMPTY_UUID && textureCache.contains(primaryTextureId)) {
-		chosenTexture = &textureCache[primaryTextureId];
-	}
-
-	std::vector<VkWriteDescriptorSet> writes;
-	std::vector<VkDescriptorImageInfo> imageInfos;
-	std::vector<VkDescriptorBufferInfo> bufferInfos;
-
-	std::size_t imageInfoReserve = 0;
-	std::size_t bufferInfoReserve = 0;
-	for (const auto& setBindings : pipeline->bindingsPerSet) {
-		for (const DescriptorBinding& binding : setBindings) {
-			const VkDescriptorType vkType = MapDescriptorType(static_cast<DescriptorType>(binding.type));
-			const uint32_t descriptorCount = binding.arrayCount > 0 ? binding.arrayCount : 1;
-			if (vkType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || vkType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER || vkType == VK_DESCRIPTOR_TYPE_SAMPLER) {
-				imageInfoReserve += descriptorCount;
-			} else if (vkType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || vkType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-				bufferInfoReserve += descriptorCount;
-			}
+	
+	if (baseColorTextureId != TerraEngine::EMPTY_UUID) {
+		EnsureTexture(baseColorTextureId);
+		if (textureIndexMap.contains(baseColorTextureId)) {
+			data.BaseColorTextureIndex = textureIndexMap[baseColorTextureId];
+		} else {
+			data.BaseColorTextureIndex = 0; // Default texture
 		}
+	} else {
+		data.BaseColorTextureIndex = 0; // Default texture
 	}
-	imageInfos.reserve(imageInfoReserve);
-	bufferInfos.reserve(bufferInfoReserve);
+	
+	uint32_t materialIndex = AllocateMaterialIndex();
+	materialIndexMap[materialId] = materialIndex;
+	
+	VkDeviceSize bufferSize = sizeof(MaterialData);
+	VulkanBuffer stagingBuffer = CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+	
+	void* mappedData;
+	vmaMapMemory(allocator, stagingBuffer.allocation, &mappedData);
+	memcpy(mappedData, &data, bufferSize);
+	vmaUnmapMemory(allocator, stagingBuffer.allocation);
+	
+	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+	VkBufferCopy copyRegion{};
+	copyRegion.srcOffset = 0;
+	copyRegion.dstOffset = materialIndex * sizeof(MaterialData);
+	copyRegion.size = bufferSize;
+	vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBO.buffer, 1, &copyRegion);
+	EndSingleTimeCommands(commandBuffer);
+	
+	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
-	for (size_t setIndex = 0; setIndex < pipeline->bindingsPerSet.size(); ++setIndex) {
-		for (const DescriptorBinding& binding : pipeline->bindingsPerSet[setIndex]) {
-			const VkDescriptorType vkType = MapDescriptorType(static_cast<DescriptorType>(binding.type));
-			uint32_t descriptorCount = binding.arrayCount > 0 ? binding.arrayCount : 1;
-			if (vkType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || vkType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-				const size_t start = imageInfos.size();
-				for (uint32_t i = 0; i < descriptorCount; ++i) {
-					VkDescriptorImageInfo info{};
-					info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-					info.imageView = chosenTexture->view;
-					info.sampler = (vkType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) ? chosenTexture->sampler : VK_NULL_HANDLE;
-					imageInfos.push_back(info);
-				}
-
-				VkWriteDescriptorSet write{};
-				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				write.dstSet = sets[setIndex];
-				write.dstBinding = binding.binding;
-				write.descriptorType = vkType;
-				write.descriptorCount = descriptorCount;
-				write.pImageInfo = &imageInfos[start];
-				writes.push_back(write);
-			} else if (vkType == VK_DESCRIPTOR_TYPE_SAMPLER) {
-				const size_t start = imageInfos.size();
-				for (uint32_t i = 0; i < descriptorCount; ++i) {
-					VkDescriptorImageInfo info{};
-					info.sampler = chosenTexture->sampler;
-					imageInfos.push_back(info);
-				}
-
-				VkWriteDescriptorSet write{};
-				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				write.dstSet = sets[setIndex];
-				write.dstBinding = binding.binding;
-				write.descriptorType = vkType;
-				write.descriptorCount = descriptorCount;
-				write.pImageInfo = &imageInfos[start];
-				writes.push_back(write);
-			} else if (vkType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || vkType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-				const size_t start = bufferInfos.size();
-				for (uint32_t i = 0; i < descriptorCount; ++i) {
-					VkDescriptorBufferInfo bufferInfo{};
-					bufferInfo.buffer = VK_NULL_HANDLE;
-					bufferInfo.offset = 0;
-					bufferInfo.range = VK_WHOLE_SIZE;
-					bufferInfos.push_back(bufferInfo);
-				}
-
-				VkWriteDescriptorSet write{};
-				write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				write.dstSet = sets[setIndex];
-				write.dstBinding = binding.binding;
-				write.descriptorType = vkType;
-				write.descriptorCount = descriptorCount;
-				write.pBufferInfo = &bufferInfos[start];
-				writes.push_back(write);
-			} else {
-				TERRAENGINE_LOG(LogLevel::Warning, "Unsupported descriptor type in material binding; leaving binding " << binding.binding << " unset");
-			}
-		}
-	}
-
-	if (!writes.empty()) {
-		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-	}
-
-	cacheForPipeline[materialId] = sets;
-	return cacheForPipeline[materialId];
+	return { globalDescriptorSet };
 }
 
 void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
@@ -656,12 +599,31 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		VkPushConstantRange fallback{};
 		fallback.offset = 0;
 		fallback.size = sizeof(PushConstants);
-		fallback.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+		fallback.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 		pushConstants.push_back(fallback);
 		supportsDefaultPushConstants = true;
 	}
 
+	// Set 0 is always the Global Bindless Heap
+	setLayouts.push_back(globalDescriptorSetLayout);
+	bindingsPerSet.push_back({}); 
+
 	for (const auto& [setIndex, bindingMap] : setBindings) {
+		if (setIndex == 0) continue; // Skip Set 0, handled globally
+
+		// Handle gaps if sets are not contiguous (e.g. Set 0 and Set 2 but no Set 1)
+		// This simple implementation assumes sequential or just appends. 
+		// Real robustness would require resizing setLayouts to setIndex+1.
+		// For now, we assume materials use Set 1.
+		while (setLayouts.size() <= setIndex) {
+			setLayouts.push_back(VK_NULL_HANDLE); // Placeholder for gaps?
+			bindingsPerSet.push_back({});
+		}
+		
+		// If we filled a gap with NULL, we need to create a real layout now?
+		// Actually, standard behavior: just append. 
+		// If setIndex is 1, and size is 1 (Set 0), we push back. Correct.
+		
 		std::vector<VkDescriptorSetLayoutBinding> vkBindings;
 		std::vector<DescriptorBinding> storedBindings;
 		vkBindings.reserve(bindingMap.size());
@@ -685,14 +647,18 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		VkDescriptorSetLayout layout = VK_NULL_HANDLE;
 		if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to create descriptor set layout from reflection");
-			for (VkDescriptorSetLayout createdLayout : setLayouts) {
-				vkDestroyDescriptorSetLayout(device, createdLayout, nullptr);
+			for (size_t i = 1; i < setLayouts.size(); ++i) { // Start from 1 to avoid destroying global layout
+				if (setLayouts[i] != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, setLayouts[i], nullptr);
 			}
 			return false;
 		}
 
-		setLayouts.push_back(layout);
-		bindingsPerSet.push_back(std::move(storedBindings));
+		if (setLayouts.size() <= setIndex) {
+			setLayouts.resize(setIndex + 1, VK_NULL_HANDLE);
+			bindingsPerSet.resize(setIndex + 1);
+		}
+		setLayouts[setIndex] = layout;
+		bindingsPerSet[setIndex] = std::move(storedBindings);
 	}
 
 	return true;
@@ -896,4 +862,137 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	pipeline.supportsDefaultPushConstants = supportsDefaultPushConstants;
 
 	pipelineCache[renderPass][shaderCollectionId] = std::move(pipeline);
+}
+
+bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
+	std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+	// Textures
+	bindings[0].binding = 0;
+	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	bindings[0].descriptorCount = MAX_BINDLESS_TEXTURES;
+	bindings[0].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[0].pImmutableSamplers = nullptr;
+	// Materials
+	bindings[1].binding = 1;
+	bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[1].descriptorCount = 1;
+	bindings[1].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[1].pImmutableSamplers = nullptr;
+
+	VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{};
+	bindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+	std::array<VkDescriptorBindingFlags, 2> flags = {
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+		0
+	};
+	bindingFlags.bindingCount = static_cast<uint32_t>(flags.size());
+	bindingFlags.pBindingFlags = flags.data();
+
+	VkDescriptorSetLayoutCreateInfo layoutInfo{};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+	layoutInfo.pBindings = bindings.data();
+	layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+	layoutInfo.pNext = &bindingFlags;
+
+	if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &globalDescriptorSetLayout) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to create global descriptor set layout!");
+		return false;
+	}
+
+	std::array<VkDescriptorPoolSize, 2> poolSizes{};
+	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[0].descriptorCount = MAX_BINDLESS_TEXTURES;
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	poolSizes[1].descriptorCount = 1;
+
+	VkDescriptorPoolCreateInfo poolInfo{};
+	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+	poolInfo.pPoolSizes = poolSizes.data();
+	poolInfo.maxSets = 1;
+	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+
+	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &globalDescriptorPool) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to create global descriptor pool!");
+		return false;
+	}
+
+	VkDescriptorSetAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	allocInfo.descriptorPool = globalDescriptorPool;
+	allocInfo.descriptorSetCount = 1;
+	allocInfo.pSetLayouts = &globalDescriptorSetLayout;
+
+	if (vkAllocateDescriptorSets(device, &allocInfo, &globalDescriptorSet) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to allocate global descriptor set!");
+		return false;
+	}
+
+	return true;
+}
+
+void VulkanContext::Impl::CreateMaterialBufferResources() {
+	VkDeviceSize bufferSize = sizeof(MaterialData) * MAX_BINDLESS_MATERIALS;
+	globalMaterialSSBO = CreateBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+
+	VkDescriptorBufferInfo bufferInfo{};
+	bufferInfo.buffer = globalMaterialSSBO.buffer;
+	bufferInfo.offset = 0;
+	bufferInfo.range = bufferSize;
+
+	VkWriteDescriptorSet descriptorWrite{};
+	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrite.dstSet = globalDescriptorSet;
+	descriptorWrite.dstBinding = 1;
+	descriptorWrite.dstArrayElement = 0;
+	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	descriptorWrite.descriptorCount = 1;
+	descriptorWrite.pBufferInfo = &bufferInfo;
+
+	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+}
+
+uint32_t VulkanContext::Impl::AllocateTextureIndex() {
+	if (!freeTextureIndices.empty()) {
+		uint32_t index = freeTextureIndices.back();
+		freeTextureIndices.pop_back();
+		return index;
+	}
+	if (nextTextureIndex >= MAX_BINDLESS_TEXTURES) {
+		TERRAENGINE_LOG(LogLevel::Error, "Max bindless textures exceeded!");
+		return 0; // Return default texture
+	}
+	return nextTextureIndex++;
+}
+
+uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
+	if (!freeMaterialIndices.empty()) {
+		uint32_t index = freeMaterialIndices.back();
+		freeMaterialIndices.pop_back();
+		return index;
+	}
+	if (nextMaterialIndex >= MAX_BINDLESS_MATERIALS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Max bindless materials exceeded!");
+		return 0; 
+	}
+	return nextMaterialIndex++;
+}
+
+void VulkanContext::Impl::UpdateGlobalTexture(uint32_t index, const VulkanImage& image) {
+	VkDescriptorImageInfo imageInfo{};
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	imageInfo.imageView = image.view;
+	imageInfo.sampler = image.sampler;
+
+	VkWriteDescriptorSet descriptorWrite{};
+	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrite.dstSet = globalDescriptorSet;
+	descriptorWrite.dstBinding = 0;
+	descriptorWrite.dstArrayElement = index;
+	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptorWrite.descriptorCount = 1;
+	descriptorWrite.pImageInfo = &imageInfo;
+
+	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 }

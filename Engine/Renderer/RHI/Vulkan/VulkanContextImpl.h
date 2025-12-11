@@ -34,7 +34,9 @@ inline const std::vector<const char*> validationLayers = {
 };
 
 inline const std::vector<const char*> deviceExtensions = {
-	VK_KHR_SWAPCHAIN_EXTENSION_NAME
+	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+	VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+	VK_KHR_MAINTENANCE3_EXTENSION_NAME
 };
 
 // Queue family indices used to set up graphics/present queues.
@@ -93,6 +95,16 @@ struct PushConstants {
 	glm::vec4 positionOffset;
 	glm::vec4 positionScale;
 	glm::vec4 uvOffsetScale;
+	uint32_t textureIndex;
+	uint32_t materialIndex;
+};
+
+// Must match shader definition
+struct alignas(16) MaterialData {
+	glm::vec4 BaseColorFactor;
+	float MetallicFactor;
+	float RoughnessFactor;
+	uint32_t BaseColorTextureIndex;
 };
 
 struct VulkanContext::Impl {
@@ -118,7 +130,7 @@ struct VulkanContext::Impl {
 	VmaAllocation depthImageAllocation = VK_NULL_HANDLE;
 	VkImageView depthImageView = VK_NULL_HANDLE;
 
-	VkCommandPool commandPool = VK_NULL_HANDLE;
+	std::vector<VkCommandPool> commandPools;
 	std::vector<VkCommandBuffer> commandBuffers;
 
 	VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -137,6 +149,33 @@ struct VulkanContext::Impl {
 	bool initialized = false;
 	bool editorMode = false;
 
+	VkPhysicalDeviceVulkan12Features vulkan12Features{};
+
+	// Bindless Resources
+	static constexpr uint32_t MAX_BINDLESS_TEXTURES = 1024;
+	static constexpr uint32_t MAX_BINDLESS_MATERIALS = 1024;
+	VkDescriptorSetLayout globalDescriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool globalDescriptorPool = VK_NULL_HANDLE;
+	VkDescriptorSet globalDescriptorSet = VK_NULL_HANDLE;
+	
+	VulkanBuffer globalMaterialSSBO;
+
+	std::vector<uint32_t> freeTextureIndices;
+	std::unordered_map<TerraEngine::UUID, uint32_t> textureIndexMap;
+	uint32_t nextTextureIndex = 0;
+
+	std::vector<uint32_t> freeMaterialIndices;
+	std::unordered_map<TerraEngine::UUID, uint32_t> materialIndexMap;
+	uint32_t nextMaterialIndex = 0;
+
+	bool CreateGlobalDescriptorResources();
+	void CreateMaterialBufferResources();
+
+	uint32_t AllocateTextureIndex();
+	void UpdateGlobalTexture(uint32_t index, const VulkanImage& image);
+
+	uint32_t AllocateMaterialIndex();
+
 	// Editor / Offscreen Resources
 	VkImage offscreenImage = VK_NULL_HANDLE;
 	VmaAllocation offscreenAllocation = VK_NULL_HANDLE;
@@ -150,7 +189,6 @@ struct VulkanContext::Impl {
 	std::unordered_map<TerraEngine::UUID, VulkanImage> textureCache;
 	// Pipelines keyed by RenderPass then ShaderID
 	std::unordered_map<VkRenderPass, std::unordered_map<TerraEngine::UUID, VulkanPipeline>> pipelineCache;
-	std::unordered_map<TerraEngine::UUID, std::unordered_map<TerraEngine::UUID, std::vector<VkDescriptorSet>>> materialDescriptorSets;
 
 	VulkanImage defaultTexture;
 	std::vector<std::vector<VkCommandPool>> workerCommandPools; // Per-frame command pools for worker threads

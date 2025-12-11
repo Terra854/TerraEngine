@@ -1,5 +1,27 @@
-[[vk::binding(0, 0)]] Texture2D baseColorTex;
-[[vk::binding(1, 0)]] SamplerState linearClamp;
+[[vk::binding(0, 0)]] Texture2D globalTextures[];
+[[vk::binding(0, 0)]] SamplerState globalSamplers[];
+
+struct MaterialData
+{
+	float4 BaseColorFactor;
+	float MetallicFactor;
+	float RoughnessFactor;
+	uint BaseColorTextureIndex;
+};
+
+[[vk::binding(1, 0)]] StructuredBuffer<MaterialData> allMaterials;
+
+struct PushConstants
+{
+	float4x4 modelViewProjection;
+	float4 positionOffset;
+	float4 positionScale;
+	float4 uvOffsetScale;
+	uint textureIndex; // Kept for now, but material index is primary
+	uint materialIndex;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
 
 struct PSIn
 {
@@ -8,7 +30,10 @@ struct PSIn
 	float3 normal : NORMAL;
 };
 
-float4 PSMain(PSIn input) : SV_Target0
+float4 main(PSIn input) : SV_Target0
 {
-	return baseColorTex.Sample(linearClamp, input.uv);
+	MaterialData mat = allMaterials[SceneUniforms.materialIndex];
+	uint textureIdx = mat.BaseColorTextureIndex;
+	float4 baseColor = globalTextures[NonUniformResourceIndex(textureIdx)].Sample(globalSamplers[NonUniformResourceIndex(textureIdx)], input.uv);
+	return baseColor * mat.BaseColorFactor;
 }

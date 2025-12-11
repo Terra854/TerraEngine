@@ -4,9 +4,13 @@
 #include <vector>
 #include <algorithm>
 #include <unordered_set>
+#include <cmath>
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/epsilon.hpp>
+#include <glm/gtx/euler_angles.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include "Engine/Window/WindowSystem.h"
 #include "Engine/Window/WindowBackend.h"
 #include "Engine/Core/Logger/Logger.h"
@@ -332,7 +336,7 @@ void EditorSystem::DrawComponentInspector(const std::string& componentName, cons
 				continue;
 			}
 			ImGui::PushID(propName.c_str());
-			if (DrawPropertyEditor(propName, prop.get_type(), value)) {
+			if (DrawPropertyEditor(propName, prop.get_type(), value, selectedObject->EntityId())) {
 				access.setter(*selectedObject, propName, value);
 			}
 			ImGui::PopID();
@@ -340,7 +344,7 @@ void EditorSystem::DrawComponentInspector(const std::string& componentName, cons
 	}
 }
 
-bool EditorSystem::DrawPropertyEditor(const std::string& label, rttr::type type, rttr::variant& value) {
+bool EditorSystem::DrawPropertyEditor(const std::string& label, rttr::type type, rttr::variant& value, entt::entity entityId) {
 	if (type == rttr::type::get<float>()) {
 		float v = value.get_value<float>();
 		if (ImGui::DragFloat(label.c_str(), &v, 0.1f)) {
@@ -378,10 +382,32 @@ bool EditorSystem::DrawPropertyEditor(const std::string& label, rttr::type type,
 	}
 
 	if (type == rttr::type::get<glm::quat>()) {
-		glm::quat q = value.get_value<glm::quat>();
-		glm::vec3 eulerDeg = QuaternionToEulerDegrees(q);
+		glm::quat q = glm::normalize(value.get_value<glm::quat>());
+		auto cacheIt = rotationEditCache.find(entityId);
+		auto lastQuatIt = rotationLastQuat.find(entityId);
+
+		bool rotationChanged = true;
+		if (lastQuatIt != rotationLastQuat.end()) {
+			float alignment = std::abs(glm::dot(lastQuatIt->second, q));
+			rotationChanged = alignment < 0.9999f;
+		}
+
+		// Seed the cache from the current component value when none exists, or when the rotation changed externally.
+		if (cacheIt == rotationEditCache.end() || rotationChanged) {
+			glm::vec3 currentDeg = glm::degrees(glm::eulerAngles(q));
+			rotationEditCache[entityId] = currentDeg;
+			cacheIt = rotationEditCache.find(entityId);
+			rotationLastQuat[entityId] = q;
+		}
+
+		glm::vec3 eulerDeg = cacheIt->second;
+		// Expose rotation as yaw(Y) / pitch(X) / roll(Z) with a persistent cache so authors can edit beyond +/-180
+		// without the UI wrapping values each frame.
 		if (ImGui::DragFloat3((label + " (Euler deg)").c_str(), &eulerDeg.x, 0.5f)) {
-			value = EulerDegreesToQuaternion(eulerDeg);
+			rotationEditCache[entityId] = eulerDeg;
+			glm::quat newQuat = EulerDegreesToQuaternion(eulerDeg);
+			rotationLastQuat[entityId] = newQuat;
+			value = newQuat;
 			return true;
 		}
 		return false;
@@ -396,14 +422,11 @@ bool EditorSystem::DrawPropertyEditor(const std::string& label, rttr::type type,
 	return false;
 }
 
-glm::vec3 EditorSystem::QuaternionToEulerDegrees(const glm::quat& q) const {
-	glm::vec3 euler = glm::degrees(glm::eulerAngles(glm::normalize(q)));
-	return euler;
-}
-
 glm::quat EditorSystem::EulerDegreesToQuaternion(const glm::vec3& euler) const {
 	glm::vec3 radians = glm::radians(euler);
-	return glm::quat(radians);
+	// Build the quaternion from yaw(Y), pitch(X), roll(Z) to match the editor field ordering.
+	glm::mat4 rotationMatrix = glm::yawPitchRoll(radians.y, radians.x, radians.z);
+	return glm::quat_cast(rotationMatrix);
 }
 
 void EditorSystem::EnsureComponentOrder(Object& object) {

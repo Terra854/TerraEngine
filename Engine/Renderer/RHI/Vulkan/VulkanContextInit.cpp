@@ -40,6 +40,9 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	if (!CreateCommandPool()) return false;
 	if (!CreateSyncObjects()) return false;
 	if (!CreateDescriptorPool()) return false;
+		if (!CreateGlobalDescriptorResources()) return false;
+	CreateMaterialBufferResources();
+
 	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	workerCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 
@@ -95,13 +98,13 @@ void VulkanContext::Impl::Cleanup() {
 	}
 
 	DestroyPipelines();
-	materialDescriptorSets.clear();
 
 	if (device) {
 		vkDestroySampler(device, defaultTexture.sampler, nullptr);
 		vkDestroyImageView(device, defaultTexture.view, nullptr);
 	}
 	vmaDestroyImage(allocator, defaultTexture.image, defaultTexture.allocation);
+	vmaDestroyBuffer(allocator, globalMaterialSSBO.buffer, globalMaterialSSBO.allocation);
 
 	for (size_t i = 0; i < renderFinishedSemaphores.size(); i++) {
 		if (device) {
@@ -117,9 +120,18 @@ void VulkanContext::Impl::Cleanup() {
 		vmaDestroyImage(allocator, depthImage, depthImageAllocation);
 	}
 
-	if (device) vkDestroyCommandPool(device, commandPool, nullptr);
+	if (device) {
+		for (VkCommandPool pool : commandPools) {
+			vkDestroyCommandPool(device, pool, nullptr);
+		}
+	}
+	commandPools.clear();
 
-	if (device) vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+	if (device) {
+		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+		vkDestroyDescriptorPool(device, globalDescriptorPool, nullptr);
+		vkDestroyDescriptorSetLayout(device, globalDescriptorSetLayout, nullptr);
+	}
 
 	if (allocator) vmaDestroyAllocator(allocator);
 
@@ -251,13 +263,30 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	VkPhysicalDeviceFeatures deviceFeatures{};
 	deviceFeatures.samplerAnisotropy = VK_TRUE;
 
+	// Enable Descriptor Indexing features
+	vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	vulkan12Features.descriptorIndexing = VK_TRUE;
+	vulkan12Features.runtimeDescriptorArray = VK_TRUE;
+	vulkan12Features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+	vulkan12Features.descriptorBindingPartiallyBound = VK_TRUE;
+	vulkan12Features.descriptorBindingVariableDescriptorCount = VK_TRUE;
+	vulkan12Features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+	// Buffer device address is often useful with bindless but strictly optional
+	vulkan12Features.bufferDeviceAddress = VK_TRUE;
+
+	VkPhysicalDeviceFeatures2 features2{};
+	features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	features2.features = deviceFeatures;
+	features2.pNext = &vulkan12Features;
+
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	createInfo.pNext = &features2; // Chain features here
 
 	createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
 	createInfo.pQueueCreateInfos = queueCreateInfos.data();
 
-	createInfo.pEnabledFeatures = &deviceFeatures;
+	createInfo.pEnabledFeatures = nullptr; // Must be null when using pNext for features
 
 	createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
 	createInfo.ppEnabledExtensionNames = deviceExtensions.data();
@@ -500,21 +529,25 @@ bool VulkanContext::Impl::CreateCommandPool() {
 	poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 	poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
 
-	if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "failed to create command pool!");
-		return false;
-	}
-
+	commandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-	VkCommandBufferAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.commandPool = commandPool;
-	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
 
-	if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "failed to allocate command buffers!");
-		return false;
+	for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+		if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPools[i]) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create command pool!");
+			return false;
+		}
+
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.commandPool = commandPools[i];
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandBufferCount = 1;
+
+		if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffers[i]) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to allocate command buffers!");
+			return false;
+		}
 	}
 	return true;
 }
@@ -569,7 +602,7 @@ bool VulkanContext::Impl::CreateDescriptorPool() {
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT | VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
 	poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
 	poolInfo.pPoolSizes = poolSizes.data();
 	poolInfo.maxSets = 512;
@@ -630,7 +663,29 @@ bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 		SwapChainSupportDetails swapChainSupport = QuerySwapChainSupport(device);
 		swapChainAdequate = !swapChainSupport.formats.empty() && !swapChainSupport.presentModes.empty();
 	}
-	return indices.isComplete() && extensionsSupported && swapChainAdequate;
+
+	if (!indices.isComplete() || !extensionsSupported || !swapChainAdequate) {
+		return false;
+	}
+
+	// Check for Descriptor Indexing support (Vulkan 1.2)
+	VkPhysicalDeviceVulkan12Features features12{};
+	features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+	VkPhysicalDeviceFeatures2 features2{};
+	features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	features2.pNext = &features12;
+
+	vkGetPhysicalDeviceFeatures2(device, &features2);
+
+	if (!features12.descriptorIndexing || !features12.runtimeDescriptorArray || 
+		!features12.shaderSampledImageArrayNonUniformIndexing || 
+		!features12.descriptorBindingPartiallyBound || 
+		!features12.descriptorBindingVariableDescriptorCount) {
+		return false;
+	}
+
+	return true;
 }
 
 bool VulkanContext::Impl::CheckDeviceExtensionSupport(VkPhysicalDevice device) {
@@ -760,7 +815,6 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	vkDeviceWaitIdle(device);
 
 	DestroyPipelines();
-	materialDescriptorSets.clear();
 	if (descriptorPool) {
 		VkResult resetResult = vkResetDescriptorPool(device, descriptorPool, 0);
 		if (resetResult != VK_SUCCESS) {

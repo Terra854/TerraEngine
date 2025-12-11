@@ -26,7 +26,7 @@ void VulkanContext::BeginFrame() {
 	if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
 		auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
 		if (!extras.empty()) {
-			vkFreeCommandBuffers(impl->device, impl->commandPool, static_cast<uint32_t>(extras.size()), extras.data());
+			vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], static_cast<uint32_t>(extras.size()), extras.data());
 			extras.clear();
 		}
 	}
@@ -36,7 +36,7 @@ void VulkanContext::BeginFrame() {
 
 	// Reset command pool so the main command buffer and any newly allocated
 	// per-camera buffers start from a clean state each frame.
-	vkResetCommandPool(impl->device, impl->commandPool, 0);
+	vkResetCommandPool(impl->device, impl->commandPools[impl->currentFrame], 0);
 	// Reset worker pools for this frame once so secondary buffers can be rerecorded safely.
 	if (impl->currentFrame < impl->workerCommandPools.size()) {
 		auto& framePools = impl->workerCommandPools[impl->currentFrame];
@@ -141,6 +141,20 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 
 		PushConstants push{};
 		push.modelViewProjection = frameData.projectionMatrix * frameData.viewMatrix * command.modelMatrix;
+		
+		// Set texture index for bindless access
+		push.textureIndex = 0; // Default
+		if (material && material->header.textureCount > 0 && !material->textures.empty()) {
+			TerraEngine::UUID texID = material->textures[0].textureUuid;
+			if (impl->textureIndexMap.contains(texID)) {
+				push.textureIndex = impl->textureIndexMap[texID];
+			}
+		}
+
+		push.materialIndex = 0; // Default
+		if (impl->materialIndexMap.contains(command.materialId)) {
+			push.materialIndex = impl->materialIndexMap[command.materialId];
+		}
 
 		if (Mesh* cpuMesh = ResourceManager::Instance().GetMesh(command.meshId)) {
 			push.positionOffset = glm::vec4(cpuMesh->header.quantization.positionOffset[0], cpuMesh->header.quantization.positionOffset[1], cpuMesh->header.quantization.positionOffset[2], 0.0f);
@@ -155,7 +169,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 		PreparedDraw draw{};
 		draw.mesh = &mesh;
 		draw.pipeline = &pipeline;
-		draw.descriptorSets = std::move(materialSets);
+		draw.descriptorSets = { impl->globalDescriptorSet }; // Always bind the global set
 		draw.push = push;
 		prepared.push_back(std::move(draw));
 	}
@@ -168,7 +182,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 	} else {
 		VkCommandBufferAllocateInfo allocInfo{};
 		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-		allocInfo.commandPool = impl->commandPool;
+		allocInfo.commandPool = impl->commandPools[impl->currentFrame];
 		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 		allocInfo.commandBufferCount = 1;
 		if (vkAllocateCommandBuffers(impl->device, &allocInfo, &cmd) != VK_SUCCESS) {
@@ -264,7 +278,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 					vkCmdBindVertexBuffers(secondary, 0, 1, vertexBuffers, offsets);
 					vkCmdBindIndexBuffer(secondary, draw.mesh->indexBuffer.buffer, 0, draw.mesh->indexType);
 					if (draw.pipeline->supportsDefaultPushConstants) {
-						vkCmdPushConstants(secondary, draw.pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &draw.push);
+						vkCmdPushConstants(secondary, draw.pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &draw.push);
 					}
 					vkCmdDrawIndexed(secondary, draw.mesh->indexCount, 1, 0, 0, 0);
 				}
@@ -409,7 +423,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	VkCommandBuffer uiCmd;
 	VkCommandBufferAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.commandPool = impl->commandPool;
+	allocInfo.commandPool = impl->commandPools[impl->currentFrame];
 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	allocInfo.commandBufferCount = 1;
 	vkAllocateCommandBuffers(impl->device, &allocInfo, &uiCmd);
@@ -465,7 +479,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	if (uiSubmitResult != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor QueueSubmit failed: " << uiSubmitResult);
 		vkDestroyFence(impl->device, uiFence, nullptr);
-		vkFreeCommandBuffers(impl->device, impl->commandPool, 1, &uiCmd);
+		vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], 1, &uiCmd);
 		impl->RecreateSwapChain();
 		return;
 	}
@@ -484,7 +498,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 
 	vkWaitForFences(impl->device, 1, &uiFence, VK_TRUE, UINT64_MAX);
 	vkDestroyFence(impl->device, uiFence, nullptr);
-	vkFreeCommandBuffers(impl->device, impl->commandPool, 1, &uiCmd);
+	vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], 1, &uiCmd);
 
 	impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 }

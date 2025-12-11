@@ -38,6 +38,8 @@ private:
 	bool initialized = false;
 	std::optional<Object> selectedObject;
 	std::unordered_map<entt::entity, std::vector<std::string>> inspectorComponentOrder;
+	std::unordered_map<entt::entity, glm::vec3> rotationEditCache;
+	std::unordered_map<entt::entity, glm::quat> rotationLastQuat;
 
 	void RenderUI(void* cmdBuffer);
 	void DrawHierarchyWindow();
@@ -46,7 +48,6 @@ private:
 	void DrawComponentInspector(const std::string& componentName, const ComponentAccessFunctions& access, int index, std::function<void(int, int)> onReorder);
 	void EnsureComponentOrder(Object& object);
 	void ReorderComponent(std::vector<std::string>& order, int from, int to);
-	bool DrawPropertyEditor(const std::string& label, rttr::type type, rttr::variant& value);
-	glm::vec3 QuaternionToEulerDegrees(const glm::quat& q) const;
+	bool DrawPropertyEditor(const std::string& label, rttr::type type, rttr::variant& value, entt::entity entityId);
 	glm::quat EulerDegreesToQuaternion(const glm::vec3& euler) const;
 };

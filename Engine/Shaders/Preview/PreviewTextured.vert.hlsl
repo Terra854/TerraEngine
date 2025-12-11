@@ -4,6 +4,8 @@ struct PushConstants
 	float4 positionOffset; // xyz, w unused
 	float4 positionScale;  // xyz, w unused
 	float4 uvOffsetScale;  // xy = offset, zw = scale
+	uint textureIndex;
+	uint materialIndex;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
@@ -22,7 +24,7 @@ struct VSOut
 	float3 normal : NORMAL;
 };
 
-VSOut VSMain(VSIn input)
+VSOut main(VSIn input)
 {
 	VSOut output;
 	
