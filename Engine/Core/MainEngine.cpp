@@ -62,7 +62,7 @@ void Engine::Initialize()
 	systems.push_back(&sceneManager);
 
 	// RenderSystem consumes scene data and produces frames.
-	static RenderSystem renderSystem;
+	RenderSystem& renderSystem = RenderSystem::Instance();
 	systems.push_back(&renderSystem);
 	
 	for (auto* system : systems) {

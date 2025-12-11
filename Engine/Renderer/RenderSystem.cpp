@@ -19,8 +19,13 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-RenderSystem::RenderSystem() = default;
-RenderSystem::~RenderSystem() = default;
+RenderSystem& RenderSystem::Instance()
+{
+	// Provide a singleton instance so the main engine loop can register the
+	// system without managing heap allocations or ownership semantics.
+	static RenderSystem instance;
+	return instance;
+}
 
 void RenderSystem::Initialize()
 {

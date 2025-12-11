@@ -7,8 +7,13 @@
 class RenderSystem : public SystemsBase
 {
 public:
-	RenderSystem();
-	~RenderSystem() override;
+	static RenderSystem& Instance();
+
+	RenderSystem(const RenderSystem&) = delete;
+	RenderSystem& operator=(const RenderSystem&) = delete;
+	RenderSystem(RenderSystem&&) = delete;
+	RenderSystem& operator=(RenderSystem&&) = delete;
+	~RenderSystem() override = default;
 
 	void Initialize() override;
 	void Update() override;
@@ -18,5 +23,6 @@ public:
 	RHIContext* GetContext() const { return rhi.get(); }
 
 private:
+	RenderSystem() = default;
 	std::unique_ptr<RHIContext> rhi;
 };
