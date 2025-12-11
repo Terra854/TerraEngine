@@ -138,7 +138,7 @@ private:
 	TerraEngine::UUID LoadPreviewShaderCollection(ResourceManager& resources) const;
 	TerraEngine::UUID CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
 	void SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
-	void UpdatePreviewInteraction();
+	void SpawnPreviewCamera();
 	Transform* GetPreviewTransform();
 
 	ThreadPool& threadPool;
@@ -155,6 +155,9 @@ private:
 	// Track the generated preview object and the user's interaction state so
 	// mouse motion/scroll can manipulate the on-screen demo model.
 	std::optional<Object> previewObject;
+	// Preview camera that replaces the hardcoded view/projection used by the
+	// renderer so authored camera settings can be reflected into the frame.
+	std::optional<Object> previewCamera;
 	glm::vec2 lastCursorPosition{0.0f, 0.0f};
 	bool isDraggingPreview = false;
 	float accumulatedYaw = 0.0f;

@@ -155,6 +155,13 @@ struct VulkanContext::Impl {
 	VulkanImage defaultTexture;
 	std::vector<std::vector<VkCommandPool>> workerCommandPools; // Per-frame command pools for worker threads
 	std::vector<std::vector<std::vector<VkCommandBuffer>>> workerCommandBuffers; // Per-frame, per-worker secondary command buffers
+	// Track additional primary command buffers allocated when rendering multiple
+	// cameras per frame so they can be freed after the frame fence completes.
+	std::vector<std::vector<VkCommandBuffer>> extraPrimaryCommandBuffers;
+	std::vector<std::vector<VkCommandBuffer>> pendingPrimaryCommandBuffers;
+	bool swapchainImageAcquired = false;
+	bool skipFrame = false;
+	uint32_t acquiredImageIndex = 0;
 
 	bool InitVulkan(WindowSystem& windowSystem);
 	void Cleanup();

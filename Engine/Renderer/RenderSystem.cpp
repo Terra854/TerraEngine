@@ -2,6 +2,7 @@
 #include "RHI/Vulkan/VulkanContext.h"
 #include "Core/Logger/Logger.h"
 #include "Window/WindowSystem.h"
+#include "Scene/CameraComponent.h"
 #include "Scene/MeshRenderComponent.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Transform.h"
@@ -9,6 +10,9 @@
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#include <algorithm>
+#include <utility>
+#include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -25,12 +29,39 @@ void RenderSystem::Initialize()
 
 void RenderSystem::Update()
 {
-	FrameRenderData frameData;
-	
-	// Hardcoded camera for now
-	frameData.viewMatrix = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-	frameData.projectionMatrix = glm::perspective(glm::radians(45.0f), 16.0f / 9.0f, 0.1f, 100.0f);
-	frameData.projectionMatrix[1][1] *= -1;
+	// Snapshot camera components so view/projection data is sourced from
+	// authored entities instead of the legacy hardcoded values.
+	std::vector<std::pair<Transform, CameraComponent>> cameras;
+	ObjectManager::instance().forEachObjectWithComponents<Transform, CameraComponent>(
+		[&](Transform& transform, CameraComponent& cameraComp)
+		{
+			CameraComponent reflectedCamera{};
+			reflectedCamera.verticalFovDegrees = GetComponentProperty<CameraComponent, float>(cameraComp, "verticalFovDegrees");
+			reflectedCamera.aspectRatio = GetComponentProperty<CameraComponent, float>(cameraComp, "aspectRatio");
+			reflectedCamera.nearPlane = GetComponentProperty<CameraComponent, float>(cameraComp, "nearPlane");
+			reflectedCamera.farPlane = GetComponentProperty<CameraComponent, float>(cameraComp, "farPlane");
+			reflectedCamera.up = GetComponentProperty<CameraComponent, glm::vec3>(cameraComp, "up");
+
+			Transform reflectedTransform{};
+			reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+			reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+			reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+
+			cameras.emplace_back(reflectedTransform, reflectedCamera);
+		}
+	);
+	// Throttle warning spam so missing cameras do not flood the console every frame.
+	static bool loggedMissingCamera = false;
+	if (cameras.empty())
+	{
+		if (!loggedMissingCamera)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "RenderSystem skipped frame because no CameraComponent was found in the scene.");
+			loggedMissingCamera = true;
+		}
+		return;
+	}
+	loggedMissingCamera = false;
 
 	// Snapshot renderable components to avoid locking the registry during parallel work.
 	std::vector<std::pair<Transform, MeshRenderComponent>> renderables;
@@ -57,6 +88,7 @@ void RenderSystem::Update()
 		}
 	);
 
+	std::vector<DrawCommand> drawCommands;
 	if (!renderables.empty())
 	{
 		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
@@ -103,12 +135,44 @@ void RenderSystem::Update()
 		for (auto& future : futures)
 		{
 			auto chunk = future.get();
-			frameData.commands.insert(frameData.commands.end(), chunk.begin(), chunk.end());
+			drawCommands.insert(drawCommands.end(), chunk.begin(), chunk.end());
 		}
 	}
 
+	FrameRenderData frameData;
+	// Commands are reused for every camera since the scene contents are shared;
+	// only the view/projection matrices will differ per camera iteration.
+	frameData.commands = drawCommands;
+
+	// Render once for every camera found so multi-camera scenes can present
+	// each authored viewpoint in sequence.
 	rhi->BeginFrame();
-	rhi->RenderFrame(frameData);
+	for (size_t cameraIndex = 0; cameraIndex < cameras.size(); ++cameraIndex)
+	{
+		const auto& cameraTransform = cameras[cameraIndex].first;
+		const auto& camera = cameras[cameraIndex].second;
+		// Normalize the rotation so derived direction vectors remain unit length
+		// even if authoring data drifts slightly off the identity quaternion.
+		const glm::quat cameraRotation = glm::normalize(cameraTransform.rotation);
+		const glm::vec3 defaultForward(0.0f, 0.0f, -1.0f);
+		const glm::vec3 forward = cameraRotation * defaultForward;
+		glm::vec3 up = cameraRotation * camera.up;
+		if (glm::length(up) < 0.0001f)
+		{
+			up = glm::vec3(0.0f, 1.0f, 0.0f);
+		}
+
+		// Clamp projection inputs to keep glm::perspective from receiving invalid values.
+		const float clampedFov = std::max(0.001f, camera.verticalFovDegrees);
+		const float safeAspect = camera.aspectRatio > 0.0f ? camera.aspectRatio : 1.0f;
+		const float nearPlane = std::max(0.0001f, camera.nearPlane);
+		const float farPlane = std::max(nearPlane + 0.001f, camera.farPlane);
+		frameData.viewMatrix = glm::lookAt(cameraTransform.position, cameraTransform.position + forward, glm::normalize(up));
+		frameData.projectionMatrix = glm::perspective(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
+		frameData.projectionMatrix[1][1] *= -1;
+
+		rhi->RenderFrame(frameData);
+	}
 	rhi->EndFrame();
 }
 

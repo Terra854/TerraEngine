@@ -17,6 +17,7 @@
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/ShaderCollection.h"
+#include "Scene/CameraComponent.h"
 #include "Scene/MeshRenderComponent.h"
 
 SceneManager& SceneManager::Instance()
@@ -48,11 +49,7 @@ void SceneManager::Initialize()
 
 void SceneManager::Update()
 {
-	// Input-driven preview manipulation runs on the main thread so it can react
-	// to mouse deltas without introducing cross-thread contention. The helper
-	// keeps the loop single-threaded by design because input callbacks are
-	// already serialized through the window pump.
-	//UpdatePreviewInteraction();
+	// Empty for now
 }
 
 void SceneManager::Shutdown()
@@ -178,6 +175,11 @@ void SceneManager::UnloadAll()
 	{
 		ObjectManager::instance().removeObject(*previewObject);
 		previewObject.reset();
+	}
+	if (previewCamera)
+	{
+		ObjectManager::instance().removeObject(*previewCamera);
+		previewCamera.reset();
 	}
 	isDraggingPreview = false;
 	lastCursorPosition = glm::vec2(0.0f, 0.0f);
@@ -309,6 +311,9 @@ void SceneManager::PreparePreviewAssets()
 	// Instantiate an object with the bindings so future renderer work can query
 	// exactly which authored assets should be drawn.
 	SpawnPreviewObject(previewMeshId, previewMaterialId, previewTextureId, previewShaderCollectionId);
+	// Seed the scene with a camera component that mirrors the old hardcoded
+	// view so the renderer can source matrices from authored data instead.
+	SpawnPreviewCamera();
 }
 
 TerraEngine::UUID SceneManager::LoadPreviewShaderCollection(ResourceManager& resources) const
@@ -427,66 +432,29 @@ void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const Ter
 	SetComponentProperty(renderComponent, "shaderCollectionId", shaderCollectionId);
 }
 
-void SceneManager::UpdatePreviewInteraction()
+void SceneManager::SpawnPreviewCamera()
 {
-	Transform* transform = GetPreviewTransform();
-	if (transform == nullptr)
+	ObjectManager& objects = ObjectManager::instance();
+	previewCamera = objects.createObject("PreviewCamera");
+
+	// Match the legacy hardcoded camera by positioning it three units away
+	// from the origin while keeping an identity rotation and uniform scale.
+	Transform* transform = previewCamera->getComponent<Transform>();
+	if (transform)
 	{
-		// When the preview entity is missing (e.g., asset load failure) skip the
-		// interaction logic so we do not touch a null Transform pointer.
-		return;
+		SetComponentProperty(*transform, "Position", glm::vec3(0.0f, 0.0f, 3.0f));
+		SetComponentProperty(*transform, "Rotation", glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
+		SetComponentProperty(*transform, "Scale", glm::vec3(1.0f, 1.0f, 1.0f));
 	}
 
-	InputSystem& input = InputSystem::Instance();
-	const auto cursor = input.GetCursorPosition();
-	const glm::vec2 cursorPosition = glm::vec2(static_cast<float>(cursor.first), static_cast<float>(cursor.second));
-
-	const bool leftMouseDown = input.IsMouseButtonPressed(MouseButton::Left);
-	if (leftMouseDown && !isDraggingPreview)
-	{
-		// Begin a drag when the user first depresses the mouse so subsequent
-		// deltas can accumulate into the preview rotation.
-		isDraggingPreview = true;
-		lastCursorPosition = cursorPosition;
-	}
-
-	if (!leftMouseDown)
-	{
-		// Releasing the mouse clears the drag so the next click starts a fresh
-		// delta measurement instead of reusing stale cursor positions.
-		isDraggingPreview = false;
-	}
-
-	if (isDraggingPreview)
-	{
-		const glm::vec2 cursorDelta = cursorPosition - lastCursorPosition;
-		lastCursorPosition = cursorPosition;
-
-		// Convert raw pixel motion into radians for pitch/yaw adjustments.
-		accumulatedYaw += cursorDelta.x * kPreviewRotationSpeed;
-		accumulatedPitch += cursorDelta.y * kPreviewRotationSpeed;
-
-		// Clamp the pitch so the model never inverts when dragging vertically.
-		const float maxPitch = glm::radians(89.0f);
-		accumulatedPitch = std::clamp(accumulatedPitch, -maxPitch, maxPitch);
-	}
-
-	const auto scrollDelta = input.GetScrollDelta();
-	if (scrollDelta.second != 0.0)
-	{
-		// Treat scroll wheel motion as forward/backward dolly, constraining the
-		// offset so the model cannot pass through the camera origin.
-		previewZoomOffset += static_cast<float>(scrollDelta.second) * kPreviewZoomStep;
-		previewZoomOffset = std::clamp(previewZoomOffset, kPreviewMaxZoomOut, kPreviewMaxZoomIn);
-	}
-
-	const glm::quat yawRotation = glm::angleAxis(accumulatedYaw, glm::vec3(0.0f, 1.0f, 0.0f));
-	const glm::quat pitchRotation = glm::angleAxis(accumulatedPitch, glm::vec3(1.0f, 0.0f, 0.0f));
-	transform->rotation = yawRotation * pitchRotation;
-
-	// Adjust the Z offset to mimic camera zoom while keeping the model centered
-	// around the origin so it remains in view of the fixed render camera.
-	transform->position = glm::vec3(0.0f, 0.0f, previewZoomOffset);
+	// Add a camera component with projection defaults that mirror the previous
+	// hardcoded parameters so the preview looks identical.
+	auto& camera = previewCamera->addComponent<CameraComponent>();
+	SetComponentProperty(camera, "verticalFovDegrees", 45.0f);
+	SetComponentProperty(camera, "aspectRatio", 16.0f / 9.0f);
+	SetComponentProperty(camera, "nearPlane", 0.1f);
+	SetComponentProperty(camera, "farPlane", 100.0f);
+	SetComponentProperty(camera, "up", glm::vec3(0.0f, 1.0f, 0.0f));
 }
 
 Transform* SceneManager::GetPreviewTransform()

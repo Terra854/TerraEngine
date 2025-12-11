@@ -525,6 +525,10 @@ bool VulkanContext::Impl::CreateSyncObjects() {
 	renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
 	uiSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
 	inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+	extraPrimaryCommandBuffers.clear();
+	extraPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	pendingPrimaryCommandBuffers.clear();
+	pendingPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 
 	VkSemaphoreCreateInfo semaphoreInfo{};
 	semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;

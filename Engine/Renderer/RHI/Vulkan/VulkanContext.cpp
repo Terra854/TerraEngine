@@ -17,12 +17,50 @@ void VulkanContext::Initialize(WindowSystem& windowSystem) {
 
 void VulkanContext::BeginFrame() {
 	// Wait until the GPU is done with the resources for this frame before reusing them.
+	if (!impl->initialized) return;
+
 	vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+
+	// Release any extra primary command buffers used for prior camera passes
+	// now that the fence guarantees they are idle.
+	if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
+		auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
+		if (!extras.empty()) {
+			vkFreeCommandBuffers(impl->device, impl->commandPool, static_cast<uint32_t>(extras.size()), extras.data());
+			extras.clear();
+		}
+	}
+	if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+		impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+	}
+
+	// Reset command pool so the main command buffer and any newly allocated
+	// per-camera buffers start from a clean state each frame.
+	vkResetCommandPool(impl->device, impl->commandPool, 0);
+
+	impl->swapchainImageAcquired = false;
+	impl->skipFrame = false;
+
+	// Acquire the swapchain image once per frame so multiple camera passes can
+	// render to the same back buffer and present only on the final camera.
+	if (!impl->editorMode) {
+		VkResult result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX, impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &impl->acquiredImageIndex);
+		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+			impl->RecreateSwapChain();
+			impl->skipFrame = true;
+			return;
+		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to acquire swap chain image! Result: " << result);
+			impl->skipFrame = true;
+			return;
+		}
+		impl->swapchainImageAcquired = true;
+	}
 }
 
 void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 	// Skip rendering if initialization failed so we do not spam validation errors.
-	if (!impl->initialized) return;
+	if (!impl->initialized || impl->skipFrame) return;
 
 	// Handle Editor Mode resizing (lazy)
 	if (impl->editorMode) {
@@ -34,22 +72,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 		}
 	}
 
-	uint32_t imageIndex = 0;
+	uint32_t imageIndex = impl->acquiredImageIndex;
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 
 	if (!impl->editorMode) {
-		// Normal Mode: Acquire image
-		VkResult result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX, impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &imageIndex);
-		
-		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-			impl->RecreateSwapChain();
-			return;
-		} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
-			TERRAENGINE_LOG(LogLevel::Error, "failed to acquire swap chain image! Result: " << result);
+		if (!impl->swapchainImageAcquired) {
 			return;
 		}
-		
 		renderPassInfo.renderPass = impl->renderPass;
 		renderPassInfo.framebuffer = impl->framebuffers[imageIndex];
 	} else {
@@ -115,9 +145,26 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 		prepared.push_back(std::move(draw));
 	}
 
-	vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
-	vkResetCommandBuffer(impl->commandBuffers[impl->currentFrame], 0);
-	VkCommandBuffer cmd = impl->commandBuffers[impl->currentFrame];
+	VkCommandBuffer cmd = VK_NULL_HANDLE;
+	const bool useMainCommandBuffer = impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size() || impl->pendingPrimaryCommandBuffers[impl->currentFrame].empty();
+	if (useMainCommandBuffer) {
+		cmd = impl->commandBuffers[impl->currentFrame];
+		vkResetCommandBuffer(cmd, 0);
+	} else {
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.commandPool = impl->commandPool;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandBufferCount = 1;
+		if (vkAllocateCommandBuffers(impl->device, &allocInfo, &cmd) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to allocate command buffer for additional camera pass");
+			return;
+		}
+		if (impl->currentFrame >= impl->extraPrimaryCommandBuffers.size()) {
+			impl->extraPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
+		}
+		impl->extraPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
+	}
 
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -195,26 +242,43 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 	vkCmdEndRenderPass(cmd);
 	vkEndCommandBuffer(cmd);
 
+	// Record the command buffer to be submitted at EndFrame so multiple cameras
+	// render sequentially before a single present.
+	if (impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {
+		impl->pendingPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
+	}
+	impl->pendingPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
+}
+
+void VulkanContext::EndFrame() {
+	if (!impl->initialized || impl->skipFrame) return;
+
+	// Submit all recorded camera command buffers together so the swapchain is
+	// presented once using the final camera's output.
+	if (impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {
+		return;
+	}
+
+	auto& cmds = impl->pendingPrimaryCommandBuffers[impl->currentFrame];
+	if (cmds.empty()) {
+		return;
+	}
+
 	VkSubmitInfo submitInfo{};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-	// In Normal Mode, we wait for ImageAvailable. In Editor Mode, we don't.
 	VkSemaphore waitSemaphores[] = {impl->imageAvailableSemaphores[impl->currentFrame]};
 	VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-	
-	if (!impl->editorMode) {
+	if (!impl->editorMode && impl->swapchainImageAcquired) {
 		submitInfo.waitSemaphoreCount = 1;
 		submitInfo.pWaitSemaphores = waitSemaphores;
 		submitInfo.pWaitDstStageMask = waitStages;
 	}
 
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cmd;
+	submitInfo.commandBufferCount = static_cast<uint32_t>(cmds.size());
+	submitInfo.pCommandBuffers = cmds.data();
 
 	VkSemaphore signalSemaphores[] = {impl->renderFinishedSemaphores[impl->currentFrame]};
-	
-	// In Editor Mode, Scene -> UI sync is via Fence, so we don't signal semaphore
-	// This prevents validation errors if UI submission fails or skips wait.
 	if (!impl->editorMode) {
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = signalSemaphores;
@@ -222,9 +286,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 		submitInfo.signalSemaphoreCount = 0;
 	}
 
+	vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
 	VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
 	if (submitResult != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffer! Result: " << submitResult);
+		TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
 		std::cerr << "[Vulkan] QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.\n";
 		impl->RecreateSwapChain();
 		return;
@@ -239,7 +304,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 		VkSwapchainKHR swapChains[] = {impl->swapchain};
 		presentInfo.swapchainCount = 1;
 		presentInfo.pSwapchains = swapChains;
-		presentInfo.pImageIndices = &imageIndex;
+		presentInfo.pImageIndices = &impl->acquiredImageIndex;
 
 		VkResult result = vkQueuePresentKHR(impl->presentQueue, &presentInfo);
 		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
@@ -252,8 +317,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 		impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 	}
 }
-
-void VulkanContext::EndFrame() {}
 
 void VulkanContext::Shutdown() {
 	impl->Cleanup();
