@@ -1,12 +1,13 @@
 #include "EditorSystem.h"
-#include <iostream>
 #include <GLFW/glfw3.h>
 #include "Engine/Window/WindowSystem.h"
 #include "Engine/Window/WindowBackend.h"
+#include "Engine/Core/Logger/Logger.h"
 
 static void check_vk_result(VkResult err) {
 	if (err == 0) return;
-	std::cerr << "[ImGui] Vulkan Error: VkResult = " << err << std::endl;
+	// Log the Vulkan error through the engine logger so it is captured consistently before aborting.
+	TERRAENGINE_LOG(LogLevel::Error, "[ImGui] Vulkan Error: VkResult = " << err);
 	if (err < 0) abort();
 }
 
@@ -15,17 +16,37 @@ EditorSystem::EditorSystem(Engine& engine) : engine(engine) {}
 EditorSystem::~EditorSystem() {}
 
 void EditorSystem::Initialize() {
+	// Ensure fatal initialization errors log once and request a clean engine shutdown.
+	auto logCriticalAndShutdown = [this](const std::string& message) {
+		TERRAENGINE_LOG(LogLevel::Critical, message);
+		engine.SignalShutdown();
+	};
+
+	// Track ImGui startup state so we can unwind partial initialization when failures occur.
+	bool imguiContextCreated = false;
+	bool imguiGlfwInitialized = false;
+	auto cleanupImGui = [&]() {
+		if (imguiGlfwInitialized) {
+			ImGui_ImplGlfw_Shutdown();
+			imguiGlfwInitialized = false;
+		}
+		if (imguiContextCreated) {
+			ImGui::DestroyContext();
+			imguiContextCreated = false;
+		}
+	};
+
 	RenderSystem* renderSystem = engine.GetSystem<RenderSystem>();
 	windowSystem = engine.GetSystem<WindowSystem>();
 
 	if (!renderSystem || !windowSystem) {
-		std::cerr << "[EditorSystem] Failed to retrieve required systems!" << std::endl;
+		logCriticalAndShutdown("Failed to retrieve required systems!");
 		return;
 	}
 
 	rhi = dynamic_cast<VulkanContext*>(renderSystem->GetContext());
 	if (!rhi) {
-		std::cerr << "[EditorSystem] RenderSystem is not using VulkanContext!" << std::endl;
+		logCriticalAndShutdown("RenderSystem is not using VulkanContext!");
 		return;
 	}
 
@@ -35,7 +56,7 @@ void EditorSystem::Initialize() {
 	rhi->GetEditorHandles(handles);
 
 	if (handles.device == nullptr) {
-		std::cerr << "[EditorSystem] Invalid Vulkan handles!" << std::endl;
+		logCriticalAndShutdown("Invalid Vulkan handles!");
 		return;
 	}
 
@@ -43,6 +64,7 @@ void EditorSystem::Initialize() {
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
+	imguiContextCreated = true;
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -50,8 +72,10 @@ void EditorSystem::Initialize() {
 	ImGui::StyleColorsDark();
 
 	ImGui_ImplGlfw_InitForVulkan(window, true);
+	imguiGlfwInitialized = true;
 
-	std::cout << "[EditorSystem] vkGetInstanceProcAddr: " << handles.vkGetInstanceProcAddr << std::endl;
+	// Log the proc address so debugging Vulkan loader issues goes through the shared logger.
+	TERRAENGINE_LOG(LogLevel::Debug, "vkGetInstanceProcAddr: " << handles.vkGetInstanceProcAddr);
 
 	struct LoaderData {
 		PFN_vkGetInstanceProcAddr loader;
@@ -75,7 +99,8 @@ void EditorSystem::Initialize() {
 	}, &loaderData);
 
 	if (!loadResult) {
-		std::cerr << "[EditorSystem] ImGui_ImplVulkan_LoadFunctions failed!" << std::endl;
+		cleanupImGui();
+		logCriticalAndShutdown("ImGui_ImplVulkan_LoadFunctions failed!");
 		return;
 	}
 
@@ -103,7 +128,7 @@ void EditorSystem::Initialize() {
 	sceneDescriptorSet = ImGui_ImplVulkan_AddTexture(sampler, imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 	initialized = true;
-	std::cout << "[EditorSystem] Initialized." << std::endl;
+	TERRAENGINE_LOG(LogLevel::Info, "Editor system Initialized.");
 }
 
 void EditorSystem::Update() {
