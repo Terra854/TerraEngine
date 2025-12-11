@@ -23,16 +23,38 @@ static void check_vk_result(VkResult err) {
 	if (err < 0) abort();
 }
 
-EditorSystem::EditorSystem(Engine& engine) : engine(engine) {}
+EditorSystem& EditorSystem::Instance() {
+	// Provide a singleton instance so editor UI state is centralized and not reallocated.
+	static EditorSystem instance;
+	return instance;
+}
+
+void EditorSystem::Configure(Engine& engineRef) {
+	// Remember the engine that owns this editor instance; warn if a different one is provided.
+	if (engine != nullptr) {
+		TERRAENGINE_LOG(LogLevel::Error, "EditorSystem has already been configured");
+		return;
+	}
+	engine = &engineRef;
+}
 
 EditorSystem::~EditorSystem() {}
 
 void EditorSystem::Initialize() {
 	// Ensure fatal initialization errors log once and request a clean engine shutdown.
 	auto logCriticalAndShutdown = [this](const std::string& message) {
+		if (!engine) {
+			return;
+		}
 		TERRAENGINE_LOG(LogLevel::Critical, message);
-		engine.SignalShutdown();
+		engine->SignalShutdown();
 	};
+
+	if (!engine) {
+		TERRAENGINE_LOG(LogLevel::Critical, "EditorSystem configured without an Engine instance; initialization aborted.");
+		engine->SignalShutdown();
+		return;
+	}
 
 	// Track ImGui startup state so we can unwind partial initialization when failures occur.
 	bool imguiContextCreated = false;
@@ -48,8 +70,8 @@ void EditorSystem::Initialize() {
 		}
 	};
 
-	RenderSystem* renderSystem = engine.GetSystem<RenderSystem>();
-	windowSystem = engine.GetSystem<WindowSystem>();
+	RenderSystem* renderSystem = engine->GetSystem<RenderSystem>();
+	windowSystem = engine->GetSystem<WindowSystem>();
 
 	if (!renderSystem || !windowSystem) {
 		logCriticalAndShutdown("Failed to retrieve required systems!");

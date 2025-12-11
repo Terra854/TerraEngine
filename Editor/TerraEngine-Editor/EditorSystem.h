@@ -22,7 +22,13 @@
 
 class EditorSystem : public SystemsBase {
 public:
-	EditorSystem(Engine& engine);
+	static EditorSystem& Instance();
+	void Configure(Engine& engine);
+
+	EditorSystem(const EditorSystem&) = delete;
+	EditorSystem& operator=(const EditorSystem&) = delete;
+	EditorSystem(EditorSystem&&) = delete;
+	EditorSystem& operator=(EditorSystem&&) = delete;
 	~EditorSystem() override;
 
 	void Initialize() override;
@@ -31,7 +37,9 @@ public:
 	std::string SystemName() override;
 
 private:
-	Engine& engine;
+	EditorSystem() = default;
+
+	Engine* engine = nullptr;
 	VulkanContext* rhi = nullptr;
 	WindowSystem* windowSystem = nullptr;
 	VkDescriptorSet sceneDescriptorSet = VK_NULL_HANDLE;

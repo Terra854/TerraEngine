@@ -7,7 +7,8 @@
 int main(int argc, char** argv) {
 	Engine engine;
 	
-	EditorSystem editorSystem(engine);
+	EditorSystem& editorSystem = EditorSystem::Instance();
+	editorSystem.Configure(engine);
 	engine.SetEditorMode(&editorSystem);
 
 	engine.Run();
