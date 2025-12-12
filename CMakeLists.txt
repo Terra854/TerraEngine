@@ -266,7 +266,7 @@ target_link_libraries(TerraEngine-Editor
 		set(TERRAENGINE_DXC_PATH "${CMAKE_SOURCE_DIR}/External/dxc/linux/bin/dxc")
 	endif()
 
-	set(SHADER_INSTALL_SCRIPT "${CMAKE_BINARY_DIR}/CMakeFiles/install_default_shaders.cmake")
+	set(SHADER_INSTALL_SCRIPT "${CMAKE_BINARY_DIR}/CMakeFiles/install_default_shaders_$<CONFIG>.cmake")
 	file(GENERATE OUTPUT "${SHADER_INSTALL_SCRIPT}" CONTENT "
 set(SHADER_COMPILER \"$<TARGET_FILE:TerraEngineShaderCompiler>\")
 set(SHADER_SRC_DIR \"${DEFAULT_SHADER_SRC_DIR}\")

@@ -42,7 +42,7 @@ void SceneManager::Initialize()
 	// reload. At this stage nothing is loaded yet so the reset is cheap and
 	// keeps stale cache entries from leaking across sessions.
 	UnloadAll();
-	PreparePreviewAssets();
+	//PreparePreviewAssets();
 	// Initialization is logged at debug level so tooling can trace startup ordering.
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager initialized with root " << sceneRoot);
 }

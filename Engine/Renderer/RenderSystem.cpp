@@ -89,9 +89,11 @@ void RenderSystem::Update()
 			TERRAENGINE_LOG(LogLevel::Warning, "RenderSystem skipped frame because no CameraComponent was found in the scene.");
 			loggedMissingCamera = true;
 		}
-		return;
 	}
-	loggedMissingCamera = false;
+	else
+	{
+		loggedMissingCamera = false;
+	}
 
 	// Snapshot renderable components to avoid locking the registry during parallel work.
 	struct RenderableEntry
@@ -100,31 +102,34 @@ void RenderSystem::Update()
 		MeshRenderComponent mesh;
 	};
 	std::vector<RenderableEntry> renderables;
-	objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
-		[&](Object object, Transform& transform, MeshRenderComponent& meshComp)
-		{
-			const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
-			const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
-			if (meshId != TerraEngine::EMPTY_UUID && materialId != TerraEngine::EMPTY_UUID)
+	if (!cameras.empty())
+	{
+		objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
+			[&](Object object, Transform& transform, MeshRenderComponent& meshComp)
 			{
-				// Capture reflected mesh bindings without touching fields directly.
-				MeshRenderComponent reflectedMesh{};
-				reflectedMesh.meshId = meshId;
-				reflectedMesh.materialId = materialId;
-				reflectedMesh.shaderCollectionId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "shaderCollectionId");
-
-				renderables.push_back({ object.EntityId(), reflectedMesh });
-				if (!localTransforms.contains(object.EntityId()))
+				const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
+				const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
+				if (meshId != TerraEngine::EMPTY_UUID && materialId != TerraEngine::EMPTY_UUID)
 				{
-					Transform reflectedTransform{};
-					reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-					reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-					reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-					localTransforms.emplace(object.EntityId(), reflectedTransform);
+					// Capture reflected mesh bindings without touching fields directly.
+					MeshRenderComponent reflectedMesh{};
+					reflectedMesh.meshId = meshId;
+					reflectedMesh.materialId = materialId;
+					reflectedMesh.shaderCollectionId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "shaderCollectionId");
+
+					renderables.push_back({ object.EntityId(), reflectedMesh });
+					if (!localTransforms.contains(object.EntityId()))
+					{
+						Transform reflectedTransform{};
+						reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+						reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+						reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+						localTransforms.emplace(object.EntityId(), reflectedTransform);
+					}
 				}
 			}
-		}
-	);
+		);
+	}
 
 	// Cache of computed world transforms to avoid recomputing during traversal.
 	std::unordered_map<entt::entity, Transform> worldTransforms;
@@ -220,33 +225,48 @@ void RenderSystem::Update()
 	// Render once for every camera found so multi-camera scenes can present
 	// each authored viewpoint in sequence.
 	rhi->BeginFrame();
-	for (size_t cameraIndex = 0; cameraIndex < cameras.size(); ++cameraIndex)
+
+	if (cameras.empty())
 	{
-		const entt::entity cameraEntity = cameras[cameraIndex].entity;
-		const auto& camera = cameras[cameraIndex].camera;
-		std::unordered_set<entt::entity> visiting;
-		Transform cameraTransform = computeWorldTransform(computeWorldTransform, cameraEntity, visiting);
-		// Normalize the rotation so derived direction vectors remain unit length
-		// even if authoring data drifts slightly off the identity quaternion.
-		const glm::quat cameraRotation = glm::normalize(cameraTransform.rotation);
-		const glm::vec3 defaultForward(0.0f, 0.0f, -1.0f);
-		const glm::vec3 forward = cameraRotation * defaultForward;
-		glm::vec3 up = cameraRotation * camera.up;
-		if (glm::length(up) < 0.0001f)
+		// If no cameras are present, render a blank frame to ensure the swapchain
+		// is updated and image layouts are transitioned (Undefined -> ShaderReadOnly/Present).
+		// This prevents validation errors and potential crashes in Editor mode where
+		// UI rendering depends on the scene pass completing.
+		FrameRenderData blankData{};
+		blankData.viewMatrix = glm::mat4(1.0f);
+		blankData.projectionMatrix = glm::mat4(1.0f);
+		rhi->RenderFrame(blankData);
+	}
+	else
+	{
+		for (size_t cameraIndex = 0; cameraIndex < cameras.size(); ++cameraIndex)
 		{
-			up = glm::vec3(0.0f, 1.0f, 0.0f);
+			const entt::entity cameraEntity = cameras[cameraIndex].entity;
+			const auto& camera = cameras[cameraIndex].camera;
+			std::unordered_set<entt::entity> visiting;
+			Transform cameraTransform = computeWorldTransform(computeWorldTransform, cameraEntity, visiting);
+			// Normalize the rotation so derived direction vectors remain unit length
+			// even if authoring data drifts slightly off the identity quaternion.
+			const glm::quat cameraRotation = glm::normalize(cameraTransform.rotation);
+			const glm::vec3 defaultForward(0.0f, 0.0f, -1.0f);
+			const glm::vec3 forward = cameraRotation * defaultForward;
+			glm::vec3 up = cameraRotation * camera.up;
+			if (glm::length(up) < 0.0001f)
+			{
+				up = glm::vec3(0.0f, 1.0f, 0.0f);
+			}
+
+			// Clamp projection inputs to keep glm::perspective from receiving invalid values.
+			const float clampedFov = std::max(0.001f, camera.verticalFovDegrees);
+			const float safeAspect = camera.aspectRatio > 0.0f ? camera.aspectRatio : 1.0f;
+			const float nearPlane = std::max(0.0001f, camera.nearPlane);
+			const float farPlane = std::max(nearPlane + 0.001f, camera.farPlane);
+			frameData.viewMatrix = glm::lookAt(cameraTransform.position, cameraTransform.position + forward, glm::normalize(up));
+			frameData.projectionMatrix = glm::perspective(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
+			frameData.projectionMatrix[1][1] *= -1;
+
+			rhi->RenderFrame(frameData);
 		}
-
-		// Clamp projection inputs to keep glm::perspective from receiving invalid values.
-		const float clampedFov = std::max(0.001f, camera.verticalFovDegrees);
-		const float safeAspect = camera.aspectRatio > 0.0f ? camera.aspectRatio : 1.0f;
-		const float nearPlane = std::max(0.0001f, camera.nearPlane);
-		const float farPlane = std::max(nearPlane + 0.001f, camera.farPlane);
-		frameData.viewMatrix = glm::lookAt(cameraTransform.position, cameraTransform.position + forward, glm::normalize(up));
-		frameData.projectionMatrix = glm::perspective(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
-		frameData.projectionMatrix[1][1] *= -1;
-
-		rhi->RenderFrame(frameData);
 	}
 	rhi->EndFrame();
 }
