@@ -11,6 +11,10 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <algorithm>
+#include <vector>
+#include <string>
+#include <unordered_set>
 
 // Helper to draw RTTR properties
 static void DrawProperty(rttr::property prop, Object& obj, ComponentAccessFunctions& access) {
@@ -171,10 +175,33 @@ void MainEditorSubsystem::DrawHierarchy() {
     ImGui::Begin("Scene Hierarchy");
     
     auto& objManager = ObjectManager::instance();
-    auto roots = objManager.getRootObjects();
-    
-    for (auto& obj : roots) {
-        DrawEntityNode(obj);
+    const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
+    std::string sceneName = activeScene ? activeScene->name : "No Active Scene";
+
+    ImGuiTreeNodeFlags sceneNodeFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen;
+    bool sceneOpened = ImGui::TreeNodeEx(sceneName.c_str(), sceneNodeFlags);
+
+    // Accept Drop on Root (Scene Node) -> Detach Parent
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ENTITY_CELL")) {
+            IM_ASSERT(payload->DataSize == sizeof(entt::entity));
+            entt::entity payload_n = *(const entt::entity*)payload->Data;
+            
+            if (auto childObj = objManager.getObject(payload_n)) {
+                // Detach from parent (make root)
+                objManager.setParent(*childObj, std::nullopt);
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    if (sceneOpened) {
+        auto roots = objManager.getRootObjects();
+        
+        for (auto& obj : roots) {
+            DrawEntityNode(obj);
+        }
+        ImGui::TreePop(); // Pop for scene name node
     }
     
     // Right click on background to create entity?
@@ -206,6 +233,30 @@ void MainEditorSubsystem::DrawEntityNode(Object& obj) {
     if (ImGui::IsItemClicked()) {
         selectedEntity = obj.EntityId();
     }
+
+    // Drag Source
+    if (ImGui::BeginDragDropSource()) {
+        entt::entity entityId = obj.EntityId();
+        ImGui::SetDragDropPayload("ENTITY_CELL", &entityId, sizeof(entt::entity));
+        ImGui::Text("%s", name.c_str());
+        ImGui::EndDragDropSource();
+    }
+
+    // Drop Target (Parenting)
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ENTITY_CELL")) {
+            IM_ASSERT(payload->DataSize == sizeof(entt::entity));
+            entt::entity payload_n = *(const entt::entity*)payload->Data;
+            
+            // Check if dropped entity is not same as current (handled by ObjectManager probably, but good to check)
+            if (payload_n != obj.EntityId()) {
+                if (auto childObj = objManager.getObject(payload_n)) {
+                    objManager.setParent(*childObj, obj);
+                }
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
     
     if (opened) {
         for (auto& child : children) {
@@ -228,17 +279,170 @@ void MainEditorSubsystem::DrawInspector() {
             ImGui::TextDisabled("ID: %d", (uint32_t)obj.EntityId());
             ImGui::Separator();
             
-            // Components
+            // --- Sync Component List ---
+            // Get or create order list for this entity
+            std::vector<std::string>& inspectorComponentOrder = perObjectComponentOrders[obj.EntityId()];
             auto& accessReg = ComponentAccessRegistry();
+            
+            // Identify currently active components
+            std::unordered_set<std::string> activeComponents;
+            bool hasTransform = false;
             for (auto& [compName, access] : accessReg) {
                 if (access.hasComponent(obj)) {
-                    if (ImGui::CollapsingHeader(compName.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-                        rttr::type type = rttr::type::get_by_name(compName);
-                        for (auto prop : type.get_properties()) {
-                            DrawProperty(prop, obj, access);
-                        }
+                    activeComponents.insert(compName);
+                    if (compName == "Transform") hasTransform = true;
+                }
+            }
+
+            // Remove stale
+            for (auto it = inspectorComponentOrder.begin(); it != inspectorComponentOrder.end(); ) {
+                if (activeComponents.find(*it) == activeComponents.end()) {
+                    it = inspectorComponentOrder.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+
+            // Add new
+            for (const auto& compName : activeComponents) {
+                bool found = false;
+                for (const auto& existing : inspectorComponentOrder) {
+                    if (existing == compName) {
+                        found = true;
+                        break;
                     }
                 }
+                if (!found) {
+                    // New component found
+                    inspectorComponentOrder.push_back(compName);
+                }
+            }
+
+            // Ensure Transform is first
+            if (hasTransform) {
+                auto it = std::find(inspectorComponentOrder.begin(), inspectorComponentOrder.end(), "Transform");
+                if (it != inspectorComponentOrder.end() && it != inspectorComponentOrder.begin()) {
+                    inspectorComponentOrder.erase(it);
+                    inspectorComponentOrder.insert(inspectorComponentOrder.begin(), "Transform");
+                } else if (it == inspectorComponentOrder.end()) {
+                    inspectorComponentOrder.insert(inspectorComponentOrder.begin(), "Transform");
+                }
+            }
+
+            // --- Draw Components ---
+            for (size_t i = 0; i < inspectorComponentOrder.size(); ++i) {
+                std::string compName = inspectorComponentOrder[i];
+                if (accessReg.find(compName) == accessReg.end()) continue;
+                ComponentAccessFunctions& access = accessReg[compName];
+
+                if (!access.hasComponent(obj)) continue; 
+
+                ImGui::PushID(compName.c_str());
+                
+                bool isActive = true;
+                rttr::type type = rttr::type::get_by_name(compName);
+                rttr::property activeProp = type.get_property("active");
+                if (activeProp.is_valid()) {
+                    rttr::variant var = access.getter(obj, "active");
+                    if (var.is_valid()) isActive = var.get_value<bool>();
+                }
+
+                // --- Manual Header Drawing ---
+                bool isOpen = ImGui::GetStateStorage()->GetInt(ImGui::GetID("IsOpen"), 1) != 0;
+                
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                float availWidth = ImGui::GetContentRegionAvail().x;
+                float lineHeight = ImGui::GetFrameHeight();
+
+                // Background
+                ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + availWidth, p.y + lineHeight), ImGui::GetColorU32(ImGuiCol_Header));
+
+                // Toggle Button (Invisible, full width)
+                ImGui::SetNextItemAllowOverlap();
+                if (ImGui::InvisibleButton("##header_bg", ImVec2(availWidth, lineHeight))) {
+                    isOpen = !isOpen;
+                    ImGui::GetStateStorage()->SetInt(ImGui::GetID("IsOpen"), isOpen);
+                }
+
+                // Drag Source (Exclude Transform)
+                if (compName != "Transform") {
+                    if (ImGui::BeginDragDropSource()) {
+                        int sourceIdx = (int)i;
+                        ImGui::SetDragDropPayload("COMPONENT_ORDER", &sourceIdx, sizeof(int));
+                        ImGui::Text("Reorder %s", compName.c_str());
+                        ImGui::EndDragDropSource();
+                    }
+                }
+
+                // Drop Target (Exclude Transform)
+                if (compName != "Transform") {
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("COMPONENT_ORDER")) {
+                            int sourceIdx = *(const int*)payload->Data;
+                            int targetIdx = (int)i;
+                            
+                            // Ensure target is valid size and source is valid
+                            if (sourceIdx >= 0 && sourceIdx < inspectorComponentOrder.size() && targetIdx < inspectorComponentOrder.size()) {
+                                std::string sourceName = inspectorComponentOrder[sourceIdx];
+                                if (sourceName != "Transform") { // Cannot move Transform
+                                    // Move logic
+                                    if (sourceIdx < targetIdx) {
+                                        // Moving down: insert at target+1, then erase source
+                                        inspectorComponentOrder.insert(inspectorComponentOrder.begin() + targetIdx + 1, sourceName);
+                                        inspectorComponentOrder.erase(inspectorComponentOrder.begin() + sourceIdx);
+                                    } else if (sourceIdx > targetIdx) {
+                                        // Moving up: insert at target, then erase source+1
+                                        inspectorComponentOrder.insert(inspectorComponentOrder.begin() + targetIdx, sourceName);
+                                        inspectorComponentOrder.erase(inspectorComponentOrder.begin() + sourceIdx + 1);
+                                    }
+                                }
+                            }
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
+                }
+
+                // Draw Widgets on Top
+                ImGui::SetCursorScreenPos(p);
+
+                // Arrow
+                ImGui::Dummy(ImVec2(2, 0)); ImGui::SameLine(); 
+                if (ImGui::ArrowButton("##arrow", isOpen ? ImGuiDir_Down : ImGuiDir_Right)) {
+                    isOpen = !isOpen;
+                    ImGui::GetStateStorage()->SetInt(ImGui::GetID("IsOpen"), isOpen);
+                }
+
+                ImGui::SameLine();
+
+                // Checkbox
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+                if (ImGui::Checkbox("##active", &isActive)) {
+                    if (activeProp.is_valid()) {
+                        access.setter(obj, "active", isActive);
+                    }
+                }
+                ImGui::PopStyleColor();
+
+                ImGui::SameLine();
+
+                // Name
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(compName.c_str());
+
+                // Advance cursor to next line
+                ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + lineHeight));
+                ImGui::Dummy(ImVec2(0,0));
+
+                if (isOpen) {
+                    ImGui::Indent();
+                    for (auto prop : type.get_properties()) {
+                        // Skip 'active' as it's in the header
+                        if (prop.get_name() == "active") continue;
+                        DrawProperty(prop, obj, access);
+                    }
+                    ImGui::Unindent();
+                }
+                ImGui::PopID();
             }
         } else {
             selectedEntity.reset();

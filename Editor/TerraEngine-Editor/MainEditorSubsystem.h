@@ -1,9 +1,12 @@
 #pragma once
 
-#include "IEditorSubsystem.h"
 #include <functional>
 #include <optional>
 #include <entt/entity/entity.hpp>
+#include <map>
+#include <vector>
+#include <string>
+#include "IEditorSubsystem.h"
 
 class Object;
 
@@ -35,4 +38,6 @@ private:
     bool sceneLoaded = false;
     
     std::optional<entt::entity> selectedEntity;
+    std::map<entt::entity, std::vector<std::string>> perObjectComponentOrders;
+    entt::entity inspectorEntityId = entt::null;
 };
