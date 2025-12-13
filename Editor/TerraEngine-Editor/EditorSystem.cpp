@@ -172,6 +172,17 @@ void EditorSystem::Update() {
 	ImGui_ImplGlfw_NewFrame();
 	ImGui::NewFrame();
 
+	// Expose a basic menu so users can exit the editor without relying on the OS window controls.
+	if (ImGui::BeginMainMenuBar()) {
+		if (ImGui::BeginMenu("File")) {
+			if (ImGui::MenuItem("Exit")) {
+				engine->SignalShutdown();
+			}
+			ImGui::EndMenu();
+		}
+		ImGui::EndMainMenuBar();
+	}
+
 	ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
 	ImGui::Begin("Game Viewport");
@@ -185,7 +196,7 @@ void EditorSystem::Update() {
 	DrawHierarchyWindow();
 	DrawInspectorWindow();
 
-	ImGui::ShowDemoWindow();
+	//ImGui::ShowDemoWindow();
 
 	ImGui::Render();
 
