@@ -3,12 +3,89 @@
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
+#include "Engine/Scene/SceneManager.h"
+#include "Engine/Core/Object/ObjectManager.h"
+#include "Engine/Core/Object/Component.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <backends/imgui_impl_vulkan.h>
+#include <glm/vec3.hpp>
+#include <glm/gtc/quaternion.hpp>
+
+// Helper to draw RTTR properties
+static void DrawProperty(rttr::property prop, Object& obj, ComponentAccessFunctions& access) {
+    std::string name = prop.get_name().to_string();
+    rttr::variant var = access.getter(obj, name);
+    rttr::type type = prop.get_type();
+
+    if (type == rttr::type::get<float>()) {
+        float val = var.get_value<float>();
+        if (ImGui::DragFloat(name.c_str(), &val, 0.1f)) {
+            access.setter(obj, name, val);
+        }
+    }
+    else if (type == rttr::type::get<int>()) {
+        int val = var.get_value<int>();
+        if (ImGui::DragInt(name.c_str(), &val)) {
+            access.setter(obj, name, val);
+        }
+    }
+    else if (type == rttr::type::get<bool>()) {
+        bool val = var.get_value<bool>();
+        if (ImGui::Checkbox(name.c_str(), &val)) {
+            access.setter(obj, name, val);
+        }
+    }
+    else if (type == rttr::type::get<std::string>()) {
+        std::string val = var.get_value<std::string>();
+        char buffer[256];
+        strncpy(buffer, val.c_str(), sizeof(buffer));
+        if (ImGui::InputText(name.c_str(), buffer, sizeof(buffer))) {
+            access.setter(obj, name, std::string(buffer));
+        }
+    }
+    else if (type == rttr::type::get<glm::vec3>()) {
+        glm::vec3 val = var.get_value<glm::vec3>();
+        if (ImGui::DragFloat3(name.c_str(), &val.x, 0.1f)) {
+            access.setter(obj, name, val);
+        }
+    }
+    else if (type == rttr::type::get<glm::quat>()) {
+        glm::quat q = var.get_value<glm::quat>();
+        glm::vec3 euler = glm::degrees(glm::eulerAngles(q));
+        if (ImGui::DragFloat3(name.c_str(), &euler.x, 0.1f)) {
+            glm::quat newQ = glm::quat(glm::radians(euler));
+            access.setter(obj, name, newQ);
+        }
+    }
+}
 
 void MainEditorSubsystem::Initialize(EditorContext& context) {
     ctx = &context;
+}
+
+void MainEditorSubsystem::OnProjectOpened() {
+    if (!ctx || !ctx->projectManager->HasActiveProject()) return;
+
+    auto projectRoot = ctx->projectManager->GetProjectRoot();
+    std::filesystem::path sceneRoot = projectRoot / "Assets" / "Scenes";
+    
+    // Ensure directory exists (created by ProjectManager, but safe check)
+    if (!std::filesystem::exists(sceneRoot)) {
+        std::filesystem::create_directories(sceneRoot);
+    }
+
+    SceneManager::Instance().SetSceneRoot(sceneRoot.string());
+    
+    // Load Default Scene
+    // TODO: Use UUID from ProjectSettings if we had it.
+    TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene("Default.tescene");
+    if (sceneId != TerraEngine::EMPTY_UUID) {
+        SceneManager::Instance().SetActiveScene(sceneId);
+        sceneLoaded = true;
+    } else {
+        // Log error?
+    }
 }
 
 void MainEditorSubsystem::Shutdown() {
@@ -71,16 +148,10 @@ void MainEditorSubsystem::DrawUI() {
 
     DrawMainMenuBar();
     
-    // Placeholder Windows
-    ImGui::Begin("Inspector");
-    ImGui::Text("No object selected.");
-    ImGui::End();
+    DrawInspector();
+    DrawHierarchy();
 
-    ImGui::Begin("Scene Hierarchy");
-    ImGui::Text("Scene Root");
-    ImGui::End();
-
-    ImGui::Begin("Game View");
+    ImGui::Begin("Scene View");
     if (sceneTextureID) {
         ImVec2 contentSize = ImGui::GetContentRegionAvail();
         ImGui::Image((ImTextureID)sceneTextureID, contentSize);
@@ -93,6 +164,87 @@ void MainEditorSubsystem::DrawUI() {
 
     if (showDemoWindow) ImGui::ShowDemoWindow(&showDemoWindow);
 
+    ImGui::End();
+}
+
+void MainEditorSubsystem::DrawHierarchy() {
+    ImGui::Begin("Scene Hierarchy");
+    
+    auto& objManager = ObjectManager::instance();
+    auto roots = objManager.getRootObjects();
+    
+    for (auto& obj : roots) {
+        DrawEntityNode(obj);
+    }
+    
+    // Right click on background to create entity?
+    if (ImGui::BeginPopupContextWindow()) {
+        if (ImGui::MenuItem("Create Empty Entity")) {
+            objManager.createObject("New Entity");
+        }
+        ImGui::EndPopup();
+    }
+    
+    ImGui::End();
+}
+
+void MainEditorSubsystem::DrawEntityNode(Object& obj) {
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+    if (selectedEntity && *selectedEntity == obj.EntityId()) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+    
+    auto& objManager = ObjectManager::instance();
+    auto children = objManager.getChildren(obj);
+    if (children.empty()) {
+        flags |= ImGuiTreeNodeFlags_Leaf;
+    }
+    
+    std::string name = objManager.getObjectName(obj);
+    bool opened = ImGui::TreeNodeEx((void*)(uint64_t)obj.EntityId(), flags, "%s", name.c_str());
+    
+    if (ImGui::IsItemClicked()) {
+        selectedEntity = obj.EntityId();
+    }
+    
+    if (opened) {
+        for (auto& child : children) {
+            DrawEntityNode(child);
+        }
+        ImGui::TreePop();
+    }
+}
+
+void MainEditorSubsystem::DrawInspector() {
+    ImGui::Begin("Inspector");
+    
+    if (selectedEntity) {
+        auto& objManager = ObjectManager::instance();
+        if (auto objOpt = objManager.getObject(*selectedEntity)) {
+            Object obj = *objOpt;
+            
+            std::string name = objManager.getObjectName(obj);
+            ImGui::Text("Entity: %s", name.c_str());
+            ImGui::TextDisabled("ID: %d", (uint32_t)obj.EntityId());
+            ImGui::Separator();
+            
+            // Components
+            auto& accessReg = ComponentAccessRegistry();
+            for (auto& [compName, access] : accessReg) {
+                if (access.hasComponent(obj)) {
+                    if (ImGui::CollapsingHeader(compName.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                        rttr::type type = rttr::type::get_by_name(compName);
+                        for (auto prop : type.get_properties()) {
+                            DrawProperty(prop, obj, access);
+                        }
+                    }
+                }
+            }
+        } else {
+            selectedEntity.reset();
+        }
+    }
+    
     ImGui::End();
 }
 

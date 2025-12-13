@@ -33,7 +33,8 @@ void EditorSystem::Setup(Engine* enginePtr) {
 
     // Wire Callbacks
     projectHub->SetOnProjectLoadedCallback([this]() {
-        // Transition logic if needed
+        // Transition logic
+        mainEditor->OnProjectOpened();
     });
 
     mainEditor->SetOnProjectClosedCallback([this]() {

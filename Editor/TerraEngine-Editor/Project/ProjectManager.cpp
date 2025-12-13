@@ -25,13 +25,20 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
     try {
         fs::create_directories(location);
         fs::create_directories(location / "Assets");
+        fs::create_directories(location / "Assets" / "Scenes");
         fs::create_directories(location / "Library");
         fs::create_directories(location / "Builds");
         fs::create_directories(location / "Temp");
 
+        // Create Default Scene
+        {
+            fs::path scenePath = location / "Assets" / "Scenes" / "Default.tescene";
+            std::ofstream sceneFile(scenePath);
+            sceneFile << R"({ "name": "DefaultScene", "entities": [] })";
+        }
+
         ProjectSettings settings;
-        settings.projectName = name;
-        // Template logic could go here to adjust settings or copy starter assets
+        // settings.projectName = name; // Field removed
 
         currentSettings = settings;
         projectRoot = location;
@@ -71,7 +78,9 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
         projectRoot = projectDir;
         isProjectLoaded = true;
 
-        AddToRecentProjects(projectDir, currentSettings->projectName);
+        // Derive name from directory
+        std::string projectName = projectDir.filename().string();
+        AddToRecentProjects(projectDir, projectName);
         return true;
     } catch (const std::exception& e) {
         std::string msg = std::string("Failed to load project settings: ") + e.what();
@@ -117,10 +126,6 @@ void ProjectManager::SaveProjectSettings() {
 }
 
 void ProjectManager::SaveEditorPreferences() {
-    // Save to user directory (e.g. AppData or .config)
-    // For now, let's save to a local file near the executable or in a generic temp spot for this CLI environment
-    // In a real app, use generic platform paths.
-    // For this context, we'll save to ".terra_editor_prefs.json" in the current working directory for simplicity
     std::ofstream file(".terra_editor_prefs.json");
     nlohmann::json j = editorPrefs;
     file << j.dump(4);
