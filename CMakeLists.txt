@@ -229,17 +229,25 @@ target_link_libraries(TerraEngine-ImGui PUBLIC glfw Vulkan::Headers)
 target_compile_definitions(TerraEngine-ImGui PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES)
 
 # --- Editor ------------------------------------------------------------------
+set(IMGUI_FILE_DIALOG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiFileDialog)
 add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/EditorMain.cpp
 	Editor/TerraEngine-Editor/EditorSystem.cpp
+	Editor/TerraEngine-Editor/ProjectHubSubsystem.cpp
+	Editor/TerraEngine-Editor/MainEditorSubsystem.cpp
+	Editor/TerraEngine-Editor/Project/ProjectManager.cpp
+	Editor/TerraEngine-Editor/Project/AssetDatabase.cpp
+	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 )
 
 target_include_directories(TerraEngine-Editor
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Project
+		${IMGUI_FILE_DIALOG_DIR}
 )
 
-target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES)
+target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM)
 
 target_link_libraries(TerraEngine-Editor
 	PRIVATE
