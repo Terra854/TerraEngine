@@ -62,7 +62,7 @@ void FileWatcher::WatchLoopWin32() {
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         NULL,
         OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
         NULL
     );
 
@@ -121,7 +121,12 @@ void FileWatcher::WatchLoopWin32() {
             if (!success) break;
         }
     }
-    CancelIo(hDir);
+    
+    if (success) {
+        CancelIo(hDir);
+        GetOverlappedResult(hDir, &overlapped, &bytesReturned, TRUE);
+    }
+    
     CloseHandle(overlapped.hEvent);
     CloseHandle(hDir);
 }
