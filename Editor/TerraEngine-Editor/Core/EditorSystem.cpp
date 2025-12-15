@@ -33,11 +33,16 @@ void EditorSystem::Setup(Engine* enginePtr) {
 
     // Wire Callbacks
     projectHub->SetOnProjectLoadedCallback([this]() {
+        // Initialize Asset Database with project root
+        if (context.projectManager->HasActiveProject()) {
+            AssetDatabase::Instance().Initialize(context.projectManager->GetProjectRoot());
+        }
         // Transition logic
         mainEditor->OnProjectOpened();
     });
 
     mainEditor->SetOnProjectClosedCallback([this]() {
+        AssetDatabase::Instance().Shutdown();
         // Transition logic
     });
 
@@ -63,6 +68,23 @@ void EditorSystem::Initialize() {
     // 2. Get Window
     auto& windowSystem = WindowSystem::Instance();
     GLFWwindow* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
+
+    // Register Drop Callback
+    glfwSetWindowUserPointer(window, this);
+    glfwSetDropCallback(window, [](GLFWwindow* window, int count, const char** paths) {
+        EditorSystem* self = static_cast<EditorSystem*>(glfwGetWindowUserPointer(window));
+        if (self && self->context.projectManager->HasActiveProject()) {
+            std::filesystem::path assetRoot = AssetDatabase::Instance().GetAssetRoot();
+            for (int i = 0; i < count; i++) {
+                std::filesystem::path src = paths[i];
+                if (std::filesystem::exists(src)) {
+                    try {
+                        std::filesystem::copy(src, assetRoot / src.filename(), std::filesystem::copy_options::overwrite_existing);
+                    } catch (...) {}
+                }
+            }
+        }
+    });
 
     // 3. Init ImGui
     IMGUI_CHECKVERSION();
@@ -122,6 +144,7 @@ void EditorSystem::Update() {
     float dt = 0.016f; // Placeholder, MainEngine handles timing for subsystems usually via Update() delta
     
     if (context.projectManager->HasActiveProject()) {
+        AssetDatabase::Instance().Update();
         mainEditor->Update(dt);
         mainEditor->DrawUI();
     } else {
@@ -150,8 +173,8 @@ void EditorSystem::Shutdown() {
     if (mainEditor) mainEditor->Shutdown();
     if (projectHub) projectHub->Shutdown();
     
+    AssetDatabase::Instance().Shutdown();
     context.projectManager.reset();
-    context.assetDatabase.reset();
     
     initialized = false;
 }

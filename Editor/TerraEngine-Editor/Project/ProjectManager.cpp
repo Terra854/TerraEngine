@@ -27,7 +27,7 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
         fs::create_directories(location / "Assets");
         fs::create_directories(location / "Assets" / "Scenes");
         fs::create_directories(location / "Library");
-        fs::create_directories(location / "Builds");
+        fs::create_directories(location / "Build");
         fs::create_directories(location / "Temp");
 
         // Create Default Scene

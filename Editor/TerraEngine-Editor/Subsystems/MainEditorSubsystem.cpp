@@ -1,5 +1,6 @@
 #include "MainEditorSubsystem.h"
 #include "ProjectManager.h"
+#include "AssetDatabase.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
@@ -9,6 +10,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <backends/imgui_impl_vulkan.h>
+#include <ImGuiFileDialog.h>
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
@@ -472,15 +474,67 @@ void MainEditorSubsystem::DrawMainMenuBar() {
     }
 }
 
+static void DrawDirectoryRecursive(const std::filesystem::path& path) {
+    for (const auto& entry : std::filesystem::directory_iterator(path)) {
+        if (entry.path().extension() == ".meta") continue;
+
+        if (entry.is_directory()) {
+            if (ImGui::TreeNode(entry.path().filename().string().c_str())) {
+                DrawDirectoryRecursive(entry.path());
+                ImGui::TreePop();
+            }
+        } else {
+            std::string filename = entry.path().filename().string();
+            ImGui::Selectable(filename.c_str());
+
+            if (ImGui::BeginDragDropSource()) {
+                // Find GUID
+                auto& assets = AssetDatabase::Instance().GetAssets();
+                auto it = assets.find(std::filesystem::absolute(entry.path()));
+                if (it != assets.end()) {
+                    TerraEngine::UUID guid = it->second.guid;
+                    ImGui::SetDragDropPayload("ASSET_GUID", &guid, sizeof(TerraEngine::UUID));
+                    ImGui::Text("%s", filename.c_str());
+                }
+                ImGui::EndDragDropSource();
+            }
+        }
+    }
+}
+
 void MainEditorSubsystem::DrawProjectBrowser() {
     ImGui::Begin("Project Browser");
+    
+    if (ImGui::Button("Import Asset")) {
+        IGFD::FileDialogConfig config;
+        config.path = ".";
+        ImGuiFileDialog::Instance()->OpenDialog("ImportAssetDlg", "Choose File", ".*", config);
+    }
+    
+    if (ImGuiFileDialog::Instance()->Display("ImportAssetDlg")) {
+        if (ImGuiFileDialog::Instance()->IsOk()) {
+            std::filesystem::path filePath = ImGuiFileDialog::Instance()->GetFilePathName();
+            if (std::filesystem::exists(filePath)) {
+                std::filesystem::path dest = AssetDatabase::Instance().GetAssetRoot() / filePath.filename();
+                try {
+                    std::filesystem::copy(filePath, dest, std::filesystem::copy_options::overwrite_existing);
+                } catch (const std::exception& e) {
+                     // Log error
+                }
+            }
+        }
+        ImGuiFileDialog::Instance()->Close();
+    }
+
+    ImGui::Separator();
+
     if (ctx->projectManager->HasActiveProject()) {
-        auto root = ctx->projectManager->GetProjectRoot();
-        ImGui::Text("Root: %s", root.string().c_str());
-        // Simple recursive list (TODO: AssetDatabase integration)
-        // For now, just show assets folder
-        ImGui::Separator();
-        ImGui::Text("Assets/");
+        std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
+        if (std::filesystem::exists(root)) {
+             DrawDirectoryRecursive(root);
+        } else {
+            ImGui::Text("Assets directory not found.");
+        }
     }
     ImGui::End();
 }

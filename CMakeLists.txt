@@ -188,29 +188,35 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Launcher PREFIX "TerraEngine-Launc
 # --- Editor Tools ------------------------------------------------------------
 add_executable(TerraEngineMeshCompiler
 	Editor/TerraEngineMeshCompiler.cpp
+	Editor/AssetCompilers/MeshCompiler.cpp
 )
 
 add_executable(TerraEngineTextureCompiler
 	Editor/TerraEngineTextureCompiler.cpp
+	Editor/AssetCompilers/TextureCompiler.cpp
 )
 
 add_executable(TerraEngineShaderCompiler
 	Editor/TerraEngineShaderCompiler.cpp
+	Editor/AssetCompilers/ShaderCompiler.cpp
 )
 
 target_include_directories(TerraEngineMeshCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
 )
 
 target_include_directories(TerraEngineTextureCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
 )
 
 target_include_directories(TerraEngineShaderCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
 )
 
 # --- ImGui -------------------------------------------------------------------
@@ -231,19 +237,27 @@ target_compile_definitions(TerraEngine-ImGui PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTY
 # --- Editor ------------------------------------------------------------------
 set(IMGUI_FILE_DIALOG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiFileDialog)
 add_executable(TerraEngine-Editor
-	Editor/TerraEngine-Editor/EditorMain.cpp
-	Editor/TerraEngine-Editor/EditorSystem.cpp
-	Editor/TerraEngine-Editor/ProjectHubSubsystem.cpp
-	Editor/TerraEngine-Editor/MainEditorSubsystem.cpp
+	Editor/TerraEngine-Editor/Core/EditorMain.cpp
+	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
+	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
+	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
 	Editor/TerraEngine-Editor/Project/ProjectManager.cpp
-	Editor/TerraEngine-Editor/Project/AssetDatabase.cpp
+	Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp
+	Editor/TerraEngine-Editor/Assets/FileWatcher.cpp
+	Editor/AssetCompilers/MeshCompiler.cpp
+	Editor/AssetCompilers/TextureCompiler.cpp
+	Editor/AssetCompilers/ShaderCompiler.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 )
 
 target_include_directories(TerraEngine-Editor
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Core
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Project
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
 		${IMGUI_FILE_DIALOG_DIR}
 )
 
