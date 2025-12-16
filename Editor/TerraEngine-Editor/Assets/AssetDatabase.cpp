@@ -223,35 +223,39 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 }
 
 bool AssetDatabase::LoadMetadata(const std::filesystem::path& metaFilePath, AssetMetadata& outMetadata) {
-    std::ifstream file(metaFilePath);
-    if (!file.is_open()) return false;
-    try {
-        json j;
-        file >> j;
-        outMetadata.guid = StringToUuid(j["guid"].get<std::string>());
-        outMetadata.importerName = j["importerName"].get<std::string>();
-        outMetadata.lastModified = std::filesystem::file_time_type(std::chrono::duration_cast<std::filesystem::file_time_type::duration>(std::chrono::nanoseconds(j["lastModified"].get<long long>())));
-        outMetadata.sourcePath = j["sourcePath"].get<std::string>();
-        outMetadata.compiledPath = j["compiledPath"].get<std::string>();
-        if (j.contains("settings")) outMetadata.settings = j["settings"];
-        return true;
-    } catch (...) { return false; }
+	std::ifstream file(metaFilePath);
+	if (!file.is_open()) return false;
+	try {
+		json j;
+		file >> j;
+		outMetadata.guid = StringToUuid(j["guid"].get<std::string>());
+		outMetadata.importerName = j["importerName"].get<std::string>();
+		using FileDuration = std::filesystem::file_time_type::duration;
+		// Keep the raw duration units intact so we compare the same clock ticks recorded on disk.
+		FileDuration::rep storedTicks = j["lastModified"].get<FileDuration::rep>();
+		outMetadata.lastModified = std::filesystem::file_time_type(FileDuration(storedTicks));
+		outMetadata.sourcePath = j["sourcePath"].get<std::string>();
+		outMetadata.compiledPath = j["compiledPath"].get<std::string>();
+		if (j.contains("settings")) outMetadata.settings = j["settings"];
+		return true;
+	} catch (...) { return false; }
 }
 
 bool AssetDatabase::SaveMetadata(const AssetMetadata& metadata) {
-    std::filesystem::path metaFilePath = (assetRoot / metadata.sourcePath).string() + ".meta";
-    std::ofstream file(metaFilePath);
-    if (!file.is_open()) return false;
-    try {
-        json j;
-        j["guid"] = UuidToString(metadata.guid);
-        j["importerName"] = metadata.importerName;
-        j["lastModified"] = metadata.lastModified.time_since_epoch().count();
-        j["sourcePath"] = metadata.sourcePath.string(); 
-        j["compiledPath"] = metadata.compiledPath.string(); 
-        j["settings"] = metadata.settings;
-        file << std::setw(4) << j << std::endl;
-        return true;
+	std::filesystem::path metaFilePath = (assetRoot / metadata.sourcePath).string() + ".meta";
+	std::ofstream file(metaFilePath);
+	if (!file.is_open()) return false;
+	try {
+		json j;
+		j["guid"] = UuidToString(metadata.guid);
+		j["importerName"] = metadata.importerName;
+		// Persist the file clock's native tick count so reloads compare identical units and avoid false recompiles.
+		j["lastModified"] = metadata.lastModified.time_since_epoch().count();
+		j["sourcePath"] = metadata.sourcePath.string();
+		j["compiledPath"] = metadata.compiledPath.string();
+		j["settings"] = metadata.settings;
+		file << std::setw(4) << j << std::endl;
+		return true;
     } catch (...) { return false; }
 }
 
