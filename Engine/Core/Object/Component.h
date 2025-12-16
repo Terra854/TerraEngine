@@ -60,6 +60,7 @@ struct ComponentAccessFunctions
 	std::function<rttr::variant(Object&, std::string_view)> getter;
 	std::function<bool(Object&, std::string_view, const rttr::variant&)> setter;
 	std::function<bool(Object&)> hasComponent;
+	std::function<void(Object&)> addComponent;
 };
 
 TERRAENGINE_API std::unordered_map<std::string, ComponentAccessFunctions>& ComponentAccessRegistry();
@@ -121,6 +122,13 @@ void RegisterComponentAccess(const std::string& name)
 		return object.getComponent<ComponentType>() != nullptr;
 	};
 
+	functions.addComponent = [](Object& object) -> void
+	{
+		if (!object.getComponent<ComponentType>()) {
+			object.addComponent<ComponentType>();
+		}
+	};
+
 	reg.emplace(name, std::move(functions));
 }
 
@@ -161,7 +169,16 @@ void SetComponentProperty(ComponentType& component, std::string_view propertyNam
 template <typename Derived>
 class Component
 {
+private:
+	// Shared mutex allows many readers to proceed concurrently while writers
+	// gain exclusive access when mutating component state. Each component
+	// owns its own mutex so copies do not share lock state.
+	mutable std::unique_ptr<std::shared_mutex> access_mutex_;
 public:
+	// Kept last to enable Tail Padding Optimization (EBO/TPO), potentially saving 8 bytes per component depending on the rest of the component layout.
+	// Does not work on Windows due to different ABI rules.
+	bool active = true;
+
 	using ReadLock = std::shared_lock<std::shared_mutex>;
 	using WriteLock = std::unique_lock<std::shared_mutex>;
 
@@ -181,7 +198,7 @@ public:
 	}
 
 	Component(Component&&) noexcept = default;
-	virtual ~Component() = default;
+	~Component() = default;
 
 	Component& operator=(const Component& other)
 	{
@@ -202,8 +219,6 @@ public:
 	{
 		ensureRegistration();
 	}
-
-	bool active = true;
 
 	// Read-only operations should take this guard to allow concurrent access
 	// while still blocking if any thread promotes to a write lock.
@@ -239,10 +254,4 @@ protected:
 		}();
 		(void)registered;
 	}
-
-private:
-	// Shared mutex allows many readers to proceed concurrently while writers
-	// gain exclusive access when mutating component state. Each component
-	// owns its own mutex so copies do not share lock state.
-	mutable std::unique_ptr<std::shared_mutex> access_mutex_;
 };

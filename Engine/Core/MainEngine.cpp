@@ -8,6 +8,7 @@
 #include "Renderer/RenderSystem.h"
 #include "Window/GLFW/GlfwWindowBackend.h"
 #include "Window/WindowSystem.h"
+#include "Object/ComponentRegistry.h"
 
 #include <algorithm>
 #include <chrono>
@@ -40,6 +41,9 @@ void Engine::Initialize()
 	
 	// Reset the frame timer so the first tick is measured from initialization time.
 	frameTimer = FrameTimer();
+
+	// Register all components so they are available for reflection/editor
+	ComponentRegistry::RegisterAllComponents();
 
 	// The window system is initialized first so other systems can depend on
 	// a valid window context if they need one later.

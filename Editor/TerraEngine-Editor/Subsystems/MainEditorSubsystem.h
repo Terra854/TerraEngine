@@ -49,6 +49,7 @@ private:
     // Project Browser State
     std::filesystem::path m_CurrentDirectory;
     std::string m_SearchFilter;
+    std::string m_HierarchySearchFilter;
     float m_ThumbnailSize = 64.0f;
     float m_Padding = 16.0f;
 };

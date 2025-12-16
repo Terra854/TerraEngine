@@ -21,6 +21,7 @@ set(ENGINE_SOURCES
 	Engine/Core/Object/Component.cpp
 	Engine/Core/Object/Object.cpp
 	Engine/Core/Object/ObjectManager.cpp
+	Engine/Core/Object/ComponentRegistry.cpp
 Engine/Resource/ResourceManager.cpp
 Engine/Resource/ResourceManagerMaterial.cpp
 Engine/Resource/ResourceManagerMesh.cpp
