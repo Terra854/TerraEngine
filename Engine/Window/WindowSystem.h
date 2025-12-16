@@ -29,6 +29,8 @@ public:
 	// can register callbacks without depending on a specific backend type.
 	void* GetNativeHandle() const;
 
+	void SetResizeCallback(std::function<void(int, int)> callback);
+
 	IWindowBackend* GetBackend() const { return backend.get(); }
 
 	void Initialize() override;

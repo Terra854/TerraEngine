@@ -35,6 +35,12 @@ void* WindowSystem::GetNativeHandle() const
 	return backend->GetNativeHandle();
 }
 
+void WindowSystem::SetResizeCallback(std::function<void(int, int)> callback)
+{
+	if (!backend) return;
+	backend->SetResizeCallback(std::move(callback));
+}
+
 void WindowSystem::Initialize()
 {
 	if (!configured) {

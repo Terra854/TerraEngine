@@ -1,8 +1,12 @@
 #include "GlfwWindowBackend.h"
 
 #include <stdexcept>
+#include <unordered_map>
 
 #include "Core/Logger/Logger.h"
+
+// Static map to store callbacks without modifying class size (ABI fix)
+static std::unordered_map<GLFWwindow*, std::function<void(int, int)>> g_ResizeCallbacks;
 
 GlfwWindowBackend::GlfwWindowBackend() = default;
 
@@ -64,9 +68,17 @@ void GlfwWindowBackend::SetCloseCallback(std::function<void()> onClose)
 	closeCallback = std::move(onClose);
 }
 
+void GlfwWindowBackend::SetResizeCallback(std::function<void(int, int)> onResize)
+{
+	if (windowHandle) {
+		g_ResizeCallbacks[windowHandle] = std::move(onResize);
+	}
+}
+
 void GlfwWindowBackend::Shutdown()
 {
 	if (windowHandle) {
+		g_ResizeCallbacks.erase(windowHandle);
 		glfwDestroyWindow(windowHandle);
 		windowHandle = nullptr;
 	}
@@ -87,6 +99,20 @@ void GlfwWindowBackend::InstallCallbacks()
 		if (backend && backend->closeCallback) {
 			TERRAENGINE_LOG(LogLevel::Debug, "GLFW backend received window close event");
 			backend->closeCallback();
+		}
+	});
+
+	glfwSetFramebufferSizeCallback(windowHandle, [](GLFWwindow* window, int width, int height) {
+		// Use static map lookup
+		auto it = g_ResizeCallbacks.find(window);
+		if (it != g_ResizeCallbacks.end() && it->second) {
+			try {
+				it->second(width, height);
+			} catch (const std::exception& e) {
+				TERRAENGINE_LOG(LogLevel::Error, "GLFW Resize Callback Exception: " << e.what());
+			} catch (...) {
+				TERRAENGINE_LOG(LogLevel::Error, "GLFW Resize Callback Unknown Exception");
+			}
 		}
 	});
 }

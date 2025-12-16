@@ -33,6 +33,19 @@ void RenderSystem::Initialize()
 	
 	rhi = std::make_unique<VulkanContext>();
 	rhi->Initialize(WindowSystem::Instance());
+
+	WindowSystem::Instance().SetResizeCallback([](int width, int height) {
+		try {
+			auto& renderSystem = RenderSystem::Instance();
+			if (renderSystem.GetContext()) {
+				static_cast<VulkanContext*>(renderSystem.GetContext())->Resize(width, height);
+			}
+		} catch (const std::exception& e) {
+			TERRAENGINE_LOG(LogLevel::Error, "Exception in resize callback: " << e.what());
+		} catch (...) {
+			TERRAENGINE_LOG(LogLevel::Error, "Unknown exception in resize callback");
+		}
+	});
 }
 
 void RenderSystem::Update()

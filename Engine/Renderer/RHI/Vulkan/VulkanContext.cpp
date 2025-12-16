@@ -15,6 +15,12 @@ void VulkanContext::Initialize(WindowSystem& windowSystem) {
 	impl->InitVulkan(windowSystem);
 }
 
+void VulkanContext::Resize(int width, int height) {
+	if (impl) {
+		impl->framebufferResized = true;
+	}
+}
+
 void VulkanContext::BeginFrame() {
 	// Wait until the GPU is done with the resources for this frame before reusing them.
 	if (!impl->initialized) return;
@@ -494,7 +500,12 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	presentInfo.pSwapchains = swapChains;
 	presentInfo.pImageIndices = &imageIndex;
 
-	vkQueuePresentKHR(impl->presentQueue, &presentInfo);
+	VkResult presentResult = vkQueuePresentKHR(impl->presentQueue, &presentInfo);
+	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
+		impl->framebufferResized = false;
+		impl->RecreateSwapChain();
+		impl->RecreateOffscreenResources();
+	}
 
 	vkWaitForFences(impl->device, 1, &uiFence, VK_TRUE, UINT64_MAX);
 	vkDestroyFence(impl->device, uiFence, nullptr);

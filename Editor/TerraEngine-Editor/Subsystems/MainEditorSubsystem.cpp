@@ -74,6 +74,7 @@ void MainEditorSubsystem::OnProjectOpened() {
     if (!ctx || !ctx->projectManager->HasActiveProject()) return;
 
     auto projectRoot = ctx->projectManager->GetProjectRoot();
+    m_CurrentDirectory = AssetDatabase::Instance().GetAssetRoot();
     std::filesystem::path sceneRoot = projectRoot / "Assets" / "Scenes";
     
     // Ensure directory exists (created by ProjectManager, but safe check)
@@ -119,6 +120,7 @@ void MainEditorSubsystem::OnBackendReady() {
             (VkImageView)handles.sceneImageView,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         );
+        cachedSceneImageView = handles.sceneImageView;
     }
 }
 
@@ -131,6 +133,31 @@ void MainEditorSubsystem::SetOnProjectClosedCallback(std::function<void()> callb
 }
 
 void MainEditorSubsystem::DrawUI() {
+    // Check for resize/recreation of offscreen resources
+    if (ctx && ctx->engine) {
+        RenderSystem* renderSystem = ctx->engine->GetSystem<RenderSystem>();
+        if (renderSystem) {
+             VulkanContext* vulkan = dynamic_cast<VulkanContext*>(renderSystem->GetContext());
+             if (vulkan) {
+                 VulkanContext::EditorHandles handles;
+                 vulkan->GetEditorHandles(handles);
+                 if (handles.sceneImageView != cachedSceneImageView) {
+                     // Note: Ideally remove old texture if backend supports it.
+                     // ImGui_ImplVulkan_RemoveTexture((VkDescriptorSet)sceneTextureID);
+                     
+                     if (handles.sceneImageView && handles.sceneSampler) {
+                         sceneTextureID = (void*)ImGui_ImplVulkan_AddTexture(
+                            (VkSampler)handles.sceneSampler,
+                            (VkImageView)handles.sceneImageView,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                         );
+                         cachedSceneImageView = handles.sceneImageView;
+                     }
+                 }
+             }
+        }
+    }
+
     // Setup Dockspace
     static ImGuiDockNodeFlags dockspace_flags = ImGuiDockNodeFlags_None;
     ImGuiWindowFlags window_flags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
@@ -474,21 +501,76 @@ void MainEditorSubsystem::DrawMainMenuBar() {
     }
 }
 
-static void DrawDirectoryRecursive(const std::filesystem::path& path) {
+void MainEditorSubsystem::DrawDirectoryTree(const std::filesystem::path& path) {
+    if (!std::filesystem::exists(path)) return;
+
     for (const auto& entry : std::filesystem::directory_iterator(path)) {
         if (entry.path().extension() == ".meta") continue;
+        if (!entry.is_directory()) continue;
 
-        if (entry.is_directory()) {
-            if (ImGui::TreeNode(entry.path().filename().string().c_str())) {
-                DrawDirectoryRecursive(entry.path());
-                ImGui::TreePop();
-            }
-        } else {
+        std::string filename = entry.path().filename().string();
+        
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_SpanAvailWidth;
+        if (entry.path() == m_CurrentDirectory) {
+            flags |= ImGuiTreeNodeFlags_Selected;
+        }
+
+        bool open = ImGui::TreeNodeEx(filename.c_str(), flags);
+        if (ImGui::IsItemClicked()) {
+            m_CurrentDirectory = entry.path();
+        }
+
+        if (open) {
+            DrawDirectoryTree(entry.path());
+            ImGui::TreePop();
+        }
+    }
+}
+
+void MainEditorSubsystem::DrawDirectoryContent(const std::filesystem::path& path) {
+    float cellSize = m_ThumbnailSize + m_Padding;
+    float panelWidth = ImGui::GetContentRegionAvail().x;
+    int columnCount = (int)(panelWidth / cellSize);
+    if (columnCount < 1) columnCount = 1;
+
+    std::vector<std::filesystem::directory_entry> entries;
+    for (const auto& entry : std::filesystem::directory_iterator(path)) {
+        if (entry.path().extension() == ".meta") continue;
+        entries.push_back(entry);
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+        if (a.is_directory() != b.is_directory()) {
+            return a.is_directory() > b.is_directory(); // Directories first
+        }
+        return a.path().filename().string() < b.path().filename().string();
+    });
+
+    if (ImGui::BeginTable("ContentTable", columnCount)) {
+        for (const auto& entry : entries) {
             std::string filename = entry.path().filename().string();
-            ImGui::Selectable(filename.c_str());
+            if (!m_SearchFilter.empty()) {
+                std::string lowerFilename = filename;
+                std::string lowerFilter = m_SearchFilter;
+                std::transform(lowerFilename.begin(), lowerFilename.end(), lowerFilename.begin(), ::tolower);
+                std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
+                if (lowerFilename.find(lowerFilter) == std::string::npos) continue;
+            }
 
-            if (ImGui::BeginDragDropSource()) {
-                // Find GUID
+            ImGui::TableNextColumn();
+            
+            ImGui::PushID(filename.c_str());
+            
+            std::string icon = entry.is_directory() ? "[DIR]" : "[FILE]";
+            ImGui::Button(icon.c_str(), ImVec2(m_ThumbnailSize, m_ThumbnailSize));
+            
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                if (entry.is_directory()) {
+                    m_CurrentDirectory = entry.path();
+                }
+            }
+            
+             if (!entry.is_directory() && ImGui::BeginDragDropSource()) {
                 auto& assets = AssetDatabase::Instance().GetAssets();
                 auto it = assets.find(std::filesystem::absolute(entry.path()));
                 if (it != assets.end()) {
@@ -498,19 +580,17 @@ static void DrawDirectoryRecursive(const std::filesystem::path& path) {
                 }
                 ImGui::EndDragDropSource();
             }
+
+            ImGui::TextWrapped("%s", filename.c_str());
+            ImGui::PopID();
         }
+        ImGui::EndTable();
     }
 }
 
 void MainEditorSubsystem::DrawProjectBrowser() {
     ImGui::Begin("Project Browser");
-    
-    if (ImGui::Button("Import Asset")) {
-        IGFD::FileDialogConfig config;
-        config.path = ".";
-        ImGuiFileDialog::Instance()->OpenDialog("ImportAssetDlg", "Choose File", ".*", config);
-    }
-    
+
     if (ImGuiFileDialog::Instance()->Display("ImportAssetDlg")) {
         if (ImGuiFileDialog::Instance()->IsOk()) {
             std::filesystem::path filePath = ImGuiFileDialog::Instance()->GetFilePathName();
@@ -526,14 +606,73 @@ void MainEditorSubsystem::DrawProjectBrowser() {
         ImGuiFileDialog::Instance()->Close();
     }
 
-    ImGui::Separator();
-
     if (ctx->projectManager->HasActiveProject()) {
-        std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
-        if (std::filesystem::exists(root)) {
-             DrawDirectoryRecursive(root);
-        } else {
-            ImGui::Text("Assets directory not found.");
+        if (ImGui::Button("<-")) {
+             std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
+             if (m_CurrentDirectory != root) {
+                  auto parent = m_CurrentDirectory.parent_path();
+                  // Check if parent is strictly inside or is root
+                  // Actually standard parent_path is fine, as long as we stop at root.
+                  // But let's just do parent for now, relying on tree view to navigate mainly.
+                  if (std::filesystem::absolute(parent).string().size() >= std::filesystem::absolute(root).string().size()) {
+                      m_CurrentDirectory = parent;
+                  }
+             }
+        }
+        ImGui::SameLine();
+        
+        if (ImGui::Button("Import Asset")) {
+            IGFD::FileDialogConfig config;
+            config.path = ".";
+            ImGuiFileDialog::Instance()->OpenDialog("ImportAssetDlg", "Choose File", ".*", config);
+        }
+        
+        ImGui::SameLine();
+        static char searchBuf[128] = "";
+        ImGui::SetNextItemWidth(200);
+        if (ImGui::InputTextWithHint("##Search", "Search...", searchBuf, IM_ARRAYSIZE(searchBuf))) {
+            m_SearchFilter = searchBuf;
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::BeginTable("BrowserSplit", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV)) {
+             ImGui::TableSetupColumn("Tree", ImGuiTableColumnFlags_WidthFixed, 200.0f);
+             ImGui::TableSetupColumn("Content", ImGuiTableColumnFlags_WidthStretch);
+             
+             ImGui::TableNextRow();
+             ImGui::TableSetColumnIndex(0);
+             
+             std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
+             if (std::filesystem::exists(root)) {
+                 ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
+                 if (root == m_CurrentDirectory) rootFlags |= ImGuiTreeNodeFlags_Selected;
+                 
+                 bool open = ImGui::TreeNodeEx("Assets", rootFlags);
+                 if (ImGui::IsItemClicked()) m_CurrentDirectory = root;
+                 
+                 if (open) {
+                     DrawDirectoryTree(root);
+                     ImGui::TreePop();
+                 }
+             }
+
+             ImGui::TableSetColumnIndex(1);
+             
+             if (m_CurrentDirectory.empty() || !std::filesystem::exists(m_CurrentDirectory)) {
+                 if (std::filesystem::exists(root)) m_CurrentDirectory = root;
+             }
+             
+             if (std::filesystem::exists(m_CurrentDirectory)) {
+                 DrawDirectoryContent(m_CurrentDirectory);
+             }
+
+             ImGui::Separator();
+
+             ImGui::SetNextItemWidth(100);
+             ImGui::SliderFloat("Zoom", &m_ThumbnailSize, 32.0f, 128.0f);
+             
+             ImGui::EndTable();
         }
     }
     ImGui::End();

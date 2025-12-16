@@ -16,6 +16,18 @@
 #include <GLFW/glfw3.h>
 #include <utility>
 
+#include <unordered_map>
+
+// Static storage for callback chaining
+static std::unordered_map<GLFWwindow*, EditorSystem*> g_EditorSystems;
+static GLFWwindowclosefun g_PrevCloseCallback = nullptr;
+static GLFWframebuffersizefun g_PrevResizeCallback = nullptr;
+static GLFWmousebuttonfun g_PrevMouseButtonCallback = nullptr;
+static GLFWscrollfun g_PrevScrollCallback = nullptr;
+static GLFWkeyfun g_PrevKeyCallback = nullptr;
+static GLFWcharfun g_PrevCharCallback = nullptr;
+static GLFWdropfun g_PrevDropCallback = nullptr;
+
 void EditorSystem::Setup(Engine* enginePtr) {
     if (initialized) return;
 
@@ -69,35 +81,70 @@ void EditorSystem::Initialize() {
     auto& windowSystem = WindowSystem::Instance();
     GLFWwindow* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
 
-    // Register Drop Callback
-    glfwSetWindowUserPointer(window, this);
-    glfwSetDropCallback(window, [](GLFWwindow* window, int count, const char** paths) {
-        EditorSystem* self = static_cast<EditorSystem*>(glfwGetWindowUserPointer(window));
-        if (self && self->context.projectManager->HasActiveProject()) {
-            std::filesystem::path assetRoot = AssetDatabase::Instance().GetAssetRoot();
-            for (int i = 0; i < count; i++) {
-                std::filesystem::path src = paths[i];
-                if (std::filesystem::exists(src)) {
-                    try {
-                        std::filesystem::copy(src, assetRoot / src.filename(), std::filesystem::copy_options::overwrite_existing);
-                    } catch (...) {}
-                }
-            }
-        }
-    });
-
+    // Register Drop Callback safely using static map
+    g_EditorSystems[window] = this;
+    
     // 3. Init ImGui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    // io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable; // Optional, maybe later
 
     ImGui::StyleColorsDark();
 
     // 4. Init Backends
-    ImGui_ImplGlfw_InitForVulkan(window, true);
+    // IMPORTANT: InstallCallbacks = false to prevent overwriting Engine's callbacks
+    ImGui_ImplGlfw_InitForVulkan(window, false);
+    
+    // 5. Chain Callbacks
+    g_PrevResizeCallback = glfwSetFramebufferSizeCallback(window, [](GLFWwindow* w, int width, int height) {
+        if (g_PrevResizeCallback) g_PrevResizeCallback(w, width, height);
+        // ImGui doesn't export WindowSize callback, but NewFrame pulls it.
+        // However, we can call this if needed or rely on NewFrame.
+        // ImGui_ImplGlfw_WindowSizeCallback(w, width, height); 
+        // Note: ImGui_ImplGlfw usually installs WindowSize callback? No, FramebufferSize.
+        // We will leave ImGui to poll in NewFrame or use specific function if exported.
+        // Actually ImGui_ImplGlfw_NewFrame calls glfwGetFramebufferSize.
+    });
+
+    g_PrevMouseButtonCallback = glfwSetMouseButtonCallback(window, [](GLFWwindow* w, int button, int action, int mods) {
+        if (g_PrevMouseButtonCallback) g_PrevMouseButtonCallback(w, button, action, mods);
+        ImGui_ImplGlfw_MouseButtonCallback(w, button, action, mods);
+    });
+
+    g_PrevScrollCallback = glfwSetScrollCallback(window, [](GLFWwindow* w, double xoffset, double yoffset) {
+        if (g_PrevScrollCallback) g_PrevScrollCallback(w, xoffset, yoffset);
+        ImGui_ImplGlfw_ScrollCallback(w, xoffset, yoffset);
+    });
+
+    g_PrevKeyCallback = glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int scancode, int action, int mods) {
+        if (g_PrevKeyCallback) g_PrevKeyCallback(w, key, scancode, action, mods);
+        ImGui_ImplGlfw_KeyCallback(w, key, scancode, action, mods);
+    });
+
+    g_PrevCharCallback = glfwSetCharCallback(window, [](GLFWwindow* w, unsigned int c) {
+        if (g_PrevCharCallback) g_PrevCharCallback(w, c);
+        ImGui_ImplGlfw_CharCallback(w, c);
+    });
+    
+    // Restore/Chain Drop Callback
+    g_PrevDropCallback = glfwSetDropCallback(window, [](GLFWwindow* w, int count, const char** paths) {
+         if (g_EditorSystems.count(w)) {
+             EditorSystem* self = g_EditorSystems[w];
+             if (self && self->context.projectManager->HasActiveProject()) {
+                std::filesystem::path assetRoot = AssetDatabase::Instance().GetAssetRoot();
+                for (int i = 0; i < count; i++) {
+                    std::filesystem::path src = paths[i];
+                    if (std::filesystem::exists(src)) {
+                        try {
+                            std::filesystem::copy(src, assetRoot / src.filename(), std::filesystem::copy_options::overwrite_existing);
+                        } catch (...) {}
+                    }
+                }
+            }
+         }
+    });
     
     ImGui_ImplVulkan_InitInfo init_info = {};
     init_info.Instance = (VkInstance)handles.instance;

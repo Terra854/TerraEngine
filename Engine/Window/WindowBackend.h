@@ -45,6 +45,9 @@
 	// shutdown signaling while keeping the backend decoupled.
 	virtual void SetCloseCallback(std::function<void()> onClose) = 0;
 
+	// Supply a callback to run when the window is resized.
+	virtual void SetResizeCallback(std::function<void(int, int)> onResize) = 0;
+
 	// Release backend specific state and destroy the window. Implementations
 	// should be safe to call even if initialization failed part way through.
 	virtual void Shutdown() = 0;

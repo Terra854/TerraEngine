@@ -815,12 +815,13 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	vkDeviceWaitIdle(device);
 
 	DestroyPipelines();
-	if (descriptorPool) {
-		VkResult resetResult = vkResetDescriptorPool(device, descriptorPool, 0);
-		if (resetResult != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Warning, "Failed to reset descriptor pool during swapchain recreation");
-		}
-	}
+	// Do NOT reset descriptor pool here. ImGui uses it and its font texture lives there.
+	// if (descriptorPool) {
+	// 	VkResult resetResult = vkResetDescriptorPool(device, descriptorPool, 0);
+	// 	if (resetResult != VK_SUCCESS) {
+	// 		TERRAENGINE_LOG(LogLevel::Warning, "Failed to reset descriptor pool during swapchain recreation");
+	// 	}
+	// }
 
 	CleanupSwapChain();
 

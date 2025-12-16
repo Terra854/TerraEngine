@@ -29,6 +29,7 @@
 		bool ShouldClose() const override;
 		void* GetNativeHandle() const override;
 	void SetCloseCallback(std::function<void()> onClose) override;
+	void SetResizeCallback(std::function<void(int, int)> onResize) override;
 	void Shutdown() override;
 
 private:

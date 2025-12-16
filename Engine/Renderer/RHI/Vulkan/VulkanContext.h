@@ -17,6 +17,8 @@ public:
 	void EndFrame() override;
 	void Shutdown() override;
 
+	void Resize(int width, int height);
+
 	// Editor / ImGui Integration
 	struct EditorHandles {
 		void* instance = nullptr;
