@@ -77,6 +77,54 @@ static void DrawProperty(rttr::property prop, Object& obj, ComponentAccessFuncti
 		}
 		UpdateInspectorDragState(inspectorDragging);
 	}
+	else if (type == rttr::type::get<TerraEngine::UUID>()) {
+		TerraEngine::UUID val = var.get_value<TerraEngine::UUID>();
+		std::string label = "None";
+		if (val != TerraEngine::EMPTY_UUID) {
+			const auto& assets = AssetDatabase::Instance().GetAssets();
+			bool found = false;
+			for (const auto& [path, meta] : assets) {
+				if (meta.guid == val) {
+					label = path.stem().string();
+					found = true;
+					break;
+				}
+			}
+			if (!found) label = "Unknown Asset";
+		}
+
+		char buf[128];
+		strncpy(buf, label.c_str(), sizeof(buf));
+		ImGui::InputText(name.c_str(), buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
+
+		if (ImGui::BeginDragDropTarget()) {
+			const char* payloads[] = { "ASSET_MESH", "ASSET_MATERIAL", "ASSET_TEXTURE", "ASSET_SHADER", "ASSET_GUID" };
+			const char* expected = nullptr;
+
+			if (name == "meshId") expected = "ASSET_MESH";
+			else if (name == "materialId") expected = "ASSET_MATERIAL";
+			else if (name.find("Texture") != std::string::npos || name.find("texture") != std::string::npos) expected = "ASSET_TEXTURE";
+
+			if (expected) {
+				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(expected)) {
+					IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
+					TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
+					access.setter(obj, name, newId);
+				}
+			} else {
+				// Generic UUID property, accept any asset payload
+				for (const char* p : payloads) {
+					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(p)) {
+						IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
+						TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
+						access.setter(obj, name, newId);
+						break;
+					}
+				}
+			}
+			ImGui::EndDragDropTarget();
+		}
+	}
 }
 
 void MainEditorSubsystem::Initialize(EditorContext& context) {
@@ -715,7 +763,15 @@ void MainEditorSubsystem::DrawDirectoryContent(const std::filesystem::path& path
                 auto it = assets.find(std::filesystem::absolute(entry.path()));
                 if (it != assets.end()) {
                     TerraEngine::UUID guid = it->second.guid;
-                    ImGui::SetDragDropPayload("ASSET_GUID", &guid, sizeof(TerraEngine::UUID));
+                    const std::string& importer = it->second.importerName;
+                    const char* payloadType = "ASSET_GUID";
+                    
+                    if (importer == "MeshImporter") payloadType = "ASSET_MESH";
+                    else if (importer == "TextureImporter") payloadType = "ASSET_TEXTURE";
+                    else if (importer == "ShaderImporter") payloadType = "ASSET_SHADER";
+                    else if (importer == "MaterialImporter") payloadType = "ASSET_MATERIAL";
+
+                    ImGui::SetDragDropPayload(payloadType, &guid, sizeof(TerraEngine::UUID));
                     ImGui::Text("%s", filename.c_str());
                 }
                 ImGui::EndDragDropSource();

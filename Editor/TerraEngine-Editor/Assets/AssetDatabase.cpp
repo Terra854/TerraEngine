@@ -174,6 +174,7 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
     if (metadata.importerName == "MeshImporter") compiledRelativePath.replace_extension(".temf");
     else if (metadata.importerName == "TextureImporter") compiledRelativePath.replace_extension(".tetf");
     else if (metadata.importerName == "ShaderImporter") compiledRelativePath.replace_extension(".tspf");
+    else if (metadata.importerName == "MaterialImporter") compiledRelativePath.replace_extension(".tmat");
     else if (metadata.importerName == "GenericImporter") compiledRelativePath.clear(); 
     
     // Store relative path in metadata
@@ -219,6 +220,7 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
     if (ext == ".obj" || ext == ".fbx") return "MeshImporter";
     if (ext == ".png" || ext == ".jpg" || ext == ".tga" || ext == ".bmp") return "TextureImporter";
     if (ext == ".hlsl" || ext == ".glsl") return "ShaderImporter";
+    if (ext == ".tmat") return "MaterialImporter";
     return "GenericImporter";
 }
 
@@ -314,6 +316,11 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 #endif
         return CompileShader(fullSourcePath, fullCompiledPath, stage, target, entry, dxcPath);
     } 
+    else if (metadata.importerName == "MaterialImporter") {
+        std::error_code ec;
+        std::filesystem::copy_file(fullSourcePath, fullCompiledPath, std::filesystem::copy_options::overwrite_existing, ec);
+        return !ec;
+    }
     else {
         return true;
     }
