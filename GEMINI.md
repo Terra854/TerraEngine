@@ -41,24 +41,24 @@ The project **requires** the install step to be executed to function correctly, 
 
 **1. Configure:**
 ```bash
-cmake -S . -B out/build -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B out/build_gemini -DCMAKE_BUILD_TYPE=Debug
 ```
 
 **2. Build:**
 ```bash
-cmake --build out/build --parallel
+cmake --build out/build_gemini --parallel
 ```
 
 **3. Install (CRITICAL):**
 You must run the install target to populate the `Build/` directory with binaries and required DLLs/assets.
 ```bash
-cmake --build out/build --target install
+cmake --build out/build_gemini --target install
 ```
 
 ### Running
 After installation, the executable will be located in the installation directory (typically `out/build/Build/<Config>/`).
 ```bash
-./out/build/Build/Debug/TerraEngine-Launcher.exe
+./out/build_gemini/Build/Debug/TerraEngine-Launcher.exe
 ```
 
 ## Development Conventions
