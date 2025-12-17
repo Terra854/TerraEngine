@@ -28,6 +28,54 @@ static GLFWkeyfun g_PrevKeyCallback = nullptr;
 static GLFWcharfun g_PrevCharCallback = nullptr;
 static GLFWdropfun g_PrevDropCallback = nullptr;
 
+// Wraps the OS cursor to the opposite edge while dragging inspector values.
+// Input: window handle for size/position queries. Output: cursor warp plus ImGui state sync.
+static void WrapCursorForInspectorDrag(GLFWwindow* window) {
+	if (!window) {
+		return;
+	}
+
+	int width = 0;
+	int height = 0;
+	glfwGetWindowSize(window, &width, &height);
+	if (width <= 4 || height <= 4) {
+		return;
+	}
+
+	double mouseX = 0.0;
+	double mouseY = 0.0;
+	glfwGetCursorPos(window, &mouseX, &mouseY);
+
+	const double wrapPadding = 2.0;
+	const double maxX = static_cast<double>(width - 1);
+	const double maxY = static_cast<double>(height - 1);
+	bool wrapped = false;
+
+	if (mouseX <= wrapPadding) {
+		mouseX = maxX - wrapPadding;
+		wrapped = true;
+	} else if (mouseX >= maxX - wrapPadding) {
+		mouseX = wrapPadding;
+		wrapped = true;
+	}
+
+	if (mouseY <= wrapPadding) {
+		mouseY = maxY - wrapPadding;
+		wrapped = true;
+	} else if (mouseY >= maxY - wrapPadding) {
+		mouseY = wrapPadding;
+		wrapped = true;
+	}
+
+	if (wrapped) {
+		glfwSetCursorPos(window, mouseX, mouseY);
+		ImGuiIO& io = ImGui::GetIO();
+		// Keep ImGui deltas small so value drags stay smooth after wrapping.
+		io.MousePos = ImVec2(static_cast<float>(mouseX), static_cast<float>(mouseY));
+		io.MouseDelta = ImVec2(0.0f, 0.0f);
+	}
+}
+
 void EditorSystem::Setup(Engine* enginePtr) {
     if (initialized) return;
 
@@ -194,6 +242,12 @@ void EditorSystem::Update() {
         AssetDatabase::Instance().Update();
         mainEditor->Update(dt);
         mainEditor->DrawUI();
+		// Enable cursor wrap only while dragging inspector values to avoid edge clipping.
+		if (mainEditor && mainEditor->IsInspectorValueDragging()) {
+			auto& windowSystem = WindowSystem::Instance();
+			GLFWwindow* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
+			WrapCursorForInspectorDrag(window);
+		}
     } else {
         projectHub->Update(dt);
         projectHub->DrawUI();

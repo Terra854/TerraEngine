@@ -22,6 +22,8 @@ public:
 
     void OnProjectOpened();
     void SetOnProjectClosedCallback(std::function<void()> callback);
+	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
+	bool IsInspectorValueDragging() const;
 
 private:
     void DrawMainMenuBar();
@@ -41,6 +43,8 @@ private:
     void* sceneTextureID = nullptr;
     void* cachedSceneImageView = nullptr;
     bool sceneLoaded = false;
+	// Tracks per-frame inspector drag activity so the editor can wrap the cursor safely.
+	bool inspectorValueDragging = false;
     
     std::optional<entt::entity> selectedEntity;
     std::map<entt::entity, std::vector<std::string>> perObjectComponentOrders;

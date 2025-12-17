@@ -18,52 +18,65 @@
 #include <string>
 #include <unordered_set>
 
-// Helper to draw RTTR properties
-static void DrawProperty(rttr::property prop, Object& obj, ComponentAccessFunctions& access) {
-    std::string name = prop.get_name().to_string();
-    rttr::variant var = access.getter(obj, name);
-    rttr::type type = prop.get_type();
+// Tracks drag activity for inspector value fields so the editor can wrap the cursor.
+static void UpdateInspectorDragState(bool& inspectorDragging) {
+	if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+		inspectorDragging = true;
+	}
+}
 
-    if (type == rttr::type::get<float>()) {
-        float val = var.get_value<float>();
-        if (ImGui::DragFloat(name.c_str(), &val, 0.1f)) {
-            access.setter(obj, name, val);
-        }
-    }
-    else if (type == rttr::type::get<int>()) {
-        int val = var.get_value<int>();
-        if (ImGui::DragInt(name.c_str(), &val)) {
-            access.setter(obj, name, val);
-        }
-    }
-    else if (type == rttr::type::get<bool>()) {
-        bool val = var.get_value<bool>();
-        if (ImGui::Checkbox(name.c_str(), &val)) {
-            access.setter(obj, name, val);
-        }
-    }
-    else if (type == rttr::type::get<std::string>()) {
-        std::string val = var.get_value<std::string>();
-        char buffer[256];
-        strncpy(buffer, val.c_str(), sizeof(buffer));
-        if (ImGui::InputText(name.c_str(), buffer, sizeof(buffer))) {
-            access.setter(obj, name, std::string(buffer));
-        }
-    }
-    else if (type == rttr::type::get<glm::vec3>()) {
-        glm::vec3 val = var.get_value<glm::vec3>();
-        if (ImGui::DragFloat3(name.c_str(), &val.x, 0.1f)) {
-            access.setter(obj, name, val);
-        }
-    }
-    else if (type == rttr::type::get<glm::quat>()) {
-        glm::quat q = var.get_value<glm::quat>();
-        glm::vec3 euler = glm::degrees(glm::eulerAngles(q));
-        if (ImGui::DragFloat3(name.c_str(), &euler.x, 0.1f)) {
-            glm::quat newQ = glm::quat(glm::radians(euler));
-            access.setter(obj, name, newQ);
-        }
-    }
+// Draws a reflected property row and reports active drag state for cursor wrapping.
+// Inputs: prop (reflection metadata), obj (target object), access (component getter/setter).
+// Output: inspectorDragging becomes true when a drag widget is actively manipulated.
+static void DrawProperty(rttr::property prop, Object& obj, ComponentAccessFunctions& access, bool& inspectorDragging) {
+	std::string name = prop.get_name().to_string();
+	rttr::variant var = access.getter(obj, name);
+	rttr::type type = prop.get_type();
+
+	if (type == rttr::type::get<float>()) {
+		float val = var.get_value<float>();
+		if (ImGui::DragFloat(name.c_str(), &val, 0.1f)) {
+			access.setter(obj, name, val);
+		}
+		UpdateInspectorDragState(inspectorDragging);
+	}
+	else if (type == rttr::type::get<int>()) {
+		int val = var.get_value<int>();
+		if (ImGui::DragInt(name.c_str(), &val)) {
+			access.setter(obj, name, val);
+		}
+		UpdateInspectorDragState(inspectorDragging);
+	}
+	else if (type == rttr::type::get<bool>()) {
+		bool val = var.get_value<bool>();
+		if (ImGui::Checkbox(name.c_str(), &val)) {
+			access.setter(obj, name, val);
+		}
+	}
+	else if (type == rttr::type::get<std::string>()) {
+		std::string val = var.get_value<std::string>();
+		char buffer[256];
+		strncpy(buffer, val.c_str(), sizeof(buffer));
+		if (ImGui::InputText(name.c_str(), buffer, sizeof(buffer))) {
+			access.setter(obj, name, std::string(buffer));
+		}
+	}
+	else if (type == rttr::type::get<glm::vec3>()) {
+		glm::vec3 val = var.get_value<glm::vec3>();
+		if (ImGui::DragFloat3(name.c_str(), &val.x, 0.1f)) {
+			access.setter(obj, name, val);
+		}
+		UpdateInspectorDragState(inspectorDragging);
+	}
+	else if (type == rttr::type::get<glm::quat>()) {
+		glm::quat q = var.get_value<glm::quat>();
+		glm::vec3 euler = glm::degrees(glm::eulerAngles(q));
+		if (ImGui::DragFloat3(name.c_str(), &euler.x, 0.1f)) {
+			glm::quat newQ = glm::quat(glm::radians(euler));
+			access.setter(obj, name, newQ);
+		}
+		UpdateInspectorDragState(inspectorDragging);
+	}
 }
 
 void MainEditorSubsystem::Initialize(EditorContext& context) {
@@ -130,6 +143,11 @@ void MainEditorSubsystem::Update(float deltaTime) {
 
 void MainEditorSubsystem::SetOnProjectClosedCallback(std::function<void()> callback) {
     onProjectClosed = callback;
+}
+
+// Returns true when a value drag is active in the inspector this frame.
+bool MainEditorSubsystem::IsInspectorValueDragging() const {
+	return inspectorValueDragging;
 }
 
 void MainEditorSubsystem::DrawUI() {
@@ -362,6 +380,8 @@ void MainEditorSubsystem::DrawEntityNode(Object& obj) {
 
 void MainEditorSubsystem::DrawInspector() {
     ImGui::Begin("Inspector");
+	// Reset per-frame drag tracking before drawing inspector controls.
+	inspectorValueDragging = false;
     
     if (selectedEntity) {
         auto& objManager = ObjectManager::instance();
@@ -542,7 +562,7 @@ void MainEditorSubsystem::DrawInspector() {
                     ImGui::Indent();
                     for (auto prop : type.get_properties()) {
                         if (prop.get_name() == "active") continue;
-                        DrawProperty(prop, obj, access);
+                        DrawProperty(prop, obj, access, inspectorValueDragging);
                     }
                     ImGui::Unindent();
                 }
