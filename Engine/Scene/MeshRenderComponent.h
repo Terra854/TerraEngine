@@ -14,7 +14,6 @@ struct MeshRenderComponent : public Component<MeshRenderComponent>
 
 	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
-	TerraEngine::UUID shaderCollectionId = TerraEngine::EMPTY_UUID;
 
 	// Exposes the component to RTTR so tools and serialization can introspect
 	// the authored asset bindings safely.
@@ -22,7 +21,6 @@ struct MeshRenderComponent : public Component<MeshRenderComponent>
 	{
 		registration
 			.property("meshId", &MeshRenderComponent::meshId)
-			.property("materialId", &MeshRenderComponent::materialId)
-			.property("shaderCollectionId", &MeshRenderComponent::shaderCollectionId);
+			.property("materialId", &MeshRenderComponent::materialId);
 	}
 };

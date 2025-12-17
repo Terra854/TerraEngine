@@ -136,7 +136,7 @@ private:
 	std::string NormalizeKey(const std::filesystem::path& path) const;
 	void PreparePreviewAssets();
 	TerraEngine::UUID CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
-	void SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
+	void SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId);
 	void SpawnPreviewCamera();
 	Transform* GetPreviewTransform();
 

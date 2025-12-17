@@ -314,7 +314,7 @@ void SceneManager::PreparePreviewAssets()
 
 	// Instantiate an object with the bindings so future renderer work can query
 	// exactly which authored assets should be drawn.
-	SpawnPreviewObject(previewMeshId, previewMaterialId, previewTextureId, previewShaderCollectionId);
+	SpawnPreviewObject(previewMeshId, previewMaterialId, previewTextureId);
 	// Seed the scene with a camera component that mirrors the old hardcoded
 	// view so the renderer can source matrices from authored data instead.
 	SpawnPreviewCamera();
@@ -373,7 +373,7 @@ std::memcpy(material->storage.data(), &binding, sizeof(TextureBinding));
 	return resources.RegisterMaterial(name, std::move(material));
 }
 
-void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)
+void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId)
 {
 	ObjectManager& objects = ObjectManager::instance();
 	// Persist the preview object so input-driven camera controls can adjust it
@@ -395,7 +395,6 @@ void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const Ter
 	// Bind authored assets via the reflection-based setter to ensure thread-safe writes.
 	SetComponentProperty(renderComponent, "meshId", meshId);
 	SetComponentProperty(renderComponent, "materialId", materialId);
-	SetComponentProperty(renderComponent, "shaderCollectionId", shaderCollectionId);
 }
 
 void SceneManager::SpawnPreviewCamera()

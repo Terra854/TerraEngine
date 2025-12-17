@@ -128,7 +128,6 @@ void RenderSystem::Update()
 					MeshRenderComponent reflectedMesh{};
 					reflectedMesh.meshId = meshId;
 					reflectedMesh.materialId = materialId;
-					reflectedMesh.shaderCollectionId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "shaderCollectionId");
 
 					renderables.push_back({ object.EntityId(), reflectedMesh });
 					if (!localTransforms.contains(object.EntityId()))
