@@ -42,6 +42,9 @@ void SceneManager::Initialize()
 	// reload. At this stage nothing is loaded yet so the reset is cheap and
 	// keeps stale cache entries from leaking across sessions.
 	UnloadAll();
+	
+	ResourceManager::Instance().LoadDefaultResources();
+
 	//PreparePreviewAssets();
 	// Initialization is logged at debug level so tooling can trace startup ordering.
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager initialized with root " << sceneRoot);
@@ -301,7 +304,7 @@ void SceneManager::PreparePreviewAssets()
 	// Load the precompiled preview shaders that ship alongside the executable so
 	// editors do not need to generate shader source at runtime. These come from
 	// Engine/Shaders/Default and serve as the engine's embedded fallback set.
-	previewShaderCollectionId = LoadPreviewShaderCollection(resources);
+	previewShaderCollectionId = resources.GetDefaultShaderCollectionID();
 	if (previewShaderCollectionId == TerraEngine::EMPTY_UUID)
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Preview shader collection is incomplete; rendering components will not reference a shader set.");
@@ -315,44 +318,6 @@ void SceneManager::PreparePreviewAssets()
 	// Seed the scene with a camera component that mirrors the old hardcoded
 	// view so the renderer can source matrices from authored data instead.
 	SpawnPreviewCamera();
-}
-
-	TerraEngine::UUID SceneManager::LoadPreviewShaderCollection(ResourceManager& resources) const
-	{
-		// Build a validated vertex/fragment pairing so preview renders never mix mismatched shader stages.
-		std::vector<ShaderStagePath> stages = {
-			{ ShaderStage::Vertex, "Shaders/Default.vert.tspf" },
-			{ ShaderStage::Fragment, "Shaders/Default.frag.tspf" }
-		};
-		const TerraEngine::UUID shaderCollectionId = resources.LoadShaderCollection(stages);
-		ShaderCollection* shaderCollection = resources.GetShaderCollection(shaderCollectionId);
-	if (shaderCollection == nullptr)
-	{
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to create preview shader collection; verify the compiled TSPF stages are deployed next to the executable.");
-		return TerraEngine::EMPTY_UUID;
-	}
-
-	bool hasVertex = false;
-	bool hasFragment = false;
-	for (const ShaderCollection::StageBinding& stage : shaderCollection->stages)
-	{
-		if (stage.stage == ShaderStage::Vertex)
-		{
-			hasVertex = stage.shaderId != TerraEngine::EMPTY_UUID;
-		}
-		else if (stage.stage == ShaderStage::Fragment)
-		{
-			hasFragment = stage.shaderId != TerraEngine::EMPTY_UUID;
-		}
-	}
-
-	if (!hasVertex || !hasFragment)
-	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Preview shader collection is missing a stage; rendering components will skip shader binding.");
-		return TerraEngine::EMPTY_UUID;
-	}
-
-	return shaderCollectionId;
 }
 
 TerraEngine::UUID SceneManager::CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)

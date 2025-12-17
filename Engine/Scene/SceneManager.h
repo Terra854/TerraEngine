@@ -135,7 +135,6 @@ private:
 	std::filesystem::path ResolveScenePath(const std::filesystem::path& path) const;
 	std::string NormalizeKey(const std::filesystem::path& path) const;
 	void PreparePreviewAssets();
-	TerraEngine::UUID LoadPreviewShaderCollection(ResourceManager& resources) const;
 	TerraEngine::UUID CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
 	void SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
 	void SpawnPreviewCamera();

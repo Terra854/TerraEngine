@@ -63,6 +63,12 @@ public:
 	// resources cannot be found.
 	std::filesystem::path GetAssetRoot() const;
 
+	// Loads the default resources (shaders) with fixed UUIDs.
+	void LoadDefaultResources();
+
+	// Returns the fixed UUID for the default shader collection.
+	TerraEngine::UUID GetDefaultShaderCollectionID() const;
+
 	// Synchronous load helpers. These block the calling thread until the
 	// file is parsed, but they reuse cached results or join any in-flight
 	// asynchronous request for the same asset to avoid duplicate work.

@@ -43,6 +43,68 @@ std::filesystem::path ResourceManager::GetAssetRoot() const
 	return assetRoot;
 }
 
+void ResourceManager::LoadDefaultResources()
+{
+	TerraEngine::UUID defaultVertId{};
+	defaultVertId.fill(0);
+	defaultVertId[15] = 1;
+
+	TerraEngine::UUID defaultFragId{};
+	defaultFragId.fill(0);
+	defaultFragId[15] = 2;
+
+	TerraEngine::UUID defaultCollectionId{};
+	defaultCollectionId.fill(0);
+	defaultCollectionId[15] = 1;
+
+	// Pre-register Vertex Shader
+	const std::string vertPath = "Shaders/Default.vert.tspf";
+	std::string vertKey = NormalizeKey(ResolveAssetPath(vertPath));
+	{
+		std::unique_lock lock(shaderCache.mutex);
+		shaderCache.pathToId[vertKey] = defaultVertId;
+	}
+	LoadShader(vertPath);
+
+	// Pre-register Fragment Shader
+	const std::string fragPath = "Shaders/Default.frag.tspf";
+	std::string fragKey = NormalizeKey(ResolveAssetPath(fragPath));
+	{
+		std::unique_lock lock(shaderCache.mutex);
+		shaderCache.pathToId[fragKey] = defaultFragId;
+	}
+	LoadShader(fragPath);
+
+	// Pre-register Shader Collection
+	// Note: We replicate the key generation logic from ResourceManagerShaderCollection.cpp
+	// to ensure the specific UUID is picked up.
+	// Logic: static_cast<std::uint32_t>(request.stage) << ":" << request.key << ";";
+	// Loop order matches the input vector.
+	std::ostringstream combined;
+	combined << static_cast<std::uint32_t>(ShaderStage::Vertex) << ":" << vertKey << ";";
+	combined << static_cast<std::uint32_t>(ShaderStage::Fragment) << ":" << fragKey << ";";
+	std::string collectionKey = combined.str();
+
+	{
+		std::unique_lock lock(shaderCollectionCache.mutex);
+		shaderCollectionCache.pathToId[collectionKey] = defaultCollectionId;
+	}
+
+	std::vector<ShaderStagePath> stages = {
+		{ ShaderStage::Vertex, vertPath },
+		{ ShaderStage::Fragment, fragPath }
+	};
+	LoadShaderCollection(stages);
+}
+
+TerraEngine::UUID ResourceManager::GetDefaultShaderCollectionID() const
+{
+	TerraEngine::UUID id{};
+	id.fill(0);
+	id[15] = 1;
+	return id;
+}
+
 void ResourceManager::ClearCaches()
 {
 	// Acquire exclusive locks in a consistent order to avoid deadlocks if
