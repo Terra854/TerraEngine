@@ -194,16 +194,16 @@ configure_file(
 
 # Generate runtime_version.h required by nethost/utils.h
 file(WRITE ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/runtime_version.h
-"#define RuntimeProductVersion \"9.0.0\"
-#define RuntimeBuildVersion \"9.0.0\"
+"#define RuntimeProductVersion \"10.0.1\"
+#define RuntimeBuildVersion \"10.0.1\"
 ")
 
 # Generate _version.h required by nethost/utils.cpp (on Windows)
 file(WRITE ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/_version.h
-"#define VER_PRODUCTVERSION_STR \"9.0.0\"
-#define VER_FILEVERSION_STR \"9.0.0.0\"
-#define VER_PRODUCTVERSION 9,0,0,0
-#define VER_FILEVERSION 9,0,0,0
+"#define VER_PRODUCTVERSION_STR \"10.0.1\"
+#define VER_FILEVERSION_STR \"10.0.1.0\"
+#define VER_PRODUCTVERSION 10,0,1,0
+#define VER_FILEVERSION 10,0,1,0
 ")
 
 set(NETHOST_SOURCES
