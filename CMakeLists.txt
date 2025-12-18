@@ -257,6 +257,17 @@ add_custom_target(TerraEngine.Core ALL
     SOURCES ${MANAGED_CORE_SOURCES}
 )
 
+set(MANAGED_EDITOR_SOURCES
+	Managed/TerraEngine.Editor/Source/EditorApplication.cs
+)
+
+add_custom_target(TerraEngine.Editor.Managed ALL
+    COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -o "${MANAGED_OUTPUT_DIR}"
+    COMMENT "Building Managed Assembly: TerraEngine.Editor"
+    SOURCES ${MANAGED_EDITOR_SOURCES}
+)
+add_dependencies(TerraEngine.Editor.Managed TerraEngine.Core)
+
 add_executable(TerraEngine-Launcher
     ${LAUNCHER_SOURCES}
 )
@@ -309,22 +320,24 @@ target_include_directories(TerraEngineShaderCompiler
 )
 
 # --- ImGui -------------------------------------------------------------------
-set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/imgui)
-add_library(TerraEngine-ImGui STATIC
-	${IMGUI_DIR}/imgui.cpp
-	${IMGUI_DIR}/imgui_demo.cpp
-	${IMGUI_DIR}/imgui_draw.cpp
-	${IMGUI_DIR}/imgui_tables.cpp
-	${IMGUI_DIR}/imgui_widgets.cpp
-	${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
-	${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+set(IMGUI_STATIC "no" CACHE STRING "Build cimgui shared" FORCE)
+set(IMGUI_WCHAR32 ON CACHE BOOL "Use 32-bit WCHAR" FORCE)
+set(CIMGUI_VARGS0 1 CACHE STRING "CIMGUI VARGS0" FORCE)
+
+add_subdirectory(External/cimgui)
+
+# Ensure cimgui exports C++ ImGui symbols so TerraEngine-Editor can use them
+target_compile_definitions(cimgui 
+	PRIVATE 
+		"IMGUI_API=__declspec(dllexport)"
+	INTERFACE
+		"IMGUI_API=__declspec(dllimport)"
 )
-target_include_directories(TerraEngine-ImGui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
-target_link_libraries(TerraEngine-ImGui PUBLIC glfw Vulkan::Headers)
-target_compile_definitions(TerraEngine-ImGui PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES)
 
 # --- Editor ------------------------------------------------------------------
+set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui)
 set(IMGUI_FILE_DIALOG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiFileDialog)
+
 add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/EditorMain.cpp
 	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
@@ -337,6 +350,9 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
+	# Include Backends directly in Editor
+	${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+	${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
 )
 
 target_include_directories(TerraEngine-Editor
@@ -348,6 +364,7 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
 		${IMGUI_FILE_DIALOG_DIR}
+		${IMGUI_DIR}/backends
 )
 
 target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM)
@@ -355,8 +372,11 @@ target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOT
 target_link_libraries(TerraEngine-Editor
 	PRIVATE
 		TerraEngine-Engine
-		TerraEngine-ImGui
+		cimgui
+		glfw
+		Vulkan::Headers
 )
+
 
 	#set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
 	set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
@@ -466,6 +486,19 @@ endif()
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 		OPTIONAL
 	)
+
+	# Install Managed Assemblies to Editor
+	install(FILES 
+		${MANAGED_OUTPUT_DIR}/TerraEngine.Core.dll
+		${MANAGED_OUTPUT_DIR}/TerraEngine.Editor.dll
+		${MANAGED_OUTPUT_DIR}/TerraEngine.Editor.runtimeconfig.json
+		${MANAGED_OUTPUT_DIR}/Hexa.NET.ImGui.dll
+		${MANAGED_OUTPUT_DIR}/HexaGen.Runtime.dll
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	)
+	
+	# Install cimgui (TerraEngine-ImGui)
+	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
 
 	# Install dependencies (glfw, rttr) to both
 	install(TARGETS glfw

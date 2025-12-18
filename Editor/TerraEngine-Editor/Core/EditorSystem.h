@@ -21,8 +21,17 @@ public:
 private:
 	EditorContext context;
 	std::shared_ptr<ProjectHubSubsystem> projectHub;
-	std::shared_ptr<MainEditorSubsystem> mainEditor;
+    std::shared_ptr<MainEditorSubsystem> mainEditor;
 
-	bool initialized = false;
+    // Managed Editor Hooks
+    typedef void (*ManagedInitFn)(void*);
+    typedef void (*ManagedUpdateFn)(float);
+    typedef void (*ManagedShutdownFn)();
+
+    ManagedInitFn managedInitialize = nullptr;
+    ManagedUpdateFn managedUpdate = nullptr;
+    ManagedShutdownFn managedShutdown = nullptr;
+
+    bool initialized = false;
 };
 

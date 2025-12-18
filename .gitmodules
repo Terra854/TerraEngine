@@ -28,10 +28,6 @@
 [submodule "External/VMA"]
 	path = External/VMA
 	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-[submodule "External/imgui"]
-	path = External/imgui
-	url = https://github.com/ocornut/imgui.git
-	branch = docking
 [submodule "External/ImGuiFileDialog"]
 	path = External/ImGuiFileDialog
 	url = https://github.com/aiekick/ImGuiFileDialog.git
@@ -39,3 +35,9 @@
 [submodule "External/dotnet/runtime"]
 	path = External/dotnet/runtime
 	url = https://github.com/dotnet/runtime.git
+[submodule "External/cimgui"]
+	path = External/cimgui
+	url = https://github.com/JunaMeinhold/cimgui
+[submodule "External/Hexa.NET.ImGui"]
+	path = External/Hexa.NET.ImGui
+	url = https://github.com/HexaEngine/Hexa.NET.ImGui

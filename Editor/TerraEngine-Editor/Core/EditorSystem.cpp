@@ -7,6 +7,7 @@
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Window/WindowSystem.h"
+#include "Engine/DotNet/DotNetHost.h"
 
 // ImGui
 #include <imgui.h>
@@ -226,6 +227,55 @@ void EditorSystem::Initialize() {
 
     if (projectHub) projectHub->OnBackendReady();
     if (mainEditor) mainEditor->OnBackendReady();
+
+    // --- Initialize .NET Host and Load Editor Assembly ---
+    std::filesystem::path cwd = std::filesystem::current_path();
+    std::filesystem::path binDir;
+    
+    // Try to locate artifacts
+    if (std::filesystem::exists(cwd / "TerraEngine.Editor.runtimeconfig.json")) {
+        binDir = cwd;
+    } else if (std::filesystem::exists(cwd / "Editor" / "TerraEngine.Editor.runtimeconfig.json")) {
+        binDir = cwd / "Editor";
+    } else {
+        // Fallback or error
+        binDir = cwd / "Editor"; 
+        std::cerr << "[DotNet] Could not find runtimeconfig.json in " << cwd << " or " << (cwd/"Editor") << std::endl;
+    }
+
+    // Ensure absolute paths
+    binDir = std::filesystem::absolute(binDir);
+    std::filesystem::path configPath = binDir / "TerraEngine.Editor.runtimeconfig.json";
+    std::filesystem::path dllPath = binDir / "TerraEngine.Editor.dll";
+
+    std::cout << "[DotNet] Loading Runtime Config: " << configPath << std::endl;
+    std::cout << "[DotNet] Loading Assembly: " << dllPath << std::endl;
+
+    if (!DotNetHost::Instance().Initialize(configPath)) {
+        std::cerr << "Failed to initialize .NET Host with config: " << configPath << std::endl;
+    } else {
+        managedInitialize = (ManagedInitFn)DotNetHost::Instance().GetManagedFunction(
+            dllPath,
+            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+            L"Initialize"
+        );
+        managedUpdate = (ManagedUpdateFn)DotNetHost::Instance().GetManagedFunction(
+            dllPath,
+            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+            L"Update"
+        );
+        managedShutdown = (ManagedShutdownFn)DotNetHost::Instance().GetManagedFunction(
+            dllPath,
+            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+            L"Shutdown"
+        );
+
+        if (managedInitialize) {
+            managedInitialize(ImGui::GetCurrentContext());
+        } else {
+            std::cerr << "Failed to load Managed Initialize function." << std::endl;
+        }
+    }
 }
 
 void EditorSystem::Update(float deltaTime) {
@@ -236,6 +286,11 @@ void EditorSystem::Update(float deltaTime) {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     
+    // Call Managed Editor Update
+    if (managedUpdate) {
+        managedUpdate(deltaTime);
+    }
+
     if (context.projectManager->HasActiveProject()) {
         AssetDatabase::Instance().Update();
         mainEditor->Update(deltaTime);
@@ -265,6 +320,10 @@ void EditorSystem::Update(float deltaTime) {
 }
 
 void EditorSystem::Shutdown() {
+    if (managedShutdown) {
+        managedShutdown();
+    }
+    
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
