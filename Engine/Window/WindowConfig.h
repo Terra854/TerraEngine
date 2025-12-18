@@ -8,4 +8,5 @@ struct WindowConfig {
     int width = 1280;
     int height = 720;
     std::string title = "TerraEngine";
+    bool resizable = true;
 };

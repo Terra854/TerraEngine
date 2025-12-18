@@ -48,6 +48,7 @@ void Engine::Initialize()
 	// The window system is initialized first so other systems can depend on
 	// a valid window context if they need one later.
 	WindowConfig windowConfig{};
+	windowConfig.resizable = editorMode;
 	WindowSystem& windowSystem = WindowSystem::Instance();
 	windowSystem.Configure(std::make_unique<GlfwWindowBackend>(), windowConfig, [this]() {
 		SignalShutdown();

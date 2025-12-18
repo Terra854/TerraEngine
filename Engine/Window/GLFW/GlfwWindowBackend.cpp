@@ -26,6 +26,9 @@ void GlfwWindowBackend::Initialize(const WindowConfig& config)
 	// Explicitly disable OpenGL context creation so Vulkan can own the surface.
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
+	// Apply resizable hint based on configuration
+	glfwWindowHint(GLFW_RESIZABLE, config.resizable ? GLFW_TRUE : GLFW_FALSE);
+
 	// Create the GLFW window using the configuration provided by the engine.
 	windowHandle = glfwCreateWindow(config.width, config.height, config.title.c_str(), nullptr, nullptr);
 	if (!windowHandle) {

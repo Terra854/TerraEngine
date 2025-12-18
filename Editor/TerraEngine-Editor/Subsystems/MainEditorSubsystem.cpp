@@ -253,7 +253,26 @@ void MainEditorSubsystem::DrawUI() {
     ImGui::Begin("Scene View");
     if (sceneTextureID) {
         ImVec2 contentSize = ImGui::GetContentRegionAvail();
-        ImGui::Image((ImTextureID)sceneTextureID, contentSize);
+        
+        // Constrain to 16:9
+        float targetRatio = 16.0f / 9.0f;
+        float currentRatio = contentSize.x / contentSize.y;
+        ImVec2 imageSize = contentSize;
+        
+        if (currentRatio > targetRatio) {
+            // Window is wider than target, limit width
+            imageSize.x = contentSize.y * targetRatio;
+        } else {
+            // Window is taller than target, limit height
+            imageSize.y = contentSize.x / targetRatio;
+        }
+        
+        // Center image
+        float cursorX = ImGui::GetCursorPosX() + (contentSize.x - imageSize.x) * 0.5f;
+        float cursorY = ImGui::GetCursorPosY() + (contentSize.y - imageSize.y) * 0.5f;
+        ImGui::SetCursorPos(ImVec2(cursorX, cursorY));
+        
+        ImGui::Image((ImTextureID)sceneTextureID, imageSize);
     } else {
         ImGui::Text("Scene rendering not available.");
     }
