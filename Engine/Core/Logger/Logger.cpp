@@ -1,14 +1,86 @@
 #include "Logger.h"
 
-void Logger::Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message)
+void Logger::Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message, bool isManaged)
 {
     LogEntry entry;
     entry.timestamp = std::chrono::system_clock::now();
     entry.level = level;
-    entry.file = ExtractFileName(file);
+    entry.file = isManaged ? file : ExtractFileName(file);
     entry.line = line;
-    entry.functionSignature = functionSignature;
+    
+    std::string cleanedSignature = functionSignature;
+    if (!isManaged) {
+        // Simple cleanup for __PRETTY_FUNCTION__ (GCC/Clang) or __FUNCSIG__ (MSVC)
+        // We want to remove the return type and arguments, while preserving template parameters.
+        
+        // 1. Remove arguments: 
+        // "void Class<T>::Method(int)" -> "void Class<T>::Method"
+        // "void Class::Method<T>(int)" -> "void Class::Method<T>"
+        // Note: we must find the LAST '(', because templates can contain '(' in some complex cases, 
+        // but the argument list always ends with ')' and starts after the method name.
+        // A better approach is to find the '(' that is NOT inside '< >'.
+        
+        size_t parenPos = std::string::npos;
+        int angleBracketDepth = 0;
+        for (size_t i = 0; i < cleanedSignature.length(); ++i) {
+            if (cleanedSignature[i] == '<') angleBracketDepth++;
+            else if (cleanedSignature[i] == '>') angleBracketDepth--;
+            else if (cleanedSignature[i] == '(' && angleBracketDepth == 0) {
+                parenPos = i;
+                break;
+            }
+        }
+
+        if (parenPos != std::string::npos) {
+            cleanedSignature = cleanedSignature.substr(0, parenPos);
+        }
+
+        // 2. Trim trailing spaces
+        size_t lastNonSpace = cleanedSignature.find_last_not_of(" \t\r\n");
+        if (lastNonSpace != std::string::npos) {
+            cleanedSignature = cleanedSignature.substr(0, lastNonSpace + 1);
+        } else {
+            cleanedSignature.clear();
+        }
+        
+        // 3. Remove return type: "void Class<T>::Method" -> "Class<T>::Method"
+        // Again, find the space that is NOT inside '< >'.
+        size_t lastSpace = std::string::npos;
+        angleBracketDepth = 0;
+        for (int i = (int)cleanedSignature.length() - 1; i >= 0; --i) {
+            if (cleanedSignature[i] == '>') angleBracketDepth++;
+            else if (cleanedSignature[i] == '<') angleBracketDepth--;
+            else if (cleanedSignature[i] == ' ' && angleBracketDepth == 0) {
+                lastSpace = i;
+                break;
+            }
+        }
+
+        if (lastSpace != std::string::npos) {
+            cleanedSignature = cleanedSignature.substr(lastSpace + 1);
+        }
+
+        // 4. Remove redundant keywords
+        auto removeKeyword = [&](const std::string& keyword) {
+            size_t pos = 0;
+            while ((pos = cleanedSignature.find(keyword, pos)) != std::string::npos) {
+                cleanedSignature.erase(pos, keyword.length());
+            }
+        };
+        removeKeyword("struct ");
+        removeKeyword("class ");
+        removeKeyword("enum ");
+        removeKeyword("const ");
+        removeKeyword("volatile ");
+    }
+
+    if (cleanedSignature.empty()) {
+        cleanedSignature = "Unknown";
+    }
+
+    entry.functionSignature = cleanedSignature;
     entry.message = message;
+    entry.isManaged = isManaged;
 
     {
         std::lock_guard<std::mutex> lock(m);
@@ -62,9 +134,16 @@ void Logger::ProcessEntries()
 
         // Build the final log message with the originating file and line for quick debugging.
         std::stringstream logStream;
-        logStream << "[" << timeStream.str() << "][" << LogLevelToString(entry.level) << "]["
-                  << entry.file << ":" << entry.line << "][" << entry.functionSignature << "] "
-                  << entry.message;
+        if (entry.isManaged) {
+            logStream << "[" << timeStream.str() << "][" << LogLevelToString(entry.level) << "][C#]["
+                << entry.functionSignature << ":" << entry.line << "] "
+                << entry.message;
+        }
+        else {
+            logStream << "[" << timeStream.str() << "][" << LogLevelToString(entry.level) << "]["
+                << entry.functionSignature << ":" << entry.line << "] "
+                << entry.message;
+        }
 
         // Get the appropriate color code and then output the message.
         std::string color = GetColorCode(entry.level);

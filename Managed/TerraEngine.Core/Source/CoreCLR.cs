@@ -1,5 +1,8 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
+using System.Diagnostics;
+using System.Reflection;
 
 namespace TerraEngine.Core
 {
@@ -29,7 +32,7 @@ namespace TerraEngine.Core
 
         // Native function imports
         [DllImport("TerraEngine-Engine")]
-        internal static extern void Native_Log(int level, string message);
+        internal static extern void Native_Log(int level, string message, string function, int line);
 
         [DllImport("TerraEngine-Engine")]
         internal static extern uint Native_Entity_Create(string? name);
@@ -46,10 +49,28 @@ namespace TerraEngine.Core
 
     public static class Log
     {
-        public static void Info(string message) => InternalCalls.Native_Log((int)LogLevel.Info, message);
-        public static void Debug(string message) => InternalCalls.Native_Log((int)LogLevel.Debug, message);
-        public static void Warning(string message) => InternalCalls.Native_Log((int)LogLevel.Warning, message);
-        public static void Error(string message) => InternalCalls.Native_Log((int)LogLevel.Error, message);
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void Info(string message, [CallerLineNumber] int line = 0) 
+            => InternalCalls.Native_Log((int)LogLevel.Info, message, GetCallerName(), line);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void Debug(string message, [CallerLineNumber] int line = 0) 
+            => InternalCalls.Native_Log((int)LogLevel.Debug, message, GetCallerName(), line);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void Warning(string message, [CallerLineNumber] int line = 0) 
+            => InternalCalls.Native_Log((int)LogLevel.Warning, message, GetCallerName(), line);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void Error(string message, [CallerLineNumber] int line = 0) 
+            => InternalCalls.Native_Log((int)LogLevel.Error, message, GetCallerName(), line);
+
+        private static string GetCallerName()
+        {
+            var method = new StackFrame(2).GetMethod();
+            if (method == null || method.DeclaringType == null) return "Unknown";
+            return $"{method.DeclaringType.FullName}.{method.Name}";
+        }
     }
 
     public struct Entity

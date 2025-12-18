@@ -10,9 +10,9 @@ static std::mutex g_ScriptGlueMutex;
 
 extern "C" {
 
-    void Native_Log(int level, const char* message) {
+    void Native_Log(int level, const char* message, const char* function, int line) {
         LogLevel logLevel = static_cast<LogLevel>(level);
-        TERRAENGINE_LOG(logLevel, "[C#] " << message);
+        Logger::Instance().Log(logLevel, "C#", line, function, message, true);
     }
 
     uint32_t Native_Entity_Create(const char* name) {

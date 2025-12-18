@@ -5,7 +5,7 @@
 
 extern "C" {
     // Logging
-    TERRAENGINE_API void Native_Log(int level, const char* message);
+    TERRAENGINE_API void Native_Log(int level, const char* message, const char* function, int line);
 
     // Entity Management (Placeholders for now)
     TERRAENGINE_API uint32_t Native_Entity_Create(const char* name);

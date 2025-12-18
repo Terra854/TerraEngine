@@ -27,6 +27,7 @@ struct LogEntry {
 	int line = 0;                                    // Source line where the log macro was invoked.
 	std::string functionSignature;                   // Function signature of the caller for richer context.
 	std::string message;                             // Human-readable message payload.
+	bool isManaged = false;                          // Whether the log originated from managed code (C#).
 };
 
 class Logger {
@@ -42,7 +43,7 @@ public:
 	Logger& operator=(const Logger&) = delete;
 
 	// Thread-safe log function that records the call-site file, line, and function signature.
-	void Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message);
+	void Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message, bool isManaged = false);
 
 	// Gracefully shutdown the logger thread.
 	void Shutdown();
@@ -66,7 +67,7 @@ private:
 	std::atomic<bool> done;
 };
 
-// Define a macro to pick the proper function signature macro depending on the compiler.
+// Macro to simplify logging while capturing source file, line, and function signature.
 #if defined(__GNUC__) || defined(__clang__)
 #define LOG_FUNCTION __PRETTY_FUNCTION__
 #elif defined(_MSC_VER)
