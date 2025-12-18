@@ -228,7 +228,7 @@ void EditorSystem::Initialize() {
     if (mainEditor) mainEditor->OnBackendReady();
 }
 
-void EditorSystem::Update() {
+void EditorSystem::Update(float deltaTime) {
     if (!initialized) return;
 
     // Standard ImGui Frame
@@ -236,11 +236,9 @@ void EditorSystem::Update() {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     
-    float dt = 0.016f; // Placeholder, MainEngine handles timing for subsystems usually via Update() delta
-    
     if (context.projectManager->HasActiveProject()) {
         AssetDatabase::Instance().Update();
-        mainEditor->Update(dt);
+        mainEditor->Update(deltaTime);
         mainEditor->DrawUI();
 		// Enable cursor wrap only while dragging inspector values to avoid edge clipping.
 		if (mainEditor && mainEditor->IsInspectorValueDragging()) {
@@ -249,7 +247,7 @@ void EditorSystem::Update() {
 			WrapCursorForInspectorDrag(window);
 		}
     } else {
-        projectHub->Update(dt);
+        projectHub->Update(deltaTime);
         projectHub->DrawUI();
     }
     

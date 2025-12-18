@@ -2,6 +2,7 @@
 
 #include "Core/SystemBase.h"
 #include "RHI/RHIContext.h"
+#include "Core/Object/ObjectManager.h"
 #include <memory>
 
 class RenderSystem : public SystemsBase
@@ -16,13 +17,15 @@ public:
 	~RenderSystem() override = default;
 
 	void Initialize() override;
-	void Update() override;
+	void Update(float deltaTime) override;
 	void Shutdown() override;
 	std::string SystemName() override;
 
 	RHIContext* GetContext() const { return rhi.get(); }
 
 private:
-	RenderSystem() = default;
+	RenderSystem();
 	std::unique_ptr<RHIContext> rhi;
+	ObjectManager& objManager = ObjectManager::instance();
+	bool initialized = false;
 };

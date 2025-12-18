@@ -27,6 +27,11 @@ RenderSystem& RenderSystem::Instance()
 	return instance;
 }
 
+RenderSystem::RenderSystem()
+	: objManager(ObjectManager::instance())
+{
+}
+
 void RenderSystem::Initialize()
 {
 	TERRAENGINE_LOG(LogLevel::Info, "Initializing RenderSystem...");
@@ -46,11 +51,15 @@ void RenderSystem::Initialize()
 			TERRAENGINE_LOG(LogLevel::Error, "Unknown exception in resize callback");
 		}
 	});
+
+	initialized = true;
 }
 
-void RenderSystem::Update()
+void RenderSystem::Update(float deltaTime)
 {
-	ObjectManager& objManager = ObjectManager::instance();
+	if (!initialized) {
+		return;
+	}
 	// Capture all transforms first so hierarchical world transforms can be derived for cameras and renderables.
 	std::unordered_map<entt::entity, Transform> localTransforms;
 	objManager.forEachObjectWithComponents<Transform>(

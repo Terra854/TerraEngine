@@ -20,7 +20,10 @@ void Engine::Run()
 {
 	Initialize();
 	
-	while(Update()) {}
+	while(true) {
+		const double deltaSeconds = frameTimer.Tick();
+		if (!Update((float)deltaSeconds)) break;
+	}
 	
 	Shutdown();
 }
@@ -87,23 +90,21 @@ void Engine::Initialize()
 	TERRAENGINE_LOG(LogLevel::Info, "Setup complete!");
 }
 
-bool Engine::Update()
+bool Engine::Update(float deltaTime)
 {
 	if (!running) {
 		return false;
 	}
 
-	const double deltaSeconds = frameTimer.Tick();
-	
 	// Run each registered system. Systems can consult the engine's
 	// state or the delta time if they need it for frame dependent
 	// calculations.
 	for (auto* system : systems) {
-		system->Update();
+		system->Update(deltaTime);
 	}
 	
 	if (editorMode) {
-		editorSystem->Update();
+		editorSystem->Update(deltaTime);
 	}
 
 	// If a system requested shutdown (e.g., the window was closed),
@@ -115,7 +116,7 @@ bool Engine::Update()
 	// Simple pacing to avoid a busy loop when no systems perform a
 	// blocking wait. Sleep for a tiny duration based on the measured
 	// delta time to yield time slices back to the OS.
-	const auto sleepDuration = std::chrono::duration<double>(std::max(0.0, 0.001 - deltaSeconds));
+	const auto sleepDuration = std::chrono::duration<double>(std::max(0.0, 0.001 - (double)deltaTime));
 	if (sleepDuration.count() > 0.0) {
 		std::this_thread::sleep_for(sleepDuration);
 	}

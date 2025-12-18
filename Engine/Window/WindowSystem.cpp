@@ -66,7 +66,7 @@ void WindowSystem::Initialize()
 	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem initialized using backend: " << backend->BackendName());
 }
 
-void WindowSystem::Update()
+void WindowSystem::Update(float deltaTime)
 {
 	if (!initialized) {
 		return;

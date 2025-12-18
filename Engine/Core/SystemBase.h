@@ -11,8 +11,8 @@ public:
 	// System Initialization
 	virtual void Initialize() = 0;
 
-	// System Update
-	virtual void Update() = 0;
+	// System Update with Delta Time
+	virtual void Update(float deltaTime) = 0;
 
 	// System freeing resources
 	virtual void Shutdown() = 0;

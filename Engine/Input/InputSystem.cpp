@@ -75,21 +75,13 @@ void InputSystem::Initialize()
 	TERRAENGINE_LOG(LogLevel::Info, "InputSystem initialized using backend: " << backend->BackendName());
 }
 
-void InputSystem::Update()
+void InputSystem::Update(float deltaTime)
 {
 	if (!initialized) {
 		return;
 	}
 
-	// Input state must update after the window pumps platform events. This
-	// sequential ordering keeps callbacks in the same frame while avoiding extra
-	// synchronization primitives that would complicate multithreaded use.
-	// Clear the scroll delta before polling so each frame reflects only the
-	// most recent scroll input. Without this reset, consumers would continue to
-	// observe the previous frame's delta and react as if scrolling never ended.
-	scrollDelta = {0.0, 0.0};
 	backend->Update();
-	cursorPosition = backend->GetCursorPosition();
 }
 
 void InputSystem::Shutdown()

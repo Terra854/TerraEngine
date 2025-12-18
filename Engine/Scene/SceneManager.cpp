@@ -50,9 +50,9 @@ void SceneManager::Initialize()
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager initialized with root " << sceneRoot);
 }
 
-void SceneManager::Update()
+void SceneManager::Update(float deltaTime)
 {
-	// Empty for now
+	// No per-frame updates currently required for the static scene management
 }
 
 void SceneManager::Shutdown()

@@ -12,7 +12,7 @@ class EditorSystem : public SystemsBase {
 public:
 	void Setup(Engine* engine);
 	void Initialize() override;
-	void Update() override;
+	void Update(float deltaTime) override;
 	void Shutdown() override;
 	std::string SystemName() override;
 

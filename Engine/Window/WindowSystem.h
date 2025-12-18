@@ -34,7 +34,7 @@ public:
 	IWindowBackend* GetBackend() const { return backend.get(); }
 
 	void Initialize() override;
-	void Update() override;
+	void Update(float deltaTime) override;
 	void Shutdown() override;
 	std::string SystemName() override;
 

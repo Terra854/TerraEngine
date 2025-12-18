@@ -40,6 +40,7 @@ Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp
 	Engine/DotNet/DotNetHost.cpp
 	Engine/Scripting/ScriptingSystem.cpp
+	Engine/Scripting/ScriptGlue.cpp
 )
 
 set(ENGINE_HEADERS
@@ -73,6 +74,7 @@ Engine/Renderer/RHI/Vulkan/VulkanCommonIncludes.h
 Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h
 Engine/DotNet/DotNetHost.h
 Engine/Scripting/ScriptingSystem.h
+Engine/Scripting/ScriptComponent.h
 Engine/Debug.h
 )
 
@@ -241,6 +243,7 @@ endif()
 
 set(MANAGED_CORE_SOURCES
 	Managed/TerraEngine.Core/Source/CoreCLR.cs
+	Managed/TerraEngine.Core/Source/Math.cs
 )
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Managed PREFIX "Managed" FILES ${MANAGED_CORE_SOURCES})

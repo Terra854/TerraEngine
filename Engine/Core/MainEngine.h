@@ -37,7 +37,7 @@ class TERRAENGINE_API Engine {
 		void SetEditorMode(SystemsBase* system);
 
 		void Initialize();
-		bool Update();
+		bool Update(float deltaTime);
 		void Shutdown();
 
 		template <typename T>

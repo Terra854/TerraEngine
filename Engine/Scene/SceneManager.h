@@ -50,7 +50,7 @@ public:
 	~SceneManager() override;
 
 	void Initialize() override;
-	void Update() override;
+	void Update(float deltaTime) override;
 	void Shutdown() override;
 	std::string SystemName() override;
 
