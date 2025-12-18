@@ -56,7 +56,7 @@ cmake --build out/build_gemini --target install
 ```
 
 ### Running
-After installation, the executable will be located in the installation directory (typically `out/build/Build/<Config>/`).
+After installation, the executable will be located in the installation directory (typically `out/build_gemini/Build/<Config>/`).
 ```bash
 ./out/build_gemini/Build/Debug/TerraEngine-Launcher.exe
 ```
