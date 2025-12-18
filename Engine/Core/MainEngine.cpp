@@ -9,6 +9,7 @@
 #include "Window/GLFW/GlfwWindowBackend.h"
 #include "Window/WindowSystem.h"
 #include "Object/ComponentRegistry.h"
+#include "Scripting/ScriptingSystem.h"
 
 #include <algorithm>
 #include <chrono>
@@ -69,6 +70,10 @@ void Engine::Initialize()
 	// RenderSystem consumes scene data and produces frames.
 	RenderSystem& renderSystem = RenderSystem::Instance();
 	systems.push_back(&renderSystem);
+
+	// ScriptingSystem manages the .NET runtime and gameplay scripts.
+	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+	systems.push_back(&scriptingSystem);
 	
 	for (auto* system : systems) {
 		system->Initialize();

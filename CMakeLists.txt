@@ -35,9 +35,11 @@ Engine/Window/WindowSystem.cpp
 Engine/Window/GLFW/GlfwWindowBackend.cpp
 Engine/ThreadPool/ThreadPool.cpp
 Engine/Renderer/RenderSystem.cpp
-Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
-Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
-Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp
+	Engine/DotNet/DotNetHost.cpp
+	Engine/Scripting/ScriptingSystem.cpp
 )
 
 set(ENGINE_HEADERS
@@ -69,6 +71,8 @@ Engine/Renderer/RHI/RHIContext.h
 Engine/Renderer/RHI/Vulkan/VulkanContext.h
 Engine/Renderer/RHI/Vulkan/VulkanCommonIncludes.h
 Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h
+Engine/DotNet/DotNetHost.h
+Engine/Scripting/ScriptingSystem.h
 Engine/Debug.h
 )
 
@@ -149,6 +153,7 @@ target_link_libraries(TerraEngine-Engine
 		Vulkan::Headers
 		volk
 		GPUOpen::VulkanMemoryAllocator
+		nethost
 )
 
 target_compile_definitions(TerraEngine-Engine
@@ -168,6 +173,86 @@ if(WIN32)
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
+
+# --- Managed Source ----------------------------------------------------------
+# The following files are managed C# source files. CMake will generate the 
+# .sln and .csproj files for these during the build process if configured.
+
+set(DOTNET_RUNTIME_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/External/dotnet/runtime/src/native/corehost)
+
+# Configure configure.h required by nethost/pal.h
+set(CLI_CMAKE_COMMIT_HASH "unknown")
+set(CLI_CMAKE_FALLBACK_OS "Windows")
+set(CLR_CMAKE_TARGET_OS "win")
+set(CLR_CMAKE_TARGET_ARCH "x64")
+configure_file(
+    ${DOTNET_RUNTIME_ROOT}/configure.h.in
+    ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/configure.h
+)
+
+# Generate runtime_version.h required by nethost/utils.h
+file(WRITE ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/runtime_version.h
+"#define RuntimeProductVersion \"9.0.0\"
+#define RuntimeBuildVersion \"9.0.0\"
+")
+
+# Generate _version.h required by nethost/utils.cpp (on Windows)
+file(WRITE ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/_version.h
+"#define VER_PRODUCTVERSION_STR \"9.0.0\"
+#define VER_FILEVERSION_STR \"9.0.0.0\"
+#define VER_PRODUCTVERSION 9,0,0,0
+#define VER_FILEVERSION 9,0,0,0
+")
+
+set(NETHOST_SOURCES
+    ${DOTNET_RUNTIME_ROOT}/nethost/nethost.cpp
+    ${DOTNET_RUNTIME_ROOT}/hostmisc/trace.cpp
+    ${DOTNET_RUNTIME_ROOT}/hostmisc/utils.cpp
+    ${DOTNET_RUNTIME_ROOT}/fxr_resolver.cpp
+    ${DOTNET_RUNTIME_ROOT}/fxr/fx_ver.cpp
+)
+
+if(WIN32)
+    list(APPEND NETHOST_SOURCES ${DOTNET_RUNTIME_ROOT}/hostmisc/pal.windows.cpp)
+    list(APPEND NETHOST_SOURCES ${DOTNET_RUNTIME_ROOT}/hostmisc/longfile.windows.cpp)
+else()
+    list(APPEND NETHOST_SOURCES ${DOTNET_RUNTIME_ROOT}/hostmisc/pal.unix.cpp)
+endif()
+
+add_library(nethost STATIC ${NETHOST_SOURCES})
+target_include_directories(nethost PUBLIC 
+    ${DOTNET_RUNTIME_ROOT}
+    ${DOTNET_RUNTIME_ROOT}/hostmisc
+    ${DOTNET_RUNTIME_ROOT}/nethost
+    ${DOTNET_RUNTIME_ROOT}/fxr
+    ${DOTNET_RUNTIME_ROOT}/..
+    ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost
+)
+target_compile_definitions(nethost PUBLIC 
+    NETHOST_USE_AS_STATIC
+)
+target_compile_definitions(nethost PRIVATE 
+    FEATURE_LIBHOST
+)
+
+if(WIN32)
+    target_compile_definitions(nethost PRIVATE TARGET_WINDOWS TARGET_AMD64)
+endif()
+
+set(MANAGED_CORE_SOURCES
+	Managed/TerraEngine.Core/Source/CoreCLR.cs
+)
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Managed PREFIX "Managed" FILES ${MANAGED_CORE_SOURCES})
+
+# Custom target to build the C# project
+# We use 'dotnet build' directly to avoid CMake C# generator limitations (VS only)
+set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Binaries/Managed")
+add_custom_target(TerraEngine.Core ALL
+    COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Managed/TerraEngine.Core/TerraEngine.Core.csproj" -c $<CONFIG> -o "${MANAGED_OUTPUT_DIR}"
+    COMMENT "Building Managed Assembly: TerraEngine.Core"
+    SOURCES ${MANAGED_CORE_SOURCES}
+)
 
 add_executable(TerraEngine-Launcher
     ${LAUNCHER_SOURCES}
