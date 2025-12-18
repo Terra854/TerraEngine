@@ -35,3 +35,7 @@
 [submodule "External/ImGuiFileDialog"]
 	path = External/ImGuiFileDialog
 	url = https://github.com/aiekick/ImGuiFileDialog.git
+
+[submodule "External/dotnet/runtime"]
+	path = External/dotnet/runtime
+	url = https://github.com/dotnet/runtime.git
