@@ -392,6 +392,12 @@ void VulkanContext::EndFrame() {
 	}
 }
 
+void VulkanContext::WaitIdle() {
+	if (impl && impl->device) {
+		vkDeviceWaitIdle(impl->device);
+	}
+}
+
 void VulkanContext::Shutdown() {
 	impl->Cleanup();
 }
@@ -439,6 +445,11 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	allocInfo.commandBufferCount = 1;
 	vkAllocateCommandBuffers(impl->device, &allocInfo, &uiCmd);
+
+	if (impl->currentFrame >= impl->extraPrimaryCommandBuffers.size()) {
+		impl->extraPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
+	}
+	impl->extraPrimaryCommandBuffers[impl->currentFrame].push_back(uiCmd);
 
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;

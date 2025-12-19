@@ -1,6 +1,7 @@
 #include "MainEditorSubsystem.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
+#include "EditorSystem.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
@@ -247,38 +248,41 @@ void MainEditorSubsystem::DrawUI() {
 
     DrawMainMenuBar();
     
-    DrawInspector();
-    DrawHierarchy();
+    if (showInspector) DrawInspector();
+    if (showHierarchy) DrawHierarchy();
 
-    ImGui::Begin("Scene View");
-    if (sceneTextureID) {
-        ImVec2 contentSize = ImGui::GetContentRegionAvail();
-        
-        // Constrain to 16:9
-        float targetRatio = 16.0f / 9.0f;
-        float currentRatio = contentSize.x / contentSize.y;
-        ImVec2 imageSize = contentSize;
-        
-        if (currentRatio > targetRatio) {
-            // Window is wider than target, limit width
-            imageSize.x = contentSize.y * targetRatio;
-        } else {
-            // Window is taller than target, limit height
-            imageSize.y = contentSize.x / targetRatio;
+    if (showSceneView) {
+        if (ImGui::Begin("Scene View", &showSceneView)) {
+            if (sceneTextureID) {
+                ImVec2 contentSize = ImGui::GetContentRegionAvail();
+                
+                // Constrain to 16:9
+                float targetRatio = 16.0f / 9.0f;
+                float currentRatio = contentSize.x / contentSize.y;
+                ImVec2 imageSize = contentSize;
+                
+                if (currentRatio > targetRatio) {
+                    // Window is wider than target, limit width
+                    imageSize.x = contentSize.y * targetRatio;
+                } else {
+                    // Window is taller than target, limit height
+                    imageSize.y = contentSize.x / targetRatio;
+                }
+                
+                // Center image
+                float cursorX = ImGui::GetCursorPosX() + (contentSize.x - imageSize.x) * 0.5f;
+                float cursorY = ImGui::GetCursorPosY() + (contentSize.y - imageSize.y) * 0.5f;
+                ImGui::SetCursorPos(ImVec2(cursorX, cursorY));
+                
+                ImGui::Image((ImTextureID)sceneTextureID, imageSize);
+            } else {
+                ImGui::Text("Scene rendering not available.");
+            }
         }
-        
-        // Center image
-        float cursorX = ImGui::GetCursorPosX() + (contentSize.x - imageSize.x) * 0.5f;
-        float cursorY = ImGui::GetCursorPosY() + (contentSize.y - imageSize.y) * 0.5f;
-        ImGui::SetCursorPos(ImVec2(cursorX, cursorY));
-        
-        ImGui::Image((ImTextureID)sceneTextureID, imageSize);
-    } else {
-        ImGui::Text("Scene rendering not available.");
+        ImGui::End();
     }
-    ImGui::End();
 
-    DrawProjectBrowser();
+    if (showProjectBrowser) DrawProjectBrowser();
 
     if (showDemoWindow) ImGui::ShowDemoWindow(&showDemoWindow);
 
@@ -286,7 +290,10 @@ void MainEditorSubsystem::DrawUI() {
 }
 
 void MainEditorSubsystem::DrawHierarchy() {
-    ImGui::Begin("Scene Hierarchy");
+    if (!ImGui::Begin("Scene Hierarchy", &showHierarchy)) {
+        ImGui::End();
+        return;
+    }
     
     auto& objManager = ObjectManager::instance();
     
@@ -446,7 +453,10 @@ void MainEditorSubsystem::DrawEntityNode(Object& obj) {
 }
 
 void MainEditorSubsystem::DrawInspector() {
-    ImGui::Begin("Inspector");
+    if (!ImGui::Begin("Inspector", &showInspector)) {
+        ImGui::End();
+        return;
+    }
 	// Reset per-frame drag tracking before drawing inspector controls.
 	inspectorValueDragging = false;
     
@@ -704,6 +714,30 @@ void MainEditorSubsystem::DrawMainMenuBar() {
             ImGui::MenuItem("ImGui Demo", nullptr, &showDemoWindow);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Windows")) {
+            if (ImGui::BeginMenu("C++")) {
+                ImGui::MenuItem("Scene Hierarchy", nullptr, &showHierarchy);
+                ImGui::MenuItem("Inspector", nullptr, &showInspector);
+                ImGui::MenuItem("Project Browser", nullptr, &showProjectBrowser);
+                ImGui::MenuItem("Scene View", nullptr, &showSceneView);
+                ImGui::EndMenu();
+            }
+            
+            if (ImGui::BeginMenu("C#")) {
+                EditorSystem* editorSystem = nullptr;
+                if (ctx && ctx->engine) {
+                    editorSystem = dynamic_cast<EditorSystem*>(ctx->engine->GetEditorSystem());
+                }
+                
+                if (editorSystem) {
+                    editorSystem->DrawWindowMenu();
+                } else {
+                    ImGui::TextDisabled("Editor System not found");
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenu();
+        }
         ImGui::EndMenuBar();
     }
 }
@@ -804,7 +838,10 @@ void MainEditorSubsystem::DrawDirectoryContent(const std::filesystem::path& path
 }
 
 void MainEditorSubsystem::DrawProjectBrowser() {
-    ImGui::Begin("Project Browser");
+    if (!ImGui::Begin("Project Browser", &showProjectBrowser)) {
+        ImGui::End();
+        return;
+    }
 
     if (ImGuiFileDialog::Instance()->Display("ImportAssetDlg")) {
         if (ImGuiFileDialog::Instance()->IsOk()) {

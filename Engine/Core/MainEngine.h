@@ -50,6 +50,8 @@ class TERRAENGINE_API Engine {
 			return nullptr;
 		}
 
+		SystemsBase* GetEditorSystem() { return editorSystem; }
+
 	private:
 		bool running = true;
 		// Non-owning references to systems stored as singletons elsewhere in the

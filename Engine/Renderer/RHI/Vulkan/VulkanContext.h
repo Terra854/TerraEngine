@@ -15,6 +15,7 @@ public:
 	void BeginFrame() override;
 	void RenderFrame(const FrameRenderData& frameData) override;
 	void EndFrame() override;
+	void WaitIdle() override;
 	void Shutdown() override;
 
 	void Resize(int width, int height);

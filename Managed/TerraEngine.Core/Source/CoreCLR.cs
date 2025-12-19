@@ -50,27 +50,20 @@ namespace TerraEngine.Core
     public static class Log
     {
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static void Info(string message, [CallerLineNumber] int line = 0) 
-            => InternalCalls.Native_Log((int)LogLevel.Info, message, GetCallerName(), line);
+        public static void Info(string message, [CallerLineNumber] int line = 0, [CallerMemberName] string memberName = "", [CallerFilePath] string filePath = "") 
+            => InternalCalls.Native_Log((int)LogLevel.Info, message, $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}.{memberName}", line);
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static void Debug(string message, [CallerLineNumber] int line = 0) 
-            => InternalCalls.Native_Log((int)LogLevel.Debug, message, GetCallerName(), line);
+        public static void Debug(string message, [CallerLineNumber] int line = 0, [CallerMemberName] string memberName = "", [CallerFilePath] string filePath = "") 
+            => InternalCalls.Native_Log((int)LogLevel.Debug, message, $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}.{memberName}", line);
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static void Warning(string message, [CallerLineNumber] int line = 0) 
-            => InternalCalls.Native_Log((int)LogLevel.Warning, message, GetCallerName(), line);
+        public static void Warning(string message, [CallerLineNumber] int line = 0, [CallerMemberName] string memberName = "", [CallerFilePath] string filePath = "") 
+            => InternalCalls.Native_Log((int)LogLevel.Warning, message, $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}.{memberName}", line);
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static void Error(string message, [CallerLineNumber] int line = 0) 
-            => InternalCalls.Native_Log((int)LogLevel.Error, message, GetCallerName(), line);
-
-        private static string GetCallerName()
-        {
-            var method = new StackFrame(2).GetMethod();
-            if (method == null || method.DeclaringType == null) return "Unknown";
-            return $"{method.DeclaringType.FullName}.{method.Name}";
-        }
+        public static void Error(string message, [CallerLineNumber] int line = 0, [CallerMemberName] string memberName = "", [CallerFilePath] string filePath = "") 
+            => InternalCalls.Native_Log((int)LogLevel.Error, message, $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}.{memberName}", line);
     }
 
     public struct Entity

@@ -15,5 +15,6 @@ public:
 	virtual void BeginFrame() = 0;
 	virtual void RenderFrame(const FrameRenderData& frameData) = 0;
 	virtual void EndFrame() = 0;
+	virtual void WaitIdle() = 0;
 	virtual void Shutdown() = 0;
 };

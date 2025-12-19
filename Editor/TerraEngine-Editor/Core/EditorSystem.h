@@ -27,11 +27,15 @@ private:
     typedef void (*ManagedInitFn)(void*);
     typedef void (*ManagedUpdateFn)(float);
     typedef void (*ManagedShutdownFn)();
+    typedef void (*ManagedDrawWindowMenuFn)();
 
     ManagedInitFn managedInitialize = nullptr;
     ManagedUpdateFn managedUpdate = nullptr;
     ManagedShutdownFn managedShutdown = nullptr;
+    ManagedDrawWindowMenuFn managedDrawWindowMenu = nullptr;
 
     bool initialized = false;
+public:
+    void DrawWindowMenu();
 };
 

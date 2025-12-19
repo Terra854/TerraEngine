@@ -1,12 +1,14 @@
 using System;
 using System.Runtime.InteropServices;
 using Hexa.NET.ImGui;
+using TerraEngine.Editor.Framework;
 
 namespace TerraEngine.Editor
 {
     public static unsafe class EditorApplication
     {
         private static bool _initialized = false;
+        private static StatusWindow _statusWindow = null!;
 
         [UnmanagedCallersOnly]
         public static void Initialize(IntPtr imguiContext)
@@ -18,6 +20,10 @@ namespace TerraEngine.Editor
             {
                 ImGui.SetCurrentContext((ImGuiContext*)imguiContext);
                 Console.WriteLine("[C#] Context Set.");
+
+                // Initialize Windows
+                _statusWindow = new StatusWindow();
+                WindowManager.RegisterWindow(_statusWindow);
             }
             catch (Exception e)
             {
@@ -32,16 +38,44 @@ namespace TerraEngine.Editor
         {
             if (!_initialized) return;
 
-            // ImGui commands
-            ImGui.Begin("C# Editor Window");
-            ImGui.Text($"Delta Time: {deltaTime}");
-            ImGui.Text($"FPS: {1.0f / deltaTime}");
-            
-            if (ImGui.Button("Hello from C#!"))
+            // Update specific window data if needed
+            if (_statusWindow != null)
             {
-                Console.WriteLine("Button Clicked!");
+                _statusWindow.UpdateData(deltaTime);
             }
-            ImGui.End();
+
+            // Render all registered windows
+            WindowManager.RenderWindows();
+        }
+
+        [UnmanagedCallersOnly]
+        public static void DrawWindowMenu()
+        {
+            var windows = WindowManager.GetWindows();
+            
+            // Fallback for debugging
+            if (!System.Linq.Enumerable.Any(windows))
+            {
+                if (_statusWindow == null) _statusWindow = new StatusWindow();
+                WindowManager.RegisterWindow(_statusWindow);
+                windows = WindowManager.GetWindows();
+            }
+
+            int count = 0;
+            foreach (var window in windows)
+            {
+                count++;
+                bool visible = window.IsVisible;
+                if (ImGui.MenuItem(window.Title, string.Empty, visible))
+                {
+                    window.IsVisible = !visible;
+                }
+            }
+
+            if (count == 0)
+            {
+                ImGui.TextDisabled("No registered C# windows");
+            }
         }
 
         [UnmanagedCallersOnly]

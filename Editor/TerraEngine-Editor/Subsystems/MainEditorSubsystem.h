@@ -40,6 +40,11 @@ private:
     
     // Internal State
     bool showDemoWindow = false;
+    bool showHierarchy = true;
+    bool showInspector = true;
+    bool showProjectBrowser = true;
+    bool showSceneView = true;
+
     void* sceneTextureID = nullptr;
     void* cachedSceneImageView = nullptr;
     bool sceneLoaded = false;

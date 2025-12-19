@@ -269,6 +269,11 @@ void EditorSystem::Initialize() {
             L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
             L"Shutdown"
         );
+        managedDrawWindowMenu = (ManagedDrawWindowMenuFn)DotNetHost::Instance().GetManagedFunction(
+            dllPath,
+            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+            L"DrawWindowMenu"
+        );
 
         if (managedInitialize) {
             managedInitialize(ImGui::GetCurrentContext());
@@ -323,6 +328,12 @@ void EditorSystem::Shutdown() {
     if (managedShutdown) {
         managedShutdown();
     }
+
+    // Ensure GPU is idle before destroying ImGui resources which might be in use
+    auto& renderSystem = RenderSystem::Instance();
+    if (auto* rhi = renderSystem.GetContext()) {
+        rhi->WaitIdle();
+    }
     
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
@@ -339,4 +350,12 @@ void EditorSystem::Shutdown() {
 
 std::string EditorSystem::SystemName() {
     return "EditorSystem";
+}
+
+void EditorSystem::DrawWindowMenu() {
+    if (managedDrawWindowMenu) {
+        managedDrawWindowMenu();
+    } else {
+        ImGui::TextDisabled("Managed menu hook not loaded");
+    }
 }
