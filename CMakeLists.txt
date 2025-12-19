@@ -320,19 +320,11 @@ target_include_directories(TerraEngineShaderCompiler
 )
 
 # --- ImGui -------------------------------------------------------------------
-set(IMGUI_STATIC "no" CACHE STRING "Build cimgui shared" FORCE)
+set(IMGUI_STATIC "yes" CACHE STRING "Build cimgui shared" FORCE)
 set(IMGUI_WCHAR32 ON CACHE BOOL "Use 32-bit WCHAR" FORCE)
 set(CIMGUI_VARGS0 1 CACHE STRING "CIMGUI VARGS0" FORCE)
 
 add_subdirectory(External/cimgui)
-
-# Ensure cimgui exports C++ ImGui symbols so TerraEngine-Editor can use them
-target_compile_definitions(cimgui 
-	PRIVATE 
-		"IMGUI_API=__declspec(dllexport)"
-	INTERFACE
-		"IMGUI_API=__declspec(dllimport)"
-)
 
 # --- Editor ------------------------------------------------------------------
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui)
