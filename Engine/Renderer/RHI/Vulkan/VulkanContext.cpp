@@ -345,20 +345,28 @@ void VulkanContext::EndFrame() {
 	submitInfo.pCommandBuffers = cmds.data();
 
 	VkSemaphore signalSemaphores[] = {impl->renderFinishedSemaphores[impl->currentFrame]};
-	if (!impl->editorMode) {
-		submitInfo.signalSemaphoreCount = 1;
-		submitInfo.pSignalSemaphores = signalSemaphores;
-	} else {
-		submitInfo.signalSemaphoreCount = 0;
-	}
+	// Always signal render finished, so Editor pass can wait on it
+	submitInfo.signalSemaphoreCount = 1;
+	submitInfo.pSignalSemaphores = signalSemaphores;
 
-	vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
-	VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
-	if (submitResult != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
-		std::cerr << "[Vulkan] QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.\n";
-		impl->RecreateSwapChain();
-		return;
+	if (impl->editorMode) {
+		// In Editor Mode, we defer the frame fence signal to the UI pass (PresentEditor)
+		// so the frame is considered "in flight" until the UI is also done.
+		VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+		if (submitResult != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
+			impl->RecreateSwapChain();
+			return;
+		}
+	} else {
+		vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
+		VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
+		if (submitResult != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
+			std::cerr << "[Vulkan] QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.\n";
+			impl->RecreateSwapChain();
+			return;
+		}
 	}
 
 	if (!impl->editorMode) {
@@ -410,10 +418,8 @@ void VulkanContext::EnableEditorMode() {
 void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	if (!impl->editorMode || !impl->initialized) return;
 
-	// Wait for Scene Render to finish (CPU Wait on Fence)
-	// This serializes Scene -> UI rendering, ensuring the offscreen texture is ready.
-	vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
-
+	// Removed CPU Fence Wait. We now rely on Semaphores to synchronize Scene -> UI on the GPU.
+	
 	uint32_t imageIndex;
 	VkResult result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX, impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &imageIndex);
 
@@ -461,12 +467,19 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	VkSubmitInfo submitInfo{};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	
-	// Wait ONLY for Image Available. Scene dependency handled by Fence.
-	VkSemaphore waitSemaphores[] = {impl->imageAvailableSemaphores[impl->currentFrame]};
-	VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = waitSemaphores;
-	submitInfo.pWaitDstStageMask = waitStages;
+	// Wait for BOTH Swapchain Image (Available) AND Scene Render (RenderFinished)
+	std::array<VkSemaphore, 2> waitSemaphores = {
+		impl->imageAvailableSemaphores[impl->currentFrame],
+		impl->renderFinishedSemaphores[impl->currentFrame]
+	};
+	std::array<VkPipelineStageFlags, 2> waitStages = {
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, // Swapchain available
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT // Scene done (safe to sample in UI fragment shader)
+	};
+	
+	submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
+	submitInfo.pWaitSemaphores = waitSemaphores.data();
+	submitInfo.pWaitDstStageMask = waitStages.data();
 
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &uiCmd;
@@ -476,15 +489,12 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = &uiSemaphore;
 
-	VkFence uiFence;
-	VkFenceCreateInfo fenceInfo{};
-	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-	vkCreateFence(impl->device, &fenceInfo, nullptr, &uiFence);
+	// Reset and use the main frame fence here, so BeginFrame waits for UI completion too.
+	vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
 
-	VkResult uiSubmitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, uiFence);
+	VkResult uiSubmitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
 	if (uiSubmitResult != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor QueueSubmit failed: " << uiSubmitResult);
-		vkDestroyFence(impl->device, uiFence, nullptr);
 		vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], 1, &uiCmd);
 		impl->RecreateSwapChain();
 		return;
@@ -507,10 +517,8 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		impl->RecreateOffscreenResources();
 	}
 
-	vkWaitForFences(impl->device, 1, &uiFence, VK_TRUE, UINT64_MAX);
-	vkDestroyFence(impl->device, uiFence, nullptr);
-	vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], 1, &uiCmd);
-
+	// Removed End-of-Frame Block. We proceed optimistically.
+	
 	impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 }
 
