@@ -7,7 +7,9 @@
 #include <vector>
 #include <string>
 #include <filesystem>
+#include <memory>
 #include "IEditorSubsystem.h"
+#include "../Framework/EditorWindow.h"
 
 class Object;
 
@@ -25,40 +27,39 @@ public:
 	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
 	bool IsInspectorValueDragging() const;
 
+    // API for Windows
+    EditorContext* GetContext() const { return ctx; }
+
+    std::optional<entt::entity> GetSelectedEntity() const { return selectedEntity; }
+    void SetSelectedEntity(std::optional<entt::entity> entity) { selectedEntity = entity; }
+
+    void* GetSceneTextureID() const { return sceneTextureID; }
+
+    template<typename T>
+    std::shared_ptr<T> GetWindow() const {
+        for (auto& win : m_Windows) {
+            if (auto casted = std::dynamic_pointer_cast<T>(win)) {
+                return casted;
+            }
+        }
+        return nullptr;
+    }
+
 private:
     void DrawMainMenuBar();
-    void DrawProjectBrowser();
-    void DrawHierarchy();
-    void DrawInspector();
-    void DrawEntityNode(Object& obj);
     
-    void DrawDirectoryTree(const std::filesystem::path& path);
-    void DrawDirectoryContent(const std::filesystem::path& path);
-
     EditorContext* ctx = nullptr;
     std::function<void()> onProjectClosed;
     
+    // Windows
+    std::vector<std::shared_ptr<EditorWindow>> m_Windows;
+
     // Internal State
     bool showDemoWindow = false;
-    bool showHierarchy = true;
-    bool showInspector = true;
-    bool showProjectBrowser = true;
-    bool showSceneView = true;
 
     void* sceneTextureID = nullptr;
     void* cachedSceneImageView = nullptr;
     bool sceneLoaded = false;
-	// Tracks per-frame inspector drag activity so the editor can wrap the cursor safely.
-	bool inspectorValueDragging = false;
     
     std::optional<entt::entity> selectedEntity;
-    std::map<entt::entity, std::vector<std::string>> perObjectComponentOrders;
-    entt::entity inspectorEntityId = entt::null;
-
-    // Project Browser State
-    std::filesystem::path m_CurrentDirectory;
-    std::string m_SearchFilter;
-    std::string m_HierarchySearchFilter;
-    float m_ThumbnailSize = 64.0f;
-    float m_Padding = 16.0f;
 };

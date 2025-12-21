@@ -1,0 +1,30 @@
+#pragma once
+#include "../Framework/EditorWindow.h"
+#include <entt/entity/entity.hpp>
+#include <map>
+#include <vector>
+#include <string>
+#include <rttr/type>
+
+class MainEditorSubsystem;
+class Object;
+struct ComponentAccessFunctions;
+
+class InspectorWindow : public EditorWindow {
+public:
+    InspectorWindow(MainEditorSubsystem* owner);
+    
+    // Reports whether a drag control in the inspector is active this frame for cursor wrapping.
+	bool IsInspectorValueDragging() const { return m_InspectorValueDragging; }
+
+protected:
+    virtual void OnGui() override;
+
+private:
+    void DrawProperty(rttr::property prop, Object& obj, ComponentAccessFunctions& access);
+    void UpdateInspectorDragState();
+
+    MainEditorSubsystem* m_Owner;
+    std::map<entt::entity, std::vector<std::string>> m_PerObjectComponentOrders;
+    bool m_InspectorValueDragging = false;
+};

@@ -1,4 +1,4 @@
-using System;
+    using System;
 using Hexa.NET.ImGui;
 
 namespace TerraEngine.Editor.Framework
@@ -18,20 +18,28 @@ namespace TerraEngine.Editor.Framework
         {
             if (!IsVisible) return;
 
-            // We need to use a bool reference for the close button to work
-            bool visible = IsVisible;
-            
-            // Hexa.NET.ImGui uses pointers or ref for the bool open argument
-            // ImGui.Begin returns true if the window is not collapsed
-            if (ImGui.Begin(Title, ref visible, Flags))
+            // Begin without ref bool to hide the default close button 'X'
+            bool expanded = ImGui.Begin(Title, Flags);
+
+            // Right-click context menu on the window/tab to close it
+            if (ImGui.BeginPopupContextWindow())
+            {
+                OnContextMenu();
+                if (ImGui.MenuItem("Close"))
+                {
+                    IsVisible = false;
+                }
+                ImGui.EndPopup();
+            }
+
+            if (expanded)
             {
                 OnGui();
             }
             ImGui.End();
-
-            IsVisible = visible;
         }
 
         protected abstract void OnGui();
+        protected virtual void OnContextMenu() { }
     }
 }

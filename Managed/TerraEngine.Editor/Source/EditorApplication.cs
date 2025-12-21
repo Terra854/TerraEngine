@@ -65,10 +65,9 @@ namespace TerraEngine.Editor
             foreach (var window in windows)
             {
                 count++;
-                bool visible = window.IsVisible;
-                if (ImGui.MenuItem(window.Title, string.Empty, visible))
+                if (ImGui.MenuItem(window.Title))
                 {
-                    window.IsVisible = !visible;
+                    window.IsVisible = true;
                 }
             }
 
