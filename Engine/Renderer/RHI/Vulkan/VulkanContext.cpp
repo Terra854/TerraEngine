@@ -344,7 +344,13 @@ void VulkanContext::EndFrame() {
 	submitInfo.commandBufferCount = static_cast<uint32_t>(cmds.size());
 	submitInfo.pCommandBuffers = cmds.data();
 
-	VkSemaphore signalSemaphores[] = {impl->renderFinishedSemaphores[impl->currentFrame]};
+	// If not in editor mode, we must use the semaphore corresponding to the swapchain image index
+	// to avoid validation errors about reusing semaphores still in use by the presentation engine.
+	VkSemaphore signalSemaphore = impl->editorMode 
+		? impl->renderFinishedSemaphores[impl->currentFrame] 
+		: impl->renderFinishedSemaphores[impl->acquiredImageIndex];
+
+	VkSemaphore signalSemaphores[] = {signalSemaphore};
 	// Always signal render finished, so Editor pass can wait on it
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = signalSemaphores;
@@ -495,7 +501,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &uiCmd;
 
-	VkSemaphore uiSemaphore = impl->uiSemaphores[impl->currentFrame];
+	VkSemaphore uiSemaphore = impl->uiSemaphores[imageIndex];
 	
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = &uiSemaphore;

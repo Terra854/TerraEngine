@@ -253,6 +253,7 @@ struct VulkanContext::Impl {
 	bool CheckValidationLayerSupport();
 	std::vector<const char*> GetRequiredExtensions();
 	bool IsDeviceSuitable(VkPhysicalDevice device);
+	int RateDeviceSuitability(VkPhysicalDevice device);
 	bool CheckDeviceExtensionSupport(VkPhysicalDevice device);
 	QueueFamilyIndices FindQueueFamilies(VkPhysicalDevice device);
 	SwapChainSupportDetails QuerySwapChainSupport(VkPhysicalDevice device);

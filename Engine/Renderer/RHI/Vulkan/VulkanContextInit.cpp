@@ -1,6 +1,7 @@
 #include "VulkanContextImpl.h"
 
 #include <algorithm>
+#include <map>
 
 bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	// Spin up instance, device, swapchain, and default resources so rendering can begin.
@@ -217,7 +218,7 @@ bool VulkanContext::Impl::SetupDebugMessenger() {
 }
 
 bool VulkanContext::Impl::PickPhysicalDevice() {
-	// Select the first suitable GPU that supports required queues and extensions.
+	// Select the best suitable GPU using a scoring system.
 	uint32_t deviceCount = 0;
 	vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
 
@@ -229,18 +230,59 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 	std::vector<VkPhysicalDevice> devices(deviceCount);
 	vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
 
+	// Use an ordered map to automatically sort candidates by score.
+	std::multimap<int, VkPhysicalDevice> candidates;
+
 	for (const auto& device : devices) {
-		if (IsDeviceSuitable(device)) {
-			physicalDevice = device;
-			break;
-		}
+		int score = RateDeviceSuitability(device);
+		candidates.insert(std::make_pair(score, device));
 	}
 
-	if (physicalDevice == VK_NULL_HANDLE) {
+	// Check if the best candidate is suitable at all.
+	if (candidates.rbegin()->first > 0) {
+		physicalDevice = candidates.rbegin()->second;
+		
+		VkPhysicalDeviceProperties deviceProperties;
+		vkGetPhysicalDeviceProperties(physicalDevice, &deviceProperties);
+		
+		uint32_t driverVersion = deviceProperties.driverVersion;
+		uint32_t apiVersion = deviceProperties.apiVersion;
+		
+		TERRAENGINE_LOG(LogLevel::Debug, "Selected GPU: " << deviceProperties.deviceName);
+		TERRAENGINE_LOG(LogLevel::Debug, "  Vendor ID: " << deviceProperties.vendorID);
+		TERRAENGINE_LOG(LogLevel::Debug, "  Device Type: " << deviceProperties.deviceType);
+		TERRAENGINE_LOG(LogLevel::Debug, "  Driver Version: " << driverVersion);
+		TERRAENGINE_LOG(LogLevel::Debug, "  API Version: " << VK_API_VERSION_MAJOR(apiVersion) << "." << VK_API_VERSION_MINOR(apiVersion) << "." << VK_API_VERSION_PATCH(apiVersion));
+	} else {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to find a suitable GPU!");
 		return false;
 	}
+
 	return true;
+}
+
+int VulkanContext::Impl::RateDeviceSuitability(VkPhysicalDevice device) {
+	if (!IsDeviceSuitable(device)) {
+		return 0;
+	}
+
+	VkPhysicalDeviceProperties deviceProperties;
+	vkGetPhysicalDeviceProperties(device, &deviceProperties);
+
+	VkPhysicalDeviceFeatures deviceFeatures;
+	vkGetPhysicalDeviceFeatures(device, &deviceFeatures);
+
+	int score = 0;
+
+	// Discrete GPUs have a significant performance advantage
+	if (deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+		score += 1000;
+	}
+
+	// Maximum possible size of textures affects graphics quality
+	score += deviceProperties.limits.maxImageDimension2D;
+
+	return score;
 }
 
 bool VulkanContext::Impl::CreateLogicalDevice() {
@@ -851,10 +893,11 @@ void VulkanContext::Impl::RecreateSwapChain() {
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanContext::Impl::DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {
 	// Route validation messages through the engine logger so users see them in one place.
-	LogLevel level = LogLevel::Info;
+	LogLevel level = LogLevel::Debug;
 	if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) level = LogLevel::Error;
 	else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) level = LogLevel::Warning;
 	else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) level = LogLevel::Info;
+	else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) level = LogLevel::Debug;
 	
 	TERRAENGINE_LOG(level, "[Vulkan] " << pCallbackData->pMessage);
 	return VK_FALSE;
