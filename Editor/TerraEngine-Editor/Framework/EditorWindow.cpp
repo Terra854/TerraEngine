@@ -31,8 +31,15 @@ void EditorWindow::Draw() {
         }
     }
 
+    bool titleBarHovered = false;
+    if (!window->DockNode && (window->Flags & ImGuiWindowFlags_NoTitleBar) == 0) {
+        if (window->TitleBarRect().Contains(ImGui::GetMousePos())) {
+            titleBarHovered = true;
+        }
+    }
+
     if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
-        if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByPopup) || tabHovered) {
+        if (titleBarHovered || tabHovered) {
              ImGui::OpenPopup("WindowContextMenu");
         }
     }
