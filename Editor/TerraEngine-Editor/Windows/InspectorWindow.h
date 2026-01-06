@@ -4,6 +4,7 @@
 #include <map>
 #include <vector>
 #include <string>
+#include <filesystem>
 #include <rttr/type>
 
 class MainEditorSubsystem;
@@ -22,9 +23,15 @@ protected:
 
 private:
     void DrawProperty(rttr::property prop, Object& obj, ComponentAccessFunctions& access);
+    void DrawMaterialInspector(const std::filesystem::path& path);
+    void DrawMeshInspector(const std::filesystem::path& path);
+    void DrawTextureInspector(const std::filesystem::path& path);
     void UpdateInspectorDragState();
 
     MainEditorSubsystem* m_Owner;
     std::map<entt::entity, std::vector<std::string>> m_PerObjectComponentOrders;
     bool m_InspectorValueDragging = false;
+
+    std::filesystem::path m_LastInspectedAsset;
+    std::vector<uint8_t> m_MaterialDataBuffer;
 };

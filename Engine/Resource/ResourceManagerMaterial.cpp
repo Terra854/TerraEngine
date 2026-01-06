@@ -145,3 +145,40 @@ TerraEngine::UUID ResourceManager::RegisterMaterial(const std::string& cacheKey,
 	materialCache.inFlight.erase(normalizedKey);
 	return id;
 }
+
+void ResourceManager::ReloadMaterial(const TerraEngine::UUID& id)
+{
+	std::string key;
+	{
+		std::shared_lock lock(materialCache.mutex);
+		for (const auto& [path, uuid] : materialCache.pathToId)
+		{
+			if (uuid == id)
+			{
+				key = path;
+				break;
+			}
+		}
+	}
+
+	if (key.empty())
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Cannot reload material: UUID " << ToHexString(id) << " not found in cache path map.");
+		return;
+	}
+
+	// Generated materials cannot be reloaded from disk.
+	if (key.starts_with("generated/"))
+	{
+		return;
+	}
+
+	const std::filesystem::path resolvedPath(key);
+	TERRAENGINE_LOG(LogLevel::Debug, "Reloading material from " << resolvedPath);
+	auto material = LoadMaterialFile(*this, resolvedPath);
+	if (material)
+	{
+		std::unique_lock lock(materialCache.mutex);
+		materialCache.resources[id] = std::move(material);
+	}
+}

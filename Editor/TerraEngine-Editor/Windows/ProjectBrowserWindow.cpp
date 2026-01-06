@@ -2,10 +2,13 @@
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
+#include "Engine/Resource/ResourceManager.h"
 #include <imgui.h>
 #include <ImGuiFileDialog.h>
 #include <algorithm>
 #include <vector>
+#include <fstream>
+#include "../../../Engine/File Formats/TerraEngineMaterialFile.h"
 
 ProjectBrowserWindow::ProjectBrowserWindow(MainEditorSubsystem* owner)
     : EditorWindow("Project Browser"), m_Owner(owner) {
@@ -28,23 +31,60 @@ void ProjectBrowserWindow::OnGui() {
     }
 
     if (m_Owner->GetContext() && m_Owner->GetContext()->projectManager->HasActiveProject()) {
-        if (ImGui::Button("<-")) {
-             std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
-             if (m_CurrentDirectory != root) {
-                  auto parent = m_CurrentDirectory.parent_path();
-                  if (std::filesystem::absolute(parent).string().size() >= std::filesystem::absolute(root).string().size()) {
-                      m_CurrentDirectory = parent;
-                  }
-             }
+        std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
+        if (m_CurrentDirectory.empty() || !std::filesystem::exists(m_CurrentDirectory)) {
+            m_CurrentDirectory = root;
         }
-        ImGui::SameLine();
-        
-        if (ImGui::Button("Import Asset")) {
-            IGFD::FileDialogConfig config;
-            config.path = ".";
-            ImGuiFileDialog::Instance()->OpenDialog("ImportAssetDlg", "Choose File", ".*", config);
+
+        if (ImGui::Button("Add")) {
+            ImGui::OpenPopup("AddAssetPopup");
         }
-        
+
+        if (ImGui::BeginPopup("AddAssetPopup")) {
+            if (ImGui::MenuItem("Folder")) {
+                std::filesystem::path newFolderPath = m_CurrentDirectory / "New Folder";
+                int i = 1;
+                while (std::filesystem::exists(newFolderPath)) {
+                    newFolderPath = m_CurrentDirectory / ("New Folder (" + std::to_string(i++) + ")");
+                }
+                std::filesystem::create_directory(newFolderPath);
+            }
+            if (ImGui::MenuItem("Material (.tmat)")) {
+                std::filesystem::path newMatPath = m_CurrentDirectory / "New Material.tmat";
+                int i = 1;
+                while (std::filesystem::exists(newMatPath)) {
+                    newMatPath = m_CurrentDirectory / ("New Material (" + std::to_string(i++) + ").tmat");
+                }
+
+                MaterialHeader header{};
+                std::memcpy(header.magic, "TMAT", 4);
+                header.version = kMaterialCurrentVersion;
+                header.headerSize = sizeof(MaterialHeader);
+                header.flags = 0;
+                header.shadingModel = (uint32_t)ShadingModel::Unlit;
+                header.alphaMode = (uint32_t)AlphaMode::Opaque;
+                header.shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
+                header.baseColorFactor[0] = 1.0f;
+                header.baseColorFactor[1] = 1.0f;
+                header.baseColorFactor[2] = 1.0f;
+                header.baseColorFactor[3] = 1.0f;
+                header.metallicFactor = 0.0f;
+                header.roughnessFactor = 0.5f;
+                header.normalScale = 1.0f;
+                header.occlusionStrength = 1.0f;
+                header.textureCount = 0;
+                header.floatParameterCount = 0;
+                header.textureArrayOffset = sizeof(MaterialHeader);
+                header.floatParameterOffset = sizeof(MaterialHeader);
+
+                std::ofstream out(newMatPath, std::ios::binary);
+                out.write((char*)&header, sizeof(MaterialHeader));
+                
+                m_Owner->SetSelectedAsset(std::filesystem::absolute(newMatPath));
+            }
+            ImGui::EndPopup();
+        }
+
         ImGui::SameLine();
         char searchBuf[128];
         strncpy(searchBuf, m_SearchFilter.c_str(), sizeof(searchBuf));
@@ -62,7 +102,6 @@ void ProjectBrowserWindow::OnGui() {
              ImGui::TableNextRow();
              ImGui::TableSetColumnIndex(0);
              
-             std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
              if (std::filesystem::exists(root)) {
                  ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
                  if (root == m_CurrentDirectory) rootFlags |= ImGuiTreeNodeFlags_Selected;
@@ -77,10 +116,6 @@ void ProjectBrowserWindow::OnGui() {
              }
 
              ImGui::TableSetColumnIndex(1);
-             
-             if (m_CurrentDirectory.empty() || !std::filesystem::exists(m_CurrentDirectory)) {
-                 if (std::filesystem::exists(root)) m_CurrentDirectory = root;
-             }
              
              if (std::filesystem::exists(m_CurrentDirectory)) {
                  DrawDirectoryContent(m_CurrentDirectory);
@@ -157,7 +192,26 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
             ImGui::PushID(filename.c_str());
             
             std::string icon = entry.is_directory() ? "[DIR]" : "[FILE]";
-            ImGui::Button(icon.c_str(), ImVec2(m_ThumbnailSize, m_ThumbnailSize));
+            
+            bool isSelected = false;
+            auto currentSelected = m_Owner->GetSelectedAsset();
+            if (currentSelected && *currentSelected == std::filesystem::absolute(entry.path())) {
+                isSelected = true;
+            }
+
+            if (isSelected) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
+            }
+
+            if (ImGui::Button(icon.c_str(), ImVec2(m_ThumbnailSize, m_ThumbnailSize))) {
+                if (!entry.is_directory()) {
+                    m_Owner->SetSelectedAsset(std::filesystem::absolute(entry.path()));
+                }
+            }
+
+            if (isSelected) {
+                ImGui::PopStyleColor();
+            }
             
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 if (entry.is_directory()) {

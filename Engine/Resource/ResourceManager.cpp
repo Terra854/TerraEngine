@@ -112,18 +112,21 @@ void ResourceManager::ClearCaches()
 	{
 		std::unique_lock lock(materialCache.mutex);
 		materialCache.pathToId.clear();
+		materialCache.idToPath.clear();
 		materialCache.resources.clear();
 		materialCache.inFlight.clear();
 	}
 	{
 		std::unique_lock lock(meshCache.mutex);
 		meshCache.pathToId.clear();
+		meshCache.idToPath.clear();
 		meshCache.resources.clear();
 		meshCache.inFlight.clear();
 	}
 	{
 		std::unique_lock lock(shaderCache.mutex);
 		shaderCache.pathToId.clear();
+		shaderCache.idToPath.clear();
 		shaderCache.resources.clear();
 		shaderCache.inFlight.clear();
 	}
@@ -131,45 +134,78 @@ void ResourceManager::ClearCaches()
 		// Clear paired shader lookups so future installs cannot reuse stale stage combinations.
 		std::unique_lock lock(shaderCollectionCache.mutex);
 		shaderCollectionCache.pathToId.clear();
+		shaderCollectionCache.idToPath.clear();
 		shaderCollectionCache.resources.clear();
 		shaderCollectionCache.inFlight.clear();
 	}
 	{
 		std::unique_lock lock(textureCache.mutex);
 		textureCache.pathToId.clear();
+		textureCache.idToPath.clear();
 		textureCache.resources.clear();
 		textureCache.inFlight.clear();
 	}
 }
 
+void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type)
+{
+	const std::string key = NormalizeKey(ResolveAssetPath(path));
+	switch (type)
+	{
+	case AssetType::Mesh:
+	{
+		std::unique_lock lock(meshCache.mutex);
+		meshCache.pathToId[key] = id;
+		meshCache.idToPath[id] = key;
+		break;
+	}
+	case AssetType::Texture:
+	{
+		std::unique_lock lock(textureCache.mutex);
+		textureCache.pathToId[key] = id;
+		textureCache.idToPath[id] = key;
+		break;
+	}
+	case AssetType::Material:
+	{
+		std::unique_lock lock(materialCache.mutex);
+		materialCache.pathToId[key] = id;
+		materialCache.idToPath[id] = key;
+		break;
+	}
+	case AssetType::ShaderCollection:
+	{
+		std::unique_lock lock(shaderCollectionCache.mutex);
+		shaderCollectionCache.pathToId[key] = id;
+		shaderCollectionCache.idToPath[id] = key;
+		break;
+	}
+	}
+}
+
 Material* ResourceManager::GetMaterial(const TerraEngine::UUID& id)
 {
-	// Callers can stash UUIDs from earlier load operations and pull the
-	// current instance when they need to bind resources without owning
-	// references for the entire application lifetime.
-	return GetResourceById(id, materialCache);
+	return GetResourceById<Material>(id, materialCache, [this](const std::filesystem::path& p) { return LoadMaterial(p); });
 }
 
 Mesh* ResourceManager::GetMesh(const TerraEngine::UUID& id)
 {
-	return GetResourceById(id, meshCache);
+	return GetResourceById<Mesh>(id, meshCache, [this](const std::filesystem::path& p) { return LoadMesh(p); });
 }
 
 Shader* ResourceManager::GetShader(const TerraEngine::UUID& id)
 {
-	return GetResourceById(id, shaderCache);
+	return GetResourceById<Shader>(id, shaderCache, [this](const std::filesystem::path& p) { return LoadShader(p); });
 }
 
 ShaderCollection* ResourceManager::GetShaderCollection(const TerraEngine::UUID& id)
 {
-	// Shader collections keep vertex/fragment pairings consistent so render
-	// code can bind a single UUID without managing individual stages.
-	return GetResourceById(id, shaderCollectionCache);
+	return GetResourceById<ShaderCollection>(id, shaderCollectionCache);
 }
 
 Texture* ResourceManager::GetTexture(const TerraEngine::UUID& id)
 {
-	return GetResourceById(id, textureCache);
+	return GetResourceById<Texture>(id, textureCache, [this](const std::filesystem::path& p) { return LoadTexture(p); });
 }
 
 std::filesystem::path ResourceManager::ResolveAssetPath(const std::filesystem::path& path) const

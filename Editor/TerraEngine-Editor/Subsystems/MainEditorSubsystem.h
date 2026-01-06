@@ -31,7 +31,16 @@ public:
     EditorContext* GetContext() const { return ctx; }
 
     std::optional<entt::entity> GetSelectedEntity() const { return selectedEntity; }
-    void SetSelectedEntity(std::optional<entt::entity> entity) { selectedEntity = entity; }
+    void SetSelectedEntity(std::optional<entt::entity> entity) { 
+        selectedEntity = entity; 
+        if (entity) selectedAsset = std::nullopt;
+    }
+
+    std::optional<std::filesystem::path> GetSelectedAsset() const { return selectedAsset; }
+    void SetSelectedAsset(std::optional<std::filesystem::path> asset) { 
+        selectedAsset = asset; 
+        if (asset) selectedEntity = std::nullopt;
+    }
 
     void* GetSceneTextureID() const { return sceneTextureID; }
 
@@ -62,4 +71,5 @@ private:
     bool sceneLoaded = false;
     
     std::optional<entt::entity> selectedEntity;
+    std::optional<std::filesystem::path> selectedAsset;
 };

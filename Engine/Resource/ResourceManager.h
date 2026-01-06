@@ -31,6 +31,13 @@ struct ShaderCollection;
 struct Texture;
 enum class ShaderStage : std::uint32_t;
 
+enum class AssetType {
+	Mesh,
+	Texture,
+	Material,
+	ShaderCollection
+};
+
 struct ShaderStagePath
 {
 	ShaderStage stage = ShaderStage::Vertex;
@@ -78,6 +85,14 @@ public:
 	TerraEngine::UUID LoadShaderCollection(const std::vector<ShaderStagePath>& stagePaths);
 	TerraEngine::UUID LoadTexture(const std::filesystem::path& path);
 
+	// Re-parse a material from disk to pick up authored changes without clearing
+	// the entire cache. This ensures the renderer sees new parameters immediately.
+	void ReloadMaterial(const TerraEngine::UUID& id);
+
+	// Register a mapping between a UUID and a filesystem path so that GetMesh/GetTexture
+	// can trigger on-demand loading if the resource is not yet in the cache.
+	void RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type);
+
 	// Inject a generated material directly into the cache so tooling can synthesize preview materials
 	// without writing TMAT files to disk. The cacheKey should be unique and stable (e.g., "generated/preview").
 	TerraEngine::UUID RegisterMaterial(const std::string& cacheKey, std::unique_ptr<Material> material);
@@ -121,6 +136,7 @@ private:
 		// quick lookup. UUID map owns the resources; path map provides
 		// deterministic deduplication across synchronous/async callers.
 		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
+		std::unordered_map<TerraEngine::UUID, std::string> idToPath;
 		std::unordered_map<TerraEngine::UUID, std::unique_ptr<Resource>> resources;
 		// Futures for tasks that are actively loading. Shared futures let
 		// multiple threads wait without spawning redundant tasks.
@@ -148,7 +164,7 @@ private:
 
 	// Retrieve a loaded resource from the UUID lookup table.
 	template <typename Resource>
-	Resource* GetResourceById(const TerraEngine::UUID& id, ResourceCache<Resource>& cache);
+	Resource* GetResourceById(const TerraEngine::UUID& id, ResourceCache<Resource>& cache, const std::function<TerraEngine::UUID(const std::filesystem::path&)>& loader = nullptr);
 
 	// Internal synchronous load wrapper shared by each format-specific
 	// loader. The provided loader is only executed when the cache does not
@@ -244,18 +260,38 @@ TerraEngine::UUID ResourceManager::EnsureResourceId(const std::string& key, Reso
 
 	const auto id = TerraEngine::GenerateUUID();
 	cache.pathToId.emplace(key, id);
+	cache.idToPath.emplace(id, key);
 	// Provide debug visibility whenever a new UUID is assigned to a resource key.
 	TERRAENGINE_LOG(LogLevel::Debug, "Assigned UUID " << ToHexString(id) << " to resource key " << key);
 	return id;
 }
 
 template <typename Resource>
-Resource* ResourceManager::GetResourceById(const TerraEngine::UUID& id, ResourceCache<Resource>& cache)
+Resource* ResourceManager::GetResourceById(const TerraEngine::UUID& id, ResourceCache<Resource>& cache, const std::function<TerraEngine::UUID(const std::filesystem::path&)>& loader)
 {
-	std::shared_lock lock(cache.mutex);
-	if (auto existing = cache.resources.find(id); existing != cache.resources.end())
 	{
-		return existing->second.get();
+		std::shared_lock lock(cache.mutex);
+		if (auto existing = cache.resources.find(id); existing != cache.resources.end())
+		{
+			return existing->second.get();
+		}
+
+		if (loader)
+		{
+			if (auto it = cache.idToPath.find(id); it != cache.idToPath.end())
+			{
+				const std::string path = it->second;
+				lock.unlock(); // Must release shared lock before triggering a load which acquires unique lock
+				loader(path);
+				
+				// Re-acquire shared lock and return from cache
+				std::shared_lock relock(cache.mutex);
+				if (auto reloaded = cache.resources.find(id); reloaded != cache.resources.end())
+				{
+					return reloaded->second.get();
+				}
+			}
+		}
 	}
 
 	return nullptr;

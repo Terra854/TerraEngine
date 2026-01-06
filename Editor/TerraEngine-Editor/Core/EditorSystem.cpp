@@ -8,6 +8,7 @@
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Window/WindowSystem.h"
 #include "Engine/DotNet/DotNetHost.h"
+#include "Engine/Resource/ResourceManager.h"
 
 // ImGui
 #include <imgui.h>
@@ -96,7 +97,13 @@ void EditorSystem::Setup(Engine* enginePtr) {
     projectHub->SetOnProjectLoadedCallback([this]() {
         // Initialize Asset Database with project root
         if (context.projectManager->HasActiveProject()) {
-            AssetDatabase::Instance().Initialize(context.projectManager->GetProjectRoot());
+            std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
+            
+            // Set Engine ResourceManager's asset root to the build directory so it can find compiled assets
+            // We do this BEFORE AssetDatabase::Initialize because that triggers ScanProject/RegisterAssetPath
+            ResourceManager::Instance().SetAssetRoot(projectRoot / "Build" / "Assets");
+            
+            AssetDatabase::Instance().Initialize(projectRoot);
         }
         // Transition logic
         mainEditor->OnProjectOpened();

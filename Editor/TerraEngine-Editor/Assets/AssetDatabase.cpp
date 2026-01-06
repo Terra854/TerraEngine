@@ -11,6 +11,7 @@
 #include "Editor/AssetCompilers/TextureCompiler.h"
 #include "Editor/AssetCompilers/ShaderCompiler.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
+#include "Engine/Resource/ResourceManager.h"
 
 using json = nlohmann::json;
 
@@ -203,6 +204,21 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
     SaveMetadata(metadata);
 
     assets[sourcePath] = metadata;
+
+    // Register with Engine ResourceManager so it can resolve GUIDs to compiled paths
+    if (!metadata.compiledPath.empty()) {
+        AssetType type;
+        bool known = false;
+        if (metadata.importerName == "MeshImporter") { type = AssetType::Mesh; known = true; }
+        else if (metadata.importerName == "TextureImporter") { type = AssetType::Texture; known = true; }
+        else if (metadata.importerName == "MaterialImporter") { type = AssetType::Material; known = true; }
+        else if (metadata.importerName == "ShaderImporter") { type = AssetType::ShaderCollection; known = true; }
+
+        if (known) {
+            std::filesystem::path fullCompiled = buildRoot / metadata.compiledPath;
+            ResourceManager::Instance().RegisterAssetPath(metadata.guid, fullCompiled, type);
+        }
+    }
 }
 
 void AssetDatabase::GenerateDefaultMetadata(const std::filesystem::path& sourcePath, AssetMetadata& outMetadata) {
