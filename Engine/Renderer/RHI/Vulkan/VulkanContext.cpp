@@ -130,19 +130,23 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 	prepared.reserve(frameData.commands.size());
 
 	for (const auto& command : frameData.commands) {
-		impl->EnsureMesh(command.meshId);
-		if (!impl->meshCache.contains(command.meshId)) continue;
-
 		Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
 		if (!material) continue;
 
-		TerraEngine::UUID shaderId = material->shaderCollectionId;
-		impl->EnsurePipeline(shaderId, renderPassInfo.renderPass);
-		if (!impl->pipelineCache.contains(renderPassInfo.renderPass) || !impl->pipelineCache[renderPassInfo.renderPass].contains(shaderId)) continue;
+		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
+		if (collectionId == TerraEngine::EMPTY_UUID) {
+			collectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
+		}
 
-		std::vector<VkDescriptorSet> materialSets = impl->EnsureMaterialDescriptorSets(shaderId, command.materialId);
+		VkRenderPass currentPass = impl->editorMode ? impl->offscreenRenderPass : impl->renderPass;
+		uint32_t materialFlags = material->header.flags;
 
-		VulkanPipeline& pipeline = impl->pipelineCache[renderPassInfo.renderPass][shaderId];
+		impl->EnsureMesh(command.meshId);
+		impl->EnsurePipeline(collectionId, currentPass, materialFlags);
+		impl->EnsureMaterialDescriptorSets(collectionId, command.materialId);
+
+		PipelineKey pipeKey = { collectionId, materialFlags };
+		VulkanPipeline& pipeline = impl->pipelineCache[currentPass][pipeKey];
 		VulkanMesh& mesh = impl->meshCache[command.meshId];
 
 		PushConstants push{};
@@ -150,7 +154,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 		
 		// Set texture index for bindless access
 		push.textureIndex = 0; // Default
-		if (material && material->header.textureCount > 0 && !material->textures.empty()) {
+		if (material->header.textureCount > 0 && !material->textures.empty()) {
 			TerraEngine::UUID texID = material->textures[0].textureUuid;
 			if (impl->textureIndexMap.contains(texID)) {
 				push.textureIndex = impl->textureIndexMap[texID];

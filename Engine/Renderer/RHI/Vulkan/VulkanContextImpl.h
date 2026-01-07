@@ -102,9 +102,38 @@ struct PushConstants {
 // Must match shader definition
 struct alignas(16) MaterialData {
 	glm::vec4 BaseColorFactor;
+	glm::vec4 EmissiveFactor;
+	glm::vec4 UVTransform; // xy = scale, zw = offset
 	float MetallicFactor;
 	float RoughnessFactor;
+	float NormalScale;
+	float OcclusionStrength;
+	float AlphaCutoff;
+	uint32_t AlphaMode;
+	uint32_t Flags;
 	uint32_t BaseColorTextureIndex;
+	uint32_t NormalTextureIndex;
+	uint32_t MaskTextureIndex;
+	uint32_t OcclusionTextureIndex;
+	uint32_t EmissiveTextureIndex;
+	uint32_t Padding[2];
+};
+
+struct PipelineKey {
+	TerraEngine::UUID shaderCollectionId;
+	uint32_t materialFlags;
+
+	bool operator==(const PipelineKey& other) const {
+		return shaderCollectionId == other.shaderCollectionId && materialFlags == other.materialFlags;
+	}
+};
+
+struct PipelineKeyHash {
+	std::size_t operator()(const PipelineKey& k) const {
+		std::size_t h1 = std::hash<TerraEngine::UUID>{}(k.shaderCollectionId);
+		std::size_t h2 = std::hash<uint32_t>{}(k.materialFlags);
+		return h1 ^ (h2 << 1);
+	}
 };
 
 struct VulkanContext::Impl {
@@ -187,8 +216,8 @@ struct VulkanContext::Impl {
 
 	std::unordered_map<TerraEngine::UUID, VulkanMesh> meshCache;
 	std::unordered_map<TerraEngine::UUID, VulkanImage> textureCache;
-	// Pipelines keyed by RenderPass then ShaderID
-	std::unordered_map<VkRenderPass, std::unordered_map<TerraEngine::UUID, VulkanPipeline>> pipelineCache;
+	// Pipelines keyed by RenderPass then PipelineKey (ShaderID + Flags)
+	std::unordered_map<VkRenderPass, std::unordered_map<PipelineKey, VulkanPipeline, PipelineKeyHash>> pipelineCache;
 
 	VulkanImage defaultTexture;
 	std::vector<std::vector<VkCommandPool>> workerCommandPools; // Per-frame command pools for worker threads
@@ -243,7 +272,7 @@ struct VulkanContext::Impl {
 	void InvalidateMesh(TerraEngine::UUID meshId);
 	void InvalidateTexture(TerraEngine::UUID textureId);
 	void EnsureMesh(TerraEngine::UUID meshId);
-	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass);
+	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass, uint32_t materialFlags);
 
 	VkDescriptorType MapDescriptorType(DescriptorType type);
 	VkShaderStageFlags StageVisibilityToVulkan(StageVisibilityMask visibility);

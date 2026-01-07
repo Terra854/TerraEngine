@@ -444,31 +444,57 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	Material* material = ResourceManager::Instance().GetMaterial(materialId);
 	if (!material) return { globalDescriptorSet };
 	
-	MaterialData data;
+	MaterialData data{};
 	data.BaseColorFactor = glm::vec4(
 		material->header.baseColorFactor[0],
 		material->header.baseColorFactor[1],
 		material->header.baseColorFactor[2],
 		material->header.baseColorFactor[3]
 	);
+	data.EmissiveFactor = glm::vec4(
+		material->header.emissiveFactor[0],
+		material->header.emissiveFactor[1],
+		material->header.emissiveFactor[2],
+		1.0f
+	);
 	data.MetallicFactor = material->header.metallicFactor;
 	data.RoughnessFactor = material->header.roughnessFactor;
-	
-	TerraEngine::UUID baseColorTextureId = TerraEngine::EMPTY_UUID;
-	if (material->header.textureCount > 0 && !material->textures.empty()) {
-		// This logic might need to be more robust to find the base color texture specifically
-		baseColorTextureId = material->textures[0].textureUuid;
-	}
-	
-	if (baseColorTextureId != TerraEngine::EMPTY_UUID) {
-		EnsureTexture(baseColorTextureId);
-		if (textureIndexMap.contains(baseColorTextureId)) {
-			data.BaseColorTextureIndex = textureIndexMap[baseColorTextureId];
-		} else {
-			data.BaseColorTextureIndex = 0; // Default texture
+	data.NormalScale = material->header.normalScale;
+	data.OcclusionStrength = material->header.occlusionStrength;
+	data.AlphaCutoff = material->header.alphaCutoff;
+	data.AlphaMode = material->header.alphaMode;
+	data.Flags = material->header.flags;
+	data.UVTransform = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f); // Default: Scale 1, Offset 0
+
+	// Initialize all indices to 0 (default white texture)
+	data.BaseColorTextureIndex = 0;
+	data.NormalTextureIndex = 0;
+	data.MaskTextureIndex = 0;
+	data.OcclusionTextureIndex = 0;
+	data.EmissiveTextureIndex = 0;
+
+	for (uint32_t i = 0; i < material->header.textureCount; ++i) {
+		const auto& binding = material->textures[i];
+		if (binding.textureUuid == TerraEngine::EMPTY_UUID) continue;
+
+		EnsureTexture(binding.textureUuid);
+		uint32_t gpuIndex = 0;
+		if (textureIndexMap.contains(binding.textureUuid)) {
+			gpuIndex = textureIndexMap[binding.textureUuid];
 		}
-	} else {
-		data.BaseColorTextureIndex = 0; // Default texture
+
+		switch (binding.semantic) {
+			case TextureSemantic::BaseColor:         
+				data.BaseColorTextureIndex = gpuIndex; 
+				// Use BaseColor's UV transform as the material-wide transform
+				data.UVTransform = glm::vec4(binding.uvScale[0], binding.uvScale[1], binding.uvOffset[0], binding.uvOffset[1]);
+				break;
+			case TextureSemantic::Normal:            data.NormalTextureIndex = gpuIndex; break;
+			case TextureSemantic::MetallicRoughness: data.MaskTextureIndex = gpuIndex; break;
+			case TextureSemantic::Occlusion:         data.OcclusionTextureIndex = gpuIndex; break;
+			case TextureSemantic::Emissive:          data.EmissiveTextureIndex = gpuIndex; break;
+			default: break;
+		}
 	}
 	
 	uint32_t materialIndex = AllocateMaterialIndex();
@@ -697,8 +723,9 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 	return true;
 }
 
-void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass) {
-	if (pipelineCache.contains(renderPass) && pipelineCache[renderPass].contains(shaderCollectionId)) return;
+void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass, uint32_t materialFlags) {
+	PipelineKey key = { shaderCollectionId, materialFlags };
+	if (pipelineCache.contains(renderPass) && pipelineCache[renderPass].contains(key)) return;
 	
 	ShaderCollection* collection = ResourceManager::Instance().GetShaderCollection(shaderCollectionId);
 	if (!collection) return;
@@ -804,7 +831,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	rasterizer.rasterizerDiscardEnable = VK_FALSE;
 	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
 	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+	rasterizer.cullMode = (materialFlags & DoubleSided) ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
 	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -894,7 +921,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	pipeline.pushConstants = std::move(pushConstants);
 	pipeline.supportsDefaultPushConstants = supportsDefaultPushConstants;
 
-	pipelineCache[renderPass][shaderCollectionId] = std::move(pipeline);
+	pipelineCache[renderPass][key] = std::move(pipeline);
 }
 
 bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
