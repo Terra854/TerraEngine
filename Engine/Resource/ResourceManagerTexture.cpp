@@ -222,3 +222,34 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadTextureAsync(const st
 		return LoadTextureFile(*this, resolvedPath);
 	});
 }
+
+void ResourceManager::ReloadTexture(const TerraEngine::UUID& id)
+{
+	std::string key;
+	{
+		std::shared_lock lock(textureCache.mutex);
+		for (const auto& [path, uuid] : textureCache.pathToId)
+		{
+			if (uuid == id)
+			{
+				key = path;
+				break;
+			}
+		}
+	}
+
+	if (key.empty())
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Cannot reload texture: UUID " << ToHexString(id) << " not found in cache path map.");
+		return;
+	}
+
+	const std::filesystem::path resolvedPath(key);
+	TERRAENGINE_LOG(LogLevel::Debug, "Reloading texture from " << resolvedPath);
+	auto texture = LoadTextureFile(*this, resolvedPath);
+	if (texture)
+	{
+		std::unique_lock lock(textureCache.mutex);
+		textureCache.resources[id] = std::move(texture);
+	}
+}

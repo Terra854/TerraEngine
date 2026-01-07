@@ -15,6 +15,9 @@ public:
 	void BeginFrame() override;
 	void RenderFrame(const FrameRenderData& frameData) override;
 	void EndFrame() override;
+	void InvalidateMaterial(const TerraEngine::UUID& materialId) override;
+	void InvalidateMesh(const TerraEngine::UUID& meshId) override;
+	void InvalidateTexture(const TerraEngine::UUID& textureId) override;
 	void WaitIdle() override;
 	void Shutdown() override;
 

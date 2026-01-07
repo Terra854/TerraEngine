@@ -495,6 +495,39 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	return { globalDescriptorSet };
 }
 
+void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
+	auto it = materialIndexMap.find(materialId);
+	if (it != materialIndexMap.end()) {
+		freeMaterialIndices.push_back(it->second);
+		materialIndexMap.erase(it);
+	}
+}
+
+void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
+	auto it = meshCache.find(meshId);
+	if (it != meshCache.end()) {
+		vmaDestroyBuffer(allocator, it->second.vertexBuffer.buffer, it->second.vertexBuffer.allocation);
+		vmaDestroyBuffer(allocator, it->second.indexBuffer.buffer, it->second.indexBuffer.allocation);
+		meshCache.erase(it);
+	}
+}
+
+void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
+	auto it = textureCache.find(textureId);
+	if (it != textureCache.end()) {
+		vkDestroySampler(device, it->second.sampler, nullptr);
+		vkDestroyImageView(device, it->second.view, nullptr);
+		vmaDestroyImage(allocator, it->second.image, it->second.allocation);
+		textureCache.erase(it);
+	}
+
+	auto idxIt = textureIndexMap.find(textureId);
+	if (idxIt != textureIndexMap.end()) {
+		freeTextureIndices.push_back(idxIt->second);
+		textureIndexMap.erase(idxIt);
+	}
+}
+
 void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	if (meshCache.contains(meshId)) return;
 	

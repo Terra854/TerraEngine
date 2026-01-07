@@ -398,6 +398,24 @@ void VulkanContext::EndFrame() {
 	}
 }
 
+void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {
+	if (impl) {
+		impl->InvalidateMaterial(materialId);
+	}
+}
+
+void VulkanContext::InvalidateMesh(const TerraEngine::UUID& meshId) {
+	if (impl) {
+		impl->InvalidateMesh(meshId);
+	}
+}
+
+void VulkanContext::InvalidateTexture(const TerraEngine::UUID& textureId) {
+	if (impl) {
+		impl->InvalidateTexture(textureId);
+	}
+}
+
 void VulkanContext::WaitIdle() {
 	if (impl && impl->device) {
 		vkDeviceWaitIdle(impl->device);

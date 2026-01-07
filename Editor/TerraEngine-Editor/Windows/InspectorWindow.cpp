@@ -517,6 +517,33 @@ void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
             ImGui::EndDragDropTarget();
         }
 
+        if (targetBinding && ImGui::BeginPopupContextItem()) {
+            if (ImGui::MenuItem("Clear")) {
+                TextureBinding* allBindings = (TextureBinding*)(m_MaterialDataBuffer.data() + header->textureArrayOffset);
+                int index = -1;
+                for (uint32_t i = 0; i < header->textureCount; ++i) {
+                    if (&allBindings[i] == targetBinding) {
+                        index = i;
+                        break;
+                    }
+                }
+
+                if (index != -1) {
+                    size_t bindingOffset = header->textureArrayOffset + (index * sizeof(TextureBinding));
+                    m_MaterialDataBuffer.erase(m_MaterialDataBuffer.begin() + bindingOffset, m_MaterialDataBuffer.begin() + bindingOffset + sizeof(TextureBinding));
+
+                    // Re-acquire header after modification
+                    header = (MaterialHeader*)m_MaterialDataBuffer.data();
+                    header->textureCount--;
+                    header->floatParameterOffset -= sizeof(TextureBinding);
+                    changed = true;
+
+                    targetBinding = nullptr;
+                }
+            }
+            ImGui::EndPopup();
+        }
+
         if (targetBinding) {
             ImGui::Indent();
             if (ImGui::DragFloat2("UV Scale", targetBinding->uvScale, 0.01f)) changed = true;

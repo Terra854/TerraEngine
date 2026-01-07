@@ -12,6 +12,7 @@
 #include "Editor/AssetCompilers/ShaderCompiler.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Renderer/RenderSystem.h"
 
 using json = nlohmann::json;
 
@@ -217,6 +218,16 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
         if (known) {
             std::filesystem::path fullCompiled = buildRoot / metadata.compiledPath;
             ResourceManager::Instance().RegisterAssetPath(metadata.guid, fullCompiled, type);
+
+            if (needsImport) {
+                if (type == AssetType::Material) {
+                    RenderSystem::Instance().ReloadMaterial(metadata.guid);
+                } else if (type == AssetType::Mesh) {
+                    RenderSystem::Instance().ReloadMesh(metadata.guid);
+                } else if (type == AssetType::Texture) {
+                    RenderSystem::Instance().ReloadTexture(metadata.guid);
+                }
+            }
         }
     }
 }

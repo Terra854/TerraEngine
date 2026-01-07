@@ -21,6 +21,10 @@ public:
 	void Shutdown() override;
 	std::string SystemName() override;
 
+	void ReloadMaterial(const TerraEngine::UUID& materialId);
+	void ReloadMesh(const TerraEngine::UUID& meshId);
+	void ReloadTexture(const TerraEngine::UUID& textureId);
+
 	RHIContext* GetContext() const { return rhi.get(); }
 
 private:

@@ -239,6 +239,9 @@ struct VulkanContext::Impl {
 	VkFormat MapTextureFormat(uint8_t format, uint8_t channelType, uint8_t semantic);
 	void EnsureTexture(TerraEngine::UUID textureId);
 	std::vector<VkDescriptorSet> EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId);
+	void InvalidateMaterial(TerraEngine::UUID materialId);
+	void InvalidateMesh(TerraEngine::UUID meshId);
+	void InvalidateTexture(TerraEngine::UUID textureId);
 	void EnsureMesh(TerraEngine::UUID meshId);
 	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass);
 

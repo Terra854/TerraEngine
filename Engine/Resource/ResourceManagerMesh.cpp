@@ -117,3 +117,34 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadMeshAsync(const std::
 		return LoadMeshFile(*this, resolvedPath);
 	});
 }
+
+void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
+{
+	std::string key;
+	{
+		std::shared_lock lock(meshCache.mutex);
+		for (const auto& [path, uuid] : meshCache.pathToId)
+		{
+			if (uuid == id)
+			{
+				key = path;
+				break;
+			}
+		}
+	}
+
+	if (key.empty())
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Cannot reload mesh: UUID " << ToHexString(id) << " not found in cache path map.");
+		return;
+	}
+
+	const std::filesystem::path resolvedPath(key);
+	TERRAENGINE_LOG(LogLevel::Debug, "Reloading mesh from " << resolvedPath);
+	auto mesh = LoadMeshFile(*this, resolvedPath);
+	if (mesh)
+	{
+		std::unique_lock lock(meshCache.mutex);
+		meshCache.resources[id] = std::move(mesh);
+	}
+}

@@ -6,6 +6,7 @@
 #include "Scene/MeshRenderComponent.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Transform.h"
+#include "Resource/ResourceManager.h"
 #include "ThreadPool/ThreadPool.h"
 #include <entt/entt.hpp>
 
@@ -303,4 +304,31 @@ void RenderSystem::Shutdown()
 std::string RenderSystem::SystemName()
 {
 	return "RenderSystem";
+}
+
+void RenderSystem::ReloadMaterial(const TerraEngine::UUID& materialId)
+{
+	ResourceManager::Instance().ReloadMaterial(materialId);
+	if (rhi)
+	{
+		rhi->InvalidateMaterial(materialId);
+	}
+}
+
+void RenderSystem::ReloadMesh(const TerraEngine::UUID& meshId)
+{
+	ResourceManager::Instance().ReloadMesh(meshId);
+	if (rhi)
+	{
+		rhi->InvalidateMesh(meshId);
+	}
+}
+
+void RenderSystem::ReloadTexture(const TerraEngine::UUID& textureId)
+{
+	ResourceManager::Instance().ReloadTexture(textureId);
+	if (rhi)
+	{
+		rhi->InvalidateTexture(textureId);
+	}
 }

@@ -89,6 +89,12 @@ public:
 	// the entire cache. This ensures the renderer sees new parameters immediately.
 	void ReloadMaterial(const TerraEngine::UUID& id);
 
+	// Re-parse a mesh from disk to pick up authored changes.
+	void ReloadMesh(const TerraEngine::UUID& id);
+
+	// Re-parse a texture from disk to pick up authored changes.
+	void ReloadTexture(const TerraEngine::UUID& id);
+
 	// Register a mapping between a UUID and a filesystem path so that GetMesh/GetTexture
 	// can trigger on-demand loading if the resource is not yet in the cache.
 	void RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type);
