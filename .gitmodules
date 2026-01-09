@@ -41,3 +41,6 @@
 [submodule "External/Hexa.NET.ImGui"]
 	path = External/Hexa.NET.ImGui
 	url = https://github.com/HexaEngine/Hexa.NET.ImGui
+[submodule "External/ImGuizmo"]
+	path = External/ImGuizmo
+	url = https://github.com/CedricGuillemet/ImGuizmo.git
