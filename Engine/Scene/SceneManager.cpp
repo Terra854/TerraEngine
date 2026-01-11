@@ -45,7 +45,7 @@ void SceneManager::Initialize()
 	
 	ResourceManager::Instance().LoadDefaultResources();
 
-	//PreparePreviewAssets();
+	PreparePreviewAssets();
 	// Initialization is logged at debug level so tooling can trace startup ordering.
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager initialized with root " << sceneRoot);
 }

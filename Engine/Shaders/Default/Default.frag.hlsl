@@ -23,12 +23,12 @@ struct MaterialData
 
 [[vk::binding(1, 0)]] StructuredBuffer<MaterialData> allMaterials;
 
+#pragma pack_matrix(column_major)
+
 struct PushConstants
 {
-	float4x4 modelViewProjection;
-	float4 positionOffset;
-	float4 positionScale;
-	float4 uvOffsetScale;
+	column_major float4x4 viewProj;
+    column_major float4x4 model;
 	uint textureIndex; 
 	uint materialIndex;
 };

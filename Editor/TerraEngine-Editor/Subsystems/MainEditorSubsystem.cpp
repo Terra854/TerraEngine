@@ -14,6 +14,7 @@
 #include "../Windows/HierarchyWindow.h"
 #include "../Windows/InspectorWindow.h"
 #include "../Windows/ProjectBrowserWindow.h"
+#include "../Windows/GameViewWindow.h"
 #include "../Windows/SceneViewWindow.h"
 
 void MainEditorSubsystem::Initialize(EditorContext& context) {
@@ -23,6 +24,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
     m_Windows.push_back(std::make_shared<HierarchyWindow>(this));
     m_Windows.push_back(std::make_shared<InspectorWindow>(this));
     m_Windows.push_back(std::make_shared<ProjectBrowserWindow>(this));
+    m_Windows.push_back(std::make_shared<GameViewWindow>(this));
     m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
 }
 
@@ -71,6 +73,15 @@ void MainEditorSubsystem::OnBackendReady() {
         );
         cachedSceneImageView = handles.sceneImageView;
     }
+
+    if (handles.gameImageView && handles.gameSampler) {
+        gameTextureID = (void*)ImGui_ImplVulkan_AddTexture(
+            (VkSampler)handles.gameSampler,
+            (VkImageView)handles.gameImageView,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        );
+        cachedGameImageView = handles.gameImageView;
+    }
 }
 
 void MainEditorSubsystem::Update(float deltaTime) {
@@ -104,6 +115,16 @@ void MainEditorSubsystem::DrawUI() {
                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
                          );
                          cachedSceneImageView = handles.sceneImageView;
+                     }
+                 }
+                 if (handles.gameImageView != cachedGameImageView) {
+                     if (handles.gameImageView && handles.gameSampler) {
+                         gameTextureID = (void*)ImGui_ImplVulkan_AddTexture(
+                            (VkSampler)handles.gameSampler,
+                            (VkImageView)handles.gameImageView,
+                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                         );
+                         cachedGameImageView = handles.gameImageView;
                      }
                  }
              }

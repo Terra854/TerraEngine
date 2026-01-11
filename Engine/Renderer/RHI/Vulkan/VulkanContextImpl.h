@@ -91,12 +91,11 @@ struct VulkanPipeline {
 
 // Push constant payload required by the preview renderer.
 struct PushConstants {
-	glm::mat4 modelViewProjection;
-	glm::vec4 positionOffset;
-	glm::vec4 positionScale;
-	glm::vec4 uvOffsetScale;
+	glm::mat4 viewProj;
+    glm::mat4 model;
 	uint32_t textureIndex;
 	uint32_t materialIndex;
+    uint32_t padding[2];
 };
 
 // Must match shader definition
@@ -179,6 +178,7 @@ struct VulkanContext::Impl {
 	bool editorMode = false;
 
 	VkPhysicalDeviceVulkan12Features vulkan12Features{};
+	VkPhysicalDeviceVulkan13Features vulkan13Features{};
 
 	// Bindless Resources
 	static constexpr uint32_t MAX_BINDLESS_TEXTURES = 1024;
@@ -206,11 +206,24 @@ struct VulkanContext::Impl {
 	uint32_t AllocateMaterialIndex();
 
 	// Editor / Offscreen Resources
-	VkImage offscreenImage = VK_NULL_HANDLE;
-	VmaAllocation offscreenAllocation = VK_NULL_HANDLE;
-	VkImageView offscreenImageView = VK_NULL_HANDLE;
-	VkSampler offscreenSampler = VK_NULL_HANDLE;
-	VkFramebuffer offscreenFramebuffer = VK_NULL_HANDLE;
+    struct PushConstants {
+	    alignas(16) glm::mat4 viewProj;
+        alignas(16) glm::mat4 model;
+	    uint32_t textureIndex;
+	    uint32_t materialIndex;
+        uint32_t padding[2];
+    };
+
+    struct OffscreenResources {
+	    VkImage image = VK_NULL_HANDLE;
+	    VmaAllocation allocation = VK_NULL_HANDLE;
+	    VkImageView view = VK_NULL_HANDLE;
+	    VkSampler sampler = VK_NULL_HANDLE;
+	    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    };
+    OffscreenResources sceneView;
+    OffscreenResources gameView;
+
 	VkDescriptorSet offscreenDescriptorSet = VK_NULL_HANDLE;
 	VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
 
@@ -235,8 +248,22 @@ struct VulkanContext::Impl {
 	void Cleanup();
 
 	void InitEditorMode();
-	void CreateOffscreenResources();
+	void CreateOffscreenResources(OffscreenResources& res);
 	void RecreateOffscreenResources(); // Handle resize
+
+    // Grid Renderer
+    VkPipeline sceneViewGridPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout sceneViewGridPipelineLayout = VK_NULL_HANDLE;
+    
+    struct GridPushConstants {
+        glm::mat4 view;
+        glm::mat4 proj;
+        glm::mat4 inverseView;
+        glm::mat4 inverseProj;
+    };
+
+    void CreateSceneViewGridPipeline(VkRenderPass renderPass);
+    void RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData);
 
 	bool CreateInstance();
 	void PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo);

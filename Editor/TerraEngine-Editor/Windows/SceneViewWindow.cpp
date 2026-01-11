@@ -1,37 +1,166 @@
 #include "SceneViewWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
+#include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Input/InputSystem.h"
+#include "Engine/Input/InputCodes.h"
+#include "Engine/Window/WindowSystem.h"
+#include <GLFW/glfw3.h>
+#include "Engine/Core/Object/Transform.h"
+#include "Engine/Core/Object/ObjectManager.h"
 #include <imgui.h>
+#include <ImGuizmo.h>
+#include <entt/entt.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/quaternion.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 
 SceneViewWindow::SceneViewWindow(MainEditorSubsystem* owner)
     : EditorWindow("Scene View"), m_Owner(owner) {
+    m_CurrentGizmoOperation = ImGuizmo::TRANSLATE;
 }
 
 void SceneViewWindow::OnGui() {
+    ImGuizmo::BeginFrame();
+
     void* texID = m_Owner->GetSceneTextureID();
     
+    // We draw the image filling the content region
+    ImVec2 contentSize = ImGui::GetContentRegionAvail();
+    ImVec2 windowPos = ImGui::GetWindowPos();
+    ImVec2 cursorPos = ImGui::GetCursorScreenPos(); // Absolute position for ImGuizmo
+    
     if (texID) {
-        ImVec2 contentSize = ImGui::GetContentRegionAvail();
-        
-        // Constrain to 16:9
-        float targetRatio = 16.0f / 9.0f;
-        float currentRatio = contentSize.x / contentSize.y;
-        ImVec2 imageSize = contentSize;
-        
-        if (currentRatio > targetRatio) {
-            // Window is wider than target, limit width
-            imageSize.x = contentSize.y * targetRatio;
-        } else {
-            // Window is taller than target, limit height
-            imageSize.y = contentSize.x / targetRatio;
-        }
-        
-        // Center image
-        float cursorX = ImGui::GetCursorPosX() + (contentSize.x - imageSize.x) * 0.5f;
-        float cursorY = ImGui::GetCursorPosY() + (contentSize.y - imageSize.y) * 0.5f;
-        ImGui::SetCursorPos(ImVec2(cursorX, cursorY));
-        
-        ImGui::Image((ImTextureID)texID, imageSize);
+        ImGui::Image((ImTextureID)texID, contentSize);
     } else {
         ImGui::Text("Scene rendering not available.");
+    }
+
+    // Prepare for Gizmos
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetDrawlist();
+    ImGuizmo::SetRect(cursorPos.x, cursorPos.y, contentSize.x, contentSize.y);
+
+    // Calculate Camera Matrices
+    glm::mat4 view = glm::mat4(1.0f);
+    glm::mat4 proj = glm::mat4(1.0f);
+    
+    // m_CameraRot.x = pitch, .y = yaw
+    glm::quat orientation = glm::quat(glm::vec3(m_CameraRot.x, m_CameraRot.y, 0.0f));
+    glm::vec3 forward = orientation * glm::vec3(0, 0, -1);
+    glm::vec3 up = orientation * glm::vec3(0, 1, 0);
+    view = glm::lookAt(m_CameraPos, m_CameraPos + forward, up);
+    
+    float aspect = contentSize.x / contentSize.y;
+    if (aspect <= 0.0f) aspect = 1.0f;
+    glm::mat4 projNoFlip = glm::perspective(glm::radians(m_Fov), aspect, 0.1f, 1000.0f);
+    proj = projNoFlip;
+    proj[1][1] *= -1; // Vulkan flip
+
+    bool isFocused = ImGui::IsWindowFocused();
+    bool isHovered = ImGui::IsWindowHovered();
+
+    if (isFocused || isHovered) {
+        HandleCameraInput(ImGui::GetIO().DeltaTime);
+    }
+    
+    // Set Scene View Camera for next render
+    RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPos);
+
+    DrawGizmos(view, projNoFlip);
+}
+
+void SceneViewWindow::HandleCameraInput(float deltaTime) {
+    auto* window = static_cast<GLFWwindow*>(WindowSystem::Instance().GetNativeHandle());
+
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        if (!m_IsFlyCamActive) {
+            m_IsFlyCamActive = true;
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            // Tell ImGui we are handling the cursor
+            ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+        }
+
+        // Fly Cam
+        glm::quat orientation = glm::quat(glm::vec3(m_CameraRot.x, m_CameraRot.y, 0.0f));
+        glm::vec3 forward = orientation * glm::vec3(0, 0, -1);
+        glm::vec3 right = orientation * glm::vec3(1, 0, 0);
+        glm::vec3 up = orientation * glm::vec3(0, 1, 0);
+
+        if (ImGui::IsKeyDown(ImGuiKey_W)) m_CameraPos += forward * m_CameraSpeed * deltaTime;
+        if (ImGui::IsKeyDown(ImGuiKey_S)) m_CameraPos -= forward * m_CameraSpeed * deltaTime;
+        if (ImGui::IsKeyDown(ImGuiKey_D)) m_CameraPos += right * m_CameraSpeed * deltaTime;
+        if (ImGui::IsKeyDown(ImGuiKey_A)) m_CameraPos -= right * m_CameraSpeed * deltaTime;
+        if (ImGui::IsKeyDown(ImGuiKey_E)) m_CameraPos += up * m_CameraSpeed * deltaTime;
+        if (ImGui::IsKeyDown(ImGuiKey_Q)) m_CameraPos -= up * m_CameraSpeed * deltaTime;
+
+        // Mouse Look
+        // When cursor is disabled, ImGui::GetIO().MouseDelta gives raw delta
+        ImVec2 delta = ImGui::GetIO().MouseDelta;
+        if (delta.x != 0.0f || delta.y != 0.0f) {
+            m_CameraRot.y -= delta.x * m_MouseSensitivity * 0.01f;
+            m_CameraRot.x -= delta.y * m_MouseSensitivity * 0.01f;
+            
+            // Clamp pitch
+            if (m_CameraRot.x > glm::radians(89.0f)) m_CameraRot.x = glm::radians(89.0f);
+            if (m_CameraRot.x < glm::radians(-89.0f)) m_CameraRot.x = glm::radians(-89.0f);
+        }
+    } else {
+        if (m_IsFlyCamActive) {
+            m_IsFlyCamActive = false;
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+        }
+    }
+    
+    // Gizmo Shortcuts
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_W)) m_CurrentGizmoOperation = ImGuizmo::TRANSLATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_E)) m_CurrentGizmoOperation = ImGuizmo::ROTATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_R)) m_CurrentGizmoOperation = ImGuizmo::SCALE;
+    }
+}
+
+void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj) {
+    // Grid
+    // ImGuizmo grid removed to be replaced by engine renderer grid
+    // glm::mat4 identity = glm::mat4(1.0f);
+    // ImGuizmo::DrawGrid(glm::value_ptr(view), glm::value_ptr(proj), glm::value_ptr(identity), 100.0f);
+
+    // Selection
+    auto selectedEntity = m_Owner->GetSelectedEntity();
+    if (selectedEntity.has_value()) {
+        auto& registry = ObjectManager::instance().getRegistry();
+        if (registry.valid(*selectedEntity)) {
+             Transform* transform = registry.try_get<Transform>(*selectedEntity);
+             if (transform) {
+                 glm::mat4 model = glm::mat4(1.0f);
+                 model = glm::translate(model, transform->position);
+                 model = model * glm::mat4_cast(transform->rotation);
+                 model = glm::scale(model, transform->scale);
+
+                 if (ImGuizmo::Manipulate(
+                     glm::value_ptr(view), 
+                     glm::value_ptr(proj), 
+                     (ImGuizmo::OPERATION)m_CurrentGizmoOperation, 
+                     ImGuizmo::LOCAL, 
+                     glm::value_ptr(model),
+                     nullptr, 
+                     m_UsingSnap ? m_SnapValue : nullptr)) 
+                 {
+                     // Decompose and update
+                     glm::vec3 scale;
+                     glm::quat rotation;
+                     glm::vec3 translation;
+                     glm::vec3 skew;
+                     glm::vec4 perspective;
+                     glm::decompose(model, scale, rotation, translation, skew, perspective);
+                     
+                     transform->position = translation;
+                     transform->rotation = rotation;
+                     transform->scale = scale;
+                 }
+             }
+        }
     }
 }

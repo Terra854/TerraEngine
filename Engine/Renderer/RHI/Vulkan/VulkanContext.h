@@ -13,7 +13,9 @@ public:
 
 	void Initialize(WindowSystem& windowSystem) override;
 	void BeginFrame() override;
-	void RenderFrame(const FrameRenderData& frameData) override;
+	void RenderFrame(const FrameRenderData& frameData) override {
+        RenderFrame(frameData, ViewType::Game);
+    }
 	void EndFrame() override;
 	void InvalidateMaterial(const TerraEngine::UUID& materialId) override;
 	void InvalidateMesh(const TerraEngine::UUID& meshId) override;
@@ -21,7 +23,14 @@ public:
 	void WaitIdle() override;
 	void Shutdown() override;
 
-	void Resize(int width, int height);
+    enum class ViewType {
+        Game,
+        Scene
+    };
+
+	void Resize(int width, int height, ViewType view = ViewType::Game);
+
+    virtual void RenderFrame(const FrameRenderData& frameData, ViewType view);
 
 	// Editor / ImGui Integration
 	struct EditorHandles {
@@ -36,6 +45,8 @@ public:
 		uint32_t imageCount = 0;
 		void* sceneImageView = nullptr;
 		void* sceneSampler = nullptr;
+        void* gameImageView = nullptr;
+        void* gameSampler = nullptr;
 		void* vkGetInstanceProcAddr = nullptr;
 	};
 	void GetEditorHandles(EditorHandles& outHandles);

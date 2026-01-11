@@ -76,6 +76,8 @@ public:
 	// Fetch the parent entity for a given child, or entt::null if unparented.
 	entt::entity getParentEntity(entt::entity child) const;
 
+	entt::registry& getRegistry() { return registry; }
+
 private:
 	ObjectManager() = default;
 	~ObjectManager() = default;

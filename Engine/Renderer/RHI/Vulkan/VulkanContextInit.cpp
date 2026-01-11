@@ -82,23 +82,38 @@ void VulkanContext::Impl::Cleanup() {
 	}
 	textureCache.clear();
 
-	if (offscreenImage != VK_NULL_HANDLE) {
-		if (device) {
-			vkDestroySampler(device, offscreenSampler, nullptr);
-			vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr);
-			vkDestroyImageView(device, offscreenImageView, nullptr);
-			vkDestroyRenderPass(device, offscreenRenderPass, nullptr); // offscreenRenderPass is separate
-		}
-		vmaDestroyImage(allocator, offscreenImage, offscreenAllocation);
-		offscreenImage = VK_NULL_HANDLE;
-		offscreenAllocation = VK_NULL_HANDLE;
-		offscreenImageView = VK_NULL_HANDLE;
-		offscreenFramebuffer = VK_NULL_HANDLE;
-		offscreenSampler = VK_NULL_HANDLE;
-		offscreenRenderPass = VK_NULL_HANDLE;
-	}
+    auto DestroyOffscreenResources = [&](OffscreenResources& res) {
+        if (res.image != VK_NULL_HANDLE) {
+            if (device) {
+                vkDestroySampler(device, res.sampler, nullptr);
+                vkDestroyFramebuffer(device, res.framebuffer, nullptr);
+                vkDestroyImageView(device, res.view, nullptr);
+            }
+            vmaDestroyImage(allocator, res.image, res.allocation);
+            res = {};
+        }
+    };
+
+    DestroyOffscreenResources(sceneView);
+    DestroyOffscreenResources(gameView);
+    
+    if (device && offscreenRenderPass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, offscreenRenderPass, nullptr);
+        offscreenRenderPass = VK_NULL_HANDLE;
+    }
 
 	DestroyPipelines();
+
+    if (device) {
+        if (sceneViewGridPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, sceneViewGridPipeline, nullptr);
+            sceneViewGridPipeline = VK_NULL_HANDLE;
+        }
+        if (sceneViewGridPipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device, sceneViewGridPipelineLayout, nullptr);
+            sceneViewGridPipelineLayout = VK_NULL_HANDLE;
+        }
+    }
 
 	if (device) {
 		vkDestroySampler(device, defaultTexture.sampler, nullptr);
@@ -315,6 +330,10 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	vulkan12Features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
 	// Buffer device address is often useful with bindless but strictly optional
 	vulkan12Features.bufferDeviceAddress = VK_TRUE;
+
+    vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    vulkan13Features.shaderDemoteToHelperInvocation = VK_TRUE;
+    vulkan12Features.pNext = &vulkan13Features;
 
 	VkPhysicalDeviceFeatures2 features2{};
 	features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -714,6 +733,10 @@ bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 	VkPhysicalDeviceVulkan12Features features12{};
 	features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 
+    VkPhysicalDeviceVulkan13Features features13{};
+    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    features12.pNext = &features13;
+
 	VkPhysicalDeviceFeatures2 features2{};
 	features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 	features2.pNext = &features12;
@@ -723,7 +746,8 @@ bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 	if (!features12.descriptorIndexing || !features12.runtimeDescriptorArray || 
 		!features12.shaderSampledImageArrayNonUniformIndexing || 
 		!features12.descriptorBindingPartiallyBound || 
-		!features12.descriptorBindingVariableDescriptorCount) {
+		!features12.descriptorBindingVariableDescriptorCount ||
+        !features13.shaderDemoteToHelperInvocation) {
 		return false;
 	}
 

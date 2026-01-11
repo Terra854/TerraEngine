@@ -351,7 +351,9 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/HierarchyWindow.cpp
 	Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp
+	Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
+	External/ImGuizmo/ImGuizmo.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
@@ -369,11 +371,12 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Project
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
+		${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuizmo
 		${IMGUI_FILE_DIALOG_DIR}
 		${IMGUI_DIR}/backends
 )
 
-target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM)
+target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM GLM_ENABLE_EXPERIMENTAL)
 
 target_link_libraries(TerraEngine-Editor
 	PRIVATE
@@ -407,11 +410,14 @@ target_link_libraries(TerraEngine-Editor
 	file(GENERATE OUTPUT "${SHADER_INSTALL_SCRIPT}" CONTENT "
 set(SHADER_COMPILER \"$<TARGET_FILE:TerraEngineShaderCompiler>\")
 set(SHADER_SRC_DIR \"${DEFAULT_SHADER_SRC_DIR}\")
+set(EDITOR_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Editor/Shaders\")
 set(SHADER_INSTALL_ROOT \"${ENGINE_INSTALL_DESTINATION}\")
 set(DXC_PATH \"${TERRAENGINE_DXC_PATH}\")
 
 set(out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders\")
+set(editor_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Editor\")
 file(MAKE_DIRECTORY \"\${out_dir}\")
+file(MAKE_DIRECTORY \"\${editor_out_dir}\")
 
 execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.vert.hlsl\" -o \"\${out_dir}/Default.vert.tspf\" -s vs --dxc \"\${DXC_PATH}\"
@@ -427,6 +433,23 @@ execute_process(
 )
 if(NOT compile_ps EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile Default.frag.hlsl with TerraEngineShaderCompiler during install\")
+endif()
+
+# Compile Grid Shaders using raw DXC (bypassing asset compiler for internal usage)
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${editor_out_dir}/SceneViewGrid.vert.spv\" -spirv \"\${EDITOR_SHADER_SRC_DIR}/SceneViewGrid.hlsl\"
+    RESULT_VARIABLE compile_grid_vs
+)
+if(NOT compile_grid_vs EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile SceneViewGrid.vert.spv during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMainWithDepth -Fo \"\${editor_out_dir}/SceneViewGrid.frag.spv\" -spirv \"\${EDITOR_SHADER_SRC_DIR}/SceneViewGrid.hlsl\"
+    RESULT_VARIABLE compile_grid_ps
+)
+if(NOT compile_grid_ps EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile SceneViewGrid.frag.spv during install\")
 endif()
 ")
 	install(SCRIPT "${SHADER_INSTALL_SCRIPT}")

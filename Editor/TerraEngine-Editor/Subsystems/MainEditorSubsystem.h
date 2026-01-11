@@ -43,6 +43,7 @@ public:
     }
 
     void* GetSceneTextureID() const { return sceneTextureID; }
+    void* GetGameTextureID() const { return gameTextureID; }
 
     template<typename T>
     std::shared_ptr<T> GetWindow() const {
@@ -68,6 +69,8 @@ private:
 
     void* sceneTextureID = nullptr;
     void* cachedSceneImageView = nullptr;
+    void* gameTextureID = nullptr;
+    void* cachedGameImageView = nullptr;
     bool sceneLoaded = false;
     
     std::optional<entt::entity> selectedEntity;

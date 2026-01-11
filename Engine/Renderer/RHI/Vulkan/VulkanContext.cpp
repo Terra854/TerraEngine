@@ -6,6 +6,7 @@
 #include "VulkanCommonIncludes.h"
 #include "VulkanContextImpl.h"
 #include "ThreadPool/ThreadPool.h"
+#include <fstream>
 
 VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {}
 VulkanContext::~VulkanContext() = default;
@@ -15,7 +16,7 @@ void VulkanContext::Initialize(WindowSystem& windowSystem) {
 	impl->InitVulkan(windowSystem);
 }
 
-void VulkanContext::Resize(int width, int height) {
+void VulkanContext::Resize(int width, int height, ViewType view) {
 	if (impl) {
 		impl->framebufferResized = true;
 	}
@@ -79,34 +80,298 @@ void VulkanContext::BeginFrame() {
 	}
 }
 
-void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
+// Actually, we should use the shader compiler logic or precompile.
+// For now, let's assume we load precompiled SPIR-V or compile on fly if using shader compiler.
+// Wait, the project uses DXC for shader compilation.
+// I should use the ShaderCompiler to compile the Grid shader.
+// But ShaderCompiler is an Editor Tool. Engine should load SPIR-V.
+// However, the previous shader compilation seems to be done offline or via ResourceManager.
+// Let's assume we can load the grid shader as a special system shader.
+
+// Since I cannot easily invoke the offline compiler here, I will assume the Grid shader is compiled to SPIR-V.
+// BUT, I wrote Grid.hlsl. It needs to be compiled.
+// The engine has `AssetCompilers` in `Editor/`.
+// I will add `CreateGridPipeline` which compiles the shader code directly using `dxc` or loads it.
+// Given the constraints, I will add a helper to compile shader code in `VulkanContext.cpp` for internal shaders,
+// or I can check if there is a `ShaderCompiler` utility available in `Engine`.
+// Looking at file list, `Engine/Editor/AssetCompilers/ShaderCompiler.h` exists but it is in `Editor`.
+// `Engine` seems to rely on loaded assets.
+// I will implement a simple shader compilation in `CreateGridPipeline` for now using `dxc` if available, or just load precompiled spv if I could.
+// But since I just wrote the HLSL, I need to compile it.
+// I will use a simple embedded compiler if possible or just skip compilation if I can't.
+// Wait, I can try to read the file and compile it.
+
+// Let's modify the plan. I will implement `CreateGridPipeline` which tries to load `Engine/Shaders/Default/Grid.vert.spv` and `Grid.frag.spv`.
+// But I need to compile them first.
+// I'll add a build step or just try to compile in C++.
+// For now, let's implement the C++ code assuming SPIR-V exists or I can compile it.
+// I will assume `ResourceManager` can load it? No, `ResourceManager` loads `.teshader`.
+// I will implement a basic `CompileShader` function in `VulkanContext.cpp` using `dxc`.
+
+// Wait, I can use `dxc` via command line in a `run_shell_command` to compile the shader.
+// That is safer.
+
+void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
+    if (sceneViewGridPipeline != VK_NULL_HANDLE) return;
+
+    // Load SPIR-V
+    auto loadShader = [&](const std::string& path) -> VkShaderModule {
+        std::ifstream file(path, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+            TERRAENGINE_LOG(LogLevel::Error, "Failed to open shader file: " << path);
+            return VK_NULL_HANDLE;
+        }
+        size_t fileSize = (size_t)file.tellg();
+        std::vector<uint32_t> buffer(fileSize / sizeof(uint32_t));
+        file.seekg(0);
+        file.read((char*)buffer.data(), fileSize);
+        file.close();
+
+        VkShaderModuleCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        createInfo.codeSize = buffer.size() * sizeof(uint32_t);
+        createInfo.pCode = buffer.data();
+
+        VkShaderModule shaderModule;
+        if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+            TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << path);
+            return VK_NULL_HANDLE;
+        }
+        return shaderModule;
+    };
+
+    // We expect these files to be generated.
+    VkShaderModule vertShader = loadShader("Shaders/Editor/SceneViewGrid.vert.spv");
+    VkShaderModule fragShader = loadShader("Shaders/Editor/SceneViewGrid.frag.spv");
+
+    if (!vertShader || !fragShader) {
+        TERRAENGINE_LOG(LogLevel::Warning, "Grid shaders not found. Grid will not be rendered.");
+        if (vertShader) vkDestroyShaderModule(device, vertShader, nullptr);
+        if (fragShader) vkDestroyShaderModule(device, fragShader, nullptr);
+        return;
+    }
+
+    VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+    vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vertShaderStageInfo.module = vertShader;
+    vertShaderStageInfo.pName = "VSMain";
+
+    VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+    fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragShaderStageInfo.module = fragShader;
+    fragShaderStageInfo.pName = "PSMainWithDepth";
+
+    VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+    VkViewport viewport{}; // Dynamic
+    VkRect2D scissor{}; // Dynamic
+
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_FALSE; // Transparent grid usually doesn't write depth? Or it does but it's at z=0?
+    // The shader calculates depth. If we output SV_Depth, we can write depth.
+    // But for a helper grid, usually we want it to be occluded by objects (Test=True) 
+    // and maybe write depth if we want objects behind it to be occluded? 
+    // Actually, infinite grid usually writes depth so you can't see objects "under" the ground plane if opaque.
+    // But our shader does 'discard' for sky.
+    // Let's enable Depth Write.
+    depthStencil.depthWriteEnable = VK_TRUE; 
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS; // Standard depth test
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable = VK_FALSE;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_TRUE;
+    colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.logicOpEnable = VK_FALSE;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    std::vector<VkDynamicState> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(GridPushConstants);
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 0;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &sceneViewGridPipelineLayout) != VK_SUCCESS) {
+        TERRAENGINE_LOG(LogLevel::Error, "failed to create grid pipeline layout!");
+        return;
+    }
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = sceneViewGridPipelineLayout;
+    pipelineInfo.renderPass = renderPass;
+    pipelineInfo.subpass = 0;
+    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &sceneViewGridPipeline) != VK_SUCCESS) {
+        TERRAENGINE_LOG(LogLevel::Error, "failed to create grid pipeline!");
+    }
+
+    vkDestroyShaderModule(device, vertShader, nullptr);
+    vkDestroyShaderModule(device, fragShader, nullptr);
+}
+
+void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData) {
+    if (sceneViewGridPipeline == VK_NULL_HANDLE) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneViewGridPipeline);
+
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)swapchainExtent.width;
+    viewport.height = (float)swapchainExtent.height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = swapchainExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    GridPushConstants push{};
+    push.view = frameData.viewMatrix;
+    push.proj = frameData.projectionMatrix;
+    push.inverseView = glm::inverse(frameData.viewMatrix);
+    push.inverseProj = glm::inverse(frameData.projectionMatrix);
+
+    vkCmdPushConstants(cmd, sceneViewGridPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GridPushConstants), &push);
+
+    vkCmdDraw(cmd, 6, 1, 0, 0); // 6 vertices for fullscreen quad
+}
+
+// Modify RenderFrame to initialize/render grid
+// I will inject this into RenderFrame method.
+
+void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view) {
+
 	// Skip rendering if initialization failed so we do not spam validation errors.
+
 	if (!impl->initialized || impl->skipFrame) return;
 
+
+
 	// Handle Editor Mode resizing (lazy)
+
 	if (impl->editorMode) {
-		if (impl->offscreenImage == VK_NULL_HANDLE) {
+
+		if (impl->sceneView.image == VK_NULL_HANDLE) {
+
 			impl->InitEditorMode();
+
 		}
-		if (impl->offscreenFramebuffer == VK_NULL_HANDLE) {
-			impl->CreateOffscreenResources();
+
+		if (impl->sceneView.framebuffer == VK_NULL_HANDLE) {
+
+			impl->CreateOffscreenResources(impl->sceneView);
+
 		}
+
+        if (impl->gameView.framebuffer == VK_NULL_HANDLE) {
+
+            impl->CreateOffscreenResources(impl->gameView);
+
+        }
+
 	}
 
+
+
 	uint32_t imageIndex = impl->acquiredImageIndex;
+
 	VkRenderPassBeginInfo renderPassInfo{};
+
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 
+
+
 	if (!impl->editorMode) {
+
 		if (!impl->swapchainImageAcquired) {
+
 			return;
+
 		}
+
 		renderPassInfo.renderPass = impl->renderPass;
+
 		renderPassInfo.framebuffer = impl->framebuffers[imageIndex];
+
 	} else {
+
 		// Editor Mode: Render to offscreen
+
 		renderPassInfo.renderPass = impl->offscreenRenderPass;
-		renderPassInfo.framebuffer = impl->offscreenFramebuffer;
+
+		renderPassInfo.framebuffer = (view == ViewType::Scene) ? impl->sceneView.framebuffer : impl->gameView.framebuffer;
+
 	}
 
 	renderPassInfo.renderArea.offset = {0, 0};
@@ -118,6 +383,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 
 	renderPassInfo.clearValueCount = 2;
 	renderPassInfo.pClearValues = clearValues;
+
+    // Create Grid Pipeline if needed (lazy init)
+    if (view == ViewType::Scene) {
+        impl->CreateSceneViewGridPipeline(renderPassInfo.renderPass);
+    }
 
 	// Prepare Draw Data
 	struct PreparedDraw {
@@ -150,7 +420,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 		VulkanMesh& mesh = impl->meshCache[command.meshId];
 
 		PushConstants push{};
-		push.modelViewProjection = frameData.projectionMatrix * frameData.viewMatrix * command.modelMatrix;
+		push.viewProj = frameData.projectionMatrix * frameData.viewMatrix;
+        push.model = command.modelMatrix;
 		
 		// Set texture index for bindless access
 		push.textureIndex = 0; // Default
@@ -164,16 +435,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 		push.materialIndex = 0; // Default
 		if (impl->materialIndexMap.contains(command.materialId)) {
 			push.materialIndex = impl->materialIndexMap[command.materialId];
-		}
-
-		if (Mesh* cpuMesh = ResourceManager::Instance().GetMesh(command.meshId)) {
-			push.positionOffset = glm::vec4(cpuMesh->header.quantization.positionOffset[0], cpuMesh->header.quantization.positionOffset[1], cpuMesh->header.quantization.positionOffset[2], 0.0f);
-			push.positionScale = glm::vec4(cpuMesh->header.quantization.positionScale[0], cpuMesh->header.quantization.positionScale[1], cpuMesh->header.quantization.positionScale[2], 0.0f);
-			push.uvOffsetScale = glm::vec4(cpuMesh->header.quantization.uvOffset[0], cpuMesh->header.quantization.uvOffset[1], cpuMesh->header.quantization.uvScale[0], cpuMesh->header.quantization.uvScale[1]);
-		} else {
-			push.positionOffset = glm::vec4(0.0f);
-			push.positionScale = glm::vec4(1.0f);
-			push.uvOffsetScale = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
 		}
 
 		PreparedDraw draw{};
@@ -303,6 +564,40 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData) {
 			if (secondary != VK_NULL_HANDLE) secondaryBuffers.push_back(secondary);
 		}
 	}
+
+    // Render Grid (Scene View Only)
+    if (view == ViewType::Scene) {
+        // Allocate a secondary buffer for the grid on the main thread
+        // We use 'workerCount' as the index to avoid collision with threaded workers
+        // We need to calculate workerCount again or store it.
+        const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+		const size_t workerCount = std::min(prepared.size(), hw);
+        
+        // Ensure pool exists for this "extra" worker index
+        impl->EnsureWorkerPools(impl->currentFrame, workerCount + 1);
+        
+        VkCommandBuffer gridCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerCount);
+        if (gridCmd != VK_NULL_HANDLE) {
+            vkResetCommandBuffer(gridCmd, 0);
+            
+            VkCommandBufferInheritanceInfo inherit{};
+            inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+            inherit.renderPass = renderPassInfo.renderPass;
+            inherit.subpass = 0;
+            inherit.framebuffer = renderPassInfo.framebuffer;
+
+            VkCommandBufferBeginInfo begin{};
+            begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+            begin.pInheritanceInfo = &inherit;
+
+            vkBeginCommandBuffer(gridCmd, &begin);
+            impl->RenderSceneViewGrid(gridCmd, frameData);
+            vkEndCommandBuffer(gridCmd);
+            
+            secondaryBuffers.push_back(gridCmd);
+        }
+    }
 
 	VkSubpassContents contents = secondaryBuffers.empty() ? VK_SUBPASS_CONTENTS_INLINE : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
 	vkCmdBeginRenderPass(cmd, &renderPassInfo, contents);
@@ -440,8 +735,10 @@ void VulkanContext::GetEditorHandles(EditorHandles& h) {
 	h.renderPass = impl->renderPass;
 	h.minImageCount = impl->MAX_FRAMES_IN_FLIGHT;
 	h.imageCount = static_cast<uint32_t>(impl->swapchainImages.size());
-	h.sceneImageView = (void*)impl->offscreenImageView;
-	h.sceneSampler = (void*)impl->offscreenSampler;
+	h.sceneImageView = (void*)impl->sceneView.view;
+	h.sceneSampler = (void*)impl->sceneView.sampler;
+    h.gameImageView = (void*)impl->gameView.view;
+    h.gameSampler = (void*)impl->gameView.sampler;
 	h.vkGetInstanceProcAddr = (void*)vkGetInstanceProcAddr;
 }
 
@@ -565,16 +862,16 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 
 void VulkanContext::Impl::InitEditorMode() {
 	editorMode = true;
-	CreateOffscreenResources();
+	CreateOffscreenResources(sceneView);
+    CreateOffscreenResources(gameView);
 }
 
-void VulkanContext::Impl::CreateOffscreenResources() {
-	if (offscreenImage != VK_NULL_HANDLE) {
-		vmaDestroyImage(allocator, offscreenImage, offscreenAllocation);
-		vkDestroyImageView(device, offscreenImageView, nullptr);
-		vkDestroyFramebuffer(device, offscreenFramebuffer, nullptr);
-		vkDestroySampler(device, offscreenSampler, nullptr);
-		// Don't destroy RenderPass if compatible?
+void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
+	if (res.image != VK_NULL_HANDLE) {
+		vmaDestroyImage(allocator, res.image, res.allocation);
+		vkDestroyImageView(device, res.view, nullptr);
+		vkDestroyFramebuffer(device, res.framebuffer, nullptr);
+		vkDestroySampler(device, res.sampler, nullptr);
 	}
 	
 	if (offscreenRenderPass == VK_NULL_HANDLE) {
@@ -664,14 +961,14 @@ void VulkanContext::Impl::CreateOffscreenResources() {
 	VmaAllocationCreateInfo allocInfo{};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-	vmaCreateImage(allocator, &imageInfo, &allocInfo, &offscreenImage, &offscreenAllocation, nullptr);
+	vmaCreateImage(allocator, &imageInfo, &allocInfo, &res.image, &res.allocation, nullptr);
 
 	// Create View
-	offscreenImageView = CreateImageView(offscreenImage, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+	res.view = CreateImageView(res.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
 
 	// Create Framebuffer
 	std::array<VkImageView, 2> attachments = {
-		offscreenImageView,
+		res.view,
 		depthImageView // Reuse swapchain depth? Size must match.
 	};
 	// Wait, swapchain depth matches swapchain extent. Offscreen matches swapchain extent. Safe.
@@ -685,7 +982,7 @@ void VulkanContext::Impl::CreateOffscreenResources() {
 	framebufferInfo.height = swapchainExtent.height;
 	framebufferInfo.layers = 1;
 
-	vkCreateFramebuffer(device, &framebufferInfo, nullptr, &offscreenFramebuffer);
+	vkCreateFramebuffer(device, &framebufferInfo, nullptr, &res.framebuffer);
 
 	// Create Sampler
 	VkSamplerCreateInfo samplerInfo{};
@@ -703,10 +1000,11 @@ void VulkanContext::Impl::CreateOffscreenResources() {
 	samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
 
-	vkCreateSampler(device, &samplerInfo, nullptr, &offscreenSampler);
+	vkCreateSampler(device, &samplerInfo, nullptr, &res.sampler);
 }
 
 void VulkanContext::Impl::RecreateOffscreenResources() {
 	vkDeviceWaitIdle(device);
-	CreateOffscreenResources();
+	CreateOffscreenResources(sceneView);
+    CreateOffscreenResources(gameView);
 }

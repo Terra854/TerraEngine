@@ -1,9 +1,9 @@
+#pragma pack_matrix(column_major)
+
 struct PushConstants
 {
-	float4x4 modelViewProjection;
-	float4 positionOffset; // xyz, w unused
-	float4 positionScale;  // xyz, w unused
-	float4 uvOffsetScale;  // xy = offset, zw = scale
+	column_major float4x4 viewProj;
+    column_major float4x4 model;
 	uint textureIndex;
 	uint materialIndex;
 };
@@ -28,18 +28,12 @@ VSOut main(VSIn input)
 {
 	VSOut output;
 	
-	// De-quantize position
-	float3 worldPos = input.position * SceneUniforms.positionScale.xyz + SceneUniforms.positionOffset.xyz;
-	
-	// De-quantize UVs
-	float2 realUV = input.uv * SceneUniforms.uvOffsetScale.zw + SceneUniforms.uvOffsetScale.xy;
+    // Transform to world space
+    float4 worldPos = mul(SceneUniforms.model, float4(input.position, 1.0f));
 
-	output.position = mul(SceneUniforms.modelViewProjection, float4(worldPos, 1.0f));
-	output.uv = realUV;
-	output.normal = input.normal; // Normals are usually just direction, scale might affect them but usually we re-normalize or use inverse transpose. 
-	// Since we are just translating/uniform scaling, the direction *should* be fine if input.normal was normalized 
-	// and stored as SNORM. SNORM unpacks to -1..1, which is correct direction. 
-	// Ideally we might want to normalize it again to be safe.
+	output.position = mul(SceneUniforms.viewProj, worldPos);
+	output.uv = input.uv;
+	output.normal = mul((float3x3)SceneUniforms.model, input.normal); 
 	
 	return output;
 }

@@ -248,7 +248,27 @@ void RenderSystem::Update(float deltaTime)
 	// each authored viewpoint in sequence.
 	rhi->BeginFrame();
 
-	if (cameras.empty())
+    VulkanContext* vulkan = static_cast<VulkanContext*>(rhi.get());
+
+    // 1. Scene View Pass
+    if (hasSceneViewCamera)
+    {
+        frameData.viewMatrix = sceneViewCamera.view;
+        frameData.projectionMatrix = sceneViewCamera.proj;
+        vulkan->RenderFrame(frameData, VulkanContext::ViewType::Scene);
+    }
+
+    // 2. Game View Pass
+    if (!gameViewCameras.empty())
+    {
+        for (const auto& cam : gameViewCameras)
+        {
+            frameData.viewMatrix = cam.view;
+            frameData.projectionMatrix = cam.proj;
+            vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);
+        }
+    }
+	else if (cameras.empty())
 	{
 		// If no cameras are present, render a blank frame to ensure the swapchain
 		// is updated and image layouts are transitioned (Undefined -> ShaderReadOnly/Present).
@@ -257,7 +277,7 @@ void RenderSystem::Update(float deltaTime)
 		FrameRenderData blankData{};
 		blankData.viewMatrix = glm::mat4(1.0f);
 		blankData.projectionMatrix = glm::mat4(1.0f);
-		rhi->RenderFrame(blankData);
+		vulkan->RenderFrame(blankData, VulkanContext::ViewType::Game);
 	}
 	else
 	{
@@ -287,10 +307,12 @@ void RenderSystem::Update(float deltaTime)
 			frameData.projectionMatrix = glm::perspective(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
 			frameData.projectionMatrix[1][1] *= -1;
 
-			rhi->RenderFrame(frameData);
+			vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);
 		}
 	}
 	rhi->EndFrame();
+
+    ClearOverrideCameras();
 }
 
 void RenderSystem::Shutdown()
