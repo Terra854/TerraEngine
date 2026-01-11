@@ -71,17 +71,30 @@ void SceneViewWindow::OnGui() {
 }
 
 void SceneViewWindow::HandleCameraInput(float deltaTime) {
+    // Need to include WindowSystem and GLFW for this
     auto* window = static_cast<GLFWwindow*>(WindowSystem::Instance().GetNativeHandle());
 
     if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         if (!m_IsFlyCamActive) {
             m_IsFlyCamActive = true;
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            // Tell ImGui we are handling the cursor
+            m_StoredCursorPos = InputSystem::Instance().GetCursorPosition();
+            
+            // Hide the cursor explicitly since we tell ImGui not to touch it
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
             ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
         }
 
-        // Fly Cam
+        // Calculate delta manually to avoid ImGui delta issues with re-centering
+        auto currentPos = InputSystem::Instance().GetCursorPosition();
+        double deltaX = currentPos.first - m_StoredCursorPos.first;
+        double deltaY = currentPos.second - m_StoredCursorPos.second;
+
+        // Reset cursor to stored position to keep it locked
+        if (deltaX != 0.0 || deltaY != 0.0) {
+            InputSystem::Instance().SetCursorPosition(m_StoredCursorPos.first, m_StoredCursorPos.second);
+        }
+
+        // Fly Cam Movement
         glm::quat orientation = glm::quat(glm::vec3(m_CameraRot.x, m_CameraRot.y, 0.0f));
         glm::vec3 forward = orientation * glm::vec3(0, 0, -1);
         glm::vec3 right = orientation * glm::vec3(1, 0, 0);
@@ -95,11 +108,9 @@ void SceneViewWindow::HandleCameraInput(float deltaTime) {
         if (ImGui::IsKeyDown(ImGuiKey_Q)) m_CameraPos -= up * m_CameraSpeed * deltaTime;
 
         // Mouse Look
-        // When cursor is disabled, ImGui::GetIO().MouseDelta gives raw delta
-        ImVec2 delta = ImGui::GetIO().MouseDelta;
-        if (delta.x != 0.0f || delta.y != 0.0f) {
-            m_CameraRot.y -= delta.x * m_MouseSensitivity * 0.01f;
-            m_CameraRot.x -= delta.y * m_MouseSensitivity * 0.01f;
+        if (deltaX != 0.0 || deltaY != 0.0) {
+            m_CameraRot.y -= (float)deltaX * m_MouseSensitivity * 0.01f;
+            m_CameraRot.x -= (float)deltaY * m_MouseSensitivity * 0.01f;
             
             // Clamp pitch
             if (m_CameraRot.x > glm::radians(89.0f)) m_CameraRot.x = glm::radians(89.0f);
@@ -108,6 +119,8 @@ void SceneViewWindow::HandleCameraInput(float deltaTime) {
     } else {
         if (m_IsFlyCamActive) {
             m_IsFlyCamActive = false;
+            
+            // Restore cursor visibility
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
         }

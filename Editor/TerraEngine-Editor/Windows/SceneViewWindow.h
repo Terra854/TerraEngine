@@ -24,6 +24,7 @@ private:
     float m_CameraSpeed = 10.0f;
     float m_MouseSensitivity = 0.1f;
     bool m_IsFlyCamActive = false;
+    std::pair<double, double> m_StoredCursorPos;
 
     // Gizmo State
     int m_CurrentGizmoOperation = -1; // -1 for none, or ImGuizmo::TRANSLATE etc.
