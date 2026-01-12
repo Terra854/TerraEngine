@@ -1,7 +1,6 @@
 #include "Serializer.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
-#include "Core/Object/IDComponent.h"
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -9,6 +8,11 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
     ObjectManager& objManager = ObjectManager::instance();
     nlohmann::json objJson;
     objJson["name"] = objManager.getObjectName(obj);
+    
+    auto uuid = obj.getUUID();
+    nlohmann::json uuidJson = nlohmann::json::array();
+    for (auto b : uuid) uuidJson.push_back(b);
+    objJson["uuid"] = uuidJson;
     
     objJson["components"] = nlohmann::json::object();
 
@@ -80,14 +84,12 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
     // and correctly applying undo/redo steps to the right entities.
     TerraEngine::UUID uuid = TerraEngine::GenerateUUID();
     bool hasUuid = false;
-    if (json.contains("components") && json["components"].contains("IDComponent")) {
-        auto& idJson = json["components"]["IDComponent"];
-        if (idJson.contains("id")) {
-            auto& uuidArr = idJson["id"];
-            if (uuidArr.is_array() && uuidArr.size() == 16) {
-                for (int i = 0; i < 16; ++i) uuid[i] = uuidArr[i].get<uint8_t>();
-                hasUuid = true;
-            }
+
+    if (json.contains("uuid")) {
+        auto& uuidArr = json["uuid"];
+        if (uuidArr.is_array() && uuidArr.size() == 16) {
+            for (int i = 0; i < 16; ++i) uuid[i] = uuidArr[i].get<uint8_t>();
+            hasUuid = true;
         }
     }
 
@@ -108,7 +110,6 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
         auto& registry = ComponentAccessRegistry();
 
         for (auto& [compName, compData] : json["components"].items()) {
-            if (compName == "IDComponent") continue; // ID handled above
 
             if (registry.count(compName)) {
                 auto& functions = registry[compName];

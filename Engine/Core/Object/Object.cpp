@@ -1,4 +1,5 @@
 #include "Object.h"
+#include "ObjectManager.h"
 
 Object::Object(entt::registry& registry)
 	: registry(&registry)
@@ -10,6 +11,11 @@ Object::Object(entt::registry& registry, entt::entity existingId)
 	: registry(&registry)
 	, id(existingId)
 {
+}
+
+TerraEngine::UUID Object::getUUID() const
+{
+	return ObjectManager::instance().getUUID(id);
 }
 
 

@@ -23,9 +23,9 @@ Object ObjectManager::createObject(const std::string& name) {
 	object.addComponent<Transform>();
 	// Assign a stable identity immediately upon creation so the entity can be
 	// tracked across serialization and undo sessions.
-	auto& idComp = object.addComponent<IDComponent>();
-	
-	uuidToEntity.emplace(idComp.id, object.EntityId());
+	TerraEngine::UUID uuid = TerraEngine::GenerateUUID();
+	entityToUuid.emplace(object.EntityId(), uuid);
+	uuidToEntity.emplace(uuid, object.EntityId());
 	
 	objectMap.insert({ object, name });
 	parentMap.emplace(object.EntityId(), entt::null);
@@ -45,9 +45,10 @@ void ObjectManager::removeObject(Object obj) {
 	{
 		// Purge the UUID mapping before the component is destroyed to maintain
 		// consistency in the lookup table.
-		if (IDComponent* idComp = registry.try_get<IDComponent>(obj.id))
+		if (auto it = entityToUuid.find(obj.id); it != entityToUuid.end())
 		{
-			uuidToEntity.erase(idComp->id);
+			uuidToEntity.erase(it->second);
+			entityToUuid.erase(it);
 		}
 		registry.destroy(obj.id);
 	}
@@ -267,10 +268,15 @@ void ObjectManager::UpdateEntityUUID(entt::entity entity, const TerraEngine::UUI
 	// Allows the identity of an existing entity to be swapped. Primarily used
 	// during scene deserialization to restore authored or undo-session IDs
 	// while keeping the lookup table in sync.
-	if (IDComponent* idComp = registry.try_get<IDComponent>(entity))
+	if (auto it = entityToUuid.find(entity); it != entityToUuid.end())
 	{
-		uuidToEntity.erase(idComp->id);
-		idComp->id = newId;
+		uuidToEntity.erase(it->second);
+		it->second = newId;
+		uuidToEntity[newId] = entity;
+	}
+	else
+	{
+		entityToUuid[entity] = newId;
 		uuidToEntity[newId] = entity;
 	}
 }
@@ -321,10 +327,21 @@ entt::entity ObjectManager::getParentEntity(entt::entity child) const
 	return entt::null;
 }
 
+TerraEngine::UUID ObjectManager::getUUID(entt::entity entity)
+{
+	if (auto it = entityToUuid.find(entity); it != entityToUuid.end())
+	{
+		return it->second;
+	}
+	return TerraEngine::UUID();
+}
+
 void ObjectManager::clear()
 {
 	registry.clear();
 	objectMap.clear();
 	parentMap.clear();
 	childrenMap.clear();
+	uuidToEntity.clear();
+	entityToUuid.clear();
 }

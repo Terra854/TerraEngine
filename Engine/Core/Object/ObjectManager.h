@@ -11,7 +11,7 @@
 
 #include "Object.h"
 #include "Transform.h"
-#include "IDComponent.h"
+#include "Utilities/UUID.h"
 
 class ObjectManager {
 public:
@@ -41,6 +41,9 @@ public:
 	std::optional<Object> getObject(entt::entity id);
 	// Build an Object handle for an existing entity by UUID.
 	std::optional<Object> getObject(const TerraEngine::UUID& id);
+	
+	// Get UUID for an entity.
+	TerraEngine::UUID getUUID(entt::entity entity);
 
 	// Update the UUID mapping for an entity. Used during deserialization to restore IDs.
 	void UpdateEntityUUID(entt::entity entity, const TerraEngine::UUID& newId);
@@ -108,6 +111,7 @@ private:
 	// identifiers. This mapping is essential for maintaining object identity
 	// across undo/redo and serialization boundaries.
 	std::unordered_map<TerraEngine::UUID, entt::entity> uuidToEntity;
+	std::unordered_map<entt::entity, TerraEngine::UUID> entityToUuid;
 
 	Object makeHandle(entt::entity entityId);
 	void detachFromParent(entt::entity childId);

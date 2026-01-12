@@ -3,13 +3,10 @@
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/Serializer.h"
-#include "Engine/Core/Object/IDComponent.h"
 
 CreateObjectCommand::CreateObjectCommand(entt::entity entity) : m_Entity(entity) {
     if (auto obj = ObjectManager::instance().getObject(entity)) {
-        if (auto idComp = obj->getComponent<IDComponent>()) {
-            m_Uuid = idComp->id;
-        }
+        m_Uuid = obj->getUUID();
         m_Json = Serializer::SerializeObject(*obj);
     }
 }
@@ -29,9 +26,7 @@ std::string CreateObjectCommand::GetName() const { return "Create Object"; }
 DeleteObjectCommand::DeleteObjectCommand(entt::entity entity) : m_Entity(entity) {
     if (auto obj = ObjectManager::instance().getObject(entity)) {
         m_Json = Serializer::SerializeObject(*obj);
-        if (auto idComp = obj->getComponent<IDComponent>()) {
-            m_Uuid = idComp->id;
-        }
+        m_Uuid = obj->getUUID();
     }
 }
 

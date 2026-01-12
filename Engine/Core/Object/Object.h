@@ -6,6 +6,8 @@
 #include <string>
 #include <utility>
 
+#include "Utilities/UUID.h"
+
 // Object now serves as an interface to manage entities in EnTT
 class Object {
 public:
@@ -14,6 +16,8 @@ public:
 	// creating a new one. Restricted to the ObjectManager so stray handles
 	// cannot be built without registry ownership.
 	Object(entt::registry& registry, entt::entity existingId);
+
+	TerraEngine::UUID getUUID() const;
 
     // Component management with EnTT
     template<typename T, typename... Args>

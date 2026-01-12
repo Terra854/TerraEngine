@@ -105,7 +105,7 @@ void RenderSystem::Update(float deltaTime)
 	);
 	// Throttle warning spam so missing cameras do not flood the console every frame.
 	static bool loggedMissingCamera = false;
-	if (cameras.empty())
+	if (cameras.empty() && !hasSceneViewCamera)
 	{
 		if (!loggedMissingCamera)
 		{
@@ -125,7 +125,7 @@ void RenderSystem::Update(float deltaTime)
 		MeshRenderComponent mesh;
 	};
 	std::vector<RenderableEntry> renderables;
-	if (!cameras.empty())
+	if (!cameras.empty() || hasSceneViewCamera)
 	{
 		objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
 			[&](Object object, Transform& transform, MeshRenderComponent& meshComp)
