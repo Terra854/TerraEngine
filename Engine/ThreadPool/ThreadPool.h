@@ -91,6 +91,14 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
     void clearDependencies() {
         dependenciesList.clear();
     }
+    
+    void reset(std::function<ReturnType()> func) {
+        taskFunc = std::move(func);
+        taskPromise = std::promise<ReturnType>();
+        dependenciesList.clear();
+        unresolvedDependencies = -1;
+        parentTask.reset();
+    }
 
     std::future<ReturnType> getFuture() {
         return taskPromise.get_future();
@@ -115,12 +123,21 @@ public:
     auto createTask(Func&& func, Args&&... args) -> std::shared_ptr<Task<std::invoke_result_t<Func, Args...>>> {
         using ReturnType = std::invoke_result_t<Func, Args...>;
         auto boundFunc = std::bind(std::forward<Func>(func), std::forward<Args>(args)...);
-        auto task = std::make_shared<Task<ReturnType>>(std::function<ReturnType()>(boundFunc));
-        return task;
+        
+        if constexpr (std::is_void_v<ReturnType>) {
+            return AllocateVoidTask(std::move(boundFunc));
+        } else {
+            return std::make_shared<Task<ReturnType>>(std::function<ReturnType()>(boundFunc));
+        }
     }
 
     void enqueue(std::shared_ptr<ITask> weakTask);
     void completeTask(std::shared_ptr<ITask> completedTask);
+
+    std::shared_ptr<Task<void>> AllocateVoidTask(std::function<void()> func);
+    void ReleaseVoidTask(Task<void>* task);
+
+    size_t getThreadCount() const { return workers.size(); }
 
 private:
     ThreadPool() : stop(false) {}
@@ -134,4 +151,7 @@ private:
     std::mutex queue_mutex;
     std::condition_variable condition;
     bool stop;
+    
+    std::vector<Task<void>*> voidTaskPool;
+    std::mutex poolMutex;
 };

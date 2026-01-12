@@ -68,14 +68,57 @@ void ScriptingSystem::Update(float deltaTime) {
 
     if (scriptObjects.empty()) return;
 
-    // Execute script updates in parallel
+    struct ScriptBatchItem {
+        uint32_t id;
+        std::string name;
+    };
+
+    const size_t totalScripts = scriptObjects.size();
+    const size_t threadCount = std::max<size_t>(1, ThreadPool::instance().getThreadCount());
+    
+    // Target multiple tasks per thread to ensure efficient load balancing
+    // across available workers.
+    const size_t targetTasks = threadCount * 4; 
+    
+    // Calculate the optimal batch size based on the target task count.
+    size_t batchSize = totalScripts / targetTasks;
+    
+    // Enforce a minimum batch size to prevent excessive scheduling overhead
+    // when processing a small number of scripts.
+    if (batchSize < 32) {
+        batchSize = 32;
+    }
+
+    std::vector<ScriptBatchItem> currentBatch;
+    currentBatch.reserve(batchSize);
+
+    // Execute script updates in parallel batches
     for (auto& obj : scriptObjects) {
         auto* script = obj.getComponent<ScriptComponent>();
         if (!script || !script->active || script->className.empty()) continue;
 
-        // Enqueue task to thread pool
-        auto task = ThreadPool::instance().createTask([this, id = (uint32_t)obj.EntityId(), name = script->className, deltaTime]() {
-            managedUpdate(id, name.c_str(), deltaTime);
+        currentBatch.push_back({ (uint32_t)obj.EntityId(), script->className });
+
+        if (currentBatch.size() >= batchSize) {
+            auto task = ThreadPool::instance().createTask([items = std::move(currentBatch), this, deltaTime]() {
+                for (const auto& item : items) {
+                    managedUpdate(item.id, item.name.c_str(), deltaTime);
+                }
+            });
+            ThreadPool::instance().enqueue(task);
+            
+            // Re-initialize for next batch (moved vector is in unspecified state)
+            currentBatch = std::vector<ScriptBatchItem>();
+            currentBatch.reserve(batchSize);
+        }
+    }
+
+    // Process remaining items
+    if (!currentBatch.empty()) {
+        auto task = ThreadPool::instance().createTask([items = std::move(currentBatch), this, deltaTime]() {
+            for (const auto& item : items) {
+                managedUpdate(item.id, item.name.c_str(), deltaTime);
+            }
         });
         ThreadPool::instance().enqueue(task);
     }

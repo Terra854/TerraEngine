@@ -45,6 +45,10 @@ public:
 	// Thread-safe log function that records the call-site file, line, and function signature.
 	void Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message, bool isManaged = false);
 
+	void SetMinLogLevel(LogLevel level) { minLevel = level; }
+	LogLevel GetMinLogLevel() const { return minLevel; }
+	bool ShouldLog(LogLevel level) const { return level >= minLevel; }
+
 	// Gracefully shutdown the logger thread.
 	void Shutdown();
 
@@ -65,6 +69,7 @@ private:
 	std::condition_variable cv;
 	std::thread t; // Seperate thread for logging outside of the main thread and threadpool
 	std::atomic<bool> done;
+	std::atomic<LogLevel> minLevel{LogLevel::Info};
 };
 
 // Macro to simplify logging while capturing source file, line, and function signature.
@@ -78,7 +83,9 @@ private:
 
 // Macro to simplify logging while capturing source file, line, and function signature.
 #define TERRAENGINE_LOG(level, message) do {                                 \
-    std::ostringstream _terraengine_os;                                      \
-    _terraengine_os << message;                                              \
-    Logger::Instance().Log(level, __FILE__, __LINE__, LOG_FUNCTION, _terraengine_os.str());\
+    if (Logger::Instance().ShouldLog(level)) {                               \
+        std::ostringstream _terraengine_os;                                  \
+        _terraengine_os << message;                                          \
+        Logger::Instance().Log(level, __FILE__, __LINE__, LOG_FUNCTION, _terraengine_os.str());\
+    }                                                                        \
 } while(0)

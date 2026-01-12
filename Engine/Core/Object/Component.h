@@ -173,7 +173,7 @@ private:
 	// Shared mutex allows many readers to proceed concurrently while writers
 	// gain exclusive access when mutating component state. Each component
 	// owns its own mutex so copies do not share lock state.
-	mutable std::unique_ptr<std::shared_mutex> access_mutex_;
+	mutable std::shared_mutex access_mutex_;
 public:
 	// Kept last to enable Tail Padding Optimization (EBO/TPO), potentially saving 8 bytes per component depending on the rest of the component layout.
 	// Does not work on Windows due to different ABI rules.
@@ -183,16 +183,16 @@ public:
 	using WriteLock = std::unique_lock<std::shared_mutex>;
 
 	Component()
-		: access_mutex_(std::make_unique<std::shared_mutex>())
 	{
 		registerType();
 	}
 
 	Component(const Component& other)
-		: access_mutex_(std::make_unique<std::shared_mutex>())
+		: active(other.active)
 	{
 		// The mutex is recreated so cloned components do not share locking
 		// state, keeping per-instance read/write access independent.
+		// Mutex is default constructed.
 		(void)other;
 		registerType();
 	}
@@ -206,7 +206,11 @@ public:
 		{
 			// Assignments also reset the mutex so a fresh component copy does
 			// not inherit lock contention from the source object.
-			access_mutex_ = std::make_unique<std::shared_mutex>();
+			// Mutex is not copyable/assignable, but we don't want to copy the lock state anyway.
+			// Since we can't re-assign the mutex member, we just leave it as is (unlocked).
+			// If the current object was locked, this would be dangerous, but assignment assumes unique ownership or external sync.
+			
+			active = other.active;
 			registerType();
 		}
 		(void)other;
@@ -224,14 +228,14 @@ public:
 	// while still blocking if any thread promotes to a write lock.
 	[[nodiscard]] ReadLock acquireReadLock() const
 	{
-		return ReadLock(*access_mutex_);
+		return ReadLock(access_mutex_);
 	}
 
 	// Mutating operations should take this guard so writers have exclusive
 	// access and readers are paused until updates are complete.
 	[[nodiscard]] WriteLock acquireWriteLock() const
 	{
-		return WriteLock(*access_mutex_);
+		return WriteLock(access_mutex_);
 	}
 
 protected:

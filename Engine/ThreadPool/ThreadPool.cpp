@@ -7,8 +7,14 @@ ThreadPool& ThreadPool::instance() {
 }
 
 void ThreadPool::initialize() {
-	for (int i = 0; i < 4; ++i) {
-		workers.emplace_back([this, i] { this->workerThread(i); });
+    const size_t hardwareThreads = std::thread::hardware_concurrency();
+
+    // specific hardware threads or default to 4 if detection fails.
+    // Ensure at least one worker is created to process tasks.
+    const size_t numThreads = hardwareThreads > 0 ? hardwareThreads : 4;
+
+	for (size_t i = 0; i < numThreads; ++i) {
+		workers.emplace_back([this, i] { this->workerThread((int)i); });
 	}
 }
 
@@ -20,6 +26,15 @@ void ThreadPool::shutdown()
 	for (std::thread& worker : workers) {
 		worker.join();
 	}
+
+    // Clean up task pool
+    {
+        std::lock_guard<std::mutex> lock(poolMutex);
+        for (auto* task : voidTaskPool) {
+            delete task;
+        }
+        voidTaskPool.clear();
+    }
 }
 
 // Enqueue a task; handle its dependencies automatically
@@ -47,6 +62,35 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
 			enqueue(dependentTask);
 		}
 	}
+}
+
+std::shared_ptr<Task<void>> ThreadPool::AllocateVoidTask(std::function<void()> func)
+{
+    Task<void>* ptr = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(poolMutex);
+        if (!voidTaskPool.empty()) {
+            ptr = voidTaskPool.back();
+            voidTaskPool.pop_back();
+        }
+    }
+
+    if (!ptr) {
+        ptr = new Task<void>(std::move(func));
+    } else {
+        ptr->reset(std::move(func));
+    }
+
+    // Return shared_ptr with custom deleter that returns to pool
+    return std::shared_ptr<Task<void>>(ptr, [this](Task<void>* t) {
+        ReleaseVoidTask(t);
+    });
+}
+
+void ThreadPool::ReleaseVoidTask(Task<void>* task)
+{
+    std::lock_guard<std::mutex> lock(poolMutex);
+    voidTaskPool.push_back(task);
 }
 
 // Notify that a task has completed; decrement unresolvedDependencies of the parent task

@@ -8,6 +8,8 @@
 #include "Core/Object/Transform.h"
 #include "Resource/ResourceManager.h"
 #include "ThreadPool/ThreadPool.h"
+#include "Core/Memory/FrameArena.h"
+#include "Core/Memory/FlatMap.h"
 #include <entt/entt.hpp>
 
 #define GLM_FORCE_RADIANS
@@ -56,13 +58,25 @@ void RenderSystem::Initialize()
 	initialized = true;
 }
 
+template<typename T>
+using FrameVector = std::vector<T, FrameAllocator<T>>;
+
+template<typename K, typename V>
+using FrameMap = FlatMap<K, V, FrameAllocator<std::pair<K, V>>>;
+
 void RenderSystem::Update(float deltaTime)
 {
 	if (!initialized) {
 		return;
 	}
+
+    // Reset the frame allocator at the start of the frame logic
+    FrameArena::Instance().Reset();
+
 	// Capture all transforms first so hierarchical world transforms can be derived for cameras and renderables.
-	std::unordered_map<entt::entity, Transform> localTransforms;
+    FrameMap<entt::entity, Transform> localTransforms;
+    localTransforms.reserve(1000); // Guess initial size
+
 	objManager.forEachObjectWithComponents<Transform>(
 		[&](Object object, Transform& transform)
 		{
@@ -76,12 +90,9 @@ void RenderSystem::Update(float deltaTime)
 
 	// Snapshot camera components so view/projection data is sourced from
 	// authored entities instead of the legacy hardcoded values.
-	struct CameraEntry
-	{
-		entt::entity entity;
-		CameraComponent camera;
-	};
-	std::vector<CameraEntry> cameras;
+	FrameVector<CameraEntry> cameras;
+    cameras.reserve(10);
+
 	objManager.forEachObjectWithComponents<Transform, CameraComponent>(
 		[&](Object object, Transform& transform, CameraComponent& cameraComp)
 		{
@@ -119,12 +130,9 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	// Snapshot renderable components to avoid locking the registry during parallel work.
-	struct RenderableEntry
-	{
-		entt::entity entity;
-		MeshRenderComponent mesh;
-	};
-	std::vector<RenderableEntry> renderables;
+    FrameVector<RenderableEntry> renderables;
+    renderables.reserve(1000);
+
 	if (!cameras.empty() || hasSceneViewCamera)
 	{
 		objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
@@ -154,24 +162,33 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	// Cache of computed world transforms to avoid recomputing during traversal.
-	std::unordered_map<entt::entity, Transform> worldTransforms;
-	auto computeWorldTransform = [&](auto&& self, entt::entity entity, std::unordered_set<entt::entity>& visiting) -> Transform
+    FrameMap<entt::entity, Transform> worldTransforms;
+    worldTransforms.reserve(localTransforms.size());
+
+    // Use a set for cycle detection. FlatSet would be better but std::set with FrameAllocator is okayish for small depth,
+    // or just use vector and linear scan for small depth. Recursion depth is usually small in scene graphs.
+    // Let's use FrameVector for "visiting" stack.
+    using VisitingStack = FrameVector<entt::entity>;
+    
+	auto computeWorldTransform = [&](auto&& self, entt::entity entity, VisitingStack& visiting) -> Transform
 	{
-		if (auto cached = worldTransforms.find(entity); cached != worldTransforms.end())
+		if (auto* cached = worldTransforms.find(entity))
 		{
-			return cached->second;
+			return *cached;
 		}
 		if (!localTransforms.contains(entity))
 		{
 			return Transform{};
 		}
 		// Prevent cycles from causing infinite recursion.
-		if (!visiting.insert(entity).second)
-		{
-			return localTransforms[entity];
-		}
+        // Linear scan is fast for small hierarchies
+        if (std::find(visiting.begin(), visiting.end(), entity) != visiting.end()) {
+             return localTransforms.at(entity);
+        }
 
-		Transform world = localTransforms[entity];
+        visiting.push_back(entity);
+
+		Transform world = localTransforms.at(entity);
 		const entt::entity parent = objManager.getParentEntity(entity);
 		if (parent != entt::null)
 		{
@@ -181,21 +198,34 @@ void RenderSystem::Update(float deltaTime)
 			world.scale = parentWorld.scale * world.scale;
 		}
 
-		visiting.erase(entity);
-		worldTransforms[entity] = world;
+		visiting.pop_back();
+		worldTransforms.emplace(entity, world);
 		return world;
 	};
 
-	// Pre-compute world transforms for all renderables sequentially to avoid
-	// data races in the 'worldTransforms' map during parallel command generation.
-	// This also ensures the cache is fully hot for the workers.
+	// Pre-compute world transforms
 	{
-		std::unordered_set<entt::entity> visiting;
+        VisitingStack visiting;
+        visiting.reserve(16);
 		for (const auto& entry : renderables)
 		{
 			computeWorldTransform(computeWorldTransform, entry.entity, visiting);
 		}
 	}
+
+    // Note: std::vector<DrawCommand> cannot easily use FrameAllocator if we want to return it from tasks/futures 
+    // because moving vectors with different allocators (thread local?) is complex?
+    // Actually FrameArena is singleton, so allocators are compatible.
+    // But std::future/async usage suggests we might want standard heap for result transport OR
+    // we just use FrameVector everywhere. FrameArena is thread-safe?
+    // FrameArena::Allocate is NOT thread safe currently. offset variable is not atomic.
+    
+    // **CRITICAL FIX**: FrameArena is NOT thread safe.
+    // Parallelizing command generation using FrameAllocator in threads requires locking or ThreadLocal arenas.
+    // For now, let's revert to Heap Vector for the parallel result merging, BUT
+    // we can use FrameVector for the `drawCommands` main list if we fill it sequentially.
+    // The tasks return `std::vector<DrawCommand>`. We'll keep that as heap vector to avoid Arena race conditions.
+    // `worldTransforms` is read-only in threads.
 
 	std::vector<DrawCommand> drawCommands;
 	if (!renderables.empty())
@@ -214,6 +244,7 @@ void RenderSystem::Update(float deltaTime)
 			const size_t end = std::min(renderables.size(), start + chunkSize);
 
 			// Pass worldTransforms by reference (read-only access is safe here)
+            // Note: capturing FrameMap by reference is fine.
 			auto task = ThreadPool::instance().createTask([start, end, &renderables, &worldTransforms]() {
 				std::vector<DrawCommand> cmds;
 				cmds.reserve(end - start);
@@ -243,7 +274,7 @@ void RenderSystem::Update(float deltaTime)
 			ThreadPool::instance().enqueue(task);
 		}
 
-		// Stitch results together in submission order to maintain deterministic command order.
+		// Stitch results together
 		for (auto& future : futures)
 		{
 			auto chunk = future.get();
@@ -252,17 +283,12 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	FrameRenderData frameData;
-	// Commands are reused for every camera since the scene contents are shared;
-	// only the view/projection matrices will differ per camera iteration.
 	frameData.commands = drawCommands;
 
-	// Render once for every camera found so multi-camera scenes can present
-	// each authored viewpoint in sequence.
 	rhi->BeginFrame();
 
     VulkanContext* vulkan = static_cast<VulkanContext*>(rhi.get());
 
-    // 1. Scene View Pass
     if (hasSceneViewCamera)
     {
         frameData.viewMatrix = sceneViewCamera.view;
@@ -270,7 +296,6 @@ void RenderSystem::Update(float deltaTime)
         vulkan->RenderFrame(frameData, VulkanContext::ViewType::Scene);
     }
 
-    // 2. Game View Pass
     if (!gameViewCameras.empty())
     {
         for (const auto& cam : gameViewCameras)
@@ -282,10 +307,6 @@ void RenderSystem::Update(float deltaTime)
     }
 	else if (cameras.empty())
 	{
-		// If no cameras are present, render a blank frame to ensure the swapchain
-		// is updated and image layouts are transitioned (Undefined -> ShaderReadOnly/Present).
-		// This prevents validation errors and potential crashes in Editor mode where
-		// UI rendering depends on the scene pass completing.
 		FrameRenderData blankData{};
 		blankData.viewMatrix = glm::mat4(1.0f);
 		blankData.projectionMatrix = glm::mat4(1.0f);
@@ -297,8 +318,12 @@ void RenderSystem::Update(float deltaTime)
 		{
 			const entt::entity cameraEntity = cameras[cameraIndex].entity;
 			const auto& camera = cameras[cameraIndex].camera;
-			std::unordered_set<entt::entity> visiting;
+            
+            VisitingStack visiting;
+            visiting.reserve(16);
+            
 			Transform cameraTransform = computeWorldTransform(computeWorldTransform, cameraEntity, visiting);
+
 			// Normalize the rotation so derived direction vectors remain unit length
 			// even if authoring data drifts slightly off the identity quaternion.
 			const glm::quat cameraRotation = glm::normalize(cameraTransform.rotation);

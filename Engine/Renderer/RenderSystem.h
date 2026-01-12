@@ -4,6 +4,13 @@
 #include "RHI/RHIContext.h"
 #include "Core/Object/ObjectManager.h"
 #include <memory>
+#include <vector>
+#include <unordered_map>
+#include <unordered_set>
+#include <entt/entt.hpp>
+#include "Core/Object/Transform.h"
+#include "Scene/CameraComponent.h"
+#include "Scene/MeshRenderComponent.h"
 
 class RenderSystem : public SystemsBase
 {
@@ -55,4 +62,16 @@ private:
     bool hasSceneViewCamera = false;
     OverrideCameraData sceneViewCamera;
     std::vector<OverrideCameraData> gameViewCameras;
+
+    // Internal structs for data gathering
+    struct CameraEntry
+    {
+        entt::entity entity;
+        CameraComponent camera;
+    };
+    struct RenderableEntry
+    {
+        entt::entity entity;
+        MeshRenderComponent mesh;
+    };
 };
