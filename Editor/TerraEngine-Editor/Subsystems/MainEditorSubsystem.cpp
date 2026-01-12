@@ -2,6 +2,7 @@
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
 #include "EditorSystem.h"
+#include "UndoRedoSystem.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
@@ -26,6 +27,12 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
     m_Windows.push_back(std::make_shared<ProjectBrowserWindow>(this));
     m_Windows.push_back(std::make_shared<GameViewWindow>(this));
     m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
+
+    UndoRedoSystem::Instance().Initialize(context);
+
+    ObjectManager::instance().SetOnModifiedCallback([]() {
+        SceneManager::Instance().MarkActiveSceneDirty();
+    });
 }
 
 void MainEditorSubsystem::OnProjectOpened() {
@@ -48,6 +55,7 @@ void MainEditorSubsystem::OnProjectOpened() {
 }
 
 void MainEditorSubsystem::Shutdown() {
+    UndoRedoSystem::Instance().Shutdown();
     ctx = nullptr;
     m_Windows.clear();
 }
@@ -86,6 +94,20 @@ void MainEditorSubsystem::OnBackendReady() {
 
 void MainEditorSubsystem::Update(float deltaTime) {
     // Logic update
+    
+    // Process editor-wide hotkeys.
+    if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_S)) {
+            SceneManager::Instance().SaveScene();
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
+            UndoRedoSystem::Instance().Undo();
+        }
+        // Traditional Windows redo shortcut (Ctrl+Y).
+        if (ImGui::IsKeyPressed(ImGuiKey_Y)) {
+            UndoRedoSystem::Instance().Redo();
+        }
+    }
 }
 
 void MainEditorSubsystem::SetOnProjectClosedCallback(std::function<void()> callback) {
@@ -166,12 +188,27 @@ void MainEditorSubsystem::DrawUI() {
 void MainEditorSubsystem::DrawMainMenuBar() {
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
+                SceneManager::Instance().SaveScene();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("Close Project")) {
                 ctx->projectManager->CloseProject();
                 if (onProjectClosed) onProjectClosed();
             }
             if (ImGui::MenuItem("Exit")) {
-                // Should signal app exit
+                // TODO: Handle app-level shutdown request.
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Edit")) {
+            // Context-aware menu enabling ensures users know when history is 
+            // available or exhausted.
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, UndoRedoSystem::Instance().CanUndo())) {
+                UndoRedoSystem::Instance().Undo();
+            }
+            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, UndoRedoSystem::Instance().CanRedo())) {
+                UndoRedoSystem::Instance().Redo();
             }
             ImGui::EndMenu();
         }

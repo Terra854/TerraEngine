@@ -18,4 +18,6 @@ private:
     
     MainEditorSubsystem* m_Owner;
     std::string m_SearchFilter;
+    entt::entity m_ContextEntityId = entt::null;
+    bool m_OpenEntityMenu = false;
 };

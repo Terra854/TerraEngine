@@ -13,7 +13,9 @@
 
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
+#include "Core/Object/Component.h"
 #include "Input/InputSystem.h"
+#include "Serializer.h"
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/ShaderCollection.h"
@@ -45,7 +47,7 @@ void SceneManager::Initialize()
 	
 	ResourceManager::Instance().LoadDefaultResources();
 
-	PreparePreviewAssets();
+	//PreparePreviewAssets();
 	// Initialization is logged at debug level so tooling can trace startup ordering.
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager initialized with root " << sceneRoot);
 }
@@ -138,6 +140,9 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 	}
 
 	activeSceneId = id;
+	// New scenes start clean to avoid showing unsaved changes indicators
+	// immediately after a successful load or swap.
+	activeSceneDirty = false;
 	// Log the swap so editors can track which scene is currently bound.
 	TERRAENGINE_LOG(LogLevel::Debug, "Active scene set to id " << ToHexString(id));
 	return true;
@@ -151,6 +156,72 @@ const SceneDocument* SceneManager::GetActiveScene() const
 	}
 
 	return GetScene(activeSceneId);
+}
+
+bool SceneManager::IsActiveSceneDirty() const
+{
+	return activeSceneDirty;
+}
+
+void SceneManager::MarkActiveSceneDirty()
+{
+	activeSceneDirty = true;
+}
+
+bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
+{
+	const SceneDocument* activeScene = GetActiveScene();
+	if (!activeScene)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "No active scene to save.");
+		return false;
+	}
+
+	// Default to overwriting the original source if no alternative path is
+	// provided by the caller (e.g. a "Save As" operation).
+	std::filesystem::path targetPath;
+	if (path.has_value())
+	{
+		targetPath = *path;
+	}
+	else
+	{
+		targetPath = activeScene->sourcePath;
+	}
+	
+	if (!targetPath.is_absolute()) {
+		targetPath = ResolveScenePath(targetPath);
+	}
+
+	nlohmann::json sceneJson;
+	sceneJson["name"] = activeScene->name;
+	sceneJson["objects"] = nlohmann::json::array();
+
+	ObjectManager& objManager = ObjectManager::instance();
+	auto roots = objManager.getRootObjects();
+
+	// Leverage the centralized Serializer to convert the live object graph 
+	// into a JSON structure suitable for disk storage.
+	for (auto& root : roots) {
+		sceneJson["objects"].push_back(Serializer::SerializeObject(root));
+	}
+
+	std::ofstream file(targetPath);
+	if (!file.is_open()) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to open file for writing: " << targetPath);
+		return false;
+	}
+
+	file << sceneJson.dump(4);
+	file.close();
+
+	TERRAENGINE_LOG(LogLevel::Info, "Saved scene to " << targetPath);
+	
+	// Resetting the dirty flag after a successful disk write ensures the editor
+	// UI accurately reflects that the current state is safely persisted.
+	activeSceneDirty = false;
+	
+	return true;
 }
 
 void SceneManager::UnloadAll()
