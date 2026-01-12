@@ -148,10 +148,24 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj) {
         if (registry.valid(*selectedEntity)) {
              Transform* transform = registry.try_get<Transform>(*selectedEntity);
              if (transform) {
-                 glm::mat4 model = glm::mat4(1.0f);
-                 model = glm::translate(model, transform->position);
-                 model = model * glm::mat4_cast(transform->rotation);
-                 model = glm::scale(model, transform->scale);
+                 // Helper to compute world transform
+                 auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
+                     glm::mat4 world(1.0f);
+                     entt::entity current = entity;
+                     while (current != entt::null && registry.valid(current)) {
+                         if (auto* t = registry.try_get<Transform>(current)) {
+                             glm::mat4 local(1.0f);
+                             local = glm::translate(local, t->position);
+                             local = local * glm::mat4_cast(t->rotation);
+                             local = glm::scale(local, t->scale);
+                             world = local * world; // Parent * Child
+                         }
+                         current = ObjectManager::instance().getParentEntity(current);
+                     }
+                     return world;
+                 };
+
+                 glm::mat4 model = computeWorldMatrix(*selectedEntity);
 
                  if (ImGuizmo::Manipulate(
                      glm::value_ptr(view), 
@@ -162,13 +176,22 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj) {
                      nullptr, 
                      m_UsingSnap ? m_SnapValue : nullptr)) 
                  {
+                     // Convert updated World Matrix back to Local Matrix
+                     glm::mat4 parentMatrix(1.0f);
+                     entt::entity parent = ObjectManager::instance().getParentEntity(*selectedEntity);
+                     if (parent != entt::null) {
+                         parentMatrix = computeWorldMatrix(parent);
+                     }
+                     
+                     glm::mat4 localMatrix = glm::inverse(parentMatrix) * model;
+
                      // Decompose and update
                      glm::vec3 scale;
                      glm::quat rotation;
                      glm::vec3 translation;
                      glm::vec3 skew;
                      glm::vec4 perspective;
-                     glm::decompose(model, scale, rotation, translation, skew, perspective);
+                     glm::decompose(localMatrix, scale, rotation, translation, skew, perspective);
                      
                      transform->position = translation;
                      transform->rotation = rotation;

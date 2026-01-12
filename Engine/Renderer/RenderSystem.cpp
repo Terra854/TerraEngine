@@ -186,6 +186,17 @@ void RenderSystem::Update(float deltaTime)
 		return world;
 	};
 
+	// Pre-compute world transforms for all renderables sequentially to avoid
+	// data races in the 'worldTransforms' map during parallel command generation.
+	// This also ensures the cache is fully hot for the workers.
+	{
+		std::unordered_set<entt::entity> visiting;
+		for (const auto& entry : renderables)
+		{
+			computeWorldTransform(computeWorldTransform, entry.entity, visiting);
+		}
+	}
+
 	std::vector<DrawCommand> drawCommands;
 	if (!renderables.empty())
 	{
@@ -202,14 +213,15 @@ void RenderSystem::Update(float deltaTime)
 			if (start >= renderables.size()) break;
 			const size_t end = std::min(renderables.size(), start + chunkSize);
 
-			auto task = ThreadPool::instance().createTask([start, end, &renderables, &computeWorldTransform]() {
+			// Pass worldTransforms by reference (read-only access is safe here)
+			auto task = ThreadPool::instance().createTask([start, end, &renderables, &worldTransforms]() {
 				std::vector<DrawCommand> cmds;
 				cmds.reserve(end - start);
-				std::unordered_set<entt::entity> visiting;
 				for (size_t i = start; i < end; ++i)
 				{
 					const RenderableEntry& entry = renderables[i];
-					Transform transform = computeWorldTransform(computeWorldTransform, entry.entity, visiting);
+					// Transform is guaranteed to be in the map now
+					Transform transform = worldTransforms.at(entry.entity);
 					const MeshRenderComponent& meshComp = entry.mesh;
 
 					DrawCommand cmd;
