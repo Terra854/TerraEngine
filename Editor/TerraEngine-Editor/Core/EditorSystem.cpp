@@ -298,11 +298,6 @@ void EditorSystem::Update(float deltaTime) {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     
-    // Call Managed Editor Update
-    if (managedUpdate) {
-        managedUpdate(deltaTime);
-    }
-
     if (context.projectManager->HasActiveProject()) {
         AssetDatabase::Instance().Update();
         mainEditor->Update(deltaTime);
@@ -316,6 +311,11 @@ void EditorSystem::Update(float deltaTime) {
     } else {
         projectHub->Update(deltaTime);
         projectHub->DrawUI();
+    }
+
+    // Call Managed Editor Update after the background DockSpace is submitted
+    if (managedUpdate) {
+        managedUpdate(deltaTime);
     }
     
     ImGui::Render();
