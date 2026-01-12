@@ -252,7 +252,7 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Managed PREFIX "Managed" FILES ${M
 
 # Custom target to build the C# project
 # We use 'dotnet build' directly to avoid CMake C# generator limitations (VS only)
-set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Binaries/Managed")
+set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Binaries/Managed/$<CONFIG>")
 add_custom_target(TerraEngine.Core ALL
     COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Managed/TerraEngine.Core/TerraEngine.Core.csproj" -c $<CONFIG> -o "${MANAGED_OUTPUT_DIR}"
     COMMENT "Building Managed Assembly: TerraEngine.Core"
@@ -390,19 +390,34 @@ target_link_libraries(TerraEngine-Editor
 )
 
 
-	#set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
-	set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
-	#if(CMAKE_CONFIGURATION_TYPES)
-	#    set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
-	#else()
-	#    if(CMAKE_BUILD_TYPE)
-	#        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/${CMAKE_BUILD_TYPE})
-	#    else()
-	#        set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
-	#    endif()
-	#endif()
+# --- Build Configurations & Optimizations ---
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+endif()
 
-	set(DEFAULT_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Default")
+# Enable Interprocedural Optimization (IPO/LTCG) for Release builds if supported by the compiler
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
+if(ipo_supported)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
+endif()
+
+if(MSVC)
+    # Stronger optimizations for MSVC in Release modes
+    add_compile_options($<$<CONFIG:RELEASE,RELWITHDEBINFO>:/Ot /Ox /GS- /Oi>)
+    add_link_options($<$<CONFIG:RELEASE,RELWITHDEBINFO>:/OPT:REF /OPT:ICF>)
+else()
+    # Stronger optimizations for GCC/Clang
+    add_compile_options($<$<CONFIG:RELEASE,RELWITHDEBINFO>:-O3 -ffast-math>)
+endif()
+
+set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
+set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
+
+set(DEFAULT_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Default")
 	if(WIN32)
 		set(TERRAENGINE_DXC_PATH "${CMAKE_SOURCE_DIR}/External/dxc/windows/bin/x64/dxc.exe")
 	else()

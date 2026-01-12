@@ -37,30 +37,45 @@ The project is structured into three main components:
 *   Vulkan SDK (implicitly required by generic Vulkan usage, though headers are bundled)
 
 ### Build Commands
-The project **requires** the install step to be executed to function correctly, as it relies on a specific directory structure for runtime assets and binaries (`Build/`).
+The project **requires** the install step to be executed to function correctly, as it relies on a specific directory structure for runtime assets and binaries (`Build/<Config>/`).
 
 **1. Configure:**
+By default, the project is configured for **Debug** builds. This is the recommended mode for development.
 ```bash
-cmake -S . -B out/build_gemini -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B out/build_gemini
 ```
 
-**2. Build:**
+**2. Build & Install (Debug - Default):**
+Run the install target to populate the `Build/Debug/` directory.
 ```bash
-cmake --build out/build_gemini --parallel
+cmake --build out/build_gemini --config Debug --target install
 ```
 
-**3. Install (CRITICAL):**
-You must run the install target to populate the `Build/` directory with binaries and required DLLs/assets.
+**Alternative Build Configurations:**
+You can build other configurations using the same build directory.
+
 ```bash
-cmake --build out/build_gemini --target install
+# Release (Optimized, No Debug Info)
+cmake --build out/build_gemini --config Release --target install
+
+# RelWithDebInfo (Optimized + Debug Symbols)
+cmake --build out/build_gemini --config RelWithDebInfo --target install
+
+# MinSizeRel (Optimized for Size)
+cmake --build out/build_gemini --config MinSizeRel --target install
 ```
 
 ### Running
-After installation, the executable will be located in the installation directory (typically `out/build_gemini/Build/<Config>/`).
+After installation, the executable will be located in the configuration-specific installation directory.
 ```bash
+# Debug (Default)
 ./out/build_gemini/Build/Debug/TerraEngine-Launcher.exe
-```
 
+# Alternatives
+./out/build_gemini/Build/Release/TerraEngine-Launcher.exe
+./out/build_gemini/Build/RelWithDebInfo/TerraEngine-Launcher.exe
+./out/build_gemini/Build/MinSizeRel/TerraEngine-Launcher.exe
+```
 ## Development Conventions
 
 Refer to `AGENTS.md` for strict guidelines. Key points include:
