@@ -250,6 +250,7 @@ struct VulkanContext::Impl {
 	void InitEditorMode();
 	void CreateOffscreenResources(OffscreenResources& res);
 	void RecreateOffscreenResources(); // Handle resize
+    void ClearResources();
 
     // Grid Renderer
     VkPipeline sceneViewGridPipeline = VK_NULL_HANDLE;

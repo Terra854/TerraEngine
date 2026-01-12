@@ -57,6 +57,7 @@ public:
 
 private:
     void DrawMainMenuBar();
+    void CloseCurrentProject();
     
     EditorContext* ctx = nullptr;
     std::function<void()> onProjectClosed;

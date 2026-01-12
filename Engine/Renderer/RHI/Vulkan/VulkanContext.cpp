@@ -80,37 +80,7 @@ void VulkanContext::BeginFrame() {
 	}
 }
 
-// Actually, we should use the shader compiler logic or precompile.
-// For now, let's assume we load precompiled SPIR-V or compile on fly if using shader compiler.
-// Wait, the project uses DXC for shader compilation.
-// I should use the ShaderCompiler to compile the Grid shader.
-// But ShaderCompiler is an Editor Tool. Engine should load SPIR-V.
-// However, the previous shader compilation seems to be done offline or via ResourceManager.
-// Let's assume we can load the grid shader as a special system shader.
-
-// Since I cannot easily invoke the offline compiler here, I will assume the Grid shader is compiled to SPIR-V.
-// BUT, I wrote Grid.hlsl. It needs to be compiled.
-// The engine has `AssetCompilers` in `Editor/`.
-// I will add `CreateGridPipeline` which compiles the shader code directly using `dxc` or loads it.
-// Given the constraints, I will add a helper to compile shader code in `VulkanContext.cpp` for internal shaders,
-// or I can check if there is a `ShaderCompiler` utility available in `Engine`.
-// Looking at file list, `Engine/Editor/AssetCompilers/ShaderCompiler.h` exists but it is in `Editor`.
-// `Engine` seems to rely on loaded assets.
-// I will implement a simple shader compilation in `CreateGridPipeline` for now using `dxc` if available, or just load precompiled spv if I could.
-// But since I just wrote the HLSL, I need to compile it.
-// I will use a simple embedded compiler if possible or just skip compilation if I can't.
-// Wait, I can try to read the file and compile it.
-
-// Let's modify the plan. I will implement `CreateGridPipeline` which tries to load `Engine/Shaders/Default/Grid.vert.spv` and `Grid.frag.spv`.
-// But I need to compile them first.
-// I'll add a build step or just try to compile in C++.
-// For now, let's implement the C++ code assuming SPIR-V exists or I can compile it.
-// I will assume `ResourceManager` can load it? No, `ResourceManager` loads `.teshader`.
-// I will implement a basic `CompileShader` function in `VulkanContext.cpp` using `dxc`.
-
-// Wait, I can use `dxc` via command line in a `run_shell_command` to compile the shader.
-// That is safer.
-
+// Create Grid Pipeline for Scene View
 void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
     if (sceneViewGridPipeline != VK_NULL_HANDLE) return;
 
@@ -199,15 +169,8 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_FALSE; // Transparent grid usually doesn't write depth? Or it does but it's at z=0?
-    // The shader calculates depth. If we output SV_Depth, we can write depth.
-    // But for a helper grid, usually we want it to be occluded by objects (Test=True) 
-    // and maybe write depth if we want objects behind it to be occluded? 
-    // Actually, infinite grid usually writes depth so you can't see objects "under" the ground plane if opaque.
-    // But our shader does 'discard' for sky.
-    // Let's enable Depth Write.
     depthStencil.depthWriteEnable = VK_TRUE; 
-    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS; // Standard depth test
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
 
@@ -725,6 +688,10 @@ void VulkanContext::Shutdown() {
 	impl->Cleanup();
 }
 
+void VulkanContext::ClearResources() {
+    impl->ClearResources();
+}
+
 void VulkanContext::GetEditorHandles(EditorHandles& h) {
 	h.instance = impl->instance;
 	h.physicalDevice = impl->physicalDevice;
@@ -1007,4 +974,30 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 	vkDeviceWaitIdle(device);
 	CreateOffscreenResources(sceneView);
     CreateOffscreenResources(gameView);
+}
+
+void VulkanContext::Impl::ClearResources() {
+    if (!device) return;
+    vkDeviceWaitIdle(device);
+
+    for (auto& [id, mesh] : meshCache) {
+        vmaDestroyBuffer(allocator, mesh.indexBuffer.buffer, mesh.indexBuffer.allocation);
+        vmaDestroyBuffer(allocator, mesh.vertexBuffer.buffer, mesh.vertexBuffer.allocation);
+    }
+    meshCache.clear();
+
+    for (auto& [id, tex] : textureCache) {
+        vkDestroySampler(device, tex.sampler, nullptr);
+        vkDestroyImageView(device, tex.view, nullptr);
+        vmaDestroyImage(allocator, tex.image, tex.allocation);
+    }
+    textureCache.clear();
+    
+    textureIndexMap.clear();
+    freeTextureIndices.clear();
+    nextTextureIndex = 1; // Index 0 is reserved for Default Texture
+
+    materialIndexMap.clear();
+    freeMaterialIndices.clear();
+    nextMaterialIndex = 0;
 }

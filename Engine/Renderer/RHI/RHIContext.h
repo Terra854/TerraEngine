@@ -18,6 +18,7 @@ public:
 	virtual void InvalidateMaterial(const TerraEngine::UUID& materialId) {}
 	virtual void InvalidateMesh(const TerraEngine::UUID& meshId) {}
 	virtual void InvalidateTexture(const TerraEngine::UUID& textureId) {}
+    virtual void ClearResources() {}
 	virtual void WaitIdle() = 0;
 	virtual void Shutdown() = 0;
 };

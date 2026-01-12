@@ -22,6 +22,7 @@ public:
 	void InvalidateTexture(const TerraEngine::UUID& textureId) override;
 	void WaitIdle() override;
 	void Shutdown() override;
+    void ClearResources() override;
 
     enum class ViewType {
         Game,

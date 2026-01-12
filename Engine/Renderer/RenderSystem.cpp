@@ -354,3 +354,12 @@ void RenderSystem::ReloadTexture(const TerraEngine::UUID& textureId)
 		rhi->InvalidateTexture(textureId);
 	}
 }
+
+void RenderSystem::Clear()
+{
+    if (rhi)
+    {
+        rhi->ClearResources();
+    }
+    ClearOverrideCameras();
+}

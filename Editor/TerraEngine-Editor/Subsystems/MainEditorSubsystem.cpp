@@ -6,6 +6,7 @@
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Scene/SceneManager.h"
+#include "Engine/Resource/ResourceManager.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <backends/imgui_impl_vulkan.h>
@@ -167,8 +168,7 @@ void MainEditorSubsystem::DrawMainMenuBar() {
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("Close Project")) {
-                ctx->projectManager->CloseProject();
-                if (onProjectClosed) onProjectClosed();
+                CloseCurrentProject();
             }
             if (ImGui::MenuItem("Exit")) {
                 // Should signal app exit
@@ -206,4 +206,35 @@ void MainEditorSubsystem::DrawMainMenuBar() {
         }
         ImGui::EndMenuBar();
     }
+}
+
+void MainEditorSubsystem::CloseCurrentProject() {
+    // Clear Scene
+    SceneManager::Instance().UnloadAll();
+    
+    // Clear Objects
+    ObjectManager::instance().clear();
+    
+    // Clear Resources
+    ResourceManager::Instance().ClearCaches();
+    
+    // Clear Renderer Resources
+    // This ensures GPU resources are flushed and binding indices are reset.
+    if (ctx && ctx->engine) {
+        RenderSystem* renderSystem = ctx->engine->GetSystem<RenderSystem>();
+        if (renderSystem) {
+            renderSystem->Clear();
+        }
+    }
+
+    // Clear Selection
+    selectedEntity = std::nullopt;
+    selectedAsset = std::nullopt;
+    
+    // Close Project
+    if (ctx && ctx->projectManager) {
+        ctx->projectManager->CloseProject();
+    }
+    
+    if (onProjectClosed) onProjectClosed();
 }

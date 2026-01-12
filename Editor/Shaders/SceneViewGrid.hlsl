@@ -32,7 +32,6 @@ struct VSOutput {
 
 // Helper to inverse a 4x4 matrix (if needed, but better passed from CPU)
 // Since we don't have it, let's try to pass inverse matrices in the push constants.
-// I will update the C++ side to match this shader.
 
 struct GridPushConstants {
     column_major float4x4 view;
@@ -108,7 +107,6 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     // Write Depth
     // output depth? We need to output depth so it interacts with other objects?
     // If we write depth, we need to output SV_Depth.
-    // But we are drawing a quad at z=0 (screen). We calculated the true depth.
     
     return color;
 }

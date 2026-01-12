@@ -24,6 +24,8 @@ public:
 	void ReloadMaterial(const TerraEngine::UUID& materialId);
 	void ReloadMesh(const TerraEngine::UUID& meshId);
 	void ReloadTexture(const TerraEngine::UUID& textureId);
+    
+    void Clear();
 
 	RHIContext* GetContext() const { return rhi.get(); }
 

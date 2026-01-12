@@ -256,3 +256,11 @@ entt::entity ObjectManager::getParentEntity(entt::entity child) const
 	}
 	return entt::null;
 }
+
+void ObjectManager::clear()
+{
+	registry.clear();
+	objectMap.clear();
+	parentMap.clear();
+	childrenMap.clear();
+}
