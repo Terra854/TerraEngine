@@ -1,5 +1,6 @@
 #include "InspectorWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
+#include "../Subsystems/UndoRedoSystem.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Resource/ResourceManager.h"
@@ -14,6 +15,43 @@
 #include <fstream>
 #include <filesystem>
 
+// Command that records a property change on a component. Captures the 
+// previous and next values to allow bidirectional state switching.
+class ModifyComponentCommand : public ICommand {
+public:
+    ModifyComponentCommand(entt::entity entity, const std::string& component, const std::string& property, rttr::variant oldVal, rttr::variant newVal)
+        : m_Entity(entity), m_Component(component), m_Property(property), m_OldValue(oldVal), m_NewValue(newVal) {}
+
+    void Undo() override {
+        ApplyValue(m_OldValue);
+    }
+
+    void Redo() override {
+        ApplyValue(m_NewValue);
+    }
+
+    std::string GetName() const override {
+        return "Modify " + m_Component + "." + m_Property;
+    }
+
+private:
+    void ApplyValue(const rttr::variant& val) {
+        if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+            auto& reg = ComponentAccessRegistry();
+            if (reg.count(m_Component)) {
+                // Setters handle thread-safety internally via component mutexes.
+                reg[m_Component].setter(*obj, m_Property, val);
+            }
+        }
+    }
+
+    entt::entity m_Entity;
+    std::string m_Component;
+    std::string m_Property;
+    rttr::variant m_OldValue;
+    rttr::variant m_NewValue;
+};
+
 InspectorWindow::InspectorWindow(MainEditorSubsystem* owner)
     : EditorWindow("Inspector"), m_Owner(owner) {
 }
@@ -24,16 +62,45 @@ void InspectorWindow::UpdateInspectorDragState() {
 	}
 }
 
-void InspectorWindow::DrawProperty(rttr::property prop, Object& obj, ComponentAccessFunctions& access) {
+void InspectorWindow::DrawProperty(const std::string& compName, rttr::property prop, Object& obj, ComponentAccessFunctions& access) {
 	std::string name = prop.get_name().to_string();
 	rttr::variant var = access.getter(obj, name);
 	rttr::type type = prop.get_type();
+
+    // Static buffers track interaction state across multiple frames while a 
+    // widget is being manipulated.
+    static rttr::variant oldValue;
+    static bool isEditing = false;
+    static std::string editingProp;
+    static entt::entity editingEntity = entt::null;
+
+    // Snapshot the initial value when the user first interacts with a control.
+    auto startEditing = [&]() {
+        if (ImGui::IsItemActivated()) {
+            oldValue = access.getter(obj, name);
+            isEditing = true;
+            editingProp = name;
+            editingEntity = obj.EntityId();
+        }
+    };
+
+    // Push the command to the UndoRedoSystem once the interaction is finalized
+    // (e.g. mouse button released after a drag).
+    auto endEditing = [&]() {
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            rttr::variant newVal = access.getter(obj, name);
+            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldValue, newVal));
+            isEditing = false;
+        }
+    };
 
 	if (type == rttr::type::get<float>()) {
 		float val = var.get_value<float>();
 		if (ImGui::DragFloat(name.c_str(), &val, 0.1f)) {
 			access.setter(obj, name, val);
 		}
+        startEditing();
+        endEditing();
 		UpdateInspectorDragState();
 	}
 	else if (type == rttr::type::get<int>()) {
@@ -41,12 +108,19 @@ void InspectorWindow::DrawProperty(rttr::property prop, Object& obj, ComponentAc
 		if (ImGui::DragInt(name.c_str(), &val)) {
 			access.setter(obj, name, val);
 		}
+        startEditing();
+        endEditing();
 		UpdateInspectorDragState();
 	}
 	else if (type == rttr::type::get<bool>()) {
 		bool val = var.get_value<bool>();
 		if (ImGui::Checkbox(name.c_str(), &val)) {
+            // Checkboxes are instantaneous interactions, so we push the 
+            // command immediately.
+            rttr::variant oldB = access.getter(obj, name);
 			access.setter(obj, name, val);
+            rttr::variant newB = access.getter(obj, name);
+            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldB, newB));
 		}
 	}
 	else if (type == rttr::type::get<std::string>()) {
@@ -56,12 +130,16 @@ void InspectorWindow::DrawProperty(rttr::property prop, Object& obj, ComponentAc
 		if (ImGui::InputText(name.c_str(), buffer, sizeof(buffer))) {
 			access.setter(obj, name, std::string(buffer));
 		}
+        startEditing();
+        endEditing();
 	}
 	else if (type == rttr::type::get<glm::vec3>()) {
 		glm::vec3 val = var.get_value<glm::vec3>();
 		if (ImGui::DragFloat3(name.c_str(), &val.x, 0.1f)) {
 			access.setter(obj, name, val);
 		}
+        startEditing();
+        endEditing();
 		UpdateInspectorDragState();
 	}
 	else if (type == rttr::type::get<glm::quat>()) {
@@ -71,6 +149,8 @@ void InspectorWindow::DrawProperty(rttr::property prop, Object& obj, ComponentAc
 			glm::quat newQ = glm::quat(glm::radians(euler));
 			access.setter(obj, name, newQ);
 		}
+        startEditing();
+        endEditing();
 		UpdateInspectorDragState();
 	}
 	else if (type == rttr::type::get<TerraEngine::UUID>()) {
@@ -105,7 +185,10 @@ void InspectorWindow::DrawProperty(rttr::property prop, Object& obj, ComponentAc
 				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(expected)) {
 					IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 					TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
+                    rttr::variant oldId = access.getter(obj, name);
 					access.setter(obj, name, newId);
+                    rttr::variant nextId = access.getter(obj, name);
+                    UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
 				}
 			} else {
 				// Generic UUID property, accept any asset payload
@@ -113,7 +196,10 @@ void InspectorWindow::DrawProperty(rttr::property prop, Object& obj, ComponentAc
 					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(p)) {
 						IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 						TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
+                        rttr::variant oldId = access.getter(obj, name);
 						access.setter(obj, name, newId);
+                        rttr::variant nextId = access.getter(obj, name);
+                        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
 						break;
 					}
 				}
@@ -164,7 +250,10 @@ void InspectorWindow::OnGui() {
                 if (accessReg.find("Transform") != accessReg.end()) {
                     ComponentAccessFunctions& transAccess = accessReg["Transform"];
                     if (transAccess.hasComponent(obj)) {
+                        rttr::variant oldA = transAccess.getter(obj, "active");
                         transAccess.setter(obj, "active", isActive);
+                        rttr::variant newA = transAccess.getter(obj, "active");
+                        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Transform", "active", oldA, newA));
                     }
                 }
             }
@@ -177,7 +266,10 @@ void InspectorWindow::OnGui() {
             strncpy(nameBuf, name.c_str(), sizeof(nameBuf));
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if (ImGui::InputText("##ObjectName", nameBuf, sizeof(nameBuf))) {
-                // objManager.setObjectName(obj, nameBuf); // Missing API
+                if (name != nameBuf) {
+                    UndoRedoSystem::Instance().PushCommand(std::make_unique<RenameObjectCommand>(obj.EntityId(), name, nameBuf));
+                    objManager.setObjectName(obj, nameBuf);
+                }
             }
             
             ImGui::Separator();
@@ -283,7 +375,12 @@ void InspectorWindow::OnGui() {
                 if (compName != "Transform") {
                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
                     if (ImGui::Checkbox("##compActive", &compActive)) {
-                        if (activeProp.is_valid()) access.setter(obj, "active", compActive);
+                        if (activeProp.is_valid()) {
+                            rttr::variant oldA = access.getter(obj, "active");
+                            access.setter(obj, "active", compActive);
+                            rttr::variant newA = access.getter(obj, "active");
+                            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "active", oldA, newA));
+                        }
                     }
                     ImGui::PopStyleColor();
                 } else {
@@ -301,7 +398,7 @@ void InspectorWindow::OnGui() {
                     ImGui::Indent();
                     for (auto prop : type.get_properties()) {
                         if (prop.get_name() == "active") continue;
-                        DrawProperty(prop, obj, access);
+                        DrawProperty(compName, prop, obj, access);
                     }
                     ImGui::Unindent();
                 }

@@ -71,83 +71,231 @@ public:
 	std::shared_future<TerraEngine::UUID> LoadSceneAsync(const std::filesystem::path& path);
 	std::shared_future<TerraEngine::UUID> LoadPrefabAsync(const std::filesystem::path& path);
 
-	// Accessors let callers retrieve cached data by UUID instead of passing raw
-	// filesystem paths around. Returned pointers remain valid until UnloadAll is
-	// invoked or a future reload overwrites the entry.
-	const SceneDocument* GetScene(const TerraEngine::UUID& id) const;
-	const SceneDocument* GetPrefab(const TerraEngine::UUID& id) const;
+		// Accessors let callers retrieve cached data by UUID instead of passing raw
 
-	// Track a single active scene so gameplay systems can query which authored
-	// file should be instantiated. The setter returns false when the requested
-	// scene is not loaded yet.
-	bool SetActiveScene(const TerraEngine::UUID& id);
-	const SceneDocument* GetActiveScene() const;
+		// filesystem paths around. Returned pointers remain valid until UnloadAll is
 
-	// Clear all cached documents and abandon in-flight futures. Use during
-	// teardown to release memory when no other threads are reading scenes.
-	void UnloadAll();
+		// invoked or a future reload overwrites the entry.
 
-private:
-	enum class SceneFileType
-	{
-		Scene,
-		Prefab
-	};
+		const SceneDocument* GetScene(const TerraEngine::UUID& id) const;
 
-	SceneManager();
+		const SceneDocument* GetPrefab(const TerraEngine::UUID& id) const;
 
-	template <typename Resource>
-	struct SceneCache
-	{
-		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
-		std::unordered_map<TerraEngine::UUID, std::unique_ptr<Resource>> resources;
-		std::unordered_map<std::string, std::shared_future<TerraEngine::UUID>> inFlight;
-		mutable std::shared_mutex mutex;
-	};
+	
 
-	template <typename Resource>
-	using LoaderFunction = std::function<std::unique_ptr<Resource>(const std::filesystem::path&, SceneFileType)>;
+			// Track a single active scene so gameplay systems can query which authored
 
-	std::shared_future<TerraEngine::UUID> MakeReadyFuture(const TerraEngine::UUID& id);
+	
 
-	template <typename Resource>
-	std::optional<TerraEngine::UUID> ResolveCached(const std::string& key, SceneCache<Resource>& cache);
+			// file should be instantiated. The setter returns false when the requested
 
-	template <typename Resource>
-	TerraEngine::UUID EnsureResourceId(const std::string& key, SceneCache<Resource>& cache);
+	
 
-	template <typename Resource>
-	const Resource* GetResourceById(const TerraEngine::UUID& id, const SceneCache<Resource>& cache) const;
+			// scene is not loaded yet.
 
-	template <typename Resource>
-	TerraEngine::UUID LoadOrGetCached(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type);
+	
 
-	template <typename Resource>
-	std::shared_future<TerraEngine::UUID> LoadOrSchedule(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type);
+			bool SetActiveScene(const TerraEngine::UUID& id);
 
-	template <typename Resource>
-	TerraEngine::UUID FinalizeLoad(const std::string& key, SceneCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource);
+	
 
-	std::unique_ptr<SceneDocument> LoadSceneDocument(const std::filesystem::path& path, SceneFileType type);
-	std::optional<std::string> ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const;
-	bool ValidateExtension(const std::filesystem::path& path, SceneFileType type) const;
+			const SceneDocument* GetActiveScene() const;
 
-	std::filesystem::path ResolveScenePath(const std::filesystem::path& path) const;
-	std::string NormalizeKey(const std::filesystem::path& path) const;
-	void PreparePreviewAssets();
-	TerraEngine::UUID CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
-	void SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId);
-	void SpawnPreviewCamera();
-	Transform* GetPreviewTransform();
+	
 
-	ThreadPool& threadPool;
-	std::filesystem::path sceneRoot;
+		
 
-	SceneCache<SceneDocument> sceneCache;
-	SceneCache<SceneDocument> prefabCache;
+	
 
-	TerraEngine::UUID activeSceneId = TerraEngine::EMPTY_UUID;
-	TerraEngine::UUID previewMeshId = TerraEngine::EMPTY_UUID;
+			// Commits the current state of the ObjectManager to a .tescene file. If a path
+
+	
+
+			// is omitted, the document's original source location is overwritten. This 
+
+	
+
+			// triggers a dirty flag reset upon successful write.
+
+	
+
+			bool SaveScene(std::optional<std::filesystem::path> path = std::nullopt);
+
+	
+
+			
+
+	
+
+			// Reports whether the active scene has received modifications since it was 
+
+	
+
+			// last saved or loaded.
+
+	
+
+			bool IsActiveSceneDirty() const;
+
+	
+
+		
+
+	
+
+			// Manually flag the active scene as containing unsaved changes. Should be 
+
+	
+
+			// called by editor systems after any mutation to the scene graph.
+
+	
+
+			void MarkActiveSceneDirty();
+
+	
+
+		
+
+	
+
+			// Clear all cached documents and abandon in-flight futures. Use during
+
+	
+
+			// teardown to release memory when no other threads are reading scenes.
+
+	
+
+			void UnloadAll();
+
+	
+
+	private:
+
+		enum class SceneFileType
+
+		{
+
+			Scene,
+
+			Prefab
+
+		};
+
+	
+
+		SceneManager();
+
+	
+
+		template <typename Resource>
+
+		struct SceneCache
+
+		{
+
+			std::unordered_map<std::string, TerraEngine::UUID> pathToId;
+
+			std::unordered_map<TerraEngine::UUID, std::unique_ptr<Resource>> resources;
+
+			std::unordered_map<std::string, std::shared_future<TerraEngine::UUID>> inFlight;
+
+			mutable std::shared_mutex mutex;
+
+		};
+
+	
+
+		template <typename Resource>
+
+		using LoaderFunction = std::function<std::unique_ptr<Resource>(const std::filesystem::path&, SceneFileType)>;
+
+	
+
+		std::shared_future<TerraEngine::UUID> MakeReadyFuture(const TerraEngine::UUID& id);
+
+	
+
+		template <typename Resource>
+
+		std::optional<TerraEngine::UUID> ResolveCached(const std::string& key, SceneCache<Resource>& cache);
+
+	
+
+		template <typename Resource>
+
+		TerraEngine::UUID EnsureResourceId(const std::string& key, SceneCache<Resource>& cache);
+
+	
+
+		template <typename Resource>
+
+		const Resource* GetResourceById(const TerraEngine::UUID& id, const SceneCache<Resource>& cache) const;
+
+	
+
+		template <typename Resource>
+
+		TerraEngine::UUID LoadOrGetCached(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type);
+
+	
+
+		template <typename Resource>
+
+		std::shared_future<TerraEngine::UUID> LoadOrSchedule(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type);
+
+	
+
+		template <typename Resource>
+
+		TerraEngine::UUID FinalizeLoad(const std::string& key, SceneCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource);
+
+	
+
+		std::unique_ptr<SceneDocument> LoadSceneDocument(const std::filesystem::path& path, SceneFileType type);
+
+		std::optional<std::string> ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const;
+
+		bool ValidateExtension(const std::filesystem::path& path, SceneFileType type) const;
+
+	
+
+		std::filesystem::path ResolveScenePath(const std::filesystem::path& path) const;
+
+		std::string NormalizeKey(const std::filesystem::path& path) const;
+
+		void PreparePreviewAssets();
+
+		TerraEngine::UUID CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId);
+
+		void SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId);
+
+		void SpawnPreviewCamera();
+
+		Transform* GetPreviewTransform();
+
+	
+
+		ThreadPool& threadPool;
+
+		std::filesystem::path sceneRoot;
+
+	
+
+		SceneCache<SceneDocument> sceneCache;
+
+		SceneCache<SceneDocument> prefabCache;
+
+	
+
+		TerraEngine::UUID activeSceneId = TerraEngine::EMPTY_UUID;
+
+		bool activeSceneDirty = false;
+
+	
+
+		TerraEngine::UUID previewMeshId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewTextureId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewShaderCollectionId = TerraEngine::EMPTY_UUID;
 	TerraEngine::UUID previewMaterialId = TerraEngine::EMPTY_UUID;

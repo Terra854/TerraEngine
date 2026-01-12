@@ -11,6 +11,7 @@
 
 #include "Object.h"
 #include "Transform.h"
+#include "IDComponent.h"
 
 class ObjectManager {
 public:
@@ -34,8 +35,15 @@ public:
 	// Return a stable display name for the object, defaulting to "Unnamed"
 	// when the object is missing from the internal name table.
 	std::string getObjectName(const Object& obj) const;
+	// Update the display name for the object.
+	void setObjectName(const Object& obj, const std::string& name);
 	// Build an Object handle for an existing entity id if it is valid.
 	std::optional<Object> getObject(entt::entity id);
+	// Build an Object handle for an existing entity by UUID.
+	std::optional<Object> getObject(const TerraEngine::UUID& id);
+
+	// Update the UUID mapping for an entity. Used during deserialization to restore IDs.
+	void UpdateEntityUUID(entt::entity entity, const TerraEngine::UUID& newId);
 
 	// Invoke a caller-provided function for every entity that owns the given
 	// component set. The callable is perfect-forwarded so lambdas (and their
@@ -80,16 +88,26 @@ public:
 
 	entt::registry& getRegistry() { return registry; }
 
+	// Registers a callback that fires whenever the scene graph structure changes
+	// (creation, deletion, or parenting). This allows external systems like the
+	// SceneManager to track dirty state without tight coupling.
+	void SetOnModifiedCallback(std::function<void()> callback) { onModified = callback; }
+
 private:
 	ObjectManager() = default;
 	~ObjectManager() = default;
 
 	friend class Object;
 
+	std::function<void()> onModified;
 	std::unordered_map<Object, std::string> objectMap;
 	entt::registry registry;
 	std::unordered_map<entt::entity, entt::entity> parentMap;
 	std::unordered_map<entt::entity, std::vector<entt::entity>> childrenMap;
+	// Secondary lookup table that pairs stable UUIDs with transient EnTT entity
+	// identifiers. This mapping is essential for maintaining object identity
+	// across undo/redo and serialization boundaries.
+	std::unordered_map<TerraEngine::UUID, entt::entity> uuidToEntity;
 
 	Object makeHandle(entt::entity entityId);
 	void detachFromParent(entt::entity childId);

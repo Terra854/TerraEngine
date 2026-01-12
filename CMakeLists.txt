@@ -26,14 +26,15 @@ Engine/Resource/ResourceManager.cpp
 Engine/Resource/ResourceManagerMaterial.cpp
 Engine/Resource/ResourceManagerMesh.cpp
 Engine/Resource/ResourceManagerShader.cpp
-Engine/Resource/ResourceManagerShaderCollection.cpp
-Engine/Resource/ResourceManagerTexture.cpp
-Engine/Scene/SceneManager.cpp
-Engine/Input/InputSystem.cpp
-Engine/Input/GLFW/GlfwInputBackend.cpp
-Engine/Window/WindowSystem.cpp
-Engine/Window/GLFW/GlfwWindowBackend.cpp
-Engine/ThreadPool/ThreadPool.cpp
+	Engine/Resource/ResourceManagerShaderCollection.cpp
+	Engine/Resource/ResourceManagerTexture.cpp
+	Engine/Scene/SceneManager.cpp
+		Engine/Scene/Serializer.cpp
+		Engine/Input/InputSystem.cpp
+		Engine/Input/GLFW/GlfwInputBackend.cpp
+		Engine/Window/WindowSystem.cpp
+		Engine/Window/GLFW/GlfwWindowBackend.cpp
+		Engine/ThreadPool/ThreadPool.cpp
 Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
@@ -58,6 +59,7 @@ Engine/Input/InputSystem.h
 Engine/Resource/ResourceManager.h
 Engine/Resource/ShaderCollection.h
 Engine/Scene/SceneManager.h
+Engine/Scene/Serializer.h
 Engine/Input/GLFW/GlfwInputBackend.h
 Engine/Utilities/UUID.h
 Engine/Window/WindowBackend.h
@@ -344,6 +346,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
+	Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
 	Editor/TerraEngine-Editor/Project/ProjectManager.cpp
 	Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp
 	Editor/TerraEngine-Editor/Assets/FileWatcher.cpp

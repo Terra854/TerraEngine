@@ -21,9 +21,19 @@ Object ObjectManager::createObject(const std::string& name) {
 	// spatial data exists without guarding for missing components.
 	auto object = Object(registry);
 	object.addComponent<Transform>();
+	// Assign a stable identity immediately upon creation so the entity can be
+	// tracked across serialization and undo sessions.
+	auto& idComp = object.addComponent<IDComponent>();
+	
+	uuidToEntity.emplace(idComp.id, object.EntityId());
+	
 	objectMap.insert({ object, name });
 	parentMap.emplace(object.EntityId(), entt::null);
 	childrenMap.emplace(object.EntityId(), std::vector<entt::entity>{});
+	
+	// Structured modifications trigger the observer callback to sync dirty state.
+	if (onModified) onModified();
+	
 	return object;
 }
 
@@ -33,17 +43,33 @@ void ObjectManager::removeObject(Object obj) {
 	// ensuring no dangling component data survives past object lifetime.
 	if (registry.valid(obj.id))
 	{
+		// Purge the UUID mapping before the component is destroyed to maintain
+		// consistency in the lookup table.
+		if (IDComponent* idComp = registry.try_get<IDComponent>(obj.id))
+		{
+			uuidToEntity.erase(idComp->id);
+		}
 		registry.destroy(obj.id);
 	}
 
-	// Detach children so they remain rooted after the parent disappears.
+	// Recursively delete children so the entire branch is removed.
+	// We copy the child list first because removeObject will mutate the map.
+	std::vector<entt::entity> childrenToDelete;
 	if (auto childIter = childrenMap.find(obj.id); childIter != childrenMap.end())
 	{
-		for (entt::entity childId : childIter->second)
-		{
-			parentMap[childId] = entt::null;
-		}
+		childrenToDelete = childIter->second;
 		childrenMap.erase(childIter);
+	}
+
+	for (entt::entity childId : childrenToDelete)
+	{
+		// removeObject expects an Object handle.
+		// Since we are inside ObjectManager, we can construct one efficiently.
+		// Note: The child entity might have been destroyed if it was somehow 
+		// processed already (cycle?), but our hierarchy should be a tree.
+		if (registry.valid(childId)) {
+			removeObject(makeHandle(childId));
+		}
 	}
 
 	// Remove this object from its parent's child list so no stale references remain.
@@ -52,6 +78,8 @@ void ObjectManager::removeObject(Object obj) {
 
 	// Erase the object from the map
 	objectMap.erase(obj);
+
+	if (onModified) onModified();
 }
 
 bool ObjectManager::setParent(Object child, std::optional<Object> parent)
@@ -151,6 +179,8 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 		SetComponentProperty(*childTransform, "Scale", localScale);
 	}
 
+	if (onModified) onModified();
+
 	return true;
 }
 
@@ -202,6 +232,15 @@ std::string ObjectManager::getObjectName(const Object& obj) const
 	return kUnnamed;
 }
 
+void ObjectManager::setObjectName(const Object& obj, const std::string& name)
+{
+	if (objectMap.find(obj) != objectMap.end())
+	{
+		objectMap[obj] = name;
+		if (onModified) onModified();
+	}
+}
+
 std::optional<Object> ObjectManager::getObject(entt::entity id)
 {
 	if (!registry.valid(id))
@@ -209,6 +248,31 @@ std::optional<Object> ObjectManager::getObject(entt::entity id)
 		return std::nullopt;
 	}
 	return makeHandle(id);
+}
+
+std::optional<Object> ObjectManager::getObject(const TerraEngine::UUID& id)
+{
+	auto it = uuidToEntity.find(id);
+	if (it != uuidToEntity.end())
+	{
+		return getObject(it->second);
+	}
+	return std::nullopt;
+}
+
+void ObjectManager::UpdateEntityUUID(entt::entity entity, const TerraEngine::UUID& newId)
+{
+	if (!registry.valid(entity)) return;
+
+	// Allows the identity of an existing entity to be swapped. Primarily used
+	// during scene deserialization to restore authored or undo-session IDs
+	// while keeping the lookup table in sync.
+	if (IDComponent* idComp = registry.try_get<IDComponent>(entity))
+	{
+		uuidToEntity.erase(idComp->id);
+		idComp->id = newId;
+		uuidToEntity[newId] = entity;
+	}
 }
 
 void ObjectManager::detachFromParent(entt::entity childId)

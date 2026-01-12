@@ -74,55 +74,56 @@ void SceneViewWindow::HandleCameraInput(float deltaTime) {
     // Need to include WindowSystem and GLFW for this
     auto* window = static_cast<GLFWwindow*>(WindowSystem::Instance().GetNativeHandle());
 
-    if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-        if (!m_IsFlyCamActive) {
+    if (m_IsFlyCamActive) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+            m_IsFlyCamActive = false;
+            
+            // Restore cursor visibility
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+        } else {
+            // Calculate delta manually to avoid ImGui delta issues with re-centering
+            auto currentPos = InputSystem::Instance().GetCursorPosition();
+            double deltaX = currentPos.first - m_StoredCursorPos.first;
+            double deltaY = currentPos.second - m_StoredCursorPos.second;
+
+            // Reset cursor to stored position to keep it locked
+            if (deltaX != 0.0 || deltaY != 0.0) {
+                InputSystem::Instance().SetCursorPosition(m_StoredCursorPos.first, m_StoredCursorPos.second);
+            }
+
+            // Fly Cam Movement
+            glm::quat orientation = glm::quat(glm::vec3(m_CameraRot.x, m_CameraRot.y, 0.0f));
+            glm::vec3 forward = orientation * glm::vec3(0, 0, -1);
+            glm::vec3 right = orientation * glm::vec3(1, 0, 0);
+            glm::vec3 up = orientation * glm::vec3(0, 1, 0);
+
+            if (ImGui::IsKeyDown(ImGuiKey_W)) m_CameraPos += forward * m_CameraSpeed * deltaTime;
+            if (ImGui::IsKeyDown(ImGuiKey_S)) m_CameraPos -= forward * m_CameraSpeed * deltaTime;
+            if (ImGui::IsKeyDown(ImGuiKey_D)) m_CameraPos += right * m_CameraSpeed * deltaTime;
+            if (ImGui::IsKeyDown(ImGuiKey_A)) m_CameraPos -= right * m_CameraSpeed * deltaTime;
+            if (ImGui::IsKeyDown(ImGuiKey_E)) m_CameraPos += up * m_CameraSpeed * deltaTime;
+            if (ImGui::IsKeyDown(ImGuiKey_Q)) m_CameraPos -= up * m_CameraSpeed * deltaTime;
+
+            // Mouse Look
+            if (deltaX != 0.0 || deltaY != 0.0) {
+                m_CameraRot.y -= (float)deltaX * m_MouseSensitivity * 0.01f;
+                m_CameraRot.x -= (float)deltaY * m_MouseSensitivity * 0.01f;
+                
+                // Clamp pitch
+                if (m_CameraRot.x > glm::radians(89.0f)) m_CameraRot.x = glm::radians(89.0f);
+                if (m_CameraRot.x < glm::radians(-89.0f)) m_CameraRot.x = glm::radians(-89.0f);
+            }
+        }
+    } else {
+        // Only activate if clicked THIS frame while hovered and not using gizmo
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && ImGui::IsWindowHovered() && !ImGuizmo::IsUsing()) {
             m_IsFlyCamActive = true;
             m_StoredCursorPos = InputSystem::Instance().GetCursorPosition();
             
             // Hide the cursor explicitly since we tell ImGui not to touch it
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
             ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-        }
-
-        // Calculate delta manually to avoid ImGui delta issues with re-centering
-        auto currentPos = InputSystem::Instance().GetCursorPosition();
-        double deltaX = currentPos.first - m_StoredCursorPos.first;
-        double deltaY = currentPos.second - m_StoredCursorPos.second;
-
-        // Reset cursor to stored position to keep it locked
-        if (deltaX != 0.0 || deltaY != 0.0) {
-            InputSystem::Instance().SetCursorPosition(m_StoredCursorPos.first, m_StoredCursorPos.second);
-        }
-
-        // Fly Cam Movement
-        glm::quat orientation = glm::quat(glm::vec3(m_CameraRot.x, m_CameraRot.y, 0.0f));
-        glm::vec3 forward = orientation * glm::vec3(0, 0, -1);
-        glm::vec3 right = orientation * glm::vec3(1, 0, 0);
-        glm::vec3 up = orientation * glm::vec3(0, 1, 0);
-
-        if (ImGui::IsKeyDown(ImGuiKey_W)) m_CameraPos += forward * m_CameraSpeed * deltaTime;
-        if (ImGui::IsKeyDown(ImGuiKey_S)) m_CameraPos -= forward * m_CameraSpeed * deltaTime;
-        if (ImGui::IsKeyDown(ImGuiKey_D)) m_CameraPos += right * m_CameraSpeed * deltaTime;
-        if (ImGui::IsKeyDown(ImGuiKey_A)) m_CameraPos -= right * m_CameraSpeed * deltaTime;
-        if (ImGui::IsKeyDown(ImGuiKey_E)) m_CameraPos += up * m_CameraSpeed * deltaTime;
-        if (ImGui::IsKeyDown(ImGuiKey_Q)) m_CameraPos -= up * m_CameraSpeed * deltaTime;
-
-        // Mouse Look
-        if (deltaX != 0.0 || deltaY != 0.0) {
-            m_CameraRot.y -= (float)deltaX * m_MouseSensitivity * 0.01f;
-            m_CameraRot.x -= (float)deltaY * m_MouseSensitivity * 0.01f;
-            
-            // Clamp pitch
-            if (m_CameraRot.x > glm::radians(89.0f)) m_CameraRot.x = glm::radians(89.0f);
-            if (m_CameraRot.x < glm::radians(-89.0f)) m_CameraRot.x = glm::radians(-89.0f);
-        }
-    } else {
-        if (m_IsFlyCamActive) {
-            m_IsFlyCamActive = false;
-            
-            // Restore cursor visibility
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
         }
     }
     
@@ -147,10 +148,24 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj) {
         if (registry.valid(*selectedEntity)) {
              Transform* transform = registry.try_get<Transform>(*selectedEntity);
              if (transform) {
-                 glm::mat4 model = glm::mat4(1.0f);
-                 model = glm::translate(model, transform->position);
-                 model = model * glm::mat4_cast(transform->rotation);
-                 model = glm::scale(model, transform->scale);
+                 // Helper to compute world transform
+                 auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
+                     glm::mat4 world(1.0f);
+                     entt::entity current = entity;
+                     while (current != entt::null && registry.valid(current)) {
+                         if (auto* t = registry.try_get<Transform>(current)) {
+                             glm::mat4 local(1.0f);
+                             local = glm::translate(local, t->position);
+                             local = local * glm::mat4_cast(t->rotation);
+                             local = glm::scale(local, t->scale);
+                             world = local * world; // Parent * Child
+                         }
+                         current = ObjectManager::instance().getParentEntity(current);
+                     }
+                     return world;
+                 };
+
+                 glm::mat4 model = computeWorldMatrix(*selectedEntity);
 
                  if (ImGuizmo::Manipulate(
                      glm::value_ptr(view), 
@@ -161,13 +176,22 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj) {
                      nullptr, 
                      m_UsingSnap ? m_SnapValue : nullptr)) 
                  {
+                     // Convert updated World Matrix back to Local Matrix
+                     glm::mat4 parentMatrix(1.0f);
+                     entt::entity parent = ObjectManager::instance().getParentEntity(*selectedEntity);
+                     if (parent != entt::null) {
+                         parentMatrix = computeWorldMatrix(parent);
+                     }
+                     
+                     glm::mat4 localMatrix = glm::inverse(parentMatrix) * model;
+
                      // Decompose and update
                      glm::vec3 scale;
                      glm::quat rotation;
                      glm::vec3 translation;
                      glm::vec3 skew;
                      glm::vec4 perspective;
-                     glm::decompose(model, scale, rotation, translation, skew, perspective);
+                     glm::decompose(localMatrix, scale, rotation, translation, skew, perspective);
                      
                      transform->position = translation;
                      transform->rotation = rotation;

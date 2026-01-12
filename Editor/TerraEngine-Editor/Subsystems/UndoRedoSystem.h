@@ -1,0 +1,101 @@
+#pragma once
+
+#include "IEditorSubsystem.h"
+#include <deque>
+#include <memory>
+#include <string>
+#include <entt/entity/entity.hpp>
+#include <nlohmann/json.hpp>
+#include "Engine/Utilities/UUID.h"
+
+// Interface for atomic editor operations that can be reversed and reapplied.
+// Concrete implementations must capture all state necessary to restore the 
+// scene to its exact previous configuration.
+struct ICommand {
+    virtual ~ICommand() = default;
+    virtual void Undo() = 0;
+    virtual void Redo() = 0;
+    virtual std::string GetName() const = 0;
+};
+
+// Records the creation of a new object. Undo destroys the entity, while Redo
+// recreates it from a JSON snapshot to ensure component data and children
+// are perfectly restored.
+class CreateObjectCommand : public ICommand {
+public:
+    CreateObjectCommand(entt::entity entity);
+    void Undo() override;
+    void Redo() override;
+    std::string GetName() const override;
+
+private:
+    entt::entity m_Entity;
+    TerraEngine::UUID m_Uuid;
+    nlohmann::json m_Json;
+};
+
+// Records the deletion of an object graph. The constructor takes a recursive
+// snapshot of the entity and all its descendants so the entire branch can be
+// brought back during an Undo operation.
+class DeleteObjectCommand : public ICommand {
+public:
+    DeleteObjectCommand(entt::entity entity);
+    void Undo() override;
+    void Redo() override;
+    std::string GetName() const override;
+
+private:
+    entt::entity m_Entity;
+    TerraEngine::UUID m_Uuid;
+    nlohmann::json m_Json;
+};
+
+class RenameObjectCommand : public ICommand {
+public:
+    RenameObjectCommand(entt::entity entity, const std::string& oldName, const std::string& newName);
+    void Undo() override;
+    void Redo() override;
+    std::string GetName() const override;
+
+private:
+    entt::entity m_Entity;
+    std::string m_OldName;
+    std::string m_NewName;
+};
+
+// Manages a history of ICommand instances to provide undo/redo capabilities in 
+// the editor. The system maintains a fixed-size buffer of past actions and 
+// clears the redo stack whenever a new command is pushed.
+class UndoRedoSystem : public IEditorSubsystem {
+public:
+    static UndoRedoSystem& Instance();
+
+    void Initialize(EditorContext& context) override;
+    void Update(float deltaTime) override;
+    void DrawUI() override;
+    void Shutdown() override;
+    std::string GetName() const override { return "Undo/Redo System"; }
+
+    // Adds a new action to the history. This clears any currently available 
+    // redo steps and marks the active scene as dirty.
+    void PushCommand(std::unique_ptr<ICommand> command);
+    
+    // Reverses the most recent command on the undo stack and moves it to the 
+    // redo stack.
+    void Undo();
+    
+    // Reapplies the most recently undone command and moves it back to the 
+    // undo stack.
+    void Redo();
+    
+    bool CanUndo() const;
+    bool CanRedo() const;
+
+private:
+    std::deque<std::unique_ptr<ICommand>> undoStack;
+    std::deque<std::unique_ptr<ICommand>> redoStack;
+    
+    // Limits history depth to prevent unbounded memory growth during long 
+    // editing sessions.
+    static constexpr size_t MaxHistory = 100;
+};

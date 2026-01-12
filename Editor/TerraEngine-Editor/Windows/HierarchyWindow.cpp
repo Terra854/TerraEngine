@@ -1,5 +1,6 @@
 #include "HierarchyWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
+#include "../Subsystems/UndoRedoSystem.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
 #include <imgui.h>
@@ -18,7 +19,8 @@ void HierarchyWindow::OnGui() {
     }
     if (ImGui::BeginPopup("CreateEntityPopup")) {
         if (ImGui::MenuItem("Create Empty")) {
-            objManager.createObject("New Entity");
+            Object obj = objManager.createObject("New Entity");
+            UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(obj.EntityId()));
         }
         ImGui::EndPopup();
     }
@@ -36,6 +38,10 @@ void HierarchyWindow::OnGui() {
 
     const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
     std::string sceneName = activeScene ? activeScene->name : "No Active Scene";
+    
+    if (SceneManager::Instance().IsActiveSceneDirty()) {
+        sceneName += "*";
+    }
 
     ImGuiTreeNodeFlags sceneNodeFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
     bool sceneOpened = ImGui::TreeNodeEx(sceneName.c_str(), sceneNodeFlags);
@@ -63,17 +69,37 @@ void HierarchyWindow::OnGui() {
         ImGui::TreePop(); // Pop for scene name node
     }
     
-    // Right click on background to create entity
-    // Note: BeginPopupContextWindow might conflict with EditorWindow::Draw context menu if not handled carefully.
-    // EditorWindow uses "WindowContextMenu". 
-    // If we want a specific context menu for the content area, we might need to use a specific ID or OpenPopupOnItemClick.
-    // BeginPopupContextWindow(nullptr) attaches to the window.
-    // Let's use a unique name.
-    if (ImGui::BeginPopupContextWindow("HierarchyContext")) {
-        if (ImGui::MenuItem("Create Empty Entity")) {
-            objManager.createObject("New Entity");
+    if (m_OpenEntityMenu) {
+        ImGui::OpenPopup("EntityContextMenu");
+        m_OpenEntityMenu = false;
+    }
+
+    if (ImGui::BeginPopup("EntityContextMenu")) {
+        if (m_ContextEntityId != entt::null && objManager.getObject(m_ContextEntityId)) {
+            if (ImGui::MenuItem("Delete")) {
+                UndoRedoSystem::Instance().PushCommand(std::make_unique<DeleteObjectCommand>(m_ContextEntityId));
+                if (auto obj = objManager.getObject(m_ContextEntityId)) {
+                    objManager.removeObject(*obj);
+                }
+                if (auto selected = m_Owner->GetSelectedEntity(); selected && *selected == m_ContextEntityId) {
+                    m_Owner->SetSelectedEntity(std::nullopt);
+                }
+                m_ContextEntityId = entt::null;
+            }
         }
         ImGui::EndPopup();
+    }
+
+    // Handle Delete Key
+    if (ImGui::IsKeyReleased(ImGuiKey_Delete)) {
+        auto selected = m_Owner->GetSelectedEntity();
+        if (selected && objManager.getObject(*selected)) {
+            UndoRedoSystem::Instance().PushCommand(std::make_unique<DeleteObjectCommand>(*selected));
+            if (auto obj = objManager.getObject(*selected)) {
+                objManager.removeObject(*obj);
+            }
+            m_Owner->SetSelectedEntity(std::nullopt);
+        }
     }
 }
 
@@ -117,6 +143,11 @@ void HierarchyWindow::DrawEntityNode(Object& obj) {
     
     if (ImGui::IsItemClicked()) {
         m_Owner->SetSelectedEntity(obj.EntityId());
+    }
+    
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+        m_ContextEntityId = obj.EntityId();
+        m_OpenEntityMenu = true;
     }
 
     // Drag Source
