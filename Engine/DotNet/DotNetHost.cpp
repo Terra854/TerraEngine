@@ -18,16 +18,16 @@ DotNetHost::~DotNetHost() {
     Shutdown();
 }
 
-bool DotNetHost::Initialize(const std::filesystem::path& runtimeConfigPath) {
+bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
     if (initialized) return true;
 
-    if (!load_hostfxr()) {
+    if (!load_hostfxr(assemblyPath.parent_path())) {
         TERRAENGINE_LOG(LogLevel::Error, "Failed to load hostfxr.");
         return false;
     }
 
     // Get the function pointers for hostfxr
-    auto init_fptr = (hostfxr_initialize_for_runtime_config_fn)get_export(hostfxr_handle, "hostfxr_initialize_for_runtime_config");
+    auto init_fptr = (hostfxr_initialize_for_dotnet_command_line_fn)get_export(hostfxr_handle, "hostfxr_initialize_for_dotnet_command_line");
     auto get_delegate_fptr = (hostfxr_get_runtime_delegate_fn)get_export(hostfxr_handle, "hostfxr_get_runtime_delegate");
     auto close_fptr = (hostfxr_close_fn)get_export(hostfxr_handle, "hostfxr_close");
 
@@ -37,9 +37,10 @@ bool DotNetHost::Initialize(const std::filesystem::path& runtimeConfigPath) {
     }
 
     // Initialize the runtime
-    int rc = init_fptr(runtimeConfigPath.c_str(), nullptr, &context_handle);
+    const char_t* argv[] = { assemblyPath.c_str() };
+    int rc = init_fptr(1, argv, nullptr, &context_handle);
     if (rc != 0 || context_handle == nullptr) {
-        TERRAENGINE_LOG(LogLevel::Error, "hostfxr_initialize_for_runtime_config failed: " << std::hex << rc);
+        TERRAENGINE_LOG(LogLevel::Error, "hostfxr_initialize_for_dotnet_command_line failed: " << std::hex << rc);
         close_fptr(context_handle);
         return false;
     }
@@ -105,7 +106,20 @@ void DotNetHost::Shutdown() {
     load_assembly_and_get_function_pointer = nullptr;
 }
 
-bool DotNetHost::load_hostfxr() {
+bool DotNetHost::load_hostfxr(const std::filesystem::path& searchPath) {
+    // 1. Try to load from the specified search path (e.g., Managed directory)
+    if (!searchPath.empty()) {
+        std::filesystem::path localHostFxr = searchPath / "hostfxr.dll";
+        if (std::filesystem::exists(localHostFxr)) {
+            hostfxr_handle = load_library(localHostFxr.c_str());
+            if (hostfxr_handle) {
+                TERRAENGINE_LOG(LogLevel::Info, "Loaded local hostfxr from: " << localHostFxr.string());
+                return true;
+            }
+        }
+    }
+
+    // 2. Fallback to nethost lookup (System installed)
     wchar_t buffer[MAX_PATH];
     size_t buffer_size = sizeof(buffer) / sizeof(wchar_t);
     int rc = get_hostfxr_path(buffer, &buffer_size, nullptr);

@@ -17,70 +17,40 @@ namespace TerraEngine.Editor.Framework
         public void Draw()
         {
             if (!IsVisible) return;
+            _isVisible = IsVisible;
 
-            // Begin without ref bool to hide the default close button 'X'
-            bool expanded = ImGui.Begin(Title, Flags);
+            // Simple Begin/End loop
+            bool expanded = ImGui.Begin(Title, ref _isVisible, Flags);
+            // Sync visibility back to property
+            IsVisible = _isVisible;
 
-            var window = ImGuiP.GetCurrentWindow();
-            bool tabHovered = false;
-            if (!window.DockNode.IsNull && !window.DockNode.TabBar.IsNull)
+            try
             {
-                var tabBar = window.DockNode.TabBar;
-                for (int i = 0; i < tabBar.Tabs.Size; i++)
+                // Standard Context Menu on the window background
+                /*
+                if (ImGui.BeginPopupContextItem())
                 {
-                    var tab = tabBar.Tabs[i];
-                    if (tab.ID == window.TabId)
+                    OnContextMenu();
+                    if (ImGui.MenuItem("Close"))
                     {
-                        var tabMin = tabBar.BarRect.Min;
-                        tabMin.X += tab.Offset - tabBar.ScrollingAnim;
-                        var tabMax = new System.Numerics.Vector2(tabMin.X + tab.Width, tabBar.BarRect.Max.Y);
-
-                        var mousePos = ImGui.GetMousePos();
-                        if (mousePos.X >= tabMin.X && mousePos.X <= tabMax.X &&
-                            mousePos.Y >= tabMin.Y && mousePos.Y <= tabMax.Y)
-                        {
-                            tabHovered = true;
-                        }
-                        break;
+                        IsVisible = false;
                     }
+                    ImGui.EndPopup();
                 }
-            }
+                */
 
-            bool titleBarHovered = false;
-            if (window.DockNode.IsNull && (window.Flags & ImGuiWindowFlags.NoTitleBar) == 0)
-            {
-                var mousePos = ImGui.GetMousePos();
-                if (mousePos.X >= window.Pos.X && mousePos.X <= (window.Pos.X + window.SizeFull.X) &&
-                    mousePos.Y >= window.Pos.Y && mousePos.Y <= (window.Pos.Y + window.TitleBarHeight))
+                if (expanded)
                 {
-                    titleBarHovered = true;
+                    OnGui();
                 }
             }
-
-            if (ImGui.IsMouseReleased(ImGuiMouseButton.Right))
+            finally
             {
-                if (titleBarHovered || tabHovered)
-                {
-                    ImGui.OpenPopup("WindowContextMenu");
-                }
+                ImGui.End();
             }
-
-            if (ImGui.BeginPopup("WindowContextMenu"))
-            {
-                OnContextMenu();
-                if (ImGui.MenuItem("Close"))
-                {
-                    IsVisible = false;
-                }
-                ImGui.EndPopup();
-            }
-
-            if (expanded)
-            {
-                OnGui();
-            }
-            ImGui.End();
         }
+
+        private bool _isVisible = true;
 
         protected abstract void OnGui();
         protected virtual void OnContextMenu() { }

@@ -256,8 +256,8 @@ void EditorSystem::Initialize() {
     std::cout << "[DotNet] Loading Runtime Config: " << configPath << std::endl;
     std::cout << "[DotNet] Loading Assembly: " << dllPath << std::endl;
 
-    if (!DotNetHost::Instance().Initialize(configPath)) {
-        std::cerr << "Failed to initialize .NET Host with config: " << configPath << std::endl;
+    if (!DotNetHost::Instance().Initialize(dllPath)) {
+        std::cerr << "Failed to initialize .NET Host with assembly: " << dllPath << std::endl;
     } else {
         managedInitialize = (ManagedInitFn)DotNetHost::Instance().GetManagedFunction(
             dllPath,

@@ -9,14 +9,28 @@ namespace TerraEngine
         [UnmanagedCallersOnly]
         public static void Initialize()
         {
-            Log.Info("TerraEngine Managed Initialized!");
+            try
+            {
+                Log.Info("TerraEngine Managed Initialized!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[C#] Critical failure in Initialize:\n{ex}");
+            }
         }
 
         [UnmanagedCallersOnly]
         public static void OnUpdate(uint objectId, IntPtr classNamePtr, float deltaTime)
         {
-            string className = Marshal.PtrToStringAnsi(classNamePtr) ?? "Unknown";
-            // TODO: Implement script instance lookup and update
+            try
+            {
+                string className = Marshal.PtrToStringAnsi(classNamePtr) ?? "Unknown";
+                // TODO: Implement script instance lookup and update
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"Exception in OnUpdate for Object {objectId}:\n{ex}");
+            }
         }
 
         // Native function imports

@@ -260,8 +260,8 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Mana
 # We use 'dotnet build' directly to avoid CMake C# generator limitations (VS only)
 set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Binaries/Managed/$<CONFIG>")
 add_custom_target(TerraEngine ALL
-    COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine/TerraEngine.csproj" -c $<CONFIG> -o "${MANAGED_OUTPUT_DIR}"
-    COMMENT "Building Managed Assembly: TerraEngine"
+    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine/TerraEngine.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
+    COMMENT "Publishing Managed Assembly: TerraEngine (Self-Contained)"
     SOURCES ${MANAGED_CORE_SOURCES}
 )
 
@@ -270,8 +270,8 @@ set(MANAGED_EDITOR_SOURCES
 )
 
 add_custom_target(TerraEngine.Editor.Managed ALL
-    COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -o "${MANAGED_OUTPUT_DIR}"
-    COMMENT "Building Managed Assembly: TerraEngine.Editor"
+    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
+    COMMENT "Publishing Managed Assembly: TerraEngine.Editor (Self-Contained)"
     SOURCES ${MANAGED_EDITOR_SOURCES}
 )
 add_dependencies(TerraEngine.Editor.Managed TerraEngine)
@@ -329,7 +329,7 @@ target_include_directories(TerraEngineShaderCompiler
 
 # --- ImGui -------------------------------------------------------------------
 set(IMGUI_STATIC "no" CACHE STRING "Build cimgui shared" FORCE)
-set(IMGUI_WCHAR32 ON CACHE BOOL "Use 32-bit WCHAR" FORCE)
+set(IMGUI_WCHAR32 OFF CACHE BOOL "Use 32-bit WCHAR" FORCE)
 set(CIMGUI_VARGS0 1 CACHE STRING "CIMGUI VARGS0" FORCE)
 
 add_subdirectory(External/cimgui)
@@ -540,15 +540,10 @@ endif()
 		OPTIONAL
 	)
 
-	# Install Managed Assemblies to Editor
-	install(FILES 
-		${MANAGED_OUTPUT_DIR}/TerraEngine.CSharp.dll
-		${MANAGED_OUTPUT_DIR}/TerraEngine.Editor.dll
-		${MANAGED_OUTPUT_DIR}/TerraEngine.CSharp.runtimeconfig.json
-		${MANAGED_OUTPUT_DIR}/TerraEngine.Editor.runtimeconfig.json
-		${MANAGED_OUTPUT_DIR}/Hexa.NET.ImGui.dll
-		${MANAGED_OUTPUT_DIR}/HexaGen.Runtime.dll
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed
+	# Install Managed Assemblies to Editor (Self-Contained)
+	install(DIRECTORY "${MANAGED_OUTPUT_DIR}/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Managed"
+		PATTERN "runtimes" EXCLUDE
 	)
 	
 	# Install cimgui (TerraEngine-ImGui)

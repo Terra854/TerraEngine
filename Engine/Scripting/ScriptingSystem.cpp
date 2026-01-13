@@ -29,7 +29,7 @@ void ScriptingSystem::Initialize() {
         return;
     }
 
-    if (DotNetHost::Instance().Initialize(configPath)) {
+    if (DotNetHost::Instance().Initialize(assemblyPath)) {
         managedInit = (InitFn)DotNetHost::Instance().GetManagedFunction(
             assemblyPath,
             L"TerraEngine.InternalCalls, TerraEngine.CSharp",

@@ -19,11 +19,11 @@ public:
     static DotNetHost& Instance();
 
     /**
-     * @brief Initializes the .NET runtime using a specific runtime configuration.
-     * @param runtimeConfigPath Path to the .runtimeconfig.json file.
+     * @brief Initializes the .NET runtime.
+     * @param assemblyPath Path to the managed assembly (.dll).
      * @return true if initialization was successful, false otherwise.
      */
-    bool Initialize(const std::filesystem::path& runtimeConfigPath);
+    bool Initialize(const std::filesystem::path& assemblyPath);
 
     /**
      * @brief Loads a managed assembly and provides a function pointer to a static method.
@@ -53,7 +53,7 @@ private:
     void* load_library(const wchar_t* path);
     void* get_export(void* h, const char* name);
 
-    bool load_hostfxr();
+    bool load_hostfxr(const std::filesystem::path& searchPath = "");
 
     void* hostfxr_handle = nullptr;
     load_assembly_and_get_function_pointer_fn load_assembly_and_get_function_pointer = nullptr;

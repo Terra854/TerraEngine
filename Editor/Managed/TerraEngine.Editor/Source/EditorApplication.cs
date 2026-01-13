@@ -15,6 +15,11 @@ namespace TerraEngine.Editor
         {
             if (_initialized) return;
 
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                TerraEngine.Log.Error($"Unhandled C# Exception:\n{e.ExceptionObject}");
+            };
+
             Console.WriteLine("[C#] Setting Context...");
             try 
             {
@@ -38,50 +43,71 @@ namespace TerraEngine.Editor
         {
             if (!_initialized) return;
 
-            // Update specific window data if needed
-            if (_statusWindow != null)
+            try
             {
-                _statusWindow.UpdateData(deltaTime);
-            }
+                // Update specific window data if needed
+                if (_statusWindow != null)
+                {
+                    _statusWindow.UpdateData(deltaTime);
+                }
 
-            // Render all registered windows
-            WindowManager.RenderWindows();
+                // Render all registered windows
+                WindowManager.RenderWindows();
+            }
+            catch (Exception ex)
+            {
+                TerraEngine.Log.Error($"Exception in Editor Update:\n{ex}");
+            }
         }
 
         [UnmanagedCallersOnly]
         public static void DrawWindowMenu()
         {
-            var windows = WindowManager.GetWindows();
-            
-            // Fallback for debugging
-            if (!System.Linq.Enumerable.Any(windows))
+            try
             {
-                if (_statusWindow == null) _statusWindow = new StatusWindow();
-                WindowManager.RegisterWindow(_statusWindow);
-                windows = WindowManager.GetWindows();
-            }
-
-            int count = 0;
-            foreach (var window in windows)
-            {
-                count++;
-                if (ImGui.MenuItem(window.Title))
+                var windows = WindowManager.GetWindows();
+                
+                // Fallback for debugging
+                if (!System.Linq.Enumerable.Any(windows))
                 {
-                    window.IsVisible = true;
+                    if (_statusWindow == null) _statusWindow = new StatusWindow();
+                    WindowManager.RegisterWindow(_statusWindow);
+                    windows = WindowManager.GetWindows();
+                }
+
+                int count = 0;
+                foreach (var window in windows)
+                {
+                    count++;
+                    if (ImGui.MenuItem(window.Title))
+                    {
+                        window.IsVisible = true;
+                    }
+                }
+
+                if (count == 0)
+                {
+                    ImGui.TextDisabled("No registered C# windows");
                 }
             }
-
-            if (count == 0)
+            catch (Exception ex)
             {
-                ImGui.TextDisabled("No registered C# windows");
+                TerraEngine.Log.Error($"Exception in DrawWindowMenu:\n{ex}");
             }
         }
 
         [UnmanagedCallersOnly]
         public static void Shutdown()
         {
-            Console.WriteLine("[C#] Editor Shutdown");
-            _initialized = false;
+            try
+            {
+                TerraEngine.Log.Info("Editor Managed Shutdown");
+                _initialized = false;
+            }
+            catch (Exception ex)
+            {
+                TerraEngine.Log.Error($"Exception in Shutdown:\n{ex}");
+            }
         }
     }
 }
