@@ -169,6 +169,8 @@ target_compile_definitions(TerraEngine-Engine
 		TERRAENGINE_ENGINE_BUILD
 )
 
+set_target_properties(TerraEngine-Engine PROPERTIES OUTPUT_NAME "TerraEngine")
+
 if(WIN32)
 	# Ensure Windows generates an import library even if individual symbols are
 	# not manually decorated; this pairs with the TERRAENGINE_API macro so the
@@ -244,31 +246,35 @@ if(WIN32)
 endif()
 
 set(MANAGED_CORE_SOURCES
-	Managed/TerraEngine.Core/Source/CoreCLR.cs
-	Managed/TerraEngine.Core/Source/Math.cs
+	Engine/Managed/TerraEngine/Source/InternalCalls.cs
+	Engine/Managed/TerraEngine/Source/Log.cs
+	Engine/Managed/TerraEngine/Source/Object.cs
+	Engine/Managed/TerraEngine/Source/Component.cs
+	Engine/Managed/TerraEngine/Source/Transform.cs
+	Engine/Managed/TerraEngine/Source/Math.cs
 )
 
-source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Managed PREFIX "Managed" FILES ${MANAGED_CORE_SOURCES})
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Managed" FILES ${MANAGED_CORE_SOURCES})
 
 # Custom target to build the C# project
 # We use 'dotnet build' directly to avoid CMake C# generator limitations (VS only)
 set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Binaries/Managed/$<CONFIG>")
-add_custom_target(TerraEngine.Core ALL
-    COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Managed/TerraEngine.Core/TerraEngine.Core.csproj" -c $<CONFIG> -o "${MANAGED_OUTPUT_DIR}"
-    COMMENT "Building Managed Assembly: TerraEngine.Core"
+add_custom_target(TerraEngine ALL
+    COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine/TerraEngine.csproj" -c $<CONFIG> -o "${MANAGED_OUTPUT_DIR}"
+    COMMENT "Building Managed Assembly: TerraEngine"
     SOURCES ${MANAGED_CORE_SOURCES}
 )
 
 set(MANAGED_EDITOR_SOURCES
-	Managed/TerraEngine.Editor/Source/EditorApplication.cs
+	Editor/Managed/TerraEngine.Editor/Source/EditorApplication.cs
 )
 
 add_custom_target(TerraEngine.Editor.Managed ALL
-    COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -o "${MANAGED_OUTPUT_DIR}"
+    COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -o "${MANAGED_OUTPUT_DIR}"
     COMMENT "Building Managed Assembly: TerraEngine.Editor"
     SOURCES ${MANAGED_EDITOR_SOURCES}
 )
-add_dependencies(TerraEngine.Editor.Managed TerraEngine.Core)
+add_dependencies(TerraEngine.Editor.Managed TerraEngine)
 
 add_executable(TerraEngine-Launcher
     ${LAUNCHER_SOURCES}
@@ -536,12 +542,13 @@ endif()
 
 	# Install Managed Assemblies to Editor
 	install(FILES 
-		${MANAGED_OUTPUT_DIR}/TerraEngine.Core.dll
+		${MANAGED_OUTPUT_DIR}/TerraEngine.CSharp.dll
 		${MANAGED_OUTPUT_DIR}/TerraEngine.Editor.dll
+		${MANAGED_OUTPUT_DIR}/TerraEngine.CSharp.runtimeconfig.json
 		${MANAGED_OUTPUT_DIR}/TerraEngine.Editor.runtimeconfig.json
 		${MANAGED_OUTPUT_DIR}/Hexa.NET.ImGui.dll
 		${MANAGED_OUTPUT_DIR}/HexaGen.Runtime.dll
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed
 	)
 	
 	# Install cimgui (TerraEngine-ImGui)

@@ -19,17 +19,10 @@ void ScriptingSystem::Initialize() {
 
     // Find managed assembly path relative to executable
     fs::path currentDir = fs::current_path();
-    fs::path managedDir = currentDir / "../Binaries/Managed";
-    
-    if (!fs::exists(managedDir)) {
-        managedDir = currentDir / "Build/Binaries/Managed";
-    }
-    if (!fs::exists(managedDir)) {
-        managedDir = currentDir / "Binaries/Managed";
-    }
+    fs::path managedDir = currentDir / "Managed";
 
-    fs::path configPath = managedDir / "TerraEngine.Core.runtimeconfig.json";
-    fs::path assemblyPath = managedDir / "TerraEngine.Core.dll";
+    fs::path configPath = managedDir / "TerraEngine.CSharp.runtimeconfig.json";
+    fs::path assemblyPath = managedDir / "TerraEngine.CSharp.dll";
 
     if (!fs::exists(configPath)) {
         TERRAENGINE_LOG(LogLevel::Warning, "Could not find runtimeconfig.json at " << configPath.string() << ". Scripting will be disabled.");
@@ -39,13 +32,13 @@ void ScriptingSystem::Initialize() {
     if (DotNetHost::Instance().Initialize(configPath)) {
         managedInit = (InitFn)DotNetHost::Instance().GetManagedFunction(
             assemblyPath,
-            L"TerraEngine.Core.InternalCalls, TerraEngine.Core",
+            L"TerraEngine.InternalCalls, TerraEngine.CSharp",
             L"Initialize"
         );
 
         managedUpdate = (UpdateFn)DotNetHost::Instance().GetManagedFunction(
             assemblyPath,
-            L"TerraEngine.Core.InternalCalls, TerraEngine.Core",
+            L"TerraEngine.InternalCalls, TerraEngine.CSharp",
             L"OnUpdate"
         );
 
@@ -53,7 +46,7 @@ void ScriptingSystem::Initialize() {
             managedInit();
             TERRAENGINE_LOG(LogLevel::Info, "Scripting System initialized successfully.");
         } else {
-            TERRAENGINE_LOG(LogLevel::Error, "Failed to find TerraEngine.Core.InternalCalls.Initialize in " << assemblyPath.string());
+            TERRAENGINE_LOG(LogLevel::Error, "Failed to find TerraEngine.InternalCalls.Initialize in " << assemblyPath.string());
         }
     } else {
         TERRAENGINE_LOG(LogLevel::Error, "Failed to initialize .NET Host.");

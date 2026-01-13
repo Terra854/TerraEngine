@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace TerraEngine.Core
+namespace TerraEngine
 {
     [StructLayout(LayoutKind.Sequential)]
     public struct Vector3

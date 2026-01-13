@@ -240,14 +240,12 @@ void EditorSystem::Initialize() {
     std::filesystem::path binDir;
     
     // Try to locate artifacts
-    if (std::filesystem::exists(cwd / "TerraEngine.Editor.runtimeconfig.json")) {
-        binDir = cwd;
-    } else if (std::filesystem::exists(cwd / "Editor" / "TerraEngine.Editor.runtimeconfig.json")) {
-        binDir = cwd / "Editor";
+    if (std::filesystem::exists(cwd / "Managed" / "TerraEngine.Editor.runtimeconfig.json")) {
+        binDir = cwd / "Managed";
     } else {
         // Fallback or error
-        binDir = cwd / "Editor"; 
-        std::cerr << "[DotNet] Could not find runtimeconfig.json in " << cwd << " or " << (cwd/"Editor") << std::endl;
+        binDir = cwd / "Editor" / "Managed"; 
+        std::cerr << "[DotNet] Could not find runtimeconfig.json in " << cwd << " or subdirectories." << std::endl;
     }
 
     // Ensure absolute paths

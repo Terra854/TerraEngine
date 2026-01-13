@@ -15,22 +15,22 @@ extern "C" {
         Logger::Instance().Log(logLevel, "C#", line, function, message, true);
     }
 
-    uint32_t Native_Entity_Create(const char* name) {
+    uint32_t Native_Object_Create(const char* name) {
         std::lock_guard<std::mutex> lock(g_ScriptGlueMutex);
-        Object obj = ObjectManager::instance().createObject(name ? name : "New Entity");
+        Object obj = ObjectManager::instance().createObject(name ? name : "New Object");
         return static_cast<uint32_t>(obj.EntityId());
     }
 
-    void Native_Entity_Destroy(uint32_t entityId) {
+    void Native_Object_Destroy(uint32_t objectId) {
         std::lock_guard<std::mutex> lock(g_ScriptGlueMutex);
-        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(entityId))) {
+        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
             ObjectManager::instance().removeObject(*objOpt);
         }
     }
 
-    void Native_Transform_GetPosition(uint32_t entityId, float* x, float* y, float* z) {
+    void Native_Transform_GetPosition(uint32_t objectId, float* x, float* y, float* z) {
         std::lock_guard<std::mutex> lock(g_ScriptGlueMutex);
-        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(entityId))) {
+        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
             if (auto* transform = objOpt->getComponent<Transform>()) {
                 glm::vec3 pos = GetComponentProperty<Transform, glm::vec3>(*transform, "Position");
                 *x = pos.x;
@@ -40,9 +40,9 @@ extern "C" {
         }
     }
 
-    void Native_Transform_SetPosition(uint32_t entityId, float x, float y, float z) {
+    void Native_Transform_SetPosition(uint32_t objectId, float x, float y, float z) {
         std::lock_guard<std::mutex> lock(g_ScriptGlueMutex);
-        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(entityId))) {
+        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
             if (auto* transform = objOpt->getComponent<Transform>()) {
                 SetComponentProperty<Transform, glm::vec3>(*transform, "Position", glm::vec3(x, y, z));
             }

@@ -18,8 +18,8 @@ void HierarchyWindow::OnGui() {
         ImGui::OpenPopup("CreateEntityPopup");
     }
     if (ImGui::BeginPopup("CreateEntityPopup")) {
-        if (ImGui::MenuItem("Create Empty")) {
-            Object obj = objManager.createObject("New Entity");
+        if (ImGui::MenuItem("Create Empty Object")) {
+            Object obj = objManager.createObject("Object");
             UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(obj.EntityId()));
         }
         ImGui::EndPopup();

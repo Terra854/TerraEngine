@@ -11,8 +11,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\TerraEngine.Core\TerraEngine.Core.csproj" />
-    <ProjectReference Include="..\..\External\Hexa.NET.ImGui\Hexa.NET.ImGui\Hexa.NET.ImGui.csproj" />
+    <ProjectReference Include="..\..\..\Engine\Managed\TerraEngine\TerraEngine.csproj" />
+    <ProjectReference Include="..\..\..\External\Hexa.NET.ImGui\Hexa.NET.ImGui\Hexa.NET.ImGui.csproj" />
   </ItemGroup>
 
 </Project>
