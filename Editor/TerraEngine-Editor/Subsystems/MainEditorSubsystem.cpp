@@ -8,6 +8,7 @@
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Scripting/ScriptingSystem.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <backends/imgui_impl_vulkan.h>
@@ -34,6 +35,8 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
     ObjectManager::instance().SetOnModifiedCallback([]() {
         SceneManager::Instance().MarkActiveSceneDirty();
     });
+
+    ScriptingSystem::Instance().SetRunning(false);
 }
 
 void MainEditorSubsystem::OnProjectOpened() {
@@ -172,11 +175,82 @@ void MainEditorSubsystem::DrawUI() {
     ImGui::PopStyleVar();
     ImGui::PopStyleVar(2);
 
+    DrawMainMenuBar();
+
+    // Toolbar
+    {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 2));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(0, 0));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        auto& colors = ImGui::GetStyle().Colors;
+        const auto& buttonHovered = colors[ImGuiCol_ButtonHovered];
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(buttonHovered.x, buttonHovered.y, buttonHovered.z, 0.5f));
+        const auto& buttonActive = colors[ImGuiCol_ButtonActive];
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(buttonActive.x, buttonActive.y, buttonActive.z, 0.5f));
+
+        float size = ImGui::GetWindowHeight() - 4.0f; // Constrain to not take too much space? No, this is the main window.
+        // We want a small toolbar strip.
+        // Since we are inside the DockSpace window, but before DockSpace node, we are just drawing at the top.
+        
+        // Let's use a fixed height for the toolbar area to ensure DockSpace doesn't overlap weirdly or just let flow handle it.
+        // But we want to center the buttons.
+        
+        float availWidth = ImGui::GetContentRegionAvail().x;
+        // Buttons: Play/Stop, Pause, Step
+        float buttonSize = 20.0f; // Approx height
+        const char* playLabel = ScriptingSystem::Instance().IsRunning() ? "Stop" : "Play";
+        const char* pauseLabel = "Pause";
+        const char* stepLabel = "Next";
+        
+        // Calculate width
+        ImVec2 playSize = ImGui::CalcTextSize(playLabel);
+        ImVec2 pauseSize = ImGui::CalcTextSize(pauseLabel);
+        ImVec2 stepSize = ImGui::CalcTextSize(stepLabel);
+        
+        float padding = 10.0f;
+        float totalWidth = playSize.x + pauseSize.x + stepSize.x + (padding * 2) + (ImGui::GetStyle().ItemSpacing.x * 2);
+        
+        ImGui::SetCursorPosX((availWidth - totalWidth) * 0.5f);
+        
+        // Play/Stop
+        if (ImGui::Button(playLabel)) {
+            bool running = ScriptingSystem::Instance().IsRunning();
+            ScriptingSystem::Instance().SetRunning(!running);
+            if (!running) {
+                // We just started
+                ScriptingSystem::Instance().SetPaused(false);
+                // TODO: Save scene state
+            } else {
+                // We just stopped
+                // TODO: Restore scene state
+            }
+        }
+        ImGui::SameLine();
+        
+        // Pause
+        // Highlight if paused
+        bool isPaused = ScriptingSystem::Instance().IsPaused();
+        if (isPaused) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 0.0f, 1.0f));
+        if (ImGui::Button(pauseLabel)) {
+             ScriptingSystem::Instance().SetPaused(!isPaused);
+        }
+        if (isPaused) ImGui::PopStyleColor();
+        ImGui::SameLine();
+        
+        // Step
+        if (ImGui::Button(stepLabel)) {
+            if (ScriptingSystem::Instance().IsRunning() && ScriptingSystem::Instance().IsPaused()) {
+                ScriptingSystem::Instance().Step(1);
+            }
+        }
+
+        ImGui::PopStyleColor(3);
+        ImGui::PopStyleVar(2);
+    }
+
     ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), dockspace_flags);
 
-    DrawMainMenuBar();
-    
     for (auto& win : m_Windows) {
         win->Draw();
     }

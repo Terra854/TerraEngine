@@ -63,6 +63,16 @@ void ScriptingSystem::Initialize() {
 void ScriptingSystem::Update(float deltaTime) {
     if (!managedUpdate) return;
 
+    if (!m_Running) return;
+
+    if (m_Paused) {
+        if (m_StepFrames > 0) {
+            m_StepFrames--;
+        } else {
+            return;
+        }
+    }
+
     auto& objManager = ObjectManager::instance();
     auto scriptObjects = objManager.getObjectsWithComponents<ScriptComponent>();
 
