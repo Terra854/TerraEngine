@@ -4,15 +4,20 @@ namespace TerraEngine
     {
         public Vector3 Position
         {
-            get
-            {
-                InternalCalls.Native_Transform_GetPosition(Object.ID, out float x, out float y, out float z);
-                return new Vector3(x, y, z);
-            }
-            set
-            {
-                InternalCalls.Native_Transform_SetPosition(Object.ID, value.X, value.Y, value.Z);        
-            }
+            get => GetProperty<Vector3>("Position");
+            set => SetProperty<Vector3>("Position", value);
+        }
+
+        public Quaternion Rotation
+        {
+            get => GetProperty<Quaternion>("Rotation");
+            set => SetProperty<Quaternion>("Rotation", value);
+        }
+
+        public Vector3 Scale
+        {
+            get => GetProperty<Vector3>("Scale");
+            set => SetProperty<Vector3>("Scale", value);
         }
     }
 }

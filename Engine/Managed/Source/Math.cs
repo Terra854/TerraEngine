@@ -19,13 +19,13 @@ namespace TerraEngine
     [StructLayout(LayoutKind.Sequential)]
     public struct Quaternion
     {
-        public float W, X, Y, Z;
+        public float X, Y, Z, W;
 
-        public Quaternion(float w, float x, float y, float z)
+        public Quaternion(float x, float y, float z, float w)
         {
-            W = w; X = x; Y = y; Z = z;
+            X = x; Y = y; Z = z; W = w;
         }
 
-        public static Quaternion Identity => new Quaternion(1, 0, 0, 0);
+        public static Quaternion Identity => new Quaternion(0, 0, 0, 1);
     }
 }
