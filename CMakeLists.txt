@@ -246,12 +246,12 @@ if(WIN32)
 endif()
 
 set(MANAGED_CORE_SOURCES
-	Engine/Managed/TerraEngine/Source/InternalCalls.cs
-	Engine/Managed/TerraEngine/Source/Log.cs
-	Engine/Managed/TerraEngine/Source/Object.cs
-	Engine/Managed/TerraEngine/Source/Component.cs
-	Engine/Managed/TerraEngine/Source/Transform.cs
-	Engine/Managed/TerraEngine/Source/Math.cs
+	Engine/Managed/Source/InternalCalls.cs
+	Engine/Managed/Source/Log.cs
+	Engine/Managed/Source/Object.cs
+	Engine/Managed/Source/Component.cs
+	Engine/Managed/Source/Transform.cs
+	Engine/Managed/Source/Math.cs
 )
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Managed" FILES ${MANAGED_CORE_SOURCES})
@@ -260,17 +260,17 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Mana
 # We use 'dotnet build' directly to avoid CMake C# generator limitations (VS only)
 set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Binaries/Managed/$<CONFIG>")
 add_custom_target(TerraEngine ALL
-    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine/TerraEngine.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
+    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
     COMMENT "Publishing Managed Assembly: TerraEngine (Self-Contained)"
     SOURCES ${MANAGED_CORE_SOURCES}
 )
 
 set(MANAGED_EDITOR_SOURCES
-	Editor/Managed/TerraEngine.Editor/Source/EditorApplication.cs
+	Editor/Managed/Source/EditorApplication.cs
 )
 
 add_custom_target(TerraEngine.Editor.Managed ALL
-    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
+    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
     COMMENT "Publishing Managed Assembly: TerraEngine.Editor (Self-Contained)"
     SOURCES ${MANAGED_EDITOR_SOURCES}
 )
