@@ -212,13 +212,7 @@ private:
 // dedicated conversion helper elsewhere in the engine.
 inline std::string ToHexString(const TerraEngine::UUID& id)
 {
-	std::ostringstream stream;
-	stream << std::hex << std::setfill('0');
-	for (std::size_t i = 0; i < id.size(); ++i)
-	{
-		stream << std::setw(2) << static_cast<int>(id[i]);
-	}
-	return stream.str();
+	return TerraEngine::ToHexString(id);
 }
 
 inline std::shared_future<TerraEngine::UUID> ResourceManager::MakeReadyFuture(const TerraEngine::UUID& id)

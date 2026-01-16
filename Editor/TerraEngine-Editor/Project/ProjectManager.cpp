@@ -32,9 +32,30 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 
         // Create Default Scene
         {
-            fs::path scenePath = location / "Assets" / "Scenes" / "Default.tescene";
+            fs::path scenePath = location / "Assets" / "Scenes" / "Scene.tescene";
             std::ofstream sceneFile(scenePath);
-            sceneFile << R"({ "name": "DefaultScene", "entities": [] })";
+            sceneFile << R"({
+    "objects": [
+        {
+            "name": "Main Camera",
+            "components": {
+                "Transform": {
+                    "Position": [0.0, 1.0, -10.0],
+                    "Rotation": [1.0, 0.0, 0.0, 0.0],
+                    "Scale": [1.0, 1.0, 1.0]
+                },
+                "CameraComponent": {
+                    "verticalFovDegrees": 45.0,
+                    "aspectRatio": 1.777777,
+                    "nearPlane": 0.1,
+                    "farPlane": 100.0,
+                    "up": [0.0, 1.0, 0.0]
+                }
+            },
+            "children": []
+        }
+    ]
+})";
         }
 
         ProjectSettings settings;

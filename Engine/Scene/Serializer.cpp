@@ -10,9 +10,7 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
     objJson["name"] = objManager.getObjectName(obj);
     
     auto uuid = obj.getUUID();
-    nlohmann::json uuidJson = nlohmann::json::array();
-    for (auto b : uuid) uuidJson.push_back(b);
-    objJson["uuid"] = uuidJson;
+    objJson["uuid"] = TerraEngine::ToHexString(uuid);
     
     objJson["components"] = nlohmann::json::object();
 
@@ -49,9 +47,7 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
                     }
                     else if (val.is_type<TerraEngine::UUID>()) {
                         auto uuid = val.get_value<TerraEngine::UUID>();
-                        nlohmann::json uuidJson = nlohmann::json::array();
-                        for (auto b : uuid) uuidJson.push_back(b);
-                        compJson[propName] = uuidJson;
+                        compJson[propName] = TerraEngine::ToHexString(uuid);
                     }
                 }
             }
@@ -86,9 +82,16 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
     bool hasUuid = false;
 
     if (json.contains("uuid")) {
-        auto& uuidArr = json["uuid"];
-        if (uuidArr.is_array() && uuidArr.size() == 16) {
-            for (int i = 0; i < 16; ++i) uuid[i] = uuidArr[i].get<uint8_t>();
+        auto& uuidVal = json["uuid"];
+        if (uuidVal.is_string()) {
+            auto parsed = TerraEngine::ParseUUID(uuidVal.get<std::string>());
+            if (parsed) {
+                uuid = *parsed;
+                hasUuid = true;
+            }
+        }
+        else if (uuidVal.is_array() && uuidVal.size() == 16) {
+            for (int i = 0; i < 16; ++i) uuid[i] = uuidVal[i].get<uint8_t>();
             hasUuid = true;
         }
     }
@@ -125,7 +128,14 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
                             if (propVal.is_number_float()) val = propVal.get<float>();
                             else if (propVal.is_number_integer()) val = propVal.get<int>();
                             else if (propVal.is_boolean()) val = propVal.get<bool>();
-                            else if (propVal.is_string()) val = propVal.get<std::string>();
+                            else if (propVal.is_string()) {
+                                if (prop.get_type() == rttr::type::get<TerraEngine::UUID>()) {
+                                    auto parsed = TerraEngine::ParseUUID(propVal.get<std::string>());
+                                    if (parsed) val = *parsed;
+                                } else {
+                                    val = propVal.get<std::string>();
+                                }
+                            }
                             else if (propVal.is_array()) {
                                 if (propVal.size() == 3) {
                                     val = glm::vec3(propVal[0], propVal[1], propVal[2]);

@@ -216,6 +216,18 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 if (entry.is_directory()) {
                     m_CurrentDirectory = entry.path();
+                } else {
+                    if (entry.path().extension() == ".tescene") {
+                         auto projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
+                         auto assetRoot = projectRoot / "Assets";
+                         std::error_code ec;
+                         auto relPath = std::filesystem::relative(entry.path(), assetRoot, ec);
+                         if (!ec) {
+                              m_Owner->RequestOpenScene(relPath);
+                         } else {
+                              m_Owner->RequestOpenScene(entry.path());
+                         }
+                    }
                 }
             }
             
@@ -243,4 +255,8 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
         }
         ImGui::EndTable();
     }
+}
+
+void ProjectBrowserWindow::Reset() {
+    m_CurrentDirectory.clear();
 }

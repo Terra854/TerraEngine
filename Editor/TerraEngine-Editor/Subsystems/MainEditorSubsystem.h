@@ -41,6 +41,14 @@ public:
         selectedAsset = asset; 
         if (asset) selectedEntity = std::nullopt;
     }
+    
+    // Opens a scene and updates the last opened scene tracking.
+    void OpenScene(const std::filesystem::path& path);
+    
+    // Request actions with dirty check
+    void RequestOpenScene(const std::filesystem::path& path);
+    void RequestCloseProject();
+    void RequestExit();
 
     void* GetSceneTextureID() const { return sceneTextureID; }
     void* GetGameTextureID() const { return gameTextureID; }
@@ -76,4 +84,18 @@ private:
     
     std::optional<entt::entity> selectedEntity;
     std::optional<std::filesystem::path> selectedAsset;
+
+    enum class PendingAction {
+        None,
+        OpenScene,
+        CloseProject,
+        Exit
+    };
+
+    PendingAction m_PendingAction = PendingAction::None;
+    std::filesystem::path m_PendingScenePath;
+    bool m_ShowSaveConfirmation = false;
+    
+    void ExecutePendingAction();
+    void DrawSaveConfirmationModal();
 };

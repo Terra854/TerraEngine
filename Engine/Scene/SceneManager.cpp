@@ -133,10 +133,25 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 {
 	// The active scene must already be loaded; callers can invoke the async
 	// load helpers beforehand and wait on the returned future.
-	if (GetScene(id) == nullptr)
+	const SceneDocument* doc = GetScene(id);
+	if (doc == nullptr)
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Attempted to activate scene that is not loaded");
 		return false;
+	}
+
+	ObjectManager& objManager = ObjectManager::instance();
+	objManager.clear();
+
+	if (doc->parsedJson.contains("objects")) {
+		for (const auto& objJson : doc->parsedJson["objects"]) {
+			Serializer::DeserializeObject(objJson);
+		}
+	}
+	else if (doc->parsedJson.contains("entities")) {
+		for (const auto& objJson : doc->parsedJson["entities"]) {
+			Serializer::DeserializeObject(objJson);
+		}
 	}
 
 	activeSceneId = id;
@@ -217,6 +232,21 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 
 	TERRAENGINE_LOG(LogLevel::Info, "Saved scene to " << targetPath);
 	
+	// Update the cache if we overwrote the currently active scene file so subsequent
+	// reloads (or SetActiveScene calls) see the fresh data.
+	if (!path.has_value() || *path == activeScene->sourcePath)
+	{
+		std::unique_lock lock(sceneCache.mutex);
+		if (auto it = sceneCache.resources.find(activeSceneId); it != sceneCache.resources.end())
+		{
+			if (it->second)
+			{
+				it->second->parsedJson = sceneJson;
+				it->second->jsonContents = sceneJson.dump(4);
+			}
+		}
+	}
+
 	// Resetting the dirty flag after a successful disk write ensures the editor
 	// UI accurately reflects that the current state is safely persisted.
 	activeSceneDirty = false;

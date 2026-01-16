@@ -8,6 +8,7 @@ class MainEditorSubsystem;
 class ProjectBrowserWindow : public EditorWindow {
 public:
     ProjectBrowserWindow(MainEditorSubsystem* owner);
+    void Reset();
 
 protected:
     virtual void OnGui() override;

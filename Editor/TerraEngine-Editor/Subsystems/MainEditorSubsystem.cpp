@@ -12,6 +12,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <backends/imgui_impl_vulkan.h>
+#include <fstream>
 
 // Include Window Headers
 #include "../Windows/HierarchyWindow.h"
@@ -42,19 +43,80 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 void MainEditorSubsystem::OnProjectOpened() {
     if (!ctx || !ctx->projectManager->HasActiveProject()) return;
 
+    if (auto browser = GetWindow<ProjectBrowserWindow>()) {
+        browser->Reset();
+    }
+
     auto projectRoot = ctx->projectManager->GetProjectRoot();
-    std::filesystem::path sceneRoot = projectRoot / "Assets" / "Scenes";
+    std::filesystem::path assetRoot = projectRoot / "Assets";
+    std::filesystem::path sceneRoot = assetRoot / "Scenes";
     
     if (!std::filesystem::exists(sceneRoot)) {
         std::filesystem::create_directories(sceneRoot);
     }
 
-    SceneManager::Instance().SetSceneRoot(sceneRoot.string());
+    // Set Scene Root to Assets folder so we can load scenes from anywhere inside Assets
+    SceneManager::Instance().SetSceneRoot(assetRoot.string());
     
-    TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene("Default.tescene");
+    // Check for last opened scene
+    std::filesystem::path lastScenePath = projectRoot / "Library" / "LastScene.txt";
+    bool loaded = false;
+    
+    if (std::filesystem::exists(lastScenePath)) {
+        std::ifstream in(lastScenePath);
+        std::string relPath;
+        if (std::getline(in, relPath) && !relPath.empty()) {
+            // Verify it still exists
+            if (std::filesystem::exists(assetRoot / relPath)) {
+                OpenScene(relPath);
+                if (sceneLoaded) loaded = true;
+            }
+        }
+    }
+    
+    if (!loaded) {
+        bool foundAny = false;
+        if (std::filesystem::exists(assetRoot)) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(assetRoot)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".tescene") {
+                    std::error_code ec;
+                    auto rel = std::filesystem::relative(entry.path(), assetRoot, ec);
+                    if (!ec) {
+                        OpenScene(rel);
+                        foundAny = true;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (!foundAny) {
+             // Maybe create a new one? For now just do nothing or log.
+        }
+    }
+}
+
+void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
+    TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(path);
     if (sceneId != TerraEngine::EMPTY_UUID) {
         SceneManager::Instance().SetActiveScene(sceneId);
         sceneLoaded = true;
+        
+        // Save to LastScene.txt
+        if (ctx && ctx->projectManager->HasActiveProject()) {
+            auto projectRoot = ctx->projectManager->GetProjectRoot();
+            std::filesystem::path libDir = projectRoot / "Library";
+            if (!std::filesystem::exists(libDir)) {
+                std::filesystem::create_directories(libDir);
+            }
+            
+            std::ofstream out(libDir / "LastScene.txt");
+            // path is typically relative to SceneRoot.
+            // If path is absolute, we should make it relative if possible,
+            // but SceneManager usually takes relative paths.
+            // Assuming path is relative to SceneRoot (Assets/Scenes)
+            out << path.generic_string();
+        }
     }
 }
 
@@ -255,6 +317,8 @@ void MainEditorSubsystem::DrawUI() {
         win->Draw();
     }
 
+    DrawSaveConfirmationModal();
+
     if (showDemoWindow) ImGui::ShowDemoWindow(&showDemoWindow);
 
     ImGui::End();
@@ -268,10 +332,10 @@ void MainEditorSubsystem::DrawMainMenuBar() {
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Close Project")) {
-                CloseCurrentProject();
+                RequestCloseProject();
             }
             if (ImGui::MenuItem("Exit")) {
-                // TODO: Handle app-level shutdown request.
+                RequestExit();
             }
             ImGui::EndMenu();
         }
@@ -316,6 +380,82 @@ void MainEditorSubsystem::DrawMainMenuBar() {
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
+    }
+}
+
+void MainEditorSubsystem::RequestOpenScene(const std::filesystem::path& path) {
+    if (SceneManager::Instance().IsActiveSceneDirty()) {
+        m_PendingAction = PendingAction::OpenScene;
+        m_PendingScenePath = path;
+        m_ShowSaveConfirmation = true;
+    } else {
+        OpenScene(path);
+    }
+}
+
+void MainEditorSubsystem::RequestCloseProject() {
+    if (SceneManager::Instance().IsActiveSceneDirty()) {
+        m_PendingAction = PendingAction::CloseProject;
+        m_ShowSaveConfirmation = true;
+    } else {
+        CloseCurrentProject();
+    }
+}
+
+void MainEditorSubsystem::RequestExit() {
+    if (SceneManager::Instance().IsActiveSceneDirty()) {
+        m_PendingAction = PendingAction::Exit;
+        m_ShowSaveConfirmation = true;
+    } else {
+        if (ctx && ctx->engine) ctx->engine->SignalShutdown();
+    }
+}
+
+void MainEditorSubsystem::ExecutePendingAction() {
+    switch (m_PendingAction) {
+        case PendingAction::OpenScene:
+            OpenScene(m_PendingScenePath);
+            break;
+        case PendingAction::CloseProject:
+            CloseCurrentProject();
+            break;
+        case PendingAction::Exit:
+            if (ctx && ctx->engine) ctx->engine->SignalShutdown();
+            break;
+        default:
+            break;
+    }
+    m_PendingAction = PendingAction::None;
+    m_PendingScenePath.clear();
+}
+
+void MainEditorSubsystem::DrawSaveConfirmationModal() {
+    if (m_ShowSaveConfirmation) {
+        ImGui::OpenPopup("Save Changes?");
+        m_ShowSaveConfirmation = false;
+    }
+
+    if (ImGui::BeginPopupModal("Save Changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("There are unsaved changes to the current scene.\nDo you want to save them?");
+        ImGui::Separator();
+
+        if (ImGui::Button("Yes", ImVec2(120, 0))) {
+            SceneManager::Instance().SaveScene();
+            ExecutePendingAction();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SetItemDefaultFocus();
+        ImGui::SameLine();
+        if (ImGui::Button("No", ImVec2(120, 0))) {
+            ExecutePendingAction();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            m_PendingAction = PendingAction::None;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 }
 

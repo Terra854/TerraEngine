@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <string>
+#include <string_view>
+#include <optional>
 
 namespace TerraEngine {
 
@@ -22,6 +25,34 @@ namespace TerraEngine {
         std::memcpy(uuid.data(), &high, 8);
         std::memcpy(uuid.data() + 8, &low, 8);
 
+        return uuid;
+    }
+
+    [[nodiscard]] inline std::string ToHexString(const UUID& uuid) {
+        static const char hexChars[] = "0123456789abcdef";
+        std::string s(32, '0');
+        for (int i = 0; i < 16; ++i) {
+            s[2 * i] = hexChars[(uuid[i] >> 4) & 0xF];
+            s[2 * i + 1] = hexChars[uuid[i] & 0xF];
+        }
+        return s;
+    }
+
+    [[nodiscard]] inline std::optional<UUID> ParseUUID(std::string_view hex) {
+        if (hex.size() != 32) return std::nullopt;
+        UUID uuid{};
+        for (int i = 0; i < 16; ++i) {
+            auto fromHex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            int h = fromHex(hex[2 * i]);
+            int l = fromHex(hex[2 * i + 1]);
+            if (h < 0 || l < 0) return std::nullopt;
+            uuid[i] = static_cast<std::uint8_t>((h << 4) | l);
+        }
         return uuid;
     }
 
