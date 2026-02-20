@@ -97,6 +97,20 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 	if (type == rttr::type::get<float>()) {
 		float val = var.get_value<float>();
 		if (ImGui::DragFloat(name.c_str(), &val, 0.1f)) {
+            if (compName == "CameraComponent") {
+                if (name == "nearPlane") {
+                    if (val < 0.001f) val = 0.001f;
+                    
+                    float farP = access.getter(obj, "farPlane").get_value<float>();
+                    if (farP < val + 0.001f) {
+                        access.setter(obj, "farPlane", val + 0.001f);
+                    }
+                }
+                else if (name == "farPlane") {
+                    float nearP = access.getter(obj, "nearPlane").get_value<float>();
+                    if (val < nearP + 0.001f) val = nearP + 0.001f;
+                }
+            }
 			access.setter(obj, name, val);
 		}
         startEditing();

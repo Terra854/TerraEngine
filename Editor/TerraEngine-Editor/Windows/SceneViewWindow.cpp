@@ -7,6 +7,7 @@
 #include <GLFW/glfw3.h>
 #include "Engine/Core/Object/Transform.h"
 #include "Engine/Core/Object/ObjectManager.h"
+#include "Engine/Scene/CameraComponent.h"
 #include <imgui.h>
 #include <ImGuizmo.h>
 #include <entt/entt.hpp>
@@ -67,7 +68,7 @@ void SceneViewWindow::OnGui() {
     // Set Scene View Camera for next render
     RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPos);
 
-    DrawGizmos(view, projNoFlip);
+    DrawGizmos(view, projNoFlip, cursorPos, contentSize);
 }
 
 void SceneViewWindow::HandleCameraInput(float deltaTime) {
@@ -135,19 +136,16 @@ void SceneViewWindow::HandleCameraInput(float deltaTime) {
     }
 }
 
-void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj) {
-    // Grid
-    // ImGuizmo grid removed to be replaced by engine renderer grid
-    // glm::mat4 identity = glm::mat4(1.0f);
-    // ImGuizmo::DrawGrid(glm::value_ptr(view), glm::value_ptr(proj), glm::value_ptr(identity), 100.0f);
-
+void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
     // Selection
     auto selectedEntity = m_Owner->GetSelectedEntity();
     if (selectedEntity.has_value()) {
         auto& registry = ObjectManager::instance().getRegistry();
         if (registry.valid(*selectedEntity)) {
              Transform* transform = registry.try_get<Transform>(*selectedEntity);
-             if (transform) {
+             CameraComponent* camera = registry.try_get<CameraComponent>(*selectedEntity);
+
+             if (transform || camera) {
                  // Helper to compute world transform
                  auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
                      glm::mat4 world(1.0f);
@@ -167,35 +165,85 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj) {
 
                  glm::mat4 model = computeWorldMatrix(*selectedEntity);
 
-                 if (ImGuizmo::Manipulate(
-                     glm::value_ptr(view), 
-                     glm::value_ptr(proj), 
-                     (ImGuizmo::OPERATION)m_CurrentGizmoOperation, 
-                     ImGuizmo::LOCAL, 
-                     glm::value_ptr(model),
-                     nullptr, 
-                     m_UsingSnap ? m_SnapValue : nullptr)) 
-                 {
-                     // Convert updated World Matrix back to Local Matrix
-                     glm::mat4 parentMatrix(1.0f);
-                     entt::entity parent = ObjectManager::instance().getParentEntity(*selectedEntity);
-                     if (parent != entt::null) {
-                         parentMatrix = computeWorldMatrix(parent);
-                     }
-                     
-                     glm::mat4 localMatrix = glm::inverse(parentMatrix) * model;
+                 if (transform) {
+                     if (ImGuizmo::Manipulate(
+                         glm::value_ptr(view), 
+                         glm::value_ptr(proj), 
+                         (ImGuizmo::OPERATION)m_CurrentGizmoOperation, 
+                         ImGuizmo::LOCAL, 
+                         glm::value_ptr(model),
+                         nullptr, 
+                         m_UsingSnap ? m_SnapValue : nullptr)) 
+                     {
+                         // Convert updated World Matrix back to Local Matrix
+                         glm::mat4 parentMatrix(1.0f);
+                         entt::entity parent = ObjectManager::instance().getParentEntity(*selectedEntity);
+                         if (parent != entt::null) {
+                             parentMatrix = computeWorldMatrix(parent);
+                         }
+                         
+                         glm::mat4 localMatrix = glm::inverse(parentMatrix) * model;
 
-                     // Decompose and update
-                     glm::vec3 scale;
-                     glm::quat rotation;
-                     glm::vec3 translation;
-                     glm::vec3 skew;
-                     glm::vec4 perspective;
-                     glm::decompose(localMatrix, scale, rotation, translation, skew, perspective);
-                     
-                     transform->position = translation;
-                     transform->rotation = rotation;
-                     transform->scale = scale;
+                         // Decompose and update
+                         glm::vec3 scale;
+                         glm::quat rotation;
+                         glm::vec3 translation;
+                         glm::vec3 skew;
+                         glm::vec4 perspective;
+                         glm::decompose(localMatrix, scale, rotation, translation, skew, perspective);
+                         
+                         transform->position = translation;
+                         transform->rotation = rotation;
+                         transform->scale = scale;
+                     }
+                 }
+
+                 if (camera) {
+                     float nearP = std::max(0.001f, camera->nearPlane);
+                     float farP = std::max(nearP + 0.001f, camera->farPlane);
+
+                     float h_n = tanf(glm::radians(camera->verticalFovDegrees) * 0.5f) * nearP;
+                     float w_n = h_n * camera->aspectRatio;
+                     float h_f = tanf(glm::radians(camera->verticalFovDegrees) * 0.5f) * farP;
+                     float w_f = h_f * camera->aspectRatio;
+
+                     glm::vec3 corners[8] = {
+                         { -w_n, -h_n, -nearP }, {  w_n, -h_n, -nearP },
+                         {  w_n,  h_n, -nearP }, { -w_n,  h_n, -nearP },
+                         { -w_f, -h_f, -farP  }, {  w_f, -h_f, -farP  },
+                         {  w_f,  h_f, -farP  }, { -w_f,  h_f, -farP  }
+                     };
+
+                     ImVec2 projected[8];
+                     bool behind[8];
+                     glm::mat4 viewProj = proj * view;
+
+                     for (int i = 0; i < 8; i++) {
+                         glm::vec4 worldPos = model * glm::vec4(corners[i], 1.0f);
+                         glm::vec4 clipPos = viewProj * worldPos;
+                         
+                         if (clipPos.w <= 0.0f) {
+                             behind[i] = true;
+                             continue;
+                         }
+                         behind[i] = false;
+                         glm::vec3 ndc = glm::vec3(clipPos) / clipPos.w;
+                         projected[i].x = viewportPos.x + (ndc.x + 1.0f) * 0.5f * viewportSize.x;
+                         projected[i].y = viewportPos.y + (1.0f - ndc.y) * 0.5f * viewportSize.y;
+                     }
+
+                     auto drawLine = [&](int i, int j) {
+                         if (!behind[i] && !behind[j]) {
+                             ImGui::GetWindowDrawList()->AddLine(projected[i], projected[j], IM_COL32(255, 255, 255, 255), 2.0f);
+                         }
+                     };
+
+                     // Near plane
+                     drawLine(0, 1); drawLine(1, 2); drawLine(2, 3); drawLine(3, 0);
+                     // Far plane
+                     drawLine(4, 5); drawLine(5, 6); drawLine(6, 7); drawLine(7, 4);
+                     // Sides
+                     drawLine(0, 4); drawLine(1, 5); drawLine(2, 6); drawLine(3, 7);
                  }
              }
         }

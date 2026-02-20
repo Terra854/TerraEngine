@@ -13,7 +13,7 @@ protected:
 
 private:
     void HandleCameraInput(float deltaTime);
-    void DrawGizmos(const glm::mat4& view, const glm::mat4& proj);
+    void DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 
     MainEditorSubsystem* m_Owner;
 
