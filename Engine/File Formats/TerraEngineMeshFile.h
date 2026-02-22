@@ -9,6 +9,9 @@
 constexpr std::uint32_t kMeshMagicValue = 0x464d4554u; // 'TEMF' little endian
 constexpr std::size_t kMaxVertexAttributes = 8;
 constexpr std::uint16_t kMeshCurrentVersion = 1;
+constexpr std::uint32_t kMeshletPrimitiveIndexSizeBytes = sizeof(std::uint32_t);
+constexpr std::uint32_t kMeshletMaxVertices = 64;
+constexpr std::uint32_t kMeshletMaxTriangles = 124;
 
 // Vertex attribute semantics mirror typical DCC exports and describe what the data represents.
 enum class AttributeSemantic : std::uint32_t
@@ -27,13 +30,6 @@ enum class AttributeFormat : std::uint32_t
 	R10G10B10A2Snorm = 1,
 	R10G10B10A2Unorm = 2,
 	R16G16Unorm = 3
-};
-
-// Describes index width on disk.
-enum class IndexFormat : std::uint32_t
-{
-	UInt16 = 0,
-	UInt32 = 1
 };
 
 #pragma pack(push, 1)
@@ -63,30 +59,62 @@ struct QuantizationInfo
 	float uvScale[2];         // Range of UV coordinates
 };
 
-// Final on-disk header that prefixes every TEMF file.
+// Per-meshlet table entry. Offsets/counts point into packed meshlet streams.
+struct MeshletRecord
+{
+	std::uint32_t vertexOffset;
+	std::uint32_t vertexCount;
+	std::uint32_t primitiveIndexOffset;
+	std::uint32_t primitiveIndexCount;
+};
+
+// Maps a render section to a contiguous range of meshlets.
+struct MeshletSection
+{
+	std::uint32_t meshletOffset;
+	std::uint32_t meshletCount;
+};
+
+// Optional per-meshlet sphere bounds for visibility/culling work.
+struct MeshletBounds
+{
+	float center[3];
+	float radius;
+};
+
+// Final on-disk header that prefixes every meshlet-only TEMF file.
 struct MeshHeader
 {
 	char magic[4];
 	std::uint16_t version;
 	std::uint16_t reserved;
 	std::uint32_t headerSize;
-	std::uint32_t vertexCount;
-	std::uint32_t indexCount;
-	std::uint32_t vertexDataOffset;
-	std::uint32_t indexDataOffset;
-	std::uint32_t indexFormat; // IndexFormat
+	std::uint32_t meshletVertexCount;
+	std::uint32_t meshletPrimitiveIndexCount;
+	std::uint32_t meshletCount;
+	std::uint32_t meshletSectionCount;
+	std::uint32_t meshletBoundsCount;
+	std::uint32_t meshletVertexDataOffset;
+	std::uint32_t meshletPrimitiveIndexDataOffset;
+	std::uint32_t meshletTableOffset;
+	std::uint32_t meshletSectionOffset;
+	std::uint32_t meshletBoundsOffset;
 	VertexLayout layout;
 	QuantizationInfo quantization;
 };
 #pragma pack(pop)
 
-static_assert(sizeof(MeshHeader) <= 512, "TEMF header should remain compact");
+static_assert(sizeof(MeshHeader) <= 640, "TEMF header should remain compact");
 
-// In-memory representation of an entire .temf payload: contiguous storage plus typed views.
+// In-memory representation of an entire .temf payload.
+// Raw byte storage keeps payload ownership in one place while spans/vectors expose typed views.
 struct Mesh
 {
 	MeshHeader header{};
 	std::vector<std::uint8_t> storage;
-	std::span<const std::uint8_t> vertexData;
-	std::span<const std::uint8_t> indexData;
+	std::span<const std::uint8_t> meshletVertexData;
+	std::span<const std::uint8_t> meshletPrimitiveIndexData;
+	std::vector<MeshletRecord> meshletRecords;
+	std::vector<MeshletSection> meshletSections;
+	std::vector<MeshletBounds> meshletBounds;
 };

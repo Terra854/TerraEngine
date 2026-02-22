@@ -45,9 +45,9 @@ std::filesystem::path ResourceManager::GetAssetRoot() const
 
 void ResourceManager::LoadDefaultResources()
 {
-	TerraEngine::UUID defaultVertId{};
-	defaultVertId.fill(0);
-	defaultVertId[15] = 1;
+	TerraEngine::UUID defaultMeshId{};
+	defaultMeshId.fill(0);
+	defaultMeshId[15] = 1;
 
 	TerraEngine::UUID defaultFragId{};
 	defaultFragId.fill(0);
@@ -57,14 +57,14 @@ void ResourceManager::LoadDefaultResources()
 	defaultCollectionId.fill(0);
 	defaultCollectionId[15] = 1;
 
-	// Pre-register Vertex Shader
-	const std::string vertPath = "Shaders/Default.vert.tspf";
-	std::string vertKey = NormalizeKey(ResolveAssetPath(vertPath));
+	// Pre-register Mesh Shader
+	const std::string meshPath = "Shaders/Default.mesh.tspf";
+	std::string meshKey = NormalizeKey(ResolveAssetPath(meshPath));
 	{
 		std::unique_lock lock(shaderCache.mutex);
-		shaderCache.pathToId[vertKey] = defaultVertId;
+		shaderCache.pathToId[meshKey] = defaultMeshId;
 	}
-	LoadShader(vertPath);
+	LoadShader(meshPath);
 
 	// Pre-register Fragment Shader
 	const std::string fragPath = "Shaders/Default.frag.tspf";
@@ -81,7 +81,7 @@ void ResourceManager::LoadDefaultResources()
 	// Logic: static_cast<std::uint32_t>(request.stage) << ":" << request.key << ";";
 	// Loop order matches the input vector.
 	std::ostringstream combined;
-	combined << static_cast<std::uint32_t>(ShaderStage::Vertex) << ":" << vertKey << ";";
+	combined << static_cast<std::uint32_t>(ShaderStage::Mesh) << ":" << meshKey << ";";
 	combined << static_cast<std::uint32_t>(ShaderStage::Fragment) << ":" << fragKey << ";";
 	std::string collectionKey = combined.str();
 
@@ -91,7 +91,7 @@ void ResourceManager::LoadDefaultResources()
 	}
 
 	std::vector<ShaderStagePath> stages = {
-		{ ShaderStage::Vertex, vertPath },
+		{ ShaderStage::Mesh, meshPath },
 		{ ShaderStage::Fragment, fragPath }
 	};
 	LoadShaderCollection(stages);

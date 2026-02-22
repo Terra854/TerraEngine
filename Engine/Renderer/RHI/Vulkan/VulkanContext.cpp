@@ -375,12 +375,48 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		uint32_t materialFlags = material->header.flags;
 
 		impl->EnsureMesh(command.meshId);
+		auto meshIt = impl->meshCache.find(command.meshId);
+		if (meshIt == impl->meshCache.end()
+			|| meshIt->second.vertexBuffer.buffer == VK_NULL_HANDLE
+			|| meshIt->second.indexBuffer.buffer == VK_NULL_HANDLE
+			|| meshIt->second.indexCount == 0) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because mesh GPU buffers are unavailable.");
+			continue;
+		}
+
 		impl->EnsurePipeline(collectionId, currentPass, materialFlags);
-		impl->EnsureMaterialDescriptorSets(collectionId, command.materialId);
 
 		PipelineKey pipeKey = { collectionId, materialFlags };
-		VulkanPipeline& pipeline = impl->pipelineCache[currentPass][pipeKey];
-		VulkanMesh& mesh = impl->meshCache[command.meshId];
+		auto passIt = impl->pipelineCache.find(currentPass);
+		if (passIt == impl->pipelineCache.end()) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because no pipeline cache exists for the current render pass.");
+			continue;
+		}
+
+		auto pipelineIt = passIt->second.find(pipeKey);
+		if (pipelineIt == passIt->second.end()
+			|| pipelineIt->second.pipeline == VK_NULL_HANDLE
+			|| pipelineIt->second.layout == VK_NULL_HANDLE) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because graphics pipeline creation failed.");
+			continue;
+		}
+
+		impl->EnsureMaterialDescriptorSets(collectionId, command.materialId);
+
+		VulkanPipeline& pipeline = pipelineIt->second;
+		VulkanMesh& mesh = meshIt->second;
+		VkDescriptorSet meshDescriptorSet = VK_NULL_HANDLE;
+		if (pipeline.usesMeshShaders) {
+			meshDescriptorSet = impl->EnsureMeshDescriptorSet(command.meshId, pipeline);
+			if (meshDescriptorSet == VK_NULL_HANDLE) {
+				TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because mesh shader descriptor bindings were not created.");
+				continue;
+			}
+			if (mesh.meshletBuffer.buffer == VK_NULL_HANDLE || mesh.meshletCount == 0) {
+				TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because meshlet payload buffers are unavailable.");
+				continue;
+			}
+		}
 
 		PushConstants push{};
 		push.viewProj = frameData.projectionMatrix * frameData.viewMatrix;
@@ -403,7 +439,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		PreparedDraw draw{};
 		draw.mesh = &mesh;
 		draw.pipeline = &pipeline;
-		draw.descriptorSets = { impl->globalDescriptorSet }; // Always bind the global set
+		// Set 0 is the global bindless heap; set 1 is per-mesh payload for mesh shader pipelines.
+		draw.descriptorSets = { impl->globalDescriptorSet };
+		if (meshDescriptorSet != VK_NULL_HANDLE) {
+			draw.descriptorSets.push_back(meshDescriptorSet);
+		}
 		draw.push = push;
 		prepared.push_back(std::move(draw));
 	}
@@ -503,18 +543,37 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 				vkBeginCommandBuffer(secondary, &begin);
 				for (size_t i = start; i < end; ++i) {
 					const PreparedDraw& draw = prepared[i];
+					if (draw.pipeline == nullptr
+						|| draw.pipeline->pipeline == VK_NULL_HANDLE
+						|| draw.pipeline->layout == VK_NULL_HANDLE
+						|| draw.mesh == nullptr
+						|| draw.mesh->vertexBuffer.buffer == VK_NULL_HANDLE
+						|| draw.mesh->indexBuffer.buffer == VK_NULL_HANDLE
+						|| draw.mesh->indexCount == 0) {
+						continue;
+					}
+					if (draw.pipeline->usesMeshShaders
+						&& (draw.mesh->meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
+							|| draw.mesh->meshletBuffer.buffer == VK_NULL_HANDLE
+							|| draw.mesh->meshletCount == 0)) {
+						continue;
+					}
 					vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->pipeline);
 					if (!draw.descriptorSets.empty()) {
 						vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->layout, 0, static_cast<uint32_t>(draw.descriptorSets.size()), draw.descriptorSets.data(), 0, nullptr);
 					}
-					VkBuffer vertexBuffers[] = {draw.mesh->vertexBuffer.buffer};
-					VkDeviceSize offsets[] = {0};
-					vkCmdBindVertexBuffers(secondary, 0, 1, vertexBuffers, offsets);
-					vkCmdBindIndexBuffer(secondary, draw.mesh->indexBuffer.buffer, 0, draw.mesh->indexType);
 					if (draw.pipeline->supportsDefaultPushConstants) {
-						vkCmdPushConstants(secondary, draw.pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &draw.push);
+						vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &draw.push);
 					}
-					vkCmdDrawIndexed(secondary, draw.mesh->indexCount, 1, 0, 0, 0);
+					if (draw.pipeline->usesMeshShaders) {
+						vkCmdDrawMeshTasksEXT(secondary, draw.mesh->meshletCount, 1, 1);
+					} else {
+						VkBuffer vertexBuffers[] = {draw.mesh->vertexBuffer.buffer};
+						VkDeviceSize offsets[] = {0};
+						vkCmdBindVertexBuffers(secondary, 0, 1, vertexBuffers, offsets);
+						vkCmdBindIndexBuffer(secondary, draw.mesh->indexBuffer.buffer, 0, draw.mesh->indexType);
+						vkCmdDrawIndexed(secondary, draw.mesh->indexCount, 1, 0, 0, 0);
+					}
 				}
 				vkEndCommandBuffer(secondary);
 				return secondary;
@@ -977,27 +1036,43 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 }
 
 void VulkanContext::Impl::ClearResources() {
-    if (!device) return;
-    vkDeviceWaitIdle(device);
+	if (!device) return;
+	vkDeviceWaitIdle(device);
 
-    for (auto& [id, mesh] : meshCache) {
-        vmaDestroyBuffer(allocator, mesh.indexBuffer.buffer, mesh.indexBuffer.allocation);
-        vmaDestroyBuffer(allocator, mesh.vertexBuffer.buffer, mesh.vertexBuffer.allocation);
-    }
-    meshCache.clear();
+	for (auto& [id, mesh] : meshCache) {
+		if (!mesh.descriptorSetsByLayout.empty() && descriptorPool != VK_NULL_HANDLE) {
+			std::vector<VkDescriptorSet> descriptorSets;
+			descriptorSets.reserve(mesh.descriptorSetsByLayout.size());
+			for (const auto& [layout, set] : mesh.descriptorSetsByLayout) {
+				if (set != VK_NULL_HANDLE) {
+					descriptorSets.push_back(set);
+				}
+			}
+			if (!descriptorSets.empty()) {
+				vkFreeDescriptorSets(device, descriptorPool, static_cast<uint32_t>(descriptorSets.size()), descriptorSets.data());
+			}
+			mesh.descriptorSetsByLayout.clear();
+		}
 
-    for (auto& [id, tex] : textureCache) {
-        vkDestroySampler(device, tex.sampler, nullptr);
-        vkDestroyImageView(device, tex.view, nullptr);
-        vmaDestroyImage(allocator, tex.image, tex.allocation);
-    }
-    textureCache.clear();
-    
-    textureIndexMap.clear();
-    freeTextureIndices.clear();
-    nextTextureIndex = 1; // Index 0 is reserved for Default Texture
+		vmaDestroyBuffer(allocator, mesh.indexBuffer.buffer, mesh.indexBuffer.allocation);
+		vmaDestroyBuffer(allocator, mesh.vertexBuffer.buffer, mesh.vertexBuffer.allocation);
+		vmaDestroyBuffer(allocator, mesh.meshShaderVertexBuffer.buffer, mesh.meshShaderVertexBuffer.allocation);
+		vmaDestroyBuffer(allocator, mesh.meshletBuffer.buffer, mesh.meshletBuffer.allocation);
+	}
+	meshCache.clear();
 
-    materialIndexMap.clear();
-    freeMaterialIndices.clear();
-    nextMaterialIndex = 0;
+	for (auto& [id, tex] : textureCache) {
+		vkDestroySampler(device, tex.sampler, nullptr);
+		vkDestroyImageView(device, tex.view, nullptr);
+		vmaDestroyImage(allocator, tex.image, tex.allocation);
+	}
+	textureCache.clear();
+	
+	textureIndexMap.clear();
+	freeTextureIndices.clear();
+	nextTextureIndex = 1; // Index 0 is reserved for Default Texture
+
+	materialIndexMap.clear();
+	freeMaterialIndices.clear();
+	nextMaterialIndex = 0;
 }

@@ -736,69 +736,92 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
         return;
     }
 
-    MeshHeader header{};
-    std::ifstream in(fullCompiledPath, std::ios::binary);
-    if (in.is_open()) {
-        in.read((char*)&header, sizeof(MeshHeader));
-    }
+	MeshHeader header{};
+	std::ifstream in(fullCompiledPath, std::ios::binary);
+	if (in.is_open()) {
+		in.read((char*)&header, sizeof(MeshHeader));
+	}
 
-    if (memcmp(header.magic, "TEMF", 4) != 0) {
-        ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid TEMF header in compiled mesh!");
-        return;
-    }
+	if (memcmp(header.magic, "TEMF", 4) != 0) {
+		ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid TEMF header in compiled mesh!");
+		return;
+	}
 
-    ImGui::Text("Compiled Info (.temf)");
-    ImGui::Indent();
-    ImGui::Text("Version: %u", (uint32_t)header.version);
-    ImGui::Text("Vertices: %u", header.vertexCount);
-    ImGui::Text("Indices: %u", header.indexCount);
-    
-    const char* indexFormats[] = { "UInt16", "UInt32" };
-    ImGui::Text("Index Format: %s", (header.indexFormat <= 1) ? indexFormats[header.indexFormat] : "Unknown");
-    ImGui::Unindent();
+	// Explicitly call out legacy assets so users understand why runtime now rejects them.
+	if (header.version < kMeshCurrentVersion) {
+		ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "Legacy/non-meshlet TEMF detected (version %u).", (uint32_t)header.version);
+		ImGui::TextWrapped("Runtime now requires meshlet-only TEMF version %u or newer. Recompile this asset to remove legacy data.", (uint32_t)kMeshCurrentVersion);
+	}
+	else if (header.version > kMeshCurrentVersion) {
+		ImGui::TextColored(ImVec4(1, 1, 0, 1), "TEMF version %u is newer than this editor/runtime (%u).", (uint32_t)header.version, (uint32_t)kMeshCurrentVersion);
+	}
 
-    ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Vertex Layout", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Indent();
-        ImGui::Text("Stride: %u bytes", header.layout.strideBytes);
-        ImGui::Text("Attributes: %u", header.layout.attributeCount);
-        
-        if (ImGui::BeginTable("VertexAttribTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-            ImGui::TableSetupColumn("Semantic");
-            ImGui::TableSetupColumn("Format");
-            ImGui::TableSetupColumn("Offset");
-            ImGui::TableHeadersRow();
+	ImGui::Text("Compiled Info (.temf - meshlet only)");
+	ImGui::Indent();
+	ImGui::Text("Version: %u", (uint32_t)header.version);
+	ImGui::Text("Meshlet Vertices: %u", header.meshletVertexCount);
+	ImGui::Text("Meshlet Primitive Indices: %u", header.meshletPrimitiveIndexCount);
+	ImGui::Text("Meshlets: %u", header.meshletCount);
+	ImGui::Text("Meshlet Sections: %u", header.meshletSectionCount);
+	ImGui::Text("Meshlet Bounds: %u", header.meshletBoundsCount);
+	ImGui::Unindent();
 
-            for (uint32_t i = 0; i < header.layout.attributeCount; ++i) {
-                const auto& attr = header.layout.attributes[i];
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                
-                const char* semantics[] = { "Position", "Normal", "Tangent", "Bitangent", "TexCoord0", "Color0" };
-                if (attr.semantic < 6) ImGui::TextUnformatted(semantics[attr.semantic]);
-                else ImGui::Text("Other (%u)", attr.semantic);
+	ImGui::Spacing();
+	if (ImGui::CollapsingHeader("Meshlet Payload", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::Indent();
+		ImGui::Text("Header Size: %u", header.headerSize);
+		ImGui::Text("Vertex Payload Offset: %u", header.meshletVertexDataOffset);
+		ImGui::Text("Primitive Index Payload Offset: %u", header.meshletPrimitiveIndexDataOffset);
+		ImGui::Text("Meshlet Table Offset: %u", header.meshletTableOffset);
+		ImGui::Text("Meshlet Section Offset: %u", header.meshletSectionOffset);
+		ImGui::Text("Meshlet Bounds Offset: %u", header.meshletBoundsOffset);
+		ImGui::Unindent();
+	}
 
-                ImGui::TableSetColumnIndex(1);
-                const char* formats[] = { "None", "R10G10B10A2Snorm", "R10G10B10A2Unorm", "R16G16Unorm" };
-                if (attr.format < 4) ImGui::TextUnformatted(formats[attr.format]);
-                else ImGui::Text("Other (%u)", attr.format);
+	if (ImGui::CollapsingHeader("Vertex Layout", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::Indent();
+		ImGui::Text("Stride: %u bytes", header.layout.strideBytes);
+		ImGui::Text("Attributes: %u", header.layout.attributeCount);
 
-                ImGui::TableSetColumnIndex(2);
-                ImGui::Text("%u", attr.offsetBytes);
-            }
-            ImGui::EndTable();
-        }
-        ImGui::Unindent();
-    }
+		if (ImGui::BeginTable("VertexAttribTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+			ImGui::TableSetupColumn("Semantic");
+			ImGui::TableSetupColumn("Format");
+			ImGui::TableSetupColumn("Offset");
+			ImGui::TableHeadersRow();
 
-    if (ImGui::CollapsingHeader("Bounds & Quantization", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Indent();
-        ImGui::Text("Center: %.3f, %.3f, %.3f", header.quantization.positionOffset[0], header.quantization.positionOffset[1], header.quantization.positionOffset[2]);
-        ImGui::Text("Extent: %.3f, %.3f, %.3f", header.quantization.positionScale[0], header.quantization.positionScale[1], header.quantization.positionScale[2]);
-        ImGui::Text("UV Min: %.3f, %.3f", header.quantization.uvOffset[0], header.quantization.uvOffset[1]);
-        ImGui::Text("UV Scale: %.3f, %.3f", header.quantization.uvScale[0], header.quantization.uvScale[1]);
-        ImGui::Unindent();
-    }
+			for (uint32_t i = 0; i < header.layout.attributeCount; ++i) {
+				const auto& attr = header.layout.attributes[i];
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+
+				const char* semantics[] = { "Position", "Normal", "Tangent", "Bitangent", "TexCoord0", "Color0" };
+				if (attr.semantic < 6) ImGui::TextUnformatted(semantics[attr.semantic]);
+				else ImGui::Text("Other (%u)", attr.semantic);
+
+				ImGui::TableSetColumnIndex(1);
+				const char* formats[] = { "None", "R10G10B10A2Snorm", "R10G10B10A2Unorm", "R16G16Unorm" };
+				if (attr.format < 4) ImGui::TextUnformatted(formats[attr.format]);
+				else ImGui::Text("Other (%u)", attr.format);
+
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%u", attr.offsetBytes);
+			}
+			ImGui::EndTable();
+		}
+		ImGui::Unindent();
+	}
+
+	if (ImGui::CollapsingHeader("Bounds & Quantization", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::Indent();
+		ImGui::Text("Center: %.3f, %.3f, %.3f", header.quantization.positionOffset[0], header.quantization.positionOffset[1], header.quantization.positionOffset[2]);
+		ImGui::Text("Extent: %.3f, %.3f, %.3f", header.quantization.positionScale[0], header.quantization.positionScale[1], header.quantization.positionScale[2]);
+		ImGui::Text("UV Min: %.3f, %.3f", header.quantization.uvOffset[0], header.quantization.uvOffset[1]);
+		ImGui::Text("UV Scale: %.3f, %.3f", header.quantization.uvScale[0], header.quantization.uvScale[1]);
+		if (header.meshletBoundsCount == 0) {
+			ImGui::TextColored(ImVec4(1, 1, 0, 1), "No meshlet bounds payload is present.");
+		}
+		ImGui::Unindent();
+	}
 }
 
 void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {

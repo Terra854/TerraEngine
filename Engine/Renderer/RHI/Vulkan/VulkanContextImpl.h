@@ -36,7 +36,8 @@ inline const std::vector<const char*> validationLayers = {
 inline const std::vector<const char*> deviceExtensions = {
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 	VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
-	VK_KHR_MAINTENANCE3_EXTENSION_NAME
+	VK_KHR_MAINTENANCE3_EXTENSION_NAME,
+	VK_EXT_MESH_SHADER_EXTENSION_NAME
 };
 
 // Queue family indices used to set up graphics/present queues.
@@ -74,9 +75,13 @@ struct VulkanImage {
 // Mesh buffers cached on the GPU.
 struct VulkanMesh {
 	VulkanBuffer vertexBuffer;
+	VulkanBuffer meshShaderVertexBuffer;
 	VulkanBuffer indexBuffer;
+	VulkanBuffer meshletBuffer;
 	uint32_t indexCount;
 	VkIndexType indexType;
+	uint32_t meshletCount;
+	std::unordered_map<VkDescriptorSetLayout, VkDescriptorSet> descriptorSetsByLayout;
 };
 
 // Pipeline pairing with its layout to avoid redundant lookups.
@@ -87,6 +92,8 @@ struct VulkanPipeline {
 	std::vector<std::vector<DescriptorBinding>> bindingsPerSet;
 	std::vector<VkPushConstantRange> pushConstants;
 	bool supportsDefaultPushConstants = false;
+	bool usesMeshShaders = false;
+	VkShaderStageFlags defaultPushConstantStages = 0;
 };
 
 // Push constant payload required by the preview renderer.
@@ -179,6 +186,9 @@ struct VulkanContext::Impl {
 
 	VkPhysicalDeviceVulkan12Features vulkan12Features{};
 	VkPhysicalDeviceVulkan13Features vulkan13Features{};
+	VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{};
+	bool meshShaderSupported = false;
+	bool taskShaderSupported = false;
 
 	// Bindless Resources
 	static constexpr uint32_t MAX_BINDLESS_TEXTURES = 1024;
@@ -301,6 +311,7 @@ struct VulkanContext::Impl {
 	void InvalidateTexture(TerraEngine::UUID textureId);
 	void EnsureMesh(TerraEngine::UUID meshId);
 	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass, uint32_t materialFlags);
+	VkDescriptorSet EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline);
 
 	VkDescriptorType MapDescriptorType(DescriptorType type);
 	VkShaderStageFlags StageVisibilityToVulkan(StageVisibilityMask visibility);

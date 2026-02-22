@@ -44,3 +44,6 @@
 [submodule "External/ImGuizmo"]
 	path = External/ImGuizmo
 	url = https://github.com/CedricGuillemet/ImGuizmo.git
+[submodule "External/meshoptimizer"]
+	path = External/meshoptimizer
+	url = https://github.com/zeux/meshoptimizer

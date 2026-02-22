@@ -422,3 +422,10 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# TerraEngine cross-platform essentials
+.env*
+.DS_Store
+Thumbs.db
+.idea/
+build/

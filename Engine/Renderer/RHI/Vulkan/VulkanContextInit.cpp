@@ -68,8 +68,24 @@ void VulkanContext::Impl::Cleanup() {
 	CleanupSwapChain();
 
 	for (auto& [id, mesh] : meshCache) {
+		if (!mesh.descriptorSetsByLayout.empty() && descriptorPool != VK_NULL_HANDLE) {
+			std::vector<VkDescriptorSet> descriptorSets;
+			descriptorSets.reserve(mesh.descriptorSetsByLayout.size());
+			for (const auto& [layout, set] : mesh.descriptorSetsByLayout) {
+				if (set != VK_NULL_HANDLE) {
+					descriptorSets.push_back(set);
+				}
+			}
+			if (!descriptorSets.empty()) {
+				vkFreeDescriptorSets(device, descriptorPool, static_cast<uint32_t>(descriptorSets.size()), descriptorSets.data());
+			}
+			mesh.descriptorSetsByLayout.clear();
+		}
+
 		vmaDestroyBuffer(allocator, mesh.indexBuffer.buffer, mesh.indexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.vertexBuffer.buffer, mesh.vertexBuffer.allocation);
+		vmaDestroyBuffer(allocator, mesh.meshShaderVertexBuffer.buffer, mesh.meshShaderVertexBuffer.allocation);
+		vmaDestroyBuffer(allocator, mesh.meshletBuffer.buffer, mesh.meshletBuffer.allocation);
 	}
 	meshCache.clear();
 
@@ -259,6 +275,16 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 		
 		VkPhysicalDeviceProperties deviceProperties;
 		vkGetPhysicalDeviceProperties(physicalDevice, &deviceProperties);
+
+		VkPhysicalDeviceMeshShaderFeaturesEXT queriedMeshFeatures{};
+		queriedMeshFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+
+		VkPhysicalDeviceFeatures2 queriedFeatures{};
+		queriedFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		queriedFeatures.pNext = &queriedMeshFeatures;
+		vkGetPhysicalDeviceFeatures2(physicalDevice, &queriedFeatures);
+		meshShaderSupported = queriedMeshFeatures.meshShader == VK_TRUE;
+		taskShaderSupported = queriedMeshFeatures.taskShader == VK_TRUE;
 		
 		uint32_t driverVersion = deviceProperties.driverVersion;
 		uint32_t apiVersion = deviceProperties.apiVersion;
@@ -268,8 +294,15 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 		TERRAENGINE_LOG(LogLevel::Debug, "  Device Type: " << deviceProperties.deviceType);
 		TERRAENGINE_LOG(LogLevel::Debug, "  Driver Version: " << driverVersion);
 		TERRAENGINE_LOG(LogLevel::Debug, "  API Version: " << VK_API_VERSION_MAJOR(apiVersion) << "." << VK_API_VERSION_MINOR(apiVersion) << "." << VK_API_VERSION_PATCH(apiVersion));
+		TERRAENGINE_LOG(LogLevel::Debug, "  Mesh Shader Support: " << (meshShaderSupported ? "yes" : "no"));
+		TERRAENGINE_LOG(LogLevel::Debug, "  Task Shader Support: " << (taskShaderSupported ? "yes" : "no"));
 	} else {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to find a suitable GPU!");
+		return false;
+	}
+
+	if (!meshShaderSupported) {
+		TERRAENGINE_LOG(LogLevel::Error, "Selected GPU does not expose VK_EXT_mesh_shader meshShader support.");
 		return false;
 	}
 
@@ -331,9 +364,17 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	// Buffer device address is often useful with bindless but strictly optional
 	vulkan12Features.bufferDeviceAddress = VK_TRUE;
 
-    vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    vulkan13Features.shaderDemoteToHelperInvocation = VK_TRUE;
-    vulkan12Features.pNext = &vulkan13Features;
+	vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	vulkan13Features.shaderDemoteToHelperInvocation = VK_TRUE;
+
+	// Mesh shaders are the required runtime geometry path for this feature.
+	meshShaderFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+	meshShaderFeatures.meshShader = VK_TRUE;
+	// Enable task shaders only when the selected GPU advertises the capability.
+	meshShaderFeatures.taskShader = taskShaderSupported ? VK_TRUE : VK_FALSE;
+
+	vulkan12Features.pNext = &vulkan13Features;
+	vulkan13Features.pNext = &meshShaderFeatures;
 
 	VkPhysicalDeviceFeatures2 features2{};
 	features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -733,9 +774,14 @@ bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 	VkPhysicalDeviceVulkan12Features features12{};
 	features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 
-    VkPhysicalDeviceVulkan13Features features13{};
-    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    features12.pNext = &features13;
+	VkPhysicalDeviceVulkan13Features features13{};
+	features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+
+	VkPhysicalDeviceMeshShaderFeaturesEXT meshFeatures{};
+	meshFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+
+	features12.pNext = &features13;
+	features13.pNext = &meshFeatures;
 
 	VkPhysicalDeviceFeatures2 features2{};
 	features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -747,7 +793,8 @@ bool VulkanContext::Impl::IsDeviceSuitable(VkPhysicalDevice device) {
 		!features12.shaderSampledImageArrayNonUniformIndexing || 
 		!features12.descriptorBindingPartiallyBound || 
 		!features12.descriptorBindingVariableDescriptorCount ||
-        !features13.shaderDemoteToHelperInvocation) {
+		!features13.shaderDemoteToHelperInvocation ||
+		!meshFeatures.meshShader) {
 		return false;
 	}
 

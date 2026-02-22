@@ -147,6 +147,13 @@ set(VULKAN_HEADERS_ENABLE_MODULE OFF CACHE BOOL "Disable Vulkan C++20 module" FO
 
 add_subdirectory(External/Vulkan-Headers)
 
+# --- meshoptimizer -----------------------------------------------------------
+set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "Disable meshoptimizer demo" FORCE)
+set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "Disable meshoptimizer gltfpack tool" FORCE)
+set(MESHOPT_INSTALL OFF CACHE BOOL "Disable meshoptimizer install target" FORCE)
+add_subdirectory(External/meshoptimizer)
+set_target_properties(meshoptimizer PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+
 find_package(Threads REQUIRED)
 
 target_link_libraries(TerraEngine-Engine
@@ -315,6 +322,11 @@ target_include_directories(TerraEngineMeshCompiler
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
 )
 
+target_link_libraries(TerraEngineMeshCompiler
+	PRIVATE
+		meshoptimizer
+)
+
 target_include_directories(TerraEngineTextureCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
@@ -393,6 +405,7 @@ target_link_libraries(TerraEngine-Editor
 		cimgui
 		glfw
 		Vulkan::Headers
+		meshoptimizer
 )
 
 
@@ -444,11 +457,11 @@ file(MAKE_DIRECTORY \"\${out_dir}\")
 file(MAKE_DIRECTORY \"\${editor_out_dir}\")
 
 execute_process(
-	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.vert.hlsl\" -o \"\${out_dir}/Default.vert.tspf\" -s vs --dxc \"\${DXC_PATH}\"
-	RESULT_VARIABLE compile_vs
+	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.mesh.hlsl\" -o \"\${out_dir}/Default.mesh.tspf\" -s ms --dxc \"\${DXC_PATH}\"
+	RESULT_VARIABLE compile_ms
 )
-if(NOT compile_vs EQUAL 0)
-	message(FATAL_ERROR \"Failed to compile Default.vert.hlsl with TerraEngineShaderCompiler during install\")
+if(NOT compile_ms EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile Default.mesh.hlsl with TerraEngineShaderCompiler during install\")
 endif()
 
 execute_process(
