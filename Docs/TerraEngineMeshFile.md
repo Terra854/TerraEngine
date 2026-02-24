@@ -1,54 +1,65 @@
 # Terra Engine Mesh File (TEMF) Specification
 
-TEMF packages mesh vertex/index data in a GPU-ready layout with minimal parsing. Headers are fixed-size and little-endian so tools can validate quickly before uploading to GPU buffers.
+TEMF packages meshlet-optimized vertex/index data in a high-performance layout designed for zero-copy GPU consumption and DirectStorage/GDS compatibility.
 
-## Design goals
-- Keep headers compact and deterministic for bundle deduplication.
-- Describe vertex layout explicitly (stride + attributes) so no runtime reflection is required.
-- Support quantized positions/UVs with decode parameters in the header.
-- Avoid external dependencies; everything needed to stream a mesh is contained in the blob.
+## Design Goals
+- **DirectStorage Ready**: Every data stream is aligned to 4KB boundaries to support high-speed NVMe IO.
+- **Zero-Copy Remap**: Support for on-disk `u16` or `u32` vertex indirection without CPU-side decompression.
+- **Meshlet Native**: Built specifically for the programmable mesh shader pipeline.
+- **Aggressive Packing**: Lean 12-byte vertex stride using quantized and octahedral attributes.
 
-## Binary layout (all little-endian)
+## Binary Layout (all little-endian)
 ```
-Header                // fixed-size, packed
-VertexData            // raw bytes; matches Header.vertexDataOffset
-IndexData             // raw bytes; matches Header.indexDataOffset
+Header                // fixed-size (220 bytes), padded to 4KB
+VertexData            // raw bytes (12b stride), aligned to 4KB
+VertexRemapData       // indirection pool (u16 or u32), aligned to 4KB
+SkinningData          // optional (8b stride), aligned to 4KB
+PrimitiveIndexData    // meshlet-local indices (u8), aligned to 4KB
+MeshletRecordTable    // offsets/counts per meshlet, aligned to 4KB
+MeshletSectionTable   // draw call ranges, aligned to 4KB
+MeshletBoundsTable    // optional culling spheres, aligned to 4KB
 ```
 
-### Header (176 bytes)
+### Header (220 bytes)
 | Offset | Size | Field | Description |
 | --- | --- | --- | --- |
 | 0 | 4 | magic | ASCII `TEMF` |
 | 4 | 2 | version | Current version = 1 |
 | 6 | 2 | reserved | Must be 0 |
-| 8 | 4 | headerSize | Always `sizeof(Header)` (176) |
-| 12 | 4 | vertexCount | Number of vertices |
-| 16 | 4 | indexCount | Number of indices |
-| 20 | 4 | vertexDataOffset | Byte offset to first vertex byte |
-| 24 | 4 | indexDataOffset | Byte offset to first index byte |
-| 28 | 4 | indexFormat | 0 = UInt16, 1 = UInt32 |
-| 32 | 4 | layout.strideBytes | Byte stride of each vertex |
-| 36 | 4 | layout.attributeCount | Attributes actually used (<= 8) |
-| 40 | 96 | layout.attributes[8] | Eight `VertexAttribute` entries (see below) |
-| 136 | 12 | quantization.positionOffset | Center of bounding box (float[3]) |
-| 148 | 12 | quantization.positionScale | Half-extent per axis (float[3]) |
-| 160 | 8 | quantization.uvOffset | Minimum UV (float[2]) |
-| 168 | 8 | quantization.uvScale | UV range (float[2]) |
+| 8 | 4 | headerSize | Size of the header struct (220) |
+| 12 | 4 | meshletVertexCount | Total vertices in the global packed pool |
+| 16 | 4 | meshletVertexRemapCount | Number of entries in the indirection stream |
+| 20 | 4 | meshletPrimitiveIndexCount | Number of `uint8` local indices |
+| 24 | 4 | meshletCount | Total number of meshlets |
+| 28 | 4 | meshletSectionCount | Number of draw call sections |
+| 32 | 4 | meshletBoundsCount | Number of culling bounds entries |
+| 36 | 4 | meshletVertexDataOffset | 4KB aligned offset to vertices |
+| 40 | 4 | meshletVertexRemapDataOffset | 4KB aligned offset to remap stream |
+| 44 | 4 | meshletPrimitiveIndexDataOffset | 4KB aligned offset to primitive stream |
+| 48 | 4 | meshletTableOffset | 4KB aligned offset to meshlet records |
+| 52 | 4 | meshletSectionOffset | 4KB aligned offset to sections |
+| 56 | 4 | meshletVertexRemapEncoding | 0 = `uint32`, 1 = `uint16` |
+| 60 | 4 | meshletFlags | bit 0: has bounds |
+| 64 | 4 | meshletBoundsOffset | 4KB aligned offset to bounds |
+| 68 | 4 | meshletSkinningDataOffset | 4KB aligned offset to skinning stream |
+| 72 | 4 | meshletSkinningDataCount | Number of skinned vertices (matches vertex count if used) |
+| 76 | 4 | layout.strideBytes | Byte stride of each vertex (standard = 12) |
+| 80 | 4 | layout.attributeCount | Attributes used (<= 8) |
+| 84 | 96 | layout.attributes[8] | Vertex declaration (semantic/format/offset) |
+| 180 | 12 | quantization.positionOffset | Bounding box center |
+| 192 | 12 | quantization.positionScale | Bounding box half-extents |
+| 204 | 8 | quantization.uvOffset | Minimum UV |
+| 212 | 8 | quantization.uvScale | UV Range |
 
-`VertexAttribute` layout (12 bytes each, tightly packed):
-- `semantic` (uint32): 0=Position, 1=Normal, 2=Tangent, 3=Bitangent, 4=TexCoord0, 5=Color0
-- `format` (uint32): 1=R10G10B10A2Snorm, 2=R10G10B10A2Unorm, 3=R16G16Unorm
-- `offsetBytes` (uint32): Byte offset within a vertex
+### Key Formats
+- **Vertex Attribute (12 bytes)**:
+  - `Position`: `R10G10B10A2Snorm` (10-bit per axis).
+  - `Normal`: `Oct32` (High-precision octahedral 2D mapping).
+  - `TexCoord`: `R16G16Unorm` (16-bit precision).
+- **Skinning Stream (8 bytes)**: 4x `uint8` Joint Indices + 4x `unorm8` Weights.
+- **Meshlet Record (16 bytes)**: Stores `vertexOffset`, `vertexCount`, `primitiveIndexOffset`, `primitiveIndexCount`.
 
-`VertexLayout` always reserves space for 8 attributes; unused entries are ignored past `attributeCount`.
-
-`QuantizationInfo` lets loaders reconstruct normalized vertex data (positions/UVs) without external metadata.
-
-### Payloads
-- **VertexData**: `vertexCount * layout.strideBytes` bytes beginning at `vertexDataOffset`.
-- **IndexData**: `indexCount * (2 or 4)` bytes beginning at `indexDataOffset`; width chosen by `indexFormat`.
-
-### Loader checklist
-- Validate magic/version/headerSize before trusting offsets.
-- Confirm `vertexDataOffset` and `indexDataOffset` are within the file and non-overlapping.
-- Apply `QuantizationInfo` when expanding packed vertex attributes in tooling; runtime paths can upload as-is if the pipeline expects the encoded formats.
+### Implementation Notes
+- **Alignment**: Every payload MUST begin on a 4096-byte boundary to ensure compatibility with `O_DIRECT`, `io_uring`, and DirectStorage.
+- **Shader Consumption**: Shaders should use `ByteAddressBuffer` to load remap indices and manually handle the `u16`/`u32` bit-shift logic based on the `meshletVertexRemapEncoding` flag.
+- **Culling**: Pre-computed `MeshletBounds` provide a sphere-based visibility check for GPU-driven occlusion or frustum culling.
