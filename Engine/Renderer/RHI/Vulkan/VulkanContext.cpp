@@ -6,7 +6,55 @@
 #include "VulkanCommonIncludes.h"
 #include "VulkanContextImpl.h"
 #include "ThreadPool/ThreadPool.h"
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <fstream>
+#include <thread>
+
+namespace
+{
+	glm::vec4 GetMatrixRow(const glm::mat4& matrix, int rowIndex)
+	{
+		return glm::vec4(matrix[0][rowIndex], matrix[1][rowIndex], matrix[2][rowIndex], matrix[3][rowIndex]);
+	}
+
+	glm::vec4 NormalizePlane(const glm::vec4& plane)
+	{
+		const float length = glm::length(glm::vec3(plane));
+		if (length <= 1e-6f)
+		{
+			return glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+		}
+		return plane / length;
+	}
+
+	std::array<glm::vec4, 6> BuildFrustumPlanes(const glm::mat4& viewProjection)
+	{
+		const glm::vec4 row0 = GetMatrixRow(viewProjection, 0);
+		const glm::vec4 row1 = GetMatrixRow(viewProjection, 1);
+		const glm::vec4 row2 = GetMatrixRow(viewProjection, 2);
+		const glm::vec4 row3 = GetMatrixRow(viewProjection, 3);
+
+		std::array<glm::vec4, 6> planes{};
+		planes[0] = NormalizePlane(row3 + row0); // Left
+		planes[1] = NormalizePlane(row3 - row0); // Right
+		planes[2] = NormalizePlane(row3 + row1); // Bottom
+		planes[3] = NormalizePlane(row3 - row1); // Top
+		planes[4] = NormalizePlane(row3 + row2); // Near
+		planes[5] = NormalizePlane(row3 - row2); // Far
+		return planes;
+	}
+
+	float SafeFrameTimeMs(float deltaTimeSeconds)
+	{
+		if (deltaTimeSeconds <= 0.0f)
+		{
+			return 0.0f;
+		}
+		return deltaTimeSeconds * 1000.0f;
+	}
+}
 
 VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {}
 VulkanContext::~VulkanContext() = default;
@@ -27,6 +75,8 @@ void VulkanContext::BeginFrame() {
 	if (!impl->initialized) return;
 
 	vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+	// The waited frame slot is now complete, so snapshot its GPU counters for UI stats.
+	impl->PublishCompletedFrameStats(impl->currentFrame);
 
 	// Release any extra primary command buffers used for prior camera passes
 	// now that the fence guarantees they are idle.
@@ -270,89 +320,63 @@ void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRe
     vkCmdDraw(cmd, 6, 1, 0, 0); // 6 vertices for fullscreen quad
 }
 
-// Modify RenderFrame to initialize/render grid
-// I will inject this into RenderFrame method.
-
 void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view) {
-
 	// Skip rendering if initialization failed so we do not spam validation errors.
-
 	if (!impl->initialized || impl->skipFrame) return;
 
-
-
-	// Handle Editor Mode resizing (lazy)
-
+	// Handle Editor Mode resizing (lazy).
 	if (impl->editorMode) {
-
 		if (impl->sceneView.image == VK_NULL_HANDLE) {
-
 			impl->InitEditorMode();
-
 		}
-
 		if (impl->sceneView.framebuffer == VK_NULL_HANDLE) {
-
 			impl->CreateOffscreenResources(impl->sceneView);
-
 		}
-
-        if (impl->gameView.framebuffer == VK_NULL_HANDLE) {
-
-            impl->CreateOffscreenResources(impl->gameView);
-
-        }
-
+		if (impl->gameView.framebuffer == VK_NULL_HANDLE) {
+			impl->CreateOffscreenResources(impl->gameView);
+		}
 	}
 
-
-
 	uint32_t imageIndex = impl->acquiredImageIndex;
-
 	VkRenderPassBeginInfo renderPassInfo{};
-
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 
-
-
 	if (!impl->editorMode) {
-
 		if (!impl->swapchainImageAcquired) {
-
 			return;
-
 		}
-
 		renderPassInfo.renderPass = impl->renderPass;
-
 		renderPassInfo.framebuffer = impl->framebuffers[imageIndex];
-
 	} else {
-
-		// Editor Mode: Render to offscreen
-
+		// Editor mode renders into per-view offscreen targets.
 		renderPassInfo.renderPass = impl->offscreenRenderPass;
-
 		renderPassInfo.framebuffer = (view == ViewType::Scene) ? impl->sceneView.framebuffer : impl->gameView.framebuffer;
-
 	}
 
 	renderPassInfo.renderArea.offset = {0, 0};
 	renderPassInfo.renderArea.extent = impl->swapchainExtent;
 
 	VkClearValue clearValues[2];
-	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}}; 
+	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 	clearValues[1].depthStencil = {1.0f, 0};
-
 	renderPassInfo.clearValueCount = 2;
 	renderPassInfo.pClearValues = clearValues;
 
-    // Create Grid Pipeline if needed (lazy init)
-    if (view == ViewType::Scene) {
-        impl->CreateSceneViewGridPipeline(renderPassInfo.renderPass);
-    }
+	// Create Grid Pipeline if needed (lazy init).
+	if (view == ViewType::Scene) {
+		impl->CreateSceneViewGridPipeline(renderPassInfo.renderPass);
+	}
 
-	// Prepare Draw Data
+	const uint32_t statsSlotIndex = impl->GetStatsSlotIndex(impl->currentFrame, view);
+	FrameCullingDataGPU cullingData{};
+	cullingData.frustumPlanes = BuildFrustumPlanes(frameData.projectionMatrix * frameData.viewMatrix);
+	cullingData.cameraPositionAndEpsilon = glm::vec4(frameData.cameraWorldPosition, std::max(frameData.cullingEpsilon, 0.0001f));
+	cullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
+	cullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
+	impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
+	impl->ResetMeshletCounters(statsSlotIndex);
+
+	// Prepare draw data.
 	struct PreparedDraw {
 		VulkanMesh* mesh = nullptr;
 		VulkanPipeline* pipeline = nullptr;
@@ -362,17 +386,38 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	std::vector<PreparedDraw> prepared;
 	prepared.reserve(frameData.commands.size());
 
+	RenderStatsSnapshot pendingStats{};
+	pendingStats.viewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
+	pendingStats.frameTimeMs = SafeFrameTimeMs(frameData.deltaTimeSeconds);
+	pendingStats.fps = pendingStats.frameTimeMs > 0.0f ? (1000.0f / pendingStats.frameTimeMs) : 0.0f;
+	pendingStats.valid = true;
+
+	const TerraEngine::UUID defaultMeshCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
+	const TerraEngine::UUID defaultTaskCollectionId = ResourceManager::Instance().GetDefaultTaskShaderCollectionID();
+	const bool defaultTaskPipelineAvailable = impl->taskShaderSupported
+		&& (ResourceManager::Instance().GetShaderCollection(defaultTaskCollectionId) != nullptr);
+
+	const auto ResolvePipeline = [&](const TerraEngine::UUID& shaderCollectionId, VkRenderPass currentPass, uint32_t materialFlags) -> VulkanPipeline* {
+		impl->EnsurePipeline(shaderCollectionId, currentPass, materialFlags);
+		auto passIt = impl->pipelineCache.find(currentPass);
+		if (passIt == impl->pipelineCache.end()) {
+			return nullptr;
+		}
+
+		PipelineKey pipeKey = {shaderCollectionId, materialFlags};
+		auto pipelineIt = passIt->second.find(pipeKey);
+		if (pipelineIt == passIt->second.end()
+			|| pipelineIt->second.pipeline == VK_NULL_HANDLE
+			|| pipelineIt->second.layout == VK_NULL_HANDLE) {
+			return nullptr;
+		}
+
+		return &pipelineIt->second;
+	};
+
 	for (const auto& command : frameData.commands) {
 		Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
 		if (!material) continue;
-
-		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
-		if (collectionId == TerraEngine::EMPTY_UUID) {
-			collectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
-		}
-
-		VkRenderPass currentPass = impl->editorMode ? impl->offscreenRenderPass : impl->renderPass;
-		uint32_t materialFlags = material->header.flags;
 
 		impl->EnsureMesh(command.meshId);
 		auto meshIt = impl->meshCache.find(command.meshId);
@@ -381,32 +426,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			continue;
 		}
 
-		impl->EnsurePipeline(collectionId, currentPass, materialFlags);
-
-		PipelineKey pipeKey = { collectionId, materialFlags };
-		auto passIt = impl->pipelineCache.find(currentPass);
-		if (passIt == impl->pipelineCache.end()) {
-			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because no pipeline cache exists for the current render pass.");
-			continue;
-		}
-
-		auto pipelineIt = passIt->second.find(pipeKey);
-		if (pipelineIt == passIt->second.end()
-			|| pipelineIt->second.pipeline == VK_NULL_HANDLE
-			|| pipelineIt->second.layout == VK_NULL_HANDLE) {
-			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because graphics pipeline creation failed.");
-			continue;
-		}
-
-		impl->EnsureMaterialDescriptorSets(collectionId, command.materialId);
-
-		VulkanPipeline& pipeline = pipelineIt->second;
+		VkRenderPass currentPass = impl->editorMode ? impl->offscreenRenderPass : impl->renderPass;
+		uint32_t materialFlags = material->header.flags;
 		VulkanMesh& mesh = meshIt->second;
-		VkDescriptorSet meshDescriptorSet = impl->EnsureMeshDescriptorSet(command.meshId, pipeline);
-		if (meshDescriptorSet == VK_NULL_HANDLE) {
-			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because mesh shader descriptor bindings were not created.");
-			continue;
-		}
+
 		if (mesh.meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
 			|| mesh.meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
 			|| mesh.meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
@@ -417,38 +440,82 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			continue;
 		}
 
+		TerraEngine::UUID collectionId = material->header.shaderCollectionId;
+		if (collectionId == TerraEngine::EMPTY_UUID) {
+			collectionId = defaultMeshCollectionId;
+		}
+
+		// Route default materials through the task pipeline whenever supported.
+		if (collectionId == defaultMeshCollectionId && defaultTaskPipelineAvailable) {
+			collectionId = defaultTaskCollectionId;
+		}
+
+		VulkanPipeline* pipeline = ResolvePipeline(collectionId, currentPass, materialFlags);
+		if (pipeline == nullptr && collectionId == defaultTaskCollectionId) {
+			collectionId = defaultMeshCollectionId;
+			pipeline = ResolvePipeline(collectionId, currentPass, materialFlags);
+		}
+		if (pipeline == nullptr) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because graphics pipeline creation failed.");
+			continue;
+		}
+
+		impl->EnsureMaterialDescriptorSets(collectionId, command.materialId);
+		VkDescriptorSet meshDescriptorSet = impl->EnsureMeshDescriptorSet(command.meshId, *pipeline);
+		if (meshDescriptorSet == VK_NULL_HANDLE) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because mesh shader descriptor bindings were not created.");
+			continue;
+		}
+
+		const bool activeTaskCulling = pipeline->hasTaskStage
+			&& frameData.globalTaskShaderCullingEnabled
+			&& impl->globalTaskShaderCullingEnabled
+			&& command.taskShaderCullingEnabled
+			&& mesh.hasMeshletBounds;
+
 		PushConstants push{};
 		push.viewProj = frameData.projectionMatrix * frameData.viewMatrix;
-        push.model = command.modelMatrix;
-		
-		// Set texture index for bindless access
-		push.textureIndex = 0; // Default
+		push.model = command.modelMatrix;
+		push.textureIndex = 0;
 		if (material->header.textureCount > 0 && !material->textures.empty()) {
 			TerraEngine::UUID texID = material->textures[0].textureUuid;
 			if (impl->textureIndexMap.contains(texID)) {
 				push.textureIndex = impl->textureIndexMap[texID];
 			}
 		}
-
-		push.materialIndex = 0; // Default
+		push.materialIndex = 0;
 		if (impl->materialIndexMap.contains(command.materialId)) {
 			push.materialIndex = impl->materialIndexMap[command.materialId];
 		}
+		push.taskCullingEnabled = activeTaskCulling ? 1u : 0u;
+		push.statsSlotIndex = statsSlotIndex;
+		push.cullingEpsilon = std::max(frameData.cullingEpsilon, 0.0001f);
 
 		PreparedDraw draw{};
 		draw.mesh = &mesh;
-		draw.pipeline = &pipeline;
+		draw.pipeline = pipeline;
 		// Set 0 is the global bindless heap; set 1 is per-mesh payload for mesh shader pipelines.
-		draw.descriptorSets = { impl->globalDescriptorSet };
-		if (meshDescriptorSet != VK_NULL_HANDLE) {
-			draw.descriptorSets.push_back(meshDescriptorSet);
-		}
+		draw.descriptorSets = {impl->globalDescriptorSet};
+		draw.descriptorSets.push_back(meshDescriptorSet);
 		draw.push = push;
 		prepared.push_back(std::move(draw));
+
+		pendingStats.drawCalls += 1u;
+		pendingStats.triangleCount += (mesh.indexCount / 3u);
+		pendingStats.meshletsTotal += mesh.meshletCount;
+		pendingStats.taskCullingActive = pendingStats.taskCullingActive || activeTaskCulling;
+
+		// Mesh-only and pass-through fallback paths keep conservative CPU estimates.
+		if (!pipeline->hasTaskStage || !activeTaskCulling) {
+			pendingStats.meshletsDispatched += mesh.meshletCount;
+		}
 	}
 
+	impl->RecordPendingStats(statsSlotIndex, pendingStats);
+
 	VkCommandBuffer cmd = VK_NULL_HANDLE;
-	const bool useMainCommandBuffer = impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size() || impl->pendingPrimaryCommandBuffers[impl->currentFrame].empty();
+	const bool useMainCommandBuffer = impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size()
+		|| impl->pendingPrimaryCommandBuffers[impl->currentFrame].empty();
 	if (useMainCommandBuffer) {
 		cmd = impl->commandBuffers[impl->currentFrame];
 		vkResetCommandBuffer(cmd, 0);
@@ -477,12 +544,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	if (!useMainCommandBuffer && !impl->editorMode) {
 		VkImageMemoryBarrier barrier{};
 		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-		// Wait for previous color output
 		barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-		// We will write color output
 		barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-		barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; // Previous pass ended here
-		barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; // Keep it here, RenderPass will handle transition from Initial=Undefined
+		barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		barrier.image = impl->swapchainImages[imageIndex];
@@ -509,24 +574,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		const size_t workerCount = std::min(prepared.size(), hw);
 		const size_t chunkSize = (prepared.size() + workerCount - 1) / workerCount;
 
-			impl->EnsureWorkerPools(impl->currentFrame, workerCount);
-			auto& framePools = impl->workerCommandPools[impl->currentFrame];
-
-			std::vector<std::future<VkCommandBuffer>> futures;
-			futures.reserve(workerCount);
+		impl->EnsureWorkerPools(impl->currentFrame, workerCount);
+		std::vector<std::future<VkCommandBuffer>> futures;
+		futures.reserve(workerCount);
 
 		for (size_t taskIndex = 0; taskIndex < workerCount; ++taskIndex) {
 			const size_t start = taskIndex * chunkSize;
 			if (start >= prepared.size()) break;
-				const size_t end = std::min(prepared.size(), start + chunkSize);
-				VkCommandPool pool = framePools[taskIndex];
-				VkFramebuffer framebuffer = renderPassInfo.framebuffer;
-				VkRenderPass renderPass = renderPassInfo.renderPass;
+			const size_t end = std::min(prepared.size(), start + chunkSize);
+			VkFramebuffer framebuffer = renderPassInfo.framebuffer;
+			VkRenderPass renderPass = renderPassInfo.renderPass;
 
-				auto task = ThreadPool::instance().createTask([pool, frameIndex = impl->currentFrame, workerIndex = taskIndex, renderPass, framebuffer, start, end, &prepared, this]() -> VkCommandBuffer {
-					VkCommandBuffer secondary = impl->AcquireWorkerCommandBuffer(frameIndex, workerIndex);
-					if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
-					vkResetCommandBuffer(secondary, 0);
+			auto task = ThreadPool::instance().createTask([frameIndex = impl->currentFrame, workerIndex = taskIndex, renderPass, framebuffer, start, end, &prepared, this]() -> VkCommandBuffer {
+				VkCommandBuffer secondary = impl->AcquireWorkerCommandBuffer(frameIndex, workerIndex);
+				if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+				vkResetCommandBuffer(secondary, 0);
 
 				VkCommandBufferInheritanceInfo inherit{};
 				inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
@@ -556,15 +618,18 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 						|| draw.mesh->meshletCount == 0) {
 						continue;
 					}
+
 					vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->pipeline);
-					if (!draw.descriptorSets.empty()) {
-						vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->layout, 0, static_cast<uint32_t>(draw.descriptorSets.size()), draw.descriptorSets.data(), 0, nullptr);
-					}
+					vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->layout, 0, static_cast<uint32_t>(draw.descriptorSets.size()), draw.descriptorSets.data(), 0, nullptr);
 					if (draw.pipeline->supportsDefaultPushConstants) {
 						vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &draw.push);
 					}
-					
-					vkCmdDrawMeshTasksEXT(secondary, draw.mesh->meshletCount, 1, 1);
+
+					const uint32_t kTaskBatchSize = 32u;
+					const uint32_t taskGroupCount = draw.pipeline->hasTaskStage
+						? ((draw.mesh->meshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
+						: draw.mesh->meshletCount;
+					vkCmdDrawMeshTasksEXT(secondary, taskGroupCount, 1, 1);
 				}
 				vkEndCommandBuffer(secondary);
 				return secondary;
@@ -572,45 +637,42 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			futures.push_back(task->getFuture());
 			ThreadPool::instance().enqueue(task);
 		}
-		for (auto& f : futures) {
-			VkCommandBuffer secondary = f.get();
-			if (secondary != VK_NULL_HANDLE) secondaryBuffers.push_back(secondary);
+
+		for (auto& future : futures) {
+			VkCommandBuffer secondary = future.get();
+			if (secondary != VK_NULL_HANDLE) {
+				secondaryBuffers.push_back(secondary);
+			}
 		}
 	}
 
-    // Render Grid (Scene View Only)
-    if (view == ViewType::Scene) {
-        // Allocate a secondary buffer for the grid on the main thread
-        // We use 'workerCount' as the index to avoid collision with threaded workers
-        // We need to calculate workerCount again or store it.
-        const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+	// Render grid (Scene View only).
+	if (view == ViewType::Scene) {
+		const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
 		const size_t workerCount = std::min(prepared.size(), hw);
-        
-        // Ensure pool exists for this "extra" worker index
-        impl->EnsureWorkerPools(impl->currentFrame, workerCount + 1);
-        
-        VkCommandBuffer gridCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerCount);
-        if (gridCmd != VK_NULL_HANDLE) {
-            vkResetCommandBuffer(gridCmd, 0);
-            
-            VkCommandBufferInheritanceInfo inherit{};
-            inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
-            inherit.renderPass = renderPassInfo.renderPass;
-            inherit.subpass = 0;
-            inherit.framebuffer = renderPassInfo.framebuffer;
+		impl->EnsureWorkerPools(impl->currentFrame, workerCount + 1);
 
-            VkCommandBufferBeginInfo begin{};
-            begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
-            begin.pInheritanceInfo = &inherit;
+		VkCommandBuffer gridCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerCount);
+		if (gridCmd != VK_NULL_HANDLE) {
+			vkResetCommandBuffer(gridCmd, 0);
 
-            vkBeginCommandBuffer(gridCmd, &begin);
-            impl->RenderSceneViewGrid(gridCmd, frameData);
-            vkEndCommandBuffer(gridCmd);
-            
-            secondaryBuffers.push_back(gridCmd);
-        }
-    }
+			VkCommandBufferInheritanceInfo inherit{};
+			inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+			inherit.renderPass = renderPassInfo.renderPass;
+			inherit.subpass = 0;
+			inherit.framebuffer = renderPassInfo.framebuffer;
+
+			VkCommandBufferBeginInfo begin{};
+			begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+			begin.pInheritanceInfo = &inherit;
+
+			vkBeginCommandBuffer(gridCmd, &begin);
+			impl->RenderSceneViewGrid(gridCmd, frameData);
+			vkEndCommandBuffer(gridCmd);
+			secondaryBuffers.push_back(gridCmd);
+		}
+	}
 
 	VkSubpassContents contents = secondaryBuffers.empty() ? VK_SUBPASS_CONTENTS_INLINE : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
 	vkCmdBeginRenderPass(cmd, &renderPassInfo, contents);
@@ -708,6 +770,25 @@ void VulkanContext::EndFrame() {
 
 		impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 	}
+}
+
+void VulkanContext::SetGlobalTaskShaderCullingEnabled(bool enabled) {
+	if (impl) {
+		impl->globalTaskShaderCullingEnabled = enabled;
+	}
+}
+
+bool VulkanContext::IsTaskShaderSupported() const {
+	return impl != nullptr && impl->taskShaderSupported;
+}
+
+RenderStatsSnapshot VulkanContext::GetLatestRenderStats(RenderViewType viewType) const {
+	if (!impl) {
+		RenderStatsSnapshot snapshot{};
+		snapshot.viewType = viewType;
+		return snapshot;
+	}
+	return impl->GetLatestStats(viewType);
 }
 
 void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {
@@ -1050,6 +1131,7 @@ void VulkanContext::Impl::ClearResources() {
 		vmaDestroyBuffer(allocator, mesh.meshletVertexRemapBuffer.buffer, mesh.meshletVertexRemapBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshDecodeInfoBuffer.buffer, mesh.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletBuffer.buffer, mesh.meshletBuffer.allocation);
+		vmaDestroyBuffer(allocator, mesh.meshletBoundsBuffer.buffer, mesh.meshletBoundsBuffer.allocation);
 	}
 	meshCache.clear();
 

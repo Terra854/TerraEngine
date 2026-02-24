@@ -33,6 +33,8 @@ RenderSystem& RenderSystem::Instance()
 RenderSystem::RenderSystem()
 	: objManager(ObjectManager::instance())
 {
+	latestGameStats.viewType = RenderViewType::Game;
+	latestSceneStats.viewType = RenderViewType::Scene;
 }
 
 void RenderSystem::Initialize()
@@ -140,12 +142,14 @@ void RenderSystem::Update(float deltaTime)
 			{
 				const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
 				const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
+				const bool objectTaskCullingEnabled = GetComponentProperty<MeshRenderComponent, bool>(meshComp, "taskShaderCullingEnabled");
 				if (meshId != TerraEngine::EMPTY_UUID && materialId != TerraEngine::EMPTY_UUID)
 				{
 					// Capture reflected mesh bindings without touching fields directly.
 					MeshRenderComponent reflectedMesh{};
 					reflectedMesh.meshId = meshId;
 					reflectedMesh.materialId = materialId;
+					reflectedMesh.taskShaderCullingEnabled = objectTaskCullingEnabled;
 
 					renderables.push_back({ object.EntityId(), reflectedMesh });
 					if (!localTransforms.contains(object.EntityId()))
@@ -258,6 +262,7 @@ void RenderSystem::Update(float deltaTime)
 					DrawCommand cmd;
 					cmd.meshId = meshComp.meshId;
 					cmd.materialId = meshComp.materialId;
+					cmd.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
 
 					glm::mat4 model = glm::mat4(1.0f);
 					model = glm::translate(model, transform.position);
@@ -283,8 +288,12 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	FrameRenderData frameData;
+	frameData.deltaTimeSeconds = deltaTime;
+	frameData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
+	frameData.cullingEpsilon = 0.001f;
 	frameData.commands = drawCommands;
 
+	rhi->SetGlobalTaskShaderCullingEnabled(taskShaderCullingEnabled);
 	rhi->BeginFrame();
 
     VulkanContext* vulkan = static_cast<VulkanContext*>(rhi.get());
@@ -293,6 +302,7 @@ void RenderSystem::Update(float deltaTime)
     {
         frameData.viewMatrix = sceneViewCamera.view;
         frameData.projectionMatrix = sceneViewCamera.proj;
+		frameData.cameraWorldPosition = sceneViewCamera.pos;
         vulkan->RenderFrame(frameData, VulkanContext::ViewType::Scene);
     }
 
@@ -302,6 +312,7 @@ void RenderSystem::Update(float deltaTime)
         {
             frameData.viewMatrix = cam.view;
             frameData.projectionMatrix = cam.proj;
+			frameData.cameraWorldPosition = cam.pos;
             vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);
         }
     }
@@ -310,6 +321,10 @@ void RenderSystem::Update(float deltaTime)
 		FrameRenderData blankData{};
 		blankData.viewMatrix = glm::mat4(1.0f);
 		blankData.projectionMatrix = glm::mat4(1.0f);
+		blankData.cameraWorldPosition = glm::vec3(0.0f);
+		blankData.deltaTimeSeconds = deltaTime;
+		blankData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
+		blankData.cullingEpsilon = 0.001f;
 		vulkan->RenderFrame(blankData, VulkanContext::ViewType::Game);
 	}
 	else
@@ -343,11 +358,18 @@ void RenderSystem::Update(float deltaTime)
 			frameData.viewMatrix = glm::lookAt(cameraTransform.position, cameraTransform.position + forward, glm::normalize(up));
 			frameData.projectionMatrix = glm::perspective(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
 			frameData.projectionMatrix[1][1] *= -1;
+			frameData.cameraWorldPosition = cameraTransform.position;
 
 			vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);
 		}
 	}
 	rhi->EndFrame();
+
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestGameStats = rhi->GetLatestRenderStats(RenderViewType::Game);
+		latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);
+	}
 
     ClearOverrideCameras();
 }
@@ -398,5 +420,31 @@ void RenderSystem::Clear()
     {
         rhi->ClearResources();
     }
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestGameStats = {};
+		latestSceneStats = {};
+		latestGameStats.viewType = RenderViewType::Game;
+		latestSceneStats.viewType = RenderViewType::Scene;
+	}
     ClearOverrideCameras();
+}
+
+void RenderSystem::SetTaskShaderCullingEnabled(bool enabled)
+{
+	taskShaderCullingEnabled = enabled;
+	if (rhi)
+	{
+		rhi->SetGlobalTaskShaderCullingEnabled(enabled);
+	}
+}
+
+RenderStatsSnapshot RenderSystem::GetLatestRenderStats(RenderViewType viewType) const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	if (viewType == RenderViewType::Scene)
+	{
+		return latestSceneStats;
+	}
+	return latestGameStats;
 }

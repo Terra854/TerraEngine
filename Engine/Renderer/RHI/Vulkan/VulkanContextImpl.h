@@ -20,6 +20,7 @@
 #include <optional>
 #include <map>
 #include <unordered_map>
+#include <mutex>
 #include <limits>
 #include <stdexcept>
 
@@ -80,9 +81,11 @@ struct VulkanMesh {
 	VulkanBuffer meshDecodeInfoBuffer;
 	VulkanBuffer indexBuffer;
 	VulkanBuffer meshletBuffer;
+	VulkanBuffer meshletBoundsBuffer;
 	uint32_t indexCount;
 	VkIndexType indexType;
 	uint32_t meshletCount;
+	bool hasMeshletBounds = false;
 	std::unordered_map<VkDescriptorSetLayout, VkDescriptorSet> descriptorSetsByLayout;
 };
 
@@ -95,6 +98,7 @@ struct VulkanPipeline {
 	std::vector<VkPushConstantRange> pushConstants;
 	bool supportsDefaultPushConstants = false;
 	VkShaderStageFlags defaultPushConstantStages = 0;
+	bool hasTaskStage = false;
 };
 
 // Push constant payload required by the preview renderer.
@@ -103,7 +107,10 @@ struct PushConstants {
     glm::mat4 model;
 	uint32_t textureIndex;
 	uint32_t materialIndex;
-    uint32_t padding[2];
+	uint32_t taskCullingEnabled;
+	uint32_t statsSlotIndex;
+	float cullingEpsilon;
+	float padding[3];
 };
 
 // Must match shader definition
@@ -199,6 +206,15 @@ struct VulkanContext::Impl {
 	VkDescriptorSet globalDescriptorSet = VK_NULL_HANDLE;
 	
 	VulkanBuffer globalMaterialSSBO;
+	VulkanBuffer globalFrameCullingSSBO;
+	VulkanBuffer globalMeshletCountersSSBO;
+	static constexpr uint32_t kStatsViewCount = 2u;
+	static constexpr uint32_t kMaxStatsFrameSlots = 8u;
+	static constexpr uint32_t kStatsSlotCount = kStatsViewCount * kMaxStatsFrameSlots;
+	std::array<RenderStatsSnapshot, kStatsViewCount> latestStatsByView{};
+	std::array<RenderStatsSnapshot, kStatsSlotCount> pendingStatsBySlot{};
+	bool globalTaskShaderCullingEnabled = true;
+	mutable std::mutex statsMutex;
 
 	std::vector<uint32_t> freeTextureIndices;
 	std::unordered_map<TerraEngine::UUID, uint32_t> textureIndexMap;
@@ -210,6 +226,14 @@ struct VulkanContext::Impl {
 
 	bool CreateGlobalDescriptorResources();
 	void CreateMaterialBufferResources();
+	void CreateCullingBufferResources();
+	void ResetMeshletCounters(uint32_t statsSlotIndex);
+	void UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData);
+	MeshletCullingCountersGPU ReadMeshletCounters(uint32_t statsSlotIndex) const;
+	uint32_t GetStatsSlotIndex(uint32_t frameIndex, VulkanContext::ViewType view) const;
+	void RecordPendingStats(uint32_t statsSlotIndex, const RenderStatsSnapshot& snapshot);
+	void PublishCompletedFrameStats(uint32_t frameIndex);
+	RenderStatsSnapshot GetLatestStats(RenderViewType viewType) const;
 
 	uint32_t AllocateTextureIndex();
 	void UpdateGlobalTexture(uint32_t index, const VulkanImage& image);
@@ -222,7 +246,10 @@ struct VulkanContext::Impl {
         alignas(16) glm::mat4 model;
 	    uint32_t textureIndex;
 	    uint32_t materialIndex;
-        uint32_t padding[2];
+		uint32_t taskCullingEnabled;
+		uint32_t statsSlotIndex;
+		float cullingEpsilon;
+		float padding[3];
     };
 
     struct OffscreenResources {

@@ -75,6 +75,7 @@ public:
 
 	// Returns the fixed UUID for the default shader collection.
 	TerraEngine::UUID GetDefaultShaderCollectionID() const;
+	TerraEngine::UUID GetDefaultTaskShaderCollectionID() const;
 
 	// Synchronous load helpers. These block the calling thread until the
 	// file is parsed, but they reuse cached results or join any in-flight

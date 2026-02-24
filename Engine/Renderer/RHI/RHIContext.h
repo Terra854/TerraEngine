@@ -15,6 +15,14 @@ public:
 	virtual void BeginFrame() = 0;
 	virtual void RenderFrame(const FrameRenderData& frameData) = 0;
 	virtual void EndFrame() = 0;
+	virtual void SetGlobalTaskShaderCullingEnabled(bool enabled) {}
+	virtual bool IsTaskShaderSupported() const { return false; }
+	virtual RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const
+	{
+		RenderStatsSnapshot snapshot{};
+		snapshot.viewType = viewType;
+		return snapshot;
+	}
 	virtual void InvalidateMaterial(const TerraEngine::UUID& materialId) {}
 	virtual void InvalidateMesh(const TerraEngine::UUID& meshId) {}
 	virtual void InvalidateTexture(const TerraEngine::UUID& textureId) {}

@@ -27,6 +27,86 @@
 #include "Engine/File Formats/TerraEngineShaderFile.h"
 
 namespace {
+	constexpr std::uint32_t kSpirvMagicNumber = 0x07230203u;
+	constexpr std::uint16_t kSpirvOpEntryPoint = 15u;
+	constexpr std::uint16_t kSpirvOpVariable = 59u;
+	constexpr std::uint16_t kSpirvOpEmitMeshTasksEXT = 5294u;
+	constexpr std::uint32_t kSpirvExecutionModelTaskEXT = 5364u;
+	constexpr std::uint32_t kSpirvStorageClassTaskPayloadWorkgroupEXT = 5402u;
+
+	bool PatchTaskEmitPayload(std::vector<std::uint8_t>& bytecode) {
+		// DXC currently emits OpEmitMeshTasksEXT without payload id. Vulkan validation
+		// requires the task payload variable to be passed explicitly when mesh stage
+		// consumes TaskPayloadWorkgroupEXT, so patch those instructions in-place.
+		if (bytecode.size() < sizeof(std::uint32_t) * 5 || (bytecode.size() % sizeof(std::uint32_t)) != 0) {
+			return false;
+		}
+
+		const std::size_t wordCount = bytecode.size() / sizeof(std::uint32_t);
+		std::vector<std::uint32_t> words(wordCount, 0u);
+		std::memcpy(words.data(), bytecode.data(), bytecode.size());
+		if (words[0] != kSpirvMagicNumber) {
+			return false;
+		}
+
+		std::vector<std::uint32_t> taskPayloadVariables;
+		bool hasTaskEntryPoint = false;
+		bool requiresPatch = false;
+
+		for (std::size_t i = 5; i < words.size();) {
+			const std::uint32_t instructionWord = words[i];
+			const std::uint16_t opcode = static_cast<std::uint16_t>(instructionWord & 0xFFFFu);
+			const std::uint16_t instructionWordCount = static_cast<std::uint16_t>(instructionWord >> 16);
+			if (instructionWordCount == 0 || (i + instructionWordCount) > words.size()) {
+				return false;
+			}
+
+			if (opcode == kSpirvOpEntryPoint && instructionWordCount >= 3 && words[i + 1] == kSpirvExecutionModelTaskEXT) {
+				hasTaskEntryPoint = true;
+			} else if (opcode == kSpirvOpVariable && instructionWordCount >= 4 && words[i + 3] == kSpirvStorageClassTaskPayloadWorkgroupEXT) {
+				taskPayloadVariables.push_back(words[i + 2]);
+			} else if (opcode == kSpirvOpEmitMeshTasksEXT && instructionWordCount == 4) {
+				requiresPatch = true;
+			}
+
+			i += instructionWordCount;
+		}
+
+		if (!requiresPatch) {
+			return true;
+		}
+		if (!hasTaskEntryPoint || taskPayloadVariables.empty()) {
+			return false;
+		}
+
+		const std::uint32_t payloadVariableId = taskPayloadVariables.front();
+		std::vector<std::uint32_t> patchedWords;
+		patchedWords.reserve(words.size() + 16);
+		patchedWords.insert(patchedWords.end(), words.begin(), words.begin() + 5);
+
+		for (std::size_t i = 5; i < words.size();) {
+			const std::uint32_t instructionWord = words[i];
+			const std::uint16_t opcode = static_cast<std::uint16_t>(instructionWord & 0xFFFFu);
+			const std::uint16_t instructionWordCount = static_cast<std::uint16_t>(instructionWord >> 16);
+
+			if (opcode == kSpirvOpEmitMeshTasksEXT && instructionWordCount == 4) {
+				patchedWords.push_back((5u << 16) | kSpirvOpEmitMeshTasksEXT);
+				patchedWords.push_back(words[i + 1]);
+				patchedWords.push_back(words[i + 2]);
+				patchedWords.push_back(words[i + 3]);
+				patchedWords.push_back(payloadVariableId);
+			} else {
+				patchedWords.insert(patchedWords.end(), words.begin() + i, words.begin() + i + instructionWordCount);
+			}
+
+			i += instructionWordCount;
+		}
+
+		bytecode.resize(patchedWords.size() * sizeof(std::uint32_t));
+		std::memcpy(bytecode.data(), patchedWords.data(), bytecode.size());
+		return true;
+	}
+
     std::string ToLower(std::string s) {
         for (char& c : s) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -402,6 +482,12 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
     spvFile.seekg(0);
     std::vector<std::uint8_t> bytecode(static_cast<std::size_t>(spvSize));
     spvFile.read(reinterpret_cast<char*>(bytecode.data()), spvSize);
+	if (*stageOpt == ShaderStage::Task) {
+		if (!PatchTaskEmitPayload(bytecode)) {
+			std::cerr << "Failed to patch task-shader payload linkage in SPIR-V: " << input << "\n";
+			return false;
+		}
+	}
 
     StringTableBuilder strings;
     const uint32_t pathOffset = strings.Add(input.string());

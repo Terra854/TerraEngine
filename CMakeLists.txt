@@ -458,6 +458,14 @@ file(MAKE_DIRECTORY \"\${out_dir}\")
 file(MAKE_DIRECTORY \"\${editor_out_dir}\")
 
 execute_process(
+	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.task.hlsl\" -o \"\${out_dir}/Default.task.tspf\" -s ts --dxc \"\${DXC_PATH}\"
+	RESULT_VARIABLE compile_ts
+)
+if(NOT compile_ts EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile Default.task.hlsl with TerraEngineShaderCompiler during install\")
+endif()
+
+execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.mesh.hlsl\" -o \"\${out_dir}/Default.mesh.tspf\" -s ms --dxc \"\${DXC_PATH}\"
 	RESULT_VARIABLE compile_ms
 )

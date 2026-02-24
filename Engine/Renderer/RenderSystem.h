@@ -4,6 +4,7 @@
 #include "RHI/RHIContext.h"
 #include "Core/Object/ObjectManager.h"
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -33,6 +34,9 @@ public:
 	void ReloadTexture(const TerraEngine::UUID& textureId);
     
     void Clear();
+	void SetTaskShaderCullingEnabled(bool enabled);
+	bool IsTaskShaderCullingEnabled() const { return taskShaderCullingEnabled; }
+	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const;
 
 	RHIContext* GetContext() const { return rhi.get(); }
 
@@ -58,6 +62,7 @@ private:
 	std::unique_ptr<RHIContext> rhi;
 	ObjectManager& objManager = ObjectManager::instance();
 	bool initialized = false;
+	bool taskShaderCullingEnabled = true;
 
     bool hasSceneViewCamera = false;
     OverrideCameraData sceneViewCamera;
@@ -74,4 +79,8 @@ private:
         entt::entity entity;
         MeshRenderComponent mesh;
     };
+
+	mutable std::mutex statsMutex;
+	RenderStatsSnapshot latestGameStats{};
+	RenderStatsSnapshot latestSceneStats{};
 };

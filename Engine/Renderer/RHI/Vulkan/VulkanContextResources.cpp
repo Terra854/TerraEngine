@@ -568,6 +568,7 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 		vmaDestroyBuffer(allocator, it->second.meshDecodeInfoBuffer.buffer, it->second.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.indexBuffer.buffer, it->second.indexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshletBuffer.buffer, it->second.meshletBuffer.allocation);
+		vmaDestroyBuffer(allocator, it->second.meshletBoundsBuffer.buffer, it->second.meshletBoundsBuffer.allocation);
 		meshCache.erase(it);
 	}
 }
@@ -599,6 +600,9 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	const VkDeviceSize skinningDataSize = static_cast<VkDeviceSize>(cpuMesh->meshletSkinningData.size());
 	const VkDeviceSize primitiveIndexSize = static_cast<VkDeviceSize>(cpuMesh->meshletPrimitiveIndexData.size());
 	const VkDeviceSize meshletTableSize = static_cast<VkDeviceSize>(cpuMesh->meshletRecords.size() * sizeof(MeshletRecord));
+	const VkDeviceSize meshletBoundsSize = static_cast<VkDeviceSize>(cpuMesh->meshletBounds.size() * sizeof(MeshletBounds));
+	const bool hasBoundsPayload = meshletBoundsSize > 0;
+	const VkDeviceSize boundsUploadSize = hasBoundsPayload ? meshletBoundsSize : static_cast<VkDeviceSize>(sizeof(MeshletBounds));
 	if (packedVertexSize == 0
 		|| vertexRemapSize == 0
 		|| primitiveIndexSize == 0
@@ -679,6 +683,20 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	memcpy(data, cpuMesh->meshletRecords.data(), static_cast<size_t>(meshletTableSize));
 	vmaUnmapMemory(allocator, stagingMeshletTable.allocation);
 
+	VulkanBuffer stagingMeshletBounds = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+	vmaMapMemory(allocator, stagingMeshletBounds.allocation, &data);
+	if (hasBoundsPayload)
+	{
+		memcpy(data, cpuMesh->meshletBounds.data(), static_cast<size_t>(meshletBoundsSize));
+	}
+	else
+	{
+		MeshletBounds fallbackBounds{};
+		fallbackBounds.coneCutoff = 2.0f;
+		memcpy(data, &fallbackBounds, sizeof(fallbackBounds));
+	}
+	vmaUnmapMemory(allocator, stagingMeshletBounds.allocation);
+
 	VulkanBuffer stagingDecodeInfo = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 	vmaMapMemory(allocator, stagingDecodeInfo.allocation, &data);
 	memcpy(data, &decodeInfo, sizeof(MeshDecodeInfo));
@@ -695,6 +713,8 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	vMesh.meshDecodeInfoBuffer = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	vMesh.indexBuffer = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	vMesh.meshletBuffer = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	vMesh.meshletBoundsBuffer = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	vMesh.hasMeshletBounds = hasBoundsPayload;
 	vMesh.indexCount = cpuMesh->header.meshletPrimitiveIndexCount;
 	vMesh.indexType = VK_INDEX_TYPE_UINT16;
 	vMesh.meshletCount = cpuMesh->header.meshletCount;
@@ -708,6 +728,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	CopyBuffer(stagingDecodeInfo.buffer, vMesh.meshDecodeInfoBuffer.buffer, sizeof(MeshDecodeInfo));
 	CopyBuffer(stagingIndex.buffer, vMesh.indexBuffer.buffer, primitiveIndexSize);
 	CopyBuffer(stagingMeshletTable.buffer, vMesh.meshletBuffer.buffer, meshletTableSize);
+	CopyBuffer(stagingMeshletBounds.buffer, vMesh.meshletBoundsBuffer.buffer, boundsUploadSize);
 
 	vmaDestroyBuffer(allocator, stagingPackedVertex.buffer, stagingPackedVertex.allocation);
 	vmaDestroyBuffer(allocator, stagingVertexRemap.buffer, stagingVertexRemap.allocation);
@@ -718,6 +739,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	vmaDestroyBuffer(allocator, stagingDecodeInfo.buffer, stagingDecodeInfo.allocation);
 	vmaDestroyBuffer(allocator, stagingIndex.buffer, stagingIndex.allocation);
 	vmaDestroyBuffer(allocator, stagingMeshletTable.buffer, stagingMeshletTable.allocation);
+	vmaDestroyBuffer(allocator, stagingMeshletBounds.buffer, stagingMeshletBounds.allocation);
 
 	TERRAENGINE_LOG(LogLevel::Info, "gpuDirectPass=true cpu-repack-used=false remap-zero-copy=true skinning=" << (skinningDataSize > 0 ? "true" : "false") << " mesh=" << ToHexString(meshId));
 	meshCache[meshId] = vMesh;
@@ -740,7 +762,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	}
 
 	const auto& meshBindings = pipeline.bindingsPerSet[1];
-	auto HasRequiredStorageBinding = [&](uint32_t bindingIndex) -> bool {
+	auto HasStorageBinding = [&](uint32_t bindingIndex) -> bool {
 		for (const DescriptorBinding& binding : meshBindings) {
 			if (binding.binding == bindingIndex) {
 				return binding.type == static_cast<uint32_t>(DescriptorType::StorageBuffer);
@@ -752,11 +774,11 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 
 	// Validate reflected layout before descriptor writes to avoid VK validation
 	// crashes when stale shader artifacts expose incomplete bindings.
-	if (!HasRequiredStorageBinding(0)
-		|| !HasRequiredStorageBinding(1)
-		|| !HasRequiredStorageBinding(2)
-		|| !HasRequiredStorageBinding(3)
-		|| !HasRequiredStorageBinding(4)) {
+	if (!HasStorageBinding(0)
+		|| !HasStorageBinding(1)
+		|| !HasStorageBinding(2)
+		|| !HasStorageBinding(3)
+		|| !HasStorageBinding(4)) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh shader descriptor set 1 must expose storage-buffer bindings 0 through 4.");
 		return VK_NULL_HANDLE;
 	}
@@ -768,6 +790,11 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 		|| mesh.indexBuffer.buffer == VK_NULL_HANDLE
 		|| mesh.meshletBuffer.buffer == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload buffers are not initialized for mesh shader descriptor binding.");
+		return VK_NULL_HANDLE;
+	}
+
+	if (HasStorageBinding(5) && mesh.meshletBoundsBuffer.buffer == VK_NULL_HANDLE) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Mesh descriptor requires bounds binding 5 but meshlet bounds payload is unavailable.");
 		return VK_NULL_HANDLE;
 	}
 
@@ -814,6 +841,11 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	decodeInfo.offset = 0;
 	decodeInfo.range = VK_WHOLE_SIZE;
 
+	VkDescriptorBufferInfo boundsInfo{};
+	boundsInfo.buffer = mesh.meshletBoundsBuffer.buffer;
+	boundsInfo.offset = 0;
+	boundsInfo.range = VK_WHOLE_SIZE;
+
 	VkDescriptorBufferInfo skinningInfo{};
 	bool hasSkinning = mesh.meshSkinningBuffer.buffer != VK_NULL_HANDLE;
 	if (hasSkinning)
@@ -824,7 +856,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	}
 
 	std::vector<VkWriteDescriptorSet> writes;
-	writes.reserve(6);
+	writes.reserve(7);
 
 	VkWriteDescriptorSet w{};
 	w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -838,9 +870,14 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	w.dstBinding = 3; w.pBufferInfo = &vertexRemapInfo; writes.push_back(w);
 	w.dstBinding = 4; w.pBufferInfo = &decodeInfo; writes.push_back(w);
 
-	if (hasSkinning && HasRequiredStorageBinding(5))
+	if (HasStorageBinding(5))
 	{
-		w.dstBinding = 5; w.pBufferInfo = &skinningInfo; writes.push_back(w);
+		w.dstBinding = 5; w.pBufferInfo = &boundsInfo; writes.push_back(w);
+	}
+
+	if (hasSkinning && HasStorageBinding(6))
+	{
+		w.dstBinding = 6; w.pBufferInfo = &skinningInfo; writes.push_back(w);
 	}
 
 	vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
@@ -1256,12 +1293,13 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	pipeline.pushConstants = std::move(pushConstants);
 	pipeline.supportsDefaultPushConstants = supportsDefaultPushConstants;
 	pipeline.defaultPushConstantStages = defaultPushConstantStages;
+	pipeline.hasTaskStage = hasTaskStage;
 
 	pipelineCache[renderPass][key] = std::move(pipeline);
 }
 
 bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
-	std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+	std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
 	// Textures
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1274,11 +1312,25 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	bindings[1].descriptorCount = 1;
 	bindings[1].stageFlags = VK_SHADER_STAGE_ALL;
 	bindings[1].pImmutableSamplers = nullptr;
+	// Frame culling payload (frustum planes + camera data) consumed by task stage.
+	bindings[2].binding = 2;
+	bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[2].descriptorCount = 1;
+	bindings[2].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[2].pImmutableSamplers = nullptr;
+	// Meshlet counters used for stats/debug output.
+	bindings[3].binding = 3;
+	bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[3].descriptorCount = 1;
+	bindings[3].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[3].pImmutableSamplers = nullptr;
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{};
 	bindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	std::array<VkDescriptorBindingFlags, 2> flags = {
+	std::array<VkDescriptorBindingFlags, 4> flags = {
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+		0,
+		0,
 		0
 	};
 	bindingFlags.bindingCount = static_cast<uint32_t>(flags.size());
@@ -1300,7 +1352,7 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	poolSizes[0].descriptorCount = MAX_BINDLESS_TEXTURES;
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSizes[1].descriptorCount = 1;
+	poolSizes[1].descriptorCount = 3;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1347,6 +1399,154 @@ void VulkanContext::Impl::CreateMaterialBufferResources() {
 	descriptorWrite.pBufferInfo = &bufferInfo;
 
 	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+}
+
+void VulkanContext::Impl::CreateCullingBufferResources() {
+	const VkDeviceSize frameDataBufferSize = static_cast<VkDeviceSize>(sizeof(FrameCullingDataGPU) * kStatsSlotCount);
+	const VkDeviceSize countersBufferSize = static_cast<VkDeviceSize>(sizeof(MeshletCullingCountersGPU) * kStatsSlotCount);
+
+	globalFrameCullingSSBO = CreateBuffer(frameDataBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	globalMeshletCountersSSBO = CreateBuffer(countersBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+	FrameCullingDataGPU defaultFrameData{};
+	for (uint32_t slotIndex = 0; slotIndex < kStatsSlotCount; ++slotIndex) {
+		UpdateFrameCullingData(slotIndex, defaultFrameData);
+		ResetMeshletCounters(slotIndex);
+	}
+
+	VkDescriptorBufferInfo frameCullingInfo{};
+	frameCullingInfo.buffer = globalFrameCullingSSBO.buffer;
+	frameCullingInfo.offset = 0;
+	frameCullingInfo.range = frameDataBufferSize;
+
+	VkDescriptorBufferInfo meshletCountersInfo{};
+	meshletCountersInfo.buffer = globalMeshletCountersSSBO.buffer;
+	meshletCountersInfo.offset = 0;
+	meshletCountersInfo.range = countersBufferSize;
+
+	VkWriteDescriptorSet writes[2]{};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].dstSet = globalDescriptorSet;
+	writes[0].dstBinding = 2;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[0].descriptorCount = 1;
+	writes[0].pBufferInfo = &frameCullingInfo;
+
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].dstSet = globalDescriptorSet;
+	writes[1].dstBinding = 3;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[1].descriptorCount = 1;
+	writes[1].pBufferInfo = &meshletCountersInfo;
+
+	vkUpdateDescriptorSets(device, static_cast<uint32_t>(std::size(writes)), writes, 0, nullptr);
+
+	for (uint32_t viewIndex = 0; viewIndex < kStatsViewCount; ++viewIndex) {
+		latestStatsByView[viewIndex] = {};
+		latestStatsByView[viewIndex].viewType = (viewIndex == 0u) ? RenderViewType::Game : RenderViewType::Scene;
+	}
+	for (uint32_t slotIndex = 0; slotIndex < kStatsSlotCount; ++slotIndex) {
+		pendingStatsBySlot[slotIndex] = {};
+		pendingStatsBySlot[slotIndex].viewType = (slotIndex % kStatsViewCount == 0u) ? RenderViewType::Game : RenderViewType::Scene;
+	}
+}
+
+void VulkanContext::Impl::ResetMeshletCounters(uint32_t statsSlotIndex) {
+	if (globalMeshletCountersSSBO.buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
+		return;
+	}
+
+	MeshletCullingCountersGPU counters{};
+	void* mapped = nullptr;
+	if (vmaMapMemory(allocator, globalMeshletCountersSSBO.allocation, &mapped) != VK_SUCCESS) {
+		return;
+	}
+	const VkDeviceSize offset = static_cast<VkDeviceSize>(statsSlotIndex) * sizeof(MeshletCullingCountersGPU);
+	std::memcpy(static_cast<std::uint8_t*>(mapped) + offset, &counters, sizeof(MeshletCullingCountersGPU));
+	vmaFlushAllocation(allocator, globalMeshletCountersSSBO.allocation, offset, sizeof(MeshletCullingCountersGPU));
+	vmaUnmapMemory(allocator, globalMeshletCountersSSBO.allocation);
+}
+
+void VulkanContext::Impl::UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData) {
+	if (globalFrameCullingSSBO.buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
+		return;
+	}
+
+	void* mapped = nullptr;
+	if (vmaMapMemory(allocator, globalFrameCullingSSBO.allocation, &mapped) != VK_SUCCESS) {
+		return;
+	}
+	const VkDeviceSize offset = static_cast<VkDeviceSize>(statsSlotIndex) * sizeof(FrameCullingDataGPU);
+	std::memcpy(static_cast<std::uint8_t*>(mapped) + offset, &frameData, sizeof(FrameCullingDataGPU));
+	vmaFlushAllocation(allocator, globalFrameCullingSSBO.allocation, offset, sizeof(FrameCullingDataGPU));
+	vmaUnmapMemory(allocator, globalFrameCullingSSBO.allocation);
+}
+
+MeshletCullingCountersGPU VulkanContext::Impl::ReadMeshletCounters(uint32_t statsSlotIndex) const {
+	MeshletCullingCountersGPU counters{};
+	if (globalMeshletCountersSSBO.buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
+		return counters;
+	}
+
+	void* mapped = nullptr;
+	if (vmaMapMemory(allocator, globalMeshletCountersSSBO.allocation, &mapped) != VK_SUCCESS) {
+		return counters;
+	}
+	const VkDeviceSize offset = static_cast<VkDeviceSize>(statsSlotIndex) * sizeof(MeshletCullingCountersGPU);
+	vmaInvalidateAllocation(allocator, globalMeshletCountersSSBO.allocation, offset, sizeof(MeshletCullingCountersGPU));
+	std::memcpy(&counters, static_cast<const std::uint8_t*>(mapped) + offset, sizeof(MeshletCullingCountersGPU));
+	vmaUnmapMemory(allocator, globalMeshletCountersSSBO.allocation);
+	return counters;
+}
+
+uint32_t VulkanContext::Impl::GetStatsSlotIndex(uint32_t frameIndex, VulkanContext::ViewType view) const {
+	const uint32_t clampedFrameIndex = std::min(frameIndex, kMaxStatsFrameSlots - 1u);
+	const uint32_t viewIndex = (view == VulkanContext::ViewType::Game) ? 0u : 1u;
+	return clampedFrameIndex * kStatsViewCount + viewIndex;
+}
+
+void VulkanContext::Impl::RecordPendingStats(uint32_t statsSlotIndex, const RenderStatsSnapshot& snapshot) {
+	if (statsSlotIndex >= kStatsSlotCount) {
+		return;
+	}
+	pendingStatsBySlot[statsSlotIndex] = snapshot;
+}
+
+void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
+	const uint32_t gameSlot = GetStatsSlotIndex(frameIndex, VulkanContext::ViewType::Game);
+	const uint32_t sceneSlot = GetStatsSlotIndex(frameIndex, VulkanContext::ViewType::Scene);
+
+	RenderStatsSnapshot gameSnapshot = pendingStatsBySlot[gameSlot];
+	const MeshletCullingCountersGPU gameCounters = ReadMeshletCounters(gameSlot);
+	if (gameSnapshot.valid) {
+		const bool useGpuCounters = (gameCounters.meshletsTotal > 0u) || (gameSnapshot.meshletsTotal == 0u);
+		if (useGpuCounters) {
+			gameSnapshot.meshletsTotal = gameCounters.meshletsTotal;
+			gameSnapshot.meshletsDispatched = gameCounters.meshletsDispatched;
+			gameSnapshot.meshletsCulled = gameCounters.meshletsCulled;
+		}
+	}
+
+	RenderStatsSnapshot sceneSnapshot = pendingStatsBySlot[sceneSlot];
+	const MeshletCullingCountersGPU sceneCounters = ReadMeshletCounters(sceneSlot);
+	if (sceneSnapshot.valid) {
+		const bool useGpuCounters = (sceneCounters.meshletsTotal > 0u) || (sceneSnapshot.meshletsTotal == 0u);
+		if (useGpuCounters) {
+			sceneSnapshot.meshletsTotal = sceneCounters.meshletsTotal;
+			sceneSnapshot.meshletsDispatched = sceneCounters.meshletsDispatched;
+			sceneSnapshot.meshletsCulled = sceneCounters.meshletsCulled;
+		}
+	}
+
+	std::lock_guard<std::mutex> lock(statsMutex);
+	latestStatsByView[0] = gameSnapshot;
+	latestStatsByView[1] = sceneSnapshot;
+}
+
+RenderStatsSnapshot VulkanContext::Impl::GetLatestStats(RenderViewType viewType) const {
+	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestStatsByView[index];
 }
 
 uint32_t VulkanContext::Impl::AllocateTextureIndex() {

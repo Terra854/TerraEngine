@@ -54,7 +54,7 @@ namespace
 
 		if(args.input.empty() || args.output.empty() || args.stage.empty())
 		{
-			std::cerr << "Usage: TerraEngineShaderCompiler -i <input.hlsl> -o <output.tspf> -s <vs|ps|cs|gs|hs|ds|ms>\n";
+			std::cerr << "Usage: TerraEngineShaderCompiler -i <input.hlsl> -o <output.tspf> -s <vs|ps|cs|gs|hs|ds|ms|ts>\n";
 			return false;
 		}
 

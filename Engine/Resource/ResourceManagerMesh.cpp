@@ -1,6 +1,7 @@
 #include "Resource/ResourceManager.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -88,6 +89,24 @@ namespace
 		}
 
 		return true;
+	}
+
+	bool IsFiniteFloat(float value)
+	{
+		return std::isfinite(value) != 0;
+	}
+
+	void DisableConeData(MeshletBounds& bounds)
+	{
+		bounds.coneApex[0] = bounds.center[0];
+		bounds.coneApex[1] = bounds.center[1];
+		bounds.coneApex[2] = bounds.center[2];
+		bounds.coneAxis[0] = 0.0f;
+		bounds.coneAxis[1] = 0.0f;
+		bounds.coneAxis[2] = 0.0f;
+		// Values outside [-1, 1] are treated by the task shader as "disabled".
+		bounds.coneCutoff = 2.0f;
+		bounds.coneApexOffset = 0.0f;
 	}
 
 	// Parse a TEMF mesh file from disk and populate spans into the payload.
@@ -399,6 +418,51 @@ namespace
 		{
 			mesh->meshletBounds.resize(header.meshletBoundsCount);
 			std::memcpy(mesh->meshletBounds.data(), payload + meshletBoundsOffset, meshletBoundsBytes);
+
+			for (std::size_t boundsIndex = 0; boundsIndex < mesh->meshletBounds.size(); ++boundsIndex)
+			{
+				MeshletBounds& bounds = mesh->meshletBounds[boundsIndex];
+				if (!IsFiniteFloat(bounds.center[0])
+					|| !IsFiniteFloat(bounds.center[1])
+					|| !IsFiniteFloat(bounds.center[2])
+					|| !IsFiniteFloat(bounds.radius)
+					|| bounds.radius < 0.0f)
+				{
+					TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet bounds[" << boundsIndex << "] has invalid sphere data in " << resolvedPath);
+					return nullptr;
+				}
+
+				// Cone validation is fail-safe: invalid payload disables backface culling
+				// for that meshlet instead of rejecting the whole asset.
+				const bool coneInvalid = !IsFiniteFloat(bounds.coneApex[0])
+					|| !IsFiniteFloat(bounds.coneApex[1])
+					|| !IsFiniteFloat(bounds.coneApex[2])
+					|| !IsFiniteFloat(bounds.coneAxis[0])
+					|| !IsFiniteFloat(bounds.coneAxis[1])
+					|| !IsFiniteFloat(bounds.coneAxis[2])
+					|| !IsFiniteFloat(bounds.coneCutoff)
+					|| !IsFiniteFloat(bounds.coneApexOffset);
+				if (coneInvalid)
+				{
+					TERRAENGINE_LOG(LogLevel::Warning, "TEMF meshlet bounds[" << boundsIndex << "] has invalid cone data; disabling cone backface culling for this meshlet.");
+					DisableConeData(bounds);
+					continue;
+				}
+
+				const float axisLengthSq = bounds.coneAxis[0] * bounds.coneAxis[0]
+					+ bounds.coneAxis[1] * bounds.coneAxis[1]
+					+ bounds.coneAxis[2] * bounds.coneAxis[2];
+				if (axisLengthSq < 1e-8f)
+				{
+					DisableConeData(bounds);
+					continue;
+				}
+
+				const float invAxisLength = 1.0f / std::sqrt(axisLengthSq);
+				bounds.coneAxis[0] *= invAxisLength;
+				bounds.coneAxis[1] *= invAxisLength;
+				bounds.coneAxis[2] *= invAxisLength;
+			}
 		}
 
 		const std::uint8_t* primitivePayload = mesh->meshletPrimitiveIndexData.data();

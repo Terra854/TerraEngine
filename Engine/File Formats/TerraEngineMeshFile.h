@@ -94,11 +94,15 @@ struct MeshletSection
 	std::uint32_t meshletCount;
 };
 
-// Optional per-meshlet sphere bounds for visibility/culling work.
+// Optional per-meshlet sphere + cone bounds for visibility/culling work.
 struct MeshletBounds
 {
 	float center[3];
 	float radius;
+	float coneApex[3];
+	float coneCutoff;
+	float coneAxis[3];
+	float coneApexOffset;
 };
 
 // Final on-disk header that prefixes every meshlet-only TEMF file.

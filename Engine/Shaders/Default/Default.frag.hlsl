@@ -31,6 +31,12 @@ struct PushConstants
     column_major float4x4 model;
 	uint textureIndex; 
 	uint materialIndex;
+	uint taskCullingEnabled;
+	uint statsSlotIndex;
+	float cullingEpsilon;
+	float padding0;
+	float padding1;
+	float padding2;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;

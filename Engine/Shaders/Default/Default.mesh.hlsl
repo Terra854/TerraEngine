@@ -18,6 +18,13 @@ struct MeshDecodeInfo
 	uint4 counts;          // x = vertex count, y = remap count, z = primitive count, w = meshlet count
 };
 
+// Task stage writes a compacted visible meshlet index list into payload.
+static const uint kTaskBatchSize = 32u;
+struct TaskPayload
+{
+	uint meshletIndices[kTaskBatchSize];
+};
+
 [[vk::binding(0, 1)]] ByteAddressBuffer meshletVertexBytes;
 [[vk::binding(1, 1)]] ByteAddressBuffer primitiveIndices;
 [[vk::binding(2, 1)]] StructuredBuffer<MeshletRecord> meshletRecords;
@@ -30,6 +37,12 @@ struct PushConstants
 	column_major float4x4 model;
 	uint textureIndex;
 	uint materialIndex;
+	uint taskCullingEnabled;
+	uint statsSlotIndex;
+	float cullingEpsilon;
+	float padding0;
+	float padding1;
+	float padding2;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
@@ -83,15 +96,12 @@ uint LoadPrimitiveIndex(uint primitiveElementIndex)
 	return (packed >> shift) & 0xFFu;
 }
 
-[outputtopology("triangle")]
-[numthreads(1, 1, 1)]
-void main(
-	uint3 groupId : SV_GroupID,
+void EmitMeshlet(
+	uint meshletIndex,
 	out vertices PSIn outputVertices[kMaxMeshletVertices],
 	out indices uint3 outputTriangles[kMaxMeshletTriangles])
 {
 	const MeshDecodeInfo decode = meshDecodeInfo[0];
-	const uint meshletIndex = groupId.x;
 	const uint meshletCount = decode.counts.w & 0x7FFFFFFFu;
 	const uint isU16 = (decode.counts.w >> 31u) & 1u;
 
@@ -173,4 +183,17 @@ void main(
 
 		outputTriangles[primitiveIndex] = uint3(index0, index1, index2);
 	}
+}
+
+[outputtopology("triangle")]
+[numthreads(1, 1, 1)]
+void main(
+	in payload TaskPayload taskPayload,
+	uint3 groupId : SV_GroupID,
+	out vertices PSIn outputVertices[kMaxMeshletVertices],
+	out indices uint3 outputTriangles[kMaxMeshletTriangles])
+{
+	const uint visibleIndex = groupId.x;
+	const uint meshletIndex = taskPayload.meshletIndices[visibleIndex];
+	EmitMeshlet(meshletIndex, outputVertices, outputTriangles);
 }

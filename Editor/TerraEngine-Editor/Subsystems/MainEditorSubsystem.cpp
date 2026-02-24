@@ -186,6 +186,20 @@ bool MainEditorSubsystem::IsInspectorValueDragging() const {
     return false;
 }
 
+bool MainEditorSubsystem::TryGetGameViewRenderStats(RenderStatsSnapshot& outStats) const {
+	if (!ctx || !ctx->engine) {
+		return false;
+	}
+
+	RenderSystem* renderSystem = ctx->engine->GetSystem<RenderSystem>();
+	if (!renderSystem) {
+		return false;
+	}
+
+	outStats = renderSystem->GetLatestRenderStats(RenderViewType::Game);
+	return outStats.valid;
+}
+
 void MainEditorSubsystem::DrawUI() {
     // Check for resize/recreation of offscreen resources
     if (ctx && ctx->engine) {

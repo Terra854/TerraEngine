@@ -17,6 +17,9 @@ public:
         RenderFrame(frameData, ViewType::Game);
     }
 	void EndFrame() override;
+	void SetGlobalTaskShaderCullingEnabled(bool enabled) override;
+	bool IsTaskShaderSupported() const override;
+	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const override;
 	void InvalidateMaterial(const TerraEngine::UUID& materialId) override;
 	void InvalidateMesh(const TerraEngine::UUID& meshId) override;
 	void InvalidateTexture(const TerraEngine::UUID& textureId) override;

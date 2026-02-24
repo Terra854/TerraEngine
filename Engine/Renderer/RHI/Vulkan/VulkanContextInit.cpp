@@ -1,6 +1,7 @@
 #include "VulkanContextImpl.h"
 
 #include <algorithm>
+#include <cstring>
 #include <map>
 
 bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
@@ -43,6 +44,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	if (!CreateDescriptorPool()) return false;
 		if (!CreateGlobalDescriptorResources()) return false;
 	CreateMaterialBufferResources();
+	CreateCullingBufferResources();
 
 	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	workerCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -87,6 +89,7 @@ void VulkanContext::Impl::Cleanup() {
 		vmaDestroyBuffer(allocator, mesh.meshletVertexRemapBuffer.buffer, mesh.meshletVertexRemapBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshDecodeInfoBuffer.buffer, mesh.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletBuffer.buffer, mesh.meshletBuffer.allocation);
+		vmaDestroyBuffer(allocator, mesh.meshletBoundsBuffer.buffer, mesh.meshletBoundsBuffer.allocation);
 	}
 	meshCache.clear();
 
@@ -138,6 +141,8 @@ void VulkanContext::Impl::Cleanup() {
 	}
 	vmaDestroyImage(allocator, defaultTexture.image, defaultTexture.allocation);
 	vmaDestroyBuffer(allocator, globalMaterialSSBO.buffer, globalMaterialSSBO.allocation);
+	vmaDestroyBuffer(allocator, globalFrameCullingSSBO.buffer, globalFrameCullingSSBO.allocation);
+	vmaDestroyBuffer(allocator, globalMeshletCountersSSBO.buffer, globalMeshletCountersSSBO.allocation);
 
 	for (size_t i = 0; i < renderFinishedSemaphores.size(); i++) {
 		if (device) {
@@ -965,13 +970,15 @@ void VulkanContext::Impl::RecreateSwapChain() {
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanContext::Impl::DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {
 	// Route validation messages through the engine logger so users see them in one place.
+	const char* message = (pCallbackData != nullptr && pCallbackData->pMessage != nullptr) ? pCallbackData->pMessage : "";
+
 	LogLevel level = LogLevel::Debug;
 	if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) level = LogLevel::Error;
 	else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) level = LogLevel::Warning;
 	else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) level = LogLevel::Info;
 	else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) level = LogLevel::Debug;
 	
-	TERRAENGINE_LOG(level, "[Vulkan] " << pCallbackData->pMessage);
+	TERRAENGINE_LOG(level, "[Vulkan] " << message);
 	return VK_FALSE;
 }
 

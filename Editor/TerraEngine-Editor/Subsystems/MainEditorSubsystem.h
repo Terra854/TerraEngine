@@ -10,6 +10,7 @@
 #include <memory>
 #include "IEditorSubsystem.h"
 #include "../Framework/EditorWindow.h"
+#include "Engine/Renderer/RenderTypes.h"
 
 class Object;
 
@@ -52,6 +53,7 @@ public:
 
     void* GetSceneTextureID() const { return sceneTextureID; }
     void* GetGameTextureID() const { return gameTextureID; }
+	bool TryGetGameViewRenderStats(RenderStatsSnapshot& outStats) const;
 
     template<typename T>
     std::shared_ptr<T> GetWindow() const {

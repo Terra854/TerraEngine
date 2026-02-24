@@ -17,7 +17,7 @@ SkinningData          // optional (8b stride), aligned to 4KB
 PrimitiveIndexData    // meshlet-local indices (u8), aligned to 4KB
 MeshletRecordTable    // offsets/counts per meshlet, aligned to 4KB
 MeshletSectionTable   // draw call ranges, aligned to 4KB
-MeshletBoundsTable    // optional culling spheres, aligned to 4KB
+MeshletBoundsTable    // optional culling spheres + cones, aligned to 4KB
 ```
 
 ### Header (220 bytes)
@@ -62,4 +62,19 @@ MeshletBoundsTable    // optional culling spheres, aligned to 4KB
 ### Implementation Notes
 - **Alignment**: Every payload MUST begin on a 4096-byte boundary to ensure compatibility with `O_DIRECT`, `io_uring`, and DirectStorage.
 - **Shader Consumption**: Shaders should use `ByteAddressBuffer` to load remap indices and manually handle the `u16`/`u32` bit-shift logic based on the `meshletVertexRemapEncoding` flag.
-- **Culling**: Pre-computed `MeshletBounds` provide a sphere-based visibility check for GPU-driven occlusion or frustum culling.
+- **Culling**: Pre-computed `MeshletBounds` provide conservative frustum sphere checks and cone-based backface checks.
+
+### Meshlet Bounds Payload (48 bytes per meshlet)
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `center` | `float3` | Bounding sphere center in object space. |
+| `radius` | `float` | Bounding sphere radius. |
+| `coneApex` | `float3` | Cone apex for perspective backface checks. |
+| `coneCutoff` | `float` | Cone cosine threshold. |
+| `coneAxis` | `float3` | Cone axis (normalized by loader). |
+| `coneApexOffset` | `float` | Reserved for future tuning, currently `0`. |
+
+Loader rules:
+- Invalid sphere values are hard errors.
+- Invalid cone values are sanitized to conservative "do not backface cull" behavior.

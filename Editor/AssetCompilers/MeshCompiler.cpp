@@ -605,6 +605,14 @@ namespace
 				bounds.center[1] = computedBounds.center[1];
 				bounds.center[2] = computedBounds.center[2];
 				bounds.radius = computedBounds.radius;
+				bounds.coneApex[0] = computedBounds.cone_apex[0];
+				bounds.coneApex[1] = computedBounds.cone_apex[1];
+				bounds.coneApex[2] = computedBounds.cone_apex[2];
+				bounds.coneCutoff = computedBounds.cone_cutoff;
+				bounds.coneAxis[0] = computedBounds.cone_axis[0];
+				bounds.coneAxis[1] = computedBounds.cone_axis[1];
+				bounds.coneAxis[2] = computedBounds.cone_axis[2];
+				bounds.coneApexOffset = 0.0f;
 				output.meshletBounds.push_back(bounds);
 			}
 		}

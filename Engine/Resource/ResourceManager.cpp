@@ -53,9 +53,17 @@ void ResourceManager::LoadDefaultResources()
 	defaultFragId.fill(0);
 	defaultFragId[15] = 2;
 
-	TerraEngine::UUID defaultCollectionId{};
-	defaultCollectionId.fill(0);
-	defaultCollectionId[15] = 1;
+	TerraEngine::UUID defaultTaskId{};
+	defaultTaskId.fill(0);
+	defaultTaskId[15] = 3;
+
+	TerraEngine::UUID defaultMeshOnlyCollectionId{};
+	defaultMeshOnlyCollectionId.fill(0);
+	defaultMeshOnlyCollectionId[15] = 1;
+
+	TerraEngine::UUID defaultTaskCollectionId{};
+	defaultTaskCollectionId.fill(0);
+	defaultTaskCollectionId[15] = 2;
 
 	// Pre-register Mesh Shader
 	const std::string meshPath = "Shaders/Default.mesh.tspf";
@@ -66,6 +74,16 @@ void ResourceManager::LoadDefaultResources()
 	}
 	LoadShader(meshPath);
 
+	// Pre-register Task Shader
+	const std::string taskPath = "Shaders/Default.task.tspf";
+	std::string taskKey = NormalizeKey(ResolveAssetPath(taskPath));
+	{
+		std::unique_lock lock(shaderCache.mutex);
+		shaderCache.pathToId[taskKey] = defaultTaskId;
+	}
+	LoadShader(taskPath);
+	const bool taskShaderReady = (GetShader(defaultTaskId) != nullptr);
+
 	// Pre-register Fragment Shader
 	const std::string fragPath = "Shaders/Default.frag.tspf";
 	std::string fragKey = NormalizeKey(ResolveAssetPath(fragPath));
@@ -75,26 +93,43 @@ void ResourceManager::LoadDefaultResources()
 	}
 	LoadShader(fragPath);
 
-	// Pre-register Shader Collection
-	// Note: We replicate the key generation logic from ResourceManagerShaderCollection.cpp
-	// to ensure the specific UUID is picked up.
-	// Logic: static_cast<std::uint32_t>(request.stage) << ":" << request.key << ";";
-	// Loop order matches the input vector.
-	std::ostringstream combined;
-	combined << static_cast<std::uint32_t>(ShaderStage::Mesh) << ":" << meshKey << ";";
-	combined << static_cast<std::uint32_t>(ShaderStage::Fragment) << ":" << fragKey << ";";
-	std::string collectionKey = combined.str();
+	// Pre-register mesh-only fallback collection UUID.
+	std::ostringstream fallbackCollectionKeyStream;
+	fallbackCollectionKeyStream << static_cast<std::uint32_t>(ShaderStage::Mesh) << ":" << meshKey << ";";
+	fallbackCollectionKeyStream << static_cast<std::uint32_t>(ShaderStage::Fragment) << ":" << fragKey << ";";
+	const std::string fallbackCollectionKey = fallbackCollectionKeyStream.str();
 
+	// Pre-register task+mesh+fragment collection UUID.
+	std::ostringstream taskCollectionKeyStream;
+	taskCollectionKeyStream << static_cast<std::uint32_t>(ShaderStage::Task) << ":" << taskKey << ";";
+	taskCollectionKeyStream << static_cast<std::uint32_t>(ShaderStage::Mesh) << ":" << meshKey << ";";
+	taskCollectionKeyStream << static_cast<std::uint32_t>(ShaderStage::Fragment) << ":" << fragKey << ";";
+	const std::string taskCollectionKey = taskCollectionKeyStream.str();
 	{
 		std::unique_lock lock(shaderCollectionCache.mutex);
-		shaderCollectionCache.pathToId[collectionKey] = defaultCollectionId;
+		shaderCollectionCache.pathToId[fallbackCollectionKey] = defaultMeshOnlyCollectionId;
+		shaderCollectionCache.pathToId[taskCollectionKey] = defaultTaskCollectionId;
 	}
 
-	std::vector<ShaderStagePath> stages = {
+	std::vector<ShaderStagePath> fallbackStages = {
 		{ ShaderStage::Mesh, meshPath },
 		{ ShaderStage::Fragment, fragPath }
 	};
-	LoadShaderCollection(stages);
+	LoadShaderCollection(fallbackStages);
+
+	if (taskShaderReady)
+	{
+		std::vector<ShaderStagePath> taskStages = {
+			{ ShaderStage::Task, taskPath },
+			{ ShaderStage::Mesh, meshPath },
+			{ ShaderStage::Fragment, fragPath }
+		};
+		LoadShaderCollection(taskStages);
+	}
+	else
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Default task shader was not available; renderer will use mesh-only fallback collection.");
+	}
 }
 
 TerraEngine::UUID ResourceManager::GetDefaultShaderCollectionID() const
@@ -102,6 +137,14 @@ TerraEngine::UUID ResourceManager::GetDefaultShaderCollectionID() const
 	TerraEngine::UUID id{};
 	id.fill(0);
 	id[15] = 1;
+	return id;
+}
+
+TerraEngine::UUID ResourceManager::GetDefaultTaskShaderCollectionID() const
+{
+	TerraEngine::UUID id{};
+	id.fill(0);
+	id[15] = 2;
 	return id;
 }
 
