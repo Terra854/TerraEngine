@@ -165,6 +165,7 @@ target_link_libraries(TerraEngine-Engine
 		volk
 		GPUOpen::VulkanMemoryAllocator
 		nethost
+		meshoptimizer
 )
 
 target_compile_definitions(TerraEngine-Engine

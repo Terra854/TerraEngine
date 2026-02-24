@@ -9,9 +9,14 @@
 constexpr std::uint32_t kMeshMagicValue = 0x464d4554u; // 'TEMF' little endian
 constexpr std::size_t kMaxVertexAttributes = 8;
 constexpr std::uint16_t kMeshCurrentVersion = 1;
-constexpr std::uint32_t kMeshletPrimitiveIndexSizeBytes = sizeof(std::uint32_t);
+constexpr std::uint32_t kMeshletPackedVertexStrideBytes = 12u;
+constexpr std::uint32_t kMeshletPrimitiveIndexSizeBytes = sizeof(std::uint8_t);
+constexpr std::uint32_t kMeshletVertexRemapDecodedElementSizeBytes = sizeof(std::uint32_t);
+constexpr std::uint32_t kMeshletVertexDataAlignmentBytes = 4096u;
+constexpr std::uint32_t kMeshletIndexDataAlignmentBytes = 4096u;
 constexpr std::uint32_t kMeshletMaxVertices = 64;
 constexpr std::uint32_t kMeshletMaxTriangles = 124;
+constexpr std::uint32_t kMeshletHeaderFlagHasBounds = 1u << 0u;
 
 // Vertex attribute semantics mirror typical DCC exports and describe what the data represents.
 enum class AttributeSemantic : std::uint32_t
@@ -29,8 +34,22 @@ enum class AttributeFormat : std::uint32_t
 {
 	R10G10B10A2Snorm = 1,
 	R10G10B10A2Unorm = 2,
-	R16G16Unorm = 3
+	R16G16Unorm = 3,
+	Oct32 = 4
 };
+
+// Remap stream encoding tells loaders whether on-disk remap elements are 16-bit
+// or 32-bit before they are expanded to a normalized uint32 runtime view.
+enum class MeshletRemapEncoding : std::uint32_t
+{
+	Uint32 = 0,
+	Uint16 = 1
+};
+
+constexpr std::uint32_t GetRemapElementSizeBytes(MeshletRemapEncoding encoding)
+{
+	return encoding == MeshletRemapEncoding::Uint16 ? static_cast<std::uint32_t>(sizeof(std::uint16_t)) : static_cast<std::uint32_t>(sizeof(std::uint32_t));
+}
 
 #pragma pack(push, 1)
 // Structures below need a predictable layout so the header matches exactly on disk.
@@ -62,10 +81,10 @@ struct QuantizationInfo
 // Per-meshlet table entry. Offsets/counts point into packed meshlet streams.
 struct MeshletRecord
 {
-	std::uint32_t vertexOffset;
-	std::uint32_t vertexCount;
-	std::uint32_t primitiveIndexOffset;
-	std::uint32_t primitiveIndexCount;
+	std::uint32_t vertexOffset;          // Offset into meshlet vertex remap stream.
+	std::uint32_t vertexCount;           // Number of local vertices (max 64).
+	std::uint32_t primitiveIndexOffset;  // Offset into uint8 meshlet-local primitive stream.
+	std::uint32_t primitiveIndexCount;   // Primitive element count (triangle-aligned).
 };
 
 // Maps a render section to a contiguous range of meshlets.
@@ -89,16 +108,22 @@ struct MeshHeader
 	std::uint16_t version;
 	std::uint16_t reserved;
 	std::uint32_t headerSize;
-	std::uint32_t meshletVertexCount;
-	std::uint32_t meshletPrimitiveIndexCount;
+	std::uint32_t meshletVertexCount;         // Global packed-vertex stream count.
+	std::uint32_t meshletVertexRemapCount;    // Number of remap entries (decoded count).
+	std::uint32_t meshletPrimitiveIndexCount; // Number of uint8 entries in primitive stream.
 	std::uint32_t meshletCount;
 	std::uint32_t meshletSectionCount;
 	std::uint32_t meshletBoundsCount;
 	std::uint32_t meshletVertexDataOffset;
+	std::uint32_t meshletVertexRemapDataOffset;
 	std::uint32_t meshletPrimitiveIndexDataOffset;
 	std::uint32_t meshletTableOffset;
 	std::uint32_t meshletSectionOffset;
+	std::uint32_t meshletVertexRemapEncoding; // MeshletRemapEncoding
+	std::uint32_t meshletFlags;               // kMeshletHeaderFlag*
 	std::uint32_t meshletBoundsOffset;
+	std::uint32_t meshletSkinningDataOffset; // Byte offset to 8-byte skinning stream (Joints/Weights)
+	std::uint32_t meshletSkinningDataCount;  // Number of vertices with skinning data
 	VertexLayout layout;
 	QuantizationInfo quantization;
 };
@@ -113,6 +138,10 @@ struct Mesh
 	MeshHeader header{};
 	std::vector<std::uint8_t> storage;
 	std::span<const std::uint8_t> meshletVertexData;
+	// Runtime always works with uint32 remap entries even if on-disk storage used uint16.
+	std::vector<std::uint32_t> meshletVertexRemapDecoded;
+	std::span<const std::uint8_t> meshletVertexRemapData;
+	std::span<const std::uint8_t> meshletSkinningData;
 	std::span<const std::uint8_t> meshletPrimitiveIndexData;
 	std::vector<MeshletRecord> meshletRecords;
 	std::vector<MeshletSection> meshletSections;

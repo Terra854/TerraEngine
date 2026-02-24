@@ -747,23 +747,40 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 		return;
 	}
 
-	// Explicitly call out legacy assets so users understand why runtime now rejects them.
-	if (header.version < kMeshCurrentVersion) {
-		ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "Legacy/non-meshlet TEMF detected (version %u).", (uint32_t)header.version);
-		ImGui::TextWrapped("Runtime now requires meshlet-only TEMF version %u or newer. Recompile this asset to remove legacy data.", (uint32_t)kMeshCurrentVersion);
+	// Direct replacement format requires an exact version match and full rebuild.
+	if (header.version != kMeshCurrentVersion) {
+		ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "Unsupported TEMF version %u.", (uint32_t)header.version);
+		ImGui::TextWrapped("This build accepts only direct-replacement TEMF version %u. Recompile all mesh assets.", (uint32_t)kMeshCurrentVersion);
 	}
-	else if (header.version > kMeshCurrentVersion) {
-		ImGui::TextColored(ImVec4(1, 1, 0, 1), "TEMF version %u is newer than this editor/runtime (%u).", (uint32_t)header.version, (uint32_t)kMeshCurrentVersion);
-	}
+
+	const MeshletRemapEncoding remapEncoding = static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding);
+	const bool remapEncodingValid = remapEncoding == MeshletRemapEncoding::Uint16 || remapEncoding == MeshletRemapEncoding::Uint32;
+	const uint32_t remapElementBytes = remapEncodingValid ? GetRemapElementSizeBytes(remapEncoding) : 0u;
+	const bool boundsFlagSet = (header.meshletFlags & kMeshletHeaderFlagHasBounds) != 0u;
+	const bool boundsMetadataConsistent = boundsFlagSet
+		? (header.meshletBoundsCount == header.meshletCount && header.meshletBoundsOffset != 0u)
+		: (header.meshletBoundsCount == 0u && header.meshletBoundsOffset == 0u);
 
 	ImGui::Text("Compiled Info (.temf - meshlet only)");
 	ImGui::Indent();
 	ImGui::Text("Version: %u", (uint32_t)header.version);
 	ImGui::Text("Meshlet Vertices: %u", header.meshletVertexCount);
+	ImGui::Text("Meshlet Vertex Remap Entries: %u", header.meshletVertexRemapCount);
+	const char* remapEncodingLabel = "invalid";
+	if (remapEncoding == MeshletRemapEncoding::Uint16) {
+		remapEncodingLabel = "u16";
+	}
+	else if (remapEncoding == MeshletRemapEncoding::Uint32) {
+		remapEncodingLabel = "u32";
+	}
+	ImGui::Text("Remap Encoding: %s", remapEncodingLabel);
+	ImGui::Text("Remap Encoded Bytes: %llu", (unsigned long long)header.meshletVertexRemapCount * (unsigned long long)remapElementBytes);
+	ImGui::Text("Remap Decoded Bytes (runtime): %llu", (unsigned long long)header.meshletVertexRemapCount * (unsigned long long)sizeof(uint32_t));
 	ImGui::Text("Meshlet Primitive Indices: %u", header.meshletPrimitiveIndexCount);
 	ImGui::Text("Meshlets: %u", header.meshletCount);
 	ImGui::Text("Meshlet Sections: %u", header.meshletSectionCount);
 	ImGui::Text("Meshlet Bounds: %u", header.meshletBoundsCount);
+	ImGui::Text("Meshlet Flags: 0x%08X", header.meshletFlags);
 	ImGui::Unindent();
 
 	ImGui::Spacing();
@@ -771,42 +788,16 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 		ImGui::Indent();
 		ImGui::Text("Header Size: %u", header.headerSize);
 		ImGui::Text("Vertex Payload Offset: %u", header.meshletVertexDataOffset);
+		ImGui::Text("Vertex Remap Payload Offset: %u", header.meshletVertexRemapDataOffset);
 		ImGui::Text("Primitive Index Payload Offset: %u", header.meshletPrimitiveIndexDataOffset);
 		ImGui::Text("Meshlet Table Offset: %u", header.meshletTableOffset);
 		ImGui::Text("Meshlet Section Offset: %u", header.meshletSectionOffset);
 		ImGui::Text("Meshlet Bounds Offset: %u", header.meshletBoundsOffset);
-		ImGui::Unindent();
-	}
-
-	if (ImGui::CollapsingHeader("Vertex Layout", ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Indent();
-		ImGui::Text("Stride: %u bytes", header.layout.strideBytes);
-		ImGui::Text("Attributes: %u", header.layout.attributeCount);
-
-		if (ImGui::BeginTable("VertexAttribTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-			ImGui::TableSetupColumn("Semantic");
-			ImGui::TableSetupColumn("Format");
-			ImGui::TableSetupColumn("Offset");
-			ImGui::TableHeadersRow();
-
-			for (uint32_t i = 0; i < header.layout.attributeCount; ++i) {
-				const auto& attr = header.layout.attributes[i];
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-
-				const char* semantics[] = { "Position", "Normal", "Tangent", "Bitangent", "TexCoord0", "Color0" };
-				if (attr.semantic < 6) ImGui::TextUnformatted(semantics[attr.semantic]);
-				else ImGui::Text("Other (%u)", attr.semantic);
-
-				ImGui::TableSetColumnIndex(1);
-				const char* formats[] = { "None", "R10G10B10A2Snorm", "R10G10B10A2Unorm", "R16G16Unorm" };
-				if (attr.format < 4) ImGui::TextUnformatted(formats[attr.format]);
-				else ImGui::Text("Other (%u)", attr.format);
-
-				ImGui::TableSetColumnIndex(2);
-				ImGui::Text("%u", attr.offsetBytes);
-			}
-			ImGui::EndTable();
+		if (!remapEncodingValid) {
+			ImGui::TextColored(ImVec4(1, 0, 0, 1), "Remap encoding metadata is invalid.");
+		}
+		if (!boundsMetadataConsistent) {
+			ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "Bounds flag/count/offset metadata is inconsistent.");
 		}
 		ImGui::Unindent();
 	}

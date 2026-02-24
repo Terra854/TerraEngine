@@ -57,6 +57,39 @@ namespace
 		return true;
 	}
 
+	bool DecodeRemapStream(
+		const std::uint8_t* encodedData,
+		std::size_t remapCount,
+		MeshletRemapEncoding encoding,
+		std::vector<std::uint32_t>& outDecoded)
+	{
+		outDecoded.resize(remapCount);
+		const std::size_t elementSize = static_cast<std::size_t>(GetRemapElementSizeBytes(encoding));
+		for (std::size_t remapIndex = 0; remapIndex < remapCount; ++remapIndex)
+		{
+			std::size_t byteOffset = 0;
+			if (!TryMultiply(remapIndex, elementSize, byteOffset))
+			{
+				return false;
+			}
+
+			if (encoding == MeshletRemapEncoding::Uint16)
+			{
+				std::uint16_t packed = 0;
+				std::memcpy(&packed, encodedData + byteOffset, sizeof(packed));
+				outDecoded[remapIndex] = static_cast<std::uint32_t>(packed);
+			}
+			else
+			{
+				std::uint32_t packed = 0;
+				std::memcpy(&packed, encodedData + byteOffset, sizeof(packed));
+				outDecoded[remapIndex] = packed;
+			}
+		}
+
+		return true;
+	}
+
 	// Parse a TEMF mesh file from disk and populate spans into the payload.
 	// This helper avoids touching global caches so it can be shared by both
 	// synchronous and asynchronous entry points.
@@ -80,16 +113,13 @@ namespace
 			return nullptr;
 		}
 
-		// Meshlet-only TEMF is version-gated so we can fail legacy assets explicitly.
-		if (header.version < kMeshCurrentVersion)
+		// Direct replacement intentionally rejects every non-current layout.
+		if (header.version != kMeshCurrentVersion)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TEMF version " << header.version << " is a legacy/non-meshlet downgrade path in " << resolvedPath << " (minimum supported: " << kMeshCurrentVersion << ")");
-			return nullptr;
-		}
-
-		if (header.version > kMeshCurrentVersion)
-		{
-			TERRAENGINE_LOG(LogLevel::Error, "TEMF version " << header.version << " is newer than runtime support in " << resolvedPath << " (current runtime: " << kMeshCurrentVersion << ")");
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TEMF version mismatch in " << resolvedPath
+				<< ". Expected version " << kMeshCurrentVersion
+				<< " with no backward compatibility path.");
 			return nullptr;
 		}
 
@@ -99,10 +129,47 @@ namespace
 			return nullptr;
 		}
 
-		if (header.layout.strideBytes == 0)
+		if (header.layout.strideBytes != kMeshletPackedVertexStrideBytes)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TEMF vertex stride is zero in " << resolvedPath);
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TEMF stride mismatch in " << resolvedPath
+				<< ". Expected fixed " << kMeshletPackedVertexStrideBytes
+				<< "-byte packed vertex layout.");
 			return nullptr;
+		}
+
+		if (header.layout.attributeCount != 3u)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF packed vertex layout must expose exactly 3 attributes in " << resolvedPath);
+			return nullptr;
+		}
+
+		const VertexAttribute expectedLayout[3] = {
+			{
+				static_cast<std::uint32_t>(AttributeSemantic::Position),
+				static_cast<std::uint32_t>(AttributeFormat::R10G10B10A2Snorm),
+				0u},
+			{
+				static_cast<std::uint32_t>(AttributeSemantic::Normal),
+				static_cast<std::uint32_t>(AttributeFormat::Oct32),
+				4u},
+			{
+				static_cast<std::uint32_t>(AttributeSemantic::TexCoord0),
+				static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
+				8u}};
+
+		for (std::size_t layoutIndex = 0; layoutIndex < 3u; ++layoutIndex)
+		{
+			const VertexAttribute& current = header.layout.attributes[layoutIndex];
+			const VertexAttribute& expected = expectedLayout[layoutIndex];
+			if (current.semantic != expected.semantic
+				|| current.format != expected.format
+				|| current.offsetBytes != expected.offsetBytes)
+			{
+				TERRAENGINE_LOG(LogLevel::Error,
+					"TEMF packed attribute mismatch at index " << layoutIndex << " in " << resolvedPath);
+				return nullptr;
+			}
 		}
 
 		if (header.headerSize > fileBytes.size())
@@ -117,9 +184,12 @@ namespace
 			return nullptr;
 		}
 
-		if (header.meshletVertexCount == 0 || header.meshletPrimitiveIndexCount == 0 || header.meshletCount == 0)
+		if (header.meshletVertexCount == 0
+			|| header.meshletVertexRemapCount == 0
+			|| header.meshletPrimitiveIndexCount == 0
+			|| header.meshletCount == 0)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet counts must all be non-zero in " << resolvedPath);
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet counts (vertex/remap/primitive/table) must all be non-zero in " << resolvedPath);
 			return nullptr;
 		}
 
@@ -129,16 +199,83 @@ namespace
 			return nullptr;
 		}
 
-		// Primitive indices are emitted as packed 32-bit triangle lists, so count must be triangle-aligned.
+		if ((header.meshletVertexDataOffset % kMeshletVertexDataAlignmentBytes) != 0u)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF vertex stream offset must be 16-byte aligned in " << resolvedPath);
+		}
+
+		if (header.meshletSkinningDataCount != 0)
+		{
+			if ((header.meshletSkinningDataOffset % kMeshletIndexDataAlignmentBytes) != 0u)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF skinning stream offset must be aligned in " << resolvedPath);
+				return nullptr;
+			}
+			
+			if (header.meshletSkinningDataCount != header.meshletVertexCount)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF skinning count must match vertex count in " << resolvedPath);
+				return nullptr;
+			}
+		}
+
+		if ((header.meshletVertexRemapDataOffset % kMeshletIndexDataAlignmentBytes) != 0u)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF vertex remap stream offset must be 4-byte aligned in " << resolvedPath);
+			return nullptr;
+		}
+
+		if ((header.meshletPrimitiveIndexDataOffset % kMeshletIndexDataAlignmentBytes) != 0u)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF primitive stream offset must be 4-byte aligned in " << resolvedPath);
+			return nullptr;
+		}
+
+		// Primitive entries are meshlet-local uint8 elements and must remain triangle-aligned.
 		if ((header.meshletPrimitiveIndexCount % 3u) != 0u)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet primitive index count must be a multiple of 3 in " << resolvedPath);
 			return nullptr;
 		}
 
-		if (header.meshletBoundsCount != 0 && header.meshletBoundsCount != header.meshletCount)
+		if ((header.meshletFlags & ~kMeshletHeaderFlagHasBounds) != 0u)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet bounds count must be zero or equal meshletCount in " << resolvedPath);
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshletFlags has unsupported bits in " << resolvedPath);
+			return nullptr;
+		}
+
+		const MeshletRemapEncoding remapEncoding = static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding);
+		if (remapEncoding != MeshletRemapEncoding::Uint16 && remapEncoding != MeshletRemapEncoding::Uint32)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF remap encoding is invalid in " << resolvedPath);
+			return nullptr;
+		}
+
+		if (remapEncoding == MeshletRemapEncoding::Uint16
+			&& header.meshletVertexCount > static_cast<std::uint32_t>(std::numeric_limits<std::uint16_t>::max()))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF remap encoding is u16 but vertex count exceeds 65535 in " << resolvedPath);
+			return nullptr;
+		}
+
+		const bool boundsPresent = (header.meshletFlags & kMeshletHeaderFlagHasBounds) != 0u;
+		if (boundsPresent)
+		{
+			if (header.meshletBoundsCount != header.meshletCount || header.meshletBoundsOffset == 0u)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF bounds flag is set but bounds count/offset is inconsistent in " << resolvedPath);
+				return nullptr;
+			}
+
+			if ((header.meshletBoundsOffset % kMeshletIndexDataAlignmentBytes) != 0u)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF bounds payload offset must be 4-byte aligned in " << resolvedPath);
+				return nullptr;
+			}
+		}
+		else if (header.meshletBoundsCount != 0u || header.meshletBoundsOffset != 0u)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF bounds payload must be fully absent when bounds flag is not set in " << resolvedPath);
 			return nullptr;
 		}
 
@@ -146,6 +283,23 @@ namespace
 		if (!TryMultiply(static_cast<std::size_t>(header.layout.strideBytes), static_cast<std::size_t>(header.meshletVertexCount), vertexBytes))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF vertex payload size overflow in " << resolvedPath);
+			return nullptr;
+		}
+
+		std::size_t skinningBytes = 0;
+		if (!TryMultiply(static_cast<std::size_t>(header.meshletSkinningDataCount), 8ULL, skinningBytes))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF skinning payload size overflow in " << resolvedPath);
+			return nullptr;
+		}
+
+		std::size_t vertexRemapBytes = 0;
+		if (!TryMultiply(
+			static_cast<std::size_t>(header.meshletVertexRemapCount),
+			static_cast<std::size_t>(GetRemapElementSizeBytes(remapEncoding)),
+			vertexRemapBytes))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF vertex remap payload size overflow in " << resolvedPath);
 			return nullptr;
 		}
 
@@ -192,6 +346,12 @@ namespace
 			return nullptr;
 		}
 
+		std::size_t vertexRemapPayloadOffset = 0;
+		if (!ResolvePayloadRange(header, payloadSize, header.meshletVertexRemapDataOffset, vertexRemapBytes, resolvedPath, "meshlet vertex remap data", vertexRemapPayloadOffset))
+		{
+			return nullptr;
+		}
+
 		std::size_t primitivePayloadOffset = 0;
 		if (!ResolvePayloadRange(header, payloadSize, header.meshletPrimitiveIndexDataOffset, primitiveIndexBytes, resolvedPath, "meshlet primitive index data", primitivePayloadOffset))
 		{
@@ -216,7 +376,17 @@ namespace
 			return nullptr;
 		}
 
+		std::size_t skinningPayloadOffset = 0;
+		if (header.meshletSkinningDataCount != 0 && !ResolvePayloadRange(header, payloadSize, header.meshletSkinningDataOffset, skinningBytes, resolvedPath, "meshlet skinning data", skinningPayloadOffset))
+		{
+			return nullptr;
+		}
+
 		mesh->meshletVertexData = std::span<const std::uint8_t>(payload + vertexPayloadOffset, vertexBytes);
+		mesh->meshletVertexRemapData = std::span<const std::uint8_t>(payload + vertexRemapPayloadOffset, vertexRemapBytes);
+		mesh->meshletSkinningData = (header.meshletSkinningDataCount != 0) 
+			? std::span<const std::uint8_t>(payload + skinningPayloadOffset, skinningBytes)
+			: std::span<const std::uint8_t>{};
 		mesh->meshletPrimitiveIndexData = std::span<const std::uint8_t>(payload + primitivePayloadOffset, primitiveIndexBytes);
 
 		mesh->meshletRecords.resize(header.meshletCount);
@@ -231,27 +401,35 @@ namespace
 			std::memcpy(mesh->meshletBounds.data(), payload + meshletBoundsOffset, meshletBoundsBytes);
 		}
 
+		const std::uint8_t* primitivePayload = mesh->meshletPrimitiveIndexData.data();
+
 		std::vector<std::uint8_t> primitiveCoverage(static_cast<std::size_t>(header.meshletPrimitiveIndexCount), 0u);
 		for (std::size_t meshletIndex = 0; meshletIndex < mesh->meshletRecords.size(); ++meshletIndex)
 		{
 			const MeshletRecord& meshlet = mesh->meshletRecords[meshletIndex];
-			if (meshlet.vertexCount == 0 || meshlet.primitiveIndexCount == 0 || (meshlet.primitiveIndexCount % 3u) != 0u)
+			if (meshlet.vertexCount == 0
+				|| meshlet.primitiveIndexCount == 0
+				|| meshlet.vertexCount > kMeshletMaxVertices
+				|| (meshlet.primitiveIndexCount % 3u) != 0u)
 			{
+				// Count validation is kept strict so malformed files fail before GPU upload.
 				TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet[" << meshletIndex << "] has invalid vertex/primitive counts in " << resolvedPath);
 				return nullptr;
 			}
 
 			std::size_t meshletVertexEnd = 0;
-			if (!TryAdd(static_cast<std::size_t>(meshlet.vertexOffset), static_cast<std::size_t>(meshlet.vertexCount), meshletVertexEnd) || meshletVertexEnd > header.meshletVertexCount)
+			if (!TryAdd(static_cast<std::size_t>(meshlet.vertexOffset), static_cast<std::size_t>(meshlet.vertexCount), meshletVertexEnd)
+				|| meshletVertexEnd > header.meshletVertexRemapCount)
 			{
-				TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet table overrun/underrun on vertex range for meshlet[" << meshletIndex << "] in " << resolvedPath);
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet[" << meshletIndex << "] remap range overruns in " << resolvedPath);
 				return nullptr;
 			}
 
 			std::size_t meshletPrimitiveEnd = 0;
-			if (!TryAdd(static_cast<std::size_t>(meshlet.primitiveIndexOffset), static_cast<std::size_t>(meshlet.primitiveIndexCount), meshletPrimitiveEnd) || meshletPrimitiveEnd > header.meshletPrimitiveIndexCount)
+			if (!TryAdd(static_cast<std::size_t>(meshlet.primitiveIndexOffset), static_cast<std::size_t>(meshlet.primitiveIndexCount), meshletPrimitiveEnd)
+				|| meshletPrimitiveEnd > header.meshletPrimitiveIndexCount)
 			{
-				TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet table overrun/underrun on primitive range for meshlet[" << meshletIndex << "] in " << resolvedPath);
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet[" << meshletIndex << "] primitive range overruns in " << resolvedPath);
 				return nullptr;
 			}
 
@@ -259,7 +437,15 @@ namespace
 			{
 				if (primitiveCoverage[primitive] != 0u)
 				{
-					TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet table overrun/underrun due to overlapping primitive ranges in " << resolvedPath);
+					// Overlap means one primitive element would belong to two meshlets, which is invalid.
+					TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet table has overlapping primitive ranges in " << resolvedPath);
+					return nullptr;
+				}
+
+				const std::uint8_t localVertex = primitivePayload[primitive];
+				if (localVertex >= meshlet.vertexCount)
+				{
+					TERRAENGINE_LOG(LogLevel::Error, "TEMF primitive stream references out-of-range local vertex in meshlet[" << meshletIndex << "] for " << resolvedPath);
 					return nullptr;
 				}
 

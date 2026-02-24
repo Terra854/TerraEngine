@@ -76,6 +76,9 @@ struct VulkanImage {
 struct VulkanMesh {
 	VulkanBuffer vertexBuffer;
 	VulkanBuffer meshShaderVertexBuffer;
+	VulkanBuffer meshletVertexRemapBuffer;
+	VulkanBuffer meshSkinningBuffer;
+	VulkanBuffer meshDecodeInfoBuffer;
 	VulkanBuffer indexBuffer;
 	VulkanBuffer meshletBuffer;
 	uint32_t indexCount;

@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -27,27 +29,47 @@ namespace
 		return (value + mask) & ~mask;
 	}
 
-	struct VertexKey
+	struct QuantizedVertexKey
 	{
-		int positionIndex;
-		int normalIndex;
-		int texcoordIndex;
+		std::int32_t positionX;
+		std::int32_t positionY;
+		std::int32_t positionZ;
+		std::int32_t normalX;
+		std::int32_t normalY;
+		std::int32_t normalZ;
+		std::int32_t uvX;
+		std::int32_t uvY;
 
-		bool operator==(const VertexKey& rhs) const
+		bool operator==(const QuantizedVertexKey& rhs) const
 		{
-			return positionIndex == rhs.positionIndex
-				&& normalIndex == rhs.normalIndex
-				&& texcoordIndex == rhs.texcoordIndex;
+			return positionX == rhs.positionX
+				&& positionY == rhs.positionY
+				&& positionZ == rhs.positionZ
+				&& normalX == rhs.normalX
+				&& normalY == rhs.normalY
+				&& normalZ == rhs.normalZ
+				&& uvX == rhs.uvX
+				&& uvY == rhs.uvY;
 		}
 	};
 
-	struct VertexKeyHasher
+	struct QuantizedVertexKeyHasher
 	{
-		std::size_t operator()(const VertexKey& key) const noexcept
+		std::size_t operator()(const QuantizedVertexKey& key) const noexcept
 		{
-			std::size_t seed = static_cast<std::size_t>(key.positionIndex);
-			seed ^= static_cast<std::size_t>(key.normalIndex + 0x9e3779b9 + (seed << 6) + (seed >> 2));
-			seed ^= static_cast<std::size_t>(key.texcoordIndex + 0x9e3779b9 + (seed << 6) + (seed >> 2));
+			const auto HashCombine = [](std::size_t seed, std::int32_t value) -> std::size_t {
+				return seed ^ (static_cast<std::size_t>(value) + 0x9e3779b9u + (seed << 6u) + (seed >> 2u));
+			};
+
+			std::size_t seed = 0u;
+			seed = HashCombine(seed, key.positionX);
+			seed = HashCombine(seed, key.positionY);
+			seed = HashCombine(seed, key.positionZ);
+			seed = HashCombine(seed, key.normalX);
+			seed = HashCombine(seed, key.normalY);
+			seed = HashCombine(seed, key.normalZ);
+			seed = HashCombine(seed, key.uvX);
+			seed = HashCombine(seed, key.uvY);
 			return seed;
 		}
 	};
@@ -61,8 +83,8 @@ namespace
 
 	struct MeshletBuildOutput
 	{
-		std::vector<std::uint32_t> flattenedVertexIndices;
-		std::vector<std::uint32_t> primitiveIndices;
+		std::vector<std::uint32_t> vertexRemapIndices;
+		std::vector<std::uint8_t> primitiveIndices;
 		std::vector<MeshletRecord> meshletRecords;
 		std::vector<MeshletSection> meshletSections;
 		std::vector<MeshletBounds> meshletBounds;
@@ -104,6 +126,29 @@ namespace
 			1.0f - attrib.texcoords[base + 1]};
 	}
 
+	std::int32_t QuantizeFloat(float value, float scale)
+	{
+		return static_cast<std::int32_t>(std::round(value * scale));
+	}
+
+	QuantizedVertexKey BuildQuantizedVertexKey(
+		const std::array<float, 3>& position,
+		const std::array<float, 3>& normal,
+		const std::array<float, 2>& uv)
+	{
+		// Quantized-key dedup allows near-identical vertices to collapse together,
+		// reducing remap stream pressure without changing compile workflow inputs.
+		return QuantizedVertexKey{
+			QuantizeFloat(position[0], 4096.0f),
+			QuantizeFloat(position[1], 4096.0f),
+			QuantizeFloat(position[2], 4096.0f),
+			QuantizeFloat(normal[0], 1024.0f),
+			QuantizeFloat(normal[1], 1024.0f),
+			QuantizeFloat(normal[2], 1024.0f),
+			QuantizeFloat(uv[0], 4096.0f),
+			QuantizeFloat(uv[1], 4096.0f)};
+	}
+
 	std::uint32_t PackR10G10B10A2Snorm(const std::array<float, 3>& value)
 	{
 		const auto clamp = [](float input) {
@@ -121,6 +166,30 @@ namespace
 		const std::uint32_t z = to10(value[2]);
 		const std::uint32_t w = 0;
 		return (w << 30) | (z << 20) | (y << 10) | x;
+	}
+
+	std::uint32_t PackOct32Normal(const std::array<float, 3>& n)
+	{
+		// Octahedral encoding maps a unit vector to a 2D point in a [-1, 1] square.
+		// Precision is significantly better than 10-bit SNORM for unit vectors.
+		const float l1 = std::abs(n[0]) + std::abs(n[1]) + std::abs(n[2]);
+		float x = n[0] / l1;
+		float y = n[1] / l1;
+
+		if (n[2] < 0.0f)
+		{
+			float oldX = x;
+			x = (1.0f - std::abs(y)) * (x >= 0.0f ? 1.0f : -1.0f);
+			y = (1.0f - std::abs(oldX)) * (y >= 0.0f ? 1.0f : -1.0f);
+		}
+
+		const auto to16 = [](float val) {
+			const float clamped = std::max(-1.0f, std::min(1.0f, val));
+			const int packed = static_cast<int>(std::round(clamped * 32767.0f));
+			return static_cast<std::uint32_t>(static_cast<std::uint16_t>(packed));
+		};
+
+		return (to16(y) << 16) | to16(x);
 	}
 
 	std::uint32_t PackR16G16Unorm(const std::array<float, 2>& value)
@@ -152,6 +221,70 @@ namespace
 		return true;
 	}
 
+	bool BuildRemapStream(
+		const std::vector<std::uint32_t>& remapIndices,
+		MeshletRemapEncoding encoding,
+		std::vector<std::uint8_t>& outBytes)
+	{
+		outBytes.clear();
+		const std::uint32_t elementSize = GetRemapElementSizeBytes(encoding);
+		outBytes.reserve(remapIndices.size() * static_cast<std::size_t>(elementSize));
+
+		for (std::uint32_t remapValue : remapIndices)
+		{
+			if (encoding == MeshletRemapEncoding::Uint16)
+			{
+				if (remapValue > std::numeric_limits<std::uint16_t>::max())
+				{
+					std::cerr << "u16 remap encoding overflow for vertex index " << remapValue << ".\n";
+					return false;
+				}
+
+				const std::uint16_t packed = static_cast<std::uint16_t>(remapValue);
+				outBytes.insert(
+					outBytes.end(),
+					reinterpret_cast<const std::uint8_t*>(&packed),
+					reinterpret_cast<const std::uint8_t*>(&packed) + sizeof(packed));
+			}
+			else
+			{
+				outBytes.insert(
+					outBytes.end(),
+					reinterpret_cast<const std::uint8_t*>(&remapValue),
+					reinterpret_cast<const std::uint8_t*>(&remapValue) + sizeof(remapValue));
+			}
+		}
+
+		return true;
+	}
+
+	std::string ComputeFileHashHex(const std::filesystem::path& filePath)
+	{
+		std::ifstream in(filePath, std::ios::binary);
+		if (!in)
+		{
+			return {};
+		}
+
+		std::uint64_t hash = 1469598103934665603ull;
+		const std::uint64_t prime = 1099511628211ull;
+		std::array<char, 4096> buffer{};
+		while (in)
+		{
+			in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+			const std::streamsize readCount = in.gcount();
+			for (std::streamsize index = 0; index < readCount; ++index)
+			{
+				hash ^= static_cast<std::uint8_t>(buffer[static_cast<std::size_t>(index)]);
+				hash *= prime;
+			}
+		}
+
+		std::ostringstream out;
+		out << std::hex << std::setfill('0') << std::setw(16) << hash;
+		return out.str();
+	}
+
 	void WritePadding(std::ofstream& out, std::uint32_t targetOffset)
 	{
 		const std::streamoff currentOffset = static_cast<std::streamoff>(out.tellp());
@@ -170,11 +303,145 @@ namespace
 		out.write(padding.data(), static_cast<std::streamsize>(padding.size()));
 	}
 
+	bool ValidateFixedGpuLayout(const MeshHeader& header)
+	{
+		// The direct-replacement format intentionally keeps one fixed layout so
+		// runtime never has to branch or repack bytes for mesh shader uploads.
+		if (header.layout.strideBytes != kMeshletPackedVertexStrideBytes)
+		{
+			std::cerr << "Unexpected packed vertex stride. Expected " << kMeshletPackedVertexStrideBytes
+				<< ", got " << header.layout.strideBytes << ".\n";
+			return false;
+		}
+
+		if (header.layout.attributeCount != 3u)
+		{
+			std::cerr << "Unexpected packed vertex attribute count. Expected 3, got "
+				<< header.layout.attributeCount << ".\n";
+			return false;
+		}
+
+		const VertexAttribute expectedLayout[3] = {
+			{
+				static_cast<std::uint32_t>(AttributeSemantic::Position),
+				static_cast<std::uint32_t>(AttributeFormat::R10G10B10A2Snorm),
+				0u},
+			{
+				static_cast<std::uint32_t>(AttributeSemantic::Normal),
+				static_cast<std::uint32_t>(AttributeFormat::Oct32),
+				4u},
+			{
+				static_cast<std::uint32_t>(AttributeSemantic::TexCoord0),
+				static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
+				8u}};
+
+		for (std::size_t attributeIndex = 0; attributeIndex < 3u; ++attributeIndex)
+		{
+			const VertexAttribute& current = header.layout.attributes[attributeIndex];
+			const VertexAttribute& expected = expectedLayout[attributeIndex];
+			if (current.semantic != expected.semantic
+				|| current.format != expected.format
+				|| current.offsetBytes != expected.offsetBytes)
+			{
+				std::cerr << "Packed vertex layout mismatch at attribute " << attributeIndex << ".\n";
+				return false;
+			}
+		}
+
+		if (kMeshletPrimitiveIndexSizeBytes != sizeof(std::uint8_t))
+		{
+			std::cerr << "Primitive stream element width must stay fixed at uint8.\n";
+			return false;
+		}
+
+		if (kMeshletMaxVertices > std::numeric_limits<std::uint8_t>::max())
+		{
+			std::cerr << "Meshlet max vertices must fit uint8 primitive elements.\n";
+			return false;
+		}
+
+		return true;
+	}
+
+	struct PayloadLayout
+	{
+		std::uint32_t vertexBytes = 0;
+		std::uint32_t vertexRemapBytes = 0;
+		std::uint32_t skinningBytes = 0;
+		std::uint32_t primitiveBytes = 0;
+		std::uint32_t meshletTableBytes = 0;
+		std::uint32_t meshletSectionBytes = 0;
+		std::uint32_t meshletBoundsBytes = 0;
+		std::uint32_t vertexDataOffset = 0;
+		std::uint32_t vertexRemapDataOffset = 0;
+		std::uint32_t skinningDataOffset = 0;
+		std::uint32_t primitiveDataOffset = 0;
+		std::uint32_t meshletTableOffset = 0;
+		std::uint32_t meshletSectionOffset = 0;
+		std::uint32_t meshletBoundsOffset = 0;
+	};
+
+	bool TryBuildPayloadLayout(
+		const MeshHeader& header,
+		std::size_t vertexBytes,
+		std::size_t vertexRemapBytes,
+		std::size_t skinningBytes,
+		std::size_t primitiveBytes,
+		std::size_t meshletTableBytes,
+		std::size_t meshletSectionBytes,
+		std::size_t meshletBoundsBytes,
+		PayloadLayout& outLayout)
+	{
+		const auto TryToU32 = [](std::size_t value, const char* label, std::uint32_t& outValue) -> bool {
+			if (value > std::numeric_limits<std::uint32_t>::max())
+			{
+				std::cerr << "Payload size overflow for " << label << ": " << value << ".\n";
+				return false;
+			}
+
+			outValue = static_cast<std::uint32_t>(value);
+			return true;
+		};
+
+		if (!TryToU32(vertexBytes, "vertex stream", outLayout.vertexBytes)
+			|| !TryToU32(vertexRemapBytes, "remap stream", outLayout.vertexRemapBytes)
+			|| !TryToU32(skinningBytes, "skinning stream", outLayout.skinningBytes)
+			|| !TryToU32(primitiveBytes, "primitive stream", outLayout.primitiveBytes)
+			|| !TryToU32(meshletTableBytes, "meshlet table", outLayout.meshletTableBytes)
+			|| !TryToU32(meshletSectionBytes, "meshlet section table", outLayout.meshletSectionBytes)
+			|| !TryToU32(meshletBoundsBytes, "meshlet bounds table", outLayout.meshletBoundsBytes))
+		{
+			return false;
+		}
+
+		// Centralized offset generation keeps stream layout rules version-aware and deterministic.
+		// Align to 4KB sector/page boundaries for DirectStorage and io_uring optimization.
+		outLayout.vertexDataOffset = AlignUp(header.headerSize, kMeshletVertexDataAlignmentBytes);
+		outLayout.vertexRemapDataOffset = AlignUp(outLayout.vertexDataOffset + AlignUp(outLayout.vertexBytes, 4096u), kMeshletIndexDataAlignmentBytes);
+		outLayout.skinningDataOffset = outLayout.skinningBytes == 0u 
+			? 0u 
+			: AlignUp(outLayout.vertexRemapDataOffset + AlignUp(outLayout.vertexRemapBytes, 4096u), 4096u);
+		
+		const std::uint32_t lastOffset = outLayout.skinningDataOffset != 0u 
+			? outLayout.skinningDataOffset + AlignUp(outLayout.skinningBytes, 4096u)
+			: outLayout.vertexRemapDataOffset + AlignUp(outLayout.vertexRemapBytes, 4096u);
+
+		outLayout.primitiveDataOffset = AlignUp(lastOffset, kMeshletIndexDataAlignmentBytes);
+		outLayout.meshletTableOffset = AlignUp(outLayout.primitiveDataOffset + AlignUp(outLayout.primitiveBytes, 4096u), 4096u);
+		outLayout.meshletSectionOffset = AlignUp(outLayout.meshletTableOffset + AlignUp(outLayout.meshletTableBytes, 4096u), 4096u);
+		outLayout.meshletBoundsOffset = outLayout.meshletBoundsBytes == 0u
+			? 0u
+			: AlignUp(outLayout.meshletSectionOffset + AlignUp(outLayout.meshletSectionBytes, 4096u), 4096u);
+		return true;
+	}
+
 	void WriteTemf(
 		const std::filesystem::path& outputPath,
 		const MeshHeader& header,
 		const std::vector<std::uint8_t>& vertexData,
-		const std::vector<std::uint32_t>& primitiveIndices,
+		const std::vector<std::uint8_t>& vertexRemapData,
+		const std::vector<std::uint8_t>& skinningData,
+		const std::vector<std::uint8_t>& primitiveIndices,
 		const std::vector<MeshletRecord>& meshletRecords,
 		const std::vector<MeshletSection>& meshletSections,
 		const std::vector<MeshletBounds>& meshletBounds)
@@ -190,8 +457,17 @@ namespace
 		WritePadding(out, header.meshletVertexDataOffset);
 		out.write(reinterpret_cast<const char*>(vertexData.data()), static_cast<std::streamsize>(vertexData.size()));
 
+		WritePadding(out, header.meshletVertexRemapDataOffset);
+		out.write(reinterpret_cast<const char*>(vertexRemapData.data()), static_cast<std::streamsize>(vertexRemapData.size()));
+
+		if (!skinningData.empty())
+		{
+			WritePadding(out, header.meshletSkinningDataOffset);
+			out.write(reinterpret_cast<const char*>(skinningData.data()), static_cast<std::streamsize>(skinningData.size()));
+		}
+
 		WritePadding(out, header.meshletPrimitiveIndexDataOffset);
-		out.write(reinterpret_cast<const char*>(primitiveIndices.data()), static_cast<std::streamsize>(primitiveIndices.size() * sizeof(std::uint32_t)));
+		out.write(reinterpret_cast<const char*>(primitiveIndices.data()), static_cast<std::streamsize>(primitiveIndices.size() * sizeof(std::uint8_t)));
 
 		WritePadding(out, header.meshletTableOffset);
 		out.write(reinterpret_cast<const char*>(meshletRecords.data()), static_cast<std::streamsize>(meshletRecords.size() * sizeof(MeshletRecord)));
@@ -206,7 +482,11 @@ namespace
 		}
 	}
 
-	bool BuildMeshletPayload(const std::vector<VertexRaw>& vertices, const std::vector<std::uint32_t>& indices, MeshletBuildOutput& output)
+	bool BuildMeshletPayload(
+		const std::vector<VertexRaw>& vertices,
+		const std::vector<std::uint32_t>& indices,
+		bool includeBounds,
+		MeshletBuildOutput& output)
 	{
 		if (vertices.empty() || indices.empty())
 		{
@@ -247,8 +527,11 @@ namespace
 
 		meshlets.resize(meshletCount);
 		output.meshletRecords.reserve(meshletCount);
-		output.meshletBounds.reserve(meshletCount);
-		output.flattenedVertexIndices.reserve(indices.size());
+		if (includeBounds)
+		{
+			output.meshletBounds.reserve(meshletCount);
+		}
+		output.vertexRemapIndices.reserve(indices.size());
 		output.primitiveIndices.reserve(indices.size());
 
 		// Keep this loop sequential to preserve deterministic byte offsets in output artifacts.
@@ -267,7 +550,7 @@ namespace
 				sourceMeshlet.vertex_count);
 
 			MeshletRecord record{};
-			if (!TryConvertCount(output.flattenedVertexIndices.size(), "meshlet vertex offset", record.vertexOffset))
+			if (!TryConvertCount(output.vertexRemapIndices.size(), "meshlet vertex remap offset", record.vertexOffset))
 			{
 				return false;
 			}
@@ -283,7 +566,7 @@ namespace
 					return false;
 				}
 
-				output.flattenedVertexIndices.push_back(sourceVertex);
+				output.vertexRemapIndices.push_back(sourceVertex);
 			}
 
 			if (!TryConvertCount(output.primitiveIndices.size(), "meshlet primitive offset", record.primitiveIndexOffset))
@@ -302,25 +585,28 @@ namespace
 					return false;
 				}
 
-				output.primitiveIndices.push_back(record.vertexOffset + localVertex);
+				output.primitiveIndices.push_back(localVertex);
 			}
 
 			output.meshletRecords.push_back(record);
 
-			const meshopt_Bounds computedBounds = meshopt_computeMeshletBounds(
-				meshletVertices.data() + sourceMeshlet.vertex_offset,
-				meshletTriangles.data() + sourceMeshlet.triangle_offset,
-				sourceMeshlet.triangle_count,
-				positions,
-				vertices.size(),
-				sizeof(VertexRaw));
+			if (includeBounds)
+			{
+				const meshopt_Bounds computedBounds = meshopt_computeMeshletBounds(
+					meshletVertices.data() + sourceMeshlet.vertex_offset,
+					meshletTriangles.data() + sourceMeshlet.triangle_offset,
+					sourceMeshlet.triangle_count,
+					positions,
+					vertices.size(),
+					sizeof(VertexRaw));
 
-			MeshletBounds bounds{};
-			bounds.center[0] = computedBounds.center[0];
-			bounds.center[1] = computedBounds.center[1];
-			bounds.center[2] = computedBounds.center[2];
-			bounds.radius = computedBounds.radius;
-			output.meshletBounds.push_back(bounds);
+				MeshletBounds bounds{};
+				bounds.center[0] = computedBounds.center[0];
+				bounds.center[1] = computedBounds.center[1];
+				bounds.center[2] = computedBounds.center[2];
+				bounds.radius = computedBounds.radius;
+				output.meshletBounds.push_back(bounds);
+			}
 		}
 
 		if (output.primitiveIndices.empty() || (output.primitiveIndices.size() % 3u) != 0u)
@@ -341,8 +627,29 @@ namespace
 	}
 }
 
-bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path& output)
+bool CompileMesh(
+	const std::filesystem::path& input,
+	const std::filesystem::path& output,
+	bool includeMeshletBounds,
+	MeshCompileReport* outReport)
 {
+	MeshCompileReport report{};
+	report.assetPath = input;
+	report.formatVersion = kMeshCurrentVersion;
+	report.sourceHashHex = ComputeFileHashHex(input);
+	if (std::filesystem::exists(input))
+	{
+		report.sourceBytes = std::filesystem::file_size(input);
+	}
+
+	const auto FinalizeReport = [&](bool result) {
+		if (outReport != nullptr)
+		{
+			*outReport = report;
+		}
+		return result;
+	};
+
 	tinyobj::attrib_t attrib;
 	std::vector<tinyobj::shape_t> shapes;
 	std::vector<tinyobj::material_t> materials;
@@ -367,14 +674,16 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 	if (!ok || !err.empty())
 	{
 		std::cerr << "Error: " << err << "\n";
-		return false;
+		report.status = "compile_fail";
+		report.failureReason = "obj-parse-failed";
+		return FinalizeReport(false);
 	}
 
 	const int positionCount = static_cast<int>(attrib.vertices.size() / 3u);
 	const int normalCount = static_cast<int>(attrib.normals.size() / 3u);
 	const int texcoordCount = static_cast<int>(attrib.texcoords.size() / 2u);
 
-	std::unordered_map<VertexKey, std::uint32_t, VertexKeyHasher> vertexRemap;
+	std::unordered_map<QuantizedVertexKey, std::uint32_t, QuantizedVertexKeyHasher> vertexRemap;
 	std::vector<VertexRaw> vertices;
 	std::vector<std::uint32_t> indices;
 
@@ -403,7 +712,9 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 			if (verticesPerFace != 3u)
 			{
 				std::cerr << "MeshCompiler only accepts triangulated topology; found face with " << verticesPerFace << " vertices.\n";
-				return false;
+				report.status = "compile_fail";
+				report.failureReason = "face-not-triangulated";
+				return FinalizeReport(false);
 			}
 
 			for (std::size_t faceVertex = 0; faceVertex < verticesPerFace; ++faceVertex)
@@ -412,23 +723,26 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 				if (idx.vertex_index < 0 || idx.vertex_index >= positionCount)
 				{
 					std::cerr << "OBJ contains an out-of-range position index; aborting meshlet compile.\n";
-					return false;
+					report.status = "compile_fail";
+					report.failureReason = "position-index-out-of-range";
+					return FinalizeReport(false);
 				}
 
 				if (idx.normal_index >= normalCount || idx.texcoord_index >= texcoordCount)
 				{
 					std::cerr << "OBJ contains an out-of-range normal/UV index; aborting meshlet compile.\n";
-					return false;
+					report.status = "compile_fail";
+					report.failureReason = "attribute-index-out-of-range";
+					return FinalizeReport(false);
 				}
 
-				VertexKey key{idx.vertex_index, idx.normal_index, idx.texcoord_index};
+				const std::array<float, 3> position = ExtractPosition(attrib, idx.vertex_index);
+				const std::array<float, 3> normal = ExtractNormal(attrib, idx.normal_index);
+				const std::array<float, 2> uv = ExtractTexcoord(attrib, idx.texcoord_index);
+				const QuantizedVertexKey key = BuildQuantizedVertexKey(position, normal, uv);
 				auto existing = vertexRemap.find(key);
 				if (existing == vertexRemap.end())
 				{
-					const std::array<float, 3> position = ExtractPosition(attrib, idx.vertex_index);
-					const std::array<float, 3> normal = ExtractNormal(attrib, idx.normal_index);
-					const std::array<float, 2> uv = ExtractTexcoord(attrib, idx.texcoord_index);
-
 					for (int component = 0; component < 3; ++component)
 					{
 						minPos[component] = std::min(minPos[component], position[component]);
@@ -459,19 +773,25 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 	if (indices.empty())
 	{
 		std::cerr << "No geometry found in OBJ: " << input << "\n";
-		return false;
+		report.status = "compile_fail";
+		report.failureReason = "empty-geometry";
+		return FinalizeReport(false);
 	}
 
 	if ((indices.size() % 3u) != 0u)
 	{
 		std::cerr << "MeshCompiler generated non-triangulated primitive output for OBJ: " << input << "\n";
-		return false;
+		report.status = "compile_fail";
+		report.failureReason = "non-triangle-index-buffer";
+		return FinalizeReport(false);
 	}
 
 	MeshletBuildOutput meshletPayload{};
-	if (!BuildMeshletPayload(vertices, indices, meshletPayload))
+	if (!BuildMeshletPayload(vertices, indices, includeMeshletBounds, meshletPayload))
 	{
-		return false;
+		report.status = "compile_fail";
+		report.failureReason = "meshlet-build-failed";
+		return FinalizeReport(false);
 	}
 
 	MeshHeader header{};
@@ -482,16 +802,19 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 	header.version = kMeshCurrentVersion;
 	header.headerSize = static_cast<std::uint32_t>(sizeof(MeshHeader));
 
-	if (!TryConvertCount(meshletPayload.flattenedVertexIndices.size(), "meshlet vertex count", header.meshletVertexCount)
+	if (!TryConvertCount(vertices.size(), "meshlet global vertex count", header.meshletVertexCount)
+		|| !TryConvertCount(meshletPayload.vertexRemapIndices.size(), "meshlet vertex remap count", header.meshletVertexRemapCount)
 		|| !TryConvertCount(meshletPayload.primitiveIndices.size(), "meshlet primitive index count", header.meshletPrimitiveIndexCount)
 		|| !TryConvertCount(meshletPayload.meshletRecords.size(), "meshlet count", header.meshletCount)
 		|| !TryConvertCount(meshletPayload.meshletSections.size(), "meshlet section count", header.meshletSectionCount)
 		|| !TryConvertCount(meshletPayload.meshletBounds.size(), "meshlet bounds count", header.meshletBoundsCount))
 	{
-		return false;
+		report.status = "compile_fail";
+		report.failureReason = "count-overflow";
+		return FinalizeReport(false);
 	}
 
-	header.layout.strideBytes = 12;
+	header.layout.strideBytes = kMeshletPackedVertexStrideBytes;
 	header.layout.attributeCount = 3;
 	header.layout.attributes[0] = {
 		static_cast<std::uint32_t>(AttributeSemantic::Position),
@@ -499,12 +822,26 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 		0};
 	header.layout.attributes[1] = {
 		static_cast<std::uint32_t>(AttributeSemantic::Normal),
-		static_cast<std::uint32_t>(AttributeFormat::R10G10B10A2Snorm),
+		static_cast<std::uint32_t>(AttributeFormat::Oct32),
 		4};
 	header.layout.attributes[2] = {
 		static_cast<std::uint32_t>(AttributeSemantic::TexCoord0),
 		static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
 		8};
+	header.meshletVertexRemapEncoding = static_cast<std::uint32_t>(
+		header.meshletVertexCount <= std::numeric_limits<std::uint16_t>::max()
+			? MeshletRemapEncoding::Uint16
+			: MeshletRemapEncoding::Uint32);
+	header.meshletFlags = meshletPayload.meshletBounds.empty() ? 0u : kMeshletHeaderFlagHasBounds;
+	header.meshletSkinningDataOffset = 0;
+	header.meshletSkinningDataCount = 0;
+
+	if (!ValidateFixedGpuLayout(header))
+	{
+		report.status = "compile_fail";
+		report.failureReason = "fixed-layout-validation-failed";
+		return FinalizeReport(false);
+	}
 
 	for (int component = 0; component < 3; ++component)
 	{
@@ -519,18 +856,11 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 	header.quantization.uvScale[1] = hasUv ? std::max(1e-6f, maxUv[1] - minUv[1]) : 1.0f;
 
 	std::vector<std::uint8_t> vertexData;
-	vertexData.reserve(meshletPayload.flattenedVertexIndices.size() * static_cast<std::size_t>(header.layout.strideBytes));
+	vertexData.reserve(vertices.size() * static_cast<std::size_t>(header.layout.strideBytes));
 
 	// Keep packing deterministic so binary assets remain stable across repeated runs.
-	for (std::uint32_t flattenedVertex : meshletPayload.flattenedVertexIndices)
+	for (const VertexRaw& vertex : vertices)
 	{
-		if (flattenedVertex >= vertices.size())
-		{
-			std::cerr << "Meshlet vertex stream references missing source vertex data.\n";
-			return false;
-		}
-
-		const VertexRaw& vertex = vertices[flattenedVertex];
 		std::array<float, 3> qPosition{
 			(vertex.position[0] - header.quantization.positionOffset[0]) / header.quantization.positionScale[0],
 			(vertex.position[1] - header.quantization.positionOffset[1]) / header.quantization.positionScale[1],
@@ -551,7 +881,7 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 			(vertex.uv[1] - header.quantization.uvOffset[1]) / header.quantization.uvScale[1]};
 
 		const std::uint32_t packedPosition = PackR10G10B10A2Snorm(qPosition);
-		const std::uint32_t packedNormal = PackR10G10B10A2Snorm(qNormal);
+		const std::uint32_t packedNormal = PackOct32Normal(qNormal);
 		const std::uint32_t packedUv = PackR16G16Unorm(qUv);
 
 		vertexData.insert(
@@ -568,19 +898,62 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 			reinterpret_cast<const std::uint8_t*>(&packedUv) + sizeof(packedUv));
 	}
 
-	const std::uint32_t vertexBytes = static_cast<std::uint32_t>(vertexData.size());
-	const std::uint32_t primitiveBytes = static_cast<std::uint32_t>(meshletPayload.primitiveIndices.size() * sizeof(std::uint32_t));
-	const std::uint32_t meshletTableBytes = static_cast<std::uint32_t>(meshletPayload.meshletRecords.size() * sizeof(MeshletRecord));
-	const std::uint32_t meshletSectionBytes = static_cast<std::uint32_t>(meshletPayload.meshletSections.size() * sizeof(MeshletSection));
-	const std::uint32_t meshletBoundsBytes = static_cast<std::uint32_t>(meshletPayload.meshletBounds.size() * sizeof(MeshletBounds));
+	if ((meshletPayload.primitiveIndices.size() % 3u) != 0u)
+	{
+		std::cerr << "Primitive stream must remain triangle-aligned.\n";
+		report.status = "compile_fail";
+		report.failureReason = "primitive-stream-not-triangle-aligned";
+		return FinalizeReport(false);
+	}
 
-	header.meshletVertexDataOffset = AlignUp(header.headerSize, 16);
-	header.meshletPrimitiveIndexDataOffset = AlignUp(header.meshletVertexDataOffset + vertexBytes, 4);
-	header.meshletTableOffset = AlignUp(header.meshletPrimitiveIndexDataOffset + primitiveBytes, 4);
-	header.meshletSectionOffset = AlignUp(header.meshletTableOffset + meshletTableBytes, 4);
-	header.meshletBoundsOffset = meshletPayload.meshletBounds.empty()
-		? 0u
-		: AlignUp(header.meshletSectionOffset + meshletSectionBytes, 4);
+	// The remap stream maps meshlet-local vertex indices to shared global vertices.
+	for (std::size_t remapIndex = 0; remapIndex < meshletPayload.vertexRemapIndices.size(); ++remapIndex)
+	{
+		if (meshletPayload.vertexRemapIndices[remapIndex] >= header.meshletVertexCount)
+		{
+			std::cerr << "Vertex remap entry is out of global vertex range at index " << remapIndex << ".\n";
+			report.status = "compile_fail";
+			report.failureReason = "remap-out-of-range";
+			return FinalizeReport(false);
+		}
+	}
+
+	const MeshletRemapEncoding remapEncoding = static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding);
+	std::vector<std::uint8_t> remapData;
+	if (!BuildRemapStream(meshletPayload.vertexRemapIndices, remapEncoding, remapData))
+	{
+		report.status = "compile_fail";
+		report.failureReason = "remap-encoding-failed";
+		return FinalizeReport(false);
+	}
+
+	report.usedU16RemapEncoding = (remapEncoding == MeshletRemapEncoding::Uint16);
+
+	PayloadLayout payloadLayout{};
+	if (!TryBuildPayloadLayout(
+		header,
+		vertexData.size(),
+		remapData.size(),
+		0, // skinningBytes (unimplemented in OBJ path)
+		meshletPayload.primitiveIndices.size() * sizeof(std::uint8_t),
+		meshletPayload.meshletRecords.size() * sizeof(MeshletRecord),
+		meshletPayload.meshletSections.size() * sizeof(MeshletSection),
+		meshletPayload.meshletBounds.size() * sizeof(MeshletBounds),
+		payloadLayout))
+	{
+		report.status = "compile_fail";
+		report.failureReason = "payload-layout-overflow";
+		return FinalizeReport(false);
+	}
+
+	// Offsets are aligned to direct GPU upload requirements so runtime only validates + uploads.
+	header.meshletVertexDataOffset = payloadLayout.vertexDataOffset;
+	header.meshletVertexRemapDataOffset = payloadLayout.vertexRemapDataOffset;
+	header.meshletSkinningDataOffset = payloadLayout.skinningDataOffset;
+	header.meshletPrimitiveIndexDataOffset = payloadLayout.primitiveDataOffset;
+	header.meshletTableOffset = payloadLayout.meshletTableOffset;
+	header.meshletSectionOffset = payloadLayout.meshletSectionOffset;
+	header.meshletBoundsOffset = payloadLayout.meshletBoundsOffset;
 
 	try
 	{
@@ -588,15 +961,32 @@ bool CompileMesh(const std::filesystem::path& input, const std::filesystem::path
 			output,
 			header,
 			vertexData,
+			remapData,
+			{}, // skinningData
 			meshletPayload.primitiveIndices,
 			meshletPayload.meshletRecords,
 			meshletPayload.meshletSections,
 			meshletPayload.meshletBounds);
-		return true;
+
+		if (std::filesystem::exists(output))
+		{
+			report.outputBytes = std::filesystem::file_size(output);
+		}
+
+		if (report.sourceBytes > 0)
+		{
+			report.compressionRatio = static_cast<double>(report.outputBytes) / static_cast<double>(report.sourceBytes);
+		}
+
+		report.status = "success";
+
+		return FinalizeReport(true);
 	}
 	catch (const std::exception& exception)
 	{
 		std::cerr << "Failed to write meshlet-only TEMF: " << exception.what() << "\n";
-		return false;
+		report.status = "compile_fail";
+		report.failureReason = "write-failed";
+		return FinalizeReport(false);
 	}
 }

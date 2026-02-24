@@ -564,6 +564,9 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 		}
 		vmaDestroyBuffer(allocator, it->second.vertexBuffer.buffer, it->second.vertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshShaderVertexBuffer.buffer, it->second.meshShaderVertexBuffer.allocation);
+		vmaDestroyBuffer(allocator, it->second.meshletVertexRemapBuffer.buffer, it->second.meshletVertexRemapBuffer.allocation);
+		vmaDestroyBuffer(allocator, it->second.meshSkinningBuffer.buffer, it->second.meshSkinningBuffer.allocation);
+		vmaDestroyBuffer(allocator, it->second.meshDecodeInfoBuffer.buffer, it->second.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.indexBuffer.buffer, it->second.indexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshletBuffer.buffer, it->second.meshletBuffer.allocation);
 		meshCache.erase(it);
@@ -592,113 +595,84 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	Mesh* cpuMesh = ResourceManager::Instance().GetMesh(meshId);
 	if (!cpuMesh) return;
 
-	VkDeviceSize vertexSize = cpuMesh->meshletVertexData.size();
-	VkDeviceSize primitiveIndexSize = cpuMesh->meshletPrimitiveIndexData.size();
+	const VkDeviceSize packedVertexSize = static_cast<VkDeviceSize>(cpuMesh->meshletVertexData.size());
+	const VkDeviceSize vertexRemapSize = static_cast<VkDeviceSize>(cpuMesh->meshletVertexRemapData.size());
+	const VkDeviceSize skinningDataSize = static_cast<VkDeviceSize>(cpuMesh->meshletSkinningData.size());
+	const VkDeviceSize primitiveIndexSize = static_cast<VkDeviceSize>(cpuMesh->meshletPrimitiveIndexData.size());
 	const VkDeviceSize meshletTableSize = static_cast<VkDeviceSize>(cpuMesh->meshletRecords.size() * sizeof(MeshletRecord));
-	if (vertexSize == 0 || primitiveIndexSize == 0 || meshletTableSize == 0 || cpuMesh->header.meshletCount == 0)
+	if (packedVertexSize == 0
+		|| vertexRemapSize == 0
+		|| primitiveIndexSize == 0
+		|| meshletTableSize == 0
+		|| cpuMesh->header.meshletCount == 0)
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload is missing meshlet vertex, primitive index, or meshlet table data for UUID " << ToHexString(meshId));
+		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload is missing packed vertex/remap/primitive/table data for UUID " << ToHexString(meshId));
 		return;
 	}
 
 	const uint32_t packedStride = cpuMesh->header.layout.strideBytes;
 	const uint32_t meshletVertexCount = cpuMesh->header.meshletVertexCount;
-	if (packedStride < 12 || meshletVertexCount == 0) {
+	if (packedStride != kMeshletPackedVertexStrideBytes || meshletVertexCount == 0) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload has invalid packed vertex stride/count for UUID " << ToHexString(meshId));
 		return;
 	}
 
-	if (static_cast<VkDeviceSize>(packedStride) * static_cast<VkDeviceSize>(meshletVertexCount) > vertexSize) {
+	const VkDeviceSize expectedVertexBytes = static_cast<VkDeviceSize>(packedStride) * static_cast<VkDeviceSize>(meshletVertexCount);
+	if (expectedVertexBytes != packedVertexSize) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload packed vertex range is truncated for UUID " << ToHexString(meshId));
 		return;
 	}
 
-	struct MeshShaderVertex {
-		// SPIR-V storage buffers align float3 members to 16 bytes, so we keep
-		// explicit padding slots to match the shader's reflected 48-byte stride.
-		float position[4];
-		float normal[4];
-		float uv[2];
-		float padding[2];
+	struct MeshDecodeInfo
+	{
+		float positionOffset[4];
+		float positionScale[4];
+		float uvOffsetScale[4];
+		std::uint32_t counts[4];
 	};
+	static_assert(sizeof(MeshDecodeInfo) == 64, "Mesh decode info buffer must keep a stable 64-byte layout.");
 
-	static_assert(sizeof(MeshShaderVertex) == 48, "Mesh shader vertex payload must match reflected storage-buffer stride.");
+	MeshDecodeInfo decodeInfo{};
+	decodeInfo.positionOffset[0] = cpuMesh->header.quantization.positionOffset[0];
+	decodeInfo.positionOffset[1] = cpuMesh->header.quantization.positionOffset[1];
+	decodeInfo.positionOffset[2] = cpuMesh->header.quantization.positionOffset[2];
+	decodeInfo.positionScale[0] = cpuMesh->header.quantization.positionScale[0];
+	decodeInfo.positionScale[1] = cpuMesh->header.quantization.positionScale[1];
+	decodeInfo.positionScale[2] = cpuMesh->header.quantization.positionScale[2];
+	decodeInfo.uvOffsetScale[0] = cpuMesh->header.quantization.uvOffset[0];
+	decodeInfo.uvOffsetScale[1] = cpuMesh->header.quantization.uvOffset[1];
+	decodeInfo.uvOffsetScale[2] = cpuMesh->header.quantization.uvScale[0];
+	decodeInfo.uvOffsetScale[3] = cpuMesh->header.quantization.uvScale[1];
+	decodeInfo.counts[0] = cpuMesh->header.meshletVertexCount;
+	decodeInfo.counts[1] = cpuMesh->header.meshletVertexRemapCount;
+	decodeInfo.counts[2] = cpuMesh->header.meshletPrimitiveIndexCount;
+	// counts.w: bits [0:30] = meshletCount, bit 31 = remapEncoding (0=u32, 1=u16)
+	decodeInfo.counts[3] = (cpuMesh->header.meshletCount & 0x7FFFFFFFu) | (cpuMesh->header.meshletVertexRemapEncoding << 31u);
 
-	auto DecodeSnorm10 = [](uint32_t packedValue, uint32_t bitOffset) -> float {
-		int32_t value = static_cast<int32_t>((packedValue >> bitOffset) & 0x3FFu);
-		if ((value & 0x200) != 0) {
-			value |= ~0x3FF;
-		}
-		float normalized = static_cast<float>(value) / 511.0f;
-		if (normalized < -1.0f) {
-			normalized = -1.0f;
-		}
-		if (normalized > 1.0f) {
-			normalized = 1.0f;
-		}
-		return normalized;
-	};
-
-	auto DecodeUnorm16 = [](uint32_t packedValue, uint32_t bitOffset) -> float {
-		const uint32_t value = (packedValue >> bitOffset) & 0xFFFFu;
-		return static_cast<float>(value) / 65535.0f;
-	};
-
-	std::vector<MeshShaderVertex> meshShaderVertices;
-	meshShaderVertices.resize(meshletVertexCount);
-	const std::uint8_t* packedVertexBytes = cpuMesh->meshletVertexData.data();
-	for (uint32_t vertexIndex = 0; vertexIndex < meshletVertexCount; ++vertexIndex) {
-		const size_t baseOffset = static_cast<size_t>(vertexIndex) * static_cast<size_t>(packedStride);
-		uint32_t packedPosition = 0;
-		uint32_t packedNormal = 0;
-		uint32_t packedUv = 0;
-
-		memcpy(&packedPosition, packedVertexBytes + baseOffset + 0, sizeof(uint32_t));
-		memcpy(&packedNormal, packedVertexBytes + baseOffset + 4, sizeof(uint32_t));
-		memcpy(&packedUv, packedVertexBytes + baseOffset + 8, sizeof(uint32_t));
-
-		MeshShaderVertex& output = meshShaderVertices[vertexIndex];
-		const float qPosX = DecodeSnorm10(packedPosition, 0);
-		const float qPosY = DecodeSnorm10(packedPosition, 10);
-		const float qPosZ = DecodeSnorm10(packedPosition, 20);
-		output.position[0] = cpuMesh->header.quantization.positionOffset[0] + qPosX * cpuMesh->header.quantization.positionScale[0];
-		output.position[1] = cpuMesh->header.quantization.positionOffset[1] + qPosY * cpuMesh->header.quantization.positionScale[1];
-		output.position[2] = cpuMesh->header.quantization.positionOffset[2] + qPosZ * cpuMesh->header.quantization.positionScale[2];
-		output.position[3] = 1.0f;
-
-		output.normal[0] = DecodeSnorm10(packedNormal, 0);
-		output.normal[1] = DecodeSnorm10(packedNormal, 10);
-		output.normal[2] = DecodeSnorm10(packedNormal, 20);
-		output.normal[3] = 0.0f;
-
-		const float qUvX = DecodeUnorm16(packedUv, 0);
-		const float qUvY = DecodeUnorm16(packedUv, 16);
-		output.uv[0] = cpuMesh->header.quantization.uvOffset[0] + qUvX * cpuMesh->header.quantization.uvScale[0];
-		output.uv[1] = cpuMesh->header.quantization.uvOffset[1] + qUvY * cpuMesh->header.quantization.uvScale[1];
-		output.padding[0] = 0.0f;
-		output.padding[1] = 0.0f;
-	}
-
-	const VkDeviceSize meshShaderVertexSize = static_cast<VkDeviceSize>(meshShaderVertices.size() * sizeof(MeshShaderVertex));
-	if (meshShaderVertexSize == 0) {
-		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload decoded zero mesh shader vertices for UUID " << ToHexString(meshId));
-		return;
-	}
-
-	VulkanBuffer stagingVertex = CreateBuffer(vertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+	VulkanBuffer stagingPackedVertex = CreateBuffer(packedVertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 	void* data;
-	vmaMapMemory(allocator, stagingVertex.allocation, &data);
-	memcpy(data, cpuMesh->meshletVertexData.data(), vertexSize);
-	vmaUnmapMemory(allocator, stagingVertex.allocation);
+	vmaMapMemory(allocator, stagingPackedVertex.allocation, &data);
+	memcpy(data, cpuMesh->meshletVertexData.data(), static_cast<size_t>(packedVertexSize));
+	vmaUnmapMemory(allocator, stagingPackedVertex.allocation);
 
-	VulkanBuffer stagingMeshShaderVertex = CreateBuffer(meshShaderVertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	vmaMapMemory(allocator, stagingMeshShaderVertex.allocation, &data);
-	memcpy(data, meshShaderVertices.data(), static_cast<size_t>(meshShaderVertexSize));
-	vmaUnmapMemory(allocator, stagingMeshShaderVertex.allocation);
+	VulkanBuffer stagingVertexRemap = CreateBuffer(vertexRemapSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+	vmaMapMemory(allocator, stagingVertexRemap.allocation, &data);
+	// Zero-copy: upload raw on-disk bytes (u16 or u32) without CPU expansion.
+	memcpy(data, cpuMesh->meshletVertexRemapData.data(), static_cast<size_t>(vertexRemapSize));
+	vmaUnmapMemory(allocator, stagingVertexRemap.allocation);
+
+	VulkanBuffer stagingSkinning = { VK_NULL_HANDLE, VK_NULL_HANDLE, 0 };
+	if (skinningDataSize > 0)
+	{
+		stagingSkinning = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		vmaMapMemory(allocator, stagingSkinning.allocation, &data);
+		memcpy(data, cpuMesh->meshletSkinningData.data(), static_cast<size_t>(skinningDataSize));
+		vmaUnmapMemory(allocator, stagingSkinning.allocation);
+	}
 
 	VulkanBuffer stagingIndex = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 	vmaMapMemory(allocator, stagingIndex.allocation, &data);
-	memcpy(data, cpuMesh->meshletPrimitiveIndexData.data(), primitiveIndexSize);
+	memcpy(data, cpuMesh->meshletPrimitiveIndexData.data(), static_cast<size_t>(primitiveIndexSize));
 	vmaUnmapMemory(allocator, stagingIndex.allocation);
 
 	VulkanBuffer stagingMeshletTable = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
@@ -706,28 +680,47 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	memcpy(data, cpuMesh->meshletRecords.data(), static_cast<size_t>(meshletTableSize));
 	vmaUnmapMemory(allocator, stagingMeshletTable.allocation);
 
+	VulkanBuffer stagingDecodeInfo = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+	vmaMapMemory(allocator, stagingDecodeInfo.allocation, &data);
+	memcpy(data, &decodeInfo, sizeof(MeshDecodeInfo));
+	vmaUnmapMemory(allocator, stagingDecodeInfo.allocation);
+
 	VulkanMesh vMesh{};
-	// Keep packed data for any remaining non-mesh graphics pipeline usage.
-	vMesh.vertexBuffer = CreateBuffer(vertexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	// Mesh shader path uses a decoded float vertex stream to avoid quantization math per vertex.
-	vMesh.meshShaderVertexBuffer = CreateBuffer(meshShaderVertexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	vMesh.indexBuffer = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	// No CPU repack path: mesh shader reads the packed payload directly from storage buffers.
+	vMesh.meshShaderVertexBuffer = CreateBuffer(packedVertexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	vMesh.meshletVertexRemapBuffer = CreateBuffer(vertexRemapSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	if (skinningDataSize > 0)
+	{
+		vMesh.meshSkinningBuffer = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	}
+	vMesh.meshDecodeInfoBuffer = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	vMesh.indexBuffer = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	vMesh.meshletBuffer = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	vMesh.indexCount = cpuMesh->header.meshletPrimitiveIndexCount;
-	// Meshlet-only TEMF emits a 32-bit primitive index stream, so no legacy format switch remains.
-	vMesh.indexType = VK_INDEX_TYPE_UINT32;
+	vMesh.indexType = VK_INDEX_TYPE_UINT16;
 	vMesh.meshletCount = cpuMesh->header.meshletCount;
 
-	CopyBuffer(stagingVertex.buffer, vMesh.vertexBuffer.buffer, vertexSize);
-	CopyBuffer(stagingMeshShaderVertex.buffer, vMesh.meshShaderVertexBuffer.buffer, meshShaderVertexSize);
+	CopyBuffer(stagingPackedVertex.buffer, vMesh.meshShaderVertexBuffer.buffer, packedVertexSize);
+	CopyBuffer(stagingVertexRemap.buffer, vMesh.meshletVertexRemapBuffer.buffer, vertexRemapSize);
+	if (skinningDataSize > 0)
+	{
+		CopyBuffer(stagingSkinning.buffer, vMesh.meshSkinningBuffer.buffer, skinningDataSize);
+	}
+	CopyBuffer(stagingDecodeInfo.buffer, vMesh.meshDecodeInfoBuffer.buffer, sizeof(MeshDecodeInfo));
 	CopyBuffer(stagingIndex.buffer, vMesh.indexBuffer.buffer, primitiveIndexSize);
 	CopyBuffer(stagingMeshletTable.buffer, vMesh.meshletBuffer.buffer, meshletTableSize);
 
-	vmaDestroyBuffer(allocator, stagingVertex.buffer, stagingVertex.allocation);
-	vmaDestroyBuffer(allocator, stagingMeshShaderVertex.buffer, stagingMeshShaderVertex.allocation);
+	vmaDestroyBuffer(allocator, stagingPackedVertex.buffer, stagingPackedVertex.allocation);
+	vmaDestroyBuffer(allocator, stagingVertexRemap.buffer, stagingVertexRemap.allocation);
+	if (skinningDataSize > 0)
+	{
+		vmaDestroyBuffer(allocator, stagingSkinning.buffer, stagingSkinning.allocation);
+	}
+	vmaDestroyBuffer(allocator, stagingDecodeInfo.buffer, stagingDecodeInfo.allocation);
 	vmaDestroyBuffer(allocator, stagingIndex.buffer, stagingIndex.allocation);
 	vmaDestroyBuffer(allocator, stagingMeshletTable.buffer, stagingMeshletTable.allocation);
 
+	TERRAENGINE_LOG(LogLevel::Info, "gpuDirectPass=true cpu-repack-used=false remap-zero-copy=true skinning=" << (skinningDataSize > 0 ? "true" : "false") << " mesh=" << ToHexString(meshId));
 	meshCache[meshId] = vMesh;
 }
 
@@ -766,13 +759,17 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	// crashes when stale shader artifacts expose incomplete bindings.
 	if (!HasRequiredStorageBinding(0)
 		|| !HasRequiredStorageBinding(1)
-		|| !HasRequiredStorageBinding(2)) {
-		TERRAENGINE_LOG(LogLevel::Error, "Mesh shader descriptor set 1 must expose storage-buffer bindings 0, 1, and 2.");
+		|| !HasRequiredStorageBinding(2)
+		|| !HasRequiredStorageBinding(3)
+		|| !HasRequiredStorageBinding(4)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Mesh shader descriptor set 1 must expose storage-buffer bindings 0 through 4.");
 		return VK_NULL_HANDLE;
 	}
 
 	VulkanMesh& mesh = meshIt->second;
 	if (mesh.meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
+		|| mesh.meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
+		|| mesh.meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
 		|| mesh.indexBuffer.buffer == VK_NULL_HANDLE
 		|| mesh.meshletBuffer.buffer == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload buffers are not initialized for mesh shader descriptor binding.");
@@ -812,27 +809,44 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	meshletTableInfo.offset = 0;
 	meshletTableInfo.range = VK_WHOLE_SIZE;
 
-	std::array<VkWriteDescriptorSet, 3> writes{};
-	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[0].dstSet = descriptorSet;
-	writes[0].dstBinding = 0;
-	writes[0].descriptorCount = 1;
-	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writes[0].pBufferInfo = &vertexInfo;
+	VkDescriptorBufferInfo vertexRemapInfo{};
+	vertexRemapInfo.buffer = mesh.meshletVertexRemapBuffer.buffer;
+	vertexRemapInfo.offset = 0;
+	vertexRemapInfo.range = VK_WHOLE_SIZE;
 
-	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[1].dstSet = descriptorSet;
-	writes[1].dstBinding = 1;
-	writes[1].descriptorCount = 1;
-	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writes[1].pBufferInfo = &primitiveIndexInfo;
+	VkDescriptorBufferInfo decodeInfo{};
+	decodeInfo.buffer = mesh.meshDecodeInfoBuffer.buffer;
+	decodeInfo.offset = 0;
+	decodeInfo.range = VK_WHOLE_SIZE;
 
-	writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[2].dstSet = descriptorSet;
-	writes[2].dstBinding = 2;
-	writes[2].descriptorCount = 1;
-	writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writes[2].pBufferInfo = &meshletTableInfo;
+	VkDescriptorBufferInfo skinningInfo{};
+	bool hasSkinning = mesh.meshSkinningBuffer.buffer != VK_NULL_HANDLE;
+	if (hasSkinning)
+	{
+		skinningInfo.buffer = mesh.meshSkinningBuffer.buffer;
+		skinningInfo.offset = 0;
+		skinningInfo.range = VK_WHOLE_SIZE;
+	}
+
+	std::vector<VkWriteDescriptorSet> writes;
+	writes.reserve(6);
+
+	VkWriteDescriptorSet w{};
+	w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	w.dstSet = descriptorSet;
+	w.descriptorCount = 1;
+	w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+
+	w.dstBinding = 0; w.pBufferInfo = &vertexInfo; writes.push_back(w);
+	w.dstBinding = 1; w.pBufferInfo = &primitiveIndexInfo; writes.push_back(w);
+	w.dstBinding = 2; w.pBufferInfo = &meshletTableInfo; writes.push_back(w);
+	w.dstBinding = 3; w.pBufferInfo = &vertexRemapInfo; writes.push_back(w);
+	w.dstBinding = 4; w.pBufferInfo = &decodeInfo; writes.push_back(w);
+
+	if (hasSkinning && HasRequiredStorageBinding(5))
+	{
+		w.dstBinding = 5; w.pBufferInfo = &skinningInfo; writes.push_back(w);
+	}
 
 	vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 	mesh.descriptorSetsByLayout[layout] = descriptorSet;
@@ -1125,7 +1139,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 
 	attributeDescriptions[1].binding = 0;
 	attributeDescriptions[1].location = 1;
-	attributeDescriptions[1].format = VK_FORMAT_A2B10G10R10_SNORM_PACK32;
+	attributeDescriptions[1].format = VK_FORMAT_R16G16_SNORM;
 	attributeDescriptions[1].offset = 4;
 
 	attributeDescriptions[2].binding = 0;
