@@ -402,26 +402,18 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 		VulkanPipeline& pipeline = pipelineIt->second;
 		VulkanMesh& mesh = meshIt->second;
-		VkDescriptorSet meshDescriptorSet = VK_NULL_HANDLE;
-		if (pipeline.usesMeshShaders) {
-			meshDescriptorSet = impl->EnsureMeshDescriptorSet(command.meshId, pipeline);
-			if (meshDescriptorSet == VK_NULL_HANDLE) {
-				TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because mesh shader descriptor bindings were not created.");
-				continue;
-			}
-			if (mesh.meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
-				|| mesh.meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
-				|| mesh.meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
-				|| mesh.indexBuffer.buffer == VK_NULL_HANDLE
-				|| mesh.meshletBuffer.buffer == VK_NULL_HANDLE
-				|| mesh.meshletCount == 0) {
-				TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because meshlet payload buffers are unavailable.");
-				continue;
-			}
-		} else if (mesh.vertexBuffer.buffer == VK_NULL_HANDLE
+		VkDescriptorSet meshDescriptorSet = impl->EnsureMeshDescriptorSet(command.meshId, pipeline);
+		if (meshDescriptorSet == VK_NULL_HANDLE) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because mesh shader descriptor bindings were not created.");
+			continue;
+		}
+		if (mesh.meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
+			|| mesh.meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
+			|| mesh.meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
 			|| mesh.indexBuffer.buffer == VK_NULL_HANDLE
-			|| mesh.indexCount == 0) {
-			TERRAENGINE_LOG(LogLevel::Warning, "Skipping non-mesh draw because vertex/index buffers are unavailable.");
+			|| mesh.meshletBuffer.buffer == VK_NULL_HANDLE
+			|| mesh.meshletCount == 0) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because meshlet payload buffers are unavailable.");
 			continue;
 		}
 
@@ -556,19 +548,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 						|| draw.mesh == nullptr) {
 						continue;
 					}
-					if (draw.pipeline->usesMeshShaders
-						&& (draw.mesh->meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
-							|| draw.mesh->meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
-							|| draw.mesh->meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
-							|| draw.mesh->indexBuffer.buffer == VK_NULL_HANDLE
-							|| draw.mesh->meshletBuffer.buffer == VK_NULL_HANDLE
-							|| draw.mesh->meshletCount == 0)) {
-						continue;
-					}
-					if (!draw.pipeline->usesMeshShaders
-						&& (draw.mesh->vertexBuffer.buffer == VK_NULL_HANDLE
-							|| draw.mesh->indexBuffer.buffer == VK_NULL_HANDLE
-							|| draw.mesh->indexCount == 0)) {
+					if (draw.mesh->meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
+						|| draw.mesh->meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
+						|| draw.mesh->meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
+						|| draw.mesh->indexBuffer.buffer == VK_NULL_HANDLE
+						|| draw.mesh->meshletBuffer.buffer == VK_NULL_HANDLE
+						|| draw.mesh->meshletCount == 0) {
 						continue;
 					}
 					vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->pipeline);
@@ -578,15 +563,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 					if (draw.pipeline->supportsDefaultPushConstants) {
 						vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &draw.push);
 					}
-					if (draw.pipeline->usesMeshShaders) {
-						vkCmdDrawMeshTasksEXT(secondary, draw.mesh->meshletCount, 1, 1);
-					} else {
-						VkBuffer vertexBuffers[] = {draw.mesh->vertexBuffer.buffer};
-						VkDeviceSize offsets[] = {0};
-						vkCmdBindVertexBuffers(secondary, 0, 1, vertexBuffers, offsets);
-						vkCmdBindIndexBuffer(secondary, draw.mesh->indexBuffer.buffer, 0, draw.mesh->indexType);
-						vkCmdDrawIndexed(secondary, draw.mesh->indexCount, 1, 0, 0, 0);
-					}
+					
+					vkCmdDrawMeshTasksEXT(secondary, draw.mesh->meshletCount, 1, 1);
 				}
 				vkEndCommandBuffer(secondary);
 				return secondary;
@@ -1068,7 +1046,6 @@ void VulkanContext::Impl::ClearResources() {
 		}
 
 		vmaDestroyBuffer(allocator, mesh.indexBuffer.buffer, mesh.indexBuffer.allocation);
-		vmaDestroyBuffer(allocator, mesh.vertexBuffer.buffer, mesh.vertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshShaderVertexBuffer.buffer, mesh.meshShaderVertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletVertexRemapBuffer.buffer, mesh.meshletVertexRemapBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshDecodeInfoBuffer.buffer, mesh.meshDecodeInfoBuffer.allocation);

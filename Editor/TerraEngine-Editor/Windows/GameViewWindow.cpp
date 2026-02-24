@@ -7,15 +7,6 @@
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include "GameViewWindow.h"
-#include "../Subsystems/MainEditorSubsystem.h"
-#include "Engine/Renderer/RenderSystem.h"
-#include "Engine/Scene/CameraComponent.h"
-#include "Engine/Core/Object/Transform.h"
-#include "Engine/Core/Object/ObjectManager.h"
-#include <imgui.h>
-#include <glm/gtc/matrix_transform.hpp>
-
 GameViewWindow::GameViewWindow(MainEditorSubsystem* owner)
     : EditorWindow("Game View"), m_Owner(owner) {
     m_AspectRatios.push_back({ "Free Aspect", 0.0f, 0.0f, false });
@@ -30,7 +21,7 @@ void GameViewWindow::OnGui() {
     // --- Toolbar ---
     ImGui::SetNextItemWidth(150);
     if (ImGui::BeginCombo("##aspect", m_AspectRatios[m_SelectedAspectRatioIndex].Name.c_str())) {
-        for (int i = 0; i < m_AspectRatios.size(); i++) {
+        for (int i = 0; i < (int)m_AspectRatios.size(); i++) {
             bool isSelected = (m_SelectedAspectRatioIndex == i);
             if (ImGui::Selectable(m_AspectRatios[i].Name.c_str(), isSelected)) {
                 m_SelectedAspectRatioIndex = i;
@@ -87,6 +78,8 @@ void GameViewWindow::OnGui() {
     if (aspect <= 0.0f) aspect = 1.0f;
 
     auto cameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
+    bool hasCameras = !cameras.empty();
+
     for (auto obj : cameras) {
         Transform* transform = obj.getComponent<Transform>();
         CameraComponent* camera = obj.getComponent<CameraComponent>();
@@ -113,7 +106,7 @@ void GameViewWindow::OnGui() {
     // Draw Background filling available area (using window background color)
     ImGui::GetWindowDrawList()->AddRectFilled(cursorPos, ImVec2(cursorPos.x + availableSize.x, cursorPos.y + availableSize.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
 
-    if (texID) {
+    if (texID && hasCameras) {
         // Center the image
         float xOffset = (availableSize.x - imageSize.x) * 0.5f;
         float yOffset = (availableSize.y - imageSize.y) * 0.5f;
@@ -127,9 +120,10 @@ void GameViewWindow::OnGui() {
         ImGui::PopClipRect();
     } else {
         // Centered text
-        const char* text = "No Camera Rendering";
+        const char* text = !hasCameras ? "No objects with cameras in the hierarchy" : "No Camera Rendering";
         ImVec2 textSize = ImGui::CalcTextSize(text);
         ImGui::SetCursorScreenPos(ImVec2(cursorPos.x + (availableSize.x - textSize.x) * 0.5f, cursorPos.y + (availableSize.y - textSize.y) * 0.5f));
         ImGui::Text("%s", text);
     }
 }
+

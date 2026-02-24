@@ -74,7 +74,6 @@ struct VulkanImage {
 
 // Mesh buffers cached on the GPU.
 struct VulkanMesh {
-	VulkanBuffer vertexBuffer;
 	VulkanBuffer meshShaderVertexBuffer;
 	VulkanBuffer meshletVertexRemapBuffer;
 	VulkanBuffer meshSkinningBuffer;
@@ -95,7 +94,6 @@ struct VulkanPipeline {
 	std::vector<std::vector<DescriptorBinding>> bindingsPerSet;
 	std::vector<VkPushConstantRange> pushConstants;
 	bool supportsDefaultPushConstants = false;
-	bool usesMeshShaders = false;
 	VkShaderStageFlags defaultPushConstantStages = 0;
 };
 

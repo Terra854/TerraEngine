@@ -562,7 +562,6 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 			}
 			it->second.descriptorSetsByLayout.clear();
 		}
-		vmaDestroyBuffer(allocator, it->second.vertexBuffer.buffer, it->second.vertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshShaderVertexBuffer.buffer, it->second.meshShaderVertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshletVertexRemapBuffer.buffer, it->second.meshletVertexRemapBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshSkinningBuffer.buffer, it->second.meshSkinningBuffer.allocation);
@@ -727,10 +726,6 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline) {
 	auto meshIt = meshCache.find(meshId);
 	if (meshIt == meshCache.end()) {
-		return VK_NULL_HANDLE;
-	}
-
-	if (!pipeline.usesMeshShaders) {
 		return VK_NULL_HANDLE;
 	}
 
@@ -911,7 +906,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 			pushConstantMerge[key] |= vkStages;
 			if (pc.offsetBytes == 0
 				&& pc.sizeBytes >= sizeof(PushConstants)
-				&& (vkStages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_MESH_BIT_EXT))) {
+				&& (vkStages & VK_SHADER_STAGE_MESH_BIT_EXT)) {
 				supportsDefaultPushConstants = true;
 			}
 		}
@@ -929,7 +924,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		VkPushConstantRange fallback{};
 		fallback.offset = 0;
 		fallback.size = sizeof(PushConstants);
-		fallback.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
+		fallback.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_TASK_BIT_EXT;
 		pushConstants.push_back(fallback);
 		supportsDefaultPushConstants = true;
 	}
@@ -1037,7 +1032,6 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	}
 
 	std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
-	bool hasVertexStage = false;
 	bool hasMeshStage = false;
 	bool hasTaskStage = false;
 	for (auto& stage : collection->stages) {
@@ -1056,11 +1050,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 			
 			VkPipelineShaderStageCreateInfo stageInfo{};
 			stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			if (stage.stage == ShaderStage::Vertex) {
-				stageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
-				hasVertexStage = true;
-			}
-			else if (stage.stage == ShaderStage::Fragment) {
+			if (stage.stage == ShaderStage::Fragment) {
 				stageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 			}
 			else if (stage.stage == ShaderStage::Mesh) {
@@ -1098,8 +1088,8 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 		return;
 	}
 
-	if (hasMeshStage && hasVertexStage) {
-		TERRAENGINE_LOG(LogLevel::Error, "Shader collection mixes vertex and mesh stages in one graphics pipeline, which is invalid.");
+	if (!hasMeshStage) {
+		TERRAENGINE_LOG(LogLevel::Error, "Graphics pipeline must include a mesh stage in this renderer.");
 		for (auto& stage : shaderStages) {
 			vkDestroyShaderModule(device, stage.module, nullptr);
 		}
@@ -1125,43 +1115,12 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 		return;
 	}
 
-	VkVertexInputBindingDescription bindingDescription{};
-	bindingDescription.binding = 0;
-	bindingDescription.stride = 12;
-	bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-	std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
-	
-	attributeDescriptions[0].binding = 0;
-	attributeDescriptions[0].location = 0;
-	attributeDescriptions[0].format = VK_FORMAT_A2B10G10R10_SNORM_PACK32;
-	attributeDescriptions[0].offset = 0;
-
-	attributeDescriptions[1].binding = 0;
-	attributeDescriptions[1].location = 1;
-	attributeDescriptions[1].format = VK_FORMAT_R16G16_SNORM;
-	attributeDescriptions[1].offset = 4;
-
-	attributeDescriptions[2].binding = 0;
-	attributeDescriptions[2].location = 2;
-	attributeDescriptions[2].format = VK_FORMAT_R16G16_UNORM;
-	attributeDescriptions[2].offset = 8;
-
 	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
 	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	if (hasMeshStage) {
-		// Mesh shader pipelines fetch geometry from storage buffers, so fixed
-		// function vertex bindings stay empty.
-		vertexInputInfo.vertexBindingDescriptionCount = 0;
-		vertexInputInfo.pVertexBindingDescriptions = nullptr;
-		vertexInputInfo.vertexAttributeDescriptionCount = 0;
-		vertexInputInfo.pVertexAttributeDescriptions = nullptr;
-	} else {
-		vertexInputInfo.vertexBindingDescriptionCount = 1;
-		vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-		vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-		vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
-	}
+	vertexInputInfo.vertexBindingDescriptionCount = 0;
+	vertexInputInfo.pVertexBindingDescriptions = nullptr;
+	vertexInputInfo.vertexAttributeDescriptionCount = 0;
+	vertexInputInfo.pVertexAttributeDescriptions = nullptr;
 
 	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
 	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -1286,9 +1245,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 		defaultPushConstantStages |= range.stageFlags;
 	}
 	if (defaultPushConstantStages == 0) {
-		defaultPushConstantStages = hasMeshStage
-			? (VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT)
-			: (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+		defaultPushConstantStages = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	}
 
 	VulkanPipeline pipeline{};
@@ -1298,7 +1255,6 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	pipeline.bindingsPerSet = std::move(bindingsPerSet);
 	pipeline.pushConstants = std::move(pushConstants);
 	pipeline.supportsDefaultPushConstants = supportsDefaultPushConstants;
-	pipeline.usesMeshShaders = hasMeshStage;
 	pipeline.defaultPushConstantStages = defaultPushConstantStages;
 
 	pipelineCache[renderPass][key] = std::move(pipeline);
