@@ -4,6 +4,7 @@
 #include "Window/WindowSystem.h"
 #include "Scene/CameraComponent.h"
 #include "Scene/MeshRenderComponent.h"
+#include "Scene/LightComponent.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Transform.h"
 #include "Resource/ResourceManager.h"
@@ -15,6 +16,7 @@
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <algorithm>
+#include <cmath>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
@@ -165,6 +167,43 @@ void RenderSystem::Update(float deltaTime)
 		);
 	}
 
+	// Snapshot scene light components so packing can run in worker tasks without
+	// touching the entity registry after this point.
+	FrameVector<LightEntry> lights;
+	lights.reserve(256);
+	objManager.forEachObjectWithComponents<Transform, LightComponent>(
+		[&](Object object, Transform& transform, LightComponent& lightComp)
+		{
+			LightComponent reflectedLight{};
+			const std::uint32_t encodedType = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "type");
+			if (encodedType > static_cast<std::uint32_t>(LightType::Spot))
+			{
+				// Unsupported legacy light types are intentionally skipped so they
+				// are not silently remapped to another runtime behavior.
+				return;
+			}
+			reflectedLight.type = static_cast<LightType>(encodedType);
+			reflectedLight.color = GetComponentProperty<LightComponent, glm::vec3>(lightComp, "color");
+			reflectedLight.intensity = GetComponentProperty<LightComponent, float>(lightComp, "intensity");
+			reflectedLight.range = GetComponentProperty<LightComponent, float>(lightComp, "range");
+			reflectedLight.innerConeAngle = GetComponentProperty<LightComponent, float>(lightComp, "innerConeAngle");
+			reflectedLight.outerConeAngle = GetComponentProperty<LightComponent, float>(lightComp, "outerConeAngle");
+			reflectedLight.width = GetComponentProperty<LightComponent, float>(lightComp, "width");
+			reflectedLight.height = GetComponentProperty<LightComponent, float>(lightComp, "height");
+			reflectedLight.castsShadows = GetComponentProperty<LightComponent, bool>(lightComp, "castsShadows");
+
+			lights.push_back({ object.EntityId(), reflectedLight });
+			if (!localTransforms.contains(object.EntityId()))
+			{
+				Transform reflectedTransform{};
+				reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+				reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+				reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+				localTransforms.emplace(object.EntityId(), reflectedTransform);
+			}
+		}
+	);
+
 	// Cache of computed world transforms to avoid recomputing during traversal.
     FrameMap<entt::entity, Transform> worldTransforms;
     worldTransforms.reserve(localTransforms.size());
@@ -212,6 +251,14 @@ void RenderSystem::Update(float deltaTime)
         VisitingStack visiting;
         visiting.reserve(16);
 		for (const auto& entry : renderables)
+		{
+			computeWorldTransform(computeWorldTransform, entry.entity, visiting);
+		}
+		for (const auto& entry : lights)
+		{
+			computeWorldTransform(computeWorldTransform, entry.entity, visiting);
+		}
+		for (const auto& entry : cameras)
 		{
 			computeWorldTransform(computeWorldTransform, entry.entity, visiting);
 		}
@@ -287,10 +334,90 @@ void RenderSystem::Update(float deltaTime)
 		}
 	}
 
+	// Pack reflected lights in parallel so large scenes keep the CPU upload path
+	// scalable while preserving deterministic ordering per frame.
+	std::vector<GPULight> packedLights;
+	if (!lights.empty())
+	{
+		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
+		const size_t taskCount = std::min(lights.size(), workerCount);
+		const size_t chunkSize = (lights.size() + taskCount - 1) / taskCount;
+
+		std::vector<std::future<std::vector<GPULight>>> futures;
+		futures.reserve(taskCount);
+
+		for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
+		{
+			const size_t start = taskIndex * chunkSize;
+			if (start >= lights.size())
+			{
+				break;
+			}
+			const size_t end = std::min(lights.size(), start + chunkSize);
+
+			auto task = ThreadPool::instance().createTask([start, end, &lights, &worldTransforms]() {
+				std::vector<GPULight> chunkLights;
+				chunkLights.reserve(end - start);
+
+				for (size_t i = start; i < end; ++i)
+				{
+					const LightEntry& entry = lights[i];
+					const Transform transform = worldTransforms.at(entry.entity);
+					const LightComponent& light = entry.light;
+
+					const glm::quat normalizedRotation = glm::normalize(transform.rotation);
+					glm::vec3 direction = normalizedRotation * glm::vec3(0.0f, 0.0f, -1.0f);
+					if (!std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z) || glm::length(direction) < 1e-5f)
+					{
+						direction = glm::vec3(0.0f, -1.0f, 0.0f);
+					}
+					else
+					{
+						direction = glm::normalize(direction);
+					}
+
+					const float clampedIntensity = std::max(light.intensity, 0.0f);
+					const float clampedRange = std::max(light.range, 0.001f);
+					const float clampedInnerAngle = std::clamp(light.innerConeAngle, 0.0f, 1.56f);
+					const float clampedOuterAngle = std::clamp(std::max(light.outerConeAngle, clampedInnerAngle + 0.001f), 0.0f, 1.57f);
+
+					GPULight gpuLight{};
+					gpuLight.positionAndType = glm::vec4(transform.position, static_cast<float>(static_cast<std::uint32_t>(light.type)));
+					gpuLight.directionAndRange = glm::vec4(direction, clampedRange);
+					gpuLight.colorAndIntensity = glm::vec4(
+						std::max(light.color.x, 0.0f),
+						std::max(light.color.y, 0.0f),
+						std::max(light.color.z, 0.0f),
+						clampedIntensity);
+					gpuLight.coneAnglesAndArea = glm::vec4(
+						std::cos(clampedInnerAngle),
+						std::cos(clampedOuterAngle),
+						std::max(light.width, 0.001f),
+						std::max(light.height, 0.001f));
+					gpuLight.shadowAndPadding = glm::vec4(light.castsShadows ? 1.0f : 0.0f, -1.0f, 0.0f, 0.0f);
+
+					chunkLights.push_back(gpuLight);
+				}
+
+				return chunkLights;
+			});
+
+			futures.push_back(task->getFuture());
+			ThreadPool::instance().enqueue(task);
+		}
+
+		for (auto& future : futures)
+		{
+			auto chunk = future.get();
+			packedLights.insert(packedLights.end(), chunk.begin(), chunk.end());
+		}
+	}
+
 	FrameRenderData frameData;
 	frameData.deltaTimeSeconds = deltaTime;
 	frameData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
 	frameData.cullingEpsilon = 0.001f;
+	frameData.lights = std::move(packedLights);
 	frameData.commands = drawCommands;
 
 	rhi->SetGlobalTaskShaderCullingEnabled(taskShaderCullingEnabled);

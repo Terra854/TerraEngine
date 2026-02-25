@@ -4,16 +4,44 @@
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Scene/LightComponent.h"
 #include "AssetDatabase.h"
 #include "Engine/File Formats/TerraEngineMaterialFile.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 #include <imgui.h>
+#include <glm/geometric.hpp>
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/trigonometric.hpp>
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <filesystem>
+#include <limits>
+
+namespace
+{
+// Convert internal registry keys like "LightComponent" to user-facing names.
+// This keeps serialization/component lookup stable while matching editor UX labels.
+std::string BuildDisplayComponentName(const std::string& componentName)
+{
+	if (componentName == "LightComponent")
+	{
+		return "Light";
+	}
+
+	const std::string componentSuffix = "Component";
+	if (componentName.size() > componentSuffix.size()
+		&& componentName.compare(componentName.size() - componentSuffix.size(), componentSuffix.size(), componentSuffix) == 0)
+	{
+		return componentName.substr(0, componentName.size() - componentSuffix.size());
+	}
+
+	return componentName;
+}
+}
 
 // Command that records a property change on a component. Captures the 
 // previous and next values to allow bidirectional state switching.
@@ -126,6 +154,17 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
         endEditing();
 		UpdateInspectorDragState();
 	}
+	else if (type == rttr::type::get<std::uint32_t>()) {
+		std::uint32_t val = var.get_value<std::uint32_t>();
+		int signedValue = static_cast<int>(val);
+		if (ImGui::DragInt(name.c_str(), &signedValue, 1.0f, 0, std::numeric_limits<int>::max())) {
+			const std::uint32_t clampedValue = static_cast<std::uint32_t>(std::max(0, signedValue));
+			access.setter(obj, name, clampedValue);
+		}
+		startEditing();
+		endEditing();
+		UpdateInspectorDragState();
+	}
 	else if (type == rttr::type::get<bool>()) {
 		bool val = var.get_value<bool>();
 		if (ImGui::Checkbox(name.c_str(), &val)) {
@@ -219,6 +258,193 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 				}
 			}
 			ImGui::EndDragDropTarget();
+		}
+	}
+}
+
+void InspectorWindow::DrawLightComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access)
+{
+	// Keep undo/redo granular by committing only fields that changed through
+	// this custom inspector layout.
+	auto setFloatPropertyWithUndo = [&](const char* propertyName, float newValue) {
+		rttr::variant oldVariant = access.getter(obj, propertyName);
+		if (!oldVariant.is_valid() || !oldVariant.is_type<float>())
+		{
+			return;
+		}
+
+		const float oldValue = oldVariant.get_value<float>();
+		if (std::abs(oldValue - newValue) <= 0.0001f)
+		{
+			return;
+		}
+
+		access.setter(obj, propertyName, newValue);
+		rttr::variant nextVariant = access.getter(obj, propertyName);
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
+	};
+
+	auto setBoolPropertyWithUndo = [&](const char* propertyName, bool newValue) {
+		rttr::variant oldVariant = access.getter(obj, propertyName);
+		if (!oldVariant.is_valid() || !oldVariant.is_type<bool>())
+		{
+			return;
+		}
+
+		const bool oldValue = oldVariant.get_value<bool>();
+		if (oldValue == newValue)
+		{
+			return;
+		}
+
+		access.setter(obj, propertyName, newValue);
+		rttr::variant nextVariant = access.getter(obj, propertyName);
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
+	};
+
+	auto setUintPropertyWithUndo = [&](const char* propertyName, std::uint32_t newValue) {
+		rttr::variant oldVariant = access.getter(obj, propertyName);
+		if (!oldVariant.is_valid() || !oldVariant.is_type<std::uint32_t>())
+		{
+			return;
+		}
+
+		const std::uint32_t oldValue = oldVariant.get_value<std::uint32_t>();
+		if (oldValue == newValue)
+		{
+			return;
+		}
+
+		access.setter(obj, propertyName, newValue);
+		rttr::variant nextVariant = access.getter(obj, propertyName);
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
+	};
+
+	auto setVec3PropertyWithUndo = [&](const char* propertyName, const glm::vec3& newValue) {
+		rttr::variant oldVariant = access.getter(obj, propertyName);
+		if (!oldVariant.is_valid() || !oldVariant.is_type<glm::vec3>())
+		{
+			return;
+		}
+
+		const glm::vec3 oldValue = oldVariant.get_value<glm::vec3>();
+		if (glm::length(oldValue - newValue) <= 0.0001f)
+		{
+			return;
+		}
+
+		access.setter(obj, propertyName, newValue);
+		rttr::variant nextVariant = access.getter(obj, propertyName);
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
+	};
+
+	constexpr std::uint32_t kMaxAuthorableType = static_cast<std::uint32_t>(LightType::Spot);
+	std::uint32_t encodedType = static_cast<std::uint32_t>(LightType::Point);
+	if (rttr::variant typeVariant = access.getter(obj, "type"); typeVariant.is_valid() && typeVariant.is_type<std::uint32_t>())
+	{
+		encodedType = typeVariant.get_value<std::uint32_t>();
+	}
+	const bool hasUnsupportedType = encodedType > kMaxAuthorableType;
+	std::uint32_t effectiveType = hasUnsupportedType ? static_cast<std::uint32_t>(LightType::Point) : encodedType;
+
+	const ImGuiTreeNodeFlags sectionFlags = ImGuiTreeNodeFlags_DefaultOpen;
+	if (ImGui::CollapsingHeader("General", sectionFlags))
+	{
+		const char* lightTypes[] = { "Directional", "Point", "Spot" };
+		if (hasUnsupportedType)
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.24f, 1.0f), "Unsupported legacy light type value: %u", encodedType);
+			ImGui::TextUnformatted("Select a supported type to replace it.");
+		}
+
+		int typeIndex = hasUnsupportedType
+			? static_cast<int>(LightType::Point)
+			: static_cast<int>(effectiveType);
+		if (ImGui::Combo("Type", &typeIndex, lightTypes, IM_ARRAYSIZE(lightTypes)))
+		{
+			typeIndex = std::clamp(typeIndex, 0, static_cast<int>(kMaxAuthorableType));
+			effectiveType = static_cast<std::uint32_t>(typeIndex);
+			setUintPropertyWithUndo("type", effectiveType);
+		}
+	}
+
+	if (ImGui::CollapsingHeader("Emission", sectionFlags))
+	{
+		glm::vec3 lightColor = glm::vec3(1.0f);
+		if (rttr::variant colorVariant = access.getter(obj, "color"); colorVariant.is_valid() && colorVariant.is_type<glm::vec3>())
+		{
+			lightColor = colorVariant.get_value<glm::vec3>();
+		}
+		if (ImGui::ColorEdit3("Filter", &lightColor.x))
+		{
+			setVec3PropertyWithUndo("color", lightColor);
+		}
+
+		float intensity = 1.0f;
+		if (rttr::variant intensityVariant = access.getter(obj, "intensity"); intensityVariant.is_valid() && intensityVariant.is_type<float>())
+		{
+			intensity = intensityVariant.get_value<float>();
+		}
+		if (ImGui::DragFloat("Intensity", &intensity, 0.05f, 0.0f, 10000.0f))
+		{
+			setFloatPropertyWithUndo("intensity", std::max(0.0f, intensity));
+		}
+		UpdateInspectorDragState();
+
+		const bool isDirectional = effectiveType == static_cast<std::uint32_t>(LightType::Directional);
+		const bool isSpot = effectiveType == static_cast<std::uint32_t>(LightType::Spot);
+
+		if (!isDirectional)
+		{
+			float range = 10.0f;
+			if (rttr::variant rangeVariant = access.getter(obj, "range"); rangeVariant.is_valid() && rangeVariant.is_type<float>())
+			{
+				range = rangeVariant.get_value<float>();
+			}
+			if (ImGui::DragFloat("Range", &range, 0.1f, 0.1f, 10000.0f))
+			{
+				setFloatPropertyWithUndo("range", std::max(0.1f, range));
+			}
+			UpdateInspectorDragState();
+		}
+
+		if (isSpot)
+		{
+			float innerDegrees = 20.0f;
+			float outerDegrees = 30.0f;
+			if (rttr::variant innerVariant = access.getter(obj, "innerConeAngle"); innerVariant.is_valid() && innerVariant.is_type<float>())
+			{
+				innerDegrees = glm::degrees(innerVariant.get_value<float>());
+			}
+			if (rttr::variant outerVariant = access.getter(obj, "outerConeAngle"); outerVariant.is_valid() && outerVariant.is_type<float>())
+			{
+				outerDegrees = glm::degrees(outerVariant.get_value<float>());
+			}
+
+			const bool innerEdited = ImGui::DragFloat("Inner Angle", &innerDegrees, 0.1f, 0.0f, 89.0f, "%.1f deg");
+			UpdateInspectorDragState();
+			const bool outerEdited = ImGui::DragFloat("Outer Angle", &outerDegrees, 0.1f, 0.1f, 89.9f, "%.1f deg");
+			UpdateInspectorDragState();
+			if (innerEdited || outerEdited)
+			{
+				innerDegrees = std::clamp(innerDegrees, 0.0f, 89.0f);
+				outerDegrees = std::clamp(outerDegrees, innerDegrees + 0.1f, 89.9f);
+				setFloatPropertyWithUndo("innerConeAngle", glm::radians(innerDegrees));
+				setFloatPropertyWithUndo("outerConeAngle", glm::radians(outerDegrees));
+			}
+		}
+	}
+
+	if (ImGui::CollapsingHeader("Shadows", sectionFlags))
+	{
+		bool castsShadows = false;
+		if (rttr::variant castVariant = access.getter(obj, "castsShadows"); castVariant.is_valid() && castVariant.is_type<bool>())
+		{
+			castsShadows = castVariant.get_value<bool>();
+		}
+		if (ImGui::Checkbox("Realtime Shadows", &castsShadows))
+		{
+			setBoolPropertyWithUndo("castsShadows", castsShadows);
 		}
 	}
 }
@@ -323,6 +549,7 @@ void InspectorWindow::OnGui() {
                 std::string compName = inspectorComponentOrder[i];
                 if (accessReg.find(compName) == accessReg.end()) continue;
                 ComponentAccessFunctions& access = accessReg[compName];
+				const std::string displayName = BuildDisplayComponentName(compName);
 
                 if (!access.hasComponent(obj)) continue; 
 
@@ -353,7 +580,7 @@ void InspectorWindow::OnGui() {
                     if (ImGui::BeginDragDropSource()) {
                         int sourceIdx = (int)i;
                         ImGui::SetDragDropPayload("COMPONENT_ORDER", &sourceIdx, sizeof(int));
-                        ImGui::Text("Reorder %s", compName.c_str());
+                        ImGui::Text("Reorder %s", displayName.c_str());
                         ImGui::EndDragDropSource();
                     }
                     if (ImGui::BeginDragDropTarget()) {
@@ -403,17 +630,24 @@ void InspectorWindow::OnGui() {
 
                 ImGui::SameLine();
                 ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted(compName.c_str());
+                ImGui::TextUnformatted(displayName.c_str());
 
                 ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + lineHeight));
                 ImGui::Dummy(ImVec2(0,0));
 
                 if (isOpen) {
                     ImGui::Indent();
-                    for (auto prop : type.get_properties()) {
-                        if (prop.get_name() == "active") continue;
-                        DrawProperty(compName, prop, obj, access);
-                    }
+					if (compName == "LightComponent")
+					{
+						DrawLightComponentInspector(compName, obj, access);
+					}
+					else
+					{
+						for (auto prop : type.get_properties()) {
+							if (prop.get_name() == "active") continue;
+							DrawProperty(compName, prop, obj, access);
+						}
+					}
                     ImGui::Unindent();
                 }
                 ImGui::Separator();
@@ -438,21 +672,29 @@ void InspectorWindow::OnGui() {
                         availableComponents.push_back(name);
                     }
                 }
-                std::sort(availableComponents.begin(), availableComponents.end());
+				std::sort(availableComponents.begin(), availableComponents.end(), [](const std::string& lhs, const std::string& rhs) {
+					return BuildDisplayComponentName(lhs) < BuildDisplayComponentName(rhs);
+				});
 
                 for (const auto& compName : availableComponents) {
+					const std::string displayName = BuildDisplayComponentName(compName);
                     if (searchBuf[0] != '\0') {
                         std::string lowerName = compName;
+						std::string lowerDisplayName = displayName;
                         std::string lowerFilter = searchBuf;
                         std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+						std::transform(lowerDisplayName.begin(), lowerDisplayName.end(), lowerDisplayName.begin(), ::tolower);
                         std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
-                        if (lowerName.find(lowerFilter) == std::string::npos) continue;
+						if (lowerName.find(lowerFilter) == std::string::npos
+							&& lowerDisplayName.find(lowerFilter) == std::string::npos) continue;
                     }
 
-                    if (ImGui::Selectable(compName.c_str())) {
+					ImGui::PushID(compName.c_str());
+                    if (ImGui::Selectable(displayName.c_str())) {
                         accessReg[compName].addComponent(obj);
                         ImGui::CloseCurrentPopup();
                     }
+					ImGui::PopID();
                 }
                 ImGui::EndPopup();
             }

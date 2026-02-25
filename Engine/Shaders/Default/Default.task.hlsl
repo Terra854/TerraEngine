@@ -24,6 +24,8 @@ struct FrameCullingData
 {
 	float4 frustumPlanes[6];
 	float4 cameraPositionAndEpsilon;
+	uint4 clusterGridAndLightCount;
+	float4 clusterDepthAndViewport;
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
 	uint reserved0;

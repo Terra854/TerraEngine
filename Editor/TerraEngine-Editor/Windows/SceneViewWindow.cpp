@@ -8,13 +8,198 @@
 #include "Engine/Core/Object/Transform.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/CameraComponent.h"
+#include "Engine/Scene/LightComponent.h"
 #include <imgui.h>
 #include <ImGuizmo.h>
 #include <entt/entt.hpp>
+#include <algorithm>
+#include <cstdint>
+#include <cmath>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
+#include <glm/gtc/constants.hpp>
+
+namespace
+{
+glm::vec3 SafeNormalize(const glm::vec3& value, const glm::vec3& fallback)
+{
+	if (!std::isfinite(value.x) || !std::isfinite(value.y) || !std::isfinite(value.z))
+	{
+		return fallback;
+	}
+
+	const float length = glm::length(value);
+	if (length <= 0.0001f)
+	{
+		return fallback;
+	}
+
+	return value / length;
+}
+
+void BuildBasisFromDirection(const glm::vec3& direction, glm::vec3& outRight, glm::vec3& outUp)
+{
+	const glm::vec3 fallbackUp = (std::abs(glm::dot(direction, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
+		? glm::vec3(1.0f, 0.0f, 0.0f)
+		: glm::vec3(0.0f, 1.0f, 0.0f);
+	outRight = SafeNormalize(glm::cross(direction, fallbackUp), glm::vec3(1.0f, 0.0f, 0.0f));
+	outUp = SafeNormalize(glm::cross(outRight, direction), glm::vec3(0.0f, 1.0f, 0.0f));
+}
+
+bool ProjectWorldPoint(
+	const glm::vec3& worldPosition,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize,
+	ImVec2& outScreenPosition)
+{
+	const glm::vec4 clipPosition = viewProjection * glm::vec4(worldPosition, 1.0f);
+	if (clipPosition.w <= 0.0001f)
+	{
+		return false;
+	}
+
+	const glm::vec3 ndc = glm::vec3(clipPosition) / clipPosition.w;
+	outScreenPosition.x = viewportPos.x + (ndc.x + 1.0f) * 0.5f * viewportSize.x;
+	outScreenPosition.y = viewportPos.y + (1.0f - ndc.y) * 0.5f * viewportSize.y;
+	return true;
+}
+
+void DrawWorldLine(
+	ImDrawList* drawList,
+	const glm::vec3& worldStart,
+	const glm::vec3& worldEnd,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize,
+	ImU32 color,
+	float thickness)
+{
+	ImVec2 screenStart{};
+	ImVec2 screenEnd{};
+	if (!ProjectWorldPoint(worldStart, viewProjection, viewportPos, viewportSize, screenStart)
+		|| !ProjectWorldPoint(worldEnd, viewProjection, viewportPos, viewportSize, screenEnd))
+	{
+		return;
+	}
+
+	drawList->AddLine(screenStart, screenEnd, color, thickness);
+}
+
+void DrawWorldCircle(
+	ImDrawList* drawList,
+	const glm::vec3& center,
+	const glm::vec3& axisA,
+	const glm::vec3& axisB,
+	float radius,
+	int segments,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize,
+	ImU32 color,
+	float thickness)
+{
+	const float step = glm::two_pi<float>() / static_cast<float>(segments);
+	for (int segment = 0; segment < segments; ++segment)
+	{
+		const float angleA = step * static_cast<float>(segment);
+		const float angleB = step * static_cast<float>(segment + 1);
+		const glm::vec3 pointA = center + (axisA * std::cos(angleA) + axisB * std::sin(angleA)) * radius;
+		const glm::vec3 pointB = center + (axisA * std::cos(angleB) + axisB * std::sin(angleB)) * radius;
+		DrawWorldLine(drawList, pointA, pointB, viewProjection, viewportPos, viewportSize, color, thickness);
+	}
+}
+
+void DrawDirectionalLightGizmo(
+	ImDrawList* drawList,
+	const glm::vec3& position,
+	const glm::vec3& direction,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize,
+	ImU32 color)
+{
+	glm::vec3 right(1.0f, 0.0f, 0.0f);
+	glm::vec3 up(0.0f, 1.0f, 0.0f);
+	BuildBasisFromDirection(direction, right, up);
+
+	const float coreRadius = 0.35f;
+	DrawWorldCircle(drawList, position, right, up, coreRadius, 32, viewProjection, viewportPos, viewportSize, color, 1.5f);
+
+	// Draw radial rays around the icon to match a classic directional-light "sun".
+	for (int rayIndex = 0; rayIndex < 12; ++rayIndex)
+	{
+		const float angle = glm::two_pi<float>() * (static_cast<float>(rayIndex) / 12.0f);
+		const glm::vec3 ringDirection = SafeNormalize(right * std::cos(angle) + up * std::sin(angle), right);
+		const glm::vec3 rayStart = position + ringDirection * 0.42f;
+		const glm::vec3 rayEnd = position + ringDirection * 0.62f;
+		DrawWorldLine(drawList, rayStart, rayEnd, viewProjection, viewportPos, viewportSize, color, 1.5f);
+	}
+
+	// Draw multiple parallel lines to communicate directional lighting.
+	for (int lineIndex = 0; lineIndex < 4; ++lineIndex)
+	{
+		const float offset = (static_cast<float>(lineIndex) - 1.5f) * 0.2f;
+		const glm::vec3 start = position + up * offset;
+		const glm::vec3 end = start + direction * 2.4f;
+		DrawWorldLine(drawList, start, end, viewProjection, viewportPos, viewportSize, color, 1.8f);
+	}
+}
+
+void DrawPointLightGizmo(
+	ImDrawList* drawList,
+	const glm::vec3& position,
+	float range,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize,
+	ImU32 color)
+{
+	const float radius = std::max(range, 0.1f);
+	DrawWorldCircle(drawList, position, glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), radius, 48, viewProjection, viewportPos, viewportSize, color, 1.5f);
+	DrawWorldCircle(drawList, position, glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), radius, 48, viewProjection, viewportPos, viewportSize, color, 1.5f);
+	DrawWorldCircle(drawList, position, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), radius, 48, viewProjection, viewportPos, viewportSize, color, 1.5f);
+}
+
+void DrawSpotLightGizmo(
+	ImDrawList* drawList,
+	const glm::vec3& position,
+	const glm::vec3& direction,
+	float range,
+	float innerConeAngle,
+	float outerConeAngle,
+	const glm::mat4& viewProjection,
+	const ImVec2& viewportPos,
+	const ImVec2& viewportSize,
+	ImU32 color)
+{
+	glm::vec3 right(1.0f, 0.0f, 0.0f);
+	glm::vec3 up(0.0f, 1.0f, 0.0f);
+	BuildBasisFromDirection(direction, right, up);
+
+	const float clampedRange = std::max(range, 0.1f);
+	const float clampedOuter = std::clamp(outerConeAngle, 0.05f, 1.55f);
+	const float clampedInner = std::clamp(innerConeAngle, 0.0f, clampedOuter - 0.01f);
+	const glm::vec3 coneCenter = position + direction * clampedRange;
+	const float outerRadius = std::tan(clampedOuter) * clampedRange;
+	const float innerRadius = std::tan(clampedInner) * clampedRange;
+
+	DrawWorldLine(drawList, position, coneCenter, viewProjection, viewportPos, viewportSize, color, 1.2f);
+	DrawWorldCircle(drawList, coneCenter, right, up, outerRadius, 48, viewProjection, viewportPos, viewportSize, color, 1.6f);
+	DrawWorldCircle(drawList, coneCenter, right, up, innerRadius, 36, viewProjection, viewportPos, viewportSize, color, 1.1f);
+
+	// Outline a sparse cone wireframe so users can read direction and range quickly.
+	for (int edgeIndex = 0; edgeIndex < 8; ++edgeIndex)
+	{
+		const float angle = glm::two_pi<float>() * (static_cast<float>(edgeIndex) / 8.0f);
+		const glm::vec3 edgeDirection = SafeNormalize(right * std::cos(angle) + up * std::sin(angle), right);
+		const glm::vec3 outerPoint = coneCenter + edgeDirection * outerRadius;
+		DrawWorldLine(drawList, position, outerPoint, viewProjection, viewportPos, viewportSize, color, 1.2f);
+	}
+}
+}
 
 SceneViewWindow::SceneViewWindow(MainEditorSubsystem* owner)
     : EditorWindow("Scene View"), m_Owner(owner) {
@@ -144,8 +329,9 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
         if (registry.valid(*selectedEntity)) {
              Transform* transform = registry.try_get<Transform>(*selectedEntity);
              CameraComponent* camera = registry.try_get<CameraComponent>(*selectedEntity);
+			 LightComponent* light = registry.try_get<LightComponent>(*selectedEntity);
 
-             if (transform || camera) {
+             if (transform || camera || light) {
                  // Helper to compute world transform
                  auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
                      glm::mat4 world(1.0f);
@@ -245,6 +431,38 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
                      // Sides
                      drawLine(0, 4); drawLine(1, 5); drawLine(2, 6); drawLine(3, 7);
                  }
+
+				 if (light && transform) {
+					 const glm::mat4 viewProjection = proj * view;
+					 const glm::vec3 lightPosition = glm::vec3(model[3]);
+					 const glm::vec3 lightDirection = SafeNormalize(glm::vec3(model * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)), glm::vec3(0.0f, -1.0f, 0.0f));
+					 const ImU32 lightColor = IM_COL32(255, 244, 214, 255);
+
+					 const LightType lightType = light->type;
+
+					 if (lightType == LightType::Directional)
+					 {
+						 DrawDirectionalLightGizmo(ImGui::GetWindowDrawList(), lightPosition, lightDirection, viewProjection, viewportPos, viewportSize, lightColor);
+					 }
+					 else if (lightType == LightType::Point)
+					 {
+						 DrawPointLightGizmo(ImGui::GetWindowDrawList(), lightPosition, light->range, viewProjection, viewportPos, viewportSize, lightColor);
+					 }
+					 else if (lightType == LightType::Spot)
+					 {
+						 DrawSpotLightGizmo(
+							 ImGui::GetWindowDrawList(),
+							 lightPosition,
+							 lightDirection,
+							 light->range,
+							 light->innerConeAngle,
+							 light->outerConeAngle,
+							 viewProjection,
+							 viewportPos,
+							 viewportSize,
+							 lightColor);
+					 }
+				 }
              }
         }
     }

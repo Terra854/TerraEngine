@@ -59,6 +59,7 @@ Engine/Input/InputSystem.h
 Engine/Resource/ResourceManager.h
 Engine/Resource/ShaderCollection.h
 Engine/Scene/SceneManager.h
+Engine/Scene/LightComponent.h
 Engine/Scene/Serializer.h
 Engine/Input/GLFW/GlfwInputBackend.h
 Engine/Utilities/UUID.h
@@ -454,8 +455,11 @@ set(DXC_PATH \"${TERRAENGINE_DXC_PATH}\")
 
 set(out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders\")
 set(editor_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Editor\")
+set(lighting_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Lighting\")
+set(lighting_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Lighting\")
 file(MAKE_DIRECTORY \"\${out_dir}\")
 file(MAKE_DIRECTORY \"\${editor_out_dir}\")
+file(MAKE_DIRECTORY \"\${lighting_out_dir}\")
 
 execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.task.hlsl\" -o \"\${out_dir}/Default.task.tspf\" -s ts --dxc \"\${DXC_PATH}\"
@@ -479,6 +483,22 @@ execute_process(
 )
 if(NOT compile_ps EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile Default.frag.hlsl with TerraEngineShaderCompiler during install\")
+endif()
+
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterGrid.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterGrid.comp.hlsl\"
+	RESULT_VARIABLE compile_cluster_grid
+)
+if(NOT compile_cluster_grid EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile ClusterGrid.comp.hlsl during install\")
+endif()
+
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/LightCull.comp.spv\" -spirv \"\${lighting_src_dir}/LightCull.comp.hlsl\"
+	RESULT_VARIABLE compile_light_cull
+)
+if(NOT compile_light_cull EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile LightCull.comp.hlsl during install\")
 endif()
 
 # Compile Grid Shaders using raw DXC (bypassing asset compiler for internal usage)

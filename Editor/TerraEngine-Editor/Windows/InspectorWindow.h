@@ -22,11 +22,12 @@ protected:
     virtual void OnGui() override;
 
 private:
-    void DrawProperty(const std::string& compName, rttr::property prop, Object& obj, ComponentAccessFunctions& access);
-    void DrawMaterialInspector(const std::filesystem::path& path);
-    void DrawMeshInspector(const std::filesystem::path& path);
-    void DrawTextureInspector(const std::filesystem::path& path);
-    void UpdateInspectorDragState();
+	void DrawProperty(const std::string& compName, rttr::property prop, Object& obj, ComponentAccessFunctions& access);
+	void DrawLightComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access);
+	void DrawMaterialInspector(const std::filesystem::path& path);
+	void DrawMeshInspector(const std::filesystem::path& path);
+	void DrawTextureInspector(const std::filesystem::path& path);
+	void UpdateInspectorDragState();
 
     MainEditorSubsystem* m_Owner;
     std::map<entt::entity, std::vector<std::string>> m_PerObjectComponentOrders;

@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <shared_mutex>
@@ -168,6 +169,9 @@ public:
 	
 
 			void UnloadAll();
+			// Spawns a deterministic point-light grid used for multithreaded
+			// renderer stress tests and perf regression checks.
+			void SpawnLightStressTestGrid(std::uint32_t gridWidth = 20u, std::uint32_t gridDepth = 20u, float spacing = 2.0f, float intensity = 25.0f);
 
 	
 

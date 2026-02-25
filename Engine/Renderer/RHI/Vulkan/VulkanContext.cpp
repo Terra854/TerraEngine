@@ -11,6 +11,7 @@
 #include <cmath>
 #include <fstream>
 #include <thread>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace
 {
@@ -53,6 +54,107 @@ namespace
 			return 0.0f;
 		}
 		return deltaTimeSeconds * 1000.0f;
+	}
+
+	glm::vec3 SafeNormalize(const glm::vec3& value, const glm::vec3& fallback)
+	{
+		const float len = glm::length(value);
+		if (!std::isfinite(len) || len <= 1e-5f)
+		{
+			return fallback;
+		}
+		return value / len;
+	}
+
+	bool MatricesApproximatelyEqual(const glm::mat4& lhs, const glm::mat4& rhs, float epsilon)
+	{
+		for (int column = 0; column < 4; ++column)
+		{
+			for (int row = 0; row < 4; ++row)
+			{
+				if (std::abs(lhs[column][row] - rhs[column][row]) > epsilon)
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraWorldPosition)
+	{
+		const glm::vec3 lightDirection = SafeNormalize(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
+		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
+			? glm::vec3(1.0f, 0.0f, 0.0f)
+			: glm::vec3(0.0f, 1.0f, 0.0f);
+		const glm::vec3 lightPosition = cameraWorldPosition - lightDirection * 60.0f;
+		glm::mat4 view = glm::lookAtRH(lightPosition, cameraWorldPosition, worldUp);
+		glm::mat4 projection = glm::orthoRH_ZO(-40.0f, 40.0f, -40.0f, 40.0f, 0.1f, 180.0f);
+		projection[1][1] *= -1.0f;
+		return projection * view;
+	}
+
+	glm::mat4 BuildSpotShadowViewProjection(const GPULight& light)
+	{
+		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
+		const glm::vec3 lightDirection = SafeNormalize(glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
+		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
+			? glm::vec3(1.0f, 0.0f, 0.0f)
+			: glm::vec3(0.0f, 1.0f, 0.0f);
+		const float range = std::max(light.directionAndRange.w, 0.5f);
+		const float outerConeCos = std::clamp(light.coneAnglesAndArea.y, -0.999f, 0.999f);
+		const float outerAngleRadians = std::max(0.1f, std::acos(outerConeCos) * 2.0f);
+		glm::mat4 view = glm::lookAtRH(lightPosition, lightPosition + lightDirection, worldUp);
+		glm::mat4 projection = glm::perspectiveRH_ZO(outerAngleRadians, 1.0f, 0.1f, range);
+		projection[1][1] *= -1.0f;
+		return projection * view;
+	}
+
+	glm::mat4 BuildAreaShadowViewProjection(const GPULight& light)
+	{
+		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
+		const glm::vec3 lightDirection = SafeNormalize(glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
+		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
+			? glm::vec3(1.0f, 0.0f, 0.0f)
+			: glm::vec3(0.0f, 1.0f, 0.0f);
+		const float range = std::max(light.directionAndRange.w, 0.5f);
+		const float width = std::max(light.coneAnglesAndArea.z, 0.5f);
+		const float height = std::max(light.coneAnglesAndArea.w, 0.5f);
+		const float fov = std::clamp(std::atan2(std::max(width, height), range) * 2.0f, 0.2f, 1.5f);
+		glm::mat4 view = glm::lookAtRH(lightPosition, lightPosition + lightDirection, worldUp);
+		glm::mat4 projection = glm::perspectiveRH_ZO(fov, 1.0f, 0.1f, range);
+		projection[1][1] *= -1.0f;
+		return projection * view;
+	}
+
+	glm::mat4 BuildPointShadowViewProjection(const GPULight& light, uint32_t faceIndex)
+	{
+		static constexpr std::array<glm::vec3, 6> kFaceDirections = {
+			glm::vec3(1.0f, 0.0f, 0.0f),
+			glm::vec3(-1.0f, 0.0f, 0.0f),
+			glm::vec3(0.0f, 1.0f, 0.0f),
+			glm::vec3(0.0f, -1.0f, 0.0f),
+			glm::vec3(0.0f, 0.0f, 1.0f),
+			glm::vec3(0.0f, 0.0f, -1.0f)
+		};
+		static constexpr std::array<glm::vec3, 6> kFaceUps = {
+			glm::vec3(0.0f, -1.0f, 0.0f),
+			glm::vec3(0.0f, -1.0f, 0.0f),
+			glm::vec3(0.0f, 0.0f, 1.0f),
+			glm::vec3(0.0f, 0.0f, -1.0f),
+			glm::vec3(0.0f, -1.0f, 0.0f),
+			glm::vec3(0.0f, -1.0f, 0.0f)
+		};
+
+		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
+		const float range = std::max(light.directionAndRange.w, 0.5f);
+		const uint32_t safeFace = std::min(faceIndex, static_cast<uint32_t>(kFaceDirections.size() - 1u));
+		const glm::vec3 targetDirection = kFaceDirections[safeFace];
+		const glm::vec3 up = kFaceUps[safeFace];
+		glm::mat4 view = glm::lookAtRH(lightPosition, lightPosition + targetDirection, up);
+		glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(90.0f), 1.0f, 0.1f, range);
+		projection[1][1] *= -1.0f;
+		return projection * view;
 	}
 }
 
@@ -368,13 +470,226 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	}
 
 	const uint32_t statsSlotIndex = impl->GetStatsSlotIndex(impl->currentFrame, view);
+	std::vector<GPULight> lightingPayload = frameData.lights;
+	for (GPULight& light : lightingPayload) {
+		const uint32_t lightType = static_cast<uint32_t>(std::max(0.0f, light.positionAndType.w));
+		const bool castsShadows = light.shadowAndPadding.x > 0.5f;
+		light.shadowAndPadding.y = -1.0f;
+		light.shadowAndPadding.z = static_cast<float>(impl->ltcAmplitudeTextureIndex);
+		light.shadowAndPadding.w = static_cast<float>(impl->ltcInverseTextureIndex);
+		if (!castsShadows) {
+			continue;
+		}
+		if (lightType == 0u) {
+			light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndex);
+		}
+		else if (lightType == 2u) {
+			light.shadowAndPadding.y = static_cast<float>(impl->spotShadowTextureIndex);
+		}
+		else if (lightType == 3u) {
+			light.shadowAndPadding.y = static_cast<float>(impl->areaShadowTextureIndex);
+		}
+	}
+	impl->UploadLightingData(lightingPayload);
 	FrameCullingDataGPU cullingData{};
 	cullingData.frustumPlanes = BuildFrustumPlanes(frameData.projectionMatrix * frameData.viewMatrix);
 	cullingData.cameraPositionAndEpsilon = glm::vec4(frameData.cameraWorldPosition, std::max(frameData.cullingEpsilon, 0.0001f));
+	cullingData.clusterGridAndLightCount = glm::uvec4(
+		kLightingClusterDimX,
+		kLightingClusterDimY,
+		kLightingClusterDimZ,
+		static_cast<uint32_t>(std::min<size_t>(lightingPayload.size(), VulkanContext::Impl::MAX_GLOBAL_LIGHTS)));
+	cullingData.clusterDepthAndViewport = glm::vec4(
+		0.1f,
+		100.0f,
+		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.width, 1u)),
+		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.height, 1u)));
 	cullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
 	cullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
 	impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
+	// Compute lighting shaders index slot 0 explicitly, so mirror the latest frame
+	// culling payload there in addition to the per-view stats slot.
+	impl->UpdateFrameCullingData(0u, cullingData);
 	impl->ResetMeshletCounters(statsSlotIndex);
+
+	const auto EnsureShadowRenderResources = [&]() -> bool {
+		if (impl->directionalShadowDepth.view == VK_NULL_HANDLE
+			|| impl->directionalShadowColor.view == VK_NULL_HANDLE
+			|| impl->spotShadowDepth.view == VK_NULL_HANDLE
+			|| impl->spotShadowColor.view == VK_NULL_HANDLE
+			|| impl->areaShadowDepth.view == VK_NULL_HANDLE
+			|| impl->areaShadowColor.view == VK_NULL_HANDLE) {
+			return false;
+		}
+
+		if (impl->shadowRenderPass == VK_NULL_HANDLE) {
+			VkAttachmentDescription colorAttachment{};
+			colorAttachment.format = impl->swapchainImageFormat;
+			colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+			colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+			VkAttachmentDescription depthAttachment{};
+			depthAttachment.format = impl->depthFormat;
+			depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+			depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+			depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+			VkAttachmentReference colorAttachmentRef{};
+			colorAttachmentRef.attachment = 0;
+			colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+			VkAttachmentReference depthAttachmentRef{};
+			depthAttachmentRef.attachment = 1;
+			depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+			VkSubpassDescription subpass{};
+			subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+			subpass.colorAttachmentCount = 1;
+			subpass.pColorAttachments = &colorAttachmentRef;
+			subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+			VkSubpassDependency dependency{};
+			dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+			dependency.dstSubpass = 0;
+			dependency.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			dependency.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+			dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+			std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
+			VkRenderPassCreateInfo renderPassInfo{};
+			renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+			renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+			renderPassInfo.pAttachments = attachments.data();
+			renderPassInfo.subpassCount = 1;
+			renderPassInfo.pSubpasses = &subpass;
+			renderPassInfo.dependencyCount = 1;
+			renderPassInfo.pDependencies = &dependency;
+			if (vkCreateRenderPass(impl->device, &renderPassInfo, nullptr, &impl->shadowRenderPass) != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Warning, "failed to create shadow render pass");
+				impl->shadowRenderPass = VK_NULL_HANDLE;
+				return false;
+			}
+		}
+
+		const uint32_t shadowWidth = VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
+		const uint32_t shadowHeight = VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
+		const uint32_t pointShadowSize = VulkanContext::Impl::POINT_SHADOW_MAP_RESOLUTION;
+
+		auto EnsureFramebuffer = [&](VkFramebuffer& framebuffer, VkImageView colorView, VkImageView depthView, uint32_t width, uint32_t height) -> bool {
+			if (framebuffer != VK_NULL_HANDLE) {
+				return true;
+			}
+			std::array<VkImageView, 2> attachments = { colorView, depthView };
+			VkFramebufferCreateInfo framebufferInfo{};
+			framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+			framebufferInfo.renderPass = impl->shadowRenderPass;
+			framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+			framebufferInfo.pAttachments = attachments.data();
+			framebufferInfo.width = width;
+			framebufferInfo.height = height;
+			framebufferInfo.layers = 1;
+			return vkCreateFramebuffer(impl->device, &framebufferInfo, nullptr, &framebuffer) == VK_SUCCESS;
+		};
+
+		if (!EnsureFramebuffer(impl->directionalShadowFramebuffer, impl->directionalShadowColor.view, impl->directionalShadowDepth.view, shadowWidth, shadowHeight)) {
+			return false;
+		}
+		if (!EnsureFramebuffer(impl->spotShadowFramebuffer, impl->spotShadowColor.view, impl->spotShadowDepth.view, shadowWidth, shadowHeight)) {
+			return false;
+		}
+		if (!EnsureFramebuffer(impl->areaShadowFramebuffer, impl->areaShadowColor.view, impl->areaShadowDepth.view, shadowWidth, shadowHeight)) {
+			return false;
+		}
+		for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
+			if (impl->pointShadowColorFaceViews[faceIndex] == VK_NULL_HANDLE || impl->pointShadowDepthFaceViews[faceIndex] == VK_NULL_HANDLE) {
+				return false;
+			}
+			if (!EnsureFramebuffer(impl->pointShadowFaceFramebuffers[faceIndex], impl->pointShadowColorFaceViews[faceIndex], impl->pointShadowDepthFaceViews[faceIndex], pointShadowSize, pointShadowSize)) {
+				return false;
+			}
+		}
+
+		return true;
+	};
+
+	const auto EnsureLightingComputePipelines = [&]() {
+		if (impl->lightingComputePipelineLayout == VK_NULL_HANDLE) {
+			VkPipelineLayoutCreateInfo layoutInfo{};
+			layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			layoutInfo.setLayoutCount = 1;
+			layoutInfo.pSetLayouts = &impl->globalDescriptorSetLayout;
+			if (vkCreatePipelineLayout(impl->device, &layoutInfo, nullptr, &impl->lightingComputePipelineLayout) != VK_SUCCESS) {
+				impl->lightingComputePipelineLayout = VK_NULL_HANDLE;
+				return;
+			}
+		}
+
+		auto LoadShaderModule = [&](const char* path) -> VkShaderModule {
+			std::ifstream file(path, std::ios::ate | std::ios::binary);
+			if (!file.is_open()) {
+				return VK_NULL_HANDLE;
+			}
+			const size_t fileSize = static_cast<size_t>(file.tellg());
+			if (fileSize == 0 || (fileSize % sizeof(uint32_t)) != 0) {
+				return VK_NULL_HANDLE;
+			}
+			std::vector<uint32_t> code(fileSize / sizeof(uint32_t));
+			file.seekg(0);
+			file.read(reinterpret_cast<char*>(code.data()), static_cast<std::streamsize>(fileSize));
+			file.close();
+
+			VkShaderModuleCreateInfo moduleInfo{};
+			moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+			moduleInfo.codeSize = fileSize;
+			moduleInfo.pCode = code.data();
+			VkShaderModule module = VK_NULL_HANDLE;
+			if (vkCreateShaderModule(impl->device, &moduleInfo, nullptr, &module) != VK_SUCCESS) {
+				return VK_NULL_HANDLE;
+			}
+			return module;
+		};
+
+		auto CreateComputePipeline = [&](VkPipeline& pipeline, const char* shaderPath) {
+			if (pipeline != VK_NULL_HANDLE || impl->lightingComputePipelineLayout == VK_NULL_HANDLE) {
+				return;
+			}
+			VkShaderModule module = LoadShaderModule(shaderPath);
+			if (module == VK_NULL_HANDLE) {
+				return;
+			}
+
+			VkPipelineShaderStageCreateInfo stageInfo{};
+			stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+			stageInfo.module = module;
+			stageInfo.pName = "main";
+
+			VkComputePipelineCreateInfo pipelineInfo{};
+			pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+			pipelineInfo.stage = stageInfo;
+			pipelineInfo.layout = impl->lightingComputePipelineLayout;
+			if (vkCreateComputePipelines(impl->device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+				pipeline = VK_NULL_HANDLE;
+			}
+			vkDestroyShaderModule(impl->device, module, nullptr);
+		};
+
+		CreateComputePipeline(impl->clusterGridComputePipeline, "Shaders/Lighting/ClusterGrid.comp.spv");
+		CreateComputePipeline(impl->lightCullComputePipeline, "Shaders/Lighting/LightCull.comp.spv");
+	};
+
+	const bool shadowResourcesReady = EnsureShadowRenderResources();
+	EnsureLightingComputePipelines();
 
 	// Prepare draw data.
 	struct PreparedDraw {
@@ -385,6 +700,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	};
 	std::vector<PreparedDraw> prepared;
 	prepared.reserve(frameData.commands.size());
+	std::vector<PreparedDraw> preparedShadow;
+	preparedShadow.reserve(frameData.commands.size());
 
 	RenderStatsSnapshot pendingStats{};
 	pendingStats.viewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
@@ -500,6 +817,29 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		draw.push = push;
 		prepared.push_back(std::move(draw));
 
+		if (shadowResourcesReady) {
+			TerraEngine::UUID shadowCollectionId = collectionId;
+			VulkanPipeline* shadowPipeline = ResolvePipeline(shadowCollectionId, impl->shadowRenderPass, materialFlags);
+			if (shadowPipeline == nullptr && shadowCollectionId == defaultTaskCollectionId) {
+				shadowCollectionId = defaultMeshCollectionId;
+				shadowPipeline = ResolvePipeline(shadowCollectionId, impl->shadowRenderPass, materialFlags);
+			}
+
+			if (shadowPipeline != nullptr) {
+				VkDescriptorSet shadowMeshDescriptorSet = impl->EnsureMeshDescriptorSet(command.meshId, *shadowPipeline);
+				if (shadowMeshDescriptorSet != VK_NULL_HANDLE) {
+					PreparedDraw shadowDraw{};
+					shadowDraw.mesh = &mesh;
+					shadowDraw.pipeline = shadowPipeline;
+					shadowDraw.descriptorSets = {impl->globalDescriptorSet, shadowMeshDescriptorSet};
+					shadowDraw.push = push;
+					// Shadow-map passes never use the cluster heatmap debug branch.
+					shadowDraw.push.taskCullingEnabled = 0u;
+					preparedShadow.push_back(std::move(shadowDraw));
+				}
+			}
+		}
+
 		pendingStats.drawCalls += 1u;
 		pendingStats.triangleCount += (mesh.indexCount / 3u);
 		pendingStats.meshletsTotal += mesh.meshletCount;
@@ -565,6 +905,176 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			0, nullptr,
 			0, nullptr,
 			1, &barrier
+		);
+	}
+
+	// Build/refresh clustered light lists with compute before recording the
+	// graphics render pass so fragment shading reads the latest culling output.
+	if (impl->lightingComputePipelineLayout != VK_NULL_HANDLE
+		&& impl->clusterGridComputePipeline != VK_NULL_HANDLE
+		&& impl->lightCullComputePipeline != VK_NULL_HANDLE) {
+		const glm::mat4 currentViewProjection = frameData.projectionMatrix * frameData.viewMatrix;
+		const bool cameraChanged = !impl->previousClusterViewProjectionValid
+			|| !MatricesApproximatelyEqual(currentViewProjection, impl->previousClusterViewProjection, 1e-4f);
+
+		if (cameraChanged) {
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterGridComputePipeline);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSet, 0, nullptr);
+			const uint32_t dispatchX = (kLightingClusterDimX + 7u) / 8u;
+			const uint32_t dispatchY = (kLightingClusterDimY + 7u) / 8u;
+			const uint32_t dispatchZ = std::max<uint32_t>(kLightingClusterDimZ, 1u);
+			vkCmdDispatch(cmd, dispatchX, dispatchY, dispatchZ);
+
+			VkMemoryBarrier gridBarrier{};
+			gridBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+			gridBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			gridBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+			vkCmdPipelineBarrier(
+				cmd,
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				0,
+				1, &gridBarrier,
+				0, nullptr,
+				0, nullptr
+			);
+
+			impl->previousClusterViewProjection = currentViewProjection;
+			impl->previousClusterViewProjectionValid = true;
+		}
+
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightCullComputePipeline);
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSet, 0, nullptr);
+		const uint32_t clusterCount = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
+		vkCmdDispatch(cmd, std::max<uint32_t>(clusterCount, 1u), 1u, 1u);
+
+		VkMemoryBarrier lightCullBarrier{};
+		lightCullBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		lightCullBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		lightCullBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
+			0,
+			1, &lightCullBarrier,
+			0, nullptr,
+			0, nullptr
+		);
+	}
+
+	const GPULight* directionalShadowLight = nullptr;
+	const GPULight* pointShadowLight = nullptr;
+	const GPULight* spotShadowLight = nullptr;
+	const GPULight* areaShadowLight = nullptr;
+	for (const GPULight& light : lightingPayload) {
+		if (light.shadowAndPadding.x <= 0.5f) {
+			continue;
+		}
+		const uint32_t lightType = static_cast<uint32_t>(std::max(0.0f, light.positionAndType.w));
+		if (lightType == 0u && directionalShadowLight == nullptr) {
+			directionalShadowLight = &light;
+		}
+		else if (lightType == 1u && pointShadowLight == nullptr) {
+			pointShadowLight = &light;
+		}
+		else if (lightType == 2u && spotShadowLight == nullptr) {
+			spotShadowLight = &light;
+		}
+		else if (lightType == 3u && areaShadowLight == nullptr) {
+			areaShadowLight = &light;
+		}
+	}
+
+	auto RecordShadowDraws = [&](const glm::mat4& lightViewProjection) {
+		for (const PreparedDraw& draw : preparedShadow) {
+			if (draw.pipeline == nullptr
+				|| draw.pipeline->pipeline == VK_NULL_HANDLE
+				|| draw.pipeline->layout == VK_NULL_HANDLE
+				|| draw.mesh == nullptr
+				|| draw.mesh->meshletCount == 0) {
+				continue;
+			}
+
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->pipeline);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->layout, 0, static_cast<uint32_t>(draw.descriptorSets.size()), draw.descriptorSets.data(), 0, nullptr);
+
+			PushConstants shadowPush = draw.push;
+			shadowPush.viewProj = lightViewProjection;
+			if (draw.pipeline->supportsDefaultPushConstants) {
+				vkCmdPushConstants(cmd, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &shadowPush);
+			}
+
+			const uint32_t kTaskBatchSize = 32u;
+			const uint32_t taskGroupCount = draw.pipeline->hasTaskStage
+				? ((draw.mesh->meshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
+				: draw.mesh->meshletCount;
+			vkCmdDrawMeshTasksEXT(cmd, taskGroupCount, 1, 1);
+		}
+	};
+
+	auto RecordShadowPass = [&](VkFramebuffer framebuffer, uint32_t width, uint32_t height, const glm::mat4& lightViewProjection) -> bool {
+		if (framebuffer == VK_NULL_HANDLE || impl->shadowRenderPass == VK_NULL_HANDLE) {
+			return false;
+		}
+
+		VkRenderPassBeginInfo shadowPassInfo{};
+		shadowPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+		shadowPassInfo.renderPass = impl->shadowRenderPass;
+		shadowPassInfo.framebuffer = framebuffer;
+		shadowPassInfo.renderArea.offset = { 0, 0 };
+		shadowPassInfo.renderArea.extent = { width, height };
+
+		VkClearValue clearValues[2];
+		clearValues[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+		clearValues[1].depthStencil = {1.0f, 0};
+		shadowPassInfo.clearValueCount = 2;
+		shadowPassInfo.pClearValues = clearValues;
+
+		vkCmdBeginRenderPass(cmd, &shadowPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+		RecordShadowDraws(lightViewProjection);
+		vkCmdEndRenderPass(cmd);
+		return true;
+	};
+
+	bool recordedAnyShadowPass = false;
+	const uint32_t shadowWidth = VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
+	const uint32_t shadowHeight = VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
+	const uint32_t pointShadowSize = VulkanContext::Impl::POINT_SHADOW_MAP_RESOLUTION;
+	if (shadowResourcesReady && impl->shadowRenderPass != VK_NULL_HANDLE && !preparedShadow.empty()) {
+		if (directionalShadowLight != nullptr) {
+			const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(*directionalShadowLight, frameData.cameraWorldPosition);
+			recordedAnyShadowPass = RecordShadowPass(impl->directionalShadowFramebuffer, shadowWidth, shadowHeight, lightViewProjection) || recordedAnyShadowPass;
+		}
+		if (pointShadowLight != nullptr) {
+			for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
+				const glm::mat4 lightViewProjection = BuildPointShadowViewProjection(*pointShadowLight, faceIndex);
+				recordedAnyShadowPass = RecordShadowPass(impl->pointShadowFaceFramebuffers[faceIndex], pointShadowSize, pointShadowSize, lightViewProjection) || recordedAnyShadowPass;
+			}
+		}
+		if (spotShadowLight != nullptr) {
+			const glm::mat4 lightViewProjection = BuildSpotShadowViewProjection(*spotShadowLight);
+			recordedAnyShadowPass = RecordShadowPass(impl->spotShadowFramebuffer, shadowWidth, shadowHeight, lightViewProjection) || recordedAnyShadowPass;
+		}
+		if (areaShadowLight != nullptr) {
+			const glm::mat4 lightViewProjection = BuildAreaShadowViewProjection(*areaShadowLight);
+			recordedAnyShadowPass = RecordShadowPass(impl->areaShadowFramebuffer, shadowWidth, shadowHeight, lightViewProjection) || recordedAnyShadowPass;
+		}
+	}
+
+	if (recordedAnyShadowPass) {
+		VkMemoryBarrier shadowBarrier{};
+		shadowBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		shadowBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		shadowBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0,
+			1, &shadowBarrier,
+			0, nullptr,
+			0, nullptr
 		);
 	}
 

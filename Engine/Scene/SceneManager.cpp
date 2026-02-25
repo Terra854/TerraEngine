@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -20,6 +21,7 @@
 #include "Resource/ResourceManager.h"
 #include "Resource/ShaderCollection.h"
 #include "Scene/CameraComponent.h"
+#include "Scene/LightComponent.h"
 #include "Scene/MeshRenderComponent.h"
 
 SceneManager& SceneManager::Instance()
@@ -292,6 +294,48 @@ void SceneManager::UnloadAll()
 	previewZoomOffset = 0.0f;
 	// Log cache flushes so teardown/hot-reload steps are easy to correlate in logs.
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager caches cleared");
+}
+
+void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32_t gridDepth, float spacing, float intensity)
+{
+	ObjectManager& objects = ObjectManager::instance();
+	const std::uint32_t safeGridWidth = std::max<std::uint32_t>(1u, gridWidth);
+	const std::uint32_t safeGridDepth = std::max<std::uint32_t>(1u, gridDepth);
+	const float safeSpacing = std::max(0.1f, spacing);
+	const float safeIntensity = std::max(0.0f, intensity);
+
+	const float centerX = static_cast<float>(safeGridWidth - 1u) * 0.5f;
+	const float centerZ = static_cast<float>(safeGridDepth - 1u) * 0.5f;
+
+	// Spawn in a deterministic pattern so benchmark runs are directly comparable.
+	for (std::uint32_t z = 0; z < safeGridDepth; ++z)
+	{
+		for (std::uint32_t x = 0; x < safeGridWidth; ++x)
+		{
+			auto lightObject = objects.createObject("StressPointLight");
+
+			if (Transform* transform = lightObject.getComponent<Transform>())
+			{
+				const float worldX = (static_cast<float>(x) - centerX) * safeSpacing;
+				const float worldZ = (static_cast<float>(z) - centerZ) * safeSpacing;
+				const float worldY = 1.5f + std::sin(static_cast<float>(x + z) * 0.37f) * 0.5f;
+				SetComponentProperty(*transform, "Position", glm::vec3(worldX, worldY, worldZ));
+			}
+
+			auto& light = lightObject.addComponent<LightComponent>();
+			SetComponentProperty(light, "type", static_cast<std::uint32_t>(LightType::Point));
+			SetComponentProperty(light, "color", glm::vec3(
+				0.4f + static_cast<float>((x * 17u + z * 3u) % 60u) / 100.0f,
+				0.4f + static_cast<float>((x * 11u + z * 5u) % 60u) / 100.0f,
+				0.4f + static_cast<float>((x * 7u + z * 13u) % 60u) / 100.0f));
+			SetComponentProperty(light, "intensity", safeIntensity);
+			SetComponentProperty(light, "range", std::max(3.0f, safeSpacing * 1.75f));
+			SetComponentProperty(light, "castsShadows", false);
+		}
+	}
+
+	MarkActiveSceneDirty();
+	TERRAENGINE_LOG(LogLevel::Info, "Spawned stress test light grid with " << (safeGridWidth * safeGridDepth) << " point lights.");
 }
 
 std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesystem::path& path, SceneFileType type)

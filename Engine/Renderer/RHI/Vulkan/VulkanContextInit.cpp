@@ -42,13 +42,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	if (!CreateCommandPool()) return false;
 	if (!CreateSyncObjects()) return false;
 	if (!CreateDescriptorPool()) return false;
-		if (!CreateGlobalDescriptorResources()) return false;
-	CreateMaterialBufferResources();
-	CreateCullingBufferResources();
-
-	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
-	workerCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-
+	if (!CreateGlobalDescriptorResources()) return false;
 	try {
 		CreateDefaultTexture();
 	} catch (const std::exception& e) {
@@ -56,6 +50,12 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 		Cleanup();
 		return false;
 	}
+	CreateMaterialBufferResources();
+	CreateCullingBufferResources();
+	CreateLightingBufferResources();
+
+	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
+	workerCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 	
 	initialized = true;
 	return true;
@@ -140,9 +140,89 @@ void VulkanContext::Impl::Cleanup() {
 		vkDestroyImageView(device, defaultTexture.view, nullptr);
 	}
 	vmaDestroyImage(allocator, defaultTexture.image, defaultTexture.allocation);
+
+	if (device) {
+		if (clusterGridComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, clusterGridComputePipeline, nullptr);
+			clusterGridComputePipeline = VK_NULL_HANDLE;
+		}
+		if (lightCullComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, lightCullComputePipeline, nullptr);
+			lightCullComputePipeline = VK_NULL_HANDLE;
+		}
+		if (lightingComputePipelineLayout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(device, lightingComputePipelineLayout, nullptr);
+			lightingComputePipelineLayout = VK_NULL_HANDLE;
+		}
+		if (directionalShadowFramebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(device, directionalShadowFramebuffer, nullptr);
+			directionalShadowFramebuffer = VK_NULL_HANDLE;
+		}
+		if (spotShadowFramebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(device, spotShadowFramebuffer, nullptr);
+			spotShadowFramebuffer = VK_NULL_HANDLE;
+		}
+		if (areaShadowFramebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(device, areaShadowFramebuffer, nullptr);
+			areaShadowFramebuffer = VK_NULL_HANDLE;
+		}
+		for (VkFramebuffer& framebuffer : pointShadowFaceFramebuffers) {
+			if (framebuffer != VK_NULL_HANDLE) {
+				vkDestroyFramebuffer(device, framebuffer, nullptr);
+				framebuffer = VK_NULL_HANDLE;
+			}
+		}
+		for (VkImageView& faceView : pointShadowDepthFaceViews) {
+			if (faceView != VK_NULL_HANDLE) {
+				vkDestroyImageView(device, faceView, nullptr);
+				faceView = VK_NULL_HANDLE;
+			}
+		}
+		for (VkImageView& faceView : pointShadowColorFaceViews) {
+			if (faceView != VK_NULL_HANDLE) {
+				vkDestroyImageView(device, faceView, nullptr);
+				faceView = VK_NULL_HANDLE;
+			}
+		}
+		if (shadowRenderPass != VK_NULL_HANDLE) {
+			vkDestroyRenderPass(device, shadowRenderPass, nullptr);
+			shadowRenderPass = VK_NULL_HANDLE;
+		}
+	}
+
+	auto DestroyVulkanImage = [&](VulkanImage& image) {
+		if (device && image.sampler != VK_NULL_HANDLE) {
+			vkDestroySampler(device, image.sampler, nullptr);
+		}
+		if (device && image.view != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, image.view, nullptr);
+		}
+		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+		}
+		image.image = VK_NULL_HANDLE;
+		image.allocation = VK_NULL_HANDLE;
+		image.view = VK_NULL_HANDLE;
+		image.sampler = VK_NULL_HANDLE;
+	};
+
+	DestroyVulkanImage(directionalShadowDepth);
+	DestroyVulkanImage(directionalShadowColor);
+	DestroyVulkanImage(spotShadowDepth);
+	DestroyVulkanImage(spotShadowColor);
+	DestroyVulkanImage(areaShadowDepth);
+	DestroyVulkanImage(areaShadowColor);
+	DestroyVulkanImage(pointShadowCubeDepth);
+	DestroyVulkanImage(pointShadowCubeColor);
+	DestroyVulkanImage(ltcAmplitudeTexture);
+	DestroyVulkanImage(ltcInverseTexture);
+
 	vmaDestroyBuffer(allocator, globalMaterialSSBO.buffer, globalMaterialSSBO.allocation);
 	vmaDestroyBuffer(allocator, globalFrameCullingSSBO.buffer, globalFrameCullingSSBO.allocation);
 	vmaDestroyBuffer(allocator, globalMeshletCountersSSBO.buffer, globalMeshletCountersSSBO.allocation);
+	vmaDestroyBuffer(allocator, globalLightSSBO.buffer, globalLightSSBO.allocation);
+	vmaDestroyBuffer(allocator, clusterGridSSBO.buffer, clusterGridSSBO.allocation);
+	vmaDestroyBuffer(allocator, lightIndexSSBO.buffer, lightIndexSSBO.allocation);
 
 	for (size_t i = 0; i < renderFinishedSemaphores.size(); i++) {
 		if (device) {
@@ -932,6 +1012,32 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		glfwWaitEvents();
 	}
 	vkDeviceWaitIdle(device);
+
+	if (device) {
+		if (directionalShadowFramebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(device, directionalShadowFramebuffer, nullptr);
+			directionalShadowFramebuffer = VK_NULL_HANDLE;
+		}
+		if (spotShadowFramebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(device, spotShadowFramebuffer, nullptr);
+			spotShadowFramebuffer = VK_NULL_HANDLE;
+		}
+		if (areaShadowFramebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(device, areaShadowFramebuffer, nullptr);
+			areaShadowFramebuffer = VK_NULL_HANDLE;
+		}
+		for (VkFramebuffer& framebuffer : pointShadowFaceFramebuffers) {
+			if (framebuffer != VK_NULL_HANDLE) {
+				vkDestroyFramebuffer(device, framebuffer, nullptr);
+				framebuffer = VK_NULL_HANDLE;
+			}
+		}
+		if (shadowRenderPass != VK_NULL_HANDLE) {
+			vkDestroyRenderPass(device, shadowRenderPass, nullptr);
+			shadowRenderPass = VK_NULL_HANDLE;
+		}
+	}
+	previousClusterViewProjectionValid = false;
 
 	DestroyPipelines();
 	// Do NOT reset descriptor pool here. ImGui uses it and its font texture lives there.

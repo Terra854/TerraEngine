@@ -51,6 +51,7 @@ struct PSIn
 {
 	float4 position : SV_Position;
 	float2 uv : TEXCOORD0;
+	float3 worldPosition : TEXCOORD1;
 	float3 normal : NORMAL;
 };
 
@@ -163,6 +164,7 @@ void EmitMeshlet(
 		PSIn outVertex;
 		outVertex.position = mul(SceneUniforms.viewProj, worldPosition);
 		outVertex.uv = uv;
+		outVertex.worldPosition = worldPosition.xyz;
 		outVertex.normal = mul((float3x3)SceneUniforms.model, normal);
 		outputVertices[vertexIndex] = outVertex;
 	}

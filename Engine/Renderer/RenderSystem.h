@@ -12,6 +12,7 @@
 #include "Core/Object/Transform.h"
 #include "Scene/CameraComponent.h"
 #include "Scene/MeshRenderComponent.h"
+#include "Scene/LightComponent.h"
 
 class RenderSystem : public SystemsBase
 {
@@ -79,6 +80,11 @@ private:
         entt::entity entity;
         MeshRenderComponent mesh;
     };
+	struct LightEntry
+	{
+		entt::entity entity;
+		LightComponent light;
+	};
 
 	mutable std::mutex statsMutex;
 	RenderStatsSnapshot latestGameStats{};

@@ -1,5 +1,7 @@
 #include "VulkanContextImpl.h"
 
+#include <algorithm>
+
 void VulkanContext::Impl::CreateDefaultTexture() {
 	uint32_t pixel = 0xFFFFFFFF;
 	VkDeviceSize imageSize = 4;
@@ -1299,7 +1301,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 }
 
 bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
-	std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+	std::array<VkDescriptorSetLayoutBinding, 9> bindings{};
 	// Textures
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1324,11 +1326,46 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	bindings[3].descriptorCount = 1;
 	bindings[3].stageFlags = VK_SHADER_STAGE_ALL;
 	bindings[3].pImmutableSamplers = nullptr;
+	// Global light payload array consumed by fragment and compute stages.
+	bindings[4].binding = 4;
+	bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[4].descriptorCount = 1;
+	bindings[4].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[4].pImmutableSamplers = nullptr;
+	// Cluster metadata table (offset/count per cluster).
+	bindings[5].binding = 5;
+	bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[5].descriptorCount = 1;
+	bindings[5].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[5].pImmutableSamplers = nullptr;
+	// Flat light-index list addressed by the cluster metadata.
+	bindings[6].binding = 6;
+	bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[6].descriptorCount = 1;
+	bindings[6].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[6].pImmutableSamplers = nullptr;
+	// Dedicated omnidirectional point-shadow cubemap image used by fragment shading.
+	bindings[7].binding = 7;
+	bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	bindings[7].descriptorCount = 1;
+	bindings[7].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[7].pImmutableSamplers = nullptr;
+	// Dedicated sampler for the point-shadow cubemap.
+	bindings[8].binding = 8;
+	bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+	bindings[8].descriptorCount = 1;
+	bindings[8].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[8].pImmutableSamplers = nullptr;
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{};
 	bindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	std::array<VkDescriptorBindingFlags, 4> flags = {
+	std::array<VkDescriptorBindingFlags, 9> flags = {
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+		0,
+		0,
+		0,
+		0,
+		0,
 		0,
 		0,
 		0
@@ -1348,11 +1385,15 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 		return false;
 	}
 
-	std::array<VkDescriptorPoolSize, 2> poolSizes{};
+	std::array<VkDescriptorPoolSize, 4> poolSizes{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	poolSizes[0].descriptorCount = MAX_BINDLESS_TEXTURES;
-	poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSizes[1].descriptorCount = 3;
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	poolSizes[1].descriptorCount = 1;
+	poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
+	poolSizes[2].descriptorCount = 1;
+	poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	poolSizes[3].descriptorCount = 6;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1448,6 +1489,485 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 	for (uint32_t slotIndex = 0; slotIndex < kStatsSlotCount; ++slotIndex) {
 		pendingStatsBySlot[slotIndex] = {};
 		pendingStatsBySlot[slotIndex].viewType = (slotIndex % kStatsViewCount == 0u) ? RenderViewType::Game : RenderViewType::Scene;
+	}
+}
+
+void VulkanContext::Impl::CreateLightingBufferResources() {
+	const VkDeviceSize lightBufferSize = static_cast<VkDeviceSize>(sizeof(GPULight) * MAX_GLOBAL_LIGHTS);
+	const VkDeviceSize clusterBufferSize = static_cast<VkDeviceSize>(sizeof(ClusterData) * MAX_LIGHT_CLUSTERS);
+	const VkDeviceSize lightIndexBufferSize = static_cast<VkDeviceSize>(sizeof(uint32_t) * MAX_LIGHT_INDEX_ENTRIES);
+
+	globalLightSSBO = CreateBuffer(lightBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	clusterGridSSBO = CreateBuffer(clusterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	lightIndexSSBO = CreateBuffer(lightIndexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+	VkDescriptorBufferInfo lightInfo{};
+	lightInfo.buffer = globalLightSSBO.buffer;
+	lightInfo.offset = 0;
+	lightInfo.range = lightBufferSize;
+
+	VkDescriptorBufferInfo clusterInfo{};
+	clusterInfo.buffer = clusterGridSSBO.buffer;
+	clusterInfo.offset = 0;
+	clusterInfo.range = clusterBufferSize;
+
+	VkDescriptorBufferInfo lightIndexInfo{};
+	lightIndexInfo.buffer = lightIndexSSBO.buffer;
+	lightIndexInfo.offset = 0;
+	lightIndexInfo.range = lightIndexBufferSize;
+
+	std::array<VkWriteDescriptorSet, 3> writes{};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].dstSet = globalDescriptorSet;
+	writes[0].dstBinding = 4;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[0].descriptorCount = 1;
+	writes[0].pBufferInfo = &lightInfo;
+
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].dstSet = globalDescriptorSet;
+	writes[1].dstBinding = 5;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[1].descriptorCount = 1;
+	writes[1].pBufferInfo = &clusterInfo;
+
+	writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[2].dstSet = globalDescriptorSet;
+	writes[2].dstBinding = 6;
+	writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	writes[2].descriptorCount = 1;
+	writes[2].pBufferInfo = &lightIndexInfo;
+
+	vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+	UploadLightingData({});
+
+	// Rebuilding this block (for example after swapchain recreation) must tear
+	// down stale views/framebuffers before allocating replacement images.
+	auto DestroyFramebuffer = [&](VkFramebuffer& framebuffer) {
+		if (framebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(device, framebuffer, nullptr);
+			framebuffer = VK_NULL_HANDLE;
+		}
+	};
+	DestroyFramebuffer(directionalShadowFramebuffer);
+	DestroyFramebuffer(spotShadowFramebuffer);
+	DestroyFramebuffer(areaShadowFramebuffer);
+	for (VkFramebuffer& framebuffer : pointShadowFaceFramebuffers) {
+		DestroyFramebuffer(framebuffer);
+	}
+
+	for (VkImageView& faceView : pointShadowDepthFaceViews) {
+		if (faceView != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, faceView, nullptr);
+			faceView = VK_NULL_HANDLE;
+		}
+	}
+	for (VkImageView& faceView : pointShadowColorFaceViews) {
+		if (faceView != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, faceView, nullptr);
+			faceView = VK_NULL_HANDLE;
+		}
+	}
+
+	auto DestroyImage = [&](VulkanImage& image) {
+		if (image.sampler != VK_NULL_HANDLE) {
+			vkDestroySampler(device, image.sampler, nullptr);
+			image.sampler = VK_NULL_HANDLE;
+		}
+		if (image.view != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, image.view, nullptr);
+			image.view = VK_NULL_HANDLE;
+		}
+		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+		}
+		image.image = VK_NULL_HANDLE;
+		image.allocation = VK_NULL_HANDLE;
+	};
+
+	DestroyImage(directionalShadowDepth);
+	DestroyImage(directionalShadowColor);
+	DestroyImage(spotShadowDepth);
+	DestroyImage(spotShadowColor);
+	DestroyImage(areaShadowDepth);
+	DestroyImage(areaShadowColor);
+	DestroyImage(pointShadowCubeDepth);
+	DestroyImage(pointShadowCubeColor);
+	DestroyImage(ltcAmplitudeTexture);
+	DestroyImage(ltcInverseTexture);
+
+	const VkFormat shadowDepthFormat = (depthFormat != VK_FORMAT_UNDEFINED) ? depthFormat : FindDepthFormat();
+	const uint32_t shadowWidth = SHADOW_MAP_RESOLUTION;
+	const uint32_t shadowHeight = SHADOW_MAP_RESOLUTION;
+	const uint32_t pointShadowSize = POINT_SHADOW_MAP_RESOLUTION;
+
+	auto CreateColorAttachment = [&](uint32_t width, uint32_t height, uint32_t layers, VkImageCreateFlags flags, VulkanImage& image, VkImageViewType viewType) {
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent.width = width;
+		imageInfo.extent.height = height;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = layers;
+		imageInfo.format = swapchainImageFormat;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		imageInfo.flags = flags;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
+			image.image = VK_NULL_HANDLE;
+			image.allocation = VK_NULL_HANDLE;
+			return;
+		}
+
+		VkImageViewCreateInfo viewInfo{};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = image.image;
+		viewInfo.viewType = viewType;
+		viewInfo.format = imageInfo.format;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		viewInfo.subresourceRange.baseMipLevel = 0;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.baseArrayLayer = 0;
+		viewInfo.subresourceRange.layerCount = layers;
+		if (vkCreateImageView(device, &viewInfo, nullptr, &image.view) != VK_SUCCESS) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+			image.image = VK_NULL_HANDLE;
+			image.allocation = VK_NULL_HANDLE;
+			image.view = VK_NULL_HANDLE;
+		}
+	};
+
+	auto CreateDepthAttachment2D = [&](uint32_t width, uint32_t height, VulkanImage& image) {
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent.width = width;
+		imageInfo.extent.height = height;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.format = shadowDepthFormat;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
+			image.image = VK_NULL_HANDLE;
+			image.allocation = VK_NULL_HANDLE;
+			return;
+		}
+		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_DEPTH_BIT);
+	};
+
+	auto CreateDepthAttachmentCube = [&](uint32_t size, VulkanImage& image) {
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent.width = size;
+		imageInfo.extent.height = size;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 6;
+		imageInfo.format = shadowDepthFormat;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
+			image.image = VK_NULL_HANDLE;
+			image.allocation = VK_NULL_HANDLE;
+			return;
+		}
+
+		VkImageViewCreateInfo viewInfo{};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = image.image;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+		viewInfo.format = imageInfo.format;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		viewInfo.subresourceRange.baseMipLevel = 0;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.baseArrayLayer = 0;
+		viewInfo.subresourceRange.layerCount = 6;
+		if (vkCreateImageView(device, &viewInfo, nullptr, &image.view) != VK_SUCCESS) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+			image.image = VK_NULL_HANDLE;
+			image.allocation = VK_NULL_HANDLE;
+			image.view = VK_NULL_HANDLE;
+		}
+	};
+
+	auto CreateShadowSampler = [&](VulkanImage& image, bool useCompareSampler) {
+		if (image.image == VK_NULL_HANDLE) {
+			return;
+		}
+
+		VkSamplerCreateInfo samplerInfo{};
+		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerInfo.magFilter = VK_FILTER_LINEAR;
+		samplerInfo.minFilter = VK_FILTER_LINEAR;
+		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+		samplerInfo.anisotropyEnable = VK_FALSE;
+		samplerInfo.maxAnisotropy = 1.0f;
+		samplerInfo.compareEnable = useCompareSampler ? VK_TRUE : VK_FALSE;
+		samplerInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+		samplerInfo.minLod = 0.0f;
+		samplerInfo.maxLod = 1.0f;
+		samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+		samplerInfo.unnormalizedCoordinates = VK_FALSE;
+		vkCreateSampler(device, &samplerInfo, nullptr, &image.sampler);
+	};
+
+	CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, directionalShadowColor, VK_IMAGE_VIEW_TYPE_2D);
+	CreateDepthAttachment2D(shadowWidth, shadowHeight, directionalShadowDepth);
+	CreateShadowSampler(directionalShadowDepth, false);
+
+	CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, spotShadowColor, VK_IMAGE_VIEW_TYPE_2D);
+	CreateDepthAttachment2D(shadowWidth, shadowHeight, spotShadowDepth);
+	CreateShadowSampler(spotShadowDepth, false);
+
+	CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, areaShadowColor, VK_IMAGE_VIEW_TYPE_2D);
+	CreateDepthAttachment2D(shadowWidth, shadowHeight, areaShadowDepth);
+	CreateShadowSampler(areaShadowDepth, false);
+
+	CreateColorAttachment(pointShadowSize, pointShadowSize, 6u, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, pointShadowCubeColor, VK_IMAGE_VIEW_TYPE_CUBE);
+	CreateDepthAttachmentCube(pointShadowSize, pointShadowCubeDepth);
+	CreateShadowSampler(pointShadowCubeDepth, false);
+
+	for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
+		VkImageViewCreateInfo depthFaceViewInfo{};
+		depthFaceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		depthFaceViewInfo.image = pointShadowCubeDepth.image;
+		depthFaceViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		depthFaceViewInfo.format = shadowDepthFormat;
+		depthFaceViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		depthFaceViewInfo.subresourceRange.baseMipLevel = 0;
+		depthFaceViewInfo.subresourceRange.levelCount = 1;
+		depthFaceViewInfo.subresourceRange.baseArrayLayer = faceIndex;
+		depthFaceViewInfo.subresourceRange.layerCount = 1;
+		vkCreateImageView(device, &depthFaceViewInfo, nullptr, &pointShadowDepthFaceViews[faceIndex]);
+
+		VkImageViewCreateInfo colorFaceViewInfo{};
+		colorFaceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		colorFaceViewInfo.image = pointShadowCubeColor.image;
+		colorFaceViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		colorFaceViewInfo.format = swapchainImageFormat;
+		colorFaceViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		colorFaceViewInfo.subresourceRange.baseMipLevel = 0;
+		colorFaceViewInfo.subresourceRange.levelCount = 1;
+		colorFaceViewInfo.subresourceRange.baseArrayLayer = faceIndex;
+		colorFaceViewInfo.subresourceRange.layerCount = 1;
+		vkCreateImageView(device, &colorFaceViewInfo, nullptr, &pointShadowColorFaceViews[faceIndex]);
+	}
+
+	auto BindDepthTexture = [&](uint32_t index, const VulkanImage& image) {
+		VkDescriptorImageInfo imageInfo{};
+		imageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		imageInfo.imageView = image.view;
+		imageInfo.sampler = image.sampler;
+
+		VkWriteDescriptorSet descriptorWrite{};
+		descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrite.dstSet = globalDescriptorSet;
+		descriptorWrite.dstBinding = 0;
+		descriptorWrite.dstArrayElement = index;
+		descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		descriptorWrite.descriptorCount = 1;
+		descriptorWrite.pImageInfo = &imageInfo;
+		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+	};
+
+	// Register 2D shadow maps into the bindless texture heap so each light type
+	// can provide its sampled shadow-map index through the GPULight payload.
+	directionalShadowTextureIndex = AllocateTextureIndex();
+	BindDepthTexture(directionalShadowTextureIndex, directionalShadowDepth);
+	spotShadowTextureIndex = AllocateTextureIndex();
+	BindDepthTexture(spotShadowTextureIndex, spotShadowDepth);
+	areaShadowTextureIndex = AllocateTextureIndex();
+	BindDepthTexture(areaShadowTextureIndex, areaShadowDepth);
+
+	// Point shadows use a dedicated cube binding because the global bindless array
+	// is typed as Texture2D in the fragment shader.
+	VkDescriptorImageInfo pointShadowCubeImageInfo{};
+	pointShadowCubeImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	pointShadowCubeImageInfo.imageView = pointShadowCubeDepth.view;
+	pointShadowCubeImageInfo.sampler = VK_NULL_HANDLE;
+
+	VkDescriptorImageInfo pointShadowCubeSamplerInfo{};
+	pointShadowCubeSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	pointShadowCubeSamplerInfo.imageView = VK_NULL_HANDLE;
+	pointShadowCubeSamplerInfo.sampler = pointShadowCubeDepth.sampler;
+
+	std::array<VkWriteDescriptorSet, 2> pointShadowCubeWrites{};
+	pointShadowCubeWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	pointShadowCubeWrites[0].dstSet = globalDescriptorSet;
+	pointShadowCubeWrites[0].dstBinding = 7;
+	pointShadowCubeWrites[0].dstArrayElement = 0;
+	pointShadowCubeWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	pointShadowCubeWrites[0].descriptorCount = 1;
+	pointShadowCubeWrites[0].pImageInfo = &pointShadowCubeImageInfo;
+
+	pointShadowCubeWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	pointShadowCubeWrites[1].dstSet = globalDescriptorSet;
+	pointShadowCubeWrites[1].dstBinding = 8;
+	pointShadowCubeWrites[1].dstArrayElement = 0;
+	pointShadowCubeWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+	pointShadowCubeWrites[1].descriptorCount = 1;
+	pointShadowCubeWrites[1].pImageInfo = &pointShadowCubeSamplerInfo;
+
+	vkUpdateDescriptorSets(device, static_cast<uint32_t>(pointShadowCubeWrites.size()), pointShadowCubeWrites.data(), 0, nullptr);
+
+	// Build lightweight procedural LTC lookup textures. These are deterministic
+	// fallback tables until authored LUT assets are imported through content.
+	auto CreateLtcLookupTexture = [&](const std::vector<glm::vec4>& texels, VulkanImage& image) {
+		if (texels.empty()) {
+			return;
+		}
+
+		const VkDeviceSize uploadSize = static_cast<VkDeviceSize>(sizeof(glm::vec4) * texels.size());
+		VulkanBuffer stagingBuffer = CreateBuffer(uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		void* mapped = nullptr;
+		vmaMapMemory(allocator, stagingBuffer.allocation, &mapped);
+		std::memcpy(mapped, texels.data(), static_cast<size_t>(uploadSize));
+		vmaUnmapMemory(allocator, stagingBuffer.allocation);
+
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent.width = LTC_LUT_RESOLUTION;
+		imageInfo.extent.height = LTC_LUT_RESOLUTION;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
+			vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+			image.image = VK_NULL_HANDLE;
+			image.allocation = VK_NULL_HANDLE;
+			return;
+		}
+
+		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		CopyBufferToImage(stagingBuffer.buffer, image.image, LTC_LUT_RESOLUTION, LTC_LUT_RESOLUTION);
+		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+
+		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
+
+		VkSamplerCreateInfo samplerInfo{};
+		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerInfo.magFilter = VK_FILTER_LINEAR;
+		samplerInfo.minFilter = VK_FILTER_LINEAR;
+		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.anisotropyEnable = VK_FALSE;
+		samplerInfo.maxAnisotropy = 1.0f;
+		samplerInfo.compareEnable = VK_FALSE;
+		samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+		samplerInfo.minLod = 0.0f;
+		samplerInfo.maxLod = 1.0f;
+		samplerInfo.unnormalizedCoordinates = VK_FALSE;
+		vkCreateSampler(device, &samplerInfo, nullptr, &image.sampler);
+	};
+
+	const uint32_t lutSize = LTC_LUT_RESOLUTION;
+	std::vector<glm::vec4> amplitudeLut(lutSize * lutSize, glm::vec4(1.0f));
+	std::vector<glm::vec4> inverseLut(lutSize * lutSize, glm::vec4(0.0f));
+	for (uint32_t y = 0u; y < lutSize; ++y) {
+		for (uint32_t x = 0u; x < lutSize; ++x) {
+			const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(lutSize);
+			const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(lutSize);
+			const float roughness = std::clamp(v, 0.02f, 1.0f);
+			const float fresnelScale = std::clamp(1.0f - 0.5f * roughness, 0.05f, 1.0f);
+			amplitudeLut[y * lutSize + x] = glm::vec4(fresnelScale, fresnelScale, fresnelScale, 1.0f);
+			inverseLut[y * lutSize + x] = glm::vec4(1.0f, 0.0f, 0.0f, u);
+		}
+	}
+
+	CreateLtcLookupTexture(amplitudeLut, ltcAmplitudeTexture);
+	CreateLtcLookupTexture(inverseLut, ltcInverseTexture);
+
+	if (ltcAmplitudeTexture.image != VK_NULL_HANDLE) {
+		ltcAmplitudeTextureIndex = AllocateTextureIndex();
+		UpdateGlobalTexture(ltcAmplitudeTextureIndex, ltcAmplitudeTexture);
+	}
+	if (ltcInverseTexture.image != VK_NULL_HANDLE) {
+		ltcInverseTextureIndex = AllocateTextureIndex();
+		UpdateGlobalTexture(ltcInverseTextureIndex, ltcInverseTexture);
+	}
+}
+
+void VulkanContext::Impl::UploadLightingData(const std::vector<GPULight>& lights) {
+	if (globalLightSSBO.buffer == VK_NULL_HANDLE || clusterGridSSBO.buffer == VK_NULL_HANDLE || lightIndexSSBO.buffer == VK_NULL_HANDLE) {
+		return;
+	}
+
+	const uint32_t clampedLightCount = static_cast<uint32_t>(std::min<size_t>(lights.size(), MAX_GLOBAL_LIGHTS));
+
+	void* mappedLights = nullptr;
+	if (vmaMapMemory(allocator, globalLightSSBO.allocation, &mappedLights) == VK_SUCCESS) {
+		auto* gpuLights = static_cast<GPULight*>(mappedLights);
+		std::fill(gpuLights, gpuLights + MAX_GLOBAL_LIGHTS, GPULight{});
+		if (clampedLightCount > 0u) {
+			std::memcpy(gpuLights, lights.data(), sizeof(GPULight) * clampedLightCount);
+		}
+		vmaFlushAllocation(allocator, globalLightSSBO.allocation, 0, VK_WHOLE_SIZE);
+		vmaUnmapMemory(allocator, globalLightSSBO.allocation);
+	}
+
+	void* mappedClusters = nullptr;
+	if (vmaMapMemory(allocator, clusterGridSSBO.allocation, &mappedClusters) == VK_SUCCESS) {
+		auto* clusters = static_cast<ClusterData*>(mappedClusters);
+		const uint32_t visiblePerCluster = std::min(clampedLightCount, MAX_LIGHTS_PER_CLUSTER);
+		for (uint32_t clusterIndex = 0; clusterIndex < MAX_LIGHT_CLUSTERS; ++clusterIndex) {
+			clusters[clusterIndex].offset = clusterIndex * MAX_LIGHTS_PER_CLUSTER;
+			clusters[clusterIndex].count = visiblePerCluster;
+		}
+		vmaFlushAllocation(allocator, clusterGridSSBO.allocation, 0, VK_WHOLE_SIZE);
+		vmaUnmapMemory(allocator, clusterGridSSBO.allocation);
+	}
+
+	void* mappedIndices = nullptr;
+	if (vmaMapMemory(allocator, lightIndexSSBO.allocation, &mappedIndices) == VK_SUCCESS) {
+		auto* indices = static_cast<uint32_t*>(mappedIndices);
+		for (uint32_t clusterIndex = 0; clusterIndex < MAX_LIGHT_CLUSTERS; ++clusterIndex) {
+			const uint32_t baseOffset = clusterIndex * MAX_LIGHTS_PER_CLUSTER;
+			for (uint32_t lane = 0; lane < MAX_LIGHTS_PER_CLUSTER; ++lane) {
+				indices[baseOffset + lane] = (lane < clampedLightCount) ? lane : 0xFFFFFFFFu;
+			}
+		}
+		vmaFlushAllocation(allocator, lightIndexSSBO.allocation, 0, VK_WHOLE_SIZE);
+		vmaUnmapMemory(allocator, lightIndexSSBO.allocation);
 	}
 }
 
