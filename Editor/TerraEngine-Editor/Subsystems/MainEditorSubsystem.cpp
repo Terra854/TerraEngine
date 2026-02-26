@@ -38,7 +38,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
     UndoRedoSystem::Instance().Initialize(context);
 
     ObjectManager::instance().SetOnModifiedCallback([]() {
-        SceneManager::Instance().MarkActiveSceneDirty();
+        SceneManager::Instance().ForceMarkActiveSceneDirty();
     });
 
     ScriptingSystem::Instance().SetRunning(false);
@@ -102,11 +102,14 @@ void MainEditorSubsystem::OnProjectOpened() {
 
 void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
     TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(path);
-    if (sceneId != TerraEngine::EMPTY_UUID) {
-        SceneManager::Instance().SetActiveScene(sceneId);
-        sceneLoaded = true;
-        
-        // Save to LastScene.txt
+        if (sceneId != TerraEngine::EMPTY_UUID) {
+            SceneManager::Instance().SetActiveScene(sceneId);
+            sceneLoaded = true;
+            m_CurrentScenePath = path;
+            UndoRedoSystem::Instance().Clear();
+    
+            // Save to LastScene.txt
+    
         if (ctx && ctx->projectManager->HasActiveProject()) {
             auto projectRoot = ctx->projectManager->GetProjectRoot();
             std::filesystem::path libDir = projectRoot / "Library";
@@ -346,7 +349,9 @@ void MainEditorSubsystem::DrawMainMenuBar() {
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
-                SceneManager::Instance().SaveScene();
+                if (SceneManager::Instance().SaveScene(m_CurrentScenePath)) {
+                    UndoRedoSystem::Instance().SetSavePoint();
+                }
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Close Project")) {
@@ -459,6 +464,7 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 
         if (ImGui::Button("Yes", ImVec2(120, 0))) {
             SceneManager::Instance().SaveScene();
+            UndoRedoSystem::Instance().SetSavePoint();
             ExecutePendingAction();
             ImGui::CloseCurrentPopup();
         }
@@ -483,6 +489,9 @@ void MainEditorSubsystem::CloseCurrentProject() {
     
     // Clear Objects
     ObjectManager::instance().clear();
+
+    // Clear Undo History
+    UndoRedoSystem::Instance().Clear();
     
     // Clear Resources
     ResourceManager::Instance().ClearCaches();

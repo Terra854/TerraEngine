@@ -86,6 +86,7 @@ private:
     
     std::optional<entt::entity> selectedEntity;
     std::optional<std::filesystem::path> selectedAsset;
+    std::filesystem::path m_CurrentScenePath;
 
     enum class PendingAction {
         None,

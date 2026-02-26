@@ -133,10 +133,24 @@ public:
     bool CanUndo() const;
     bool CanRedo() const;
 
+    // Marks the current point in history as the 'Saved' state.
+    void SetSavePoint();
+
+    // Clears the undo/redo history.
+    void Clear();
+
 private:
+    void UpdateDirtyState();
+
     std::deque<std::unique_ptr<ICommand>> undoStack;
     std::deque<std::unique_ptr<ICommand>> redoStack;
     
+    // Points to the command that was at the top of the undo stack when last saved.
+    // If null, the saved state is the empty undo stack.
+    ICommand* m_SavedCommand = nullptr;
+    // Tracks if the saved state is currently reachable (not pruned by MaxHistory).
+    bool m_SavedStateIsReachable = true;
+
     // Limits history depth to prevent unbounded memory growth during long 
     // editing sessions.
     static constexpr size_t MaxHistory = 100;

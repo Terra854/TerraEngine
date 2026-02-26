@@ -180,9 +180,14 @@ bool SceneManager::IsActiveSceneDirty() const
 	return activeSceneDirty;
 }
 
-void SceneManager::MarkActiveSceneDirty()
+void SceneManager::ForceMarkActiveSceneDirty()
 {
 	activeSceneDirty = true;
+}
+
+void SceneManager::ClearActiveSceneDirty()
+{
+	activeSceneDirty = false;
 }
 
 bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
@@ -251,7 +256,7 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 
 	// Resetting the dirty flag after a successful disk write ensures the editor
 	// UI accurately reflects that the current state is safely persisted.
-	activeSceneDirty = false;
+	ClearActiveSceneDirty();
 	
 	return true;
 }
@@ -334,7 +339,7 @@ void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32
 		}
 	}
 
-	MarkActiveSceneDirty();
+	ForceMarkActiveSceneDirty();
 	TERRAENGINE_LOG(LogLevel::Info, "Spawned stress test light grid with " << (safeGridWidth * safeGridDepth) << " point lights.");
 }
 

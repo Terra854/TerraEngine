@@ -175,11 +175,14 @@ void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
     redoStack.clear();
 
     if (undoStack.size() > MaxHistory) {
+        auto& first = undoStack.front();
+        if (first.get() == m_SavedCommand) {
+            m_SavedStateIsReachable = false;
+        }
         undoStack.pop_front();
     }
 
-    // Every undoable action is considered a scene modification.
-    SceneManager::Instance().MarkActiveSceneDirty();
+    UpdateDirtyState();
 }
 
 void UndoRedoSystem::Undo() {
@@ -192,7 +195,7 @@ void UndoRedoSystem::Undo() {
     command->Undo();
 
     redoStack.push_back(std::move(command));
-    SceneManager::Instance().MarkActiveSceneDirty();
+    UpdateDirtyState();
 }
 
 void UndoRedoSystem::Redo() {
@@ -207,7 +210,7 @@ void UndoRedoSystem::Redo() {
     command->Redo();
 
     undoStack.push_back(std::move(command));
-    SceneManager::Instance().MarkActiveSceneDirty();
+    UpdateDirtyState();
 }
 
 bool UndoRedoSystem::CanUndo() const {
@@ -216,4 +219,32 @@ bool UndoRedoSystem::CanUndo() const {
 
 bool UndoRedoSystem::CanRedo() const {
     return !redoStack.empty();
+}
+
+void UndoRedoSystem::SetSavePoint() {
+    m_SavedCommand = undoStack.empty() ? nullptr : undoStack.back().get();
+    m_SavedStateIsReachable = true;
+    UpdateDirtyState();
+}
+
+void UndoRedoSystem::Clear() {
+    undoStack.clear();
+    redoStack.clear();
+    m_SavedCommand = nullptr;
+    m_SavedStateIsReachable = true;
+    UpdateDirtyState();
+}
+
+void UndoRedoSystem::UpdateDirtyState() {
+    if (!m_SavedStateIsReachable) {
+        SceneManager::Instance().ForceMarkActiveSceneDirty();
+        return;
+    }
+
+    ICommand* currentTop = undoStack.empty() ? nullptr : undoStack.back().get();
+    if (currentTop == m_SavedCommand) {
+        SceneManager::Instance().ClearActiveSceneDirty();
+    } else {
+        SceneManager::Instance().ForceMarkActiveSceneDirty();
+    }
 }

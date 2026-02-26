@@ -144,15 +144,13 @@ public:
 
 	
 
-			// Manually flag the active scene as containing unsaved changes. Should be 
-
-	
-
-			// called by editor systems after any mutation to the scene graph.
-
-	
-
-			void MarkActiveSceneDirty();
+						// Manually flag the active scene as containing unsaved changes. Should be 
+						// called by editor systems after any mutation to the scene graph.
+						void ForceMarkActiveSceneDirty();
+			
+						// Manually clear the dirty flag for the active scene.
+						void ClearActiveSceneDirty();
+			
 
 	
 
