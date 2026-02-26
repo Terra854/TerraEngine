@@ -743,7 +743,6 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	vmaDestroyBuffer(allocator, stagingMeshletTable.buffer, stagingMeshletTable.allocation);
 	vmaDestroyBuffer(allocator, stagingMeshletBounds.buffer, stagingMeshletBounds.allocation);
 
-	TERRAENGINE_LOG(LogLevel::Info, "gpuDirectPass=true cpu-repack-used=false remap-zero-copy=true skinning=" << (skinningDataSize > 0 ? "true" : "false") << " mesh=" << ToHexString(meshId));
 	meshCache[meshId] = vMesh;
 }
 

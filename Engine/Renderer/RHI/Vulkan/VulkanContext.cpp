@@ -1252,8 +1252,7 @@ void VulkanContext::EndFrame() {
 		vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
 		VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
 		if (submitResult != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
-			std::cerr << "[Vulkan] QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.\n";
+			TERRAENGINE_LOG(LogLevel::Error, "[Vulkan] QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.");
 			impl->RecreateSwapChain();
 			return;
 		}

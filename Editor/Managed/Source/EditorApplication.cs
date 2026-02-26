@@ -20,11 +20,11 @@ namespace TerraEngine.Editor
                 TerraEngine.Log.Error($"Unhandled C# Exception:\n{e.ExceptionObject}");
             };
 
-            Console.WriteLine("[C#] Setting Context...");
+            TerraEngine.Log.Info("Setting ImGui Context...");
             try 
             {
                 ImGui.SetCurrentContext((ImGuiContext*)imguiContext);
-                Console.WriteLine("[C#] Context Set.");
+                TerraEngine.Log.Info("Context Set.");
 
                 // Initialize Windows
                 _statusWindow = new StatusWindow();
@@ -32,7 +32,7 @@ namespace TerraEngine.Editor
             }
             catch (Exception e)
             {
-                Console.WriteLine($"[C#] Failed to set context: {e}");
+                TerraEngine.Log.Error($"Failed to set context: {e}");
             }
             
             _initialized = true;

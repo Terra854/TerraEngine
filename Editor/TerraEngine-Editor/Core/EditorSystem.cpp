@@ -9,6 +9,7 @@
 #include "Engine/Window/WindowSystem.h"
 #include "Engine/DotNet/DotNetHost.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Core/Logger/Logger.h"
 
 // ImGui
 #include <imgui.h>
@@ -242,23 +243,23 @@ void EditorSystem::Initialize() {
     // Try to locate artifacts
     if (std::filesystem::exists(cwd / "Managed" / "TerraEngine.Editor.runtimeconfig.json")) {
         binDir = cwd / "Managed";
-    } else {
-        // Fallback or error
-        binDir = cwd / "Editor" / "Managed"; 
-        std::cerr << "[DotNet] Could not find runtimeconfig.json in " << cwd << " or subdirectories." << std::endl;
-    }
+	} else {
+		// Fallback or error
+		binDir = cwd / "Editor" / "Managed"; 
+		TERRAENGINE_LOG(LogLevel::Warning, "[DotNet] Could not find runtimeconfig.json in " << cwd << " or subdirectories.");
+	}
 
     // Ensure absolute paths
     binDir = std::filesystem::absolute(binDir);
     std::filesystem::path configPath = binDir / "TerraEngine.Editor.runtimeconfig.json";
     std::filesystem::path dllPath = binDir / "TerraEngine.Editor.dll";
 
-    std::cout << "[DotNet] Loading Runtime Config: " << configPath << std::endl;
-    std::cout << "[DotNet] Loading Assembly: " << dllPath << std::endl;
+	TERRAENGINE_LOG(LogLevel::Info, "[DotNet] Loading Runtime Config: " << configPath);
+	TERRAENGINE_LOG(LogLevel::Info, "[DotNet] Loading Assembly: " << dllPath);
 
-    if (!DotNetHost::Instance().Initialize(dllPath)) {
-        std::cerr << "Failed to initialize .NET Host with assembly: " << dllPath << std::endl;
-    } else {
+	if (!DotNetHost::Instance().Initialize(dllPath)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to initialize .NET Host with assembly: " << dllPath);
+	} else {
         managedInitialize = (ManagedInitFn)DotNetHost::Instance().GetManagedFunction(
             dllPath,
             L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
@@ -280,12 +281,12 @@ void EditorSystem::Initialize() {
             L"DrawWindowMenu"
         );
 
-        if (managedInitialize) {
-            managedInitialize(ImGui::GetCurrentContext());
-        } else {
-            std::cerr << "Failed to load Managed Initialize function." << std::endl;
-        }
-    }
+		if (managedInitialize) {
+			managedInitialize(ImGui::GetCurrentContext());
+		} else {
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to load Managed Initialize function.");
+		}
+	}
 }
 
 void EditorSystem::Update(float deltaTime) {

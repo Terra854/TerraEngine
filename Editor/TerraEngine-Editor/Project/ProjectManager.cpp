@@ -1,8 +1,8 @@
 #include "ProjectManager.h"
 #include <fstream>
-#include <iostream>
 #include <chrono>
 #include <algorithm>
+#include "Engine/Core/Logger/Logger.h"
 
 namespace fs = std::filesystem;
 
@@ -17,7 +17,7 @@ ProjectManager::~ProjectManager() {
 bool ProjectManager::CreateProject(const fs::path& location, const std::string& name, ProjectTemplate tmpl, std::string* outError) {
     if (fs::exists(location) && !fs::is_empty(location)) {
         std::string msg = "Project location must be empty or new: " + location.string();
-        std::cerr << msg << std::endl;
+        TERRAENGINE_LOG(LogLevel::Error, msg);
         if (outError) *outError = msg;
         return false;
     }
@@ -69,7 +69,7 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
         return LoadProject(location, outError);
     } catch (const std::exception& e) {
         std::string msg = std::string("Failed to create project: ") + e.what();
-        std::cerr << msg << std::endl;
+        TERRAENGINE_LOG(LogLevel::Error, msg);
         if (outError) *outError = msg;
         return false;
     }
@@ -82,11 +82,12 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
     }
 
     fs::path settingsPath = projectDir / "ProjectSettings.terra";
-    std::cout << "[ProjectManager] Checking for settings at: " << fs::absolute(settingsPath).string() << std::endl;
+    // Trace project discovery through the shared logger for consistent editor diagnostics.
+    TERRAENGINE_LOG(LogLevel::Info, "[ProjectManager] Checking for settings at: " << fs::absolute(settingsPath).string());
 
     if (!fs::exists(settingsPath)) {
         std::string msg = "Not a valid project folder (missing ProjectSettings.terra): " + fs::absolute(settingsPath).string();
-        std::cerr << msg << std::endl;
+        TERRAENGINE_LOG(LogLevel::Error, msg);
         if (outError) *outError = msg;
         return false;
     }
@@ -105,7 +106,7 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
         return true;
     } catch (const std::exception& e) {
         std::string msg = std::string("Failed to load project settings: ") + e.what();
-        std::cerr << msg << std::endl;
+        TERRAENGINE_LOG(LogLevel::Error, msg);
         if (outError) *outError = msg;
         return false;
     }

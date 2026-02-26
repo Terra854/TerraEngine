@@ -361,7 +361,7 @@ set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui)
 set(IMGUI_FILE_DIALOG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiFileDialog)
 
 add_executable(TerraEngine-Editor
-	"Editor/TerraEngine-Editor/ImGuiPolyfill.cpp"
+	Editor/TerraEngine-Editor/ImGuiPolyfill.cpp
 	Editor/TerraEngine-Editor/Core/EditorMain.cpp
 	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp

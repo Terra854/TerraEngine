@@ -1,7 +1,7 @@
 #include "ProjectHubSubsystem.h"
 #include "ProjectManager.h"
 #include <imgui.h>
-#include <iostream>
+#include "Engine/Core/Logger/Logger.h"
 
 void ProjectHubSubsystem::Initialize(EditorContext& context) {
     ctx = &context;
@@ -63,7 +63,7 @@ void ProjectHubSubsystem::DrawUI() {
             if (filePathName.empty()) {
                 filePathName = ImGuiFileDialog::Instance()->GetCurrentPath();
             }
-            std::cout << "[ProjectHub] Open Project Selected Path: " << filePathName << std::endl;
+            TERRAENGINE_LOG(LogLevel::Info, "[ProjectHub] Open Project Selected Path: " << filePathName);
 
             if (ctx->projectManager->LoadProject(filePathName, &errorMessage)) {
                 errorMessage.clear();
@@ -79,7 +79,8 @@ void ProjectHubSubsystem::DrawUI() {
             if (selectedPath.empty()) {
                 selectedPath = ImGuiFileDialog::Instance()->GetCurrentPath();
             }
-            std::cout << "Selected Project Path: " << selectedPath << std::endl;
+            // Keep file-dialog path traces in logger output to simplify debugging project creation flows.
+            TERRAENGINE_LOG(LogLevel::Info, "Selected Project Path: " << selectedPath);
             newProjectPath = selectedPath;
         }
         ImGuiFileDialog::Instance()->Close();
