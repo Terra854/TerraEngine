@@ -1,6 +1,10 @@
 #include "SceneViewWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
+#include "../Subsystems/UndoRedoSystem.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Resource/ResourceManager.h"
+#include "Engine/File Formats/TerraEngineMeshFile.h"
+#include "Engine/Scene/MeshRenderComponent.h"
 #include "Engine/Input/InputSystem.h"
 #include "Engine/Input/InputCodes.h"
 #include "Engine/Window/WindowSystem.h"
@@ -253,7 +257,140 @@ void SceneViewWindow::OnGui() {
     // Set Scene View Camera for next render
     RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPos);
 
+    HandlePicking(view, projNoFlip, cursorPos, contentSize);
+
     DrawGizmos(view, projNoFlip, cursorPos, contentSize);
+}
+
+bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec3& aabbMin, const glm::vec3& aabbMax, float& t)
+{
+	float tmin = 0.0f;
+	float tmax = std::numeric_limits<float>::max();
+
+	for (int i = 0; i < 3; i++)
+	{
+		if (std::abs(rayDir[i]) < 0.0001f)
+		{
+			if (rayOrigin[i] < aabbMin[i] || rayOrigin[i] > aabbMax[i]) return false;
+		}
+		else
+		{
+			float invD = 1.0f / rayDir[i];
+			float t1 = (aabbMin[i] - rayOrigin[i]) * invD;
+			float t2 = (aabbMax[i] - rayOrigin[i]) * invD;
+
+			if (t1 > t2) std::swap(t1, t2);
+
+			tmin = std::max(tmin, t1);
+			tmax = std::min(tmax, t2);
+
+			if (tmin > tmax) return false;
+		}
+	}
+
+	t = tmin;
+	return true;
+}
+
+void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
+    if (!ImGui::IsMouseClicked(0) || ImGuizmo::IsOver() || m_IsFlyCamActive || !ImGui::IsWindowHovered()) return;
+
+    ImVec2 mousePos = ImGui::GetMousePos();
+    if (mousePos.x < viewportPos.x || mousePos.x > viewportPos.x + viewportSize.x ||
+        mousePos.y < viewportPos.y || mousePos.y > viewportPos.y + viewportSize.y) return;
+
+    // NDC coordinates
+    float x = ((mousePos.x - viewportPos.x) / viewportSize.x) * 2.0f - 1.0f;
+    float y = 1.0f - ((mousePos.y - viewportPos.y) / viewportSize.y) * 2.0f;
+
+    glm::mat4 invVP = glm::inverse(proj * view);
+    glm::vec4 rayStart = invVP * glm::vec4(x, y, 0.01f, 1.0f);
+    glm::vec4 rayEnd = invVP * glm::vec4(x, y, 1.0f, 1.0f);
+
+    glm::vec3 rayOrigin = glm::vec3(rayStart) / rayStart.w;
+    glm::vec3 rayDirection = glm::normalize((glm::vec3(rayEnd) / rayEnd.w) - rayOrigin);
+
+    entt::entity bestEntity = entt::null;
+    float bestDist = std::numeric_limits<float>::max();
+
+    auto& registry = ObjectManager::instance().getRegistry();
+    
+    auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
+        glm::mat4 world(1.0f);
+        entt::entity current = entity;
+        while (current != entt::null && registry.valid(current)) {
+            if (auto* t = registry.try_get<Transform>(current)) {
+                glm::mat4 local(1.0f);
+                local = glm::translate(local, t->position);
+                local = local * glm::mat4_cast(t->rotation);
+                local = glm::scale(local, t->scale);
+                world = local * world;
+            }
+            current = ObjectManager::instance().getParentEntity(current);
+        }
+        return world;
+    };
+
+    auto viewTransforms = registry.view<Transform>();
+    for (auto entity : viewTransforms) {
+        glm::mat4 worldMatrix = computeWorldMatrix(entity);
+        glm::vec3 worldPos = glm::vec3(worldMatrix[3]);
+
+        bool hit = false;
+        float t = 0.0f;
+
+        if (auto* meshComp = registry.try_get<MeshRenderComponent>(entity)) {
+            if (Mesh* mesh = ResourceManager::Instance().GetMesh(meshComp->meshId)) {
+                // Transform ray to local space
+                glm::mat4 invWorld = glm::inverse(worldMatrix);
+                glm::vec3 localRayOrigin = glm::vec3(invWorld * glm::vec4(rayOrigin, 1.0f));
+                glm::vec3 localRayDir = glm::normalize(glm::vec3(invWorld * glm::vec4(rayDirection, 0.0f)));
+
+                glm::vec3 aabbMin(
+                    mesh->header.quantization.positionOffset[0] - mesh->header.quantization.positionScale[0],
+                    mesh->header.quantization.positionOffset[1] - mesh->header.quantization.positionScale[1],
+                    mesh->header.quantization.positionOffset[2] - mesh->header.quantization.positionScale[2]
+                );
+                glm::vec3 aabbMax(
+                    mesh->header.quantization.positionOffset[0] + mesh->header.quantization.positionScale[0],
+                    mesh->header.quantization.positionOffset[1] + mesh->header.quantization.positionScale[1],
+                    mesh->header.quantization.positionOffset[2] + mesh->header.quantization.positionScale[2]
+                );
+
+                if (RayAABB(localRayOrigin, localRayDir, aabbMin, aabbMax, t)) {
+                    // Convert t back to world distance (approx)
+                    glm::vec3 hitPointLocal = localRayOrigin + localRayDir * t;
+                    glm::vec3 hitPointWorld = glm::vec3(worldMatrix * glm::vec4(hitPointLocal, 1.0f));
+                    t = glm::distance(rayOrigin, hitPointWorld);
+                    hit = true;
+                }
+            }
+        }
+
+        if (!hit) {
+            // Fallback to point check
+            glm::vec3 v = worldPos - rayOrigin;
+            t = glm::dot(v, rayDirection);
+            if (t >= 0) {
+                glm::vec3 closestPoint = rayOrigin + rayDirection * t;
+                float d = glm::length(worldPos - closestPoint);
+                if (d < 0.5f) {
+                    hit = true;
+                }
+            }
+        }
+
+        if (hit && t < bestDist) {
+            bestDist = t;
+            bestEntity = entity;
+        }
+    }
+
+    if (bestEntity != entt::null) {
+        m_Owner->SetSelectedEntity(bestEntity);
+    } else {
+        m_Owner->SetSelectedEntity(std::nullopt);
+    }
 }
 
 void SceneViewWindow::HandleCameraInput(float deltaTime) {
@@ -361,6 +498,13 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
                          nullptr, 
                          m_UsingSnap ? m_SnapValue : nullptr)) 
                      {
+                         if (!m_WasUsingGizmo) {
+                             m_WasUsingGizmo = true;
+                             m_GizmoStartPos = transform->position;
+                             m_GizmoStartRot = transform->rotation;
+                             m_GizmoStartScale = transform->scale;
+                         }
+
                          // Convert updated World Matrix back to Local Matrix
                          glm::mat4 parentMatrix(1.0f);
                          entt::entity parent = ObjectManager::instance().getParentEntity(*selectedEntity);
@@ -381,6 +525,15 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
                          transform->position = translation;
                          transform->rotation = rotation;
                          transform->scale = scale;
+                     }
+
+                     if (m_WasUsingGizmo && !ImGuizmo::IsUsing()) {
+                         m_WasUsingGizmo = false;
+                         UndoRedoSystem::Instance().PushCommand(std::make_unique<ChangeTransformCommand>(
+                             *selectedEntity,
+                             m_GizmoStartPos, m_GizmoStartRot, m_GizmoStartScale,
+                             transform->position, transform->rotation, transform->scale
+                         ));
                      }
                  }
 

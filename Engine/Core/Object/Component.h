@@ -12,8 +12,12 @@
 #include <functional>
 #include <string_view>
 #include <mutex>
+#include <nlohmann/json.hpp>
+#include <glm/vec3.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include "Core/Export.h"
 #include "Object.h"
+#include "Utilities/UUID.h"
 
 // Helper utilities that keep the CRTP component base lightweight while still
 // allowing each component to expose metadata to RTTR in a consistent way.
@@ -61,6 +65,9 @@ struct ComponentAccessFunctions
 	std::function<bool(Object&, std::string_view, const rttr::variant&)> setter;
 	std::function<bool(Object&)> hasComponent;
 	std::function<void(Object&)> addComponent;
+	std::function<void(Object&)> removeComponent;
+	std::function<nlohmann::json(Object&)> serialize;
+	std::function<void(Object&, const nlohmann::json&)> deserialize;
 };
 
 TERRAENGINE_API std::unordered_map<std::string, ComponentAccessFunctions>& ComponentAccessRegistry();
@@ -126,6 +133,87 @@ void RegisterComponentAccess(const std::string& name)
 	{
 		if (!object.getComponent<ComponentType>()) {
 			object.addComponent<ComponentType>();
+		}
+	};
+
+	functions.removeComponent = [](Object& object) -> void
+	{
+		object.removeComponent<ComponentType>();
+	};
+
+	functions.serialize = [name](Object& object) -> nlohmann::json
+	{
+		nlohmann::json compJson = nlohmann::json::object();
+		ComponentType* component = object.getComponent<ComponentType>();
+		if (!component) return compJson;
+
+		auto guard = component->acquireReadLock();
+		rttr::type type = rttr::type::get<ComponentType>();
+		for (auto& prop : type.get_properties())
+		{
+			std::string propName = prop.get_name().to_string();
+			rttr::variant val = prop.get_value(*component);
+
+			if (val.is_type<float>()) compJson[propName] = val.get_value<float>();
+			else if (val.is_type<int>()) compJson[propName] = val.get_value<int>();
+			else if (val.is_type<bool>()) compJson[propName] = val.get_value<bool>();
+			else if (val.is_type<std::string>()) compJson[propName] = val.get_value<std::string>();
+			else if (val.is_type<glm::vec3>()) {
+				auto v = val.get_value<glm::vec3>();
+				compJson[propName] = { v.x, v.y, v.z };
+			}
+			else if (val.is_type<glm::quat>()) {
+				auto q = val.get_value<glm::quat>();
+				compJson[propName] = { q.w, q.x, q.y, q.z };
+			}
+			else if (val.is_type<TerraEngine::UUID>()) {
+				auto uuid = val.get_value<TerraEngine::UUID>();
+				compJson[propName] = TerraEngine::ToHexString(uuid);
+			}
+		}
+		return compJson;
+	};
+
+	functions.deserialize = [](Object& object, const nlohmann::json& compData) -> void
+	{
+		ComponentType* component = object.getComponent<ComponentType>();
+		if (!component) return;
+
+		auto guard = component->acquireWriteLock();
+		rttr::type type = rttr::type::get<ComponentType>();
+		for (auto& [propName, propVal] : compData.items())
+		{
+			rttr::property prop = type.get_property(propName);
+			if (prop.is_valid())
+			{
+				rttr::variant val;
+				if (propVal.is_number_float()) val = propVal.get<float>();
+				else if (propVal.is_number_integer()) val = propVal.get<int>();
+				else if (propVal.is_boolean()) val = propVal.get<bool>();
+				else if (propVal.is_string()) {
+					if (prop.get_type() == rttr::type::get<TerraEngine::UUID>()) {
+						auto parsed = TerraEngine::ParseUUID(propVal.get<std::string>());
+						if (parsed) val = *parsed;
+					}
+					else {
+						val = propVal.get<std::string>();
+					}
+				}
+				else if (propVal.is_array()) {
+					if (propVal.size() == 3) {
+						val = glm::vec3(propVal[0], propVal[1], propVal[2]);
+					}
+					else if (propVal.size() == 4) {
+						if (prop.get_type() == rttr::type::get<glm::quat>()) {
+							val = glm::quat(propVal[0], propVal[1], propVal[2], propVal[3]);
+						}
+					}
+				}
+
+				if (val.is_valid()) {
+					prop.set_value(*component, val);
+				}
+			}
 		}
 	};
 

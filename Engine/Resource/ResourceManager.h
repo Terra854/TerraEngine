@@ -61,6 +61,9 @@ public:
 	ResourceManager& operator=(const ResourceManager&) = delete;
 	~ResourceManager();
 
+	// Configure the base directory used to resolve internal engine assets.
+	void SetEngineRoot(const std::filesystem::path& engineRootPath);
+
 	// Configure the base directory used to resolve relative asset paths.
 	// The path is normalized immediately so lookup keys are consistent
 	// regardless of the caller's working directory.
@@ -201,6 +204,7 @@ private:
 
 	ThreadPool& threadPool;
 	std::filesystem::path assetRoot;
+	std::filesystem::path engineRoot;
 
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;

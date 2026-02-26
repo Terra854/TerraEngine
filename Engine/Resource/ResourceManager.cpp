@@ -27,6 +27,13 @@ ResourceManager::ResourceManager()
 	: threadPool(ThreadPool::instance())
 {
 	assetRoot = std::filesystem::current_path();
+	engineRoot = std::filesystem::current_path();
+}
+
+void ResourceManager::SetEngineRoot(const std::filesystem::path& engineRootPath)
+{
+	engineRoot = engineRootPath.lexically_normal();
+	TERRAENGINE_LOG(LogLevel::Debug, "Engine root set to " << engineRoot);
 }
 
 void ResourceManager::SetAssetRoot(const std::filesystem::path& assetRootPath)
@@ -65,34 +72,40 @@ void ResourceManager::LoadDefaultResources()
 	defaultTaskCollectionId.fill(0);
 	defaultTaskCollectionId[15] = 2;
 
+	auto ResolveEnginePath = [this](const std::filesystem::path& p) {
+		if (p.is_absolute()) return p.lexically_normal();
+		return (engineRoot / p).lexically_normal();
+	};
+
 	// Pre-register Mesh Shader
 	const std::string meshPath = "Shaders/Default.mesh.tspf";
-	std::string meshKey = NormalizeKey(ResolveAssetPath(meshPath));
+	std::string meshKey = NormalizeKey(ResolveEnginePath(meshPath));
 	{
 		std::unique_lock lock(shaderCache.mutex);
 		shaderCache.pathToId[meshKey] = defaultMeshId;
 	}
-	LoadShader(meshPath);
+	
+	// LoadShader normally uses assetRoot, so we must pass the absolute path
+	LoadShader(ResolveEnginePath(meshPath));
 
 	// Pre-register Task Shader
 	const std::string taskPath = "Shaders/Default.task.tspf";
-	std::string taskKey = NormalizeKey(ResolveAssetPath(taskPath));
+	std::string taskKey = NormalizeKey(ResolveEnginePath(taskPath));
 	{
 		std::unique_lock lock(shaderCache.mutex);
 		shaderCache.pathToId[taskKey] = defaultTaskId;
 	}
-	LoadShader(taskPath);
+	LoadShader(ResolveEnginePath(taskPath));
 	const bool taskShaderReady = (GetShader(defaultTaskId) != nullptr);
 
 	// Pre-register Fragment Shader
 	const std::string fragPath = "Shaders/Default.frag.tspf";
-	std::string fragKey = NormalizeKey(ResolveAssetPath(fragPath));
+	std::string fragKey = NormalizeKey(ResolveEnginePath(fragPath));
 	{
 		std::unique_lock lock(shaderCache.mutex);
 		shaderCache.pathToId[fragKey] = defaultFragId;
 	}
-	LoadShader(fragPath);
-
+	LoadShader(ResolveEnginePath(fragPath));
 	// Pre-register mesh-only fallback collection UUID.
 	std::ostringstream fallbackCollectionKeyStream;
 	fallbackCollectionKeyStream << static_cast<std::uint32_t>(ShaderStage::Mesh) << ":" << meshKey << ";";
@@ -112,17 +125,17 @@ void ResourceManager::LoadDefaultResources()
 	}
 
 	std::vector<ShaderStagePath> fallbackStages = {
-		{ ShaderStage::Mesh, meshPath },
-		{ ShaderStage::Fragment, fragPath }
+		{ ShaderStage::Mesh, ResolveEnginePath(meshPath) },
+		{ ShaderStage::Fragment, ResolveEnginePath(fragPath) }
 	};
 	LoadShaderCollection(fallbackStages);
 
 	if (taskShaderReady)
 	{
 		std::vector<ShaderStagePath> taskStages = {
-			{ ShaderStage::Task, taskPath },
-			{ ShaderStage::Mesh, meshPath },
-			{ ShaderStage::Fragment, fragPath }
+			{ ShaderStage::Task, ResolveEnginePath(taskPath) },
+			{ ShaderStage::Mesh, ResolveEnginePath(meshPath) },
+			{ ShaderStage::Fragment, ResolveEnginePath(fragPath) }
 		};
 		LoadShaderCollection(taskStages);
 	}

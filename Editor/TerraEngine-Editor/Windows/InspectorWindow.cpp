@@ -577,6 +577,16 @@ void InspectorWindow::OnGui() {
                 }
 
                 if (compName != "Transform") {
+                    if (ImGui::BeginPopupContextItem("ComponentSettings")) {
+                        if (ImGui::MenuItem("Remove Component")) {
+                            UndoRedoSystem::Instance().PushCommand(std::make_unique<RemoveComponentCommand>(obj.EntityId(), compName));
+                            access.removeComponent(obj);
+                        }
+                        ImGui::EndPopup();
+                    }
+                }
+
+                if (compName != "Transform") {
                     if (ImGui::BeginDragDropSource()) {
                         int sourceIdx = (int)i;
                         ImGui::SetDragDropPayload("COMPONENT_ORDER", &sourceIdx, sizeof(int));
@@ -691,6 +701,7 @@ void InspectorWindow::OnGui() {
 
 					ImGui::PushID(compName.c_str());
                     if (ImGui::Selectable(displayName.c_str())) {
+                        UndoRedoSystem::Instance().PushCommand(std::make_unique<AddComponentCommand>(obj.EntityId(), compName));
                         accessReg[compName].addComponent(obj);
                         ImGui::CloseCurrentPopup();
                     }

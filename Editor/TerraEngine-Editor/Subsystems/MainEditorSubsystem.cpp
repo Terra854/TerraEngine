@@ -23,6 +23,10 @@
 
 void MainEditorSubsystem::Initialize(EditorContext& context) {
     ctx = &context;
+
+    // Set engine root to the executable's directory so default shaders can be found
+    // even if the project asset root is changed later.
+    ResourceManager::Instance().SetEngineRoot(std::filesystem::current_path());
     
     // Initialize Windows
     m_Windows.push_back(std::make_shared<HierarchyWindow>(this));
@@ -482,6 +486,7 @@ void MainEditorSubsystem::CloseCurrentProject() {
     
     // Clear Resources
     ResourceManager::Instance().ClearCaches();
+    ResourceManager::Instance().LoadDefaultResources();
     
     // Clear Renderer Resources
     // This ensures GPU resources are flushed and binding indices are reset.

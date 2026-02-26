@@ -2,6 +2,8 @@
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Core/Object/ObjectManager.h"
+#include "Engine/Core/Object/Transform.h"
+#include "Engine/Core/Object/Component.h"
 #include "Engine/Scene/Serializer.h"
 
 CreateObjectCommand::CreateObjectCommand(entt::entity entity) : m_Entity(entity) {
@@ -58,6 +60,87 @@ void RenameObjectCommand::Redo() {
 }
 
 std::string RenameObjectCommand::GetName() const { return "Rename Object"; }
+
+AddComponentCommand::AddComponentCommand(entt::entity entity, const std::string& componentName)
+    : m_Entity(entity), m_ComponentName(componentName) {}
+
+void AddComponentCommand::Undo() {
+    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+        auto& reg = ComponentAccessRegistry();
+        if (reg.count(m_ComponentName)) {
+            reg[m_ComponentName].removeComponent(*obj);
+        }
+    }
+}
+
+void AddComponentCommand::Redo() {
+    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+        auto& reg = ComponentAccessRegistry();
+        if (reg.count(m_ComponentName)) {
+            reg[m_ComponentName].addComponent(*obj);
+        }
+    }
+}
+
+std::string AddComponentCommand::GetName() const { return "Add " + m_ComponentName; }
+
+RemoveComponentCommand::RemoveComponentCommand(entt::entity entity, const std::string& componentName)
+    : m_Entity(entity), m_ComponentName(componentName) {
+    if (auto obj = ObjectManager::instance().getObject(entity)) {
+        auto& reg = ComponentAccessRegistry();
+        if (reg.count(m_ComponentName)) {
+            m_ComponentJson = reg[m_ComponentName].serialize(*obj);
+        }
+    }
+}
+
+void RemoveComponentCommand::Undo() {
+    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+        auto& reg = ComponentAccessRegistry();
+        if (reg.count(m_ComponentName)) {
+            reg[m_ComponentName].addComponent(*obj);
+            reg[m_ComponentName].deserialize(*obj, m_ComponentJson);
+        }
+    }
+}
+
+void RemoveComponentCommand::Redo() {
+    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+        auto& reg = ComponentAccessRegistry();
+        if (reg.count(m_ComponentName)) {
+            reg[m_ComponentName].removeComponent(*obj);
+        }
+    }
+}
+
+std::string RemoveComponentCommand::GetName() const { return "Remove " + m_ComponentName; }
+
+ChangeTransformCommand::ChangeTransformCommand(entt::entity entity, const glm::vec3& oldPos, const glm::quat& oldRot, const glm::vec3& oldScale,
+                                             const glm::vec3& newPos, const glm::quat& newRot, const glm::vec3& newScale)
+    : m_Entity(entity), m_OldPos(oldPos), m_OldRot(oldRot), m_OldScale(oldScale),
+      m_NewPos(newPos), m_NewRot(newRot), m_NewScale(newScale) {}
+
+void ChangeTransformCommand::Undo() {
+    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+        if (auto* t = ObjectManager::instance().getRegistry().try_get<Transform>(m_Entity)) {
+            t->position = m_OldPos;
+            t->rotation = m_OldRot;
+            t->scale = m_OldScale;
+        }
+    }
+}
+
+void ChangeTransformCommand::Redo() {
+    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+        if (auto* t = ObjectManager::instance().getRegistry().try_get<Transform>(m_Entity)) {
+            t->position = m_NewPos;
+            t->rotation = m_NewRot;
+            t->scale = m_NewScale;
+        }
+    }
+}
+
+std::string ChangeTransformCommand::GetName() const { return "Transform Object"; }
 
 UndoRedoSystem& UndoRedoSystem::Instance() {
     static UndoRedoSystem instance;

@@ -6,6 +6,8 @@
 #include <string>
 #include <entt/entity/entity.hpp>
 #include <nlohmann/json.hpp>
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include "Engine/Utilities/UUID.h"
 
 // Interface for atomic editor operations that can be reversed and reapplied.
@@ -61,6 +63,46 @@ private:
     entt::entity m_Entity;
     std::string m_OldName;
     std::string m_NewName;
+};
+
+class AddComponentCommand : public ICommand {
+public:
+    AddComponentCommand(entt::entity entity, const std::string& componentName);
+    void Undo() override;
+    void Redo() override;
+    std::string GetName() const override;
+
+private:
+    entt::entity m_Entity;
+    std::string m_ComponentName;
+};
+
+class RemoveComponentCommand : public ICommand {
+public:
+    RemoveComponentCommand(entt::entity entity, const std::string& componentName);
+    void Undo() override;
+    void Redo() override;
+    std::string GetName() const override;
+
+private:
+    entt::entity m_Entity;
+    std::string m_ComponentName;
+    nlohmann::json m_ComponentJson;
+};
+
+class ChangeTransformCommand : public ICommand {
+public:
+    ChangeTransformCommand(entt::entity entity, const glm::vec3& oldPos, const glm::quat& oldRot, const glm::vec3& oldScale,
+                         const glm::vec3& newPos, const glm::quat& newRot, const glm::vec3& newScale);
+    void Undo() override;
+    void Redo() override;
+    std::string GetName() const override;
+
+private:
+    entt::entity m_Entity;
+    glm::vec3 m_OldPos, m_NewPos;
+    glm::quat m_OldRot, m_NewRot;
+    glm::vec3 m_OldScale, m_NewScale;
 };
 
 // Manages a history of ICommand instances to provide undo/redo capabilities in 

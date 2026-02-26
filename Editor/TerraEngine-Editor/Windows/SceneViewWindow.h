@@ -1,6 +1,7 @@
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 class MainEditorSubsystem;
 
@@ -30,4 +31,11 @@ private:
     int m_CurrentGizmoOperation = -1; // -1 for none, or ImGuizmo::TRANSLATE etc.
     bool m_UsingSnap = false;
     float m_SnapValue[3] = { 0.5f, 0.5f, 0.5f };
+
+    bool m_WasUsingGizmo = false;
+    glm::vec3 m_GizmoStartPos;
+    glm::quat m_GizmoStartRot;
+    glm::vec3 m_GizmoStartScale;
+
+    void HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 };

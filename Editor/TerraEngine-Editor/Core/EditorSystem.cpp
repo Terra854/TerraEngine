@@ -3,6 +3,7 @@
 #include "MainEditorSubsystem.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
+#include "Engine/Scene/SceneManager.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
@@ -183,6 +184,20 @@ void EditorSystem::Initialize() {
     g_PrevCharCallback = glfwSetCharCallback(window, [](GLFWwindow* w, unsigned int c) {
         if (g_PrevCharCallback) g_PrevCharCallback(w, c);
         ImGui_ImplGlfw_CharCallback(w, c);
+    });
+
+    g_PrevCloseCallback = glfwSetWindowCloseCallback(window, [](GLFWwindow* w) {
+        if (g_EditorSystems.count(w)) {
+            EditorSystem* self = g_EditorSystems[w];
+            if (self->mainEditor) {
+                if (SceneManager::Instance().IsActiveSceneDirty()) {
+                    glfwSetWindowShouldClose(w, GLFW_FALSE); // Stop immediate closure
+                    self->mainEditor->RequestExit();
+                    return;
+                }
+            }
+        }
+        if (g_PrevCloseCallback) g_PrevCloseCallback(w);
     });
     
     // Restore/Chain Drop Callback
