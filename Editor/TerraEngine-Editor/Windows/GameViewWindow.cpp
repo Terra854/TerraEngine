@@ -81,8 +81,8 @@ void GameViewWindow::OnGui() {
 	imageSize.y *= m_Scale;
 
 	// --- Update Cameras ---
-	float aspect = imageSize.x / imageSize.y;
-	if (aspect <= 0.0f) aspect = 1.0f;
+	float aspect = (imageSize.y > 0.0001f) ? (imageSize.x / imageSize.y) : 1.0f;
+	if (aspect <= 0.0001f) aspect = 1.0f;
 
 	auto cameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
 	bool hasCameras = !cameras.empty();
@@ -141,6 +141,9 @@ void GameViewWindow::OnGui() {
 		char line5[96];
 		char line6[96];
 		char line7[96];
+		char line8[96];
+		char line9[96];
+		char line10[96];
 
 		if (statsReady) {
 			const std::uint32_t displayedCulled = stats.taskCullingActive ? stats.meshletsCulled : 0u;
@@ -153,7 +156,10 @@ void GameViewWindow::OnGui() {
 			std::snprintf(line4, sizeof(line4), "Meshlets Total: %u", stats.meshletsTotal);
 			std::snprintf(line5, sizeof(line5), "Meshlets Dispatched: %u", displayedDispatched);
 			std::snprintf(line6, sizeof(line6), "Meshlets Culled: %u", displayedCulled);
-			std::snprintf(line7, sizeof(line7), "Task Culling: %s", stats.taskCullingActive ? "On" : "Off");
+			std::snprintf(line7, sizeof(line7), "  - Culled by Hi-Z: %u", stats.meshletsCulledHiZ);
+			std::snprintf(line8, sizeof(line8), "Task Culling: %s", stats.taskCullingActive ? "On" : "Off");
+			std::snprintf(line9, sizeof(line9), "Hi-Z Occlusion: %s", stats.hiZActive ? "Active" : "Off");
+			std::snprintf(line10, sizeof(line10), "Variable Rate Shading: %s", stats.vrsActive ? "Active" : "Off");
 		} else {
 			std::snprintf(line0, sizeof(line0), "Stats unavailable");
 			std::snprintf(line1, sizeof(line1), "No active camera/render stats");
@@ -163,9 +169,12 @@ void GameViewWindow::OnGui() {
 			line5[0] = '\0';
 			line6[0] = '\0';
 			line7[0] = '\0';
+			line8[0] = '\0';
+			line9[0] = '\0';
+			line10[0] = '\0';
 		}
 
-		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7};
+		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7, line8, line9, line10};
 		float textWidth = 0.0f;
 		int lineCount = 0;
 		for (const char* line : lines) {

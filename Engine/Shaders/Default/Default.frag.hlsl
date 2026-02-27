@@ -12,14 +12,19 @@ struct MaterialData
 	float OcclusionStrength;
 	float AlphaCutoff;
 	uint AlphaMode;
+	uint ShadingModel;
 	uint Flags;
 	uint BaseColorTextureIndex;
 	uint NormalTextureIndex;
 	uint MaskTextureIndex;
 	uint OcclusionTextureIndex;
 	uint EmissiveTextureIndex;
-	uint Padding[2];
+	uint Padding[1];
 };
+
+static const uint kShadingModel_Unlit = 0u;
+static const uint kShadingModel_MetallicRoughness = 1u;
+static const uint kShadingModel_SpecularGlossiness = 2u;
 
 struct FrameCullingData
 {
@@ -27,6 +32,8 @@ struct FrameCullingData
 	float4 cameraPositionAndEpsilon;
 	uint4 clusterGridAndLightCount;
 	float4 clusterDepthAndViewport;
+	column_major float4x4 viewMatrix;
+	column_major float4x4 invProjection;
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
 	uint reserved0;
@@ -46,6 +53,8 @@ struct ClusterData
 {
 	uint offset;
 	uint count;
+	float3 minBounds;
+	float3 maxBounds;
 };
 
 [[vk::binding(1, 0)]] StructuredBuffer<MaterialData> allMaterials;
@@ -55,6 +64,7 @@ struct ClusterData
 [[vk::binding(6, 0)]] StructuredBuffer<uint> lightIndices;
 [[vk::binding(7, 0)]] TextureCube pointShadowCube;
 [[vk::binding(8, 0)]] SamplerState pointShadowSampler;
+[[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
 
 #pragma pack_matrix(column_major)
 
@@ -62,14 +72,14 @@ struct PushConstants
 {
 	column_major float4x4 viewProj;
 	column_major float4x4 model;
-	uint textureIndex;
 	uint materialIndex;
+	uint meshDataIndex;
+	uint textureIndex;
+	uint vrsActive;
 	uint taskCullingEnabled;
 	uint statsSlotIndex;
 	float cullingEpsilon;
-	float padding0;
-	float padding1;
-	float padding2;
+	float padding;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
@@ -97,11 +107,21 @@ static const float kSpotShadowBias = 0.0020f;
 static const float kPointShadowBias = 0.0050f;
 static const float kAreaShadowBias = 0.0020f;
 
-float3 BuildLightingNormal(float3 vertexNormal, float3 sampledNormal, float normalScale)
+float3 BuildLightingNormal(float3 vertexNormal, float3 worldPosition, float2 uv, float3 sampledNormal, float normalScale)
 {
+	const float3 q1 = ddx(worldPosition);
+	const float3 q2 = ddy(worldPosition);
+	const float2 st1 = ddx(uv);
+	const float2 st2 = ddy(uv);
+
+	const float3 n = normalize(vertexNormal);
+	const float3 t = normalize(q1 * st2.y - q2 * st1.y);
+	const float3 b = -normalize(cross(n, t));
+	const float3x3 tbn = float3x3(t, b, n);
+
 	const float3 unpackedNormal = sampledNormal * 2.0f - 1.0f;
-	const float blendFactor = saturate(normalScale);
-	return normalize(lerp(normalize(vertexNormal), unpackedNormal, blendFactor));
+	const float3 scaledNormal = normalize(lerp(float3(0.0, 0.0, 1.0), unpackedNormal, saturate(normalScale)));
+	return normalize(mul(scaledNormal, tbn));
 }
 
 uint ComputeClusterIndex(PSIn input, FrameCullingData frame)
@@ -408,10 +428,15 @@ float4 main(PSIn input) : SV_Target0
 	const float metallic = saturate(maskSample.b * mat.MetallicFactor);
 	const float3 emissive = globalTextures[NonUniformResourceIndex(mat.EmissiveTextureIndex)].Sample(globalSamplers[NonUniformResourceIndex(mat.EmissiveTextureIndex)], uv).rgb * mat.EmissiveFactor.rgb;
 
+	if (mat.ShadingModel == kShadingModel_Unlit)
+	{
+		return float4(finalColor.rgb + emissive, finalColor.a);
+	}
+
 	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
 	const FrameCullingData frame = frameCullingData[statsIndex];
 	const uint lightCount = frame.clusterGridAndLightCount.w;
-	const float3 normal = BuildLightingNormal(input.normal, sampledNormal, mat.NormalScale);
+	const float3 normal = BuildLightingNormal(input.normal, input.worldPosition, uv, sampledNormal, mat.NormalScale);
 	const float3 viewDir = normalize(frame.cameraPositionAndEpsilon.xyz - input.worldPosition);
 	const uint clusterIndex = ComputeClusterIndex(input, frame);
 	const ClusterData cluster = clusterGrid[clusterIndex];

@@ -35,14 +35,27 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	vmaCreateAllocator(&allocatorInfo, &allocator);
 
 	if (!CreateSwapChain(windowSystem)) return false;
+	if (!CreateCommandPool()) return false;
 	if (!CreateImageViews()) return false;
 	if (!CreateDepthResources()) return false;
+
+	VkFormat depthFmt = FindDepthFormat();
+	hiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
+	TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+	if (vrsFeatures.pipelineFragmentShadingRate) {
+		vrs.Create(device, physicalDevice, allocator, swapchainExtent.width, swapchainExtent.height);
+		TransitionImageLayout(vrs.image, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
+	}
+
 	if (!CreateRenderPass()) return false;
 	if (!CreateFramebuffers()) return false;
-	if (!CreateCommandPool()) return false;
 	if (!CreateSyncObjects()) return false;
 	if (!CreateDescriptorPool()) return false;
 	if (!CreateGlobalDescriptorResources()) return false;
+	
+	UpdateGlobalHiZ(hiZ);
+
 	try {
 		CreateDefaultTexture();
 	} catch (const std::exception& e) {
@@ -53,6 +66,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	CreateMaterialBufferResources();
 	CreateCullingBufferResources();
 	CreateLightingBufferResources();
+	CreateIndirectDrawResources();
 
 	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	workerCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -65,6 +79,9 @@ void VulkanContext::Impl::Cleanup() {
 	if (device) {
 		vkDeviceWaitIdle(device);
 	}
+
+	hiZ.Destroy(device, allocator);
+	vrs.Destroy(device, allocator);
 
 	DestroyWorkerPools();
 	CleanupSwapChain();
@@ -87,6 +104,7 @@ void VulkanContext::Impl::Cleanup() {
 		vmaDestroyBuffer(allocator, mesh.indexBuffer.buffer, mesh.indexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshShaderVertexBuffer.buffer, mesh.meshShaderVertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletVertexRemapBuffer.buffer, mesh.meshletVertexRemapBuffer.allocation);
+		vmaDestroyBuffer(allocator, mesh.meshSkinningBuffer.buffer, mesh.meshSkinningBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshDecodeInfoBuffer.buffer, mesh.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletBuffer.buffer, mesh.meshletBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletBoundsBuffer.buffer, mesh.meshletBoundsBuffer.allocation);
@@ -145,6 +163,10 @@ void VulkanContext::Impl::Cleanup() {
 		if (clusterGridComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, clusterGridComputePipeline, nullptr);
 			clusterGridComputePipeline = VK_NULL_HANDLE;
+		}
+		if (clusterDepthMaskComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, clusterDepthMaskComputePipeline, nullptr);
+			clusterDepthMaskComputePipeline = VK_NULL_HANDLE;
 		}
 		if (lightCullComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, lightCullComputePipeline, nullptr);
@@ -222,7 +244,21 @@ void VulkanContext::Impl::Cleanup() {
 	vmaDestroyBuffer(allocator, globalMeshletCountersSSBO.buffer, globalMeshletCountersSSBO.allocation);
 	vmaDestroyBuffer(allocator, globalLightSSBO.buffer, globalLightSSBO.allocation);
 	vmaDestroyBuffer(allocator, clusterGridSSBO.buffer, clusterGridSSBO.allocation);
+	vmaDestroyBuffer(allocator, clusterDepthSSBO.buffer, clusterDepthSSBO.allocation);
 	vmaDestroyBuffer(allocator, lightIndexSSBO.buffer, lightIndexSSBO.allocation);
+	vmaDestroyBuffer(allocator, indirectDrawBuffer.buffer, indirectDrawBuffer.allocation);
+
+    globalMaterialSSBO = {};
+    globalFrameCullingSSBO = {};
+    globalMeshletCountersSSBO = {};
+    globalLightSSBO = {};
+    clusterGridSSBO = {};
+    clusterDepthSSBO = {};
+    lightIndexSSBO = {};
+    indirectDrawBuffer = {};
+
+	hiZ.Destroy(device, allocator);
+	vrs.Destroy(device, allocator);
 
 	for (size_t i = 0; i < renderFinishedSemaphores.size(); i++) {
 		if (device) {
@@ -232,10 +268,17 @@ void VulkanContext::Impl::Cleanup() {
 			vkDestroyFence(device, inFlightFences[i], nullptr);
 		}
 	}
+    renderFinishedSemaphores.clear();
+    imageAvailableSemaphores.clear();
+    uiSemaphores.clear();
+    inFlightFences.clear();
 
 	if (device) {
 		vkDestroyImageView(device, depthImageView, nullptr);
 		vmaDestroyImage(allocator, depthImage, depthImageAllocation);
+        depthImageView = VK_NULL_HANDLE;
+        depthImage = VK_NULL_HANDLE;
+        depthImageAllocation = VK_NULL_HANDLE;
 	}
 
 	if (device) {
@@ -249,6 +292,9 @@ void VulkanContext::Impl::Cleanup() {
 		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 		vkDestroyDescriptorPool(device, globalDescriptorPool, nullptr);
 		vkDestroyDescriptorSetLayout(device, globalDescriptorSetLayout, nullptr);
+        descriptorPool = VK_NULL_HANDLE;
+        globalDescriptorPool = VK_NULL_HANDLE;
+        globalDescriptorSetLayout = VK_NULL_HANDLE;
 	}
 
 	if (allocator) vmaDestroyAllocator(allocator);
@@ -447,6 +493,11 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	vulkan12Features.descriptorBindingPartiallyBound = VK_TRUE;
 	vulkan12Features.descriptorBindingVariableDescriptorCount = VK_TRUE;
 	vulkan12Features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+	vulkan12Features.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+	vulkan12Features.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+	vulkan12Features.descriptorBindingUniformTexelBufferUpdateAfterBind = VK_TRUE;
+	vulkan12Features.descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
+	vulkan12Features.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
 	// Buffer device address is often useful with bindless but strictly optional
 	vulkan12Features.bufferDeviceAddress = VK_TRUE;
 
@@ -459,8 +510,24 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	// Enable task shaders only when the selected GPU advertises the capability.
 	meshShaderFeatures.taskShader = taskShaderSupported ? VK_TRUE : VK_FALSE;
 
+	vrsFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR;
+	
+	// Query actual support before enabling
+	VkPhysicalDeviceFragmentShadingRateFeaturesKHR supportedVrsFeatures{};
+	supportedVrsFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR;
+	VkPhysicalDeviceFeatures2 features{};
+	features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	features.pNext = &supportedVrsFeatures;
+	vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
+
+	vrsFeatures.attachmentFragmentShadingRate = supportedVrsFeatures.attachmentFragmentShadingRate;
+	vrsFeatures.pipelineFragmentShadingRate = supportedVrsFeatures.pipelineFragmentShadingRate;
+	vrsFeatures.primitiveFragmentShadingRate = supportedVrsFeatures.primitiveFragmentShadingRate;
+
 	vulkan12Features.pNext = &vulkan13Features;
 	vulkan13Features.pNext = &meshShaderFeatures;
+	meshShaderFeatures.pNext = &vrsFeatures;
+	vrsFeatures.pNext = nullptr;
 
 	VkPhysicalDeviceFeatures2 features2{};
 	features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -604,7 +671,7 @@ bool VulkanContext::Impl::CreateDepthResources() {
 	imageInfo.format = chosenDepthFormat;
 	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+	imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -617,79 +684,170 @@ bool VulkanContext::Impl::CreateDepthResources() {
 	}
 
 	depthImageView = CreateImageView(depthImage, chosenDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+	TransitionImageLayout(depthImage, chosenDepthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 	return true;
 }
 
 bool VulkanContext::Impl::CreateRenderPass() {
-	// Create a render pass that clears color and depth and outputs to the swapchain.
-	VkAttachmentDescription colorAttachment{};
-	colorAttachment.format = swapchainImageFormat;
-	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	if (vrsFeatures.attachmentFragmentShadingRate) {
+		// Use RenderPass2 to support VRS attachment
+		VkAttachmentDescription2 colorAttachment{};
+		colorAttachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+		colorAttachment.format = swapchainImageFormat;
+		colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-	VkAttachmentReference colorAttachmentRef{};
-	colorAttachmentRef.attachment = 0;
-	colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		VkAttachmentReference2 colorAttachmentRef{};
+		colorAttachmentRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+		colorAttachmentRef.attachment = 0;
+		colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-	VkAttachmentDescription depthAttachment{};
-	depthAttachment.format = depthFormat;
-	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		VkAttachmentDescription2 depthAttachment{};
+		depthAttachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+		depthAttachment.format = depthFormat;
+		depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-	VkAttachmentReference depthAttachmentRef{};
-	depthAttachmentRef.attachment = 1;
-	depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		VkAttachmentReference2 depthAttachmentRef{};
+		depthAttachmentRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+		depthAttachmentRef.attachment = 1;
+		depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-	VkSubpassDescription subpass{};
-	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-	subpass.colorAttachmentCount = 1;
-	subpass.pColorAttachments = &colorAttachmentRef;
-	subpass.pDepthStencilAttachment = &depthAttachmentRef;
+		VkAttachmentDescription2 vrsAttachment{};
+		vrsAttachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+		vrsAttachment.format = VK_FORMAT_R8_UINT;
+		vrsAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		vrsAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		vrsAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		vrsAttachment.initialLayout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
+		vrsAttachment.finalLayout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
 
-	VkSubpassDependency dependency{};
-	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-	dependency.dstSubpass = 0;
-	dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	dependency.srcAccessMask = 0;
-	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		VkAttachmentReference2 vrsAttachmentRef{};
+		vrsAttachmentRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+		vrsAttachmentRef.attachment = 2;
+		vrsAttachmentRef.layout = VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
 
-	std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
-	VkRenderPassCreateInfo renderPassInfo{};
-	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-	renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-	renderPassInfo.pAttachments = attachments.data();
-	renderPassInfo.subpassCount = 1;
-	renderPassInfo.pSubpasses = &subpass;
-	renderPassInfo.dependencyCount = 1;
-	renderPassInfo.pDependencies = &dependency;
+		VkFragmentShadingRateAttachmentInfoKHR vrsInfo{};
+		vrsInfo.sType = VK_STRUCTURE_TYPE_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR;
+		vrsInfo.pFragmentShadingRateAttachment = &vrsAttachmentRef;
+		vrsInfo.shadingRateAttachmentTexelSize = vrs.texelSize;
 
-	if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "failed to create render pass!");
-		return false;
+		VkSubpassDescription2 subpass{};
+		subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.colorAttachmentCount = 1;
+		subpass.pColorAttachments = &colorAttachmentRef;
+		subpass.pDepthStencilAttachment = &depthAttachmentRef;
+		subpass.pNext = &vrsInfo;
+
+		VkSubpassDependency2 dependency{};
+		dependency.sType = VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2;
+		dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+		dependency.dstSubpass = 0;
+		dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		dependency.srcAccessMask = 0;
+		dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+		std::array<VkAttachmentDescription2, 3> attachments = {colorAttachment, depthAttachment, vrsAttachment};
+		VkRenderPassCreateInfo2 renderPassInfo{};
+		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
+		renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+		renderPassInfo.pAttachments = attachments.data();
+		renderPassInfo.subpassCount = 1;
+		renderPassInfo.pSubpasses = &subpass;
+		renderPassInfo.dependencyCount = 1;
+		renderPassInfo.pDependencies = &dependency;
+
+		if (vkCreateRenderPass2(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create render pass 2!");
+			return false;
+		}
+	} else {
+		// Fallback to standard RenderPass
+		VkAttachmentDescription colorAttachment{};
+		colorAttachment.format = swapchainImageFormat;
+		colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+		VkAttachmentReference colorAttachmentRef{};
+		colorAttachmentRef.attachment = 0;
+		colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkAttachmentDescription depthAttachment{};
+		depthAttachment.format = depthFormat;
+		depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+		VkAttachmentReference depthAttachmentRef{};
+		depthAttachmentRef.attachment = 1;
+		depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+		VkSubpassDescription subpass{};
+		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.colorAttachmentCount = 1;
+		subpass.pColorAttachments = &colorAttachmentRef;
+		subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+		VkSubpassDependency dependency{};
+		dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+		dependency.dstSubpass = 0;
+		dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		dependency.srcAccessMask = 0;
+		dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+		dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+		std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
+		VkRenderPassCreateInfo renderPassInfo{};
+		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+		renderPassInfo.pAttachments = attachments.data();
+		renderPassInfo.subpassCount = 1;
+		renderPassInfo.pSubpasses = &subpass;
+		renderPassInfo.dependencyCount = 1;
+		renderPassInfo.pDependencies = &dependency;
+
+		if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create render pass!");
+			return false;
+		}
 	}
 	return true;
 }
 
 bool VulkanContext::Impl::CreateFramebuffers() {
-	// Pair each swapchain view with the shared depth buffer.
+	// Pair each swapchain view with the shared depth buffer and optional VRS image.
 	framebuffers.resize(swapchainImageViews.size());
 
 	for (size_t i = 0; i < swapchainImageViews.size(); i++) {
-		std::array<VkImageView, 2> attachments = {
+		std::vector<VkImageView> attachments = {
 			swapchainImageViews[i],
 			depthImageView
 		};
+
+		if (vrsFeatures.attachmentFragmentShadingRate && vrs.view != VK_NULL_HANDLE) {
+			attachments.push_back(vrs.view);
+		}
 
 		VkFramebufferCreateInfo framebufferInfo{};
 		framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -1050,8 +1208,30 @@ void VulkanContext::Impl::RecreateSwapChain() {
 
 	CleanupSwapChain();
 
+	vmaDestroyBuffer(allocator, globalFrameCullingSSBO.buffer, globalFrameCullingSSBO.allocation);
+	vmaDestroyBuffer(allocator, globalMeshletCountersSSBO.buffer, globalMeshletCountersSSBO.allocation);
+	vmaDestroyBuffer(allocator, globalLightSSBO.buffer, globalLightSSBO.allocation);
+	vmaDestroyBuffer(allocator, clusterGridSSBO.buffer, clusterGridSSBO.allocation);
+	vmaDestroyBuffer(allocator, clusterDepthSSBO.buffer, clusterDepthSSBO.allocation);
+	vmaDestroyBuffer(allocator, lightIndexSSBO.buffer, lightIndexSSBO.allocation);
+	vmaDestroyBuffer(allocator, indirectDrawBuffer.buffer, indirectDrawBuffer.allocation);
+
+	hiZ.Destroy(device, allocator);
+	vrs.Destroy(device, allocator);
+
 	vkDestroyImageView(device, depthImageView, nullptr);
 	vmaDestroyImage(allocator, depthImage, depthImageAllocation);
+
+    globalFrameCullingSSBO = {};
+    globalMeshletCountersSSBO = {};
+    globalLightSSBO = {};
+    clusterGridSSBO = {};
+    clusterDepthSSBO = {};
+    lightIndexSSBO = {};
+    indirectDrawBuffer = {};
+	depthImage = VK_NULL_HANDLE;
+	depthImageAllocation = VK_NULL_HANDLE;
+	depthImageView = VK_NULL_HANDLE;
 
 	// Destroy sync objects to reset their state (e.g. clear signaled semaphores from failed frames)
 	for (size_t i = 0; i < renderFinishedSemaphores.size(); i++) {
@@ -1068,10 +1248,25 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	CreateSwapChain(*windowSystem);
 	CreateImageViews();
 	CreateDepthResources();
+
+	VkFormat depthFmt = FindDepthFormat();
+	hiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
+	TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+	if (vrsFeatures.pipelineFragmentShadingRate) {
+		vrs.Create(device, physicalDevice, allocator, swapchainExtent.width, swapchainExtent.height);
+		TransitionImageLayout(vrs.image, VK_FORMAT_R8_UINT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR);
+	}
+
 	CreateRenderPass();
 	CreateFramebuffers();
 	CreateSyncObjects(); // Recreate fresh sync objects
 	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
+
+	CreateCullingBufferResources();
+	CreateLightingBufferResources();
+	CreateIndirectDrawResources();
+	UpdateGlobalHiZ(hiZ);
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanContext::Impl::DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {

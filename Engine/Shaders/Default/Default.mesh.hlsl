@@ -35,10 +35,10 @@ struct PushConstants
 {
 	column_major float4x4 viewProj;
 	column_major float4x4 model;
-	uint textureIndex;
 	uint materialIndex;
-	uint taskCullingEnabled;
-	uint statsSlotIndex;
+	uint meshDataIndex;
+	uint textureIndex;
+	uint vrsActive;
 	float cullingEpsilon;
 	float padding0;
 	float padding1;

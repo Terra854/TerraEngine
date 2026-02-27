@@ -924,7 +924,7 @@ void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
         ImGui::PopID();
     };
 
-    drawTextureSlot("Base Color", TextureSemantic::BaseColor);
+    drawTextureSlot("Base Map", TextureSemantic::Base);
     drawTextureSlot("Normal Map", TextureSemantic::Normal);
     drawTextureSlot("Metallic Roughness", TextureSemantic::MetallicRoughness);
     drawTextureSlot("Occlusion", TextureSemantic::Occlusion);

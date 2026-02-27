@@ -241,9 +241,9 @@ void SceneViewWindow::OnGui() {
     glm::vec3 up = orientation * glm::vec3(0, 1, 0);
     view = glm::lookAt(m_CameraPos, m_CameraPos + forward, up);
     
-    float aspect = contentSize.x / contentSize.y;
-    if (aspect <= 0.0f) aspect = 1.0f;
-    glm::mat4 projNoFlip = glm::perspective(glm::radians(m_Fov), aspect, 0.1f, 1000.0f);
+    float aspect = (contentSize.y > 0.0001f) ? (contentSize.x / contentSize.y) : 1.0f;
+    if (aspect <= 0.0001f) aspect = 1.0f;
+    glm::mat4 projNoFlip = glm::perspective(glm::radians(std::max(m_Fov, 0.1f)), aspect, 0.1f, 1000.0f);
     proj = projNoFlip;
     proj[1][1] *= -1; // Vulkan flip
 

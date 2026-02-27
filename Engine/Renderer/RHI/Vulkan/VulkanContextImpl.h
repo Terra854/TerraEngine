@@ -2,6 +2,8 @@
 
 #include "VulkanContext.h"
 #include "VulkanCommonIncludes.h"
+#include "VulkanHiZ.h"
+#include "VulkanVRS.h"
 
 #include "Core/Logger/Logger.h"
 #include "Window/WindowSystem.h"
@@ -38,7 +40,9 @@ inline const std::vector<const char*> deviceExtensions = {
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 	VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
 	VK_KHR_MAINTENANCE3_EXTENSION_NAME,
-	VK_EXT_MESH_SHADER_EXTENSION_NAME
+	VK_EXT_MESH_SHADER_EXTENSION_NAME,
+	VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME,
+	VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME
 };
 
 // Queue family indices used to set up graphics/present queues.
@@ -86,6 +90,7 @@ struct VulkanMesh {
 	VkIndexType indexType;
 	uint32_t meshletCount;
 	bool hasMeshletBounds = false;
+	uint32_t bindlessIndex = 0xFFFFFFFFu;
 	std::unordered_map<VkDescriptorSetLayout, VkDescriptorSet> descriptorSetsByLayout;
 };
 
@@ -101,18 +106,6 @@ struct VulkanPipeline {
 	bool hasTaskStage = false;
 };
 
-// Push constant payload required by the preview renderer.
-struct PushConstants {
-	glm::mat4 viewProj;
-    glm::mat4 model;
-	uint32_t textureIndex;
-	uint32_t materialIndex;
-	uint32_t taskCullingEnabled;
-	uint32_t statsSlotIndex;
-	float cullingEpsilon;
-	float padding[3];
-};
-
 // Must match shader definition
 struct alignas(16) MaterialData {
 	glm::vec4 BaseColorFactor;
@@ -124,13 +117,14 @@ struct alignas(16) MaterialData {
 	float OcclusionStrength;
 	float AlphaCutoff;
 	uint32_t AlphaMode;
+	uint32_t ShadingModel;
 	uint32_t Flags;
 	uint32_t BaseColorTextureIndex;
 	uint32_t NormalTextureIndex;
 	uint32_t MaskTextureIndex;
 	uint32_t OcclusionTextureIndex;
 	uint32_t EmissiveTextureIndex;
-	uint32_t Padding[2];
+	uint32_t Padding[1];
 };
 
 struct PipelineKey {
@@ -195,12 +189,15 @@ struct VulkanContext::Impl {
 	VkPhysicalDeviceVulkan12Features vulkan12Features{};
 	VkPhysicalDeviceVulkan13Features vulkan13Features{};
 	VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{};
+	VkPhysicalDeviceFragmentShadingRateFeaturesKHR vrsFeatures{};
 	bool meshShaderSupported = false;
 	bool taskShaderSupported = false;
 
 	// Bindless Resources
 	static constexpr uint32_t MAX_BINDLESS_TEXTURES = 1024;
+	static constexpr uint32_t MAX_BINDLESS_BUFFERS = 1024;
 	static constexpr uint32_t MAX_BINDLESS_MATERIALS = 1024;
+	static constexpr uint32_t MAX_BINDLESS_DRAWS = 4096;
 	static constexpr uint32_t MAX_GLOBAL_LIGHTS = 1024;
 	static constexpr uint32_t MAX_LIGHTS_PER_CLUSTER = 64;
 	static constexpr uint32_t MAX_LIGHT_CLUSTERS = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
@@ -216,10 +213,15 @@ struct VulkanContext::Impl {
 	VulkanBuffer globalFrameCullingSSBO;
 	VulkanBuffer globalMeshletCountersSSBO;
 	VulkanBuffer globalLightSSBO;
-	VulkanBuffer clusterGridSSBO;
-	VulkanBuffer lightIndexSSBO;
-	VulkanImage directionalShadowDepth;
-	VulkanImage directionalShadowColor;
+		VulkanBuffer clusterGridSSBO;
+		VulkanBuffer lightIndexSSBO;
+		VulkanBuffer clusterDepthSSBO;
+				VulkanBuffer indirectDrawBuffer;
+				VulkanHiZ hiZ;
+				VulkanVRS vrs;
+				
+				VulkanImage directionalShadowDepth;
+						VulkanImage directionalShadowColor;
 	VkFramebuffer directionalShadowFramebuffer = VK_NULL_HANDLE;
 	uint32_t directionalShadowTextureIndex = 0u;
 	VulkanImage spotShadowDepth;
@@ -242,7 +244,12 @@ struct VulkanContext::Impl {
 	VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
 	VkPipelineLayout lightingComputePipelineLayout = VK_NULL_HANDLE;
 	VkPipeline clusterGridComputePipeline = VK_NULL_HANDLE;
+	VkPipeline clusterDepthMaskComputePipeline = VK_NULL_HANDLE;
 	VkPipeline lightCullComputePipeline = VK_NULL_HANDLE;
+	VkPipeline hiZComputePipeline = VK_NULL_HANDLE;
+	VkPipeline vrsComputePipeline = VK_NULL_HANDLE;
+	VkPipelineLayout hiZPipelineLayout = VK_NULL_HANDLE;
+	VkPipelineLayout vrsPipelineLayout = VK_NULL_HANDLE;
 	glm::mat4 previousClusterViewProjection = glm::mat4(0.0f);
 	bool previousClusterViewProjectionValid = false;
 	static constexpr uint32_t kStatsViewCount = 2u;
@@ -261,12 +268,21 @@ struct VulkanContext::Impl {
 	std::unordered_map<TerraEngine::UUID, uint32_t> materialIndexMap;
 	uint32_t nextMaterialIndex = 0;
 
+	std::vector<uint32_t> freeBufferIndices;
+	uint32_t nextBufferIndex = 0;
+
 	bool CreateGlobalDescriptorResources();
 	void CreateMaterialBufferResources();
 	void CreateCullingBufferResources();
-	void CreateLightingBufferResources();
-	void UploadLightingData(const std::vector<GPULight>& lights);
-	void ResetMeshletCounters(uint32_t statsSlotIndex);
+		void CreateLightingBufferResources();
+		void CreateIndirectDrawResources();
+		bool EnsureShadowRenderResources();
+		void UploadLightingData(const std::vector<GPULight>& lights);
+			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView);
+		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
+	
+		void ResetMeshletCounters(uint32_t statsSlotIndex);
+	
 	void UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData);
 	MeshletCullingCountersGPU ReadMeshletCounters(uint32_t statsSlotIndex) const;
 	uint32_t GetStatsSlotIndex(uint32_t frameIndex, VulkanContext::ViewType view) const;
@@ -276,6 +292,10 @@ struct VulkanContext::Impl {
 
 	uint32_t AllocateTextureIndex();
 	void UpdateGlobalTexture(uint32_t index, const VulkanImage& image);
+
+	uint32_t AllocateBufferIndex();
+	void UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
+	void UpdateGlobalHiZ(const VulkanHiZ& hiZ);
 
 	uint32_t AllocateMaterialIndex();
 
@@ -310,6 +330,7 @@ struct VulkanContext::Impl {
 	std::unordered_map<VkRenderPass, std::unordered_map<PipelineKey, VulkanPipeline, PipelineKeyHash>> pipelineCache;
 
 	VulkanImage defaultTexture;
+	VulkanImage defaultNormalTexture;
 	std::vector<std::vector<VkCommandPool>> workerCommandPools; // Per-frame command pools for worker threads
 	std::vector<std::vector<std::vector<VkCommandBuffer>>> workerCommandBuffers; // Per-frame, per-worker secondary command buffers
 	// Track additional primary command buffers allocated when rendering multiple
@@ -386,6 +407,7 @@ struct VulkanContext::Impl {
 	bool BuildPipelineLayouts(const ShaderCollection& collection, std::vector<VkDescriptorSetLayout>& setLayouts, std::vector<std::vector<DescriptorBinding>>& bindingsPerSet, std::vector<VkPushConstantRange>& pushConstants, bool& supportsDefaultPushConstants);
 	void EnsureWorkerPools(uint32_t frameIndex, size_t workerCount);
 	VkCommandBuffer AcquireWorkerCommandBuffer(uint32_t frameIndex, size_t workerIndex);
+	VkCommandBuffer AcquirePrimaryCommandBuffer(uint32_t frameIndex);
 	void DestroyWorkerPools();
 
 	bool CheckValidationLayerSupport();

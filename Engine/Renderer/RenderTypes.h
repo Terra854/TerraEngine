@@ -17,7 +17,24 @@ struct DrawCommand
 	TerraEngine::UUID meshId;
 	TerraEngine::UUID materialId;
 	glm::mat4 modelMatrix;
+	std::uint32_t materialIndex = 0u;
+	std::uint32_t meshDataIndex = 0u;
+	std::uint32_t textureIndex = 0u;
 	bool taskShaderCullingEnabled = true;
+};
+
+struct PushConstants
+{
+	glm::mat4 viewProj;
+	glm::mat4 model;
+	std::uint32_t materialIndex = 0u;
+	std::uint32_t meshDataIndex = 0u;
+	std::uint32_t textureIndex = 0u;
+	std::uint32_t vrsActive = 0u;
+	std::uint32_t taskCullingEnabled = 0u;
+	std::uint32_t statsSlotIndex = 0u;
+	float cullingEpsilon = 0.001f;
+	float padding = 0.0f;
 };
 
 inline constexpr std::uint32_t kLightingClusterDimX = 16u;
@@ -36,12 +53,17 @@ struct alignas(16) GPULight
 static_assert(sizeof(GPULight) == 80, "GPULight layout changed; update shader mirror types.");
 
 // Cluster table entry mapping one cluster to a segment of the flat light-index list.
-struct alignas(8) ClusterData
+struct alignas(16) ClusterData
 {
 	std::uint32_t offset = 0u;
 	std::uint32_t count = 0u;
+	float padding[2];
+	glm::vec3 minBounds = glm::vec3(0.0f);
+	float padding1 = 0.0f;
+	glm::vec3 maxBounds = glm::vec3(0.0f);
+	float padding2 = 0.0f;
 };
-static_assert(sizeof(ClusterData) == 8, "ClusterData layout changed; update shader mirror types.");
+static_assert(sizeof(ClusterData) == 48, "ClusterData layout changed; update shader mirror types.");
 
 struct FrameRenderData
 {
@@ -62,12 +84,14 @@ struct alignas(16) FrameCullingDataGPU
 	glm::vec4 cameraPositionAndEpsilon = glm::vec4(0.0f, 0.0f, 0.0f, 0.001f);
 	glm::uvec4 clusterGridAndLightCount = glm::uvec4(kLightingClusterDimX, kLightingClusterDimY, kLightingClusterDimZ, 0u);
 	glm::vec4 clusterDepthAndViewport = glm::vec4(0.1f, 100.0f, 1920.0f, 1080.0f);
+	glm::mat4 viewMatrix = glm::mat4(1.0f);
+	glm::mat4 invProjection = glm::mat4(1.0f);
 	std::uint32_t globalTaskCullingEnabled = 1u;
 	std::uint32_t taskShaderSupported = 0u;
 	std::uint32_t reserved0 = 0u;
 	std::uint32_t reserved1 = 0u;
 };
-static_assert(sizeof(FrameCullingDataGPU) == 160, "Frame culling payload must stay tightly packed for GPU uploads.");
+static_assert(sizeof(FrameCullingDataGPU) == 288, "Frame culling payload must stay tightly packed for GPU uploads.");
 
 // GPU counters written by task shader atomic operations per view/frame slot.
 struct alignas(16) MeshletCullingCountersGPU
@@ -75,7 +99,7 @@ struct alignas(16) MeshletCullingCountersGPU
 	std::uint32_t meshletsTotal = 0u;
 	std::uint32_t meshletsDispatched = 0u;
 	std::uint32_t meshletsCulled = 0u;
-	std::uint32_t reserved = 0u;
+	std::uint32_t meshletsCulledHiZ = 0u;
 };
 static_assert(sizeof(MeshletCullingCountersGPU) == 16, "Meshlet counter payload must keep a stable 16-byte layout.");
 
@@ -91,6 +115,9 @@ struct RenderStatsSnapshot
 	std::uint32_t meshletsTotal = 0u;
 	std::uint32_t meshletsDispatched = 0u;
 	std::uint32_t meshletsCulled = 0u;
+	std::uint32_t meshletsCulledHiZ = 0u;
 	bool taskCullingActive = false;
+	bool hiZActive = false;
+	bool vrsActive = false;
 	bool valid = false;
 };

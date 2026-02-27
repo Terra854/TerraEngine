@@ -32,7 +32,7 @@ enum class AlphaMode : std::uint32_t
 
 enum class TextureSemantic : std::uint32_t
 {
-	BaseColor = 0,
+	Base = 0,
 	Normal = 1,
 	MetallicRoughness = 2,
 	Occlusion = 3,

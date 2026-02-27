@@ -26,6 +26,8 @@ struct FrameCullingData
 	float4 cameraPositionAndEpsilon;
 	uint4 clusterGridAndLightCount;
 	float4 clusterDepthAndViewport;
+	column_major float4x4 viewMatrix;
+	column_major float4x4 invProjection;
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
 	uint reserved0;
@@ -37,7 +39,7 @@ struct MeshletCullingCounters
 	uint meshletsTotal;
 	uint meshletsDispatched;
 	uint meshletsCulled;
-	uint reserved;
+	uint meshletsCulledHiZ;
 };
 
 // Task stage compacts visible meshlets for each task-group chunk.
@@ -47,10 +49,15 @@ struct TaskPayload
 	uint meshletIndices[kTaskBatchSize];
 };
 
+[[vk::binding(0, 0)]] Texture2D globalTextures[];
+[[vk::binding(0, 0)]] SamplerState globalSamplers[];
 [[vk::binding(2, 0)]] StructuredBuffer<FrameCullingData> frameCullingData;
 [[vk::binding(3, 0)]] RWStructuredBuffer<MeshletCullingCounters> meshletCounters;
 [[vk::binding(4, 1)]] StructuredBuffer<MeshDecodeInfo> meshDecodeInfo;
 [[vk::binding(5, 1)]] StructuredBuffer<MeshletBounds> meshletBounds;
+[[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
+[[vk::binding(10, 0)]] Texture2D<float> hiZPyramid;
+[[vk::binding(11, 0)]] SamplerState hiZSampler;
 
 groupshared TaskPayload gTaskPayload;
 
@@ -58,14 +65,14 @@ struct PushConstants
 {
 	column_major float4x4 viewProj;
 	column_major float4x4 model;
-	uint textureIndex;
 	uint materialIndex;
+	uint meshDataIndex;
+	uint textureIndex;
+	uint vrsActive;
 	uint taskCullingEnabled;
 	uint statsSlotIndex;
 	float cullingEpsilon;
-	float padding0;
-	float padding1;
-	float padding2;
+	float padding;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
@@ -103,17 +110,62 @@ bool IsConeBackfacing(const float3 coneApexWorld, const float3 coneAxisWorld, co
 		return false;
 	}
 
-	// Large meshlets should stay conservative to avoid silhouette popping.
 	const float apexDistance = sqrt(apexDistanceSq);
 	if (radiusWorld >= apexDistance)
 	{
 		return false;
 	}
 
-	// meshoptimizer perspective rejection uses normalize(cone_apex - camera_position).
 	const float3 viewDirection = cameraToApex / apexDistance;
 	const float facing = dot(viewDirection, axis);
 	return facing >= (coneCutoff + epsilon);
+}
+
+bool IsOccluded(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const float epsilon)
+{
+	// Project bounding sphere to NDC
+	float4 centerClip = mul(SceneUniforms.viewProj, float4(centerWorld, 1.0f));
+	if (centerClip.w <= 0.0f) return false; // Near plane clipping
+
+	float3 centerNdc = centerClip.xyz / centerClip.w;
+	// Projection is already Y-flipped on CPU for Vulkan, so do not flip again here.
+	float2 uv = centerNdc.xy * 0.5f + 0.5f;
+
+	// Clamp UV to avoid sampling border/background
+	if (any(uv < 0.0) || any(uv > 1.0)) return false;
+
+	// Conservative radius in screen space for mip selection.
+	// Use absolute projection scale because Vulkan's Y-flip makes [1][1] negative.
+	float2 projectionScale = abs(float2(SceneUniforms.viewProj[0][0], SceneUniforms.viewProj[1][1]));
+	float screenRadius = (radiusWorld * max(projectionScale.x, projectionScale.y)) / max(centerClip.w, 1e-6f);
+	
+	float2 viewportSize = frameData.clusterDepthAndViewport.zw;
+	float sizeInPixels = max(1.0f, screenRadius * max(viewportSize.x, viewportSize.y));
+	if (!isfinite(sizeInPixels))
+	{
+		return false;
+	}
+	
+	// Choose mip level where the sphere covers roughly 2x2 texels
+	float mip = max(0.0f, ceil(log2(sizeInPixels / 2.0f)));
+	// Clamp to the mip range derived from the current viewport to avoid invalid samples.
+	float maxMip = max(0.0f, floor(log2(max(viewportSize.x, viewportSize.y))));
+	mip = min(mip, maxMip);
+	
+	// Sample furthest depth in the region
+	float furthestDepth = hiZPyramid.SampleLevel(hiZSampler, uv, mip).r;
+	// Fail open when Hi-Z is invalid/uninitialized so visibility stays correct.
+	if (!isfinite(furthestDepth) || furthestDepth <= 0.0f)
+	{
+		return false;
+	}
+	
+	// Conservative closest point in depth. Clamp to [0, 1] so the comparison matches Vulkan ZO depth.
+	float meshletClosestDepth = saturate(centerNdc.z - (radiusWorld / max(centerClip.w, 1e-6f)));
+	float occlusionBias = max(epsilon, 1e-4f);
+	
+	// Occluded if the nearest point on the meshlet is still deeper than occluders in the Hi-Z region.
+	return meshletClosestDepth > (furthestDepth + occlusionBias);
 }
 
 [numthreads(1, 1, 1)]
@@ -126,7 +178,6 @@ void main(uint3 groupId : SV_GroupID)
 	const float epsilon = max(SceneUniforms.cullingEpsilon, frameData.cameraPositionAndEpsilon.w);
 	const float3 cameraPosition = frameData.cameraPositionAndEpsilon.xyz;
 
-	// Each task group scans a fixed-size meshlet chunk and emits only visible ones.
 	const uint meshletBase = groupId.x * kTaskBatchSize;
 	uint visibleCount = 0u;
 	uint ignored = 0u;
@@ -162,6 +213,14 @@ void main(uint3 groupId : SV_GroupID)
 			if (!culled)
 			{
 				culled = IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, worldRadius, cameraPosition, epsilon);
+			}
+			if (!culled)
+			{
+				if (IsOccluded(worldCenter, worldRadius, frameData, epsilon))
+				{
+					InterlockedAdd(meshletCounters[statsIndex].meshletsCulledHiZ, 1u, ignored);
+					culled = true;
+				}
 			}
 		}
 

@@ -39,6 +39,8 @@ Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanHiZ.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanVRS.cpp
 	Engine/DotNet/DotNetHost.cpp
 	Engine/Scripting/ScriptingSystem.cpp
 	Engine/Scripting/ScriptGlue.cpp
@@ -75,6 +77,8 @@ Engine/Renderer/RHI/RHIContext.h
 Engine/Renderer/RHI/Vulkan/VulkanContext.h
 Engine/Renderer/RHI/Vulkan/VulkanCommonIncludes.h
 Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h
+Engine/Renderer/RHI/Vulkan/VulkanHiZ.h
+Engine/Renderer/RHI/Vulkan/VulkanVRS.h
 Engine/DotNet/DotNetHost.h
 Engine/Scripting/ScriptingSystem.h
 Engine/Scripting/ScriptComponent.h
@@ -456,10 +460,13 @@ set(DXC_PATH \"${TERRAENGINE_DXC_PATH}\")
 set(out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders\")
 set(editor_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Editor\")
 set(lighting_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Lighting\")
+set(postprocess_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/PostProcess\")
 set(lighting_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Lighting\")
+set(postprocess_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/PostProcess\")
 file(MAKE_DIRECTORY \"\${out_dir}\")
 file(MAKE_DIRECTORY \"\${editor_out_dir}\")
 file(MAKE_DIRECTORY \"\${lighting_out_dir}\")
+file(MAKE_DIRECTORY \"\${postprocess_out_dir}\")
 
 execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.task.hlsl\" -o \"\${out_dir}/Default.task.tspf\" -s ts --dxc \"\${DXC_PATH}\"
@@ -499,6 +506,22 @@ execute_process(
 )
 if(NOT compile_light_cull EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile LightCull.comp.hlsl during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${postprocess_out_dir}/HiZGenerate.comp.spv\" -spirv \"\${postprocess_src_dir}/HiZGenerate.comp.hlsl\"
+    RESULT_VARIABLE compile_hiz
+)
+if(NOT compile_hiz EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile HiZGenerate.comp.hlsl during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${postprocess_out_dir}/VRSGenerate.comp.spv\" -spirv \"\${postprocess_src_dir}/VRSGenerate.comp.hlsl\"
+    RESULT_VARIABLE compile_vrs
+)
+if(NOT compile_vrs EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile VRSGenerate.comp.hlsl during install\")
 endif()
 
 # Compile Grid Shaders using raw DXC (bypassing asset compiler for internal usage)

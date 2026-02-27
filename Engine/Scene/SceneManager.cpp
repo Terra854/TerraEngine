@@ -500,7 +500,7 @@ TerraEngine::UUID SceneManager::CreateGeneratedMaterial(ResourceManager& resourc
 	header.floatParameterOffset = header.headerSize + static_cast<std::uint32_t>(sizeof(TextureBinding));
 
 	TextureBinding binding{};
-	binding.semantic = TextureSemantic::BaseColor;
+	binding.semantic = TextureSemantic::Base;
 	binding.textureUuid = textureId;
 	binding.samplerFilter = SamplerFilter::Trilinear;
 	binding.addressU = SamplerAddressMode::Repeat;
