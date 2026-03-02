@@ -35,6 +35,7 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
                     
                     if (val.is_type<float>()) compJson[propName] = val.get_value<float>();
                     else if (val.is_type<int>()) compJson[propName] = val.get_value<int>();
+                    else if (val.is_type<std::uint32_t>()) compJson[propName] = val.get_value<std::uint32_t>();
                     else if (val.is_type<bool>()) compJson[propName] = val.get_value<bool>();
                     else if (val.is_type<std::string>()) compJson[propName] = val.get_value<std::string>();
                     else if (val.is_type<glm::vec3>()) {
@@ -126,7 +127,13 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
                             rttr::variant val;
                             // Heuristic-based type reconstruction for JSON variants.
                             if (propVal.is_number_float()) val = propVal.get<float>();
-                            else if (propVal.is_number_integer()) val = propVal.get<int>();
+                            else if (propVal.is_number_integer()) {
+                                if (prop.get_type() == rttr::type::get<std::uint32_t>()) {
+                                    val = propVal.get<std::uint32_t>();
+                                } else {
+                                    val = propVal.get<int>();
+                                }
+                            }
                             else if (propVal.is_boolean()) val = propVal.get<bool>();
                             else if (propVal.is_string()) {
                                 if (prop.get_type() == rttr::type::get<TerraEngine::UUID>()) {
