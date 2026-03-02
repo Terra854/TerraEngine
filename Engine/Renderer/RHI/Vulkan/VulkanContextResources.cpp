@@ -7,7 +7,7 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 	{
 		uint32_t whitePixel = 0xFFFFFFFF;
 		VkDeviceSize imageSize = 4;
-		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Generic Staging Buffer");
 		void* data;
 		vmaMapMemory(allocator, stagingBuffer.allocation, &data);
 		memcpy(data, &whitePixel, 4);
@@ -28,6 +28,7 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 		VmaAllocationCreateInfo allocInfo = {};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 		vmaCreateImage(allocator, &imageInfo, &allocInfo, &defaultTexture.image, &defaultTexture.allocation, nullptr);
+		vmaSetAllocationName(allocator, defaultTexture.allocation, "Default White Texture");
 
 		TransitionImageLayout(defaultTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 		CopyBufferToImage(stagingBuffer.buffer, defaultTexture.image, 1, 1);
@@ -53,7 +54,7 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 	{
 		uint32_t bluePixel = 0xFFFF7F7F; // (127, 127, 255, 255) -> Flat Normal
 		VkDeviceSize imageSize = 4;
-		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Default Normal Staging Buffer");
 		void* data;
 		vmaMapMemory(allocator, stagingBuffer.allocation, &data);
 		memcpy(data, &bluePixel, 4);
@@ -96,7 +97,7 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 	}
 }
 
-VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage) {
+VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* name) {
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	bufferInfo.size = size;
@@ -110,6 +111,10 @@ VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageF
 	buffer.size = size;
 	if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, nullptr) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create buffer!");
+	}
+
+	if (name) {
+		vmaSetAllocationName(allocator, buffer.allocation, name);
 	}
 
 	return buffer;
@@ -453,7 +458,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 
 	VkDeviceSize imageSize = cpuTexture->mips[0].data.size();
 	
-	VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+	VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Generic Staging Buffer");
 	
 	void* data;
 	vmaMapMemory(allocator, stagingBuffer.allocation, &data);
@@ -1809,6 +1814,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 			image.allocation = VK_NULL_HANDLE;
 			return;
 		}
+		vmaSetAllocationName(allocator, image.allocation, "Shadow/Attachment Color Image");
 
 		VkImageViewCreateInfo viewInfo{};
 		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1851,6 +1857,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 			image.allocation = VK_NULL_HANDLE;
 			return;
 		}
+		vmaSetAllocationName(allocator, image.allocation, "Shadow/Attachment Color Image");
 		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_DEPTH_BIT);
 	};
 
@@ -1878,6 +1885,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 			image.allocation = VK_NULL_HANDLE;
 			return;
 		}
+		vmaSetAllocationName(allocator, image.allocation, "Shadow/Attachment Color Image");
 
 		VkImageViewCreateInfo viewInfo{};
 		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;

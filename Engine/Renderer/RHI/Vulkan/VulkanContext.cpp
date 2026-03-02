@@ -3,6 +3,15 @@
 #define VOLK_IMPLEMENTATION
 #define VMA_IMPLEMENTATION
 
+#include <cstdio>
+#include "Core/Logger/Logger.h"
+
+#define VMA_LEAK_LOG_FORMAT(format, ...) do { \
+        char _vma_buf[1024]; \
+        std::snprintf(_vma_buf, sizeof(_vma_buf), (format), __VA_ARGS__); \
+        TERRAENGINE_LOG(LogLevel::Error, "[VMA] " << _vma_buf); \
+    } while(false)
+
 #include "VulkanCommonIncludes.h"
 #include "VulkanContextImpl.h"
 #include "ThreadPool/ThreadPool.h"
@@ -2004,6 +2013,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
 	vmaCreateImage(allocator, &imageInfo, &allocInfo, &res.image, &res.allocation, nullptr);
+	vmaSetAllocationName(allocator, res.allocation, "Offscreen Render Target Image");
 
 	// Create View
 	res.view = CreateImageView(res.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);

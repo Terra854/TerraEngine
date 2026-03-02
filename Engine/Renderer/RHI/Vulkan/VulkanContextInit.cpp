@@ -156,8 +156,11 @@ void VulkanContext::Impl::Cleanup() {
 	if (device) {
 		vkDestroySampler(device, defaultTexture.sampler, nullptr);
 		vkDestroyImageView(device, defaultTexture.view, nullptr);
+		vkDestroySampler(device, defaultNormalTexture.sampler, nullptr);
+		vkDestroyImageView(device, defaultNormalTexture.view, nullptr);
 	}
 	vmaDestroyImage(allocator, defaultTexture.image, defaultTexture.allocation);
+	vmaDestroyImage(allocator, defaultNormalTexture.image, defaultNormalTexture.allocation);
 
 	if (device) {
 		if (clusterGridComputePipeline != VK_NULL_HANDLE) {
@@ -682,6 +685,7 @@ bool VulkanContext::Impl::CreateDepthResources() {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create depth image!");
 		return false;
 	}
+	vmaSetAllocationName(allocator, depthImageAllocation, "Main Depth Image");
 
 	depthImageView = CreateImageView(depthImage, chosenDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
 	TransitionImageLayout(depthImage, chosenDepthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);

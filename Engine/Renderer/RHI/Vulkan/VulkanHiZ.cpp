@@ -29,6 +29,7 @@ void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenW
     if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image, &allocation, nullptr) != VK_SUCCESS) {
         throw std::runtime_error("failed to create Hi-Z image!");
     }
+    vmaSetAllocationName(allocator, allocation, "Hi-Z Pyramid Image");
 
     {
         VkImageViewCreateInfo viewInfo{};

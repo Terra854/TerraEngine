@@ -41,6 +41,7 @@ void VulkanVRS::Create(VkDevice device, VkPhysicalDevice physicalDevice, VmaAllo
     if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image, &allocation, nullptr) != VK_SUCCESS) {
         throw std::runtime_error("failed to create VRS image!");
     }
+    vmaSetAllocationName(allocator, allocation, "VRS Shading Rate Image");
 
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
