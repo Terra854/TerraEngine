@@ -242,23 +242,23 @@ void VulkanContext::Impl::Cleanup() {
 	DestroyVulkanImage(ltcAmplitudeTexture);
 	DestroyVulkanImage(ltcInverseTexture);
 
-	vmaDestroyBuffer(allocator, globalMaterialSSBO.buffer, globalMaterialSSBO.allocation);
-	vmaDestroyBuffer(allocator, globalFrameCullingSSBO.buffer, globalFrameCullingSSBO.allocation);
-	vmaDestroyBuffer(allocator, globalMeshletCountersSSBO.buffer, globalMeshletCountersSSBO.allocation);
-	vmaDestroyBuffer(allocator, globalLightSSBO.buffer, globalLightSSBO.allocation);
-	vmaDestroyBuffer(allocator, clusterGridSSBO.buffer, clusterGridSSBO.allocation);
-	vmaDestroyBuffer(allocator, clusterDepthSSBO.buffer, clusterDepthSSBO.allocation);
-	vmaDestroyBuffer(allocator, lightIndexSSBO.buffer, lightIndexSSBO.allocation);
-	vmaDestroyBuffer(allocator, indirectDrawBuffer.buffer, indirectDrawBuffer.allocation);
+	auto DestroyBufferVector = [&](std::vector<VulkanBuffer>& buffers) {
+		for (auto& buffer : buffers) {
+			if (buffer.buffer != VK_NULL_HANDLE) {
+				vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+			}
+		}
+		buffers.clear();
+	};
 
-    globalMaterialSSBO = {};
-    globalFrameCullingSSBO = {};
-    globalMeshletCountersSSBO = {};
-    globalLightSSBO = {};
-    clusterGridSSBO = {};
-    clusterDepthSSBO = {};
-    lightIndexSSBO = {};
-    indirectDrawBuffer = {};
+	DestroyBufferVector(globalMaterialSSBOs);
+	DestroyBufferVector(globalFrameCullingSSBOs);
+	DestroyBufferVector(globalMeshletCountersSSBOs);
+	DestroyBufferVector(globalLightSSBOs);
+	DestroyBufferVector(clusterGridSSBOs);
+	DestroyBufferVector(lightIndexSSBOs);
+	DestroyBufferVector(clusterDepthSSBOs);
+	DestroyBufferVector(indirectDrawBuffers);
 
 	hiZ.Destroy(device, allocator);
 	vrs.Destroy(device, allocator);
@@ -619,7 +619,6 @@ bool VulkanContext::Impl::CreateSwapChain(WindowSystem& windowSystem) {
 
 	swapchainImageFormat = surfaceFormat.format;
 	swapchainExtent = extent;
-	MAX_FRAMES_IN_FLIGHT = static_cast<int>(swapchainImages.size());
 	return true;
 }
 
@@ -1212,13 +1211,22 @@ void VulkanContext::Impl::RecreateSwapChain() {
 
 	CleanupSwapChain();
 
-	vmaDestroyBuffer(allocator, globalFrameCullingSSBO.buffer, globalFrameCullingSSBO.allocation);
-	vmaDestroyBuffer(allocator, globalMeshletCountersSSBO.buffer, globalMeshletCountersSSBO.allocation);
-	vmaDestroyBuffer(allocator, globalLightSSBO.buffer, globalLightSSBO.allocation);
-	vmaDestroyBuffer(allocator, clusterGridSSBO.buffer, clusterGridSSBO.allocation);
-	vmaDestroyBuffer(allocator, clusterDepthSSBO.buffer, clusterDepthSSBO.allocation);
-	vmaDestroyBuffer(allocator, lightIndexSSBO.buffer, lightIndexSSBO.allocation);
-	vmaDestroyBuffer(allocator, indirectDrawBuffer.buffer, indirectDrawBuffer.allocation);
+	auto DestroyBufferVector = [&](std::vector<VulkanBuffer>& buffers) {
+		for (auto& buffer : buffers) {
+			if (buffer.buffer != VK_NULL_HANDLE) {
+				vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+			}
+		}
+		buffers.clear();
+	};
+
+	DestroyBufferVector(globalFrameCullingSSBOs);
+	DestroyBufferVector(globalMeshletCountersSSBOs);
+	DestroyBufferVector(globalLightSSBOs);
+	DestroyBufferVector(clusterGridSSBOs);
+	DestroyBufferVector(lightIndexSSBOs);
+	DestroyBufferVector(clusterDepthSSBOs);
+	DestroyBufferVector(indirectDrawBuffers);
 
 	hiZ.Destroy(device, allocator);
 	vrs.Destroy(device, allocator);
@@ -1226,13 +1234,6 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	vkDestroyImageView(device, depthImageView, nullptr);
 	vmaDestroyImage(allocator, depthImage, depthImageAllocation);
 
-    globalFrameCullingSSBO = {};
-    globalMeshletCountersSSBO = {};
-    globalLightSSBO = {};
-    clusterGridSSBO = {};
-    clusterDepthSSBO = {};
-    lightIndexSSBO = {};
-    indirectDrawBuffer = {};
 	depthImage = VK_NULL_HANDLE;
 	depthImageAllocation = VK_NULL_HANDLE;
 	depthImageView = VK_NULL_HANDLE;

@@ -435,6 +435,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	// Skip rendering if initialization failed so we do not spam validation errors.
 	if (!impl->initialized || impl->skipFrame) return;
 
+	const uint32_t currentFrame = impl->currentFrame;
+
 	if (!impl->editorMode && !impl->swapchainImageAcquired) {
 		return;
 	}
@@ -796,7 +798,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 	// Light Culling
 	if (impl->clusterGridComputePipeline != VK_NULL_HANDLE && impl->lightCullComputePipeline != VK_NULL_HANDLE) {
-		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSet, 0, nullptr);
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSets[currentFrame], 0, nullptr);
 		
 		uint32_t clusterGroupCountX = (kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ + 63) / 64;
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterGridComputePipeline);
@@ -947,7 +949,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		draw.mesh = &mesh;
 		draw.pipeline = pipeline;
 		// Set 0 is the global bindless heap; set 1 is per-mesh payload for mesh shader pipelines.
-		draw.descriptorSets = {impl->globalDescriptorSet};
+		draw.descriptorSets = {impl->globalDescriptorSets[currentFrame]};
 		draw.descriptorSets.push_back(meshDescriptorSet);
 		draw.push = push;
 		
@@ -979,7 +981,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 					PreparedDraw shadowDraw{};
 					shadowDraw.mesh = &mesh;
 					shadowDraw.pipeline = shadowPipeline;
-					shadowDraw.descriptorSets = {impl->globalDescriptorSet, shadowMeshDescriptorSet};
+					shadowDraw.descriptorSets = {impl->globalDescriptorSets[currentFrame], shadowMeshDescriptorSet};
 					shadowDraw.push = push;
 					// Shadow-map passes never use the cluster heatmap debug branch.
 					shadowDraw.push.taskCullingEnabled = 0u;
@@ -1049,7 +1051,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 		if (cameraChanged) {
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterGridComputePipeline);
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSet, 0, nullptr);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSets[currentFrame], 0, nullptr);
 			const uint32_t dispatchX = (kLightingClusterDimX + 7u) / 8u;
 			const uint32_t dispatchY = (kLightingClusterDimY + 7u) / 8u;
 			const uint32_t dispatchZ = std::max<uint32_t>(kLightingClusterDimZ, 1u);
@@ -1074,7 +1076,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		}
 
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightCullComputePipeline);
-		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSet, 0, nullptr);
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSets[currentFrame], 0, nullptr);
 		const uint32_t clusterCount = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
 		vkCmdDispatch(cmd, std::max<uint32_t>(clusterCount, 1u), 1u, 1u);
 
@@ -1136,7 +1138,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			}
 
 			VkDeviceSize offset = draw.indirectBufferIndex * sizeof(VkDrawMeshTasksIndirectCommandEXT);
-			vkCmdDrawMeshTasksIndirectEXT(cmd, impl->indirectDrawBuffer.buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
+			vkCmdDrawMeshTasksIndirectEXT(cmd, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
 		}
 	};
 
@@ -1207,9 +1209,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 	if (!indirectCommands.empty()) {
 		void* data = nullptr;
-		vmaMapMemory(impl->allocator, impl->indirectDrawBuffer.allocation, &data);
+		vmaMapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation, &data);
 		std::memcpy(data, indirectCommands.data(), indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
-		vmaUnmapMemory(impl->allocator, impl->indirectDrawBuffer.allocation);
+		vmaUnmapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation);
 	}
 
 	std::vector<VkCommandBuffer> secondaryBuffers;
@@ -1228,9 +1230,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			const size_t end = std::min(prepared.size(), start + chunkSize);
 			VkFramebuffer framebuffer = renderPassInfo.framebuffer;
 			VkRenderPass renderPass = renderPassInfo.renderPass;
+			const uint32_t frameIndex = currentFrame;
+			VkCommandBuffer secondary = impl->AcquireWorkerCommandBuffer(frameIndex, taskIndex);
 
-			auto task = ThreadPool::instance().createTask([frameIndex = impl->currentFrame, workerIndex = taskIndex, renderPass, framebuffer, start, end, &prepared, this]() -> VkCommandBuffer {
-				VkCommandBuffer secondary = impl->AcquireWorkerCommandBuffer(frameIndex, workerIndex);
+			auto task = ThreadPool::instance().createTask([secondary, renderPass, framebuffer, start, end, &prepared, this]() -> VkCommandBuffer {
 				if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 				vkResetCommandBuffer(secondary, 0);
 
@@ -1270,7 +1273,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 					}
 
 					VkDeviceSize offset = draw.indirectBufferIndex * sizeof(VkDrawMeshTasksIndirectCommandEXT);
-					vkCmdDrawMeshTasksIndirectEXT(secondary, impl->indirectDrawBuffer.buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
+					vkCmdDrawMeshTasksIndirectEXT(secondary, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
 				}
 				vkEndCommandBuffer(secondary);
 				return secondary;
@@ -1380,21 +1383,21 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 
 		std::array<VkWriteDescriptorSet, 2> writes{};
 		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[0].dstSet = globalDescriptorSet;
+		writes[0].dstSet = globalDescriptorSets[currentFrame];
 		writes[0].dstBinding = 12;
 		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		writes[0].descriptorCount = 1;
 		writes[0].pImageInfo = &depthInfo;
 
 		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[1].dstSet = globalDescriptorSet;
+		writes[1].dstSet = globalDescriptorSets[currentFrame];
 		writes[1].dstBinding = 16;
 		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 		writes[1].descriptorCount = 1;
 		writes[1].pImageInfo = &outputInfo;
 
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lightingComputePipelineLayout, 0, 1, &globalDescriptorSet, 0, nullptr);
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lightingComputePipelineLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
 
 		struct { uint32_t w, h, isL0; } push;
 		push.w = hiZ.width; push.h = hiZ.height; push.isL0 = 1;
@@ -1436,14 +1439,14 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 
 		std::array<VkWriteDescriptorSet, 2> writes{};
 		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[0].dstSet = globalDescriptorSet;
+		writes[0].dstSet = globalDescriptorSets[currentFrame];
 		writes[0].dstBinding = 12;
 		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		writes[0].descriptorCount = 1;
 		writes[0].pImageInfo = &inputInfo;
 
 		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[1].dstSet = globalDescriptorSet;
+		writes[1].dstSet = globalDescriptorSets[currentFrame];
 		writes[1].dstBinding = 16;
 		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 		writes[1].descriptorCount = 1;
@@ -1479,7 +1482,7 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 
 	VkWriteDescriptorSet restoreWrite{};
 	restoreWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	restoreWrite.dstSet = globalDescriptorSet;
+	restoreWrite.dstSet = globalDescriptorSets[currentFrame];
 	restoreWrite.dstBinding = 12;
 	restoreWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	restoreWrite.descriptorCount = 1;
@@ -1518,14 +1521,14 @@ void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colo
 
 	std::array<VkWriteDescriptorSet, 2> vrsWrites{};
 	vrsWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	vrsWrites[0].dstSet = globalDescriptorSet;
+	vrsWrites[0].dstSet = globalDescriptorSets[currentFrame];
 	vrsWrites[0].dstBinding = 14;
 	vrsWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	vrsWrites[0].descriptorCount = 1;
 	vrsWrites[0].pImageInfo = &vrsOutputInfo;
 
 	vrsWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	vrsWrites[1].dstSet = globalDescriptorSet;
+	vrsWrites[1].dstSet = globalDescriptorSets[currentFrame];
 	vrsWrites[1].dstBinding = 15;
 	vrsWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	vrsWrites[1].descriptorCount = 1;
@@ -1534,7 +1537,7 @@ void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colo
 	vkUpdateDescriptorSets(device, static_cast<uint32_t>(vrsWrites.size()), vrsWrites.data(), 0, nullptr);
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vrsComputePipeline);
-	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lightingComputePipelineLayout, 0, 1, &globalDescriptorSet, 0, nullptr);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lightingComputePipelineLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
 
 	struct {
 		uint32_t width;

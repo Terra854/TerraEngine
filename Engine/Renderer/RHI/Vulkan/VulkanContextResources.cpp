@@ -533,11 +533,11 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	// No longer returns descriptor sets, but acts as an upload mechanism for material data.
 	// The return value is kept for now to minimize API breakage, but it will be empty besides the global set.
 	if (materialIndexMap.contains(materialId)) {
-		return { globalDescriptorSet };
+		return { globalDescriptorSets[currentFrame] };
 	}
 
 	Material* material = ResourceManager::Instance().GetMaterial(materialId);
-	if (!material) return { globalDescriptorSet };
+	if (!material) return { globalDescriptorSets[currentFrame] };
 	
 	MaterialData data{};
 	data.BaseColorFactor = glm::vec4(
@@ -609,12 +609,14 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	copyRegion.srcOffset = 0;
 	copyRegion.dstOffset = materialIndex * sizeof(MaterialData);
 	copyRegion.size = bufferSize;
-	vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBO.buffer, 1, &copyRegion);
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
+	}
 	EndSingleTimeCommands(commandBuffer);
 	
 	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
-	return { globalDescriptorSet };
+	return { globalDescriptorSets[currentFrame] };
 }
 
 void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
@@ -1539,22 +1541,22 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 
 	std::array<VkDescriptorPoolSize, 5> poolSizes{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSizes[0].descriptorCount = MAX_BINDLESS_TEXTURES;
+	poolSizes[0].descriptorCount = MAX_BINDLESS_TEXTURES * MAX_FRAMES_IN_FLIGHT;
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	poolSizes[1].descriptorCount = 4; // Point shadow + Hi-Z + Depth + VRS Color
+	poolSizes[1].descriptorCount = 4 * MAX_FRAMES_IN_FLIGHT; // Point shadow + Hi-Z + Depth + VRS Color
 	poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-	poolSizes[2].descriptorCount = 2; // Point shadow + Hi-Z
+	poolSizes[2].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // Point shadow + Hi-Z
 	poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSizes[3].descriptorCount = 7 + MAX_BINDLESS_BUFFERS;
+	poolSizes[3].descriptorCount = (7 + MAX_BINDLESS_BUFFERS) * MAX_FRAMES_IN_FLIGHT;
 	poolSizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	poolSizes[4].descriptorCount = 2; // VRS Image + Hi-Z Output
+	poolSizes[4].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // VRS Image + Hi-Z Output
 
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
 	poolInfo.pPoolSizes = poolSizes.data();
-	poolInfo.maxSets = 1;
+	poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
 	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
 
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &globalDescriptorPool) != VK_SUCCESS) {
@@ -1562,15 +1564,18 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 		return false;
 	}
 
-	VkDescriptorSetAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-	allocInfo.descriptorPool = globalDescriptorPool;
-	allocInfo.descriptorSetCount = 1;
-	allocInfo.pSetLayouts = &globalDescriptorSetLayout;
+	globalDescriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		VkDescriptorSetAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocInfo.descriptorPool = globalDescriptorPool;
+		allocInfo.descriptorSetCount = 1;
+		allocInfo.pSetLayouts = &globalDescriptorSetLayout;
 
-	if (vkAllocateDescriptorSets(device, &allocInfo, &globalDescriptorSet) != VK_SUCCESS) {
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to allocate global descriptor set!");
-		return false;
+		if (vkAllocateDescriptorSets(device, &allocInfo, &globalDescriptorSets[i]) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to allocate global descriptor set for frame " << i);
+			return false;
+		}
 	}
 
 	return true;
@@ -1578,64 +1583,78 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 
 void VulkanContext::Impl::CreateMaterialBufferResources() {
 	VkDeviceSize bufferSize = sizeof(MaterialData) * MAX_BINDLESS_MATERIALS;
-	globalMaterialSSBO = CreateBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	globalMaterialSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		globalMaterialSSBOs[i] = CreateBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
-	VkDescriptorBufferInfo bufferInfo{};
-	bufferInfo.buffer = globalMaterialSSBO.buffer;
-	bufferInfo.offset = 0;
-	bufferInfo.range = bufferSize;
+		VkDescriptorBufferInfo bufferInfo{};
+		bufferInfo.buffer = globalMaterialSSBOs[i].buffer;
+		bufferInfo.offset = 0;
+		bufferInfo.range = bufferSize;
 
-	VkWriteDescriptorSet descriptorWrite{};
-	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrite.dstSet = globalDescriptorSet;
-	descriptorWrite.dstBinding = 1;
-	descriptorWrite.dstArrayElement = 0;
-	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	descriptorWrite.descriptorCount = 1;
-	descriptorWrite.pBufferInfo = &bufferInfo;
+		VkWriteDescriptorSet descriptorWrite{};
+		descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrite.dstSet = globalDescriptorSets[i];
+		descriptorWrite.dstBinding = 1;
+		descriptorWrite.dstArrayElement = 0;
+		descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		descriptorWrite.descriptorCount = 1;
+		descriptorWrite.pBufferInfo = &bufferInfo;
 
-	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+	}
 }
 
 void VulkanContext::Impl::CreateCullingBufferResources() {
 	const VkDeviceSize frameDataBufferSize = static_cast<VkDeviceSize>(sizeof(FrameCullingDataGPU) * kStatsSlotCount);
 	const VkDeviceSize countersBufferSize = static_cast<VkDeviceSize>(sizeof(MeshletCullingCountersGPU) * kStatsSlotCount);
 
-	globalFrameCullingSSBO = CreateBuffer(frameDataBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-	globalMeshletCountersSSBO = CreateBuffer(countersBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	globalFrameCullingSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
+	globalMeshletCountersSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
 
-	FrameCullingDataGPU defaultFrameData{};
-	for (uint32_t slotIndex = 0; slotIndex < kStatsSlotCount; ++slotIndex) {
-		UpdateFrameCullingData(slotIndex, defaultFrameData);
-		ResetMeshletCounters(slotIndex);
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		globalFrameCullingSSBOs[i] = CreateBuffer(frameDataBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+		globalMeshletCountersSSBOs[i] = CreateBuffer(countersBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+		FrameCullingDataGPU defaultFrameData{};
+		for (uint32_t slotIndex = 0; slotIndex < kStatsSlotCount; ++slotIndex) {
+			// Initialize all slots for this frame's buffer
+			void* mapped = nullptr;
+			if (vmaMapMemory(allocator, globalFrameCullingSSBOs[i].allocation, &mapped) == VK_SUCCESS) {
+				const VkDeviceSize offset = static_cast<VkDeviceSize>(slotIndex) * sizeof(FrameCullingDataGPU);
+				std::memcpy(static_cast<std::uint8_t*>(mapped) + offset, &defaultFrameData, sizeof(FrameCullingDataGPU));
+				vmaFlushAllocation(allocator, globalFrameCullingSSBOs[i].allocation, offset, sizeof(FrameCullingDataGPU));
+				vmaUnmapMemory(allocator, globalFrameCullingSSBOs[i].allocation);
+			}
+		}
+
+		VkDescriptorBufferInfo frameCullingInfo{};
+		frameCullingInfo.buffer = globalFrameCullingSSBOs[i].buffer;
+		frameCullingInfo.offset = 0;
+		frameCullingInfo.range = frameDataBufferSize;
+
+		VkDescriptorBufferInfo meshletCountersInfo{};
+		meshletCountersInfo.buffer = globalMeshletCountersSSBOs[i].buffer;
+		meshletCountersInfo.offset = 0;
+		meshletCountersInfo.range = countersBufferSize;
+
+		VkWriteDescriptorSet writes[2]{};
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = globalDescriptorSets[i];
+		writes[0].dstBinding = 2;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[0].descriptorCount = 1;
+		writes[0].pBufferInfo = &frameCullingInfo;
+
+		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet = globalDescriptorSets[i];
+		writes[1].dstBinding = 3;
+		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[1].descriptorCount = 1;
+		writes[1].pBufferInfo = &meshletCountersInfo;
+
+		vkUpdateDescriptorSets(device, static_cast<uint32_t>(std::size(writes)), writes, 0, nullptr);
 	}
-
-	VkDescriptorBufferInfo frameCullingInfo{};
-	frameCullingInfo.buffer = globalFrameCullingSSBO.buffer;
-	frameCullingInfo.offset = 0;
-	frameCullingInfo.range = frameDataBufferSize;
-
-	VkDescriptorBufferInfo meshletCountersInfo{};
-	meshletCountersInfo.buffer = globalMeshletCountersSSBO.buffer;
-	meshletCountersInfo.offset = 0;
-	meshletCountersInfo.range = countersBufferSize;
-
-	VkWriteDescriptorSet writes[2]{};
-	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[0].dstSet = globalDescriptorSet;
-	writes[0].dstBinding = 2;
-	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writes[0].descriptorCount = 1;
-	writes[0].pBufferInfo = &frameCullingInfo;
-
-	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[1].dstSet = globalDescriptorSet;
-	writes[1].dstBinding = 3;
-	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writes[1].descriptorCount = 1;
-	writes[1].pBufferInfo = &meshletCountersInfo;
-
-	vkUpdateDescriptorSets(device, static_cast<uint32_t>(std::size(writes)), writes, 0, nullptr);
 
 	for (uint32_t viewIndex = 0; viewIndex < kStatsViewCount; ++viewIndex) {
 		latestStatsByView[viewIndex] = {};
@@ -1653,80 +1672,90 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 	const VkDeviceSize lightIndexBufferSize = static_cast<VkDeviceSize>(sizeof(uint32_t) * MAX_LIGHT_INDEX_ENTRIES);
 	const VkDeviceSize clusterDepthBufferSize = static_cast<VkDeviceSize>(sizeof(float) * 2 * kLightingClusterDimX * kLightingClusterDimY);
 
-	globalLightSSBO = CreateBuffer(lightBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-	clusterGridSSBO = CreateBuffer(clusterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-	lightIndexSSBO = CreateBuffer(lightIndexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-	clusterDepthSSBO = CreateBuffer(clusterDepthBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	globalLightSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
+	clusterGridSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
+	lightIndexSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
+	clusterDepthSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
 
-	VkDescriptorBufferInfo lightInfo{};
-	lightInfo.buffer = globalLightSSBO.buffer;
-	lightInfo.offset = 0;
-	lightInfo.range = lightBufferSize;
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		globalLightSSBOs[i] = CreateBuffer(lightBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+		clusterGridSSBOs[i] = CreateBuffer(clusterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+		lightIndexSSBOs[i] = CreateBuffer(lightIndexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+		clusterDepthSSBOs[i] = CreateBuffer(clusterDepthBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
-	VkDescriptorBufferInfo clusterInfo{};
-	clusterInfo.buffer = clusterGridSSBO.buffer;
-	clusterInfo.offset = 0;
-	clusterInfo.range = clusterBufferSize;
+		VkDescriptorBufferInfo lightInfo{};
+		lightInfo.buffer = globalLightSSBOs[i].buffer;
+		lightInfo.offset = 0;
+		lightInfo.range = lightBufferSize;
 
-	VkDescriptorBufferInfo lightIndexInfo{};
-	lightIndexInfo.buffer = lightIndexSSBO.buffer;
-	lightIndexInfo.offset = 0;
-	lightIndexInfo.range = lightIndexBufferSize;
+		VkDescriptorBufferInfo clusterInfo{};
+		clusterInfo.buffer = clusterGridSSBOs[i].buffer;
+		clusterInfo.offset = 0;
+		clusterInfo.range = clusterBufferSize;
 
-	VkDescriptorImageInfo depthInfo{};
-	depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	depthInfo.imageView = depthImageView;
-	depthInfo.sampler = hiZ.sampler; // Reuse Hi-Z sampler for depth buffer if needed, or default
+		VkDescriptorBufferInfo lightIndexInfo{};
+		lightIndexInfo.buffer = lightIndexSSBOs[i].buffer;
+		lightIndexInfo.offset = 0;
+		lightIndexInfo.range = lightIndexBufferSize;
 
-	VkDescriptorBufferInfo clusterDepthInfo{};
-	clusterDepthInfo.buffer = clusterDepthSSBO.buffer;
-	clusterDepthInfo.offset = 0;
-	clusterDepthInfo.range = clusterDepthBufferSize;
+		VkDescriptorImageInfo depthInfo{};
+		depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		depthInfo.imageView = depthImageView;
+		depthInfo.sampler = hiZ.sampler; 
 
-	std::array<VkWriteDescriptorSet, 5> writes{};
-	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[0].dstSet = globalDescriptorSet;
-	writes[0].dstBinding = 4;
-	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writes[0].descriptorCount = 1;
-	writes[0].pBufferInfo = &lightInfo;
+		VkDescriptorBufferInfo clusterDepthInfo{};
+		clusterDepthInfo.buffer = clusterDepthSSBOs[i].buffer;
+		clusterDepthInfo.offset = 0;
+		clusterDepthInfo.range = clusterDepthBufferSize;
 
-	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[1].dstSet = globalDescriptorSet;
-	writes[1].dstBinding = 5;
-	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writes[1].descriptorCount = 1;
-	writes[1].pBufferInfo = &clusterInfo;
+		std::array<VkWriteDescriptorSet, 5> writes{};
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = globalDescriptorSets[i];
+		writes[0].dstBinding = 4;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[0].descriptorCount = 1;
+		writes[0].pBufferInfo = &lightInfo;
 
-	writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[2].dstSet = globalDescriptorSet;
-	writes[2].dstBinding = 6;
-	writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writes[2].descriptorCount = 1;
-	writes[2].pBufferInfo = &lightIndexInfo;
+		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet = globalDescriptorSets[i];
+		writes[1].dstBinding = 5;
+		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[1].descriptorCount = 1;
+		writes[1].pBufferInfo = &clusterInfo;
 
-	writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[3].dstSet = globalDescriptorSet;
-	writes[3].dstBinding = 12;
-	writes[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	writes[3].descriptorCount = 1;
-	writes[3].pImageInfo = &depthInfo;
+		writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[2].dstSet = globalDescriptorSets[i];
+		writes[2].dstBinding = 6;
+		writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[2].descriptorCount = 1;
+		writes[2].pBufferInfo = &lightIndexInfo;
 
-	writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	writes[4].dstSet = globalDescriptorSet;
-	writes[4].dstBinding = 13;
-	writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	writes[4].descriptorCount = 1;
-	writes[4].pBufferInfo = &clusterDepthInfo;
+		writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[3].dstSet = globalDescriptorSets[i];
+		writes[3].dstBinding = 12;
+		writes[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		writes[3].descriptorCount = 1;
+		writes[3].pImageInfo = &depthInfo;
 
-	vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+		writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[4].dstSet = globalDescriptorSets[i];
+		writes[4].dstBinding = 13;
+		writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[4].descriptorCount = 1;
+		writes[4].pBufferInfo = &clusterDepthInfo;
+
+		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+	}
 
 	UploadLightingData({});
 }
 
 void VulkanContext::Impl::CreateIndirectDrawResources() {
 	VkDeviceSize indirectBufferSize = MAX_BINDLESS_DRAWS * sizeof(VkDrawMeshTasksIndirectCommandEXT);
-	indirectDrawBuffer = CreateBuffer(indirectBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	indirectDrawBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		indirectDrawBuffers[i] = CreateBuffer(indirectBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	}
 }
 
 bool VulkanContext::Impl::EnsureShadowRenderResources() {
@@ -1977,15 +2006,17 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 		imageInfo.imageView = image.view;
 		imageInfo.sampler = image.sampler;
 
-		VkWriteDescriptorSet descriptorWrite{};
-		descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrite.dstSet = globalDescriptorSet;
-		descriptorWrite.dstBinding = 0;
-		descriptorWrite.dstArrayElement = index;
-		descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		descriptorWrite.descriptorCount = 1;
-		descriptorWrite.pImageInfo = &imageInfo;
-		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+			VkWriteDescriptorSet descriptorWrite{};
+			descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrite.dstSet = globalDescriptorSets[i];
+			descriptorWrite.dstBinding = 0;
+			descriptorWrite.dstArrayElement = index;
+			descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.pImageInfo = &imageInfo;
+			vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+		}
 	};
 
 	// Register 2D shadow maps into the bindless texture heap so each light type
@@ -2009,24 +2040,26 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 	pointShadowCubeSamplerInfo.imageView = VK_NULL_HANDLE;
 	pointShadowCubeSamplerInfo.sampler = pointShadowCubeDepth.sampler;
 
-	std::array<VkWriteDescriptorSet, 2> pointShadowCubeWrites{};
-	pointShadowCubeWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	pointShadowCubeWrites[0].dstSet = globalDescriptorSet;
-	pointShadowCubeWrites[0].dstBinding = 7;
-	pointShadowCubeWrites[0].dstArrayElement = 0;
-	pointShadowCubeWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	pointShadowCubeWrites[0].descriptorCount = 1;
-	pointShadowCubeWrites[0].pImageInfo = &pointShadowCubeImageInfo;
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		std::array<VkWriteDescriptorSet, 2> pointShadowCubeWrites{};
+		pointShadowCubeWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		pointShadowCubeWrites[0].dstSet = globalDescriptorSets[i];
+		pointShadowCubeWrites[0].dstBinding = 7;
+		pointShadowCubeWrites[0].dstArrayElement = 0;
+		pointShadowCubeWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		pointShadowCubeWrites[0].descriptorCount = 1;
+		pointShadowCubeWrites[0].pImageInfo = &pointShadowCubeImageInfo;
 
-	pointShadowCubeWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	pointShadowCubeWrites[1].dstSet = globalDescriptorSet;
-	pointShadowCubeWrites[1].dstBinding = 8;
-	pointShadowCubeWrites[1].dstArrayElement = 0;
-	pointShadowCubeWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-	pointShadowCubeWrites[1].descriptorCount = 1;
-	pointShadowCubeWrites[1].pImageInfo = &pointShadowCubeSamplerInfo;
+		pointShadowCubeWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		pointShadowCubeWrites[1].dstSet = globalDescriptorSets[i];
+		pointShadowCubeWrites[1].dstBinding = 8;
+		pointShadowCubeWrites[1].dstArrayElement = 0;
+		pointShadowCubeWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+		pointShadowCubeWrites[1].descriptorCount = 1;
+		pointShadowCubeWrites[1].pImageInfo = &pointShadowCubeSamplerInfo;
 
-	vkUpdateDescriptorSets(device, static_cast<uint32_t>(pointShadowCubeWrites.size()), pointShadowCubeWrites.data(), 0, nullptr);
+		vkUpdateDescriptorSets(device, static_cast<uint32_t>(pointShadowCubeWrites.size()), pointShadowCubeWrites.data(), 0, nullptr);
+	}
 
 	// Build lightweight procedural LTC lookup textures. These are deterministic
 	// fallback tables until authored LUT assets are imported through content.
@@ -2121,69 +2154,69 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 }
 
 void VulkanContext::Impl::UploadLightingData(const std::vector<GPULight>& lights) {
-	if (globalLightSSBO.buffer == VK_NULL_HANDLE || clusterGridSSBO.buffer == VK_NULL_HANDLE || lightIndexSSBO.buffer == VK_NULL_HANDLE) {
+	if (globalLightSSBOs.empty() || globalLightSSBOs[currentFrame].buffer == VK_NULL_HANDLE) {
 		return;
 	}
 
 	const uint32_t clampedLightCount = static_cast<uint32_t>(std::min<size_t>(lights.size(), MAX_GLOBAL_LIGHTS));
 
 	void* mappedLights = nullptr;
-	if (vmaMapMemory(allocator, globalLightSSBO.allocation, &mappedLights) == VK_SUCCESS) {
+	if (vmaMapMemory(allocator, globalLightSSBOs[currentFrame].allocation, &mappedLights) == VK_SUCCESS) {
 		auto* gpuLights = static_cast<GPULight*>(mappedLights);
 		std::fill(gpuLights, gpuLights + MAX_GLOBAL_LIGHTS, GPULight{});
 		if (clampedLightCount > 0u) {
 			std::memcpy(gpuLights, lights.data(), sizeof(GPULight) * clampedLightCount);
 		}
-		vmaFlushAllocation(allocator, globalLightSSBO.allocation, 0, VK_WHOLE_SIZE);
-		vmaUnmapMemory(allocator, globalLightSSBO.allocation);
+		vmaFlushAllocation(allocator, globalLightSSBOs[currentFrame].allocation, 0, VK_WHOLE_SIZE);
+		vmaUnmapMemory(allocator, globalLightSSBOs[currentFrame].allocation);
 	}
 }
 
 void VulkanContext::Impl::ResetMeshletCounters(uint32_t statsSlotIndex) {
-	if (globalMeshletCountersSSBO.buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
+	if (globalMeshletCountersSSBOs.empty() || globalMeshletCountersSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
 		return;
 	}
 
 	MeshletCullingCountersGPU counters{};
 	void* mapped = nullptr;
-	if (vmaMapMemory(allocator, globalMeshletCountersSSBO.allocation, &mapped) != VK_SUCCESS) {
+	if (vmaMapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation, &mapped) != VK_SUCCESS) {
 		return;
 	}
 	const VkDeviceSize offset = static_cast<VkDeviceSize>(statsSlotIndex) * sizeof(MeshletCullingCountersGPU);
 	std::memcpy(static_cast<std::uint8_t*>(mapped) + offset, &counters, sizeof(MeshletCullingCountersGPU));
-	vmaFlushAllocation(allocator, globalMeshletCountersSSBO.allocation, offset, sizeof(MeshletCullingCountersGPU));
-	vmaUnmapMemory(allocator, globalMeshletCountersSSBO.allocation);
+	vmaFlushAllocation(allocator, globalMeshletCountersSSBOs[currentFrame].allocation, offset, sizeof(MeshletCullingCountersGPU));
+	vmaUnmapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation);
 }
 
 void VulkanContext::Impl::UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData) {
-	if (globalFrameCullingSSBO.buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
+	if (globalFrameCullingSSBOs.empty() || globalFrameCullingSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
 		return;
 	}
 
 	void* mapped = nullptr;
-	if (vmaMapMemory(allocator, globalFrameCullingSSBO.allocation, &mapped) != VK_SUCCESS) {
+	if (vmaMapMemory(allocator, globalFrameCullingSSBOs[currentFrame].allocation, &mapped) != VK_SUCCESS) {
 		return;
 	}
 	const VkDeviceSize offset = static_cast<VkDeviceSize>(statsSlotIndex) * sizeof(FrameCullingDataGPU);
 	std::memcpy(static_cast<std::uint8_t*>(mapped) + offset, &frameData, sizeof(FrameCullingDataGPU));
-	vmaFlushAllocation(allocator, globalFrameCullingSSBO.allocation, offset, sizeof(FrameCullingDataGPU));
-	vmaUnmapMemory(allocator, globalFrameCullingSSBO.allocation);
+	vmaFlushAllocation(allocator, globalFrameCullingSSBOs[currentFrame].allocation, offset, sizeof(FrameCullingDataGPU));
+	vmaUnmapMemory(allocator, globalFrameCullingSSBOs[currentFrame].allocation);
 }
 
 MeshletCullingCountersGPU VulkanContext::Impl::ReadMeshletCounters(uint32_t statsSlotIndex) const {
 	MeshletCullingCountersGPU counters{};
-	if (globalMeshletCountersSSBO.buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
+	if (globalMeshletCountersSSBOs.empty() || globalMeshletCountersSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
 		return counters;
 	}
 
 	void* mapped = nullptr;
-	if (vmaMapMemory(allocator, globalMeshletCountersSSBO.allocation, &mapped) != VK_SUCCESS) {
+	if (vmaMapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation, &mapped) != VK_SUCCESS) {
 		return counters;
 	}
 	const VkDeviceSize offset = static_cast<VkDeviceSize>(statsSlotIndex) * sizeof(MeshletCullingCountersGPU);
-	vmaInvalidateAllocation(allocator, globalMeshletCountersSSBO.allocation, offset, sizeof(MeshletCullingCountersGPU));
+	vmaInvalidateAllocation(allocator, globalMeshletCountersSSBOs[currentFrame].allocation, offset, sizeof(MeshletCullingCountersGPU));
 	std::memcpy(&counters, static_cast<const std::uint8_t*>(mapped) + offset, sizeof(MeshletCullingCountersGPU));
-	vmaUnmapMemory(allocator, globalMeshletCountersSSBO.allocation);
+	vmaUnmapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation);
 	return counters;
 }
 
@@ -2275,16 +2308,18 @@ void VulkanContext::Impl::UpdateGlobalTexture(uint32_t index, const VulkanImage&
 	imageInfo.imageView = image.view;
 	imageInfo.sampler = image.sampler;
 
-	VkWriteDescriptorSet descriptorWrite{};
-	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrite.dstSet = globalDescriptorSet;
-	descriptorWrite.dstBinding = 0;
-	descriptorWrite.dstArrayElement = index;
-	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	descriptorWrite.descriptorCount = 1;
-	descriptorWrite.pImageInfo = &imageInfo;
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		VkWriteDescriptorSet descriptorWrite{};
+		descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrite.dstSet = globalDescriptorSets[i];
+		descriptorWrite.dstBinding = 0;
+		descriptorWrite.dstArrayElement = index;
+		descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		descriptorWrite.descriptorCount = 1;
+		descriptorWrite.pImageInfo = &imageInfo;
 
-	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+	}
 }
 
 uint32_t VulkanContext::Impl::AllocateBufferIndex() {
@@ -2305,16 +2340,18 @@ void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 	bufferInfo.offset = offset;
 	bufferInfo.range = range;
 
-	VkWriteDescriptorSet descriptorWrite{};
-	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrite.dstSet = globalDescriptorSet;
-	descriptorWrite.dstBinding = 9;
-	descriptorWrite.dstArrayElement = index;
-	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	descriptorWrite.descriptorCount = 1;
-	descriptorWrite.pBufferInfo = &bufferInfo;
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		VkWriteDescriptorSet descriptorWrite{};
+		descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrite.dstSet = globalDescriptorSets[i];
+		descriptorWrite.dstBinding = 9;
+		descriptorWrite.dstArrayElement = index;
+		descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		descriptorWrite.descriptorCount = 1;
+		descriptorWrite.pBufferInfo = &bufferInfo;
 
-	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+	}
 }
 
 void VulkanContext::Impl::UpdateGlobalHiZ(const VulkanHiZ& hiZ) {
@@ -2328,20 +2365,22 @@ void VulkanContext::Impl::UpdateGlobalHiZ(const VulkanHiZ& hiZ) {
     VkDescriptorImageInfo samplerInfo{};
     samplerInfo.sampler = hiZ.sampler;
 
-    VkWriteDescriptorSet writes[2]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = globalDescriptorSet;
-    writes[0].dstBinding = 10;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    writes[0].descriptorCount = 1;
-    writes[0].pImageInfo = &imageInfo;
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		VkWriteDescriptorSet writes[2]{};
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = globalDescriptorSets[i];
+		writes[0].dstBinding = 10;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		writes[0].descriptorCount = 1;
+		writes[0].pImageInfo = &imageInfo;
 
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = globalDescriptorSet;
-    writes[1].dstBinding = 11;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    writes[1].descriptorCount = 1;
-    writes[1].pImageInfo = &samplerInfo;
+		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet = globalDescriptorSets[i];
+		writes[1].dstBinding = 11;
+		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+		writes[1].descriptorCount = 1;
+		writes[1].pImageInfo = &samplerInfo;
 
-    vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+		vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+	}
 }

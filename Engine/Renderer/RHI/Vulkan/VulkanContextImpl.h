@@ -182,7 +182,7 @@ struct VulkanContext::Impl {
 
 	uint32_t currentFrame = 0;
 	bool framebufferResized = false;
-	int MAX_FRAMES_IN_FLIGHT = 2;
+	static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
 	bool initialized = false;
 	bool editorMode = false;
 
@@ -207,16 +207,16 @@ struct VulkanContext::Impl {
 	static constexpr uint32_t LTC_LUT_RESOLUTION = 64u;
 	VkDescriptorSetLayout globalDescriptorSetLayout = VK_NULL_HANDLE;
 	VkDescriptorPool globalDescriptorPool = VK_NULL_HANDLE;
-	VkDescriptorSet globalDescriptorSet = VK_NULL_HANDLE;
+	std::vector<VkDescriptorSet> globalDescriptorSets;
 	
-	VulkanBuffer globalMaterialSSBO;
-	VulkanBuffer globalFrameCullingSSBO;
-	VulkanBuffer globalMeshletCountersSSBO;
-	VulkanBuffer globalLightSSBO;
-		VulkanBuffer clusterGridSSBO;
-		VulkanBuffer lightIndexSSBO;
-		VulkanBuffer clusterDepthSSBO;
-				VulkanBuffer indirectDrawBuffer;
+	std::vector<VulkanBuffer> globalMaterialSSBOs;
+	std::vector<VulkanBuffer> globalFrameCullingSSBOs;
+	std::vector<VulkanBuffer> globalMeshletCountersSSBOs;
+	std::vector<VulkanBuffer> globalLightSSBOs;
+		std::vector<VulkanBuffer> clusterGridSSBOs;
+		std::vector<VulkanBuffer> lightIndexSSBOs;
+		std::vector<VulkanBuffer> clusterDepthSSBOs;
+				std::vector<VulkanBuffer> indirectDrawBuffers;
 				VulkanHiZ hiZ;
 				VulkanVRS vrs;
 				
