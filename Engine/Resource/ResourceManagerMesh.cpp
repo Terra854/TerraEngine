@@ -157,13 +157,13 @@ namespace
 			return nullptr;
 		}
 
-		if (header.layout.attributeCount != 3u)
+		if (header.layout.attributeCount != 4u)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TEMF packed vertex layout must expose exactly 3 attributes in " << resolvedPath);
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF packed vertex layout must expose exactly 4 attributes in " << resolvedPath);
 			return nullptr;
 		}
 
-		const VertexAttribute expectedLayout[3] = {
+		const VertexAttribute expectedLayout[4] = {
 			{
 				static_cast<std::uint32_t>(AttributeSemantic::Position),
 				static_cast<std::uint32_t>(AttributeFormat::R10G10B10A2Snorm),
@@ -173,11 +173,15 @@ namespace
 				static_cast<std::uint32_t>(AttributeFormat::Oct32),
 				4u},
 			{
+				static_cast<std::uint32_t>(AttributeSemantic::Tangent),
+				static_cast<std::uint32_t>(AttributeFormat::Oct32),
+				8u},
+			{
 				static_cast<std::uint32_t>(AttributeSemantic::TexCoord0),
 				static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
-				8u}};
+				12u}};
 
-		for (std::size_t layoutIndex = 0; layoutIndex < 3u; ++layoutIndex)
+		for (std::size_t layoutIndex = 0; layoutIndex < 4u; ++layoutIndex)
 		{
 			const VertexAttribute& current = header.layout.attributes[layoutIndex];
 			const VertexAttribute& expected = expectedLayout[layoutIndex];

@@ -90,6 +90,7 @@ struct PSIn
 	float2 uv : TEXCOORD0;
 	float3 worldPosition : TEXCOORD1;
 	float3 normal : NORMAL;
+	float4 tangent : TANGENT;
 };
 
 static const uint kLightTypeDirectional = 0u;
@@ -107,16 +108,11 @@ static const float kSpotShadowBias = 0.0020f;
 static const float kPointShadowBias = 0.0050f;
 static const float kAreaShadowBias = 0.0020f;
 
-float3 BuildLightingNormal(float3 vertexNormal, float3 worldPosition, float2 uv, float3 sampledNormal, float normalScale)
+float3 BuildLightingNormal(float3 vertexNormal, float3 worldPosition, float2 uv, float3 sampledNormal, float normalScale, float4 bakedTangent)
 {
-	const float3 q1 = ddx(worldPosition);
-	const float3 q2 = ddy(worldPosition);
-	const float2 st1 = ddx(uv);
-	const float2 st2 = ddy(uv);
-
 	const float3 n = normalize(vertexNormal);
-	const float3 t = normalize(q1 * st2.y - q2 * st1.y);
-	const float3 b = -normalize(cross(n, t));
+	const float3 t = normalize(bakedTangent.xyz);
+	const float3 b = normalize(cross(n, t) * bakedTangent.w);
 	const float3x3 tbn = float3x3(t, b, n);
 
 	const float3 unpackedNormal = sampledNormal * 2.0f - 1.0f;
@@ -436,7 +432,7 @@ float4 main(PSIn input) : SV_Target0
 	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
 	const FrameCullingData frame = frameCullingData[statsIndex];
 	const uint lightCount = frame.clusterGridAndLightCount.w;
-	const float3 normal = BuildLightingNormal(input.normal, input.worldPosition, uv, sampledNormal, mat.NormalScale);
+	const float3 normal = BuildLightingNormal(input.normal, input.worldPosition, uv, sampledNormal, mat.NormalScale, input.tangent);
 	const float3 viewDir = normalize(frame.cameraPositionAndEpsilon.xyz - input.worldPosition);
 	const uint clusterIndex = ComputeClusterIndex(input, frame);
 	const ClusterData cluster = clusterGrid[clusterIndex];

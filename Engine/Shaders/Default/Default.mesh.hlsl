@@ -53,6 +53,7 @@ struct PSIn
 	float2 uv : TEXCOORD0;
 	float3 worldPosition : TEXCOORD1;
 	float3 normal : NORMAL;
+	float4 tangent : TANGENT;
 };
 
 static const uint kMaxMeshletVertices = 64;
@@ -79,14 +80,20 @@ float DecodeUnorm16(uint packedValue, uint bitOffset)
 float3 DecodeOct32Normal(uint packedValue)
 {
 	float2 f = float2(
-		float(int(packedValue & 0xFFFF)) / 32767.0,
-		float(int(packedValue >> 16)) / 32767.0
+		float((int(packedValue) << 16) >> 16) / 32767.0,
+		float(int(packedValue) >> 16) / 32767.0
 	);
 
 	float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
 	float t = saturate(-n.z);
-	n.xy += select(n.xy >= 0.0, -t, t);
+	n.x += (n.x >= 0.0) ? -t : t;
+	n.y += (n.y >= 0.0) ? -t : t;
 	return normalize(n);
+}
+
+float4 DecodeOct32Tangent(uint packedValue)
+{
+	return float4(DecodeOct32Normal(packedValue), 1.0);
 }
 
 uint LoadPrimitiveIndex(uint primitiveElementIndex)
@@ -143,17 +150,24 @@ void EmitMeshlet(
 			globalVertexIndex = 0u;
 		}
 
-		const uint packedVertexByteOffset = globalVertexIndex * 12u;
+		const uint packedVertexByteOffset = globalVertexIndex * 16u;
 		const uint packedPosition = meshletVertexBytes.Load(packedVertexByteOffset + 0u);
-		const uint packedNormal = meshletVertexBytes.Load(packedVertexByteOffset + 4u);
-		const uint packedUv = meshletVertexBytes.Load(packedVertexByteOffset + 8u);
+		const uint packedNormal   = meshletVertexBytes.Load(packedVertexByteOffset + 4u);
+		const uint packedTangent  = meshletVertexBytes.Load(packedVertexByteOffset + 8u);
+		const uint packedUv       = meshletVertexBytes.Load(packedVertexByteOffset + 12u);
 
 		const float3 qPosition = float3(
 			DecodeSnorm10(packedPosition, 0u),
 			DecodeSnorm10(packedPosition, 10u),
 			DecodeSnorm10(packedPosition, 20u));
 		const float3 position = decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
+		
+		// Decode bitangent sign from the 2-bit alpha component
+		const float tangentW = float((int(packedPosition >> 30) << 30) >> 30);
+		
 		const float3 normal = DecodeOct32Normal(packedNormal);
+		const float3 tangent = DecodeOct32Normal(packedTangent);
+		
 		const float2 qUv = float2(
 			DecodeUnorm16(packedUv, 0u),
 			DecodeUnorm16(packedUv, 16u));
@@ -165,7 +179,8 @@ void EmitMeshlet(
 		outVertex.position = mul(SceneUniforms.viewProj, worldPosition);
 		outVertex.uv = uv;
 		outVertex.worldPosition = worldPosition.xyz;
-		outVertex.normal = mul((float3x3)SceneUniforms.model, normal);
+		outVertex.normal = normalize(mul((float3x3)SceneUniforms.model, normal));
+		outVertex.tangent = float4(normalize(mul((float3x3)SceneUniforms.model, tangent)), tangentW);
 		outputVertices[vertexIndex] = outVertex;
 	}
 

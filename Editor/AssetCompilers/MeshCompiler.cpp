@@ -18,11 +18,14 @@
 
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "External/meshoptimizer/src/meshoptimizer.h"
+#include "External/mikktspace/mikktspace.h"
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "External/tinyobjloader/tiny_obj_loader.h"
 
 namespace
 {
+	constexpr float kPi = 3.14159265358979323846f;
+
 	std::uint32_t AlignUp(std::uint32_t value, std::uint32_t alignment)
 	{
 		const std::uint32_t mask = alignment - 1u;
@@ -78,8 +81,265 @@ namespace
 	{
 		std::array<float, 3> position;
 		std::array<float, 3> normal;
+		std::array<float, 3> tangent; // Final smoothed normal + tangents for sync
 		std::array<float, 2> uv;
+		float tangentW = 1.0f; // Sign for bitangent calculation
 	};
+
+	struct FaceInfo
+	{
+		std::array<uint32_t, 3> indices;
+		std::array<float, 3> faceNormal;
+		float area;
+	};
+
+	void CalculateFaceNormals(
+		const std::vector<VertexRaw>& vertices,
+		const std::vector<std::uint32_t>& indices,
+		std::vector<FaceInfo>& outFaces)
+	{
+		outFaces.clear();
+		outFaces.reserve(indices.size() / 3);
+
+		for (size_t i = 0; i < indices.size(); i += 3)
+		{
+			FaceInfo face;
+			face.indices = {indices[i + 0], indices[i + 1], indices[i + 2]};
+
+			const auto& v0 = vertices[face.indices[0]].position;
+			const auto& v1 = vertices[face.indices[1]].position;
+			const auto& v2 = vertices[face.indices[2]].position;
+
+			float e1[3] = {v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]};
+			float e2[3] = {v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]};
+
+			// Cross product for face normal (length is 2 * area)
+			float nx = e1[1] * e2[2] - e1[2] * e2[1];
+			float ny = e1[2] * e2[0] - e1[0] * e2[2];
+			float nz = e1[0] * e2[1] - e1[1] * e2[0];
+
+			float length = std::sqrt(nx * nx + ny * ny + nz * nz);
+			if (length > 1e-9f)
+			{
+				face.faceNormal = {nx / length, ny / length, nz / length};
+				face.area = length * 0.5f;
+			}
+			else
+			{
+				face.faceNormal = {0.0f, 0.0f, 0.0f};
+				face.area = 0.0f;
+			}
+
+			outFaces.push_back(face);
+		}
+	}
+
+	void SmoothNormals(std::vector<VertexRaw>& unindexedVertices, const std::vector<std::uint32_t>& unindexedIndices, float smoothingAngleDeg, float weldThreshold)
+	{
+		const float cosThreshold = std::cos(smoothingAngleDeg * (kPi / 180.0f));
+
+		std::vector<FaceInfo> faces;
+		CalculateFaceNormals(unindexedVertices, unindexedIndices, faces);
+
+		// Quantize positions
+		const float scale = (weldThreshold > 0.0f) ? (1.0f / weldThreshold) : 1000000.0f;
+
+		struct CornerInfo {
+			int32_t x, y, z;
+			uint32_t vertexIdx;
+			uint32_t faceIdx;
+
+			bool operator<(const CornerInfo& other) const {
+				if (x != other.x) return x < other.x;
+				if (y != other.y) return y < other.y;
+				return z < other.z;
+			}
+			bool operator==(const CornerInfo& other) const {
+				return x == other.x && y == other.y && z == other.z;
+			}
+		};
+
+		std::vector<CornerInfo> corners(unindexedVertices.size());
+		for (uint32_t i = 0; i < unindexedVertices.size(); ++i) {
+			const auto& pos = unindexedVertices[i].position;
+			corners[i] = {
+				static_cast<int32_t>(std::round(pos[0] * scale)),
+				static_cast<int32_t>(std::round(pos[1] * scale)),
+				static_cast<int32_t>(std::round(pos[2] * scale)),
+				i,
+				i / 3 // face index
+			};
+		}
+
+		std::sort(corners.begin(), corners.end());
+
+		// Process each run of identical positions
+		for (size_t i = 0; i < corners.size(); )
+		{
+			size_t runEnd = i + 1;
+			while (runEnd < corners.size() && corners[runEnd] == corners[i]) {
+				runEnd++;
+			}
+
+			// All corners in [i, runEnd) share the same physical position
+			size_t runLength = runEnd - i;
+			if (runLength == 1) {
+				unindexedVertices[corners[i].vertexIdx].normal = faces[corners[i].faceIdx].faceNormal;
+				i = runEnd;
+				continue;
+			}
+
+			// Group faces by connectivity and angle
+			std::vector<uint32_t> assignedGroup(runLength, 0xFFFFFFFF);
+			uint32_t groupCount = 0;
+
+			for (size_t j = 0; j < runLength; ++j)
+			{
+				if (assignedGroup[j] != 0xFFFFFFFF) continue;
+
+				uint32_t currentGroup = groupCount++;
+				assignedGroup[j] = currentGroup;
+
+				std::vector<size_t> stack = { j };
+				while (!stack.empty())
+				{
+					size_t aIdx = stack.back();
+					stack.pop_back();
+
+					const auto& normalA = faces[corners[i + aIdx].faceIdx].faceNormal;
+
+					for (size_t k = 0; k < runLength; ++k)
+					{
+						if (assignedGroup[k] != 0xFFFFFFFF) continue;
+
+						const auto& normalB = faces[corners[i + k].faceIdx].faceNormal;
+						float dot = normalA[0] * normalB[0] + normalA[1] * normalB[1] + normalA[2] * normalB[2];
+
+						if (dot >= cosThreshold)
+						{
+							assignedGroup[k] = currentGroup;
+							stack.push_back(k);
+						}
+					}
+				}
+			}
+
+			// Calculate average normal for each group and assign
+			for (uint32_t g = 0; g < groupCount; ++g)
+			{
+				float nx = 0, ny = 0, nz = 0;
+				uint32_t firstFaceIdx = 0xFFFFFFFF;
+
+				for (size_t j = 0; j < runLength; ++j)
+				{
+					if (assignedGroup[j] == g)
+					{
+						uint32_t fIdx = corners[i + j].faceIdx;
+						if (firstFaceIdx == 0xFFFFFFFF) firstFaceIdx = fIdx;
+
+						float area = faces[fIdx].area;
+						nx += faces[fIdx].faceNormal[0] * area;
+						ny += faces[fIdx].faceNormal[1] * area;
+						nz += faces[fIdx].faceNormal[2] * area;
+					}
+				}
+
+				float mag = std::sqrt(nx * nx + ny * ny + nz * nz);
+				std::array<float, 3> finalNormal;
+				if (mag > 1e-9f) {
+					finalNormal = {nx / mag, ny / mag, nz / mag};
+				} else {
+					finalNormal = faces[firstFaceIdx].faceNormal;
+				}
+
+				// Assign to all vertices in this group
+				for (size_t j = 0; j < runLength; ++j)
+				{
+					if (assignedGroup[j] == g)
+					{
+						unindexedVertices[corners[i + j].vertexIdx].normal = finalNormal;
+					}
+				}
+			}
+
+			i = runEnd;
+		}
+	}
+	// MikkTSpace interface implementation
+	struct MikkContext
+	{
+		std::vector<VertexRaw>* vertices;
+		std::vector<std::uint32_t>* indices;
+		std::vector<VertexRaw> outVertices;
+		std::vector<uint32_t> outIndices;
+	};
+
+	int MikkGetNumFaces(const SMikkTSpaceContext* pContext)
+	{
+		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
+		return static_cast<int>(ctx->indices->size() / 3);
+	}
+
+	int MikkGetNumVerticesOfFace(const SMikkTSpaceContext* pContext, const int iFace)
+	{
+		return 3;
+	}
+
+	void MikkGetPosition(const SMikkTSpaceContext* pContext, float fvPosOut[], const int iFace, const int iVert)
+	{
+		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
+		uint32_t index = (*ctx->indices)[iFace * 3 + iVert];
+		const auto& pos = (*ctx->vertices)[index].position;
+		fvPosOut[0] = pos[0]; fvPosOut[1] = pos[1]; fvPosOut[2] = pos[2];
+	}
+
+	void MikkGetNormal(const SMikkTSpaceContext* pContext, float fvNormOut[], const int iFace, const int iVert)
+	{
+		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
+		uint32_t index = (*ctx->indices)[iFace * 3 + iVert];
+		const auto& norm = (*ctx->vertices)[index].normal;
+		fvNormOut[0] = norm[0]; fvNormOut[1] = norm[1]; fvNormOut[2] = norm[2];
+	}
+
+	void MikkGetTexCoord(const SMikkTSpaceContext* pContext, float fvTexcOut[], const int iFace, const int iVert)
+	{
+		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
+		uint32_t index = (*ctx->indices)[iFace * 3 + iVert];
+		const auto& uv = (*ctx->vertices)[index].uv;
+		fvTexcOut[0] = uv[0]; fvTexcOut[1] = uv[1];
+	}
+
+	void MikkSetTSpaceBasic(const SMikkTSpaceContext* pContext, const float fvTangent[], const float fSign, const int iFace, const int iVert)
+	{
+		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
+		uint32_t index = (*ctx->indices)[iFace * 3 + iVert];
+		VertexRaw& v = (*ctx->vertices)[index];
+		v.tangent = {fvTangent[0], fvTangent[1], fvTangent[2]};
+		v.tangentW = fSign;
+	}
+
+	void GenerateTangents(std::vector<VertexRaw>& vertices, std::vector<std::uint32_t>& indices)
+	{
+		MikkContext mikkCtx;
+		mikkCtx.vertices = &vertices;
+		mikkCtx.indices = &indices;
+
+		SMikkTSpaceInterface mikkInterface{};
+		mikkInterface.m_getNumFaces = MikkGetNumFaces;
+		mikkInterface.m_getNumVerticesOfFace = MikkGetNumVerticesOfFace;
+		mikkInterface.m_getPosition = MikkGetPosition;
+		mikkInterface.m_getNormal = MikkGetNormal;
+		mikkInterface.m_getTexCoord = MikkGetTexCoord;
+		mikkInterface.m_setTSpaceBasic = MikkSetTSpaceBasic;
+
+		SMikkTSpaceContext context{};
+		context.m_pInterface = &mikkInterface;
+		context.m_pUserData = &mikkCtx;
+
+		// MikkTSpace expects per-face vertex data. It won't split vertices itself in this basic callback,
+		// but we already split them during the normal smoothing phase to preserve hard edges.
+		genTangSpaceDefault(&context);
+	}
 
 	struct MeshletBuildOutput
 	{
@@ -149,7 +409,7 @@ namespace
 			QuantizeFloat(uv[1], 4096.0f)};
 	}
 
-	std::uint32_t PackR10G10B10A2Snorm(const std::array<float, 3>& value)
+	std::uint32_t PackR10G10B10A2Snorm(const std::array<float, 3>& value, float w = 0.0f)
 	{
 		const auto clamp = [](float input) {
 			return std::max(-1.0f, std::min(1.0f, input));
@@ -164,8 +424,13 @@ namespace
 		const std::uint32_t x = to10(value[0]);
 		const std::uint32_t y = to10(value[1]);
 		const std::uint32_t z = to10(value[2]);
-		const std::uint32_t w = 0;
-		return (w << 30) | (z << 20) | (y << 10) | x;
+		
+		// Map -1..1 to 2-bit signed: -1 -> 0b10 (-2), 0 -> 0b00, 1 -> 0b01
+		// For bitangent sign: -1.0 -> 0b11 (-1), 1.0 -> 0b01 (1)
+		const int wInt = (w < 0.0f) ? 3 : 1;
+		const std::uint32_t wBits = static_cast<std::uint32_t>(wInt & 0x3);
+		
+		return (wBits << 30) | (z << 20) | (y << 10) | x;
 	}
 
 	std::uint32_t PackOct32Normal(const std::array<float, 3>& n)
@@ -185,8 +450,8 @@ namespace
 
 		const auto to16 = [](float val) {
 			const float clamped = std::max(-1.0f, std::min(1.0f, val));
-			const int packed = static_cast<int>(std::round(clamped * 32767.0f));
-			return static_cast<std::uint32_t>(static_cast<std::uint16_t>(packed));
+			const int16_t packed = static_cast<int16_t>(std::round(clamped * 32767.0f));
+			return static_cast<uint32_t>(static_cast<uint16_t>(packed));
 		};
 
 		return (to16(y) << 16) | to16(x);
@@ -314,14 +579,14 @@ namespace
 			return false;
 		}
 
-		if (header.layout.attributeCount != 3u)
+		if (header.layout.attributeCount != 4u)
 		{
-			std::cerr << "Unexpected packed vertex attribute count. Expected 3, got "
+			std::cerr << "Unexpected packed vertex attribute count. Expected 4, got "
 				<< header.layout.attributeCount << ".\n";
 			return false;
 		}
 
-		const VertexAttribute expectedLayout[3] = {
+		const VertexAttribute expectedLayout[4] = {
 			{
 				static_cast<std::uint32_t>(AttributeSemantic::Position),
 				static_cast<std::uint32_t>(AttributeFormat::R10G10B10A2Snorm),
@@ -331,11 +596,15 @@ namespace
 				static_cast<std::uint32_t>(AttributeFormat::Oct32),
 				4u},
 			{
+				static_cast<std::uint32_t>(AttributeSemantic::Tangent),
+				static_cast<std::uint32_t>(AttributeFormat::Oct32),
+				8u},
+			{
 				static_cast<std::uint32_t>(AttributeSemantic::TexCoord0),
 				static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
-				8u}};
+				12u}};
 
-		for (std::size_t attributeIndex = 0; attributeIndex < 3u; ++attributeIndex)
+		for (std::size_t attributeIndex = 0; attributeIndex < 4u; ++attributeIndex)
 		{
 			const VertexAttribute& current = header.layout.attributes[attributeIndex];
 			const VertexAttribute& expected = expectedLayout[attributeIndex];
@@ -639,7 +908,9 @@ bool CompileMesh(
 	const std::filesystem::path& input,
 	const std::filesystem::path& output,
 	bool includeMeshletBounds,
-	MeshCompileReport* outReport)
+	MeshCompileReport* outReport,
+	float smoothingAngle,
+	float weldThreshold)
 {
 	MeshCompileReport report{};
 	report.assetPath = input;
@@ -691,25 +962,8 @@ bool CompileMesh(
 	const int normalCount = static_cast<int>(attrib.normals.size() / 3u);
 	const int texcoordCount = static_cast<int>(attrib.texcoords.size() / 2u);
 
-	std::unordered_map<QuantizedVertexKey, std::uint32_t, QuantizedVertexKeyHasher> vertexRemap;
-	std::vector<VertexRaw> vertices;
-	std::vector<std::uint32_t> indices;
-
-	std::array<float, 3> minPos{
-		std::numeric_limits<float>::max(),
-		std::numeric_limits<float>::max(),
-		std::numeric_limits<float>::max()};
-	std::array<float, 3> maxPos{
-		std::numeric_limits<float>::lowest(),
-		std::numeric_limits<float>::lowest(),
-		std::numeric_limits<float>::lowest()};
-	std::array<float, 2> minUv{
-		std::numeric_limits<float>::max(),
-		std::numeric_limits<float>::max()};
-	std::array<float, 2> maxUv{
-		std::numeric_limits<float>::lowest(),
-		std::numeric_limits<float>::lowest()};
-	bool hasUv = false;
+	std::vector<VertexRaw> rawVertices;
+	std::vector<std::uint32_t> rawIndices;
 
 	for (const auto& shape : shapes)
 	{
@@ -728,54 +982,76 @@ bool CompileMesh(
 			for (std::size_t faceVertex = 0; faceVertex < verticesPerFace; ++faceVertex)
 			{
 				const tinyobj::index_t idx = shape.mesh.indices[indexOffset + faceVertex];
-				if (idx.vertex_index < 0 || idx.vertex_index >= positionCount)
-				{
-					std::cerr << "OBJ contains an out-of-range position index; aborting meshlet compile.\n";
-					report.status = "compile_fail";
-					report.failureReason = "position-index-out-of-range";
-					return FinalizeReport(false);
-				}
-
-				if (idx.normal_index >= normalCount || idx.texcoord_index >= texcoordCount)
-				{
-					std::cerr << "OBJ contains an out-of-range normal/UV index; aborting meshlet compile.\n";
-					report.status = "compile_fail";
-					report.failureReason = "attribute-index-out-of-range";
-					return FinalizeReport(false);
-				}
-
 				const std::array<float, 3> position = ExtractPosition(attrib, idx.vertex_index);
 				const std::array<float, 3> normal = ExtractNormal(attrib, idx.normal_index);
 				const std::array<float, 2> uv = ExtractTexcoord(attrib, idx.texcoord_index);
-				const QuantizedVertexKey key = BuildQuantizedVertexKey(position, normal, uv);
-				auto existing = vertexRemap.find(key);
-				if (existing == vertexRemap.end())
-				{
-					for (int component = 0; component < 3; ++component)
-					{
-						minPos[component] = std::min(minPos[component], position[component]);
-						maxPos[component] = std::max(maxPos[component], position[component]);
-					}
-
-					minUv[0] = std::min(minUv[0], uv[0]);
-					minUv[1] = std::min(minUv[1], uv[1]);
-					maxUv[0] = std::max(maxUv[0], uv[0]);
-					maxUv[1] = std::max(maxUv[1], uv[1]);
-					hasUv = hasUv || idx.texcoord_index >= 0;
-
-					const std::uint32_t vertexIndex = static_cast<std::uint32_t>(vertices.size());
-					vertexRemap.emplace(key, vertexIndex);
-					vertices.push_back(VertexRaw{position, normal, uv});
-					indices.push_back(vertexIndex);
-				}
-				else
-				{
-					indices.push_back(existing->second);
-				}
+				
+				rawIndices.push_back(static_cast<uint32_t>(rawVertices.size()));
+				rawVertices.push_back({position, normal, {0.0f, 0.0f, 0.0f}, uv, 1.0f});
 			}
-
 			indexOffset += verticesPerFace;
 		}
+	}
+
+	if (rawIndices.empty())
+	{
+		std::cerr << "No geometry found in OBJ: " << input << "\n";
+		report.status = "compile_fail";
+		report.failureReason = "empty-geometry";
+		return FinalizeReport(false);
+	}
+
+	// Phase 2: Foundational Cleanup (Welding & Smoothing)
+	
+	// 1. Smooth normals (Connectivity-aware) on unindexed vertices
+	SmoothNormals(rawVertices, rawIndices, smoothingAngle, weldThreshold);
+	
+	// 2. Generate tangents on unindexed stream
+	GenerateTangents(rawVertices, rawIndices);
+	
+	// 3. Final attribute-based weld to collapse identical vertices
+	std::vector<unsigned int> finalRemap(rawVertices.size());
+	size_t finalVertexCount = meshopt_generateVertexRemap(
+		finalRemap.data(),
+		rawIndices.data(),
+		rawIndices.size(),
+		rawVertices.data(),
+		rawVertices.size(),
+		sizeof(VertexRaw));
+
+	std::vector<VertexRaw> vertices(finalVertexCount);
+	std::vector<uint32_t> indices(rawIndices.size());
+
+	meshopt_remapIndexBuffer(indices.data(), rawIndices.data(), rawIndices.size(), finalRemap.data());
+	meshopt_remapVertexBuffer(vertices.data(), rawVertices.data(), rawVertices.size(), sizeof(VertexRaw), finalRemap.data());
+
+	std::array<float, 3> minPos{
+		std::numeric_limits<float>::max(),
+		std::numeric_limits<float>::max(),
+		std::numeric_limits<float>::max()};
+	std::array<float, 3> maxPos{
+		std::numeric_limits<float>::lowest(),
+		std::numeric_limits<float>::lowest(),
+		std::numeric_limits<float>::lowest()};
+	std::array<float, 2> minUv{
+		std::numeric_limits<float>::max(),
+		std::numeric_limits<float>::max()};
+	std::array<float, 2> maxUv{
+		std::numeric_limits<float>::lowest(),
+		std::numeric_limits<float>::lowest()};
+	bool hasUv = true; // Assume true for now as OBJ usually has them or defaults
+
+	for (const auto& v : vertices)
+	{
+		for (int component = 0; component < 3; ++component)
+		{
+			minPos[component] = std::min(minPos[component], v.position[component]);
+			maxPos[component] = std::max(maxPos[component], v.position[component]);
+		}
+		minUv[0] = std::min(minUv[0], v.uv[0]);
+		minUv[1] = std::min(minUv[1], v.uv[1]);
+		maxUv[0] = std::max(maxUv[0], v.uv[0]);
+		maxUv[1] = std::max(maxUv[1], v.uv[1]);
 	}
 
 	if (indices.empty())
@@ -823,7 +1099,7 @@ bool CompileMesh(
 	}
 
 	header.layout.strideBytes = kMeshletPackedVertexStrideBytes;
-	header.layout.attributeCount = 3;
+	header.layout.attributeCount = 4;
 	header.layout.attributes[0] = {
 		static_cast<std::uint32_t>(AttributeSemantic::Position),
 		static_cast<std::uint32_t>(AttributeFormat::R10G10B10A2Snorm),
@@ -833,9 +1109,13 @@ bool CompileMesh(
 		static_cast<std::uint32_t>(AttributeFormat::Oct32),
 		4};
 	header.layout.attributes[2] = {
+		static_cast<std::uint32_t>(AttributeSemantic::Tangent),
+		static_cast<std::uint32_t>(AttributeFormat::Oct32),
+		8};
+	header.layout.attributes[3] = {
 		static_cast<std::uint32_t>(AttributeSemantic::TexCoord0),
 		static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
-		8};
+		12};
 	header.meshletVertexRemapEncoding = static_cast<std::uint32_t>(
 		header.meshletVertexCount <= std::numeric_limits<std::uint16_t>::max()
 			? MeshletRemapEncoding::Uint16
@@ -843,6 +1123,8 @@ bool CompileMesh(
 	header.meshletFlags = meshletPayload.meshletBounds.empty() ? 0u : kMeshletHeaderFlagHasBounds;
 	header.meshletSkinningDataOffset = 0;
 	header.meshletSkinningDataCount = 0;
+
+	report.meshletGlobalVertexCount = header.meshletVertexCount;
 
 	if (!ValidateFixedGpuLayout(header))
 	{
@@ -888,8 +1170,13 @@ bool CompileMesh(
 			(vertex.uv[0] - header.quantization.uvOffset[0]) / header.quantization.uvScale[0],
 			(vertex.uv[1] - header.quantization.uvOffset[1]) / header.quantization.uvScale[1]};
 
-		const std::uint32_t packedPosition = PackR10G10B10A2Snorm(qPosition);
-		const std::uint32_t packedNormal = PackOct32Normal(qNormal);
+		const std::uint32_t packedPosition = PackR10G10B10A2Snorm(qPosition, vertex.tangentW);
+		const std::uint32_t packedNormal   = PackOct32Normal(qNormal);
+
+		
+		std::array<float, 3> tangentVec = {vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]};
+		const std::uint32_t packedTangent = PackOct32Normal(tangentVec);
+		
 		const std::uint32_t packedUv = PackR16G16Unorm(qUv);
 
 		vertexData.insert(
@@ -900,6 +1187,10 @@ bool CompileMesh(
 			vertexData.end(),
 			reinterpret_cast<const std::uint8_t*>(&packedNormal),
 			reinterpret_cast<const std::uint8_t*>(&packedNormal) + sizeof(packedNormal));
+		vertexData.insert(
+			vertexData.end(),
+			reinterpret_cast<const std::uint8_t*>(&packedTangent),
+			reinterpret_cast<const std::uint8_t*>(&packedTangent) + sizeof(packedTangent));
 		vertexData.insert(
 			vertexData.end(),
 			reinterpret_cast<const std::uint8_t*>(&packedUv),

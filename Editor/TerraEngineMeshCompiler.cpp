@@ -20,6 +20,8 @@ namespace
 		std::filesystem::path baseline;
 		bool includeMeshletBounds = true;
 		bool showHelp = false;
+		float smoothingAngle = 60.0f;
+		float weldThreshold = 1e-6f;
 	};
 
 	std::string ToBoolText(bool value)
@@ -67,6 +69,8 @@ namespace
 		std::cout << "  -b, --baseline <path.temf>         Optional accepted baseline artifact for source-hash-aware regression checks.\n";
 		std::cout << "      --include-bounds               Emit optional meshlet bounds payload (default).\n";
 		std::cout << "      --omit-bounds                  Skip optional meshlet bounds payload for extra size savings.\n";
+		std::cout << "      --smoothing-angle <deg>        Angle threshold for normal smoothing (default: 60). Edges sharper than this will be split.\n";
+		std::cout << "      --weld-threshold <eps>         Distance threshold for vertex position welding (default: 1e-6).\n";
 		std::cout << "  -h, --help                         Show this help message.\n";
 	}
 
@@ -117,6 +121,14 @@ namespace
 			else if (flag == "--omit-bounds" || flag == "--excludeMeshletBounds")
 			{
 				args.includeMeshletBounds = false;
+			}
+			else if (flag == "--smoothing-angle" && i + 1 < argc)
+			{
+				args.smoothingAngle = std::stof(argv[++i]);
+			}
+			else if (flag == "--weld-threshold" && i + 1 < argc)
+			{
+				args.weldThreshold = std::stof(argv[++i]);
 			}
 			else
 			{
@@ -189,6 +201,7 @@ namespace
 		json << "\"deterministicReady\":" << ToBoolText(report.deterministicReady) << ",";
 		json << "\"runtimeValidationPass\":" << ToBoolText(report.runtimeValidationPass) << ",";
 		json << "\"usedU16RemapEncoding\":" << ToBoolText(report.usedU16RemapEncoding) << ",";
+		json << "\"meshletGlobalVertexCount\":" << report.meshletGlobalVertexCount << ",";
 		json << "\"status\":\"" << EscapeJson(report.status) << "\",";
 		json << "\"failureReason\":\"" << EscapeJson(report.failureReason) << "\"";
 		json << "}";
@@ -316,7 +329,7 @@ int main(int argc, char** argv)
 	}
 
 	MeshCompileReport report{};
-	const bool compileResult = CompileMesh(args.input, args.output, args.includeMeshletBounds, &report);
+	const bool compileResult = CompileMesh(args.input, args.output, args.includeMeshletBounds, &report, args.smoothingAngle, args.weldThreshold);
 
 	if (compileResult || std::filesystem::exists(args.output))
 	{

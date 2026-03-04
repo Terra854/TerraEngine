@@ -9,7 +9,7 @@
 constexpr std::uint32_t kMeshMagicValue = 0x464d4554u; // 'TEMF' little endian
 constexpr std::size_t kMaxVertexAttributes = 8;
 constexpr std::uint16_t kMeshCurrentVersion = 1;
-constexpr std::uint32_t kMeshletPackedVertexStrideBytes = 12u;
+constexpr std::uint32_t kMeshletPackedVertexStrideBytes = 16u;
 constexpr std::uint32_t kMeshletPrimitiveIndexSizeBytes = sizeof(std::uint8_t);
 constexpr std::uint32_t kMeshletVertexRemapDecodedElementSizeBytes = sizeof(std::uint32_t);
 constexpr std::uint32_t kMeshletVertexDataAlignmentBytes = 4096u;

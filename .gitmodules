@@ -47,3 +47,6 @@
 [submodule "External/meshoptimizer"]
 	path = External/meshoptimizer
 	url = https://github.com/zeux/meshoptimizer
+[submodule "External/mikktspace"]
+	path = External/mikktspace
+	url = https://github.com/mmikk/MikkTSpace

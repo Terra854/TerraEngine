@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(TerraEngine LANGUAGES CXX)
+project(TerraEngine LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -158,6 +158,15 @@ set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "Disable meshoptimizer gltfpack tool" 
 set(MESHOPT_INSTALL OFF CACHE BOOL "Disable meshoptimizer install target" FORCE)
 add_subdirectory(External/meshoptimizer)
 set_target_properties(meshoptimizer PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+
+# --- mikktspace --------------------------------------------------------------
+add_library(mikktspace STATIC External/mikktspace/mikktspace.c External/mikktspace/mikktspace.h)
+target_include_directories(mikktspace PUBLIC External/mikktspace)
+if(MSVC)
+	target_compile_options(mikktspace PRIVATE /W0) # Disable warnings for external C code
+else()
+	target_compile_options(mikktspace PRIVATE -w)
+endif()
 
 find_package(Threads REQUIRED)
 
@@ -331,6 +340,7 @@ target_include_directories(TerraEngineMeshCompiler
 target_link_libraries(TerraEngineMeshCompiler
 	PRIVATE
 		meshoptimizer
+		mikktspace
 )
 
 target_include_directories(TerraEngineTextureCompiler
@@ -412,6 +422,7 @@ target_link_libraries(TerraEngine-Editor
 		glfw
 		Vulkan::Headers
 		meshoptimizer
+		mikktspace
 )
 
 

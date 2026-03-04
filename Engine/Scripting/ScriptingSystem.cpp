@@ -5,6 +5,7 @@
 #include "ScriptComponent.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Core/Timer.h"
+#include "Resource/ResourceManager.h"
 #include <filesystem>
 
 namespace fs = std::filesystem;
@@ -18,8 +19,7 @@ void ScriptingSystem::Initialize() {
     TERRAENGINE_LOG(LogLevel::Info, "Initializing Scripting System...");
 
     // Find managed assembly path relative to executable
-    fs::path currentDir = fs::current_path();
-    fs::path managedDir = currentDir / "Managed";
+    fs::path managedDir = ResourceManager::Instance().GetAssetRoot() / "Managed";
 
     fs::path configPath = managedDir / "TerraEngine.CSharp.runtimeconfig.json";
     fs::path assemblyPath = managedDir / "TerraEngine.CSharp.dll";
