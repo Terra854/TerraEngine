@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <string_view>
+#include <cmath>
+#include <algorithm>
 
 #include <glm/trigonometric.hpp>
 #include <glm/vec3.hpp>
@@ -23,6 +25,12 @@ enum class LightUnit : std::uint32_t
 	Lux = 1u
 };
 
+enum class LightAppearance : std::uint32_t
+{
+	Color = 0u,
+	FilterAndTemperature = 1u
+};
+
 // Scene light component mirrored to GPU light payloads each frame.
 struct LightComponent : public Component<LightComponent>
 {
@@ -30,7 +38,9 @@ struct LightComponent : public Component<LightComponent>
 
 	LightType type = LightType::Point;
 	LightUnit unit = LightUnit::Lumens;
+	LightAppearance appearance = LightAppearance::Color;
 	glm::vec3 color = glm::vec3(1.0f);
+	float temperature = 6500.0f; // D65 standard illuminant (Daylight)
 	float intensity = 1.0f;
 	float range = 10.0f;
 	float innerConeAngle = glm::radians(20.0f);
@@ -49,7 +59,9 @@ struct LightComponent : public Component<LightComponent>
 		registration
 			.property("type", &LightComponent::GetTypeValue, &LightComponent::SetTypeValue)
 			.property("unit", &LightComponent::GetUnitValue, &LightComponent::SetUnitValue)
+			.property("appearance", &LightComponent::GetAppearanceValue, &LightComponent::SetAppearanceValue)
 			.property("color", &LightComponent::color)
+			.property("temperature", &LightComponent::temperature)
 			.property("intensity", &LightComponent::intensity)
 			.property("range", &LightComponent::range)
 			.property("innerConeAngle", &LightComponent::innerConeAngle)
@@ -82,5 +94,43 @@ struct LightComponent : public Component<LightComponent>
 	void SetUnitValue(std::uint32_t encodedUnit)
 	{
 		unit = static_cast<LightUnit>(encodedUnit);
+	}
+
+	std::uint32_t GetAppearanceValue() const
+	{
+		return static_cast<std::uint32_t>(appearance);
+	}
+
+	void SetAppearanceValue(std::uint32_t encodedAppearance)
+	{
+		appearance = static_cast<LightAppearance>(encodedAppearance);
+	}
+
+	static glm::vec3 KelvinToRGB(float kelvin)
+	{
+		float temp = kelvin / 100.0f;
+		float r, g, b;
+
+		if (temp <= 66.0f)
+		{
+			r = 1.0f;
+			g = std::clamp((99.4708025861f * std::log(temp) - 161.1195681661f) / 255.0f, 0.0f, 1.0f);
+			if (temp <= 19.0f)
+			{
+				b = 0.0f;
+			}
+			else
+			{
+				b = std::clamp((138.5177312231f * std::log(temp - 10.0f) - 305.0447927307f) / 255.0f, 0.0f, 1.0f);
+			}
+		}
+		else
+		{
+			r = std::clamp((329.698727446f * std::pow(temp - 60.0f, -0.1332047592f)) / 255.0f, 0.0f, 1.0f);
+			g = std::clamp((288.1221695283f * std::pow(temp - 60.0f, -0.0755148492f)) / 255.0f, 0.0f, 1.0f);
+			b = 1.0f;
+		}
+
+		return glm::vec3(r, g, b);
 	}
 };

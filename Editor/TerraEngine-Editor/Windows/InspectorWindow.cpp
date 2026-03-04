@@ -371,14 +371,40 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			setUintPropertyWithUndo("type", effectiveType);
 		}
 
+		std::uint32_t currentAppearance = 0u;
+		if (rttr::variant appVariant = access.getter(obj, "appearance"); appVariant.is_valid() && appVariant.is_type<std::uint32_t>())
+		{
+			currentAppearance = appVariant.get_value<std::uint32_t>();
+		}
+
+		const char* appearanceTypes[] = { "Color", "Filter and Temperature" };
+		int appIndex = static_cast<int>(currentAppearance);
+		if (ImGui::Combo("Appearance", &appIndex, appearanceTypes, IM_ARRAYSIZE(appearanceTypes)))
+		{
+			setUintPropertyWithUndo("appearance", static_cast<std::uint32_t>(appIndex));
+		}
+
 		glm::vec3 lightColor = glm::vec3(1.0f);
 		if (rttr::variant colorVariant = access.getter(obj, "color"); colorVariant.is_valid() && colorVariant.is_type<glm::vec3>())
 		{
 			lightColor = colorVariant.get_value<glm::vec3>();
 		}
-		if (ImGui::ColorEdit3("Color", &lightColor.x))
+		if (ImGui::ColorEdit3(currentAppearance == 0u ? "Color" : "Filter", &lightColor.x))
 		{
 			setVec3PropertyWithUndo("color", lightColor);
+		}
+
+		if (currentAppearance == 1u)
+		{
+			float temperature = 6500.0f;
+			if (rttr::variant tempVariant = access.getter(obj, "temperature"); tempVariant.is_valid() && tempVariant.is_type<float>())
+			{
+				temperature = tempVariant.get_value<float>();
+			}
+			if (ImGui::SliderFloat("Temperature", &temperature, 1000.0f, 20000.0f, "%.0f K"))
+			{
+				setFloatPropertyWithUndo("temperature", temperature);
+			}
 		}
 
 		float intensity = 1.0f;

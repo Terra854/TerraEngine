@@ -187,7 +187,11 @@ void RenderSystem::Update(float deltaTime)
 			const std::uint32_t encodedUnit = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "unit");
 			reflectedLight.unit = static_cast<LightUnit>(encodedUnit);
 
+			const std::uint32_t encodedAppearance = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "appearance");
+			reflectedLight.appearance = static_cast<LightAppearance>(encodedAppearance);
+
 			reflectedLight.color = GetComponentProperty<LightComponent, glm::vec3>(lightComp, "color");
+			reflectedLight.temperature = GetComponentProperty<LightComponent, float>(lightComp, "temperature");
 			reflectedLight.intensity = GetComponentProperty<LightComponent, float>(lightComp, "intensity");
 			reflectedLight.range = GetComponentProperty<LightComponent, float>(lightComp, "range");
 			reflectedLight.innerConeAngle = GetComponentProperty<LightComponent, float>(lightComp, "innerConeAngle");
@@ -380,6 +384,12 @@ void RenderSystem::Update(float deltaTime)
 						direction = glm::normalize(direction);
 					}
 
+					glm::vec3 finalColor = light.color;
+					if (light.appearance == LightAppearance::FilterAndTemperature)
+					{
+						finalColor *= LightComponent::KelvinToRGB(light.temperature);
+					}
+
 					float clampedIntensity = std::max(light.intensity, 0.0f);
 					if (light.type != LightType::Directional && light.unit == LightUnit::Lumens)
 					{
@@ -394,9 +404,9 @@ void RenderSystem::Update(float deltaTime)
 					gpuLight.positionAndType = glm::vec4(transform.position, static_cast<float>(static_cast<std::uint32_t>(light.type)));
 					gpuLight.directionAndRange = glm::vec4(direction, clampedRange);
 					gpuLight.colorAndIntensity = glm::vec4(
-						std::max(light.color.x, 0.0f),
-						std::max(light.color.y, 0.0f),
-						std::max(light.color.z, 0.0f),
+						std::max(finalColor.x, 0.0f),
+						std::max(finalColor.y, 0.0f),
+						std::max(finalColor.z, 0.0f),
 						clampedIntensity);
 					gpuLight.coneAnglesAndArea = glm::vec4(
 						std::cos(clampedInnerAngle),
