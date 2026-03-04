@@ -183,6 +183,10 @@ void RenderSystem::Update(float deltaTime)
 				return;
 			}
 			reflectedLight.type = static_cast<LightType>(encodedType);
+			
+			const std::uint32_t encodedUnit = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "unit");
+			reflectedLight.unit = static_cast<LightUnit>(encodedUnit);
+
 			reflectedLight.color = GetComponentProperty<LightComponent, glm::vec3>(lightComp, "color");
 			reflectedLight.intensity = GetComponentProperty<LightComponent, float>(lightComp, "intensity");
 			reflectedLight.range = GetComponentProperty<LightComponent, float>(lightComp, "range");
@@ -376,7 +380,12 @@ void RenderSystem::Update(float deltaTime)
 						direction = glm::normalize(direction);
 					}
 
-					const float clampedIntensity = std::max(light.intensity, 0.0f);
+					float clampedIntensity = std::max(light.intensity, 0.0f);
+					if (light.type != LightType::Directional && light.unit == LightUnit::Lumens)
+					{
+						clampedIntensity /= (4.0f * 3.14159265f); // Convert Lumens to Candela
+					}
+
 					const float clampedRange = std::max(light.range, 0.001f);
 					const float clampedInnerAngle = std::clamp(light.innerConeAngle, 0.0f, 1.56f);
 					const float clampedOuterAngle = std::clamp(std::max(light.outerConeAngle, clampedInnerAngle + 0.001f), 0.0f, 1.57f);
@@ -395,6 +404,11 @@ void RenderSystem::Update(float deltaTime)
 						std::max(light.width, 0.001f),
 						std::max(light.height, 0.001f));
 					gpuLight.shadowAndPadding = glm::vec4(light.castsShadows ? 1.0f : 0.0f, -1.0f, 0.0f, 0.0f);
+					gpuLight.extraParams = glm::vec4(
+						std::clamp(light.shadowStrength, 0.0f, 1.0f),
+						std::max(light.shadowBias, 0.0f),
+						std::max(light.indirectMultiplier, 0.0f),
+						0.0f);
 
 					chunkLights.push_back(gpuLight);
 				}

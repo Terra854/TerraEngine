@@ -42,11 +42,12 @@ struct FrameCullingData
 
 struct GPULight
 {
-	float4 positionAndType;
-	float4 directionAndRange;
-	float4 colorAndIntensity;
-	float4 coneAnglesAndArea;
-	float4 shadowAndPadding;
+	float4 positionAndType;     // xyz: position, w: type
+	float4 directionAndRange;   // xyz: direction, w: range
+	float4 colorAndIntensity;   // xyz: color, w: intensity
+	float4 coneAnglesAndArea;   // x: innerCos, y: outerCos, z: width, w: height
+	float4 shadowAndPadding;    // x: castsShadows, y: shadowTex, z: ltcAmp, w: ltcInv
+	float4 extraParams;         // x: shadowStrength, y: shadowBias, z: indirectMultiplier, w: padding
 };
 
 struct ClusterData
@@ -143,10 +144,18 @@ float3 SafeNormalize(float3 value, float3 fallback)
 float ComputePointAttenuation(GPULight light, float3 worldPosition)
 {
 	const float3 toLight = light.positionAndType.xyz - worldPosition;
-	const float distanceToLight = length(toLight);
-	const float range = max(light.directionAndRange.w, 0.001);
-	const float rangeFactor = saturate(1.0 - (distanceToLight / range));
-	return rangeFactor * rangeFactor;
+	const float distanceSq = dot(toLight, toLight);
+	const float range = max(light.directionAndRange.w, 0.001f);
+	const float rangeSq = range * range;
+
+	// Inverse square law
+	const float attenuation = 1.0f / (distanceSq + 0.0001f);
+
+	// Smooth range windowing (Epic Games approach)
+	const float distanceOverRangeSq = distanceSq / rangeSq;
+	const float windowFactor = saturate(1.0f - (distanceOverRangeSq * distanceOverRangeSq));
+
+	return attenuation * (windowFactor * windowFactor);
 }
 
 float SampleDirectionalShadow(GPULight light, FrameCullingData frame, float3 worldPosition)
@@ -303,16 +312,48 @@ float ComputeShadowFactor(GPULight light, FrameCullingData frame, float3 worldPo
 	return 1.0f;
 }
 
+float D_GGX(float nDotH, float roughness)
+{
+	float a = roughness * roughness;
+	float a2 = a * a;
+	float d = (nDotH * a2 - nDotH) * nDotH + 1.0;
+	return a2 / (kPi * d * d);
+}
+
+float V_SmithJointSchlick(float nDotL, float nDotV, float roughness)
+{
+	float a = roughness * roughness;
+	float ggxV = nDotL * (nDotV * (1.0 - a) + a);
+	float ggxL = nDotV * (nDotL * (1.0 - a) + a);
+	return 0.5 / (ggxV + ggxL + 0.00001); // 0.5 is already combined with the 1/4 factor of Cook-Torrance denominator
+}
+
+float3 F_Schlick(float cosTheta, float3 f0)
+{
+	float f = pow(1.0 - cosTheta, 5.0);
+	return f0 + (1.0 - f0) * f;
+}
+
 float3 EvaluateDirectionalLight(GPULight light, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
 {
 	const float3 lightDir = SafeNormalize(-light.directionAndRange.xyz, float3(0.0, -1.0, 0.0));
 	const float nDotL = saturate(dot(normal, lightDir));
+	if (nDotL <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
+
 	const float3 halfVector = SafeNormalize(lightDir + viewDir, lightDir);
-	const float specPower = lerp(128.0, 8.0, saturate(roughness));
-	const float specularTerm = pow(saturate(dot(normal, halfVector)), specPower);
+	const float nDotV = saturate(dot(normal, viewDir)) + 1e-5f;
+	const float nDotH = saturate(dot(normal, halfVector));
+	const float vDotH = saturate(dot(viewDir, halfVector));
+
 	const float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, saturate(metallic));
-	const float3 diffuse = albedo * (1.0 - saturate(metallic)) / kPi;
-	const float3 specular = f0 * specularTerm;
+	const float3 F = F_Schlick(vDotH, f0);
+	const float D = D_GGX(nDotH, roughness);
+	const float V = V_SmithJointSchlick(nDotL, nDotV, roughness);
+
+	const float3 specular = D * V * F;
+	const float3 kD = (1.0 - F) * (1.0 - saturate(metallic));
+	const float3 diffuse = kD * albedo / kPi;
+
 	const float3 radiance = light.colorAndIntensity.rgb * light.colorAndIntensity.w;
 	return (diffuse + specular) * radiance * nDotL;
 }
@@ -322,13 +363,25 @@ float3 EvaluatePointLight(GPULight light, float3 worldPosition, float3 normal, f
 	const float3 toLight = light.positionAndType.xyz - worldPosition;
 	const float3 lightDir = SafeNormalize(toLight, float3(0.0, -1.0, 0.0));
 	const float nDotL = saturate(dot(normal, lightDir));
+	if (nDotL <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
+
 	const float attenuation = ComputePointAttenuation(light, worldPosition);
+	if (attenuation <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
+
 	const float3 halfVector = SafeNormalize(lightDir + viewDir, lightDir);
-	const float specPower = lerp(128.0, 8.0, saturate(roughness));
-	const float specularTerm = pow(saturate(dot(normal, halfVector)), specPower);
+	const float nDotV = saturate(dot(normal, viewDir)) + 1e-5f;
+	const float nDotH = saturate(dot(normal, halfVector));
+	const float vDotH = saturate(dot(viewDir, halfVector));
+
 	const float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, saturate(metallic));
-	const float3 diffuse = albedo * (1.0 - saturate(metallic)) / kPi;
-	const float3 specular = f0 * specularTerm;
+	const float3 F = F_Schlick(vDotH, f0);
+	const float D = D_GGX(nDotH, roughness);
+	const float V = V_SmithJointSchlick(nDotL, nDotV, roughness);
+
+	const float3 specular = D * V * F;
+	const float3 kD = (1.0 - F) * (1.0 - saturate(metallic));
+	const float3 diffuse = kD * albedo / kPi;
+
 	const float3 radiance = light.colorAndIntensity.rgb * light.colorAndIntensity.w;
 	return (diffuse + specular) * radiance * nDotL * attenuation;
 }

@@ -7,6 +7,7 @@ struct GPULight
 	float4 colorAndIntensity;
 	float4 coneAnglesAndArea;
 	float4 shadowAndPadding;
+	float4 extraParams;
 };
 
 struct ClusterData

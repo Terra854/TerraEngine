@@ -338,7 +338,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
-	constexpr std::uint32_t kMaxAuthorableType = static_cast<std::uint32_t>(LightType::Spot);
+	constexpr std::uint32_t kMaxAuthorableType = static_cast<std::uint32_t>(LightType::Area);
 	std::uint32_t encodedType = static_cast<std::uint32_t>(LightType::Point);
 	if (rttr::variant typeVariant = access.getter(obj, "type"); typeVariant.is_valid() && typeVariant.is_type<std::uint32_t>())
 	{
@@ -347,10 +347,14 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 	const bool hasUnsupportedType = encodedType > kMaxAuthorableType;
 	std::uint32_t effectiveType = hasUnsupportedType ? static_cast<std::uint32_t>(LightType::Point) : encodedType;
 
+	const bool isDirectional = effectiveType == static_cast<std::uint32_t>(LightType::Directional);
+	const bool isSpot = effectiveType == static_cast<std::uint32_t>(LightType::Spot);
+	const bool isArea = effectiveType == static_cast<std::uint32_t>(LightType::Area);
+
 	const ImGuiTreeNodeFlags sectionFlags = ImGuiTreeNodeFlags_DefaultOpen;
 	if (ImGui::CollapsingHeader("General", sectionFlags))
 	{
-		const char* lightTypes[] = { "Directional", "Point", "Spot" };
+		const char* lightTypes[] = { "Directional", "Point", "Spot", "Area" };
 		if (hasUnsupportedType)
 		{
 			ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.24f, 1.0f), "Unsupported legacy light type value: %u", encodedType);
@@ -366,16 +370,13 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			effectiveType = static_cast<std::uint32_t>(typeIndex);
 			setUintPropertyWithUndo("type", effectiveType);
 		}
-	}
 
-	if (ImGui::CollapsingHeader("Emission", sectionFlags))
-	{
 		glm::vec3 lightColor = glm::vec3(1.0f);
 		if (rttr::variant colorVariant = access.getter(obj, "color"); colorVariant.is_valid() && colorVariant.is_type<glm::vec3>())
 		{
 			lightColor = colorVariant.get_value<glm::vec3>();
 		}
-		if (ImGui::ColorEdit3("Filter", &lightColor.x))
+		if (ImGui::ColorEdit3("Color", &lightColor.x))
 		{
 			setVec3PropertyWithUndo("color", lightColor);
 		}
@@ -385,15 +386,63 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 		{
 			intensity = intensityVariant.get_value<float>();
 		}
-		if (ImGui::DragFloat("Intensity", &intensity, 0.05f, 0.0f, 10000.0f))
+
+		std::uint32_t currentUnit = 0u;
+		if (rttr::variant unitVariant = access.getter(obj, "unit"); unitVariant.is_valid() && unitVariant.is_type<std::uint32_t>())
+		{
+			currentUnit = unitVariant.get_value<std::uint32_t>();
+		}
+
+		const char* intensityFormat = "%.2f";
+		if (isDirectional)
+		{
+			intensityFormat = "%.2f lux";
+		}
+		else
+		{
+			intensityFormat = currentUnit == 0u ? "%.2f lm" : "%.2f lux";
+		}
+
+		if (ImGui::DragFloat("Intensity", &intensity, 0.05f, 0.0f, 1000000.0f, intensityFormat))
 		{
 			setFloatPropertyWithUndo("intensity", std::max(0.0f, intensity));
 		}
 		UpdateInspectorDragState();
 
-		const bool isDirectional = effectiveType == static_cast<std::uint32_t>(LightType::Directional);
-		const bool isSpot = effectiveType == static_cast<std::uint32_t>(LightType::Spot);
+		if (!isDirectional)
+		{
+			const char* lightUnits[] = { "Lumens", "Lux" };
+			int unitIndex = std::clamp(static_cast<int>(currentUnit), 0, 1);
+			if (ImGui::Combo("Unit", &unitIndex, lightUnits, IM_ARRAYSIZE(lightUnits)))
+			{
+				setUintPropertyWithUndo("unit", static_cast<std::uint32_t>(unitIndex));
 
+				// Convert intensity value to maintain perceived brightness
+				if (currentUnit == 0u && unitIndex == 1) // Lumens -> Lux
+				{
+					setFloatPropertyWithUndo("intensity", std::max(0.0f, intensity / (4.0f * glm::pi<float>())));
+				}
+				else if (currentUnit == 1u && unitIndex == 0) // Lux -> Lumens
+				{
+					setFloatPropertyWithUndo("intensity", std::max(0.0f, intensity * (4.0f * glm::pi<float>())));
+				}
+			}
+		}
+
+		float indirectMultiplier = 1.0f;
+		if (rttr::variant indVariant = access.getter(obj, "indirectMultiplier"); indVariant.is_valid() && indVariant.is_type<float>())
+		{
+			indirectMultiplier = indVariant.get_value<float>();
+		}
+		if (ImGui::DragFloat("Indirect Multiplier", &indirectMultiplier, 0.05f, 0.0f, 10.0f))
+		{
+			setFloatPropertyWithUndo("indirectMultiplier", std::max(0.0f, indirectMultiplier));
+		}
+		UpdateInspectorDragState();
+	}
+
+	if (ImGui::CollapsingHeader("Shape", sectionFlags))
+	{
 		if (!isDirectional)
 		{
 			float range = 10.0f;
@@ -401,7 +450,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			{
 				range = rangeVariant.get_value<float>();
 			}
-			if (ImGui::DragFloat("Range", &range, 0.1f, 0.1f, 10000.0f))
+			if (ImGui::DragFloat("Range", &range, 0.1f, 0.1f, 10000.0f, "%.2f m"))
 			{
 				setFloatPropertyWithUndo("range", std::max(0.1f, range));
 			}
@@ -433,6 +482,28 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 				setFloatPropertyWithUndo("outerConeAngle", glm::radians(outerDegrees));
 			}
 		}
+
+		if (isArea)
+		{
+			float width = 1.0f;
+			float height = 1.0f;
+			if (rttr::variant wVariant = access.getter(obj, "width"); wVariant.is_valid() && wVariant.is_type<float>())
+			{
+				width = wVariant.get_value<float>();
+			}
+			if (rttr::variant hVariant = access.getter(obj, "height"); hVariant.is_valid() && hVariant.is_type<float>())
+			{
+				height = hVariant.get_value<float>();
+			}
+
+			const bool wEdited = ImGui::DragFloat("Width", &width, 0.1f, 0.01f, 1000.0f, "%.2f m");
+			UpdateInspectorDragState();
+			const bool hEdited = ImGui::DragFloat("Height", &height, 0.1f, 0.01f, 1000.0f, "%.2f m");
+			UpdateInspectorDragState();
+
+			if (wEdited) setFloatPropertyWithUndo("width", std::max(0.01f, width));
+			if (hEdited) setFloatPropertyWithUndo("height", std::max(0.01f, height));
+		}
 	}
 
 	if (ImGui::CollapsingHeader("Shadows", sectionFlags))
@@ -445,6 +516,30 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 		if (ImGui::Checkbox("Realtime Shadows", &castsShadows))
 		{
 			setBoolPropertyWithUndo("castsShadows", castsShadows);
+		}
+
+		if (castsShadows)
+		{
+			float shadowStrength = 1.0f;
+			if (rttr::variant strVariant = access.getter(obj, "shadowStrength"); strVariant.is_valid() && strVariant.is_type<float>())
+			{
+				shadowStrength = strVariant.get_value<float>();
+			}
+			if (ImGui::SliderFloat("Strength", &shadowStrength, 0.0f, 1.0f))
+			{
+				setFloatPropertyWithUndo("shadowStrength", std::clamp(shadowStrength, 0.0f, 1.0f));
+			}
+
+			float shadowBias = 0.005f;
+			if (rttr::variant biasVariant = access.getter(obj, "shadowBias"); biasVariant.is_valid() && biasVariant.is_type<float>())
+			{
+				shadowBias = biasVariant.get_value<float>();
+			}
+			if (ImGui::DragFloat("Bias", &shadowBias, 0.001f, 0.0f, 0.1f, "%.4f"))
+			{
+				setFloatPropertyWithUndo("shadowBias", std::clamp(shadowBias, 0.0f, 0.1f));
+			}
+			UpdateInspectorDragState();
 		}
 	}
 }

@@ -49,8 +49,9 @@ struct alignas(16) GPULight
 	glm::vec4 colorAndIntensity = glm::vec4(0.0f);     // rgb = color, w = scalar intensity
 	glm::vec4 coneAnglesAndArea = glm::vec4(0.0f);     // x = innerCos, y = outerCos, z = width, w = height
 	glm::vec4 shadowAndPadding = glm::vec4(0.0f);      // x = castsShadows flag, y = shadow resource index
+	glm::vec4 extraParams = glm::vec4(0.0f);           // x = shadowStrength, y = shadowBias, z = indirectMultiplier, w = padding
 };
-static_assert(sizeof(GPULight) == 80, "GPULight layout changed; update shader mirror types.");
+static_assert(sizeof(GPULight) == 96, "GPULight layout changed; update shader mirror types.");
 
 // Cluster table entry mapping one cluster to a segment of the flat light-index list.
 struct alignas(16) ClusterData
