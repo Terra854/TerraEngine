@@ -22,4 +22,7 @@ private:
     std::string m_SearchFilter;
     float m_ThumbnailSize = 64.0f;
     float m_Padding = 16.0f;
+
+    std::filesystem::path m_AssetToDelete;
+    bool m_ShowDeleteModal = false;
 };

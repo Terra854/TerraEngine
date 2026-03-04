@@ -301,6 +301,35 @@ void SceneManager::UnloadAll()
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager caches cleared");
 }
 
+void SceneManager::NullifyAssetReferences(const TerraEngine::UUID& assetId)
+{
+	ObjectManager::instance().forEachObjectWithComponents<MeshRenderComponent>(
+		[&](Object object, MeshRenderComponent& meshComp)
+		{
+			bool changed = false;
+			const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
+			const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
+
+			if (meshId == assetId)
+			{
+				SetComponentProperty(meshComp, "meshId", TerraEngine::EMPTY_UUID);
+				changed = true;
+			}
+			
+			if (materialId == assetId)
+			{
+				SetComponentProperty(meshComp, "materialId", TerraEngine::EMPTY_UUID);
+				changed = true;
+			}
+
+			if (changed)
+			{
+				activeSceneDirty = true;
+			}
+		}
+	);
+}
+
 void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32_t gridDepth, float spacing, float intensity)
 {
 	ObjectManager& objects = ObjectManager::instance();

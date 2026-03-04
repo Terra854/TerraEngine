@@ -13,6 +13,7 @@
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Scene/SceneManager.h"
 
 using json = nlohmann::json;
 
@@ -229,6 +230,51 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
                 }
             }
         }
+    }
+}
+
+void AssetDatabase::DeleteAsset(const std::filesystem::path& sourcePath) {
+    auto absPath = std::filesystem::absolute(sourcePath);
+    auto it = assets.find(absPath);
+    if (it == assets.end()) {
+        // Try relative
+        it = assets.find(sourcePath);
+    }
+    
+    if (it == assets.end()) return;
+
+    AssetMetadata metadata = it->second;
+    const TerraEngine::UUID guid = metadata.guid;
+    const std::filesystem::path metaPath = (assetRoot / metadata.sourcePath).string() + ".meta";
+    const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
+    const std::filesystem::path compiledPath = buildRoot / metadata.compiledPath;
+
+    // 1. Notify Engine Systems FIRST while resources are still valid
+    AssetType type = AssetType::Mesh;
+    if (metadata.importerName == "TextureImporter") type = AssetType::Texture;
+    else if (metadata.importerName == "MaterialImporter") type = AssetType::Material;
+    else if (metadata.importerName == "ShaderImporter") type = AssetType::ShaderCollection;
+
+    // Clean up Scene references
+    SceneManager::Instance().NullifyAssetReferences(guid);
+
+    // Purge from ResourceManager cache and Renderer
+    ResourceManager::Instance().DeleteResource(guid, type);
+
+    // 2. Remove from local database
+    assets.erase(it);
+
+    // 3. Delete Files from disk
+    try {
+        std::error_code ec;
+        if (std::filesystem::exists(fullSourcePath)) std::filesystem::remove(fullSourcePath, ec);
+        if (std::filesystem::exists(metaPath)) std::filesystem::remove(metaPath, ec);
+        if (!metadata.compiledPath.empty() && std::filesystem::exists(compiledPath)) {
+            std::filesystem::remove(compiledPath, ec);
+        }
+        TERRAENGINE_LOG(LogLevel::Info, "Deleted asset: " << fullSourcePath.filename().string());
+    } catch (const std::exception& e) {
+        TERRAENGINE_LOG(LogLevel::Error, "Failed to delete asset " << fullSourcePath << ": " << e.what());
     }
 }
 

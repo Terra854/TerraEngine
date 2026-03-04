@@ -33,6 +33,8 @@ public:
 	void ReloadMaterial(const TerraEngine::UUID& materialId);
 	void ReloadMesh(const TerraEngine::UUID& meshId);
 	void ReloadTexture(const TerraEngine::UUID& textureId);
+
+	void DeleteResource(const TerraEngine::UUID& id);
     
     void Clear();
 	void SetTaskShaderCullingEnabled(bool enabled);

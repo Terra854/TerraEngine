@@ -65,6 +65,8 @@ public:
         return nullptr;
     }
 
+    const std::vector<std::shared_ptr<EditorWindow>>& GetWindows() const { return m_Windows; }
+
 private:
     void DrawMainMenuBar();
     void CloseCurrentProject();

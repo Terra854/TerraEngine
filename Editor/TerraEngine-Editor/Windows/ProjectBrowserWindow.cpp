@@ -128,6 +128,28 @@ void ProjectBrowserWindow::OnGui() {
              
              ImGui::EndTable();
         }
+
+        if (m_ShowDeleteModal) {
+            ImGui::OpenPopup("Delete Asset?");
+            m_ShowDeleteModal = false;
+        }
+
+        if (ImGui::BeginPopupModal("Delete Asset?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Are you sure you want to delete '%s'?", m_AssetToDelete.filename().string().c_str());
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "This action cannot be undone!");
+            ImGui::Separator();
+
+            if (ImGui::Button("Delete", ImVec2(120, 0))) {
+                AssetDatabase::Instance().DeleteAsset(m_AssetToDelete);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SetItemDefaultFocus();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
     }
 }
 
@@ -211,6 +233,14 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 
             if (isSelected) {
                 ImGui::PopStyleColor();
+            }
+
+            if (ImGui::BeginPopupContextWindow()) {
+                if (ImGui::MenuItem("Delete")) {
+                    m_AssetToDelete = std::filesystem::absolute(entry.path());
+                    m_ShowDeleteModal = true;
+                }
+                ImGui::EndPopup();
             }
             
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {

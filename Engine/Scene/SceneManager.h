@@ -160,16 +160,17 @@ public:
 
 			// Clear all cached documents and abandon in-flight futures. Use during
 
-	
-
 			// teardown to release memory when no other threads are reading scenes.
 
-	
-
 			void UnloadAll();
+
+			// Scan the active scene and nullify any references to the given asset ID.
+			void NullifyAssetReferences(const TerraEngine::UUID& assetId);
+
 			// Spawns a deterministic point-light grid used for multithreaded
 			// renderer stress tests and perf regression checks.
 			void SpawnLightStressTestGrid(std::uint32_t gridWidth = 20u, std::uint32_t gridDepth = 20u, float spacing = 2.0f, float intensity = 25.0f);
+
 
 	
 

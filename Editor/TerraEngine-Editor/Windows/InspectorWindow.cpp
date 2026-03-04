@@ -224,6 +224,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 
 		char buf[128];
 		strncpy(buf, label.c_str(), sizeof(buf));
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30);
 		ImGui::InputText(name.c_str(), buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
 
 		if (ImGui::BeginDragDropTarget()) {
@@ -258,6 +259,14 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 				}
 			}
 			ImGui::EndDragDropTarget();
+		}
+
+		ImGui::SameLine();
+		if (ImGui::Button("X", ImVec2(24, 0))) {
+			rttr::variant oldId = access.getter(obj, name);
+			access.setter(obj, name, TerraEngine::EMPTY_UUID);
+			rttr::variant nextId = access.getter(obj, name);
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
 		}
 	}
 }

@@ -145,22 +145,27 @@ void RenderSystem::Update(float deltaTime)
 				const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
 				const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
 				const bool objectTaskCullingEnabled = GetComponentProperty<MeshRenderComponent, bool>(meshComp, "taskShaderCullingEnabled");
+				
 				if (meshId != TerraEngine::EMPTY_UUID && materialId != TerraEngine::EMPTY_UUID)
 				{
-					// Capture reflected mesh bindings without touching fields directly.
-					MeshRenderComponent reflectedMesh{};
-					reflectedMesh.meshId = meshId;
-					reflectedMesh.materialId = materialId;
-					reflectedMesh.taskShaderCullingEnabled = objectTaskCullingEnabled;
-
-					renderables.push_back({ object.EntityId(), reflectedMesh });
-					if (!localTransforms.contains(object.EntityId()))
+					// Ensure resources still exist in the cache to prevent renderer crashes
+					auto& rm = ResourceManager::Instance();
+					if (rm.HasResource(meshId) && rm.HasResource(materialId))
 					{
-						Transform reflectedTransform{};
-						reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-						reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-						reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-						localTransforms.emplace(object.EntityId(), reflectedTransform);
+						MeshRenderComponent reflectedMesh{};
+						reflectedMesh.meshId = meshId;
+						reflectedMesh.materialId = materialId;
+						reflectedMesh.taskShaderCullingEnabled = objectTaskCullingEnabled;
+
+						renderables.push_back({ object.EntityId(), reflectedMesh });
+						if (!localTransforms.contains(object.EntityId()))
+						{
+							Transform reflectedTransform{};
+							reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+							reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+							reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+							localTransforms.emplace(object.EntityId(), reflectedTransform);
+						}
 					}
 				}
 			}
@@ -562,6 +567,15 @@ void RenderSystem::ReloadTexture(const TerraEngine::UUID& textureId)
 	if (rhi)
 	{
 		rhi->InvalidateTexture(textureId);
+	}
+}
+
+void RenderSystem::DeleteResource(const TerraEngine::UUID& id)
+{
+	if (rhi)
+	{
+		rhi->WaitIdle();
+		rhi->InvalidateResource(id);
 	}
 }
 

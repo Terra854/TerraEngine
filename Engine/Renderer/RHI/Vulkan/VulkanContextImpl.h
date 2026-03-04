@@ -397,6 +397,7 @@ struct VulkanContext::Impl {
 	void InvalidateMaterial(TerraEngine::UUID materialId);
 	void InvalidateMesh(TerraEngine::UUID meshId);
 	void InvalidateTexture(TerraEngine::UUID textureId);
+	void InvalidateResource(TerraEngine::UUID id);
 	void EnsureMesh(TerraEngine::UUID meshId);
 	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass, uint32_t materialFlags);
 	VkDescriptorSet EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline);

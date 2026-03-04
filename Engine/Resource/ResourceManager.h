@@ -99,6 +99,12 @@ public:
 	// Re-parse a texture from disk to pick up authored changes.
 	void ReloadTexture(const TerraEngine::UUID& id);
 
+	// Unregister a resource from the cache and trigger any necessary renderer invalidations.
+	void DeleteResource(const TerraEngine::UUID& id, AssetType type);
+
+	// Check if a resource with the given UUID exists in any of the manager's caches.
+	bool HasResource(const TerraEngine::UUID& id) const;
+
 	// Register a mapping between a UUID and a filesystem path so that GetMesh/GetTexture
 	// can trigger on-demand loading if the resource is not yet in the cache.
 	void RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type);

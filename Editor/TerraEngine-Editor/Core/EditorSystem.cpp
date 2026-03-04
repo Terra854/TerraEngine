@@ -109,14 +109,120 @@ void EditorSystem::Setup(Engine* enginePtr) {
         }
         // Transition logic
         mainEditor->OnProjectOpened();
+        LoadWorkspaceLayout();
     });
 
     mainEditor->SetOnProjectClosedCallback([this]() {
+        SaveWorkspaceLayout();
+        
+        // Hide all C++ windows
+        auto windows = mainEditor->GetWindows();
+        for (auto& win : windows) {
+            win->SetVisible(false);
+        }
+
+        // Hide all C# windows
+        if (managedHideAllWindows) {
+            managedHideAllWindows();
+        }
+
         AssetDatabase::Instance().Shutdown();
         // Transition logic
     });
 
     initialized = true;
+}
+
+void EditorSystem::SaveWorkspaceLayout() {
+    if (!context.projectManager->HasActiveProject()) return;
+
+    std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
+    std::filesystem::path userSettingsDir = projectRoot / "UserSettings";
+    if (!std::filesystem::exists(userSettingsDir)) {
+        std::filesystem::create_directories(userSettingsDir);
+    }
+
+    // 1. Save Window Visibility to JSON
+    nlohmann::json layout;
+    layout["windows"] = nlohmann::json::array();
+    
+    auto windows = mainEditor->GetWindows();
+    for (auto& win : windows) {
+        nlohmann::json winJson;
+        winJson["title"] = win->GetTitle();
+        winJson["visible"] = win->IsVisible();
+        layout["windows"].push_back(winJson);
+    }
+
+    // 1b. Save Managed (C#) Windows
+    if (managedGetWindows) {
+        static nlohmann::json* s_currentLayout = nullptr;
+        s_currentLayout = &layout;
+
+        managedGetWindows([](const char* title, int visible) {
+            if (s_currentLayout && title) {
+                nlohmann::json winJson;
+                winJson["title"] = title;
+                winJson["visible"] = (visible != 0);
+                winJson["managed"] = true;
+                (*s_currentLayout)["windows"].push_back(winJson);
+            }
+        });
+
+        s_currentLayout = nullptr;
+    }
+
+    std::ofstream file(userSettingsDir / "EditorLayout.terra");
+    file << layout.dump(4);
+
+    // 2. ImGui Docking State (.ini)
+    // ImGui usually saves this automatically to IniFilename if set.
+    // We explicitly call save just in case or to ensure it's synced.
+    ImGui::SaveIniSettingsToDisk((userSettingsDir / "EditorLayout.ini").string().c_str());
+}
+
+void EditorSystem::LoadWorkspaceLayout() {
+    if (!context.projectManager->HasActiveProject()) return;
+
+    std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
+    std::filesystem::path layoutPath = projectRoot / "UserSettings" / "EditorLayout.terra";
+    std::filesystem::path iniPath = projectRoot / "UserSettings" / "EditorLayout.ini";
+
+    // 1. Load ImGui Docking State
+    if (std::filesystem::exists(iniPath)) {
+        ImGui::LoadIniSettingsFromDisk(iniPath.string().c_str());
+    }
+
+    // 2. Load Window Visibility
+    if (std::filesystem::exists(layoutPath)) {
+        try {
+            std::ifstream file(layoutPath);
+            nlohmann::json layout;
+            file >> layout;
+
+            auto windows = mainEditor->GetWindows();
+            for (const auto& winJson : layout["windows"]) {
+                std::string title = winJson["title"];
+                bool visible = winJson["visible"];
+                bool isManaged = winJson.contains("managed") && winJson["managed"].get<bool>();
+
+                if (isManaged) {
+                    if (managedSetWindowVisibility) {
+                        managedSetWindowVisibility(title.c_str(), visible);
+                    }
+                } else {
+                    for (auto& win : windows) {
+                        if (win->GetTitle() == title) {
+                            win->SetVisible(visible);
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (...) {
+            TERRAENGINE_LOG(LogLevel::Warning, "Failed to load EditorLayout.terra");
+        }
+    }
 }
 
 void EditorSystem::Initialize() {
@@ -295,6 +401,21 @@ void EditorSystem::Initialize() {
             L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
             L"DrawWindowMenu"
         );
+        managedGetWindows = (ManagedGetWindowsFn)DotNetHost::Instance().GetManagedFunction(
+            dllPath,
+            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+            L"GetManagedWindows"
+        );
+        managedSetWindowVisibility = (ManagedSetWindowVisibilityFn)DotNetHost::Instance().GetManagedFunction(
+            dllPath,
+            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+            L"SetWindowVisibility"
+        );
+        managedHideAllWindows = (ManagedHideAllWindowsFn)DotNetHost::Instance().GetManagedFunction(
+            dllPath,
+            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+            L"HideAllWindows"
+        );
 
 		if (managedInitialize) {
 			managedInitialize(ImGui::GetCurrentContext());
@@ -346,6 +467,7 @@ void EditorSystem::Update(float deltaTime) {
 }
 
 void EditorSystem::Shutdown() {
+    SaveWorkspaceLayout();
     if (managedShutdown) {
         managedShutdown();
     }

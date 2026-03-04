@@ -1676,6 +1676,12 @@ void VulkanContext::InvalidateTexture(const TerraEngine::UUID& textureId) {
 	}
 }
 
+void VulkanContext::InvalidateResource(const TerraEngine::UUID& id) {
+	if (impl) {
+		impl->InvalidateResource(id);
+	}
+}
+
 void VulkanContext::WaitIdle() {
 	if (impl && impl->device) {
 		vkDeviceWaitIdle(impl->device);

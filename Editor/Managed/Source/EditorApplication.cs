@@ -109,5 +109,62 @@ namespace TerraEngine.Editor
                 TerraEngine.Log.Error($"Exception in Shutdown:\n{ex}");
             }
         }
+
+        [UnmanagedCallersOnly]
+        public static void GetManagedWindows(delegate* unmanaged<IntPtr, int, void> callback)
+        {
+            try
+            {
+                foreach (var window in WindowManager.GetWindows())
+                {
+                    IntPtr titlePtr = Marshal.StringToHGlobalAnsi(window.Title);
+                    callback(titlePtr, window.IsVisible ? 1 : 0);
+                    Marshal.FreeHGlobal(titlePtr);
+                }
+            }
+            catch (Exception ex)
+            {
+                TerraEngine.Log.Error($"Exception in GetManagedWindows:\n{ex}");
+            }
+        }
+
+        [UnmanagedCallersOnly]
+        public static void SetWindowVisibility(IntPtr titlePtr, int visible)
+        {
+            try
+            {
+                string? title = Marshal.PtrToStringAnsi(titlePtr);
+                if (title == null) return;
+
+                foreach (var window in WindowManager.GetWindows())
+                {
+                    if (window.Title == title)
+                    {
+                        window.IsVisible = visible != 0;
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                TerraEngine.Log.Error($"Exception in SetWindowVisibility:\n{ex}");
+            }
+        }
+
+        [UnmanagedCallersOnly]
+        public static void HideAllWindows()
+        {
+            try
+            {
+                foreach (var window in WindowManager.GetWindows())
+                {
+                    window.IsVisible = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                TerraEngine.Log.Error($"Exception in HideAllWindows:\n{ex}");
+            }
+        }
     }
 }

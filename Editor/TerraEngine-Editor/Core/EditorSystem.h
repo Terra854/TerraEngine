@@ -16,6 +16,9 @@ public:
 	void Shutdown() override;
 	std::string SystemName() override;
 
+	void SaveWorkspaceLayout();
+	void LoadWorkspaceLayout();
+
 	void Draw();
 
 private:
@@ -28,11 +31,17 @@ private:
     typedef void (*ManagedUpdateFn)(float);
     typedef void (*ManagedShutdownFn)();
     typedef void (*ManagedDrawWindowMenuFn)();
+    typedef void (*ManagedGetWindowsFn)(void (*callback)(const char*, int));
+    typedef void (*ManagedSetWindowVisibilityFn)(const char*, int);
+    typedef void (*ManagedHideAllWindowsFn)();
 
     ManagedInitFn managedInitialize = nullptr;
     ManagedUpdateFn managedUpdate = nullptr;
     ManagedShutdownFn managedShutdown = nullptr;
     ManagedDrawWindowMenuFn managedDrawWindowMenu = nullptr;
+    ManagedGetWindowsFn managedGetWindows = nullptr;
+    ManagedSetWindowVisibilityFn managedSetWindowVisibility = nullptr;
+    ManagedHideAllWindowsFn managedHideAllWindows = nullptr;
 
     bool initialized = false;
 public:

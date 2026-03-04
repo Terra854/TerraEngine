@@ -11,6 +11,7 @@ ProjectManager::ProjectManager() {
 }
 
 ProjectManager::~ProjectManager() {
+    CloseProject();
     SaveEditorPreferences();
 }
 
@@ -29,6 +30,8 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
         fs::create_directories(location / "Library");
         fs::create_directories(location / "Build");
         fs::create_directories(location / "Temp");
+        fs::create_directories(location / "ProjectSettings");
+        fs::create_directories(location / "UserSettings");
 
         // Create Default Scene
         {
@@ -76,17 +79,14 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 }
 
 bool ProjectManager::LoadProject(const fs::path& location, std::string* outError) {
+    // The user must select the project folder itself, not the settings file inside it.
     fs::path projectDir = location;
-    if (location.filename() == "ProjectSettings.terra") {
-        projectDir = location.parent_path();
-    }
-
-    fs::path settingsPath = projectDir / "ProjectSettings.terra";
+    fs::path settingsPath = projectDir / "ProjectSettings" / "ProjectSettings.terra";
     // Trace project discovery through the shared logger for consistent editor diagnostics.
     TERRAENGINE_LOG(LogLevel::Info, "[ProjectManager] Checking for settings at: " << fs::absolute(settingsPath).string());
 
     if (!fs::exists(settingsPath)) {
-        std::string msg = "Not a valid project folder (missing ProjectSettings.terra): " + fs::absolute(settingsPath).string();
+        std::string msg = "Not a valid project folder (missing ProjectSettings/ProjectSettings.terra): " + fs::absolute(settingsPath).string();
         TERRAENGINE_LOG(LogLevel::Error, msg);
         if (outError) *outError = msg;
         return false;
@@ -141,7 +141,11 @@ const std::vector<RecentProjectEntry>& ProjectManager::GetRecentProjects() const
 void ProjectManager::SaveProjectSettings() {
     if (!currentSettings.has_value() || projectRoot.empty()) return;
 
-    fs::path settingsPath = projectRoot / "ProjectSettings.terra";
+    fs::path settingsPath = projectRoot / "ProjectSettings" / "ProjectSettings.terra";
+    if (!fs::exists(settingsPath.parent_path())) {
+        fs::create_directories(settingsPath.parent_path());
+    }
+
     std::ofstream file(settingsPath);
     nlohmann::json j = *currentSettings;
     file << j.dump(4);

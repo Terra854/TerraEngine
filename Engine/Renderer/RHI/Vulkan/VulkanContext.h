@@ -23,6 +23,7 @@ public:
 	void InvalidateMaterial(const TerraEngine::UUID& materialId) override;
 	void InvalidateMesh(const TerraEngine::UUID& meshId) override;
 	void InvalidateTexture(const TerraEngine::UUID& textureId) override;
+	void InvalidateResource(const TerraEngine::UUID& id) override;
 	void WaitIdle() override;
 	void Shutdown() override;
     void ClearResources() override;

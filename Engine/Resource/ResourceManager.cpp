@@ -1,4 +1,5 @@
 #include "Resource/ResourceManager.h"
+#include "Renderer/RenderSystem.h"
 
 #include <fstream>
 #include <sstream>
@@ -203,6 +204,39 @@ void ResourceManager::ClearCaches()
 	}
 }
 
+void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type)
+{
+	auto removeFromCache = [&](auto& cache) {
+		std::unique_lock lock(cache.mutex);
+		if (auto it = cache.idToPath.find(id); it != cache.idToPath.end()) {
+			cache.pathToId.erase(it->second);
+			cache.idToPath.erase(it);
+		}
+		cache.resources.erase(id);
+	};
+
+	switch (type) {
+	case AssetType::Mesh: removeFromCache(meshCache); break;
+	case AssetType::Texture: removeFromCache(textureCache); break;
+	case AssetType::Material: removeFromCache(materialCache); break;
+	case AssetType::ShaderCollection: removeFromCache(shaderCollectionCache); break;
+	}
+
+	// Notify renderer to purge any GPU-side references/buffers
+	RenderSystem::Instance().DeleteResource(id);
+}
+
+bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
+{
+	auto inCache = [&](const auto& cache) {
+		std::shared_lock lock(cache.mutex);
+		return cache.resources.find(id) != cache.resources.end();
+	};
+
+	return inCache(meshCache) || inCache(textureCache) || inCache(materialCache) ||
+		inCache(shaderCollectionCache) || inCache(shaderCache);
+}
+
 void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type)
 {
 	const std::string key = NormalizeKey(ResolveAssetPath(path));
@@ -283,6 +317,12 @@ std::string ResourceManager::NormalizeKey(const std::filesystem::path& path) con
 
 std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::path& path) const
 {
+	if (!std::filesystem::exists(path))
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Resource file does not exist: " << path);
+		return {};
+	}
+
 	std::ifstream file(path, std::ios::binary | std::ios::ate);
 	if (!file)
 	{

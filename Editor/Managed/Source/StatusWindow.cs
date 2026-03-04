@@ -10,6 +10,7 @@ namespace TerraEngine.Editor
 
         public StatusWindow() : base("Engine Status")
         {
+            IsVisible = false;
         }
 
         public void UpdateData(float deltaTime)

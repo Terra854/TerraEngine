@@ -31,6 +31,9 @@ public:
     // Explicitly import an asset
     void ImportAsset(const std::filesystem::path& sourcePath);
 
+    // Delete an asset from disk and unregister it
+    void DeleteAsset(const std::filesystem::path& sourcePath);
+
     // Getters
     const std::map<std::filesystem::path, AssetMetadata>& GetAssets() const { return assets; }
     std::filesystem::path GetAssetRoot() const { return assetRoot; }

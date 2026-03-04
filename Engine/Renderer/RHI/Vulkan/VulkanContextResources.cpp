@@ -670,6 +670,12 @@ void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
 	}
 }
 
+void VulkanContext::Impl::InvalidateResource(TerraEngine::UUID id) {
+	InvalidateMesh(id);
+	InvalidateTexture(id);
+	InvalidateMaterial(id);
+}
+
 void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	if (meshCache.contains(meshId)) return;
 	
