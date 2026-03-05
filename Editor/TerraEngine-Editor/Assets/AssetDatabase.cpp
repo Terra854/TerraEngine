@@ -52,6 +52,7 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
     if (!std::filesystem::exists(assetRoot)) std::filesystem::create_directories(assetRoot);
     if (!std::filesystem::exists(buildRoot)) std::filesystem::create_directories(buildRoot);
 
+    assets.clear();
     TERRAENGINE_LOG(LogLevel::Info, "AssetDatabase initialized. Watching: " << assetRoot);
     
     // Initial Scan
@@ -72,7 +73,7 @@ void AssetDatabase::Update() {
     for (const auto& e : events) {
         // Debounce: update or add entry in pending
         // Debounce time: 200ms
-        pendingEvents[e.path] = { e.status, 0.2f };
+        pendingEvents[std::filesystem::absolute(e.path)] = { e.status, 0.2f };
     }
 
     // Process Pending
@@ -132,46 +133,46 @@ void AssetDatabase::ScanProject() {
     }
 
     // 2. Import existing assets (Sync DB with Disk)
-    std::map<std::filesystem::path, AssetMetadata> currentAssets;
     if (std::filesystem::exists(assetRoot)) {
         for (const auto& entry : std::filesystem::recursive_directory_iterator(assetRoot)) {
             if (entry.is_regular_file()) {
                 if (entry.path().extension() == ".meta") continue;
-                ImportAsset(entry.path());
+                ImportAsset(std::filesystem::absolute(entry.path()));
             }
         }
     }
 }
 
 void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
-    if (sourcePath.extension() == ".meta") return;
-    if (std::filesystem::is_directory(sourcePath)) return;
+    const auto absSourcePath = std::filesystem::absolute(sourcePath);
+    if (absSourcePath.extension() == ".meta") return;
+    if (std::filesystem::is_directory(absSourcePath)) return;
 
     AssetMetadata metadata;
-    std::filesystem::path metaFilePath = sourcePath.string() + ".meta";
+    std::filesystem::path metaFilePath = absSourcePath.string() + ".meta";
     
     bool needsImport = false;
     
     if (std::filesystem::exists(metaFilePath)) {
         if (LoadMetadata(metaFilePath, metadata)) {
             // Check timestamp
-            auto currentModTime = std::filesystem::last_write_time(sourcePath);
+            auto currentModTime = std::filesystem::last_write_time(absSourcePath);
             if (currentModTime > metadata.lastModified) {
                 needsImport = true;
                 metadata.lastModified = currentModTime;
             }
         } else {
             // Meta corrupt, regenerate
-            GenerateDefaultMetadata(sourcePath, metadata);
+            GenerateDefaultMetadata(absSourcePath, metadata);
             needsImport = true;
         }
     } else {
-        GenerateDefaultMetadata(sourcePath, metadata);
+        GenerateDefaultMetadata(absSourcePath, metadata);
         needsImport = true;
     }
 
     // Determine Compiled Path (Relative)
-    std::filesystem::path relativeSourcePath = std::filesystem::relative(sourcePath, assetRoot);
+    std::filesystem::path relativeSourcePath = std::filesystem::relative(absSourcePath, assetRoot);
     std::filesystem::path compiledRelativePath = relativeSourcePath;
     
     if (metadata.importerName == "MeshImporter") compiledRelativePath.replace_extension(".temf");
@@ -187,7 +188,6 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
         // Resolve Absolute Paths for checking/compiling
         // Use buildRoot to ensure path includes Assets/
         std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
-        std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
 
         if (needsImport || !std::filesystem::exists(fullCompiledPath)) {
             if (!std::filesystem::exists(fullCompiledPath.parent_path())) {
@@ -197,7 +197,7 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
             bool compiled = CompileAsset(metadata);
             
             if (!compiled) {
-                TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << fullSourcePath);
+                TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << absSourcePath);
             }
         }
     }
@@ -205,7 +205,7 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
     // Always save metadata
     SaveMetadata(metadata);
 
-    assets[sourcePath] = metadata;
+    assets[absSourcePath] = metadata;
 
     // Register with Engine ResourceManager so it can resolve GUIDs to compiled paths
     if (!metadata.compiledPath.empty()) {
@@ -234,47 +234,29 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
 }
 
 void AssetDatabase::DeleteAsset(const std::filesystem::path& sourcePath) {
-    auto absPath = std::filesystem::absolute(sourcePath);
+    const auto absPath = std::filesystem::absolute(sourcePath);
     auto it = assets.find(absPath);
-    if (it == assets.end()) {
-        // Try relative
-        it = assets.find(sourcePath);
-    }
-    
     if (it == assets.end()) return;
 
     AssetMetadata metadata = it->second;
-    const TerraEngine::UUID guid = metadata.guid;
-    const std::filesystem::path metaPath = (assetRoot / metadata.sourcePath).string() + ".meta";
     const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
-    const std::filesystem::path compiledPath = buildRoot / metadata.compiledPath;
 
-    // 1. Notify Engine Systems FIRST while resources are still valid
-    AssetType type = AssetType::Mesh;
-    if (metadata.importerName == "TextureImporter") type = AssetType::Texture;
-    else if (metadata.importerName == "MaterialImporter") type = AssetType::Material;
-    else if (metadata.importerName == "ShaderImporter") type = AssetType::ShaderCollection;
+    // Clean up Scene references ONLY during explicit Delete (user intent)
+    SceneManager::Instance().NullifyAssetReferences(metadata.guid);
 
-    // Clean up Scene references
-    SceneManager::Instance().NullifyAssetReferences(guid);
+    // 1. Delete source file from disk.
+    std::error_code ec;
+    if (std::filesystem::exists(fullSourcePath)) {
+        std::filesystem::remove(fullSourcePath, ec);
+    }
 
-    // Purge from ResourceManager cache and Renderer
-    ResourceManager::Instance().DeleteResource(guid, type);
-
-    // 2. Remove from local database
-    assets.erase(it);
-
-    // 3. Delete Files from disk
-    try {
-        std::error_code ec;
-        if (std::filesystem::exists(fullSourcePath)) std::filesystem::remove(fullSourcePath, ec);
-        if (std::filesystem::exists(metaPath)) std::filesystem::remove(metaPath, ec);
-        if (!metadata.compiledPath.empty() && std::filesystem::exists(compiledPath)) {
-            std::filesystem::remove(compiledPath, ec);
-        }
+    // 2. Delegate everything else (DB cleanup, engine notification, meta/compiled deletion) to RemoveAsset
+    RemoveAsset(absPath);
+    
+    if (!ec) {
         TERRAENGINE_LOG(LogLevel::Info, "Deleted asset: " << fullSourcePath.filename().string());
-    } catch (const std::exception& e) {
-        TERRAENGINE_LOG(LogLevel::Error, "Failed to delete asset " << fullSourcePath << ": " << e.what());
+    } else {
+        TERRAENGINE_LOG(LogLevel::Error, "Failed to delete source file " << fullSourcePath << ": " << ec.message());
     }
 }
 
@@ -400,15 +382,29 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 }
 
 void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
-    auto it = assets.find(sourcePath);
+    const auto absPath = std::filesystem::absolute(sourcePath);
+    auto it = assets.find(absPath);
     if (it != assets.end()) {
+        const auto& metadata = it->second;
+
+        AssetType type;
+        bool knownResource = false;
+        if (metadata.importerName == "MeshImporter") { type = AssetType::Mesh; knownResource = true; }
+        else if (metadata.importerName == "TextureImporter") { type = AssetType::Texture; knownResource = true; }
+        else if (metadata.importerName == "MaterialImporter") { type = AssetType::Material; knownResource = true; }
+        else if (metadata.importerName == "ShaderImporter") { type = AssetType::ShaderCollection; knownResource = true; }
+
+        if (knownResource) {
+            ResourceManager::Instance().DeleteResource(metadata.guid, type);
+        }
+
         std::error_code ec;
-        if (!it->second.compiledPath.empty()) {
-            std::filesystem::path fullCompiled = buildRoot / it->second.compiledPath;
+        if (!metadata.compiledPath.empty()) {
+            std::filesystem::path fullCompiled = buildRoot / metadata.compiledPath;
             if (std::filesystem::exists(fullCompiled)) std::filesystem::remove(fullCompiled, ec);
         }
         
-        std::filesystem::path meta = sourcePath.string() + ".meta";
+        std::filesystem::path meta = absPath.string() + ".meta";
         if (std::filesystem::exists(meta)) std::filesystem::remove(meta, ec);
         assets.erase(it);
     }

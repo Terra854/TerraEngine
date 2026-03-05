@@ -630,6 +630,10 @@ void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 	auto it = meshCache.find(meshId);
 	if (it != meshCache.end()) {
+		// Clear bindless buffer slot
+		UpdateGlobalBuffer(it->second.bindlessIndex, VK_NULL_HANDLE, 0, 0);
+		freeBufferIndices.push_back(it->second.bindlessIndex);
+
 		if (!it->second.descriptorSetsByLayout.empty() && descriptorPool != VK_NULL_HANDLE) {
 			std::vector<VkDescriptorSet> descriptorSets;
 			descriptorSets.reserve(it->second.descriptorSetsByLayout.size());
@@ -645,7 +649,9 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 		}
 		vmaDestroyBuffer(allocator, it->second.meshShaderVertexBuffer.buffer, it->second.meshShaderVertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshletVertexRemapBuffer.buffer, it->second.meshletVertexRemapBuffer.allocation);
-		vmaDestroyBuffer(allocator, it->second.meshSkinningBuffer.buffer, it->second.meshSkinningBuffer.allocation);
+		if (it->second.meshSkinningBuffer.buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(allocator, it->second.meshSkinningBuffer.buffer, it->second.meshSkinningBuffer.allocation);
+		}
 		vmaDestroyBuffer(allocator, it->second.meshDecodeInfoBuffer.buffer, it->second.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.indexBuffer.buffer, it->second.indexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshletBuffer.buffer, it->second.meshletBuffer.allocation);
@@ -657,6 +663,9 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
 	auto it = textureCache.find(textureId);
 	if (it != textureCache.end()) {
+		// Don't invalidate default texture
+		if (it->second.image == defaultTexture.image) return;
+
 		vkDestroySampler(device, it->second.sampler, nullptr);
 		vkDestroyImageView(device, it->second.view, nullptr);
 		vmaDestroyImage(allocator, it->second.image, it->second.allocation);
@@ -665,7 +674,11 @@ void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
 
 	auto idxIt = textureIndexMap.find(textureId);
 	if (idxIt != textureIndexMap.end()) {
-		freeTextureIndices.push_back(idxIt->second);
+		uint32_t index = idxIt->second;
+		// Overwrite bindless slot with default white texture to prevent rendering with deleted data
+		UpdateGlobalTexture(index, defaultTexture);
+
+		freeTextureIndices.push_back(index);
 		textureIndexMap.erase(idxIt);
 	}
 }

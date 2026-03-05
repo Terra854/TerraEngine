@@ -228,13 +228,13 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 
 bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 {
-	auto inCache = [&](const auto& cache) {
+	auto isAvailable = [&](const auto& cache) {
 		std::shared_lock lock(cache.mutex);
-		return cache.resources.find(id) != cache.resources.end();
+		return cache.resources.find(id) != cache.resources.end() || cache.idToPath.find(id) != cache.idToPath.end();
 	};
 
-	return inCache(meshCache) || inCache(textureCache) || inCache(materialCache) ||
-		inCache(shaderCollectionCache) || inCache(shaderCache);
+	return isAvailable(meshCache) || isAvailable(textureCache) || isAvailable(materialCache) ||
+		isAvailable(shaderCollectionCache) || isAvailable(shaderCache);
 }
 
 void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type)
