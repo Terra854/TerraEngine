@@ -12,6 +12,25 @@ enum class RenderViewType : std::uint8_t
 	Scene = 1
 };
 
+enum class QualityPreset : std::uint32_t
+{
+	Low = 0,
+	Medium = 1,
+	High = 2,
+	Ultra = 3,
+	Custom = 4
+};
+
+struct RenderSettings
+{
+	std::uint32_t shadowResolution = 2048u;
+	std::uint32_t shadowFilteringSize = 5u;
+	std::uint32_t maxDynamicLights = 128u;
+	std::uint32_t enableLTC = 1u;
+	std::uint32_t enableIBL = 1u;
+	std::uint32_t anisotropicFiltering = 4u;
+};
+
 struct DrawCommand
 {
 	TerraEngine::UUID meshId;
@@ -74,6 +93,7 @@ struct FrameRenderData
 	float deltaTimeSeconds = 0.0f;
 	bool globalTaskShaderCullingEnabled = true;
 	float cullingEpsilon = 0.001f;
+	RenderSettings settings;
 	std::vector<GPULight> lights;
 	std::vector<DrawCommand> commands;
 };
@@ -87,12 +107,14 @@ struct alignas(16) FrameCullingDataGPU
 	glm::vec4 clusterDepthAndViewport = glm::vec4(0.1f, 100.0f, 1920.0f, 1080.0f);
 	glm::mat4 viewMatrix = glm::mat4(1.0f);
 	glm::mat4 invProjection = glm::mat4(1.0f);
+	glm::uvec4 renderSettings0 = glm::uvec4(2048u, 5u, 128u, 1u); // x: shadowRes, y: shadowFilter, z: maxLights, w: enableLTC
+	glm::uvec4 renderSettings1 = glm::uvec4(1u, 4u, 0u, 0u);      // x: enableIBL, y: aniso, zw: reserved
 	std::uint32_t globalTaskCullingEnabled = 1u;
 	std::uint32_t taskShaderSupported = 0u;
 	std::uint32_t reserved0 = 0u;
 	std::uint32_t reserved1 = 0u;
 };
-static_assert(sizeof(FrameCullingDataGPU) == 288, "Frame culling payload must stay tightly packed for GPU uploads.");
+static_assert(sizeof(FrameCullingDataGPU) == 320, "Frame culling payload must stay tightly packed for GPU uploads.");
 
 // GPU counters written by task shader atomic operations per view/frame slot.
 struct alignas(16) MeshletCullingCountersGPU

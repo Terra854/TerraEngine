@@ -555,55 +555,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		impl->CreateSceneViewGridPipeline(renderPassInfo.renderPass);
 	}
 
-	const uint32_t statsSlotIndex = impl->GetStatsSlotIndex(impl->currentFrame, view);
-	std::vector<GPULight> lightingPayload = frameData.lights;
-	for (GPULight& light : lightingPayload) {
-		const uint32_t lightType = static_cast<uint32_t>(std::max(0.0f, light.positionAndType.w));
-		const bool castsShadows = light.shadowAndPadding.x > 0.5f;
-		light.shadowAndPadding.y = -1.0f;
-		light.shadowAndPadding.z = static_cast<float>(impl->ltcAmplitudeTextureIndex);
-		light.shadowAndPadding.w = static_cast<float>(impl->ltcInverseTextureIndex);
-		if (!castsShadows) {
-			continue;
-		}
-		if (lightType == 0u) {
-			light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndex);
-		}
-		else if (lightType == 2u) {
-			light.shadowAndPadding.y = static_cast<float>(impl->spotShadowTextureIndex);
-		}
-		else if (lightType == 3u) {
-			light.shadowAndPadding.y = static_cast<float>(impl->areaShadowTextureIndex);
-		}
-	}
-	impl->UploadLightingData(lightingPayload);
-	FrameCullingDataGPU cullingData{};
-	cullingData.frustumPlanes = BuildFrustumPlanes(frameData.projectionMatrix * frameData.viewMatrix);
-	cullingData.cameraPositionAndEpsilon = glm::vec4(frameData.cameraWorldPosition, std::max(frameData.cullingEpsilon, 0.0001f));
-	cullingData.clusterGridAndLightCount = glm::uvec4(
-		kLightingClusterDimX,
-		kLightingClusterDimY,
-		kLightingClusterDimZ,
-		static_cast<uint32_t>(std::min<size_t>(lightingPayload.size(), VulkanContext::Impl::MAX_GLOBAL_LIGHTS)));
-	cullingData.clusterDepthAndViewport = glm::vec4(
-		0.1f,
-		100.0f,
-		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.width, 1u)),
-		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.height, 1u)));
-	cullingData.viewMatrix = frameData.viewMatrix;
-	cullingData.invProjection = glm::inverse(frameData.projectionMatrix);
-	cullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
-	cullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
-	impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
-	// Compute lighting shaders index slot 0 explicitly, so mirror the latest frame
-	// culling payload there in addition to the per-view stats slot.
-	impl->UpdateFrameCullingData(0u, cullingData);
-	impl->ResetMeshletCounters(statsSlotIndex);
-
-	// Prepare Indirect Buffer
-	std::vector<VkDrawMeshTasksIndirectCommandEXT> indirectCommands;
-	indirectCommands.reserve(frameData.commands.size());
-
 	const auto EnsureShadowRenderResources = [&]() -> bool {
 		if (impl->directionalShadowDepth.view == VK_NULL_HANDLE
 			|| impl->directionalShadowColor.view == VK_NULL_HANDLE
@@ -611,7 +562,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			|| impl->spotShadowColor.view == VK_NULL_HANDLE
 			|| impl->areaShadowDepth.view == VK_NULL_HANDLE
 			|| impl->areaShadowColor.view == VK_NULL_HANDLE) {
-			return false;
+			if (!impl->EnsureShadowRenderResources()) {
+				return false;
+			}
 		}
 
 		if (impl->shadowRenderPass == VK_NULL_HANDLE) {
@@ -714,6 +667,66 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		return true;
 	};
 
+	const bool shadowResourcesReady = EnsureShadowRenderResources();
+
+	const uint32_t statsSlotIndex = impl->GetStatsSlotIndex(impl->currentFrame, view);
+	std::vector<GPULight> lightingPayload = frameData.lights;
+	for (GPULight& light : lightingPayload) {
+		const uint32_t lightType = static_cast<uint32_t>(std::max(0.0f, light.positionAndType.w));
+		const bool castsShadows = light.shadowAndPadding.x > 0.5f;
+		light.shadowAndPadding.y = -1.0f;
+		light.shadowAndPadding.z = static_cast<float>(impl->ltcAmplitudeTextureIndex);
+		light.shadowAndPadding.w = static_cast<float>(impl->ltcInverseTextureIndex);
+		if (!castsShadows) {
+			continue;
+		}
+		if (lightType == 0u) {
+			light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndex);
+		}
+		else if (lightType == 2u) {
+			light.shadowAndPadding.y = static_cast<float>(impl->spotShadowTextureIndex);
+		}
+		else if (lightType == 3u) {
+			light.shadowAndPadding.y = static_cast<float>(impl->areaShadowTextureIndex);
+		}
+	}
+	impl->UploadLightingData(lightingPayload);
+	FrameCullingDataGPU cullingData{};
+	cullingData.frustumPlanes = BuildFrustumPlanes(frameData.projectionMatrix * frameData.viewMatrix);
+	cullingData.cameraPositionAndEpsilon = glm::vec4(frameData.cameraWorldPosition, std::max(frameData.cullingEpsilon, 0.0001f));
+	cullingData.clusterGridAndLightCount = glm::uvec4(
+		kLightingClusterDimX,
+		kLightingClusterDimY,
+		kLightingClusterDimZ,
+		static_cast<uint32_t>(std::min<size_t>(lightingPayload.size(), VulkanContext::Impl::MAX_GLOBAL_LIGHTS)));
+	cullingData.clusterDepthAndViewport = glm::vec4(
+		0.1f,
+		100.0f,
+		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.width, 1u)),
+		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.height, 1u)));
+	cullingData.viewMatrix = frameData.viewMatrix;
+	cullingData.invProjection = glm::inverse(frameData.projectionMatrix);
+	cullingData.renderSettings0 = glm::uvec4(
+		frameData.settings.shadowResolution,
+		frameData.settings.shadowFilteringSize,
+		frameData.settings.maxDynamicLights,
+		frameData.settings.enableLTC ? 1u : 0u);
+	cullingData.renderSettings1 = glm::uvec4(
+		frameData.settings.enableIBL ? 1u : 0u,
+		frameData.settings.anisotropicFiltering,
+		0u, 0u);
+	cullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
+	cullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
+	impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
+	// Compute lighting shaders index slot 0 explicitly, so mirror the latest frame
+	// culling payload there in addition to the per-view stats slot.
+	impl->UpdateFrameCullingData(0u, cullingData);
+	impl->ResetMeshletCounters(statsSlotIndex);
+
+	// Prepare Indirect Buffer
+	std::vector<VkDrawMeshTasksIndirectCommandEXT> indirectCommands;
+	indirectCommands.reserve(frameData.commands.size());
+
 	const auto EnsureLightingComputePipelines = [&]() {
 		if (impl->lightingComputePipelineLayout == VK_NULL_HANDLE) {
 			VkPushConstantRange pushRange{};
@@ -790,7 +803,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		CreateComputePipeline(impl->vrsComputePipeline, "Editor/Shaders/PostProcess/VRSGenerate.comp.spv");
 	};
 
-	const bool shadowResourcesReady = EnsureShadowRenderResources();
 	EnsureLightingComputePipelines();
 
 	// Hi-Z Generation
@@ -2108,9 +2120,78 @@ void VulkanContext::Impl::ClearResources() {
 	}
 	textureCache.clear();
 	
+	auto DestroyVulkanImage = [&](VulkanImage& image) {
+		if (device && image.sampler != VK_NULL_HANDLE) {
+			vkDestroySampler(device, image.sampler, nullptr);
+		}
+		if (device && image.view != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, image.view, nullptr);
+		}
+		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+		}
+		image.image = VK_NULL_HANDLE;
+		image.allocation = VK_NULL_HANDLE;
+		image.view = VK_NULL_HANDLE;
+		image.sampler = VK_NULL_HANDLE;
+	};
+
+	auto DestroyFramebuffer = [&](VkFramebuffer& framebuffer) {
+		if (framebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(device, framebuffer, nullptr);
+			framebuffer = VK_NULL_HANDLE;
+		}
+	};
+
+	DestroyFramebuffer(directionalShadowFramebuffer);
+	DestroyFramebuffer(spotShadowFramebuffer);
+	DestroyFramebuffer(areaShadowFramebuffer);
+	for (VkFramebuffer& framebuffer : pointShadowFaceFramebuffers) {
+		DestroyFramebuffer(framebuffer);
+	}
+
+	for (VkImageView& faceView : pointShadowDepthFaceViews) {
+		if (faceView != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, faceView, nullptr);
+			faceView = VK_NULL_HANDLE;
+		}
+	}
+	for (VkImageView& faceView : pointShadowColorFaceViews) {
+		if (faceView != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, faceView, nullptr);
+			faceView = VK_NULL_HANDLE;
+		}
+	}
+
+	DestroyVulkanImage(directionalShadowDepth);
+	DestroyVulkanImage(directionalShadowColor);
+	DestroyVulkanImage(spotShadowDepth);
+	DestroyVulkanImage(spotShadowColor);
+	DestroyVulkanImage(areaShadowDepth);
+	DestroyVulkanImage(areaShadowColor);
+	DestroyVulkanImage(pointShadowCubeDepth);
+	DestroyVulkanImage(pointShadowCubeColor);
+	DestroyVulkanImage(ltcAmplitudeTexture);
+	DestroyVulkanImage(ltcInverseTexture);
+
 	textureIndexMap.clear();
 	freeTextureIndices.clear();
-	nextTextureIndex = 1; // Index 0 is reserved for Default Texture
+	nextTextureIndex = 2; // Index 0 is Default White, Index 1 is Default Normal
+
+    // Reset shadow texture indices so they get reallocated on reopen
+    directionalShadowTextureIndex = 0;
+    spotShadowTextureIndex = 0;
+    areaShadowTextureIndex = 0;
+    ltcAmplitudeTextureIndex = 0;
+    ltcInverseTextureIndex = 0;
+
+	// Reset default texture descriptors to prevent stale views from being sampled if they were overwritten
+	if (defaultTexture.view != VK_NULL_HANDLE) {
+		UpdateGlobalTexture(0, defaultTexture);
+	}
+	if (defaultNormalTexture.view != VK_NULL_HANDLE) {
+		UpdateGlobalTexture(1, defaultNormalTexture);
+	}
 
 	materialIndexMap.clear();
 	freeMaterialIndices.clear();

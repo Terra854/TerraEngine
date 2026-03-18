@@ -9,6 +9,9 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include "Renderer/RenderSystem.h"
+#include "Resource/ResourceManager.h"
+
 static std::shared_mutex g_ScriptGlueMutex;
 
 enum class ScriptType : int
@@ -126,6 +129,32 @@ extern "C" {
                 it->second.setter(*objOpt, propertyName, val);
             }
         }
+    }
+
+    void Native_Graphics_SetQualityPreset(uint32_t preset) {
+        RenderSystem::Instance().SetQualityPreset(static_cast<QualityPreset>(preset));
+    }
+
+    uint32_t Native_Graphics_GetQualityPreset() {
+        return static_cast<uint32_t>(RenderSystem::Instance().GetQualityPreset());
+    }
+
+    void Native_Graphics_SetRenderSettings(RenderSettings* settings) {
+        if (settings) {
+            RenderSystem::Instance().SetRenderSettings(*settings);
+        }
+    }
+
+    void Native_Graphics_GetRenderSettings(RenderSettings* outSettings) {
+        if (outSettings) {
+            *outSettings = RenderSystem::Instance().GetRenderSettings();
+        }
+    }
+
+    const char* Native_ResourceManager_GetAssetRoot() {
+        static std::string assetRoot;
+        assetRoot = ResourceManager::Instance().GetAssetRoot().string();
+        return assetRoot.c_str();
     }
 
 }

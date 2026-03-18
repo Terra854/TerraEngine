@@ -34,6 +34,8 @@ struct FrameCullingData
 	float4 clusterDepthAndViewport;
 	column_major float4x4 viewMatrix;
 	column_major float4x4 invProjection;
+	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: maxLights, w: enableLTC
+	uint4 renderSettings1; // x: enableIBL, y: aniso, zw: reserved
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
 	uint reserved0;
@@ -158,6 +160,31 @@ float ComputePointAttenuation(GPULight light, float3 worldPosition)
 	return attenuation * (windowFactor * windowFactor);
 }
 
+float SampleShadowPCF(Texture2D shadowMap, SamplerState shadowSampler, float2 uv, float depthNdc, float bias, uint filterSize, float2 texelSize)
+{
+	if (filterSize <= 1u)
+	{
+		const float shadowDepth = shadowMap.Sample(shadowSampler, uv).r;
+		return (depthNdc - bias) <= shadowDepth ? 1.0f : 0.0f;
+	}
+
+	float visibility = 0.0f;
+	float weight = 0.0f;
+	int range = (int)(filterSize / 2u);
+
+	for (int y = -range; y <= range; ++y)
+	{
+		for (int x = -range; x <= range; ++x)
+		{
+			const float2 offset = float2((float)x, (float)y) * texelSize;
+			const float tapDepth = shadowMap.Sample(shadowSampler, uv + offset).r;
+			visibility += (depthNdc - bias) <= tapDepth ? 1.0f : 0.0f;
+			weight += 1.0f;
+		}
+	}
+	return visibility / weight;
+}
+
 float SampleDirectionalShadow(GPULight light, FrameCullingData frame, float3 worldPosition)
 {
 	if (light.shadowAndPadding.x <= 0.5f || light.shadowAndPadding.y < 0.0f)
@@ -184,11 +211,13 @@ float SampleDirectionalShadow(GPULight light, FrameCullingData frame, float3 wor
 
 	const float linearDepth = dot(toPoint, lightDir);
 	const float depthNdc = saturate((linearDepth - kDirectionalShadowNear) / (kDirectionalShadowFar - kDirectionalShadowNear));
-	const float shadowDepth = globalTextures[nonUniformIndex].Sample(globalSamplers[nonUniformIndex], uv).r;
-	return (depthNdc - kDirectionalShadowBias) <= shadowDepth ? 1.0f : 0.0f;
+	
+	const float res = (float)frame.renderSettings0.x;
+	const float2 texelSize = 1.0f / max(res, 512.0f);
+	return SampleShadowPCF(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], uv, depthNdc, kDirectionalShadowBias, frame.renderSettings0.y, texelSize);
 }
 
-float SampleSpotShadow(GPULight light, float3 worldPosition)
+float SampleSpotShadow(GPULight light, FrameCullingData frame, float3 worldPosition)
 {
 	if (light.shadowAndPadding.x <= 0.5f || light.shadowAndPadding.y < 0.0f)
 	{
@@ -219,8 +248,10 @@ float SampleSpotShadow(GPULight light, float3 worldPosition)
 
 	const float range = max(light.directionAndRange.w, 0.1f);
 	const float depthNdc = saturate(lightSpace.z / range);
-	const float shadowDepth = globalTextures[nonUniformIndex].Sample(globalSamplers[nonUniformIndex], uv).r;
-	return (depthNdc - kSpotShadowBias) <= shadowDepth ? 1.0f : 0.0f;
+	
+	const float res = (float)frame.renderSettings0.x;
+	const float2 texelSize = 1.0f / max(res, 512.0f);
+	return SampleShadowPCF(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], uv, depthNdc, kSpotShadowBias, frame.renderSettings0.y, texelSize);
 }
 
 float SamplePointShadow(GPULight light, float3 worldPosition)
@@ -270,24 +301,11 @@ float SampleAreaShadow(GPULight light, FrameCullingData frame, float3 worldPosit
 	}
 
 	const float depthNdc = saturate(projectedDepth / range);
-	const float2 texel = 1.0f / max(float2(256.0f, 256.0f), frame.clusterDepthAndViewport.zw * 0.25f);
+	const float res = (float)frame.renderSettings0.x;
+	const float2 texel = 1.0f / max(res, 512.0f);
 	const float kernelScale = saturate(max(width, height) / max(range, 0.1f)) * 2.0f;
-	float visibility = 0.0f;
-	float weight = 0.0f;
-	[unroll]
-	for (int y = -1; y <= 1; ++y)
-	{
-		[unroll]
-		for (int x = -1; x <= 1; ++x)
-		{
-			const float2 offset = float2((float)x, (float)y) * texel * kernelScale;
-			const float tapDepth = globalTextures[nonUniformIndex].Sample(globalSamplers[nonUniformIndex], uv + offset).r;
-			const float tapVisibility = (depthNdc - kAreaShadowBias) <= tapDepth ? 1.0f : 0.0f;
-			visibility += tapVisibility;
-			weight += 1.0f;
-		}
-	}
-	return weight > 0.0f ? (visibility / weight) : 1.0f;
+	
+	return SampleShadowPCF(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], uv, depthNdc, kAreaShadowBias, frame.renderSettings0.y, texel * kernelScale);
 }
 
 float ComputeShadowFactor(GPULight light, FrameCullingData frame, float3 worldPosition)
@@ -303,7 +321,7 @@ float ComputeShadowFactor(GPULight light, FrameCullingData frame, float3 worldPo
 	}
 	if (lightType == kLightTypeSpot)
 	{
-		return SampleSpotShadow(light, worldPosition);
+		return SampleSpotShadow(light, frame, worldPosition);
 	}
 	if (lightType == kLightTypeAreaRect)
 	{
@@ -448,7 +466,15 @@ float3 EvaluateSingleLight(uint lightIndex, PSIn input, FrameCullingData frame, 
 	}
 	if (lightType == kLightTypeAreaRect)
 	{
-		return EvaluateAreaLightLTC(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
+		if (frame.renderSettings0.w > 0u)
+		{
+			return EvaluateAreaLightLTC(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
+		}
+		else
+		{
+			// Fallback to point light if LTC is disabled
+			return EvaluatePointLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
+		}
 	}
 	return float3(0.0, 0.0, 0.0);
 }
@@ -526,5 +552,12 @@ float4 main(PSIn input) : SV_Target0
 		return float4(BuildHeatmapColor(normalizedCount), 1.0);
 	}
 
-	return float4(lighting + emissive, finalColor.a);
+	float3 finalLighting = lighting;
+	if (frame.renderSettings1.x > 0u)
+	{
+		// Placeholder for IBL evaluation (Ultra tier)
+		// finalLighting += EvaluateIBL(normal, viewDir, finalColor.rgb, metallic, roughness);
+	}
+
+	return float4(finalLighting + emissive, finalColor.a);
 }

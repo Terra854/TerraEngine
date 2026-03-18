@@ -8,7 +8,7 @@ EditorWindow::EditorWindow(const std::string& title, bool startVisible, ImGuiWin
 void EditorWindow::Draw() {
     if (!m_IsVisible) return;
 
-    bool expanded = ImGui::Begin(m_Title.c_str(), nullptr, m_Flags);
+    bool expanded = ImGui::Begin(m_Title.c_str(), &m_IsVisible, m_Flags);
 
     // Context Menu Logic (mimicking BeginWindowWithContextMenu)
     ImGuiWindow* window = ImGui::GetCurrentWindow();

@@ -12,14 +12,15 @@ struct FrameCullingData
 	float4 cameraPositionAndEpsilon;
 	uint4 clusterGridAndLightCount;
 	float4 clusterDepthAndViewport;
-    column_major float4x4 viewMatrix;
-    column_major float4x4 invProjection;
+	column_major float4x4 viewMatrix;
+	column_major float4x4 invProjection;
+	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: maxLights, w: enableLTC
+	uint4 renderSettings1; // x: enableIBL, y: aniso, zw: reserved
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
 	uint reserved0;
 	uint reserved1;
 };
-
 [[vk::binding(12, 0)]] Texture2D<float> depthBuffer;
 [[vk::binding(13, 0)]] RWStructuredBuffer<ClusterDepth> clusterDepthBounds;
 [[vk::binding(2, 0)]] StructuredBuffer<FrameCullingData> frameCullingData;

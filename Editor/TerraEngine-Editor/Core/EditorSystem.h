@@ -44,7 +44,11 @@ private:
     ManagedHideAllWindowsFn managedHideAllWindows = nullptr;
 
     bool initialized = false;
+    bool pendingLoadLayout = false;
+    bool pendingSaveLayout = false;
 public:
     void DrawWindowMenu();
+    void HideAllWindows();
+    void GetManagedWindows(void (*callback)(const char*, int));
 };
 

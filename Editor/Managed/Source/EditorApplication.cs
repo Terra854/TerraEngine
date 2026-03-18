@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using Hexa.NET.ImGui;
 using TerraEngine.Editor.Framework;
@@ -9,6 +11,7 @@ namespace TerraEngine.Editor
     {
         private static bool _initialized = false;
         private static StatusWindow _statusWindow = null!;
+        private static RenderSettingsWindow _renderSettingsWindow = null!;
 
         [UnmanagedCallersOnly]
         public static void Initialize(IntPtr imguiContext)
@@ -26,9 +29,7 @@ namespace TerraEngine.Editor
                 ImGui.SetCurrentContext((ImGuiContext*)imguiContext);
                 TerraEngine.Log.Info("Context Set.");
 
-                // Initialize Windows
-                _statusWindow = new StatusWindow();
-                WindowManager.RegisterWindow(_statusWindow);
+                EnsureWindowsRegistered();
             }
             catch (Exception e)
             {
@@ -38,6 +39,21 @@ namespace TerraEngine.Editor
             _initialized = true;
         }
 
+        private static void EnsureWindowsRegistered()
+        {
+            if (_statusWindow == null)
+            {
+                _statusWindow = new StatusWindow();
+                WindowManager.RegisterWindow(_statusWindow);
+            }
+
+            if (_renderSettingsWindow == null)
+            {
+                _renderSettingsWindow = new RenderSettingsWindow();
+                WindowManager.RegisterWindow(_renderSettingsWindow);
+            }
+        }
+
         [UnmanagedCallersOnly]
         public static void Update(float deltaTime)
         {
@@ -45,6 +61,8 @@ namespace TerraEngine.Editor
 
             try
             {
+                EnsureWindowsRegistered();
+
                 // Update specific window data if needed
                 if (_statusWindow != null)
                 {
@@ -65,23 +83,17 @@ namespace TerraEngine.Editor
         {
             try
             {
-                var windows = WindowManager.GetWindows();
-                
-                // Fallback for debugging
-                if (!System.Linq.Enumerable.Any(windows))
-                {
-                    if (_statusWindow == null) _statusWindow = new StatusWindow();
-                    WindowManager.RegisterWindow(_statusWindow);
-                    windows = WindowManager.GetWindows();
-                }
+                EnsureWindowsRegistered();
 
+                var windows = WindowManager.GetWindows();
                 int count = 0;
                 foreach (var window in windows)
                 {
                     count++;
-                    if (ImGui.MenuItem(window.Title))
+                    bool visible = window.IsVisible;
+                    if (ImGui.MenuItem(window.Title, "", ref visible))
                     {
-                        window.IsVisible = true;
+                        window.IsVisible = visible;
                     }
                 }
 
@@ -115,6 +127,7 @@ namespace TerraEngine.Editor
         {
             try
             {
+                EnsureWindowsRegistered();
                 foreach (var window in WindowManager.GetWindows())
                 {
                     IntPtr titlePtr = Marshal.StringToHGlobalAnsi(window.Title);
@@ -133,6 +146,7 @@ namespace TerraEngine.Editor
         {
             try
             {
+                EnsureWindowsRegistered();
                 string? title = Marshal.PtrToStringAnsi(titlePtr);
                 if (title == null) return;
 
@@ -156,6 +170,7 @@ namespace TerraEngine.Editor
         {
             try
             {
+                EnsureWindowsRegistered();
                 foreach (var window in WindowManager.GetWindows())
                 {
                     window.IsVisible = false;

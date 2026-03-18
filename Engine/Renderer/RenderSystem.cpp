@@ -24,6 +24,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <nlohmann/json.hpp>
+#include <fstream>
+#include <filesystem>
+
 RenderSystem& RenderSystem::Instance()
 {
 	// Provide a singleton instance so the main engine loop can register the
@@ -58,6 +62,8 @@ void RenderSystem::Initialize()
 			TERRAENGINE_LOG(LogLevel::Error, "Unknown exception in resize callback");
 		}
 	});
+
+	LoadSettings();
 
 	initialized = true;
 }
@@ -446,6 +452,7 @@ void RenderSystem::Update(float deltaTime)
 	frameData.deltaTimeSeconds = deltaTime;
 	frameData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
 	frameData.cullingEpsilon = 0.001f;
+	frameData.settings = currentSettings;
 	frameData.lights = std::move(packedLights);
 	frameData.commands = drawCommands;
 
@@ -612,4 +619,128 @@ RenderStatsSnapshot RenderSystem::GetLatestRenderStats(RenderViewType viewType) 
 		return latestSceneStats;
 	}
 	return latestGameStats;
+}
+
+void RenderSystem::SetQualityPreset(QualityPreset preset)
+{
+	if (preset == QualityPreset::Custom)
+	{
+		currentPreset = QualityPreset::Custom;
+		return;
+	}
+
+	currentPreset = preset;
+	switch (preset)
+	{
+	case QualityPreset::Low:
+		currentSettings.shadowResolution = 512u;
+		currentSettings.shadowFilteringSize = 1u;
+		currentSettings.maxDynamicLights = 8u;
+		currentSettings.enableLTC = 0u;
+		currentSettings.enableIBL = 0u;
+		currentSettings.anisotropicFiltering = 1u;
+		break;
+	case QualityPreset::Medium:
+		currentSettings.shadowResolution = 1024u;
+		currentSettings.shadowFilteringSize = 3u;
+		currentSettings.maxDynamicLights = 32u;
+		currentSettings.enableLTC = 1u;
+		currentSettings.enableIBL = 1u;
+		currentSettings.anisotropicFiltering = 1u;
+		break;
+	case QualityPreset::High:
+		currentSettings.shadowResolution = 2048u;
+		currentSettings.shadowFilteringSize = 5u;
+		currentSettings.maxDynamicLights = 128u;
+		currentSettings.enableLTC = 1u;
+		currentSettings.enableIBL = 1u;
+		currentSettings.anisotropicFiltering = 4u;
+		break;
+	case QualityPreset::Ultra:
+		currentSettings.shadowResolution = 4096u;
+		currentSettings.shadowFilteringSize = 7u;
+		currentSettings.maxDynamicLights = 1024u;
+		currentSettings.enableLTC = 1u;
+		currentSettings.enableIBL = 1u;
+		currentSettings.anisotropicFiltering = 16u;
+		break;
+	}
+
+	SaveSettings();
+}
+
+void RenderSystem::SetRenderSettings(const RenderSettings& settings)
+{
+	currentSettings = settings;
+	currentPreset = QualityPreset::Custom;
+	SaveSettings();
+}
+
+void RenderSystem::LoadSettings()
+{
+	namespace fs = std::filesystem;
+	const fs::path settingsPath = ResourceManager::Instance().GetAssetRoot() / "ProjectSettings" / "RenderSettings.json";
+
+	if (!fs::exists(settingsPath))
+	{
+		SetQualityPreset(QualityPreset::High);
+		return;
+	}
+
+	try
+	{
+		std::ifstream file(settingsPath);
+		nlohmann::json j;
+		file >> j;
+
+		currentPreset = static_cast<QualityPreset>(j.value("preset", 2u));
+		
+		auto s = j["settings"];
+		currentSettings.shadowResolution = s.value("shadowResolution", 2048u);
+		currentSettings.shadowFilteringSize = s.value("shadowFilteringSize", 5u);
+		currentSettings.maxDynamicLights = s.value("maxDynamicLights", 128u);
+		currentSettings.enableLTC = s.value("enableLTC", 1u);
+		currentSettings.enableIBL = s.value("enableIBL", 1u);
+		currentSettings.anisotropicFiltering = s.value("anisotropicFiltering", 4u);
+	}
+	catch (const std::exception& e)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to load RenderSettings: " << e.what());
+		SetQualityPreset(QualityPreset::High);
+	}
+}
+
+void RenderSystem::SaveSettings()
+{
+	namespace fs = std::filesystem;
+	const fs::path settingsDir = ResourceManager::Instance().GetAssetRoot() / "ProjectSettings";
+	const fs::path settingsPath = settingsDir / "RenderSettings.json";
+
+	if (!fs::exists(settingsDir))
+	{
+		fs::create_directories(settingsDir);
+	}
+
+	try
+	{
+		nlohmann::json j;
+		j["preset"] = static_cast<uint32_t>(currentPreset);
+		
+		nlohmann::json s;
+		s["shadowResolution"] = currentSettings.shadowResolution;
+		s["shadowFilteringSize"] = currentSettings.shadowFilteringSize;
+		s["maxDynamicLights"] = currentSettings.maxDynamicLights;
+		s["enableLTC"] = currentSettings.enableLTC;
+		s["enableIBL"] = currentSettings.enableIBL;
+		s["anisotropicFiltering"] = currentSettings.anisotropicFiltering;
+		
+		j["settings"] = s;
+
+		std::ofstream file(settingsPath);
+		file << j.dump(4);
+	}
+	catch (const std::exception& e)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to save RenderSettings: " << e.what());
+	}
 }

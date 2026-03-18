@@ -14,12 +14,13 @@
 
 // ImGui
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <ImGuiFileDialog.h>
 #include <GLFW/glfw3.h>
 #include <utility>
-
+#include <fstream>
 #include <unordered_map>
 
 // Static storage for callback chaining
@@ -109,12 +110,12 @@ void EditorSystem::Setup(Engine* enginePtr) {
         }
         // Transition logic
         mainEditor->OnProjectOpened();
-        LoadWorkspaceLayout();
+        pendingLoadLayout = true;
     });
 
     mainEditor->SetOnProjectClosedCallback([this]() {
         SaveWorkspaceLayout();
-        
+
         // Hide all C++ windows
         auto windows = mainEditor->GetWindows();
         for (auto& win : windows) {
@@ -122,9 +123,10 @@ void EditorSystem::Setup(Engine* enginePtr) {
         }
 
         // Hide all C# windows
-        if (managedHideAllWindows) {
-            managedHideAllWindows();
-        }
+        HideAllWindows();
+
+        // Clear ImGui state for the next project
+        ImGui::LoadIniSettingsFromMemory("");
 
         AssetDatabase::Instance().Shutdown();
         // Transition logic
@@ -156,28 +158,25 @@ void EditorSystem::SaveWorkspaceLayout() {
 
     // 1b. Save Managed (C#) Windows
     if (managedGetWindows) {
-        static nlohmann::json* s_currentLayout = nullptr;
-        s_currentLayout = &layout;
-
+        static nlohmann::json* s_layoutPtr = nullptr;
+        s_layoutPtr = &layout;
         managedGetWindows([](const char* title, int visible) {
-            if (s_currentLayout && title) {
+            if (s_layoutPtr && title) {
                 nlohmann::json winJson;
                 winJson["title"] = title;
                 winJson["visible"] = (visible != 0);
                 winJson["managed"] = true;
-                (*s_currentLayout)["windows"].push_back(winJson);
+                (*s_layoutPtr)["windows"].push_back(winJson);
             }
         });
-
-        s_currentLayout = nullptr;
+        s_layoutPtr = nullptr;
     }
 
     std::ofstream file(userSettingsDir / "EditorLayout.terra");
     file << layout.dump(4);
 
     // 2. ImGui Docking State (.ini)
-    // ImGui usually saves this automatically to IniFilename if set.
-    // We explicitly call save just in case or to ensure it's synced.
+    // We explicitly call save to ensure it's synced to our project-specific file.
     ImGui::SaveIniSettingsToDisk((userSettingsDir / "EditorLayout.ini").string().c_str());
 }
 
@@ -254,6 +253,7 @@ void EditorSystem::Initialize() {
     ImGuiIO& io = ImGui::GetIO(); (void)io;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.IniFilename = nullptr; // Disable default auto-save to imgui.ini, we handle it per-project
 
     ImGui::StyleColorsDark();
 
@@ -264,12 +264,6 @@ void EditorSystem::Initialize() {
     // 5. Chain Callbacks
     g_PrevResizeCallback = glfwSetFramebufferSizeCallback(window, [](GLFWwindow* w, int width, int height) {
         if (g_PrevResizeCallback) g_PrevResizeCallback(w, width, height);
-        // ImGui doesn't export WindowSize callback, but NewFrame pulls it.
-        // However, we can call this if needed or rely on NewFrame.
-        // ImGui_ImplGlfw_WindowSizeCallback(w, width, height); 
-        // Note: ImGui_ImplGlfw usually installs WindowSize callback? No, FramebufferSize.
-        // We will leave ImGui to poll in NewFrame or use specific function if exported.
-        // Actually ImGui_ImplGlfw_NewFrame calls glfwGetFramebufferSize.
     });
 
     g_PrevMouseButtonCallback = glfwSetMouseButtonCallback(window, [](GLFWwindow* w, int button, int action, int mods) {
@@ -352,8 +346,6 @@ void EditorSystem::Initialize() {
     
     ImGui_ImplVulkan_Init(&init_info);
     
-    // ImGui_ImplVulkan_CreateFontsTexture(); // Handled by NewFrame or Init
-
     if (projectHub) projectHub->OnBackendReady();
     if (mainEditor) mainEditor->OnBackendReady();
 
@@ -361,22 +353,15 @@ void EditorSystem::Initialize() {
     std::filesystem::path cwd = std::filesystem::current_path();
     std::filesystem::path binDir;
     
-    // Try to locate artifacts
     if (std::filesystem::exists(cwd / "Managed" / "TerraEngine.Editor.runtimeconfig.json")) {
         binDir = cwd / "Managed";
 	} else {
-		// Fallback or error
 		binDir = cwd / "Editor" / "Managed"; 
 		TERRAENGINE_LOG(LogLevel::Warning, "[DotNet] Could not find runtimeconfig.json in " << cwd << " or subdirectories.");
 	}
 
-    // Ensure absolute paths
     binDir = std::filesystem::absolute(binDir);
-    std::filesystem::path configPath = binDir / "TerraEngine.Editor.runtimeconfig.json";
     std::filesystem::path dllPath = binDir / "TerraEngine.Editor.dll";
-
-	TERRAENGINE_LOG(LogLevel::Info, "[DotNet] Loading Runtime Config: " << configPath);
-	TERRAENGINE_LOG(LogLevel::Info, "[DotNet] Loading Assembly: " << dllPath);
 
 	if (!DotNetHost::Instance().Initialize(dllPath)) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to initialize .NET Host with assembly: " << dllPath);
@@ -419,8 +404,6 @@ void EditorSystem::Initialize() {
 
 		if (managedInitialize) {
 			managedInitialize(ImGui::GetCurrentContext());
-		} else {
-			TERRAENGINE_LOG(LogLevel::Error, "Failed to load Managed Initialize function.");
 		}
 	}
 }
@@ -428,7 +411,16 @@ void EditorSystem::Initialize() {
 void EditorSystem::Update(float deltaTime) {
     if (!initialized) return;
 
-    // Standard ImGui Frame
+    if (pendingLoadLayout) {
+        LoadWorkspaceLayout();
+        pendingLoadLayout = false;
+    }
+
+    if (pendingSaveLayout) {
+        SaveWorkspaceLayout();
+        pendingSaveLayout = false;
+    }
+
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
@@ -437,7 +429,6 @@ void EditorSystem::Update(float deltaTime) {
         AssetDatabase::Instance().Update();
         mainEditor->Update(deltaTime);
         mainEditor->DrawUI();
-		// Enable cursor wrap only while dragging inspector values to avoid edge clipping.
 		if (mainEditor && mainEditor->IsInspectorValueDragging()) {
 			auto& windowSystem = WindowSystem::Instance();
 			GLFWwindow* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
@@ -448,14 +439,12 @@ void EditorSystem::Update(float deltaTime) {
         projectHub->DrawUI();
     }
 
-    // Call Managed Editor Update after the background DockSpace is submitted
     if (managedUpdate) {
         managedUpdate(deltaTime);
     }
     
     ImGui::Render();
     
-    // Present
     auto& renderSystem = RenderSystem::Instance();
     auto* rhi = renderSystem.GetContext();
     auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
@@ -472,7 +461,6 @@ void EditorSystem::Shutdown() {
         managedShutdown();
     }
 
-    // Ensure GPU is idle before destroying ImGui resources which might be in use
     auto& renderSystem = RenderSystem::Instance();
     if (auto* rhi = renderSystem.GetContext()) {
         rhi->WaitIdle();
@@ -500,5 +488,17 @@ void EditorSystem::DrawWindowMenu() {
         managedDrawWindowMenu();
     } else {
         ImGui::TextDisabled("Managed menu hook not loaded");
+    }
+}
+
+void EditorSystem::HideAllWindows() {
+    if (managedHideAllWindows) {
+        managedHideAllWindows();
+    }
+}
+
+void EditorSystem::GetManagedWindows(void (*callback)(const char*, int)) {
+    if (managedGetWindows) {
+        managedGetWindows(callback);
     }
 }

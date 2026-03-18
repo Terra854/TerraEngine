@@ -378,28 +378,23 @@ void MainEditorSubsystem::DrawMainMenuBar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Windows")) {
-            if (ImGui::BeginMenu("C++")) {
-                for (auto& win : m_Windows) {
-                    if (ImGui::MenuItem(win->GetTitle().c_str())) {
-                        win->SetVisible(true);
-                    }
+            for (auto& win : m_Windows) {
+                if (ImGui::MenuItem(win->GetTitle().c_str())) {
+                    win->SetVisible(true);
                 }
-                ImGui::EndMenu();
             }
             
-            if (ImGui::BeginMenu("C#")) {
-                EditorSystem* editorSystem = nullptr;
-                if (ctx && ctx->engine) {
-                    editorSystem = dynamic_cast<EditorSystem*>(ctx->engine->GetEditorSystem());
-                }
-                
-                if (editorSystem) {
-                    editorSystem->DrawWindowMenu();
-                } else {
-                    ImGui::TextDisabled("Editor System not found");
-                }
-                ImGui::EndMenu();
+            ImGui::Separator();
+
+            EditorSystem* editorSystem = nullptr;
+            if (ctx && ctx->engine) {
+                editorSystem = dynamic_cast<EditorSystem*>(ctx->engine->GetEditorSystem());
             }
+            
+            if (editorSystem) {
+                editorSystem->DrawWindowMenu();
+            }
+            
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
@@ -430,6 +425,7 @@ void MainEditorSubsystem::RequestExit() {
         m_PendingAction = PendingAction::Exit;
         m_ShowSaveConfirmation = true;
     } else {
+        CloseCurrentProject();
         if (ctx && ctx->engine) ctx->engine->SignalShutdown();
     }
 }
@@ -443,6 +439,7 @@ void MainEditorSubsystem::ExecutePendingAction() {
             CloseCurrentProject();
             break;
         case PendingAction::Exit:
+            CloseCurrentProject();
             if (ctx && ctx->engine) ctx->engine->SignalShutdown();
             break;
         default:
@@ -510,10 +507,12 @@ void MainEditorSubsystem::CloseCurrentProject() {
     selectedEntity = std::nullopt;
     selectedAsset = std::nullopt;
     
+    // Trigger callbacks BEFORE closing the project in ProjectManager
+    // so that subsystems can save data to the project directory.
+    if (onProjectClosed) onProjectClosed();
+
     // Close Project
     if (ctx && ctx->projectManager) {
         ctx->projectManager->CloseProject();
     }
-    
-    if (onProjectClosed) onProjectClosed();
 }

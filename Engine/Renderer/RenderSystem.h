@@ -36,10 +36,18 @@ public:
 
 	void DeleteResource(const TerraEngine::UUID& id);
     
-    void Clear();
+	void Clear();
 	void SetTaskShaderCullingEnabled(bool enabled);
 	bool IsTaskShaderCullingEnabled() const { return taskShaderCullingEnabled; }
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const;
+
+	void SetQualityPreset(QualityPreset preset);
+	QualityPreset GetQualityPreset() const { return currentPreset; }
+	void SetRenderSettings(const RenderSettings& settings);
+	const RenderSettings& GetRenderSettings() const { return currentSettings; }
+
+	void LoadSettings();
+	void SaveSettings();
 
 	RHIContext* GetContext() const { return rhi.get(); }
 
@@ -91,4 +99,7 @@ private:
 	mutable std::mutex statsMutex;
 	RenderStatsSnapshot latestGameStats{};
 	RenderStatsSnapshot latestSceneStats{};
+
+	QualityPreset currentPreset = QualityPreset::High;
+	RenderSettings currentSettings;
 };
