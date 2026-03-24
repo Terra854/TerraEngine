@@ -23,6 +23,12 @@ public:
 		snapshot.viewType = viewType;
 		return snapshot;
 	}
+	virtual FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const
+	{
+		FrameBudgetDiagnosticsSnapshot snapshot{};
+		snapshot.viewType = viewType;
+		return snapshot;
+	}
 	virtual void InvalidateMaterial(const TerraEngine::UUID& materialId) {}
 	virtual void InvalidateMesh(const TerraEngine::UUID& meshId) {}
 	virtual void InvalidateTexture(const TerraEngine::UUID& textureId) {}

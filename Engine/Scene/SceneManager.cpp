@@ -24,6 +24,35 @@
 #include "Scene/LightComponent.h"
 #include "Scene/MeshRenderComponent.h"
 
+namespace
+{
+	void RemoveValidationLights(ObjectManager& objects)
+	{
+		// Validation fixtures need deterministic light ownership, so remove any
+		// prior light-only objects before spawning the new arrangement.
+		const std::vector<Object> existingLights = objects.getObjectsWithComponents<LightComponent>();
+		for (const Object& lightObject : existingLights)
+		{
+			objects.removeObject(lightObject);
+		}
+	}
+
+	void ConfigureValidationPointLight(Object lightObject, const glm::vec3& position, const glm::vec3& color, float intensity, float range)
+	{
+		if (Transform* transform = lightObject.getComponent<Transform>())
+		{
+			SetComponentProperty(*transform, "Position", position);
+		}
+
+		auto& light = lightObject.addComponent<LightComponent>();
+		SetComponentProperty(light, "type", static_cast<std::uint32_t>(LightType::Point));
+		SetComponentProperty(light, "color", color);
+		SetComponentProperty(light, "intensity", std::max(intensity, 0.0f));
+		SetComponentProperty(light, "range", std::max(range, 0.1f));
+		SetComponentProperty(light, "castsShadows", false);
+	}
+}
+
 SceneManager& SceneManager::Instance()
 {
 	static SceneManager instance;
@@ -370,6 +399,80 @@ void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32
 
 	ForceMarkActiveSceneDirty();
 	TERRAENGINE_LOG(LogLevel::Info, "Spawned stress test light grid with " << (safeGridWidth * safeGridDepth) << " point lights.");
+}
+
+void SceneManager::SpawnClusterBinDenseFixture()
+{
+	ObjectManager& objects = ObjectManager::instance();
+	RemoveValidationLights(objects);
+
+	// Pack more than 64 lights into a tight volume near the origin so the
+	// clustered-light build is forced to produce at least one dense range.
+	constexpr std::uint32_t kDenseLightCount = 96u;
+	for (std::uint32_t lightIndex = 0u; lightIndex < kDenseLightCount; ++lightIndex)
+	{
+		const float ringIndex = static_cast<float>(lightIndex % 12u);
+		const float stackIndex = static_cast<float>(lightIndex / 12u);
+		const float angle = ringIndex * glm::two_pi<float>() / 12.0f;
+		const float radius = 0.35f + static_cast<float>(lightIndex % 3u) * 0.08f;
+		const glm::vec3 position(
+			std::cos(angle) * radius,
+			0.75f + stackIndex * 0.18f,
+			-5.5f + std::sin(angle) * radius);
+		const glm::vec3 color(
+			0.55f + static_cast<float>((lightIndex * 7u) % 30u) / 100.0f,
+			0.55f + static_cast<float>((lightIndex * 11u) % 25u) / 100.0f,
+			0.60f + static_cast<float>((lightIndex * 13u) % 20u) / 100.0f);
+
+		ConfigureValidationPointLight(
+			objects.createObject("DenseClusterValidationLight"),
+			position,
+			color,
+			24.0f,
+			8.0f);
+	}
+
+	ForceMarkActiveSceneDirty();
+	TERRAENGINE_LOG(LogLevel::Info, "Spawned dense cluster-bin validation fixture with " << kDenseLightCount << " point lights.");
+}
+
+void SceneManager::SpawnClusterBinSparseFixture()
+{
+	ObjectManager& objects = ObjectManager::instance();
+	RemoveValidationLights(objects);
+
+	// Spread lights far apart so the validation run observes many empty
+	// clusters while still keeping a few populated ranges for correctness.
+	constexpr std::uint32_t kSparseWidth = 6u;
+	constexpr std::uint32_t kSparseDepth = 5u;
+	const float spacing = 12.0f;
+	const float centerX = static_cast<float>(kSparseWidth - 1u) * 0.5f;
+	const float centerZ = static_cast<float>(kSparseDepth - 1u) * 0.5f;
+
+	for (std::uint32_t z = 0u; z < kSparseDepth; ++z)
+	{
+		for (std::uint32_t x = 0u; x < kSparseWidth; ++x)
+		{
+			const glm::vec3 position(
+				(static_cast<float>(x) - centerX) * spacing,
+				1.25f + static_cast<float>((x + z) % 3u) * 0.2f,
+				-12.0f + (static_cast<float>(z) - centerZ) * spacing);
+			const glm::vec3 color(
+				0.45f + static_cast<float>((x * 13u + z * 5u) % 20u) / 100.0f,
+				0.50f + static_cast<float>((x * 7u + z * 11u) % 20u) / 100.0f,
+				0.55f + static_cast<float>((x * 3u + z * 17u) % 20u) / 100.0f);
+
+			ConfigureValidationPointLight(
+				objects.createObject("SparseClusterValidationLight"),
+				position,
+				color,
+				8.0f,
+				3.5f);
+		}
+	}
+
+	ForceMarkActiveSceneDirty();
+	TERRAENGINE_LOG(LogLevel::Info, "Spawned sparse cluster-bin validation fixture with " << (kSparseWidth * kSparseDepth) << " point lights.");
 }
 
 std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesystem::path& path, SceneFileType type)

@@ -21,11 +21,38 @@ enum class QualityPreset : std::uint32_t
 	Custom = 4
 };
 
+enum class LightingReductionCategory : std::uint32_t
+{
+	None = 0u,
+	Uploaded = 1u,
+	Special = 2u,
+	Retained = 3u,
+	Shadow = 4u
+};
+
+inline constexpr std::uint32_t kFrameLightCandidateFlagShadowCapable = 1u << 0;
+inline constexpr std::uint32_t kFrameLightCandidateFlagSpecialCost = 1u << 1;
+inline constexpr std::uint32_t kFrameLightCandidateFlagDirectional = 1u << 2;
+
+inline constexpr std::uint32_t kGpuLightAnalysisFlagVisible = 1u << 0;
+inline constexpr std::uint32_t kGpuLightAnalysisFlagDirectional = 1u << 1;
+
 struct RenderSettings
 {
 	std::uint32_t shadowResolution = 2048u;
 	std::uint32_t shadowFilteringSize = 5u;
+	// Scene-wide candidate budget uploaded into the lightweight GPU analysis
+	// pass before the final retained-light list is chosen for shading.
+	std::uint32_t maxUploadedLights = 256u;
+	// Scene-wide per-frame cap for how many dynamic lights survive the final
+	// screen-aware selection stage and reach clustered lighting.
 	std::uint32_t maxDynamicLights = 128u;
+	// Scene-wide per-frame cap for how many retained lights may request shadow
+	// resources. The runtime also clamps this against the available shadow slots.
+	std::uint32_t maxShadowLights = 4u;
+	// Optional cap for higher-cost area lights inside the retained-light set so
+	// presets can bound expensive lighting classes independently.
+	std::uint32_t maxAreaLights = 4u;
 	std::uint32_t enableLTC = 1u;
 	std::uint32_t enableIBL = 1u;
 	std::uint32_t anisotropicFiltering = 4u;
@@ -68,9 +95,31 @@ struct alignas(16) GPULight
 	glm::vec4 colorAndIntensity = glm::vec4(0.0f);     // rgb = color, w = scalar intensity
 	glm::vec4 coneAnglesAndArea = glm::vec4(0.0f);     // x = innerCos, y = outerCos, z = width, w = height
 	glm::vec4 shadowAndPadding = glm::vec4(0.0f);      // x = castsShadows flag, y = shadow resource index
-	glm::vec4 extraParams = glm::vec4(0.0f);           // x = shadowStrength, y = shadowBias, z = indirectMultiplier, w = padding
+	glm::vec4 extraParams = glm::vec4(0.0f);           // x = shadowStrength, y = shadowBias, z = indirectMultiplier, w = authored priority
 };
 static_assert(sizeof(GPULight) == 96, "GPULight layout changed; update shader mirror types.");
+
+// CPU-side light candidate metadata keeps stable identifiers and author hints
+// beside the GPU payload so temporal retention and diagnostics remain
+// deterministic without changing the shader-facing light structure.
+struct FrameLightCandidate
+{
+	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+	GPULight gpuLight{};
+	float stabilityPreference = 0.0f;
+	std::uint32_t candidateFlags = 0u;
+};
+
+// Small GPU-written analysis record used by the hybrid CPU/GPU selection path.
+// Keeping this buffer compact makes ordinary runtime diagnostics inexpensive.
+struct alignas(16) GPULightAnalysisRecord
+{
+	float gpuVisibilityScore = 0.0f;
+	float gpuRangeCoverage = 0.0f;
+	std::uint32_t flags = 0u;
+	std::uint32_t reserved = 0u;
+};
+static_assert(sizeof(GPULightAnalysisRecord) == 16, "GPU light analysis layout changed; update shader mirrors.");
 
 // Cluster table entry mapping one cluster to a segment of the flat light-index list.
 struct alignas(16) ClusterData
@@ -85,6 +134,84 @@ struct alignas(16) ClusterData
 };
 static_assert(sizeof(ClusterData) == 48, "ClusterData layout changed; update shader mirror types.");
 
+// Per-frame metadata summarizing how the variable-length shared light list was
+// populated. Validation tools consume this summary so they can reason about
+// dense coverage, sparse-scene waste, and deterministic range stability
+// without reverse-engineering renderer internals.
+struct ClusterLightBuildMetadata
+{
+	std::uint32_t clusterCount = 0u;
+	std::uint32_t activeLightCount = 0u;
+	std::uint32_t lightIndexCapacity = 0u;
+	std::uint32_t usedIndexCount = 0u;
+	std::uint32_t actualAssignedLightCount = 0u;
+	std::uint32_t emptyClusterCount = 0u;
+	std::uint32_t maxClusterLightCount = 0u;
+	std::uint32_t outOfBoundsRangeCount = 0u;
+	std::uint32_t invalidLightIndexCount = 0u;
+	std::uint32_t overflowClusterCount = 0u;
+	std::uint32_t determinismMismatchCount = 0u;
+	std::uint64_t rangeHash = 0u;
+	bool clusteredLightingAvailable = false;
+	bool overflowDetected = false;
+};
+
+// Flat range snapshot for one cluster. Keeping this structure small makes it
+// cheap to export and easy to compare across repeated regression runs.
+struct ClusterLightRangeSnapshot
+{
+	std::uint32_t clusterIndex = 0u;
+	std::uint32_t offset = 0u;
+	std::uint32_t count = 0u;
+	bool outOfBounds = false;
+};
+
+// Immutable validation payload returned by the renderer after a frame
+// completes. Callers receive copies so tooling can inspect the data without
+// mutating renderer-owned state.
+struct ClusterValidationSnapshot
+{
+	RenderViewType viewType = RenderViewType::Game;
+	ClusterLightBuildMetadata buildMetadata{};
+	std::vector<ClusterLightRangeSnapshot> ranges;
+	bool valid = false;
+};
+
+// Lightweight per-frame budgeting summary returned without GPU readback so the
+// editor, QA tools, and validation scripts can verify preset behavior during
+// ordinary runtime sessions.
+struct FrameBudgetDiagnosticsSnapshot
+{
+	RenderViewType viewType = RenderViewType::Game;
+	QualityPreset activePreset = QualityPreset::High;
+	LightingReductionCategory reductionCategory = LightingReductionCategory::None;
+	std::uint32_t uploadedLightBudget = 0u;
+	std::uint32_t retainedLightBudget = 0u;
+	std::uint32_t shadowLightBudget = 0u;
+	std::uint32_t specialLightBudget = 0u;
+	std::uint32_t candidateLightCount = 0u;
+	std::uint32_t uploadedLightCount = 0u;
+	std::uint32_t retainedLightCount = 0u;
+	std::uint32_t specialLightCount = 0u;
+	std::uint32_t shadowEligibleLightCount = 0u;
+	std::uint32_t shadowedLightCount = 0u;
+	std::uint32_t gpuVisibleCandidateCount = 0u;
+	std::uint32_t retainedDirectionalLightCount = 0u;
+	std::uint32_t retainedAuthoredPriorityLightCount = 0u;
+	std::uint32_t retainedLightChurnCount = 0u;
+	std::uint32_t retainedLightReplacementCount = 0u;
+	std::uint32_t stabilityBiasAppliedCount = 0u;
+	std::uint32_t shadowReuseCount = 0u;
+	std::uint32_t shadowReplacementCount = 0u;
+	bool gpuAssistActive = false;
+	bool customOverrideActive = false;
+	bool budgetReductionOccurred = false;
+	bool uploadedReductionOccurred = false;
+	bool specialReductionOccurred = false;
+	bool shadowReductionOccurred = false;
+	bool valid = false;
+};
+
 struct FrameRenderData
 {
 	glm::mat4 viewMatrix;
@@ -93,8 +220,10 @@ struct FrameRenderData
 	float deltaTimeSeconds = 0.0f;
 	bool globalTaskShaderCullingEnabled = true;
 	float cullingEpsilon = 0.001f;
+	QualityPreset activePreset = QualityPreset::High;
+	bool customOverrideActive = false;
 	RenderSettings settings;
-	std::vector<GPULight> lights;
+	std::vector<FrameLightCandidate> lightCandidates;
 	std::vector<DrawCommand> commands;
 };
 
@@ -107,12 +236,12 @@ struct alignas(16) FrameCullingDataGPU
 	glm::vec4 clusterDepthAndViewport = glm::vec4(0.1f, 100.0f, 1920.0f, 1080.0f);
 	glm::mat4 viewMatrix = glm::mat4(1.0f);
 	glm::mat4 invProjection = glm::mat4(1.0f);
-	glm::uvec4 renderSettings0 = glm::uvec4(2048u, 5u, 128u, 1u); // x: shadowRes, y: shadowFilter, z: maxLights, w: enableLTC
-	glm::uvec4 renderSettings1 = glm::uvec4(1u, 4u, 0u, 0u);      // x: enableIBL, y: aniso, zw: reserved
+	glm::uvec4 renderSettings0 = glm::uvec4(2048u, 5u, 128u, 1u); // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
+	glm::uvec4 renderSettings1 = glm::uvec4(1u, 4u, 4u, 256u);    // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
 	std::uint32_t globalTaskCullingEnabled = 1u;
 	std::uint32_t taskShaderSupported = 0u;
-	std::uint32_t reserved0 = 0u;
-	std::uint32_t reserved1 = 0u;
+	std::uint32_t clusteredLightingValid = 0u;
+	std::uint32_t clusteredLightingOverflowed = 0u;
 };
 static_assert(sizeof(FrameCullingDataGPU) == 320, "Frame culling payload must stay tightly packed for GPU uploads.");
 

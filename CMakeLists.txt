@@ -512,11 +512,43 @@ if(NOT compile_cluster_grid EQUAL 0)
 endif()
 
 execute_process(
+	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterDepthMask.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterDepthMask.comp.hlsl\"
+	RESULT_VARIABLE compile_cluster_depth
+)
+if(NOT compile_cluster_depth EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile ClusterDepthMask.comp.hlsl during install\")
+endif()
+
+execute_process(
 	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/LightCull.comp.spv\" -spirv \"\${lighting_src_dir}/LightCull.comp.hlsl\"
 	RESULT_VARIABLE compile_light_cull
 )
 if(NOT compile_light_cull EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile LightCull.comp.hlsl during install\")
+endif()
+
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterLightCount.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterLightCount.comp.hlsl\"
+	RESULT_VARIABLE compile_cluster_count
+)
+if(NOT compile_cluster_count EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile ClusterLightCount.comp.hlsl during install\")
+endif()
+
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterLightPrefix.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterLightPrefix.comp.hlsl\"
+	RESULT_VARIABLE compile_cluster_prefix
+)
+if(NOT compile_cluster_prefix EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile ClusterLightPrefix.comp.hlsl during install\")
+endif()
+
+execute_process(
+	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterLightFill.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterLightFill.comp.hlsl\"
+	RESULT_VARIABLE compile_cluster_fill
+)
+if(NOT compile_cluster_fill EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile ClusterLightFill.comp.hlsl during install\")
 endif()
 
 execute_process(

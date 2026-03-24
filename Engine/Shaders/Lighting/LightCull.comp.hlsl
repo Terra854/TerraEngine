@@ -7,15 +7,7 @@ struct GPULight
 	float4 colorAndIntensity;
 	float4 coneAnglesAndArea;
 	float4 shadowAndPadding;
-	float4 extraParams;
-};
-
-struct ClusterData
-{
-	uint offset;
-	uint count;
-	float3 minBounds;
-	float3 maxBounds;
+	float4 extraParams;         // x = shadowStrength, y = shadowBias, z = indirectMultiplier, w = authoredPriority
 };
 
 struct FrameCullingData
@@ -26,134 +18,108 @@ struct FrameCullingData
 	float4 clusterDepthAndViewport;
 	column_major float4x4 viewMatrix;
 	column_major float4x4 invProjection;
-	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: maxLights, w: enableLTC
-	uint4 renderSettings1; // x: enableIBL, y: aniso, zw: reserved
+	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
+	uint4 renderSettings1; // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
-	uint reserved0;
-	uint reserved1;
+	uint clusteredLightingValid;
+	uint clusteredLightingOverflowed;
 };
 
-struct ClusterDepth
+struct GPULightAnalysisRecord
 {
-    float minDepth;
-    float maxDepth;
+	float gpuVisibilityScore;
+	float gpuRangeCoverage;
+	uint flags;
+	uint reserved;
 };
 
-static const uint kMaxLightsPerCluster = 64u;
-static const uint kCullThreadCount = 64u;
+struct AnalysisPushConstants
+{
+	uint lightCount;
+	uint outputOffset;
+	uint padding0;
+	uint padding1;
+	uint4 paddingBlock0;
+	uint4 paddingBlock1;
+	uint4 paddingBlock2;
+};
+
+static const uint kAnalysisThreadCount = 64u;
 static const uint kLightTypeDirectional = 0u;
-static const uint kLightTypePoint = 1u;
-static const uint kLightTypeSpot = 2u;
 static const uint kLightTypeAreaRect = 3u;
+static const uint kGpuLightAnalysisFlagVisible = 1u << 0;
+static const uint kGpuLightAnalysisFlagDirectional = 1u << 1;
 
-[[vk::binding(12, 0)]] Texture2D<float> depthBuffer;
-[[vk::binding(13, 0)]] StructuredBuffer<ClusterDepth> clusterDepthBounds;
 [[vk::binding(2, 0)]] StructuredBuffer<FrameCullingData> frameCullingData;
-[[vk::binding(4, 0)]] StructuredBuffer<GPULight> globalLights;
-[[vk::binding(5, 0)]] RWStructuredBuffer<ClusterData> clusterGrid;
-[[vk::binding(6, 0)]] RWStructuredBuffer<uint> lightIndices;
+[[vk::binding(17, 0)]] RWStructuredBuffer<GPULightAnalysisRecord> lightAnalysisBuffer;
+[[vk::binding(18, 0)]] StructuredBuffer<GPULight> analysisLights;
+[[vk::push_constant]] ConstantBuffer<AnalysisPushConstants> analysisPush;
 
-groupshared uint gVisibleCount;
-groupshared uint gSharedIndices[kMaxLightsPerCluster];
-
-bool SphereIntersectsAABB(float3 center, float radius, float3 minB, float3 maxB)
+bool SphereIntersectsFrustum(float3 center, float radius, float4 planes[6])
 {
-    float3 closest = max(minB, min(center, maxB));
-    float3 distV = closest - center;
-    return dot(distV, distV) <= (radius * radius);
+	[unroll]
+	for (uint planeIndex = 0u; planeIndex < 6u; ++planeIndex)
+	{
+		const float4 plane = planes[planeIndex];
+		if (dot(plane.xyz, center) + plane.w < -radius)
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
-// Per-cluster light culling using group-shared memory for cooperative writes.
-[numthreads(kCullThreadCount, 1, 1)]
-void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+// This pass gives the CPU a lightweight next-frame hint about which uploaded
+// lights were plausibly relevant to the current view. It intentionally avoids
+// heavy cluster readback and only writes one compact record per uploaded light.
+[numthreads(kAnalysisThreadCount, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-	const FrameCullingData frame = frameCullingData[0];
-	const uint3 gridDim = frame.clusterGridAndLightCount.xyz;
-	const uint clusterCount = gridDim.x * gridDim.y * gridDim.z;
-	const uint clusterIndex = groupId.x;
-	if (clusterIndex >= clusterCount)
+	const uint lightIndex = dispatchThreadId.x;
+	if (lightIndex >= analysisPush.lightCount)
 	{
 		return;
 	}
 
-    // Depth Masking Optimization
-    const uint xyIndex = clusterIndex % (gridDim.x * gridDim.y);
-    const uint zIndex = clusterIndex / (gridDim.x * gridDim.y);
-    const ClusterDepth tileDepth = clusterDepthBounds[xyIndex];
-    
-    // If no geometry in this tile column, skip all clusters in it
-    if (tileDepth.minDepth >= 1.0) {
-        if (groupThreadId.x == 0u) {
-            clusterGrid[clusterIndex].count = 0u;
-        }
-        return;
-    }
+	const FrameCullingData frame = frameCullingData[0];
+	const GPULight light = analysisLights[lightIndex];
+	const uint lightType = (uint)(light.positionAndType.w + 0.5f);
+	const float intensity = max(light.colorAndIntensity.w, 0.0f);
 
-    // Convert cluster Z range to NDC for comparison with tile depth
-    // Note: This depends on how cluster Z is partitioned.
-    // Usually clusters are exponential or linear in view space.
-    // For now, we assume the cluster bounds in ClusterData are already in view space.
-    // Actually, LightCull uses view space AABBs.
-    
-    // Check if cluster Z range overlaps with tile depth range
-    // Since tileDepth is in NDC (0..1), we need to compare appropriately.
-    // If we want to be simple, we just use the tile-based masking for now.
+	GPULightAnalysisRecord record;
+	record.gpuVisibilityScore = 0.0f;
+	record.gpuRangeCoverage = 0.0f;
+	record.flags = 0u;
+	record.reserved = 0u;
 
-	if (groupThreadId.x == 0u)
+	if (lightType == kLightTypeDirectional)
 	{
-		gVisibleCount = 0u;
-	}
-	GroupMemoryBarrierWithGroupSync();
-
-	const ClusterData currentCluster = clusterGrid[clusterIndex];
-	const uint lightCount = frame.clusterGridAndLightCount.w;
-
-	for (uint lightIndex = groupThreadId.x; lightIndex < lightCount; lightIndex += kCullThreadCount)
-	{
-		const GPULight light = globalLights[lightIndex];
-		const uint lightType = (uint)(light.positionAndType.w + 0.5);
-
-		bool intersects = false;
-		if (lightType == kLightTypeDirectional)
-		{
-			intersects = true;
-		}
-		else if (lightType == kLightTypePoint || lightType == kLightTypeSpot)
-		{
-			float3 lightPosView = mul(frame.viewMatrix, float4(light.positionAndType.xyz, 1.0)).xyz;
-			float range = max(light.directionAndRange.w, 0.001);
-			intersects = SphereIntersectsAABB(lightPosView, range, currentCluster.minBounds, currentCluster.maxBounds);
-		}
-		else if (lightType == kLightTypeAreaRect)
-		{
-			float3 lightPosView = mul(frame.viewMatrix, float4(light.positionAndType.xyz, 1.0)).xyz;
-			float extent = max(light.coneAnglesAndArea.z, light.coneAnglesAndArea.w);
-			float range = max(light.directionAndRange.w, extent);
-			intersects = SphereIntersectsAABB(lightPosView, range, currentCluster.minBounds, currentCluster.maxBounds);
-		}
-
-		if (intersects) {
-			uint slot = 0u;
-			InterlockedAdd(gVisibleCount, 1u, slot);
-			if (slot < kMaxLightsPerCluster)
-			{
-				gSharedIndices[slot] = lightIndex;
-			}
-		}
-	}
-	GroupMemoryBarrierWithGroupSync();
-
-	const uint visibleCount = min(gVisibleCount, kMaxLightsPerCluster);
-	const uint outputOffset = clusterIndex * kMaxLightsPerCluster;
-
-	if (groupThreadId.x == 0u)
-	{
-		clusterGrid[clusterIndex].count = visibleCount;
+		record.gpuVisibilityScore = max(intensity, 1.0f);
+		record.gpuRangeCoverage = 1.0f;
+		record.flags = kGpuLightAnalysisFlagVisible | kGpuLightAnalysisFlagDirectional;
+		lightAnalysisBuffer[analysisPush.outputOffset + lightIndex] = record;
+		return;
 	}
 
-	if (groupThreadId.x < visibleCount)
+	float range = max(light.directionAndRange.w, 0.001f);
+	if (lightType == kLightTypeAreaRect)
 	{
-		lightIndices[outputOffset + groupThreadId.x] = gSharedIndices[groupThreadId.x];
+		const float extent = max(light.coneAnglesAndArea.z, light.coneAnglesAndArea.w);
+		range = max(range, extent);
 	}
+
+	const float3 cameraPosition = frame.cameraPositionAndEpsilon.xyz;
+	const float3 lightPosition = light.positionAndType.xyz;
+	const float distanceToCamera = length(lightPosition - cameraPosition);
+	const float rangeCoverage = saturate((range - distanceToCamera) / max(range, 0.001f));
+
+	record.gpuRangeCoverage = rangeCoverage;
+	if (SphereIntersectsFrustum(lightPosition, range, frame.frustumPlanes))
+	{
+		record.flags |= kGpuLightAnalysisFlagVisible;
+		record.gpuVisibilityScore = (1.0f + intensity) * max(rangeCoverage, 0.05f);
+	}
+
+	lightAnalysisBuffer[analysisPush.outputOffset + lightIndex] = record;
 }

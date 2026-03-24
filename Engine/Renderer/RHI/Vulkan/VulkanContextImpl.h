@@ -25,6 +25,7 @@
 #include <mutex>
 #include <limits>
 #include <stdexcept>
+#include <filesystem>
 
 #ifdef NDEBUG
 inline const bool enableValidationLayers = false;
@@ -199,9 +200,9 @@ struct VulkanContext::Impl {
 	static constexpr uint32_t MAX_BINDLESS_MATERIALS = 1024;
 	static constexpr uint32_t MAX_BINDLESS_DRAWS = 4096;
 	static constexpr uint32_t MAX_GLOBAL_LIGHTS = 1024;
-	static constexpr uint32_t MAX_LIGHTS_PER_CLUSTER = 64;
 	static constexpr uint32_t MAX_LIGHT_CLUSTERS = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
-	static constexpr uint32_t MAX_LIGHT_INDEX_ENTRIES = MAX_LIGHT_CLUSTERS * MAX_LIGHTS_PER_CLUSTER;
+	static constexpr uint32_t MAX_LIGHT_INDEX_ENTRIES = MAX_LIGHT_CLUSTERS * MAX_GLOBAL_LIGHTS;
+	static constexpr uint32_t MAX_SHADOW_RESOURCE_SLOTS = 4u;
 	static constexpr uint32_t SHADOW_MAP_RESOLUTION = 1024u;
 	static constexpr uint32_t POINT_SHADOW_MAP_RESOLUTION = 1024u;
 	static constexpr uint32_t LTC_LUT_RESOLUTION = 64u;
@@ -213,9 +214,11 @@ struct VulkanContext::Impl {
 	std::vector<VulkanBuffer> globalFrameCullingSSBOs;
 	std::vector<VulkanBuffer> globalMeshletCountersSSBOs;
 	std::vector<VulkanBuffer> globalLightSSBOs;
+	std::vector<VulkanBuffer> lightAnalysisInputSSBOs;
 		std::vector<VulkanBuffer> clusterGridSSBOs;
 		std::vector<VulkanBuffer> lightIndexSSBOs;
 		std::vector<VulkanBuffer> clusterDepthSSBOs;
+	std::vector<VulkanBuffer> lightAnalysisSSBOs;
 				std::vector<VulkanBuffer> indirectDrawBuffers;
 				VulkanHiZ hiZ;
 				VulkanVRS vrs;
@@ -245,18 +248,68 @@ struct VulkanContext::Impl {
 	VkPipelineLayout lightingComputePipelineLayout = VK_NULL_HANDLE;
 	VkPipeline clusterGridComputePipeline = VK_NULL_HANDLE;
 	VkPipeline clusterDepthMaskComputePipeline = VK_NULL_HANDLE;
-	VkPipeline lightCullComputePipeline = VK_NULL_HANDLE;
+	VkPipeline clusterLightCountComputePipeline = VK_NULL_HANDLE;
+	VkPipeline clusterLightPrefixComputePipeline = VK_NULL_HANDLE;
+	VkPipeline clusterLightFillComputePipeline = VK_NULL_HANDLE;
+	VkPipeline lightAnalysisComputePipeline = VK_NULL_HANDLE;
 	VkPipeline hiZComputePipeline = VK_NULL_HANDLE;
 	VkPipeline vrsComputePipeline = VK_NULL_HANDLE;
 	VkPipelineLayout hiZPipelineLayout = VK_NULL_HANDLE;
 	VkPipelineLayout vrsPipelineLayout = VK_NULL_HANDLE;
-	glm::mat4 previousClusterViewProjection = glm::mat4(0.0f);
-	bool previousClusterViewProjectionValid = false;
+
+	struct GpuLightAnalysisViewSnapshot
+	{
+		std::unordered_map<TerraEngine::UUID, GPULightAnalysisRecord> recordsByLightId;
+		std::uint32_t visibleCandidateCount = 0u;
+		bool valid = false;
+	};
+
+	struct TemporalLightSelectionState
+	{
+		float lastCompositeScore = 0.0f;
+		float lastGpuVisibilityScore = 0.0f;
+		float lastScreenInfluence = 0.0f;
+		std::uint64_t lastSeenFrameSerial = 0u;
+		bool retainedLastFrame = false;
+		bool shadowedLastFrame = false;
+	};
+
+	struct ViewLightingTemporalState
+	{
+		std::unordered_map<TerraEngine::UUID, TemporalLightSelectionState> lights;
+		std::array<TerraEngine::UUID, MAX_SHADOW_RESOURCE_SLOTS> previousShadowOwners{};
+		glm::vec3 lastCameraWorldPosition = glm::vec3(0.0f);
+		glm::mat4 lastViewMatrix = glm::mat4(1.0f);
+		glm::mat4 lastProjectionMatrix = glm::mat4(1.0f);
+		std::uint64_t frameSerial = 0u;
+		bool valid = false;
+	};
+
+	struct LightBudgetApplicationResult
+	{
+		std::vector<FrameLightCandidate> uploadedCandidates;
+		std::vector<FrameLightCandidate> retainedLights;
+		FrameBudgetDiagnosticsSnapshot diagnostics;
+	};
+
 	static constexpr uint32_t kStatsViewCount = 2u;
 	static constexpr uint32_t kMaxStatsFrameSlots = 8u;
 	static constexpr uint32_t kStatsSlotCount = kStatsViewCount * kMaxStatsFrameSlots;
 	std::array<RenderStatsSnapshot, kStatsViewCount> latestStatsByView{};
 	std::array<RenderStatsSnapshot, kStatsSlotCount> pendingStatsBySlot{};
+	std::array<FrameBudgetDiagnosticsSnapshot, kStatsViewCount> latestBudgetDiagnosticsByView{};
+	std::array<FrameBudgetDiagnosticsSnapshot, kStatsSlotCount> pendingBudgetDiagnosticsBySlot{};
+	std::array<std::vector<FrameLightCandidate>, kStatsSlotCount> pendingLightAnalysisCandidatesBySlot{};
+	std::array<GpuLightAnalysisViewSnapshot, kStatsViewCount> latestGpuLightAnalysisByView{};
+	std::array<ViewLightingTemporalState, kStatsViewCount> lightingTemporalStateByView{};
+	std::array<ClusterValidationSnapshot, MAX_FRAMES_IN_FLIGHT> pendingClusterValidationByFrame{};
+	ClusterValidationSnapshot previousClusterValidationSnapshot{};
+	bool previousClusterValidationSnapshotValid = false;
+	std::filesystem::path clusterValidationCapturePath = std::filesystem::path("Tools") / "LightingValidation" / "results" / "latest-cluster-validation.json";
+	// Validation capture is opt-in because it keeps large lighting buffers
+	// CPU-visible and reads them back after every frame, which is too
+	// expensive for normal editor and game sessions.
+	bool clusterValidationCaptureEnabled = false;
 	bool globalTaskShaderCullingEnabled = true;
 	mutable std::mutex statsMutex;
 
@@ -278,17 +331,26 @@ struct VulkanContext::Impl {
 		void CreateIndirectDrawResources();
 		bool EnsureShadowRenderResources();
 		void UploadLightingData(const std::vector<GPULight>& lights);
+		void UploadLightAnalysisInputData(const std::vector<GPULight>& lights);
 			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
 	
 	void UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData);
+	LightBudgetApplicationResult ApplyFrameLightBudgets(const FrameRenderData& frameData, RenderViewType viewType);
 	MeshletCullingCountersGPU ReadMeshletCounters(uint32_t statsSlotIndex) const;
 	uint32_t GetStatsSlotIndex(uint32_t frameIndex, VulkanContext::ViewType view) const;
 	void RecordPendingStats(uint32_t statsSlotIndex, const RenderStatsSnapshot& snapshot);
+	void RecordPendingBudgetDiagnostics(uint32_t statsSlotIndex, const FrameBudgetDiagnosticsSnapshot& snapshot);
+	void RecordPendingLightAnalysisCandidates(uint32_t statsSlotIndex, const std::vector<FrameLightCandidate>& candidates);
 	void PublishCompletedFrameStats(uint32_t frameIndex);
 	RenderStatsSnapshot GetLatestStats(RenderViewType viewType) const;
+	FrameBudgetDiagnosticsSnapshot GetLatestBudgetDiagnostics(RenderViewType viewType) const;
+	GpuLightAnalysisViewSnapshot GetLatestGpuLightAnalysis(RenderViewType viewType) const;
+	void RecordPendingClusterValidationSnapshot(uint32_t frameIndex, const ClusterValidationSnapshot& snapshot);
+	ClusterValidationSnapshot ReadCompletedClusterValidationSnapshot(uint32_t frameIndex) const;
+	void WriteClusterValidationCapture(const ClusterValidationSnapshot& snapshot, const FrameBudgetDiagnosticsSnapshot& diagnostics) const;
 
 	uint32_t AllocateTextureIndex();
 	void UpdateGlobalTexture(uint32_t index, const VulkanImage& image);

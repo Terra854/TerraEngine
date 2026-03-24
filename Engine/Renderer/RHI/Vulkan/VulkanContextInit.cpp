@@ -171,9 +171,21 @@ void VulkanContext::Impl::Cleanup() {
 			vkDestroyPipeline(device, clusterDepthMaskComputePipeline, nullptr);
 			clusterDepthMaskComputePipeline = VK_NULL_HANDLE;
 		}
-		if (lightCullComputePipeline != VK_NULL_HANDLE) {
-			vkDestroyPipeline(device, lightCullComputePipeline, nullptr);
-			lightCullComputePipeline = VK_NULL_HANDLE;
+		if (clusterLightCountComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, clusterLightCountComputePipeline, nullptr);
+			clusterLightCountComputePipeline = VK_NULL_HANDLE;
+		}
+		if (clusterLightPrefixComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, clusterLightPrefixComputePipeline, nullptr);
+			clusterLightPrefixComputePipeline = VK_NULL_HANDLE;
+		}
+		if (clusterLightFillComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, clusterLightFillComputePipeline, nullptr);
+			clusterLightFillComputePipeline = VK_NULL_HANDLE;
+		}
+		if (lightAnalysisComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, lightAnalysisComputePipeline, nullptr);
+			lightAnalysisComputePipeline = VK_NULL_HANDLE;
 		}
 		if (lightingComputePipelineLayout != VK_NULL_HANDLE) {
 			vkDestroyPipelineLayout(device, lightingComputePipelineLayout, nullptr);
@@ -255,9 +267,11 @@ void VulkanContext::Impl::Cleanup() {
 	DestroyBufferVector(globalFrameCullingSSBOs);
 	DestroyBufferVector(globalMeshletCountersSSBOs);
 	DestroyBufferVector(globalLightSSBOs);
+	DestroyBufferVector(lightAnalysisInputSSBOs);
 	DestroyBufferVector(clusterGridSSBOs);
 	DestroyBufferVector(lightIndexSSBOs);
 	DestroyBufferVector(clusterDepthSSBOs);
+	DestroyBufferVector(lightAnalysisSSBOs);
 	DestroyBufferVector(indirectDrawBuffers);
 
 	hiZ.Destroy(device, allocator);
@@ -1198,7 +1212,7 @@ void VulkanContext::Impl::RecreateSwapChain() {
 			shadowRenderPass = VK_NULL_HANDLE;
 		}
 	}
-	previousClusterViewProjectionValid = false;
+	previousClusterValidationSnapshotValid = false;
 
 	DestroyPipelines();
 	// Do NOT reset descriptor pool here. ImGui uses it and its font texture lives there.
@@ -1223,9 +1237,11 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	DestroyBufferVector(globalFrameCullingSSBOs);
 	DestroyBufferVector(globalMeshletCountersSSBOs);
 	DestroyBufferVector(globalLightSSBOs);
+	DestroyBufferVector(lightAnalysisInputSSBOs);
 	DestroyBufferVector(clusterGridSSBOs);
 	DestroyBufferVector(lightIndexSSBOs);
 	DestroyBufferVector(clusterDepthSSBOs);
+	DestroyBufferVector(lightAnalysisSSBOs);
 	DestroyBufferVector(indirectDrawBuffers);
 
 	hiZ.Destroy(device, allocator);

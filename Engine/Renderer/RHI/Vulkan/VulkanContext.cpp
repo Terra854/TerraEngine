@@ -24,6 +24,30 @@
 
 namespace
 {
+	constexpr std::uint32_t kMaxSceneDynamicLights = 1024u;
+	constexpr std::uint32_t kMaxShadowResourceSlots = 4u;
+	constexpr float kTemporalResetDistance = 25.0f;
+	constexpr float kTemporalResetMatrixEpsilon = 0.75f;
+	constexpr std::uint64_t kTemporalStateHistoryFrames = 240u;
+
+	struct ScoredCandidate
+	{
+		float score = 0.0f;
+		float baseScore = 0.0f;
+		float screenInfluence = 0.0f;
+		float gpuVisibilityScore = 0.0f;
+		std::size_t uploadedIndex = 0u;
+		bool stabilityBiasApplied = false;
+	};
+
+	struct ShadowWinner
+	{
+		float score = 0.0f;
+		std::size_t uploadedIndex = 0u;
+		std::uint32_t slotIndex = kMaxShadowResourceSlots;
+		bool reuseBonusApplied = false;
+	};
+
 	glm::vec4 GetMatrixRow(const glm::mat4& matrix, int rowIndex)
 	{
 		return glm::vec4(matrix[0][rowIndex], matrix[1][rowIndex], matrix[2][rowIndex], matrix[3][rowIndex]);
@@ -88,6 +112,98 @@ namespace
 			}
 		}
 		return true;
+	}
+
+	std::uint32_t GetLightType(const GPULight& light)
+	{
+		return static_cast<std::uint32_t>(std::max(light.positionAndType.w, 0.0f) + 0.5f);
+	}
+
+	std::uint32_t GetShadowSlotIndex(const FrameLightCandidate& candidate)
+	{
+		switch (GetLightType(candidate.gpuLight))
+		{
+		case 0u: return 0u;
+		case 1u: return 1u;
+		case 2u: return 2u;
+		case 3u: return 3u;
+		default: return kMaxShadowResourceSlots;
+		}
+	}
+
+	float ComputeSceneInfluenceScore(const FrameLightCandidate& candidate, const glm::vec3& cameraWorldPosition)
+	{
+		const GPULight& light = candidate.gpuLight;
+		const std::uint32_t lightType = GetLightType(light);
+		const float authoredPriority = std::max(light.extraParams.w, 0.0f);
+		const float luminousIntensity = std::max(light.colorAndIntensity.w, 0.0f);
+		const float colorWeight = std::max({ light.colorAndIntensity.x, light.colorAndIntensity.y, light.colorAndIntensity.z, 0.0f });
+		const float effectiveRange = std::max(light.directionAndRange.w, 0.001f);
+		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
+		const float distanceToCamera = glm::length(lightPosition - cameraWorldPosition);
+		const float rangeCoverage = std::max(effectiveRange - distanceToCamera, 0.0f);
+		const float specialExtent = std::max(light.coneAnglesAndArea.z, light.coneAnglesAndArea.w);
+		float score = luminousIntensity * std::max(colorWeight, 0.1f);
+		score += authoredPriority * 100000.0f;
+		score += rangeCoverage * 1000.0f;
+		score += ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) != 0u) ? 1000000.0f : 0.0f;
+		score += ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u) ? 2000000.0f : 0.0f;
+		score += ((candidate.candidateFlags & kFrameLightCandidateFlagSpecialCost) != 0u) ? specialExtent * 150.0f : 0.0f;
+		score -= distanceToCamera;
+		if (lightType == 0u)
+		{
+			score += 500000.0f;
+		}
+		return score;
+	}
+
+	float ComputeProjectedScreenInfluence(const FrameLightCandidate& candidate, const glm::mat4& viewMatrix, const glm::mat4& projectionMatrix)
+	{
+		const GPULight& light = candidate.gpuLight;
+		if ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u)
+		{
+			return 1.0f;
+		}
+
+		const glm::vec4 viewPosition = viewMatrix * glm::vec4(glm::vec3(light.positionAndType), 1.0f);
+		const float depth = -viewPosition.z;
+		if (!std::isfinite(depth) || depth <= 0.001f)
+		{
+			return 0.0f;
+		}
+
+		const glm::vec4 clipPosition = projectionMatrix * viewPosition;
+		if (!std::isfinite(clipPosition.w) || std::abs(clipPosition.w) <= 1e-5f)
+		{
+			return 0.0f;
+		}
+
+		const glm::vec2 ndc = glm::vec2(clipPosition) / clipPosition.w;
+		const glm::vec2 outside = glm::max(glm::abs(ndc) - glm::vec2(1.0f), glm::vec2(0.0f));
+		const float centerDistanceOutside = glm::length(outside);
+		const float specialExtent = std::max(light.coneAnglesAndArea.z, light.coneAnglesAndArea.w);
+		const float influenceRadius = std::max(light.directionAndRange.w, ((candidate.candidateFlags & kFrameLightCandidateFlagSpecialCost) != 0u) ? specialExtent : 0.0f);
+		const float projectionScale = std::max(std::abs(projectionMatrix[1][1]), 0.5f);
+		const float projectedRadius = (influenceRadius / std::max(depth, 0.1f)) * projectionScale;
+		const float visibility = std::max(projectedRadius - centerDistanceOutside, 0.0f);
+		const float intensity = std::max(light.colorAndIntensity.w, 0.0f);
+		return visibility * visibility * (1.0f + intensity);
+	}
+
+	bool ShouldResetTemporalViewState(bool stateValid, const glm::vec3& lastCameraWorldPosition, const glm::mat4& lastProjectionMatrix, const FrameRenderData& frameData)
+	{
+		if (!stateValid)
+		{
+			return false;
+		}
+
+		const float cameraDistance = glm::length(frameData.cameraWorldPosition - lastCameraWorldPosition);
+		if (cameraDistance > kTemporalResetDistance)
+		{
+			return true;
+		}
+
+		return !MatricesApproximatelyEqual(frameData.projectionMatrix, lastProjectionMatrix, kTemporalResetMatrixEpsilon);
 	}
 
 	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraWorldPosition)
@@ -167,7 +283,392 @@ namespace
 	}
 }
 
-VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {}
+VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFrameLightBudgets(const FrameRenderData& frameData, RenderViewType viewType)
+{
+	LightBudgetApplicationResult result{};
+	result.diagnostics.viewType = viewType;
+	result.diagnostics.activePreset = frameData.activePreset;
+	result.diagnostics.customOverrideActive = frameData.customOverrideActive;
+	result.diagnostics.candidateLightCount = static_cast<std::uint32_t>(std::min<std::size_t>(frameData.lightCandidates.size(), static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+	result.diagnostics.uploadedLightBudget = std::min(frameData.settings.maxUploadedLights, MAX_GLOBAL_LIGHTS);
+	result.diagnostics.retainedLightBudget = std::min(frameData.settings.maxDynamicLights, result.diagnostics.uploadedLightBudget);
+	result.diagnostics.shadowLightBudget = std::min(frameData.settings.maxShadowLights, std::min(result.diagnostics.retainedLightBudget, MAX_SHADOW_RESOURCE_SLOTS));
+	result.diagnostics.specialLightBudget = std::min(frameData.settings.maxAreaLights, result.diagnostics.retainedLightBudget);
+	result.diagnostics.gpuAssistActive = (lightAnalysisComputePipeline != VK_NULL_HANDLE);
+
+	const std::uint32_t viewIndex = (viewType == RenderViewType::Scene) ? 1u : 0u;
+	ViewLightingTemporalState& viewState = lightingTemporalStateByView[viewIndex];
+	if (ShouldResetTemporalViewState(viewState.valid, viewState.lastCameraWorldPosition, viewState.lastProjectionMatrix, frameData))
+	{
+		viewState.lights.clear();
+		viewState.previousShadowOwners.fill(TerraEngine::EMPTY_UUID);
+		viewState.valid = false;
+	}
+	viewState.frameSerial += 1u;
+	const std::uint64_t frameSerial = viewState.frameSerial;
+
+	const GpuLightAnalysisViewSnapshot previousGpuAnalysis = GetLatestGpuLightAnalysis(viewType);
+	if (previousGpuAnalysis.valid)
+	{
+		result.diagnostics.gpuVisibleCandidateCount = previousGpuAnalysis.visibleCandidateCount;
+	}
+
+	struct UploadScoredCandidate
+	{
+		float score = 0.0f;
+		std::size_t originalIndex = 0u;
+	};
+
+	std::vector<UploadScoredCandidate> uploadScores;
+	uploadScores.reserve(frameData.lightCandidates.size());
+	for (std::size_t candidateIndex = 0; candidateIndex < frameData.lightCandidates.size(); ++candidateIndex)
+	{
+		UploadScoredCandidate entry{};
+		entry.score = ComputeSceneInfluenceScore(frameData.lightCandidates[candidateIndex], frameData.cameraWorldPosition);
+		entry.originalIndex = candidateIndex;
+		uploadScores.push_back(entry);
+	}
+	std::stable_sort(uploadScores.begin(), uploadScores.end(), [](const UploadScoredCandidate& lhs, const UploadScoredCandidate& rhs) {
+		if (lhs.score == rhs.score)
+		{
+			return lhs.originalIndex < rhs.originalIndex;
+		}
+		return lhs.score > rhs.score;
+	});
+	if (uploadScores.size() > static_cast<std::size_t>(result.diagnostics.uploadedLightBudget))
+	{
+		uploadScores.resize(result.diagnostics.uploadedLightBudget);
+	}
+	std::stable_sort(uploadScores.begin(), uploadScores.end(), [](const UploadScoredCandidate& lhs, const UploadScoredCandidate& rhs) {
+		return lhs.originalIndex < rhs.originalIndex;
+	});
+
+	result.uploadedCandidates.reserve(uploadScores.size());
+	for (const UploadScoredCandidate& uploadScore : uploadScores)
+	{
+		result.uploadedCandidates.push_back(frameData.lightCandidates[uploadScore.originalIndex]);
+	}
+	result.diagnostics.uploadedLightCount = static_cast<std::uint32_t>(result.uploadedCandidates.size());
+	result.diagnostics.uploadedReductionOccurred = result.diagnostics.uploadedLightCount < result.diagnostics.candidateLightCount;
+	if (result.diagnostics.uploadedReductionOccurred)
+	{
+		result.diagnostics.reductionCategory = LightingReductionCategory::Uploaded;
+	}
+
+	std::vector<ScoredCandidate> scoredCandidates;
+	scoredCandidates.reserve(result.uploadedCandidates.size());
+	for (std::size_t uploadedIndex = 0; uploadedIndex < result.uploadedCandidates.size(); ++uploadedIndex)
+	{
+		const FrameLightCandidate& candidate = result.uploadedCandidates[uploadedIndex];
+		ScoredCandidate scored{};
+		scored.uploadedIndex = uploadedIndex;
+		scored.screenInfluence = ComputeProjectedScreenInfluence(candidate, frameData.viewMatrix, frameData.projectionMatrix);
+		scored.gpuVisibilityScore = 0.0f;
+		scored.baseScore = ComputeSceneInfluenceScore(candidate, frameData.cameraWorldPosition);
+		scored.baseScore += scored.screenInfluence * 4000.0f;
+
+		const auto gpuIt = previousGpuAnalysis.recordsByLightId.find(candidate.lightId);
+		if (gpuIt != previousGpuAnalysis.recordsByLightId.end())
+		{
+			scored.gpuVisibilityScore = std::max(gpuIt->second.gpuVisibilityScore, 0.0f);
+			scored.baseScore += scored.gpuVisibilityScore * 250.0f;
+		}
+
+		const auto temporalIt = viewState.lights.find(candidate.lightId);
+		if (temporalIt != viewState.lights.end() && temporalIt->second.retainedLastFrame)
+		{
+			const float stabilityWeight = 0.08f + std::clamp(candidate.stabilityPreference, 0.0f, 1.0f) * 0.20f;
+			scored.baseScore += std::max(2000.0f, std::abs(scored.baseScore) * stabilityWeight);
+			scored.stabilityBiasApplied = true;
+		}
+
+		scored.score = scored.baseScore;
+		scoredCandidates.push_back(scored);
+	}
+
+	std::vector<ScoredCandidate> sortedCandidates = scoredCandidates;
+	std::stable_sort(sortedCandidates.begin(), sortedCandidates.end(), [](const ScoredCandidate& lhs, const ScoredCandidate& rhs) {
+		if (lhs.score == rhs.score)
+		{
+			return lhs.uploadedIndex < rhs.uploadedIndex;
+		}
+		return lhs.score > rhs.score;
+	});
+
+	std::vector<std::size_t> retainedIndices;
+	retainedIndices.reserve(std::min<std::size_t>(sortedCandidates.size(), result.diagnostics.retainedLightBudget));
+	std::uint32_t retainedSpecialCount = 0u;
+	bool specialBudgetReduced = false;
+	for (const ScoredCandidate& scored : sortedCandidates)
+	{
+		if (retainedIndices.size() >= static_cast<std::size_t>(result.diagnostics.retainedLightBudget))
+		{
+			break;
+		}
+
+		const FrameLightCandidate& candidate = result.uploadedCandidates[scored.uploadedIndex];
+		const bool specialCost = (candidate.candidateFlags & kFrameLightCandidateFlagSpecialCost) != 0u;
+		if (specialCost && retainedSpecialCount >= result.diagnostics.specialLightBudget)
+		{
+			specialBudgetReduced = true;
+			continue;
+		}
+
+		retainedIndices.push_back(scored.uploadedIndex);
+		if (specialCost)
+		{
+			retainedSpecialCount += 1u;
+		}
+	}
+	std::stable_sort(retainedIndices.begin(), retainedIndices.end());
+
+	std::vector<bool> retainedMask(result.uploadedCandidates.size(), false);
+	for (std::size_t retainedIndex : retainedIndices)
+	{
+		retainedMask[retainedIndex] = true;
+	}
+
+	result.retainedLights.reserve(retainedIndices.size());
+	for (std::size_t retainedIndex : retainedIndices)
+	{
+		result.retainedLights.push_back(result.uploadedCandidates[retainedIndex]);
+	}
+
+	result.diagnostics.retainedLightCount = static_cast<std::uint32_t>(result.retainedLights.size());
+	result.diagnostics.specialLightCount = retainedSpecialCount;
+	result.diagnostics.specialReductionOccurred = specialBudgetReduced;
+	result.diagnostics.budgetReductionOccurred = result.diagnostics.retainedLightCount < result.diagnostics.candidateLightCount
+		|| result.diagnostics.specialReductionOccurred;
+	if (result.diagnostics.reductionCategory == LightingReductionCategory::None
+		&& result.diagnostics.specialReductionOccurred)
+	{
+		result.diagnostics.reductionCategory = LightingReductionCategory::Special;
+	}
+	if (result.diagnostics.reductionCategory == LightingReductionCategory::None
+		&& result.diagnostics.retainedLightCount < result.diagnostics.uploadedLightCount)
+	{
+		result.diagnostics.reductionCategory = LightingReductionCategory::Retained;
+	}
+
+	std::vector<TerraEngine::UUID> previousRetainedLights;
+	previousRetainedLights.reserve(viewState.lights.size());
+	for (const auto& [lightId, lightState] : viewState.lights)
+	{
+		if (lightState.retainedLastFrame)
+		{
+			previousRetainedLights.push_back(lightId);
+		}
+	}
+
+	std::uint32_t retainedReplacementCount = 0u;
+	for (const ScoredCandidate& scored : scoredCandidates)
+	{
+		if (!retainedMask[scored.uploadedIndex])
+		{
+			continue;
+		}
+
+		const FrameLightCandidate& candidate = result.uploadedCandidates[scored.uploadedIndex];
+		if (scored.stabilityBiasApplied)
+		{
+			result.diagnostics.stabilityBiasAppliedCount += 1u;
+		}
+		if ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u)
+		{
+			result.diagnostics.retainedDirectionalLightCount += 1u;
+		}
+		if (candidate.gpuLight.extraParams.w > 0.0f)
+		{
+			result.diagnostics.retainedAuthoredPriorityLightCount += 1u;
+		}
+
+		const auto temporalIt = viewState.lights.find(candidate.lightId);
+		const bool retainedPreviously = temporalIt != viewState.lights.end() && temporalIt->second.retainedLastFrame;
+		if (!retainedPreviously)
+		{
+			retainedReplacementCount += 1u;
+		}
+		if ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) != 0u)
+		{
+			result.diagnostics.shadowEligibleLightCount += 1u;
+		}
+	}
+	result.diagnostics.retainedLightReplacementCount = retainedReplacementCount;
+
+	std::uint32_t retainedChurnCount = 0u;
+	for (const TerraEngine::UUID& previousLightId : previousRetainedLights)
+	{
+		bool stillRetained = false;
+		for (std::size_t retainedIndex : retainedIndices)
+		{
+			if (result.uploadedCandidates[retainedIndex].lightId == previousLightId)
+			{
+				stillRetained = true;
+				break;
+			}
+		}
+		if (!stillRetained)
+		{
+			retainedChurnCount += 1u;
+		}
+	}
+	retainedChurnCount += retainedReplacementCount;
+	result.diagnostics.retainedLightChurnCount = retainedChurnCount;
+
+	std::array<std::optional<ShadowWinner>, MAX_SHADOW_RESOURCE_SLOTS> bestShadowBySlot{};
+	for (const ScoredCandidate& scored : scoredCandidates)
+	{
+		if (!retainedMask[scored.uploadedIndex])
+		{
+			continue;
+		}
+
+		const FrameLightCandidate& candidate = result.uploadedCandidates[scored.uploadedIndex];
+		if ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) == 0u)
+		{
+			continue;
+		}
+
+		const std::uint32_t shadowSlotIndex = GetShadowSlotIndex(candidate);
+		if (shadowSlotIndex >= MAX_SHADOW_RESOURCE_SLOTS)
+		{
+			continue;
+		}
+
+		ShadowWinner winner{};
+		winner.score = scored.score;
+		winner.uploadedIndex = scored.uploadedIndex;
+		winner.slotIndex = shadowSlotIndex;
+		if (viewState.previousShadowOwners[shadowSlotIndex] == candidate.lightId)
+		{
+			winner.score += 7500.0f;
+			winner.reuseBonusApplied = true;
+		}
+
+		const auto temporalIt = viewState.lights.find(candidate.lightId);
+		if (temporalIt != viewState.lights.end() && temporalIt->second.shadowedLastFrame)
+		{
+			winner.score += 1500.0f;
+		}
+
+		if (!bestShadowBySlot[shadowSlotIndex].has_value()
+			|| winner.score > bestShadowBySlot[shadowSlotIndex]->score
+			|| (winner.score == bestShadowBySlot[shadowSlotIndex]->score && winner.uploadedIndex < bestShadowBySlot[shadowSlotIndex]->uploadedIndex))
+		{
+			bestShadowBySlot[shadowSlotIndex] = winner;
+		}
+	}
+
+	std::vector<ShadowWinner> shadowWinners;
+	for (const std::optional<ShadowWinner>& winner : bestShadowBySlot)
+	{
+		if (winner.has_value())
+		{
+			shadowWinners.push_back(*winner);
+		}
+	}
+	std::stable_sort(shadowWinners.begin(), shadowWinners.end(), [](const ShadowWinner& lhs, const ShadowWinner& rhs) {
+		if (lhs.score == rhs.score)
+		{
+			return lhs.uploadedIndex < rhs.uploadedIndex;
+		}
+		return lhs.score > rhs.score;
+	});
+	if (shadowWinners.size() > static_cast<std::size_t>(result.diagnostics.shadowLightBudget))
+	{
+		shadowWinners.resize(result.diagnostics.shadowLightBudget);
+	}
+
+	std::vector<bool> shadowedMask(result.uploadedCandidates.size(), false);
+	std::array<TerraEngine::UUID, MAX_SHADOW_RESOURCE_SLOTS> currentShadowOwners{};
+	for (const ShadowWinner& winner : shadowWinners)
+	{
+		shadowedMask[winner.uploadedIndex] = true;
+		currentShadowOwners[winner.slotIndex] = result.uploadedCandidates[winner.uploadedIndex].lightId;
+		if (winner.reuseBonusApplied)
+		{
+			result.diagnostics.shadowReuseCount += 1u;
+		}
+	}
+
+	for (std::uint32_t slotIndex = 0u; slotIndex < MAX_SHADOW_RESOURCE_SLOTS; ++slotIndex)
+	{
+		if (viewState.previousShadowOwners[slotIndex] != TerraEngine::EMPTY_UUID
+			&& currentShadowOwners[slotIndex] != TerraEngine::EMPTY_UUID
+			&& currentShadowOwners[slotIndex] != viewState.previousShadowOwners[slotIndex])
+		{
+			result.diagnostics.shadowReplacementCount += 1u;
+		}
+	}
+
+	for (FrameLightCandidate& retainedCandidate : result.retainedLights)
+	{
+		retainedCandidate.gpuLight.shadowAndPadding.x = 0.0f;
+		retainedCandidate.gpuLight.shadowAndPadding.y = -1.0f;
+	}
+	for (std::size_t retainedVectorIndex = 0u; retainedVectorIndex < retainedIndices.size(); ++retainedVectorIndex)
+	{
+		const std::size_t uploadedIndex = retainedIndices[retainedVectorIndex];
+		if (shadowedMask[uploadedIndex])
+		{
+			result.retainedLights[retainedVectorIndex].gpuLight.shadowAndPadding.x = 1.0f;
+			result.diagnostics.shadowedLightCount += 1u;
+		}
+	}
+
+	result.diagnostics.shadowReductionOccurred = result.diagnostics.shadowedLightCount < result.diagnostics.shadowEligibleLightCount;
+	if (result.diagnostics.reductionCategory == LightingReductionCategory::None
+		&& result.diagnostics.shadowReductionOccurred)
+	{
+		result.diagnostics.reductionCategory = LightingReductionCategory::Shadow;
+	}
+
+	for (auto& [lightId, lightState] : viewState.lights)
+	{
+		lightState.retainedLastFrame = false;
+		lightState.shadowedLastFrame = false;
+	}
+
+	for (const ScoredCandidate& scored : scoredCandidates)
+	{
+		const FrameLightCandidate& candidate = result.uploadedCandidates[scored.uploadedIndex];
+		TemporalLightSelectionState& lightState = viewState.lights[candidate.lightId];
+		lightState.lastCompositeScore = scored.score;
+		lightState.lastGpuVisibilityScore = scored.gpuVisibilityScore;
+		lightState.lastScreenInfluence = scored.screenInfluence;
+		lightState.lastSeenFrameSerial = frameSerial;
+		lightState.retainedLastFrame = retainedMask[scored.uploadedIndex];
+		lightState.shadowedLastFrame = shadowedMask[scored.uploadedIndex];
+	}
+
+	for (auto stateIt = viewState.lights.begin(); stateIt != viewState.lights.end(); )
+	{
+		if ((frameSerial - stateIt->second.lastSeenFrameSerial) > kTemporalStateHistoryFrames)
+		{
+			stateIt = viewState.lights.erase(stateIt);
+		}
+		else
+		{
+			++stateIt;
+		}
+	}
+
+	viewState.previousShadowOwners = currentShadowOwners;
+	viewState.lastCameraWorldPosition = frameData.cameraWorldPosition;
+	viewState.lastViewMatrix = frameData.viewMatrix;
+	viewState.lastProjectionMatrix = frameData.projectionMatrix;
+	viewState.valid = true;
+
+	result.diagnostics.valid = true;
+	return result;
+}
+
+VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {
+	impl->latestStatsByView[0].viewType = RenderViewType::Game;
+	impl->latestStatsByView[1].viewType = RenderViewType::Scene;
+	impl->latestBudgetDiagnosticsByView[0].viewType = RenderViewType::Game;
+	impl->latestBudgetDiagnosticsByView[1].viewType = RenderViewType::Scene;
+}
 VulkanContext::~VulkanContext() = default;
 
 void VulkanContext::Initialize(WindowSystem& windowSystem) {
@@ -669,64 +1170,45 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 	const bool shadowResourcesReady = EnsureShadowRenderResources();
 
+	const RenderViewType renderViewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
 	const uint32_t statsSlotIndex = impl->GetStatsSlotIndex(impl->currentFrame, view);
-	std::vector<GPULight> lightingPayload = frameData.lights;
-	for (GPULight& light : lightingPayload) {
+	// Apply the long-term preset policy on the CPU before upload so clustered
+	// lighting receives a predictable retained-light list and an independent
+	// shadow subset while the lightweight GPU analysis path observes a larger
+	// uploaded candidate set for the next frame.
+	const VulkanContext::Impl::LightBudgetApplicationResult budgetResult = impl->ApplyFrameLightBudgets(frameData, renderViewType);
+
+	std::vector<GPULight> analysisLightingPayload;
+	analysisLightingPayload.reserve(budgetResult.uploadedCandidates.size());
+	for (const FrameLightCandidate& candidate : budgetResult.uploadedCandidates) {
+		analysisLightingPayload.push_back(candidate.gpuLight);
+	}
+
+	std::vector<GPULight> lightingPayload;
+	lightingPayload.reserve(budgetResult.retainedLights.size());
+	for (const FrameLightCandidate& candidate : budgetResult.retainedLights) {
+		GPULight light = candidate.gpuLight;
 		const uint32_t lightType = static_cast<uint32_t>(std::max(0.0f, light.positionAndType.w));
 		const bool castsShadows = light.shadowAndPadding.x > 0.5f;
 		light.shadowAndPadding.y = -1.0f;
 		light.shadowAndPadding.z = static_cast<float>(impl->ltcAmplitudeTextureIndex);
 		light.shadowAndPadding.w = static_cast<float>(impl->ltcInverseTextureIndex);
-		if (!castsShadows) {
-			continue;
+		// Every retained light must still reach the shader. Only the shadow
+		// resource binding is conditional; non-shadowed retained lights still
+		// contribute direct lighting in the forward pass.
+		if (castsShadows) {
+			if (lightType == 0u) {
+				light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndex);
+			}
+			else if (lightType == 2u) {
+				light.shadowAndPadding.y = static_cast<float>(impl->spotShadowTextureIndex);
+			}
+			else if (lightType == 3u) {
+				light.shadowAndPadding.y = static_cast<float>(impl->areaShadowTextureIndex);
+			}
 		}
-		if (lightType == 0u) {
-			light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndex);
-		}
-		else if (lightType == 2u) {
-			light.shadowAndPadding.y = static_cast<float>(impl->spotShadowTextureIndex);
-		}
-		else if (lightType == 3u) {
-			light.shadowAndPadding.y = static_cast<float>(impl->areaShadowTextureIndex);
-		}
+		lightingPayload.push_back(light);
 	}
-	impl->UploadLightingData(lightingPayload);
-	FrameCullingDataGPU cullingData{};
-	cullingData.frustumPlanes = BuildFrustumPlanes(frameData.projectionMatrix * frameData.viewMatrix);
-	cullingData.cameraPositionAndEpsilon = glm::vec4(frameData.cameraWorldPosition, std::max(frameData.cullingEpsilon, 0.0001f));
-	cullingData.clusterGridAndLightCount = glm::uvec4(
-		kLightingClusterDimX,
-		kLightingClusterDimY,
-		kLightingClusterDimZ,
-		static_cast<uint32_t>(std::min<size_t>(lightingPayload.size(), VulkanContext::Impl::MAX_GLOBAL_LIGHTS)));
-	cullingData.clusterDepthAndViewport = glm::vec4(
-		0.1f,
-		100.0f,
-		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.width, 1u)),
-		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.height, 1u)));
-	cullingData.viewMatrix = frameData.viewMatrix;
-	cullingData.invProjection = glm::inverse(frameData.projectionMatrix);
-	cullingData.renderSettings0 = glm::uvec4(
-		frameData.settings.shadowResolution,
-		frameData.settings.shadowFilteringSize,
-		frameData.settings.maxDynamicLights,
-		frameData.settings.enableLTC ? 1u : 0u);
-	cullingData.renderSettings1 = glm::uvec4(
-		frameData.settings.enableIBL ? 1u : 0u,
-		frameData.settings.anisotropicFiltering,
-		0u, 0u);
-	cullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
-	cullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
-	impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
-	// Compute lighting shaders index slot 0 explicitly, so mirror the latest frame
-	// culling payload there in addition to the per-view stats slot.
-	impl->UpdateFrameCullingData(0u, cullingData);
-	impl->ResetMeshletCounters(statsSlotIndex);
-
-	// Prepare Indirect Buffer
-	std::vector<VkDrawMeshTasksIndirectCommandEXT> indirectCommands;
-	indirectCommands.reserve(frameData.commands.size());
-
 	const auto EnsureLightingComputePipelines = [&]() {
 		if (impl->lightingComputePipelineLayout == VK_NULL_HANDLE) {
 			VkPushConstantRange pushRange{};
@@ -798,41 +1280,178 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 		CreateComputePipeline(impl->clusterGridComputePipeline, "Shaders/Lighting/ClusterGrid.comp.spv");
 		CreateComputePipeline(impl->clusterDepthMaskComputePipeline, "Shaders/Lighting/ClusterDepthMask.comp.spv");
-		CreateComputePipeline(impl->lightCullComputePipeline, "Shaders/Lighting/LightCull.comp.spv");
+		CreateComputePipeline(impl->clusterLightCountComputePipeline, "Shaders/Lighting/ClusterLightCount.comp.spv");
+		CreateComputePipeline(impl->clusterLightPrefixComputePipeline, "Shaders/Lighting/ClusterLightPrefix.comp.spv");
+		CreateComputePipeline(impl->clusterLightFillComputePipeline, "Shaders/Lighting/ClusterLightFill.comp.spv");
+		CreateComputePipeline(impl->lightAnalysisComputePipeline, "Shaders/Lighting/LightCull.comp.spv");
 		CreateComputePipeline(impl->hiZComputePipeline, "Editor/Shaders/PostProcess/HiZGenerate.comp.spv");
 		CreateComputePipeline(impl->vrsComputePipeline, "Editor/Shaders/PostProcess/VRSGenerate.comp.spv");
 	};
 
 	EnsureLightingComputePipelines();
 
+	FrameCullingDataGPU analysisCullingData{};
+	analysisCullingData.frustumPlanes = BuildFrustumPlanes(frameData.projectionMatrix * frameData.viewMatrix);
+	analysisCullingData.cameraPositionAndEpsilon = glm::vec4(frameData.cameraWorldPosition, std::max(frameData.cullingEpsilon, 0.0001f));
+	analysisCullingData.clusterGridAndLightCount = glm::uvec4(
+		kLightingClusterDimX,
+		kLightingClusterDimY,
+		kLightingClusterDimZ,
+		static_cast<uint32_t>(std::min<size_t>(analysisLightingPayload.size(), VulkanContext::Impl::MAX_GLOBAL_LIGHTS)));
+	analysisCullingData.clusterDepthAndViewport = glm::vec4(
+		0.1f,
+		100.0f,
+		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.width, 1u)),
+		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.height, 1u)));
+	analysisCullingData.viewMatrix = frameData.viewMatrix;
+	analysisCullingData.invProjection = glm::inverse(frameData.projectionMatrix);
+	analysisCullingData.renderSettings0 = glm::uvec4(
+		frameData.settings.shadowResolution,
+		frameData.settings.shadowFilteringSize,
+		budgetResult.diagnostics.retainedLightBudget,
+		frameData.settings.enableLTC ? 1u : 0u);
+	analysisCullingData.renderSettings1 = glm::uvec4(
+		frameData.settings.enableIBL ? 1u : 0u,
+		frameData.settings.anisotropicFiltering,
+		budgetResult.diagnostics.shadowLightBudget,
+		budgetResult.diagnostics.uploadedLightBudget);
+	analysisCullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
+	analysisCullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
+
+	FrameCullingDataGPU cullingData = analysisCullingData;
+	cullingData.clusterGridAndLightCount.w = static_cast<uint32_t>(std::min<size_t>(lightingPayload.size(), VulkanContext::Impl::MAX_GLOBAL_LIGHTS));
+
+	const uint32_t clusterCount = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
+	const bool clusteredLightingAvailable = impl->lightingComputePipelineLayout != VK_NULL_HANDLE
+		&& impl->clusterGridComputePipeline != VK_NULL_HANDLE
+		&& impl->clusterDepthMaskComputePipeline != VK_NULL_HANDLE
+		&& impl->clusterLightCountComputePipeline != VK_NULL_HANDLE
+		&& impl->clusterLightPrefixComputePipeline != VK_NULL_HANDLE
+		&& impl->clusterLightFillComputePipeline != VK_NULL_HANDLE;
+	static bool loggedClusteredLightingUnavailable = false;
+	if (!clusteredLightingAvailable && cullingData.clusterGridAndLightCount.w > 0u) {
+		// Warn once per outage so validation runs clearly explain why fragment
+		// shading fell back to the full-light path instead of using cluster bins.
+		if (!loggedClusteredLightingUnavailable) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Variable light bins are unavailable because one or more clustered-light compute pipelines failed to initialize. Falling back to full-light shading for this frame.");
+			loggedClusteredLightingUnavailable = true;
+		}
+	}
+	else if (clusteredLightingAvailable) {
+		loggedClusteredLightingUnavailable = false;
+	}
+	const bool gpuLightAnalysisAvailable = impl->lightingComputePipelineLayout != VK_NULL_HANDLE
+		&& impl->lightAnalysisComputePipeline != VK_NULL_HANDLE;
+	cullingData.clusteredLightingValid = clusteredLightingAvailable ? 1u : 0u;
+	cullingData.clusteredLightingOverflowed = 0u;
+	analysisCullingData.clusteredLightingValid = clusteredLightingAvailable ? 1u : 0u;
+	analysisCullingData.clusteredLightingOverflowed = 0u;
+
+	if (gpuLightAnalysisAvailable && !analysisLightingPayload.empty()) {
+		struct AnalysisPushConstants
+		{
+			std::uint32_t lightCount = 0u;
+			std::uint32_t outputOffset = 0u;
+			std::uint32_t padding[14]{};
+		};
+
+		impl->UploadLightAnalysisInputData(analysisLightingPayload);
+		impl->RecordPendingLightAnalysisCandidates(statsSlotIndex, budgetResult.uploadedCandidates);
+		impl->UpdateFrameCullingData(statsSlotIndex, analysisCullingData);
+		impl->UpdateFrameCullingData(0u, analysisCullingData);
+
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSets[currentFrame], 0, nullptr);
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightAnalysisComputePipeline);
+
+		AnalysisPushConstants push{};
+		push.lightCount = static_cast<std::uint32_t>(std::min<size_t>(analysisLightingPayload.size(), VulkanContext::Impl::MAX_GLOBAL_LIGHTS));
+		push.outputOffset = statsSlotIndex * VulkanContext::Impl::MAX_GLOBAL_LIGHTS;
+		vkCmdPushConstants(cmd, impl->lightingComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+		vkCmdDispatch(cmd, std::max<uint32_t>((push.lightCount + 63u) / 64u, 1u), 1u, 1u);
+
+		VkMemoryBarrier analysisBarrier{};
+		analysisBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		analysisBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		analysisBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &analysisBarrier, 0, nullptr, 0, nullptr);
+	}
+	else {
+		impl->RecordPendingLightAnalysisCandidates(statsSlotIndex, {});
+	}
+
+	impl->UploadLightingData(lightingPayload);
+	cullingData.clusteredLightingValid = clusteredLightingAvailable ? 1u : 0u;
+	cullingData.clusteredLightingOverflowed = 0u;
+
+	impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
+	// Compute lighting shaders read slot 0 explicitly, so mirror the latest
+	// frame culling payload there in addition to the per-view stats slot.
+	impl->UpdateFrameCullingData(0u, cullingData);
+	impl->ResetMeshletCounters(statsSlotIndex);
+
+	FrameBudgetDiagnosticsSnapshot pendingBudgetDiagnostics = budgetResult.diagnostics;
+	pendingBudgetDiagnostics.viewType = renderViewType;
+	impl->RecordPendingBudgetDiagnostics(statsSlotIndex, pendingBudgetDiagnostics);
+
+	if (impl->clusterValidationCaptureEnabled) {
+		ClusterValidationSnapshot pendingClusterValidation{};
+		pendingClusterValidation.valid = true;
+		pendingClusterValidation.viewType = renderViewType;
+		pendingClusterValidation.buildMetadata.clusterCount = clusterCount;
+		pendingClusterValidation.buildMetadata.activeLightCount = cullingData.clusterGridAndLightCount.w;
+		pendingClusterValidation.buildMetadata.lightIndexCapacity = static_cast<uint32_t>(std::min<std::uint64_t>(
+			static_cast<std::uint64_t>(clusterCount) * static_cast<std::uint64_t>(cullingData.clusterGridAndLightCount.w),
+			static_cast<std::uint64_t>(VulkanContext::Impl::MAX_LIGHT_INDEX_ENTRIES)));
+		pendingClusterValidation.buildMetadata.clusteredLightingAvailable = clusteredLightingAvailable;
+		impl->RecordPendingClusterValidationSnapshot(currentFrame, pendingClusterValidation);
+	}
+
+	// Prepare Indirect Buffer
+	std::vector<VkDrawMeshTasksIndirectCommandEXT> indirectCommands;
+	indirectCommands.reserve(frameData.commands.size());
+
 	// Hi-Z Generation
 	impl->GenerateHiZPyramid(cmd, impl->depthImageView);
 
-	// Light Culling
-	if (impl->clusterGridComputePipeline != VK_NULL_HANDLE && impl->lightCullComputePipeline != VK_NULL_HANDLE) {
+	// Build the variable-length light list before graphics so clustered shading
+	// reads a fresh contiguous range for every cluster.
+	if (clusteredLightingAvailable) {
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSets[currentFrame], 0, nullptr);
-		
-		uint32_t clusterGroupCountX = (kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ + 63) / 64;
+
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterGridComputePipeline);
-		vkCmdDispatch(cmd, clusterGroupCountX, 1, 1);
+		vkCmdDispatch(cmd, (kLightingClusterDimX + 7u) / 8u, (kLightingClusterDimY + 7u) / 8u, std::max<uint32_t>(kLightingClusterDimZ, 1u));
 
 		VkMemoryBarrier barrier{};
 		barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 		barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-		if (impl->clusterDepthMaskComputePipeline != VK_NULL_HANDLE) {
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterDepthMaskComputePipeline);
-			vkCmdDispatch(cmd, (kLightingClusterDimX + 7) / 8, (kLightingClusterDimY + 7) / 8, 1);
-			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
-		}
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterDepthMaskComputePipeline);
+		vkCmdDispatch(cmd, (kLightingClusterDimX + 7u) / 8u, (kLightingClusterDimY + 7u) / 8u, 1u);
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightCullComputePipeline);
-		// Note: LightCull needs access to depth buffer for masking
-		vkCmdDispatch(cmd, clusterGroupCountX, 1, 1);
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterLightCountComputePipeline);
+		vkCmdDispatch(cmd, std::max<uint32_t>(clusterCount, 1u), 1u, 1u);
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterLightPrefixComputePipeline);
+		vkCmdDispatch(cmd, 1u, 1u, 1u);
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterLightFillComputePipeline);
+		vkCmdDispatch(cmd, std::max<uint32_t>(clusterCount, 1u), 1u, 1u);
+
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier(
+			cmd,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
+			0,
+			1, &barrier,
+			0, nullptr,
+			0, nullptr
+		);
 	}
 
 	// Prepare draw data.
@@ -1049,61 +1668,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			0, nullptr,
 			0, nullptr,
 			1, &barrier
-		);
-	}
-
-	// Build/refresh clustered light lists with compute before recording the
-	// graphics render pass so fragment shading reads the latest culling output.
-	if (impl->lightingComputePipelineLayout != VK_NULL_HANDLE
-		&& impl->clusterGridComputePipeline != VK_NULL_HANDLE
-		&& impl->lightCullComputePipeline != VK_NULL_HANDLE) {
-		const glm::mat4 currentViewProjection = frameData.projectionMatrix * frameData.viewMatrix;
-		const bool cameraChanged = !impl->previousClusterViewProjectionValid
-			|| !MatricesApproximatelyEqual(currentViewProjection, impl->previousClusterViewProjection, 1e-4f);
-
-		if (cameraChanged) {
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterGridComputePipeline);
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSets[currentFrame], 0, nullptr);
-			const uint32_t dispatchX = (kLightingClusterDimX + 7u) / 8u;
-			const uint32_t dispatchY = (kLightingClusterDimY + 7u) / 8u;
-			const uint32_t dispatchZ = std::max<uint32_t>(kLightingClusterDimZ, 1u);
-			vkCmdDispatch(cmd, dispatchX, dispatchY, dispatchZ);
-
-			VkMemoryBarrier gridBarrier{};
-			gridBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-			gridBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-			gridBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-			vkCmdPipelineBarrier(
-				cmd,
-				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-				0,
-				1, &gridBarrier,
-				0, nullptr,
-				0, nullptr
-			);
-
-			impl->previousClusterViewProjection = currentViewProjection;
-			impl->previousClusterViewProjectionValid = true;
-		}
-
-		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightCullComputePipeline);
-		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSets[currentFrame], 0, nullptr);
-		const uint32_t clusterCount = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
-		vkCmdDispatch(cmd, std::max<uint32_t>(clusterCount, 1u), 1u, 1u);
-
-		VkMemoryBarrier lightCullBarrier{};
-		lightCullBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-		lightCullBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		lightCullBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-		vkCmdPipelineBarrier(
-			cmd,
-			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
-			0,
-			1, &lightCullBarrier,
-			0, nullptr,
-			0, nullptr
 		);
 	}
 
@@ -1668,6 +2232,15 @@ RenderStatsSnapshot VulkanContext::GetLatestRenderStats(RenderViewType viewType)
 		return snapshot;
 	}
 	return impl->GetLatestStats(viewType);
+}
+
+FrameBudgetDiagnosticsSnapshot VulkanContext::GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const {
+	if (!impl) {
+		FrameBudgetDiagnosticsSnapshot snapshot{};
+		snapshot.viewType = viewType;
+		return snapshot;
+	}
+	return impl->GetLatestBudgetDiagnostics(viewType);
 }
 
 void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {

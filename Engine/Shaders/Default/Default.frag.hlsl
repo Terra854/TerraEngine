@@ -34,12 +34,12 @@ struct FrameCullingData
 	float4 clusterDepthAndViewport;
 	column_major float4x4 viewMatrix;
 	column_major float4x4 invProjection;
-	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: maxLights, w: enableLTC
-	uint4 renderSettings1; // x: enableIBL, y: aniso, zw: reserved
+	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
+	uint4 renderSettings1; // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
-	uint reserved0;
-	uint reserved1;
+	uint clusteredLightingValid;
+	uint clusteredLightingOverflowed;
 };
 
 struct GPULight
@@ -49,15 +49,18 @@ struct GPULight
 	float4 colorAndIntensity;   // xyz: color, w: intensity
 	float4 coneAnglesAndArea;   // x: innerCos, y: outerCos, z: width, w: height
 	float4 shadowAndPadding;    // x: castsShadows, y: shadowTex, z: ltcAmp, w: ltcInv
-	float4 extraParams;         // x: shadowStrength, y: shadowBias, z: indirectMultiplier, w: padding
+	float4 extraParams;         // x: shadowStrength, y: shadowBias, z: indirectMultiplier, w: authoredPriority
 };
 
 struct ClusterData
 {
 	uint offset;
 	uint count;
+	uint2 padding;
 	float3 minBounds;
+	float minBoundsPadding;
 	float3 maxBounds;
+	float maxBoundsPadding;
 };
 
 [[vk::binding(1, 0)]] StructuredBuffer<MaterialData> allMaterials;
@@ -100,7 +103,6 @@ static const uint kLightTypeDirectional = 0u;
 static const uint kLightTypePoint = 1u;
 static const uint kLightTypeSpot = 2u;
 static const uint kLightTypeAreaRect = 3u;
-static const uint kMaxLightsPerCluster = 64u;
 static const uint kMaxStatsSlots = 16u;
 static const float kPi = 3.14159265f;
 static const float kDirectionalShadowNear = 0.1f;
@@ -515,15 +517,15 @@ float4 main(PSIn input) : SV_Target0
 	const float3 viewDir = normalize(frame.cameraPositionAndEpsilon.xyz - input.worldPosition);
 	const uint clusterIndex = ComputeClusterIndex(input, frame);
 	const ClusterData cluster = clusterGrid[clusterIndex];
+	const bool clusteredLightingAvailable = frame.clusteredLightingValid > 0u && frame.clusteredLightingOverflowed == 0u;
 
 	float3 lighting = float3(0.0, 0.0, 0.0);
 	uint evaluatedLightCount = 0u;
 
-	if (cluster.count > 0u)
+	if (clusteredLightingAvailable)
 	{
-		const uint clusterLightCount = min(cluster.count, kMaxLightsPerCluster);
 		[loop]
-		for (uint lane = 0u; lane < clusterLightCount; ++lane)
+		for (uint lane = 0u; lane < cluster.count; ++lane)
 		{
 			const uint lightIndex = lightIndices[cluster.offset + lane];
 			if (lightIndex == 0xFFFFFFFFu || lightIndex >= lightCount)
@@ -548,7 +550,7 @@ float4 main(PSIn input) : SV_Target0
 	// Debug heatmap mode: set task-culling push constant to 2 from CPU tools.
 	if (SceneUniforms.taskCullingEnabled > 1u)
 	{
-		const float normalizedCount = (float)evaluatedLightCount / float(kMaxLightsPerCluster);
+		const float normalizedCount = (float)evaluatedLightCount / max((float)lightCount, 1.0f);
 		return float4(BuildHeatmapColor(normalizedCount), 1.0);
 	}
 

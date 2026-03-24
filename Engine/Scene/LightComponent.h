@@ -51,6 +51,12 @@ struct LightComponent : public Component<LightComponent>
 	float shadowStrength = 1.0f;
 	float shadowBias = 0.005f;
 	float indirectMultiplier = 1.0f;
+	// Optional author hint that nudges importance-based retention when the scene
+	// exceeds the current per-frame light budget. Zero is neutral.
+	float authoredPriority = 0.0f;
+	// Optional author hint that increases how strongly this light resists minor
+	// frame-to-frame churn once it has already been retained. Zero is neutral.
+	float stabilityPreference = 0.0f;
 
 	// Reflection exposes a stable uint32 representation for type so serializer
 	// code can persist the enum without custom JSON enum parsing.
@@ -71,7 +77,9 @@ struct LightComponent : public Component<LightComponent>
 			.property("castsShadows", &LightComponent::castsShadows)
 			.property("shadowStrength", &LightComponent::shadowStrength)
 			.property("shadowBias", &LightComponent::shadowBias)
-			.property("indirectMultiplier", &LightComponent::indirectMultiplier);
+			.property("indirectMultiplier", &LightComponent::indirectMultiplier)
+			.property("authoredPriority", &LightComponent::authoredPriority)
+			.property("stabilityPreference", &LightComponent::stabilityPreference);
 	}
 
 	std::uint32_t GetTypeValue() const

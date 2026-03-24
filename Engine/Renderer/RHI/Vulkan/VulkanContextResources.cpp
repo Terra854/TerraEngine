@@ -1,6 +1,103 @@
 #include "VulkanContextImpl.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+namespace
+{
+	constexpr std::uint64_t kClusterRangeHashOffset = 1469598103934665603ull;
+	constexpr std::uint64_t kClusterRangeHashPrime = 1099511628211ull;
+
+	void HashClusterRangeValue(std::uint64_t& hashValue, std::uint64_t input)
+	{
+		hashValue ^= input;
+		hashValue *= kClusterRangeHashPrime;
+	}
+
+	const char* RenderViewTypeToString(RenderViewType viewType)
+	{
+		return (viewType == RenderViewType::Scene) ? "Scene" : "Game";
+	}
+
+	const char* QualityPresetToString(QualityPreset preset)
+	{
+		switch (preset)
+		{
+		case QualityPreset::Low:
+			return "Low";
+		case QualityPreset::Medium:
+			return "Medium";
+		case QualityPreset::High:
+			return "High";
+		case QualityPreset::Ultra:
+			return "Ultra";
+		case QualityPreset::Custom:
+			return "Custom";
+		default:
+			return "Unknown";
+		}
+	}
+
+	const char* LightingReductionCategoryToString(LightingReductionCategory category)
+	{
+		switch (category)
+		{
+		case LightingReductionCategory::None:
+			return "None";
+		case LightingReductionCategory::Uploaded:
+			return "Uploaded";
+		case LightingReductionCategory::Special:
+			return "Special";
+		case LightingReductionCategory::Retained:
+			return "Retained";
+		case LightingReductionCategory::Shadow:
+			return "Shadow";
+		default:
+			return "Unknown";
+		}
+	}
+
+	std::string BuildHashHex(std::uint64_t hashValue)
+	{
+		std::ostringstream stream;
+		stream << "0x" << std::hex << std::setw(16) << std::setfill('0') << hashValue;
+		return stream.str();
+	}
+
+	bool IsTruthyEnvironmentValue(const char* value)
+	{
+		if (value == nullptr || value[0] == '\0')
+		{
+			return false;
+		}
+
+		std::string normalizedValue;
+		for (const char* cursor = value; *cursor != '\0'; ++cursor)
+		{
+			normalizedValue.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*cursor))));
+		}
+
+		return normalizedValue == "1"
+			|| normalizedValue == "true"
+			|| normalizedValue == "yes"
+			|| normalizedValue == "on";
+	}
+
+	bool IsClusterValidationCaptureEnabledFromEnvironment()
+	{
+		return IsTruthyEnvironmentValue(std::getenv("TERRAENGINE_CLUSTER_VALIDATION_CAPTURE"));
+	}
+}
 
 void VulkanContext::Impl::CreateDefaultTexture() {
 	// 1. Create Default White Texture (Index 0)
@@ -1418,7 +1515,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 }
 
 bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
-	std::array<VkDescriptorSetLayoutBinding, 17> bindings{};
+	std::array<VkDescriptorSetLayoutBinding, 19> bindings{};
 	// Textures
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1521,10 +1618,23 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	bindings[16].descriptorCount = 1;
 	bindings[16].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	bindings[16].pImmutableSamplers = nullptr;
+	// Lightweight GPU light-analysis output consumed by the hybrid selection path.
+	bindings[17].binding = 17;
+	bindings[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[17].descriptorCount = 1;
+	bindings[17].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[17].pImmutableSamplers = nullptr;
+	// Separate candidate-light input for the GPU analysis pass so the final
+	// retained-light upload can use a different buffer in the same frame.
+	bindings[18].binding = 18;
+	bindings[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[18].descriptorCount = 1;
+	bindings[18].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[18].pImmutableSamplers = nullptr;
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{};
 	bindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	std::array<VkDescriptorBindingFlags, 17> flags = {
+	std::array<VkDescriptorBindingFlags, 19> flags = {
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 0: Textures
 		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 1: Materials (updated mid-frame)
 		0, // 2
@@ -1541,7 +1651,9 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 		0, // 13: Cluster Depth
 		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 14: VRS Image
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 15: VRS Color
-		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT // 16: Hi-Z Output
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 16: Hi-Z Output
+		0, // 17: Light analysis output
+		0 // 18: Light analysis input
 	};
 	bindingFlags.bindingCount = static_cast<uint32_t>(flags.size());
 	bindingFlags.pBindingFlags = flags.data();
@@ -1566,7 +1678,7 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
 	poolSizes[2].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // Point shadow + Hi-Z
 	poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSizes[3].descriptorCount = (7 + MAX_BINDLESS_BUFFERS) * MAX_FRAMES_IN_FLIGHT;
+	poolSizes[3].descriptorCount = (9 + MAX_BINDLESS_BUFFERS) * MAX_FRAMES_IN_FLIGHT;
 	poolSizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	poolSizes[4].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // VRS Image + Hi-Z Output
 
@@ -1683,6 +1795,13 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 		pendingStatsBySlot[slotIndex] = {};
 		pendingStatsBySlot[slotIndex].viewType = (slotIndex % kStatsViewCount == 0u) ? RenderViewType::Game : RenderViewType::Scene;
 	}
+	for (ClusterValidationSnapshot& snapshot : pendingClusterValidationByFrame) {
+		snapshot = {};
+		snapshot.viewType = RenderViewType::Game;
+	}
+	previousClusterValidationSnapshot = {};
+	previousClusterValidationSnapshot.viewType = RenderViewType::Game;
+	previousClusterValidationSnapshotValid = false;
 }
 
 void VulkanContext::Impl::CreateLightingBufferResources() {
@@ -1690,17 +1809,65 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 	const VkDeviceSize clusterBufferSize = static_cast<VkDeviceSize>(sizeof(ClusterData) * MAX_LIGHT_CLUSTERS);
 	const VkDeviceSize lightIndexBufferSize = static_cast<VkDeviceSize>(sizeof(uint32_t) * MAX_LIGHT_INDEX_ENTRIES);
 	const VkDeviceSize clusterDepthBufferSize = static_cast<VkDeviceSize>(sizeof(float) * 2 * kLightingClusterDimX * kLightingClusterDimY);
+	const VkDeviceSize lightAnalysisBufferSize = static_cast<VkDeviceSize>(sizeof(GPULightAnalysisRecord) * MAX_GLOBAL_LIGHTS * kStatsSlotCount);
+
+	clusterValidationCaptureEnabled = IsClusterValidationCaptureEnabledFromEnvironment();
+	if (clusterValidationCaptureEnabled) {
+		TERRAENGINE_LOG(LogLevel::Info, "Cluster validation capture enabled via TERRAENGINE_CLUSTER_VALIDATION_CAPTURE. Lighting buffers will remain CPU-visible for frame-end readback.");
+	}
 
 	globalLightSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
+	lightAnalysisInputSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
 	clusterGridSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
 	lightIndexSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
 	clusterDepthSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
+	lightAnalysisSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
+
+	const VmaMemoryUsage clusterBufferMemoryUsage = clusterValidationCaptureEnabled
+		? VMA_MEMORY_USAGE_CPU_TO_GPU
+		: VMA_MEMORY_USAGE_GPU_ONLY;
 
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		// Light uploads are CPU-driven every frame, so this buffer must remain
+		// CPU-visible regardless of whether validation capture is active.
 		globalLightSSBOs[i] = CreateBuffer(lightBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-		clusterGridSSBOs[i] = CreateBuffer(clusterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-		lightIndexSSBOs[i] = CreateBuffer(lightIndexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-		clusterDepthSSBOs[i] = CreateBuffer(clusterDepthBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+		lightAnalysisInputSSBOs[i] = CreateBuffer(lightBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "Light Analysis Input Buffer");
+		clusterGridSSBOs[i] = CreateBuffer(clusterBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, clusterBufferMemoryUsage);
+		lightIndexSSBOs[i] = CreateBuffer(lightIndexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, clusterBufferMemoryUsage);
+		clusterDepthSSBOs[i] = CreateBuffer(clusterDepthBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, clusterBufferMemoryUsage);
+		lightAnalysisSSBOs[i] = CreateBuffer(lightAnalysisBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU, "Light Analysis Buffer");
+
+		if (clusterValidationCaptureEnabled) {
+			// Validation mode seeds buffers with deterministic defaults so the
+			// frame-end readback code can flag incomplete writes immediately.
+			void* mappedClusterGrid = nullptr;
+			if (vmaMapMemory(allocator, clusterGridSSBOs[i].allocation, &mappedClusterGrid) == VK_SUCCESS) {
+				std::memset(mappedClusterGrid, 0, static_cast<size_t>(clusterBufferSize));
+				vmaFlushAllocation(allocator, clusterGridSSBOs[i].allocation, 0, clusterBufferSize);
+				vmaUnmapMemory(allocator, clusterGridSSBOs[i].allocation);
+			}
+
+			void* mappedLightIndices = nullptr;
+			if (vmaMapMemory(allocator, lightIndexSSBOs[i].allocation, &mappedLightIndices) == VK_SUCCESS) {
+				std::fill_n(static_cast<std::uint32_t*>(mappedLightIndices), MAX_LIGHT_INDEX_ENTRIES, 0xFFFFFFFFu);
+				vmaFlushAllocation(allocator, lightIndexSSBOs[i].allocation, 0, lightIndexBufferSize);
+				vmaUnmapMemory(allocator, lightIndexSSBOs[i].allocation);
+			}
+
+			void* mappedClusterDepth = nullptr;
+			if (vmaMapMemory(allocator, clusterDepthSSBOs[i].allocation, &mappedClusterDepth) == VK_SUCCESS) {
+				std::fill_n(static_cast<float*>(mappedClusterDepth), static_cast<size_t>(clusterDepthBufferSize / sizeof(float)), 1.0f);
+				vmaFlushAllocation(allocator, clusterDepthSSBOs[i].allocation, 0, clusterDepthBufferSize);
+				vmaUnmapMemory(allocator, clusterDepthSSBOs[i].allocation);
+			}
+		}
+
+		void* mappedLightAnalysis = nullptr;
+		if (vmaMapMemory(allocator, lightAnalysisSSBOs[i].allocation, &mappedLightAnalysis) == VK_SUCCESS) {
+			std::memset(mappedLightAnalysis, 0, static_cast<size_t>(lightAnalysisBufferSize));
+			vmaFlushAllocation(allocator, lightAnalysisSSBOs[i].allocation, 0, lightAnalysisBufferSize);
+			vmaUnmapMemory(allocator, lightAnalysisSSBOs[i].allocation);
+		}
 
 		VkDescriptorBufferInfo lightInfo{};
 		lightInfo.buffer = globalLightSSBOs[i].buffer;
@@ -1727,7 +1894,17 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		clusterDepthInfo.offset = 0;
 		clusterDepthInfo.range = clusterDepthBufferSize;
 
-		std::array<VkWriteDescriptorSet, 5> writes{};
+		VkDescriptorBufferInfo lightAnalysisInfo{};
+		lightAnalysisInfo.buffer = lightAnalysisSSBOs[i].buffer;
+		lightAnalysisInfo.offset = 0;
+		lightAnalysisInfo.range = lightAnalysisBufferSize;
+
+		VkDescriptorBufferInfo lightAnalysisInputInfo{};
+		lightAnalysisInputInfo.buffer = lightAnalysisInputSSBOs[i].buffer;
+		lightAnalysisInputInfo.offset = 0;
+		lightAnalysisInputInfo.range = lightBufferSize;
+
+		std::array<VkWriteDescriptorSet, 7> writes{};
 		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writes[0].dstSet = globalDescriptorSets[i];
 		writes[0].dstBinding = 4;
@@ -1762,6 +1939,20 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		writes[4].descriptorCount = 1;
 		writes[4].pBufferInfo = &clusterDepthInfo;
+
+		writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[5].dstSet = globalDescriptorSets[i];
+		writes[5].dstBinding = 17;
+		writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[5].descriptorCount = 1;
+		writes[5].pBufferInfo = &lightAnalysisInfo;
+
+		writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[6].dstSet = globalDescriptorSets[i];
+		writes[6].dstBinding = 18;
+		writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[6].descriptorCount = 1;
+		writes[6].pBufferInfo = &lightAnalysisInputInfo;
 
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 	}
@@ -2191,6 +2382,25 @@ void VulkanContext::Impl::UploadLightingData(const std::vector<GPULight>& lights
 	}
 }
 
+void VulkanContext::Impl::UploadLightAnalysisInputData(const std::vector<GPULight>& lights) {
+	if (lightAnalysisInputSSBOs.empty() || lightAnalysisInputSSBOs[currentFrame].buffer == VK_NULL_HANDLE) {
+		return;
+	}
+
+	const uint32_t clampedLightCount = static_cast<uint32_t>(std::min<size_t>(lights.size(), MAX_GLOBAL_LIGHTS));
+
+	void* mappedLights = nullptr;
+	if (vmaMapMemory(allocator, lightAnalysisInputSSBOs[currentFrame].allocation, &mappedLights) == VK_SUCCESS) {
+		auto* gpuLights = static_cast<GPULight*>(mappedLights);
+		std::fill(gpuLights, gpuLights + MAX_GLOBAL_LIGHTS, GPULight{});
+		if (clampedLightCount > 0u) {
+			std::memcpy(gpuLights, lights.data(), sizeof(GPULight) * clampedLightCount);
+		}
+		vmaFlushAllocation(allocator, lightAnalysisInputSSBOs[currentFrame].allocation, 0, VK_WHOLE_SIZE);
+		vmaUnmapMemory(allocator, lightAnalysisInputSSBOs[currentFrame].allocation);
+	}
+}
+
 void VulkanContext::Impl::ResetMeshletCounters(uint32_t statsSlotIndex) {
 	if (globalMeshletCountersSSBOs.empty() || globalMeshletCountersSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
 		return;
@@ -2252,6 +2462,20 @@ void VulkanContext::Impl::RecordPendingStats(uint32_t statsSlotIndex, const Rend
 	pendingStatsBySlot[statsSlotIndex] = snapshot;
 }
 
+void VulkanContext::Impl::RecordPendingBudgetDiagnostics(uint32_t statsSlotIndex, const FrameBudgetDiagnosticsSnapshot& snapshot) {
+	if (statsSlotIndex >= kStatsSlotCount) {
+		return;
+	}
+	pendingBudgetDiagnosticsBySlot[statsSlotIndex] = snapshot;
+}
+
+void VulkanContext::Impl::RecordPendingLightAnalysisCandidates(uint32_t statsSlotIndex, const std::vector<FrameLightCandidate>& candidates) {
+	if (statsSlotIndex >= kStatsSlotCount) {
+		return;
+	}
+	pendingLightAnalysisCandidatesBySlot[statsSlotIndex] = candidates;
+}
+
 void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	const uint32_t gameSlot = GetStatsSlotIndex(frameIndex, VulkanContext::ViewType::Game);
 	const uint32_t sceneSlot = GetStatsSlotIndex(frameIndex, VulkanContext::ViewType::Scene);
@@ -2284,15 +2508,314 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 		sceneSnapshot.vrsActive = vrs.image != VK_NULL_HANDLE;
 	}
 
-	std::lock_guard<std::mutex> lock(statsMutex);
-	latestStatsByView[0] = gameSnapshot;
-	latestStatsByView[1] = sceneSnapshot;
+	const FrameBudgetDiagnosticsSnapshot gameBudgetDiagnostics = pendingBudgetDiagnosticsBySlot[gameSlot];
+	const FrameBudgetDiagnosticsSnapshot sceneBudgetDiagnostics = pendingBudgetDiagnosticsBySlot[sceneSlot];
+
+	GpuLightAnalysisViewSnapshot gameLightAnalysis{};
+	GpuLightAnalysisViewSnapshot sceneLightAnalysis{};
+	if (frameIndex < lightAnalysisSSBOs.size() && lightAnalysisSSBOs[frameIndex].buffer != VK_NULL_HANDLE) {
+		const VulkanBuffer& analysisBuffer = lightAnalysisSSBOs[frameIndex];
+		void* mappedAnalysis = nullptr;
+		if (vmaMapMemory(allocator, analysisBuffer.allocation, &mappedAnalysis) == VK_SUCCESS) {
+			vmaInvalidateAllocation(allocator, analysisBuffer.allocation, 0, analysisBuffer.size);
+			const auto* analysisRecords = static_cast<const GPULightAnalysisRecord*>(mappedAnalysis);
+			const auto readSnapshot = [&](uint32_t statsSlotIndex) {
+				GpuLightAnalysisViewSnapshot snapshot{};
+				if (statsSlotIndex >= pendingLightAnalysisCandidatesBySlot.size()) {
+					return snapshot;
+				}
+
+				const std::vector<FrameLightCandidate>& candidates = pendingLightAnalysisCandidatesBySlot[statsSlotIndex];
+				if (candidates.empty()) {
+					snapshot.valid = true;
+					return snapshot;
+				}
+
+				const std::size_t clampedCount = std::min<std::size_t>(candidates.size(), MAX_GLOBAL_LIGHTS);
+				const std::size_t baseIndex = static_cast<std::size_t>(statsSlotIndex) * static_cast<std::size_t>(MAX_GLOBAL_LIGHTS);
+				snapshot.recordsByLightId.reserve(clampedCount);
+				for (std::size_t lightIndex = 0; lightIndex < clampedCount; ++lightIndex) {
+					const GPULightAnalysisRecord& record = analysisRecords[baseIndex + lightIndex];
+					snapshot.recordsByLightId.emplace(candidates[lightIndex].lightId, record);
+					if ((record.flags & kGpuLightAnalysisFlagVisible) != 0u) {
+						snapshot.visibleCandidateCount += 1u;
+					}
+				}
+				snapshot.valid = true;
+				return snapshot;
+			};
+
+			gameLightAnalysis = readSnapshot(gameSlot);
+			sceneLightAnalysis = readSnapshot(sceneSlot);
+			vmaUnmapMemory(allocator, analysisBuffer.allocation);
+		}
+	}
+
+	ClusterValidationSnapshot clusterSnapshot{};
+	if (clusterValidationCaptureEnabled) {
+		clusterSnapshot = ReadCompletedClusterValidationSnapshot(frameIndex);
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestStatsByView[0] = gameSnapshot;
+		latestStatsByView[1] = sceneSnapshot;
+		latestBudgetDiagnosticsByView[0] = gameBudgetDiagnostics;
+		latestBudgetDiagnosticsByView[1] = sceneBudgetDiagnostics;
+		latestGpuLightAnalysisByView[0] = std::move(gameLightAnalysis);
+		latestGpuLightAnalysisByView[1] = std::move(sceneLightAnalysis);
+		if (clusterSnapshot.valid) {
+			previousClusterValidationSnapshot = clusterSnapshot;
+			previousClusterValidationSnapshotValid = true;
+		}
+	}
+
+	if (clusterSnapshot.valid) {
+		const FrameBudgetDiagnosticsSnapshot& captureDiagnostics = (clusterSnapshot.viewType == RenderViewType::Scene)
+			? sceneBudgetDiagnostics
+			: gameBudgetDiagnostics;
+		WriteClusterValidationCapture(clusterSnapshot, captureDiagnostics);
+	}
 }
 
 RenderStatsSnapshot VulkanContext::Impl::GetLatestStats(RenderViewType viewType) const {
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestStatsByView[index];
+}
+
+FrameBudgetDiagnosticsSnapshot VulkanContext::Impl::GetLatestBudgetDiagnostics(RenderViewType viewType) const {
+	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestBudgetDiagnosticsByView[index];
+}
+
+VulkanContext::Impl::GpuLightAnalysisViewSnapshot VulkanContext::Impl::GetLatestGpuLightAnalysis(RenderViewType viewType) const {
+	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestGpuLightAnalysisByView[index];
+}
+
+void VulkanContext::Impl::RecordPendingClusterValidationSnapshot(uint32_t frameIndex, const ClusterValidationSnapshot& snapshot) {
+	if (frameIndex >= pendingClusterValidationByFrame.size()) {
+		return;
+	}
+	pendingClusterValidationByFrame[frameIndex] = snapshot;
+}
+
+ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSnapshot(uint32_t frameIndex) const {
+	if (!clusterValidationCaptureEnabled) {
+		return {};
+	}
+
+	if (frameIndex >= pendingClusterValidationByFrame.size()) {
+		return {};
+	}
+
+	ClusterValidationSnapshot snapshot = pendingClusterValidationByFrame[frameIndex];
+	if (!snapshot.valid || !snapshot.buildMetadata.clusteredLightingAvailable) {
+		return snapshot;
+	}
+	if (frameIndex >= clusterGridSSBOs.size() || frameIndex >= lightIndexSSBOs.size()) {
+		snapshot.valid = false;
+		return snapshot;
+	}
+
+	const VulkanBuffer& clusterBuffer = clusterGridSSBOs[frameIndex];
+	const VulkanBuffer& lightIndexBuffer = lightIndexSSBOs[frameIndex];
+	if (clusterBuffer.buffer == VK_NULL_HANDLE || lightIndexBuffer.buffer == VK_NULL_HANDLE) {
+		snapshot.valid = false;
+		return snapshot;
+	}
+
+	const std::uint32_t clusterCount = snapshot.buildMetadata.clusterCount;
+	snapshot.ranges.clear();
+	snapshot.ranges.reserve(clusterCount);
+
+	void* mappedClusters = nullptr;
+	if (vmaMapMemory(allocator, clusterBuffer.allocation, &mappedClusters) != VK_SUCCESS) {
+		snapshot.valid = false;
+		return snapshot;
+	}
+
+	const VkDeviceSize clusterReadSize = static_cast<VkDeviceSize>(sizeof(ClusterData) * clusterCount);
+	vmaInvalidateAllocation(allocator, clusterBuffer.allocation, 0, clusterReadSize);
+
+	const ClusterData* clusterGridData = static_cast<const ClusterData*>(mappedClusters);
+	std::uint64_t rangeHash = kClusterRangeHashOffset;
+	std::uint32_t usedIndexCount = 0u;
+	std::uint32_t actualAssignedLightCount = 0u;
+	std::uint32_t emptyClusterCount = 0u;
+	std::uint32_t maxClusterLightCount = 0u;
+	std::uint32_t outOfBoundsRangeCount = 0u;
+
+	for (std::uint32_t clusterIndex = 0u; clusterIndex < clusterCount; ++clusterIndex) {
+		const ClusterData& cluster = clusterGridData[clusterIndex];
+		const std::uint64_t rangeEnd = static_cast<std::uint64_t>(cluster.offset) + static_cast<std::uint64_t>(cluster.count);
+		const bool outOfBounds = rangeEnd > snapshot.buildMetadata.lightIndexCapacity
+			|| rangeEnd > static_cast<std::uint64_t>(MAX_LIGHT_INDEX_ENTRIES);
+
+		ClusterLightRangeSnapshot rangeSnapshot{};
+		rangeSnapshot.clusterIndex = clusterIndex;
+		rangeSnapshot.offset = cluster.offset;
+		rangeSnapshot.count = cluster.count;
+		rangeSnapshot.outOfBounds = outOfBounds;
+		snapshot.ranges.push_back(rangeSnapshot);
+
+		if (cluster.count == 0u) {
+			emptyClusterCount += 1u;
+		}
+		maxClusterLightCount = std::max(maxClusterLightCount, cluster.count);
+		actualAssignedLightCount += cluster.count;
+		if (rangeEnd > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+			usedIndexCount = std::numeric_limits<std::uint32_t>::max();
+		}
+		else {
+			usedIndexCount = std::max(usedIndexCount, static_cast<std::uint32_t>(rangeEnd));
+		}
+		if (outOfBounds) {
+			outOfBoundsRangeCount += 1u;
+		}
+
+		HashClusterRangeValue(rangeHash, clusterIndex);
+		HashClusterRangeValue(rangeHash, cluster.offset);
+		HashClusterRangeValue(rangeHash, cluster.count);
+		HashClusterRangeValue(rangeHash, outOfBounds ? 1u : 0u);
+	}
+
+	vmaUnmapMemory(allocator, clusterBuffer.allocation);
+
+	std::uint32_t invalidLightIndexCount = 0u;
+	if (usedIndexCount > 0u) {
+		void* mappedLightIndices = nullptr;
+		if (vmaMapMemory(allocator, lightIndexBuffer.allocation, &mappedLightIndices) == VK_SUCCESS) {
+			const VkDeviceSize lightIndexReadSize = static_cast<VkDeviceSize>(sizeof(std::uint32_t) * usedIndexCount);
+			vmaInvalidateAllocation(allocator, lightIndexBuffer.allocation, 0, lightIndexReadSize);
+
+			const std::uint32_t* lightIndexData = static_cast<const std::uint32_t*>(mappedLightIndices);
+			for (std::uint32_t entryIndex = 0u; entryIndex < usedIndexCount; ++entryIndex) {
+				const std::uint32_t lightIndex = lightIndexData[entryIndex];
+				if (lightIndex == 0xFFFFFFFFu || lightIndex >= snapshot.buildMetadata.activeLightCount) {
+					invalidLightIndexCount += 1u;
+				}
+			}
+
+			vmaUnmapMemory(allocator, lightIndexBuffer.allocation);
+		}
+	}
+
+	std::uint32_t determinismMismatchCount = 0u;
+	if (previousClusterValidationSnapshotValid
+		&& previousClusterValidationSnapshot.viewType == snapshot.viewType
+		&& previousClusterValidationSnapshot.ranges.size() == snapshot.ranges.size()
+		&& previousClusterValidationSnapshot.buildMetadata.activeLightCount == snapshot.buildMetadata.activeLightCount) {
+		for (size_t rangeIndex = 0; rangeIndex < snapshot.ranges.size(); ++rangeIndex) {
+			const ClusterLightRangeSnapshot& currentRange = snapshot.ranges[rangeIndex];
+			const ClusterLightRangeSnapshot& previousRange = previousClusterValidationSnapshot.ranges[rangeIndex];
+			if (currentRange.offset != previousRange.offset
+				|| currentRange.count != previousRange.count
+				|| currentRange.outOfBounds != previousRange.outOfBounds) {
+				determinismMismatchCount += 1u;
+			}
+		}
+	}
+
+	snapshot.buildMetadata.usedIndexCount = usedIndexCount;
+	snapshot.buildMetadata.actualAssignedLightCount = actualAssignedLightCount;
+	snapshot.buildMetadata.emptyClusterCount = emptyClusterCount;
+	snapshot.buildMetadata.maxClusterLightCount = maxClusterLightCount;
+	snapshot.buildMetadata.outOfBoundsRangeCount = outOfBoundsRangeCount;
+	snapshot.buildMetadata.invalidLightIndexCount = invalidLightIndexCount;
+	snapshot.buildMetadata.overflowClusterCount = outOfBoundsRangeCount;
+	snapshot.buildMetadata.determinismMismatchCount = determinismMismatchCount;
+	snapshot.buildMetadata.rangeHash = rangeHash;
+	snapshot.buildMetadata.overflowDetected = (outOfBoundsRangeCount > 0u) || (invalidLightIndexCount > 0u);
+	return snapshot;
+}
+
+void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationSnapshot& snapshot, const FrameBudgetDiagnosticsSnapshot& diagnostics) const {
+	if (!clusterValidationCaptureEnabled || !snapshot.valid) {
+		return;
+	}
+
+	try {
+		namespace fs = std::filesystem;
+		const fs::path outputPath = clusterValidationCapturePath;
+		if (outputPath.has_parent_path()) {
+			fs::create_directories(outputPath.parent_path());
+		}
+
+		const double emptyClusterPercent = snapshot.buildMetadata.clusterCount > 0u
+			? (static_cast<double>(snapshot.buildMetadata.emptyClusterCount) * 100.0 / static_cast<double>(snapshot.buildMetadata.clusterCount))
+			: 0.0;
+		const double logicalIndexOverheadPercent = snapshot.buildMetadata.actualAssignedLightCount > 0u
+			? (static_cast<double>(snapshot.buildMetadata.usedIndexCount) * 100.0 / static_cast<double>(snapshot.buildMetadata.actualAssignedLightCount))
+			: 0.0;
+
+		nlohmann::json capture;
+		capture["view_type"] = RenderViewTypeToString(snapshot.viewType);
+		capture["valid"] = snapshot.valid;
+		capture["clustered_lighting_available"] = snapshot.buildMetadata.clusteredLightingAvailable;
+		capture["overflow_detected"] = snapshot.buildMetadata.overflowDetected;
+		capture["active_preset_name"] = QualityPresetToString(diagnostics.activePreset);
+		capture["reduction_category"] = LightingReductionCategoryToString(diagnostics.reductionCategory);
+		capture["gpu_assist_active"] = diagnostics.gpuAssistActive;
+		capture["custom_override_active"] = diagnostics.customOverrideActive;
+		capture["uploaded_light_budget"] = diagnostics.uploadedLightBudget;
+		capture["retained_light_budget"] = diagnostics.retainedLightBudget;
+		capture["shadow_light_budget"] = diagnostics.shadowLightBudget;
+		capture["special_light_budget"] = diagnostics.specialLightBudget;
+		capture["candidate_light_count"] = diagnostics.candidateLightCount;
+		capture["uploaded_light_count"] = diagnostics.uploadedLightCount;
+		capture["retained_light_count"] = diagnostics.retainedLightCount;
+		capture["special_light_count"] = diagnostics.specialLightCount;
+		capture["shadow_eligible_light_count"] = diagnostics.shadowEligibleLightCount;
+		capture["shadowed_light_count"] = diagnostics.shadowedLightCount;
+		capture["gpu_visible_candidate_count"] = diagnostics.gpuVisibleCandidateCount;
+		capture["retained_directional_light_count"] = diagnostics.retainedDirectionalLightCount;
+		capture["retained_authored_priority_light_count"] = diagnostics.retainedAuthoredPriorityLightCount;
+		capture["budget_reduction_occurred"] = diagnostics.budgetReductionOccurred;
+		capture["uploaded_reduction_occurred"] = diagnostics.uploadedReductionOccurred;
+		capture["special_reduction_occurred"] = diagnostics.specialReductionOccurred;
+		capture["shadow_reduction_occurred"] = diagnostics.shadowReductionOccurred;
+		capture["retained_light_churn_count"] = diagnostics.retainedLightChurnCount;
+		capture["retained_light_replacement_count"] = diagnostics.retainedLightReplacementCount;
+		capture["stability_bias_applied_count"] = diagnostics.stabilityBiasAppliedCount;
+		capture["shadow_reuse_count"] = diagnostics.shadowReuseCount;
+		capture["shadow_replacement_count"] = diagnostics.shadowReplacementCount;
+		capture["cluster_count"] = snapshot.buildMetadata.clusterCount;
+		capture["active_light_count"] = snapshot.buildMetadata.activeLightCount;
+		capture["light_index_capacity"] = snapshot.buildMetadata.lightIndexCapacity;
+		capture["used_index_count"] = snapshot.buildMetadata.usedIndexCount;
+		capture["actual_assigned_light_count"] = snapshot.buildMetadata.actualAssignedLightCount;
+		capture["logical_index_overhead_percent"] = logicalIndexOverheadPercent;
+		capture["empty_cluster_count"] = snapshot.buildMetadata.emptyClusterCount;
+		capture["empty_cluster_percent"] = emptyClusterPercent;
+		capture["max_cluster_light_count"] = snapshot.buildMetadata.maxClusterLightCount;
+		capture["retained_eligible_light_count"] = snapshot.buildMetadata.maxClusterLightCount;
+		capture["out_of_bounds_range_count"] = snapshot.buildMetadata.outOfBoundsRangeCount;
+		capture["invalid_light_index_count"] = snapshot.buildMetadata.invalidLightIndexCount;
+		capture["overflow_cluster_count"] = snapshot.buildMetadata.overflowClusterCount;
+		capture["determinism_mismatch_count"] = snapshot.buildMetadata.determinismMismatchCount;
+		capture["range_hash"] = snapshot.buildMetadata.rangeHash;
+		capture["range_hash_hex"] = BuildHashHex(snapshot.buildMetadata.rangeHash);
+		capture["ranges"] = nlohmann::json::array();
+
+		for (const ClusterLightRangeSnapshot& range : snapshot.ranges) {
+			nlohmann::json rangeJson;
+			rangeJson["cluster_index"] = range.clusterIndex;
+			rangeJson["offset"] = range.offset;
+			rangeJson["count"] = range.count;
+			rangeJson["out_of_bounds"] = range.outOfBounds;
+			capture["ranges"].push_back(std::move(rangeJson));
+		}
+
+		std::ofstream outputFile(outputPath);
+		outputFile << capture.dump(2);
+	}
+	catch (const std::exception& exception) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Failed to write cluster validation capture: " << exception.what());
+	}
 }
 
 uint32_t VulkanContext::Impl::AllocateTextureIndex() {

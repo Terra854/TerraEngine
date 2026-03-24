@@ -28,6 +28,22 @@
 #include <fstream>
 #include <filesystem>
 
+namespace
+{
+	constexpr std::uint32_t kMaxShadowResourceSlots = 4u;
+
+	RenderSettings SanitizeRenderSettings(const RenderSettings& input)
+	{
+		RenderSettings sanitized = input;
+		sanitized.maxUploadedLights = std::max(sanitized.maxUploadedLights, 1u);
+		sanitized.maxDynamicLights = std::min(sanitized.maxDynamicLights, sanitized.maxUploadedLights);
+		sanitized.maxAreaLights = std::min(sanitized.maxAreaLights, sanitized.maxDynamicLights);
+		sanitized.maxShadowLights = std::min(sanitized.maxShadowLights, sanitized.maxDynamicLights);
+		sanitized.maxShadowLights = std::min(sanitized.maxShadowLights, kMaxShadowResourceSlots);
+		return sanitized;
+	}
+}
+
 RenderSystem& RenderSystem::Instance()
 {
 	// Provide a singleton instance so the main engine loop can register the
@@ -41,6 +57,8 @@ RenderSystem::RenderSystem()
 {
 	latestGameStats.viewType = RenderViewType::Game;
 	latestSceneStats.viewType = RenderViewType::Scene;
+	latestGameBudgetDiagnostics.viewType = RenderViewType::Game;
+	latestSceneBudgetDiagnostics.viewType = RenderViewType::Scene;
 }
 
 void RenderSystem::Initialize()
@@ -187,7 +205,7 @@ void RenderSystem::Update(float deltaTime)
 		{
 			LightComponent reflectedLight{};
 			const std::uint32_t encodedType = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "type");
-			if (encodedType > static_cast<std::uint32_t>(LightType::Spot))
+			if (encodedType > static_cast<std::uint32_t>(LightType::Area))
 			{
 				// Unsupported legacy light types are intentionally skipped so they
 				// are not silently remapped to another runtime behavior.
@@ -210,8 +228,13 @@ void RenderSystem::Update(float deltaTime)
 			reflectedLight.width = GetComponentProperty<LightComponent, float>(lightComp, "width");
 			reflectedLight.height = GetComponentProperty<LightComponent, float>(lightComp, "height");
 			reflectedLight.castsShadows = GetComponentProperty<LightComponent, bool>(lightComp, "castsShadows");
+			reflectedLight.shadowStrength = GetComponentProperty<LightComponent, float>(lightComp, "shadowStrength");
+			reflectedLight.shadowBias = GetComponentProperty<LightComponent, float>(lightComp, "shadowBias");
+			reflectedLight.indirectMultiplier = GetComponentProperty<LightComponent, float>(lightComp, "indirectMultiplier");
+			reflectedLight.authoredPriority = GetComponentProperty<LightComponent, float>(lightComp, "authoredPriority");
+			reflectedLight.stabilityPreference = GetComponentProperty<LightComponent, float>(lightComp, "stabilityPreference");
 
-			lights.push_back({ object.EntityId(), reflectedLight });
+			lights.push_back({ object.EntityId(), object.getUUID(), reflectedLight });
 			if (!localTransforms.contains(object.EntityId()))
 			{
 				Transform reflectedTransform{};
@@ -354,15 +377,15 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	// Pack reflected lights in parallel so large scenes keep the CPU upload path
-	// scalable while preserving deterministic ordering per frame.
-	std::vector<GPULight> packedLights;
+	// scalable while preserving deterministic ordering and stable light IDs.
+	std::vector<FrameLightCandidate> packedLights;
 	if (!lights.empty())
 	{
 		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
 		const size_t taskCount = std::min(lights.size(), workerCount);
 		const size_t chunkSize = (lights.size() + taskCount - 1) / taskCount;
 
-		std::vector<std::future<std::vector<GPULight>>> futures;
+		std::vector<std::future<std::vector<FrameLightCandidate>>> futures;
 		futures.reserve(taskCount);
 
 		for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
@@ -375,7 +398,7 @@ void RenderSystem::Update(float deltaTime)
 			const size_t end = std::min(lights.size(), start + chunkSize);
 
 			auto task = ThreadPool::instance().createTask([start, end, &lights, &worldTransforms]() {
-				std::vector<GPULight> chunkLights;
+				std::vector<FrameLightCandidate> chunkLights;
 				chunkLights.reserve(end - start);
 
 				for (size_t i = start; i < end; ++i)
@@ -429,9 +452,26 @@ void RenderSystem::Update(float deltaTime)
 						std::clamp(light.shadowStrength, 0.0f, 1.0f),
 						std::max(light.shadowBias, 0.0f),
 						std::max(light.indirectMultiplier, 0.0f),
-						0.0f);
+						light.authoredPriority);
 
-					chunkLights.push_back(gpuLight);
+					FrameLightCandidate candidate{};
+					candidate.lightId = entry.lightId;
+					candidate.gpuLight = gpuLight;
+					candidate.stabilityPreference = std::max(light.stabilityPreference, 0.0f);
+					candidate.candidateFlags = 0u;
+					if (light.castsShadows)
+					{
+						candidate.candidateFlags |= kFrameLightCandidateFlagShadowCapable;
+					}
+					if (light.type == LightType::Area)
+					{
+						candidate.candidateFlags |= kFrameLightCandidateFlagSpecialCost;
+					}
+					if (light.type == LightType::Directional)
+					{
+						candidate.candidateFlags |= kFrameLightCandidateFlagDirectional;
+					}
+					chunkLights.push_back(candidate);
 				}
 
 				return chunkLights;
@@ -452,8 +492,10 @@ void RenderSystem::Update(float deltaTime)
 	frameData.deltaTimeSeconds = deltaTime;
 	frameData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
 	frameData.cullingEpsilon = 0.001f;
-	frameData.settings = currentSettings;
-	frameData.lights = std::move(packedLights);
+	frameData.activePreset = currentPreset;
+	frameData.customOverrideActive = (currentPreset == QualityPreset::Custom);
+	frameData.settings = SanitizeRenderSettings(currentSettings);
+	frameData.lightCandidates = std::move(packedLights);
 	frameData.commands = drawCommands;
 
 	rhi->SetGlobalTaskShaderCullingEnabled(taskShaderCullingEnabled);
@@ -488,6 +530,9 @@ void RenderSystem::Update(float deltaTime)
 		blankData.deltaTimeSeconds = deltaTime;
 		blankData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
 		blankData.cullingEpsilon = 0.001f;
+		blankData.activePreset = currentPreset;
+		blankData.customOverrideActive = (currentPreset == QualityPreset::Custom);
+		blankData.settings = SanitizeRenderSettings(currentSettings);
 		vulkan->RenderFrame(blankData, VulkanContext::ViewType::Game);
 	}
 	else
@@ -532,6 +577,8 @@ void RenderSystem::Update(float deltaTime)
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestGameStats = rhi->GetLatestRenderStats(RenderViewType::Game);
 		latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);
+		latestGameBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Game);
+		latestSceneBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Scene);
 	}
 
     ClearOverrideCameras();
@@ -596,8 +643,12 @@ void RenderSystem::Clear()
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestGameStats = {};
 		latestSceneStats = {};
+		latestGameBudgetDiagnostics = {};
+		latestSceneBudgetDiagnostics = {};
 		latestGameStats.viewType = RenderViewType::Game;
 		latestSceneStats.viewType = RenderViewType::Scene;
+		latestGameBudgetDiagnostics.viewType = RenderViewType::Game;
+		latestSceneBudgetDiagnostics.viewType = RenderViewType::Scene;
 	}
     ClearOverrideCameras();
 }
@@ -621,6 +672,16 @@ RenderStatsSnapshot RenderSystem::GetLatestRenderStats(RenderViewType viewType) 
 	return latestGameStats;
 }
 
+FrameBudgetDiagnosticsSnapshot RenderSystem::GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	if (viewType == RenderViewType::Scene)
+	{
+		return latestSceneBudgetDiagnostics;
+	}
+	return latestGameBudgetDiagnostics;
+}
+
 void RenderSystem::SetQualityPreset(QualityPreset preset)
 {
 	if (preset == QualityPreset::Custom)
@@ -635,7 +696,10 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 	case QualityPreset::Low:
 		currentSettings.shadowResolution = 512u;
 		currentSettings.shadowFilteringSize = 1u;
-		currentSettings.maxDynamicLights = 8u;
+		currentSettings.maxUploadedLights = 64u;
+		currentSettings.maxDynamicLights = 32u;
+		currentSettings.maxShadowLights = 1u;
+		currentSettings.maxAreaLights = 0u;
 		currentSettings.enableLTC = 0u;
 		currentSettings.enableIBL = 0u;
 		currentSettings.anisotropicFiltering = 1u;
@@ -643,7 +707,10 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 	case QualityPreset::Medium:
 		currentSettings.shadowResolution = 1024u;
 		currentSettings.shadowFilteringSize = 3u;
-		currentSettings.maxDynamicLights = 32u;
+		currentSettings.maxUploadedLights = 128u;
+		currentSettings.maxDynamicLights = 64u;
+		currentSettings.maxShadowLights = 2u;
+		currentSettings.maxAreaLights = 2u;
 		currentSettings.enableLTC = 1u;
 		currentSettings.enableIBL = 1u;
 		currentSettings.anisotropicFiltering = 1u;
@@ -651,7 +718,10 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 	case QualityPreset::High:
 		currentSettings.shadowResolution = 2048u;
 		currentSettings.shadowFilteringSize = 5u;
+		currentSettings.maxUploadedLights = 256u;
 		currentSettings.maxDynamicLights = 128u;
+		currentSettings.maxShadowLights = 3u;
+		currentSettings.maxAreaLights = 4u;
 		currentSettings.enableLTC = 1u;
 		currentSettings.enableIBL = 1u;
 		currentSettings.anisotropicFiltering = 4u;
@@ -659,19 +729,23 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 	case QualityPreset::Ultra:
 		currentSettings.shadowResolution = 4096u;
 		currentSettings.shadowFilteringSize = 7u;
-		currentSettings.maxDynamicLights = 1024u;
+		currentSettings.maxUploadedLights = 512u;
+		currentSettings.maxDynamicLights = 256u;
+		currentSettings.maxShadowLights = 4u;
+		currentSettings.maxAreaLights = 8u;
 		currentSettings.enableLTC = 1u;
 		currentSettings.enableIBL = 1u;
 		currentSettings.anisotropicFiltering = 16u;
 		break;
 	}
 
+	currentSettings = SanitizeRenderSettings(currentSettings);
 	SaveSettings();
 }
 
 void RenderSystem::SetRenderSettings(const RenderSettings& settings)
 {
-	currentSettings = settings;
+	currentSettings = SanitizeRenderSettings(settings);
 	currentPreset = QualityPreset::Custom;
 	SaveSettings();
 }
@@ -698,10 +772,14 @@ void RenderSystem::LoadSettings()
 		auto s = j["settings"];
 		currentSettings.shadowResolution = s.value("shadowResolution", 2048u);
 		currentSettings.shadowFilteringSize = s.value("shadowFilteringSize", 5u);
+		currentSettings.maxUploadedLights = s.value("maxUploadedLights", 256u);
 		currentSettings.maxDynamicLights = s.value("maxDynamicLights", 128u);
+		currentSettings.maxShadowLights = s.value("maxShadowLights", 4u);
+		currentSettings.maxAreaLights = s.value("maxAreaLights", 4u);
 		currentSettings.enableLTC = s.value("enableLTC", 1u);
 		currentSettings.enableIBL = s.value("enableIBL", 1u);
 		currentSettings.anisotropicFiltering = s.value("anisotropicFiltering", 4u);
+		currentSettings = SanitizeRenderSettings(currentSettings);
 	}
 	catch (const std::exception& e)
 	{
@@ -729,7 +807,10 @@ void RenderSystem::SaveSettings()
 		nlohmann::json s;
 		s["shadowResolution"] = currentSettings.shadowResolution;
 		s["shadowFilteringSize"] = currentSettings.shadowFilteringSize;
+		s["maxUploadedLights"] = currentSettings.maxUploadedLights;
 		s["maxDynamicLights"] = currentSettings.maxDynamicLights;
+		s["maxShadowLights"] = currentSettings.maxShadowLights;
+		s["maxAreaLights"] = currentSettings.maxAreaLights;
 		s["enableLTC"] = currentSettings.enableLTC;
 		s["enableIBL"] = currentSettings.enableIBL;
 		s["anisotropicFiltering"] = currentSettings.anisotropicFiltering;

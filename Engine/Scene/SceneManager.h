@@ -171,6 +171,14 @@ public:
 			// renderer stress tests and perf regression checks.
 			void SpawnLightStressTestGrid(std::uint32_t gridWidth = 20u, std::uint32_t gridDepth = 20u, float spacing = 2.0f, float intensity = 25.0f);
 
+			// Creates a dense clustered-light validation layout that intentionally
+			// overlaps many point lights so at least one cluster exceeds legacy caps.
+			void SpawnClusterBinDenseFixture();
+
+			// Creates a sparse clustered-light validation layout with mostly empty
+			// clusters so logical shared-list usage can be measured against reality.
+			void SpawnClusterBinSparseFixture();
+
 
 	
 

@@ -40,6 +40,7 @@ public:
 	void SetTaskShaderCullingEnabled(bool enabled);
 	bool IsTaskShaderCullingEnabled() const { return taskShaderCullingEnabled; }
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const;
+	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const;
 
 	void SetQualityPreset(QualityPreset preset);
 	QualityPreset GetQualityPreset() const { return currentPreset; }
@@ -93,12 +94,15 @@ private:
 	struct LightEntry
 	{
 		entt::entity entity;
+		TerraEngine::UUID lightId;
 		LightComponent light;
 	};
 
 	mutable std::mutex statsMutex;
 	RenderStatsSnapshot latestGameStats{};
 	RenderStatsSnapshot latestSceneStats{};
+	FrameBudgetDiagnosticsSnapshot latestGameBudgetDiagnostics{};
+	FrameBudgetDiagnosticsSnapshot latestSceneBudgetDiagnostics{};
 
 	QualityPreset currentPreset = QualityPreset::High;
 	RenderSettings currentSettings;

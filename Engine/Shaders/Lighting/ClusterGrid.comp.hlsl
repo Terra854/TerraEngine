@@ -4,8 +4,11 @@ struct ClusterData
 {
 	uint offset;
 	uint count;
+	uint2 padding;
 	float3 minBounds;
+	float minBoundsPadding;
 	float3 maxBounds;
+	float maxBoundsPadding;
 };
 
 struct FrameCullingData
@@ -16,19 +19,16 @@ struct FrameCullingData
 	float4 clusterDepthAndViewport;
 	column_major float4x4 viewMatrix;
 	column_major float4x4 invProjection;
-	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: maxLights, w: enableLTC
-	uint4 renderSettings1; // x: enableIBL, y: aniso, zw: reserved
+	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
+	uint4 renderSettings1; // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
-	uint reserved0;
-	uint reserved1;
+	uint clusteredLightingValid;
+	uint clusteredLightingOverflowed;
 };
-
-static const uint kMaxLightsPerCluster = 64u;
 
 [[vk::binding(2, 0)]] StructuredBuffer<FrameCullingData> frameCullingData;
 [[vk::binding(5, 0)]] RWStructuredBuffer<ClusterData> clusterGrid;
-[[vk::binding(6, 0)]] RWStructuredBuffer<uint> lightIndices;
 
 // Builds a dense 3D cluster table where each cluster reserves a contiguous
 // segment in the flat light-index list. This pass currently stores metadata
@@ -86,15 +86,12 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	}
 
 	ClusterData cluster;
-	cluster.offset = clusterIndex * kMaxLightsPerCluster;
+	cluster.offset = 0u;
 	cluster.count = 0u;
+	cluster.padding = uint2(0u, 0u);
 	cluster.minBounds = minB;
+	cluster.minBoundsPadding = 0.0;
 	cluster.maxBounds = maxB;
+	cluster.maxBoundsPadding = 0.0;
 	clusterGrid[clusterIndex] = cluster;
-
-	// Reset this cluster's light-index lane so stale values are never consumed.
-	for (uint lane = 0u; lane < kMaxLightsPerCluster; ++lane)
-	{
-		lightIndices[cluster.offset + lane] = 0xFFFFFFFFu;
-	}
 }

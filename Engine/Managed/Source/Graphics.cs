@@ -30,8 +30,14 @@ namespace TerraEngine
         public uint ShadowResolution;
         /// <summary> Size of the PCF filter kernel (must be an odd number like 1, 3, 5, 7). </summary>
         public uint ShadowFilteringSize;
-        /// <summary> Maximum number of dynamic lights processed per cluster. </summary>
+        /// <summary> Scene-wide candidate budget uploaded into the lightweight GPU analysis pass before the final retained-light list is chosen for shading. </summary>
+        public uint MaxUploadedLights;
+        /// <summary> Scene-wide maximum number of dynamic lights retained for shading each frame. Variable light bins no longer treat this as a per-cluster cap. </summary>
         public uint MaxDynamicLights;
+        /// <summary> Scene-wide maximum number of retained lights that may still request shadow resources in the same frame. This value is clamped so it never exceeds MaxDynamicLights or the available shadow slots. </summary>
+        public uint MaxShadowLights;
+        /// <summary> Optional cap for retained area lights so grouped presets can bound higher-cost lighting classes independently. </summary>
+        public uint MaxAreaLights;
         /// <summary> Toggles Linearly Transformed Cosines (LTC) for Area Lights. 1 = Enabled, 0 = Disabled. </summary>
         public uint EnableLTC;
         /// <summary> Toggles Image-Based Lighting (IBL). 1 = Enabled, 0 = Disabled. </summary>
