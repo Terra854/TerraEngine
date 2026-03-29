@@ -64,7 +64,8 @@ namespace
 
 	void PrintUsage()
 	{
-		std::cout << "Usage: TerraEngineMeshCompiler -i <input.obj> -o <output.temf> [options]\n";
+		std::cout << "Usage: TerraEngineMeshCompiler -i <input.mesh> -o <output.temf> [options]\n";
+		std::cout << "Supported mesh source formats: " << GetSupportedMeshSourceExtensionsText() << "\n";
 		std::cout << "Options:\n";
 		std::cout << "  -b, --baseline <path.temf>         Optional accepted baseline artifact for source-hash-aware regression checks.\n";
 		std::cout << "      --include-bounds               Emit optional meshlet bounds payload (default).\n";

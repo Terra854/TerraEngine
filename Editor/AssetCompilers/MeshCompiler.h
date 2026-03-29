@@ -23,8 +23,16 @@ struct MeshCompileReport
 	std::string failureReason;
 };
 
+// Returns true when the file extension maps to a mesh source format the offline
+// compiler can parse directly. Editor discovery and CLI validation both use this
+// helper so supported formats stay in sync.
+bool IsSupportedMeshSourceExtension(const std::filesystem::path& filePath);
+
+// Builds a human-readable extension list for help text and diagnostics.
+std::string GetSupportedMeshSourceExtensionsText();
+
 // Compiles an input mesh into a meshlet-only TEMF artifact.
-// Input: triangulated-compatible source mesh path.
+// Input: supported static mesh source path such as OBJ, FBX, glTF/GLB, DAE, PLY, or STL.
 // Output: .temf file containing packed shared vertices, uint8 primitive indices, remap data, and meshlet tables.
 // Returns false and emits diagnostics to stderr when parsing, meshlet generation, or file write fails.
 bool CompileMesh(

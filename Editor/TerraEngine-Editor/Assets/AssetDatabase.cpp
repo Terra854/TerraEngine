@@ -272,8 +272,8 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
     std::string ext = filePath.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
     
-    if (ext == ".obj" || ext == ".fbx") return "MeshImporter";
-    if (ext == ".png" || ext == ".jpg" || ext == ".tga" || ext == ".bmp") return "TextureImporter";
+    if (IsSupportedMeshSourceExtension(filePath)) return "MeshImporter";
+    if (IsSupportedTextureSourceExtension(filePath)) return "TextureImporter";
     if (ext == ".hlsl" || ext == ".glsl") return "ShaderImporter";
     if (ext == ".tmat") return "MaterialImporter";
     return "GenericImporter";

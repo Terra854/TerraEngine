@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -12,19 +13,30 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "External/meshoptimizer/src/meshoptimizer.h"
 #include "External/mikktspace/mikktspace.h"
-#define TINYOBJLOADER_IMPLEMENTATION
-#include "External/tinyobjloader/tiny_obj_loader.h"
 
 namespace
 {
 	constexpr float kPi = 3.14159265358979323846f;
+	constexpr std::array<std::string_view, 7> kSupportedMeshSourceExtensions = {
+		".obj",
+		".fbx",
+		".gltf",
+		".glb",
+		".dae",
+		".ply",
+		".stl"};
 
 	std::uint32_t AlignUp(std::uint32_t value, std::uint32_t alignment)
 	{
@@ -350,40 +362,176 @@ namespace
 		std::vector<MeshletBounds> meshletBounds;
 	};
 
-	std::array<float, 3> ExtractPosition(const tinyobj::attrib_t& attrib, int index)
+	std::string NormalizeExtension(const std::filesystem::path& filePath)
 	{
-		const int base = index * 3;
-		return {
-			attrib.vertices[base + 0],
-			attrib.vertices[base + 1],
-			attrib.vertices[base + 2]};
+		std::string ext = filePath.extension().string();
+		std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+			return static_cast<char>(std::tolower(c));
+		});
+		return ext;
 	}
 
-	std::array<float, 3> ExtractNormal(const tinyobj::attrib_t& attrib, int index)
+	bool ShouldFlipTexcoordV(const std::filesystem::path& inputPath)
 	{
-		if (index < 0)
+		// Preserve the legacy OBJ behavior exactly so the importer swap does not
+		// change existing assets that were already authored against that path.
+		return NormalizeExtension(inputPath) == ".obj";
+	}
+
+	std::array<float, 3> ExtractPosition(const aiVector3D& value)
+	{
+		return {
+			value.x,
+			value.y,
+			value.z};
+	}
+
+	std::array<float, 3> ExtractNormal(const aiMesh& mesh, unsigned int vertexIndex)
+	{
+		if (!mesh.HasNormals())
 		{
 			return {0.0f, 0.0f, 1.0f};
 		}
 
-		const int base = index * 3;
+		const aiVector3D& normal = mesh.mNormals[vertexIndex];
 		return {
-			attrib.normals[base + 0],
-			attrib.normals[base + 1],
-			attrib.normals[base + 2]};
+			normal.x,
+			normal.y,
+			normal.z};
 	}
 
-	std::array<float, 2> ExtractTexcoord(const tinyobj::attrib_t& attrib, int index)
+	std::array<float, 2> ExtractTexcoord(const aiMesh& mesh, unsigned int vertexIndex, bool flipV)
 	{
-		if (index < 0)
+		if (!mesh.HasTextureCoords(0))
 		{
 			return {0.0f, 0.0f};
 		}
 
-		const int base = index * 2;
+		const aiVector3D& texcoord = mesh.mTextureCoords[0][vertexIndex];
+		const float v = flipV ? (1.0f - texcoord.y) : texcoord.y;
 		return {
-			attrib.texcoords[base + 0],
-			1.0f - attrib.texcoords[base + 1]};
+			texcoord.x,
+			v};
+	}
+
+	bool ImportSourceMesh(
+		const std::filesystem::path& input,
+		MeshCompileReport& report,
+		std::vector<VertexRaw>& outRawVertices,
+		std::vector<std::uint32_t>& outRawIndices,
+		bool& outHasUv)
+	{
+		outRawVertices.clear();
+		outRawIndices.clear();
+		outHasUv = false;
+
+		if (!IsSupportedMeshSourceExtension(input))
+		{
+			std::cerr << "Unsupported mesh source format '" << input.extension().string()
+				<< "'. Supported formats: " << GetSupportedMeshSourceExtensionsText() << ".\n";
+			report.status = "compile_fail";
+			report.failureReason = "unsupported-source-format";
+			return false;
+		}
+
+		Assimp::Importer importer;
+		const unsigned int importFlags =
+			aiProcess_Triangulate
+			| aiProcess_SortByPType
+			| aiProcess_PreTransformVertices
+			| aiProcess_JoinIdenticalVertices
+			| aiProcess_FindInvalidData;
+
+		const aiScene* scene = importer.ReadFile(input.string(), importFlags);
+		if (scene == nullptr || scene->mRootNode == nullptr || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) != 0u)
+		{
+			std::cerr << "Error: " << importer.GetErrorString() << "\n";
+			report.status = "compile_fail";
+			report.failureReason = "source-parse-failed";
+			return false;
+		}
+
+		if (scene->HasAnimations())
+		{
+			std::cerr << "Warning: ignoring animation data while compiling static mesh source '" << input << "'.\n";
+		}
+		if (scene->HasLights())
+		{
+			std::cerr << "Warning: ignoring light data while compiling static mesh source '" << input << "'.\n";
+		}
+		if (scene->HasCameras())
+		{
+			std::cerr << "Warning: ignoring camera data while compiling static mesh source '" << input << "'.\n";
+		}
+
+		const bool flipTexcoordV = ShouldFlipTexcoordV(input);
+		std::size_t skippedNonTriangleFaces = 0;
+		bool warnedAboutBones = false;
+
+		// Normalize every imported mesh into the same unindexed triangle soup that
+		// the existing cleanup, tangent generation, and TEMF packing code already expects.
+		for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex)
+		{
+			const aiMesh* mesh = scene->mMeshes[meshIndex];
+			if (mesh == nullptr || mesh->mNumVertices == 0 || mesh->mNumFaces == 0)
+			{
+				continue;
+			}
+
+			if (mesh->HasBones() && !warnedAboutBones)
+			{
+				std::cerr << "Warning: ignoring skinning weights and bones while compiling static mesh source '" << input << "'.\n";
+				warnedAboutBones = true;
+			}
+
+			const bool meshHasUv = mesh->HasTextureCoords(0);
+			outHasUv = outHasUv || meshHasUv;
+
+			for (unsigned int faceIndex = 0; faceIndex < mesh->mNumFaces; ++faceIndex)
+			{
+				const aiFace& face = mesh->mFaces[faceIndex];
+				if (face.mNumIndices != 3u)
+				{
+					++skippedNonTriangleFaces;
+					continue;
+				}
+
+				for (unsigned int localIndex = 0; localIndex < face.mNumIndices; ++localIndex)
+				{
+					const unsigned int vertexIndex = face.mIndices[localIndex];
+					if (vertexIndex >= mesh->mNumVertices)
+					{
+						std::cerr << "Error: imported mesh face references a vertex outside the source vertex array.\n";
+						report.status = "compile_fail";
+						report.failureReason = "source-index-out-of-range";
+						return false;
+					}
+
+					const std::array<float, 3> position = ExtractPosition(mesh->mVertices[vertexIndex]);
+					const std::array<float, 3> normal = ExtractNormal(*mesh, vertexIndex);
+					const std::array<float, 2> uv = ExtractTexcoord(*mesh, vertexIndex, flipTexcoordV);
+
+					outRawIndices.push_back(static_cast<std::uint32_t>(outRawVertices.size()));
+					outRawVertices.push_back({position, normal, {0.0f, 0.0f, 0.0f}, uv, 1.0f});
+				}
+			}
+		}
+
+		if (skippedNonTriangleFaces > 0u)
+		{
+			std::cerr << "Warning: skipped " << skippedNonTriangleFaces
+				<< " non-triangle faces while normalizing source mesh '" << input << "'.\n";
+		}
+
+		if (outRawIndices.empty())
+		{
+			std::cerr << "No triangle geometry found in source mesh: " << input << "\n";
+			report.status = "compile_fail";
+			report.failureReason = "empty-geometry";
+			return false;
+		}
+
+		return true;
 	}
 
 	std::int32_t QuantizeFloat(float value, float scale)
@@ -904,6 +1052,31 @@ namespace
 	}
 }
 
+bool IsSupportedMeshSourceExtension(const std::filesystem::path& filePath)
+{
+	const std::string ext = NormalizeExtension(filePath);
+	return std::find(
+		kSupportedMeshSourceExtensions.begin(),
+		kSupportedMeshSourceExtensions.end(),
+		std::string_view(ext)) != kSupportedMeshSourceExtensions.end();
+}
+
+std::string GetSupportedMeshSourceExtensionsText()
+{
+	std::string result;
+	for (std::size_t index = 0; index < kSupportedMeshSourceExtensions.size(); ++index)
+	{
+		if (!result.empty())
+		{
+			result += ", ";
+		}
+
+		result += kSupportedMeshSourceExtensions[index];
+	}
+
+	return result;
+}
+
 bool CompileMesh(
 	const std::filesystem::path& input,
 	const std::filesystem::path& output,
@@ -929,75 +1102,11 @@ bool CompileMesh(
 		return result;
 	};
 
-	tinyobj::attrib_t attrib;
-	std::vector<tinyobj::shape_t> shapes;
-	std::vector<tinyobj::material_t> materials;
-	std::string warn;
-	std::string err;
-
-	const bool ok = tinyobj::LoadObj(
-		&attrib,
-		&shapes,
-		&materials,
-		&warn,
-		&err,
-		input.string().c_str(),
-		input.parent_path().string().c_str(),
-		true);
-
-	if (!warn.empty())
-	{
-		std::cerr << "Warning: " << warn << "\n";
-	}
-
-	if (!ok || !err.empty())
-	{
-		std::cerr << "Error: " << err << "\n";
-		report.status = "compile_fail";
-		report.failureReason = "obj-parse-failed";
-		return FinalizeReport(false);
-	}
-
-	const int positionCount = static_cast<int>(attrib.vertices.size() / 3u);
-	const int normalCount = static_cast<int>(attrib.normals.size() / 3u);
-	const int texcoordCount = static_cast<int>(attrib.texcoords.size() / 2u);
-
 	std::vector<VertexRaw> rawVertices;
 	std::vector<std::uint32_t> rawIndices;
-
-	for (const auto& shape : shapes)
+	bool hasUv = false;
+	if (!ImportSourceMesh(input, report, rawVertices, rawIndices, hasUv))
 	{
-		std::size_t indexOffset = 0;
-		for (std::size_t faceIndex = 0; faceIndex < shape.mesh.num_face_vertices.size(); ++faceIndex)
-		{
-			const std::size_t verticesPerFace = static_cast<std::size_t>(shape.mesh.num_face_vertices[faceIndex]);
-			if (verticesPerFace != 3u)
-			{
-				std::cerr << "MeshCompiler only accepts triangulated topology; found face with " << verticesPerFace << " vertices.\n";
-				report.status = "compile_fail";
-				report.failureReason = "face-not-triangulated";
-				return FinalizeReport(false);
-			}
-
-			for (std::size_t faceVertex = 0; faceVertex < verticesPerFace; ++faceVertex)
-			{
-				const tinyobj::index_t idx = shape.mesh.indices[indexOffset + faceVertex];
-				const std::array<float, 3> position = ExtractPosition(attrib, idx.vertex_index);
-				const std::array<float, 3> normal = ExtractNormal(attrib, idx.normal_index);
-				const std::array<float, 2> uv = ExtractTexcoord(attrib, idx.texcoord_index);
-				
-				rawIndices.push_back(static_cast<uint32_t>(rawVertices.size()));
-				rawVertices.push_back({position, normal, {0.0f, 0.0f, 0.0f}, uv, 1.0f});
-			}
-			indexOffset += verticesPerFace;
-		}
-	}
-
-	if (rawIndices.empty())
-	{
-		std::cerr << "No geometry found in OBJ: " << input << "\n";
-		report.status = "compile_fail";
-		report.failureReason = "empty-geometry";
 		return FinalizeReport(false);
 	}
 
@@ -1039,7 +1148,6 @@ bool CompileMesh(
 	std::array<float, 2> maxUv{
 		std::numeric_limits<float>::lowest(),
 		std::numeric_limits<float>::lowest()};
-	bool hasUv = true; // Assume true for now as OBJ usually has them or defaults
 
 	for (const auto& v : vertices)
 	{
@@ -1056,7 +1164,7 @@ bool CompileMesh(
 
 	if (indices.empty())
 	{
-		std::cerr << "No geometry found in OBJ: " << input << "\n";
+		std::cerr << "No geometry found in source mesh: " << input << "\n";
 		report.status = "compile_fail";
 		report.failureReason = "empty-geometry";
 		return FinalizeReport(false);
@@ -1064,7 +1172,7 @@ bool CompileMesh(
 
 	if ((indices.size() % 3u) != 0u)
 	{
-		std::cerr << "MeshCompiler generated non-triangulated primitive output for OBJ: " << input << "\n";
+		std::cerr << "MeshCompiler generated non-triangulated primitive output for source mesh: " << input << "\n";
 		report.status = "compile_fail";
 		report.failureReason = "non-triangle-index-buffer";
 		return FinalizeReport(false);
@@ -1233,7 +1341,7 @@ bool CompileMesh(
 		header,
 		vertexData.size(),
 		remapData.size(),
-		0, // skinningBytes (unimplemented in OBJ path)
+		0, // skinningBytes (static mesh source path only for now)
 		meshletPayload.primitiveIndices.size() * sizeof(std::uint8_t),
 		meshletPayload.meshletRecords.size() * sizeof(MeshletRecord),
 		meshletPayload.meshletSections.size() * sizeof(MeshletSection),

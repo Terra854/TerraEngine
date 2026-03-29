@@ -53,6 +53,7 @@ namespace
 		if(args.input.empty() || args.output.empty())
 		{
 			std::cerr << "Usage: TerraEngineTextureCompiler -i <input image> -o <output.tetf> [-s <color|data>]\n";
+			std::cerr << "Supported texture source formats: " << GetSupportedTextureSourceExtensionsText() << "\n";
 			return false;
 		}
 

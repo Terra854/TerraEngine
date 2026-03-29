@@ -17,7 +17,7 @@ The submodules track the following upstream releases:
 - [VMA (Vulkan Memory Allocator) v3.1.0](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) — specialized memory management for Vulkan resources.
 - [nlohmann/json (snapshot)](https://github.com/nlohmann/json) — header-only JSON parser/serializer used for authored `.tescene` and `.teprefab` validation.
 - [stb (commit f1c79c0)](https://github.com/nothings/stb/tree/f1c79c0) — header-only texture decoding helpers shipped alongside the engine.
-- [tinyobjloader (commit a4e519b)](https://github.com/tinyobjloader/tinyobjloader) — header-only OBJ mesh loader for offline asset import.
+- [Assimp v6.0.4](https://github.com/assimp/assimp/tree/v6.0.4) - static mesh import library for offline asset compilation across OBJ, FBX, glTF, COLLADA, PLY, and STL sources.
 - [meshoptimizer v0.21](https://github.com/zeux/meshoptimizer) — vertex/index optimization and meshlet generation for the asset pipeline.
 - [mikktspace (commit 3f5d5e5)](https://github.com/mmikk/MikkTSpace) — industry-standard tangent space generation.
 - [cimgui (ImGui v1.90.1)](https://github.com/cimgui/cimgui) — C-api for Dear ImGui used by the editor's UI layer.

@@ -6,6 +6,8 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Scene/LightComponent.h"
 #include "AssetDatabase.h"
+#include "Editor/AssetCompilers/MeshCompiler.h"
+#include "Editor/AssetCompilers/TextureCompiler.h"
 #include "Engine/File Formats/TerraEngineMaterialFile.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
@@ -680,9 +682,9 @@ void InspectorWindow::OnGui() {
 
         if (ext == ".tmat") {
             DrawMaterialInspector(*selectedAsset);
-        } else if (ext == ".obj" || ext == ".fbx") {
+        } else if (IsSupportedMeshSourceExtension(*selectedAsset)) {
             DrawMeshInspector(*selectedAsset);
-        } else if (ext == ".png" || ext == ".jpg" || ext == ".tga" || ext == ".bmp") {
+        } else if (IsSupportedTextureSourceExtension(*selectedAsset)) {
             DrawTextureInspector(*selectedAsset);
         } else {
              ImGui::Text("Selected Asset: %s", selectedAsset->filename().string().c_str());
