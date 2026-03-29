@@ -94,8 +94,8 @@ add_library(TerraEngine-Engine SHARED
 	${ENGINE_HEADERS}
 )
 
-# Header-only dependencies stay bundled so texture decoding never relies on
-# external package managers.
+# Header-only dependencies stay bundled so texture decoding and OBJ parsing never
+# rely on external package managers.
 target_include_directories(TerraEngine-Engine
 	PUBLIC
 		${CMAKE_CURRENT_SOURCE_DIR}/Engine
@@ -103,6 +103,7 @@ target_include_directories(TerraEngine-Engine
 		${CMAKE_CURRENT_SOURCE_DIR}/External/glm
 		${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
 		${CMAKE_CURRENT_SOURCE_DIR}/External/stb
+		${CMAKE_CURRENT_SOURCE_DIR}/External/tinyobjloader
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
@@ -158,50 +159,6 @@ set(MESHOPT_INSTALL OFF CACHE BOOL "Disable meshoptimizer install target" FORCE)
 add_subdirectory(External/meshoptimizer)
 set_target_properties(meshoptimizer PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 
-# --- assimp ------------------------------------------------------------------
-# Build Assimp as a static, import-only dependency so the mesh compiler gains
-# broad format support without adding a system dependency or extra runtime DLLs.
-set(TERRAENGINE_BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
-set(ASSIMP_NO_EXPORT ON CACHE BOOL "Disable Assimp exporters" FORCE)
-set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "Disable Assimp tests" FORCE)
-set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "Disable Assimp tools" FORCE)
-set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "Disable Assimp samples" FORCE)
-set(ASSIMP_BUILD_DOCS OFF CACHE BOOL "Disable Assimp docs" FORCE)
-set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "Allow upstream Assimp warnings" FORCE)
-set(ASSIMP_INSTALL OFF CACHE BOOL "Disable Assimp install target" FORCE)
-set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "Build Assimp's bundled zlib" FORCE)
-set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "Build only the importers TerraEngine uses" FORCE)
-set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "Enable Assimp OBJ importer" FORCE)
-set(ASSIMP_BUILD_FBX_IMPORTER ON CACHE BOOL "Enable Assimp FBX importer" FORCE)
-set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "Enable Assimp glTF importer" FORCE)
-set(ASSIMP_BUILD_COLLADA_IMPORTER ON CACHE BOOL "Enable Assimp COLLADA importer" FORCE)
-set(ASSIMP_BUILD_PLY_IMPORTER ON CACHE BOOL "Enable Assimp PLY importer" FORCE)
-set(ASSIMP_BUILD_STL_IMPORTER ON CACHE BOOL "Enable Assimp STL importer" FORCE)
-add_subdirectory(External/assimp)
-set(BUILD_SHARED_LIBS ${TERRAENGINE_BUILD_SHARED_LIBS_SAVED} CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
-set_target_properties(assimp PROPERTIES CXX_SCAN_FOR_MODULES OFF)
-
-# --- KTX-Software ------------------------------------------------------------
-# Build libktx as a static dependency so the texture compiler, editor, and
-# runtime share one Khronos-backed KTX2 implementation without extra runtime
-# DLLs or a dependency on external command-line tools.
-set(TERRAENGINE_BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
-set(KTX_FEATURE_DOC OFF CACHE BOOL "Disable KTX documentation" FORCE)
-set(KTX_FEATURE_JNI OFF CACHE BOOL "Disable KTX Java bindings" FORCE)
-set(KTX_FEATURE_PY OFF CACHE BOOL "Disable KTX Python bindings" FORCE)
-set(KTX_FEATURE_JS OFF CACHE BOOL "Disable KTX JavaScript bindings" FORCE)
-set(KTX_FEATURE_TESTS OFF CACHE BOOL "Disable KTX tests" FORCE)
-set(KTX_FEATURE_TOOLS OFF CACHE BOOL "Disable KTX tools" FORCE)
-set(KTX_FEATURE_TOOLS_CTS OFF CACHE BOOL "Disable KTX CTS tools" FORCE)
-set(KTX_FEATURE_VK_UPLOAD OFF CACHE BOOL "Disable libktx Vulkan upload helpers" FORCE)
-set(BASISU_SUPPORT_OPENCL OFF CACHE BOOL "Disable OpenCL support in libktx" FORCE)
-add_subdirectory(External/KTX-Software)
-set(BUILD_SHARED_LIBS ${TERRAENGINE_BUILD_SHARED_LIBS_SAVED} CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
-set_target_properties(ktx PROPERTIES CXX_SCAN_FOR_MODULES OFF)
-set_target_properties(ktx_read PROPERTIES CXX_SCAN_FOR_MODULES OFF)
-
 # --- mikktspace --------------------------------------------------------------
 add_library(mikktspace STATIC External/mikktspace/mikktspace.c External/mikktspace/mikktspace.h)
 target_include_directories(mikktspace PUBLIC External/mikktspace)
@@ -222,7 +179,6 @@ target_link_libraries(TerraEngine-Engine
 		volk
 		GPUOpen::VulkanMemoryAllocator
 		nethost
-		ktx_read
 		meshoptimizer
 )
 
@@ -383,15 +339,8 @@ target_include_directories(TerraEngineMeshCompiler
 
 target_link_libraries(TerraEngineMeshCompiler
 	PRIVATE
-		assimp::assimp
 		meshoptimizer
 		mikktspace
-)
-
-target_link_libraries(TerraEngineTextureCompiler
-	PRIVATE
-		ktx
-		Vulkan::Headers
 )
 
 target_include_directories(TerraEngineTextureCompiler
@@ -404,11 +353,6 @@ target_include_directories(TerraEngineShaderCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
-)
-
-target_link_libraries(TerraEngineShaderCompiler
-	PRIVATE
-		Vulkan::Headers
 )
 
 # --- ImGui -------------------------------------------------------------------
@@ -471,20 +415,12 @@ target_include_directories(TerraEngine-Editor
 
 target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM GLM_ENABLE_EXPERIMENTAL)
 
-if(MSVC)
-	# The editor target builds a large number of C++ files directly, including
-	# vendored sources, so /FS avoids transient Debug PDB write races on Windows.
-	target_compile_options(TerraEngine-Editor PRIVATE /FS)
-endif()
-
 target_link_libraries(TerraEngine-Editor
 	PRIVATE
 		TerraEngine-Engine
 		cimgui
 		glfw
 		Vulkan::Headers
-		ktx
-		assimp::assimp
 		meshoptimizer
 		mikktspace
 )

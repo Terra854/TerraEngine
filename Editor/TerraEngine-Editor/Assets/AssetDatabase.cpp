@@ -5,9 +5,7 @@
 #include <iomanip>
 #include <chrono>
 #include <algorithm>
-#include <cstring>
 #include <cstdlib>
-#include <vector>
 
 #include "Editor/AssetCompilers/MeshCompiler.h"
 #include "Editor/AssetCompilers/TextureCompiler.h"
@@ -36,111 +34,6 @@ namespace {
         }
         return uuid;
     }
-
-	enum class CompiledTextureContractState {
-		Missing,
-		Current,
-		Legacy,
-		Invalid
-	};
-
-	const std::uint8_t* MapCompiledTextureRange(
-		const std::vector<std::uint8_t>& fileBytes,
-		const std::size_t fileOffset,
-		const std::size_t requiredSize)
-	{
-		if (fileOffset > fileBytes.size() || requiredSize > fileBytes.size() - fileOffset) {
-			return nullptr;
-		}
-
-		return fileBytes.data() + fileOffset;
-	}
-
-	CompiledTextureContractState InspectCompiledTextureContract(const std::filesystem::path& compiledPath) {
-		std::ifstream file(compiledPath, std::ios::binary);
-		if (!file.is_open()) {
-			return CompiledTextureContractState::Missing;
-		}
-
-		file.seekg(0, std::ios::end);
-		const std::streamoff fileSize = file.tellg();
-		if (fileSize < static_cast<std::streamoff>(sizeof(TETFHeader))) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		file.seekg(0, std::ios::beg);
-		std::vector<std::uint8_t> fileBytes(static_cast<std::size_t>(fileSize));
-		file.read(reinterpret_cast<char*>(fileBytes.data()), static_cast<std::streamsize>(fileSize));
-		if (!file.good()) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		TETFHeader header{};
-		std::memcpy(&header, fileBytes.data(), sizeof(TETFHeader));
-
-		if (header.magic != kMagic) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		if (header.versionMajor < kVersionMajor) {
-			return CompiledTextureContractState::Legacy;
-		}
-
-		if (!IsCurrentTetfVersion(header.versionMajor)) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		if (header.headerSize < sizeof(TETFHeader) || header.headerSize > fileBytes.size()) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		// Mirror just enough of the current TETF wrapper contract to distinguish
-		// real current outputs from stale or malformed files without opening KTX2.
-		const std::size_t chunkTableSize = static_cast<std::size_t>(header.chunkCount) * sizeof(TETFChunkEntry);
-		const std::uint8_t* chunkTablePtr = MapCompiledTextureRange(
-			fileBytes,
-			static_cast<std::size_t>(header.tocOffset),
-			chunkTableSize);
-		if (chunkTablePtr == nullptr) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		std::vector<TETFChunkEntry> chunks(header.chunkCount);
-		std::memcpy(chunks.data(), chunkTablePtr, chunkTableSize);
-
-		const auto descIt = std::find_if(chunks.begin(), chunks.end(), [](const TETFChunkEntry& chunk) {
-			return chunk.id == kDescChunkId;
-		});
-		if (descIt == chunks.end() || descIt->size < sizeof(TETFDesc)) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		const std::uint8_t* descPtr = MapCompiledTextureRange(
-			fileBytes,
-			static_cast<std::size_t>(descIt->offset),
-			sizeof(TETFDesc));
-		if (descPtr == nullptr) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		TETFDesc desc{};
-		std::memcpy(&desc, descPtr, sizeof(TETFDesc));
-		if (desc.payloadChunk >= chunks.size()) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		const TETFChunkEntry& payloadEntry = chunks[desc.payloadChunk];
-		if (payloadEntry.id != kKtx2ChunkId) {
-			return CompiledTextureContractState::Invalid;
-		}
-
-		return MapCompiledTextureRange(
-			fileBytes,
-			static_cast<std::size_t>(payloadEntry.offset),
-			static_cast<std::size_t>(payloadEntry.size)) != nullptr
-			? CompiledTextureContractState::Current
-			: CompiledTextureContractState::Invalid;
-	}
 }
 
 AssetDatabase& AssetDatabase::Instance() {
@@ -283,8 +176,6 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
     std::filesystem::path compiledRelativePath = relativeSourcePath;
     
     if (metadata.importerName == "MeshImporter") compiledRelativePath.replace_extension(".temf");
-    // Keep the compiled texture boundary stable at .tetf so the same source
-    // GUID keeps resolving after recompiles even though the payload contract changed.
     else if (metadata.importerName == "TextureImporter") compiledRelativePath.replace_extension(".tetf");
     else if (metadata.importerName == "ShaderImporter") compiledRelativePath.replace_extension(".tspf");
     else if (metadata.importerName == "MaterialImporter") compiledRelativePath.replace_extension(".tmat");
@@ -309,27 +200,6 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
                 TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << absSourcePath);
             }
         }
-
-		if (metadata.importerName == "TextureImporter" && std::filesystem::exists(fullCompiledPath)) {
-			switch (InspectCompiledTextureContract(fullCompiledPath)) {
-			case CompiledTextureContractState::Current:
-				break;
-			case CompiledTextureContractState::Legacy:
-				TERRAENGINE_LOG(
-					LogLevel::Warning,
-					"Texture asset still points at a legacy compiled .tetf and will fail until recompiled: "
-					<< absSourcePath);
-				break;
-			case CompiledTextureContractState::Invalid:
-				TERRAENGINE_LOG(
-					LogLevel::Warning,
-					"Texture asset has an invalid compiled .tetf output and should be recompiled: "
-					<< absSourcePath);
-				break;
-			case CompiledTextureContractState::Missing:
-				break;
-			}
-		}
     }
     
     // Always save metadata

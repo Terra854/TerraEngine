@@ -360,7 +360,7 @@ void VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint
 	EndSingleTimeCommands(commandBuffer);
 }
 
-VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t levelCount, uint32_t layerCount) {
+VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags) {
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	viewInfo.image = image;
@@ -368,9 +368,9 @@ VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format,
 	viewInfo.format = format;
 	viewInfo.subresourceRange.aspectMask = aspectFlags;
 	viewInfo.subresourceRange.baseMipLevel = 0;
-	viewInfo.subresourceRange.levelCount = levelCount;
+	viewInfo.subresourceRange.levelCount = 1;
 	viewInfo.subresourceRange.baseArrayLayer = 0;
-	viewInfo.subresourceRange.layerCount = layerCount;
+	viewInfo.subresourceRange.layerCount = 1;
 
 	VkImageView imageView;
 	if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
@@ -528,9 +528,12 @@ VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIn
 	return secondary;
 }
 
-VkFormat VulkanContext::Impl::MapTextureFormat(const TETFDesc& descriptor) {
-	if (descriptor.vkFormat != VK_FORMAT_UNDEFINED) {
-		return static_cast<VkFormat>(descriptor.vkFormat);
+VkFormat VulkanContext::Impl::MapTextureFormat(uint8_t format, uint8_t channelType, uint8_t semantic) {
+	if (format == static_cast<uint8_t>(TETFFormat::RGBA8)) {
+		if (semantic == static_cast<uint8_t>(TextureFileSemantic::Color)) {
+			return VK_FORMAT_R8G8B8A8_SRGB;
+		}
+		return VK_FORMAT_R8G8B8A8_UNORM;
 	}
 	return VK_FORMAT_R8G8B8A8_UNORM;
 }
@@ -548,53 +551,16 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	Texture* cpuTexture = ResourceManager::Instance().GetTexture(textureId);
 	if (!cpuTexture) return;
 	
-	if (cpuTexture->mips.empty() || cpuTexture->imageData.empty()) return;
+	if (cpuTexture->mips.empty()) return;
 
-	if (cpuTexture->descriptor.layers != 1 || cpuTexture->descriptor.faces != 1 || cpuTexture->descriptor.depth != 1) {
-		TERRAENGINE_LOG(LogLevel::Error, "Only 2D single-layer current TETF textures are supported by the Vulkan upload path.");
-		return;
-	}
-
-	VkDeviceSize imageSize = cpuTexture->imageData.size();
+	VkDeviceSize imageSize = cpuTexture->mips[0].data.size();
 	
 	VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Generic Staging Buffer");
 	
 	void* data;
 	vmaMapMemory(allocator, stagingBuffer.allocation, &data);
-	memcpy(data, cpuTexture->imageData.data(), imageSize);
+	memcpy(data, cpuTexture->mips[0].data.data(), imageSize);
 	vmaUnmapMemory(allocator, stagingBuffer.allocation);
-
-	std::vector<VkBufferImageCopy> copyRegions;
-	copyRegions.reserve(cpuTexture->mips.size());
-	VkDeviceSize expectedOffset = 0;
-	for (const TETFMipPayload& mip : cpuTexture->mips) {
-		if (mip.data.empty()) {
-			TERRAENGINE_LOG(LogLevel::Error, "Current TETF mip payload is empty for texture upload.");
-			vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
-			return;
-		}
-
-		const VkDeviceSize spanOffset = static_cast<VkDeviceSize>(mip.data.data() - cpuTexture->imageData.data());
-		if (spanOffset != expectedOffset) {
-			TERRAENGINE_LOG(LogLevel::Error, "Current TETF mip payload storage is not tightly packed for Vulkan upload.");
-			vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
-			return;
-		}
-
-		VkBufferImageCopy region{};
-		region.bufferOffset = spanOffset;
-		region.bufferRowLength = 0;
-		region.bufferImageHeight = 0;
-		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		region.imageSubresource.mipLevel = mip.mipLevel;
-		region.imageSubresource.baseArrayLayer = 0;
-		region.imageSubresource.layerCount = 1;
-		region.imageOffset = {0, 0, 0};
-		region.imageExtent = {mip.width, mip.height, mip.depth};
-		copyRegions.push_back(region);
-
-		expectedOffset += static_cast<VkDeviceSize>(mip.data.size());
-	}
 
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -602,9 +568,9 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	imageInfo.extent.width = cpuTexture->descriptor.width;
 	imageInfo.extent.height = cpuTexture->descriptor.height;
 	imageInfo.extent.depth = 1;
-	imageInfo.mipLevels = static_cast<uint32_t>(cpuTexture->mips.size());
+	imageInfo.mipLevels = 1; 
 	imageInfo.arrayLayers = 1;
-	imageInfo.format = MapTextureFormat(cpuTexture->descriptor);
+	imageInfo.format = MapTextureFormat(cpuTexture->descriptor.format, cpuTexture->descriptor.channelType, cpuTexture->descriptor.semantic);
 	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -623,22 +589,12 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	}
 
 	TransitionImageLayout(vImage.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	{
-		VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-		vkCmdCopyBufferToImage(
-			commandBuffer,
-			stagingBuffer.buffer,
-			vImage.image,
-			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			static_cast<uint32_t>(copyRegions.size()),
-			copyRegions.data());
-		EndSingleTimeCommands(commandBuffer);
-	}
+	CopyBufferToImage(stagingBuffer.buffer, vImage.image, cpuTexture->descriptor.width, cpuTexture->descriptor.height);
 	TransitionImageLayout(vImage.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
-	vImage.view = CreateImageView(vImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT, imageInfo.mipLevels, imageInfo.arrayLayers);
+	vImage.view = CreateImageView(vImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
 	if (vImage.view == VK_NULL_HANDLE) {
 		// Tear down the image allocation if view creation fails so shutdown does not leak VMA allocations.
 		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
@@ -654,8 +610,6 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 	samplerInfo.maxAnisotropy = 1.0f;
-	samplerInfo.minLod = 0.0f;
-	samplerInfo.maxLod = static_cast<float>(std::max<std::size_t>(1, cpuTexture->mips.size()) - 1);
 	
 	if (vkCreateSampler(device, &samplerInfo, nullptr, &vImage.sampler) != VK_SUCCESS) {
 		// Clean up the already-created image resources if sampler creation fails.

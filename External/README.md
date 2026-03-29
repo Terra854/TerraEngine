@@ -17,7 +17,6 @@ The submodules track the following upstream releases:
 - [VMA (Vulkan Memory Allocator) v3.1.0](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) — specialized memory management for Vulkan resources.
 - [nlohmann/json (snapshot)](https://github.com/nlohmann/json) — header-only JSON parser/serializer used for authored `.tescene` and `.teprefab` validation.
 - [stb (commit f1c79c0)](https://github.com/nothings/stb/tree/f1c79c0) — header-only texture decoding helpers shipped alongside the engine.
-- [KTX-Software v4.4.2](https://github.com/KhronosGroup/KTX-Software/tree/v4.4.2) - Khronos KTX2 reader/writer library used to wrap the current `.tetf` payload, inspect compiled textures in the editor, and load current textures at runtime.
 - [Assimp v6.0.4](https://github.com/assimp/assimp/tree/v6.0.4) - static mesh import library for offline asset compilation across OBJ, FBX, glTF, COLLADA, PLY, and STL sources.
 - [meshoptimizer v0.21](https://github.com/zeux/meshoptimizer) — vertex/index optimization and meshlet generation for the asset pipeline.
 - [mikktspace (commit 3f5d5e5)](https://github.com/mmikk/MikkTSpace) — industry-standard tangent space generation.

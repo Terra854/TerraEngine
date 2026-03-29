@@ -580,7 +580,7 @@ void SceneManager::PreparePreviewAssets()
 	previewTextureId = resources.LoadTexture("texture.tetf");
 	if (resources.GetTexture(previewTextureId) == nullptr)
 	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Preview texture (texture.tetf) failed to load; invalid or legacy compiled textures fall back to defaults.");
+		TERRAENGINE_LOG(LogLevel::Warning, "Preview texture (texture.tetf) failed to load; material will fall back to defaults.");
 	}
 
 	// Load the precompiled preview shaders that ship alongside the executable so
