@@ -159,6 +159,30 @@ set(MESHOPT_INSTALL OFF CACHE BOOL "Disable meshoptimizer install target" FORCE)
 add_subdirectory(External/meshoptimizer)
 set_target_properties(meshoptimizer PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 
+# --- assimp ------------------------------------------------------------------
+# Build Assimp as a static, import-only dependency so the mesh compiler gains
+# broad format support without adding a system dependency or extra runtime DLLs.
+set(TERRAENGINE_BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
+set(ASSIMP_NO_EXPORT ON CACHE BOOL "Disable Assimp exporters" FORCE)
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "Disable Assimp tests" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "Disable Assimp tools" FORCE)
+set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "Disable Assimp samples" FORCE)
+set(ASSIMP_BUILD_DOCS OFF CACHE BOOL "Disable Assimp docs" FORCE)
+set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "Allow upstream Assimp warnings" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "Disable Assimp install target" FORCE)
+set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "Build Assimp's bundled zlib" FORCE)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "Build only the importers TerraEngine uses" FORCE)
+set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "Enable Assimp OBJ importer" FORCE)
+set(ASSIMP_BUILD_FBX_IMPORTER ON CACHE BOOL "Enable Assimp FBX importer" FORCE)
+set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "Enable Assimp glTF importer" FORCE)
+set(ASSIMP_BUILD_COLLADA_IMPORTER ON CACHE BOOL "Enable Assimp COLLADA importer" FORCE)
+set(ASSIMP_BUILD_PLY_IMPORTER ON CACHE BOOL "Enable Assimp PLY importer" FORCE)
+set(ASSIMP_BUILD_STL_IMPORTER ON CACHE BOOL "Enable Assimp STL importer" FORCE)
+add_subdirectory(External/assimp)
+set(BUILD_SHARED_LIBS ${TERRAENGINE_BUILD_SHARED_LIBS_SAVED} CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
+set_target_properties(assimp PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+
 # --- mikktspace --------------------------------------------------------------
 add_library(mikktspace STATIC External/mikktspace/mikktspace.c External/mikktspace/mikktspace.h)
 target_include_directories(mikktspace PUBLIC External/mikktspace)
@@ -340,6 +364,7 @@ target_include_directories(TerraEngineMeshCompiler
 target_link_libraries(TerraEngineMeshCompiler
 	PRIVATE
 		meshoptimizer
+		assimp::assimp
 		mikktspace
 )
 
@@ -415,12 +440,19 @@ target_include_directories(TerraEngine-Editor
 
 target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM GLM_ENABLE_EXPERIMENTAL)
 
+if(MSVC)
+	# The editor target builds a large number of C++ files directly, including
+	# vendored sources, so /FS avoids transient Debug PDB write races on Windows.
+	target_compile_options(TerraEngine-Editor PRIVATE /FS)
+endif()
+
 target_link_libraries(TerraEngine-Editor
 	PRIVATE
 		TerraEngine-Engine
 		cimgui
 		glfw
 		Vulkan::Headers
+		assimp::assimp
 		meshoptimizer
 		mikktspace
 )
