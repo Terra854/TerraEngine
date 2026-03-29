@@ -536,9 +536,23 @@ float4 main(PSIn input) : SV_Target0
 			evaluatedLightCount += 1u;
 		}
 	}
-	else
+
+	// Cluster culling is an optimization, not a correctness boundary. If a
+	// visible fragment ends up with an empty or invalid cluster light list while
+	// the frame still has active retained lights, fall back to the shared light
+	// list so lighting does not incorrectly snap to black.
+	const bool needsGlobalLightFallback = (evaluatedLightCount == 0u) && (lightCount > 0u);
+	if (!clusteredLightingAvailable || needsGlobalLightFallback)
 	{
-		// Fallback keeps shading stable while the compute culling path warms up.
+		if (needsGlobalLightFallback)
+		{
+			lighting = float3(0.0, 0.0, 0.0);
+			evaluatedLightCount = 0u;
+		}
+
+		// Fallback keeps shading stable while the compute culling path warms up
+		// or when clustered assignment misses a fragment that should still see a
+		// retained light.
 		[loop]
 		for (uint lightIndex = 0u; lightIndex < lightCount; ++lightIndex)
 		{

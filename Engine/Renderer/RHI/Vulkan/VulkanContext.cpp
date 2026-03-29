@@ -75,9 +75,37 @@ namespace
 		planes[1] = NormalizePlane(row3 - row0); // Right
 		planes[2] = NormalizePlane(row3 + row1); // Bottom
 		planes[3] = NormalizePlane(row3 - row1); // Top
-		planes[4] = NormalizePlane(row3 + row2); // Near
+		// The renderer uses zero-to-one clip-space depth, so the near plane comes
+		// directly from row2. Using the OpenGL-style row3 + row2 form skews the
+		// frustum test and can incorrectly reject visible light volumes as the
+		// camera rotates or moves away.
+		planes[4] = NormalizePlane(row2); // Near
 		planes[5] = NormalizePlane(row3 - row2); // Far
 		return planes;
+	}
+
+	float GetEffectiveLightInfluenceRadius(const FrameLightCandidate& candidate)
+	{
+		const GPULight& light = candidate.gpuLight;
+		float influenceRadius = std::max(light.directionAndRange.w, 0.001f);
+		if ((candidate.candidateFlags & kFrameLightCandidateFlagSpecialCost) != 0u)
+		{
+			const float specialExtent = std::max(light.coneAnglesAndArea.z, light.coneAnglesAndArea.w);
+			influenceRadius = std::max(influenceRadius, specialExtent);
+		}
+		return influenceRadius;
+	}
+
+	bool SphereIntersectsFrustum(const glm::vec3& center, float radius, const std::array<glm::vec4, 6>& planes)
+	{
+		for (const glm::vec4& plane : planes)
+		{
+			if (glm::dot(glm::vec3(plane), center) + plane.w < -radius)
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	float SafeFrameTimeMs(float deltaTimeSeconds)
@@ -131,25 +159,35 @@ namespace
 		}
 	}
 
-	float ComputeSceneInfluenceScore(const FrameLightCandidate& candidate, const glm::vec3& cameraWorldPosition)
+	float ComputeSceneInfluenceScore(
+		const FrameLightCandidate& candidate,
+		const glm::vec3& cameraWorldPosition,
+		const std::array<glm::vec4, 6>& frustumPlanes)
 	{
 		const GPULight& light = candidate.gpuLight;
 		const std::uint32_t lightType = GetLightType(light);
 		const float authoredPriority = std::max(light.extraParams.w, 0.0f);
 		const float luminousIntensity = std::max(light.colorAndIntensity.w, 0.0f);
 		const float colorWeight = std::max({ light.colorAndIntensity.x, light.colorAndIntensity.y, light.colorAndIntensity.z, 0.0f });
-		const float effectiveRange = std::max(light.directionAndRange.w, 0.001f);
+		const float effectiveRange = GetEffectiveLightInfluenceRadius(candidate);
 		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
 		const float distanceToCamera = glm::length(lightPosition - cameraWorldPosition);
-		const float rangeCoverage = std::max(effectiveRange - distanceToCamera, 0.0f);
+		const float distanceOutsideInfluence = std::max(distanceToCamera - effectiveRange, 0.0f);
+		const bool intersectsFrustum = ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u)
+			|| SphereIntersectsFrustum(lightPosition, effectiveRange, frustumPlanes);
 		const float specialExtent = std::max(light.coneAnglesAndArea.z, light.coneAnglesAndArea.w);
 		float score = luminousIntensity * std::max(colorWeight, 0.1f);
 		score += authoredPriority * 100000.0f;
-		score += rangeCoverage * 1000.0f;
+		// Prefer lights whose influence volume can actually reach the current
+		// view. The previous camera-distance heuristic dropped valid lights once
+		// the camera moved away, even while those lights were still affecting
+		// visible meshes.
+		score += intersectsFrustum ? 50000.0f : 0.0f;
+		score += effectiveRange * 25.0f;
 		score += ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) != 0u) ? 1000000.0f : 0.0f;
 		score += ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u) ? 2000000.0f : 0.0f;
 		score += ((candidate.candidateFlags & kFrameLightCandidateFlagSpecialCost) != 0u) ? specialExtent * 150.0f : 0.0f;
-		score -= distanceToCamera;
+		score -= distanceOutsideInfluence * 2.0f;
 		if (lightType == 0u)
 		{
 			score += 500000.0f;
@@ -157,7 +195,11 @@ namespace
 		return score;
 	}
 
-	float ComputeProjectedScreenInfluence(const FrameLightCandidate& candidate, const glm::mat4& viewMatrix, const glm::mat4& projectionMatrix)
+	float ComputeProjectedScreenInfluence(
+		const FrameLightCandidate& candidate,
+		const glm::mat4& viewMatrix,
+		const glm::mat4& projectionMatrix,
+		const std::array<glm::vec4, 6>& frustumPlanes)
 	{
 		const GPULight& light = candidate.gpuLight;
 		if ((candidate.candidateFlags & kFrameLightCandidateFlagDirectional) != 0u)
@@ -165,29 +207,29 @@ namespace
 			return 1.0f;
 		}
 
-		const glm::vec4 viewPosition = viewMatrix * glm::vec4(glm::vec3(light.positionAndType), 1.0f);
-		const float depth = -viewPosition.z;
-		if (!std::isfinite(depth) || depth <= 0.001f)
+		const float influenceRadius = GetEffectiveLightInfluenceRadius(candidate);
+		if (!SphereIntersectsFrustum(glm::vec3(light.positionAndType), influenceRadius, frustumPlanes))
 		{
 			return 0.0f;
 		}
 
+		const glm::vec4 viewPosition = viewMatrix * glm::vec4(glm::vec3(light.positionAndType), 1.0f);
+		const float depth = -viewPosition.z;
 		const glm::vec4 clipPosition = projectionMatrix * viewPosition;
 		if (!std::isfinite(clipPosition.w) || std::abs(clipPosition.w) <= 1e-5f)
 		{
-			return 0.0f;
+			const float intensity = std::max(light.colorAndIntensity.w, 0.0f);
+			return 0.1f * (1.0f + intensity);
 		}
 
 		const glm::vec2 ndc = glm::vec2(clipPosition) / clipPosition.w;
 		const glm::vec2 outside = glm::max(glm::abs(ndc) - glm::vec2(1.0f), glm::vec2(0.0f));
 		const float centerDistanceOutside = glm::length(outside);
-		const float specialExtent = std::max(light.coneAnglesAndArea.z, light.coneAnglesAndArea.w);
-		const float influenceRadius = std::max(light.directionAndRange.w, ((candidate.candidateFlags & kFrameLightCandidateFlagSpecialCost) != 0u) ? specialExtent : 0.0f);
 		const float projectionScale = std::max(std::abs(projectionMatrix[1][1]), 0.5f);
-		const float projectedRadius = (influenceRadius / std::max(depth, 0.1f)) * projectionScale;
+		const float projectedRadius = (influenceRadius / std::max(depth - influenceRadius, 0.1f)) * projectionScale;
 		const float visibility = std::max(projectedRadius - centerDistanceOutside, 0.0f);
 		const float intensity = std::max(light.colorAndIntensity.w, 0.0f);
-		return visibility * visibility * (1.0f + intensity);
+		return std::max(visibility * visibility * (1.0f + intensity), 0.1f * (1.0f + intensity));
 	}
 
 	bool ShouldResetTemporalViewState(bool stateValid, const glm::vec3& lastCameraWorldPosition, const glm::mat4& lastProjectionMatrix, const FrameRenderData& frameData)
@@ -308,6 +350,7 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 	const std::uint64_t frameSerial = viewState.frameSerial;
 
 	const GpuLightAnalysisViewSnapshot previousGpuAnalysis = GetLatestGpuLightAnalysis(viewType);
+	const std::array<glm::vec4, 6> frustumPlanes = BuildFrustumPlanes(frameData.projectionMatrix * frameData.viewMatrix);
 	if (previousGpuAnalysis.valid)
 	{
 		result.diagnostics.gpuVisibleCandidateCount = previousGpuAnalysis.visibleCandidateCount;
@@ -324,7 +367,7 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 	for (std::size_t candidateIndex = 0; candidateIndex < frameData.lightCandidates.size(); ++candidateIndex)
 	{
 		UploadScoredCandidate entry{};
-		entry.score = ComputeSceneInfluenceScore(frameData.lightCandidates[candidateIndex], frameData.cameraWorldPosition);
+		entry.score = ComputeSceneInfluenceScore(frameData.lightCandidates[candidateIndex], frameData.cameraWorldPosition, frustumPlanes);
 		entry.originalIndex = candidateIndex;
 		uploadScores.push_back(entry);
 	}
@@ -362,9 +405,9 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 		const FrameLightCandidate& candidate = result.uploadedCandidates[uploadedIndex];
 		ScoredCandidate scored{};
 		scored.uploadedIndex = uploadedIndex;
-		scored.screenInfluence = ComputeProjectedScreenInfluence(candidate, frameData.viewMatrix, frameData.projectionMatrix);
+		scored.screenInfluence = ComputeProjectedScreenInfluence(candidate, frameData.viewMatrix, frameData.projectionMatrix, frustumPlanes);
 		scored.gpuVisibilityScore = 0.0f;
-		scored.baseScore = ComputeSceneInfluenceScore(candidate, frameData.cameraWorldPosition);
+		scored.baseScore = ComputeSceneInfluenceScore(candidate, frameData.cameraWorldPosition, frustumPlanes);
 		scored.baseScore += scored.screenInfluence * 4000.0f;
 
 		const auto gpuIt = previousGpuAnalysis.recordsByLightId.find(candidate.lightId);

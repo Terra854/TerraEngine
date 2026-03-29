@@ -47,19 +47,17 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 		+ dispatchThreadId.y * gridDim.x
 		+ dispatchThreadId.z * (gridDim.x * gridDim.y);
 
-	// The normalized tile/depth math is kept for future AABB reconstruction.
+	// Cluster reconstruction must match the projection conventions used by the
+	// rest of the renderer. The CPU already applies the Vulkan Y flip to the
+	// projection matrix, so screen-space UVs map back to NDC with a direct
+	// [-1, 1] remap. Depth slices also live in standard ZO depth because the
+	// fragment shader picks clusters from SV_Position.z in that same domain.
 	const float2 screenDim = max(frame.clusterDepthAndViewport.zw, float2(1.0, 1.0));
 	const float2 tileSize = screenDim / max(float2(gridDim.xy), float2(1.0, 1.0));
 	const float2 tileMin = dispatchThreadId.xy * tileSize / screenDim;
 	const float2 tileMax = (dispatchThreadId.xy + 1.0) * tileSize / screenDim;
-	const float nearPlane = frame.clusterDepthAndViewport.x;
-	const float farPlane = max(frame.clusterDepthAndViewport.y, nearPlane + 0.001);
-	
-	const float zSliceMin = nearPlane + (farPlane - nearPlane) * (float(dispatchThreadId.z) / max(float(gridDim.z), 1.0));
-	const float zSliceMax = nearPlane + (farPlane - nearPlane) * (float(dispatchThreadId.z + 1u) / max(float(gridDim.z), 1.0));
-
-	float zNear = zSliceMin;
-	float zFar = zSliceMax;
+	const float zNear = float(dispatchThreadId.z) / max(float(gridDim.z), 1.0);
+	const float zFar = float(dispatchThreadId.z + 1u) / max(float(gridDim.z), 1.0);
 
 	// Project 8 corners of the tile
 	float2 p[4] = { tileMin, float2(tileMax.x, tileMin.y), tileMax, float2(tileMin.x, tileMax.y) };
@@ -68,10 +66,6 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
 	for(int i=0; i<4; ++i) {
 		float2 ndcXY = p[i] * 2.0 - 1.0;
-		// NDC y is typically inverted in Vulkan (top is -1, bottom is 1), 
-		// but our tile math follows screen space (top is 0, bottom is H).
-		// So we map p[i].y (0 to 1) to (1 to -1).
-		ndcXY.y = 1.0 - p[i].y * 2.0;
 
 		float4 nearClip = float4(ndcXY, zNear, 1.0);
 		float4 nearView = mul(frame.invProjection, nearClip);

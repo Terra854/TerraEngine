@@ -75,18 +75,10 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 		return;
 	}
 
-	const uint xyIndex = clusterIndex % (gridDim.x * gridDim.y);
-	const ClusterDepth tileDepth = clusterDepthBounds[xyIndex];
-	if (tileDepth.minDepth >= 1.0f)
-	{
-		if (groupThreadId.x == 0u)
-		{
-			clusterGrid[clusterIndex].offset = 0u;
-			clusterGrid[clusterIndex].count = 0u;
-			clusterGrid[clusterIndex].padding = uint2(0u, 0u);
-		}
-		return;
-	}
+	// Do not early-out from the tile-depth hint here. Thin silhouettes and
+	// far-depth quantization can mark a still-visible tile as empty, which then
+	// drops every clustered light for that screen region. The hint remains bound
+	// for future optimization work, but correctness wins here.
 
 	if (groupThreadId.x == 0u)
 	{

@@ -48,9 +48,12 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float maxZ = 0.0;
     bool anyPixel = false;
 
-    // Sample pixels in this tile to find depth range
-    for (uint y = tileStart.y; y < tileEnd.y; y += 2) {
-        for (uint x = tileStart.x; x < tileEnd.x; x += 2) {
+    // Sample every pixel in the tile. A previous 2x2 stride was cheaper, but
+    // thin silhouettes and distant meshes could slip between the samples and
+    // incorrectly mark the whole tile column as empty, which then removed all
+    // clustered lights for still-visible geometry.
+    for (uint y = tileStart.y; y < tileEnd.y; ++y) {
+        for (uint x = tileStart.x; x < tileEnd.x; ++x) {
             float d = depthBuffer.Load(uint3(x, y, 0));
             if (d < 1.0) { // Valid pixel (not far plane/clear)
                 minZ = min(minZ, d); // Nearer (smaller value)

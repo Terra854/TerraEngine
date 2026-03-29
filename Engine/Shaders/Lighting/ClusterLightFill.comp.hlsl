@@ -75,12 +75,9 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 		return;
 	}
 
-	const uint xyIndex = clusterIndex % (gridDim.x * gridDim.y);
-	const ClusterDepth tileDepth = clusterDepthBounds[xyIndex];
-	if (tileDepth.minDepth >= 1.0f)
-	{
-		return;
-	}
+	// Keep filling cluster light lists even if the tile-depth hint appears
+	// empty. Visibility at far distances can quantize to the clear-depth value
+	// and would otherwise make valid geometry lose all local lights.
 
 	if (groupThreadId.x == 0u)
 	{

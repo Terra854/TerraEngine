@@ -112,13 +112,18 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	const float3 cameraPosition = frame.cameraPositionAndEpsilon.xyz;
 	const float3 lightPosition = light.positionAndType.xyz;
 	const float distanceToCamera = length(lightPosition - cameraPosition);
-	const float rangeCoverage = saturate((range - distanceToCamera) / max(range, 0.001f));
+	const float distanceOutsideInfluence = max(distanceToCamera - range, 0.0f);
+	const float rangeCoverage = 1.0f - saturate(distanceOutsideInfluence / max(range, 0.001f));
 
 	record.gpuRangeCoverage = rangeCoverage;
 	if (SphereIntersectsFrustum(lightPosition, range, frame.frustumPlanes))
 	{
 		record.flags |= kGpuLightAnalysisFlagVisible;
-		record.gpuVisibilityScore = (1.0f + intensity) * max(rangeCoverage, 0.05f);
+		// Keep a meaningful score for any light whose influence sphere reaches the
+		// current view. The previous camera-distance weighting collapsed to a tiny
+		// value for far lights, which biased the CPU retention path against
+		// still-visible lights after camera moves and rotations.
+		record.gpuVisibilityScore = (1.0f + intensity) * max(rangeCoverage, 0.25f);
 	}
 
 	lightAnalysisBuffer[analysisPush.outputOffset + lightIndex] = record;
