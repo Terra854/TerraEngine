@@ -52,8 +52,9 @@ namespace
 
 		if(args.input.empty() || args.output.empty())
 		{
-			std::cerr << "Usage: TerraEngineTextureCompiler -i <input image> -o <output.tetf> [-s <color|data>]\n";
+			std::cerr << "Usage: TerraEngineTextureCompiler -i <input image> -o <output" << kCompiledTextureExtension << "> [-s <color|data>]\n";
 			std::cerr << "Supported texture source formats: " << GetSupportedTextureSourceExtensionsText() << "\n";
+			std::cerr << "Compiled output: " << GetCompiledTextureOutputDescription() << "\n";
 			return false;
 		}
 
@@ -71,7 +72,7 @@ int main(int argc, char** argv)
 
 	if(CompileTexture(args.input, args.output, args.semantic))
 	{
-		std::cout << "Wrote TETF: " << args.output << "\n";
+		std::cout << "Wrote current TETF with embedded KTX2 payload: " << args.output << "\n";
 		return 0;
 	}
 	else

@@ -1,14 +1,10 @@
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <span>
+#include <string_view>
 #include <vector>
-
-constexpr uint16_t kVersionMajor = 1;
-constexpr uint16_t kVersionMinor = 0;
-constexpr uint32_t kMagic = 0x54455446; // "TETF" little-endian
-constexpr uint32_t TETF_INVALID_CHUNK_INDEX = 0xFFFFFFFFu;
 
 inline constexpr uint32_t MakeFourCC(const char(&c)[5]) {
 	return (static_cast<uint32_t>(c[0]) << 0) |
@@ -29,14 +25,22 @@ inline constexpr size_t AlignUp(size_t value, size_t alignment) {
 	return (value + mask) & ~mask;
 }
 
+constexpr uint32_t kVersionMajor = 1;
+constexpr uint32_t kMagic = 0x54455446; // "TETF" little-endian
+constexpr uint32_t TETF_INVALID_CHUNK_INDEX = 0xFFFFFFFFu;
+
+constexpr uint32_t kDescChunkId = MakeFourCC("DESC");
+constexpr uint32_t kKtx2ChunkId = MakeFourCC("KTX2");
+constexpr uint32_t kMetadataChunkId = MakeFourCC("META");
+constexpr uint32_t kThumbnailChunkId = MakeFourCC("THMB");
+
 #pragma pack(push, 1)
 struct TETFHeader {
 	uint32_t magic;
-	uint16_t versionMajor;
-	uint16_t versionMinor;
+	uint32_t versionMajor; // single packed version field for the current TETF contract
 	uint16_t headerSize;
 	uint16_t reserved;     // must be 0
-	uint32_t flags;
+	uint32_t flags;        // reserved for future direct-replacement contract metadata
 	uint32_t alignment;
 	uint32_t chunkCount;
 	uint64_t tocOffset;
@@ -55,57 +59,27 @@ struct TETFChunkEntry {
 struct TETFDesc {
 	uint16_t width;
 	uint16_t height;
-	uint16_t depth;          // 1 for 2D/arrays/cubemap
-	uint16_t layers;         // array layers (facesets for cubemap arrays)
+	uint16_t depth;          // 1 for standard 2D textures
+	uint16_t layers;         // array layers
 	uint8_t mipCount;
-	uint8_t faces;           // 1 or 6
-	uint8_t format;          // see TETF format enum
-	uint8_t channelType;     // 0=UNORM,1=SNORM,2=UINT,3=SINT,4=FLOAT
-	uint16_t blockWidth;     // pixels per block in X (1 for uncompressed)
-	uint16_t blockHeight;    // pixels per block in Y
-	uint16_t blockBytes;     // bytes per block
+	uint8_t faces;           // 1 for standard 2D textures, 6 for cubemaps
+	uint8_t reservedFormat0; // reserved; legacy TerraEngine format enum was removed
+	uint8_t reservedFormat1; // reserved; legacy TerraEngine channel type was removed
+	uint16_t reservedFormat2; // reserved; legacy block width was removed
+	uint16_t reservedFormat3; // reserved; legacy block height was removed
+	uint16_t reservedFormat4; // reserved; legacy block byte size was removed
 	uint8_t semantic;        // optional usage hint
 	uint8_t reserved;        // must be 0
-	uint32_t mipOffsetChunk;     // index of first MIP chunk
+	uint32_t payloadChunk;       // index of the required KTX2 payload chunk
 	uint32_t userMetadataChunk;  // TETF_INVALID_CHUNK_INDEX if none
 	uint32_t thumbnailChunk;     // TETF_INVALID_CHUNK_INDEX if none
-	uint32_t reserved2;
-};
-
-struct TETFMipChunkHeader {
-	uint8_t mipLevel;   // 0 = top level
-	uint8_t sliceCount; // faces * layers, or depth slices for 3D
-	uint16_t reserved;  // must be 0 (future per-mip flags)
-	uint32_t sliceStride; // bytes per slice (raw)
+	uint32_t vkFormat;           // mirrored from the embedded KTX2 payload for quick inspection
 };
 #pragma pack(pop)
 
 static_assert(sizeof(TETFHeader) == 48, "TETFHeader must be 48 bytes");
 static_assert(sizeof(TETFChunkEntry) == 24, "TETFChunkEntry must be 24 bytes");
 static_assert(sizeof(TETFDesc) == 36, "TETFDesc must be 36 bytes");
-static_assert(sizeof(TETFMipChunkHeader) == 8, "TETFMipChunkHeader must be 8 bytes");
-
-enum class TETFFormat : uint8_t {
-	RGBA8 = 0,
-	BGRA8 = 1,
-	BC1 = 10,
-	BC3 = 11,
-	BC4 = 12,
-	BC5 = 13,
-	BC6H = 14,
-	BC7 = 15,
-	ASTC_4x4 = 20,
-	ASTC_6x6 = 21,
-	ASTC_8x8 = 22,
-};
-
-enum class TETFChannelType : uint8_t {
-	UNORM = 0,
-	SNORM = 1,
-	UINT = 2,
-	SINT = 3,
-	FLOAT = 4
-};
 
 enum class TextureFileSemantic : uint8_t {
 	Unknown = 0,
@@ -113,34 +87,59 @@ enum class TextureFileSemantic : uint8_t {
 	Data = 2
 };
 
-inline bool IsCompressedFormat(uint8_t fmt) {
-	return fmt == static_cast<uint8_t>(TETFFormat::BC1) ||
-		fmt == static_cast<uint8_t>(TETFFormat::BC3) ||
-		fmt == static_cast<uint8_t>(TETFFormat::BC4) ||
-		fmt == static_cast<uint8_t>(TETFFormat::BC5) ||
-		fmt == static_cast<uint8_t>(TETFFormat::BC6H) ||
-		fmt == static_cast<uint8_t>(TETFFormat::BC7) ||
-		fmt == static_cast<uint8_t>(TETFFormat::ASTC_4x4) ||
-		fmt == static_cast<uint8_t>(TETFFormat::ASTC_6x6) ||
-		fmt == static_cast<uint8_t>(TETFFormat::ASTC_8x8);
+// TETF now uses a single packed version field. Keeping it as uint32_t leaves
+// room for future direct-replacement contract bumps without reworking the
+// header layout again.
+inline bool IsCurrentTetfVersion(uint32_t major) {
+	return major == kVersionMajor;
+}
+
+inline bool IsCurrentTetfHeader(const TETFHeader& header) {
+	return header.magic == kMagic && IsCurrentTetfVersion(header.versionMajor);
+}
+
+inline bool IsLegacyTetfHeader(const TETFHeader& header) {
+	return header.magic == kMagic && header.versionMajor < kVersionMajor;
+}
+
+inline std::string_view GetTextureSemanticName(uint8_t semantic) {
+	switch (static_cast<TextureFileSemantic>(semantic))
+	{
+	case TextureFileSemantic::Color:
+		return "Color";
+	case TextureFileSemantic::Data:
+		return "Data";
+	default:
+		return "Unknown";
+	}
 }
 
 uint32_t ComputeCrc32(const uint8_t* data, size_t size);
 
-// Fully loaded representation of a .TETF blob. Storage owns the raw payloads that
-// sit after the chunk table while spans provide typed, bounds-checked windows into
-// that storage for easy slice/mip iteration without extra copies.
+// Fully loaded representation of a current .tetf blob. containerBytes owns the
+// raw wrapped file so metadata and the embedded KTX2 payload can be referenced
+// safely, while imageData owns the byte-exact mip payloads the Vulkan upload
+// path copies into GPU images.
 struct TETFMipPayload {
-	TETFMipChunkHeader header{};
-	std::span<const uint8_t> data; // Contains header.sliceCount slices; each sliceStride bytes.
+	uint8_t mipLevel = 0;
+	uint8_t sliceCount = 0;
+	uint16_t reserved = 0;
+	uint32_t sliceStride = 0;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	uint32_t depth = 0;
+	std::span<const uint8_t> data;
 };
 
 struct Texture {
 	TETFHeader header{};
 	TETFDesc descriptor{};
 	std::vector<TETFChunkEntry> chunkTable;
-	std::vector<uint8_t> storage;
+	std::vector<uint8_t> containerBytes;
+	std::vector<uint8_t> imageData;
 	std::vector<TETFMipPayload> mips;
+	std::span<const uint8_t> ktx2Payload;
 	std::span<const uint8_t> userMetadata; // JSON metadata from META chunk (may be empty)
 	std::span<const uint8_t> thumbnail;    // Raw thumbnail payload from THMB chunk (may be empty)
+	uint32_t supercompressionScheme = 0;
 };

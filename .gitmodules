@@ -50,3 +50,6 @@
 [submodule "External/assimp"]
 	path = External/assimp
 	url = https://github.com/assimp/assimp
+[submodule "External/KTX-Software"]
+	path = External/KTX-Software
+	url = https://github.com/KhronosGroup/KTX-Software

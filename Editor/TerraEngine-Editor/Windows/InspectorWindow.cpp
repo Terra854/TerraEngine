@@ -11,6 +11,8 @@
 #include "Engine/File Formats/TerraEngineMaterialFile.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
+#include <ktx.h>
+#include <vulkan/vulkan_core.h>
 #include <imgui.h>
 #include <glm/geometric.hpp>
 #include <glm/vec3.hpp>
@@ -22,9 +24,229 @@
 #include <fstream>
 #include <filesystem>
 #include <limits>
+#include <memory>
 
 namespace
 {
+	struct KtxTextureDestroy {
+		void operator()(ktxTexture2* texture) const
+		{
+			if (texture != nullptr)
+			{
+				ktxTexture2_Destroy(texture);
+			}
+		}
+	};
+
+	using UniqueKtxTexture2 = std::unique_ptr<ktxTexture2, KtxTextureDestroy>;
+
+	struct TextureInspectorSummary {
+		TETFHeader header{};
+		TETFDesc desc{};
+		bool headerRead = false;
+		bool descRead = false;
+		bool isCurrent = false;
+		bool isLegacy = false;
+		bool hasRequiredKtx2Payload = false;
+		bool ktx2PayloadOpened = false;
+		std::uint32_t supercompressionScheme = 0;
+		std::string statusMessage;
+	};
+
+	const std::uint8_t* MapInspectorFileRange(const std::vector<std::uint8_t>& fileBytes, std::size_t offset, std::size_t size)
+	{
+		if (offset > fileBytes.size() || size > fileBytes.size() - offset)
+		{
+			return nullptr;
+		}
+
+		return fileBytes.data() + offset;
+	}
+
+	std::string DescribeVkFormat(std::uint32_t vkFormat)
+	{
+		switch (static_cast<VkFormat>(vkFormat))
+		{
+		case VK_FORMAT_R8G8B8A8_UNORM:
+			return "VK_FORMAT_R8G8B8A8_UNORM";
+		case VK_FORMAT_R8G8B8A8_SRGB:
+			return "VK_FORMAT_R8G8B8A8_SRGB";
+		case VK_FORMAT_B8G8R8A8_UNORM:
+			return "VK_FORMAT_B8G8R8A8_UNORM";
+		case VK_FORMAT_B8G8R8A8_SRGB:
+			return "VK_FORMAT_B8G8R8A8_SRGB";
+		case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+			return "VK_FORMAT_BC1_RGB_UNORM_BLOCK";
+		case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+			return "VK_FORMAT_BC1_RGB_SRGB_BLOCK";
+		case VK_FORMAT_BC3_UNORM_BLOCK:
+			return "VK_FORMAT_BC3_UNORM_BLOCK";
+		case VK_FORMAT_BC3_SRGB_BLOCK:
+			return "VK_FORMAT_BC3_SRGB_BLOCK";
+		case VK_FORMAT_BC5_UNORM_BLOCK:
+			return "VK_FORMAT_BC5_UNORM_BLOCK";
+		case VK_FORMAT_BC7_UNORM_BLOCK:
+			return "VK_FORMAT_BC7_UNORM_BLOCK";
+		case VK_FORMAT_BC7_SRGB_BLOCK:
+			return "VK_FORMAT_BC7_SRGB_BLOCK";
+		case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
+			return "VK_FORMAT_ASTC_4x4_UNORM_BLOCK";
+		case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
+			return "VK_FORMAT_ASTC_4x4_SRGB_BLOCK";
+		default:
+			return "VK_FORMAT_" + std::to_string(vkFormat);
+		}
+	}
+
+	const char* DescribeSupercompressionScheme(std::uint32_t scheme)
+	{
+		switch (static_cast<ktxSupercmpScheme>(scheme))
+		{
+		case KTX_SS_NONE:
+			return "None";
+		case KTX_SS_BASIS_LZ:
+			return "BasisLZ";
+		case KTX_SS_ZSTD:
+			return "Zstd";
+		case KTX_SS_ZLIB:
+			return "Zlib";
+		default:
+			return "Unknown";
+		}
+	}
+
+	TextureInspectorSummary BuildTextureInspectorSummary(const std::filesystem::path& compiledPath)
+	{
+		TextureInspectorSummary summary{};
+
+		std::ifstream input(compiledPath, std::ios::binary);
+		if (!input.is_open())
+		{
+			summary.statusMessage = "Failed to open compiled texture file.";
+			return summary;
+		}
+
+		input.seekg(0, std::ios::end);
+		const std::streamoff fileSize = input.tellg();
+		if (fileSize < static_cast<std::streamoff>(sizeof(TETFHeader)))
+		{
+			summary.statusMessage = "Compiled texture is too small to contain a valid TETF header.";
+			return summary;
+		}
+
+		input.seekg(0, std::ios::beg);
+		std::vector<std::uint8_t> fileBytes(static_cast<std::size_t>(fileSize));
+		input.read(reinterpret_cast<char*>(fileBytes.data()), static_cast<std::streamsize>(fileSize));
+		if (!input.good())
+		{
+			summary.statusMessage = "Failed to read compiled texture bytes.";
+			return summary;
+		}
+
+		std::memcpy(&summary.header, fileBytes.data(), sizeof(TETFHeader));
+		summary.headerRead = true;
+
+		if (summary.header.magic != kMagic)
+		{
+			summary.statusMessage = "Invalid TETF header.";
+			return summary;
+		}
+
+		if (!IsCurrentTetfVersion(summary.header.versionMajor))
+		{
+			summary.isLegacy = summary.header.versionMajor < kVersionMajor;
+			if (summary.isLegacy)
+			{
+				summary.statusMessage = "Legacy compiled texture rejected. Recompile the source image to produce a current .tetf with embedded KTX2.";
+			}
+			else
+			{
+				summary.statusMessage = "Unsupported TETF version.";
+			}
+			return summary;
+		}
+
+		const std::size_t chunkTableSize = static_cast<std::size_t>(summary.header.chunkCount) * sizeof(TETFChunkEntry);
+		const std::uint8_t* chunkTablePtr = MapInspectorFileRange(
+			fileBytes,
+			static_cast<std::size_t>(summary.header.tocOffset),
+			chunkTableSize);
+		if (chunkTablePtr == nullptr)
+		{
+			summary.statusMessage = "TETF chunk table is truncated.";
+			return summary;
+		}
+
+		std::vector<TETFChunkEntry> chunks(summary.header.chunkCount);
+		std::memcpy(chunks.data(), chunkTablePtr, chunkTableSize);
+
+		const auto descIt = std::find_if(chunks.begin(), chunks.end(), [](const TETFChunkEntry& chunk) {
+			return chunk.id == kDescChunkId;
+		});
+		if (descIt == chunks.end())
+		{
+			summary.statusMessage = "Current TETF is missing the DESC chunk.";
+			return summary;
+		}
+
+		const std::uint8_t* descPtr = MapInspectorFileRange(
+			fileBytes,
+			static_cast<std::size_t>(descIt->offset),
+			sizeof(TETFDesc));
+		if (descPtr == nullptr)
+		{
+			summary.statusMessage = "Current TETF DESC chunk is truncated.";
+			return summary;
+		}
+
+		std::memcpy(&summary.desc, descPtr, sizeof(TETFDesc));
+		summary.descRead = true;
+
+		if (summary.desc.payloadChunk >= chunks.size())
+		{
+			summary.statusMessage = "Current TETF payload chunk index is invalid.";
+			return summary;
+		}
+
+		const TETFChunkEntry& payloadChunk = chunks[summary.desc.payloadChunk];
+		if (payloadChunk.id != kKtx2ChunkId)
+		{
+			summary.statusMessage = "Current TETF does not point to a KTX2 payload chunk.";
+			return summary;
+		}
+
+		const std::uint8_t* payloadPtr = MapInspectorFileRange(
+			fileBytes,
+			static_cast<std::size_t>(payloadChunk.offset),
+			static_cast<std::size_t>(payloadChunk.size));
+		if (payloadPtr == nullptr)
+		{
+			summary.statusMessage = "Embedded KTX2 payload is truncated.";
+			return summary;
+		}
+
+		summary.hasRequiredKtx2Payload = true;
+
+		ktxTexture2* rawTexture = nullptr;
+		const KTX_error_code openResult = ktxTexture2_CreateFromMemory(
+			payloadPtr,
+			static_cast<ktx_size_t>(payloadChunk.size),
+			KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT,
+			&rawTexture);
+		if (openResult != KTX_SUCCESS || rawTexture == nullptr)
+		{
+			summary.statusMessage = std::string("Embedded KTX2 payload failed to open: ") + ktxErrorString(openResult);
+			return summary;
+		}
+
+		UniqueKtxTexture2 payload(rawTexture);
+		summary.isCurrent = true;
+		summary.ktx2PayloadOpened = true;
+		summary.supercompressionScheme = static_cast<std::uint32_t>(payload->supercompressionScheme);
+		summary.statusMessage = "Current TETF with embedded KTX2 payload.";
+		return summary;
+	}
+
 // Convert internal registry keys like "LightComponent" to user-facing names.
 // This keeps serialization/component lookup stable while matching editor UX labels.
 std::string BuildDisplayComponentName(const std::string& componentName)
@@ -1399,93 +1621,79 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 }
 
 void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
-    ImGui::Text("Texture Asset: %s", path.filename().string().c_str());
-    ImGui::Separator();
+	ImGui::Text("Texture Asset: %s", path.filename().string().c_str());
+	ImGui::Separator();
 
-    auto& assets = AssetDatabase::Instance().GetAssets();
-    auto it = assets.find(std::filesystem::absolute(path));
-    if (it == assets.end()) {
-        ImGui::TextColored(ImVec4(1, 1, 0, 1), "Asset not found in database.");
-        return;
-    }
+	auto& assets = AssetDatabase::Instance().GetAssets();
+	auto it = assets.find(std::filesystem::absolute(path));
+	if (it == assets.end()) {
+		ImGui::TextColored(ImVec4(1, 1, 0, 1), "Asset not found in database.");
+		return;
+	}
 
-    const AssetMetadata& meta = it->second;
-    std::filesystem::path fullCompiledPath = AssetDatabase::Instance().GetBuildRoot() / meta.compiledPath;
+	const AssetMetadata& meta = it->second;
+	std::filesystem::path fullCompiledPath = AssetDatabase::Instance().GetBuildRoot() / meta.compiledPath;
 
-    if (meta.compiledPath.empty() || !std::filesystem::exists(fullCompiledPath)) {
-        ImGui::TextColored(ImVec4(1, 1, 0, 1), "Compiled texture file (.tetf) not found.");
-        return;
-    }
+	if (meta.compiledPath.empty() || !std::filesystem::exists(fullCompiledPath)) {
+		ImGui::TextColored(ImVec4(1, 1, 0, 1), "Compiled texture file (.tetf) not found.");
+		return;
+	}
 
-    TETFHeader header{};
-    TETFDesc desc{};
-    std::ifstream in(fullCompiledPath, std::ios::binary);
-    if (in.is_open()) {
-        in.read((char*)&header, sizeof(TETFHeader));
-        if (header.magic == kMagic) {
-            std::vector<TETFChunkEntry> chunks(header.chunkCount);
-            in.seekg(header.tocOffset, std::ios::beg);
-            in.read((char*)chunks.data(), chunks.size() * sizeof(TETFChunkEntry));
-            
-            bool foundDesc = false;
-            uint32_t descFourCC = MakeFourCC('D', 'E', 'S', 'C');
-            for (const auto& chunk : chunks) {
-                if (chunk.id == descFourCC) {
-                    in.seekg(chunk.offset, std::ios::beg);
-                    in.read((char*)&desc, sizeof(TETFDesc));
-                    foundDesc = true;
-                    break;
-                }
-            }
+	const TextureInspectorSummary summary = BuildTextureInspectorSummary(fullCompiledPath);
+	if (summary.isCurrent && summary.ktx2PayloadOpened) {
+		ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.55f, 1.0f), "%s", summary.statusMessage.c_str());
+	}
+	else if (summary.isLegacy) {
+		ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.24f, 1.0f), "%s", summary.statusMessage.c_str());
+		ImGui::TextWrapped("Mixed projects can keep using already-recompiled textures, but this texture will remain unresolved until its source image is recompiled.");
+	}
+	else {
+		ImGui::TextColored(ImVec4(1, 0, 0, 1), "%s", summary.statusMessage.c_str());
+	}
 
-            if (!foundDesc) {
-                ImGui::TextColored(ImVec4(1, 0, 0, 1), "DESC chunk not found in TETF!");
-                return;
-            }
-        } else {
-            ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid TETF header!");
-            return;
-        }
-    }
+	if (summary.isLegacy) {
+		ImGui::TextWrapped("Recompiling the same source asset keeps authored references intact because the compiled output still resolves through the same .tetf path and asset identity.");
+	}
 
 	ImGui::Text("Compiled Info (.tetf)");
-    if (ImGui::BeginTable("TextureInfoTable", 2, ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
-        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+	if (ImGui::BeginTable("TextureInfoTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+		ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
 
-        auto drawRow = [](const char* label, const char* value) {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(label);
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(value);
-        };
+		auto drawRow = [](const char* label, const std::string& value) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(value.c_str());
+		};
 
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%u x %u", (uint32_t)desc.width, (uint32_t)desc.height);
-        drawRow("Dimensions", buf);
+		if (summary.headerRead) {
+			drawRow("Version", std::to_string(summary.header.versionMajor));
+			drawRow("Contract", summary.isCurrent ? "Current TETF + embedded KTX2" : (summary.isLegacy ? "Legacy TETF (rejected)" : "Invalid TETF"));
+		}
 
-        if (desc.depth > 1) drawRow("Depth", std::to_string(desc.depth).c_str());
-        if (desc.layers > 1) drawRow("Layers", std::to_string(desc.layers).c_str());
-        drawRow("Mips", std::to_string(desc.mipCount).c_str());
+		if (summary.descRead) {
+			drawRow("Dimensions", std::to_string(summary.desc.width) + " x " + std::to_string(summary.desc.height));
+			if (summary.desc.depth > 1) {
+				drawRow("Depth", std::to_string(summary.desc.depth));
+			}
+			if (summary.desc.layers > 1) {
+				drawRow("Layers", std::to_string(summary.desc.layers));
+			}
+			if (summary.desc.faces > 1) {
+				drawRow("Faces", std::to_string(summary.desc.faces));
+			}
+			drawRow("Mips", std::to_string(summary.desc.mipCount));
+			drawRow("Semantic", std::string(GetTextureSemanticName(summary.desc.semantic)));
+			drawRow("Payload", summary.hasRequiredKtx2Payload ? "Embedded KTX2" : "Missing required KTX2 payload");
+			drawRow("VkFormat", DescribeVkFormat(summary.desc.vkFormat));
+		}
 
-        std::string formatStr = "Unknown";
-        if (desc.format == (uint8_t)TETFFormat::RGBA8) formatStr = "RGBA8";
-        else if (desc.format == (uint8_t)TETFFormat::BGRA8) formatStr = "BGRA8";
-        else if (desc.format == (uint8_t)TETFFormat::BC1) formatStr = "BC1 (DXT1)";
-        else if (desc.format == (uint8_t)TETFFormat::BC3) formatStr = "BC3 (DXT5)";
-        else if (desc.format == (uint8_t)TETFFormat::BC4) formatStr = "BC4";
-        else if (desc.format == (uint8_t)TETFFormat::BC5) formatStr = "BC5";
-        else if (desc.format == (uint8_t)TETFFormat::BC6H) formatStr = "BC6H";
-        else if (desc.format == (uint8_t)TETFFormat::BC7) formatStr = "BC7";
-        drawRow("Format", formatStr.c_str());
+		if (summary.ktx2PayloadOpened) {
+			drawRow("Supercompression", DescribeSupercompressionScheme(summary.supercompressionScheme));
+		}
 
-        const char* channelTypes[] = { "UNORM", "SNORM", "UINT", "SINT", "FLOAT" };
-        if (desc.channelType < 5) drawRow("Type", channelTypes[desc.channelType]);
-
-        const char* semantics[] = { "Unknown", "Color", "Data" };
-        if (desc.semantic < 3) drawRow("Semantic", semantics[desc.semantic]);
-
-        ImGui::EndTable();
-    }
+		ImGui::EndTable();
+	}
 }
