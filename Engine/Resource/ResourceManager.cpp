@@ -13,6 +13,8 @@
 #include "File Formats/TerraEngineShaderFile.h"
 #include "File Formats/TerraEngineTextureFile.h"
 #include "Resource/ShaderCollection.h"
+#include "basisu_transcoder.h"
+#include "basisu_transcoder_uastc.h"
 
 ResourceManager& ResourceManager::Instance()
 {
@@ -29,6 +31,9 @@ ResourceManager::ResourceManager()
 {
 	assetRoot = std::filesystem::current_path();
 	engineRoot = std::filesystem::current_path();
+
+	basist::basisu_transcoder_init();
+	basist::uastc_init();
 }
 
 void ResourceManager::SetEngineRoot(const std::filesystem::path& engineRootPath)

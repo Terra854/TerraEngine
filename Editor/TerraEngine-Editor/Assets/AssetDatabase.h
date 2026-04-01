@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <future>
 #include <nlohmann/json.hpp>
 
 struct AssetMetadata {
@@ -29,7 +30,7 @@ public:
     void ScanProject();
 
     // Explicitly import an asset
-    void ImportAsset(const std::filesystem::path& sourcePath);
+    void ImportAsset(const std::filesystem::path& sourcePath, bool force = false);
 
     // Delete an asset from disk and unregister it
     void DeleteAsset(const std::filesystem::path& sourcePath);
@@ -38,6 +39,10 @@ public:
     const std::map<std::filesystem::path, AssetMetadata>& GetAssets() const { return assets; }
     std::filesystem::path GetAssetRoot() const { return assetRoot; }
     std::filesystem::path GetBuildRoot() const { return buildRoot; }
+
+    bool IsCompiling() const { return !asyncJobs.empty(); }
+    bool IsAssetCompiling(const std::filesystem::path& absSourcePath) const;
+    size_t GetCompileJobsCount() const { return asyncJobs.size(); }
 
 private:
     AssetDatabase();
@@ -53,6 +58,7 @@ private:
     
     std::string GetImporterName(const std::filesystem::path& filePath) const;
     bool CompileAsset(const AssetMetadata& metadata);
+    void FinishImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport);
     void RemoveAsset(const std::filesystem::path& sourcePath);
 
     std::filesystem::path projectRoot;
@@ -70,4 +76,12 @@ private:
         float timer; // Seconds until process
     };
     std::map<std::filesystem::path, PendingEvent> pendingEvents;
+
+    struct AsyncCompileJob {
+        AssetMetadata metadata;
+        std::future<bool> future;
+        bool needsImport;
+        std::filesystem::path absSourcePath;
+    };
+    std::vector<AsyncCompileJob> asyncJobs;
 };

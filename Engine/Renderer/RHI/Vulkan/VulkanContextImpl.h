@@ -453,7 +453,7 @@ struct VulkanContext::Impl {
 	void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
 	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags);
 
-	VkFormat MapTextureFormat(uint8_t format, uint8_t channelType, uint8_t semantic);
+	VkFormat MapTextureFormat(uint32_t vkFormat);
 	void EnsureTexture(TerraEngine::UUID textureId);
 	std::vector<VkDescriptorSet> EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId);
 	void InvalidateMaterial(TerraEngine::UUID materialId);

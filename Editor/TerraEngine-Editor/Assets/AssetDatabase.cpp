@@ -77,9 +77,9 @@ void AssetDatabase::Update() {
     }
 
     // Process Pending
-    // We assume Update is called with some frequency. 
-    float dt = 0.016f; 
-    
+    // We assume Update is called with some frequency.
+    float dt = 0.016f;
+
     auto it = pendingEvents.begin();
     while (it != pendingEvents.end()) {
         it->second.timer -= dt;
@@ -90,6 +90,29 @@ void AssetDatabase::Update() {
             ++it;
         }
     }
+
+    // Process Async Jobs
+    for (auto jobIt = asyncJobs.begin(); jobIt != asyncJobs.end(); ) {
+        if (jobIt->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            bool compiled = jobIt->future.get();
+            if (!compiled) {
+                TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << jobIt->absSourcePath);
+            } else {
+                FinishImport(jobIt->metadata, jobIt->absSourcePath, jobIt->needsImport);
+            }
+            jobIt = asyncJobs.erase(jobIt);
+        } else {
+            ++jobIt;
+        }
+    }
+}
+bool AssetDatabase::IsAssetCompiling(const std::filesystem::path& absSourcePath) const {
+    for (const auto& job : asyncJobs) {
+        if (job.absSourcePath == absSourcePath) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void AssetDatabase::OnFileEvent(const std::filesystem::path& path, FileStatus status) {
@@ -143,7 +166,7 @@ void AssetDatabase::ScanProject() {
     }
 }
 
-void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
+void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool force) {
     const auto absSourcePath = std::filesystem::absolute(sourcePath);
     if (absSourcePath.extension() == ".meta") return;
     if (std::filesystem::is_directory(absSourcePath)) return;
@@ -151,24 +174,29 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
     AssetMetadata metadata;
     std::filesystem::path metaFilePath = absSourcePath.string() + ".meta";
     
-    bool needsImport = false;
-    
-    if (std::filesystem::exists(metaFilePath)) {
-        if (LoadMetadata(metaFilePath, metadata)) {
-            // Check timestamp
-            auto currentModTime = std::filesystem::last_write_time(absSourcePath);
-            if (currentModTime > metadata.lastModified) {
-                needsImport = true;
-                metadata.lastModified = currentModTime;
-            }
-        } else {
-            // Meta corrupt, regenerate
-            GenerateDefaultMetadata(absSourcePath, metadata);
-            needsImport = true;
-        }
-    } else {
+    bool needsImport = force;
+    bool metadataValid = false;
+
+    // 1. Prefer in-memory metadata if we are forcing or it already exists
+    if (assets.count(absSourcePath)) {
+        metadata = assets[absSourcePath];
+        metadataValid = true;
+    } 
+    // 2. Otherwise try loading from disk
+    else if (std::filesystem::exists(metaFilePath)) {
+        metadataValid = LoadMetadata(metaFilePath, metadata);
+    }
+
+    if (!metadataValid) {
         GenerateDefaultMetadata(absSourcePath, metadata);
         needsImport = true;
+    } else if (!force) {
+        // Check timestamp only if not forcing
+        auto currentModTime = std::filesystem::last_write_time(absSourcePath);
+        if (currentModTime > metadata.lastModified) {
+            needsImport = true;
+            metadata.lastModified = currentModTime;
+        }
     }
 
     // Determine Compiled Path (Relative)
@@ -194,14 +222,25 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath) {
                 std::filesystem::create_directories(fullCompiledPath.parent_path());
             }
             
-            bool compiled = CompileAsset(metadata);
-            
-            if (!compiled) {
-                TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << absSourcePath);
+            if (metadata.importerName == "TextureImporter") {
+                auto future = std::async(std::launch::async, [this, metadata]() {
+                    return CompileAsset(metadata);
+                });
+                asyncJobs.push_back({metadata, std::move(future), needsImport, absSourcePath});
+                return; // Defer registration until async job finishes
+            } else {
+                bool compiled = CompileAsset(metadata);
+                if (!compiled) {
+                    TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << absSourcePath);
+                }
             }
         }
     }
     
+    FinishImport(metadata, absSourcePath, needsImport);
+}
+
+void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport) {
     // Always save metadata
     SaveMetadata(metadata);
 
@@ -337,8 +376,13 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
         
         TextureFileSemantic semantic = TextureFileSemantic::Color;
         if (semanticStr == "data") semantic = TextureFileSemantic::Data;
+
+        std::uint32_t quality = 1; // Balanced
+        if (metadata.settings.contains("quality")) {
+            quality = static_cast<std::uint32_t>(metadata.settings["quality"].get<int>());
+        }
         
-        return CompileTexture(fullSourcePath, fullCompiledPath, semantic);
+        return CompileTexture(fullSourcePath, fullCompiledPath, semantic, quality);
     } 
     else if (metadata.importerName == "ShaderImporter") {
         std::string stage = "vs";

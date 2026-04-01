@@ -11,6 +11,8 @@ namespace
 		std::filesystem::path input;
 		std::filesystem::path output;
 		TextureFileSemantic semantic = TextureFileSemantic::Unknown;
+		std::uint32_t quality = 1;
+		std::string format = "UASTC";
 	};
 
 	bool ParseCommandLine(int argc, char** argv, CommandLine& args)
@@ -43,6 +45,14 @@ namespace
 					return false;
 				}
 			}
+			else if((flag == "-q" || flag == "--quality") && i + 1 < argc)
+			{
+				args.quality = static_cast<std::uint32_t>(std::stoul(argv[++i]));
+			}
+			else if((flag == "-f" || flag == "--format") && i + 1 < argc)
+			{
+				args.format = argv[++i];
+			}
 			else
 			{
 				std::cerr << "Unrecognized argument: " << flag << "\n";
@@ -52,7 +62,7 @@ namespace
 
 		if(args.input.empty() || args.output.empty())
 		{
-			std::cerr << "Usage: TerraEngineTextureCompiler -i <input image> -o <output.tetf> [-s <color|data>]\n";
+			std::cerr << "Usage: TerraEngineTextureCompiler -i <input image> -o <output.tetf> [-s <color|data>] [-q <quality 0-2>] [-f <format>]\n";
 			std::cerr << "Supported texture source formats: " << GetSupportedTextureSourceExtensionsText() << "\n";
 			return false;
 		}
@@ -69,7 +79,7 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	if(CompileTexture(args.input, args.output, args.semantic))
+	if(CompileTexture(args.input, args.output, args.semantic, args.quality))
 	{
 		std::cout << "Wrote TETF: " << args.output << "\n";
 		return 0;

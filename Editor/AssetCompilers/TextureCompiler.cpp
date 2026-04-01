@@ -94,7 +94,7 @@ std::uint32_t ComputeCrc32(const std::uint8_t* data, size_t size) {
     return crc ^ 0xFFFFFFFFu;
 }
 
-bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic) {
+bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality) {
     int width = 0;
     int height = 0;
     int channels = 0;
@@ -105,15 +105,76 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
     }
 
     const std::size_t mipSize = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4;
-    std::vector<std::uint8_t> imageData(pixels, pixels + mipSize);
+
+    // Initialize KTX texture
+    ktxTexture2* ktx = nullptr;
+    const bool isSRGB = (semantic == TextureFileSemantic::Color);
+    
+    ktxTextureCreateInfo createInfo{};
+    // UASTC usually starts from RGBA8
+    createInfo.vkFormat = isSRGB ? 43 : 37; 
+    createInfo.baseWidth = static_cast<std::uint32_t>(width);
+    createInfo.baseHeight = static_cast<std::uint32_t>(height);
+    createInfo.baseDepth = 1;
+    createInfo.numDimensions = 2;
+    createInfo.numLevels = 1; 
+    createInfo.numLayers = 1;
+    createInfo.numFaces = 1;
+    createInfo.isArray = KTX_FALSE;
+    createInfo.generateMipmaps = KTX_FALSE;
+
+    KTX_error_code ktxResult = ktxTexture2_Create(&createInfo, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &ktx);
+    if (ktxResult != KTX_SUCCESS) {
+        std::cerr << "Failed to create KTX texture: " << ktxResult << "\n";
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    ktxResult = ktxTexture_SetImageFromMemory(ktxTexture(ktx), 0, 0, 0, pixels, mipSize);
     stbi_image_free(pixels);
+
+    if (ktxResult != KTX_SUCCESS) {
+        std::cerr << "Failed to set KTX image data: " << ktxResult << "\n";
+        ktxTexture_Destroy(ktxTexture(ktx));
+        return false;
+    }
+
+    // Compress to UASTC
+    ktxBasisParams params{};
+    params.structSize = sizeof(params);
+    params.uastc = KTX_TRUE;
+    // Map quality 0-3 to basisu levels (approx)
+    // 0: Level 0 (Fastest), 1: Level 2 (Default), 2: Level 3 (Slower), 3: Level 4 (Very Slow)
+    params.uastcFlags = (quality == 0) ? KTX_PACK_UASTC_LEVEL_FASTEST : 
+                        (quality == 2) ? KTX_PACK_UASTC_LEVEL_SLOWER :
+                        (quality == 3) ? KTX_PACK_UASTC_LEVEL_VERYSLOW : 
+                        KTX_PACK_UASTC_LEVEL_DEFAULT;
+
+    ktxResult = ktxTexture2_CompressBasisEx(ktx, &params);
+    if (ktxResult != KTX_SUCCESS) {
+        std::cerr << "Failed to compress KTX to UASTC: " << ktxResult << "\n";
+        ktxTexture_Destroy(ktxTexture(ktx));
+        return false;
+    }
+
+    // Extract level table
+    std::vector<TETFLevelEntry> levelTable;
+    levelTable.resize(ktx->numLevels);
+    for (std::uint32_t i = 0; i < ktx->numLevels; ++i) {
+        ktx_size_t offset;
+        ktxTexture_GetImageOffset(ktxTexture(ktx), i, 0, 0, &offset);
+        levelTable[i].offset = static_cast<std::uint64_t>(offset);
+        levelTable[i].size = static_cast<std::uint64_t>(ktxTexture_GetImageSize(ktxTexture(ktx), i));
+    }
+
+    const std::uint8_t* rawKtxData = ktxTexture_GetData(ktxTexture(ktx));
+    const std::size_t rawKtxDataSize = ktxTexture_GetDataSize(ktxTexture(ktx));
 
     TETFHeader header{};
     header.magic = kMagic;
-    header.versionMajor = kVersionMajor;
-    header.versionMinor = kVersionMinor;
+    header.version = kVersion;
     header.headerSize = static_cast<std::uint16_t>(sizeof(TETFHeader));
-    header.flags = 0;
+    header.flags = isSRGB ? 1 : 0; // Bit 0 is sRGB
     header.alignment = 16;
     header.chunkCount = 2; 
     header.fileCrc32 = 0;
@@ -125,46 +186,52 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
     desc.height = static_cast<std::uint16_t>(height);
     desc.depth = 1;
     desc.layers = 1;
-    desc.mipCount = 1;
+    desc.mipCount = static_cast<std::uint8_t>(ktx->numLevels);
     desc.faces = 1;
-    desc.format = static_cast<std::uint8_t>(TETFFormat::RGBA8);
-    desc.channelType = static_cast<std::uint8_t>(TETFChannelType::UNORM);
-    desc.blockWidth = 1;
-    desc.blockHeight = 1;
-    desc.blockBytes = 4;
+    desc.reserved = 0;
+    desc.reserved2 = 0;
+    desc.blockWidth = 4; // UASTC is 4x4
+    desc.blockHeight = 4;
+    desc.blockBytes = 16; // UASTC is 128 bits per block
     desc.semantic = static_cast<std::uint8_t>(semantic);
-    desc.mipOffsetChunk = 1;
+    desc.payloadChunkIndex = 1;
     desc.userMetadataChunk = TETF_INVALID_CHUNK_INDEX;
     desc.thumbnailChunk = TETF_INVALID_CHUNK_INDEX;
-
-    TETFMipChunkHeader mipHeader{};
-    mipHeader.mipLevel = 0;
-    mipHeader.sliceCount = 1;
-    mipHeader.sliceStride = static_cast<std::uint32_t>(mipSize);
+    // For UASTC, we store the *target* hardware format if possible, 
+    // or just signal UASTC via chunk ID. 
+    // The spec says: vkFormat stores suggested hardware format.
+    desc.vkFormat = isSRGB ? 146 : 145; // VK_FORMAT_BC7_SRGB_BLOCK=146, VK_FORMAT_BC7_UNORM_BLOCK=145
 
     const std::uint32_t tocSize = header.chunkCount * static_cast<std::uint32_t>(sizeof(TETFChunkEntry));
+    const std::uint32_t descFixedSize = static_cast<std::uint32_t>(sizeof(TETFDesc));
+    const std::uint32_t levelTableSize = static_cast<std::uint32_t>(levelTable.size() * sizeof(TETFLevelEntry));
+    const std::uint32_t descTotalSize = descFixedSize + levelTableSize;
+
     const std::uint32_t descOffset = AlignUp32(header.tocOffset + tocSize, header.alignment);
-    const std::uint32_t descSize = static_cast<std::uint32_t>(sizeof(TETFDesc));
-    const std::uint32_t mipOffset = AlignUp32(descOffset + descSize, header.alignment);
-    const std::uint32_t mipHeaderSize = static_cast<std::uint32_t>(sizeof(TETFMipChunkHeader));
-    const std::uint32_t mipDataOffset = mipOffset + mipHeaderSize;
+    const std::uint32_t uastOffset = AlignUp32(descOffset + descTotalSize, header.alignment);
 
     std::vector<TETFChunkEntry> entries;
     entries.resize(header.chunkCount);
-    entries[0] = {MakeFourCC('D', 'E', 'S', 'C'), 0, descOffset, descSize};
-    entries[1] = {MakeFourCC('M', 'I', 'P', ' '), 0, mipOffset, mipHeaderSize + static_cast<std::uint32_t>(imageData.size())};
+    entries[0] = {kChunkDESC, 0, descOffset, descTotalSize};
+    entries[1] = {kChunkUAST, 0, uastOffset, static_cast<std::uint64_t>(rawKtxDataSize)};
 
-    const std::uint32_t totalSize = AlignUp32(mipDataOffset + static_cast<std::uint32_t>(imageData.size()), header.alignment);
+    const std::uint32_t totalSize = AlignUp32(uastOffset + static_cast<std::uint32_t>(rawKtxDataSize), header.alignment);
     header.totalSize = totalSize;
-    header.chunkCount = static_cast<std::uint32_t>(entries.size());
 
     std::vector<std::uint8_t> fileData;
     fileData.resize(totalSize, 0);
     std::memcpy(fileData.data(), &header, sizeof(header));
     std::memcpy(fileData.data() + header.tocOffset, entries.data(), entries.size() * sizeof(TETFChunkEntry));
-    std::memcpy(fileData.data() + descOffset, &desc, sizeof(desc));
-    std::memcpy(fileData.data() + mipOffset, &mipHeader, sizeof(mipHeader));
-    std::memcpy(fileData.data() + mipDataOffset, imageData.data(), imageData.size());
+    
+    // Copy DESC fixed part
+    std::memcpy(fileData.data() + descOffset, &desc, descFixedSize);
+    // Copy Level Table
+    std::memcpy(fileData.data() + descOffset + descFixedSize, levelTable.data(), levelTableSize);
+    
+    // Copy raw UASTC payload
+    std::memcpy(fileData.data() + uastOffset, rawKtxData, rawKtxDataSize);
+
+    ktxTexture_Destroy(ktxTexture(ktx));
 
     const std::uint32_t crc = ComputeCrc32(fileData.data(), fileData.size());
     std::memcpy(fileData.data() + offsetof(TETFHeader, fileCrc32), &crc, sizeof(crc));

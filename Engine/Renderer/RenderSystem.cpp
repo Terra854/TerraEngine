@@ -617,7 +617,10 @@ void RenderSystem::ReloadMesh(const TerraEngine::UUID& meshId)
 
 void RenderSystem::ReloadTexture(const TerraEngine::UUID& textureId)
 {
-	ResourceManager::Instance().ReloadTexture(textureId);
+	auto future = ResourceManager::Instance().ReloadTexture(textureId);
+	// Wait for the background transcode to finish before we swap the GPU resource
+	future.get();
+
 	if (rhi)
 	{
 		rhi->InvalidateTexture(textureId);

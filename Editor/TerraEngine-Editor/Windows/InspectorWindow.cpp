@@ -4,6 +4,7 @@
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/LightComponent.h"
 #include "AssetDatabase.h"
 #include "Editor/AssetCompilers/MeshCompiler.h"
@@ -42,6 +43,30 @@ std::string BuildDisplayComponentName(const std::string& componentName)
 	}
 
 	return componentName;
+}
+
+const char* VkFormatToString(uint32_t vkFormat)
+{
+	switch (vkFormat)
+	{
+	case 37: return "R8G8B8A8_UNORM";
+	case 43: return "R8G8B8A8_SRGB";
+	case 50: return "B8G8R8A8_UNORM";
+	case 56: return "B8G8R8A8_SRGB";
+	case 131: return "BC1_RGB_UNORM_BLOCK";
+	case 133: return "BC1_RGB_SRGB_BLOCK";
+	case 137: return "BC3_UNORM_BLOCK";
+	case 139: return "BC3_SRGB_BLOCK";
+	case 141: return "BC4_UNORM_BLOCK";
+	case 142: return "BC4_SNORM_BLOCK";
+	case 143: return "BC5_UNORM_BLOCK";
+	case 144: return "BC5_SNORM_BLOCK";
+	case 145: return "BC7_UNORM_BLOCK";
+	case 146: return "BC7_SRGB_BLOCK";
+	case 157: return "ASTC_4x4_UNORM_BLOCK";
+	case 158: return "ASTC_4x4_SRGB_BLOCK";
+	default: return "Other/Unknown";
+	}
 }
 }
 
@@ -1409,6 +1434,15 @@ void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
         return;
     }
 
+    if (AssetDatabase::Instance().IsAssetCompiling(std::filesystem::absolute(path))) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.6f, 0.8f, 1.0f));
+        // Use a negative fraction animated by time to show an indeterminate progress bar
+        ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(), ImVec2(-1, 0), "Compiling...");
+        ImGui::PopStyleColor();
+        return;
+    }
+
     const AssetMetadata& meta = it->second;
     std::filesystem::path fullCompiledPath = AssetDatabase::Instance().GetBuildRoot() / meta.compiledPath;
 
@@ -1469,23 +1503,43 @@ void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
         if (desc.layers > 1) drawRow("Layers", std::to_string(desc.layers).c_str());
         drawRow("Mips", std::to_string(desc.mipCount).c_str());
 
-        std::string formatStr = "Unknown";
-        if (desc.format == (uint8_t)TETFFormat::RGBA8) formatStr = "RGBA8";
-        else if (desc.format == (uint8_t)TETFFormat::BGRA8) formatStr = "BGRA8";
-        else if (desc.format == (uint8_t)TETFFormat::BC1) formatStr = "BC1 (DXT1)";
-        else if (desc.format == (uint8_t)TETFFormat::BC3) formatStr = "BC3 (DXT5)";
-        else if (desc.format == (uint8_t)TETFFormat::BC4) formatStr = "BC4";
-        else if (desc.format == (uint8_t)TETFFormat::BC5) formatStr = "BC5";
-        else if (desc.format == (uint8_t)TETFFormat::BC6H) formatStr = "BC6H";
-        else if (desc.format == (uint8_t)TETFFormat::BC7) formatStr = "BC7";
-        drawRow("Format", formatStr.c_str());
-
-        const char* channelTypes[] = { "UNORM", "SNORM", "UINT", "SINT", "FLOAT" };
-        if (desc.channelType < 5) drawRow("Type", channelTypes[desc.channelType]);
+        drawRow("Format", VkFormatToString(desc.vkFormat));
 
         const char* semantics[] = { "Unknown", "Color", "Data" };
         if (desc.semantic < 3) drawRow("Semantic", semantics[desc.semantic]);
 
         ImGui::EndTable();
     }
+
+	ImGui::Spacing();
+	ImGui::Text("Import Settings");
+	if (ImGui::BeginTable("TextureImportTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+		ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::TextUnformatted("UASTC Quality");
+		ImGui::TableSetColumnIndex(1);
+		ImGui::SetNextItemWidth(-1.0f);
+
+		// Mutable reference to update metadata directly in the database
+		AssetMetadata& metadata = const_cast<AssetMetadata&>(it->second);
+		int currentQuality = 1; // Balanced default
+		if (metadata.settings.contains("quality")) {
+			currentQuality = metadata.settings["quality"].get<int>();
+		}
+
+		const char* qualityPresets[] = { "Low (Fast)", "Balanced", "High (Slower)", "Ultra (Very Slow)" };
+		if (ImGui::Combo("##UastcQuality", &currentQuality, qualityPresets, IM_ARRAYSIZE(qualityPresets))) {
+			metadata.settings["quality"] = currentQuality;
+			// Trigger re-import which will call CompileTexture with the new quality
+			AssetDatabase::Instance().ImportAsset(std::filesystem::absolute(path), true);
+			
+			// Notify the renderer to reload the updated asset from disk
+			RenderSystem::Instance().ReloadTexture(metadata.guid);
+		}
+
+		ImGui::EndTable();
+	}
 }

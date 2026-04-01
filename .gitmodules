@@ -50,3 +50,6 @@
 [submodule "External/assimp"]
 	path = External/assimp
 	url = https://github.com/assimp/assimp
+[submodule "External/basisu"]
+	path = External/basisu
+	url = https://github.com/BinomialLLC/basis_universal.git

@@ -22,20 +22,20 @@ set(ENGINE_SOURCES
 	Engine/Core/Object/Object.cpp
 	Engine/Core/Object/ObjectManager.cpp
 	Engine/Core/Object/ComponentRegistry.cpp
-Engine/Resource/ResourceManager.cpp
-Engine/Resource/ResourceManagerMaterial.cpp
-Engine/Resource/ResourceManagerMesh.cpp
-Engine/Resource/ResourceManagerShader.cpp
+	Engine/Resource/ResourceManager.cpp
+	Engine/Resource/ResourceManagerMaterial.cpp
+	Engine/Resource/ResourceManagerMesh.cpp
+	Engine/Resource/ResourceManagerShader.cpp
 	Engine/Resource/ResourceManagerShaderCollection.cpp
 	Engine/Resource/ResourceManagerTexture.cpp
 	Engine/Scene/SceneManager.cpp
-		Engine/Scene/Serializer.cpp
-		Engine/Input/InputSystem.cpp
-		Engine/Input/GLFW/GlfwInputBackend.cpp
-		Engine/Window/WindowSystem.cpp
-		Engine/Window/GLFW/GlfwWindowBackend.cpp
-		Engine/ThreadPool/ThreadPool.cpp
-Engine/Renderer/RenderSystem.cpp
+	Engine/Scene/Serializer.cpp
+	Engine/Input/InputSystem.cpp
+	Engine/Input/GLFW/GlfwInputBackend.cpp
+	Engine/Window/WindowSystem.cpp
+	Engine/Window/GLFW/GlfwWindowBackend.cpp
+	Engine/ThreadPool/ThreadPool.cpp
+	Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp
@@ -47,42 +47,46 @@ Engine/Renderer/RenderSystem.cpp
 )
 
 set(ENGINE_HEADERS
-Engine/Core/MainEngine.h
-Engine/Core/Logger/Logger.h
-Engine/Core/SystemBase.h
-Engine/Core/Timer.h
-Engine/Core/Object/Component.h
-Engine/Core/Object/Object.h
-Engine/Core/Object/ObjectManager.h
-Engine/Core/Object/Transform.h
-Engine/Input/InputBackend.h
-Engine/Input/InputCodes.h
-Engine/Input/InputSystem.h
-Engine/Resource/ResourceManager.h
-Engine/Resource/ShaderCollection.h
-Engine/Scene/SceneManager.h
-Engine/Scene/LightComponent.h
-Engine/Scene/Serializer.h
-Engine/Input/GLFW/GlfwInputBackend.h
-Engine/Utilities/UUID.h
-Engine/Window/WindowBackend.h
-Engine/Window/WindowConfig.h
-Engine/Window/WindowSystem.h
-Engine/Window/GLFW/GlfwWindowBackend.h
-Engine/ThreadPool/ThreadPool.h
-Engine/Renderer/RenderSystem.h
-Engine/Renderer/RenderTypes.h
-Engine/Renderer/RHI/RHIDefinitions.h
-Engine/Renderer/RHI/RHIContext.h
-Engine/Renderer/RHI/Vulkan/VulkanContext.h
-Engine/Renderer/RHI/Vulkan/VulkanCommonIncludes.h
-Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h
-Engine/Renderer/RHI/Vulkan/VulkanHiZ.h
-Engine/Renderer/RHI/Vulkan/VulkanVRS.h
-Engine/DotNet/DotNetHost.h
-Engine/Scripting/ScriptingSystem.h
-Engine/Scripting/ScriptComponent.h
-Engine/Debug.h
+	Engine/Core/MainEngine.h
+	Engine/Core/Logger/Logger.h
+	Engine/Core/SystemBase.h
+	Engine/Core/Timer.h
+	Engine/Core/Object/Component.h
+	Engine/Core/Object/Object.h
+	Engine/Core/Object/ObjectManager.h
+	Engine/Core/Object/Transform.h
+	Engine/Input/InputBackend.h
+	Engine/Input/InputCodes.h
+	Engine/Input/InputSystem.h
+	Engine/Resource/ResourceManager.h
+	Engine/Resource/ShaderCollection.h
+	Engine/Scene/SceneManager.h
+	Engine/Scene/LightComponent.h
+	Engine/Scene/Serializer.h
+	Engine/Input/GLFW/GlfwInputBackend.h
+	Engine/Utilities/UUID.h
+	Engine/Window/WindowBackend.h
+	Engine/Window/WindowConfig.h
+	Engine/Window/WindowSystem.h
+	Engine/Window/GLFW/GlfwWindowBackend.h
+	Engine/ThreadPool/ThreadPool.h
+	Engine/Renderer/RenderSystem.h
+	Engine/Renderer/RenderTypes.h
+	Engine/Renderer/RHI/RHIDefinitions.h
+	Engine/Renderer/RHI/RHIContext.h
+	Engine/Renderer/RHI/Vulkan/VulkanContext.h
+	Engine/Renderer/RHI/Vulkan/VulkanCommonIncludes.h
+	Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h
+	Engine/Renderer/RHI/Vulkan/VulkanHiZ.h
+	Engine/Renderer/RHI/Vulkan/VulkanVRS.h
+	Engine/DotNet/DotNetHost.h
+	Engine/Scripting/ScriptingSystem.h
+	Engine/Scripting/ScriptComponent.h
+	Engine/Debug.h
+)
+
+set(EXTERNAL_ENGINE_SOURCES
+	External/basisu/transcoder/basisu_transcoder.cpp
 )
 
 set(LAUNCHER_SOURCES
@@ -92,6 +96,7 @@ set(LAUNCHER_SOURCES
 add_library(TerraEngine-Engine SHARED
 	${ENGINE_SOURCES}
 	${ENGINE_HEADERS}
+	${EXTERNAL_ENGINE_SOURCES}
 )
 
 # Header-only dependencies stay bundled so texture decoding and OBJ parsing never
@@ -104,6 +109,7 @@ target_include_directories(TerraEngine-Engine
 		${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
 		${CMAKE_CURRENT_SOURCE_DIR}/External/stb
 		${CMAKE_CURRENT_SOURCE_DIR}/External/tinyobjloader
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/transcoder
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
@@ -213,6 +219,8 @@ target_compile_definitions(TerraEngine-Engine
 		RTTR_DLL
 		GLFW_DLL
 		TERRAENGINE_ENGINE_BUILD
+		BASISD_SUPPORT_KTX2=0
+		BASISD_SUPPORT_KTX2_ZSTD=0
 )
 
 set_target_properties(TerraEngine-Engine PROPERTIES OUTPUT_NAME "TerraEngine")
@@ -225,6 +233,7 @@ if(WIN32)
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
+source_group("External/basisu" FILES ${EXTERNAL_ENGINE_SOURCES})
 
 # --- Managed Source ----------------------------------------------------------
 # The following files are managed C# source files. CMake will generate the 
@@ -340,6 +349,21 @@ add_dependencies(TerraEngine-Launcher
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Launcher PREFIX "TerraEngine-Launcher" FILES ${LAUNCHER_SOURCES})
 
 # --- Editor Tools ------------------------------------------------------------
+include(FetchContent)
+FetchContent_Declare(
+	libktx
+	GIT_REPOSITORY https://github.com/KhronosGroup/KTX-Software.git
+	GIT_TAG v4.3.2
+	GIT_SHALLOW TRUE
+)
+
+# Disable KTX tools and tests to speed up build
+set(KTX_FEATURE_TOOLS OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_TESTS OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(libktx)
+
 add_executable(TerraEngineMeshCompiler
 	Editor/TerraEngineMeshCompiler.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
@@ -372,6 +396,13 @@ target_include_directories(TerraEngineTextureCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
+		${libktx_SOURCE_DIR}/include
+		${libktx_SOURCE_DIR}/other_include
+)
+
+target_link_libraries(TerraEngineTextureCompiler
+	PRIVATE
+		ktx
 )
 
 target_include_directories(TerraEngineShaderCompiler
@@ -436,6 +467,8 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuizmo
 		${IMGUI_FILE_DIALOG_DIR}
 		${IMGUI_DIR}/backends
+		${libktx_SOURCE_DIR}/include
+		${libktx_SOURCE_DIR}/other_include
 )
 
 target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM GLM_ENABLE_EXPERIMENTAL)
@@ -455,6 +488,7 @@ target_link_libraries(TerraEngine-Editor
 		assimp::assimp
 		meshoptimizer
 		mikktspace
+		ktx
 )
 
 
@@ -572,7 +606,7 @@ execute_process(
 	RESULT_VARIABLE compile_cluster_prefix
 )
 if(NOT compile_cluster_prefix EQUAL 0)
-	message(FATAL_ERROR \"Failed to compile ClusterLightPrefix.comp.hlsl during install\")
+	message(FATAL_ERROR \"Failed to compile ClusterLightPrefix.hlsl during install\")
 endif()
 
 execute_process(

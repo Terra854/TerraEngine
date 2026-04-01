@@ -2,14 +2,121 @@
 
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineTextureFile.h"
+#include "basisu_transcoder.h"
+#include "basisu_transcoder_uastc.h"
 
 namespace
 {
 	constexpr std::uint32_t kDescChunkId = MakeFourCC("DESC");
-	constexpr std::uint32_t kMipChunkId = MakeFourCC('M', 'I', 'P', ' ');
+	constexpr std::uint32_t kUastChunkId = MakeFourCC("UAST");
+
+	// Transcode raw UASTC blocks to hardware formats using the low-level API
+	bool TranscodeUastc(Texture& texture, const std::filesystem::path& path)
+	{
+		if (texture.uastcPayload.empty()) return true;
+
+		auto startTime = std::chrono::high_resolution_clock::now();
+
+		// Map the suggested VkFormat to a simplified target
+		enum class InternalFormat { BC7, ASTC, RGBA8 };
+		InternalFormat target = InternalFormat::BC7;
+		
+		const uint32_t vkFormat = texture.descriptor.vkFormat;
+		const bool isSRGB = (texture.header.flags & 1) != 0;
+
+		// Corrected mapping based on standard VkFormat enum:
+		// 145/146: BC7, 157/158: ASTC, 37/43: RGBA8
+		if (vkFormat == 157 || vkFormat == 158) {
+			target = InternalFormat::ASTC;
+			texture.descriptor.vkFormat = isSRGB ? 158 : 157;
+		} else if (vkFormat == 37 || vkFormat == 43) {
+			target = InternalFormat::RGBA8;
+			texture.descriptor.vkFormat = isSRGB ? 43 : 37;
+		} else {
+			target = InternalFormat::BC7;
+			texture.descriptor.vkFormat = isSRGB ? 146 : 145;
+		}
+
+		const size_t bytesPerBlock = (target == InternalFormat::RGBA8) ? 64 : 16;
+		
+		// Update descriptor to reflect transcoded block state for the RHI
+		texture.descriptor.blockWidth = (target == InternalFormat::RGBA8) ? 1 : 4;
+		texture.descriptor.blockHeight = (target == InternalFormat::RGBA8) ? 1 : 4;
+		texture.descriptor.blockBytes = static_cast<uint16_t>(bytesPerBlock);
+
+		size_t totalTranscodedSize = 0;
+		std::vector<size_t> levelSizes;
+		
+		for (uint32_t i = 0; i < texture.descriptor.mipCount; ++i)
+		{
+			uint32_t levelWidth = std::max(1u, (uint32_t)texture.descriptor.width >> i);
+			uint32_t levelHeight = std::max(1u, (uint32_t)texture.descriptor.height >> i);
+			uint32_t blocksX = (levelWidth + 3) / 4;
+			uint32_t blocksY = (levelHeight + 3) / 4;
+			size_t levelSize = blocksX * blocksY * bytesPerBlock;
+			levelSizes.push_back(levelSize);
+			totalTranscodedSize += levelSize;
+		}
+
+		texture.transcodedData.resize(totalTranscodedSize);
+		std::vector<TETFLevelEntry> newLevelTable;
+		size_t currentOffset = 0;
+
+		const basist::uastc_block* srcBlocks = reinterpret_cast<const basist::uastc_block*>(texture.uastcPayload.data());
+		const size_t totalBlocksInPayload = texture.uastcPayload.size() / 16;
+		size_t blocksRead = 0;
+
+		for (uint32_t i = 0; i < texture.descriptor.mipCount; ++i)
+		{
+			uint32_t levelWidth = std::max(1u, (uint32_t)texture.descriptor.width >> i);
+			uint32_t levelHeight = std::max(1u, (uint32_t)texture.descriptor.height >> i);
+			uint32_t blocksX = (levelWidth + 3) / 4;
+			uint32_t blocksY = (levelHeight + 3) / 4;
+			uint32_t numBlocks = blocksX * blocksY;
+
+			if (blocksRead + numBlocks > totalBlocksInPayload)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "UASTC payload underflow in " << path.filename() << " level " << i);
+				return false;
+			}
+
+			uint8_t* dstData = texture.transcodedData.data() + currentOffset;
+
+			for (uint32_t b = 0; b < numBlocks; ++b)
+			{
+				const basist::uastc_block& srcBlock = srcBlocks[blocksRead + b];
+				uint8_t* dstBlock = dstData + b * bytesPerBlock;
+
+				if (target == InternalFormat::BC7)
+				{
+					basist::transcode_uastc_to_bc7(srcBlock, dstBlock);
+				}
+				else if (target == InternalFormat::ASTC)
+				{
+					basist::transcode_uastc_to_astc(srcBlock, dstBlock);
+				}
+				else
+				{
+					basist::unpack_uastc(srcBlock, reinterpret_cast<basist::color32*>(dstBlock), false);
+				}
+			}
+
+			newLevelTable.push_back({ (uint64_t)currentOffset, (uint64_t)levelSizes[i] });
+			currentOffset += levelSizes[i];
+			blocksRead += numBlocks;
+		}
+
+		auto endTime = std::chrono::high_resolution_clock::now();
+		auto duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
+		TERRAENGINE_LOG(LogLevel::Info, "Transcoded " << path.filename() << " (" << texture.descriptor.width << "x" << texture.descriptor.height << ") to VK format " << texture.descriptor.vkFormat << " in " << (duration / 1000.0) << " ms");
+
+		texture.levelTable = std::move(newLevelTable);
+		return true;
+	}
 
 	// Safely translate an absolute file offset into a pointer inside the
 	// payload buffer that starts after the chunk table.
@@ -51,9 +158,9 @@ namespace
 			return nullptr;
 		}
 
-		if (header.versionMajor != kVersionMajor || header.versionMinor != kVersionMinor)
+		if (header.version != kVersion)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TETF version mismatch in " << resolvedPath << " (expected " << kVersionMajor << "." << kVersionMinor << ")");
+			TERRAENGINE_LOG(LogLevel::Error, "TETF version mismatch in " << resolvedPath << " (expected " << kVersion << ")");
 			return nullptr;
 		}
 
@@ -120,69 +227,44 @@ namespace
 
 		std::memcpy(&texture->descriptor, descPtr, sizeof(TETFDesc));
 
+		// Load Level Table
+		if (texture->descriptor.mipCount > 0)
+		{
+			const std::size_t levelTableSize = static_cast<std::size_t>(texture->descriptor.mipCount) * sizeof(TETFLevelEntry);
+			const std::size_t expectedDescSize = sizeof(TETFDesc) + levelTableSize;
+			
+			if (descEntry->size < expectedDescSize)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TETF DESC chunk truncated levelTable in " << resolvedPath);
+				return nullptr;
+			}
+
+			texture->levelTable.resize(texture->descriptor.mipCount);
+			std::memcpy(texture->levelTable.data(), descPtr + sizeof(TETFDesc), levelTableSize);
+		}
+
 		const auto validateChunkIndex = [&](std::uint32_t index) -> bool {
 			return index < texture->chunkTable.size();
 		};
 
-		if (texture->descriptor.mipCount == 0)
+		// Map UASTC Payload
+		const TETFChunkEntry* uastEntry = findChunkById(kUastChunkId);
+		if (uastEntry)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TETF mipCount is zero in " << resolvedPath);
+			const std::uint8_t* uastPtr = MapPayload(resolvedPath, payloadBase, payloadSize, texture->storage, static_cast<std::size_t>(uastEntry->offset), static_cast<std::size_t>(uastEntry->size));
+			if (uastPtr)
+			{
+				texture->uastcPayload = std::span<const std::uint8_t>(uastPtr, static_cast<std::size_t>(uastEntry->size));
+				if (!TranscodeUastc(*texture, resolvedPath))
+				{
+					return nullptr;
+				}
+			}
+		}
+		else
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TETF missing UAST chunk in " << resolvedPath);
 			return nullptr;
-		}
-
-		std::vector<const TETFChunkEntry*> mipEntries;
-		for (const auto& entry : texture->chunkTable)
-		{
-			if (entry.id == kMipChunkId)
-			{
-				mipEntries.push_back(&entry);
-			}
-		}
-
-		if (mipEntries.empty())
-		{
-			TERRAENGINE_LOG(LogLevel::Error, "TETF has no MIP chunks in " << resolvedPath);
-			return nullptr;
-		}
-
-		texture->mips.reserve(mipEntries.size());
-
-		for (const TETFChunkEntry* mipEntry : mipEntries)
-		{
-			if (mipEntry->size < sizeof(TETFMipChunkHeader))
-			{
-				TERRAENGINE_LOG(LogLevel::Error, "TETF MIP chunk is too small in " << resolvedPath);
-				return nullptr;
-			}
-
-			const std::uint8_t* mipPtr = MapPayload(resolvedPath, payloadBase, payloadSize, texture->storage, static_cast<std::size_t>(mipEntry->offset), static_cast<std::size_t>(mipEntry->size));
-			if (!mipPtr)
-			{
-				return nullptr;
-			}
-
-			TETFMipPayload payload{};
-			std::memcpy(&payload.header, mipPtr, sizeof(TETFMipChunkHeader));
-
-			const std::size_t sliceBytes = static_cast<std::size_t>(payload.header.sliceCount) * static_cast<std::size_t>(payload.header.sliceStride);
-			const std::size_t availableBytes = mipEntry->size - sizeof(TETFMipChunkHeader);
-			if (sliceBytes > availableBytes)
-			{
-				TERRAENGINE_LOG(LogLevel::Error, "TETF MIP payload underruns slice data in " << resolvedPath);
-				return nullptr;
-			}
-
-			payload.data = std::span<const std::uint8_t>(mipPtr + sizeof(TETFMipChunkHeader), sliceBytes);
-			texture->mips.push_back(payload);
-		}
-
-		std::sort(texture->mips.begin(), texture->mips.end(), [](const TETFMipPayload& a, const TETFMipPayload& b) {
-			return a.header.mipLevel < b.header.mipLevel;
-		});
-
-		if (texture->mips.size() != texture->descriptor.mipCount)
-		{
-			TERRAENGINE_LOG(LogLevel::Warning, "TETF mip count mismatch in " << resolvedPath << " (descriptor " << static_cast<std::uint32_t>(texture->descriptor.mipCount) << ", chunks " << texture->mips.size() << ")");
 		}
 
 		if (texture->descriptor.userMetadataChunk != TETF_INVALID_CHUNK_INDEX && validateChunkIndex(texture->descriptor.userMetadataChunk))
@@ -223,7 +305,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadTextureAsync(const st
 	});
 }
 
-void ResourceManager::ReloadTexture(const TerraEngine::UUID& id)
+std::shared_future<void> ResourceManager::ReloadTexture(const TerraEngine::UUID& id)
 {
 	std::string key;
 	{
@@ -241,15 +323,24 @@ void ResourceManager::ReloadTexture(const TerraEngine::UUID& id)
 	if (key.empty())
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Cannot reload texture: UUID " << ToHexString(id) << " not found in cache path map.");
-		return;
+		std::promise<void> p;
+		p.set_value();
+		return p.get_future().share();
 	}
 
 	const std::filesystem::path resolvedPath(key);
 	TERRAENGINE_LOG(LogLevel::Debug, "Reloading texture from " << resolvedPath);
-	auto texture = LoadTextureFile(*this, resolvedPath);
-	if (texture)
-	{
-		std::unique_lock lock(textureCache.mutex);
-		textureCache.resources[id] = std::move(texture);
-	}
+	
+	auto task = threadPool.createTask([this, key, resolvedPath, id]() {
+		auto texture = LoadTextureFile(*this, resolvedPath);
+		if (texture)
+		{
+			std::unique_lock lock(textureCache.mutex);
+			textureCache.resources[id] = std::move(texture);
+		}
+	});
+
+	auto future = task->getFuture().share();
+	threadPool.enqueue(task);
+	return future;
 }

@@ -97,7 +97,7 @@ public:
 	void ReloadMesh(const TerraEngine::UUID& id);
 
 	// Re-parse a texture from disk to pick up authored changes.
-	void ReloadTexture(const TerraEngine::UUID& id);
+	std::shared_future<void> ReloadTexture(const TerraEngine::UUID& id);
 
 	// Unregister a resource from the cache and trigger any necessary renderer invalidations.
 	void DeleteResource(const TerraEngine::UUID& id, AssetType type);
