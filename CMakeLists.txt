@@ -85,9 +85,46 @@ set(ENGINE_HEADERS
 	Engine/Debug.h
 )
 
-set(EXTERNAL_ENGINE_SOURCES
+set(BASISU_SOURCES
+	External/basisu/encoder/basisu_astc_hdr_6x6_enc.cpp
+	External/basisu/encoder/basisu_astc_hdr_common.cpp
+	External/basisu/encoder/basisu_astc_ldr_common.cpp
+	External/basisu/encoder/basisu_astc_ldr_encode.cpp
+	External/basisu/encoder/basisu_backend.cpp
+	External/basisu/encoder/basisu_basis_file.cpp
+	External/basisu/encoder/basisu_bc7enc.cpp
+	External/basisu/encoder/basisu_comp.cpp
+	External/basisu/encoder/basisu_enc.cpp
+	External/basisu/encoder/basisu_etc.cpp
+	External/basisu/encoder/basisu_frontend.cpp
+	External/basisu/encoder/basisu_gpu_texture.cpp
+	External/basisu/encoder/basisu_kernels_sse.cpp
+	External/basisu/encoder/basisu_opencl.cpp
+	External/basisu/encoder/basisu_pvrtc1_4.cpp
+	External/basisu/encoder/basisu_resampler.cpp
+	External/basisu/encoder/basisu_resample_filters.cpp
+	External/basisu/encoder/basisu_ssim.cpp
+	External/basisu/encoder/basisu_uastc_enc.cpp
+	External/basisu/encoder/basisu_uastc_hdr_4x4_enc.cpp
+	External/basisu/encoder/jpgd.cpp
+	External/basisu/encoder/pvpngreader.cpp
+	External/basisu/encoder/3rdparty/android_astc_decomp.cpp
+	External/basisu/encoder/3rdparty/tinyexr.cpp
 	External/basisu/transcoder/basisu_transcoder.cpp
+	External/basisu/zstd/zstd.c
 )
+
+add_library(basisu STATIC ${BASISU_SOURCES})
+target_include_directories(basisu PUBLIC 
+	External/basisu/encoder 
+	External/basisu/transcoder 
+	External/basisu/zstd
+	External/basisu/encoder/3rdparty
+)
+target_compile_definitions(basisu PUBLIC BASISU_SUPPORT_ENCODING=1 BASISD_SUPPORT_KTX2=1 BASISD_SUPPORT_KTX2_ZSTD=0)
+if(MSVC)
+	target_compile_options(basisu PRIVATE /W0 /FS)
+endif()
 
 set(LAUNCHER_SOURCES
 	Launcher/Launch.cpp
@@ -96,7 +133,6 @@ set(LAUNCHER_SOURCES
 add_library(TerraEngine-Engine SHARED
 	${ENGINE_SOURCES}
 	${ENGINE_HEADERS}
-	${EXTERNAL_ENGINE_SOURCES}
 )
 
 # Header-only dependencies stay bundled so texture decoding and OBJ parsing never
@@ -110,6 +146,7 @@ target_include_directories(TerraEngine-Engine
 		${CMAKE_CURRENT_SOURCE_DIR}/External/stb
 		${CMAKE_CURRENT_SOURCE_DIR}/External/tinyobjloader
 		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/transcoder
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/zstd
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
@@ -210,6 +247,7 @@ target_link_libraries(TerraEngine-Engine
 		GPUOpen::VulkanMemoryAllocator
 		nethost
 		meshoptimizer
+		basisu
 )
 
 target_compile_definitions(TerraEngine-Engine
@@ -224,6 +262,7 @@ target_compile_definitions(TerraEngine-Engine
 )
 
 set_target_properties(TerraEngine-Engine PROPERTIES OUTPUT_NAME "TerraEngine")
+set_target_properties(TerraEngine-Engine PROPERTIES DEBUG_POSTFIX "")
 
 if(WIN32)
 	# Ensure Windows generates an import library even if individual symbols are
@@ -233,7 +272,7 @@ if(WIN32)
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
-source_group("External/basisu" FILES ${EXTERNAL_ENGINE_SOURCES})
+source_group("External/basisu" FILES ${BASISU_SOURCES})
 
 # --- Managed Source ----------------------------------------------------------
 # The following files are managed C# source files. CMake will generate the 
@@ -349,21 +388,6 @@ add_dependencies(TerraEngine-Launcher
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Launcher PREFIX "TerraEngine-Launcher" FILES ${LAUNCHER_SOURCES})
 
 # --- Editor Tools ------------------------------------------------------------
-include(FetchContent)
-FetchContent_Declare(
-	libktx
-	GIT_REPOSITORY https://github.com/KhronosGroup/KTX-Software.git
-	GIT_TAG v4.3.2
-	GIT_SHALLOW TRUE
-)
-
-# Disable KTX tools and tests to speed up build
-set(KTX_FEATURE_TOOLS OFF CACHE BOOL "" FORCE)
-set(KTX_FEATURE_TESTS OFF CACHE BOOL "" FORCE)
-set(KTX_FEATURE_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
-
-FetchContent_MakeAvailable(libktx)
-
 add_executable(TerraEngineMeshCompiler
 	Editor/TerraEngineMeshCompiler.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
@@ -396,13 +420,14 @@ target_include_directories(TerraEngineTextureCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
-		${libktx_SOURCE_DIR}/include
-		${libktx_SOURCE_DIR}/other_include
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/encoder
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/transcoder
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/zstd
 )
 
 target_link_libraries(TerraEngineTextureCompiler
 	PRIVATE
-		ktx
+		basisu
 )
 
 target_include_directories(TerraEngineShaderCompiler
@@ -467,11 +492,12 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuizmo
 		${IMGUI_FILE_DIALOG_DIR}
 		${IMGUI_DIR}/backends
-		${libktx_SOURCE_DIR}/include
-		${libktx_SOURCE_DIR}/other_include
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/encoder
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/transcoder
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/zstd
 )
 
-target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM GLM_ENABLE_EXPERIMENTAL)
+target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM GLM_ENABLE_EXPERIMENTAL BASISU_SUPPORT_ENCODING=1)
 
 if(MSVC)
 	# The editor target builds a large number of C++ files directly, including
@@ -488,7 +514,7 @@ target_link_libraries(TerraEngine-Editor
 		assimp::assimp
 		meshoptimizer
 		mikktspace
-		ktx
+		basisu
 )
 
 

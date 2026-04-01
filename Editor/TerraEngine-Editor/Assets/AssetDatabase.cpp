@@ -305,6 +305,13 @@ void AssetDatabase::GenerateDefaultMetadata(const std::filesystem::path& sourceP
     outMetadata.importerName = GetImporterName(sourcePath);
     outMetadata.sourcePath = std::filesystem::relative(sourcePath, assetRoot);
     outMetadata.settings = json::object(); 
+
+    if (outMetadata.importerName == "TextureImporter") {
+        outMetadata.settings["generateMipmaps"] = true;
+        outMetadata.settings["filterType"] = "Lanczos";
+        outMetadata.settings["quality"] = 1;
+        outMetadata.settings["semantic"] = "color";
+    }
 }
 
 std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath) const {
@@ -381,8 +388,22 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
         if (metadata.settings.contains("quality")) {
             quality = static_cast<std::uint32_t>(metadata.settings["quality"].get<int>());
         }
+
+        bool generateMipmaps = true;
+        if (metadata.settings.contains("generateMipmaps")) {
+            generateMipmaps = metadata.settings["generateMipmaps"].get<bool>();
+        }
+
+        TextureFilterType filter = TextureFilterType::Lanczos;
+        if (metadata.settings.contains("filterType")) {
+            std::string filterStr = metadata.settings["filterType"];
+            if (filterStr == "Box") filter = TextureFilterType::Box;
+            else if (filterStr == "Triangle") filter = TextureFilterType::Triangle;
+            else if (filterStr == "Lanczos") filter = TextureFilterType::Lanczos;
+            else if (filterStr == "Kaiser") filter = TextureFilterType::Kaiser;
+        }
         
-        return CompileTexture(fullSourcePath, fullCompiledPath, semantic, quality);
+        return CompileTexture(fullSourcePath, fullCompiledPath, semantic, quality, generateMipmaps, filter);
     } 
     else if (metadata.importerName == "ShaderImporter") {
         std::string stage = "vs";

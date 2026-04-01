@@ -1517,14 +1517,17 @@ void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
 		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
 		ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
+		// Mutable reference to update metadata directly in the database
+		AssetMetadata& metadata = const_cast<AssetMetadata&>(it->second);
+		bool settingsChanged = false;
+
+		// UASTC Quality
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
 		ImGui::TextUnformatted("UASTC Quality");
 		ImGui::TableSetColumnIndex(1);
 		ImGui::SetNextItemWidth(-1.0f);
 
-		// Mutable reference to update metadata directly in the database
-		AssetMetadata& metadata = const_cast<AssetMetadata&>(it->second);
 		int currentQuality = 1; // Balanced default
 		if (metadata.settings.contains("quality")) {
 			currentQuality = metadata.settings["quality"].get<int>();
@@ -1533,7 +1536,54 @@ void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
 		const char* qualityPresets[] = { "Low (Fast)", "Balanced", "High (Slower)", "Ultra (Very Slow)" };
 		if (ImGui::Combo("##UastcQuality", &currentQuality, qualityPresets, IM_ARRAYSIZE(qualityPresets))) {
 			metadata.settings["quality"] = currentQuality;
-			// Trigger re-import which will call CompileTexture with the new quality
+			settingsChanged = true;
+		}
+
+		// Generate Mipmaps
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::TextUnformatted("Generate Mipmaps");
+		ImGui::TableSetColumnIndex(1);
+		
+		bool genMips = true;
+		if (metadata.settings.contains("generateMipmaps")) {
+			genMips = metadata.settings["generateMipmaps"].get<bool>();
+		}
+		if (ImGui::Checkbox("##GenMips", &genMips)) {
+			metadata.settings["generateMipmaps"] = genMips;
+			settingsChanged = true;
+		}
+
+		// Downsampling Filter
+		if (genMips) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted("Filter Type");
+			ImGui::TableSetColumnIndex(1);
+			ImGui::SetNextItemWidth(-1.0f);
+
+			const char* filters[] = { "Box", "Triangle", "Lanczos", "Kaiser" };
+			std::string currentFilter = "Lanczos";
+			if (metadata.settings.contains("filterType")) {
+				currentFilter = metadata.settings["filterType"].get<std::string>();
+			}
+
+			int filterIdx = 2; // Lanczos default
+			for (int i = 0; i < 4; ++i) {
+				if (currentFilter == filters[i]) {
+					filterIdx = i;
+					break;
+				}
+			}
+
+			if (ImGui::Combo("##FilterType", &filterIdx, filters, IM_ARRAYSIZE(filters))) {
+				metadata.settings["filterType"] = filters[filterIdx];
+				settingsChanged = true;
+			}
+		}
+
+		if (settingsChanged) {
+			// Trigger re-import which will call CompileTexture with new settings
 			AssetDatabase::Instance().ImportAsset(std::filesystem::absolute(path), true);
 			
 			// Notify the renderer to reload the updated asset from disk
@@ -1541,5 +1591,11 @@ void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
 		}
 
 		ImGui::EndTable();
+	}
+
+	ImGui::Spacing();
+	if (ImGui::Button("Reimport", ImVec2(-1, 0))) {
+		AssetDatabase::Instance().ImportAsset(std::filesystem::absolute(path), true);
+		RenderSystem::Instance().ReloadTexture(it->second.guid);
 	}
 }

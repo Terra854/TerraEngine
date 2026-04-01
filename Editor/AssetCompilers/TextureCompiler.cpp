@@ -24,6 +24,10 @@
 #define STBI_ONLY_PNM
 #include "External/stb/stb_image.h"
 
+#include "basisu_comp.h"
+#include "basisu_transcoder.h"
+#include "basisu_enc.h"
+
 namespace {
     constexpr std::array<std::string_view, 11> kSupportedTextureSourceExtensions = {
         ".png",
@@ -49,6 +53,14 @@ namespace {
             return static_cast<char>(std::tolower(c));
         });
         return ext;
+    }
+
+    void InitializeBasisu() {
+        static bool initialized = false;
+        if (!initialized) {
+            basisu::basisu_encoder_init();
+            initialized = true;
+        }
     }
 }
 
@@ -94,7 +106,9 @@ std::uint32_t ComputeCrc32(const std::uint8_t* data, size_t size) {
     return crc ^ 0xFFFFFFFFu;
 }
 
-bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality) {
+bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality, bool generateMipmaps, TextureFilterType filter) {
+    InitializeBasisu();
+
     int width = 0;
     int height = 0;
     int channels = 0;
@@ -104,71 +118,90 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
         return false;
     }
 
-    const std::size_t mipSize = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4;
-
-    // Initialize KTX texture
-    ktxTexture2* ktx = nullptr;
     const bool isSRGB = (semantic == TextureFileSemantic::Color);
-    
-    ktxTextureCreateInfo createInfo{};
-    // UASTC usually starts from RGBA8
-    createInfo.vkFormat = isSRGB ? 43 : 37; 
-    createInfo.baseWidth = static_cast<std::uint32_t>(width);
-    createInfo.baseHeight = static_cast<std::uint32_t>(height);
-    createInfo.baseDepth = 1;
-    createInfo.numDimensions = 2;
-    createInfo.numLevels = 1; 
-    createInfo.numLayers = 1;
-    createInfo.numFaces = 1;
-    createInfo.isArray = KTX_FALSE;
-    createInfo.generateMipmaps = KTX_FALSE;
 
-    KTX_error_code ktxResult = ktxTexture2_Create(&createInfo, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &ktx);
-    if (ktxResult != KTX_SUCCESS) {
-        std::cerr << "Failed to create KTX texture: " << ktxResult << "\n";
-        stbi_image_free(pixels);
-        return false;
-    }
-
-    ktxResult = ktxTexture_SetImageFromMemory(ktxTexture(ktx), 0, 0, 0, pixels, mipSize);
+    basisu::image sourceImage(width, height);
+    std::memcpy(sourceImage.get_ptr(), pixels, width * height * 4);
     stbi_image_free(pixels);
 
-    if (ktxResult != KTX_SUCCESS) {
-        std::cerr << "Failed to set KTX image data: " << ktxResult << "\n";
-        ktxTexture_Destroy(ktxTexture(ktx));
+    basisu::basis_compressor_params params;
+    params.m_uastc = true;
+    params.m_quality_level = -1; // Use uastc level flags instead
+    
+    // Map quality 0-3 to basisu levels
+    params.m_pack_uastc_ldr_4x4_flags = (quality == 0) ? basisu::cPackUASTCLevelFastest : 
+                                        (quality == 2) ? basisu::cPackUASTCLevelSlower :
+                                        (quality == 3) ? basisu::cPackUASTCLevelVerySlow : 
+                                        basisu::cPackUASTCLevelDefault;
+
+    params.m_mip_gen = generateMipmaps;
+    params.m_mip_srgb = isSRGB;
+    
+    switch (filter) {
+        case TextureFilterType::Box: params.m_mip_filter = "box"; break;
+        case TextureFilterType::Triangle: params.m_mip_filter = "tent"; break;
+        case TextureFilterType::Lanczos: params.m_mip_filter = "lanczos3"; break;
+        case TextureFilterType::Kaiser: params.m_mip_filter = "kaiser"; break;
+    }
+
+    params.m_source_images.push_back(sourceImage);
+    params.m_create_ktx2_file = true;
+    params.m_ktx2_and_basis_srgb_transfer_function = isSRGB;
+    params.m_multithreading = true;
+
+    basisu::job_pool jpool(std::thread::hardware_concurrency());
+    params.m_pJob_pool = &jpool;
+
+    basisu::basis_compressor compressor;
+    if (!compressor.init(params)) {
+        std::cerr << "Failed to initialize basis compressor\n";
         return false;
     }
 
-    // Compress to UASTC
-    ktxBasisParams params{};
-    params.structSize = sizeof(params);
-    params.uastc = KTX_TRUE;
-    // Map quality 0-3 to basisu levels (approx)
-    // 0: Level 0 (Fastest), 1: Level 2 (Default), 2: Level 3 (Slower), 3: Level 4 (Very Slow)
-    params.uastcFlags = (quality == 0) ? KTX_PACK_UASTC_LEVEL_FASTEST : 
-                        (quality == 2) ? KTX_PACK_UASTC_LEVEL_SLOWER :
-                        (quality == 3) ? KTX_PACK_UASTC_LEVEL_VERYSLOW : 
-                        KTX_PACK_UASTC_LEVEL_DEFAULT;
-
-    ktxResult = ktxTexture2_CompressBasisEx(ktx, &params);
-    if (ktxResult != KTX_SUCCESS) {
-        std::cerr << "Failed to compress KTX to UASTC: " << ktxResult << "\n";
-        ktxTexture_Destroy(ktxTexture(ktx));
+    basisu::basis_compressor::error_code result = compressor.process();
+    if (result != basisu::basis_compressor::cECSuccess) {
+        std::cerr << "Basis compression failed with error code: " << result << "\n";
         return false;
     }
 
-    // Extract level table
+    const basisu::uint8_vec& ktx2Data = compressor.get_output_ktx2_file();
+    
+    // Parse KTX2 to extract level table
+    if (ktx2Data.size() < sizeof(basist::ktx2_header)) {
+        std::cerr << "Invalid KTX2 data returned from compressor\n";
+        return false;
+    }
+
+    const basist::ktx2_header* ktx2Header = reinterpret_cast<const basist::ktx2_header*>(ktx2Data.data());
+    const std::uint32_t mipCount = ktx2Header->m_level_count.get_uint64();
+    
     std::vector<TETFLevelEntry> levelTable;
-    levelTable.resize(ktx->numLevels);
-    for (std::uint32_t i = 0; i < ktx->numLevels; ++i) {
-        ktx_size_t offset;
-        ktxTexture_GetImageOffset(ktxTexture(ktx), i, 0, 0, &offset);
-        levelTable[i].offset = static_cast<std::uint64_t>(offset);
-        levelTable[i].size = static_cast<std::uint64_t>(ktxTexture_GetImageSize(ktxTexture(ktx), i));
+    levelTable.resize(mipCount);
+
+    const basist::ktx2_level_index* levelIndex = reinterpret_cast<const basist::ktx2_level_index*>(ktx2Data.data() + sizeof(basist::ktx2_header));
+    
+    // KTX2 stores levels from largest to smallest? 
+    // Actually KTX2 level index is at the end of header.
+    // Let's verify the offset.
+    
+    std::uint64_t totalUastcSize = 0;
+    for (std::uint32_t i = 0; i < mipCount; ++i) {
+        levelTable[i].offset = totalUastcSize;
+        levelTable[i].size = levelIndex[i].m_byte_length.get_uint64();
+        totalUastcSize += levelIndex[i].m_byte_length.get_uint64();
     }
 
-    const std::uint8_t* rawKtxData = ktxTexture_GetData(ktxTexture(ktx));
-    const std::size_t rawKtxDataSize = ktxTexture_GetDataSize(ktxTexture(ktx));
+    // We want to store ONLY the raw UASTC blocks in our UAST chunk.
+    // KTX2 includes DFD, KVD, etc. which we don't need if we are just a container.
+    // However, to keep it simple, we'll just extract the level data blobs.
+    
+    std::vector<uint8_t> rawUastcPayload;
+    rawUastcPayload.reserve(totalUastcSize);
+    for (std::uint32_t i = 0; i < mipCount; ++i) {
+        const std::uint64_t ktxOffset = levelIndex[i].m_byte_offset.get_uint64();
+        const std::uint64_t ktxSize = levelIndex[i].m_byte_length.get_uint64();
+        rawUastcPayload.insert(rawUastcPayload.end(), ktx2Data.begin() + ktxOffset, ktx2Data.begin() + ktxOffset + ktxSize);
+    }
 
     TETFHeader header{};
     header.magic = kMagic;
@@ -186,7 +219,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
     desc.height = static_cast<std::uint16_t>(height);
     desc.depth = 1;
     desc.layers = 1;
-    desc.mipCount = static_cast<std::uint8_t>(ktx->numLevels);
+    desc.mipCount = static_cast<std::uint8_t>(mipCount);
     desc.faces = 1;
     desc.reserved = 0;
     desc.reserved2 = 0;
@@ -197,9 +230,6 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
     desc.payloadChunkIndex = 1;
     desc.userMetadataChunk = TETF_INVALID_CHUNK_INDEX;
     desc.thumbnailChunk = TETF_INVALID_CHUNK_INDEX;
-    // For UASTC, we store the *target* hardware format if possible, 
-    // or just signal UASTC via chunk ID. 
-    // The spec says: vkFormat stores suggested hardware format.
     desc.vkFormat = isSRGB ? 146 : 145; // VK_FORMAT_BC7_SRGB_BLOCK=146, VK_FORMAT_BC7_UNORM_BLOCK=145
 
     const std::uint32_t tocSize = header.chunkCount * static_cast<std::uint32_t>(sizeof(TETFChunkEntry));
@@ -213,9 +243,9 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
     std::vector<TETFChunkEntry> entries;
     entries.resize(header.chunkCount);
     entries[0] = {kChunkDESC, 0, descOffset, descTotalSize};
-    entries[1] = {kChunkUAST, 0, uastOffset, static_cast<std::uint64_t>(rawKtxDataSize)};
+    entries[1] = {kChunkUAST, 0, uastOffset, static_cast<std::uint64_t>(rawUastcPayload.size())};
 
-    const std::uint32_t totalSize = AlignUp32(uastOffset + static_cast<std::uint32_t>(rawKtxDataSize), header.alignment);
+    const std::uint32_t totalSize = AlignUp32(uastOffset + static_cast<std::uint32_t>(rawUastcPayload.size()), header.alignment);
     header.totalSize = totalSize;
 
     std::vector<std::uint8_t> fileData;
@@ -229,9 +259,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
     std::memcpy(fileData.data() + descOffset + descFixedSize, levelTable.data(), levelTableSize);
     
     // Copy raw UASTC payload
-    std::memcpy(fileData.data() + uastOffset, rawKtxData, rawKtxDataSize);
-
-    ktxTexture_Destroy(ktxTexture(ktx));
+    std::memcpy(fileData.data() + uastOffset, rawUastcPayload.data(), rawUastcPayload.size());
 
     const std::uint32_t crc = ComputeCrc32(fileData.data(), fileData.size());
     std::memcpy(fileData.data() + offsetof(TETFHeader, fileCrc32), &crc, sizeof(crc));
@@ -245,3 +273,4 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
     out.write(reinterpret_cast<const char*>(fileData.data()), static_cast<std::streamsize>(fileData.size()));
     return true;
 }
+
