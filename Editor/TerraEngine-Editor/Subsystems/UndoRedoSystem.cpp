@@ -5,8 +5,22 @@
 #include "Engine/Core/Object/Transform.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Scene/Serializer.h"
+#include "Engine/Scripting/ScriptingSystem.h"
 
-CreateObjectCommand::CreateObjectCommand(entt::entity entity) : m_Entity(entity) {
+namespace
+{
+std::optional<Object> ResolveObject(const TerraEngine::UUID& uuid)
+{
+	if (uuid == TerraEngine::EMPTY_UUID)
+	{
+		return std::nullopt;
+	}
+
+	return ObjectManager::instance().getObject(uuid);
+}
+}
+
+CreateObjectCommand::CreateObjectCommand(entt::entity entity) {
     if (auto obj = ObjectManager::instance().getObject(entity)) {
         m_Uuid = obj->getUUID();
         m_Json = Serializer::SerializeObject(*obj);
@@ -25,7 +39,7 @@ void CreateObjectCommand::Redo() {
 
 std::string CreateObjectCommand::GetName() const { return "Create Object"; }
 
-DeleteObjectCommand::DeleteObjectCommand(entt::entity entity) : m_Entity(entity) {
+DeleteObjectCommand::DeleteObjectCommand(entt::entity entity) {
     if (auto obj = ObjectManager::instance().getObject(entity)) {
         m_Json = Serializer::SerializeObject(*obj);
         m_Uuid = obj->getUUID();
@@ -45,16 +59,16 @@ void DeleteObjectCommand::Redo() {
 std::string DeleteObjectCommand::GetName() const { return "Delete Object"; }
 
 RenameObjectCommand::RenameObjectCommand(entt::entity entity, const std::string& oldName, const std::string& newName)
-    : m_Entity(entity), m_OldName(oldName), m_NewName(newName) {}
+    : m_Uuid(ObjectManager::instance().getUUID(entity)), m_OldName(oldName), m_NewName(newName) {}
 
 void RenameObjectCommand::Undo() {
-    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+    if (auto obj = ResolveObject(m_Uuid)) {
         ObjectManager::instance().setObjectName(*obj, m_OldName);
     }
 }
 
 void RenameObjectCommand::Redo() {
-    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+    if (auto obj = ResolveObject(m_Uuid)) {
         ObjectManager::instance().setObjectName(*obj, m_NewName);
     }
 }
@@ -62,10 +76,10 @@ void RenameObjectCommand::Redo() {
 std::string RenameObjectCommand::GetName() const { return "Rename Object"; }
 
 AddComponentCommand::AddComponentCommand(entt::entity entity, const std::string& componentName)
-    : m_Entity(entity), m_ComponentName(componentName) {}
+    : m_Uuid(ObjectManager::instance().getUUID(entity)), m_ComponentName(componentName) {}
 
 void AddComponentCommand::Undo() {
-    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+    if (auto obj = ResolveObject(m_Uuid)) {
         auto& reg = ComponentAccessRegistry();
         if (reg.count(m_ComponentName)) {
             reg[m_ComponentName].removeComponent(*obj);
@@ -74,7 +88,7 @@ void AddComponentCommand::Undo() {
 }
 
 void AddComponentCommand::Redo() {
-    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+    if (auto obj = ResolveObject(m_Uuid)) {
         auto& reg = ComponentAccessRegistry();
         if (reg.count(m_ComponentName)) {
             reg[m_ComponentName].addComponent(*obj);
@@ -85,7 +99,7 @@ void AddComponentCommand::Redo() {
 std::string AddComponentCommand::GetName() const { return "Add " + m_ComponentName; }
 
 RemoveComponentCommand::RemoveComponentCommand(entt::entity entity, const std::string& componentName)
-    : m_Entity(entity), m_ComponentName(componentName) {
+    : m_Uuid(ObjectManager::instance().getUUID(entity)), m_ComponentName(componentName) {
     if (auto obj = ObjectManager::instance().getObject(entity)) {
         auto& reg = ComponentAccessRegistry();
         if (reg.count(m_ComponentName)) {
@@ -95,7 +109,7 @@ RemoveComponentCommand::RemoveComponentCommand(entt::entity entity, const std::s
 }
 
 void RemoveComponentCommand::Undo() {
-    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+    if (auto obj = ResolveObject(m_Uuid)) {
         auto& reg = ComponentAccessRegistry();
         if (reg.count(m_ComponentName)) {
             reg[m_ComponentName].addComponent(*obj);
@@ -105,7 +119,7 @@ void RemoveComponentCommand::Undo() {
 }
 
 void RemoveComponentCommand::Redo() {
-    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+    if (auto obj = ResolveObject(m_Uuid)) {
         auto& reg = ComponentAccessRegistry();
         if (reg.count(m_ComponentName)) {
             reg[m_ComponentName].removeComponent(*obj);
@@ -117,12 +131,12 @@ std::string RemoveComponentCommand::GetName() const { return "Remove " + m_Compo
 
 ChangeTransformCommand::ChangeTransformCommand(entt::entity entity, const glm::vec3& oldPos, const glm::quat& oldRot, const glm::vec3& oldScale,
                                              const glm::vec3& newPos, const glm::quat& newRot, const glm::vec3& newScale)
-    : m_Entity(entity), m_OldPos(oldPos), m_OldRot(oldRot), m_OldScale(oldScale),
+    : m_Uuid(ObjectManager::instance().getUUID(entity)), m_OldPos(oldPos), m_OldRot(oldRot), m_OldScale(oldScale),
       m_NewPos(newPos), m_NewRot(newRot), m_NewScale(newScale) {}
 
 void ChangeTransformCommand::Undo() {
-    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
-        if (auto* t = ObjectManager::instance().getRegistry().try_get<Transform>(m_Entity)) {
+    if (auto obj = ResolveObject(m_Uuid)) {
+        if (auto* t = obj->getComponent<Transform>()) {
             t->position = m_OldPos;
             t->rotation = m_OldRot;
             t->scale = m_OldScale;
@@ -131,8 +145,8 @@ void ChangeTransformCommand::Undo() {
 }
 
 void ChangeTransformCommand::Redo() {
-    if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
-        if (auto* t = ObjectManager::instance().getRegistry().try_get<Transform>(m_Entity)) {
+    if (auto obj = ResolveObject(m_Uuid)) {
+        if (auto* t = obj->getComponent<Transform>()) {
             t->position = m_NewPos;
             t->rotation = m_NewRot;
             t->scale = m_NewScale;
@@ -166,6 +180,9 @@ void UndoRedoSystem::Shutdown() {
 
 void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
     if (!command) return;
+    // Play-mode edits are transient because Stop restores the pre-play scene
+    // snapshot, so TerraEngine keeps the editor history frozen while running.
+    if (ScriptingSystem::Instance().IsRunning()) return;
 
     TERRAENGINE_LOG(LogLevel::Debug, "Pushing command: " << command->GetName());
 
@@ -187,6 +204,7 @@ void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
 
 void UndoRedoSystem::Undo() {
     if (undoStack.empty()) return;
+    if (ScriptingSystem::Instance().IsRunning()) return;
 
     auto command = std::move(undoStack.back());
     undoStack.pop_back();
@@ -200,6 +218,7 @@ void UndoRedoSystem::Undo() {
 
 void UndoRedoSystem::Redo() {
     if (redoStack.empty()) return;
+    if (ScriptingSystem::Instance().IsRunning()) return;
 
     // Redo stack entries are pulled from the back to maintain chronological 
     // order when reapplying multiple Undone steps.
@@ -214,11 +233,11 @@ void UndoRedoSystem::Redo() {
 }
 
 bool UndoRedoSystem::CanUndo() const {
-    return !undoStack.empty();
+    return !ScriptingSystem::Instance().IsRunning() && !undoStack.empty();
 }
 
 bool UndoRedoSystem::CanRedo() const {
-    return !redoStack.empty();
+    return !ScriptingSystem::Instance().IsRunning() && !redoStack.empty();
 }
 
 void UndoRedoSystem::SetSavePoint() {

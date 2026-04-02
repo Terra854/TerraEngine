@@ -3,6 +3,7 @@
 #include "MainEditorSubsystem.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
+#include "Engine/Scripting/ScriptingSystem.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -129,6 +130,7 @@ void EditorSystem::Setup(Engine* enginePtr) {
         ImGui::LoadIniSettingsFromMemory("");
 
         AssetDatabase::Instance().Shutdown();
+        ScriptingSystem::Instance().ClearGameplayAssembly();
         // Transition logic
     });
 
@@ -435,6 +437,7 @@ void EditorSystem::Update(float deltaTime) {
 			WrapCursorForInspectorDrag(window);
 		}
     } else {
+        ScriptingSystem::Instance().UpdateInspectorWatch(std::nullopt, context.scripting.selectionVersion);
         projectHub->Update(deltaTime);
         projectHub->DrawUI();
     }

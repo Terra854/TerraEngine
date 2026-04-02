@@ -24,26 +24,20 @@ namespace TerraEngine
         public unsafe T AddComponent<T>() where T : Component, new()
         {
             string typeName = typeof(T).Name;
-            if (InternalCalls.Native_AddComponent(ID, typeName))
+            if (typeof(Script).IsAssignableFrom(typeof(T)))
             {
+                string scriptName = typeof(T).FullName ?? typeName;
+                if (InternalCalls.Native_ScriptComponent_AddBinding(ID, scriptName))
+                {
+                    return new T { Object = this };
+                }
+
+                Log.Error($"Could not add gameplay script {scriptName} to Object {ID}");
                 return new T { Object = this };
             }
 
-            // Fallback: Try to add as a Script
-            if (InternalCalls.Native_AddComponent(ID, "Script"))
+            if (InternalCalls.Native_AddComponent(ID, typeName))
             {
-                // We successfully added a ScriptComponent, now set the ClassName
-                // We prefer FullName for scripts to avoid collisions
-                string scriptName = typeof(T).FullName ?? typeName;
-                IntPtr namePtr = System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(scriptName);
-                try
-                {
-                    InternalCalls.Native_SetComponentProperty(ID, "Script", "ClassName", (void*)namePtr, (int)ScriptType.String);
-                }
-                finally
-                {
-                    System.Runtime.InteropServices.Marshal.FreeHGlobal(namePtr);
-                }
                 return new T { Object = this };
             }
 
@@ -54,6 +48,17 @@ namespace TerraEngine
         public T? GetComponent<T>() where T : Component, new()
         {
             string typeName = typeof(T).Name;
+            if (typeof(Script).IsAssignableFrom(typeof(T)))
+            {
+                string scriptName = typeof(T).FullName ?? typeName;
+                if (InternalCalls.Native_ScriptComponent_HasBinding(ID, scriptName))
+                {
+                    return new T { Object = this };
+                }
+
+                return null;
+            }
+
             if (InternalCalls.Native_HasComponent(ID, typeName))
             {
                 return new T { Object = this };
@@ -63,6 +68,12 @@ namespace TerraEngine
 
         public bool HasComponent<T>() where T : Component
         {
+            if (typeof(Script).IsAssignableFrom(typeof(T)))
+            {
+                string scriptName = typeof(T).FullName ?? typeof(T).Name;
+                return InternalCalls.Native_ScriptComponent_HasBinding(ID, scriptName);
+            }
+
             return InternalCalls.Native_HasComponent(ID, typeof(T).Name);
         }
 

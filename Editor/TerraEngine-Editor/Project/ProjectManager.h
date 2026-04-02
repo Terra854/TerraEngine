@@ -27,6 +27,11 @@ public:
     const ProjectSettings& GetSettings() const;
     std::filesystem::path GetProjectRoot() const;
     const std::vector<RecentProjectEntry>& GetRecentProjects() const;
+    const EditorPreferences& GetEditorPreferences() const;
+    std::string GetExternalScriptEditorCommand() const;
+    bool ShouldAutoBuildScripts() const;
+    void SetExternalScriptEditorCommand(const std::string& commandTemplate);
+    void SetAutoBuildScripts(bool enabled);
 
     // Persist changes
     void SaveProjectSettings();

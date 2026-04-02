@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<EnableDynamicLoading>true</EnableDynamicLoading>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+		<OutputPath>Build/Assembly-CSharp/</OutputPath>
+		<BaseOutputPath>Build/Assembly-CSharp/</BaseOutputPath>
+		<BaseIntermediateOutputPath>Build/Assembly-CSharp/obj/</BaseIntermediateOutputPath>
+		<IntermediateOutputPath>Build/Assembly-CSharp/obj/$(Configuration)/</IntermediateOutputPath>
+		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Reference Include="TerraEngine.CSharp">
+			<HintPath>@REFERENCE_DLL@</HintPath>
+			<Private>true</Private>
+		</Reference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<Compile Remove="Build\**\*.cs" />
+		<Compile Remove="Library\**\*.cs" />
+		<Compile Remove="Temp\**\*.cs" />
+		<Compile Remove="ProjectSettings\**\*.cs" />
+		<Compile Remove="UserSettings\**\*.cs" />
+	</ItemGroup>
+</Project>

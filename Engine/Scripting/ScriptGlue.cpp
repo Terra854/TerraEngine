@@ -1,11 +1,14 @@
 #include "ScriptGlue.h"
 #include "Core/Logger/Logger.h"
-#include "Core/Object/ObjectManager.h"
-#include "Core/Object/Object.h"
 #include "Core/Object/Component.h"
+#include "Core/Object/Object.h"
+#include "Core/Object/ObjectManager.h"
 #include "Core/Object/Transform.h"
+#include "ScriptComponent.h"
+
 #include <mutex>
 #include <shared_mutex>
+
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -13,6 +16,9 @@
 #include "Resource/ResourceManager.h"
 
 static std::shared_mutex g_ScriptGlueMutex;
+// Native_ScriptComponent_GetBindingPayload returns a raw const char*, so each
+// thread keeps its own backing string alive until the next bridge call.
+thread_local std::string g_ScriptBindingPayloadBuffer;
 
 enum class ScriptType : int
 {
@@ -66,6 +72,22 @@ static void MarshallToNative(const rttr::variant& var, void* data, ScriptType ty
     }
 }
 
+static ScriptBinding* ResolveBinding(Object& object, const char* bindingId)
+{
+	if (bindingId == nullptr || bindingId[0] == '\0')
+	{
+		return nullptr;
+	}
+
+	ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+	if (scriptComponent == nullptr)
+	{
+		return nullptr;
+	}
+
+	return scriptComponent->FindBinding(bindingId);
+}
+
 extern "C" {
 
     void Native_Log(int level, const char* message, const char* function, int line) {
@@ -109,6 +131,130 @@ extern "C" {
         return false;
     }
 
+	bool Native_ScriptComponent_AddBinding(uint32_t objectId, const char* className) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (className == nullptr || className[0] == '\0') {
+			return false;
+		}
+
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>();
+			if (scriptComponent == nullptr) {
+				scriptComponent = &objOpt->addComponent<ScriptComponent>();
+			}
+
+			auto guard = scriptComponent->acquireWriteLock();
+			scriptComponent->AddBinding(TerraEngine::EMPTY_UUID, className);
+			return true;
+		}
+
+		return false;
+	}
+
+	bool Native_ScriptComponent_HasBinding(uint32_t objectId, const char* className) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (className == nullptr || className[0] == '\0') {
+			return false;
+		}
+
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
+				auto guard = scriptComponent->acquireReadLock();
+				return scriptComponent->HasBinding(className);
+			}
+		}
+
+		return false;
+	}
+
+	const char* Native_ScriptComponent_GetBindingPayload(uint32_t objectId, const char* bindingId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		g_ScriptBindingPayloadBuffer.clear();
+		if (bindingId == nullptr || bindingId[0] == '\0') {
+			return g_ScriptBindingPayloadBuffer.c_str();
+		}
+
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
+				auto guard = scriptComponent->acquireReadLock();
+				if (const ScriptBinding* binding = scriptComponent->FindBinding(bindingId)) {
+					// Return the authored binding payload only. Live runtime state is
+					// reconstructed on demand inside the managed bridge.
+					g_ScriptBindingPayloadBuffer = nlohmann::json(*binding).dump();
+				}
+			}
+		}
+
+		return g_ScriptBindingPayloadBuffer.c_str();
+	}
+
+	bool Native_ScriptComponent_SetBindingValue(uint32_t objectId, const char* bindingId, const char* fieldPath, const char* valueKind, const char* valueJson, const char* compatibility, const char* sourceTypeFingerprint) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (bindingId == nullptr || bindingId[0] == '\0' || fieldPath == nullptr || fieldPath[0] == '\0' || valueJson == nullptr) {
+			return false;
+		}
+
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>();
+			if (scriptComponent == nullptr) {
+				return false;
+			}
+
+			auto guard = scriptComponent->acquireWriteLock();
+			ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
+			if (binding == nullptr) {
+				return false;
+			}
+
+			ScriptFieldValue& fieldValue = binding->UpsertSerializedValue(fieldPath, valueKind != nullptr ? valueKind : "");
+			try {
+				// Inspector writes already serialize through JSON, so preserve the
+				// structured payload when possible instead of flattening to strings.
+				fieldValue.value = nlohmann::json::parse(valueJson);
+			} catch (...) {
+				fieldValue.value = valueJson;
+			}
+
+			fieldValue.fieldPath = fieldPath;
+			fieldValue.fieldName = fieldPath;
+			if (valueKind != nullptr) {
+				fieldValue.valueKind = valueKind;
+			}
+			fieldValue.compatibility = compatibility != nullptr && compatibility[0] != '\0' ? compatibility : "Current";
+			fieldValue.persistenceState = fieldValue.compatibility;
+			fieldValue.sourceTypeFingerprint = sourceTypeFingerprint != nullptr ? sourceTypeFingerprint : "";
+			scriptComponent->SynchronizeStorageFromBindings();
+			return true;
+		}
+
+		return false;
+	}
+
+	bool Native_ScriptComponent_RemoveBindingValue(uint32_t objectId, const char* bindingId, const char* fieldPath) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (bindingId == nullptr || bindingId[0] == '\0' || fieldPath == nullptr || fieldPath[0] == '\0') {
+			return false;
+		}
+
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>();
+			if (scriptComponent == nullptr) {
+				return false;
+			}
+
+			auto guard = scriptComponent->acquireWriteLock();
+			ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
+			if (binding == nullptr || !binding->RemoveSerializedValue(fieldPath)) {
+				return false;
+			}
+
+			scriptComponent->SynchronizeStorageFromBindings();
+			return true;
+		}
+
+		return false;
+	}
+
     void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type) {
         std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
         if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
@@ -121,7 +267,7 @@ extern "C" {
     }
 
     void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type) {
-        std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+        std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
         if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
             auto& reg = ComponentAccessRegistry();
             if (auto it = reg.find(componentType); it != reg.end()) {

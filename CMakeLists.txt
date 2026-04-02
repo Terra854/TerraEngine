@@ -269,6 +269,7 @@ if(WIN32)
 	# not manually decorated; this pairs with the TERRAENGINE_API macro so the
 	# launcher can link against the DLL reliably.
 	set_target_properties(TerraEngine-Engine PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+	target_compile_options(TerraEngine-Engine PRIVATE /FS)
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
@@ -346,6 +347,11 @@ set(MANAGED_CORE_SOURCES
 	Engine/Managed/Source/Component.cs
 	Engine/Managed/Source/Transform.cs
 	Engine/Managed/Source/Math.cs
+	Engine/Managed/Source/Script.cs
+	Engine/Managed/Source/Time.cs
+	Engine/Managed/Source/Graphics.cs
+	Engine/Managed/Source/SerializationAttributes.cs
+	Engine/Managed/Source/ScriptReflection.cs
 )
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Managed" FILES ${MANAGED_CORE_SOURCES})
@@ -461,8 +467,10 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
+	Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
 	Editor/TerraEngine-Editor/Project/ProjectManager.cpp
+	Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp
 	Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp
 	Editor/TerraEngine-Editor/Assets/FileWatcher.cpp
 	Editor/TerraEngine-Editor/Framework/EditorWindow.cpp
@@ -744,6 +752,10 @@ endif()
 	install(DIRECTORY "${MANAGED_OUTPUT_DIR}/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Managed"
 		PATTERN "runtimes" EXCLUDE
+	)
+
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/Templates/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Project/Templates"
 	)
 	
 	# Install cimgui (TerraEngine-ImGui)

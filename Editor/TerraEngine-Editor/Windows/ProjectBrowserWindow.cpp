@@ -1,17 +1,20 @@
 #include "ProjectBrowserWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
+#include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
 #include "Engine/Resource/ResourceManager.h"
 #include <imgui.h>
 #include <ImGuiFileDialog.h>
 #include <algorithm>
-#include <vector>
+#include <cstring>
 #include <fstream>
+#include <vector>
 #include "../../../Engine/File Formats/TerraEngineMaterialFile.h"
 
 ProjectBrowserWindow::ProjectBrowserWindow(MainEditorSubsystem* owner)
     : EditorWindow("Project Browser"), m_Owner(owner) {
+    std::fill(m_NewScriptName.begin(), m_NewScriptName.end(), '\0');
 }
 
 void ProjectBrowserWindow::OnGui() {
@@ -82,6 +85,13 @@ void ProjectBrowserWindow::OnGui() {
                 
                 m_Owner->SetSelectedAsset(std::filesystem::absolute(newMatPath));
             }
+            if (ImGui::MenuItem("C# Script (.cs)")) {
+                std::fill(m_NewScriptName.begin(), m_NewScriptName.end(), '\0');
+                const char* defaultName = "NewScript";
+                std::copy(defaultName, defaultName + std::strlen(defaultName), m_NewScriptName.begin());
+                m_CreateScriptError.clear();
+                m_ShowCreateScriptModal = true;
+            }
             ImGui::EndPopup();
         }
 
@@ -144,6 +154,35 @@ void ProjectBrowserWindow::OnGui() {
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SetItemDefaultFocus();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        if (m_ShowCreateScriptModal) {
+            ImGui::OpenPopup("Create C# Script");
+            m_ShowCreateScriptModal = false;
+        }
+
+        if (ImGui::BeginPopupModal("Create C# Script", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("New scripts are created in the currently selected asset folder.");
+            ImGui::InputText("Class Name", m_NewScriptName.data(), m_NewScriptName.size());
+            if (!m_CreateScriptError.empty()) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", m_CreateScriptError.c_str());
+            }
+
+            if (ImGui::Button("Create", ImVec2(120, 0))) {
+                std::filesystem::path createdPath;
+                std::string error;
+                if (ScriptCompilationSubsystem::Instance().CreateScriptAsset(m_CurrentDirectory, m_NewScriptName.data(), createdPath, &error)) {
+                    m_Owner->SetSelectedAsset(std::filesystem::absolute(createdPath));
+                    ImGui::CloseCurrentPopup();
+                } else {
+                    m_CreateScriptError = error;
+                }
+            }
             ImGui::SameLine();
             if (ImGui::Button("Cancel", ImVec2(120, 0))) {
                 ImGui::CloseCurrentPopup();
@@ -214,6 +253,9 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
             ImGui::PushID(filename.c_str());
             
             std::string icon = entry.is_directory() ? "[DIR]" : "[FILE]";
+            if (!entry.is_directory() && entry.path().extension() == ".cs") {
+                icon = "[C#]";
+            }
             
             bool isSelected = false;
             auto currentSelected = m_Owner->GetSelectedAsset();
@@ -254,9 +296,11 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
                          auto relPath = std::filesystem::relative(entry.path(), assetRoot, ec);
                          if (!ec) {
                               m_Owner->RequestOpenScene(relPath);
-                         } else {
+                          } else {
                               m_Owner->RequestOpenScene(entry.path());
-                         }
+                          }
+                    } else if (entry.path().extension() == ".cs") {
+                        ScriptCompilationSubsystem::Instance().OpenScript(std::filesystem::absolute(entry.path()));
                     }
                 }
             }
@@ -273,6 +317,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
                     else if (importer == "TextureImporter") payloadType = "ASSET_TEXTURE";
                     else if (importer == "ShaderImporter") payloadType = "ASSET_SHADER";
                     else if (importer == "MaterialImporter") payloadType = "ASSET_MATERIAL";
+                    else if (importer == "ScriptImporter") payloadType = "ASSET_SCRIPT";
 
                     ImGui::SetDragDropPayload(payloadType, &guid, sizeof(TerraEngine::UUID));
                     ImGui::Text("%s", filename.c_str());

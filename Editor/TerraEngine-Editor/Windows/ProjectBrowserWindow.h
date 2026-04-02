@@ -1,5 +1,6 @@
 #pragma once
 #include "../Framework/EditorWindow.h"
+#include <array>
 #include <string>
 #include <filesystem>
 
@@ -25,4 +26,7 @@ private:
 
     std::filesystem::path m_AssetToDelete;
     bool m_ShowDeleteModal = false;
+    bool m_ShowCreateScriptModal = false;
+    std::array<char, 128> m_NewScriptName{};
+    std::string m_CreateScriptError;
 };

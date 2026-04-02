@@ -7,7 +7,9 @@
 #include <vector>
 #include <map>
 #include <future>
+#include <chrono>
 #include <nlohmann/json.hpp>
+#include <string_view>
 
 struct AssetMetadata {
     TerraEngine::UUID guid;
@@ -39,6 +41,10 @@ public:
     const std::map<std::filesystem::path, AssetMetadata>& GetAssets() const { return assets; }
     std::filesystem::path GetAssetRoot() const { return assetRoot; }
     std::filesystem::path GetBuildRoot() const { return buildRoot; }
+    const AssetMetadata* FindAssetByGuid(const TerraEngine::UUID& guid) const;
+    const AssetMetadata* FindScriptAssetByFullName(std::string_view fullName) const;
+    std::string GetScriptFullName(const TerraEngine::UUID& guid) const;
+    void SetScriptCompileState(const std::string& compileState, const std::string& summary);
 
     bool IsCompiling() const { return !asyncJobs.empty(); }
     bool IsAssetCompiling(const std::filesystem::path& absSourcePath) const;
@@ -55,6 +61,9 @@ private:
     bool LoadMetadata(const std::filesystem::path& metaFilePath, AssetMetadata& outMetadata);
     bool SaveMetadata(const AssetMetadata& metadata);
     void GenerateDefaultMetadata(const std::filesystem::path& sourcePath, AssetMetadata& outMetadata);
+    void UpdateScriptMetadata(const std::filesystem::path& sourcePath, AssetMetadata& metadata);
+    void PruneRecentlyRemovedAssets();
+    bool TryReuseRecentlyRemovedScriptMetadata(const std::filesystem::path& sourcePath, AssetMetadata& outMetadata);
     
     std::string GetImporterName(const std::filesystem::path& filePath) const;
     bool CompileAsset(const AssetMetadata& metadata);
@@ -84,4 +93,11 @@ private:
         std::filesystem::path absSourcePath;
     };
     std::vector<AsyncCompileJob> asyncJobs;
+
+    struct RecentlyRemovedAsset {
+        AssetMetadata metadata;
+        std::filesystem::path absSourcePath;
+        std::chrono::steady_clock::time_point expiresAt;
+    };
+    std::vector<RecentlyRemovedAsset> recentlyRemovedAssets;
 };

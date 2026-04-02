@@ -138,6 +138,28 @@ const std::vector<RecentProjectEntry>& ProjectManager::GetRecentProjects() const
     return editorPrefs.recentProjects;
 }
 
+const EditorPreferences& ProjectManager::GetEditorPreferences() const {
+	return editorPrefs;
+}
+
+std::string ProjectManager::GetExternalScriptEditorCommand() const {
+	return editorPrefs.externalScriptEditorCommand;
+}
+
+bool ProjectManager::ShouldAutoBuildScripts() const {
+	return editorPrefs.autoBuildScripts;
+}
+
+void ProjectManager::SetExternalScriptEditorCommand(const std::string& commandTemplate) {
+	editorPrefs.externalScriptEditorCommand = commandTemplate;
+	SaveEditorPreferences();
+}
+
+void ProjectManager::SetAutoBuildScripts(bool enabled) {
+	editorPrefs.autoBuildScripts = enabled;
+	SaveEditorPreferences();
+}
+
 void ProjectManager::SaveProjectSettings() {
     if (!currentSettings.has_value() || projectRoot.empty()) return;
 

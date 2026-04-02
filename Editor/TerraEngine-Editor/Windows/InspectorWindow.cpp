@@ -1,11 +1,14 @@
 #include "InspectorWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
+#include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Subsystems/UndoRedoSystem.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/LightComponent.h"
+#include "Engine/Scripting/ScriptComponent.h"
+#include "Engine/Scripting/ScriptingSystem.h"
 #include "AssetDatabase.h"
 #include "Editor/AssetCompilers/MeshCompiler.h"
 #include "Editor/AssetCompilers/TextureCompiler.h"
@@ -13,11 +16,13 @@
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <glm/geometric.hpp>
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/trigonometric.hpp>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -33,6 +38,11 @@ std::string BuildDisplayComponentName(const std::string& componentName)
 	if (componentName == "LightComponent")
 	{
 		return "Light";
+	}
+
+	if (componentName == "Script")
+	{
+		return "Script";
 	}
 
 	const std::string componentSuffix = "Component";
@@ -68,6 +78,455 @@ const char* VkFormatToString(uint32_t vkFormat)
 	default: return "Other/Unknown";
 	}
 }
+
+std::string BuildScriptBindingStatusMessage(const ScriptBinding& binding)
+{
+	if (binding.status == "Attached")
+	{
+		return {};
+	}
+
+	if (binding.status == "BrokenType")
+	{
+		return "The active Assembly-CSharp build does not currently expose this class as a public non-abstract TerraEngine.Script type. This usually means the script failed to compile, was renamed, changed namespace, or no longer inherits from TerraEngine.Script.";
+	}
+
+	if (binding.status == "LiveReady")
+	{
+		return {};
+	}
+
+	if (binding.status == "InstanceUnavailable")
+	{
+		return "TerraEngine could not find a live managed instance for this binding. The object may have been destroyed, disabled, or is still waiting for the next script update.";
+	}
+
+	if (binding.status == "ReloadPending")
+	{
+		return "Assembly-CSharp is recompiling or reloading, so live values are temporarily unavailable.";
+	}
+
+	if (binding.status.empty())
+	{
+		return {};
+	}
+
+	return "Script status: " + binding.status + ".";
+}
+
+ImVec4 BuildScriptBindingStatusColor(const ScriptBinding& binding)
+{
+	if (binding.status == "BrokenType")
+	{
+		return ImVec4(1.0f, 0.45f, 0.45f, 1.0f);
+	}
+
+	if (binding.status == "InstanceUnavailable")
+	{
+		return ImVec4(1.0f, 0.7f, 0.4f, 1.0f);
+	}
+
+	return ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+}
+
+std::string ReadScriptMetadataString(const AssetMetadata* assetMetadata, const char* key)
+{
+	if (assetMetadata == nullptr)
+	{
+		return {};
+	}
+
+	const auto settingIt = assetMetadata->settings.find(key);
+	if (settingIt == assetMetadata->settings.end() || !settingIt->is_string())
+	{
+		return {};
+	}
+
+	return settingIt->get<std::string>();
+}
+
+// Inspector headers use the script class name without namespaces because that
+// is the same source Unity uses for "My Custom Script (Script)" cards.
+std::string ExtractScriptLeafName(const std::string& fullName)
+{
+	if (fullName.empty())
+	{
+		return {};
+	}
+
+	const std::size_t lastNamespaceSeparator = fullName.find_last_of('.');
+	if (lastNamespaceSeparator == std::string::npos)
+	{
+		return fullName;
+	}
+
+	return fullName.substr(lastNamespaceSeparator + 1);
+}
+
+// Unity nicifies PascalCase class names into inspector titles like
+// "New Mono Behaviour Script" while leaving the backing identifier untouched.
+std::string NicifyScriptIdentifier(const std::string& identifier)
+{
+	if (identifier.empty())
+	{
+		return {};
+	}
+
+	std::string nicified;
+	nicified.reserve(identifier.size() * 2);
+
+	for (std::size_t index = 0; index < identifier.size(); ++index)
+	{
+		const unsigned char current = static_cast<unsigned char>(identifier[index]);
+		if (current == '_' || current == '-')
+		{
+			if (!nicified.empty() && nicified.back() != ' ')
+			{
+				nicified.push_back(' ');
+			}
+			continue;
+		}
+
+		bool shouldInsertSpace = false;
+		if (index > 0 && !nicified.empty() && nicified.back() != ' ')
+		{
+			const unsigned char previous = static_cast<unsigned char>(identifier[index - 1]);
+			const unsigned char next = index + 1 < identifier.size()
+				? static_cast<unsigned char>(identifier[index + 1])
+				: 0;
+			shouldInsertSpace =
+				(std::isupper(current) != 0 && (std::islower(previous) != 0 || std::isdigit(previous) != 0))
+				|| (std::isupper(current) != 0 && std::isupper(previous) != 0 && next != 0 && std::islower(next) != 0)
+				|| (std::isdigit(current) != 0 && std::isalpha(previous) != 0)
+				|| (std::isalpha(current) != 0 && std::isdigit(previous) != 0);
+		}
+
+		if (shouldInsertSpace)
+		{
+			nicified.push_back(' ');
+		}
+
+		nicified.push_back(static_cast<char>(current));
+	}
+
+	return nicified;
+}
+
+std::string BuildScriptBindingDisplayName(const ScriptBinding& binding, const AssetMetadata* assetMetadata)
+{
+	const std::string currentFullName = ReadScriptMetadataString(assetMetadata, "scriptFullName");
+	const std::string scriptLeafName = ExtractScriptLeafName(currentFullName.empty() ? binding.className : currentFullName);
+	if (scriptLeafName.empty())
+	{
+		return "Missing Script";
+	}
+
+	return NicifyScriptIdentifier(scriptLeafName);
+}
+
+std::string BuildScriptAssetDisplayName(const ScriptBinding& binding, const AssetMetadata* assetMetadata)
+{
+	if (assetMetadata != nullptr && !assetMetadata->sourcePath.empty())
+	{
+		return assetMetadata->sourcePath.stem().string();
+	}
+
+	const std::string currentFullName = ReadScriptMetadataString(assetMetadata, "scriptFullName");
+	const std::string scriptLeafName = ExtractScriptLeafName(currentFullName.empty() ? binding.className : currentFullName);
+	return scriptLeafName.empty() ? "MissingScript" : scriptLeafName;
+}
+
+std::string FormatScriptFieldValue(const ScriptFieldValue& fieldValue)
+{
+	if (fieldValue.value.is_string())
+	{
+		return fieldValue.value.get<std::string>();
+	}
+
+	if (fieldValue.value.is_boolean())
+	{
+		return fieldValue.value.get<bool>() ? "True" : "False";
+	}
+
+	if (fieldValue.value.is_number_integer())
+	{
+		return std::to_string(fieldValue.value.get<long long>());
+	}
+
+	if (fieldValue.value.is_number_unsigned())
+	{
+		return std::to_string(fieldValue.value.get<unsigned long long>());
+	}
+
+	if (fieldValue.value.is_number_float())
+	{
+		return std::to_string(fieldValue.value.get<double>());
+	}
+
+	if (fieldValue.value.is_null())
+	{
+		return "None";
+	}
+
+	return fieldValue.value.dump();
+}
+
+std::string ExtractScriptFieldRootPath(std::string_view fieldPath)
+{
+	const std::size_t dotIndex = fieldPath.find('.');
+	const std::size_t bracketIndex = fieldPath.find('[');
+	const std::size_t cutIndex = dotIndex == std::string::npos
+		? bracketIndex
+		: bracketIndex == std::string::npos ? dotIndex : std::min(dotIndex, bracketIndex);
+	return cutIndex == std::string::npos ? std::string(fieldPath) : std::string(fieldPath.substr(0, cutIndex));
+}
+
+std::string ExtractScriptFieldRelativePath(std::string_view rootPath, std::string_view fullPath)
+{
+	if (fullPath.size() <= rootPath.size())
+	{
+		return {};
+	}
+
+	std::string relativePath = std::string(fullPath.substr(rootPath.size()));
+	if (!relativePath.empty() && relativePath.front() == '.')
+	{
+		relativePath.erase(relativePath.begin());
+	}
+
+	return relativePath;
+}
+
+std::string ReplaceFirstCollectionPlaceholder(const std::string& fieldPath, std::size_t index)
+{
+	const std::size_t placeholderIndex = fieldPath.find("[]");
+	if (placeholderIndex == std::string::npos)
+	{
+		return fieldPath;
+	}
+
+	return fieldPath.substr(0, placeholderIndex) + "[" + std::to_string(index) + "]" + fieldPath.substr(placeholderIndex + 2);
+}
+
+ScriptFieldDescriptor MaterializeCollectionDescriptor(const ScriptFieldDescriptor& templateDescriptor, std::size_t index)
+{
+	ScriptFieldDescriptor descriptor = templateDescriptor;
+	const auto materializeChildren = [&](const auto& self, ScriptFieldDescriptor& currentDescriptor) -> void {
+		currentDescriptor.fieldPath = ReplaceFirstCollectionPlaceholder(currentDescriptor.fieldPath, index);
+		for (ScriptFieldDescriptor& child : currentDescriptor.children)
+		{
+			self(self, child);
+		}
+	};
+
+	materializeChildren(materializeChildren, descriptor);
+	if (descriptor.displayName == "Element")
+	{
+		descriptor.displayName = "Element " + std::to_string(index);
+	}
+	return descriptor;
+}
+
+nlohmann::json BuildDefaultScriptFieldJson(const ScriptFieldDescriptor& descriptor)
+{
+	if (descriptor.containerKind == "Collection")
+	{
+		return nlohmann::json::array();
+	}
+
+	if (descriptor.containerKind == "NestedObject")
+	{
+		nlohmann::json objectValue = nlohmann::json::object();
+		for (const ScriptFieldDescriptor& child : descriptor.children)
+		{
+			objectValue[child.serializedName] = BuildDefaultScriptFieldJson(child);
+		}
+		return objectValue;
+	}
+
+	if (descriptor.valueKind == "Bool")
+	{
+		return false;
+	}
+
+	if (descriptor.valueKind == "Int")
+	{
+		return 0;
+	}
+
+	if (descriptor.valueKind == "Float")
+	{
+		return 0.0f;
+	}
+
+	if (descriptor.valueKind == "String")
+	{
+		return "";
+	}
+
+	if (descriptor.valueKind == "Enum")
+	{
+		return descriptor.enumOptions.empty() ? "" : descriptor.enumOptions.front();
+	}
+
+	if (descriptor.valueKind == "Vector2")
+	{
+		return nlohmann::json::array({ 0.0f, 0.0f });
+	}
+
+	if (descriptor.valueKind == "Vector3")
+	{
+		return nlohmann::json::array({ 0.0f, 0.0f, 0.0f });
+	}
+
+	if (descriptor.valueKind == "Vector4")
+	{
+		return nlohmann::json::array({ 0.0f, 0.0f, 0.0f, 0.0f });
+	}
+
+	if (descriptor.valueKind == "Quaternion")
+	{
+		return nlohmann::json::array({ 0.0f, 0.0f, 0.0f, 1.0f });
+	}
+
+	if (descriptor.valueKind == "EntityReference")
+	{
+		return 0;
+	}
+
+	return nullptr;
+}
+
+nlohmann::json* ResolveScriptJsonPath(nlohmann::json& rootValue, std::string_view rootPath, std::string_view fullPath, bool createMissing)
+{
+	std::string relativePath = ExtractScriptFieldRelativePath(rootPath, fullPath);
+	if (relativePath.empty())
+	{
+		return &rootValue;
+	}
+
+	nlohmann::json* current = &rootValue;
+	for (std::size_t index = 0; index < relativePath.size();)
+	{
+		if (relativePath[index] == '.')
+		{
+			++index;
+			continue;
+		}
+
+		if (relativePath[index] == '[')
+		{
+			const std::size_t closingBracket = relativePath.find(']', index);
+			if (closingBracket == std::string::npos)
+			{
+				return nullptr;
+			}
+
+			const std::size_t arrayIndex = static_cast<std::size_t>(std::stoul(relativePath.substr(index + 1, closingBracket - index - 1)));
+			if (!current->is_array())
+			{
+				if (!createMissing)
+				{
+					return nullptr;
+				}
+
+				*current = nlohmann::json::array();
+			}
+
+			while (current->size() <= arrayIndex)
+			{
+				current->push_back(nullptr);
+			}
+
+			current = &(*current)[arrayIndex];
+			index = closingBracket + 1;
+			continue;
+		}
+
+		const std::size_t tokenEnd = relativePath.find_first_of(".[", index);
+		const std::string token = relativePath.substr(index, tokenEnd == std::string::npos ? std::string::npos : tokenEnd - index);
+		if (!current->is_object())
+		{
+			if (!createMissing)
+			{
+				return nullptr;
+			}
+
+			*current = nlohmann::json::object();
+		}
+
+		current = &(*current)[token];
+		if (tokenEnd == std::string::npos)
+		{
+			break;
+		}
+
+		index = tokenEnd;
+	}
+
+	return current;
+}
+
+const nlohmann::json* ResolveScriptJsonPath(const nlohmann::json& rootValue, std::string_view rootPath, std::string_view fullPath)
+{
+	std::string relativePath = ExtractScriptFieldRelativePath(rootPath, fullPath);
+	if (relativePath.empty())
+	{
+		return &rootValue;
+	}
+
+	const nlohmann::json* current = &rootValue;
+	for (std::size_t index = 0; index < relativePath.size();)
+	{
+		if (relativePath[index] == '.')
+		{
+			++index;
+			continue;
+		}
+
+		if (relativePath[index] == '[')
+		{
+			const std::size_t closingBracket = relativePath.find(']', index);
+			if (closingBracket == std::string::npos || !current->is_array())
+			{
+				return nullptr;
+			}
+
+			const std::size_t arrayIndex = static_cast<std::size_t>(std::stoul(relativePath.substr(index + 1, closingBracket - index - 1)));
+			if (arrayIndex >= current->size())
+			{
+				return nullptr;
+			}
+
+			current = &(*current)[arrayIndex];
+			index = closingBracket + 1;
+			continue;
+		}
+
+		const std::size_t tokenEnd = relativePath.find_first_of(".[", index);
+		const std::string token = relativePath.substr(index, tokenEnd == std::string::npos ? std::string::npos : tokenEnd - index);
+		if (!current->is_object())
+		{
+			return nullptr;
+		}
+
+		auto tokenIt = current->find(token);
+		if (tokenIt == current->end())
+		{
+			return nullptr;
+		}
+
+		current = &(*tokenIt);
+		if (tokenEnd == std::string::npos)
+		{
+			break;
+		}
+
+		index = tokenEnd;
+	}
+
+	return current;
+}
 }
 
 // Command that records a property change on a component. Captures the 
@@ -75,7 +534,7 @@ const char* VkFormatToString(uint32_t vkFormat)
 class ModifyComponentCommand : public ICommand {
 public:
     ModifyComponentCommand(entt::entity entity, const std::string& component, const std::string& property, rttr::variant oldVal, rttr::variant newVal)
-        : m_Entity(entity), m_Component(component), m_Property(property), m_OldValue(oldVal), m_NewValue(newVal) {}
+        : m_Uuid(ObjectManager::instance().getUUID(entity)), m_Component(component), m_Property(property), m_OldValue(oldVal), m_NewValue(newVal) {}
 
     void Undo() override {
         ApplyValue(m_OldValue);
@@ -91,7 +550,7 @@ public:
 
 private:
     void ApplyValue(const rttr::variant& val) {
-        if (auto obj = ObjectManager::instance().getObject(m_Entity)) {
+        if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
             auto& reg = ComponentAccessRegistry();
             if (reg.count(m_Component)) {
                 // Setters handle thread-safety internally via component mutexes.
@@ -100,7 +559,7 @@ private:
         }
     }
 
-    entt::entity m_Entity;
+    TerraEngine::UUID m_Uuid;
     std::string m_Component;
     std::string m_Property;
     rttr::variant m_OldValue;
@@ -320,6 +779,563 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 			}
 			ImGui::EndDragDropTarget();
 		}
+	}
+}
+
+void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
+	ScriptComponent* scriptComponent = obj.getComponent<ScriptComponent>();
+	if (scriptComponent == nullptr) {
+		return;
+	}
+
+	auto& assetDatabase = AssetDatabase::Instance();
+	EditorContext* context = m_Owner != nullptr ? m_Owner->GetContext() : nullptr;
+	const bool playMode = ScriptingSystem::Instance().IsRunning();
+	const bool reloadPending = context != nullptr
+		&& (context->scripting.coordinatorState == "Queued"
+			|| context->scripting.coordinatorState == "Building"
+			|| context->scripting.coordinatorState == "Reloading");
+	auto guard = scriptComponent->acquireWriteLock();
+	std::vector<ScriptBinding>& bindings = scriptComponent->GetBindings();
+
+	if (bindings.empty()) {
+		return;
+	}
+
+	std::map<std::string, int> shortNameCounts;
+	for (const ScriptBinding& binding : bindings)
+	{
+		shortNameCounts[ExtractScriptLeafName(binding.className)]++;
+	}
+
+	// Mirror Unity's inspector model: each binding gets its own component
+	// card even though Terra stores all bindings inside one ScriptComponent.
+	for (std::size_t bindingIndex = 0; bindingIndex < bindings.size(); ++bindingIndex) {
+		ScriptBinding& binding = bindings[bindingIndex];
+		const AssetMetadata* assetMetadata = assetDatabase.FindAssetByGuid(binding.assetGuid);
+		if (assetMetadata == nullptr && !binding.className.empty()) {
+			assetMetadata = assetDatabase.FindScriptAssetByFullName(binding.className);
+		}
+		std::string displayName = BuildScriptBindingDisplayName(binding, assetMetadata);
+		const bool needsDisambiguation = shortNameCounts[ExtractScriptLeafName(binding.className)] > 1;
+		if (needsDisambiguation)
+		{
+			const std::string scriptNamespace = ReadScriptMetadataString(assetMetadata, "scriptNamespace");
+			if (!scriptNamespace.empty())
+			{
+				displayName += " [" + scriptNamespace + "]";
+			}
+			else if (assetMetadata != nullptr)
+			{
+				displayName += " [" + assetMetadata->sourcePath.parent_path().string() + "]";
+			}
+			else if (!binding.className.empty())
+			{
+				displayName += " [" + binding.className + "]";
+			}
+		}
+		const std::string scriptAssetName = BuildScriptAssetDisplayName(binding, assetMetadata);
+		const std::string componentTitle = displayName + " (Script)";
+		std::string statusMessage = reloadPending ? (context != nullptr ? context->scripting.lastSummary : std::string{}) : BuildScriptBindingStatusMessage(binding);
+
+		ImGui::PushID(binding.bindingId.c_str());
+		bool bindingEnabled = binding.enabled;
+		bool isOpen = ImGui::GetStateStorage()->GetInt(ImGui::GetID("IsOpen"), 1) != 0;
+		ImVec2 headerPosition = ImGui::GetCursorScreenPos();
+		float headerWidth = ImGui::GetContentRegionAvail().x;
+		float headerHeight = ImGui::GetFrameHeight();
+
+		ImGui::GetWindowDrawList()->AddRectFilled(
+			headerPosition,
+			ImVec2(headerPosition.x + headerWidth, headerPosition.y + headerHeight),
+			ImGui::GetColorU32(ImGuiCol_Header));
+
+		ImGui::SetNextItemAllowOverlap();
+		if (ImGui::InvisibleButton("##header_bg", ImVec2(headerWidth, headerHeight))) {
+			isOpen = !isOpen;
+			ImGui::GetStateStorage()->SetInt(ImGui::GetID("IsOpen"), isOpen);
+		}
+
+		bool removeBinding = false;
+		if (ImGui::BeginPopupContextItem("ComponentSettings")) {
+			if (ImGui::MenuItem("Remove Component")) {
+				removeBinding = true;
+			}
+			ImGui::EndPopup();
+		}
+
+		ImGui::SetCursorScreenPos(headerPosition);
+		ImGui::Dummy(ImVec2(2.0f, 0.0f));
+		ImGui::SameLine();
+		if (ImGui::ArrowButton("##arrow", isOpen ? ImGuiDir_Down : ImGuiDir_Right)) {
+			isOpen = !isOpen;
+			ImGui::GetStateStorage()->SetInt(ImGui::GetID("IsOpen"), isOpen);
+		}
+
+		ImGui::SameLine();
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+		if (ImGui::Checkbox("##compActive", &bindingEnabled)) {
+			const std::string oldJson = scriptComponent->GetBindingsJson();
+			binding.enabled = bindingEnabled;
+			scriptComponent->SynchronizeStorageFromBindings();
+			const std::string newJson = scriptComponent->GetBindingsJson();
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+		}
+		ImGui::PopStyleColor();
+
+		ImGui::SameLine();
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted(componentTitle.c_str());
+
+		ImGui::SetCursorScreenPos(ImVec2(headerPosition.x, headerPosition.y + headerHeight));
+		ImGui::Dummy(ImVec2(0.0f, 0.0f));
+
+		if (removeBinding) {
+			const std::string oldJson = scriptComponent->GetBindingsJson();
+			scriptComponent->RemoveBinding(binding.bindingId);
+			const std::string newJson = scriptComponent->GetBindingsJson();
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+			ImGui::Separator();
+			ImGui::PopID();
+			break;
+		}
+
+		if (isOpen) {
+			ImGui::Indent();
+			char scriptBuffer[256];
+			strncpy(scriptBuffer, scriptAssetName.c_str(), sizeof(scriptBuffer));
+			scriptBuffer[sizeof(scriptBuffer) - 1] = '\0';
+			ImGui::BeginDisabled();
+			ImGui::SetNextItemWidth(-1.0f);
+			ImGui::InputText("##ScriptAsset", scriptBuffer, sizeof(scriptBuffer), ImGuiInputTextFlags_ReadOnly);
+			const bool hoveredScriptField = ImGui::IsItemHovered();
+			ImGui::EndDisabled();
+			if (assetMetadata != nullptr && hoveredScriptField) {
+				ImGui::SetTooltip("%s", assetMetadata->sourcePath.string().c_str());
+			}
+
+			auto getCurrentRootValue = [&](const ScriptFieldDescriptor& rootDescriptor) -> nlohmann::json {
+				if (playMode) {
+					if (const ScriptFieldSnapshot* liveSnapshot = binding.FindLiveSnapshot(rootDescriptor.fieldPath)) {
+						return liveSnapshot->value;
+					}
+
+					if (const ScriptFieldValue* runtimeOverride = binding.FindRuntimeOverride(rootDescriptor.fieldPath)) {
+						return runtimeOverride->value;
+					}
+				}
+
+				if (const ScriptFieldValue* authoredValue = binding.FindSerializedValue(rootDescriptor.fieldPath)) {
+					return authoredValue->value;
+				}
+
+				return BuildDefaultScriptFieldJson(rootDescriptor);
+			};
+
+			auto commitRootValue = [&](const ScriptFieldDescriptor& rootDescriptor, const nlohmann::json& nextRootValue) -> bool {
+				if (playMode) {
+					std::string liveWriteError;
+					if (!ScriptingSystem::Instance().WriteLiveBindingValue(static_cast<uint32_t>(obj.EntityId()), binding, rootDescriptor.fieldPath, nextRootValue, &liveWriteError)) {
+						m_LastScriptMessage = liveWriteError.empty() ? "TerraEngine could not apply the live script edit." : liveWriteError;
+						m_LastScriptMessageIsError = true;
+						return false;
+					}
+
+					m_LastScriptMessage.clear();
+					m_LastScriptMessageIsError = false;
+					return true;
+				}
+
+				const std::string oldJson = scriptComponent->GetBindingsJson();
+				ScriptFieldValue& storedValue = binding.UpsertSerializedValue(rootDescriptor.fieldPath, rootDescriptor.valueKind);
+				storedValue.fieldPath = rootDescriptor.fieldPath;
+				storedValue.fieldName = rootDescriptor.fieldPath;
+				storedValue.displayName = rootDescriptor.displayName;
+				storedValue.valueKind = rootDescriptor.valueKind;
+				storedValue.value = nextRootValue;
+				storedValue.compatibility = "Current";
+				storedValue.persistenceState = "Current";
+				storedValue.sourceTypeFingerprint = rootDescriptor.typeFingerprint;
+				storedValue.diagnosticMessage.clear();
+				scriptComponent->SynchronizeStorageFromBindings();
+				const std::string newJson = scriptComponent->GetBindingsJson();
+				if (oldJson != newJson) {
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+				}
+
+				return true;
+			};
+
+			auto removeStoredField = [&](std::string_view fieldPath) {
+				const std::string oldJson = scriptComponent->GetBindingsJson();
+				if (binding.RemoveSerializedValue(fieldPath)) {
+					scriptComponent->SynchronizeStorageFromBindings();
+					const std::string newJson = scriptComponent->GetBindingsJson();
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+				}
+			};
+
+			auto renderField = [&](const auto& self, const ScriptFieldDescriptor& rootDescriptor, const ScriptFieldDescriptor& descriptor) -> void {
+				if (descriptor.hiddenInInspector) {
+					return;
+				}
+
+				nlohmann::json currentRootValue = getCurrentRootValue(rootDescriptor);
+				const nlohmann::json* resolvedValue = ResolveScriptJsonPath(currentRootValue, rootDescriptor.fieldPath, descriptor.fieldPath);
+				const nlohmann::json currentValue = resolvedValue != nullptr ? *resolvedValue : BuildDefaultScriptFieldJson(descriptor);
+				const bool editable = descriptor.editable && descriptor.valueKind != "Unsupported" && !reloadPending && binding.status != "BrokenType";
+
+				ImGui::PushID(descriptor.fieldPath.c_str());
+				if (descriptor.containerKind == "NestedObject") {
+					if (ImGui::TreeNodeEx(descriptor.displayName.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+						for (const ScriptFieldDescriptor& child : descriptor.children) {
+							self(self, rootDescriptor, child);
+						}
+						ImGui::TreePop();
+					}
+					if (!descriptor.tooltip.empty() && ImGui::IsItemHovered()) {
+						ImGui::SetTooltip("%s", descriptor.tooltip.c_str());
+					}
+					ImGui::PopID();
+					return;
+				}
+
+				if (descriptor.containerKind == "Collection") {
+					nlohmann::json collectionValue = currentValue.is_array() ? currentValue : nlohmann::json::array();
+					const std::string treeLabel = descriptor.displayName + " [" + std::to_string(collectionValue.size()) + "]";
+					const bool open = ImGui::TreeNodeEx(treeLabel.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+					if (!descriptor.tooltip.empty() && ImGui::IsItemHovered()) {
+						ImGui::SetTooltip("%s", descriptor.tooltip.c_str());
+					}
+					if (editable) {
+						ImGui::SameLine();
+						if (ImGui::SmallButton("+")) {
+							nlohmann::json nextRootValue = currentRootValue;
+							nlohmann::json* collectionTarget = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true);
+							if (collectionTarget != nullptr) {
+								if (!collectionTarget->is_array()) {
+									*collectionTarget = nlohmann::json::array();
+								}
+
+								collectionTarget->push_back(descriptor.children.empty() ? nullptr : BuildDefaultScriptFieldJson(descriptor.children.front()));
+								commitRootValue(rootDescriptor, nextRootValue);
+							}
+						}
+					}
+
+					if (open) {
+						for (std::size_t elementIndex = 0; elementIndex < collectionValue.size(); ++elementIndex) {
+							if (!descriptor.children.empty()) {
+								ScriptFieldDescriptor elementDescriptor = MaterializeCollectionDescriptor(descriptor.children.front(), elementIndex);
+								ImGui::PushID(static_cast<int>(elementIndex));
+								if (editable) {
+									if (ImGui::SmallButton("x")) {
+										nlohmann::json nextRootValue = currentRootValue;
+										nlohmann::json* collectionTarget = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true);
+										if (collectionTarget != nullptr && collectionTarget->is_array() && elementIndex < collectionTarget->size()) {
+											collectionTarget->erase(collectionTarget->begin() + static_cast<nlohmann::json::difference_type>(elementIndex));
+											commitRootValue(rootDescriptor, nextRootValue);
+										}
+									}
+									ImGui::SameLine();
+									if (ImGui::SmallButton("^") && elementIndex > 0) {
+										nlohmann::json nextRootValue = currentRootValue;
+										nlohmann::json* collectionTarget = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true);
+										if (collectionTarget != nullptr && collectionTarget->is_array()) {
+											std::swap((*collectionTarget)[elementIndex], (*collectionTarget)[elementIndex - 1]);
+											commitRootValue(rootDescriptor, nextRootValue);
+										}
+									}
+									ImGui::SameLine();
+									if (ImGui::SmallButton("v") && elementIndex + 1 < collectionValue.size()) {
+										nlohmann::json nextRootValue = currentRootValue;
+										nlohmann::json* collectionTarget = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true);
+										if (collectionTarget != nullptr && collectionTarget->is_array()) {
+											std::swap((*collectionTarget)[elementIndex], (*collectionTarget)[elementIndex + 1]);
+											commitRootValue(rootDescriptor, nextRootValue);
+										}
+									}
+									ImGui::SameLine();
+								}
+
+								self(self, rootDescriptor, elementDescriptor);
+								ImGui::PopID();
+							}
+						}
+
+						ImGui::TreePop();
+					}
+
+					ImGui::PopID();
+					return;
+				}
+
+				if (!descriptor.readOnlyReason.empty() && descriptor.valueKind == "Unsupported") {
+					ImGui::TextDisabled("%s", descriptor.displayName.c_str());
+					ImGui::TextWrapped("%s", descriptor.readOnlyReason.c_str());
+					ImGui::PopID();
+					return;
+				}
+
+				if (descriptor.valueKind == "Bool") {
+					bool editedValue = currentValue.is_boolean() ? currentValue.get<bool>() : false;
+					if (ImGui::Checkbox(descriptor.displayName.c_str(), &editedValue) && editable) {
+						nlohmann::json nextRootValue = currentRootValue;
+						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+							*targetValue = editedValue;
+							commitRootValue(rootDescriptor, nextRootValue);
+						}
+					}
+				} else if (descriptor.valueKind == "Int") {
+					int editedValue = currentValue.is_number_integer() ? currentValue.get<int>() : 0;
+					const bool changed = descriptor.hasRange
+						? ImGui::SliderInt(descriptor.displayName.c_str(), &editedValue, static_cast<int>(descriptor.rangeMin), static_cast<int>(descriptor.rangeMax))
+						: ImGui::DragInt(descriptor.displayName.c_str(), &editedValue, 1.0f);
+					if (changed && editable) {
+						nlohmann::json nextRootValue = currentRootValue;
+						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+							*targetValue = editedValue;
+							commitRootValue(rootDescriptor, nextRootValue);
+						}
+					}
+					UpdateInspectorDragState();
+				} else if (descriptor.valueKind == "Float") {
+					float editedValue = currentValue.is_number() ? currentValue.get<float>() : 0.0f;
+					const bool changed = descriptor.hasRange
+						? ImGui::SliderFloat(descriptor.displayName.c_str(), &editedValue, static_cast<float>(descriptor.rangeMin), static_cast<float>(descriptor.rangeMax))
+						: ImGui::DragFloat(descriptor.displayName.c_str(), &editedValue, 0.1f);
+					if (changed && editable) {
+						nlohmann::json nextRootValue = currentRootValue;
+						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+							*targetValue = editedValue;
+							commitRootValue(rootDescriptor, nextRootValue);
+						}
+					}
+					UpdateInspectorDragState();
+				} else if (descriptor.valueKind == "String") {
+					std::string editedValue = currentValue.is_string() ? currentValue.get<std::string>() : std::string{};
+					char textBuffer[256];
+					strncpy(textBuffer, editedValue.c_str(), sizeof(textBuffer));
+					textBuffer[sizeof(textBuffer) - 1] = '\0';
+					if (ImGui::InputText(descriptor.displayName.c_str(), textBuffer, sizeof(textBuffer)) && editable) {
+						nlohmann::json nextRootValue = currentRootValue;
+						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+							*targetValue = std::string(textBuffer);
+							commitRootValue(rootDescriptor, nextRootValue);
+						}
+					}
+				} else if (descriptor.valueKind == "Enum") {
+					int selectedIndex = 0;
+					if (currentValue.is_string()) {
+						auto optionIt = std::find(descriptor.enumOptions.begin(), descriptor.enumOptions.end(), currentValue.get<std::string>());
+						if (optionIt != descriptor.enumOptions.end()) {
+							selectedIndex = static_cast<int>(std::distance(descriptor.enumOptions.begin(), optionIt));
+						}
+					}
+
+					std::vector<const char*> options;
+					options.reserve(descriptor.enumOptions.size());
+					for (const std::string& option : descriptor.enumOptions) {
+						options.push_back(option.c_str());
+					}
+					if (!options.empty() && ImGui::Combo(descriptor.displayName.c_str(), &selectedIndex, options.data(), static_cast<int>(options.size())) && editable) {
+						nlohmann::json nextRootValue = currentRootValue;
+						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+							*targetValue = descriptor.enumOptions[static_cast<std::size_t>(selectedIndex)];
+							commitRootValue(rootDescriptor, nextRootValue);
+						}
+					}
+				} else if (descriptor.valueKind == "Vector2" || descriptor.valueKind == "Vector3" || descriptor.valueKind == "Vector4" || descriptor.valueKind == "Quaternion") {
+					const int componentCount = descriptor.valueKind == "Vector2" ? 2 : descriptor.valueKind == "Vector3" ? 3 : 4;
+					float components[4] = { 0.0f, 0.0f, 0.0f, descriptor.valueKind == "Quaternion" ? 1.0f : 0.0f };
+					if (currentValue.is_array()) {
+						for (int componentIndex = 0; componentIndex < componentCount && componentIndex < static_cast<int>(currentValue.size()); ++componentIndex) {
+							components[componentIndex] = currentValue[static_cast<std::size_t>(componentIndex)].get<float>();
+						}
+					}
+
+					const bool changed = componentCount == 2
+						? ImGui::DragFloat2(descriptor.displayName.c_str(), components, 0.1f)
+						: componentCount == 3
+							? ImGui::DragFloat3(descriptor.displayName.c_str(), components, 0.1f)
+							: ImGui::DragFloat4(descriptor.displayName.c_str(), components, 0.1f);
+					if (changed && editable) {
+						nlohmann::json nextRootValue = currentRootValue;
+						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+							nlohmann::json nextVector = nlohmann::json::array();
+							for (int componentIndex = 0; componentIndex < componentCount; ++componentIndex) {
+								nextVector.push_back(components[componentIndex]);
+							}
+							*targetValue = std::move(nextVector);
+							commitRootValue(rootDescriptor, nextRootValue);
+						}
+					}
+					UpdateInspectorDragState();
+				} else if (descriptor.valueKind == "EntityReference") {
+					int entityId = currentValue.is_number_integer() ? currentValue.get<int>() : 0;
+					if (ImGui::DragInt(descriptor.displayName.c_str(), &entityId, 1.0f, 0) && editable) {
+						nlohmann::json nextRootValue = currentRootValue;
+						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+							*targetValue = entityId;
+							commitRootValue(rootDescriptor, nextRootValue);
+						}
+					}
+					UpdateInspectorDragState();
+				} else {
+					std::string readOnlyValue = currentValue.is_discarded() ? "None" : currentValue.dump();
+					ImGui::TextDisabled("%s: %s", descriptor.displayName.c_str(), readOnlyValue.c_str());
+				}
+
+				if (!descriptor.tooltip.empty() && ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("%s", descriptor.tooltip.c_str());
+				}
+
+				if (context != nullptr) {
+					if (ImGui::IsItemActive()) {
+						context->scripting.activeEditedBindingId = binding.bindingId;
+						context->scripting.activeEditedFieldPath = descriptor.fieldPath;
+					} else if (context->scripting.activeEditedBindingId == binding.bindingId && context->scripting.activeEditedFieldPath == descriptor.fieldPath) {
+						context->scripting.activeEditedBindingId.clear();
+						context->scripting.activeEditedFieldPath.clear();
+					}
+				}
+
+				ImGui::PopID();
+			};
+
+			if (!binding.fieldDescriptors.empty()) {
+				for (const ScriptFieldDescriptor& rootDescriptor : binding.fieldDescriptors) {
+					renderField(renderField, rootDescriptor, rootDescriptor);
+				}
+			} else {
+				for (const ScriptFieldValue& fieldValue : binding.serializedValues) {
+					ImGui::TextDisabled("%s: %s", fieldValue.fieldName.c_str(), FormatScriptFieldValue(fieldValue).c_str());
+				}
+			}
+
+			std::string brokenFieldToRemove;
+			for (const ScriptFieldValue& fieldValue : binding.serializedValues) {
+				if (fieldValue.compatibility != "Broken") {
+					continue;
+				}
+
+				ImGui::PushID((fieldValue.fieldPath + ":broken").c_str());
+				ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.35f, 1.0f), "%s is stale after reload.", fieldValue.displayName.empty() ? fieldValue.fieldName.c_str() : fieldValue.displayName.c_str());
+				if (!fieldValue.diagnosticMessage.empty()) {
+					ImGui::TextWrapped("%s", fieldValue.diagnosticMessage.c_str());
+				}
+				if (ImGui::SmallButton("Clear Value")) {
+					brokenFieldToRemove = fieldValue.fieldPath.empty() ? fieldValue.fieldName : fieldValue.fieldPath;
+				}
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Remove Stale Data")) {
+					brokenFieldToRemove = fieldValue.fieldPath.empty() ? fieldValue.fieldName : fieldValue.fieldPath;
+				}
+				ImGui::PopID();
+
+				if (!brokenFieldToRemove.empty()) {
+					break;
+				}
+			}
+
+			if (!brokenFieldToRemove.empty()) {
+				removeStoredField(brokenFieldToRemove);
+			}
+
+			for (const ScriptFieldDiagnostic& diagnostic : binding.diagnostics) {
+				if (diagnostic.message.empty()) {
+					continue;
+				}
+
+				// Unsupported fields already render their read-only explanation
+				// inline, so repeating the same warning below every frame only adds
+				// noisy duplicate yellow rows to the inspector.
+				if (diagnostic.code == "UnsupportedType") {
+					continue;
+				}
+
+				const ImVec4 diagnosticColor = diagnostic.severity == "Error"
+					? ImVec4(1.0f, 0.45f, 0.45f, 1.0f)
+					: diagnostic.severity == "Warning"
+						? ImVec4(1.0f, 0.8f, 0.35f, 1.0f)
+						: ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+				ImGui::TextColored(diagnosticColor, "%s", diagnostic.message.c_str());
+			}
+
+			if (!statusMessage.empty()) {
+				ImGui::TextColored(reloadPending ? ImVec4(1.0f, 0.8f, 0.35f, 1.0f) : BuildScriptBindingStatusColor(binding), "%s", statusMessage.c_str());
+			}
+			ImGui::Unindent();
+		}
+
+		ImGui::Separator();
+		ImGui::PopID();
+	}
+}
+
+void InspectorWindow::DrawScriptDropTarget(Object& obj) {
+	// Use the visible inspector body as the drop zone so scripts can be
+	// attached by drag-and-drop without rendering a dedicated placeholder box.
+	ImGuiWindow* inspectorWindow = ImGui::GetCurrentWindow();
+	const ImRect dropBounds(inspectorWindow->InnerRect.Min, inspectorWindow->InnerRect.Max);
+	if (!ImGui::BeginDragDropTargetCustom(dropBounds, inspectorWindow->GetID("InspectorScriptDropTarget"))) {
+		return;
+	}
+
+	if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_SCRIPT")) {
+		IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
+		const TerraEngine::UUID scriptGuid = *static_cast<const TerraEngine::UUID*>(payload->Data);
+		const AssetMetadata* scriptMetadata = AssetDatabase::Instance().FindAssetByGuid(scriptGuid);
+		if (scriptMetadata == nullptr) {
+			m_LastScriptMessage = "The dropped script asset no longer exists in the asset database.";
+			m_LastScriptMessageIsError = true;
+		} else {
+			const std::string className = AssetDatabase::Instance().GetScriptFullName(scriptGuid);
+			const bool sourceLooksAttachable = scriptMetadata->settings.contains("isAttachable")
+				&& scriptMetadata->settings["isAttachable"].get<bool>();
+			if (className.empty()) {
+				m_LastScriptMessage = "The dropped script file does not currently declare a usable gameplay class.";
+				m_LastScriptMessageIsError = true;
+			} else if (!sourceLooksAttachable) {
+				m_LastScriptMessage = "The dropped script source does not currently inherit from TerraEngine.Script.";
+				m_LastScriptMessageIsError = true;
+			} else {
+				ScriptComponent* scriptComponent = obj.getComponent<ScriptComponent>();
+				if (scriptComponent == nullptr) {
+					scriptComponent = &obj.addComponent<ScriptComponent>();
+				}
+
+				auto guard = scriptComponent->acquireWriteLock();
+				const std::string oldJson = scriptComponent->GetBindingsJson();
+				// Terra mirrors Unity here: one object can hold multiple script
+				// bindings, including multiple instances of the exact same class.
+				ScriptBinding& binding = scriptComponent->AddBinding(scriptGuid, className);
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				scriptingSystem.InitializeBindingMetadata(binding);
+				const bool assemblyCanAttachImmediately = binding.status == "Attached";
+				scriptComponent->SynchronizeStorageFromBindings();
+				const std::string newJson = scriptComponent->GetBindingsJson();
+				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+
+				if (assemblyCanAttachImmediately) {
+					m_LastScriptMessage = "Attached " + className + " to the selected object.";
+				} else {
+					// Persist the binding immediately, but do not force a rebuild just
+					// because the user attached an existing script asset in the editor.
+					// If the gameplay assembly is stale or missing, the binding will
+					// activate on the next normal successful compile or reload.
+					m_LastScriptMessage = "Added " + className + " to the selected object. The binding will activate when the gameplay assembly is next ready.";
+				}
+				m_LastScriptMessageIsError = false;
+			}
+		}
+	}
+
+	ImGui::EndDragDropTarget();
+
+	if (!m_LastScriptMessage.empty()) {
+		const ImVec4 messageColor = m_LastScriptMessageIsError ? ImVec4(1.0f, 0.4f, 0.4f, 1.0f) : ImVec4(0.5f, 0.85f, 0.5f, 1.0f);
+		ImGui::TextColored(messageColor, "%s", m_LastScriptMessage.c_str());
 	}
 }
 
@@ -797,6 +1813,12 @@ void InspectorWindow::OnGui() {
                 std::string compName = inspectorComponentOrder[i];
                 if (accessReg.find(compName) == accessReg.end()) continue;
                 ComponentAccessFunctions& access = accessReg[compName];
+				if (compName == "Script") {
+					// ScriptComponent is just the serialized backing store. Draw each
+					// script binding as its own Unity-style component block instead.
+					DrawScriptComponentInspector(obj);
+					continue;
+				}
 				const std::string displayName = BuildDisplayComponentName(compName);
 
                 if (!access.hasComponent(obj)) continue; 
@@ -904,6 +1926,10 @@ void InspectorWindow::OnGui() {
 					{
 						DrawLightComponentInspector(compName, obj, access);
 					}
+					else if (compName == "Script")
+					{
+						DrawScriptComponentInspector(obj);
+					}
 					else
 					{
                         if (ImGui::BeginTable("PropertyTable", 2, ImGuiTableFlags_SizingStretchProp)) {
@@ -923,6 +1949,8 @@ void InspectorWindow::OnGui() {
                 ImGui::PopID();
             }
             ImGui::Spacing();
+            DrawScriptDropTarget(obj);
+            ImGui::Spacing();
 
             float availWidth = ImGui::GetContentRegionAvail().x;
             if (ImGui::Button("Add Component", ImVec2(availWidth, 0))) {
@@ -937,7 +1965,7 @@ void InspectorWindow::OnGui() {
 
                 std::vector<std::string> availableComponents;
                 for (auto& [name, access] : accessReg) {
-                    if (!access.hasComponent(obj)) {
+                    if (name != "Script" && !access.hasComponent(obj)) {
                         availableComponents.push_back(name);
                     }
                 }

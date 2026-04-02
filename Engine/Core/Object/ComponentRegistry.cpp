@@ -1,5 +1,6 @@
 #include "ComponentRegistry.h"
 #include "Transform.h"
+#include "Scripting/ScriptComponent.h"
 #include "Scene/CameraComponent.h"
 #include "Scene/LightComponent.h"
 #include "Scene/MeshRenderComponent.h"
@@ -19,6 +20,7 @@ void ComponentRegistry::RegisterAllComponents() {
 		.property("w", &glm::quat::w);
 
 	Transform::registerType();
+	ScriptComponent::registerType();
 	CameraComponent::registerType();
 	LightComponent::registerType();
 	MeshRenderComponent::registerType();

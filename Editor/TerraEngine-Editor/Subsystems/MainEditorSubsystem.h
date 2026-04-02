@@ -11,6 +11,7 @@
 #include "IEditorSubsystem.h"
 #include "../Framework/EditorWindow.h"
 #include "Engine/Renderer/RenderTypes.h"
+#include "Engine/Utilities/UUID.h"
 
 class Object;
 
@@ -32,16 +33,10 @@ public:
     EditorContext* GetContext() const { return ctx; }
 
     std::optional<entt::entity> GetSelectedEntity() const { return selectedEntity; }
-    void SetSelectedEntity(std::optional<entt::entity> entity) { 
-        selectedEntity = entity; 
-        if (entity) selectedAsset = std::nullopt;
-    }
+    void SetSelectedEntity(std::optional<entt::entity> entity);
 
     std::optional<std::filesystem::path> GetSelectedAsset() const { return selectedAsset; }
-    void SetSelectedAsset(std::optional<std::filesystem::path> asset) { 
-        selectedAsset = asset; 
-        if (asset) selectedEntity = std::nullopt;
-    }
+    void SetSelectedAsset(std::optional<std::filesystem::path> asset);
     
     // Opens a scene and updates the last opened scene tracking.
     void OpenScene(const std::filesystem::path& path);
@@ -68,8 +63,11 @@ public:
     const std::vector<std::shared_ptr<EditorWindow>>& GetWindows() const { return m_Windows; }
 
 private:
-    void DrawMainMenuBar();
-    void CloseCurrentProject();
+	void CapturePlayModeSceneState();
+	void RestorePlayModeSceneState();
+	void ClearPlayModeSceneState();
+	void DrawMainMenuBar();
+	void CloseCurrentProject();
     
     EditorContext* ctx = nullptr;
     std::function<void()> onProjectClosed;
@@ -78,9 +76,13 @@ private:
     std::vector<std::shared_ptr<EditorWindow>> m_Windows;
 
     // Internal State
-    bool showDemoWindow = false;
+	bool showDemoWindow = false;
+	bool m_HasPlayModeSceneSnapshot = false;
+	bool m_PlayModeSceneWasDirty = false;
+	std::string m_PlayModeSceneSnapshotJson;
+	std::optional<TerraEngine::UUID> m_PlayModeSelectedEntityUuid;
 
-    void* sceneTextureID = nullptr;
+	void* sceneTextureID = nullptr;
     void* cachedSceneImageView = nullptr;
     void* gameTextureID = nullptr;
     void* cachedGameImageView = nullptr;
@@ -103,4 +105,5 @@ private:
     
     void ExecutePendingAction();
     void DrawSaveConfirmationModal();
+	void DrawScriptCompilationModal();
 };

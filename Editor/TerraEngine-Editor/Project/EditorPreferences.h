@@ -15,6 +15,8 @@ struct RecentProjectEntry {
 struct EditorPreferences {
     std::vector<RecentProjectEntry> recentProjects;
     std::string theme = "Dark";
+    std::string externalScriptEditorCommand;
+    bool autoBuildScripts = true;
 
-    NLOHMANN_DEFINE_TYPE_INTRUSIVE(EditorPreferences, recentProjects, theme)
+    NLOHMANN_DEFINE_TYPE_INTRUSIVE(EditorPreferences, recentProjects, theme, externalScriptEditorCommand, autoBuildScripts)
 };

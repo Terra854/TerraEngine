@@ -31,7 +31,6 @@ public:
     std::string GetName() const override;
 
 private:
-    entt::entity m_Entity;
     TerraEngine::UUID m_Uuid;
     nlohmann::json m_Json;
 };
@@ -47,7 +46,6 @@ public:
     std::string GetName() const override;
 
 private:
-    entt::entity m_Entity;
     TerraEngine::UUID m_Uuid;
     nlohmann::json m_Json;
 };
@@ -60,7 +58,7 @@ public:
     std::string GetName() const override;
 
 private:
-    entt::entity m_Entity;
+    TerraEngine::UUID m_Uuid;
     std::string m_OldName;
     std::string m_NewName;
 };
@@ -73,7 +71,7 @@ public:
     std::string GetName() const override;
 
 private:
-    entt::entity m_Entity;
+    TerraEngine::UUID m_Uuid;
     std::string m_ComponentName;
 };
 
@@ -85,7 +83,7 @@ public:
     std::string GetName() const override;
 
 private:
-    entt::entity m_Entity;
+    TerraEngine::UUID m_Uuid;
     std::string m_ComponentName;
     nlohmann::json m_ComponentJson;
 };
@@ -99,7 +97,7 @@ public:
     std::string GetName() const override;
 
 private:
-    entt::entity m_Entity;
+    TerraEngine::UUID m_Uuid;
     glm::vec3 m_OldPos, m_NewPos;
     glm::quat m_OldRot, m_NewRot;
     glm::vec3 m_OldScale, m_NewScale;

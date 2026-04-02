@@ -39,10 +39,11 @@ namespace TerraEngine
             if (type == typeof(bool)) return ScriptType.Bool;
             if (type == typeof(int)) return ScriptType.Int;
             if (type == typeof(float)) return ScriptType.Float;
+            if (type == typeof(Vector2)) return ScriptType.Vector2;
             if (type == typeof(Vector3)) return ScriptType.Vector3;
+            if (type == typeof(Vector4)) return ScriptType.Vector4;
             if (type == typeof(Quaternion)) return ScriptType.Quaternion;
             if (type == typeof(uint)) return ScriptType.EntityID;
-            // TODO: Vector2, Vector4
             return (ScriptType)(-1);
         }
     }

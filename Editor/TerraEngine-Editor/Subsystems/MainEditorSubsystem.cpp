@@ -2,11 +2,14 @@
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
 #include "EditorSystem.h"
+#include "ScriptCompilationSubsystem.h"
 #include "UndoRedoSystem.h"
+#include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Scene/SceneManager.h"
+#include "Engine/Scene/Serializer.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include <imgui.h>
@@ -36,16 +39,18 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
     m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
 
     UndoRedoSystem::Instance().Initialize(context);
+    ScriptCompilationSubsystem::Instance().Initialize(context);
 
-    ObjectManager::instance().SetOnModifiedCallback([]() {
-        SceneManager::Instance().ForceMarkActiveSceneDirty();
-    });
+	ObjectManager::instance().SetOnModifiedCallback([]() {
+		SceneManager::Instance().ForceMarkActiveSceneDirty();
+	});
 
-    ScriptingSystem::Instance().SetRunning(false);
+	ScriptingSystem::Instance().SetRunning(false);
+	ClearPlayModeSceneState();
 }
 
 void MainEditorSubsystem::OnProjectOpened() {
-    if (!ctx || !ctx->projectManager->HasActiveProject()) return;
+	if (!ctx || !ctx->projectManager->HasActiveProject()) return;
 
     if (auto browser = GetWindow<ProjectBrowserWindow>()) {
         browser->Reset();
@@ -98,6 +103,103 @@ void MainEditorSubsystem::OnProjectOpened() {
              // Maybe create a new one? For now just do nothing or log.
         }
     }
+
+    ScriptCompilationSubsystem::Instance().OnProjectOpened();
+}
+
+void MainEditorSubsystem::CapturePlayModeSceneState()
+{
+	m_HasPlayModeSceneSnapshot = false;
+	m_PlayModeSceneSnapshotJson.clear();
+	m_PlayModeSelectedEntityUuid.reset();
+	m_PlayModeSceneWasDirty = SceneManager::Instance().IsActiveSceneDirty();
+
+	nlohmann::json snapshotJson;
+	const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
+	snapshotJson["name"] = activeScene != nullptr ? activeScene->name : "ActiveScene";
+	snapshotJson["objects"] = nlohmann::json::array();
+
+	// Capture the full live hierarchy and reflected component payloads before
+	// play starts so Stop can rebuild the exact authored scene state without
+	// touching the on-disk scene file.
+	for (Object rootObject : ObjectManager::instance().getRootObjects())
+	{
+		snapshotJson["objects"].push_back(Serializer::SerializeObject(rootObject));
+	}
+
+	if (selectedEntity.has_value())
+	{
+		m_PlayModeSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedEntity);
+	}
+
+	m_PlayModeSceneSnapshotJson = snapshotJson.dump();
+	m_HasPlayModeSceneSnapshot = true;
+}
+
+void MainEditorSubsystem::RestorePlayModeSceneState()
+{
+	if (!m_HasPlayModeSceneSnapshot)
+	{
+		return;
+	}
+
+	nlohmann::json snapshotJson;
+	try
+	{
+		snapshotJson = nlohmann::json::parse(m_PlayModeSceneSnapshotJson);
+	}
+	catch (const nlohmann::json::parse_error& parseError)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to parse the pre-play scene snapshot at byte " << parseError.byte << ": " << parseError.what());
+		ClearPlayModeSceneState();
+		SetSelectedEntity(std::nullopt);
+		return;
+	}
+
+	ObjectManager::instance().clear();
+	if (snapshotJson.contains("objects") && snapshotJson["objects"].is_array())
+	{
+		for (const nlohmann::json& objectJson : snapshotJson["objects"])
+		{
+			Serializer::DeserializeObject(objectJson);
+		}
+	}
+
+	ScriptingSystem::Instance().RebuildRestoredSceneBindings();
+	if (m_PlayModeSceneWasDirty)
+	{
+		SceneManager::Instance().ForceMarkActiveSceneDirty();
+	}
+	else
+	{
+		SceneManager::Instance().ClearActiveSceneDirty();
+	}
+
+	if (m_PlayModeSelectedEntityUuid.has_value())
+	{
+		if (auto restoredObject = ObjectManager::instance().getObject(*m_PlayModeSelectedEntityUuid))
+		{
+			SetSelectedEntity(restoredObject->EntityId());
+		}
+		else
+		{
+			SetSelectedEntity(std::nullopt);
+		}
+	}
+	else
+	{
+		SetSelectedEntity(std::nullopt);
+	}
+
+	ClearPlayModeSceneState();
+}
+
+void MainEditorSubsystem::ClearPlayModeSceneState()
+{
+	m_HasPlayModeSceneSnapshot = false;
+	m_PlayModeSceneWasDirty = false;
+	m_PlayModeSceneSnapshotJson.clear();
+	m_PlayModeSelectedEntityUuid.reset();
 }
 
 void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
@@ -106,6 +208,7 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
             SceneManager::Instance().SetActiveScene(sceneId);
             sceneLoaded = true;
             m_CurrentScenePath = path;
+            ClearPlayModeSceneState();
             UndoRedoSystem::Instance().Clear();
     
             // Save to LastScene.txt
@@ -128,6 +231,8 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 }
 
 void MainEditorSubsystem::Shutdown() {
+	ClearPlayModeSceneState();
+    ScriptCompilationSubsystem::Instance().Shutdown();
     UndoRedoSystem::Instance().Shutdown();
     ctx = nullptr;
     m_Windows.clear();
@@ -166,25 +271,81 @@ void MainEditorSubsystem::OnBackendReady() {
 }
 
 void MainEditorSubsystem::Update(float deltaTime) {
-    // Logic update
-    
-    // Process editor-wide hotkeys.
-    if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) {
-        if (ImGui::IsKeyPressed(ImGuiKey_S)) {
-            SceneManager::Instance().SaveScene();
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
-            UndoRedoSystem::Instance().Undo();
-        }
-        // Traditional Windows redo shortcut (Ctrl+Y).
-        if (ImGui::IsKeyPressed(ImGuiKey_Y)) {
-            UndoRedoSystem::Instance().Redo();
-        }
-    }
+	// Advance the scripting coordinator after asset watcher events have been
+	// processed so queued C# rebuilds can start and completed async builds can
+	// clear their in-flight state during the same editor frame.
+	ScriptCompilationSubsystem::Instance().Update(deltaTime);
+
+	// A blocking script compile pauses editor-side interactions until the build
+	// either reloads the new assembly or restores the previous working one.
+	if (ScriptCompilationSubsystem::Instance().ShouldBlockEditorInteraction()) {
+		return;
+	}
+
+	// Logic update
+
+	if (ctx != nullptr)
+	{
+		std::optional<uint32_t> watchedObjectId;
+		if (selectedEntity.has_value())
+		{
+			watchedObjectId = static_cast<uint32_t>(*selectedEntity);
+		}
+
+		ctx->scripting.hasWatchedObject = watchedObjectId.has_value();
+		ctx->scripting.watchedObjectId = watchedObjectId.value_or(0);
+		ScriptingSystem::Instance().UpdateInspectorWatch(watchedObjectId, ctx->scripting.selectionVersion);
+	}
+
+	// Process editor-wide hotkeys.
+	if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) {
+		if (ImGui::IsKeyPressed(ImGuiKey_S)) {
+			SceneManager::Instance().SaveScene();
+		}
+		if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
+			UndoRedoSystem::Instance().Undo();
+		}
+		// Traditional Windows redo shortcut (Ctrl+Y).
+		if (ImGui::IsKeyPressed(ImGuiKey_Y)) {
+			UndoRedoSystem::Instance().Redo();
+		}
+	}
 }
 
 void MainEditorSubsystem::SetOnProjectClosedCallback(std::function<void()> callback) {
     onProjectClosed = callback;
+}
+
+void MainEditorSubsystem::SetSelectedEntity(std::optional<entt::entity> entity)
+{
+	selectedEntity = entity;
+	if (entity)
+	{
+		selectedAsset = std::nullopt;
+	}
+
+	if (ctx != nullptr)
+	{
+		ctx->scripting.selectionVersion++;
+		ctx->scripting.hasWatchedObject = entity.has_value();
+		ctx->scripting.watchedObjectId = entity.has_value() ? static_cast<std::uint32_t>(*entity) : 0;
+	}
+}
+
+void MainEditorSubsystem::SetSelectedAsset(std::optional<std::filesystem::path> asset)
+{
+	selectedAsset = asset;
+	if (asset)
+	{
+		selectedEntity = std::nullopt;
+	}
+
+	if (ctx != nullptr)
+	{
+		ctx->scripting.selectionVersion++;
+		ctx->scripting.hasWatchedObject = false;
+		ctx->scripting.watchedObjectId = 0;
+	}
 }
 
 bool MainEditorSubsystem::IsInspectorValueDragging() const {
@@ -295,19 +456,18 @@ void MainEditorSubsystem::DrawUI() {
         
         ImGui::SetCursorPosX((availWidth - totalWidth) * 0.5f);
         
-        // Play/Stop
-        if (ImGui::Button(playLabel)) {
-            bool running = ScriptingSystem::Instance().IsRunning();
-            ScriptingSystem::Instance().SetRunning(!running);
-            if (!running) {
-                // We just started
-                ScriptingSystem::Instance().SetPaused(false);
-                // TODO: Save scene state
-            } else {
-                // We just stopped
-                // TODO: Restore scene state
-            }
-        }
+		// Play/Stop
+		if (ImGui::Button(playLabel)) {
+			bool running = ScriptingSystem::Instance().IsRunning();
+			if (!running) {
+				CapturePlayModeSceneState();
+				ScriptingSystem::Instance().SetRunning(true);
+				ScriptingSystem::Instance().SetPaused(false);
+			} else {
+				ScriptingSystem::Instance().SetRunning(false);
+				RestorePlayModeSceneState();
+			}
+		}
         ImGui::SameLine();
         
         // Pause
@@ -321,14 +481,14 @@ void MainEditorSubsystem::DrawUI() {
         ImGui::SameLine();
         
         // Step
-        if (ImGui::Button(stepLabel)) {
-            if (ScriptingSystem::Instance().IsRunning() && ScriptingSystem::Instance().IsPaused()) {
-                ScriptingSystem::Instance().Step(1);
-            }
-        }
+		if (ImGui::Button(stepLabel)) {
+			if (ScriptingSystem::Instance().IsRunning() && ScriptingSystem::Instance().IsPaused()) {
+				ScriptingSystem::Instance().Step(1);
+			}
+		}
 
-        ImGui::PopStyleColor(3);
-        ImGui::PopStyleVar(2);
+		ImGui::PopStyleColor(3);
+		ImGui::PopStyleVar(2);
     }
 
     ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
@@ -339,6 +499,7 @@ void MainEditorSubsystem::DrawUI() {
     }
 
     DrawSaveConfirmationModal();
+	DrawScriptCompilationModal();
 
     if (showDemoWindow) ImGui::ShowDemoWindow(&showDemoWindow);
 
@@ -377,6 +538,20 @@ void MainEditorSubsystem::DrawMainMenuBar() {
             ImGui::MenuItem("ImGui Demo", nullptr, &showDemoWindow);
             ImGui::EndMenu();
         }
+		if (ImGui::BeginMenu("Scripting")) {
+			// Keep script actions reachable from the menu, but leave build status
+			// text out of the chrome so attaching scripts stays drag-and-drop only.
+			if (ImGui::MenuItem("Open Workspace")) {
+				ScriptCompilationSubsystem::Instance().OpenWorkspace();
+			}
+            if (ImGui::MenuItem("Regenerate Workspace")) {
+                ScriptCompilationSubsystem::Instance().RegenerateWorkspace();
+            }
+			if (ImGui::MenuItem("Rebuild Scripts")) {
+				ScriptCompilationSubsystem::Instance().RequestBuild(ScriptBuildReason::ManualRefresh);
+			}
+			ImGui::EndMenu();
+		}
         if (ImGui::BeginMenu("Windows")) {
             for (auto& win : m_Windows) {
                 if (ImGui::MenuItem(win->GetTitle().c_str())) {
@@ -480,7 +655,43 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
     }
 }
 
+void MainEditorSubsystem::DrawScriptCompilationModal() {
+	const ScriptCompilationSubsystem& scriptCompilation = ScriptCompilationSubsystem::Instance();
+	const ScriptCompilationStatus& scriptStatus = scriptCompilation.GetStatus();
+	const bool isCompilingScripts = scriptCompilation.IsBusy();
+
+	if (isCompilingScripts) {
+		ImGui::OpenPopup("Compiling C# Scripts");
+	}
+
+	ImGuiViewport* viewport = ImGui::GetMainViewport();
+	ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	if (ImGui::BeginPopupModal("Compiling C# Scripts", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+		if (!isCompilingScripts) {
+			ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+			return;
+		}
+
+		ImGui::TextWrapped("TerraEngine paused gameplay script execution while Assembly-CSharp recompiles.");
+		ImGui::Spacing();
+		ImGui::TextUnformatted(scriptStatus.lastSummary.c_str());
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.6f, 0.8f, 1.0f));
+		const char* progressLabel = scriptStatus.state == ScriptCoordinatorState::Reloading ? "Reloading..." : "Compiling...";
+		// Use a negative fraction animated by ImGui time to render an
+		// indeterminate progress bar while the build runs in the background.
+		ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(360.0f, 0.0f), progressLabel);
+		ImGui::PopStyleColor();
+		ImGui::EndPopup();
+	}
+}
+
 void MainEditorSubsystem::CloseCurrentProject() {
+	ScriptingSystem::Instance().SetRunning(false);
+	ClearPlayModeSceneState();
+    ScriptCompilationSubsystem::Instance().OnProjectClosed();
+
     // Clear Scene
     SceneManager::Instance().UnloadAll();
     
@@ -506,6 +717,13 @@ void MainEditorSubsystem::CloseCurrentProject() {
     // Clear Selection
     selectedEntity = std::nullopt;
     selectedAsset = std::nullopt;
+	if (ctx != nullptr)
+	{
+		ctx->scripting.selectionVersion++;
+		ctx->scripting.hasWatchedObject = false;
+		ctx->scripting.watchedObjectId = 0;
+		ScriptingSystem::Instance().UpdateInspectorWatch(std::nullopt, ctx->scripting.selectionVersion);
+	}
     
     // Trigger callbacks BEFORE closing the project in ProjectManager
     // so that subsystems can save data to the project directory.

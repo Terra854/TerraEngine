@@ -1,0 +1,13 @@
+using TerraEngine;
+
+public class __SCRIPT_NAME__ : Script
+{
+	public override void OnStart()
+	{
+		Log.Info($"{nameof(__SCRIPT_NAME__)} started on object {Object.ID}.");
+	}
+
+	public override void OnUpdate()
+	{
+	}
+}

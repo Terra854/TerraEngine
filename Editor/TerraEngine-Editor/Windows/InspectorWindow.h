@@ -23,6 +23,8 @@ protected:
 
 private:
 	void DrawProperty(const std::string& compName, rttr::property prop, Object& obj, ComponentAccessFunctions& access);
+	void DrawScriptComponentInspector(Object& obj);
+	void DrawScriptDropTarget(Object& obj);
 	void DrawLightComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access);
 	void DrawMaterialInspector(const std::filesystem::path& path);
 	void DrawMeshInspector(const std::filesystem::path& path);
@@ -35,4 +37,6 @@ private:
 
     std::filesystem::path m_LastInspectedAsset;
     std::vector<uint8_t> m_MaterialDataBuffer;
+    std::string m_LastScriptMessage;
+    bool m_LastScriptMessageIsError = false;
 };
