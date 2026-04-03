@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstring>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -641,7 +642,8 @@ namespace
 	{
 		outBytes.clear();
 		const std::uint32_t elementSize = GetRemapElementSizeBytes(encoding);
-		outBytes.reserve(remapIndices.size() * static_cast<std::size_t>(elementSize));
+		outBytes.resize(remapIndices.size() * static_cast<std::size_t>(elementSize));
+		std::uint8_t* writeCursor = outBytes.data();
 
 		for (std::uint32_t remapValue : remapIndices)
 		{
@@ -654,21 +656,25 @@ namespace
 				}
 
 				const std::uint16_t packed = static_cast<std::uint16_t>(remapValue);
-				outBytes.insert(
-					outBytes.end(),
-					reinterpret_cast<const std::uint8_t*>(&packed),
-					reinterpret_cast<const std::uint8_t*>(&packed) + sizeof(packed));
+				std::memcpy(writeCursor, &packed, sizeof(packed));
+				writeCursor += sizeof(packed);
 			}
 			else
 			{
-				outBytes.insert(
-					outBytes.end(),
-					reinterpret_cast<const std::uint8_t*>(&remapValue),
-					reinterpret_cast<const std::uint8_t*>(&remapValue) + sizeof(remapValue));
+				std::memcpy(writeCursor, &remapValue, sizeof(remapValue));
+				writeCursor += sizeof(remapValue);
 			}
 		}
 
 		return true;
+	}
+
+	template <typename T>
+	void ReleaseVectorMemory(std::vector<T>& values)
+	{
+		// Swap with an empty vector so the allocator can release large transient
+		// buffers as soon as the compile pipeline no longer needs them.
+		std::vector<T>().swap(values);
 	}
 
 	std::string ComputeFileHashHex(const std::filesystem::path& filePath)
@@ -712,8 +718,14 @@ namespace
 			return;
 		}
 
-		std::vector<char> padding(static_cast<std::size_t>(targetOffset - current), 0);
-		out.write(padding.data(), static_cast<std::streamsize>(padding.size()));
+		const std::array<char, 4096> zeroBytes{};
+		std::uint32_t remaining = targetOffset - current;
+		while (remaining > 0u)
+		{
+			const std::size_t chunkSize = std::min<std::size_t>(remaining, zeroBytes.size());
+			out.write(zeroBytes.data(), static_cast<std::streamsize>(chunkSize));
+			remaining -= static_cast<std::uint32_t>(chunkSize);
+		}
 	}
 
 	bool ValidateFixedGpuLayout(const MeshHeader& header)
@@ -1134,6 +1146,12 @@ bool CompileMesh(
 	meshopt_remapIndexBuffer(indices.data(), rawIndices.data(), rawIndices.size(), finalRemap.data());
 	meshopt_remapVertexBuffer(vertices.data(), rawVertices.data(), rawVertices.size(), sizeof(VertexRaw), finalRemap.data());
 
+	// The unindexed import buffers are no longer needed once the final indexed
+	// mesh exists, so release them before the meshlet and packing stages begin.
+	ReleaseVectorMemory(rawVertices);
+	ReleaseVectorMemory(rawIndices);
+	ReleaseVectorMemory(finalRemap);
+
 	std::array<float, 3> minPos{
 		std::numeric_limits<float>::max(),
 		std::numeric_limits<float>::max(),
@@ -1185,6 +1203,9 @@ bool CompileMesh(
 		report.failureReason = "meshlet-build-failed";
 		return FinalizeReport(false);
 	}
+
+	// Meshlet generation is the last consumer of the index buffer.
+	ReleaseVectorMemory(indices);
 
 	MeshHeader header{};
 	header.magic[0] = 'T';
@@ -1253,8 +1274,8 @@ bool CompileMesh(
 	header.quantization.uvScale[0] = hasUv ? std::max(1e-6f, maxUv[0] - minUv[0]) : 1.0f;
 	header.quantization.uvScale[1] = hasUv ? std::max(1e-6f, maxUv[1] - minUv[1]) : 1.0f;
 
-	std::vector<std::uint8_t> vertexData;
-	vertexData.reserve(vertices.size() * static_cast<std::size_t>(header.layout.strideBytes));
+	std::vector<std::uint8_t> vertexData(vertices.size() * static_cast<std::size_t>(header.layout.strideBytes));
+	std::uint8_t* vertexWriteCursor = vertexData.data();
 
 	// Keep packing deterministic so binary assets remain stable across repeated runs.
 	for (const VertexRaw& vertex : vertices)
@@ -1287,23 +1308,18 @@ bool CompileMesh(
 		
 		const std::uint32_t packedUv = PackR16G16Unorm(qUv);
 
-		vertexData.insert(
-			vertexData.end(),
-			reinterpret_cast<const std::uint8_t*>(&packedPosition),
-			reinterpret_cast<const std::uint8_t*>(&packedPosition) + sizeof(packedPosition));
-		vertexData.insert(
-			vertexData.end(),
-			reinterpret_cast<const std::uint8_t*>(&packedNormal),
-			reinterpret_cast<const std::uint8_t*>(&packedNormal) + sizeof(packedNormal));
-		vertexData.insert(
-			vertexData.end(),
-			reinterpret_cast<const std::uint8_t*>(&packedTangent),
-			reinterpret_cast<const std::uint8_t*>(&packedTangent) + sizeof(packedTangent));
-		vertexData.insert(
-			vertexData.end(),
-			reinterpret_cast<const std::uint8_t*>(&packedUv),
-			reinterpret_cast<const std::uint8_t*>(&packedUv) + sizeof(packedUv));
+		std::memcpy(vertexWriteCursor, &packedPosition, sizeof(packedPosition));
+		vertexWriteCursor += sizeof(packedPosition);
+		std::memcpy(vertexWriteCursor, &packedNormal, sizeof(packedNormal));
+		vertexWriteCursor += sizeof(packedNormal);
+		std::memcpy(vertexWriteCursor, &packedTangent, sizeof(packedTangent));
+		vertexWriteCursor += sizeof(packedTangent);
+		std::memcpy(vertexWriteCursor, &packedUv, sizeof(packedUv));
+		vertexWriteCursor += sizeof(packedUv);
 	}
+
+	// The packed stream now owns the vertex data required for serialization.
+	ReleaseVectorMemory(vertices);
 
 	if ((meshletPayload.primitiveIndices.size() % 3u) != 0u)
 	{
@@ -1333,6 +1349,8 @@ bool CompileMesh(
 		report.failureReason = "remap-encoding-failed";
 		return FinalizeReport(false);
 	}
+
+	ReleaseVectorMemory(meshletPayload.vertexRemapIndices);
 
 	report.usedU16RemapEncoding = (remapEncoding == MeshletRemapEncoding::Uint16);
 
