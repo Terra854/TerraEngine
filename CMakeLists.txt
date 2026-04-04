@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 project(TerraEngine LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -449,20 +450,50 @@ set(CIMGUI_VARGS0 1 CACHE STRING "CIMGUI VARGS0" FORCE)
 
 add_subdirectory(External/cimgui)
 
-# Ensure cimgui exports C++ ImGui symbols so TerraEngine-Editor can use them
+# Ensure cimgui exports C++ ImGui symbols so TerraEngine-Editor can use them.
+# Also clear postfixes so managed wrappers can find the DLL by its expected name.
+set_target_properties(cimgui PROPERTIES 
+	DEBUG_POSTFIX ""
+	PREFIX ""
+)
+
+# Resolve 'inconsistent dll linkage' properly by compiling backends and ImGuizmo
+# into the cimgui.dll itself instead of the Editor.
+set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui)
+
+target_sources(cimgui PRIVATE 
+	External/ImGuizmo/ImGuizmo.cpp
+	${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+	${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
+)
+
+target_include_directories(cimgui PRIVATE 
+	${CMAKE_CURRENT_SOURCE_DIR}
+	External/ImGuizmo
+	${IMGUI_DIR}/backends
+)
+
+# Ensure consistent DLL linkage macros for all symbols exported by cimgui.dll
 target_compile_definitions(cimgui 
 	PRIVATE 
 		"IMGUI_API=__declspec(dllexport)"
-	INTERFACE
+		"IMGUI_IMPL_API=extern \"C\" __declspec(dllexport)"
+		IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+)
+target_compile_definitions(cimgui INTERFACE
 		"IMGUI_API=__declspec(dllimport)"
+		"IMGUI_IMPL_API=extern \"C\" __declspec(dllimport)"
 )
 
+target_link_libraries(cimgui glfw Vulkan::Headers)
+
+set_target_properties(glfw PROPERTIES DEBUG_POSTFIX "")
+set_target_properties(rttr_core PROPERTIES DEBUG_POSTFIX "")
+
 # --- Editor ------------------------------------------------------------------
-set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui)
 set(IMGUI_FILE_DIALOG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiFileDialog)
 
 add_executable(TerraEngine-Editor
-	Editor/TerraEngine-Editor/ImGuiPolyfill.cpp
 	Editor/TerraEngine-Editor/Core/EditorMain.cpp
 	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
@@ -479,14 +510,10 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp
 	Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
-	External/ImGuizmo/ImGuizmo.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
-	# Include Backends directly in Editor
-	${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
-	${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
 )
 
 target_include_directories(TerraEngine-Editor
@@ -505,7 +532,12 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/zstd
 )
 
-target_compile_definitions(TerraEngine-Editor PUBLIC IMGUI_IMPL_VULKAN_NO_PROTOTYPES USE_STD_FILESYSTEM GLM_ENABLE_EXPERIMENTAL BASISU_SUPPORT_ENCODING=1)
+target_compile_definitions(TerraEngine-Editor PRIVATE 
+	IMGUI_IMPL_VULKAN_NO_PROTOTYPES 
+	USE_STD_FILESYSTEM 
+	GLM_ENABLE_EXPERIMENTAL 
+	BASISU_SUPPORT_ENCODING=1
+)
 
 if(MSVC)
 	# The editor target builds a large number of C++ files directly, including
@@ -760,23 +792,26 @@ endif()
 	
 	# Install cimgui (TerraEngine-ImGui)
 	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
+	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
 
 	# Install dependencies (glfw, rttr) to both
 	install(TARGETS glfw
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine 
 		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 	)
-	# Copy to Launcher/Editor
+	# Copy to Launcher/Editor/Managed
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
+	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
 
 	install(TARGETS rttr_core
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 	)
-	# Copy to Launcher/Editor
+	# Copy to Launcher/Editor/Managed
 	install(FILES $<TARGET_FILE:rttr_core> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
 	install(FILES $<TARGET_FILE:rttr_core> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
+	install(FILES $<TARGET_FILE:rttr_core> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
 
 install(TARGETS TerraEngineMeshCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
