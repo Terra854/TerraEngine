@@ -9,4 +9,11 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
 
+  <!-- Export sources (ExportBridge, ExportVTable) are now part of the core 
+       engine API so user projects don't need local copies. 
+       ExportBootstrap is injected by the Source Generator during export. -->
+  <ItemGroup>
+    <Compile Remove="Source\Export\ExportBootstrap.cs" />
+  </ItemGroup>
+
 </Project>

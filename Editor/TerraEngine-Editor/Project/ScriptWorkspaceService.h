@@ -45,12 +45,12 @@ public:
 	bool RegenerateWorkspace(std::string* outError = nullptr);
 	bool CreateScriptFromTemplate(const std::filesystem::path& destinationDirectory, const std::string& className, std::filesystem::path& outCreatedPath, std::string* outError = nullptr);
 	bool OpenScriptInExternalEditor(const std::filesystem::path& scriptPath, const std::string& commandTemplate, std::string* outError = nullptr);
+	bool SyncManagedReferences(std::string* outError = nullptr);
 
 private:
 	// These helpers are kept private so every caller goes through
 	// EnsureWorkspace/RegenerateWorkspace and gets one consistent validation path.
 	bool WriteWorkspaceFiles(std::string* outError);
-	bool SyncManagedReferences(std::string* outError);
 	bool WriteTextIfChanged(const std::filesystem::path& path, const std::string& contents, std::string* outError) const;
 
 	[[nodiscard]] std::filesystem::path ResolveTemplateRoot() const;

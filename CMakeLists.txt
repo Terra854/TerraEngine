@@ -45,6 +45,14 @@ set(ENGINE_SOURCES
 	Engine/DotNet/DotNetHost.cpp
 	Engine/Scripting/ScriptingSystem.cpp
 	Engine/Scripting/ScriptGlue.cpp
+	# --- ContentMount (TEPAK reader integration for export builds) ---
+	Engine/Runtime/ContentMount/ContentMount.cpp
+	Engine/Runtime/ContentMount/archive/PackReader.cpp
+	Engine/Runtime/ContentMount/archive/ExtentReader.cpp
+	Engine/Runtime/ContentMount/archive/ArchiveSerialization.cpp
+	Engine/Runtime/ContentMount/codec/CodecProvider.cpp
+	Engine/Runtime/ContentMount/io/PathNormalizer.cpp
+	Engine/Runtime/ContentMount/util/WorkerPool.cpp
 )
 
 set(ENGINE_HEADERS
@@ -83,6 +91,8 @@ set(ENGINE_HEADERS
 	Engine/DotNet/DotNetHost.h
 	Engine/Scripting/ScriptingSystem.h
 	Engine/Scripting/ScriptComponent.h
+	Engine/Scripting/ExportVTable.h
+	Engine/Runtime/ContentMount/ContentMount.h
 	Engine/Debug.h
 )
 
@@ -131,6 +141,15 @@ set(LAUNCHER_SOURCES
 	Launcher/Launch.cpp
 )
 
+# --- TEPAK Dependencies (xxhash and zstd) ------------------------------------
+# These are used by the TEPAK reader/writer source copies in Engine/Runtime/
+# ContentMount/ and Editor/Export/. They now live alongside the other vendored
+# engine dependencies under External/ instead of inside the standalone TEPAK/
+# project folder.
+set(TEPAK_EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/External")
+add_subdirectory("${TEPAK_EXTERNAL_DIR}/xxhash/build/cmake" "${CMAKE_BINARY_DIR}/xxhash")
+add_subdirectory("${TEPAK_EXTERNAL_DIR}/zstd/build/cmake" "${CMAKE_BINARY_DIR}/zstd")
+
 add_library(TerraEngine-Engine SHARED
 	${ENGINE_SOURCES}
 	${ENGINE_HEADERS}
@@ -148,6 +167,10 @@ target_include_directories(TerraEngine-Engine
 		${CMAKE_CURRENT_SOURCE_DIR}/External/tinyobjloader
 		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/transcoder
 		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/zstd
+	PRIVATE
+		# Copied TEPAK reader sources use internal relative includes that
+		# expect the source root as an include path.
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine/Runtime/ContentMount
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
@@ -249,6 +272,10 @@ target_link_libraries(TerraEngine-Engine
 		nethost
 		meshoptimizer
 		basisu
+	PRIVATE
+		# TEPAK reader dependencies (zstd for decompression, xxhash for hashing)
+		libzstd_static
+		xxhash
 )
 
 target_compile_definitions(TerraEngine-Engine
@@ -260,6 +287,9 @@ target_compile_definitions(TerraEngine-Engine
 		TERRAENGINE_ENGINE_BUILD
 		BASISD_SUPPORT_KTX2=0
 		BASISD_SUPPORT_KTX2_ZSTD=0
+		# Required by copied TEPAK sources to access xxhash/zstd internal APIs
+		XXH_STATIC_LINKING_ONLY
+		ZSTD_STATIC_LINKING_ONLY
 )
 
 set_target_properties(TerraEngine-Engine PROPERTIES OUTPUT_NAME "TerraEngine")
@@ -353,6 +383,7 @@ set(MANAGED_CORE_SOURCES
 	Engine/Managed/Source/Graphics.cs
 	Engine/Managed/Source/SerializationAttributes.cs
 	Engine/Managed/Source/ScriptReflection.cs
+	Engine/Managed/Source/Export/ExportVTable.cs
 )
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Managed" FILES ${MANAGED_CORE_SOURCES})
@@ -366,16 +397,32 @@ add_custom_target(TerraEngine ALL
     SOURCES ${MANAGED_CORE_SOURCES}
 )
 
+# Build the editor-owned Roslyn source generator that gameplay projects compile with.
+# The runtime never loads this DLL directly. Instead, the editor stages it into each
+# script workspace so Roslyn can emit the export bootstrap code during project builds.
+add_custom_target(TerraEngine.Export.Generator ALL
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${MANAGED_OUTPUT_DIR}/Analyzers"
+	COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/TerraEngine.Export.Generator.csproj" -c $<CONFIG> -nologo
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/bin/$<CONFIG>/netstandard2.0/TerraEngine.Export.Generator.dll"
+		"${MANAGED_OUTPUT_DIR}/Analyzers/TerraEngine.Export.Generator.dll"
+	COMMENT "Building Managed Analyzer: TerraEngine.Export.Generator"
+	SOURCES
+		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/ScriptRegistryGenerator.cs"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/TerraEngine.Export.Generator.csproj"
+)
+
 set(MANAGED_EDITOR_SOURCES
-	Editor/Managed/Source/EditorApplication.cs
+	Editor/Managed/TerraEngine.Editor/Source/EditorApplication.cs
 )
 
 add_custom_target(TerraEngine.Editor.Managed ALL
-    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
+    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
     COMMENT "Publishing Managed Assembly: TerraEngine.Editor (Self-Contained)"
     SOURCES ${MANAGED_EDITOR_SOURCES}
 )
 add_dependencies(TerraEngine.Editor.Managed TerraEngine)
+add_dependencies(TerraEngine.Editor.Managed TerraEngine.Export.Generator)
 
 add_executable(TerraEngine-Launcher
     ${LAUNCHER_SOURCES}
@@ -510,9 +557,26 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp
 	Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
+	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
+	# --- Export pipeline (BuildProfile, Validator, Packager, Pipeline) ---
+	Editor/Export/BuildProfile.cpp
+	Editor/Export/ExportValidator.cpp
+	Editor/Export/TepakPackager.cpp
+	Editor/Export/ExportPipeline.cpp
+	# --- Copied TEPAK writer sources for asset packaging ---
+	Editor/Export/archive/PackWriter.cpp
+	Editor/Export/archive/PackPlanner.cpp
+	Editor/Export/archive/PackagingRequest.cpp
+	Editor/Export/archive/PackReader.cpp
+	Editor/Export/archive/ExtentReader.cpp
+	Editor/Export/archive/ArchiveSerialization.cpp
+	Editor/Export/codec/CodecProvider.cpp
+	Editor/Export/io/PathNormalizer.cpp
+	Editor/Export/util/WorkerPool.cpp
+	Editor/Export/validation/PackValidator.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 )
 
@@ -530,6 +594,8 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/encoder
 		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/transcoder
 		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/zstd
+		# Export pipeline and copied TEPAK writer sources
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/Export
 )
 
 target_compile_definitions(TerraEngine-Editor PRIVATE 
@@ -537,6 +603,9 @@ target_compile_definitions(TerraEngine-Editor PRIVATE
 	USE_STD_FILESYSTEM 
 	GLM_ENABLE_EXPERIMENTAL 
 	BASISU_SUPPORT_ENCODING=1
+	# Required by copied TEPAK sources for export asset packaging
+	XXH_STATIC_LINKING_ONLY
+	ZSTD_STATIC_LINKING_ONLY
 )
 
 if(MSVC)
@@ -555,6 +624,9 @@ target_link_libraries(TerraEngine-Editor
 		meshoptimizer
 		mikktspace
 		basisu
+		# TEPAK writer dependencies for export asset packaging
+		libzstd_static
+		xxhash
 )
 
 
@@ -788,6 +860,13 @@ endif()
 
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/Templates/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Project/Templates"
+	)
+
+	# Install Engine's export-mode interop sources as templates so the editor 
+	# can reliably sync them into user projects.
+	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/Source/Export/"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Project/Templates/Export"
+		FILES_MATCHING PATTERN "*.cs"
 	)
 	
 	# Install cimgui (TerraEngine-ImGui)

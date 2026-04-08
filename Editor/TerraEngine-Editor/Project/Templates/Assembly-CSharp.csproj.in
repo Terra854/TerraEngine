@@ -9,17 +9,16 @@
 		<AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
 		<OutputPath>Build/Assembly-CSharp/</OutputPath>
 		<BaseOutputPath>Build/Assembly-CSharp/</BaseOutputPath>
-		<BaseIntermediateOutputPath>Build/Assembly-CSharp/obj/</BaseIntermediateOutputPath>
-		<IntermediateOutputPath>Build/Assembly-CSharp/obj/$(Configuration)/</IntermediateOutputPath>
 		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
 		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
 	</PropertyGroup>
 
 	<ItemGroup>
 		<Reference Include="TerraEngine.CSharp">
-			<HintPath>@REFERENCE_DLL@</HintPath>
+			<HintPath>$(MSBuildProjectDirectory)/Build/Assembly-CSharp/References/TerraEngine.CSharp.dll</HintPath>
 			<Private>true</Private>
 		</Reference>
+		<Analyzer Include="$(MSBuildProjectDirectory)/Build/Assembly-CSharp/References/TerraEngine.Export.Generator.dll" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -28,5 +27,6 @@
 		<Compile Remove="Temp\**\*.cs" />
 		<Compile Remove="ProjectSettings\**\*.cs" />
 		<Compile Remove="UserSettings\**\*.cs" />
+		<Compile Remove="Project\Internal\Export\**\*.cs" />
 	</ItemGroup>
 </Project>

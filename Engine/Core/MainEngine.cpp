@@ -9,6 +9,7 @@
 #include "Window/GLFW/GlfwWindowBackend.h"
 #include "Window/WindowSystem.h"
 #include "Object/ComponentRegistry.h"
+#include "Resource/ResourceManager.h"
 #include "Scripting/ScriptingSystem.h"
 
 #include <algorithm>
@@ -49,6 +50,11 @@ void Engine::Initialize()
 	// Register all components so they are available for reflection/editor
 	ComponentRegistry::RegisterAllComponents();
 
+	// ResourceManager is not a frame-updated system, but export builds still
+	// need a deterministic startup hook so the TEPAK archive is mounted and the
+	// startup scene is discovered before SceneManager begins loading content.
+	ResourceManager& resourceManager = ResourceManager::Instance();
+
 	// The window system is initialized first so other systems can depend on
 	// a valid window context if they need one later.
 	WindowConfig windowConfig{};
@@ -77,13 +83,44 @@ void Engine::Initialize()
 	// ScriptingSystem manages the .NET runtime and gameplay scripts.
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 	systems.push_back(&scriptingSystem);
-	
-	for (auto* system : systems) {
-		system->Initialize();
-	}
 
-	if (editorMode) {
-		editorSystem->Initialize();
+	std::size_t initializedSystemCount = 0;
+	bool editorSystemInitialized = false;
+	bool resourceManagerInitialized = false;
+	try {
+		resourceManager.Initialize();
+		resourceManagerInitialized = true;
+		sceneManager.SetSceneRoot(resourceManager.GetAssetRoot());
+		sceneManager.SetStartupScene(resourceManager.GetConfiguredStartupScene().value_or(std::filesystem::path{}));
+
+		for (auto* system : systems) {
+			system->Initialize();
+			initializedSystemCount++;
+		}
+
+		if (editorMode) {
+			editorSystem->Initialize();
+			editorSystemInitialized = true;
+		}
+	}
+	catch (...) {
+		// If any system throws during startup, unwind only the systems that did
+		// finish initialization so exported builds do not leave windowing,
+		// rendering, or threading resources half alive after a fatal error.
+		if (editorSystemInitialized && editorSystem != nullptr) {
+			editorSystem->Shutdown();
+		}
+
+		while (initializedSystemCount > 0) {
+			systems[--initializedSystemCount]->Shutdown();
+		}
+
+		if (resourceManagerInitialized) {
+			resourceManager.Shutdown();
+		}
+
+		pool.shutdown();
+		throw;
 	}
 	
 	// Confirm engine initialization finished so later logs have a baseline.
@@ -133,6 +170,8 @@ void Engine::Shutdown()
 	for (auto it = systems.rbegin(); it != systems.rend(); ++it) {
 		(*it)->Shutdown();
 	}
+
+	ResourceManager::Instance().Shutdown();
 	
 	pool.shutdown();
 	

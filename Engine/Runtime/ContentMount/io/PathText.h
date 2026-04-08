@@ -1,0 +1,23 @@
+#pragma once
+
+#include <filesystem>
+#include <string>
+
+namespace tepak::io {
+
+inline std::string PathToUtf8String(const std::filesystem::path& path) {
+	// TEPAK persists and reports paths as UTF-8 so archive metadata stays
+	// stable across Windows code pages and other host-specific encodings.
+	const auto utf8Path = path.generic_u8string();
+	return std::string(utf8Path.begin(), utf8Path.end());
+}
+
+inline void LowercaseAsciiInPlace(std::string& text) {
+	for (char& value : text) {
+		if (value >= 'A' && value <= 'Z') {
+			value = static_cast<char>(value - 'A' + 'a');
+		}
+	}
+}
+
+} // namespace tepak::io

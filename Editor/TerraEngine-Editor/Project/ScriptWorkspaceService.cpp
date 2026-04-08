@@ -709,6 +709,38 @@ bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 		std::filesystem::copy_file(sourcePdb, GetReferenceRoot() / "TerraEngine.CSharp.pdb", std::filesystem::copy_options::overwrite_existing, copyError);
 	}
 
+	// Copy the source generator (analyzer) into the project.
+	const std::filesystem::path analyzerSource = managedRoot / "Analyzers" / "TerraEngine.Export.Generator.dll";
+	const std::filesystem::path analyzerDest = GetReferenceRoot() / "TerraEngine.Export.Generator.dll";
+	// Exported gameplay builds depend on this analyzer to generate the script
+	// registry that the native export runtime calls into. If the editor ships
+	// without it, projects may still compile but exported scripts will fail to
+	// instantiate because the managed registry is stale or missing.
+	if (!std::filesystem::exists(analyzerSource))
+	{
+		const std::string message = "The export script analyzer is missing from the editor install at " + analyzerSource.string() + ". Reinstall TerraEngine so project exports regenerate the managed script registry.";
+		m_Status.health = ScriptWorkspaceHealth::Broken;
+		m_Status.lastMessage = message;
+		if (outError)
+		{
+			*outError = message;
+		}
+		return false;
+	}
+
+	std::filesystem::copy_file(analyzerSource, analyzerDest, std::filesystem::copy_options::overwrite_existing, copyError);
+	if (copyError)
+	{
+		const std::string message = "Failed to synchronize TerraEngine.Export.Generator.dll into the project workspace: " + copyError.message();
+		m_Status.health = ScriptWorkspaceHealth::Broken;
+		m_Status.lastMessage = message;
+		if (outError)
+		{
+			*outError = message;
+		}
+		return false;
+	}
+
 	return true;
 }
 
@@ -737,12 +769,23 @@ bool ScriptWorkspaceService::WriteTextIfChanged(const std::filesystem::path& pat
 
 std::filesystem::path ScriptWorkspaceService::ResolveTemplateRoot() const
 {
-	const std::filesystem::path current = std::filesystem::current_path();
+	std::filesystem::path editorDir;
+#ifdef _WIN32
+	wchar_t path[MAX_PATH];
+	if (GetModuleFileNameW(NULL, path, MAX_PATH) != 0) {
+		editorDir = std::filesystem::path(path).parent_path();
+	} else {
+		editorDir = std::filesystem::current_path();
+	}
+#else
+	editorDir = std::filesystem::current_path();
+#endif
+
 	const std::filesystem::path candidates[] = {
-		current / "Project" / "Templates",
-		current / "Editor" / "TerraEngine-Editor" / "Project" / "Templates",
-		current / "Templates",
-		current.parent_path() / "Project" / "Templates"
+		editorDir / "Project" / "Templates",
+		editorDir / "Editor" / "TerraEngine-Editor" / "Project" / "Templates",
+		editorDir / "Templates",
+		editorDir.parent_path() / "Project" / "Templates"
 	};
 
 	for (const auto& candidate : candidates)

@@ -49,7 +49,9 @@ struct ShaderStagePath
 // deduplicates loads, and issues asynchronous tasks through the shared
 // thread pool so multiple systems can pull resources without blocking the
 // main thread. This class intentionally avoids SystemsBase inheritance
-// because resources are utility data rather than frame-driven systems.
+// because resources are utility data rather than frame-driven systems, but
+// it still exposes explicit Initialize/Shutdown hooks so export archives can
+// be mounted once during engine startup instead of on every file read.
 class TERRAENGINE_API ResourceManager
 {
 public:
@@ -60,6 +62,16 @@ public:
 	ResourceManager(const ResourceManager&) = delete;
 	ResourceManager& operator=(const ResourceManager&) = delete;
 	~ResourceManager();
+
+	// Performs one-time startup work for the current runtime session. In export
+	// builds this mounts the TEPAK archive and reads game.json before other
+	// systems attempt to load scenes or assets through the manager.
+	void Initialize();
+
+	// Releases runtime-only state such as mounted export archives and cached
+	// startup metadata. This keeps repeated engine sessions in the same process
+	// from inheriting stale resource state.
+	void Shutdown();
 
 	// Configure the base directory used to resolve internal engine assets.
 	void SetEngineRoot(const std::filesystem::path& engineRootPath);
@@ -72,6 +84,20 @@ public:
 	// Inspect the currently configured asset root to help debugging when
 	// resources cannot be found.
 	std::filesystem::path GetAssetRoot() const;
+
+	// Records the exported TEPAK archive that should be mounted later during
+	// Initialize(). The launcher only provides the path; ResourceManager owns
+	// the actual mount so content bootstrap happens inside engine startup.
+	void ConfigureExportArchive(const std::filesystem::path& archivePath);
+
+	// Exposes the startup scene discovered from the export manifest so the
+	// engine can hand it to SceneManager before scene initialization begins.
+	std::optional<std::filesystem::path> GetConfiguredStartupScene() const;
+
+	// Lets runtime systems distinguish packaged export sessions from editor
+	// project sessions so exported builds can keep their writable files in a
+	// flatter layout without changing the editor project structure.
+	bool IsExportRuntime() const;
 
 	// Loads the default resources (shaders) with fixed UUIDs.
 	void LoadDefaultResources();
@@ -211,6 +237,8 @@ private:
 	ThreadPool& threadPool;
 	std::filesystem::path assetRoot;
 	std::filesystem::path engineRoot;
+	std::optional<std::filesystem::path> m_ConfiguredStartupScene;
+	std::optional<std::filesystem::path> m_ConfiguredExportArchivePath;
 
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;

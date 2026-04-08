@@ -23,6 +23,7 @@
 #include "../Windows/ProjectBrowserWindow.h"
 #include "../Windows/GameViewWindow.h"
 #include "../Windows/SceneViewWindow.h"
+#include "../Windows/BuildProfilesWindow.h"
 
 void MainEditorSubsystem::Initialize(EditorContext& context) {
     ctx = &context;
@@ -37,6 +38,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
     m_Windows.push_back(std::make_shared<ProjectBrowserWindow>(this));
     m_Windows.push_back(std::make_shared<GameViewWindow>(this));
     m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
+    m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
 
     UndoRedoSystem::Instance().Initialize(context);
     ScriptCompilationSubsystem::Instance().Initialize(context);
@@ -54,6 +56,10 @@ void MainEditorSubsystem::OnProjectOpened() {
 
     if (auto browser = GetWindow<ProjectBrowserWindow>()) {
         browser->Reset();
+    }
+    
+    if (auto buildProfiles = GetWindow<BuildProfilesWindow>()) {
+        buildProfiles->OnProjectOpened();
     }
 
     auto projectRoot = ctx->projectManager->GetProjectRoot();
@@ -309,6 +315,19 @@ void MainEditorSubsystem::Update(float deltaTime) {
 		if (ImGui::IsKeyPressed(ImGuiKey_Y)) {
 			UndoRedoSystem::Instance().Redo();
 		}
+		
+		if (ImGui::IsKeyPressed(ImGuiKey_B)) {
+			if (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift)) {
+				if (auto win = GetWindow<BuildProfilesWindow>()) {
+					win->SetVisible(true);
+				}
+			} else {
+				if (auto win = GetWindow<BuildProfilesWindow>()) {
+					win->SetVisible(true);
+					win->StartExportAndRun();
+				}
+			}
+		}
 	}
 }
 
@@ -512,6 +531,18 @@ void MainEditorSubsystem::DrawMainMenuBar() {
             if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
                 if (SceneManager::Instance().SaveScene(m_CurrentScenePath)) {
                     UndoRedoSystem::Instance().SetSavePoint();
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Build Profiles...", "Ctrl+Shift+B")) {
+                if (auto win = GetWindow<BuildProfilesWindow>()) {
+                    win->SetVisible(true);
+                }
+            }
+            if (ImGui::MenuItem("Build and Run", "Ctrl+B")) {
+                if (auto win = GetWindow<BuildProfilesWindow>()) {
+                    win->SetVisible(true);
+                    win->StartExportAndRun();
                 }
             }
             ImGui::Separator();

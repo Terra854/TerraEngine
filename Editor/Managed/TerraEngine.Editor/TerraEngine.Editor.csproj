@@ -10,9 +10,12 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
 
+  <!-- Keep the editor's managed sources in their own project folder so the SDK
+       default file globs only collect editor files, not sibling managed tools. -->
+
   <ItemGroup>
-    <ProjectReference Include="..\..\Engine\Managed\TerraEngine.csproj" />
-    <ProjectReference Include="..\..\External\Hexa.NET.ImGui\Hexa.NET.ImGui\Hexa.NET.ImGui.csproj" />
+    <ProjectReference Include="..\..\..\Engine\Managed\TerraEngine.csproj" />
+    <ProjectReference Include="..\..\..\External\Hexa.NET.ImGui\Hexa.NET.ImGui\Hexa.NET.ImGui.csproj" />
   </ItemGroup>
 
 </Project>

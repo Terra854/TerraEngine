@@ -9,6 +9,8 @@
 #include <coreclr_delegates.h>
 #include <hostfxr.h>
 
+#include "Scripting/ExportVTable.h"
+
 DotNetHost& DotNetHost::Instance() {
     static DotNetHost instance;
     return instance;
@@ -65,6 +67,74 @@ bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
     return true;
 }
 
+bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotLibaryPath, ManagedVTable* outTable) {
+    if (initialized) return true;
+
+    if (outTable == nullptr) {
+        TERRAENGINE_LOG(LogLevel::Error, "DotNetHost::InitializeExportRuntime called with null VTable pointer.");
+        return false;
+    }
+
+    if (!std::filesystem::exists(nativeAotLibaryPath)) {
+        TERRAENGINE_LOG(LogLevel::Error, "NativeAOT library not found: " << nativeAotLibaryPath.string());
+        return false;
+    }
+
+    // Load the NativeAOT shared library. Unlike hostfxr, this library
+    // self-initialises its GC and runtime on DllMain so no CoreCLR host is
+    // required. The library handle stays alive for the entire engine session.
+    nativeAotLibraryHandle = load_library(nativeAotLibaryPath.c_str());
+    if (nativeAotLibraryHandle == nullptr) {
+        TERRAENGINE_LOG(LogLevel::Error, "Failed to load NativeAOT library: " << nativeAotLibaryPath.string());
+        return false;
+    }
+
+    // Resolve the single exported C function that populates the VTable.
+    auto initFn = reinterpret_cast<InitManagedRuntimeFn>(
+        get_export(nativeAotLibraryHandle, "InitManagedRuntime"));
+    if (initFn == nullptr) {
+        TERRAENGINE_LOG(LogLevel::Error, "Failed to find InitManagedRuntime in NativeAOT library.");
+        FreeLibrary(static_cast<HMODULE>(nativeAotLibraryHandle));
+        nativeAotLibraryHandle = nullptr;
+        return false;
+    }
+
+    // Zero-initialise the VTable so any unset pointers are safely detectable.
+    std::memset(outTable, 0, sizeof(ManagedVTable));
+
+    // Call the managed init function. The NativeAOT side populates the VTable
+    // struct with function pointers from the source-generated script registry.
+    const int32_t result = initFn(outTable);
+
+    TERRAENGINE_LOG(LogLevel::Debug, "--- RAW VTABLE DUMP ---");
+    uint64_t* rawPtr = reinterpret_cast<uint64_t*>(outTable);
+    for (int i = 0; i < sizeof(ManagedVTable) / 8; ++i) {
+        TERRAENGINE_LOG(LogLevel::Debug, "Offset " << (i * 8) << ": " << rawPtr[i]);
+    }
+    TERRAENGINE_LOG(LogLevel::Debug, "-----------------------");
+
+    if (result != 0) {
+        TERRAENGINE_LOG(LogLevel::Error, "InitManagedRuntime returned error code " << result);
+        FreeLibrary(static_cast<HMODULE>(nativeAotLibraryHandle));
+        nativeAotLibraryHandle = nullptr;
+        return false;
+    }
+
+    // Verify the VTable version is at least what the engine requires.
+    if (outTable->version < kManagedVTableMinVersion) {
+        TERRAENGINE_LOG(LogLevel::Error, "ManagedVTable version " << outTable->version
+            << " is below the required minimum " << kManagedVTableMinVersion);
+        FreeLibrary(static_cast<HMODULE>(nativeAotLibraryHandle));
+        nativeAotLibraryHandle = nullptr;
+        return false;
+    }
+
+    initialized = true;
+    exportMode = true;
+    TERRAENGINE_LOG(LogLevel::Info, "NativeAOT export runtime initialized (VTable v" << outTable->version << ").");
+    return true;
+}
+
 void* DotNetHost::GetManagedFunction(
     const std::filesystem::path& assemblyPath,
     const std::wstring& typeName,
@@ -102,6 +172,15 @@ void DotNetHost::Shutdown() {
         FreeLibrary((HMODULE)hostfxr_handle);
         hostfxr_handle = nullptr;
     }
+
+    if (nativeAotLibraryHandle) {
+        // The NativeAOT library owns its GC heap, so unloading it cleanly
+        // tears down all managed state that was created during the session.
+        FreeLibrary(static_cast<HMODULE>(nativeAotLibraryHandle));
+        nativeAotLibraryHandle = nullptr;
+    }
+    exportMode = false;
+
     initialized = false;
     load_assembly_and_get_function_pointer = nullptr;
 }

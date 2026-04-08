@@ -2,11 +2,13 @@
 
 #include "Core/SystemBase.h"
 #include "ScriptComponent.h"
+#include "Scripting/ExportVTable.h"
 
 #include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 class ScriptingSystem : public SystemsBase {
 public:
@@ -16,6 +18,11 @@ public:
 	void Update(float deltaTime) override;
 	void Shutdown() override;
 	std::string SystemName() override;
+
+	/// Records the exported NativeAOT gameplay library discovered by the
+	/// launcher. The actual library load is deferred until Initialize() so
+	/// export scripting comes up in the normal system lifecycle order.
+	void ConfigureExportRuntime(const std::filesystem::path& nativeAotLibraryPath);
 
 	void SetRunning(bool running);
 	void SetPaused(bool paused) { m_Paused = paused; }
@@ -90,4 +97,25 @@ private:
 	ReadLiveBindingValuesFn managedReadLiveBindingValues = nullptr;
 	WriteLiveBindingValueFn managedWriteLiveBindingValue = nullptr;
 	MigrateBindingAuthoredStateFn managedMigrateBindingAuthoredState = nullptr;
+
+	void InitializeExportMode(const ManagedVTable& vtable);
+
+	// Export-mode VTable — populated by InitializeExportMode() and used for
+	// all script lifecycle dispatch when running an exported build.
+	ManagedVTable m_ExportVTable{};
+	bool m_ExportMode = false;
+	std::optional<std::filesystem::path> m_ConfiguredExportRuntimePath;
+
+	// Script instance handles tracked by the export-mode dispatcher so the
+	// engine can invoke lifecycle methods on the correct managed objects.
+	struct ExportScriptInstance {
+		void* handle = nullptr;
+		uint64_t scriptId = 0;
+		uint32_t objectId = 0;
+		bool started = false;
+	};
+	std::vector<ExportScriptInstance> m_ExportInstances;
+	std::mutex m_ExportInstancesMutex;
+
+	void UpdateExportMode(float deltaTime);
 };

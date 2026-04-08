@@ -1,0 +1,327 @@
+#include "io/PathNormalizer.h"
+#include "io/PathText.h"
+
+#include <algorithm>
+#include <fstream>
+#include <map>
+#include <stdexcept>
+#include <unordered_set>
+
+namespace {
+
+constexpr std::size_t kSampleBytesPerFile = 32U * 1024U;
+constexpr std::size_t kMaxDictionarySampleBytes = 64U * 1024U * 1024U;
+
+bool IsSelected(const tepak::PackagingRequest& request, const std::filesystem::path& path) {
+	if (request.entrySelectionRules.empty()) {
+		return true;
+	}
+
+	// Selection rules are suffix matches so callers can cheaply target asset
+	// classes or subtrees without having to supply a full glob engine.
+	const auto genericPath = tepak::io::PathToUtf8String(path);
+	return std::any_of(request.entrySelectionRules.begin(), request.entrySelectionRules.end(), [&](const std::string& rule) {
+		return genericPath.ends_with(rule);
+	});
+}
+
+bool IsDictionarySampleEligible(const std::string& assetClass) {
+	// Audio and video are usually already compressed, so sampling them tends to
+	// waste training budget without improving a shared dictionary.
+	return assetClass != "audio" && assetClass != "video";
+}
+
+tepak::ByteBuffer ReadDictionarySample(const std::filesystem::path& path, std::size_t bytesToRead) {
+	// Only the front slice of each file is sampled because TEPAK wants a cheap,
+	// bounded training set rather than another full-file buffering pass.
+	tepak::ByteBuffer sample(bytesToRead);
+	std::ifstream stream(path, std::ios::binary);
+	if (!stream) {
+		throw std::runtime_error("Failed to open staged file sample: " + tepak::io::PathToUtf8String(path));
+	}
+	if (bytesToRead > 0U) {
+		stream.read(reinterpret_cast<char*>(sample.data()), static_cast<std::streamsize>(bytesToRead));
+		if (!stream) {
+			throw std::runtime_error("Failed to read staged file sample: " + tepak::io::PathToUtf8String(path));
+		}
+	}
+	return sample;
+}
+
+std::string ParentDirectoryPath(std::string_view normalizedPath) {
+	const auto separator = normalizedPath.rfind('/');
+	return separator == std::string_view::npos ? std::string{} : std::string(normalizedPath.substr(0U, separator));
+}
+
+struct DirectoryAccumulator final {
+	std::string normalizedPath;
+	std::string parentPath;
+	std::vector<std::string> childDirectories;
+	std::vector<tepak::model::StagedFile> childFiles;
+};
+
+} // namespace
+
+namespace tepak::io {
+
+std::string NormalizeRelativePath(const std::filesystem::path& inputRoot, const std::filesystem::path& sourcePath) {
+	// TEPAK stores logical paths in a stable archive-wide form so different
+	// source directory spellings do not create duplicate entries.
+	const auto relativePath = std::filesystem::relative(sourcePath, inputRoot);
+	if (relativePath.empty()) {
+		throw std::runtime_error("Source path is not inside the declared input root.");
+	}
+
+	std::vector<std::string> segments;
+	for (const auto& segment : relativePath) {
+		const auto text = PathToUtf8String(segment);
+		if (text == ".") {
+			continue;
+		}
+		if (text == "..") {
+			throw std::runtime_error("Normalized paths may not traverse above the input root.");
+		}
+		segments.push_back(text);
+	}
+
+	std::string normalized;
+	for (std::size_t index = 0; index < segments.size(); ++index) {
+		if (index > 0U) {
+			normalized.push_back('/');
+		}
+		normalized += segments[index];
+	}
+
+	LowercaseAsciiInPlace(normalized);
+	return normalized;
+}
+
+std::string NormalizeLookupPath(std::string_view logicalPath) {
+	std::string normalized;
+	normalized.reserve(logicalPath.size());
+	for (const char value : logicalPath) {
+		normalized.push_back(value == '\\' ? '/' : value);
+	}
+
+	while (!normalized.empty() && normalized.front() == '/') {
+		normalized.erase(normalized.begin());
+	}
+	if (normalized.starts_with("./")) {
+		normalized.erase(0U, 2U);
+	}
+	LowercaseAsciiInPlace(normalized);
+	return normalized;
+}
+
+std::string ExtractLeafName(std::string_view normalizedPath) {
+	if (normalizedPath.empty()) {
+		return {};
+	}
+
+	const auto separator = normalizedPath.rfind('/');
+	return separator == std::string_view::npos ? std::string(normalizedPath) : std::string(normalizedPath.substr(separator + 1U));
+}
+
+std::vector<std::string> EnumerateDirectoryPaths(std::string_view normalizedFilePath) {
+	std::vector<std::string> directories;
+	std::string current;
+	// "meshes/props/cube.obj" contributes "meshes" and "meshes/props" so the
+	// archive can recreate implicit directories from file paths alone.
+	for (const char value : normalizedFilePath) {
+		if (value == '/') {
+			if (!current.empty()) {
+				directories.push_back(current);
+			}
+		}
+		current.push_back(value);
+	}
+	return directories;
+}
+
+std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
+	std::string extension = PathToUtf8String(sourcePath.extension());
+	LowercaseAsciiInPlace(extension);
+
+	// Asset classes are coarse by design. They are primarily used for summaries
+	// and future policy hooks, not as a strict runtime type system.
+	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl") {
+		return "shader";
+	}
+	if (extension == ".png" || extension == ".jpg" || extension == ".jpeg" || extension == ".dds" || extension == ".ktx" || extension == ".hdr" || extension == ".exr") {
+		return "texture";
+	}
+	if (extension == ".obj" || extension == ".gltf" || extension == ".glb" || extension == ".mesh" || extension == ".temf") {
+		return "mesh";
+	}
+	if (extension == ".wav" || extension == ".flac" || extension == ".ogg" || extension == ".mp3" || extension == ".m4a" || extension == ".wma") {
+		return "audio";
+	}
+	if (extension == ".y4m" || extension == ".avi" || extension == ".mov" || extension == ".mp4" || extension == ".mkv" || extension == ".webm" || extension == ".flv") {
+		return "video";
+	}
+	if (extension == ".json" || extension == ".txt" || extension == ".xml" || extension == ".csv" || extension == ".bin") {
+		return "data";
+	}
+	return "other";
+}
+
+model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& request) {
+	// The discovery pass keeps only file metadata and bounded dictionary samples
+	// in memory so archive size no longer dictates export memory usage.
+	if (!std::filesystem::exists(request.inputRoot)) {
+		throw std::runtime_error("The input root does not exist.");
+	}
+	if (!std::filesystem::is_directory(request.inputRoot)) {
+		throw std::runtime_error("The input root must be a directory.");
+	}
+
+	model::PackagingInventory inventory;
+	std::vector<model::StagedFile> discoveredFiles;
+	std::unordered_set<std::string> filePaths;
+	std::unordered_set<std::string> directoryPaths;
+
+	for (const auto& entry : std::filesystem::recursive_directory_iterator(request.inputRoot)) {
+		if (!entry.is_regular_file()) {
+			continue;
+		}
+		if (!IsSelected(request, entry.path())) {
+			continue;
+		}
+
+		model::StagedFile stagedFile;
+		stagedFile.sourcePath = entry.path();
+		stagedFile.normalizedPath = NormalizeRelativePath(request.inputRoot, entry.path());
+		stagedFile.name = ExtractLeafName(stagedFile.normalizedPath);
+		stagedFile.assetClass = DetectAssetClass(entry.path());
+		stagedFile.logicalSize = entry.file_size();
+
+		if (!filePaths.insert(stagedFile.normalizedPath).second) {
+			throw std::runtime_error("Duplicate normalized path detected: " + stagedFile.normalizedPath);
+		}
+
+		for (const auto& directoryPath : EnumerateDirectoryPaths(stagedFile.normalizedPath)) {
+			directoryPaths.insert(directoryPath);
+		}
+
+		inventory.totalInputBytes += stagedFile.logicalSize;
+		discoveredFiles.push_back(std::move(stagedFile));
+	}
+
+	if (discoveredFiles.empty()) {
+		throw std::runtime_error("The staged input set does not contain any eligible files.");
+	}
+
+	for (const auto& directoryPath : directoryPaths) {
+		if (filePaths.contains(directoryPath)) {
+			throw std::runtime_error("A normalized file path collides with an implied directory path: " + directoryPath);
+		}
+	}
+
+	std::map<std::string, DirectoryAccumulator> directories;
+	directories.emplace("", DirectoryAccumulator{});
+	directories[""].normalizedPath = "";
+
+	for (const auto& directoryPath : directoryPaths) {
+		auto& accumulator = directories[directoryPath];
+		accumulator.normalizedPath = directoryPath;
+		accumulator.parentPath = ParentDirectoryPath(directoryPath);
+	}
+
+	for (auto& stagedFile : discoveredFiles) {
+		const auto parentPath = ParentDirectoryPath(stagedFile.normalizedPath);
+		directories[parentPath].childFiles.push_back(std::move(stagedFile));
+	}
+
+	for (auto& [path, accumulator] : directories) {
+		if (path.empty()) {
+			continue;
+		}
+		auto& parent = directories[accumulator.parentPath];
+		parent.childDirectories.push_back(path);
+	}
+
+	for (auto& [path, accumulator] : directories) {
+		std::sort(accumulator.childDirectories.begin(), accumulator.childDirectories.end(), [](const std::string& left, const std::string& right) {
+			const auto leftName = ExtractLeafName(left);
+			const auto rightName = ExtractLeafName(right);
+			return leftName == rightName ? left < right : leftName < rightName;
+		});
+		accumulator.childDirectories.erase(std::unique(accumulator.childDirectories.begin(), accumulator.childDirectories.end()), accumulator.childDirectories.end());
+		std::sort(accumulator.childFiles.begin(), accumulator.childFiles.end(), [](const model::StagedFile& left, const model::StagedFile& right) {
+			return left.name == right.name ? left.normalizedPath < right.normalizedPath : left.name < right.name;
+		});
+	}
+
+	std::vector<std::string> directoryOrder;
+	directoryOrder.push_back("");
+	std::unordered_map<std::string, std::uint32_t> firstChildDirectoryIndex;
+	std::unordered_map<std::string, std::uint32_t> childDirectoryCount;
+	// Breadth-first directory order guarantees that each directory's children
+	// occupy one contiguous span later in the serialized directory table.
+	for (std::size_t index = 0U; index < directoryOrder.size(); ++index) {
+		const auto& directoryPath = directoryOrder[index];
+		const auto& children = directories.at(directoryPath).childDirectories;
+		firstChildDirectoryIndex[directoryPath] = static_cast<std::uint32_t>(directoryOrder.size());
+		childDirectoryCount[directoryPath] = static_cast<std::uint32_t>(children.size());
+		for (const auto& childPath : children) {
+			directoryOrder.push_back(childPath);
+		}
+	}
+
+	std::unordered_map<std::string, std::uint32_t> directoryIds;
+	inventory.directories.reserve(directoryOrder.size());
+	for (std::uint32_t directoryId = 0U; directoryId < directoryOrder.size(); ++directoryId) {
+		directoryIds.emplace(directoryOrder[directoryId], directoryId);
+	}
+
+	for (std::uint32_t directoryId = 0U; directoryId < directoryOrder.size(); ++directoryId) {
+		const auto& directoryPath = directoryOrder[directoryId];
+		const auto& accumulator = directories.at(directoryPath);
+		DirectoryNode node;
+		node.directoryId = directoryId;
+		node.parentDirectoryId = directoryPath.empty() ? kInvalidDirectoryId : directoryIds.at(accumulator.parentPath);
+		node.normalizedPath = directoryPath;
+		node.firstChildDirectoryIndex = firstChildDirectoryIndex.at(directoryPath);
+		node.childDirectoryCount = childDirectoryCount.at(directoryPath);
+		inventory.directories.push_back(std::move(node));
+	}
+
+	for (auto& node : inventory.directories) {
+		const auto& files = directories.at(node.normalizedPath).childFiles;
+		node.firstChildFileIndex = static_cast<std::uint32_t>(inventory.stagedFiles.size());
+		node.childFileCount = static_cast<std::uint32_t>(files.size());
+		// Files are appended directory by directory so each directory node can
+		// point at a contiguous file span in the final file table.
+		for (const auto& file : files) {
+			auto orderedFile = file;
+			orderedFile.parentDirectoryId = node.directoryId;
+			inventory.stagedFiles.push_back(std::move(orderedFile));
+		}
+	}
+
+	if (request.enableCompression && request.enableDictionaryTraining) {
+		// Raw-only packs never consult a dictionary, so sampling would only add
+		// avoidable resident memory and planning work before the first byte is written.
+		std::size_t sampledBytes = 0U;
+		for (const auto& stagedFile : inventory.stagedFiles) {
+			if (!IsDictionarySampleEligible(stagedFile.assetClass) || stagedFile.logicalSize == 0U || sampledBytes >= kMaxDictionarySampleBytes) {
+				continue;
+			}
+
+			const auto sampleSize = static_cast<std::size_t>(std::min<std::uint64_t>(stagedFile.logicalSize, kSampleBytesPerFile));
+			const auto cappedSampleSize = std::min<std::size_t>(sampleSize, kMaxDictionarySampleBytes - sampledBytes);
+			if (cappedSampleSize == 0U) {
+				continue;
+			}
+
+			// Sampling is capped globally so dictionary selection stays predictable
+			// even when the source tree is extremely large.
+			inventory.dictionarySamples.push_back(ReadDictionarySample(stagedFile.sourcePath, cappedSampleSize));
+			sampledBytes += cappedSampleSize;
+		}
+	}
+
+	return inventory;
+}
+
+} // namespace tepak::io

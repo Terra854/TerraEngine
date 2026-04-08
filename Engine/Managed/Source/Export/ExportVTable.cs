@@ -1,0 +1,38 @@
+// ExportVTable.cs — C# mirror of the C-compatible ManagedVTable interop contract.
+//
+// This file is part of the core engine source and describes the memory layout
+// used to bridge the C++ engine and NativeAOT gameplay library (AC-003).
+
+using System;
+using System.Runtime.InteropServices;
+
+namespace TerraEngine.Export
+{
+	[StructLayout(LayoutKind.Sequential, Pack = 8)]
+	public unsafe struct ExportFieldDescriptor
+	{
+		public int FieldIndex;
+		public int ValueKind;
+		public int ValueSize;
+		public ulong NameHash;
+		public fixed byte NameUtf8[64];
+	}
+
+	[StructLayout(LayoutKind.Explicit, Size = 104)]
+	public unsafe struct ManagedVTable
+	{
+		[FieldOffset(0)]  public ulong Version;
+		[FieldOffset(8)]  public delegate* unmanaged[Cdecl]<int>                                          GetScriptCount;
+		[FieldOffset(16)] public delegate* unmanaged[Cdecl]<ulong*, int, void>                            GetScriptIds;
+		[FieldOffset(24)] public delegate* unmanaged[Cdecl]<ulong, uint, IntPtr>                          CreateScript;
+		[FieldOffset(32)] public delegate* unmanaged[Cdecl]<IntPtr, void>                                 DestroyScript;
+		[FieldOffset(40)] public delegate* unmanaged[Cdecl]<IntPtr, void>                                 InvokeAwake;
+		[FieldOffset(48)] public delegate* unmanaged[Cdecl]<IntPtr, void>                                 InvokeStart;
+		[FieldOffset(56)] public delegate* unmanaged[Cdecl]<IntPtr, float, void>                          InvokeUpdate;
+		[FieldOffset(64)] public delegate* unmanaged[Cdecl]<IntPtr, void>                                 InvokeDisable;
+		[FieldOffset(72)] public delegate* unmanaged[Cdecl]<ulong, int>                                   GetFieldCount;
+		[FieldOffset(80)] public delegate* unmanaged[Cdecl]<ulong, ExportFieldDescriptor*, int, void>     GetFieldDescriptors;
+		[FieldOffset(88)] public delegate* unmanaged[Cdecl]<IntPtr, int, void*, int, void>                GetFieldValue;
+		[FieldOffset(96)] public delegate* unmanaged[Cdecl]<IntPtr, int, void*, int, void>                SetFieldValue;
+	}
+}

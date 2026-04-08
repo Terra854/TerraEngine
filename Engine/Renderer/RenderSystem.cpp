@@ -32,6 +32,14 @@ namespace
 {
 	constexpr std::uint32_t kMaxShadowResourceSlots = 4u;
 
+	constexpr const char* ResolveRuntimeSettingsFolderName()
+	{
+		// Exported builds store writable runtime settings in a short top-level
+		// Settings folder, while editor/project sessions keep the authored
+		// ProjectSettings directory layout unchanged.
+		return ResourceManager::Instance().IsExportRuntime() ? "Settings" : "ProjectSettings";
+	}
+
 	RenderSettings SanitizeRenderSettings(const RenderSettings& input)
 	{
 		RenderSettings sanitized = input;
@@ -756,7 +764,7 @@ void RenderSystem::SetRenderSettings(const RenderSettings& settings)
 void RenderSystem::LoadSettings()
 {
 	namespace fs = std::filesystem;
-	const fs::path settingsPath = ResourceManager::Instance().GetAssetRoot() / "ProjectSettings" / "RenderSettings.json";
+	const fs::path settingsPath = ResourceManager::Instance().GetAssetRoot() / ResolveRuntimeSettingsFolderName() / "RenderSettings.json";
 
 	if (!fs::exists(settingsPath))
 	{
@@ -794,7 +802,7 @@ void RenderSystem::LoadSettings()
 void RenderSystem::SaveSettings()
 {
 	namespace fs = std::filesystem;
-	const fs::path settingsDir = ResourceManager::Instance().GetAssetRoot() / "ProjectSettings";
+	const fs::path settingsDir = ResourceManager::Instance().GetAssetRoot() / ResolveRuntimeSettingsFolderName();
 	const fs::path settingsPath = settingsDir / "RenderSettings.json";
 
 	if (!fs::exists(settingsDir))

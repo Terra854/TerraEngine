@@ -20,6 +20,7 @@
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/ShaderCollection.h"
+#include "Runtime/ContentMount/ContentMount.h"
 #include "Scene/CameraComponent.h"
 #include "Scene/LightComponent.h"
 #include "Scene/MeshRenderComponent.h"
@@ -78,6 +79,22 @@ void SceneManager::Initialize()
 	
 	ResourceManager::Instance().LoadDefaultResources();
 
+	// If a startup scene was configured (e.g., via the export manifest), load 
+	// and activate it immediately so the engine boots directly into gameplay.
+	if (!m_StartupScene.empty())
+	{
+		const auto id = LoadScene(m_StartupScene);
+		if (id != TerraEngine::EMPTY_UUID)
+		{
+			SetActiveScene(id);
+			TERRAENGINE_LOG(LogLevel::Info, "Booted into startup scene: " << m_StartupScene);
+		}
+		else
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to load configured startup scene: " << m_StartupScene);
+		}
+	}
+
 	//PreparePreviewAssets();
 	// Initialization is logged at debug level so tooling can trace startup ordering.
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager initialized with root " << sceneRoot);
@@ -112,6 +129,16 @@ void SceneManager::SetSceneRoot(const std::filesystem::path& root)
 std::filesystem::path SceneManager::GetSceneRoot() const
 {
 	return sceneRoot;
+}
+
+void SceneManager::SetStartupScene(const std::filesystem::path& path)
+{
+	m_StartupScene = path;
+}
+
+std::filesystem::path SceneManager::GetStartupScene() const
+{
+	return m_StartupScene;
 }
 
 TerraEngine::UUID SceneManager::LoadScene(const std::filesystem::path& path)
@@ -515,10 +542,30 @@ std::optional<std::string> SceneManager::ReadJsonFile(const std::filesystem::pat
 		return std::nullopt;
 	}
 
+	// In export builds, attempt to read the JSON document from the TEPAK archive.
+	if (ContentMount::Instance().IsMounted())
+	{
+		const std::filesystem::path absolutePath = ResolveScenePath(path);
+		const std::filesystem::path logicalPath = absolutePath.lexically_relative(sceneRoot);
+		const std::string logicalPathString = logicalPath.generic_string();
+
+		if (ContentMount::Instance().Exists(logicalPathString))
+		{
+			const std::vector<uint8_t> bytes = ContentMount::Instance().ReadAll(logicalPathString);
+			if (!bytes.empty())
+			{
+				TERRAENGINE_LOG(LogLevel::Debug, "Reading scene file from mount: " << logicalPathString);
+				return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+			}
+		}
+
+		TERRAENGINE_LOG(LogLevel::Warning, "Scene file not found in mount: " << logicalPathString);
+	}
+
 	std::ifstream file(path, std::ios::binary);
 	if (!file)
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to open scene file: " << path);
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to open scene file from disk: " << path);
 		return std::nullopt;
 	}
 

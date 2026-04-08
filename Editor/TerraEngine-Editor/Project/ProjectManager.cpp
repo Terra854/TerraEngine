@@ -4,6 +4,11 @@
 #include <algorithm>
 #include "Engine/Core/Logger/Logger.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#endif
+
 namespace fs = std::filesystem;
 
 ProjectManager::ProjectManager() {
@@ -103,6 +108,25 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
         // Derive name from directory
         std::string projectName = projectDir.filename().string();
         AddToRecentProjects(projectDir, projectName);
+
+        // CLEAN OBSOLETE INTEROP SCRIPTS:
+        // The export interop layer (ExportBootstrap, ExportVTable, etc.) is now
+        // provided entirely by the engine DLL and the Roslyn Source Generator.
+        // We forcefully delete any legacy script files that might exist in the
+        // project to ensure they do not cause "CS0436: Type conflict" errors.
+        try {
+            fs::path obsoleteDir = projectDir / "Project" / "Internal" / "Export";
+            if (fs::exists(obsoleteDir)) {
+                for (const auto& entry : fs::recursive_directory_iterator(obsoleteDir)) {
+                    fs::permissions(entry, fs::perms::all);
+                }
+                fs::remove_all(obsoleteDir);
+                TERRAENGINE_LOG(LogLevel::Info, "[ProjectManager] Deleted obsolete interop folder: " << obsoleteDir.string());
+            }
+        } catch (const std::exception& e) {
+            TERRAENGINE_LOG(LogLevel::Warning, "[ProjectManager] Failed to delete obsolete interop folder: " << e.what());
+        }
+
         return true;
     } catch (const std::exception& e) {
         std::string msg = std::string("Failed to load project settings: ") + e.what();

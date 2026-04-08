@@ -61,6 +61,11 @@ public:
 	void SetSceneRoot(const std::filesystem::path& root);
 	std::filesystem::path GetSceneRoot() const;
 
+	// Sets the scene that should be loaded and activated during Initialize().
+	// This is primarily used by exported builds to boot into the main menu or level.
+	void SetStartupScene(const std::filesystem::path& path);
+	std::filesystem::path GetStartupScene() const;
+
 	// Synchronous load helpers. These block the calling thread until the JSON
 	// file is read and lightly validated, but they reuse cached data if the
 	// same path was requested earlier.
@@ -291,8 +296,7 @@ public:
 		ThreadPool& threadPool;
 
 		std::filesystem::path sceneRoot;
-
-	
+		std::filesystem::path m_StartupScene;
 
 		SceneCache<SceneDocument> sceneCache;
 

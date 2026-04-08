@@ -2,10 +2,13 @@
 #include "Renderer/RenderSystem.h"
 
 #include <fstream>
+#include <stdexcept>
 #include <sstream>
 #include <utility>
+#include <nlohmann/json.hpp>
 
 #include "Core/Logger/Logger.h"
+#include "Runtime/ContentMount/ContentMount.h"
 // Concrete resource definitions are required here so the cache-owned
 // std::unique_ptr instances have complete types when the deleters compile.
 #include "File Formats/TerraEngineMaterialFile.h"
@@ -36,6 +39,85 @@ ResourceManager::ResourceManager()
 	basist::uastc_init();
 }
 
+void ResourceManager::Initialize()
+{
+	// Each engine session starts with a fresh startup-scene override so stale
+	// export manifest data cannot leak into the next launch.
+	m_ConfiguredStartupScene.reset();
+
+	if (!m_ConfiguredExportArchivePath.has_value()) {
+		return;
+	}
+
+	try {
+		const std::filesystem::path archivePath = *m_ConfiguredExportArchivePath;
+		if (!std::filesystem::exists(archivePath)) {
+			throw std::runtime_error("Configured TEPAK archive does not exist: " + archivePath.string());
+		}
+
+		// Mount the export archive now, inside engine startup, so scene and
+		// resource loading can depend on the mounted content root without the
+		// launcher performing content I/O before Engine::Run().
+		if (!ContentMount::Instance().Mount(archivePath)) {
+			throw std::runtime_error("Failed to mount TEPAK archive: " + archivePath.string());
+		}
+
+		if (!ContentMount::Instance().Exists("game.json")) {
+			throw std::runtime_error("Mounted TEPAK archive is missing game.json: " + archivePath.string());
+		}
+
+		const std::vector<uint8_t> manifestBytes = ContentMount::Instance().ReadAll("game.json");
+		if (manifestBytes.empty()) {
+			throw std::runtime_error("game.json inside TEPAK archive is empty: " + archivePath.string());
+		}
+
+		const std::string manifestText(reinterpret_cast<const char*>(manifestBytes.data()), manifestBytes.size());
+		const nlohmann::json manifest = nlohmann::json::parse(manifestText);
+
+		if (manifest.contains("startupScene")) {
+			m_ConfiguredStartupScene = manifest["startupScene"].get<std::string>();
+		}
+
+		// Register the exported asset lookup table before SceneManager loads the
+		// startup scene so UUID references inside scenes and prefabs can resolve
+		// back to logical archive paths immediately.
+		if (manifest.contains("assets")) {
+			for (const auto& assetEntry : manifest["assets"]) {
+				try {
+					const std::string guidStr = assetEntry.value("guid", "");
+					const std::string path = assetEntry.value("path", "");
+					const uint32_t typeInt = assetEntry.value("type", 0u);
+
+					if (auto guid = TerraEngine::ParseUUID(guidStr)) {
+						RegisterAssetPath(*guid, path, static_cast<AssetType>(typeInt));
+					}
+				}
+				catch (...) {
+					// Skip malformed entries so one bad manifest record does not
+					// prevent every other exported asset from being registered.
+				}
+			}
+		}
+	}
+	catch (...) {
+		// Leave the manager in a clean state if export startup fails halfway
+		// through so the engine's higher-level exception handling can retry or
+		// report the failure without a half-mounted archive lingering around.
+		Shutdown();
+		throw;
+	}
+}
+
+void ResourceManager::Shutdown()
+{
+	m_ConfiguredStartupScene.reset();
+	ClearCaches();
+
+	if (ContentMount::Instance().IsMounted()) {
+		ContentMount::Instance().Unmount();
+	}
+}
+
 void ResourceManager::SetEngineRoot(const std::filesystem::path& engineRootPath)
 {
 	engineRoot = engineRootPath.lexically_normal();
@@ -54,6 +136,35 @@ void ResourceManager::SetAssetRoot(const std::filesystem::path& assetRootPath)
 std::filesystem::path ResourceManager::GetAssetRoot() const
 {
 	return assetRoot;
+}
+
+void ResourceManager::ConfigureExportArchive(const std::filesystem::path& archivePath)
+{
+	if (archivePath.empty()) {
+		m_ConfiguredExportArchivePath.reset();
+		return;
+	}
+
+	// Anchor both engine and asset roots to the export folder so path-derived
+	// cache keys and default shader lookups stay correct even if the process is
+	// launched from a different working directory.
+	m_ConfiguredExportArchivePath = std::filesystem::absolute(archivePath);
+	const std::filesystem::path runtimeRoot = m_ConfiguredExportArchivePath->parent_path();
+	SetEngineRoot(runtimeRoot);
+	SetAssetRoot(runtimeRoot);
+}
+
+std::optional<std::filesystem::path> ResourceManager::GetConfiguredStartupScene() const
+{
+	return m_ConfiguredStartupScene;
+}
+
+bool ResourceManager::IsExportRuntime() const
+{
+	// Export sessions always configure a TEPAK archive before engine startup.
+	// Editor/game-project sessions leave this unset and continue using the
+	// authored on-disk project layout instead.
+	return m_ConfiguredExportArchivePath.has_value();
 }
 
 void ResourceManager::LoadDefaultResources()
@@ -322,9 +433,29 @@ std::string ResourceManager::NormalizeKey(const std::filesystem::path& path) con
 
 std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::path& path) const
 {
+	// In export builds, the ContentMount provides access to assets packed into 
+	// a .tepak archive. If a mount is active, we attempt to read through it 
+	// using a logical path relative to the asset root.
+	if (ContentMount::Instance().IsMounted())
+	{
+		const std::filesystem::path absolutePath = ResolveAssetPath(path);
+		const std::filesystem::path logicalPath = absolutePath.lexically_relative(assetRoot);
+		
+		// ContentMount expects forward-slash paths (logical paths).
+		const std::string logicalPathString = logicalPath.generic_string();
+		
+		if (ContentMount::Instance().Exists(logicalPathString))
+		{
+			TERRAENGINE_LOG(LogLevel::Debug, "Reading resource file from mount: " << logicalPathString);
+			return ContentMount::Instance().ReadAll(logicalPathString);
+		}
+		
+		TERRAENGINE_LOG(LogLevel::Warning, "Resource not found in mount: " << logicalPathString);
+	}
+
 	if (!std::filesystem::exists(path))
 	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Resource file does not exist: " << path);
+		TERRAENGINE_LOG(LogLevel::Warning, "Resource file does not exist on disk: " << path);
 		return {};
 	}
 

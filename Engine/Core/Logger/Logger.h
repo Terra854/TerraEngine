@@ -69,7 +69,7 @@ private:
 	std::condition_variable cv;
 	std::thread t; // Seperate thread for logging outside of the main thread and threadpool
 	std::atomic<bool> done;
-	std::atomic<LogLevel> minLevel{LogLevel::Info};
+	std::atomic<LogLevel> minLevel{LogLevel::Debug};
 };
 
 // Macro to simplify logging while capturing source file, line, and function signature.

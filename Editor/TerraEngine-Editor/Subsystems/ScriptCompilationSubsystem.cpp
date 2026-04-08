@@ -449,6 +449,14 @@ void ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets()
 
 void ScriptCompilationSubsystem::BeginBuild()
 {
+	// Ensure the project workspace has the latest engine references before
+	// starting the background build job.
+	std::string syncError;
+	if (!m_WorkspaceService.SyncManagedReferences(&syncError))
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Failed to synchronize managed references before build: " << syncError);
+	}
+
 	PrepareForBuild();
 	m_Status.queuedBuild = false;
 	m_Status.state = ScriptCoordinatorState::Building;

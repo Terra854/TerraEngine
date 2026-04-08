@@ -8,12 +8,24 @@
 #include <algorithm>
 #include <filesystem>
 #include <future>
+#include <stdexcept>
 
 namespace fs = std::filesystem;
 
 namespace
 {
 	constexpr float kLiveInspectorRefreshSeconds = 0.25f;
+
+	uint64_t FnvHash64(const std::string& text) {
+		const uint64_t FnvOffsetBasis = 14695981039346656037ULL;
+		const uint64_t FnvPrime = 1099511628211ULL;
+		uint64_t hash = FnvOffsetBasis;
+		for (char c : text) {
+			hash ^= static_cast<uint64_t>(static_cast<unsigned char>(c));
+			hash *= FnvPrime;
+		}
+		return hash;
+	}
 
 	struct ManagedDescriptorResponse
 	{
@@ -134,8 +146,37 @@ ScriptingSystem& ScriptingSystem::Instance() {
 	return instance;
 }
 
+void ScriptingSystem::ConfigureExportRuntime(const std::filesystem::path& nativeAotLibraryPath) {
+	// Store the absolute path up front so later system initialization does not
+	// depend on whatever the current working directory happens to be then.
+	if (nativeAotLibraryPath.empty()) {
+		m_ConfiguredExportRuntimePath.reset();
+		return;
+	}
+
+	m_ConfiguredExportRuntimePath = fs::absolute(nativeAotLibraryPath);
+}
+
 void ScriptingSystem::Initialize() {
 	TERRAENGINE_LOG(LogLevel::Info, "Initializing Scripting System...");
+
+	if (m_ExportMode) {
+		TERRAENGINE_LOG(LogLevel::Info, "Scripting System already initialized in export mode. Skipping standard hostfxr initialization.");
+		return;
+	}
+
+	if (m_ConfiguredExportRuntimePath.has_value()) {
+		// Export builds still discover the NativeAOT library in the launcher,
+		// but the actual runtime load now happens here so scripting is brought
+		// online with the rest of the engine systems instead of before them.
+		ManagedVTable vtable{};
+		if (!DotNetHost::Instance().InitializeExportRuntime(*m_ConfiguredExportRuntimePath, &vtable)) {
+			throw std::runtime_error("Failed to initialize NativeAOT export runtime from " + m_ConfiguredExportRuntimePath->string());
+		}
+
+		InitializeExportMode(vtable);
+		return;
+	}
 
 	const fs::path bridgeAssemblyPath = ResolveManagedBridgeAssemblyPath();
 	const fs::path runtimeConfigPath = bridgeAssemblyPath.parent_path() / "TerraEngine.CSharp.runtimeconfig.json";
@@ -222,6 +263,11 @@ void ScriptingSystem::SetRunning(bool running)
 }
 
 void ScriptingSystem::Update(float deltaTime) {
+	if (m_ExportMode) {
+		UpdateExportMode(deltaTime);
+		return;
+	}
+
 	if (managedUpdateScript == nullptr || !m_GameplayAssemblyLoaded || !m_Running) {
 		return;
 	}
@@ -306,6 +352,16 @@ void ScriptingSystem::Update(float deltaTime) {
 
 void ScriptingSystem::Shutdown() {
 	ClearGameplayAssembly();
+
+	// Reset export-mode caches so a later engine session in the same process
+	// can reinitialize the NativeAOT scripting path cleanly.
+	{
+		std::scoped_lock lock(m_ExportInstancesMutex);
+		m_ExportInstances.clear();
+	}
+	m_ExportVTable = {};
+	m_ExportMode = false;
+
 	DotNetHost::Instance().Shutdown();
 }
 
@@ -837,3 +893,165 @@ std::filesystem::path ScriptingSystem::ResolveManagedBridgeAssemblyPath() const 
 
 	return candidates[0];
 }
+
+void ScriptingSystem::InitializeExportMode(const ManagedVTable& vtable) {
+	TERRAENGINE_LOG(LogLevel::Info, "Initializing Scripting System in export mode (VTable v" << vtable.version << ")...");
+
+	// Copy the VTable so the scripting system owns its own snapshot.
+	m_ExportVTable = vtable;
+	m_ExportMode = true;
+
+	// Log function pointers to detect potential marshalling/corruption issues.
+	TERRAENGINE_LOG(LogLevel::Debug, "VTable Function Pointers:");
+	TERRAENGINE_LOG(LogLevel::Debug, "  getScriptCount: " << (void*)m_ExportVTable.getScriptCount);
+	TERRAENGINE_LOG(LogLevel::Debug, "  getScriptIds: " << (void*)m_ExportVTable.getScriptIds);
+	TERRAENGINE_LOG(LogLevel::Debug, "  createScript: " << (void*)m_ExportVTable.createScript);
+	TERRAENGINE_LOG(LogLevel::Debug, "  invokeUpdate: " << (void*)m_ExportVTable.invokeUpdate);
+
+	// Query the registry to learn what script types are available.
+	if (m_ExportVTable.getScriptCount != nullptr) {
+		const int32_t count = m_ExportVTable.getScriptCount();
+		TERRAENGINE_LOG(LogLevel::Info, "Export runtime provides " << count << " registered script type(s).");
+	}
+	else {
+		TERRAENGINE_LOG(LogLevel::Error, "Export VTable getScriptCount pointer is null!");
+	}
+
+	m_Running = true;
+	TERRAENGINE_LOG(LogLevel::Info, "Scripting System (export mode) initialized successfully.");
+}
+
+void ScriptingSystem::UpdateExportMode(float deltaTime) {
+	// Export-mode update dispatches through the VTable function pointers.
+	// The threading model mirrors the editor runtime: bindings are gathered,
+	// batched across the thread pool, and waited on before returning.
+	if (!m_ExportMode || !m_Running) {
+		return;
+	}
+
+	if (m_Paused) {
+		if (m_StepFrames > 0) {
+			m_StepFrames--;
+		} else {
+			return;
+		}
+	}
+
+	// Collect active script bindings from the ECS, same as editor mode.
+	struct ExportBatchItem {
+		uint32_t objectId = 0;
+		std::string className;
+	};
+
+	std::vector<ExportBatchItem> allBindings;
+	auto& objectManager = ObjectManager::instance();
+	size_t objectsWithScripts = 0;
+	for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>()) {
+		objectsWithScripts++;
+		ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+		if (scriptComponent == nullptr || !scriptComponent->active) {
+			continue;
+		}
+
+		auto guard = scriptComponent->acquireReadLock();
+		for (const ScriptBinding& binding : scriptComponent->GetBindings()) {
+			if (!binding.enabled || binding.className.empty()) {
+				continue;
+			}
+			allBindings.push_back({ static_cast<uint32_t>(object.EntityId()), binding.className });
+		}
+	}
+
+	if (allBindings.empty()) {
+		if (objectsWithScripts > 0) {
+			static bool loggedOnce = false;
+			if (!loggedOnce) {
+				TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Found " << objectsWithScripts << " objects with ScriptComponents, but 0 enabled bindings.");
+				loggedOnce = true;
+			}
+		}
+		return;
+	}
+
+	// Ensure all required script instances exist and are initialised.
+	{
+		std::scoped_lock lock(m_ExportInstancesMutex);
+		for (const auto& item : allBindings) {
+			const uint64_t scriptId = FnvHash64(item.className);
+			
+			auto it = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& inst) {
+				return inst.objectId == item.objectId && inst.scriptId == scriptId;
+			});
+
+			if (it == m_ExportInstances.end()) {
+				TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Creating instance for " << item.className << " (ID: " << scriptId << ") on object " << item.objectId);
+				void* handle = m_ExportVTable.createScript(scriptId, item.objectId);
+				if (handle != nullptr) {
+					ExportScriptInstance inst;
+					inst.handle = handle;
+					inst.scriptId = scriptId;
+					inst.objectId = item.objectId;
+					inst.started = false;
+					m_ExportInstances.push_back(inst);
+					
+					if (m_ExportVTable.invokeAwake) {
+						m_ExportVTable.invokeAwake(handle);
+					}
+					TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Instance created successfully.");
+				} else {
+					TERRAENGINE_LOG(LogLevel::Error, "[Scripting] createScript returned NULL for " << item.className << " (ID: " << scriptId << ")");
+				}
+			}
+		}
+	}
+
+	// Batch and dispatch through the thread pool.
+	const std::size_t threadCount = std::max<std::size_t>(1, ThreadPool::instance().getThreadCount());
+	const std::size_t targetTaskCount = threadCount * 4;
+	std::size_t batchSize = allBindings.size() / std::max<std::size_t>(1, targetTaskCount);
+	batchSize = std::max<std::size_t>(8, batchSize);
+
+	std::vector<std::future<void>> futures;
+	std::vector<ExportBatchItem> currentBatch;
+	currentBatch.reserve(batchSize);
+
+	auto dispatchBatch = [&](std::vector<ExportBatchItem> items) {
+		auto task = ThreadPool::instance().createTask([items = std::move(items), this, deltaTime]() {
+			std::scoped_lock lock(m_ExportInstancesMutex);
+			for (const auto& entry : items) {
+				const uint64_t scriptId = FnvHash64(entry.className);
+				auto it = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& inst) {
+					return inst.objectId == entry.objectId && inst.scriptId == scriptId;
+				});
+
+				if (it != m_ExportInstances.end()) {
+					if (!it->started) {
+						if (m_ExportVTable.invokeStart) m_ExportVTable.invokeStart(it->handle);
+						it->started = true;
+					}
+					if (m_ExportVTable.invokeUpdate) m_ExportVTable.invokeUpdate(it->handle, deltaTime);
+				}
+			}
+		});
+		futures.push_back(task->getFuture());
+		ThreadPool::instance().enqueue(task);
+	};
+
+	for (const ExportBatchItem& item : allBindings) {
+		currentBatch.push_back(item);
+		if (currentBatch.size() >= batchSize) {
+			dispatchBatch(std::move(currentBatch));
+			currentBatch = std::vector<ExportBatchItem>();
+			currentBatch.reserve(batchSize);
+		}
+	}
+
+	if (!currentBatch.empty()) {
+		dispatchBatch(std::move(currentBatch));
+	}
+
+	for (std::future<void>& future : futures) {
+		future.get();
+	}
+}
+
