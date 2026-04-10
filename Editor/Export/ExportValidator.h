@@ -42,8 +42,9 @@ public:
 	/// Validates the build profile settings (paths, platform, etc.).
 	ExportValidationResult ValidateProfile(const BuildProfile& profile) const;
 
-	/// Scans managed source files for patterns incompatible with NativeAOT
-	/// export (reflection, non-blittable serializable fields, etc.).
+/// Scans managed source files for patterns incompatible with NativeAOT
+/// export, including reflection emit, dynamic binder usage, and serialized
+/// field types outside the fixed-size v1 hydration ABI subset.
 	ExportValidationResult ValidateManagedSource(const std::filesystem::path& projectRoot) const;
 
 	/// Runs both profile and managed source validation.

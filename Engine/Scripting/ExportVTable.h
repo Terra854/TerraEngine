@@ -20,9 +20,20 @@
 // Each ExportFieldDescriptor describes one serializable field on a script type
 // and carries enough metadata for the engine to resolve scene bindings at load
 // time and to read/write field values at runtime via the VTable getters/setters.
+enum class ExportFieldValueKind : int32_t {
+	Bool = 0,
+	Int = 1,
+	Float = 2,
+	EntityReference = 3,
+	Vector2 = 4,
+	Vector3 = 5,
+	Vector4 = 6,
+	Quaternion = 7
+};
+
 struct ExportFieldDescriptor {
 	int32_t   fieldIndex;       // Zero-based index within the script type
-	int32_t   valueKind;        // Enum: Bool=0, Int=1, Float=2, EntityRef=3, Vec2=4, Vec3=5, Vec4=6, Quat=7
+	int32_t   valueKind;        // ExportFieldValueKind value for this field
 	int32_t   valueSize;        // Size in bytes of the blittable representation
 	uint64_t  nameHash;         // Deterministic FNV-1a hash of the field name
 	char      nameUtf8[64];     // Null-terminated UTF-8 field name (truncated if >63 chars)

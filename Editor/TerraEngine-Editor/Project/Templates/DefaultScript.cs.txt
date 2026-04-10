@@ -1,6 +1,6 @@
 using TerraEngine;
 
-public class __SCRIPT_NAME__ : Script
+public partial class __SCRIPT_NAME__ : Script
 {
 	public override void OnStart()
 	{

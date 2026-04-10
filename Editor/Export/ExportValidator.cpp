@@ -3,10 +3,13 @@
 #include "ExportValidator.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <regex>
 #include <sstream>
+#include <unordered_set>
 
 // --- Helpers ---
 
@@ -32,6 +35,68 @@ static void AddDiagnostic(ExportValidationResult& result,
 	else if (severity == ExportDiagnosticSeverity::Warning) {
 		result.warningCount++;
 	}
+}
+
+static bool ShouldScanManagedSourceFile(const std::filesystem::path& projectRoot, const std::filesystem::path& filePath)
+{
+	std::error_code ec;
+	const std::filesystem::path relativePath = std::filesystem::relative(filePath, projectRoot, ec);
+	if (ec)
+	{
+		return true;
+	}
+
+	const std::string normalized = relativePath.generic_string();
+	return normalized.rfind("Build/", 0) != 0
+		&& normalized.rfind("Library/", 0) != 0
+		&& normalized.rfind("Temp/", 0) != 0
+		&& normalized.rfind("ProjectSettings/", 0) != 0
+		&& normalized.rfind("UserSettings/", 0) != 0;
+}
+
+static int CalculateLineNumber(std::string_view text, std::size_t characterOffset)
+{
+	int lineNumber = 1;
+	for (std::size_t index = 0; index < std::min(characterOffset, text.size()); ++index)
+	{
+		if (text[index] == '\n')
+		{
+			++lineNumber;
+		}
+	}
+
+	return lineNumber;
+}
+
+static bool IsSupportedNativeAotFieldType(std::string typeName)
+{
+	typeName.erase(std::remove_if(typeName.begin(), typeName.end(), [](unsigned char value) {
+		return std::isspace(value) != 0;
+	}), typeName.end());
+
+	const std::size_t lastScope = typeName.find_last_of(':');
+	if (lastScope != std::string::npos)
+	{
+		typeName = typeName.substr(lastScope + 1);
+	}
+	const std::size_t lastDot = typeName.find_last_of('.');
+	if (lastDot != std::string::npos)
+	{
+		typeName = typeName.substr(lastDot + 1);
+	}
+
+	static const std::unordered_set<std::string> supportedTypes = {
+		"bool",
+		"int",
+		"float",
+		"uint",
+		"Vector2",
+		"Vector3",
+		"Vector4",
+		"Quaternion"
+	};
+
+	return supportedTypes.count(typeName) > 0;
 }
 
 // --- Profile validation ---
@@ -81,28 +146,31 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 	// Resolve the source directory from the .csproj path.
 	const auto projectDir = projectRoot;
 
-	// Scan all .cs files in the project directory for unsupported patterns.
-	// These regex patterns detect common anti-patterns that break NativeAOT.
+	// Scan authored .cs files for patterns that NativeAOT export cannot safely
+	// support. The checks stay regex-based so validation remains lightweight and
+	// can run inside the editor before a full managed compile begins.
 	std::regex reflectionPattern(R"(\bType\.GetType\b|\bActivator\.CreateInstance\b|\bAssembly\.Load\b|\bMethodInfo\b|\bFieldInfo\b)");
+	std::regex reflectionEmitPattern(R"(\bSystem\.Reflection\.Emit\b|\bAssemblyBuilder\b|\bDynamicMethod\b|\bILGenerator\b)");
 	std::regex dynamicPattern(R"(\bdynamic\b)");
-	
-	// Fast rudimentary check for [SerializeField] applied to known non-blittable types like string or object.
-	std::regex nonBlittableFieldPattern(R"(\[SerializeField\]\s*(?:public\s+|private\s+|protected\s+|internal\s+)*(?:string|object|dynamic)\b)");
+	std::regex serializedFieldPattern(R"(\[SerializeField\]\s*(?:\r?\n\s*)*(?:public|private|protected|internal|readonly|volatile|new|unsafe|\s)+([A-Za-z_][A-Za-z0-9_:\.<>[\]]*)\s+[A-Za-z_][A-Za-z0-9_]*)");
 
 	uint32_t scannedFiles = 0;
 
 	for (const auto& entry : std::filesystem::recursive_directory_iterator(projectDir)) {
 		if (!entry.is_regular_file()) continue;
 		if (entry.path().extension() != ".cs") continue;
+		if (!ShouldScanManagedSourceFile(projectRoot, entry.path())) continue;
 
 		scannedFiles++;
 
 		std::ifstream file(entry.path());
 		if (!file) continue;
 
+		const std::string fileText((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+		std::istringstream lineStream(fileText);
 		std::string line;
 		int lineNumber = 0;
-		while (std::getline(file, line)) {
+		while (std::getline(lineStream, line)) {
 			lineNumber++;
 
 			// Check for reflection usage.
@@ -110,23 +178,35 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 					"ManagedSource",
 					"Reflection API usage detected. NativeAOT export does not support runtime reflection.",
+						entry.path().string(), lineNumber);
+			}
+
+			if (std::regex_search(line, reflectionEmitPattern)) {
+				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+					"ManagedSource",
+					"System.Reflection.Emit usage detected. NativeAOT export requires closed-world code generation and cannot support runtime IL emission.",
 					entry.path().string(), lineNumber);
 			}
 
 			// Check for dynamic keyword usage.
 			if (std::regex_search(line, dynamicPattern)) {
-				AddDiagnostic(result, ExportDiagnosticSeverity::Warning,
-					"ManagedSource",
-					"'dynamic' keyword usage detected. This may fail in NativeAOT builds.",
-					entry.path().string(), lineNumber);
-			}
-
-			// Check for non-blittable serialized fields.
-			if (std::regex_search(line, nonBlittableFieldPattern)) {
 				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 					"ManagedSource",
-					"Unsupported non-blittable type used with [SerializeField]. NativeAOT interop only supports primitive blittable types (e.g. float, int, Vector3).",
+					"'dynamic' keyword usage detected. NativeAOT export does not support runtime binder generation.",
 					entry.path().string(), lineNumber);
+			}
+		}
+
+		for (std::sregex_iterator matchIt(fileText.begin(), fileText.end(), serializedFieldPattern), endIt; matchIt != endIt; ++matchIt) {
+			const std::smatch& match = *matchIt;
+			const std::string typeName = match[1].str();
+			const int fieldLine = CalculateLineNumber(fileText, static_cast<std::size_t>(match.position(1)));
+			const bool obviousCollectionShape = typeName.find('<') != std::string::npos || typeName.find('[') != std::string::npos;
+			if (obviousCollectionShape || !IsSupportedNativeAotFieldType(typeName)) {
+				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+					"ManagedSource",
+					"Unsupported [SerializeField] type '" + typeName + "'. NativeAOT export v1 only supports bool, int, float, uint, Vector2, Vector3, Vector4, and Quaternion.",
+					entry.path().string(), fieldLine);
 			}
 		}
 	}

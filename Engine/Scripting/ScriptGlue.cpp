@@ -22,32 +22,30 @@ thread_local std::string g_ScriptBindingPayloadBuffer;
 
 enum class ScriptType : int
 {
-    Bool = 0,
-    Int = 1,
-    Float = 2,
-    String = 3,
-    Vector2 = 4,
-    Vector3 = 5,
-    Vector4 = 6,
-    Quaternion = 7,
-    EntityID = 8
+	Bool = 0,
+	Int = 1,
+	Float = 2,
+	EntityID = 3,
+	Vector2 = 4,
+	Vector3 = 5,
+	Vector4 = 6,
+	Quaternion = 7
 };
 
 static rttr::variant MarshallFromNative(void* data, ScriptType type)
 {
     switch (type)
     {
-    case ScriptType::Bool: return *static_cast<bool*>(data);
-    case ScriptType::Int: return *static_cast<int*>(data);
-    case ScriptType::Float: return *static_cast<float*>(data);
-    case ScriptType::String: return std::string(static_cast<const char*>(data));
-    case ScriptType::Vector2: return *static_cast<glm::vec2*>(data);
-    case ScriptType::Vector3: return *static_cast<glm::vec3*>(data);
-    case ScriptType::Vector4: return *static_cast<glm::vec4*>(data);
-    case ScriptType::Quaternion: return *static_cast<glm::quat*>(data);
-    case ScriptType::EntityID: return *static_cast<uint32_t*>(data);
-    }
-    return {};
+	case ScriptType::Bool: return *static_cast<bool*>(data);
+	case ScriptType::Int: return *static_cast<int*>(data);
+	case ScriptType::Float: return *static_cast<float*>(data);
+	case ScriptType::EntityID: return *static_cast<uint32_t*>(data);
+	case ScriptType::Vector2: return *static_cast<glm::vec2*>(data);
+	case ScriptType::Vector3: return *static_cast<glm::vec3*>(data);
+	case ScriptType::Vector4: return *static_cast<glm::vec4*>(data);
+	case ScriptType::Quaternion: return *static_cast<glm::quat*>(data);
+	}
+	return {};
 }
 
 static void MarshallToNative(const rttr::variant& var, void* data, ScriptType type)
@@ -56,20 +54,15 @@ static void MarshallToNative(const rttr::variant& var, void* data, ScriptType ty
 
     switch (type)
     {
-    case ScriptType::Bool: *static_cast<bool*>(data) = var.convert<bool>(); break;
-    case ScriptType::Int: *static_cast<int*>(data) = var.convert<int>(); break;
-    case ScriptType::Float: *static_cast<float*>(data) = var.convert<float>(); break;
-    case ScriptType::String: 
-        // Strings are tricky with void*. Assuming caller provided buffer or we can't easily do it.
-        // For GetProperty with String, we might need a separate call or fixed buffer.
-        // For now, ignoring String output to void*.
-        break;
-    case ScriptType::Vector2: *static_cast<glm::vec2*>(data) = var.convert<glm::vec2>(); break;
-    case ScriptType::Vector3: *static_cast<glm::vec3*>(data) = var.convert<glm::vec3>(); break;
-    case ScriptType::Vector4: *static_cast<glm::vec4*>(data) = var.convert<glm::vec4>(); break;
-    case ScriptType::Quaternion: *static_cast<glm::quat*>(data) = var.convert<glm::quat>(); break;
-    case ScriptType::EntityID: *static_cast<uint32_t*>(data) = var.convert<uint32_t>(); break;
-    }
+	case ScriptType::Bool: *static_cast<bool*>(data) = var.convert<bool>(); break;
+	case ScriptType::Int: *static_cast<int*>(data) = var.convert<int>(); break;
+	case ScriptType::Float: *static_cast<float*>(data) = var.convert<float>(); break;
+	case ScriptType::EntityID: *static_cast<uint32_t*>(data) = var.convert<uint32_t>(); break;
+	case ScriptType::Vector2: *static_cast<glm::vec2*>(data) = var.convert<glm::vec2>(); break;
+	case ScriptType::Vector3: *static_cast<glm::vec3*>(data) = var.convert<glm::vec3>(); break;
+	case ScriptType::Vector4: *static_cast<glm::vec4*>(data) = var.convert<glm::vec4>(); break;
+	case ScriptType::Quaternion: *static_cast<glm::quat*>(data) = var.convert<glm::quat>(); break;
+	}
 }
 
 static ScriptBinding* ResolveBinding(Object& object, const char* bindingId)

@@ -214,6 +214,11 @@ private:
 	template <typename Resource>
 	TerraEngine::UUID LoadOrGetCached(const std::filesystem::path& path, ResourceCache<Resource>& cache, const LoaderFunction<Resource>& loader);
 
+	// Route type-specific cache work through one visitor so asset-path
+	// registration stays generic instead of open-coding one branch per cache.
+	template <typename Visitor>
+	void VisitAssetCache(AssetType type, Visitor&& visitor);
+
 	// Internal asynchronous wrapper that enqueues the loader on the shared
 	// thread pool. If the resource already exists or is in-flight, the
 	// existing shared_future is returned instead of scheduling new work.
@@ -383,6 +388,28 @@ TerraEngine::UUID ResourceManager::LoadOrGetCached(const std::filesystem::path& 
 	TERRAENGINE_LOG(LogLevel::Debug, "Loading resource from " << resolvedPath << " (id " << ToHexString(id) << ")");
 	auto resource = loader(resolvedPath);
 	return FinalizeLoad(key, cache, id, std::move(resource));
+}
+
+template <typename Visitor>
+void ResourceManager::VisitAssetCache(AssetType type, Visitor&& visitor)
+{
+	switch (type)
+	{
+	case AssetType::Mesh:
+		visitor(meshCache);
+		return;
+	case AssetType::Texture:
+		visitor(textureCache);
+		return;
+	case AssetType::Material:
+		visitor(materialCache);
+		return;
+	case AssetType::ShaderCollection:
+		visitor(shaderCollectionCache);
+		return;
+	default:
+		return;
+	}
 }
 
 template <typename Resource>

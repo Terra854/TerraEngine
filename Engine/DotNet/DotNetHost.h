@@ -66,13 +66,16 @@ public:
 
     /// Returns true when the host was initialized in export-mode (NativeAOT).
     bool IsExportMode() const { return exportMode; }
+    const std::string& GetLastNativeError() const { return m_LastNativeError; }
 
 private:
     DotNetHost() = default;
     ~DotNetHost();
 
-    void* load_library(const wchar_t* path);
-    void* get_export(void* h, const char* name);
+    void* LoadNativeLibrary(const std::filesystem::path& path);
+    void* GetNativeExport(void* libraryHandle, const char* exportName);
+    void FreeNativeLibrary(void* libraryHandle);
+    void SetNativeError(const std::string& message);
 
     bool load_hostfxr(const std::filesystem::path& searchPath = "");
 
@@ -86,4 +89,5 @@ private:
     // entire engine session so the managed GC heap remains valid.
     void* nativeAotLibraryHandle = nullptr;
     bool exportMode = false;
+    std::string m_LastNativeError;
 };

@@ -14,12 +14,11 @@ namespace TerraEngine
 		Bool = 0,
 		Int = 1,
 		Float = 2,
-		String = 3,
+		EntityID = 3,
 		Vector2 = 4,
 		Vector3 = 5,
 		Vector4 = 6,
-		Quaternion = 7,
-		EntityID = 8
+		Quaternion = 7
 	}
 
 	// Payload types mirror the JSON contracts shared between the native engine,
@@ -41,6 +40,7 @@ namespace TerraEngine
 	{
 		public string BindingId { get; set; } = string.Empty;
 		public string ClassName { get; set; } = string.Empty;
+		public ulong ScriptId { get; set; }
 		public List<ScriptFieldValuePayload> SerializedValues { get; set; } = new();
 	}
 

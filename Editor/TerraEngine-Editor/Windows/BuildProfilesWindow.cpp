@@ -6,12 +6,12 @@
 #include "../Core/EditorContext.h"
 #include "../Project/ProjectManager.h"
 #include "Engine/Scripting/ScriptingSystem.h"
+#include "Engine/ThreadPool/ThreadPool.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include <ImGuiFileDialog.h>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
-#include <thread>
 
 namespace
 {
@@ -468,7 +468,7 @@ void BuildProfilesWindow::StartExport() {
 	const auto profile = m_Profiles[m_SelectedProfileIndex];
 	const auto projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
 
-	std::thread exportThread([this, profile, projectRoot]() {
+	auto exportTask = ThreadPool::instance().createTask([this, profile, projectRoot]() {
 		// Unload the gameplay assembly before starting managed compilation to
 		// avoid file locks on Assembly-CSharp.dll.
 		if (profile.enableManagedCompilation) {
@@ -498,7 +498,7 @@ void BuildProfilesWindow::StartExport() {
 			ScriptCompilationSubsystem::Instance().RequestBuild(ScriptBuildReason::ManualRefresh);
 		}
 	});
-	exportThread.detach();
+	ThreadPool::instance().enqueue(exportTask);
 }
 
 void BuildProfilesWindow::StartExportAndRun() {

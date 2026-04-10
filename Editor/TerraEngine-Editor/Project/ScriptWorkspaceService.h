@@ -54,7 +54,8 @@ private:
 	bool WriteTextIfChanged(const std::filesystem::path& path, const std::string& contents, std::string* outError) const;
 
 	[[nodiscard]] std::filesystem::path ResolveTemplateRoot() const;
-	[[nodiscard]] std::filesystem::path ResolveManagedRoot() const;
+	[[nodiscard]] std::filesystem::path ResolveManagedBridgePath() const;
+	[[nodiscard]] std::filesystem::path ResolveManagedAnalyzerPath() const;
 #if defined(_WIN32)
 	[[nodiscard]] std::filesystem::path ResolveVisualStudioPath() const;
 	[[nodiscard]] bool LaunchVisualStudioWorkspace(const std::filesystem::path& scriptPath, std::string* outError) const;

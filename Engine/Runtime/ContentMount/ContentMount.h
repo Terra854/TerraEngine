@@ -58,6 +58,10 @@ public:
 	/// @param logicalPath Normalised forward-slash path (e.g. "scenes/main.tescene").
 	[[nodiscard]] bool Exists(std::string_view logicalPath) const;
 
+	/// Applies the one archive lookup policy shared by manifest entries and
+	/// runtime reads: forward slashes, lowercase, and no leading root markers.
+	[[nodiscard]] static std::string NormalizeLogicalPath(std::string_view logicalPath);
+
 	/// Reads the entire contents of a logical file from the mounted archive.
 	/// @param logicalPath Normalised forward-slash path.
 	/// @return Byte buffer with the file contents.

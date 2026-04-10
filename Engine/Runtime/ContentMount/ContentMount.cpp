@@ -92,21 +92,13 @@ const std::filesystem::path& ContentMount::GetArchivePath() const {
 	return m_impl->archivePath;
 }
 
-bool ContentMount::Exists(std::string_view logicalPath) const {
-	if (!m_impl->mounted) {
-		return false;
-	}
-	
-	// Normalize the path using the same rules as the internal lookup maps
-	// (forward slashes, lowercase, etc) so that callers don't need to know
-	// about TEPAK's internal storage conventions.
-	std::string normalized = std::string(logicalPath);
+std::string ContentMount::NormalizeLogicalPath(std::string_view logicalPath) {
+	std::string normalized(logicalPath);
 	for (char& c : normalized) {
 		if (c == '\\') c = '/';
 		if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
 	}
 
-	// Remove leading slashes and ./ prefix to match NormalizeLookupPath
 	std::string_view lookup = normalized;
 	while (!lookup.empty() && lookup.front() == '/') {
 		lookup.remove_prefix(1);
@@ -115,7 +107,15 @@ bool ContentMount::Exists(std::string_view logicalPath) const {
 		lookup.remove_prefix(2);
 	}
 
-	return m_impl->filePaths.count(std::string(lookup)) > 0;
+	return std::string(lookup);
+}
+
+bool ContentMount::Exists(std::string_view logicalPath) const {
+	if (!m_impl->mounted) {
+		return false;
+	}
+
+	return m_impl->filePaths.count(NormalizeLogicalPath(logicalPath)) > 0;
 }
 
 std::vector<uint8_t> ContentMount::ReadAll(std::string_view logicalPath) const {
@@ -127,7 +127,7 @@ std::vector<uint8_t> ContentMount::ReadAll(std::string_view logicalPath) const {
 	try {
 		// TEPAK's ReadAll returns a ByteBuffer (std::vector<uint8_t>) which is
 		// exactly what the engine resource managers expect.
-		return m_impl->reader.ReadAll(logicalPath);
+		return m_impl->reader.ReadAll(NormalizeLogicalPath(logicalPath));
 	}
 	catch (const std::exception& e) {
 		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: Failed to read '"
@@ -143,7 +143,7 @@ std::vector<uint8_t> ContentMount::ReadRange(std::string_view logicalPath, uint6
 	}
 
 	try {
-		return m_impl->reader.ReadRange(logicalPath, offset, size);
+		return m_impl->reader.ReadRange(NormalizeLogicalPath(logicalPath), offset, size);
 	}
 	catch (const std::exception& e) {
 		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: Failed to read range from '"

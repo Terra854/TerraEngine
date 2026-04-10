@@ -356,37 +356,12 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type)
 {
 	const std::string key = NormalizeKey(ResolveAssetPath(path));
-	switch (type)
-	{
-	case AssetType::Mesh:
-	{
-		std::unique_lock lock(meshCache.mutex);
-		meshCache.pathToId[key] = id;
-		meshCache.idToPath[id] = key;
-		break;
-	}
-	case AssetType::Texture:
-	{
-		std::unique_lock lock(textureCache.mutex);
-		textureCache.pathToId[key] = id;
-		textureCache.idToPath[id] = key;
-		break;
-	}
-	case AssetType::Material:
-	{
-		std::unique_lock lock(materialCache.mutex);
-		materialCache.pathToId[key] = id;
-		materialCache.idToPath[id] = key;
-		break;
-	}
-	case AssetType::ShaderCollection:
-	{
-		std::unique_lock lock(shaderCollectionCache.mutex);
-		shaderCollectionCache.pathToId[key] = id;
-		shaderCollectionCache.idToPath[id] = key;
-		break;
-	}
-	}
+
+	VisitAssetCache(type, [&](auto& cache) {
+		std::unique_lock lock(cache.mutex);
+		cache.pathToId[key] = id;
+		cache.idToPath[id] = key;
+	});
 }
 
 Material* ResourceManager::GetMaterial(const TerraEngine::UUID& id)
@@ -440,16 +415,15 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 	{
 		const std::filesystem::path absolutePath = ResolveAssetPath(path);
 		const std::filesystem::path logicalPath = absolutePath.lexically_relative(assetRoot);
-		
-		// ContentMount expects forward-slash paths (logical paths).
-		const std::string logicalPathString = logicalPath.generic_string();
-		
-		if (ContentMount::Instance().Exists(logicalPathString))
+		const std::string logicalPathString = ContentMount::NormalizeLogicalPath(logicalPath.generic_string());
+
+		TERRAENGINE_LOG(LogLevel::Debug, "Reading resource file from mount: " << logicalPathString);
+		const std::vector<std::uint8_t> mountedBytes = ContentMount::Instance().ReadAll(logicalPathString);
+		if (!mountedBytes.empty())
 		{
-			TERRAENGINE_LOG(LogLevel::Debug, "Reading resource file from mount: " << logicalPathString);
-			return ContentMount::Instance().ReadAll(logicalPathString);
+			return mountedBytes;
 		}
-		
+
 		TERRAENGINE_LOG(LogLevel::Warning, "Resource not found in mount: " << logicalPathString);
 	}
 

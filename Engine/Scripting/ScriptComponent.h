@@ -267,6 +267,7 @@ struct ScriptBinding
 	std::string bindingId;
 	TerraEngine::UUID assetGuid = TerraEngine::EMPTY_UUID;
 	std::string className;
+	std::uint64_t scriptId = 0;
 	std::string status;
 	bool enabled = true;
 	int orderIndex = 0;
@@ -422,6 +423,13 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptBinding& binding)
 		{ "serializedValues", binding.serializedValues },
 		{ "diagnosticIds", binding.diagnosticIds }
 	};
+
+	if (binding.scriptId != 0)
+	{
+		// Authored scenes keep using className, while staged export copies can
+		// persist the resolved scriptId without rewriting editor source assets.
+		jsonValue["scriptId"] = binding.scriptId;
+	}
 }
 
 inline void from_json(const nlohmann::json& jsonValue, ScriptBinding& binding)
@@ -429,6 +437,7 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptBinding& binding)
 	binding.bindingId = jsonValue.value("bindingId", std::string{});
 	binding.assetGuid = jsonValue.value("assetGuid", TerraEngine::EMPTY_UUID);
 	binding.className = jsonValue.value("className", std::string{});
+	binding.scriptId = jsonValue.value("scriptId", static_cast<std::uint64_t>(0));
 	binding.status = jsonValue.value("status", std::string{});
 	if (binding.status == "PendingCompile")
 	{

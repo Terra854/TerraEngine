@@ -1,8 +1,14 @@
 #include "DotNetHost.h"
 #include "Core/Logger/Logger.h"
 
+#include <cstring>
 #include <iostream>
+
+#ifdef _WIN32
 #include <Windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 // These headers are expected to be in External/dotnet/include or propagated by nethost target
 #include <nethost.h>
@@ -10,6 +16,47 @@
 #include <hostfxr.h>
 
 #include "Scripting/ExportVTable.h"
+
+namespace
+{
+#ifdef _WIN32
+	constexpr const wchar_t* kHostFxrLibraryName = L"hostfxr.dll";
+#else
+	constexpr const char* kHostFxrLibraryName = "libhostfxr.so";
+#endif
+
+#ifdef _WIN32
+	std::string BuildPlatformLoadErrorMessage() {
+		const DWORD errorCode = GetLastError();
+		if (errorCode == 0) {
+			return "Unknown Win32 loader error.";
+		}
+
+		char* messageBuffer = nullptr;
+		const DWORD messageLength = FormatMessageA(
+			FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+			nullptr,
+			errorCode,
+			MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+			reinterpret_cast<LPSTR>(&messageBuffer),
+			0,
+			nullptr);
+
+		std::string message = messageLength > 0 && messageBuffer != nullptr
+			? std::string(messageBuffer, messageLength)
+			: "Unknown Win32 loader error.";
+		if (messageBuffer != nullptr) {
+			LocalFree(messageBuffer);
+		}
+		return "Win32 error " + std::to_string(errorCode) + ": " + message;
+	}
+#else
+	std::string BuildPlatformLoadErrorMessage() {
+		const char* errorText = dlerror();
+		return errorText != nullptr ? std::string(errorText) : std::string("Unknown dlopen error.");
+	}
+#endif
+}
 
 DotNetHost& DotNetHost::Instance() {
     static DotNetHost instance;
@@ -22,6 +69,7 @@ DotNetHost::~DotNetHost() {
 
 bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
     if (initialized) return true;
+    SetNativeError({});
 
     if (!load_hostfxr(assemblyPath.parent_path())) {
         TERRAENGINE_LOG(LogLevel::Error, "Failed to load hostfxr.");
@@ -29,9 +77,9 @@ bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
     }
 
     // Get the function pointers for hostfxr
-    auto init_fptr = (hostfxr_initialize_for_dotnet_command_line_fn)get_export(hostfxr_handle, "hostfxr_initialize_for_dotnet_command_line");
-    auto get_delegate_fptr = (hostfxr_get_runtime_delegate_fn)get_export(hostfxr_handle, "hostfxr_get_runtime_delegate");
-    auto close_fptr = (hostfxr_close_fn)get_export(hostfxr_handle, "hostfxr_close");
+    auto init_fptr = (hostfxr_initialize_for_dotnet_command_line_fn)GetNativeExport(hostfxr_handle, "hostfxr_initialize_for_dotnet_command_line");
+    auto get_delegate_fptr = (hostfxr_get_runtime_delegate_fn)GetNativeExport(hostfxr_handle, "hostfxr_get_runtime_delegate");
+    auto close_fptr = (hostfxr_close_fn)GetNativeExport(hostfxr_handle, "hostfxr_close");
 
     if (!init_fptr || !get_delegate_fptr || !close_fptr) {
         TERRAENGINE_LOG(LogLevel::Error, "Failed to get hostfxr function pointers.");
@@ -69,32 +117,37 @@ bool DotNetHost::Initialize(const std::filesystem::path& assemblyPath) {
 
 bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotLibaryPath, ManagedVTable* outTable) {
     if (initialized) return true;
+    SetNativeError({});
 
     if (outTable == nullptr) {
-        TERRAENGINE_LOG(LogLevel::Error, "DotNetHost::InitializeExportRuntime called with null VTable pointer.");
+        SetNativeError("DotNetHost::InitializeExportRuntime was called with a null ManagedVTable pointer.");
+        TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
         return false;
     }
 
     if (!std::filesystem::exists(nativeAotLibaryPath)) {
-        TERRAENGINE_LOG(LogLevel::Error, "NativeAOT library not found: " << nativeAotLibaryPath.string());
+        SetNativeError("NativeAOT runtime library was not found at " + nativeAotLibaryPath.string() + ". Make sure the export output includes Managed/Assembly-CSharp.dll and its native dependencies.");
+        TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
         return false;
     }
 
     // Load the NativeAOT shared library. Unlike hostfxr, this library
     // self-initialises its GC and runtime on DllMain so no CoreCLR host is
     // required. The library handle stays alive for the entire engine session.
-    nativeAotLibraryHandle = load_library(nativeAotLibaryPath.c_str());
+    nativeAotLibraryHandle = LoadNativeLibrary(nativeAotLibaryPath);
     if (nativeAotLibraryHandle == nullptr) {
-        TERRAENGINE_LOG(LogLevel::Error, "Failed to load NativeAOT library: " << nativeAotLibaryPath.string());
+        SetNativeError("Failed to load NativeAOT runtime library " + nativeAotLibaryPath.string() + ". " + BuildPlatformLoadErrorMessage());
+        TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
         return false;
     }
 
     // Resolve the single exported C function that populates the VTable.
     auto initFn = reinterpret_cast<InitManagedRuntimeFn>(
-        get_export(nativeAotLibraryHandle, "InitManagedRuntime"));
+        GetNativeExport(nativeAotLibraryHandle, "InitManagedRuntime"));
     if (initFn == nullptr) {
-        TERRAENGINE_LOG(LogLevel::Error, "Failed to find InitManagedRuntime in NativeAOT library.");
-        FreeLibrary(static_cast<HMODULE>(nativeAotLibraryHandle));
+        SetNativeError("The NativeAOT gameplay library does not export InitManagedRuntime. Rebuild the gameplay project and confirm the source generator produced the export bootstrap.");
+        TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
+        FreeNativeLibrary(nativeAotLibraryHandle);
         nativeAotLibraryHandle = nullptr;
         return false;
     }
@@ -114,17 +167,18 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
     TERRAENGINE_LOG(LogLevel::Debug, "-----------------------");
 
     if (result != 0) {
-        TERRAENGINE_LOG(LogLevel::Error, "InitManagedRuntime returned error code " << result);
-        FreeLibrary(static_cast<HMODULE>(nativeAotLibraryHandle));
+        SetNativeError("InitManagedRuntime returned error code " + std::to_string(result) + ". The gameplay NativeAOT library failed to initialize its registry.");
+        TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
+        FreeNativeLibrary(nativeAotLibraryHandle);
         nativeAotLibraryHandle = nullptr;
         return false;
     }
 
     // Verify the VTable version is at least what the engine requires.
     if (outTable->version < kManagedVTableMinVersion) {
-        TERRAENGINE_LOG(LogLevel::Error, "ManagedVTable version " << outTable->version
-            << " is below the required minimum " << kManagedVTableMinVersion);
-        FreeLibrary(static_cast<HMODULE>(nativeAotLibraryHandle));
+        SetNativeError("ManagedVTable version " + std::to_string(outTable->version) + " is below the required minimum " + std::to_string(kManagedVTableMinVersion) + ".");
+        TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
+        FreeNativeLibrary(nativeAotLibraryHandle);
         nativeAotLibraryHandle = nullptr;
         return false;
     }
@@ -169,28 +223,29 @@ void* DotNetHost::GetManagedFunction(
 
 void DotNetHost::Shutdown() {
     if (hostfxr_handle) {
-        FreeLibrary((HMODULE)hostfxr_handle);
+        FreeNativeLibrary(hostfxr_handle);
         hostfxr_handle = nullptr;
     }
 
     if (nativeAotLibraryHandle) {
         // The NativeAOT library owns its GC heap, so unloading it cleanly
         // tears down all managed state that was created during the session.
-        FreeLibrary(static_cast<HMODULE>(nativeAotLibraryHandle));
+        FreeNativeLibrary(nativeAotLibraryHandle);
         nativeAotLibraryHandle = nullptr;
     }
     exportMode = false;
 
     initialized = false;
     load_assembly_and_get_function_pointer = nullptr;
+    m_LastNativeError.clear();
 }
 
 bool DotNetHost::load_hostfxr(const std::filesystem::path& searchPath) {
     // 1. Try to load from the specified search path (e.g., Managed directory)
     if (!searchPath.empty()) {
-        std::filesystem::path localHostFxr = searchPath / "hostfxr.dll";
+        std::filesystem::path localHostFxr = searchPath / std::filesystem::path(kHostFxrLibraryName);
         if (std::filesystem::exists(localHostFxr)) {
-            hostfxr_handle = load_library(localHostFxr.c_str());
+            hostfxr_handle = LoadNativeLibrary(localHostFxr);
             if (hostfxr_handle) {
                 TERRAENGINE_LOG(LogLevel::Info, "Loaded local hostfxr from: " << localHostFxr.string());
                 return true;
@@ -199,23 +254,63 @@ bool DotNetHost::load_hostfxr(const std::filesystem::path& searchPath) {
     }
 
     // 2. Fallback to nethost lookup (System installed)
-    wchar_t buffer[MAX_PATH];
-    size_t buffer_size = sizeof(buffer) / sizeof(wchar_t);
+    char_t buffer[4096];
+    size_t buffer_size = sizeof(buffer) / sizeof(char_t);
     int rc = get_hostfxr_path(buffer, &buffer_size, nullptr);
     if (rc != 0) {
         return false;
     }
 
-    hostfxr_handle = load_library(buffer);
+    hostfxr_handle = LoadNativeLibrary(buffer);
     return hostfxr_handle != nullptr;
 }
 
-void* DotNetHost::load_library(const wchar_t* path) {
-    HMODULE h = LoadLibraryW(path);
-    return (void*)h;
+void* DotNetHost::LoadNativeLibrary(const std::filesystem::path& path) {
+#ifdef _WIN32
+    HMODULE moduleHandle = LoadLibraryW(path.c_str());
+    if (moduleHandle == nullptr) {
+        SetNativeError("Failed to load native library " + path.string() + ". " + BuildPlatformLoadErrorMessage());
+    }
+    return reinterpret_cast<void*>(moduleHandle);
+#else
+    dlerror();
+    void* moduleHandle = dlopen(path.c_str(), RTLD_NOW);
+    if (moduleHandle == nullptr) {
+        SetNativeError("Failed to load native library " + path.string() + ". " + BuildPlatformLoadErrorMessage());
+    }
+    return moduleHandle;
+#endif
 }
 
-void* DotNetHost::get_export(void* h, const char* name) {
-    void* f = GetProcAddress((HMODULE)h, name);
-    return f;
+void* DotNetHost::GetNativeExport(void* libraryHandle, const char* exportName) {
+    if (libraryHandle == nullptr || exportName == nullptr) {
+        return nullptr;
+    }
+
+#ifdef _WIN32
+    void* exportPointer = reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(libraryHandle), exportName));
+#else
+    dlerror();
+    void* exportPointer = dlsym(libraryHandle, exportName);
+#endif
+    if (exportPointer == nullptr) {
+        SetNativeError("Failed to locate export '" + std::string(exportName) + "'. " + BuildPlatformLoadErrorMessage());
+    }
+    return exportPointer;
+}
+
+void DotNetHost::FreeNativeLibrary(void* libraryHandle) {
+    if (libraryHandle == nullptr) {
+        return;
+    }
+
+#ifdef _WIN32
+    FreeLibrary(static_cast<HMODULE>(libraryHandle));
+#else
+    dlclose(libraryHandle);
+#endif
+}
+
+void DotNetHost::SetNativeError(const std::string& message) {
+    m_LastNativeError = message;
 }

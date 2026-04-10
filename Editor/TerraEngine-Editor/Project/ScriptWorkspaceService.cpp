@@ -8,6 +8,7 @@
 #include <cwctype>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 #if defined(_WIN32)
 #include <Windows.h>
@@ -91,6 +92,128 @@ namespace
 		}
 
 		return std::string(firstNonWhitespace, lastNonWhitespace);
+	}
+
+	std::filesystem::path ResolveEditorExecutableDirectory()
+	{
+#if defined(_WIN32)
+		wchar_t path[MAX_PATH];
+		if (GetModuleFileNameW(nullptr, path, MAX_PATH) != 0)
+		{
+			return std::filesystem::path(path).parent_path();
+		}
+#endif
+
+		return std::filesystem::current_path();
+	}
+
+	void AppendManagedRootCandidates(const std::filesystem::path& baseDirectory, std::vector<std::filesystem::path>& roots)
+	{
+		if (baseDirectory.empty())
+		{
+			return;
+		}
+
+		// Development launches may set the working directory to either the build
+		// output folder or the editor binary folder, so probe both shapes TerraEngine
+		// uses for installed managed assets.
+		roots.push_back(baseDirectory / "Managed");
+		roots.push_back(baseDirectory / "Editor" / "Managed");
+		roots.push_back(baseDirectory.parent_path() / "Editor" / "Managed");
+	}
+
+	bool IsRepoRoot(const std::filesystem::path& candidate)
+	{
+		return std::filesystem::exists(candidate / "Engine" / "Managed" / "TerraEngine.csproj")
+			&& std::filesystem::exists(candidate / "Editor" / "Managed" / "TerraEngine.Export.Generator" / "TerraEngine.Export.Generator.csproj");
+	}
+
+	std::filesystem::path FindRepoRoot(std::filesystem::path start)
+	{
+		if (start.empty())
+		{
+			return {};
+		}
+
+		start = std::filesystem::absolute(start).lexically_normal();
+		for (std::filesystem::path current = start; !current.empty();)
+		{
+			if (IsRepoRoot(current))
+			{
+				return current;
+			}
+
+			const std::filesystem::path parent = current.parent_path();
+			if (parent == current)
+			{
+				break;
+			}
+
+			current = parent;
+		}
+
+		return {};
+	}
+
+	void AppendRepoBridgeCandidates(const std::filesystem::path& repoRoot, std::vector<std::filesystem::path>& files)
+	{
+		if (repoRoot.empty())
+		{
+			return;
+		}
+
+		// Prefer repo-local managed outputs during development when they are newer
+		// than the active install tree. This keeps Assembly-CSharp compilation in
+		// sync with the latest bridge surface even before the editor binary is
+		// restarted from a refreshed install tree.
+		const std::filesystem::path binRoot = repoRoot / "Engine" / "Managed" / "bin";
+		files.push_back(binRoot / "Debug" / "net10.0" / "TerraEngine.CSharp.dll");
+		files.push_back(binRoot / "Debug" / "net10.0" / "win-x64" / "TerraEngine.CSharp.dll");
+		files.push_back(binRoot / "Release" / "net10.0" / "TerraEngine.CSharp.dll");
+		files.push_back(binRoot / "Release" / "net10.0" / "win-x64" / "TerraEngine.CSharp.dll");
+	}
+
+	void AppendRepoAnalyzerCandidates(const std::filesystem::path& repoRoot, std::vector<std::filesystem::path>& files)
+	{
+		if (repoRoot.empty())
+		{
+			return;
+		}
+
+		const std::filesystem::path binRoot = repoRoot / "Editor" / "Managed" / "TerraEngine.Export.Generator" / "bin";
+		files.push_back(binRoot / "Debug" / "netstandard2.0" / "TerraEngine.Export.Generator.dll");
+		files.push_back(binRoot / "Release" / "netstandard2.0" / "TerraEngine.Export.Generator.dll");
+	}
+
+	std::filesystem::path SelectNewestExistingFile(const std::vector<std::filesystem::path>& candidates)
+	{
+		std::filesystem::path selectedPath;
+		std::filesystem::file_time_type selectedWriteTime{};
+		bool foundCandidate = false;
+		for (const std::filesystem::path& candidate : candidates)
+		{
+			std::error_code statusError;
+			if (!std::filesystem::is_regular_file(candidate, statusError))
+			{
+				continue;
+			}
+
+			std::error_code timeError;
+			const std::filesystem::file_time_type writeTime = std::filesystem::last_write_time(candidate, timeError);
+			if (timeError)
+			{
+				continue;
+			}
+
+			if (!foundCandidate || writeTime > selectedWriteTime)
+			{
+				selectedPath = candidate;
+				selectedWriteTime = writeTime;
+				foundCandidate = true;
+			}
+		}
+
+		return foundCandidate ? selectedPath : std::filesystem::path{};
 	}
 
 #if defined(_WIN32)
@@ -668,8 +791,7 @@ bool ScriptWorkspaceService::WriteWorkspaceFiles(std::string* outError)
 
 bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 {
-	const std::filesystem::path managedRoot = ResolveManagedRoot();
-	const std::filesystem::path sourceDll = managedRoot / "TerraEngine.CSharp.dll";
+	const std::filesystem::path sourceDll = ResolveManagedBridgePath();
 	const std::filesystem::path targetDll = GetReferenceRoot() / "TerraEngine.CSharp.dll";
 
 	if (!std::filesystem::exists(sourceDll))
@@ -703,14 +825,14 @@ bool ScriptWorkspaceService::SyncManagedReferences(std::string* outError)
 		return false;
 	}
 
-	const std::filesystem::path sourcePdb = managedRoot / "TerraEngine.CSharp.pdb";
+	const std::filesystem::path sourcePdb = sourceDll.parent_path() / "TerraEngine.CSharp.pdb";
 	if (std::filesystem::exists(sourcePdb))
 	{
 		std::filesystem::copy_file(sourcePdb, GetReferenceRoot() / "TerraEngine.CSharp.pdb", std::filesystem::copy_options::overwrite_existing, copyError);
 	}
 
 	// Copy the source generator (analyzer) into the project.
-	const std::filesystem::path analyzerSource = managedRoot / "Analyzers" / "TerraEngine.Export.Generator.dll";
+	const std::filesystem::path analyzerSource = ResolveManagedAnalyzerPath();
 	const std::filesystem::path analyzerDest = GetReferenceRoot() / "TerraEngine.Export.Generator.dll";
 	// Exported gameplay builds depend on this analyzer to generate the script
 	// registry that the native export runtime calls into. If the editor ships
@@ -801,24 +923,56 @@ std::filesystem::path ScriptWorkspaceService::ResolveTemplateRoot() const
 	return candidates[1];
 }
 
-std::filesystem::path ScriptWorkspaceService::ResolveManagedRoot() const
+std::filesystem::path ScriptWorkspaceService::ResolveManagedBridgePath() const
 {
-	const std::filesystem::path current = std::filesystem::current_path();
-	const std::filesystem::path candidates[] = {
-		current / "Managed",
-		current / "Editor" / "Managed",
-		current.parent_path() / "Editor" / "Managed"
-	};
+	std::vector<std::filesystem::path> candidates;
+	AppendManagedRootCandidates(std::filesystem::current_path(), candidates);
+	AppendManagedRootCandidates(ResolveEditorExecutableDirectory(), candidates);
 
-	for (const auto& candidate : candidates)
+	std::vector<std::filesystem::path> bridgeCandidates;
+	bridgeCandidates.reserve(candidates.size() + 2);
+	for (const std::filesystem::path& root : candidates)
 	{
-		if (std::filesystem::exists(candidate / "TerraEngine.CSharp.dll"))
-		{
-			return candidate;
-		}
+		bridgeCandidates.push_back(root / "TerraEngine.CSharp.dll");
 	}
 
-	return candidates[0];
+	std::filesystem::path repoRoot = FindRepoRoot(std::filesystem::current_path());
+	if (repoRoot.empty())
+	{
+		repoRoot = FindRepoRoot(ResolveEditorExecutableDirectory());
+	}
+
+	// When TerraEngine runs from a source checkout, repo-local managed builds can
+	// be newer than the install tree that launched the current editor process.
+	// Choosing the newest valid file keeps the project compile reference aligned
+	// with the latest bridge API surface.
+	AppendRepoBridgeCandidates(repoRoot, bridgeCandidates);
+	return SelectNewestExistingFile(bridgeCandidates);
+}
+
+std::filesystem::path ScriptWorkspaceService::ResolveManagedAnalyzerPath() const
+{
+	std::vector<std::filesystem::path> roots;
+	AppendManagedRootCandidates(std::filesystem::current_path(), roots);
+	AppendManagedRootCandidates(ResolveEditorExecutableDirectory(), roots);
+
+	std::vector<std::filesystem::path> analyzerCandidates;
+	analyzerCandidates.reserve(roots.size() + 2);
+	for (const std::filesystem::path& root : roots)
+	{
+		analyzerCandidates.push_back(root / "Analyzers" / "TerraEngine.Export.Generator.dll");
+	}
+
+	std::filesystem::path repoRoot = FindRepoRoot(std::filesystem::current_path());
+	if (repoRoot.empty())
+	{
+		repoRoot = FindRepoRoot(ResolveEditorExecutableDirectory());
+	}
+
+	// Keep the source generator in lockstep with the bridge reference so editor
+	// builds do not mix a fresh generator with a stale TerraEngine.CSharp.dll.
+	AppendRepoAnalyzerCandidates(repoRoot, analyzerCandidates);
+	return SelectNewestExistingFile(analyzerCandidates);
 }
 
 #if defined(_WIN32)

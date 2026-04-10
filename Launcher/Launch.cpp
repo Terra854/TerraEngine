@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 #include <entt/entt.hpp>
@@ -49,13 +50,21 @@ void ConfigureExportBootstrap(const char* argv0) {
 	const fs::path executablePath = ResolveExecutablePath(argv0);
 	const fs::path executableDirectory = executablePath.parent_path();
 	const fs::path archivePath = executableDirectory / (executablePath.stem().string() + ".tepak");
+	const fs::path managedLibraryPath = ResolveManagedLibraryPath(executableDirectory);
+
+	if (!fs::exists(archivePath)) {
+		throw std::runtime_error("Export archive not found beside the launcher: " + archivePath.string());
+	}
+	if (!fs::exists(managedLibraryPath)) {
+		throw std::runtime_error("NativeAOT gameplay runtime not found: " + managedLibraryPath.string());
+	}
 
 	// The launcher now only records the deterministic export file locations.
 	// ResourceManager owns the actual TEPAK mount during engine startup, and
 	// ScriptingSystem still owns the eventual NativeAOT runtime load later in
 	// its own Initialize() step.
 	ResourceManager::Instance().ConfigureExportArchive(archivePath);
-	ScriptingSystem::Instance().ConfigureExportRuntime(ResolveManagedLibraryPath(executableDirectory));
+	ScriptingSystem::Instance().ConfigureExportRuntime(managedLibraryPath);
 }
 } // namespace
 

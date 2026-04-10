@@ -112,6 +112,7 @@ private:
 		void* handle = nullptr;
 		uint64_t scriptId = 0;
 		uint32_t objectId = 0;
+		std::string bindingId;
 		bool started = false;
 	};
 	std::vector<ExportScriptInstance> m_ExportInstances;

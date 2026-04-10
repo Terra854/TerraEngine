@@ -8,6 +8,18 @@ using System.Runtime.InteropServices;
 
 namespace TerraEngine.Export
 {
+	public enum ExportFieldValueKind : int
+	{
+		Bool = 0,
+		Int = 1,
+		Float = 2,
+		EntityReference = 3,
+		Vector2 = 4,
+		Vector3 = 5,
+		Vector4 = 6,
+		Quaternion = 7
+	}
+
 	[StructLayout(LayoutKind.Sequential, Pack = 8)]
 	public unsafe struct ExportFieldDescriptor
 	{

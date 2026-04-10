@@ -6,15 +6,22 @@
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <stdexcept>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 namespace fs = std::filesystem;
 
 namespace
 {
 	constexpr float kLiveInspectorRefreshSeconds = 0.25f;
+	constexpr std::size_t kMaxExportFieldValueBytes = sizeof(glm::quat);
 
 	uint64_t FnvHash64(const std::string& text) {
 		const uint64_t FnvOffsetBasis = 14695981039346656037ULL;
@@ -25,6 +32,199 @@ namespace
 			hash *= FnvPrime;
 		}
 		return hash;
+	}
+
+	std::string ExtractExportFieldName(const ExportFieldDescriptor& descriptor)
+	{
+		std::size_t nameLength = 0;
+		while (nameLength < sizeof(descriptor.nameUtf8) && descriptor.nameUtf8[nameLength] != '\0')
+		{
+			++nameLength;
+		}
+		return std::string(descriptor.nameUtf8, descriptor.nameUtf8 + nameLength);
+	}
+
+	std::string ExtractRootFieldPath(std::string_view fieldPath)
+	{
+		const std::size_t dotIndex = fieldPath.find('.');
+		const std::size_t bracketIndex = fieldPath.find('[');
+		std::size_t cutIndex = std::string_view::npos;
+		if (dotIndex != std::string_view::npos)
+		{
+			cutIndex = dotIndex;
+		}
+		if (bracketIndex != std::string_view::npos)
+		{
+			cutIndex = cutIndex == std::string_view::npos ? bracketIndex : std::min(cutIndex, bracketIndex);
+		}
+
+		return cutIndex == std::string_view::npos
+			? std::string(fieldPath)
+			: std::string(fieldPath.substr(0, cutIndex));
+	}
+
+	bool TryBuildExportFieldBuffer(const ScriptFieldValue& fieldValue, const ExportFieldDescriptor& descriptor, std::array<std::byte, kMaxExportFieldValueBytes>& buffer)
+	{
+		buffer.fill(std::byte{ 0 });
+		const ExportFieldValueKind valueKind = static_cast<ExportFieldValueKind>(descriptor.valueKind);
+
+		try
+		{
+			switch (valueKind)
+			{
+			case ExportFieldValueKind::Bool:
+			{
+				if (!fieldValue.value.is_boolean() || descriptor.valueSize != sizeof(bool))
+				{
+					return false;
+				}
+
+				const bool value = fieldValue.value.get<bool>();
+				std::memcpy(buffer.data(), &value, sizeof(value));
+				return true;
+			}
+			case ExportFieldValueKind::Int:
+			{
+				if (!fieldValue.value.is_number_integer() || descriptor.valueSize != sizeof(int))
+				{
+					return false;
+				}
+
+				const int value = fieldValue.value.get<int>();
+				std::memcpy(buffer.data(), &value, sizeof(value));
+				return true;
+			}
+			case ExportFieldValueKind::Float:
+			{
+				if (!fieldValue.value.is_number() || descriptor.valueSize != sizeof(float))
+				{
+					return false;
+				}
+
+				const float value = fieldValue.value.get<float>();
+				std::memcpy(buffer.data(), &value, sizeof(value));
+				return true;
+			}
+			case ExportFieldValueKind::EntityReference:
+			{
+				if (!fieldValue.value.is_number_unsigned() && !fieldValue.value.is_number_integer())
+				{
+					return false;
+				}
+				if (descriptor.valueSize != sizeof(uint32_t))
+				{
+					return false;
+				}
+
+				const uint32_t value = fieldValue.value.get<uint32_t>();
+				std::memcpy(buffer.data(), &value, sizeof(value));
+				return true;
+			}
+			case ExportFieldValueKind::Vector2:
+			{
+				if (!fieldValue.value.is_array() || fieldValue.value.size() != 2 || descriptor.valueSize != sizeof(glm::vec2))
+				{
+					return false;
+				}
+
+				const glm::vec2 value(
+					fieldValue.value[0].get<float>(),
+					fieldValue.value[1].get<float>());
+				std::memcpy(buffer.data(), &value, sizeof(value));
+				return true;
+			}
+			case ExportFieldValueKind::Vector3:
+			{
+				if (!fieldValue.value.is_array() || fieldValue.value.size() != 3 || descriptor.valueSize != sizeof(glm::vec3))
+				{
+					return false;
+				}
+
+				const glm::vec3 value(
+					fieldValue.value[0].get<float>(),
+					fieldValue.value[1].get<float>(),
+					fieldValue.value[2].get<float>());
+				std::memcpy(buffer.data(), &value, sizeof(value));
+				return true;
+			}
+			case ExportFieldValueKind::Vector4:
+			{
+				if (!fieldValue.value.is_array() || fieldValue.value.size() != 4 || descriptor.valueSize != sizeof(glm::vec4))
+				{
+					return false;
+				}
+
+				const glm::vec4 value(
+					fieldValue.value[0].get<float>(),
+					fieldValue.value[1].get<float>(),
+					fieldValue.value[2].get<float>(),
+					fieldValue.value[3].get<float>());
+				std::memcpy(buffer.data(), &value, sizeof(value));
+				return true;
+			}
+			case ExportFieldValueKind::Quaternion:
+			{
+				if (!fieldValue.value.is_array() || fieldValue.value.size() != 4 || descriptor.valueSize != sizeof(glm::quat))
+				{
+					return false;
+				}
+
+				const glm::quat value(
+					fieldValue.value[3].get<float>(),
+					fieldValue.value[0].get<float>(),
+					fieldValue.value[1].get<float>(),
+					fieldValue.value[2].get<float>());
+				std::memcpy(buffer.data(), &value, sizeof(value));
+				return true;
+			}
+			}
+		}
+		catch (const std::exception&)
+		{
+			return false;
+		}
+
+		return false;
+	}
+
+	void ApplyExportBindingValues(const ManagedVTable& vtable, const ScriptBinding& binding, void* handle, uint64_t scriptId)
+	{
+		if (handle == nullptr || vtable.setFieldValue == nullptr || vtable.getFieldCount == nullptr || vtable.getFieldDescriptors == nullptr)
+		{
+			return;
+		}
+
+		const int32_t fieldCount = vtable.getFieldCount(scriptId);
+		if (fieldCount <= 0)
+		{
+			return;
+		}
+
+		std::vector<ExportFieldDescriptor> descriptors(static_cast<std::size_t>(fieldCount));
+		vtable.getFieldDescriptors(scriptId, descriptors.data(), fieldCount);
+
+		for (const ScriptFieldValue& fieldValue : binding.serializedValues)
+		{
+			const std::string rootFieldName = ExtractRootFieldPath(fieldValue.fieldPath.empty() ? fieldValue.fieldName : fieldValue.fieldPath);
+			const uint64_t fieldNameHash = FnvHash64(rootFieldName);
+			auto descriptorIt = std::find_if(descriptors.begin(), descriptors.end(), [&](const ExportFieldDescriptor& descriptor) {
+				return descriptor.nameHash == fieldNameHash || ExtractExportFieldName(descriptor) == rootFieldName;
+			});
+			if (descriptorIt == descriptors.end())
+			{
+				TERRAENGINE_LOG(LogLevel::Warning, "[Scripting] Export hydration skipped unknown field '" << rootFieldName << "' on binding " << binding.bindingId);
+				continue;
+			}
+
+			std::array<std::byte, kMaxExportFieldValueBytes> valueBuffer{};
+			if (!TryBuildExportFieldBuffer(fieldValue, *descriptorIt, valueBuffer))
+			{
+				TERRAENGINE_LOG(LogLevel::Warning, "[Scripting] Export hydration could not decode field '" << rootFieldName << "' on binding " << binding.bindingId);
+				continue;
+			}
+
+			vtable.setFieldValue(handle, descriptorIt->fieldIndex, valueBuffer.data(), descriptorIt->valueSize);
+		}
 	}
 
 	struct ManagedDescriptorResponse
@@ -171,7 +371,10 @@ void ScriptingSystem::Initialize() {
 		// online with the rest of the engine systems instead of before them.
 		ManagedVTable vtable{};
 		if (!DotNetHost::Instance().InitializeExportRuntime(*m_ConfiguredExportRuntimePath, &vtable)) {
-			throw std::runtime_error("Failed to initialize NativeAOT export runtime from " + m_ConfiguredExportRuntimePath->string());
+			const std::string hostDiagnostic = DotNetHost::Instance().GetLastNativeError();
+			throw std::runtime_error(hostDiagnostic.empty()
+				? "Failed to initialize NativeAOT export runtime from " + m_ConfiguredExportRuntimePath->string()
+				: hostDiagnostic);
 		}
 
 		InitializeExportMode(vtable);
@@ -355,9 +558,21 @@ void ScriptingSystem::Shutdown() {
 
 	// Reset export-mode caches so a later engine session in the same process
 	// can reinitialize the NativeAOT scripting path cleanly.
+	std::vector<void*> handlesToDestroy;
 	{
 		std::scoped_lock lock(m_ExportInstancesMutex);
+		for (const ExportScriptInstance& instance : m_ExportInstances)
+		{
+			handlesToDestroy.push_back(instance.handle);
+		}
 		m_ExportInstances.clear();
+	}
+	for (void* handle : handlesToDestroy)
+	{
+		if (m_ExportVTable.destroyScript != nullptr && handle != nullptr)
+		{
+			m_ExportVTable.destroyScript(handle);
+		}
 	}
 	m_ExportVTable = {};
 	m_ExportMode = false;
@@ -940,7 +1155,10 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	// Collect active script bindings from the ECS, same as editor mode.
 	struct ExportBatchItem {
 		uint32_t objectId = 0;
+		uint64_t scriptId = 0;
+		std::string bindingId;
 		std::string className;
+		std::vector<ScriptFieldValue> serializedValues;
 	};
 
 	std::vector<ExportBatchItem> allBindings;
@@ -955,10 +1173,51 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 
 		auto guard = scriptComponent->acquireReadLock();
 		for (const ScriptBinding& binding : scriptComponent->GetBindings()) {
-			if (!binding.enabled || binding.className.empty()) {
+			if (!binding.enabled) {
 				continue;
 			}
-			allBindings.push_back({ static_cast<uint32_t>(object.EntityId()), binding.className });
+
+			if (binding.scriptId == 0) {
+				TERRAENGINE_LOG(LogLevel::Error, "[Scripting] Export binding " << binding.bindingId << " on object " << static_cast<uint32_t>(object.EntityId()) << " is missing staged scriptId data.");
+				continue;
+			}
+
+			ExportBatchItem item;
+			item.objectId = static_cast<uint32_t>(object.EntityId());
+			item.scriptId = binding.scriptId;
+			item.bindingId = binding.bindingId;
+			item.className = binding.className.empty() ? ("scriptId:" + std::to_string(binding.scriptId)) : binding.className;
+			item.serializedValues = binding.serializedValues;
+			allBindings.push_back(std::move(item));
+		}
+	}
+
+	std::vector<ExportScriptInstance> staleInstances;
+	{
+		std::scoped_lock lock(m_ExportInstancesMutex);
+		auto staleBegin = std::remove_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& instance) {
+			const bool stillActive = std::any_of(allBindings.begin(), allBindings.end(), [&](const ExportBatchItem& item) {
+				return item.objectId == instance.objectId
+					&& item.bindingId == instance.bindingId
+					&& item.scriptId == instance.scriptId;
+			});
+			if (!stillActive) {
+				staleInstances.push_back(instance);
+			}
+			return !stillActive;
+		});
+		m_ExportInstances.erase(staleBegin, m_ExportInstances.end());
+	}
+
+	for (const ExportScriptInstance& instance : staleInstances) {
+		if (instance.handle == nullptr) {
+			continue;
+		}
+		if (instance.started && m_ExportVTable.invokeDisable != nullptr) {
+			m_ExportVTable.invokeDisable(instance.handle);
+		}
+		if (m_ExportVTable.destroyScript != nullptr) {
+			m_ExportVTable.destroyScript(instance.handle);
 		}
 	}
 
@@ -973,36 +1232,54 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 		return;
 	}
 
-	// Ensure all required script instances exist and are initialised.
+	// Create missing instances first so gameplay callbacks always see hydrated
+	// scene values before Awake and Start begin executing.
+	std::vector<ExportBatchItem> pendingCreations;
 	{
 		std::scoped_lock lock(m_ExportInstancesMutex);
-		for (const auto& item : allBindings) {
-			const uint64_t scriptId = FnvHash64(item.className);
-			
-			auto it = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& inst) {
-				return inst.objectId == item.objectId && inst.scriptId == scriptId;
+		for (const ExportBatchItem& item : allBindings) {
+			auto instanceIt = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& instance) {
+				return instance.objectId == item.objectId
+					&& instance.bindingId == item.bindingId
+					&& instance.scriptId == item.scriptId;
 			});
-
-			if (it == m_ExportInstances.end()) {
-				TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Creating instance for " << item.className << " (ID: " << scriptId << ") on object " << item.objectId);
-				void* handle = m_ExportVTable.createScript(scriptId, item.objectId);
-				if (handle != nullptr) {
-					ExportScriptInstance inst;
-					inst.handle = handle;
-					inst.scriptId = scriptId;
-					inst.objectId = item.objectId;
-					inst.started = false;
-					m_ExportInstances.push_back(inst);
-					
-					if (m_ExportVTable.invokeAwake) {
-						m_ExportVTable.invokeAwake(handle);
-					}
-					TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Instance created successfully.");
-				} else {
-					TERRAENGINE_LOG(LogLevel::Error, "[Scripting] createScript returned NULL for " << item.className << " (ID: " << scriptId << ")");
-				}
+			if (instanceIt == m_ExportInstances.end()) {
+				pendingCreations.push_back(item);
 			}
 		}
+	}
+
+	for (const ExportBatchItem& item : pendingCreations) {
+		if (m_ExportVTable.createScript == nullptr) {
+			break;
+		}
+
+		TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Creating instance for " << item.className << " (ID: " << item.scriptId << ") on object " << item.objectId);
+		void* handle = m_ExportVTable.createScript(item.scriptId, item.objectId);
+		if (handle == nullptr) {
+			TERRAENGINE_LOG(LogLevel::Error, "[Scripting] createScript returned NULL for " << item.className << " (ID: " << item.scriptId << ")");
+			continue;
+		}
+
+		ScriptBinding stagedBinding;
+		stagedBinding.bindingId = item.bindingId;
+		stagedBinding.className = item.className;
+		stagedBinding.scriptId = item.scriptId;
+		stagedBinding.serializedValues = item.serializedValues;
+		ApplyExportBindingValues(m_ExportVTable, stagedBinding, handle, item.scriptId);
+		if (m_ExportVTable.invokeAwake != nullptr) {
+			m_ExportVTable.invokeAwake(handle);
+		}
+
+		ExportScriptInstance instance;
+		instance.handle = handle;
+		instance.scriptId = item.scriptId;
+		instance.objectId = item.objectId;
+		instance.bindingId = item.bindingId;
+		instance.started = false;
+
+		std::scoped_lock lock(m_ExportInstancesMutex);
+		m_ExportInstances.push_back(std::move(instance));
 	}
 
 	// Batch and dispatch through the thread pool.
@@ -1018,10 +1295,11 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	auto dispatchBatch = [&](std::vector<ExportBatchItem> items) {
 		auto task = ThreadPool::instance().createTask([items = std::move(items), this, deltaTime]() {
 			std::scoped_lock lock(m_ExportInstancesMutex);
-			for (const auto& entry : items) {
-				const uint64_t scriptId = FnvHash64(entry.className);
+			for (const ExportBatchItem& entry : items) {
 				auto it = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& inst) {
-					return inst.objectId == entry.objectId && inst.scriptId == scriptId;
+					return inst.objectId == entry.objectId
+						&& inst.bindingId == entry.bindingId
+						&& inst.scriptId == entry.scriptId;
 				});
 
 				if (it != m_ExportInstances.end()) {
