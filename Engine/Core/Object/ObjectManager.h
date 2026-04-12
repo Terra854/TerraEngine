@@ -14,6 +14,14 @@
 #include "Components/Transform.h"
 #include "Utilities/UUID.h"
 
+struct ObjectMetadata {
+	std::string name;
+	std::string tag = "Untagged";
+	std::string layer = "Default";
+	bool active = true;
+	bool isStatic = false;
+};
+
 class ObjectManager {
 public:
 	static ObjectManager& instance();
@@ -34,14 +42,47 @@ public:
 	// can display a hierarchy tree.
 	std::vector<Object> getRootObjects();
 	// Return a stable display name for the object, defaulting to "Unnamed"
-	// when the object is missing from the internal name table.
+	// when the object is missing from the internal metadata table.
 	std::string getObjectName(const Object& obj) const;
 	// Update the display name for the object.
 	void setObjectName(const Object& obj, const std::string& name);
+
+	// Return the object's gameplay-specific tag, defaulting to "Untagged"
+	// when the object is missing from the internal metadata table.
+	std::string getObjectTag(const Object& obj) const;
+	// Update the gameplay-specific tag for the object.
+	void setObjectTag(const Object& obj, const std::string& tag);
+
+	// Return the object's layer assignment, defaulting to "Default"
+	// when the object is missing from the internal metadata table.
+	std::string getObjectLayer(const Object& obj) const;
+	// Update the layer assignment for the object.
+	void setObjectLayer(const Object& obj, const std::string& layer);
+
+	// Return whether the object is considered active in the scene.
+	bool isObjectActive(const Object& obj) const;
+	// Set the object's active state in the scene.
+	void setObjectActive(const Object& obj, bool active);
+
+	// Return whether the object is marked as static for engine optimizations.
+	bool isObjectStatic(const Object& obj) const;
+	// Set the object's static state for engine optimizations.
+	void setObjectStatic(const Object& obj, bool isStatic);
+
+	// Get the list of all globally available tags defined in the project.
+	const std::vector<std::string>& getAvailableTags() const { return availableTags; }
+	// Register a new gameplay tag to the global project list.
+	void registerTag(const std::string& tag);
+
+	// Get the list of all globally available layers defined in the project.
+	const std::vector<std::string>& getAvailableLayers() const { return availableLayers; }
+	// Register a new system layer to the global project list.
+	void registerLayer(const std::string& layer);
+
 	// Find the first valid object whose authored display name matches the
 	// requested text exactly. Returns std::nullopt when no match exists.
 	std::optional<Object> FindObjectByName(std::string_view name) const;
-	// Find the first valid object whose TagComponent string matches exactly.
+	// Find the first valid object whose tag string matches exactly.
 	// Returns std::nullopt when no tagged object matches.
 	std::optional<Object> FindObjectByTag(std::string_view tag) const;
 	// Build an Object handle for an existing entity id if it is valid.
@@ -64,8 +105,9 @@ public:
 	void forEachObjectWithComponents(Func&& func)
 	{
 		registry.view<Components...>().each([&](entt::entity entity, Components&... comps) {
-			if ((comps.active && ...)) {
-				func(makeHandle(entity), comps...);
+			auto obj = makeHandle(entity);
+			if (isObjectActive(obj) && (comps.active && ...)) {
+				func(obj, comps...);
 			}
 		});
 	};
@@ -79,11 +121,14 @@ public:
 		auto view = registry.view<Components...>();
 		for (auto entity : view)
 		{
+			auto obj = makeHandle(entity);
+			if (!isObjectActive(obj)) continue;
+
 			// Retrieve components to check their active state
 			auto tuple = view.get(entity);
 			if (std::apply([](auto&... comps) { return (comps.active && ...); }, tuple))
 			{
-				objects.push_back(makeHandle(entity));
+				objects.push_back(obj);
 			}
 		}
 		return objects;
@@ -104,13 +149,13 @@ public:
 	void SetOnModifiedCallback(std::function<void()> callback) { onModified = callback; }
 
 private:
-	ObjectManager() = default;
-	~ObjectManager() = default;
+	ObjectManager();
+	~ObjectManager();
 
 	friend class Object;
 
 	std::function<void()> onModified;
-	std::unordered_map<Object, std::string> objectMap;
+	std::unordered_map<Object, ObjectMetadata> metadataMap;
 	entt::registry registry;
 	std::unordered_map<entt::entity, entt::entity> parentMap;
 	std::unordered_map<entt::entity, std::vector<entt::entity>> childrenMap;
@@ -119,6 +164,9 @@ private:
 	// across undo/redo and serialization boundaries.
 	std::unordered_map<TerraEngine::UUID, entt::entity> uuidToEntity;
 	std::unordered_map<entt::entity, TerraEngine::UUID> entityToUuid;
+
+	std::vector<std::string> availableTags;
+	std::vector<std::string> availableLayers;
 
 	Object makeHandle(entt::entity entityId);
 	void detachFromParent(entt::entity childId);

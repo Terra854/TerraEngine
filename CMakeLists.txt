@@ -64,7 +64,6 @@ set(ENGINE_HEADERS
 	Engine/Core/Object/Object.h
 	Engine/Core/Object/ObjectManager.h
 	Engine/Components/Transform.h
-	Engine/Components/TagComponent.h
 	Engine/Input/InputBackend.h
 	Engine/Input/InputCodes.h
 	Engine/Input/InputSystem.h

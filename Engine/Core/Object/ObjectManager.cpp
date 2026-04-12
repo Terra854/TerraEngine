@@ -1,12 +1,36 @@
 #include "ObjectManager.h"
 
-#include "Components/TagComponent.h"
-
 #include <glm/gtc/quaternion.hpp>
 
 ObjectManager& ObjectManager::instance() {
 	static ObjectManager instance;
 	return instance;
+}
+
+ObjectManager::ObjectManager()
+{
+	// Initialize default tags and layers that the editor and gameplay systems
+	// expect to be present in any valid project.
+	availableTags = { "Untagged", "MainCamera", "Player", "GameController" };
+	availableLayers = { "Default", "TransparentFX", "Ignore Raycast", "Water", "UI" };
+}
+
+ObjectManager::~ObjectManager() = default;
+
+void ObjectManager::registerTag(const std::string& tag)
+{
+	if (std::find(availableTags.begin(), availableTags.end(), tag) == availableTags.end())
+	{
+		availableTags.push_back(tag);
+	}
+}
+
+void ObjectManager::registerLayer(const std::string& layer)
+{
+	if (std::find(availableLayers.begin(), availableLayers.end(), layer) == availableLayers.end())
+	{
+		availableLayers.push_back(layer);
+	}
 }
 
 Object ObjectManager::makeHandle(entt::entity entityId)
@@ -20,19 +44,19 @@ Object ObjectManager::makeHandle(entt::entity entityId)
 // Create a new Object
 Object ObjectManager::createObject(const std::string& name) {
 	// Every entity begins life with a Transform so systems can safely assume
-	// spatial data exists without guarding for missing components. Objects also
-	// get a TagComponent immediately so FindWithTag never depends on optional
-	// component setup that gameplay authors could forget.
+	// spatial data exists without guarding for missing components.
 	auto object = Object(registry);
 	object.addComponent<Transform>();
-	object.addComponent<TagComponent>();
+
 	// Assign a stable identity immediately upon creation so the entity can be
 	// tracked across serialization and undo sessions.
 	TerraEngine::UUID uuid = TerraEngine::GenerateUUID();
 	entityToUuid.emplace(object.EntityId(), uuid);
 	uuidToEntity.emplace(uuid, object.EntityId());
 	
-	objectMap.insert({ object, name });
+	ObjectMetadata metadata;
+	metadata.name = name;
+	metadataMap.insert({ object, metadata });
 	parentMap.emplace(object.EntityId(), entt::null);
 	childrenMap.emplace(object.EntityId(), std::vector<entt::entity>{});
 	
@@ -83,7 +107,7 @@ void ObjectManager::removeObject(Object obj) {
 	parentMap.erase(obj.id);
 
 	// Erase the object from the map
-	objectMap.erase(obj);
+	metadataMap.erase(obj);
 
 	if (onModified) onModified();
 }
@@ -214,9 +238,9 @@ std::vector<Object> ObjectManager::getChildren(const Object& parent)
 std::vector<Object> ObjectManager::getRootObjects()
 {
 	std::vector<Object> roots;
-	for (const auto& [objectHandle, name] : objectMap)
+	for (const auto& [objectHandle, metadata] : metadataMap)
 	{
-		(void)name;
+		(void)metadata;
 		const entt::entity entityId = objectHandle.EntityId();
 		auto parentIter = parentMap.find(entityId);
 		if (parentIter == parentMap.end() || parentIter->second == entt::null)
@@ -230,19 +254,97 @@ std::vector<Object> ObjectManager::getRootObjects()
 std::string ObjectManager::getObjectName(const Object& obj) const
 {
 	static const std::string kUnnamed = "Unnamed";
-	auto iter = objectMap.find(obj);
-	if (iter != objectMap.end())
+	auto iter = metadataMap.find(obj);
+	if (iter != metadataMap.end())
 	{
-		return iter->second;
+		return iter->second.name;
 	}
 	return kUnnamed;
 }
 
 void ObjectManager::setObjectName(const Object& obj, const std::string& name)
 {
-	if (objectMap.find(obj) != objectMap.end())
+	if (auto it = metadataMap.find(obj); it != metadataMap.end())
 	{
-		objectMap[obj] = name;
+		it->second.name = name;
+		if (onModified) onModified();
+	}
+}
+
+std::string ObjectManager::getObjectTag(const Object& obj) const
+{
+	static const std::string kUntagged = "Untagged";
+	auto iter = metadataMap.find(obj);
+	if (iter != metadataMap.end())
+	{
+		return iter->second.tag;
+	}
+	return kUntagged;
+}
+
+void ObjectManager::setObjectTag(const Object& obj, const std::string& tag)
+{
+	if (auto it = metadataMap.find(obj); it != metadataMap.end())
+	{
+		it->second.tag = tag;
+		if (onModified) onModified();
+	}
+}
+
+std::string ObjectManager::getObjectLayer(const Object& obj) const
+{
+	static const std::string kDefault = "Default";
+	auto iter = metadataMap.find(obj);
+	if (iter != metadataMap.end())
+	{
+		return iter->second.layer;
+	}
+	return kDefault;
+}
+
+void ObjectManager::setObjectLayer(const Object& obj, const std::string& layer)
+{
+	if (auto it = metadataMap.find(obj); it != metadataMap.end())
+	{
+		it->second.layer = layer;
+		if (onModified) onModified();
+	}
+}
+
+bool ObjectManager::isObjectActive(const Object& obj) const
+{
+	auto iter = metadataMap.find(obj);
+	if (iter != metadataMap.end())
+	{
+		return iter->second.active;
+	}
+	return true;
+}
+
+void ObjectManager::setObjectActive(const Object& obj, bool active)
+{
+	if (auto it = metadataMap.find(obj); it != metadataMap.end())
+	{
+		it->second.active = active;
+		if (onModified) onModified();
+	}
+}
+
+bool ObjectManager::isObjectStatic(const Object& obj) const
+{
+	auto iter = metadataMap.find(obj);
+	if (iter != metadataMap.end())
+	{
+		return iter->second.isStatic;
+	}
+	return false;
+}
+
+void ObjectManager::setObjectStatic(const Object& obj, bool isStatic)
+{
+	if (auto it = metadataMap.find(obj); it != metadataMap.end())
+	{
+		it->second.isStatic = isStatic;
 		if (onModified) onModified();
 	}
 }
@@ -252,14 +354,14 @@ std::optional<Object> ObjectManager::FindObjectByName(std::string_view name) con
 	// Names live in the side-table because they are editor-facing metadata
 	// rather than ECS component state. Iterate that table so lookups stay in
 	// sync with the hierarchy names authors actually see.
-	for (const auto& [objectHandle, objectName] : objectMap)
+	for (const auto& [objectHandle, metadata] : metadataMap)
 	{
 		if (!registry.valid(objectHandle.EntityId()))
 		{
 			continue;
 		}
 
-		if (objectName == name)
+		if (metadata.name == name)
 		{
 			return const_cast<ObjectManager*>(this)->makeHandle(objectHandle.EntityId());
 		}
@@ -270,19 +372,18 @@ std::optional<Object> ObjectManager::FindObjectByName(std::string_view name) con
 
 std::optional<Object> ObjectManager::FindObjectByTag(std::string_view tag) const
 {
-	// Tags live on a dedicated component so scripts can query them without
-	// overloading the scene-hierarchy display name with gameplay meaning.
-	auto view = registry.view<const TagComponent>();
-	for (entt::entity entityId : view)
+	// Tags now live in the metadata side-table.
+	for (const auto& [objectHandle, metadata] : metadataMap)
 	{
-		const TagComponent& tagComponent = view.get<const TagComponent>(entityId);
-		auto guard = tagComponent.acquireReadLock();
-		if (!tagComponent.active || tagComponent.tag != tag)
+		if (!registry.valid(objectHandle.EntityId()))
 		{
 			continue;
 		}
 
-		return const_cast<ObjectManager*>(this)->makeHandle(entityId);
+		if (metadata.active && metadata.tag == tag)
+		{
+			return const_cast<ObjectManager*>(this)->makeHandle(objectHandle.EntityId());
+		}
 	}
 
 	return std::nullopt;
@@ -385,7 +486,7 @@ TerraEngine::UUID ObjectManager::getUUID(entt::entity entity)
 void ObjectManager::clear()
 {
 	registry.clear();
-	objectMap.clear();
+	metadataMap.clear();
 	parentMap.clear();
 	childrenMap.clear();
 	uuidToEntity.clear();

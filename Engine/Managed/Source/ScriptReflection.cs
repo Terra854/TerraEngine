@@ -73,6 +73,7 @@ namespace TerraEngine
 		public double? RangeMin { get; set; }
 		public double? RangeMax { get; set; }
 		public string TypeFingerprint { get; set; } = string.Empty;
+		public object? DefaultValue { get; set; }
 		public List<string> EnumOptions { get; set; } = new();
 		public List<ScriptFieldDescriptorPayload> Children { get; set; } = new();
 	}

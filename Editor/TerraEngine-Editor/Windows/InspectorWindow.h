@@ -39,4 +39,7 @@ private:
     std::vector<uint8_t> m_MaterialDataBuffer;
     std::string m_LastScriptMessage;
     bool m_LastScriptMessageIsError = false;
+
+    char m_TagInputBuffer[256] = "";
+    char m_LayerInputBuffer[256] = "";
 };

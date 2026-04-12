@@ -7,7 +7,11 @@
 nlohmann::json SerializeObjectRecursive(Object& obj) {
     ObjectManager& objManager = ObjectManager::instance();
     nlohmann::json objJson;
-    objJson["name"] = objManager.getObjectName(obj);
+    objJson["name"] = obj.getName();
+    objJson["tag"] = obj.getTag();
+    objJson["layer"] = obj.getLayer();
+    objJson["active"] = obj.isActive();
+    objJson["isStatic"] = obj.isStatic();
     
     auto uuid = obj.getUUID();
     objJson["uuid"] = TerraEngine::ToHexString(uuid);
@@ -20,6 +24,8 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
 
     for (auto& [compName, functions] : registry)
     {
+        if (compName == "TagComponent") continue; // Skip TagComponent as it's now embedded in Object
+
         if (functions.hasComponent(obj))
         {
             nlohmann::json compJson = nlohmann::json::object();
@@ -104,6 +110,11 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
         // JSON document instead of its automatically generated transient UUID.
         objManager.UpdateEntityUUID(obj.EntityId(), uuid);
     }
+
+    obj.setTag(json.value("tag", "Untagged"));
+    obj.setLayer(json.value("layer", "Default"));
+    obj.setActive(json.value("active", true));
+    obj.setStatic(json.value("isStatic", false));
 
     if (parent) {
         objManager.setParent(obj, *parent);

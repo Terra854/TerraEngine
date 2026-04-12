@@ -809,8 +809,87 @@ namespace TerraEngine
 				}
 
 				descriptor = ScriptReflection.DescribeScriptType(scriptType);
+				PopulateDescriptorDefaultValues(scriptType, descriptor);
 				_descriptorCache[className] = descriptor;
 				return descriptor;
+			}
+		}
+
+		private static void PopulateDescriptorDefaultValues(Type scriptType, ScriptTypeDescriptorPayload descriptor)
+		{
+			// Create one detached sample instance so the inspector can reflect the
+			// field initializers that gameplay code authored on the C# class.
+			object? scriptSample = TryCreateDescriptorSample(scriptType);
+			foreach (ScriptFieldDescriptorPayload rootDescriptor in descriptor.Fields)
+			{
+				FieldInfo? field = FindSerializableField(scriptType, rootDescriptor.SerializedName);
+				if (field == null)
+				{
+					continue;
+				}
+
+				object? rootValue = scriptSample != null ? field.GetValue(scriptSample) : null;
+				PopulateDescriptorDefaultValues(rootDescriptor, field.FieldType, rootValue);
+			}
+		}
+
+		private static void PopulateDescriptorDefaultValues(ScriptFieldDescriptorPayload descriptor, Type valueType, object? value)
+		{
+			descriptor.DefaultValue = ConvertRuntimeValueToPayload(value, valueType);
+
+			if (descriptor.ContainerKind == "NestedObject")
+			{
+				// Nested children read from the sampled object when present. When a
+				// parent default is null, fall back to a detached sample so structs
+				// and serializable classes can still seed newly materialized data.
+				object? nestedSample = value ?? TryCreateDescriptorSample(valueType);
+				foreach (ScriptFieldDescriptorPayload childDescriptor in descriptor.Children)
+				{
+					FieldInfo? childField = FindSerializableField(valueType, childDescriptor.SerializedName);
+					if (childField == null)
+					{
+						continue;
+					}
+
+					object? childValue = nestedSample != null ? childField.GetValue(nestedSample) : null;
+					PopulateDescriptorDefaultValues(childDescriptor, childField.FieldType, childValue);
+				}
+
+				return;
+			}
+
+			if (descriptor.ContainerKind == "Collection"
+				&& descriptor.Children.Count > 0
+				&& ScriptReflection.TryGetCollectionElementType(valueType, out Type? elementType, out _)
+				&& elementType != null)
+			{
+				// Collection descriptors store one element template, so sample the
+				// element type independently to seed the "+" button in inspector UI.
+				object? elementSample = TryCreateDescriptorSample(elementType);
+				PopulateDescriptorDefaultValues(descriptor.Children[0], elementType, elementSample);
+			}
+		}
+
+		private static object? TryCreateDescriptorSample(Type valueType)
+		{
+			try
+			{
+				if (valueType == typeof(string))
+				{
+					return string.Empty;
+				}
+
+				if (valueType.IsArray)
+				{
+					Type? elementType = valueType.GetElementType();
+					return elementType != null ? Array.CreateInstance(elementType, 0) : null;
+				}
+
+				return Activator.CreateInstance(valueType);
+			}
+			catch
+			{
+				return null;
 			}
 		}
 

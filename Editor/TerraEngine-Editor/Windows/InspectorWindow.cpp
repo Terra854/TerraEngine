@@ -329,6 +329,13 @@ ScriptFieldDescriptor MaterializeCollectionDescriptor(const ScriptFieldDescripto
 
 nlohmann::json BuildDefaultScriptFieldJson(const ScriptFieldDescriptor& descriptor)
 {
+	// Prefer the managed field initializer captured from the C# type. When the
+	// bridge cannot provide one, fall back to a type-based editor default.
+	if (!descriptor.defaultValue.is_null())
+	{
+		return descriptor.defaultValue;
+	}
+
 	if (descriptor.containerKind == "Collection")
 	{
 		return nlohmann::json::array();
@@ -562,6 +569,49 @@ private:
     TerraEngine::UUID m_Uuid;
     std::string m_Component;
     std::string m_Property;
+    rttr::variant m_OldValue;
+    rttr::variant m_NewValue;
+};
+
+enum class ObjectMetadataField {
+    Tag,
+    Layer,
+    Active,
+    Static
+};
+
+class ModifyObjectMetadataCommand : public ICommand {
+public:
+    ModifyObjectMetadataCommand(entt::entity entity, ObjectMetadataField field, rttr::variant oldVal, rttr::variant newVal)
+        : m_Uuid(ObjectManager::instance().getUUID(entity)), m_Field(field), m_OldValue(oldVal), m_NewValue(newVal) {}
+
+    void Undo() override { ApplyValue(m_OldValue); }
+    void Redo() override { ApplyValue(m_NewValue); }
+
+    std::string GetName() const override {
+        switch (m_Field) {
+            case ObjectMetadataField::Tag: return "Modify Object Tag";
+            case ObjectMetadataField::Layer: return "Modify Object Layer";
+            case ObjectMetadataField::Active: return "Modify Object Active State";
+            case ObjectMetadataField::Static: return "Modify Object Static State";
+        }
+        return "Modify Object Metadata";
+    }
+
+private:
+    void ApplyValue(const rttr::variant& val) {
+        if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
+            switch (m_Field) {
+                case ObjectMetadataField::Tag: obj->setTag(val.get_value<std::string>()); break;
+                case ObjectMetadataField::Layer: obj->setLayer(val.get_value<std::string>()); break;
+                case ObjectMetadataField::Active: obj->setActive(val.get_value<bool>()); break;
+                case ObjectMetadataField::Static: obj->setStatic(val.get_value<bool>()); break;
+            }
+        }
+    }
+
+    TerraEngine::UUID m_Uuid;
+    ObjectMetadataField m_Field;
     rttr::variant m_OldValue;
     rttr::variant m_NewValue;
 };
@@ -1739,41 +1789,154 @@ void InspectorWindow::OnGui() {
         if (auto objOpt = objManager.getObject(*selectedEntity)) {
             Object obj = *objOpt;
             
-            bool isActive = true;
             auto& accessReg = ComponentAccessRegistry();
-            if (accessReg.find("Transform") != accessReg.end()) {
-                ComponentAccessFunctions& transAccess = accessReg["Transform"];
-                if (transAccess.hasComponent(obj)) {
-                    rttr::variant var = transAccess.getter(obj, "active");
-                    if (var.is_valid()) isActive = var.get_value<bool>();
-                }
-            }
 
-            ImGui::PushID("InspectorHeader");
+            // Header: Active Checkbox, Name Input, Static Checkbox
+            ImGui::PushID("InspectorHeaderTop");
+            
+            bool isActive = obj.isActive();
             if (ImGui::Checkbox("##ActiveGlobal", &isActive)) {
-                if (accessReg.find("Transform") != accessReg.end()) {
-                    ComponentAccessFunctions& transAccess = accessReg["Transform"];
-                    if (transAccess.hasComponent(obj)) {
-                        rttr::variant oldA = transAccess.getter(obj, "active");
-                        transAccess.setter(obj, "active", isActive);
-                        rttr::variant newA = transAccess.getter(obj, "active");
-                        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Transform", "active", oldA, newA));
-                    }
-                }
+                rttr::variant oldVal = obj.isActive();
+                obj.setActive(isActive);
+                rttr::variant newVal = obj.isActive();
+                UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Active, oldVal, newVal));
             }
             ImGui::PopID();
             
             ImGui::SameLine();
             
-            std::string name = objManager.getObjectName(obj);
+            std::string name = obj.getName();
             char nameBuf[256];
             strncpy(nameBuf, name.c_str(), sizeof(nameBuf));
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            
+            // Calculate width for name input: available width minus "Static" checkbox width
+            float staticWidth = ImGui::CalcTextSize("Static").x + ImGui::GetStyle().ItemSpacing.x + ImGui::GetFrameHeight();
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - staticWidth - ImGui::GetStyle().ItemSpacing.x);
+            
             if (ImGui::InputText("##ObjectName", nameBuf, sizeof(nameBuf))) {
                 if (name != nameBuf) {
                     UndoRedoSystem::Instance().PushCommand(std::make_unique<RenameObjectCommand>(obj.EntityId(), name, nameBuf));
-                    objManager.setObjectName(obj, nameBuf);
+                    obj.setName(nameBuf);
                 }
+            }
+            
+            ImGui::SameLine();
+            
+            bool isStatic = obj.isStatic();
+            if (ImGui::Checkbox("Static", &isStatic)) {
+                rttr::variant oldVal = obj.isStatic();
+                obj.setStatic(isStatic);
+                rttr::variant newVal = obj.isStatic();
+                UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Static, oldVal, newVal));
+            }
+
+            // Tag and Layer
+            ImGui::Spacing();
+            
+            // Use a table for alignment
+            if (ImGui::BeginTable("TagLayerTable", 4, ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("TagLabel", ImGuiTableColumnFlags_WidthFixed, 30.0f);
+                ImGui::TableSetupColumn("TagValue", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("LayerLabel", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+                ImGui::TableSetupColumn("LayerValue", ImGuiTableColumnFlags_WidthStretch);
+
+                ImGui::TableNextRow();
+                
+                ImGui::TableSetColumnIndex(0);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("Tag");
+                
+                ImGui::TableSetColumnIndex(1);
+                std::string tag = obj.getTag();
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::BeginCombo("##TagCombo", tag.c_str())) {
+                    const auto& tags = objManager.getAvailableTags();
+                    for (const auto& t : tags) {
+                        bool is_selected = (tag == t);
+                        if (ImGui::Selectable(t.c_str(), is_selected)) {
+                            if (tag != t) {
+                                rttr::variant oldV = tag;
+                                obj.setTag(t);
+                                rttr::variant newV = t;
+                                UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Tag, oldV, newV));
+                            }
+                        }
+                        if (is_selected) ImGui::SetItemDefaultFocus();
+                    }
+                    
+                    ImGui::Separator();
+                    if (ImGui::Selectable("Add Tag...")) {
+                        ImGui::OpenPopup("AddTagPopup");
+                        memset(m_TagInputBuffer, 0, sizeof(m_TagInputBuffer));
+                    }
+                    
+                    ImGui::EndCombo();
+                }
+
+                if (ImGui::BeginPopup("AddTagPopup")) {
+                    ImGui::Text("New Tag Name:");
+                    ImGui::InputText("##NewTagName", m_TagInputBuffer, sizeof(m_TagInputBuffer));
+                    if (ImGui::Button("Add") || (ImGui::IsKeyPressed(ImGuiKey_Enter))) {
+                        if (strlen(m_TagInputBuffer) > 0) {
+                            objManager.registerTag(m_TagInputBuffer);
+                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::TableSetColumnIndex(2);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("Layer");
+                
+                ImGui::TableSetColumnIndex(3);
+                std::string layer = obj.getLayer();
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::BeginCombo("##LayerCombo", layer.c_str())) {
+                    const auto& layers = objManager.getAvailableLayers();
+                    for (const auto& l : layers) {
+                        bool is_selected = (layer == l);
+                        if (ImGui::Selectable(l.c_str(), is_selected)) {
+                            if (layer != l) {
+                                rttr::variant oldV = layer;
+                                obj.setLayer(l);
+                                rttr::variant newV = l;
+                                UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Layer, oldV, newV));
+                            }
+                        }
+                        if (is_selected) ImGui::SetItemDefaultFocus();
+                    }
+
+                    ImGui::Separator();
+                    if (ImGui::Selectable("Add Layer...")) {
+                        ImGui::OpenPopup("AddLayerPopup");
+                        memset(m_LayerInputBuffer, 0, sizeof(m_LayerInputBuffer));
+                    }
+
+                    ImGui::EndCombo();
+                }
+
+                if (ImGui::BeginPopup("AddLayerPopup")) {
+                    ImGui::Text("New Layer Name:");
+                    ImGui::InputText("##NewLayerName", m_LayerInputBuffer, sizeof(m_LayerInputBuffer));
+                    if (ImGui::Button("Add") || (ImGui::IsKeyPressed(ImGuiKey_Enter))) {
+                        if (strlen(m_LayerInputBuffer) > 0) {
+                            objManager.registerLayer(m_LayerInputBuffer);
+                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::EndTable();
             }
             
             ImGui::Separator();

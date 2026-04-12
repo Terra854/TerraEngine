@@ -29,6 +29,7 @@ struct ScriptFieldDescriptor
 	double rangeMax = 0.0;
 	bool hasRange = false;
 	std::string typeFingerprint;
+	nlohmann::json defaultValue;
 	std::vector<std::string> enumOptions;
 	std::vector<ScriptFieldDescriptor> children;
 };
@@ -47,6 +48,7 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptFieldDescriptor& desc
 		{ "order", descriptor.order },
 		{ "tooltip", descriptor.tooltip },
 		{ "typeFingerprint", descriptor.typeFingerprint },
+		{ "defaultValue", descriptor.defaultValue },
 		{ "enumOptions", descriptor.enumOptions },
 		{ "children", descriptor.children }
 	};
@@ -71,6 +73,7 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptFieldDescriptor& de
 	descriptor.order = jsonValue.value("order", 0);
 	descriptor.tooltip = jsonValue.value("tooltip", std::string{});
 	descriptor.typeFingerprint = jsonValue.value("typeFingerprint", std::string{});
+	descriptor.defaultValue = jsonValue.contains("defaultValue") ? jsonValue["defaultValue"] : nlohmann::json{};
 	descriptor.enumOptions = jsonValue.value("enumOptions", std::vector<std::string>{});
 	descriptor.children = jsonValue.value("children", std::vector<ScriptFieldDescriptor>{});
 	descriptor.hasRange = jsonValue.contains("rangeMin") && jsonValue.contains("rangeMax");

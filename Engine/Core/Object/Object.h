@@ -19,6 +19,21 @@ public:
 
 	TerraEngine::UUID getUUID() const;
 
+	std::string getName() const;
+	void setName(const std::string& name);
+
+	std::string getTag() const;
+	void setTag(const std::string& tag);
+
+	std::string getLayer() const;
+	void setLayer(const std::string& layer);
+
+	bool isActive() const;
+	void setActive(bool active);
+
+	bool isStatic() const;
+	void setStatic(bool isStatic);
+
     // Component management with EnTT
     template<typename T, typename... Args>
     T& addComponent(Args&&... args) {

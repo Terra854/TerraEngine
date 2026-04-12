@@ -1,6 +1,5 @@
 #include "ComponentRegistry.h"
 #include "Components/Transform.h"
-#include "Components/TagComponent.h"
 #include "Components/ScriptComponent.h"
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"
@@ -21,7 +20,6 @@ void ComponentRegistry::RegisterAllComponents() {
 		.property("w", &glm::quat::w);
 
 	Transform::registerType();
-	TagComponent::registerType();
 	ScriptComponent::registerType();
 	CameraComponent::registerType();
 	LightComponent::registerType();
