@@ -46,16 +46,16 @@ namespace TerraEngine
 		public override string ToString() => $"({X}, {Y}, {Z}, {W})";
 	}
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct Quaternion
-    {
-        public float X, Y, Z, W;
+	[StructLayout(LayoutKind.Sequential)]
+	public struct Quaternion
+	{
+		public float X, Y, Z, W;
 
         public Quaternion(float x, float y, float z, float w)
-        {
-            X = x; Y = y; Z = z; W = w;
-        }
+		{
+			X = x; Y = y; Z = z; W = w;
+		}
 
-        public static Quaternion Identity => new Quaternion(0, 0, 0, 1);
-    }
+		public static Quaternion Identity => new Quaternion(0, 0, 0, 1);
+	}
 }

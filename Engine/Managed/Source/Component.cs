@@ -17,7 +17,7 @@ namespace TerraEngine
 				return value;
 			}
 
-			InternalCalls.Native_GetComponentProperty(Object.ID, GetType().Name, propertyName, &value, (int)type);
+			InternalCalls.Native_GetComponentProperty(Object.ID, ResolveNativeComponentTypeName(GetType()), propertyName, &value, (int)type);
 			return value;
 		}
 
@@ -30,7 +30,20 @@ namespace TerraEngine
 				return;
 			}
 
-			InternalCalls.Native_SetComponentProperty(Object.ID, GetType().Name, propertyName, &value, (int)type);
+			InternalCalls.Native_SetComponentProperty(Object.ID, ResolveNativeComponentTypeName(GetType()), propertyName, &value, (int)type);
+		}
+
+		internal static string ResolveNativeComponentTypeName(Type managedType)
+		{
+			// Managed API names stay short and idiomatic while native reflection
+			// keeps the original engine component names for serialization/tools.
+			return managedType.Name switch
+			{
+				nameof(Camera) => "CameraComponent",
+				nameof(Light) => "LightComponent",
+				nameof(MeshRenderer) => "MeshRenderComponent",
+				_ => managedType.Name
+			};
 		}
 
 		private static ScriptType GetScriptType<T>()

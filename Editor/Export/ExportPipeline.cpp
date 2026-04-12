@@ -669,6 +669,9 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 		std::filesystem::path shadersSrc = editorDir / "Shaders";
 		if (std::filesystem::exists(shadersSrc)) {
 			std::filesystem::path shadersDest = outputDir / "Shaders";
+			// Replace the staged shader tree wholesale so stale runtime shader
+			// payloads from a previous export cannot linger beside the new build.
+			RemoveDirectoryIfExists(shadersDest);
 			std::filesystem::create_directories(shadersDest);
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(shadersSrc)) {
 				if (!entry.is_regular_file()) continue;

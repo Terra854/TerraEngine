@@ -4,7 +4,7 @@
 #include "../Project/ProjectManager.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/ObjectManager.h"
-#include "Engine/Scripting/ScriptComponent.h"
+#include "Engine/Components/ScriptComponent.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 
 #include <array>

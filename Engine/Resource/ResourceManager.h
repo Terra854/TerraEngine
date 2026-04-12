@@ -8,6 +8,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <mutex>
 #include <utility>
@@ -134,6 +135,13 @@ public:
 	// Register a mapping between a UUID and a filesystem path so that GetMesh/GetTexture
 	// can trigger on-demand loading if the resource is not yet in the cache.
 	void RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type);
+	// Resolve a script-facing asset reference into the UUID the renderer uses
+	// internally. The lookup accepts either an exact relative path or a simple
+	// asset name/stem so gameplay code does not need to memorize UUIDs.
+	TerraEngine::UUID ResolveAssetReference(std::string_view assetReference, AssetType type);
+	// Convert an internal UUID back into a readable asset path so managed code
+	// can display or persist friendly identifiers instead of raw GUID text.
+	std::filesystem::path DescribeAssetReference(const TerraEngine::UUID& id, AssetType type) const;
 
 	// Inject a generated material directly into the cache so tooling can synthesize preview materials
 	// without writing TMAT files to disk. The cacheKey should be unique and stable (e.g., "generated/preview").

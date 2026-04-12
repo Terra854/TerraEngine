@@ -63,14 +63,15 @@ set(ENGINE_HEADERS
 	Engine/Core/Object/Component.h
 	Engine/Core/Object/Object.h
 	Engine/Core/Object/ObjectManager.h
-	Engine/Core/Object/Transform.h
+	Engine/Components/Transform.h
+	Engine/Components/TagComponent.h
 	Engine/Input/InputBackend.h
 	Engine/Input/InputCodes.h
 	Engine/Input/InputSystem.h
 	Engine/Resource/ResourceManager.h
 	Engine/Resource/ShaderCollection.h
 	Engine/Scene/SceneManager.h
-	Engine/Scene/LightComponent.h
+	Engine/Components/LightComponent.h
 	Engine/Scene/Serializer.h
 	Engine/Input/GLFW/GlfwInputBackend.h
 	Engine/Utilities/UUID.h
@@ -90,7 +91,7 @@ set(ENGINE_HEADERS
 	Engine/Renderer/RHI/Vulkan/VulkanVRS.h
 	Engine/DotNet/DotNetHost.h
 	Engine/Scripting/ScriptingSystem.h
-	Engine/Scripting/ScriptComponent.h
+	Engine/Components/ScriptComponent.h
 	Engine/Scripting/ExportVTable.h
 	Engine/Runtime/ContentMount/ContentMount.h
 	Engine/Debug.h
@@ -377,6 +378,9 @@ set(MANAGED_CORE_SOURCES
 	Engine/Managed/Source/Object.cs
 	Engine/Managed/Source/Component.cs
 	Engine/Managed/Source/Transform.cs
+	Engine/Managed/Source/Camera.cs
+	Engine/Managed/Source/Light.cs
+	Engine/Managed/Source/MeshRenderer.cs
 	Engine/Managed/Source/Math.cs
 	Engine/Managed/Source/Script.cs
 	Engine/Managed/Source/Time.cs
@@ -682,6 +686,20 @@ file(MAKE_DIRECTORY \"\${out_dir}\")
 file(MAKE_DIRECTORY \"\${editor_out_dir}\")
 file(MAKE_DIRECTORY \"\${lighting_out_dir}\")
 file(MAKE_DIRECTORY \"\${postprocess_out_dir}\")
+file(REMOVE
+	\"\${out_dir}/Default.task.spv\"
+	\"\${out_dir}/Default.mesh.spv\"
+	\"\${out_dir}/Default.frag.spv\"
+	\"\${lighting_out_dir}/ClusterGrid.comp.tspf\"
+	\"\${lighting_out_dir}/ClusterDepthMask.comp.tspf\"
+	\"\${lighting_out_dir}/LightCull.comp.tspf\"
+	\"\${lighting_out_dir}/ClusterLightCount.comp.tspf\"
+	\"\${lighting_out_dir}/ClusterLightPrefix.comp.tspf\"
+	\"\${lighting_out_dir}/ClusterLightFill.comp.tspf\"
+	\"\${postprocess_out_dir}/HiZGenerate.comp.tspf\"
+	\"\${postprocess_out_dir}/VRSGenerate.comp.tspf\"
+	\"\${editor_out_dir}/SceneViewGrid.vert.tspf\"
+	\"\${editor_out_dir}/SceneViewGrid.frag.tspf\")
 
 execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.task.hlsl\" -o \"\${out_dir}/Default.task.tspf\" -s ts --dxc \"\${DXC_PATH}\"

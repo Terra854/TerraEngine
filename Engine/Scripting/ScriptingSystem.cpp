@@ -466,6 +466,7 @@ void ScriptingSystem::SetRunning(bool running)
 }
 
 void ScriptingSystem::Update(float deltaTime) {
+	m_LastDeltaTime = deltaTime;
 	if (m_ExportMode) {
 		UpdateExportMode(deltaTime);
 		return;

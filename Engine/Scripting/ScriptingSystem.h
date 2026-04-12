@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Core/SystemBase.h"
-#include "ScriptComponent.h"
+#include "Components/ScriptComponent.h"
 #include "Scripting/ExportVTable.h"
 
 #include <filesystem>
@@ -33,6 +33,7 @@ public:
 	[[nodiscard]] bool HasLoadedGameplayAssembly() const { return m_GameplayAssemblyLoaded; }
 	[[nodiscard]] const std::filesystem::path& GetLoadedGameplayAssemblyPath() const { return m_LoadedGameplayAssemblyPath; }
 	[[nodiscard]] const std::string& GetLastGameplayDiagnostic() const { return m_LastGameplayDiagnostic; }
+	[[nodiscard]] float GetLastDeltaTime() const { return m_LastDeltaTime; }
 
 	bool LoadGameplayAssembly(const std::filesystem::path& assemblyPath, std::string* outError = nullptr);
 	void ClearGameplayAssembly();
@@ -70,6 +71,7 @@ private:
 	bool m_GameplayAssemblyLoaded = false;
 	std::filesystem::path m_LoadedGameplayAssemblyPath;
 	std::string m_LastGameplayDiagnostic;
+	float m_LastDeltaTime = 0.0f;
 
 	std::mutex m_InspectorWatchMutex;
 	InspectorWatchState m_InspectorWatchState;

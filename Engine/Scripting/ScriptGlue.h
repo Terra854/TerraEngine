@@ -10,6 +10,14 @@ extern "C" {
 	// Object Management
 	TERRAENGINE_API uint32_t Native_Object_Create(const char* name);
 	TERRAENGINE_API void Native_Object_Destroy(uint32_t objectId);
+	TERRAENGINE_API const char* Native_Object_GetName(uint32_t objectId);
+	TERRAENGINE_API void Native_Object_SetName(uint32_t objectId, const char* name);
+	TERRAENGINE_API uint32_t Native_Object_Find(const char* name);
+	TERRAENGINE_API uint32_t Native_Object_FindWithTag(const char* tag);
+	TERRAENGINE_API const char* Native_MeshRenderer_GetMesh(uint32_t objectId);
+	TERRAENGINE_API void Native_MeshRenderer_SetMesh(uint32_t objectId, const char* assetReference);
+	TERRAENGINE_API const char* Native_MeshRenderer_GetMaterial(uint32_t objectId);
+	TERRAENGINE_API void Native_MeshRenderer_SetMaterial(uint32_t objectId, const char* assetReference);
 
 	// Reflection-backed component access
 	TERRAENGINE_API bool Native_HasComponent(uint32_t objectId, const char* componentType);

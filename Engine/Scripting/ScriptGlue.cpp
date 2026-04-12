@@ -3,8 +3,11 @@
 #include "Core/Object/Component.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
-#include "Core/Object/Transform.h"
-#include "ScriptComponent.h"
+#include "Components/Transform.h"
+#include "Components/ScriptComponent.h"
+#include "ScriptingSystem.h"
+#include "Input/InputSystem.h"
+#include "Scene/SceneManager.h"
 
 #include <mutex>
 #include <shared_mutex>
@@ -81,6 +84,59 @@ static ScriptBinding* ResolveBinding(Object& object, const char* bindingId)
 	return scriptComponent->FindBinding(bindingId);
 }
 
+static uint32_t InvalidObjectId()
+{
+	return static_cast<uint32_t>(entt::null);
+}
+
+static const char* GetMeshRendererAssetReference(uint32_t objectId, std::string_view propertyName, AssetType type)
+{
+	static thread_local std::string assetReferenceBuffer;
+	assetReferenceBuffer.clear();
+
+	if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId)))
+	{
+		auto& registry = ComponentAccessRegistry();
+		if (auto it = registry.find("MeshRenderComponent"); it != registry.end())
+		{
+			rttr::variant value = it->second.getter(*objOpt, propertyName);
+			if (value.is_type<TerraEngine::UUID>())
+			{
+				assetReferenceBuffer = ResourceManager::Instance().DescribeAssetReference(
+					value.get_value<TerraEngine::UUID>(),
+					type).generic_string();
+			}
+		}
+	}
+
+	return assetReferenceBuffer.c_str();
+}
+
+static void SetMeshRendererAssetReference(uint32_t objectId, std::string_view propertyName, AssetType type, const char* assetReference)
+{
+	if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId)))
+	{
+		auto& registry = ComponentAccessRegistry();
+		if (auto it = registry.find("MeshRenderComponent"); it != registry.end())
+		{
+			TerraEngine::UUID resolvedId = TerraEngine::EMPTY_UUID;
+			if (assetReference != nullptr && assetReference[0] != '\0')
+			{
+				resolvedId = ResourceManager::Instance().ResolveAssetReference(assetReference, type);
+				if (resolvedId == TerraEngine::EMPTY_UUID)
+				{
+					TERRAENGINE_LOG(LogLevel::Warning,
+						"[Scripting] Could not resolve asset reference '" << assetReference
+						<< "' for MeshRenderComponent property '" << propertyName << "'.");
+					return;
+				}
+			}
+
+			it->second.setter(*objOpt, propertyName, resolvedId);
+		}
+	}
+}
+
 extern "C" {
 
     void Native_Log(int level, const char* message, const char* function, int line) {
@@ -100,6 +156,69 @@ extern "C" {
             ObjectManager::instance().removeObject(*objOpt);
         }
     }
+
+	const char* Native_Object_GetName(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		static thread_local std::string nameBuffer;
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			nameBuffer = ObjectManager::instance().getObjectName(*objOpt);
+			return nameBuffer.c_str();
+		}
+		return "";
+	}
+
+	void Native_Object_SetName(uint32_t objectId, const char* name) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			ObjectManager::instance().setObjectName(*objOpt, name ? name : "");
+		}
+	}
+
+	uint32_t Native_Object_Find(const char* name) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (name == nullptr || name[0] == '\0') {
+			return InvalidObjectId();
+		}
+
+		if (auto objOpt = ObjectManager::instance().FindObjectByName(name)) {
+			return static_cast<uint32_t>(objOpt->EntityId());
+		}
+
+		return InvalidObjectId();
+	}
+
+	uint32_t Native_Object_FindWithTag(const char* tag) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (tag == nullptr || tag[0] == '\0') {
+			return InvalidObjectId();
+		}
+
+		if (auto objOpt = ObjectManager::instance().FindObjectByTag(tag)) {
+			return static_cast<uint32_t>(objOpt->EntityId());
+		}
+
+		return InvalidObjectId();
+	}
+
+	const char* Native_MeshRenderer_GetMesh(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		return GetMeshRendererAssetReference(objectId, "meshId", AssetType::Mesh);
+	}
+
+	void Native_MeshRenderer_SetMesh(uint32_t objectId, const char* assetReference) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		SetMeshRendererAssetReference(objectId, "meshId", AssetType::Mesh, assetReference);
+	}
+
+	const char* Native_MeshRenderer_GetMaterial(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		return GetMeshRendererAssetReference(objectId, "materialId", AssetType::Material);
+	}
+
+	void Native_MeshRenderer_SetMaterial(uint32_t objectId, const char* assetReference) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		SetMeshRendererAssetReference(objectId, "materialId", AssetType::Material, assetReference);
+	}
 
     bool Native_HasComponent(uint32_t objectId, const char* componentType) {
         std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
@@ -296,4 +415,46 @@ extern "C" {
         return assetRoot.c_str();
     }
 
+	bool Native_Input_IsKeyPressed(int key) {
+		return InputSystem::Instance().IsKeyPressed(static_cast<Key>(key));
+	}
+
+	bool Native_Input_IsMouseButtonPressed(int button) {
+		return InputSystem::Instance().IsMouseButtonPressed(static_cast<MouseButton>(button));
+	}
+
+	void Native_Input_GetMousePosition(double* outX, double* outY) {
+		auto [x, y] = InputSystem::Instance().GetCursorPosition();
+		if (outX) *outX = x;
+		if (outY) *outY = y;
+	}
+
+	const char* Native_Scene_LoadScene(const char* path) {
+		static thread_local std::string uuidBuffer;
+		if (path == nullptr) return "";
+		TerraEngine::UUID id = SceneManager::Instance().LoadScene(path);
+		uuidBuffer = TerraEngine::ToHexString(id);
+		return uuidBuffer.c_str();
+	}
+
+	const char* Native_Scene_LoadPrefab(const char* path) {
+		static thread_local std::string uuidBuffer;
+		if (path == nullptr) return "";
+		TerraEngine::UUID id = SceneManager::Instance().LoadPrefab(path);
+		uuidBuffer = TerraEngine::ToHexString(id);
+		return uuidBuffer.c_str();
+	}
+
+	bool Native_Scene_SetActiveScene(const char* uuidHex) {
+		if (uuidHex == nullptr) return false;
+		auto id = TerraEngine::ParseUUID(uuidHex);
+		if (!id) return false;
+		return SceneManager::Instance().SetActiveScene(*id);
+	}
+
+	float Native_Time_GetDeltaTime() {
+		return ScriptingSystem::Instance().GetLastDeltaTime();
+	}
+
 }
+

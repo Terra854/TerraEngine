@@ -4,15 +4,15 @@
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
-#include "Engine/Scene/MeshRenderComponent.h"
+#include "Engine/Components/MeshRenderComponent.h"
 #include "Engine/Input/InputSystem.h"
 #include "Engine/Input/InputCodes.h"
 #include "Engine/Window/WindowSystem.h"
 #include <GLFW/glfw3.h>
-#include "Engine/Core/Object/Transform.h"
+#include "Engine/Components/Transform.h"
 #include "Engine/Core/Object/ObjectManager.h"
-#include "Engine/Scene/CameraComponent.h"
-#include "Engine/Scene/LightComponent.h"
+#include "Engine/Components/CameraComponent.h"
+#include "Engine/Components/LightComponent.h"
 #include <imgui.h>
 #include <ImGuizmo.h>
 #include <entt/entt.hpp>

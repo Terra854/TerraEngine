@@ -9,10 +9,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <entt/entt.hpp>
-#include "Core/Object/Transform.h"
-#include "Scene/CameraComponent.h"
-#include "Scene/MeshRenderComponent.h"
-#include "Scene/LightComponent.h"
+#include "Components/Transform.h"
+#include "Components/CameraComponent.h"
+#include "Components/MeshRenderComponent.h"
+#include "Components/LightComponent.h"
 
 class RenderSystem : public SystemsBase
 {

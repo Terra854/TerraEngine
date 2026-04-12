@@ -154,6 +154,16 @@ namespace TerraEngine
 			WriteIndented = false
 		};
 
+		internal static string ReadNativeUtf8(IntPtr nativeText)
+		{
+			// Script glue returns pointers into static or thread-local UTF-8
+			// buffers. Marshal them explicitly so .NET copies the text without
+			// attempting to free engine-owned memory after the call returns.
+			return nativeText == IntPtr.Zero
+				? string.Empty
+				: Marshal.PtrToStringUTF8(nativeText) ?? string.Empty;
+		}
+
 		// These caches all belong to the currently loaded gameplay assembly.
 		// Loading a new Assembly-CSharp replaces every one of them atomically.
 		private static GameplayScriptLoadContext? _gameplayLoadContext;
@@ -161,6 +171,27 @@ namespace TerraEngine
 		private static Dictionary<string, Type> _attachableTypes = new(StringComparer.Ordinal);
 		private static Dictionary<string, ScriptTypeDescriptorPayload> _descriptorCache = new(StringComparer.Ordinal);
 		private static Dictionary<string, ScriptInstanceState> _scriptInstances = new(StringComparer.Ordinal);
+
+		private static List<ScriptInstanceState> DrainScriptInstances()
+		{
+			lock (s_bridgeSync)
+			{
+				var drainedInstances = new List<ScriptInstanceState>(_scriptInstances.Values);
+				_scriptInstances.Clear();
+				return drainedInstances;
+			}
+		}
+
+		private static void DisposeScriptInstances()
+		{
+			foreach (ScriptInstanceState scriptState in DrainScriptInstances())
+			{
+				lock (scriptState.SyncRoot)
+				{
+					scriptState.Instance.InvokeDestroyed();
+				}
+			}
+		}
 
 		[UnmanagedCallersOnly]
 		public static void Initialize()
@@ -192,6 +223,7 @@ namespace TerraEngine
 				var nextLoadContext = new GameplayScriptLoadContext(assemblyPath);
 				var nextAssembly = nextLoadContext.LoadFromAssemblyPath(assemblyPath);
 				var nextCatalog = ScriptReflection.BuildAttachableTypeCatalog(nextAssembly);
+				DisposeScriptInstances();
 
 				lock (s_bridgeSync)
 				{
@@ -225,9 +257,10 @@ namespace TerraEngine
 		[UnmanagedCallersOnly]
 		public static void UnloadGameplayAssembly()
 		{
+			DisposeScriptInstances();
+
 			lock (s_bridgeSync)
 			{
-				_scriptInstances.Clear();
 				_descriptorCache.Clear();
 				_attachableTypes.Clear();
 			}
@@ -248,12 +281,9 @@ namespace TerraEngine
 		[UnmanagedCallersOnly]
 		public static void ResetGameplaySession()
 		{
-			lock (s_bridgeSync)
-			{
-				// Stop should discard every managed runtime instance while keeping
-				// the reflected type catalog warm for the next Play press.
-				_scriptInstances.Clear();
-			}
+			// Stop should discard every managed runtime instance while keeping the
+			// reflected type catalog warm for the next Play press.
+			DisposeScriptInstances();
 		}
 
 		[UnmanagedCallersOnly]
@@ -718,8 +748,7 @@ namespace TerraEngine
 							return;
 						}
 
-						script.Object = new Object(objectId);
-						script.BindingId = bindingId;
+						script.BindEngineInstance(objectId, bindingId);
 						scriptState = new ScriptInstanceState
 						{
 							Instance = script,
@@ -739,8 +768,7 @@ namespace TerraEngine
 				{
 					scriptState.ObjectId = objectId;
 					scriptState.ClassName = className;
-					scriptState.Instance.Object = new Object(objectId);
-					scriptState.Instance.BindingId = bindingId;
+					scriptState.Instance.BindEngineInstance(objectId, bindingId);
 
 					if (createdState || !string.Equals(scriptState.LastHydratedSignature, authoredSignature, StringComparison.Ordinal))
 					{
@@ -748,22 +776,12 @@ namespace TerraEngine
 						scriptState.LastHydratedSignature = authoredSignature;
 					}
 
-					Time.DeltaTime = deltaTime;
 					if (createdState)
 					{
 						scriptState.Instance.InvokeCreated();
 					}
 
-					scriptState.Instance.InvokeStartIfNeeded();
-					if (scriptState.Instance.Enabled)
-					{
-						scriptState.Instance.OnUpdate();
-					}
-					else
-					{
-						scriptState.Instance.OnDisable();
-					}
-
+					scriptState.Instance.DispatchFrame(deltaTime);
 					scriptState.ObservedVersion++;
 				}
 			}
@@ -1073,7 +1091,7 @@ namespace TerraEngine
 			{
 				if (jsonValue.ValueKind == JsonValueKind.Null)
 				{
-					convertedValue = new Object(0);
+					convertedValue = new Object(Object.InvalidID);
 					return true;
 				}
 
@@ -1280,6 +1298,24 @@ namespace TerraEngine
 		internal static extern void Native_Object_Destroy(uint objectId);
 
 		[DllImport("TerraEngine")]
+		internal static extern uint Native_Object_Find(string name);
+
+		[DllImport("TerraEngine")]
+		internal static extern uint Native_Object_FindWithTag(string tag);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_MeshRenderer_GetMesh(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_MeshRenderer_SetMesh(uint objectId, string assetReference);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_MeshRenderer_GetMaterial(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_MeshRenderer_SetMaterial(uint objectId, string assetReference);
+
+		[DllImport("TerraEngine")]
 		internal static extern bool Native_HasComponent(uint objectId, string componentType);
 
 		[DllImport("TerraEngine")]
@@ -1304,6 +1340,33 @@ namespace TerraEngine
 		internal static extern bool Native_ScriptComponent_SetBindingValue(uint objectId, string bindingId, string fieldPath, string valueKind, string valueJson, string compatibility, string sourceTypeFingerprint);
 
 		[DllImport("TerraEngine")]
-		internal static extern bool Native_ScriptComponent_RemoveBindingValue(uint objectId, string bindingId, string fieldPath);
+		internal static extern void Native_ScriptComponent_RemoveBindingValue(uint objectId, string bindingId, string fieldPath);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_Object_GetName(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Object_SetName(uint objectId, string name);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_Input_IsKeyPressed(int key);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_Input_IsMouseButtonPressed(int button);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Input_GetMousePosition(out double x, out double y);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_Scene_LoadScene(string path);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_Scene_LoadPrefab(string path);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_Scene_SetActiveScene(string uuid);
+
+		[DllImport("TerraEngine")]
+		internal static extern float Native_Time_GetDeltaTime();
 	}
 }

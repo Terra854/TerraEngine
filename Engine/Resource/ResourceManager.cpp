@@ -19,6 +19,36 @@
 #include "basisu_transcoder.h"
 #include "basisu_transcoder_uastc.h"
 
+namespace
+{
+	std::vector<std::string_view> SupportedExtensionsForAssetType(AssetType type)
+	{
+		switch (type)
+		{
+		case AssetType::Mesh:
+			return { ".temf" };
+		case AssetType::Texture:
+			return { ".tetf" };
+		case AssetType::Material:
+			return { ".tmat" };
+		case AssetType::ShaderCollection:
+			return { ".tspf" };
+		}
+
+		return {};
+	}
+
+	bool AssetReferenceLooksLikePath(std::string_view assetReference)
+	{
+		const std::filesystem::path queryPath(assetReference);
+		return queryPath.is_absolute()
+			|| queryPath.has_extension()
+			|| assetReference.find('/') != std::string_view::npos
+			|| assetReference.find('\\') != std::string_view::npos;
+	}
+
+}
+
 ResourceManager& ResourceManager::Instance()
 {
 	static ResourceManager instance;
@@ -364,6 +394,141 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 	});
 }
 
+TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetReference, AssetType type)
+{
+	if (assetReference.empty())
+	{
+		return TerraEngine::EMPTY_UUID;
+	}
+
+	const auto buildCandidatePaths = [&]() -> std::vector<std::filesystem::path> {
+		std::vector<std::filesystem::path> candidatePaths;
+		const std::filesystem::path queryPath(assetReference);
+		if (AssetReferenceLooksLikePath(assetReference))
+		{
+			// Explicit paths are resolved literally relative to the asset root.
+			// TerraEngine intentionally does not scan subfolders by filename
+			// because duplicate names across directories are common in projects.
+			candidatePaths.push_back(queryPath);
+			return candidatePaths;
+		}
+
+		const std::filesystem::path topLevelName = queryPath.filename();
+		if (queryPath.has_extension())
+		{
+			// A bare filename like "Player.temf" is assumed to live directly
+			// under the asset root, not somewhere deeper in the tree.
+			candidatePaths.push_back(topLevelName);
+			return candidatePaths;
+		}
+
+		for (std::string_view extension : SupportedExtensionsForAssetType(type))
+		{
+			std::filesystem::path candidate = topLevelName;
+			candidate += extension;
+			candidatePaths.push_back(std::move(candidate));
+		}
+
+		return candidatePaths;
+	};
+
+	const std::vector<std::filesystem::path> candidatePaths = buildCandidatePaths();
+
+	const auto tryFindRegisteredMatch = [&](auto& cache) -> TerraEngine::UUID {
+		std::shared_lock lock(cache.mutex);
+		for (const std::filesystem::path& candidatePath : candidatePaths)
+		{
+			const std::string exactKey = NormalizeKey(ResolveAssetPath(candidatePath));
+			if (auto exactMatch = cache.pathToId.find(exactKey); exactMatch != cache.pathToId.end())
+			{
+				return exactMatch->second;
+			}
+		}
+
+		return TerraEngine::EMPTY_UUID;
+	};
+
+	const auto tryLoadExplicitPath = [&](const std::filesystem::path& candidatePath) -> TerraEngine::UUID {
+		switch (type)
+		{
+		case AssetType::Mesh:
+			return LoadMesh(candidatePath);
+		case AssetType::Texture:
+			return LoadTexture(candidatePath);
+		case AssetType::Material:
+			return LoadMaterial(candidatePath);
+		case AssetType::ShaderCollection:
+			return TerraEngine::EMPTY_UUID;
+		}
+
+		return TerraEngine::EMPTY_UUID;
+	};
+
+	TerraEngine::UUID resolvedId = TerraEngine::EMPTY_UUID;
+	VisitAssetCache(type, [&](auto& cache) {
+		resolvedId = tryFindRegisteredMatch(cache);
+	});
+	if (resolvedId != TerraEngine::EMPTY_UUID)
+	{
+		return resolvedId;
+	}
+
+	for (const std::filesystem::path& candidatePath : candidatePaths)
+	{
+		resolvedId = tryLoadExplicitPath(candidatePath);
+		if (resolvedId != TerraEngine::EMPTY_UUID)
+		{
+			return resolvedId;
+		}
+	}
+
+	return TerraEngine::EMPTY_UUID;
+}
+
+std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine::UUID& id, AssetType type) const
+{
+	if (id == TerraEngine::EMPTY_UUID)
+	{
+		return {};
+	}
+
+	std::filesystem::path result;
+	const auto capturePath = [&](const auto& cache) {
+		std::shared_lock lock(cache.mutex);
+		if (auto pathIt = cache.idToPath.find(id); pathIt != cache.idToPath.end())
+		{
+			result = std::filesystem::path(pathIt->second);
+		}
+	};
+
+	switch (type)
+	{
+	case AssetType::Mesh:
+		capturePath(meshCache);
+		break;
+	case AssetType::Texture:
+		capturePath(textureCache);
+		break;
+	case AssetType::Material:
+		capturePath(materialCache);
+		break;
+	case AssetType::ShaderCollection:
+		capturePath(shaderCollectionCache);
+		break;
+	}
+
+	if (result.is_absolute())
+	{
+		const std::filesystem::path relativePath = result.lexically_relative(assetRoot);
+		if (!relativePath.empty())
+		{
+			return relativePath;
+		}
+	}
+
+	return result;
+}
+
 Material* ResourceManager::GetMaterial(const TerraEngine::UUID& id)
 {
 	return GetResourceById<Material>(id, materialCache, [this](const std::filesystem::path& p) { return LoadMaterial(p); });
@@ -408,12 +573,21 @@ std::string ResourceManager::NormalizeKey(const std::filesystem::path& path) con
 
 std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::path& path) const
 {
+	const std::filesystem::path absolutePath = ResolveAssetPath(path);
+
+	// Only TerraEngine's built-in default task/mesh/fragment shaders are
+	// intentionally staged beside the runtime instead of inside the TEPAK.
+	// Keep mount probes enabled for every other resource path.
+	const bool isInstalledDefaultShader =
+		absolutePath == (engineRoot / "Shaders" / "Default.task.tspf").lexically_normal()
+		|| absolutePath == (engineRoot / "Shaders" / "Default.mesh.tspf").lexically_normal()
+		|| absolutePath == (engineRoot / "Shaders" / "Default.frag.tspf").lexically_normal();
+
 	// In export builds, the ContentMount provides access to assets packed into 
 	// a .tepak archive. If a mount is active, we attempt to read through it 
 	// using a logical path relative to the asset root.
-	if (ContentMount::Instance().IsMounted())
+	if (ContentMount::Instance().IsMounted() && !isInstalledDefaultShader)
 	{
-		const std::filesystem::path absolutePath = ResolveAssetPath(path);
 		const std::filesystem::path logicalPath = absolutePath.lexically_relative(assetRoot);
 		const std::string logicalPathString = ContentMount::NormalizeLogicalPath(logicalPath.generic_string());
 
@@ -427,28 +601,28 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 		TERRAENGINE_LOG(LogLevel::Warning, "Resource not found in mount: " << logicalPathString);
 	}
 
-	if (!std::filesystem::exists(path))
+	if (!std::filesystem::exists(absolutePath))
 	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Resource file does not exist on disk: " << path);
+		TERRAENGINE_LOG(LogLevel::Warning, "Resource file does not exist on disk: " << absolutePath);
 		return {};
 	}
 
-	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	std::ifstream file(absolutePath, std::ios::binary | std::ios::ate);
 	if (!file)
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to open resource file: " << path);
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to open resource file: " << absolutePath);
 		return {};
 	}
 
 	const std::streamsize length = file.tellg();
 	if (length <= 0)
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Resource file is empty: " << path);
+		TERRAENGINE_LOG(LogLevel::Error, "Resource file is empty: " << absolutePath);
 		return {};
 	}
 
 	// Emit a debug log with the resolved size so callers can correlate reads with disk usage.
-	TERRAENGINE_LOG(LogLevel::Debug, "Reading resource file " << path << " (" << length << " bytes)");
+	TERRAENGINE_LOG(LogLevel::Debug, "Reading resource file " << absolutePath << " (" << length << " bytes)");
 
 	std::vector<std::uint8_t> buffer(static_cast<std::size_t>(length));
 
@@ -457,7 +631,7 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 	file.seekg(0, std::ios::beg);
 	if (!file.read(reinterpret_cast<char*>(buffer.data()), length))
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to read resource file: " << path);
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to read resource file: " << absolutePath);
 		return {};
 	}
 

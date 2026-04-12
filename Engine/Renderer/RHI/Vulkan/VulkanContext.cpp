@@ -5,7 +5,6 @@
 
 #include <cstdio>
 #include "Core/Logger/Logger.h"
-
 #define VMA_LEAK_LOG_FORMAT(format, ...) do { \
         char _vma_buf[1024]; \
         std::snprintf(_vma_buf, sizeof(_vma_buf), (format), __VA_ARGS__); \
@@ -815,7 +814,7 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
         return shaderModule;
     };
 
-    // We expect these files to be generated.
+    // These editor/debug shaders stay as raw SPIR-V payloads.
     VkShaderModule vertShader = loadShader("Shaders/Editor/SceneViewGrid.vert.spv");
     VkShaderModule fragShader = loadShader("Shaders/Editor/SceneViewGrid.frag.spv");
 
@@ -917,6 +916,8 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &sceneViewGridPipelineLayout) != VK_SUCCESS) {
         TERRAENGINE_LOG(LogLevel::Error, "failed to create grid pipeline layout!");
+        vkDestroyShaderModule(device, vertShader, nullptr);
+        vkDestroyShaderModule(device, fragShader, nullptr);
         return;
     }
 

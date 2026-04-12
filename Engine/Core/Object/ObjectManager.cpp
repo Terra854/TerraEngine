@@ -1,5 +1,7 @@
 #include "ObjectManager.h"
 
+#include "Components/TagComponent.h"
+
 #include <glm/gtc/quaternion.hpp>
 
 ObjectManager& ObjectManager::instance() {
@@ -18,9 +20,12 @@ Object ObjectManager::makeHandle(entt::entity entityId)
 // Create a new Object
 Object ObjectManager::createObject(const std::string& name) {
 	// Every entity begins life with a Transform so systems can safely assume
-	// spatial data exists without guarding for missing components.
+	// spatial data exists without guarding for missing components. Objects also
+	// get a TagComponent immediately so FindWithTag never depends on optional
+	// component setup that gameplay authors could forget.
 	auto object = Object(registry);
 	object.addComponent<Transform>();
+	object.addComponent<TagComponent>();
 	// Assign a stable identity immediately upon creation so the entity can be
 	// tracked across serialization and undo sessions.
 	TerraEngine::UUID uuid = TerraEngine::GenerateUUID();
@@ -240,6 +245,47 @@ void ObjectManager::setObjectName(const Object& obj, const std::string& name)
 		objectMap[obj] = name;
 		if (onModified) onModified();
 	}
+}
+
+std::optional<Object> ObjectManager::FindObjectByName(std::string_view name) const
+{
+	// Names live in the side-table because they are editor-facing metadata
+	// rather than ECS component state. Iterate that table so lookups stay in
+	// sync with the hierarchy names authors actually see.
+	for (const auto& [objectHandle, objectName] : objectMap)
+	{
+		if (!registry.valid(objectHandle.EntityId()))
+		{
+			continue;
+		}
+
+		if (objectName == name)
+		{
+			return const_cast<ObjectManager*>(this)->makeHandle(objectHandle.EntityId());
+		}
+	}
+
+	return std::nullopt;
+}
+
+std::optional<Object> ObjectManager::FindObjectByTag(std::string_view tag) const
+{
+	// Tags live on a dedicated component so scripts can query them without
+	// overloading the scene-hierarchy display name with gameplay meaning.
+	auto view = registry.view<const TagComponent>();
+	for (entt::entity entityId : view)
+	{
+		const TagComponent& tagComponent = view.get<const TagComponent>(entityId);
+		auto guard = tagComponent.acquireReadLock();
+		if (!tagComponent.active || tagComponent.tag != tag)
+		{
+			continue;
+		}
+
+		return const_cast<ObjectManager*>(this)->makeHandle(entityId);
+	}
+
+	return std::nullopt;
 }
 
 std::optional<Object> ObjectManager::getObject(entt::entity id)

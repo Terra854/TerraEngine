@@ -215,6 +215,23 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptBindingMigrationRes
 	migrationResult.hiddenStoredFieldPaths = jsonValue.value("hiddenStoredFieldPaths", std::vector<std::string>{});
 }
 
+inline std::uint64_t ComputeScriptBindingTypeId(std::string_view className)
+{
+	// Export staging rewrites bindings from class names to deterministic FNV-64
+	// identifiers, so runtime lookup helpers need the same hash to match a
+	// managed type request against a staged binding that no longer stores text.
+	constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
+	constexpr std::uint64_t kFnvPrime = 1099511628211ull;
+	std::uint64_t hash = kFnvOffsetBasis;
+	for (unsigned char value : className)
+	{
+		hash ^= static_cast<std::uint64_t>(value);
+		hash *= kFnvPrime;
+	}
+
+	return hash;
+}
+
 // Authored value persisted into the scene for one reflected script field.
 struct ScriptFieldValue
 {
@@ -517,9 +534,18 @@ public:
 
 	bool HasBinding(std::string_view className) const
 	{
+		const std::uint64_t requestedScriptId = className.empty()
+			? static_cast<std::uint64_t>(0)
+			: ComputeScriptBindingTypeId(className);
+
 		for (const ScriptBinding& binding : bindings)
 		{
 			if (binding.className == className)
+			{
+				return true;
+			}
+
+			if (!className.empty() && binding.scriptId != 0 && binding.scriptId == requestedScriptId)
 			{
 				return true;
 			}

@@ -2,6 +2,7 @@
 
 #include <entt/entt.hpp>
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -10,7 +11,7 @@
 #include <vector>
 
 #include "Object.h"
-#include "Transform.h"
+#include "Components/Transform.h"
 #include "Utilities/UUID.h"
 
 class ObjectManager {
@@ -37,6 +38,12 @@ public:
 	std::string getObjectName(const Object& obj) const;
 	// Update the display name for the object.
 	void setObjectName(const Object& obj, const std::string& name);
+	// Find the first valid object whose authored display name matches the
+	// requested text exactly. Returns std::nullopt when no match exists.
+	std::optional<Object> FindObjectByName(std::string_view name) const;
+	// Find the first valid object whose TagComponent string matches exactly.
+	// Returns std::nullopt when no tagged object matches.
+	std::optional<Object> FindObjectByTag(std::string_view tag) const;
 	// Build an Object handle for an existing entity id if it is valid.
 	std::optional<Object> getObject(entt::entity id);
 	// Build an Object handle for an existing entity by UUID.

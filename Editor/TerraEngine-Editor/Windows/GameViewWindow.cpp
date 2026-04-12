@@ -1,8 +1,8 @@
 #include "GameViewWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Renderer/RenderSystem.h"
-#include "Engine/Scene/CameraComponent.h"
-#include "Engine/Core/Object/Transform.h"
+#include "Engine/Components/CameraComponent.h"
+#include "Engine/Components/Transform.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>

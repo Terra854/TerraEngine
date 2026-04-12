@@ -502,6 +502,10 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
         CleanupTempSpv();
         return false;
     }
+    // Close the temporary SPIR-V file before attempting to delete it later.
+    // Windows keeps the path locked while the stream stays open, which would
+    // leave behind stale .spv siblings next to every generated .tspf shader.
+    spvFile.close();
 	if (*stageOpt == ShaderStage::Task) {
 		if (!PatchTaskEmitPayload(bytecode)) {
 			std::cerr << "Failed to patch task-shader payload linkage in SPIR-V: " << input << "\n";

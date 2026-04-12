@@ -21,9 +21,9 @@
 #include "Resource/ResourceManager.h"
 #include "Resource/ShaderCollection.h"
 #include "Runtime/ContentMount/ContentMount.h"
-#include "Scene/CameraComponent.h"
-#include "Scene/LightComponent.h"
-#include "Scene/MeshRenderComponent.h"
+#include "Components/CameraComponent.h"
+#include "Components/LightComponent.h"
+#include "Components/MeshRenderComponent.h"
 
 namespace
 {
