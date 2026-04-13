@@ -11,6 +11,7 @@
 #include "Object/ComponentRegistry.h"
 #include "Resource/ResourceManager.h"
 #include "Scripting/ScriptingSystem.h"
+#include "Scripting/ScriptGlue.h"
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +43,9 @@ void Engine::SetEditorMode(SystemsBase* system)
 
 void Engine::Initialize()
 {
+	// Register the currently booting engine instance so script glue can signal
+	// the outer run loop when Application.Quit() is invoked in exports.
+	SetApplicationHostEngine(this);
 	pool.initialize();
 	
 	// Reset the frame timer so the first tick is measured from initialization time.
@@ -120,6 +124,7 @@ void Engine::Initialize()
 		}
 
 		pool.shutdown();
+		SetApplicationHostEngine(nullptr);
 		throw;
 	}
 	
@@ -180,4 +185,8 @@ void Engine::Shutdown()
 	
 	// Stop the logger thread so queued messages flush before the application exits.
 	Logger::Instance().Shutdown();
+
+	// Clear the non-owning quit hook after every shutdown so a future engine
+	// session in the same process cannot target a stale instance pointer.
+	SetApplicationHostEngine(nullptr);
 }

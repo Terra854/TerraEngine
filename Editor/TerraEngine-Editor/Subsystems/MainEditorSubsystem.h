@@ -24,8 +24,9 @@ public:
     virtual void Shutdown() override;
     virtual std::string GetName() const override { return "Main Editor"; }
 
-    void OnProjectOpened();
-    void SetOnProjectClosedCallback(std::function<void()> callback);
+	void OnProjectOpened();
+	void SetOnProjectClosedCallback(std::function<void()> callback);
+	void StopPlayMode();
 	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
 	bool IsInspectorValueDragging() const;
 

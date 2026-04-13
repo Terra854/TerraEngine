@@ -21,6 +21,9 @@
 
 namespace
 {
+	constexpr std::string_view kDefaultManifestProductName = "TerraEngine";
+	constexpr std::string_view kDefaultManifestVersion = "1.0.0";
+
 	std::vector<std::string_view> SupportedExtensionsForAssetType(AssetType type)
 	{
 		switch (type)
@@ -47,6 +50,33 @@ namespace
 			|| assetReference.find('\\') != std::string_view::npos;
 	}
 
+	std::optional<std::filesystem::path> FindEditorProjectRoot(const std::filesystem::path& assetRoot)
+	{
+		if (assetRoot.empty())
+		{
+			return std::nullopt;
+		}
+
+		std::filesystem::path cursor = assetRoot.lexically_normal();
+		for (int depth = 0; depth < 6; ++depth)
+		{
+			if (std::filesystem::exists(cursor / "ProjectSettings" / "ProjectSettings.terra")
+				|| std::filesystem::exists(cursor / "game.json"))
+			{
+				return cursor;
+			}
+
+			const std::filesystem::path parent = cursor.parent_path();
+			if (parent.empty() || parent == cursor)
+			{
+				break;
+			}
+
+			cursor = parent;
+		}
+
+		return std::nullopt;
+	}
 }
 
 ResourceManager& ResourceManager::Instance()
@@ -74,6 +104,7 @@ void ResourceManager::Initialize()
 	// Each engine session starts with a fresh startup-scene override so stale
 	// export manifest data cannot leak into the next launch.
 	m_ConfiguredStartupScene.reset();
+	ResetManifestMetadata();
 
 	if (!m_ConfiguredExportArchivePath.has_value()) {
 		return;
@@ -103,6 +134,7 @@ void ResourceManager::Initialize()
 
 		const std::string manifestText(reinterpret_cast<const char*>(manifestBytes.data()), manifestBytes.size());
 		const nlohmann::json manifest = nlohmann::json::parse(manifestText);
+		ApplyManifestMetadata(manifest, archivePath.stem().string());
 
 		if (manifest.contains("startupScene")) {
 			m_ConfiguredStartupScene = manifest["startupScene"].get<std::string>();
@@ -141,6 +173,7 @@ void ResourceManager::Initialize()
 void ResourceManager::Shutdown()
 {
 	m_ConfiguredStartupScene.reset();
+	ResetManifestMetadata();
 	ClearCaches();
 
 	if (ContentMount::Instance().IsMounted()) {
@@ -159,6 +192,10 @@ void ResourceManager::SetAssetRoot(const std::filesystem::path& assetRootPath)
 	// Normalize immediately so the cache keys stay predictable even if
 	// callers provide paths with redundant separators or relative jumps.
 	assetRoot = assetRootPath.lexically_normal();
+	if (!IsExportRuntime())
+	{
+		RefreshEditorProjectManifest();
+	}
 	// Verbose debug logging makes it obvious which asset tree subsequent loads will pull from.
 	TERRAENGINE_LOG(LogLevel::Debug, "Asset root set to " << assetRoot);
 }
@@ -189,12 +226,90 @@ std::optional<std::filesystem::path> ResourceManager::GetConfiguredStartupScene(
 	return m_ConfiguredStartupScene;
 }
 
+std::string ResourceManager::GetProductName() const
+{
+	return m_ProductName;
+}
+
+std::string ResourceManager::GetVersion() const
+{
+	return m_Version;
+}
+
 bool ResourceManager::IsExportRuntime() const
 {
 	// Export sessions always configure a TEPAK archive before engine startup.
 	// Editor/game-project sessions leave this unset and continue using the
 	// authored on-disk project layout instead.
 	return m_ConfiguredExportArchivePath.has_value();
+}
+
+void ResourceManager::ResetManifestMetadata(std::string_view fallbackProductName)
+{
+	m_ProductName = fallbackProductName.empty()
+		? std::string(kDefaultManifestProductName)
+		: std::string(fallbackProductName);
+	m_Version = std::string(kDefaultManifestVersion);
+}
+
+void ResourceManager::ApplyManifestMetadata(const nlohmann::json& manifest, std::string_view fallbackProductName)
+{
+	ResetManifestMetadata(fallbackProductName);
+
+	if (auto nameIt = manifest.find("name"); nameIt != manifest.end() && nameIt->is_string())
+	{
+		const std::string manifestName = nameIt->get<std::string>();
+		if (!manifestName.empty())
+		{
+			m_ProductName = manifestName;
+		}
+	}
+
+	if (auto versionIt = manifest.find("version"); versionIt != manifest.end() && versionIt->is_string())
+	{
+		const std::string manifestVersion = versionIt->get<std::string>();
+		if (!manifestVersion.empty())
+		{
+			m_Version = manifestVersion;
+		}
+	}
+}
+
+void ResourceManager::RefreshEditorProjectManifest()
+{
+	const std::optional<std::filesystem::path> projectRoot = FindEditorProjectRoot(assetRoot);
+	if (!projectRoot.has_value())
+	{
+		ResetManifestMetadata();
+		return;
+	}
+
+	const std::string fallbackProductName = projectRoot->filename().string();
+	ResetManifestMetadata(fallbackProductName);
+
+	const std::filesystem::path manifestPath = *projectRoot / "game.json";
+	if (!std::filesystem::exists(manifestPath))
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Project manifest is missing at " << manifestPath << "; using fallback product metadata.");
+		return;
+	}
+
+	try
+	{
+		std::ifstream manifestStream(manifestPath);
+		if (!manifestStream)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Project manifest could not be opened at " << manifestPath << "; using fallback product metadata.");
+			return;
+		}
+
+		const nlohmann::json manifest = nlohmann::json::parse(manifestStream);
+		ApplyManifestMetadata(manifest, fallbackProductName);
+	}
+	catch (const std::exception& exception)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Project manifest could not be parsed at " << manifestPath << ": " << exception.what());
+	}
 }
 
 void ResourceManager::LoadDefaultResources()

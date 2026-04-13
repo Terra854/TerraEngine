@@ -30,6 +30,7 @@ public:
 
 	[[nodiscard]] bool IsRunning() const { return m_Running; }
 	[[nodiscard]] bool IsPaused() const { return m_Paused; }
+	[[nodiscard]] bool IsExportMode() const { return m_ExportMode; }
 	[[nodiscard]] bool HasLoadedGameplayAssembly() const { return m_GameplayAssemblyLoaded; }
 	[[nodiscard]] const std::filesystem::path& GetLoadedGameplayAssemblyPath() const { return m_LoadedGameplayAssemblyPath; }
 	[[nodiscard]] const std::string& GetLastGameplayDiagnostic() const { return m_LastGameplayDiagnostic; }

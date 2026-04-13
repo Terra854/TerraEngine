@@ -15,6 +15,7 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
+#include <nlohmann/json.hpp>
 
 #include "Core/Export.h"
 #include "Core/Logger/Logger.h"
@@ -94,6 +95,11 @@ public:
 	// Exposes the startup scene discovered from the export manifest so the
 	// engine can hand it to SceneManager before scene initialization begins.
 	std::optional<std::filesystem::path> GetConfiguredStartupScene() const;
+
+	// Returns the manifest-backed product metadata that Application.cs exposes to
+	// gameplay scripts. These values come from project-root or export game.json.
+	std::string GetProductName() const;
+	std::string GetVersion() const;
 
 	// Lets runtime systems distinguish packaged export sessions from editor
 	// project sessions so exported builds can keep their writable files in a
@@ -247,11 +253,25 @@ private:
 	// stored using generic separators to avoid Windows/Linux mismatches.
 	std::string NormalizeKey(const std::filesystem::path& path) const;
 
+	// Reset manifest metadata to safe defaults so repeated editor/export runs in
+	// the same process never leak stale product information.
+	void ResetManifestMetadata(std::string_view fallbackProductName = {});
+
+	// Apply name/version values from a parsed manifest while preserving stable
+	// fallbacks when fields are absent or empty.
+	void ApplyManifestMetadata(const nlohmann::json& manifest, std::string_view fallbackProductName);
+
+	// Editor projects keep their manifest on disk beside ProjectSettings rather
+	// than inside a mounted archive, so refresh it whenever the asset root moves.
+	void RefreshEditorProjectManifest();
+
 	ThreadPool& threadPool;
 	std::filesystem::path assetRoot;
 	std::filesystem::path engineRoot;
 	std::optional<std::filesystem::path> m_ConfiguredStartupScene;
 	std::optional<std::filesystem::path> m_ConfiguredExportArchivePath;
+	std::string m_ProductName = "TerraEngine";
+	std::string m_Version = "1.0.0";
 
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;

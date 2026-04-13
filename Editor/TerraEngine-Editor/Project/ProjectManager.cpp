@@ -11,6 +11,51 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+	constexpr std::string_view kDefaultProjectVersion = "1.0.0";
+
+	bool EnsureProjectManifest(const fs::path& projectRoot, std::string_view requestedName, std::string* outError = nullptr)
+	{
+		const fs::path manifestPath = projectRoot / "game.json";
+		if (fs::exists(manifestPath))
+		{
+			return true;
+		}
+
+		nlohmann::json manifest;
+		manifest["name"] = requestedName.empty() ? projectRoot.filename().string() : std::string(requestedName);
+		manifest["version"] = kDefaultProjectVersion;
+
+		std::ofstream manifestFile(manifestPath);
+		if (!manifestFile)
+		{
+			const std::string message = "Failed to create project manifest: " + manifestPath.string();
+			TERRAENGINE_LOG(LogLevel::Error, message);
+			if (outError != nullptr)
+			{
+				*outError = message;
+			}
+			return false;
+		}
+
+		manifestFile << manifest.dump(4);
+		if (!manifestFile.good())
+		{
+			const std::string message = "Failed to write project manifest: " + manifestPath.string();
+			TERRAENGINE_LOG(LogLevel::Error, message);
+			if (outError != nullptr)
+			{
+				*outError = message;
+			}
+			return false;
+		}
+
+		TERRAENGINE_LOG(LogLevel::Info, "[ProjectManager] Created default project manifest at " << manifestPath.string());
+		return true;
+	}
+}
+
 ProjectManager::ProjectManager() {
     LoadEditorPreferences();
 }
@@ -72,6 +117,9 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
         currentSettings = settings;
         projectRoot = location;
         SaveProjectSettings();
+        if (!EnsureProjectManifest(location, name, outError)) {
+            return false;
+        }
 
         // Load it immediately
         return LoadProject(location, outError);
@@ -107,6 +155,9 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
 
         // Derive name from directory
         std::string projectName = projectDir.filename().string();
+        if (!EnsureProjectManifest(projectDir, projectName)) {
+            TERRAENGINE_LOG(LogLevel::Warning, "[ProjectManager] Continuing without a freshly written game.json for project " << projectDir.string());
+        }
         AddToRecentProjects(projectDir, projectName);
 
         // CLEAN OBSOLETE INTEROP SCRIPTS:

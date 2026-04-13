@@ -1371,6 +1371,30 @@ namespace TerraEngine
 		internal static extern void Native_Log(int level, string message, string function, int line);
 
 		[DllImport("TerraEngine")]
+		internal static extern void Native_Application_Quit();
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Application_OpenURL(string url);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_Application_GetPersistentDataPath();
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_Application_GetStreamingAssetsPath();
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_Application_IsEditor();
+
+		[DllImport("TerraEngine")]
+		internal static extern uint Native_Application_GetPlatform();
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_Application_GetProductName();
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_Application_GetVersion();
+
+		[DllImport("TerraEngine")]
 		internal static extern uint Native_Object_Create(string? name);
 
 		[DllImport("TerraEngine")]

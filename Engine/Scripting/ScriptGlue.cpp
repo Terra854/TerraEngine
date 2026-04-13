@@ -1,5 +1,6 @@
 #include "ScriptGlue.h"
 #include "Core/Logger/Logger.h"
+#include "Core/MainEngine.h"
 #include "Core/Object/Component.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
@@ -8,6 +9,7 @@
 #include "ScriptingSystem.h"
 #include "Input/InputSystem.h"
 #include "Scene/SceneManager.h"
+#include "Utilities/PlatformUtils.h"
 
 #include <mutex>
 #include <shared_mutex>
@@ -22,6 +24,10 @@ static std::shared_mutex g_ScriptGlueMutex;
 // Native_ScriptComponent_GetBindingPayload returns a raw const char*, so each
 // thread keeps its own backing string alive until the next bridge call.
 thread_local std::string g_ScriptBindingPayloadBuffer;
+thread_local std::string g_ApplicationReturnBuffer;
+std::mutex g_ApplicationBridgeMutex;
+Engine* g_ApplicationHostEngine = nullptr;
+ApplicationEditorStopPlayModeCallback g_ApplicationEditorStopCallback = nullptr;
 
 enum class ScriptType : int
 {
@@ -89,6 +95,24 @@ static uint32_t InvalidObjectId()
 	return static_cast<uint32_t>(entt::null);
 }
 
+static const char* WriteApplicationReturnText(std::string text)
+{
+	g_ApplicationReturnBuffer = std::move(text);
+	return g_ApplicationReturnBuffer.c_str();
+}
+
+static Engine* GetApplicationHostEngine()
+{
+	std::lock_guard<std::mutex> lock(g_ApplicationBridgeMutex);
+	return g_ApplicationHostEngine;
+}
+
+static ApplicationEditorStopPlayModeCallback GetApplicationEditorStopCallback()
+{
+	std::lock_guard<std::mutex> lock(g_ApplicationBridgeMutex);
+	return g_ApplicationEditorStopCallback;
+}
+
 static const char* GetMeshRendererAssetReference(uint32_t objectId, std::string_view propertyName, AssetType type)
 {
 	static thread_local std::string assetReferenceBuffer;
@@ -137,12 +161,77 @@ static void SetMeshRendererAssetReference(uint32_t objectId, std::string_view pr
 	}
 }
 
+void SetApplicationHostEngine(Engine* engine)
+{
+	std::lock_guard<std::mutex> lock(g_ApplicationBridgeMutex);
+	g_ApplicationHostEngine = engine;
+}
+
+void SetApplicationEditorStopPlayModeCallback(ApplicationEditorStopPlayModeCallback callback)
+{
+	std::lock_guard<std::mutex> lock(g_ApplicationBridgeMutex);
+	g_ApplicationEditorStopCallback = callback;
+}
+
 extern "C" {
 
     void Native_Log(int level, const char* message, const char* function, int line) {
         LogLevel logLevel = static_cast<LogLevel>(level);
         Logger::Instance().Log(logLevel, "C#", line, function, message, true);
     }
+
+	void Native_Application_Quit() {
+		if (ScriptingSystem::Instance().IsExportMode()) {
+			if (Engine* hostEngine = GetApplicationHostEngine()) {
+				hostEngine->SignalShutdown();
+				return;
+			}
+
+			TERRAENGINE_LOG(LogLevel::Warning, "Application.Quit() was called in export mode before the host engine was registered.");
+			return;
+		}
+
+		if (ApplicationEditorStopPlayModeCallback stopPlayMode = GetApplicationEditorStopCallback()) {
+			stopPlayMode();
+			return;
+		}
+
+		// Fall back to stopping script execution so a missing editor callback does
+		// not keep runaway gameplay scripts alive forever during development.
+		TERRAENGINE_LOG(LogLevel::Warning, "Application.Quit() could not reach the editor Play Mode stop callback; stopping scripts without restoring the scene snapshot.");
+		ScriptingSystem::Instance().SetRunning(false);
+		ScriptingSystem::Instance().SetPaused(false);
+	}
+
+	void Native_Application_OpenURL(const char* url) {
+		TerraEngine::PlatformUtils::OpenUrl(url != nullptr ? url : "");
+	}
+
+	const char* Native_Application_GetPersistentDataPath() {
+		const std::filesystem::path persistentDataPath = TerraEngine::PlatformUtils::GetPersistentDataPath(
+			ResourceManager::Instance().GetProductName());
+		return WriteApplicationReturnText(persistentDataPath.string());
+	}
+
+	const char* Native_Application_GetStreamingAssetsPath() {
+		return WriteApplicationReturnText(ResourceManager::Instance().GetAssetRoot().string());
+	}
+
+	bool Native_Application_IsEditor() {
+		return !ScriptingSystem::Instance().IsExportMode();
+	}
+
+	std::uint32_t Native_Application_GetPlatform() {
+		return static_cast<std::uint32_t>(TerraEngine::PlatformUtils::GetRuntimePlatform());
+	}
+
+	const char* Native_Application_GetProductName() {
+		return WriteApplicationReturnText(ResourceManager::Instance().GetProductName());
+	}
+
+	const char* Native_Application_GetVersion() {
+		return WriteApplicationReturnText(ResourceManager::Instance().GetVersion());
+	}
 
     uint32_t Native_Object_Create(const char* name) {
         std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);

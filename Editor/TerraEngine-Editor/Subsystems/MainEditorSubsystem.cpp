@@ -11,6 +11,7 @@
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/Scripting/ScriptGlue.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -24,6 +25,19 @@
 #include "../Windows/GameViewWindow.h"
 #include "../Windows/SceneViewWindow.h"
 #include "../Windows/BuildProfilesWindow.h"
+
+namespace
+{
+	MainEditorSubsystem* g_ActiveMainEditorSubsystem = nullptr;
+
+	void StopPlayModeFromApplicationQuit()
+	{
+		if (g_ActiveMainEditorSubsystem != nullptr)
+		{
+			g_ActiveMainEditorSubsystem->StopPlayMode();
+		}
+	}
+}
 
 void MainEditorSubsystem::Initialize(EditorContext& context) {
     ctx = &context;
@@ -49,6 +63,8 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 
 	ScriptingSystem::Instance().SetRunning(false);
 	ClearPlayModeSceneState();
+	g_ActiveMainEditorSubsystem = this;
+	SetApplicationEditorStopPlayModeCallback(&StopPlayModeFromApplicationQuit);
 }
 
 void MainEditorSubsystem::OnProjectOpened() {
@@ -238,10 +254,29 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 
 void MainEditorSubsystem::Shutdown() {
 	ClearPlayModeSceneState();
+	if (g_ActiveMainEditorSubsystem == this)
+	{
+		g_ActiveMainEditorSubsystem = nullptr;
+	}
+	SetApplicationEditorStopPlayModeCallback(nullptr);
     ScriptCompilationSubsystem::Instance().Shutdown();
     UndoRedoSystem::Instance().Shutdown();
     ctx = nullptr;
     m_Windows.clear();
+}
+
+void MainEditorSubsystem::StopPlayMode()
+{
+	if (!ScriptingSystem::Instance().IsRunning())
+	{
+		return;
+	}
+
+	// Route every stop request through one helper so toolbar clicks and
+	// Application.Quit() both restore the same cached pre-play scene snapshot.
+	ScriptingSystem::Instance().SetRunning(false);
+	ScriptingSystem::Instance().SetPaused(false);
+	RestorePlayModeSceneState();
 }
 
 void MainEditorSubsystem::OnBackendReady() {
@@ -483,8 +518,7 @@ void MainEditorSubsystem::DrawUI() {
 				ScriptingSystem::Instance().SetRunning(true);
 				ScriptingSystem::Instance().SetPaused(false);
 			} else {
-				ScriptingSystem::Instance().SetRunning(false);
-				RestorePlayModeSceneState();
+				StopPlayMode();
 			}
 		}
         ImGui::SameLine();

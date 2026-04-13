@@ -3,9 +3,30 @@
 #include "Core/Export.h"
 #include <cstdint>
 
+class Engine;
+
+// The editor executable registers a plain function pointer so gameplay code can
+// stop Play Mode without the engine DLL depending directly on editor headers.
+using ApplicationEditorStopPlayModeCallback = void (*)();
+
+// MainEngine registers the active host engine so Application.Quit() can signal
+// the standalone runtime loop from inside the script bridge.
+TERRAENGINE_API void SetApplicationHostEngine(Engine* engine);
+TERRAENGINE_API void SetApplicationEditorStopPlayModeCallback(ApplicationEditorStopPlayModeCallback callback);
+
 extern "C" {
 	// Logging
 	TERRAENGINE_API void Native_Log(int level, const char* message, const char* function, int line);
+
+	// Application control and metadata
+	TERRAENGINE_API void Native_Application_Quit();
+	TERRAENGINE_API void Native_Application_OpenURL(const char* url);
+	TERRAENGINE_API const char* Native_Application_GetPersistentDataPath();
+	TERRAENGINE_API const char* Native_Application_GetStreamingAssetsPath();
+	TERRAENGINE_API bool Native_Application_IsEditor();
+	TERRAENGINE_API std::uint32_t Native_Application_GetPlatform();
+	TERRAENGINE_API const char* Native_Application_GetProductName();
+	TERRAENGINE_API const char* Native_Application_GetVersion();
 
 	// Object Management
 	TERRAENGINE_API uint32_t Native_Object_Create(const char* name);

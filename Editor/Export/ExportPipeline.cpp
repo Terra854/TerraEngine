@@ -85,6 +85,51 @@ static void RemoveDebugSymbolFiles(const std::filesystem::path& rootDirectory) {
 	}
 }
 
+struct ProjectManifestMetadata {
+	std::string name = "TerraEngine";
+	std::string version = "1.0.0";
+};
+
+static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem::path& projectRoot) {
+	ProjectManifestMetadata metadata;
+	if (!projectRoot.filename().string().empty()) {
+		metadata.name = projectRoot.filename().string();
+	}
+
+	const std::filesystem::path manifestPath = projectRoot / "game.json";
+	if (!std::filesystem::exists(manifestPath)) {
+		return metadata;
+	}
+
+	try {
+		std::ifstream input(manifestPath);
+		if (!input) {
+			return metadata;
+		}
+
+		const nlohmann::json manifest = nlohmann::json::parse(input);
+		if (auto nameIt = manifest.find("name"); nameIt != manifest.end() && nameIt->is_string()) {
+			const std::string manifestName = nameIt->get<std::string>();
+			if (!manifestName.empty()) {
+				metadata.name = manifestName;
+			}
+		}
+
+		if (auto versionIt = manifest.find("version"); versionIt != manifest.end() && versionIt->is_string()) {
+			const std::string manifestVersion = versionIt->get<std::string>();
+			if (!manifestVersion.empty()) {
+				metadata.version = manifestVersion;
+			}
+		}
+	}
+	catch (...) {
+		// Export validation already reports richer context elsewhere. Falling back
+		// here keeps manifest generation resilient even if metadata is malformed.
+	}
+
+	return metadata;
+}
+
 static uint64_t ComputeExportScriptId(const std::string& className) {
 	const uint64_t fnvOffsetBasis = 14695981039346656037ULL;
 	const uint64_t fnvPrime = 1099511628211ULL;
@@ -536,7 +581,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		// 4. Stage the export manifest directly into the TEPAK input root so the
 		// launcher can read game.json from inside the archive that it already
 		// mounted, instead of depending on a second file beside the executable.
-		if (!WriteExportManifest(profile, stagingDir)) {
+		if (!WriteExportManifest(profile, projectRoot, stagingDir)) {
 			result.errorMessage = "Failed to stage game.json into the export archive input.";
 			return false;
 		}
@@ -699,6 +744,7 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 }
 
 bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
+	const std::filesystem::path& projectRoot,
 	const std::filesystem::path& targetDirectory)
 {
 	try {
@@ -707,6 +753,9 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		// runtime paths, such as Managed/Assembly-CSharp.dll, are now derived by
 		// convention so the manifest stays small and harder to desynchronize.
 		nlohmann::json manifest;
+		const ProjectManifestMetadata projectMetadata = LoadProjectManifestMetadata(projectRoot);
+		manifest["name"] = projectMetadata.name;
+		manifest["version"] = projectMetadata.version;
 		if (!profile.startupScene.empty()) {
 			manifest["startupScene"] = profile.startupScene;
 		}

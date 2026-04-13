@@ -93,6 +93,7 @@ private:
 	/// only contains the export data that still varies per project, such as the
 	/// startup scene and asset GUID map, because runtime paths are deterministic.
 	bool WriteExportManifest(const BuildProfile& profile,
+		const std::filesystem::path& projectRoot,
 		const std::filesystem::path& targetDirectory);
 
 	struct StagedAsset {

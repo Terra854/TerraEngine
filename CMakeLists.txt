@@ -33,6 +33,7 @@ set(ENGINE_SOURCES
 	Engine/Scene/Serializer.cpp
 	Engine/Input/InputSystem.cpp
 	Engine/Input/GLFW/GlfwInputBackend.cpp
+	Engine/Utilities/PlatformUtils.cpp
 	Engine/Window/WindowSystem.cpp
 	Engine/Window/GLFW/GlfwWindowBackend.cpp
 	Engine/ThreadPool/ThreadPool.cpp
@@ -73,6 +74,7 @@ set(ENGINE_HEADERS
 	Engine/Components/LightComponent.h
 	Engine/Scene/Serializer.h
 	Engine/Input/GLFW/GlfwInputBackend.h
+	Engine/Utilities/PlatformUtils.h
 	Engine/Utilities/UUID.h
 	Engine/Window/WindowBackend.h
 	Engine/Window/WindowConfig.h
@@ -278,6 +280,12 @@ target_link_libraries(TerraEngine-Engine
 		xxhash
 )
 
+if(WIN32)
+	# PlatformUtils uses ShellExecuteW/SHGetKnownFolderPath so the engine must
+	# link the corresponding Windows SDK libraries explicitly.
+	target_link_libraries(TerraEngine-Engine PRIVATE shell32 ole32)
+endif()
+
 target_compile_definitions(TerraEngine-Engine
 	PUBLIC
 		TERRAENGINE_SHARED
@@ -372,6 +380,7 @@ if(WIN32)
 endif()
 
 set(MANAGED_CORE_SOURCES
+	Engine/Managed/Source/Application.cs
 	Engine/Managed/Source/InternalCalls.cs
 	Engine/Managed/Source/Log.cs
 	Engine/Managed/Source/Object.cs
