@@ -4,6 +4,7 @@
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"
 #include "Components/MeshRenderComponent.h"
+#include "Components/UIComponent.h"
 #include <rttr/registration>
 
 void ComponentRegistry::RegisterAllComponents() {
@@ -24,4 +25,5 @@ void ComponentRegistry::RegisterAllComponents() {
 	CameraComponent::registerType();
 	LightComponent::registerType();
 	MeshRenderComponent::registerType();
+	UIComponent::registerType();
 }

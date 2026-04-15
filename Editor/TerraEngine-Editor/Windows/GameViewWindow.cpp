@@ -4,6 +4,7 @@
 #include "Engine/Components/CameraComponent.h"
 #include "Engine/Components/Transform.h"
 #include "Engine/Core/Object/ObjectManager.h"
+#include "Engine/UI/UISystem.h"
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -79,6 +80,7 @@ void GameViewWindow::OnGui() {
 
 	imageSize.x *= m_Scale;
 	imageSize.y *= m_Scale;
+	UISystem::Instance().SetGameViewportSize(glm::vec2(imageSize.x, imageSize.y));
 
 	// --- Update Cameras ---
 	float aspect = (imageSize.y > 0.0001f) ? (imageSize.x / imageSize.y) : 1.0f;
@@ -122,7 +124,38 @@ void GameViewWindow::OnGui() {
 		ImGui::SetCursorScreenPos(imageMin);
 		ImGui::Image((ImTextureID)texID, imageSize);
 		ImGui::PopClipRect();
+
+		const ImVec2 mousePosition = ImGui::GetIO().MousePos;
+		const bool pointerInsideImage = mousePosition.x >= imageMin.x
+			&& mousePosition.x <= imageMax.x
+			&& mousePosition.y >= imageMin.y
+			&& mousePosition.y <= imageMax.y;
+		glm::vec2 localPointerPosition(-1.0f, -1.0f);
+		if (pointerInsideImage)
+		{
+			const glm::vec2 rawLocalPointerPosition(mousePosition.x - imageMin.x, mousePosition.y - imageMin.y);
+			const UIRenderBatch currentUiBatch = UISystem::Instance().GetCombinedFrameBatch();
+			const glm::vec2 logicalViewportSize = (currentUiBatch.viewportSize.x > 0.0f && currentUiBatch.viewportSize.y > 0.0f)
+				? currentUiBatch.viewportSize
+				: glm::vec2(imageSize.x, imageSize.y);
+
+			// Letterboxed and scaled editor Game Views must translate the mouse
+			// into the logical UI batch space, otherwise hover/clicks react as if
+			// the UI were stretched across the full host window.
+			localPointerPosition = glm::vec2(
+				(rawLocalPointerPosition.x / std::max(imageSize.x, 1.0f)) * logicalViewportSize.x,
+				(rawLocalPointerPosition.y / std::max(imageSize.y, 1.0f)) * logicalViewportSize.y);
+		}
+
+		// The editor translates ImGui's screen-space mouse into Game View-local
+		// coordinates so UISystem can use the exact same hit-testing code as the
+		// exported runtime without guessing about docking offsets.
+		UISystem::Instance().SetEditorGameViewPointer(
+			localPointerPosition,
+			pointerInsideImage,
+			ImGui::IsMouseDown(ImGuiMouseButton_Left));
 	} else {
+		UISystem::Instance().SetEditorGameViewPointer(glm::vec2(-1.0f, -1.0f), false, false);
 		const char* text = !hasCameras ? "No objects with cameras in the hierarchy" : "No Camera Rendering";
 		ImVec2 textSize = ImGui::CalcTextSize(text);
 		ImGui::SetCursorScreenPos(ImVec2(cursorPos.x + (availableSize.x - textSize.x) * 0.5f, cursorPos.y + (availableSize.y - textSize.y) * 0.5f));

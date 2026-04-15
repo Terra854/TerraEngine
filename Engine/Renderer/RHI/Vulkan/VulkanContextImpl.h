@@ -14,6 +14,7 @@
 #include "File Formats/TerraEngineTextureFile.h"
 #include "File Formats/TerraEngineShaderFile.h"
 #include "Scene/SceneManager.h"
+#include "UI/UIRenderer.h"
 
 #include <vector>
 #include <set>
@@ -425,6 +426,29 @@ struct VulkanContext::Impl {
 
     void CreateSceneViewGridPipeline(VkRenderPass renderPass);
     void RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData);
+
+    // UI Rendering
+    VkPipeline staticUiPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout staticUiPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline instancedUiPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout instancedUiPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline sdfTextPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout sdfTextPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout uiFontDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSet uiFontDescriptorSet = VK_NULL_HANDLE;
+    VulkanImage uiFontAtlasImage{};
+    int uiFontAtlasWidth = 0;
+    int uiFontAtlasHeight = 0;
+    float uiFontAtlasPixelHeight = 48.0f;
+    UIRenderer uiTextRenderer;
+
+    // Re-usable UI buffers (resized dynamically)
+    VulkanBuffer uiStaticVertexBuffer{};
+    VulkanBuffer uiInstanceBuffer{};
+    VulkanBuffer uiSdfVertexBuffer{};
+
+    void CreateUIPipelines(VkRenderPass renderPass);
+    void RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch);
 
 	bool CreateInstance();
 	void PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo);

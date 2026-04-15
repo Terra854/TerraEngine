@@ -87,6 +87,14 @@ public:
 	// resources cannot be found.
 	std::filesystem::path GetAssetRoot() const;
 
+	// Inspect the currently configured engine root so runtime systems can find
+	// bundled engine-owned assets such as shaders and fallback fonts without
+	// depending on the process working directory.
+	std::filesystem::path GetEngineRoot() const
+	{
+		return engineRoot;
+	}
+
 	// Records the exported TEPAK archive that should be mounted later during
 	// Initialize(). The launcher only provides the path; ResourceManager owns
 	// the actual mount so content bootstrap happens inside engine startup.

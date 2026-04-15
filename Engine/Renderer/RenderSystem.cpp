@@ -1,4 +1,5 @@
 #include "RenderSystem.h"
+#include "UI/UISystem.h"
 #include "RHI/Vulkan/VulkanContext.h"
 #include "Core/Logger/Logger.h"
 #include "Window/WindowSystem.h"
@@ -11,7 +12,9 @@
 #include "ThreadPool/ThreadPool.h"
 #include "Core/Memory/FrameArena.h"
 #include "Core/Memory/FlatMap.h"
+#include "UI/UISystem.h"
 #include <entt/entt.hpp>
+#include <GLFW/glfw3.h>
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -104,6 +107,24 @@ void RenderSystem::Update(float deltaTime)
 {
 	if (!initialized) {
 		return;
+	}
+
+	// Standalone runtime UI should track the real framebuffer size. In the
+	// editor, however, the Game View is letterboxed inside an ImGui window and
+	// owns its own viewport size, so forcing the full GLFW framebuffer here
+	// would make UI layout and hit testing react to the wrong rectangle.
+	if (!editorModeEnabled)
+	{
+		if (auto* windowHandle = static_cast<GLFWwindow*>(WindowSystem::Instance().GetNativeHandle()))
+		{
+			int framebufferWidth = 0;
+			int framebufferHeight = 0;
+			glfwGetFramebufferSize(windowHandle, &framebufferWidth, &framebufferHeight);
+			if (framebufferWidth > 0 && framebufferHeight > 0)
+			{
+				UISystem::Instance().SetGameViewportSize(glm::vec2(static_cast<float>(framebufferWidth), static_cast<float>(framebufferHeight)));
+			}
+		}
 	}
 
     // Reset the frame allocator at the start of the frame logic
@@ -505,6 +526,7 @@ void RenderSystem::Update(float deltaTime)
 	frameData.settings = SanitizeRenderSettings(currentSettings);
 	frameData.lightCandidates = std::move(packedLights);
 	frameData.commands = drawCommands;
+	frameData.uiBatch = UISystem::Instance().GetCombinedFrameBatch();
 
 	rhi->SetGlobalTaskShaderCullingEnabled(taskShaderCullingEnabled);
 	rhi->BeginFrame();

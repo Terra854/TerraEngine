@@ -1,6 +1,7 @@
 #include "ProjectBrowserWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
+#include "UIBuilderWindow.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
 #include "Engine/Resource/ResourceManager.h"
@@ -11,6 +12,42 @@
 #include <fstream>
 #include <vector>
 #include "../../../Engine/File Formats/TerraEngineMaterialFile.h"
+
+namespace
+{
+const char* kDefaultUIMarkup = R"(<UIRoot>
+	<VisualElement id="main-container" class="container">
+		<Label id="title" text="New TerraEngine UI" />
+		<Button id="primary-button" text="Click Me" />
+	</VisualElement>
+</UIRoot>
+)";
+
+std::filesystem::path MakeUniqueAssetPath(const std::filesystem::path& directory, const std::string& baseName, const std::string& extension)
+{
+	std::filesystem::path candidatePath = directory / (baseName + extension);
+	int duplicateIndex = 1;
+	while (std::filesystem::exists(candidatePath))
+	{
+		candidatePath = directory / (baseName + " (" + std::to_string(duplicateIndex++) + ")" + extension);
+	}
+
+	return candidatePath;
+}
+
+void OpenMarkupAssetInBuilder(MainEditorSubsystem* owner, const std::filesystem::path& markupPath)
+{
+	if (owner == nullptr)
+	{
+		return;
+	}
+
+	if (std::shared_ptr<UIBuilderWindow> uiBuilder = owner->GetWindow<UIBuilderWindow>())
+	{
+		uiBuilder->OpenMarkupDocument(std::filesystem::absolute(markupPath));
+	}
+}
+}
 
 ProjectBrowserWindow::ProjectBrowserWindow(MainEditorSubsystem* owner)
     : EditorWindow("Project Browser"), m_Owner(owner) {
@@ -82,9 +119,20 @@ void ProjectBrowserWindow::OnGui() {
 
                 std::ofstream out(newMatPath, std::ios::binary);
                 out.write((char*)&header, sizeof(MaterialHeader));
-                
+
                 m_Owner->SetSelectedAsset(std::filesystem::absolute(newMatPath));
             }
+            if (ImGui::MenuItem("UI Markup (.tuiml)")) {
+				const std::filesystem::path markupPath = MakeUniqueAssetPath(m_CurrentDirectory, "New UI", ".tuiml");
+
+				std::ofstream markupOutput(markupPath);
+				if (markupOutput) {
+					// UI markup is the only file created from the asset browser.
+					// Stylesheets are attached later from the UI Builder itself.
+					markupOutput << kDefaultUIMarkup;
+					m_Owner->SetSelectedAsset(std::filesystem::absolute(markupPath));
+				}
+			}
             if (ImGui::MenuItem("C# Script (.cs)")) {
                 std::fill(m_NewScriptName.begin(), m_NewScriptName.end(), '\0');
                 const char* defaultName = "NewScript";
@@ -255,6 +303,8 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
             std::string icon = entry.is_directory() ? "[DIR]" : "[FILE]";
             if (!entry.is_directory() && entry.path().extension() == ".cs") {
                 icon = "[C#]";
+            } else if (!entry.is_directory() && entry.path().extension() == ".tuiml") {
+				icon = "[UI]";
             }
             
             bool isSelected = false;
@@ -267,11 +317,11 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
             }
 
-            if (ImGui::Button(icon.c_str(), ImVec2(m_ThumbnailSize, m_ThumbnailSize))) {
-                if (!entry.is_directory()) {
-                    m_Owner->SetSelectedAsset(std::filesystem::absolute(entry.path()));
-                }
-            }
+				if (ImGui::Button(icon.c_str(), ImVec2(m_ThumbnailSize, m_ThumbnailSize))) {
+					if (!entry.is_directory()) {
+						m_Owner->SetSelectedAsset(std::filesystem::absolute(entry.path()));
+					}
+				}
 
             if (isSelected) {
                 ImGui::PopStyleColor();
@@ -285,7 +335,9 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
                 ImGui::EndPopup();
             }
             
-            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+			// Double-click performs the "open" action while single-click stays a
+			// pure selection gesture, which matches the Unity-style asset flow.
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 if (entry.is_directory()) {
                     m_CurrentDirectory = entry.path();
                 } else {
@@ -301,6 +353,8 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
                           }
                     } else if (entry.path().extension() == ".cs") {
                         ScriptCompilationSubsystem::Instance().OpenScript(std::filesystem::absolute(entry.path()));
+                    } else if (entry.path().extension() == ".tuiml") {
+						OpenMarkupAssetInBuilder(m_Owner, entry.path());
                     }
                 }
             }
@@ -318,6 +372,8 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
                     else if (importer == "ShaderImporter") payloadType = "ASSET_SHADER";
                     else if (importer == "MaterialImporter") payloadType = "ASSET_MATERIAL";
                     else if (importer == "ScriptImporter") payloadType = "ASSET_SCRIPT";
+                    else if (importer == "UIImporter") payloadType = "ASSET_TUIML";
+                    else if (importer == "StyleImporter") payloadType = "ASSET_TUSS";
 
                     ImGui::SetDragDropPayload(payloadType, &guid, sizeof(TerraEngine::UUID));
                     ImGui::Text("%s", filename.c_str());

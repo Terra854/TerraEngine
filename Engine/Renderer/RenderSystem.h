@@ -57,10 +57,11 @@ public:
         glm::mat4 proj;
         glm::vec3 pos;
     };
-    void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
-        sceneViewCamera = OverrideCameraData{view, proj, pos};
-        hasSceneViewCamera = true;
-    }
+	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
+		sceneViewCamera = OverrideCameraData{view, proj, pos};
+		hasSceneViewCamera = true;
+	}
+	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
     void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
         gameViewCameras.push_back({view, proj, pos});
     }
@@ -75,6 +76,7 @@ private:
 	ObjectManager& objManager = ObjectManager::instance();
 	bool initialized = false;
 	bool taskShaderCullingEnabled = true;
+	bool editorModeEnabled = false;
 
     bool hasSceneViewCamera = false;
     OverrideCameraData sceneViewCamera;

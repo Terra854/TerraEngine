@@ -534,6 +534,21 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 			// A bare filename like "Player.temf" is assumed to live directly
 			// under the asset root, not somewhere deeper in the tree.
 			candidatePaths.push_back(topLevelName);
+
+			// Also try substituting with native extensions for this asset type
+			// if the provided extension is different. This handles cases where
+			// a document refers to a source asset (e.g. "viking_room.png") but
+			// the engine needs the compiled version ("viking_room.tetf").
+			for (std::string_view extension : SupportedExtensionsForAssetType(type))
+			{
+				if (topLevelName.extension() != extension)
+				{
+					std::filesystem::path candidate = topLevelName;
+					candidate.replace_extension(extension);
+					candidatePaths.push_back(std::move(candidate));
+				}
+			}
+
 			return candidatePaths;
 		}
 

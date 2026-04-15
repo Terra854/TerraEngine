@@ -46,6 +46,11 @@ extern "C" {
 	TERRAENGINE_API void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type);
 	TERRAENGINE_API void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type);
 
+	// Runtime UI queries let gameplay scripts react to authored .tuiml buttons
+	// without reaching into editor-only state or native engine internals.
+	TERRAENGINE_API bool Native_UI_WasElementClicked(const char* elementId);
+	TERRAENGINE_API bool Native_UI_IsElementHovered(const char* elementId);
+
 	// Script binding helpers bypass the generic property layer because gameplay
 	// scripts live inside one ordered binding container component.
 	TERRAENGINE_API bool Native_ScriptComponent_AddBinding(uint32_t objectId, const char* className);

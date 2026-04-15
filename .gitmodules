@@ -59,3 +59,9 @@
 [submodule "External/zstd"]
 	path = External/zstd
 	url = https://github.com/facebook/zstd.git
+[submodule "External/yoga"]
+	path = External/yoga
+	url = https://github.com/facebook/yoga.git
+[submodule "External/pugixml"]
+	path = External/pugixml
+	url = https://github.com/zeux/pugixml.git

@@ -162,6 +162,66 @@ void VulkanContext::Impl::Cleanup() {
 	vmaDestroyImage(allocator, defaultTexture.image, defaultTexture.allocation);
 	vmaDestroyImage(allocator, defaultNormalTexture.image, defaultNormalTexture.allocation);
 
+	// UI Rendering cleanup
+	if (device) {
+		if (staticUiPipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, staticUiPipeline, nullptr);
+			staticUiPipeline = VK_NULL_HANDLE;
+		}
+		if (staticUiPipelineLayout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(device, staticUiPipelineLayout, nullptr);
+			staticUiPipelineLayout = VK_NULL_HANDLE;
+		}
+		if (instancedUiPipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, instancedUiPipeline, nullptr);
+			instancedUiPipeline = VK_NULL_HANDLE;
+		}
+		if (instancedUiPipelineLayout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(device, instancedUiPipelineLayout, nullptr);
+			instancedUiPipelineLayout = VK_NULL_HANDLE;
+		}
+		if (sdfTextPipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, sdfTextPipeline, nullptr);
+			sdfTextPipeline = VK_NULL_HANDLE;
+		}
+		if (sdfTextPipelineLayout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(device, sdfTextPipelineLayout, nullptr);
+			sdfTextPipelineLayout = VK_NULL_HANDLE;
+		}
+		if (uiFontDescriptorSetLayout != VK_NULL_HANDLE) {
+			vkDestroyDescriptorSetLayout(device, uiFontDescriptorSetLayout, nullptr);
+			uiFontDescriptorSetLayout = VK_NULL_HANDLE;
+		}
+		if (uiFontAtlasImage.sampler != VK_NULL_HANDLE) {
+			vkDestroySampler(device, uiFontAtlasImage.sampler, nullptr);
+			uiFontAtlasImage.sampler = VK_NULL_HANDLE;
+		}
+		if (uiFontAtlasImage.view != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, uiFontAtlasImage.view, nullptr);
+			uiFontAtlasImage.view = VK_NULL_HANDLE;
+		}
+	}
+	if (uiFontAtlasImage.image != VK_NULL_HANDLE && uiFontAtlasImage.allocation != VK_NULL_HANDLE) {
+		vmaDestroyImage(allocator, uiFontAtlasImage.image, uiFontAtlasImage.allocation);
+		uiFontAtlasImage.image = VK_NULL_HANDLE;
+		uiFontAtlasImage.allocation = VK_NULL_HANDLE;
+	}
+	uiFontDescriptorSet = VK_NULL_HANDLE;
+	uiFontAtlasWidth = 0;
+	uiFontAtlasHeight = 0;
+	if (uiStaticVertexBuffer.buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(allocator, uiStaticVertexBuffer.buffer, uiStaticVertexBuffer.allocation);
+		uiStaticVertexBuffer.buffer = VK_NULL_HANDLE;
+	}
+	if (uiInstanceBuffer.buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(allocator, uiInstanceBuffer.buffer, uiInstanceBuffer.allocation);
+		uiInstanceBuffer.buffer = VK_NULL_HANDLE;
+	}
+	if (uiSdfVertexBuffer.buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(allocator, uiSdfVertexBuffer.buffer, uiSdfVertexBuffer.allocation);
+		uiSdfVertexBuffer.buffer = VK_NULL_HANDLE;
+	}
+
 	if (device) {
 		if (clusterGridComputePipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, clusterGridComputePipeline, nullptr);
@@ -1215,6 +1275,16 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	previousClusterValidationSnapshotValid = false;
 
 	DestroyPipelines();
+	if (device) {
+		if (staticUiPipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, staticUiPipeline, nullptr);
+			staticUiPipeline = VK_NULL_HANDLE;
+		}
+		if (sdfTextPipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, sdfTextPipeline, nullptr);
+			sdfTextPipeline = VK_NULL_HANDLE;
+		}
+	}
 	// Do NOT reset descriptor pool here. ImGui uses it and its font texture lives there.
 	// if (descriptorPool) {
 	// 	VkResult resetResult = vkResetDescriptorPool(device, descriptorPool, 0);

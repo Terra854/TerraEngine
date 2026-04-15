@@ -732,6 +732,23 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 				std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
 			}
 		}
+
+		// Copy bundled runtime fonts beside the exported executable so the UI
+		// text renderer can build its fallback atlas without depending on any
+		// system-installed fonts on the target machine.
+		std::filesystem::path fontsSrc = editorDir / "Fonts";
+		if (std::filesystem::exists(fontsSrc)) {
+			std::filesystem::path fontsDest = outputDir / "Fonts";
+			RemoveDirectoryIfExists(fontsDest);
+			std::filesystem::create_directories(fontsDest);
+			for (const auto& entry : std::filesystem::recursive_directory_iterator(fontsSrc)) {
+				if (!entry.is_regular_file()) continue;
+				auto relative = std::filesystem::relative(entry.path(), fontsSrc);
+				auto dest = fontsDest / relative;
+				std::filesystem::create_directories(dest.parent_path());
+				std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
+			}
+		}
 	}
 	catch (const std::exception& e) {
 		result.errorMessage = std::string("Failed to copy engine binaries/shaders: ") + e.what();

@@ -11,6 +11,7 @@
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Resource/ResourceManager.h"
+#include "Engine/UI/UISystem.h"
 #include "Engine/Scripting/ScriptGlue.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include <imgui.h>
@@ -25,6 +26,7 @@
 #include "../Windows/GameViewWindow.h"
 #include "../Windows/SceneViewWindow.h"
 #include "../Windows/BuildProfilesWindow.h"
+#include "../Windows/UIBuilderWindow.h"
 
 namespace
 {
@@ -53,6 +55,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
     m_Windows.push_back(std::make_shared<GameViewWindow>(this));
     m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
     m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
+    m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));
 
     UndoRedoSystem::Instance().Initialize(context);
     ScriptCompilationSubsystem::Instance().Initialize(context);
@@ -78,6 +81,12 @@ void MainEditorSubsystem::OnProjectOpened() {
         buildProfiles->OnProjectOpened();
     }
 
+	if (auto uiBuilder = GetWindow<UIBuilderWindow>()) {
+		// Reset the builder when projects change so hidden internal asset paths
+		// never leak across workspaces and the next open starts from local state.
+		uiBuilder->ResetForProjectOpen();
+	}
+
     auto projectRoot = ctx->projectManager->GetProjectRoot();
     std::filesystem::path assetRoot = projectRoot / "Assets";
     std::filesystem::path sceneRoot = assetRoot / "Scenes";
@@ -88,6 +97,7 @@ void MainEditorSubsystem::OnProjectOpened() {
 
     // Set Scene Root to Assets folder so we can load scenes from anywhere inside Assets
     SceneManager::Instance().SetSceneRoot(assetRoot.string());
+    ResourceManager::Instance().SetAssetRoot(assetRoot);
     
     // Check for last opened scene
     std::filesystem::path lastScenePath = projectRoot / "Library" / "LastScene.txt";
@@ -316,6 +326,12 @@ void MainEditorSubsystem::Update(float deltaTime) {
 	// processed so queued C# rebuilds can start and completed async builds can
 	// clear their in-flight state during the same editor frame.
 	ScriptCompilationSubsystem::Instance().Update(deltaTime);
+
+	// Ensure UI system updates even when the game is not playing so we get live previews.
+	if (!ScriptingSystem::Instance().IsRunning())
+	{
+		UISystem::Instance().Update(deltaTime);
+	}
 
 	// A blocking script compile pauses editor-side interactions until the build
 	// either reloads the new assembly or restores the previous working one.

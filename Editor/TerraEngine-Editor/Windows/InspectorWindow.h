@@ -26,6 +26,7 @@ private:
 	void DrawScriptComponentInspector(Object& obj);
 	void DrawScriptDropTarget(Object& obj);
 	void DrawLightComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access);
+	void DrawUIComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access);
 	void DrawMaterialInspector(const std::filesystem::path& path);
 	void DrawMeshInspector(const std::filesystem::path& path);
 	void DrawTextureInspector(const std::filesystem::path& path);

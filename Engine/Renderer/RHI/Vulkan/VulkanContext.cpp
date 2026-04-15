@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include "Core/Logger/Logger.h"
+#include "Resource/ResourceManager.h"
 #define VMA_LEAK_LOG_FORMAT(format, ...) do { \
         char _vma_buf[1024]; \
         std::snprintf(_vma_buf, sizeof(_vma_buf), (format), __VA_ARGS__); \
@@ -976,6 +977,589 @@ void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRe
     vkCmdDraw(cmd, 6, 1, 0, 0); // 6 vertices for fullscreen quad
 }
 
+// UI Rendering Implementation
+void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
+	auto loadShader = [&](const std::string& path) -> VkShaderModule {
+		std::filesystem::path resolvedPath(path);
+		std::ifstream file(resolvedPath, std::ios::ate | std::ios::binary);
+		if (!file.is_open() && ResourceManager::Instance().IsExportRuntime()) {
+			// Export builds configure ResourceManager to the packaged runtime
+			// root, so retry there instead of assuming the process working
+			// directory still matches the exported game folder.
+			resolvedPath = ResourceManager::Instance().GetAssetRoot() / path;
+			file.open(resolvedPath, std::ios::ate | std::ios::binary);
+		}
+		if (!file.is_open()) {
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to open shader file: " << path << " (resolved: " << resolvedPath << ")");
+			return VK_NULL_HANDLE;
+		}
+
+		const size_t fileSize = (size_t)file.tellg();
+		std::vector<uint32_t> buffer(fileSize / sizeof(uint32_t));
+		file.seekg(0);
+		file.read((char*)buffer.data(), fileSize);
+		file.close();
+
+		VkShaderModuleCreateInfo createInfo{};
+		createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		createInfo.codeSize = buffer.size() * sizeof(uint32_t);
+		createInfo.pCode = buffer.data();
+
+		VkShaderModule shaderModule = VK_NULL_HANDLE;
+		if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << resolvedPath);
+			return VK_NULL_HANDLE;
+		}
+
+		return shaderModule;
+	};
+
+	VkVertexInputBindingDescription bindingDescription{};
+	bindingDescription.binding = 0;
+	bindingDescription.stride = sizeof(float) * 8;
+	bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+	VkVertexInputAttributeDescription attributeDescriptions[3]{};
+	attributeDescriptions[0].binding = 0;
+	attributeDescriptions[0].location = 0;
+	attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+	attributeDescriptions[0].offset = 0;
+	attributeDescriptions[1].binding = 0;
+	attributeDescriptions[1].location = 1;
+	attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
+	attributeDescriptions[1].offset = sizeof(float) * 2;
+	attributeDescriptions[2].binding = 0;
+	attributeDescriptions[2].location = 2;
+	attributeDescriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+	attributeDescriptions[2].offset = sizeof(float) * 4;
+
+	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vertexInputInfo.vertexBindingDescriptionCount = 1;
+	vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+	vertexInputInfo.vertexAttributeDescriptionCount = 3;
+	vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
+
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+	VkViewport viewport{};
+	viewport.x = 0.0f;
+	viewport.y = 0.0f;
+	viewport.width = (float)swapchainExtent.width;
+	viewport.height = (float)swapchainExtent.height;
+	viewport.minDepth = 0.0f;
+	viewport.maxDepth = 1.0f;
+
+	VkRect2D scissor{};
+	scissor.offset = { 0, 0 };
+	scissor.extent = swapchainExtent;
+
+	VkPipelineViewportStateCreateInfo viewportState{};
+	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewportState.viewportCount = 1;
+	viewportState.pViewports = &viewport;
+	viewportState.scissorCount = 1;
+	viewportState.pScissors = &scissor;
+
+	VkPipelineRasterizationStateCreateInfo rasterizer{};
+	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterizer.depthClampEnable = VK_FALSE;
+	rasterizer.rasterizerDiscardEnable = VK_FALSE;
+	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterizer.lineWidth = 1.0f;
+	rasterizer.cullMode = VK_CULL_MODE_NONE;
+	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	rasterizer.depthBiasEnable = VK_FALSE;
+
+	VkPipelineMultisampleStateCreateInfo multisampling{};
+	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multisampling.sampleShadingEnable = VK_FALSE;
+	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineDepthStencilStateCreateInfo depthStencil{};
+	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depthStencil.depthTestEnable = VK_FALSE;
+	depthStencil.depthWriteEnable = VK_FALSE;
+	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+	depthStencil.depthBoundsTestEnable = VK_FALSE;
+	depthStencil.stencilTestEnable = VK_FALSE;
+
+	VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+	colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	colorBlendAttachment.blendEnable = VK_TRUE;
+	colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+	colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+	colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+	VkPipelineColorBlendStateCreateInfo colorBlending{};
+	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	colorBlending.logicOpEnable = VK_FALSE;
+	colorBlending.attachmentCount = 1;
+	colorBlending.pAttachments = &colorBlendAttachment;
+
+	VkPushConstantRange pushConstantRange{};
+	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+	pushConstantRange.offset = 0;
+	pushConstantRange.size = sizeof(glm::vec2) + (sizeof(uint32_t) * 2);
+
+	if (staticUiPipelineLayout == VK_NULL_HANDLE) {
+		VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		pipelineLayoutInfo.setLayoutCount = 1;
+		pipelineLayoutInfo.pSetLayouts = &globalDescriptorSetLayout;
+		pipelineLayoutInfo.pushConstantRangeCount = 1;
+		pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+		if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &staticUiPipelineLayout) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create static UI pipeline layout!");
+		}
+	}
+
+	if (staticUiPipeline == VK_NULL_HANDLE && staticUiPipelineLayout != VK_NULL_HANDLE) {
+		VkShaderModule staticVert = loadShader("Shaders/UI/UI_Static.vert.spv");
+		VkShaderModule staticFrag = loadShader("Shaders/UI/UI_Static.frag.spv");
+		if (!staticVert || !staticFrag) {
+			TERRAENGINE_LOG(LogLevel::Warning, "UI Static shaders not found. UI rendering may be disabled.");
+			if (staticVert) vkDestroyShaderModule(device, staticVert, nullptr);
+			if (staticFrag) vkDestroyShaderModule(device, staticFrag, nullptr);
+		} else {
+			VkPipelineShaderStageCreateInfo shaderStages[2]{};
+			shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+			shaderStages[0].module = staticVert;
+			shaderStages[0].pName = "VSMain";
+			shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			shaderStages[1].module = staticFrag;
+			shaderStages[1].pName = "PSMain";
+
+			VkGraphicsPipelineCreateInfo pipelineInfo{};
+			pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+			pipelineInfo.stageCount = 2;
+			pipelineInfo.pStages = shaderStages;
+			pipelineInfo.pVertexInputState = &vertexInputInfo;
+			pipelineInfo.pInputAssemblyState = &inputAssembly;
+			pipelineInfo.pViewportState = &viewportState;
+			pipelineInfo.pRasterizationState = &rasterizer;
+			pipelineInfo.pMultisampleState = &multisampling;
+			pipelineInfo.pDepthStencilState = &depthStencil;
+			pipelineInfo.pColorBlendState = &colorBlending;
+			pipelineInfo.layout = staticUiPipelineLayout;
+			pipelineInfo.renderPass = renderPass;
+			pipelineInfo.subpass = 0;
+
+			if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &staticUiPipeline) != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Error, "failed to create static UI pipeline!");
+			}
+
+			vkDestroyShaderModule(device, staticVert, nullptr);
+			vkDestroyShaderModule(device, staticFrag, nullptr);
+		}
+	}
+
+	if (uiFontDescriptorSetLayout == VK_NULL_HANDLE) {
+		VkDescriptorSetLayoutBinding textBindings[2]{};
+		textBindings[0].binding = 0;
+		textBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		textBindings[0].descriptorCount = 1;
+		textBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		textBindings[1].binding = 1;
+		textBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+		textBindings[1].descriptorCount = 1;
+		textBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+		VkDescriptorSetLayoutCreateInfo setLayoutInfo{};
+		setLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		setLayoutInfo.bindingCount = 2;
+		setLayoutInfo.pBindings = textBindings;
+
+		if (vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &uiFontDescriptorSetLayout) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create UI font descriptor set layout!");
+		}
+	}
+
+	if (uiFontDescriptorSet == VK_NULL_HANDLE && uiFontDescriptorSetLayout != VK_NULL_HANDLE) {
+		VkDescriptorSetAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocInfo.descriptorPool = descriptorPool;
+		allocInfo.descriptorSetCount = 1;
+		allocInfo.pSetLayouts = &uiFontDescriptorSetLayout;
+
+		if (vkAllocateDescriptorSets(device, &allocInfo, &uiFontDescriptorSet) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to allocate UI font descriptor set!");
+			uiFontDescriptorSet = VK_NULL_HANDLE;
+		}
+	}
+
+	if (sdfTextPipelineLayout == VK_NULL_HANDLE && uiFontDescriptorSetLayout != VK_NULL_HANDLE) {
+		VkPushConstantRange textPushConstantRange{};
+		textPushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+		textPushConstantRange.offset = 0;
+		textPushConstantRange.size = sizeof(glm::vec2);
+
+		VkPipelineLayoutCreateInfo textLayoutInfo{};
+		textLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		textLayoutInfo.setLayoutCount = 1;
+		textLayoutInfo.pSetLayouts = &uiFontDescriptorSetLayout;
+		textLayoutInfo.pushConstantRangeCount = 1;
+		textLayoutInfo.pPushConstantRanges = &textPushConstantRange;
+
+		if (vkCreatePipelineLayout(device, &textLayoutInfo, nullptr, &sdfTextPipelineLayout) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to create SDF text pipeline layout!");
+		}
+	}
+
+	if (sdfTextPipeline == VK_NULL_HANDLE && sdfTextPipelineLayout != VK_NULL_HANDLE) {
+		VkShaderModule textVert = loadShader("Shaders/UI/UI_SDF_Text.vert.spv");
+		VkShaderModule textFrag = loadShader("Shaders/UI/UI_SDF_Text.frag.spv");
+		if (!textVert || !textFrag) {
+			TERRAENGINE_LOG(LogLevel::Warning, "UI SDF text shaders not found. Runtime UI text rendering may be disabled.");
+			if (textVert) vkDestroyShaderModule(device, textVert, nullptr);
+			if (textFrag) vkDestroyShaderModule(device, textFrag, nullptr);
+		} else {
+			VkPipelineShaderStageCreateInfo shaderStages[2]{};
+			shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+			shaderStages[0].module = textVert;
+			shaderStages[0].pName = "VSMain";
+			shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			shaderStages[1].module = textFrag;
+			shaderStages[1].pName = "PSMain";
+
+			VkGraphicsPipelineCreateInfo pipelineInfo{};
+			pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+			pipelineInfo.stageCount = 2;
+			pipelineInfo.pStages = shaderStages;
+			pipelineInfo.pVertexInputState = &vertexInputInfo;
+			pipelineInfo.pInputAssemblyState = &inputAssembly;
+			pipelineInfo.pViewportState = &viewportState;
+			pipelineInfo.pRasterizationState = &rasterizer;
+			pipelineInfo.pMultisampleState = &multisampling;
+			pipelineInfo.pDepthStencilState = &depthStencil;
+			pipelineInfo.pColorBlendState = &colorBlending;
+			pipelineInfo.layout = sdfTextPipelineLayout;
+			pipelineInfo.renderPass = renderPass;
+			pipelineInfo.subpass = 0;
+
+			if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &sdfTextPipeline) != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Error, "failed to create SDF text pipeline!");
+			}
+
+			vkDestroyShaderModule(device, textVert, nullptr);
+			vkDestroyShaderModule(device, textFrag, nullptr);
+		}
+	}
+}
+
+struct UIStaticPushConstants
+{
+	glm::vec2 viewportSize;
+	uint32_t textureIndex;
+	uint32_t useTexture;
+};
+
+void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch) {
+	if (batch.staticQuads.empty() && batch.immediateQuads.empty() && batch.textRuns.empty() && batch.imageRuns.empty()) return;
+
+	auto appendQuadVertices = [](std::vector<float>& vertices, const glm::vec2& position, const glm::vec2& size, const glm::vec4& color, const glm::vec2& uvMin, const glm::vec2& uvMax) {
+		const float x = position.x;
+		const float y = position.y;
+		const float w = size.x;
+		const float h = size.y;
+
+		auto addVertex = [&](float px, float py, float u, float v) {
+			vertices.push_back(px); vertices.push_back(py);
+			vertices.push_back(u); vertices.push_back(v);
+			vertices.push_back(color.r); vertices.push_back(color.g);
+			vertices.push_back(color.b); vertices.push_back(color.a);
+		};
+
+		addVertex(x, y, uvMin.x, uvMin.y);
+		addVertex(x + w, y, uvMax.x, uvMin.y);
+		addVertex(x, y + h, uvMin.x, uvMax.y);
+		addVertex(x, y + h, uvMin.x, uvMax.y);
+		addVertex(x + w, y, uvMax.x, uvMin.y);
+		addVertex(x + w, y + h, uvMax.x, uvMax.y);
+	};
+
+	if (staticUiPipeline != VK_NULL_HANDLE) {
+		std::vector<float> quadVertices;
+		struct ImageDraw {
+			uint32_t firstVertex;
+			std::string texturePath;
+			glm::vec4 color;
+		};
+		std::vector<ImageDraw> imageDraws;
+
+		quadVertices.reserve((batch.staticQuads.size() + batch.immediateQuads.size() + batch.imageRuns.size()) * 6 * 8);
+
+		for (const auto& quad : batch.staticQuads) {
+			appendQuadVertices(quadVertices, quad.position, quad.size, quad.color, glm::vec2(0.0f, 0.0f), glm::vec2(1.0f, 1.0f));
+		}
+
+		for (const auto& quad : batch.immediateQuads) {
+			appendQuadVertices(
+				quadVertices,
+				quad.position,
+				quad.size,
+				quad.color,
+				glm::vec2(quad.uvRect.x, quad.uvRect.y),
+				glm::vec2(quad.uvRect.z, quad.uvRect.w));
+		}
+
+		const uint32_t staticVertexCount = static_cast<uint32_t>(quadVertices.size() / 8);
+
+		for (const auto& image : batch.imageRuns) {
+			ImageDraw draw;
+			draw.firstVertex = static_cast<uint32_t>(quadVertices.size() / 8);
+			draw.texturePath = image.texturePath;
+			draw.color = image.color;
+			imageDraws.push_back(draw);
+
+			appendQuadVertices(quadVertices, image.position, image.size, image.color, glm::vec2(0.0f, 0.0f), glm::vec2(1.0f, 1.0f));
+		}
+
+		if (!quadVertices.empty()) {
+			const VkDeviceSize bufferSize = quadVertices.size() * sizeof(float);
+			if (uiStaticVertexBuffer.buffer == VK_NULL_HANDLE || uiStaticVertexBuffer.size < bufferSize) {
+				if (uiStaticVertexBuffer.buffer != VK_NULL_HANDLE) {
+					vmaDestroyBuffer(allocator, uiStaticVertexBuffer.buffer, uiStaticVertexBuffer.allocation);
+				}
+				uiStaticVertexBuffer = CreateBuffer(bufferSize * 2, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "UIStaticVertexBuffer");
+			}
+
+			void* data = nullptr;
+			vmaMapMemory(allocator, uiStaticVertexBuffer.allocation, &data);
+			memcpy(data, quadVertices.data(), bufferSize);
+			vmaUnmapMemory(allocator, uiStaticVertexBuffer.allocation);
+
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, staticUiPipeline);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, staticUiPipelineLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
+
+			VkBuffer vertexBuffers[] = { uiStaticVertexBuffer.buffer };
+			VkDeviceSize offsets[] = { 0 };
+			vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+
+			// Draw non-textured quads
+			if (staticVertexCount > 0) {
+				UIStaticPushConstants push{};
+				push.viewportSize = batch.viewportSize;
+				push.textureIndex = 0;
+				push.useTexture = 0;
+				vkCmdPushConstants(cmd, staticUiPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UIStaticPushConstants), &push);
+				vkCmdDraw(cmd, staticVertexCount, 1, 0, 0);
+			}
+
+			// Draw each textured image run
+			for (const auto& draw : imageDraws) {
+				UIStaticPushConstants push{};
+				push.viewportSize = batch.viewportSize;
+				push.useTexture = 0;
+				push.textureIndex = 0;
+
+				TerraEngine::UUID textureId = ResourceManager::Instance().ResolveAssetReference(draw.texturePath, AssetType::Texture);
+				if (textureId != TerraEngine::EMPTY_UUID) {
+					EnsureTexture(textureId);
+					if (textureIndexMap.contains(textureId)) {
+						push.textureIndex = textureIndexMap[textureId];
+						push.useTexture = 1;
+					}
+				}				vkCmdPushConstants(cmd, staticUiPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UIStaticPushConstants), &push);
+				vkCmdDraw(cmd, 6, 1, draw.firstVertex, 0);
+			}
+		}
+	}
+
+	if (batch.textRuns.empty() || sdfTextPipeline == VK_NULL_HANDLE || uiFontDescriptorSet == VK_NULL_HANDLE) {
+		return;
+	}
+
+	const std::filesystem::path fontPath = ResourceManager::Instance().GetEngineRoot() / "Fonts" / "Roboto-Medium.ttf";
+	const UIFontAtlas& fontAtlas = uiTextRenderer.EnsureSignedDistanceFontAtlas(fontPath, uiFontAtlasPixelHeight);
+	if (!fontAtlas.ready || fontAtlas.width <= 0 || fontAtlas.height <= 0 || fontAtlas.pixels.empty()) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Runtime UI text atlas is unavailable. Missing or invalid font: " << fontPath);
+		return;
+	}
+
+	auto destroyUIFontAtlasImage = [&]() {
+		if (uiFontAtlasImage.sampler != VK_NULL_HANDLE) {
+			vkDestroySampler(device, uiFontAtlasImage.sampler, nullptr);
+			uiFontAtlasImage.sampler = VK_NULL_HANDLE;
+		}
+		if (uiFontAtlasImage.view != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, uiFontAtlasImage.view, nullptr);
+			uiFontAtlasImage.view = VK_NULL_HANDLE;
+		}
+		if (uiFontAtlasImage.image != VK_NULL_HANDLE && uiFontAtlasImage.allocation != VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, uiFontAtlasImage.image, uiFontAtlasImage.allocation);
+			uiFontAtlasImage.image = VK_NULL_HANDLE;
+			uiFontAtlasImage.allocation = VK_NULL_HANDLE;
+		}
+		uiFontAtlasWidth = 0;
+		uiFontAtlasHeight = 0;
+	};
+
+	if (uiFontAtlasImage.image == VK_NULL_HANDLE || uiFontAtlasWidth != fontAtlas.width || uiFontAtlasHeight != fontAtlas.height) {
+		destroyUIFontAtlasImage();
+
+		const VkDeviceSize imageSize = static_cast<VkDeviceSize>(fontAtlas.pixels.size());
+		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "UIFontAtlasStagingBuffer");
+		void* stagingData = nullptr;
+		vmaMapMemory(allocator, stagingBuffer.allocation, &stagingData);
+		memcpy(stagingData, fontAtlas.pixels.data(), static_cast<std::size_t>(imageSize));
+		vmaUnmapMemory(allocator, stagingBuffer.allocation);
+
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent = { static_cast<uint32_t>(fontAtlas.width), static_cast<uint32_t>(fontAtlas.height), 1 };
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.format = VK_FORMAT_R8_UNORM;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &uiFontAtlasImage.image, &uiFontAtlasImage.allocation, nullptr) != VK_SUCCESS) {
+			vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to allocate runtime UI font atlas image.");
+			return;
+		}
+
+		TransitionImageLayout(uiFontAtlasImage.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		CopyBufferToImage(stagingBuffer.buffer, uiFontAtlasImage.image, static_cast<uint32_t>(fontAtlas.width), static_cast<uint32_t>(fontAtlas.height));
+		TransitionImageLayout(uiFontAtlasImage.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+
+		uiFontAtlasImage.view = CreateImageView(uiFontAtlasImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
+
+		VkSamplerCreateInfo samplerInfo{};
+		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerInfo.magFilter = VK_FILTER_LINEAR;
+		samplerInfo.minFilter = VK_FILTER_LINEAR;
+		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.anisotropyEnable = VK_FALSE;
+		samplerInfo.maxAnisotropy = 1.0f;
+		samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+		samplerInfo.unnormalizedCoordinates = VK_FALSE;
+		samplerInfo.compareEnable = VK_FALSE;
+		samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		if (vkCreateSampler(device, &samplerInfo, nullptr, &uiFontAtlasImage.sampler) != VK_SUCCESS) {
+			destroyUIFontAtlasImage();
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to create runtime UI font atlas sampler.");
+			return;
+		}
+
+		uiFontAtlasWidth = fontAtlas.width;
+		uiFontAtlasHeight = fontAtlas.height;
+
+		VkDescriptorImageInfo sampledImageInfo{};
+		sampledImageInfo.imageView = uiFontAtlasImage.view;
+		sampledImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		VkDescriptorImageInfo samplerDescriptorInfo{};
+		samplerDescriptorInfo.sampler = uiFontAtlasImage.sampler;
+
+		VkWriteDescriptorSet writes[2]{};
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = uiFontDescriptorSet;
+		writes[0].dstBinding = 0;
+		writes[0].descriptorCount = 1;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		writes[0].pImageInfo = &sampledImageInfo;
+		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet = uiFontDescriptorSet;
+		writes[1].dstBinding = 1;
+		writes[1].descriptorCount = 1;
+		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+		writes[1].pImageInfo = &samplerDescriptorInfo;
+		vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+	}
+
+	std::vector<float> textVertices;
+	textVertices.reserve(batch.textRuns.size() * 96 * 8);
+
+	for (const UITextRun& textRun : batch.textRuns) {
+		if (textRun.text.empty() || textRun.fontSize <= 0.0f) {
+			continue;
+		}
+
+		const float glyphScale = textRun.fontSize / std::max(fontAtlas.pixelHeight, 1.0f);
+		float penX = textRun.position.x;
+		float baselineY = textRun.position.y + textRun.fontSize;
+		const float lineAdvance = textRun.fontSize * 1.2f;
+
+		for (char character : textRun.text) {
+			if (character == '\n') {
+				penX = textRun.position.x;
+				baselineY += lineAdvance;
+				continue;
+			}
+			if (character == '\r') {
+				continue;
+			}
+
+			const auto glyphIt = fontAtlas.glyphs.find(character);
+			if (glyphIt == fontAtlas.glyphs.end()) {
+				penX += textRun.fontSize * 0.35f;
+				continue;
+			}
+
+			const UIFontGlyph& glyph = glyphIt->second;
+			appendQuadVertices(
+				textVertices,
+				glm::vec2(penX + (glyph.bearing.x * glyphScale), baselineY + (glyph.bearing.y * glyphScale)),
+				glyph.size * glyphScale,
+				textRun.color,
+				glyph.uvMin,
+				glyph.uvMax);
+			penX += glyph.advance * glyphScale;
+		}
+	}
+
+	if (textVertices.empty()) {
+		return;
+	}
+
+	const VkDeviceSize textBufferSize = textVertices.size() * sizeof(float);
+	if (uiSdfVertexBuffer.buffer == VK_NULL_HANDLE || uiSdfVertexBuffer.size < textBufferSize) {
+		if (uiSdfVertexBuffer.buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(allocator, uiSdfVertexBuffer.buffer, uiSdfVertexBuffer.allocation);
+		}
+		uiSdfVertexBuffer = CreateBuffer(textBufferSize * 2, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "UISdfVertexBuffer");
+	}
+
+	void* textData = nullptr;
+	vmaMapMemory(allocator, uiSdfVertexBuffer.allocation, &textData);
+	memcpy(textData, textVertices.data(), textBufferSize);
+	vmaUnmapMemory(allocator, uiSdfVertexBuffer.allocation);
+
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sdfTextPipeline);
+
+	glm::vec2 viewportSize = batch.viewportSize;
+	vkCmdPushConstants(cmd, sdfTextPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::vec2), &viewportSize);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sdfTextPipelineLayout, 0, 1, &uiFontDescriptorSet, 0, nullptr);
+
+	VkBuffer textVertexBuffers[] = { uiSdfVertexBuffer.buffer };
+	VkDeviceSize textOffsets[] = { 0 };
+	vkCmdBindVertexBuffers(cmd, 0, 1, textVertexBuffers, textOffsets);
+	vkCmdDraw(cmd, static_cast<uint32_t>(textVertices.size() / 8), 1, 0, 0);
+}
+
 void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view) {
 	// Skip rendering if initialization failed so we do not spam validation errors.
 	if (!impl->initialized || impl->skipFrame) return;
@@ -1938,12 +2522,42 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		}
 	}
 
+	// Runtime UI belongs to the Game view only. The Scene view must stay free of
+	// authored UI so editor camera work, picking, and gizmos are never obscured
+	// by the game's overlay.
+	if (view == ViewType::Game) {
+		const size_t workerIndex = secondaryBuffers.size();
+		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
+		VkCommandBuffer uiCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerIndex);
+		if (uiCmd != VK_NULL_HANDLE) {
+			vkResetCommandBuffer(uiCmd, 0);
+
+			VkCommandBufferInheritanceInfo inherit{};
+			inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+			inherit.renderPass = renderPassInfo.renderPass;
+			inherit.subpass = 0;
+			inherit.framebuffer = renderPassInfo.framebuffer;
+
+			VkCommandBufferBeginInfo begin{};
+			begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+			begin.pInheritanceInfo = &inherit;
+
+			vkBeginCommandBuffer(uiCmd, &begin);
+			impl->CreateUIPipelines(renderPassInfo.renderPass);
+			impl->RenderUI(uiCmd, frameData.uiBatch);
+			vkEndCommandBuffer(uiCmd);
+			secondaryBuffers.push_back(uiCmd);
+		}
+	}
+
 	VkSubpassContents contents = secondaryBuffers.empty() ? VK_SUBPASS_CONTENTS_INLINE : VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS;
 	vkCmdBeginRenderPass(cmd, &renderPassInfo, contents);
 	if (!secondaryBuffers.empty()) {
 		vkCmdExecuteCommands(cmd, static_cast<uint32_t>(secondaryBuffers.size()), secondaryBuffers.data());
 	}
-				vkCmdEndRenderPass(cmd);
+
+	vkCmdEndRenderPass(cmd);
 			
 				// VRS Generation for next frame
 				impl->GenerateVRSImage(cmd, (view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);

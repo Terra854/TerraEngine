@@ -12,6 +12,7 @@
 #include "Resource/ResourceManager.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Scripting/ScriptGlue.h"
+#include "UI/UISystem.h"
 
 #include <algorithm>
 #include <chrono>
@@ -82,11 +83,17 @@ void Engine::Initialize()
 
 	// RenderSystem consumes scene data and produces frames.
 	RenderSystem& renderSystem = RenderSystem::Instance();
+	renderSystem.SetEditorModeEnabled(editorMode);
 	systems.push_back(&renderSystem);
 
 	// ScriptingSystem manages the .NET runtime and gameplay scripts.
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 	systems.push_back(&scriptingSystem);
+
+	// UISystem parses `.tuiml`/`.tuss` assets and builds CPU-side UI batches
+	// after gameplay and scene state have been updated for the current frame.
+	UISystem& uiSystem = UISystem::Instance();
+	systems.push_back(&uiSystem);
 
 	std::size_t initializedSystemCount = 0;
 	bool editorSystemInitialized = false;

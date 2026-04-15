@@ -7,6 +7,7 @@
 #include "Components/Transform.h"
 #include "Components/ScriptComponent.h"
 #include "ScriptingSystem.h"
+#include "UI/UISystem.h"
 #include "Input/InputSystem.h"
 #include "Scene/SceneManager.h"
 #include "Utilities/PlatformUtils.h"
@@ -516,6 +517,22 @@ extern "C" {
 		auto [x, y] = InputSystem::Instance().GetCursorPosition();
 		if (outX) *outX = x;
 		if (outY) *outY = y;
+	}
+
+	bool Native_UI_WasElementClicked(const char* elementId) {
+		if (elementId == nullptr || elementId[0] == '\0') {
+			return false;
+		}
+
+		return UISystem::Instance().WasElementClicked(elementId);
+	}
+
+	bool Native_UI_IsElementHovered(const char* elementId) {
+		if (elementId == nullptr || elementId[0] == '\0') {
+			return false;
+		}
+
+		return UISystem::Instance().IsElementHovered(elementId);
 	}
 
 	const char* Native_Scene_LoadScene(const char* path) {

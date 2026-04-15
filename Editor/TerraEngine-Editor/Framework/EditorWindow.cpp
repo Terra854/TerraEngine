@@ -8,7 +8,16 @@ EditorWindow::EditorWindow(const std::string& title, bool startVisible, ImGuiWin
 void EditorWindow::Draw() {
     if (!m_IsVisible) return;
 
-    bool expanded = ImGui::Begin(m_Title.c_str(), &m_IsVisible, m_Flags);
+    bool nextVisible = m_IsVisible;
+    bool expanded = ImGui::Begin(m_Title.c_str(), &nextVisible, m_Flags);
+    if (!nextVisible && m_IsVisible) {
+        if (OnCloseRequested()) {
+            m_IsVisible = false;
+        } else {
+            nextVisible = true;
+        }
+    }
+    m_IsVisible = nextVisible;
 
     // Context Menu Logic (mimicking BeginWindowWithContextMenu)
     ImGuiWindow* window = ImGui::GetCurrentWindow();
@@ -46,7 +55,7 @@ void EditorWindow::Draw() {
 
     if (ImGui::BeginPopup("WindowContextMenu")) {
         OnContextMenu();
-        if (ImGui::MenuItem("Close")) m_IsVisible = false;
+        if (ImGui::MenuItem("Close") && OnCloseRequested()) m_IsVisible = false;
         ImGui::EndPopup();
     }
 

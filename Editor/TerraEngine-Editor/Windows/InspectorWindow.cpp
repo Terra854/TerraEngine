@@ -7,6 +7,7 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Components/LightComponent.h"
+#include "Engine/Components/UIComponent.h"
 #include "Engine/Components/ScriptComponent.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "AssetDatabase.h"
@@ -739,6 +740,26 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 		}
         startEditing();
         endEditing();
+
+		if (ImGui::BeginDragDropTarget()) {
+			const char* expected = nullptr;
+			if (name == "sourceMarkup") expected = "ASSET_TUIML";
+
+			if (expected) {
+				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(expected)) {
+					IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
+					TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
+					if (const AssetMetadata* meta = AssetDatabase::Instance().FindAssetByGuid(newId)) {
+						std::string path = meta->sourcePath.generic_string();
+						rttr::variant oldV = access.getter(obj, name);
+						access.setter(obj, name, path);
+						rttr::variant newV = access.getter(obj, name);
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldV, newV));
+					}
+				}
+			}
+			ImGui::EndDragDropTarget();
+		}
 	}
 	else if (type == rttr::type::get<glm::vec3>()) {
 		glm::vec3 val = var.get_value<glm::vec3>();
@@ -1763,6 +1784,87 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 	}
 }
 
+void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access)
+{
+	UIComponent* uiComponent = obj.getComponent<UIComponent>();
+	if (uiComponent == nullptr)
+	{
+		return;
+	}
+
+	auto drawLabeledWidget = [&](const char* label, auto widgetFunc) {
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted(label);
+		ImGui::TableSetColumnIndex(1);
+		ImGui::SetNextItemWidth(-1.0f);
+		widgetFunc();
+	};
+
+	auto setStringPropertyWithUndo = [&](const char* propertyName, const std::string& newValue) {
+		rttr::variant oldVariant = access.getter(obj, propertyName);
+		if (!oldVariant.is_valid() || !oldVariant.is_type<std::string>())
+		{
+			return;
+		}
+
+		const std::string oldValue = oldVariant.get_value<std::string>();
+		if (oldValue == newValue)
+		{
+			return;
+		}
+
+		access.setter(obj, propertyName, newValue);
+		rttr::variant nextVariant = access.getter(obj, propertyName);
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
+	};
+
+	// The custom UIComponent inspector owns its own property table because the
+	// generic component path is bypassed for this specialized multi-asset UI.
+	if (ImGui::BeginTable("UIComponentPropertyTable", 2, ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+		ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+
+		drawLabeledWidget("Source Asset", [&]() {
+			std::string markupPath = uiComponent->GetSourceMarkup();
+			char markupBuffer[256];
+			strncpy(markupBuffer, markupPath.c_str(), sizeof(markupBuffer));
+			markupBuffer[sizeof(markupBuffer) - 1] = '\0';
+			if (ImGui::InputText("##UIComponentSourceMarkup", markupBuffer, sizeof(markupBuffer)))
+			{
+				setStringPropertyWithUndo("sourceMarkup", markupBuffer);
+			}
+
+			if (ImGui::BeginPopupContextItem())
+			{
+				if (ImGui::MenuItem("Clear"))
+				{
+					setStringPropertyWithUndo("sourceMarkup", "");
+				}
+				ImGui::EndPopup();
+			}
+
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_TUIML"))
+				{
+					IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
+					const TerraEngine::UUID assetGuid = *static_cast<const TerraEngine::UUID*>(payload->Data);
+					if (const AssetMetadata* meta = AssetDatabase::Instance().FindAssetByGuid(assetGuid))
+					{
+						setStringPropertyWithUndo("sourceMarkup", meta->sourcePath.generic_string());
+					}
+				}
+				ImGui::EndDragDropTarget();
+			}
+		});
+
+		ImGui::EndTable();
+	}
+}
+
 void InspectorWindow::OnGui() {
 	m_InspectorValueDragging = false;
     
@@ -2088,6 +2190,10 @@ void InspectorWindow::OnGui() {
 					if (compName == "LightComponent")
 					{
 						DrawLightComponentInspector(compName, obj, access);
+					}
+					else if (compName == "UIComponent")
+					{
+						DrawUIComponentInspector(compName, obj, access);
 					}
 					else if (compName == "Script")
 					{

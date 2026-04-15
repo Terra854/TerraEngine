@@ -304,6 +304,10 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
         else if (metadata.importerName == "ShaderImporter") { type = AssetType::ShaderCollection; known = true; }
 
         if (known) {
+            // Register source path as an alias so the engine can resolve things like "viking_room.png" to the same GUID.
+            // We do this first so that idToPath (the preferred load path) is eventually overwritten by the compiled path.
+            ResourceManager::Instance().RegisterAssetPath(metadata.guid, absSourcePath, type);
+
             std::filesystem::path fullCompiled = buildRoot / metadata.compiledPath;
             ResourceManager::Instance().RegisterAssetPath(metadata.guid, fullCompiled, type);
 
@@ -379,6 +383,8 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
     if (ext == ".hlsl" || ext == ".glsl") return "ShaderImporter";
     if (ext == ".tmat") return "MaterialImporter";
     if (ext == ".cs") return "ScriptImporter";
+    if (ext == ".tuiml") return "UIImporter";
+    if (ext == ".tuss") return "StyleImporter";
     return "GenericImporter";
 }
 

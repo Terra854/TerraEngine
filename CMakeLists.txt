@@ -46,6 +46,12 @@ set(ENGINE_SOURCES
 	Engine/DotNet/DotNetHost.cpp
 	Engine/Scripting/ScriptingSystem.cpp
 	Engine/Scripting/ScriptGlue.cpp
+	Engine/UI/UIStyle.cpp
+	Engine/UI/UIElement.cpp
+	Engine/UI/UIParser.cpp
+	Engine/UI/UILayoutEngine.cpp
+	Engine/UI/UIRenderer.cpp
+	Engine/UI/UISystem.cpp
 	# --- ContentMount (TEPAK reader integration for export builds) ---
 	Engine/Runtime/ContentMount/ContentMount.cpp
 	Engine/Runtime/ContentMount/archive/PackReader.cpp
@@ -72,6 +78,7 @@ set(ENGINE_HEADERS
 	Engine/Resource/ShaderCollection.h
 	Engine/Scene/SceneManager.h
 	Engine/Components/LightComponent.h
+	Engine/Components/UIComponent.h
 	Engine/Scene/Serializer.h
 	Engine/Input/GLFW/GlfwInputBackend.h
 	Engine/Utilities/PlatformUtils.h
@@ -94,6 +101,12 @@ set(ENGINE_HEADERS
 	Engine/Scripting/ScriptingSystem.h
 	Engine/Components/ScriptComponent.h
 	Engine/Scripting/ExportVTable.h
+	Engine/UI/UIStyle.h
+	Engine/UI/UIElement.h
+	Engine/UI/UIParser.h
+	Engine/UI/UILayoutEngine.h
+	Engine/UI/UIRenderer.h
+	Engine/UI/UISystem.h
 	Engine/Runtime/ContentMount/ContentMount.h
 	Engine/Debug.h
 )
@@ -176,6 +189,25 @@ target_include_directories(TerraEngine-Engine
 )
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
+
+# --- Yoga --------------------------------------------------------------------
+# Build the static core target directly so the engine gets the layout library
+# without pulling Yoga's test targets into the main solution.
+add_subdirectory(External/yoga/yoga ${CMAKE_BINARY_DIR}/yoga)
+set_target_properties(yogacore PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+
+# --- pugixml -----------------------------------------------------------------
+# Keep pugixml self-contained and static so UI parsing never depends on an
+# external DLL at runtime.
+set(TERRAENGINE_BUILD_SHARED_LIBS_SAVED_PUGI ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build pugixml as a static library" FORCE)
+set(PUGIXML_BUILD_TESTS OFF CACHE BOOL "Disable pugixml tests" FORCE)
+set(PUGIXML_INSTALL OFF CACHE BOOL "Disable pugixml install target" FORCE)
+add_subdirectory(External/pugixml)
+set(BUILD_SHARED_LIBS ${TERRAENGINE_BUILD_SHARED_LIBS_SAVED_PUGI} CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
+if(TARGET pugixml-static)
+	set_target_properties(pugixml-static PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+endif()
 
 # --- volk --------------------------------------------------------------------
 if(NOT DEFINED VULKAN_HEADERS_INSTALL_DIR)
@@ -274,6 +306,8 @@ target_link_libraries(TerraEngine-Engine
 		nethost
 		meshoptimizer
 		basisu
+		yogacore
+		pugixml::pugixml
 	PRIVATE
 		# TEPAK reader dependencies (zstd for decompression, xxhash for hashing)
 		libzstd_static
@@ -570,6 +604,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
+	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
@@ -676,11 +711,12 @@ set(DEFAULT_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Default")
 		set(TERRAENGINE_DXC_PATH "${CMAKE_SOURCE_DIR}/External/dxc/linux/bin/dxc")
 	endif()
 
-	set(SHADER_INSTALL_SCRIPT "${CMAKE_BINARY_DIR}/CMakeFiles/install_default_shaders_$<CONFIG>.cmake")
-	file(GENERATE OUTPUT "${SHADER_INSTALL_SCRIPT}" CONTENT "
+set(SHADER_INSTALL_SCRIPT "${CMAKE_BINARY_DIR}/CMakeFiles/install_default_shaders_$<CONFIG>.cmake")
+file(GENERATE OUTPUT "${SHADER_INSTALL_SCRIPT}" CONTENT "
 set(SHADER_COMPILER \"$<TARGET_FILE:TerraEngineShaderCompiler>\")
 set(SHADER_SRC_DIR \"${DEFAULT_SHADER_SRC_DIR}\")
 set(EDITOR_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Editor/Shaders\")
+set(UI_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Engine/Shaders/UI\")
 set(SHADER_INSTALL_ROOT \"${ENGINE_INSTALL_DESTINATION}\")
 set(DXC_PATH \"${TERRAENGINE_DXC_PATH}\")
 
@@ -688,12 +724,14 @@ set(out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders\")
 set(editor_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Editor\")
 set(lighting_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Lighting\")
 set(postprocess_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/PostProcess\")
+set(ui_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/UI\")
 set(lighting_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Lighting\")
 set(postprocess_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/PostProcess\")
 file(MAKE_DIRECTORY \"\${out_dir}\")
 file(MAKE_DIRECTORY \"\${editor_out_dir}\")
 file(MAKE_DIRECTORY \"\${lighting_out_dir}\")
 file(MAKE_DIRECTORY \"\${postprocess_out_dir}\")
+file(MAKE_DIRECTORY \"\${ui_out_dir}\")
 file(REMOVE
 	\"\${out_dir}/Default.task.spv\"
 	\"\${out_dir}/Default.mesh.spv\"
@@ -706,6 +744,14 @@ file(REMOVE
 	\"\${lighting_out_dir}/ClusterLightFill.comp.tspf\"
 	\"\${postprocess_out_dir}/HiZGenerate.comp.tspf\"
 	\"\${postprocess_out_dir}/VRSGenerate.comp.tspf\"
+	\"\${ui_out_dir}/UI_Static.vert.spv\"
+	\"\${ui_out_dir}/UI_Static.frag.spv\"
+	\"\${ui_out_dir}/UI_Instanced.vert.spv\"
+	\"\${ui_out_dir}/UI_Instanced.frag.spv\"
+	\"\${ui_out_dir}/UI_SDF_Text.vert.spv\"
+	\"\${ui_out_dir}/UI_SDF_Text.frag.spv\"
+	\"\${ui_out_dir}/UI_Textured.vert.spv\"
+	\"\${ui_out_dir}/UI_Textured.frag.spv\"
 	\"\${editor_out_dir}/SceneViewGrid.vert.tspf\"
 	\"\${editor_out_dir}/SceneViewGrid.frag.tspf\")
 
@@ -795,6 +841,54 @@ execute_process(
 )
 if(NOT compile_vrs EQUAL 0)
     message(FATAL_ERROR \"Failed to compile VRSGenerate.comp.hlsl during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_Static.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Static.hlsl\"
+    RESULT_VARIABLE compile_ui_static_vs
+)
+if(NOT compile_ui_static_vs EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile UI_Static.hlsl vertex shader during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMain -Fo \"\${ui_out_dir}/UI_Static.frag.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Static.hlsl\"
+    RESULT_VARIABLE compile_ui_static_ps
+)
+if(NOT compile_ui_static_ps EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile UI_Static.hlsl fragment shader during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_Instanced.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Instanced.hlsl\"
+    RESULT_VARIABLE compile_ui_instanced_vs
+)
+if(NOT compile_ui_instanced_vs EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile UI_Instanced.hlsl vertex shader during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMain -Fo \"\${ui_out_dir}/UI_Instanced.frag.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Instanced.hlsl\"
+    RESULT_VARIABLE compile_ui_instanced_ps
+)
+if(NOT compile_ui_instanced_ps EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile UI_Instanced.hlsl fragment shader during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_SDF_Text.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_SDF_Text.hlsl\"
+    RESULT_VARIABLE compile_ui_text_vs
+)
+if(NOT compile_ui_text_vs EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile UI_SDF_Text.hlsl vertex shader during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMain -Fo \"\${ui_out_dir}/UI_SDF_Text.frag.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_SDF_Text.hlsl\"
+    RESULT_VARIABLE compile_ui_text_ps
+)
+if(NOT compile_ui_text_ps EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile UI_SDF_Text.hlsl fragment shader during install\")
 endif()
 
 # Compile Grid Shaders using raw DXC (bypassing asset compiler for internal usage)
@@ -898,6 +992,17 @@ endif()
 	# Install cimgui (TerraEngine-ImGui)
 	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
 	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
+
+	# Ship a bundled fallback UI font so runtime UI text rendering works in both
+	# the editor and exported builds without depending on any OS-installed font.
+	install(FILES
+		${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui/misc/fonts/Roboto-Medium.ttf
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Fonts
+	)
+	install(FILES
+		${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui/misc/fonts/Roboto-Medium.ttf
+		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher/Fonts
+	)
 
 	# Install dependencies (glfw, rttr) to both
 	install(TARGETS glfw

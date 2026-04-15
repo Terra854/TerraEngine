@@ -1461,6 +1461,12 @@ namespace TerraEngine
 		internal static extern void Native_Input_GetMousePosition(out double x, out double y);
 
 		[DllImport("TerraEngine")]
+		internal static extern bool Native_UI_WasElementClicked(string elementId);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_UI_IsElementHovered(string elementId);
+
+		[DllImport("TerraEngine")]
 		internal static extern IntPtr Native_Scene_LoadScene(string path);
 
 		[DllImport("TerraEngine")]

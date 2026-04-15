@@ -212,6 +212,70 @@ struct FrameBudgetDiagnosticsSnapshot
 	bool valid = false;
 };
 
+// Static quads are the CPU-side output used for menu backgrounds, panels, and
+// other layout-driven visuals before a GPU backend consumes them.
+struct UIStaticQuad
+{
+	glm::vec2 position = glm::vec2(0.0f, 0.0f);
+	glm::vec2 size = glm::vec2(0.0f, 0.0f);
+	glm::vec4 color = glm::vec4(1.0f);
+	float cornerRadius = 0.0f;
+};
+
+// Immediate quads support fast-changing HUD elements that bypass layout and
+// are rewritten every frame.
+struct UIImmediateQuad
+{
+	glm::vec2 position = glm::vec2(0.0f, 0.0f);
+	glm::vec2 size = glm::vec2(0.0f, 0.0f);
+	glm::vec4 color = glm::vec4(1.0f);
+	glm::vec4 uvRect = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+};
+
+// Text runs are kept at a higher level than individual glyph vertices so the
+// editor can preview them with ImGui while the runtime SDF atlas work evolves.
+struct UITextRun
+{
+	std::string text;
+	glm::vec2 position = glm::vec2(0.0f, 0.0f);
+	glm::vec2 bounds = glm::vec2(0.0f, 0.0f);
+	glm::vec4 color = glm::vec4(1.0f);
+	float fontSize = 16.0f;
+};
+
+// Image runs allow the UI to display texture assets with layout-driven sizing,
+// offloading the resource resolution and drawing to the GPU backend.
+struct UIImageRun
+{
+	std::string texturePath;
+	glm::vec2 position = glm::vec2(0.0f, 0.0f);
+	glm::vec2 size = glm::vec2(0.0f, 0.0f);
+	glm::vec4 color = glm::vec4(1.0f);
+	float cornerRadius = 0.0f;
+};
+
+struct UIRenderBatch
+{
+	glm::vec2 viewportSize = glm::vec2(0.0f, 0.0f);
+	std::vector<UIStaticQuad> staticQuads;
+	std::vector<UIImmediateQuad> immediateQuads;
+	std::vector<UITextRun> textRuns;
+	std::vector<UIImageRun> imageRuns;
+
+	void Append(const UIRenderBatch& other)
+	{
+		if (viewportSize.x <= 0.0f || viewportSize.y <= 0.0f)
+		{
+			viewportSize = other.viewportSize;
+		}
+
+		staticQuads.insert(staticQuads.end(), other.staticQuads.begin(), other.staticQuads.end());
+		immediateQuads.insert(immediateQuads.end(), other.immediateQuads.begin(), other.immediateQuads.end());
+		textRuns.insert(textRuns.end(), other.textRuns.begin(), other.textRuns.end());
+		imageRuns.insert(imageRuns.end(), other.imageRuns.begin(), other.imageRuns.end());
+	}
+};
+
 struct FrameRenderData
 {
 	glm::mat4 viewMatrix;
@@ -225,6 +289,7 @@ struct FrameRenderData
 	RenderSettings settings;
 	std::vector<FrameLightCandidate> lightCandidates;
 	std::vector<DrawCommand> commands;
+	UIRenderBatch uiBatch;
 };
 
 // GPU-facing frustum/camera payload consumed by the task shader path.
