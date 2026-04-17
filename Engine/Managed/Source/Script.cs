@@ -74,6 +74,9 @@ namespace TerraEngine
 			}
 
 			InvokeStartIfNeeded();
+			// UI callbacks are pumped once per engine frame from the managed side
+			// so scripts can subscribe with standard C# events instead of polling.
+			UIBridge.PumpPendingEvents();
 			OnUpdate();
 		}
 

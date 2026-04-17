@@ -4,16 +4,22 @@
 #include "Core/Object/Component.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
+#include "Components/UIComponent.h"
 #include "Components/Transform.h"
 #include "Components/ScriptComponent.h"
+#include "DotNet/DotNetHost.h"
 #include "ScriptingSystem.h"
+#include "UI/UIElement.h"
 #include "UI/UISystem.h"
 #include "Input/InputSystem.h"
 #include "Scene/SceneManager.h"
 #include "Utilities/PlatformUtils.h"
 
+#include <array>
 #include <mutex>
 #include <shared_mutex>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -29,6 +35,37 @@ thread_local std::string g_ApplicationReturnBuffer;
 std::mutex g_ApplicationBridgeMutex;
 Engine* g_ApplicationHostEngine = nullptr;
 ApplicationEditorStopPlayModeCallback g_ApplicationEditorStopCallback = nullptr;
+thread_local std::string g_UIBridgeReturnBuffer;
+
+enum class ManagedUIStyleProperty : int
+{
+	Width = 0,
+	Height = 1,
+	Color = 2,
+	BackgroundColor = 3
+};
+
+struct ManagedUIElementHandle
+{
+	std::weak_ptr<UIElement> weakElement;
+	std::shared_ptr<UIElement> ownedElement;
+};
+
+std::mutex g_UIHandleMutex;
+std::unordered_map<UIElement*, std::unordered_set<ManagedUIElementHandle*>> g_UIHandleIndex;
+std::once_flag g_UIEventDispatchResolveOnce;
+bool g_UIEventDispatchResolveAttempted = false;
+bool g_UIEventDispatchUnavailableLogged = false;
+
+enum class ManagedUIEventType : int
+{
+	Click = 0,
+	MouseEnter = 1,
+	MouseLeave = 2
+};
+
+using ManagedUIDispatchEventFn = void (*)(void*, int, float, float);
+ManagedUIDispatchEventFn g_ManagedUIDispatchEvent = nullptr;
 
 enum class ScriptType : int
 {
@@ -102,6 +139,12 @@ static const char* WriteApplicationReturnText(std::string text)
 	return g_ApplicationReturnBuffer.c_str();
 }
 
+static const char* WriteUIBridgeReturnText(std::string text)
+{
+	g_UIBridgeReturnBuffer = std::move(text);
+	return g_UIBridgeReturnBuffer.c_str();
+}
+
 static Engine* GetApplicationHostEngine()
 {
 	std::lock_guard<std::mutex> lock(g_ApplicationBridgeMutex);
@@ -160,6 +203,195 @@ static void SetMeshRendererAssetReference(uint32_t objectId, std::string_view pr
 			it->second.setter(*objOpt, propertyName, resolvedId);
 		}
 	}
+}
+
+static void ForgetUIHandleIndexLocked(ManagedUIElementHandle* handle)
+{
+	for (auto iterator = g_UIHandleIndex.begin(); iterator != g_UIHandleIndex.end();)
+	{
+		iterator->second.erase(handle);
+		if (iterator->second.empty())
+		{
+			iterator = g_UIHandleIndex.erase(iterator);
+		}
+		else
+		{
+			++iterator;
+		}
+	}
+}
+
+static void BindUIHandleToElement(ManagedUIElementHandle* handle, const std::shared_ptr<UIElement>& element, bool keepDetachedOwnership)
+{
+	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
+	ForgetUIHandleIndexLocked(handle);
+	handle->weakElement = element;
+	handle->ownedElement = keepDetachedOwnership ? element : nullptr;
+	if (element)
+	{
+		g_UIHandleIndex[element.get()].insert(handle);
+	}
+}
+
+static ManagedUIElementHandle* CreateUIHandle(const std::shared_ptr<UIElement>& element, bool keepDetachedOwnership)
+{
+	if (!element)
+	{
+		return nullptr;
+	}
+
+	ManagedUIElementHandle* handle = new ManagedUIElementHandle();
+	BindUIHandleToElement(handle, element, keepDetachedOwnership);
+	return handle;
+}
+
+static std::shared_ptr<UIElement> ResolveUIHandle(void* handlePointer)
+{
+	if (handlePointer == nullptr)
+	{
+		return nullptr;
+	}
+
+	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
+	ManagedUIElementHandle* handle = static_cast<ManagedUIElementHandle*>(handlePointer);
+	if (handle->ownedElement)
+	{
+		return handle->ownedElement;
+	}
+
+	return handle->weakElement.lock();
+}
+
+static void PromoteDetachedUIOwnership(const std::shared_ptr<UIElement>& element)
+{
+	if (!element)
+	{
+		return;
+	}
+
+	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
+	if (auto iterator = g_UIHandleIndex.find(element.get()); iterator != g_UIHandleIndex.end())
+	{
+		for (ManagedUIElementHandle* handle : iterator->second)
+		{
+			handle->ownedElement = element;
+		}
+	}
+}
+
+static void DropDetachedUIOwnership(const std::shared_ptr<UIElement>& element)
+{
+	if (!element)
+	{
+		return;
+	}
+
+	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
+	if (auto iterator = g_UIHandleIndex.find(element.get()); iterator != g_UIHandleIndex.end())
+	{
+		for (ManagedUIElementHandle* handle : iterator->second)
+		{
+			handle->ownedElement.reset();
+		}
+	}
+}
+
+static void RefreshManagedElementStyle(UIElement& element)
+{
+	// Runtime setters act like inline style overrides layered on top of the
+	// already-authored computed style, so only the touched property needs to be
+	// copied through before the display style is refreshed.
+	element.RefreshDisplayStyle();
+	element.MarkDirty();
+}
+
+static std::filesystem::path ResolveManagedBridgeAssemblyPath()
+{
+	const std::filesystem::path current = std::filesystem::current_path();
+	const std::filesystem::path candidates[] = {
+		current / "Managed" / "TerraEngine.CSharp.dll",
+		current / "Editor" / "Managed" / "TerraEngine.CSharp.dll",
+		current.parent_path() / "Editor" / "Managed" / "TerraEngine.CSharp.dll"
+	};
+
+	for (const std::filesystem::path& candidate : candidates)
+	{
+		if (std::filesystem::exists(candidate))
+		{
+			return candidate;
+		}
+	}
+
+	return candidates[0];
+}
+
+static ManagedUIDispatchEventFn ResolveManagedUIEventDispatcher()
+{
+	std::call_once(g_UIEventDispatchResolveOnce, []() {
+		g_UIEventDispatchResolveAttempted = true;
+		if (!DotNetHost::Instance().IsInitialized() || DotNetHost::Instance().IsExportMode())
+		{
+			return;
+		}
+
+		g_ManagedUIDispatchEvent = reinterpret_cast<ManagedUIDispatchEventFn>(DotNetHost::Instance().GetManagedFunction(
+			ResolveManagedBridgeAssemblyPath(),
+			L"TerraEngine.InternalCalls, TerraEngine.CSharp",
+			L"DispatchNativeUIEvent"));
+	});
+
+	if (g_ManagedUIDispatchEvent == nullptr && g_UIEventDispatchResolveAttempted && !g_UIEventDispatchUnavailableLogged)
+	{
+		g_UIEventDispatchUnavailableLogged = true;
+		const LogLevel level = DotNetHost::Instance().IsExportMode() ? LogLevel::Debug : LogLevel::Warning;
+		TERRAENGINE_LOG(level, "[UI] Managed UI event dispatch is unavailable. Falling back to managed polling events where possible.");
+	}
+
+	return g_ManagedUIDispatchEvent;
+}
+
+static ManagedUIElementHandle* FindFirstUIHandleForElement(UIElement& element)
+{
+	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
+	if (auto iterator = g_UIHandleIndex.find(&element); iterator != g_UIHandleIndex.end() && !iterator->second.empty())
+	{
+		return *iterator->second.begin();
+	}
+
+	return nullptr;
+}
+
+static void DispatchManagedUIEvent(UIElement& element, ManagedUIEventType eventType, const glm::vec2& pointerPosition)
+{
+	ManagedUIDispatchEventFn dispatcher = ResolveManagedUIEventDispatcher();
+	if (dispatcher == nullptr)
+	{
+		return;
+	}
+
+	ManagedUIElementHandle* handle = FindFirstUIHandleForElement(element);
+	if (handle == nullptr)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "[UI] Tried to dispatch an event for element '" << element.id << "' without an active managed handle.");
+		return;
+	}
+
+	dispatcher(handle, static_cast<int>(eventType), pointerPosition.x, pointerPosition.y);
+}
+
+static void DispatchManagedClickEvent(UIElement& element, const glm::vec2& pointerPosition)
+{
+	DispatchManagedUIEvent(element, ManagedUIEventType::Click, pointerPosition);
+}
+
+static void DispatchManagedMouseEnterEvent(UIElement& element, const glm::vec2& pointerPosition)
+{
+	DispatchManagedUIEvent(element, ManagedUIEventType::MouseEnter, pointerPosition);
+}
+
+static void DispatchManagedMouseLeaveEvent(UIElement& element, const glm::vec2& pointerPosition)
+{
+	DispatchManagedUIEvent(element, ManagedUIEventType::MouseLeave, pointerPosition);
 }
 
 void SetApplicationHostEngine(Engine* engine)
@@ -533,6 +765,323 @@ extern "C" {
 		}
 
 		return UISystem::Instance().IsElementHovered(elementId);
+	}
+
+	std::uint64_t Native_UI_GetInteractionFrame() {
+		return UISystem::Instance().GetInteractionFrame();
+	}
+
+	void* Native_UI_CreateElement(int elementType) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		UIElement::Ptr element = UIElement::CreateDefault(static_cast<UIElementType>(elementType));
+		return CreateUIHandle(element, true);
+	}
+
+	void Native_UI_ReleaseHandle(void* elementHandle) {
+		if (elementHandle == nullptr) {
+			return;
+		}
+
+		std::lock_guard<std::mutex> lock(g_UIHandleMutex);
+		ManagedUIElementHandle* handle = static_cast<ManagedUIElementHandle*>(elementHandle);
+		ForgetUIHandleIndexLocked(handle);
+		delete handle;
+	}
+
+	void* Native_UI_GetRootElement(uint32_t objectId) {
+		{
+			std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			if (auto object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+				UIComponent* component = object->getComponent<UIComponent>();
+				if (component == nullptr) {
+					return nullptr;
+				}
+
+				if (UIElement::Ptr root = component->GetRoot()) {
+					return CreateUIHandle(root, false);
+				}
+			}
+			else {
+				return nullptr;
+			}
+		}
+
+		if (auto object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			if (UIComponent* component = object->getComponent<UIComponent>()) {
+				UISystem::Instance().EnsureDocumentReady(object->EntityId(), *component);
+			}
+		}
+
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			UIComponent* component = object->getComponent<UIComponent>();
+			if (component == nullptr) {
+				return nullptr;
+			}
+
+			UIElement::Ptr root = component->GetRoot();
+			if (!root) {
+				root = UIElement::Create(UIElementType::Root);
+				root->typeName = "UIRoot";
+				component->SetRoot(root);
+				component->MarkDirty();
+			}
+
+			return CreateUIHandle(root, false);
+		}
+
+		return nullptr;
+	}
+
+	void* Native_UI_FindElementById(void* elementHandle, const char* elementId) {
+		if (elementId == nullptr || elementId[0] == '\0') {
+			return nullptr;
+		}
+
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		UIElement::Ptr element = ResolveUIHandle(elementHandle);
+		if (!element) {
+			return nullptr;
+		}
+
+		return CreateUIHandle(element->FindById(elementId), false);
+	}
+
+	int Native_UI_GetElementType(void* elementHandle) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			return static_cast<int>(element->type);
+		}
+
+		return static_cast<int>(UIElementType::VisualElement);
+	}
+
+	bool Native_UI_IsHandleAlive(void* elementHandle) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		return ResolveUIHandle(elementHandle) != nullptr;
+	}
+
+	const char* Native_UI_GetElementId(void* elementHandle) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			return WriteUIBridgeReturnText(element->id);
+		}
+
+		return WriteUIBridgeReturnText({});
+	}
+
+	void Native_UI_SetElementId(void* elementHandle, const char* elementId) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			element->id = elementId != nullptr ? elementId : "";
+			element->MarkDirty();
+		}
+	}
+
+	const char* Native_UI_GetElementText(void* elementHandle) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			return WriteUIBridgeReturnText(element->text);
+		}
+
+		return WriteUIBridgeReturnText({});
+	}
+
+	void Native_UI_SetElementText(void* elementHandle, const char* text) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			element->text = text != nullptr ? text : "";
+			element->MarkDirty();
+		}
+	}
+
+	bool Native_UI_GetElementVisible(void* elementHandle) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			return element->IsVisible();
+		}
+
+		return false;
+	}
+
+	void Native_UI_SetElementVisible(void* elementHandle, bool visible) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			element->SetVisible(visible);
+		}
+	}
+
+	void Native_UI_AddChild(void* parentHandle, void* childHandle) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		UIElement::Ptr parent = ResolveUIHandle(parentHandle);
+		UIElement::Ptr child = ResolveUIHandle(childHandle);
+		if (!parent || !child) {
+			return;
+		}
+
+		if (parent->InsertChild(parent->children.size(), child)) {
+			DropDetachedUIOwnership(child);
+		}
+	}
+
+	void Native_UI_RemoveChild(void* parentHandle, void* childHandle) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		UIElement::Ptr parent = ResolveUIHandle(parentHandle);
+		UIElement::Ptr child = ResolveUIHandle(childHandle);
+		if (!parent || !child) {
+			return;
+		}
+
+		if (parent->RemoveChild(child)) {
+			PromoteDetachedUIOwnership(child);
+		}
+	}
+
+	void Native_UI_ClearChildren(void* parentHandle) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		UIElement::Ptr parent = ResolveUIHandle(parentHandle);
+		if (!parent) {
+			return;
+		}
+
+		std::vector<UIElement::Ptr> detachedChildren = parent->children;
+		parent->ClearChildren();
+		for (const UIElement::Ptr& child : detachedChildren) {
+			PromoteDetachedUIOwnership(child);
+		}
+	}
+
+	void Native_UI_SetStyleFloat(void* elementHandle, int property, float value) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			switch (static_cast<ManagedUIStyleProperty>(property)) {
+			case ManagedUIStyleProperty::Width:
+				element->inlineStyle.width = UIValue::Points(value);
+				element->computedStyle.width = element->inlineStyle.width;
+				break;
+			case ManagedUIStyleProperty::Height:
+				element->inlineStyle.height = UIValue::Points(value);
+				element->computedStyle.height = element->inlineStyle.height;
+				break;
+			default:
+				return;
+			}
+
+			RefreshManagedElementStyle(*element);
+		}
+	}
+
+	float Native_UI_GetStyleFloat(void* elementHandle, int property) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			switch (static_cast<ManagedUIStyleProperty>(property)) {
+			case ManagedUIStyleProperty::Width:
+				return element->displayStyle.width.has_value() ? element->displayStyle.width->value : 0.0f;
+			case ManagedUIStyleProperty::Height:
+				return element->displayStyle.height.has_value() ? element->displayStyle.height->value : 0.0f;
+			default:
+				return 0.0f;
+			}
+		}
+
+		return 0.0f;
+	}
+
+	void Native_UI_SetStyleColor(void* elementHandle, int property, float x, float y, float z, float w) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			const glm::vec4 color(x, y, z, w);
+			switch (static_cast<ManagedUIStyleProperty>(property)) {
+			case ManagedUIStyleProperty::Color:
+				element->inlineStyle.color = color;
+				element->computedStyle.color = color;
+				break;
+			case ManagedUIStyleProperty::BackgroundColor:
+				element->inlineStyle.backgroundColor = color;
+				element->computedStyle.backgroundColor = color;
+				break;
+			default:
+				return;
+			}
+
+			RefreshManagedElementStyle(*element);
+		}
+	}
+
+	void Native_UI_GetStyleColor(void* elementHandle, int property, float* outX, float* outY, float* outZ, float* outW) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		std::array<float*, 4> outputs = { outX, outY, outZ, outW };
+		for (float* output : outputs) {
+			if (output != nullptr) {
+				*output = 0.0f;
+			}
+		}
+
+		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			std::optional<glm::vec4> color;
+			switch (static_cast<ManagedUIStyleProperty>(property)) {
+			case ManagedUIStyleProperty::Color:
+				color = element->displayStyle.color;
+				break;
+			case ManagedUIStyleProperty::BackgroundColor:
+				color = element->displayStyle.backgroundColor;
+				break;
+			default:
+				return;
+			}
+
+			if (color.has_value()) {
+				if (outX) *outX = color->x;
+				if (outY) *outY = color->y;
+				if (outZ) *outZ = color->z;
+				if (outW) *outW = color->w;
+			}
+		}
+	}
+
+	bool Native_UI_SetEventCallback(void* elementHandle, int eventType, bool enabled) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		UIElement::Ptr element = ResolveUIHandle(elementHandle);
+		if (!element) {
+			return false;
+		}
+
+		if (ResolveManagedUIEventDispatcher() == nullptr) {
+			return false;
+		}
+
+		UIElement::UIEventCallback callback = nullptr;
+		if (enabled) {
+			switch (static_cast<ManagedUIEventType>(eventType)) {
+			case ManagedUIEventType::Click:
+				callback = &DispatchManagedClickEvent;
+				break;
+			case ManagedUIEventType::MouseEnter:
+				callback = &DispatchManagedMouseEnterEvent;
+				break;
+			case ManagedUIEventType::MouseLeave:
+				callback = &DispatchManagedMouseLeaveEvent;
+				break;
+			default:
+				return false;
+			}
+		}
+
+		switch (static_cast<ManagedUIEventType>(eventType)) {
+		case ManagedUIEventType::Click:
+			element->OnClick = callback;
+			break;
+		case ManagedUIEventType::MouseEnter:
+			element->OnMouseEnter = callback;
+			break;
+		case ManagedUIEventType::MouseLeave:
+			element->OnMouseLeave = callback;
+			break;
+		default:
+			return false;
+		}
+
+		return true;
 	}
 
 	const char* Native_Scene_LoadScene(const char* path) {

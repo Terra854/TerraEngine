@@ -50,6 +50,27 @@ extern "C" {
 	// without reaching into editor-only state or native engine internals.
 	TERRAENGINE_API bool Native_UI_WasElementClicked(const char* elementId);
 	TERRAENGINE_API bool Native_UI_IsElementHovered(const char* elementId);
+	TERRAENGINE_API std::uint64_t Native_UI_GetInteractionFrame();
+	TERRAENGINE_API void* Native_UI_CreateElement(int elementType);
+	TERRAENGINE_API void Native_UI_ReleaseHandle(void* elementHandle);
+	TERRAENGINE_API void* Native_UI_GetRootElement(uint32_t objectId);
+	TERRAENGINE_API void* Native_UI_FindElementById(void* elementHandle, const char* elementId);
+	TERRAENGINE_API int Native_UI_GetElementType(void* elementHandle);
+	TERRAENGINE_API bool Native_UI_IsHandleAlive(void* elementHandle);
+	TERRAENGINE_API const char* Native_UI_GetElementId(void* elementHandle);
+	TERRAENGINE_API void Native_UI_SetElementId(void* elementHandle, const char* elementId);
+	TERRAENGINE_API const char* Native_UI_GetElementText(void* elementHandle);
+	TERRAENGINE_API void Native_UI_SetElementText(void* elementHandle, const char* text);
+	TERRAENGINE_API bool Native_UI_GetElementVisible(void* elementHandle);
+	TERRAENGINE_API void Native_UI_SetElementVisible(void* elementHandle, bool visible);
+	TERRAENGINE_API void Native_UI_AddChild(void* parentHandle, void* childHandle);
+	TERRAENGINE_API void Native_UI_RemoveChild(void* parentHandle, void* childHandle);
+	TERRAENGINE_API void Native_UI_ClearChildren(void* parentHandle);
+	TERRAENGINE_API void Native_UI_SetStyleFloat(void* elementHandle, int property, float value);
+	TERRAENGINE_API float Native_UI_GetStyleFloat(void* elementHandle, int property);
+	TERRAENGINE_API void Native_UI_SetStyleColor(void* elementHandle, int property, float x, float y, float z, float w);
+	TERRAENGINE_API void Native_UI_GetStyleColor(void* elementHandle, int property, float* outX, float* outY, float* outZ, float* outW);
+	TERRAENGINE_API bool Native_UI_SetEventCallback(void* elementHandle, int eventType, bool enabled);
 
 	// Script binding helpers bypass the generic property layer because gameplay
 	// scripts live inside one ordered binding container component.

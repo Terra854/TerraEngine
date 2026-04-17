@@ -420,6 +420,7 @@ set(MANAGED_CORE_SOURCES
 	Engine/Managed/Source/Script.cs
 	Engine/Managed/Source/Time.cs
 	Engine/Managed/Source/Graphics.cs
+	Engine/Managed/Source/UI.cs
 	Engine/Managed/Source/SerializationAttributes.cs
 	Engine/Managed/Source/ScriptReflection.cs
 	Engine/Managed/Source/Export/ExportVTable.cs

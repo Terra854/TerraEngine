@@ -111,6 +111,14 @@ void VulkanContext::Impl::Cleanup() {
 	}
 	meshCache.clear();
 
+	for (auto& retiredBuffers : retiredBuffersByFrame) {
+		for (VulkanBuffer& retiredBuffer : retiredBuffers) {
+			DestroyBufferImmediate(retiredBuffer);
+		}
+		retiredBuffers.clear();
+	}
+	retiredBuffersByFrame.clear();
+
 	for (auto& [id, tex] : textureCache) {
 		if (device) {
 			vkDestroySampler(device, tex.sampler, nullptr);
@@ -985,6 +993,8 @@ bool VulkanContext::Impl::CreateSyncObjects() {
 	extraPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 	pendingPrimaryCommandBuffers.clear();
 	pendingPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	retiredBuffersByFrame.clear();
+	retiredBuffersByFrame.resize(MAX_FRAMES_IN_FLIGHT);
 
 	VkSemaphoreCreateInfo semaphoreInfo{};
 	semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;

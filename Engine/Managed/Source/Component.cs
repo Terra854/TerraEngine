@@ -7,6 +7,16 @@ namespace TerraEngine
 		public Object Object { get; internal set; } = null!;
 		public Transform Transform => Object.Transform;
 
+		public T? GetComponent<T>() where T : Component, new()
+		{
+			return Object.GetComponent<T>();
+		}
+
+		public T AddComponent<T>() where T : Component, new()
+		{
+			return Object.AddComponent<T>();
+		}
+
 		protected unsafe T GetProperty<T>(string propertyName) where T : unmanaged
 		{
 			T value = default;

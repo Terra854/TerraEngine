@@ -35,10 +35,10 @@ glm::vec2 GetInteractiveElementSize(const UIElement& element)
 bool BuildHoveredElementPath(
 	const UIElement::Ptr& element,
 	const glm::vec2& localPointerPosition,
-	std::vector<const UIElement*>& hoveredPath,
-	const UIElement*& outHitElement)
+	std::vector<UIElement::Ptr>& hoveredPath,
+	UIElement::Ptr& outHitElement)
 {
-	if (!element)
+	if (!element || !element->IsVisible())
 	{
 		return false;
 	}
@@ -54,7 +54,7 @@ bool BuildHoveredElementPath(
 		return false;
 	}
 
-	hoveredPath.push_back(element.get());
+	hoveredPath.push_back(element);
 	for (std::size_t reverseIndex = element->children.size(); reverseIndex > 0; --reverseIndex)
 	{
 		const UIElement::Ptr& child = element->children[reverseIndex - 1];
@@ -64,7 +64,7 @@ bool BuildHoveredElementPath(
 		}
 	}
 
-	outHitElement = element.get();
+	outHitElement = element;
 	return true;
 }
 
@@ -86,15 +86,30 @@ void ApplyHoverStateRecursive(const UIElement::Ptr& element, const std::unordere
 	}
 }
 
-void CollectHoveredElementIds(const std::vector<const UIElement*>& hoveredPath, std::unordered_set<std::string>& outHoveredIds)
+void CollectHoveredElements(
+	const std::vector<UIElement::Ptr>& hoveredPath,
+	std::unordered_set<std::string>& outHoveredIds,
+	std::unordered_map<std::string, UIElement::Ptr>& outHoveredRefs)
 {
-	for (const UIElement* element : hoveredPath)
+	for (const UIElement::Ptr& element : hoveredPath)
 	{
 		if (element != nullptr && !element->id.empty())
 		{
 			outHoveredIds.insert(element->id);
+			outHoveredRefs[element->id] = element;
 		}
 	}
+}
+
+void DispatchElementEvent(UIElement& element, UIElement::UIEventCallback callback, const glm::vec2& pointerPosition, std::string_view eventName)
+{
+	if (callback == nullptr)
+	{
+		return;
+	}
+
+	TERRAENGINE_LOG(LogLevel::Debug, "[UI] Dispatching " << eventName << " for element '" << element.id << "'.");
+	callback(element, pointerPosition);
 }
 }
 
@@ -110,6 +125,8 @@ void UISystem::Initialize()
 	documents_.clear();
 	pendingImmediateQuads_.clear();
 	combinedBatch_ = {};
+	hoveredElementRefs_.clear();
+	interactionFrame_ = 0;
 	initialized_ = true;
 }
 
@@ -164,6 +181,7 @@ void UISystem::Update(float deltaTime)
 		liveEntities.reserve(liveComponents.size());
 		std::unordered_set<std::string> nextClickedElementIds;
 		std::unordered_set<std::string> nextHoveredElementIds;
+		std::unordered_map<std::string, UIElement::Ptr> nextHoveredElementRefs;
 		const bool leftButtonClickedThisFrame = pointerState.insideViewport
 			&& pointerState.leftButtonDown
 			&& !previousLeftButtonDown_;
@@ -178,29 +196,42 @@ void UISystem::Update(float deltaTime)
 			bool animationChanged = false;
 			if (state.root)
 			{
-				std::vector<const UIElement*> hoveredPath;
-				const UIElement* hitElement = nullptr;
+				std::vector<UIElement::Ptr> hoveredPath;
+				UIElement::Ptr hitElement;
 				if (!pointerConsumedByDocument && pointerState.insideViewport)
 				{
 					pointerConsumedByDocument = BuildHoveredElementPath(state.root, pointerState.position, hoveredPath, hitElement);
 				}
 
-				const std::unordered_set<const UIElement*> hoveredElements(hoveredPath.begin(), hoveredPath.end());
+				std::unordered_set<const UIElement*> hoveredElements;
+				for (const UIElement::Ptr& hoveredElement : hoveredPath)
+				{
+					if (hoveredElement)
+					{
+						hoveredElements.insert(hoveredElement.get());
+					}
+				}
 				ApplyHoverStateRecursive(state.root, hoveredElements);
 				animationChanged = state.root->AdvanceAnimationRecursive(deltaTime);
 
 				if (hitElement != nullptr)
 				{
-					CollectHoveredElementIds(hoveredPath, nextHoveredElementIds);
+					CollectHoveredElements(hoveredPath, nextHoveredElementIds, nextHoveredElementRefs);
 					if (leftButtonClickedThisFrame && !hitElement->id.empty())
 					{
 						nextClickedElementIds.insert(hitElement->id);
+						DispatchElementEvent(*hitElement, hitElement->OnClick, pointerState.position, "click");
 					}
 				}
 			}
 
-			if (state.root && !state.buildInFlight && animationChanged)
+			if (state.root && !state.buildInFlight && (animationChanged || state.root->dirty))
 			{
+				// Managed runtime UI mutations mark the tree dirty in place, so the
+				// system must recompute Yoga layout and rebuild the draw batch even
+				// when no authored asset file changed this frame.
+				layoutEngine_.ComputeLayout(state.root, viewportSize);
+				state.root->ClearDirtyRecursive();
 				state.batch = renderer_.BuildBatch(state.root, viewportSize);
 			}
 
@@ -213,6 +244,7 @@ void UISystem::Update(float deltaTime)
 				// pure churn and caused avoidable stalls in both the editor and
 				// exported runtime.
 				layoutEngine_.ComputeLayout(state.root, viewportSize);
+				state.root->ClearDirtyRecursive();
 				state.batch = renderer_.BuildBatch(state.root, viewportSize);
 				state.viewportSize = viewportSize;
 				continue;
@@ -239,8 +271,26 @@ void UISystem::Update(float deltaTime)
 			}
 		}
 
+		for (const auto& [hoveredId, hoveredElement] : nextHoveredElementRefs)
+		{
+			if (!hoveredElementIds_.contains(hoveredId) && hoveredElement)
+			{
+				DispatchElementEvent(*hoveredElement, hoveredElement->OnMouseEnter, pointerState.position, "mouse-enter");
+			}
+		}
+
+		for (const auto& [hoveredId, hoveredElement] : hoveredElementRefs_)
+		{
+			if (!nextHoveredElementIds.contains(hoveredId) && hoveredElement)
+			{
+				DispatchElementEvent(*hoveredElement, hoveredElement->OnMouseLeave, pointerState.position, "mouse-leave");
+			}
+		}
+
 		clickedElementIds_ = std::move(nextClickedElementIds);
 		hoveredElementIds_ = std::move(nextHoveredElementIds);
+		hoveredElementRefs_ = std::move(nextHoveredElementRefs);
+		++interactionFrame_;
 		previousLeftButtonDown_ = pointerState.insideViewport && pointerState.leftButtonDown;
 	}
 
@@ -253,6 +303,7 @@ void UISystem::Shutdown()
 	documents_.clear();
 	pendingImmediateQuads_.clear();
 	combinedBatch_ = {};
+	hoveredElementRefs_.clear();
 	initialized_ = false;
 }
 
@@ -305,6 +356,70 @@ bool UISystem::IsElementHovered(std::string_view elementId) const
 	return hoveredElementIds_.contains(std::string(elementId));
 }
 
+std::uint64_t UISystem::GetInteractionFrame() const
+{
+	std::lock_guard<std::mutex> lock(stateMutex_);
+	return interactionFrame_;
+}
+
+bool UISystem::EnsureDocumentReady(entt::entity entity, UIComponent& component)
+{
+	const glm::vec2 viewportSize = GetFallbackViewportSize();
+
+	auto publishBuildResult = [&](UIBuildResult buildResult) {
+		std::lock_guard<std::mutex> lock(stateMutex_);
+		UIDocumentState& state = documents_[entity];
+		state.buildInFlight = false;
+		state.contentVersion = component.GetContentVersion();
+		state.viewportSize = viewportSize;
+		state.lastError = buildResult.error;
+
+		if (buildResult.root)
+		{
+			state.root = buildResult.root;
+			state.batch = buildResult.batch;
+			component.SetRoot(buildResult.root);
+			return true;
+		}
+
+		state.root.reset();
+		state.batch = {};
+		component.ClearRuntimeTree();
+		return false;
+	};
+
+	std::shared_future<UIBuildResult> pendingBuild;
+	{
+		std::lock_guard<std::mutex> lock(stateMutex_);
+		UIDocumentState& state = documents_[entity];
+		if (state.root != nullptr && state.contentVersion == component.GetContentVersion())
+		{
+			component.SetRoot(state.root);
+			return true;
+		}
+
+		if (state.buildInFlight && state.buildFuture.valid())
+		{
+			pendingBuild = state.buildFuture;
+		}
+	}
+
+	// Exported gameplay scripts can ask for authored controls in OnStart before
+	// UISystem::Update has integrated the asynchronous build. Wait for the
+	// in-flight document or build it synchronously so root.Q("...") resolves
+	// against the authored tree instead of an empty placeholder element.
+	if (pendingBuild.valid())
+	{
+		return publishBuildResult(pendingBuild.get());
+	}
+
+	return publishBuildResult(BuildDocumentFromSources(
+		component.GetSourceMarkup(),
+		{},
+		component.GetRoot(),
+		viewportSize));
+}
+
 UISystem::UIBuildResult UISystem::BuildPreviewDocument(const UIElement::Ptr& root, const glm::vec2& viewportSize) const
 {
 	UIBuildResult result;
@@ -315,6 +430,7 @@ UISystem::UIBuildResult UISystem::BuildPreviewDocument(const UIElement::Ptr& roo
 
 	result.root = root->Clone();
 	layoutEngine_.ComputeLayout(result.root, viewportSize);
+	result.root->ClearDirtyRecursive();
 	result.batch = renderer_.BuildBatch(result.root, viewportSize);
 	return result;
 }
@@ -398,6 +514,7 @@ UISystem::UIBuildResult UISystem::BuildDocumentFromSources(
 		}
 
 		layoutEngine_.ComputeLayout(result.root, viewportSize);
+		result.root->ClearDirtyRecursive();
 		result.batch = renderer_.BuildBatch(result.root, viewportSize);
 	}
 	catch (const std::exception& exception)

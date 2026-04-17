@@ -278,6 +278,12 @@ namespace TerraEngine.Export.Generator
 				return true;
 			}
 
+			if (fieldType.SpecialType == SpecialType.System_String)
+			{
+				model = CreateFieldModel(field, "string", "global::TerraEngine.Export.ExportFieldValueKind.String", 256);
+				return true;
+			}
+
 			string qualifiedName = fieldType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 			if (string.Equals(qualifiedName, "global::TerraEngine.Vector2", StringComparison.Ordinal))
 			{
@@ -490,9 +496,18 @@ namespace TerraEngine.Export.Generator
 				ExportFieldModel field = model.OwnFields[index];
 				source.Append("\t\t\tcase ").Append(index.ToString(CultureInfo.InvariantCulture)).AppendLine(":");
 				source.AppendLine("\t\t\t{");
-				source.Append("\t\t\t\tglobal::TerraEngine.Export.ExportBridge.TryWriteValue(valueBuffer, valueSize, typedInstance.")
-					.Append(field.FieldName)
-					.AppendLine(");");
+				if (string.Equals(field.TypeName, "string", StringComparison.Ordinal))
+				{
+					source.Append("\t\t\t\tglobal::TerraEngine.Export.ExportBridge.TryWriteString(valueBuffer, valueSize, typedInstance.")
+						.Append(field.FieldName)
+						.AppendLine(");");
+				}
+				else
+				{
+					source.Append("\t\t\t\tglobal::TerraEngine.Export.ExportBridge.TryWriteValue(valueBuffer, valueSize, typedInstance.")
+						.Append(field.FieldName)
+						.AppendLine(");");
+				}
 				source.AppendLine("\t\t\t\treturn;");
 				source.AppendLine("\t\t\t}");
 			}
@@ -518,9 +533,16 @@ namespace TerraEngine.Export.Generator
 				ExportFieldModel field = model.OwnFields[index];
 				source.Append("\t\t\tcase ").Append(index.ToString(CultureInfo.InvariantCulture)).AppendLine(":");
 				source.AppendLine("\t\t\t{");
-				source.Append("\t\t\t\tif (global::TerraEngine.Export.ExportBridge.TryReadValue(valueBuffer, valueSize, out ")
-					.Append(field.TypeName)
-					.AppendLine(" nextValue))");
+				if (string.Equals(field.TypeName, "string", StringComparison.Ordinal))
+				{
+					source.AppendLine("\t\t\t\tif (global::TerraEngine.Export.ExportBridge.TryReadString(valueBuffer, valueSize, out string nextValue))");
+				}
+				else
+				{
+					source.Append("\t\t\t\tif (global::TerraEngine.Export.ExportBridge.TryReadValue(valueBuffer, valueSize, out ")
+						.Append(field.TypeName)
+						.AppendLine(" nextValue))");
+				}
 				source.AppendLine("\t\t\t\t{");
 				source.Append("\t\t\t\t\ttypedInstance.").Append(field.FieldName).AppendLine(" = nextValue;");
 				source.AppendLine("\t\t\t\t}");

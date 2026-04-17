@@ -400,6 +400,7 @@ struct VulkanContext::Impl {
 	// cameras per frame so they can be freed after the frame fence completes.
 	std::vector<std::vector<VkCommandBuffer>> extraPrimaryCommandBuffers;
 	std::vector<std::vector<VkCommandBuffer>> pendingPrimaryCommandBuffers;
+	std::vector<std::vector<VulkanBuffer>> retiredBuffersByFrame;
 	std::vector<std::vector<size_t>> workerBufferUsage; // Tracks next available secondary buffer index per worker per frame
 	bool swapchainImageAcquired = false;
 	bool skipFrame = false;
@@ -470,6 +471,8 @@ struct VulkanContext::Impl {
 
 	void CreateDefaultTexture();
 	VulkanBuffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* name = nullptr);
+	void DestroyBufferImmediate(VulkanBuffer& buffer);
+	void RetireBuffer(VulkanBuffer& buffer);
 	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 	VkCommandBuffer BeginSingleTimeCommands();
 	void EndSingleTimeCommands(VkCommandBuffer commandBuffer);

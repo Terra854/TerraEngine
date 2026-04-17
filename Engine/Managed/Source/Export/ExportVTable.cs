@@ -17,7 +17,8 @@ namespace TerraEngine.Export
 		Vector2 = 4,
 		Vector3 = 5,
 		Vector4 = 6,
-		Quaternion = 7
+		Quaternion = 7,
+		String = 8
 	}
 
 	[StructLayout(LayoutKind.Sequential, Pack = 8)]

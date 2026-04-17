@@ -184,6 +184,11 @@ void UIRenderer::CollectDraws(const UIElement::Ptr& element, UIRenderBatch& batc
 		return;
 	}
 
+	if (!element->IsVisible())
+	{
+		return;
+	}
+
 	const UIStyle& style = element->displayStyle;
 	const float opacity = style.opacity.value_or(1.0f);
 	const glm::vec2 translate = style.transform.translate.value_or(glm::vec2(0.0f, 0.0f));

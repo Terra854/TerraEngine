@@ -791,6 +791,19 @@ namespace TerraEngine
 			}
 		}
 
+		[UnmanagedCallersOnly]
+		public static void DispatchNativeUIEvent(IntPtr elementHandle, int eventType, float pointerX, float pointerY)
+		{
+			try
+			{
+				UIBridge.DispatchNativeEvent(elementHandle, (UIEventType)eventType, new Vector2(pointerX, pointerY));
+			}
+			catch (Exception ex)
+			{
+				Log.Error($"Exception while dispatching a native UI event:\n{ex}");
+			}
+		}
+
 		private static bool TryResolveScriptType(string className, out Type? scriptType)
 		{
 			lock (s_bridgeSync)
@@ -1465,6 +1478,69 @@ namespace TerraEngine
 
 		[DllImport("TerraEngine")]
 		internal static extern bool Native_UI_IsElementHovered(string elementId);
+
+		[DllImport("TerraEngine")]
+		internal static extern ulong Native_UI_GetInteractionFrame();
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_UI_CreateElement(int elementType);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_ReleaseHandle(IntPtr elementHandle);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_UI_GetRootElement(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_UI_FindElementById(IntPtr elementHandle, string elementId);
+
+		[DllImport("TerraEngine")]
+		internal static extern int Native_UI_GetElementType(IntPtr elementHandle);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_UI_IsHandleAlive(IntPtr elementHandle);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_UI_GetElementId(IntPtr elementHandle);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_SetElementId(IntPtr elementHandle, string elementId);
+
+		[DllImport("TerraEngine")]
+		internal static extern IntPtr Native_UI_GetElementText(IntPtr elementHandle);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_SetElementText(IntPtr elementHandle, string text);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_UI_GetElementVisible(IntPtr elementHandle);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_SetElementVisible(IntPtr elementHandle, bool visible);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_AddChild(IntPtr parentHandle, IntPtr childHandle);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_RemoveChild(IntPtr parentHandle, IntPtr childHandle);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_ClearChildren(IntPtr parentHandle);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_SetStyleFloat(IntPtr elementHandle, int property, float value);
+
+		[DllImport("TerraEngine")]
+		internal static extern float Native_UI_GetStyleFloat(IntPtr elementHandle, int property);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_SetStyleColor(IntPtr elementHandle, int property, float x, float y, float z, float w);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_UI_GetStyleColor(IntPtr elementHandle, int property, out float x, out float y, out float z, out float w);
+
+		[DllImport("TerraEngine")]
+		internal static extern bool Native_UI_SetEventCallback(IntPtr elementHandle, int eventType, bool enabled);
 
 		[DllImport("TerraEngine")]
 		internal static extern IntPtr Native_Scene_LoadScene(string path);

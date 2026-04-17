@@ -745,6 +745,13 @@ void VulkanContext::BeginFrame() {
 	if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 		impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 	}
+	if (impl->currentFrame < impl->retiredBuffersByFrame.size()) {
+		auto& retiredBuffers = impl->retiredBuffersByFrame[impl->currentFrame];
+		for (VulkanBuffer& retiredBuffer : retiredBuffers) {
+			impl->DestroyBufferImmediate(retiredBuffer);
+		}
+		retiredBuffers.clear();
+	}
 
 	// Reset command pool so the main command buffer and any newly allocated
 	// per-camera buffers start from a clean state each frame.
@@ -1330,7 +1337,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 			const VkDeviceSize bufferSize = quadVertices.size() * sizeof(float);
 			if (uiStaticVertexBuffer.buffer == VK_NULL_HANDLE || uiStaticVertexBuffer.size < bufferSize) {
 				if (uiStaticVertexBuffer.buffer != VK_NULL_HANDLE) {
-					vmaDestroyBuffer(allocator, uiStaticVertexBuffer.buffer, uiStaticVertexBuffer.allocation);
+					RetireBuffer(uiStaticVertexBuffer);
 				}
 				uiStaticVertexBuffer = CreateBuffer(bufferSize * 2, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "UIStaticVertexBuffer");
 			}
@@ -1538,7 +1545,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 	const VkDeviceSize textBufferSize = textVertices.size() * sizeof(float);
 	if (uiSdfVertexBuffer.buffer == VK_NULL_HANDLE || uiSdfVertexBuffer.size < textBufferSize) {
 		if (uiSdfVertexBuffer.buffer != VK_NULL_HANDLE) {
-			vmaDestroyBuffer(allocator, uiSdfVertexBuffer.buffer, uiSdfVertexBuffer.allocation);
+			RetireBuffer(uiSdfVertexBuffer);
 		}
 		uiSdfVertexBuffer = CreateBuffer(textBufferSize * 2, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "UISdfVertexBuffer");
 	}

@@ -16,6 +16,7 @@ class UIElement : public std::enable_shared_from_this<UIElement>
 {
 public:
 	using Ptr = std::shared_ptr<UIElement>;
+	using UIEventCallback = void (*)(UIElement&, const glm::vec2&);
 
 	static Ptr Create(UIElementType type);
 	static Ptr CreateDefault(UIElementType type);
@@ -39,6 +40,9 @@ public:
 	[[nodiscard]] std::string GetClassListAsString() const;
 
 	void MarkDirty();
+	void ClearDirtyRecursive();
+	void SetVisible(bool visible);
+	[[nodiscard]] bool IsVisible() const;
 	void SetHoverState(bool hovered);
 	[[nodiscard]] bool AdvanceAnimation(float deltaTime);
 	[[nodiscard]] bool AdvanceAnimationRecursive(float deltaTime);
@@ -63,6 +67,10 @@ public:
 	glm::vec2 calculatedPosition = glm::vec2(0.0f, 0.0f);
 	glm::vec2 calculatedSize = glm::vec2(0.0f, 0.0f);
 	bool dirty = true;
+	bool visible = true;
+	UIEventCallback OnClick = nullptr;
+	UIEventCallback OnMouseEnter = nullptr;
+	UIEventCallback OnMouseLeave = nullptr;
 
 private:
 	float hoverBlend_ = 0.0f;

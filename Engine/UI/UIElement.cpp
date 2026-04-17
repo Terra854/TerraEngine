@@ -160,6 +160,7 @@ UIElement::Ptr UIElement::Clone() const
 	clone->calculatedPosition = calculatedPosition;
 	clone->calculatedSize = calculatedSize;
 	clone->dirty = dirty;
+	clone->visible = visible;
 
 	for (const Ptr& child : children)
 	{
@@ -273,6 +274,34 @@ void UIElement::MarkDirty()
 		current->dirty = true;
 		current = current->parent;
 	}
+}
+
+void UIElement::ClearDirtyRecursive()
+{
+	dirty = false;
+	for (const Ptr& child : children)
+	{
+		if (child)
+		{
+			child->ClearDirtyRecursive();
+		}
+	}
+}
+
+void UIElement::SetVisible(bool nextVisible)
+{
+	if (visible == nextVisible)
+	{
+		return;
+	}
+
+	visible = nextVisible;
+	MarkDirty();
+}
+
+bool UIElement::IsVisible() const
+{
+	return visible;
 }
 
 void UIElement::SetHoverState(bool hovered)

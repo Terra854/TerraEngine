@@ -18,6 +18,7 @@ namespace TerraEngine.Export
 	public static partial class ExportBridge
 	{
 		private const string EngineDll = "TerraEngine.dll";
+		public const int MaxExportStringBytes = 256;
 
 		/// <summary>
 		/// Writes a message to the engine's log stream.
@@ -71,6 +72,59 @@ namespace TerraEngine.Export
 			}
 
 			value = *(T*)source;
+			return true;
+		}
+
+		public static unsafe bool TryWriteString(void* destination, int valueSize, string? value)
+		{
+			if (destination == null || valueSize <= 0)
+			{
+				return false;
+			}
+
+			byte* bytes = (byte*)destination;
+			for (int index = 0; index < valueSize; ++index)
+			{
+				bytes[index] = 0;
+			}
+
+			byte[] utf8Value = Encoding.UTF8.GetBytes(value ?? string.Empty);
+			int copyLength = Math.Min(valueSize - 1, utf8Value.Length);
+			for (int index = 0; index < copyLength; ++index)
+			{
+				bytes[index] = utf8Value[index];
+			}
+
+			return true;
+		}
+
+		public static unsafe bool TryReadString(void* source, int valueSize, out string value)
+		{
+			value = string.Empty;
+			if (source == null || valueSize <= 0)
+			{
+				return false;
+			}
+
+			byte* bytes = (byte*)source;
+			int length = 0;
+			while (length < valueSize && bytes[length] != 0)
+			{
+				++length;
+			}
+
+			if (length == 0)
+			{
+				return true;
+			}
+
+			byte[] utf8Value = new byte[length];
+			for (int index = 0; index < length; ++index)
+			{
+				utf8Value[index] = bytes[index];
+			}
+
+			value = Encoding.UTF8.GetString(utf8Value);
 			return true;
 		}
 

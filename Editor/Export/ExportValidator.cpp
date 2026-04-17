@@ -68,6 +68,190 @@ static int CalculateLineNumber(std::string_view text, std::size_t characterOffse
 	return lineNumber;
 }
 
+static bool IsCSharpIdentifierCharacter(char value)
+{
+	return std::isalnum(static_cast<unsigned char>(value)) != 0 || value == '_';
+}
+
+static bool ContainsCSharpToken(std::string_view text, std::string_view token)
+{
+	if (token.empty() || text.size() < token.size())
+	{
+		return false;
+	}
+
+	std::size_t searchStart = 0;
+	while (searchStart < text.size())
+	{
+		const std::size_t matchIndex = text.find(token, searchStart);
+		if (matchIndex == std::string_view::npos)
+		{
+			return false;
+		}
+
+		// Treat escaped identifiers such as `@dynamic` as user-defined names,
+		// not as keyword hits that should fail NativeAOT validation.
+		const bool hasIdentifierBefore = matchIndex > 0
+			&& (IsCSharpIdentifierCharacter(text[matchIndex - 1]) || text[matchIndex - 1] == '@');
+		const std::size_t tokenEnd = matchIndex + token.size();
+		const bool hasIdentifierAfter = tokenEnd < text.size() && IsCSharpIdentifierCharacter(text[tokenEnd]);
+		if (!hasIdentifierBefore && !hasIdentifierAfter)
+		{
+			return true;
+		}
+
+		searchStart = matchIndex + token.size();
+	}
+
+	return false;
+}
+
+static std::string StripCSharpCommentsAndLiterals(std::string_view text)
+{
+	std::string sanitized(text);
+
+	enum class ScanState
+	{
+		Code,
+		LineComment,
+		BlockComment,
+		StringLiteral,
+		VerbatimStringLiteral,
+		CharLiteral
+	};
+
+	ScanState state = ScanState::Code;
+	for (std::size_t index = 0; index < sanitized.size(); ++index)
+	{
+		char& current = sanitized[index];
+		const char next = (index + 1) < sanitized.size() ? sanitized[index + 1] : '\0';
+
+		switch (state)
+		{
+		case ScanState::Code:
+			if (current == '/' && next == '/')
+			{
+				current = ' ';
+				sanitized[index + 1] = ' ';
+				state = ScanState::LineComment;
+				++index;
+			}
+			else if (current == '/' && next == '*')
+			{
+				current = ' ';
+				sanitized[index + 1] = ' ';
+				state = ScanState::BlockComment;
+				++index;
+			}
+			else if (current == '@' && next == '"')
+			{
+				current = ' ';
+				sanitized[index + 1] = ' ';
+				state = ScanState::VerbatimStringLiteral;
+				++index;
+			}
+			else if (current == '"')
+			{
+				current = ' ';
+				state = ScanState::StringLiteral;
+			}
+			else if (current == '\'')
+			{
+				current = ' ';
+				state = ScanState::CharLiteral;
+			}
+			break;
+
+		case ScanState::LineComment:
+			if (current == '\n')
+			{
+				state = ScanState::Code;
+			}
+			else
+			{
+				current = ' ';
+			}
+			break;
+
+		case ScanState::BlockComment:
+			if (current == '*' && next == '/')
+			{
+				current = ' ';
+				sanitized[index + 1] = ' ';
+				state = ScanState::Code;
+				++index;
+			}
+			else if (current != '\n' && current != '\r')
+			{
+				current = ' ';
+			}
+			break;
+
+		case ScanState::StringLiteral:
+			if (current == '\\' && next != '\0')
+			{
+				current = ' ';
+				if (sanitized[index + 1] != '\n' && sanitized[index + 1] != '\r')
+				{
+					sanitized[index + 1] = ' ';
+				}
+				++index;
+			}
+			else if (current == '"')
+			{
+				current = ' ';
+				state = ScanState::Code;
+			}
+			else if (current != '\n' && current != '\r')
+			{
+				current = ' ';
+			}
+			break;
+
+		case ScanState::VerbatimStringLiteral:
+			if (current == '"' && next == '"')
+			{
+				current = ' ';
+				sanitized[index + 1] = ' ';
+				++index;
+			}
+			else if (current == '"')
+			{
+				current = ' ';
+				state = ScanState::Code;
+			}
+			else if (current != '\n' && current != '\r')
+			{
+				current = ' ';
+			}
+			break;
+
+		case ScanState::CharLiteral:
+			if (current == '\\' && next != '\0')
+			{
+				current = ' ';
+				if (sanitized[index + 1] != '\n' && sanitized[index + 1] != '\r')
+				{
+					sanitized[index + 1] = ' ';
+				}
+				++index;
+			}
+			else if (current == '\'')
+			{
+				current = ' ';
+				state = ScanState::Code;
+			}
+			else if (current != '\n' && current != '\r')
+			{
+				current = ' ';
+			}
+			break;
+		}
+	}
+
+	return sanitized;
+}
+
 static bool IsSupportedNativeAotFieldType(std::string typeName)
 {
 	typeName.erase(std::remove_if(typeName.begin(), typeName.end(), [](unsigned char value) {
@@ -151,7 +335,6 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 	// can run inside the editor before a full managed compile begins.
 	std::regex reflectionPattern(R"(\bType\.GetType\b|\bActivator\.CreateInstance\b|\bAssembly\.Load\b|\bMethodInfo\b|\bFieldInfo\b)");
 	std::regex reflectionEmitPattern(R"(\bSystem\.Reflection\.Emit\b|\bAssemblyBuilder\b|\bDynamicMethod\b|\bILGenerator\b)");
-	std::regex dynamicPattern(R"(\bdynamic\b)");
 	std::regex serializedFieldPattern(R"(\[SerializeField\]\s*(?:\r?\n\s*)*(?:public|private|protected|internal|readonly|volatile|new|unsafe|\s)+([A-Za-z_][A-Za-z0-9_:\.<>[\]]*)\s+[A-Za-z_][A-Za-z0-9_]*)");
 
 	uint32_t scannedFiles = 0;
@@ -167,7 +350,8 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 		if (!file) continue;
 
 		const std::string fileText((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-		std::istringstream lineStream(fileText);
+		const std::string sanitizedFileText = StripCSharpCommentsAndLiterals(fileText);
+		std::istringstream lineStream(sanitizedFileText);
 		std::string line;
 		int lineNumber = 0;
 		while (std::getline(lineStream, line)) {
@@ -189,7 +373,7 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 			}
 
 			// Check for dynamic keyword usage.
-			if (std::regex_search(line, dynamicPattern)) {
+			if (ContainsCSharpToken(line, "dynamic")) {
 				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 					"ManagedSource",
 					"'dynamic' keyword usage detected. NativeAOT export does not support runtime binder generation.",
@@ -197,10 +381,10 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 			}
 		}
 
-		for (std::sregex_iterator matchIt(fileText.begin(), fileText.end(), serializedFieldPattern), endIt; matchIt != endIt; ++matchIt) {
+		for (std::sregex_iterator matchIt(sanitizedFileText.begin(), sanitizedFileText.end(), serializedFieldPattern), endIt; matchIt != endIt; ++matchIt) {
 			const std::smatch& match = *matchIt;
 			const std::string typeName = match[1].str();
-			const int fieldLine = CalculateLineNumber(fileText, static_cast<std::size_t>(match.position(1)));
+			const int fieldLine = CalculateLineNumber(sanitizedFileText, static_cast<std::size_t>(match.position(1)));
 			const bool obviousCollectionShape = typeName.find('<') != std::string::npos || typeName.find('[') != std::string::npos;
 			if (obviousCollectionShape || !IsSupportedNativeAotFieldType(typeName)) {
 				AddDiagnostic(result, ExportDiagnosticSeverity::Error,

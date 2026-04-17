@@ -21,7 +21,7 @@ namespace fs = std::filesystem;
 namespace
 {
 	constexpr float kLiveInspectorRefreshSeconds = 0.25f;
-	constexpr std::size_t kMaxExportFieldValueBytes = sizeof(glm::quat);
+	constexpr std::size_t kMaxExportFieldValueBytes = 256;
 
 	uint64_t FnvHash64(const std::string& text) {
 		const uint64_t FnvOffsetBasis = 14695981039346656037ULL;
@@ -175,6 +175,25 @@ namespace
 					fieldValue.value[1].get<float>(),
 					fieldValue.value[2].get<float>());
 				std::memcpy(buffer.data(), &value, sizeof(value));
+				return true;
+			}
+			case ExportFieldValueKind::String:
+			{
+				if (descriptor.valueSize <= 0 || static_cast<std::size_t>(descriptor.valueSize) > buffer.size())
+				{
+					return false;
+				}
+
+				const std::string value = fieldValue.value.is_null()
+					? std::string{}
+					: fieldValue.value.is_string() ? fieldValue.value.get<std::string>() : std::string{};
+				if (!fieldValue.value.is_null() && !fieldValue.value.is_string())
+				{
+					return false;
+				}
+
+				const std::size_t copyLength = std::min<std::size_t>(value.size(), static_cast<std::size_t>(descriptor.valueSize - 1));
+				std::memcpy(buffer.data(), value.data(), copyLength);
 				return true;
 			}
 			}

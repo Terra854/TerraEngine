@@ -53,6 +53,8 @@ public:
 	[[nodiscard]] std::string SerializeStyles(const UIElement::Ptr& root) const;
 	[[nodiscard]] bool WasElementClicked(std::string_view elementId) const;
 	[[nodiscard]] bool IsElementHovered(std::string_view elementId) const;
+	[[nodiscard]] std::uint64_t GetInteractionFrame() const;
+	bool EnsureDocumentReady(entt::entity entity, UIComponent& component);
 
 private:
 	UISystem() = default;
@@ -99,5 +101,7 @@ private:
 	bool previousLeftButtonDown_ = false;
 	std::unordered_set<std::string> clickedElementIds_;
 	std::unordered_set<std::string> hoveredElementIds_;
+	std::unordered_map<std::string, UIElement::Ptr> hoveredElementRefs_;
+	std::uint64_t interactionFrame_ = 0;
 	bool initialized_ = false;
 };

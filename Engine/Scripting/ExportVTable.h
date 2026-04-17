@@ -28,7 +28,8 @@ enum class ExportFieldValueKind : int32_t {
 	Vector2 = 4,
 	Vector3 = 5,
 	Vector4 = 6,
-	Quaternion = 7
+	Quaternion = 7,
+	String = 8
 };
 
 struct ExportFieldDescriptor {

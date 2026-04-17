@@ -217,6 +217,36 @@ VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageF
 	return buffer;
 }
 
+void VulkanContext::Impl::DestroyBufferImmediate(VulkanBuffer& buffer)
+{
+	if (buffer.buffer != VK_NULL_HANDLE && buffer.allocation != VK_NULL_HANDLE)
+	{
+		vmaDestroyBuffer(allocator, buffer.buffer, buffer.allocation);
+	}
+
+	buffer = {};
+}
+
+void VulkanContext::Impl::RetireBuffer(VulkanBuffer& buffer)
+{
+	if (buffer.buffer == VK_NULL_HANDLE || buffer.allocation == VK_NULL_HANDLE)
+	{
+		buffer = {};
+		return;
+	}
+
+	if (retiredBuffersByFrame.size() < MAX_FRAMES_IN_FLIGHT)
+	{
+		retiredBuffersByFrame.resize(MAX_FRAMES_IN_FLIGHT);
+	}
+
+	// Shared buffers can still be referenced by other frames already queued on
+	// the GPU. Defer destruction until this frame slot comes back around and
+	// its fence has been waited, which guarantees the old submissions are done.
+	retiredBuffersByFrame[currentFrame].push_back(buffer);
+	buffer = {};
+}
+
 void VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
