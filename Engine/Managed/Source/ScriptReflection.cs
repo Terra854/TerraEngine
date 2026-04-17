@@ -238,6 +238,7 @@ namespace TerraEngine
 		private static ScriptFieldDescriptorPayload BuildDescriptorForField(FieldInfo field, string fieldPath, ref int nextOrder, List<ScriptFieldDiagnosticPayload> diagnostics, HashSet<Type> recursionGuard)
 		{
 			RangeAttribute? range = field.GetCustomAttribute<RangeAttribute>(inherit: true);
+			AssetReferenceAttribute? assetReference = field.GetCustomAttribute<AssetReferenceAttribute>(inherit: true);
 			string tooltip = field.GetCustomAttribute<TooltipAttribute>(inherit: true)?.Text ?? string.Empty;
 			bool hidden = field.IsDefined(typeof(HideInInspectorAttribute), inherit: true);
 			return BuildDescriptorForType(
@@ -250,10 +251,11 @@ namespace TerraEngine
 				recursionGuard,
 				hidden,
 				tooltip,
-				range);
+				range,
+				assetReference);
 		}
 
-		private static ScriptFieldDescriptorPayload BuildDescriptorForType(Type valueType, string fieldPath, string serializedName, string displayName, ref int nextOrder, List<ScriptFieldDiagnosticPayload> diagnostics, HashSet<Type> recursionGuard, bool hiddenInInspector, string tooltip, RangeAttribute? range)
+		private static ScriptFieldDescriptorPayload BuildDescriptorForType(Type valueType, string fieldPath, string serializedName, string displayName, ref int nextOrder, List<ScriptFieldDiagnosticPayload> diagnostics, HashSet<Type> recursionGuard, bool hiddenInInspector, string tooltip, RangeAttribute? range, AssetReferenceAttribute? assetReference)
 		{
 			var descriptor = new ScriptFieldDescriptorPayload
 			{
@@ -267,7 +269,7 @@ namespace TerraEngine
 				Editable = !hiddenInInspector
 			};
 
-			if (TryConfigureScalarDescriptor(valueType, descriptor, range))
+			if (TryConfigureScalarDescriptor(valueType, descriptor, range, assetReference))
 			{
 				FinalizeDescriptor(descriptor);
 				return descriptor;
@@ -300,6 +302,7 @@ namespace TerraEngine
 					new HashSet<Type>(recursionGuard),
 					false,
 					string.Empty,
+					null,
 					null));
 				FinalizeDescriptor(descriptor);
 				return descriptor;
@@ -368,7 +371,7 @@ namespace TerraEngine
 			}
 		}
 
-		private static bool TryConfigureScalarDescriptor(Type valueType, ScriptFieldDescriptorPayload descriptor, RangeAttribute? range)
+		private static bool TryConfigureScalarDescriptor(Type valueType, ScriptFieldDescriptorPayload descriptor, RangeAttribute? range, AssetReferenceAttribute? assetReference)
 		{
 			if (valueType == typeof(bool))
 			{
@@ -394,7 +397,14 @@ namespace TerraEngine
 
 			if (valueType == typeof(string))
 			{
-				descriptor.ValueKind = "String";
+				descriptor.ValueKind = assetReference?.AssetKind switch
+				{
+					AssetReferenceKind.Mesh => "MeshAssetReference",
+					AssetReferenceKind.Material => "MaterialAssetReference",
+					AssetReferenceKind.Texture => "TextureAssetReference",
+					AssetReferenceKind.Shader => "ShaderAssetReference",
+					_ => "String"
+				};
 				return true;
 			}
 

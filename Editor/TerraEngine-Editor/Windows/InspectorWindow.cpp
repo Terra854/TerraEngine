@@ -324,6 +324,73 @@ std::string FormatScriptFieldValue(const ScriptFieldValue& fieldValue)
 	return fieldValue.value.dump();
 }
 
+const char* ScriptAssetPayloadType(std::string_view valueKind)
+{
+	if (valueKind == "MeshAssetReference")
+	{
+		return "ASSET_MESH";
+	}
+
+	if (valueKind == "MaterialAssetReference")
+	{
+		return "ASSET_MATERIAL";
+	}
+
+	if (valueKind == "TextureAssetReference")
+	{
+		return "ASSET_TEXTURE";
+	}
+
+	if (valueKind == "ShaderAssetReference")
+	{
+		return "ASSET_SHADER";
+	}
+
+	return nullptr;
+}
+
+const char* ScriptAssetImporterName(std::string_view valueKind)
+{
+	if (valueKind == "MeshAssetReference")
+	{
+		return "MeshImporter";
+	}
+
+	if (valueKind == "MaterialAssetReference")
+	{
+		return "MaterialImporter";
+	}
+
+	if (valueKind == "TextureAssetReference")
+	{
+		return "TextureImporter";
+	}
+
+	if (valueKind == "ShaderAssetReference")
+	{
+		return "ShaderImporter";
+	}
+
+	return nullptr;
+}
+
+std::string BuildScriptAssetReferenceValue(const AssetMetadata& metadata)
+{
+	// Store the authored stem so script-side asset resolution can continue to
+	// use the same top-level name lookup path it already supports.
+	if (!metadata.sourcePath.empty())
+	{
+		return metadata.sourcePath.stem().string();
+	}
+
+	if (!metadata.compiledPath.empty())
+	{
+		return metadata.compiledPath.stem().string();
+	}
+
+	return {};
+}
+
 std::string ExtractScriptFieldRootPath(std::string_view fieldPath)
 {
 	const std::size_t dotIndex = fieldPath.find('.');
@@ -1246,6 +1313,55 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 							*targetValue = std::string(textBuffer);
 							commitRootValue(rootDescriptor, nextRootValue);
 						}
+					}
+				} else if (descriptor.valueKind == "MeshAssetReference"
+					|| descriptor.valueKind == "MaterialAssetReference"
+					|| descriptor.valueKind == "TextureAssetReference"
+					|| descriptor.valueKind == "ShaderAssetReference") {
+					std::string editedValue = currentValue.is_string() ? currentValue.get<std::string>() : std::string{};
+					char textBuffer[256];
+					strncpy(textBuffer, editedValue.c_str(), sizeof(textBuffer));
+					textBuffer[sizeof(textBuffer) - 1] = '\0';
+					if (ImGui::InputText(descriptor.displayName.c_str(), textBuffer, sizeof(textBuffer)) && editable) {
+						nlohmann::json nextRootValue = currentRootValue;
+						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+							*targetValue = std::string(textBuffer);
+							commitRootValue(rootDescriptor, nextRootValue);
+						}
+					}
+
+					if (ImGui::BeginPopupContextItem()) {
+						if (ImGui::MenuItem("Clear") && editable) {
+							nlohmann::json nextRootValue = currentRootValue;
+							if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+								*targetValue = std::string{};
+								commitRootValue(rootDescriptor, nextRootValue);
+							}
+						}
+						ImGui::EndPopup();
+					}
+
+					if (editable && ImGui::BeginDragDropTarget()) {
+						const char* payloadType = ScriptAssetPayloadType(descriptor.valueKind);
+						const char* expectedImporter = ScriptAssetImporterName(descriptor.valueKind);
+						if (payloadType != nullptr) {
+							if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(payloadType)) {
+								IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
+								const TerraEngine::UUID assetGuid = *static_cast<const TerraEngine::UUID*>(payload->Data);
+								const AssetMetadata* metadata = assetDatabase.FindAssetByGuid(assetGuid);
+								if (metadata != nullptr
+									&& expectedImporter != nullptr
+									&& metadata->importerName == expectedImporter) {
+									const std::string assetReference = BuildScriptAssetReferenceValue(*metadata);
+									nlohmann::json nextRootValue = currentRootValue;
+									if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
+										*targetValue = assetReference;
+										commitRootValue(rootDescriptor, nextRootValue);
+									}
+								}
+							}
+						}
+						ImGui::EndDragDropTarget();
 					}
 				} else if (descriptor.valueKind == "Enum") {
 					int selectedIndex = 0;

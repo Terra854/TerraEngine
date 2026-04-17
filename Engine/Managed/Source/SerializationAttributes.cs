@@ -2,6 +2,14 @@ using System;
 
 namespace TerraEngine
 {
+	public enum AssetReferenceKind
+	{
+		Mesh,
+		Material,
+		Texture,
+		Shader
+	}
+
 	[AttributeUsage(AttributeTargets.Field)]
 	public sealed class SerializeFieldAttribute : Attribute
 	{
@@ -34,5 +42,16 @@ namespace TerraEngine
 		}
 
 		public string Text { get; }
+	}
+
+	[AttributeUsage(AttributeTargets.Field)]
+	public sealed class AssetReferenceAttribute : Attribute
+	{
+		public AssetReferenceAttribute(AssetReferenceKind assetKind)
+		{
+			AssetKind = assetKind;
+		}
+
+		public AssetReferenceKind AssetKind { get; }
 	}
 }
