@@ -685,7 +685,7 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 		}
 
 		// Copy required native engine DLLs beside the launcher.
-		std::vector<std::string> engineDlls = { "TerraEngine.dll", "rttr_core.dll", "glfw3.dll" };
+		std::vector<std::string> engineDlls = { "TerraEngine.dll", "glfw3.dll" };
 		for (const auto& dll : engineDlls) {
 			std::filesystem::path dllSrc = engineBuildDir / "Launcher" / dll;
 			if (!std::filesystem::exists(dllSrc)) {

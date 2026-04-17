@@ -1,6 +1,7 @@
 #include "UIParser.h"
 
 #include "Resource/ResourceManager.h"
+#include "Runtime/ContentMount/ContentMount.h"
 
 #include <pugixml.hpp>
 
@@ -90,6 +91,27 @@ std::string ReadFileToString(const std::filesystem::path& filePath)
 	const std::vector<std::uint8_t> fileBytes = ResourceManager::Instance().ReadFileBytes(filePath);
 	if (fileBytes.empty())
 	{
+		// Zero-byte UI files on disk are valid authored placeholders. Preserve
+		// the distinction between "empty file" and "missing file" so empty
+		// stylesheets do not surface as load failures. Exported builds can also
+		// author empty files inside the mounted archive, so check the mount too.
+		if (std::filesystem::exists(filePath))
+		{
+			return {};
+		}
+
+		const std::filesystem::path assetRoot = ResourceManager::Instance().GetAssetRoot();
+		const std::filesystem::path absolutePath = filePath.is_absolute()
+			? filePath.lexically_normal()
+			: (assetRoot / filePath).lexically_normal();
+		const std::filesystem::path logicalPath = absolutePath.lexically_relative(assetRoot);
+		if (ContentMount::Instance().IsMounted()
+			&& logicalPath != absolutePath
+			&& ContentMount::Instance().Exists(logicalPath.generic_string()))
+		{
+			return {};
+		}
+
 		throw std::runtime_error("Failed to open UI asset: " + filePath.generic_string());
 	}
 

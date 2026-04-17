@@ -2,7 +2,7 @@ namespace TerraEngine
 {
 	public class Camera : Component
 	{
-		// These wrappers translate the engine's RTTR property names into the
+		// These wrappers translate the engine's reflected property names into the
 		// shorter camera vocabulary gameplay scripts expect to write by hand.
 		public float FieldOfView
 		{

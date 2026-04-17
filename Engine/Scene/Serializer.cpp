@@ -29,31 +29,31 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
         if (functions.hasComponent(obj))
         {
             nlohmann::json compJson = nlohmann::json::object();
-            rttr::type type = rttr::type::get_by_name(compName);
-            if (type.is_valid())
+            TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType(compName);
+            if (TerraEngine::Reflection::IsValid(type))
             {
                 // Enumerate all reflected properties and convert their values into
                 // JSON-compatible primitives or arrays.
-                for (auto& prop : type.get_properties())
+                for (const TerraEngine::Reflection::Property& prop : TerraEngine::Reflection::GetProperties(type))
                 {
-                    std::string propName = prop.get_name().to_string();
-                    rttr::variant val = functions.getter(obj, propName);
+                    std::string propName = TerraEngine::Reflection::GetPropertyName(prop);
+                    TerraEngine::Reflection::Variant val = functions.getter(obj, propName);
                     
-                    if (val.is_type<float>()) compJson[propName] = val.get_value<float>();
-                    else if (val.is_type<int>()) compJson[propName] = val.get_value<int>();
-                    else if (val.is_type<std::uint32_t>()) compJson[propName] = val.get_value<std::uint32_t>();
-                    else if (val.is_type<bool>()) compJson[propName] = val.get_value<bool>();
-                    else if (val.is_type<std::string>()) compJson[propName] = val.get_value<std::string>();
-                    else if (val.is_type<glm::vec3>()) {
-                        auto v = val.get_value<glm::vec3>();
+                    if (TerraEngine::Reflection::IsType<float>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<float>(val);
+                    else if (TerraEngine::Reflection::IsType<int>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<int>(val);
+                    else if (TerraEngine::Reflection::IsType<std::uint32_t>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<std::uint32_t>(val);
+                    else if (TerraEngine::Reflection::IsType<bool>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<bool>(val);
+                    else if (TerraEngine::Reflection::IsType<std::string>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<std::string>(val);
+                    else if (TerraEngine::Reflection::IsType<glm::vec3>(val)) {
+                        auto v = TerraEngine::Reflection::GetValue<glm::vec3>(val);
                         compJson[propName] = {v.x, v.y, v.z};
                     }
-                    else if (val.is_type<glm::quat>()) {
-                        auto q = val.get_value<glm::quat>();
+                    else if (TerraEngine::Reflection::IsType<glm::quat>(val)) {
+                        auto q = TerraEngine::Reflection::GetValue<glm::quat>(val);
                         compJson[propName] = {q.w, q.x, q.y, q.z};
                     }
-                    else if (val.is_type<TerraEngine::UUID>()) {
-                        auto uuid = val.get_value<TerraEngine::UUID>();
+                    else if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(val)) {
+                        auto uuid = TerraEngine::Reflection::GetValue<TerraEngine::UUID>(val);
                         compJson[propName] = TerraEngine::ToHexString(uuid);
                     }
                 }
@@ -130,16 +130,16 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
                 auto& functions = registry[compName];
                 functions.addComponent(obj);
 
-                rttr::type type = rttr::type::get_by_name(compName);
-                if (type.is_valid()) {
+                TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType(compName);
+                if (TerraEngine::Reflection::IsValid(type)) {
                     for (auto& [propName, propVal] : compData.items()) {
-                        rttr::property prop = type.get_property(propName);
-                        if (prop.is_valid()) {
-                            rttr::variant val;
+                        TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(type, propName);
+                        if (TerraEngine::Reflection::IsValid(prop)) {
+                            TerraEngine::Reflection::Variant val;
                             // Heuristic-based type reconstruction for JSON variants.
                             if (propVal.is_number_float()) val = propVal.get<float>();
                             else if (propVal.is_number_integer()) {
-                                if (prop.get_type() == rttr::type::get<std::uint32_t>()) {
+                                if (TerraEngine::Reflection::IsType<std::uint32_t>(TerraEngine::Reflection::GetPropertyType(prop))) {
                                     val = propVal.get<std::uint32_t>();
                                 } else {
                                     val = propVal.get<int>();
@@ -147,7 +147,7 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
                             }
                             else if (propVal.is_boolean()) val = propVal.get<bool>();
                             else if (propVal.is_string()) {
-                                if (prop.get_type() == rttr::type::get<TerraEngine::UUID>()) {
+                                if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(TerraEngine::Reflection::GetPropertyType(prop))) {
                                     auto parsed = TerraEngine::ParseUUID(propVal.get<std::string>());
                                     if (parsed) val = *parsed;
                                 } else {
@@ -158,17 +158,17 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
                                 if (propVal.size() == 3) {
                                     val = glm::vec3(propVal[0], propVal[1], propVal[2]);
                                 } else if (propVal.size() == 4) {
-                                    if (prop.get_type() == rttr::type::get<glm::quat>()) {
+                                    if (TerraEngine::Reflection::IsType<glm::quat>(TerraEngine::Reflection::GetPropertyType(prop))) {
                                         val = glm::quat(propVal[0], propVal[1], propVal[2], propVal[3]); // w, x, y, z
                                     }
-                                } else if (propVal.size() == 16 && prop.get_type() == rttr::type::get<TerraEngine::UUID>()) {
+                                } else if (propVal.size() == 16 && TerraEngine::Reflection::IsType<TerraEngine::UUID>(TerraEngine::Reflection::GetPropertyType(prop))) {
                                      TerraEngine::UUID u;
                                      for(int i=0; i<16; ++i) u[i] = propVal[i].get<uint8_t>();
                                      val = u;
                                 }
                             }
                             
-                            if (val.is_valid()) {
+                            if (TerraEngine::Reflection::IsValid(val)) {
                                 functions.setter(obj, propName, val);
                             }
                         }

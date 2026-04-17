@@ -728,6 +728,15 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 			return mountedBytes;
 		}
 
+		// Mounted zero-byte files are valid authored assets. TEPAK returns an
+		// empty buffer for them, so probe existence separately before treating
+		// the empty read as a cache miss.
+		if (ContentMount::Instance().Exists(logicalPathString))
+		{
+			TERRAENGINE_LOG(LogLevel::Debug, "Mounted resource file is empty: " << logicalPathString);
+			return {};
+		}
+
 		TERRAENGINE_LOG(LogLevel::Warning, "Resource not found in mount: " << logicalPathString);
 	}
 
@@ -747,7 +756,10 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 	const std::streamsize length = file.tellg();
 	if (length <= 0)
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Resource file is empty: " << absolutePath);
+		// Empty authored files are valid for assets such as placeholder UI
+		// stylesheets, so return an empty payload without escalating to an
+		// error. Callers that require non-empty content must validate it.
+		TERRAENGINE_LOG(LogLevel::Debug, "Resource file is empty: " << absolutePath);
 		return {};
 	}
 

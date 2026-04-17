@@ -6,6 +6,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+string(REPLACE "\\" "/" TERRAENGINE_NORMALIZED_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
+if(TERRAENGINE_NORMALIZED_INSTALL_PREFIX MATCHES [[/External/[^/]+/install/?$]])
+	# Older build trees inherited a dependency-specific install prefix. Reset it
+	# so regenerated caches no longer carry obsolete third-party paths forward.
+	set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "Install prefix" FORCE)
+endif()
+
 include(ProcessorCount)
 ProcessorCount(TERRAENGINE_CPU_COUNT)
 if(TERRAENGINE_CPU_COUNT GREATER 0 AND NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)
@@ -222,18 +229,6 @@ set(VMA_STATIC_VULKAN_FUNCTIONS OFF CACHE BOOL "VMA: Use dynamic function pointe
 set(VMA_DYNAMIC_VULKAN_FUNCTIONS ON CACHE BOOL "VMA: Fetch function pointers" FORCE)
 add_subdirectory(External/VMA)
 
-# --- RTTR --------------------------------------------------------------------
-set(BUILD_RTTR_DYNAMIC ON CACHE BOOL "Build RTTR as a shared library" FORCE)
-set(BUILD_STATIC OFF CACHE BOOL "Disable RTTR static library" FORCE)
-set(BUILD_UNIT_TESTS OFF CACHE BOOL "Disable RTTR unit tests" FORCE)
-set(BUILD_BENCHMARKS OFF CACHE BOOL "Disable RTTR benchmarks" FORCE)
-set(BUILD_EXAMPLES OFF CACHE BOOL "Disable RTTR examples" FORCE)
-set(BUILD_DOCUMENTATION OFF CACHE BOOL "Disable RTTR documentation" FORCE)
-set(BUILD_INSTALLER OFF CACHE BOOL "Disable RTTR installer" FORCE)
-set(BUILD_PACKAGE OFF CACHE BOOL "Disable RTTR package builder" FORCE)
-
-add_subdirectory(External/rttr)
-
 # --- GLFW --------------------------------------------------------------------
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "Disable GLFW docs" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "Disable GLFW examples" FORCE)
@@ -298,7 +293,6 @@ find_package(Threads REQUIRED)
 target_link_libraries(TerraEngine-Engine
 	PUBLIC
 		Threads::Threads
-		RTTR::Core
 		glfw
 		Vulkan::Headers
 		volk
@@ -324,7 +318,6 @@ target_compile_definitions(TerraEngine-Engine
 	PUBLIC
 		TERRAENGINE_SHARED
 	PRIVATE
-		RTTR_DLL
 		GLFW_DLL
 		TERRAENGINE_ENGINE_BUILD
 		BASISD_SUPPORT_KTX2=0
@@ -437,11 +430,17 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Mana
 # Custom target to build the C# project
 # We use 'dotnet build' directly to avoid CMake C# generator limitations (VS only)
 set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Binaries/Managed/$<CONFIG>")
+add_custom_target(TerraEngine.Managed.Output
+	COMMAND ${CMAKE_COMMAND} -E rm -rf "${MANAGED_OUTPUT_DIR}"
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${MANAGED_OUTPUT_DIR}"
+	COMMENT "Preparing managed publish output directory"
+)
 add_custom_target(TerraEngine ALL
     COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
     COMMENT "Publishing Managed Assembly: TerraEngine (Self-Contained)"
     SOURCES ${MANAGED_CORE_SOURCES}
 )
+add_dependencies(TerraEngine TerraEngine.Managed.Output)
 
 # Build the editor-owned Roslyn source generator that gameplay projects compile with.
 # The runtime never loads this DLL directly. Instead, the editor stages it into each
@@ -457,6 +456,7 @@ add_custom_target(TerraEngine.Export.Generator ALL
 		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/ScriptRegistryGenerator.cs"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/TerraEngine.Export.Generator.csproj"
 )
+add_dependencies(TerraEngine.Export.Generator TerraEngine.Managed.Output)
 
 set(MANAGED_EDITOR_SOURCES
 	Editor/Managed/TerraEngine.Editor/Source/EditorApplication.cs
@@ -467,6 +467,7 @@ add_custom_target(TerraEngine.Editor.Managed ALL
     COMMENT "Publishing Managed Assembly: TerraEngine.Editor (Self-Contained)"
     SOURCES ${MANAGED_EDITOR_SOURCES}
 )
+add_dependencies(TerraEngine.Editor.Managed TerraEngine.Managed.Output)
 add_dependencies(TerraEngine.Editor.Managed TerraEngine)
 add_dependencies(TerraEngine.Editor.Managed TerraEngine.Export.Generator)
 
@@ -581,7 +582,6 @@ target_compile_definitions(cimgui INTERFACE
 target_link_libraries(cimgui glfw Vulkan::Headers)
 
 set_target_properties(glfw PROPERTIES DEBUG_POSTFIX "")
-set_target_properties(rttr_core PROPERTIES DEBUG_POSTFIX "")
 
 # --- Editor ------------------------------------------------------------------
 set(IMGUI_FILE_DIALOG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiFileDialog)
@@ -1004,7 +1004,7 @@ endif()
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher/Fonts
 	)
 
-	# Install dependencies (glfw, rttr) to both
+	# Install dependencies (glfw) to both
 	install(TARGETS glfw
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine 
 		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
@@ -1013,15 +1013,6 @@ endif()
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
-
-	install(TARGETS rttr_core
-		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
-		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
-	)
-	# Copy to Launcher/Editor/Managed
-	install(FILES $<TARGET_FILE:rttr_core> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
-	install(FILES $<TARGET_FILE:rttr_core> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
-	install(FILES $<TARGET_FILE:rttr_core> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
 
 install(TARGETS TerraEngineMeshCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor

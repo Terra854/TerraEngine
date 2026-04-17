@@ -23,13 +23,13 @@ public:
 	glm::quat rotation;
 	glm::vec3 scale;
 
-	static void reflect(rttr::registration::class_<Transform>& registration)
+	static void reflect(entt::meta_factory<Transform>& factory)
 	{
-		// Register every field so editor tooling can adjust TRS values
-		// through RTTR's reflection data.
-		registration.property("Position", &Transform::position)
-			.property("Rotation", &Transform::rotation)
-			.property("Scale", &Transform::scale);
+		// Register every field so editor tooling can adjust TRS values through
+		// the shared EnTT-backed reflection data.
+		TerraEngine::Reflection::RegisterDataProperty<&Transform::position>(factory, "Position");
+		TerraEngine::Reflection::RegisterDataProperty<&Transform::rotation>(factory, "Rotation");
+		TerraEngine::Reflection::RegisterDataProperty<&Transform::scale>(factory, "Scale");
 	}
 };
 

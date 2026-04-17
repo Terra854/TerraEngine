@@ -16,13 +16,12 @@ struct MeshRenderComponent : public Component<MeshRenderComponent>
 	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
 	bool taskShaderCullingEnabled = true;
 
-	// Exposes the component to RTTR so tools and serialization can introspect
+	// Exposes the component to the EnTT-backed reflection layer so tools and serialization can introspect
 	// the authored asset bindings safely.
-	static void reflect(rttr::registration::class_<MeshRenderComponent>& registration)
+	static void reflect(entt::meta_factory<MeshRenderComponent>& factory)
 	{
-		registration
-			.property("meshId", &MeshRenderComponent::meshId)
-			.property("materialId", &MeshRenderComponent::materialId)
-			.property("taskShaderCullingEnabled", &MeshRenderComponent::taskShaderCullingEnabled);
+		TerraEngine::Reflection::RegisterDataProperty<&MeshRenderComponent::meshId>(factory, "meshId");
+		TerraEngine::Reflection::RegisterDataProperty<&MeshRenderComponent::materialId>(factory, "materialId");
+		TerraEngine::Reflection::RegisterDataProperty<&MeshRenderComponent::taskShaderCullingEnabled>(factory, "taskShaderCullingEnabled");
 	}
 };

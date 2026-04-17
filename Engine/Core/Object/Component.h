@@ -1,8 +1,5 @@
 #pragma once
 
-#include <rttr/registration>
-#include <rttr/variant.h>
-
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -16,11 +13,13 @@
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include "Core/Export.h"
+#include "Reflection.h"
 #include "Object.h"
 #include "Utilities/UUID.h"
 
 // Helper utilities that keep the CRTP component base lightweight while still
-// allowing each component to expose metadata to RTTR in a consistent way.
+// allowing each component to expose metadata through the shared reflection
+// backend in a consistent way.
 template <typename T, typename = void>
 struct component_has_custom_name : std::false_type
 {
@@ -37,7 +36,7 @@ struct component_has_reflect : std::false_type
 };
 
 template <typename T>
-struct component_has_reflect<T, std::void_t<decltype(T::reflect(std::declval<rttr::registration::class_<T>&>()))>> : std::true_type
+struct component_has_reflect<T, std::void_t<decltype(T::reflect(std::declval<entt::meta_factory<T>&>()))>> : std::true_type
 {
 };
 
@@ -53,7 +52,7 @@ inline std::string component_name_for()
 	}
 	else
 	{
-		return rttr::type::get<T>().get_name().to_string();
+		return std::string(entt::type_name<T>::value());
 	}
 }
 
@@ -61,8 +60,11 @@ inline std::string component_name_for()
 // registered through the Component CRTP without exposing the concrete type.
 struct ComponentAccessFunctions
 {
-	std::function<rttr::variant(Object&, std::string_view)> getter;
-	std::function<bool(Object&, std::string_view, const rttr::variant&)> setter;
+	// Store the reflected type from the engine module so editor code can query
+	// properties against the same EnTT meta context that performed registration.
+	TerraEngine::Reflection::Type reflectionType;
+	std::function<TerraEngine::Reflection::Variant(Object&, std::string_view)> getter;
+	std::function<bool(Object&, std::string_view, const TerraEngine::Reflection::Variant&)> setter;
 	std::function<bool(Object&)> hasComponent;
 	std::function<void(Object&)> addComponent;
 	std::function<void(Object&)> removeComponent;
@@ -86,7 +88,8 @@ void RegisterComponentAccess(const std::string& name)
 	}
 
 	ComponentAccessFunctions functions;
-	functions.getter = [](Object& object, std::string_view property) -> rttr::variant
+	functions.reflectionType = TerraEngine::Reflection::ResolveType<ComponentType>();
+	functions.getter = [](Object& object, std::string_view property) -> TerraEngine::Reflection::Variant
 	{
 		// Fetch the concrete component by type-safe API, then take a shared
 		// lock so concurrent reads remain safe while writers block.
@@ -97,15 +100,15 @@ void RegisterComponentAccess(const std::string& name)
 		}
 
 		auto guard = component->acquireReadLock();
-		rttr::property prop = rttr::type::get<ComponentType>().get_property(std::string(property).c_str());
-		if (!prop.is_valid())
+		TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), property);
+		if (!TerraEngine::Reflection::IsValid(prop))
 		{
 			return {};
 		}
-		return prop.get_value(*component);
+		return TerraEngine::Reflection::GetPropertyValue(prop, *component);
 	};
 
-	functions.setter = [](Object& object, std::string_view property, const rttr::variant& value) -> bool
+	functions.setter = [](Object& object, std::string_view property, const TerraEngine::Reflection::Variant& value) -> bool
 	{
 		// Promote to exclusive access before mutating reflected properties
 		// to keep writer updates serialized relative to readers.
@@ -116,12 +119,12 @@ void RegisterComponentAccess(const std::string& name)
 		}
 
 		auto guard = component->acquireWriteLock();
-		rttr::property prop = rttr::type::get<ComponentType>().get_property(std::string(property).c_str());
-		if (!prop.is_valid())
+		TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), property);
+		if (!TerraEngine::Reflection::IsValid(prop))
 		{
 			return false;
 		}
-		return prop.set_value(*component, value);
+		return TerraEngine::Reflection::SetPropertyValue(prop, *component, value);
 	};
 
 	functions.hasComponent = [](Object& object) -> bool
@@ -148,26 +151,26 @@ void RegisterComponentAccess(const std::string& name)
 		if (!component) return compJson;
 
 		auto guard = component->acquireReadLock();
-		rttr::type type = rttr::type::get<ComponentType>();
-		for (auto& prop : type.get_properties())
+		TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType<ComponentType>();
+		for (const TerraEngine::Reflection::Property& prop : TerraEngine::Reflection::GetProperties(type))
 		{
-			std::string propName = prop.get_name().to_string();
-			rttr::variant val = prop.get_value(*component);
+			std::string propName = TerraEngine::Reflection::GetPropertyName(prop);
+			TerraEngine::Reflection::Variant val = TerraEngine::Reflection::GetPropertyValue(prop, *component);
 
-			if (val.is_type<float>()) compJson[propName] = val.get_value<float>();
-			else if (val.is_type<int>()) compJson[propName] = val.get_value<int>();
-			else if (val.is_type<bool>()) compJson[propName] = val.get_value<bool>();
-			else if (val.is_type<std::string>()) compJson[propName] = val.get_value<std::string>();
-			else if (val.is_type<glm::vec3>()) {
-				auto v = val.get_value<glm::vec3>();
+			if (TerraEngine::Reflection::IsType<float>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<float>(val);
+			else if (TerraEngine::Reflection::IsType<int>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<int>(val);
+			else if (TerraEngine::Reflection::IsType<bool>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<bool>(val);
+			else if (TerraEngine::Reflection::IsType<std::string>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<std::string>(val);
+			else if (TerraEngine::Reflection::IsType<glm::vec3>(val)) {
+				auto v = TerraEngine::Reflection::GetValue<glm::vec3>(val);
 				compJson[propName] = { v.x, v.y, v.z };
 			}
-			else if (val.is_type<glm::quat>()) {
-				auto q = val.get_value<glm::quat>();
+			else if (TerraEngine::Reflection::IsType<glm::quat>(val)) {
+				auto q = TerraEngine::Reflection::GetValue<glm::quat>(val);
 				compJson[propName] = { q.w, q.x, q.y, q.z };
 			}
-			else if (val.is_type<TerraEngine::UUID>()) {
-				auto uuid = val.get_value<TerraEngine::UUID>();
+			else if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(val)) {
+				auto uuid = TerraEngine::Reflection::GetValue<TerraEngine::UUID>(val);
 				compJson[propName] = TerraEngine::ToHexString(uuid);
 			}
 		}
@@ -180,18 +183,18 @@ void RegisterComponentAccess(const std::string& name)
 		if (!component) return;
 
 		auto guard = component->acquireWriteLock();
-		rttr::type type = rttr::type::get<ComponentType>();
+		TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType<ComponentType>();
 		for (auto& [propName, propVal] : compData.items())
 		{
-			rttr::property prop = type.get_property(propName);
-			if (prop.is_valid())
+			TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(type, propName);
+			if (TerraEngine::Reflection::IsValid(prop))
 			{
-				rttr::variant val;
+				TerraEngine::Reflection::Variant val;
 				if (propVal.is_number_float()) val = propVal.get<float>();
 				else if (propVal.is_number_integer()) val = propVal.get<int>();
 				else if (propVal.is_boolean()) val = propVal.get<bool>();
 				else if (propVal.is_string()) {
-					if (prop.get_type() == rttr::type::get<TerraEngine::UUID>()) {
+					if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(TerraEngine::Reflection::GetPropertyType(prop))) {
 						auto parsed = TerraEngine::ParseUUID(propVal.get<std::string>());
 						if (parsed) val = *parsed;
 					}
@@ -204,14 +207,14 @@ void RegisterComponentAccess(const std::string& name)
 						val = glm::vec3(propVal[0], propVal[1], propVal[2]);
 					}
 					else if (propVal.size() == 4) {
-						if (prop.get_type() == rttr::type::get<glm::quat>()) {
+						if (TerraEngine::Reflection::IsType<glm::quat>(TerraEngine::Reflection::GetPropertyType(prop))) {
 							val = glm::quat(propVal[0], propVal[1], propVal[2], propVal[3]);
 						}
 					}
 				}
 
-				if (val.is_valid()) {
-					prop.set_value(*component, val);
+				if (TerraEngine::Reflection::IsValid(val)) {
+					TerraEngine::Reflection::SetPropertyValue(prop, *component, val);
 				}
 			}
 		}
@@ -227,30 +230,30 @@ template <typename ComponentType, typename T>
 T GetComponentProperty(ComponentType& component, std::string_view propertyName)
 {
 	auto guard = component.acquireReadLock();
-	rttr::property prop = rttr::type::get<ComponentType>().get_property(std::string(propertyName).c_str());
-	if (!prop.is_valid())
+	TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), propertyName);
+	if (!TerraEngine::Reflection::IsValid(prop))
 	{
 		return T{};
 	}
-	rttr::variant value = prop.get_value(component);
-	if (!value.is_type<T>())
+	TerraEngine::Reflection::Variant value = TerraEngine::Reflection::GetPropertyValue(prop, component);
+	if (!TerraEngine::Reflection::IsType<T>(value))
 	{
 		return T{};
 	}
-	return value.get_value<T>();
+	return TerraEngine::Reflection::GetValue<T>(value);
 }
 
 template <typename ComponentType, typename ValueType>
 void SetComponentProperty(ComponentType& component, std::string_view propertyName, ValueType&& value)
 {
 	auto guard = component.acquireWriteLock();
-	rttr::property prop = rttr::type::get<ComponentType>().get_property(std::string(propertyName).c_str());
-	if (!prop.is_valid())
+	TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), propertyName);
+	if (!TerraEngine::Reflection::IsValid(prop))
 	{
 		return;
 	}
-	rttr::variant wrappedValue(std::forward<ValueType>(value));
-	prop.set_value(component, wrappedValue);
+	TerraEngine::Reflection::Variant wrappedValue(std::forward<ValueType>(value));
+	TerraEngine::Reflection::SetPropertyValue(prop, component, wrappedValue);
 }
 
 // Base component that all other components will inherit via CRTP.
@@ -327,19 +330,21 @@ public:
 	}
 
 protected:
-	// Ensures that the derived component registers itself with RTTR exactly
+	// Ensures that the derived component registers itself with the EnTT-backed
+	// reflection registry exactly
 	// once, regardless of how many instances are constructed at runtime.
 	static void ensureRegistration()
 	{
 		static bool registered = []() {
 			const std::string name = component_name_for<Derived>();
-			auto registration = rttr::registration::class_<Derived>(name.c_str())
-				.template constructor<>()
-				.property("active", &Derived::active);
+			entt::meta_factory<Derived> factory{};
+			TerraEngine::Reflection::ConfigureTypeMetadata(factory, name);
+			factory.template ctor<>();
+			TerraEngine::Reflection::RegisterDataProperty<&Derived::active>(factory, "active");
 
 			if constexpr (component_has_reflect_v<Derived>)
 			{
-				Derived::reflect(registration);
+				Derived::reflect(factory);
 			}
 			RegisterComponentAccess<Derived>(name);
 			return true;

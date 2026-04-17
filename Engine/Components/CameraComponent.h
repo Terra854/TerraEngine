@@ -18,15 +18,14 @@ struct CameraComponent : public Component<CameraComponent>
 	float farPlane = 100.0f;
 	glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
 
-	// Register the camera properties with RTTR so tools can edit the projection
+	// Register the camera properties with the EnTT-backed reflection layer so tools can edit the projection
 	// parameters at runtime while the renderer reads them in a thread-safe way.
-	static void reflect(rttr::registration::class_<CameraComponent>& registration)
+	static void reflect(entt::meta_factory<CameraComponent>& factory)
 	{
-		registration
-			.property("verticalFovDegrees", &CameraComponent::verticalFovDegrees)
-			.property("aspectRatio", &CameraComponent::aspectRatio)
-			.property("nearPlane", &CameraComponent::nearPlane)
-			.property("farPlane", &CameraComponent::farPlane)
-			.property("up", &CameraComponent::up);
+		TerraEngine::Reflection::RegisterDataProperty<&CameraComponent::verticalFovDegrees>(factory, "verticalFovDegrees");
+		TerraEngine::Reflection::RegisterDataProperty<&CameraComponent::aspectRatio>(factory, "aspectRatio");
+		TerraEngine::Reflection::RegisterDataProperty<&CameraComponent::nearPlane>(factory, "nearPlane");
+		TerraEngine::Reflection::RegisterDataProperty<&CameraComponent::farPlane>(factory, "farPlane");
+		TerraEngine::Reflection::RegisterDataProperty<&CameraComponent::up>(factory, "up");
 	}
 };

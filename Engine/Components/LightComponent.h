@@ -60,26 +60,25 @@ struct LightComponent : public Component<LightComponent>
 
 	// Reflection exposes a stable uint32 representation for type so serializer
 	// code can persist the enum without custom JSON enum parsing.
-	static void reflect(rttr::registration::class_<LightComponent>& registration)
+	static void reflect(entt::meta_factory<LightComponent>& factory)
 	{
-		registration
-			.property("type", &LightComponent::GetTypeValue, &LightComponent::SetTypeValue)
-			.property("unit", &LightComponent::GetUnitValue, &LightComponent::SetUnitValue)
-			.property("appearance", &LightComponent::GetAppearanceValue, &LightComponent::SetAppearanceValue)
-			.property("color", &LightComponent::color)
-			.property("temperature", &LightComponent::temperature)
-			.property("intensity", &LightComponent::intensity)
-			.property("range", &LightComponent::range)
-			.property("innerConeAngle", &LightComponent::innerConeAngle)
-			.property("outerConeAngle", &LightComponent::outerConeAngle)
-			.property("width", &LightComponent::width)
-			.property("height", &LightComponent::height)
-			.property("castsShadows", &LightComponent::castsShadows)
-			.property("shadowStrength", &LightComponent::shadowStrength)
-			.property("shadowBias", &LightComponent::shadowBias)
-			.property("indirectMultiplier", &LightComponent::indirectMultiplier)
-			.property("authoredPriority", &LightComponent::authoredPriority)
-			.property("stabilityPreference", &LightComponent::stabilityPreference);
+		TerraEngine::Reflection::RegisterAccessorProperty<&LightComponent::SetTypeValue, &LightComponent::GetTypeValue>(factory, "type");
+		TerraEngine::Reflection::RegisterAccessorProperty<&LightComponent::SetUnitValue, &LightComponent::GetUnitValue>(factory, "unit");
+		TerraEngine::Reflection::RegisterAccessorProperty<&LightComponent::SetAppearanceValue, &LightComponent::GetAppearanceValue>(factory, "appearance");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::color>(factory, "color");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::temperature>(factory, "temperature");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::intensity>(factory, "intensity");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::range>(factory, "range");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::innerConeAngle>(factory, "innerConeAngle");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::outerConeAngle>(factory, "outerConeAngle");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::width>(factory, "width");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::height>(factory, "height");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::castsShadows>(factory, "castsShadows");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::shadowStrength>(factory, "shadowStrength");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::shadowBias>(factory, "shadowBias");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::indirectMultiplier>(factory, "indirectMultiplier");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::authoredPriority>(factory, "authoredPriority");
+		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::stabilityPreference>(factory, "stabilityPreference");
 	}
 
 	std::uint32_t GetTypeValue() const

@@ -7,7 +7,6 @@
 #include <fstream>
 #include <sstream>
 #include <utility>
-#include <rttr/variant.h>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <nlohmann/json.hpp>

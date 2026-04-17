@@ -30,8 +30,60 @@
 #include <filesystem>
 #include <limits>
 
+using ReflectionProperty = TerraEngine::Reflection::Property;
+using ReflectionType = TerraEngine::Reflection::Type;
+using ReflectionVariant = TerraEngine::Reflection::Variant;
+
 namespace
 {
+template <typename ValueType>
+bool IsMetaValueType(const ReflectionVariant& value)
+{
+	return TerraEngine::Reflection::IsType<ValueType>(value);
+}
+
+template <typename ValueType>
+ValueType MetaValue(const ReflectionVariant& value)
+{
+	return TerraEngine::Reflection::GetValue<ValueType>(value);
+}
+
+template <typename ValueType>
+bool IsMetaType(const ReflectionType& type)
+{
+	return TerraEngine::Reflection::IsType<ValueType>(type);
+}
+
+inline bool IsValid(const ReflectionVariant& value)
+{
+	return TerraEngine::Reflection::IsValid(value);
+}
+
+inline bool IsValid(const ReflectionProperty& value)
+{
+	return TerraEngine::Reflection::IsValid(value);
+}
+
+inline bool IsValid(const ReflectionType& value)
+{
+	return TerraEngine::Reflection::IsValid(value);
+}
+
+inline std::string MetaPropertyName(const ReflectionProperty& property)
+{
+	return TerraEngine::Reflection::GetPropertyName(property);
+}
+
+inline ReflectionType MetaPropertyType(const ReflectionProperty& property)
+{
+	return TerraEngine::Reflection::GetPropertyType(property);
+}
+
+inline ReflectionProperty FindMetaProperty(const ReflectionType& type, std::string_view name)
+{
+	return TerraEngine::Reflection::FindProperty(type, name);
+}
+
 // Convert internal registry keys like "LightComponent" to user-facing names.
 // This keeps serialization/component lookup stable while matching editor UX labels.
 std::string BuildDisplayComponentName(const std::string& componentName)
@@ -541,7 +593,7 @@ const nlohmann::json* ResolveScriptJsonPath(const nlohmann::json& rootValue, std
 // previous and next values to allow bidirectional state switching.
 class ModifyComponentCommand : public ICommand {
 public:
-    ModifyComponentCommand(entt::entity entity, const std::string& component, const std::string& property, rttr::variant oldVal, rttr::variant newVal)
+    ModifyComponentCommand(entt::entity entity, const std::string& component, const std::string& property, ReflectionVariant oldVal, ReflectionVariant newVal)
         : m_Uuid(ObjectManager::instance().getUUID(entity)), m_Component(component), m_Property(property), m_OldValue(oldVal), m_NewValue(newVal) {}
 
     void Undo() override {
@@ -557,7 +609,7 @@ public:
     }
 
 private:
-    void ApplyValue(const rttr::variant& val) {
+    void ApplyValue(const ReflectionVariant& val) {
         if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
             auto& reg = ComponentAccessRegistry();
             if (reg.count(m_Component)) {
@@ -570,8 +622,8 @@ private:
     TerraEngine::UUID m_Uuid;
     std::string m_Component;
     std::string m_Property;
-    rttr::variant m_OldValue;
-    rttr::variant m_NewValue;
+    ReflectionVariant m_OldValue;
+    ReflectionVariant m_NewValue;
 };
 
 enum class ObjectMetadataField {
@@ -583,7 +635,7 @@ enum class ObjectMetadataField {
 
 class ModifyObjectMetadataCommand : public ICommand {
 public:
-    ModifyObjectMetadataCommand(entt::entity entity, ObjectMetadataField field, rttr::variant oldVal, rttr::variant newVal)
+    ModifyObjectMetadataCommand(entt::entity entity, ObjectMetadataField field, ReflectionVariant oldVal, ReflectionVariant newVal)
         : m_Uuid(ObjectManager::instance().getUUID(entity)), m_Field(field), m_OldValue(oldVal), m_NewValue(newVal) {}
 
     void Undo() override { ApplyValue(m_OldValue); }
@@ -600,21 +652,21 @@ public:
     }
 
 private:
-    void ApplyValue(const rttr::variant& val) {
+    void ApplyValue(const ReflectionVariant& val) {
         if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
             switch (m_Field) {
-                case ObjectMetadataField::Tag: obj->setTag(val.get_value<std::string>()); break;
-                case ObjectMetadataField::Layer: obj->setLayer(val.get_value<std::string>()); break;
-                case ObjectMetadataField::Active: obj->setActive(val.get_value<bool>()); break;
-                case ObjectMetadataField::Static: obj->setStatic(val.get_value<bool>()); break;
+                case ObjectMetadataField::Tag: obj->setTag(MetaValue<std::string>(val)); break;
+                case ObjectMetadataField::Layer: obj->setLayer(MetaValue<std::string>(val)); break;
+                case ObjectMetadataField::Active: obj->setActive(MetaValue<bool>(val)); break;
+                case ObjectMetadataField::Static: obj->setStatic(MetaValue<bool>(val)); break;
             }
         }
     }
 
     TerraEngine::UUID m_Uuid;
     ObjectMetadataField m_Field;
-    rttr::variant m_OldValue;
-    rttr::variant m_NewValue;
+    ReflectionVariant m_OldValue;
+    ReflectionVariant m_NewValue;
 };
 
 InspectorWindow::InspectorWindow(MainEditorSubsystem* owner)
@@ -627,16 +679,16 @@ void InspectorWindow::UpdateInspectorDragState() {
 	}
 }
 
-void InspectorWindow::DrawProperty(const std::string& compName, rttr::property prop, Object& obj, ComponentAccessFunctions& access) {
-	std::string name = prop.get_name().to_string();
-	rttr::variant var = access.getter(obj, name);
-	rttr::type type = prop.get_type();
+void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProperty prop, Object& obj, ComponentAccessFunctions& access) {
+	std::string name = MetaPropertyName(prop);
+	ReflectionVariant var = access.getter(obj, name);
+	ReflectionType type = MetaPropertyType(prop);
 
-    if (!var.is_valid()) return;
+    if (!IsValid(var)) return;
 
     // Static buffers track interaction state across multiple frames while a 
     // widget is being manipulated.
-    static rttr::variant oldValue;
+    static ReflectionVariant oldValue;
     static bool isEditing = false;
     static std::string editingProp;
     static entt::entity editingEntity = entt::null;
@@ -655,7 +707,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
     // (e.g. mouse button released after a drag).
     auto endEditing = [&]() {
         if (ImGui::IsItemDeactivatedAfterEdit()) {
-            rttr::variant newVal = access.getter(obj, name);
+            ReflectionVariant newVal = access.getter(obj, name);
             UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldValue, newVal));
             isEditing = false;
         }
@@ -667,26 +719,26 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
     ImGui::TextUnformatted(name.c_str());
     ImGui::TableSetColumnIndex(1);
 
-	if (type == rttr::type::get<float>()) {
-		float val = var.get_value<float>();
+	if (IsMetaType<float>(type)) {
+		float val = MetaValue<float>(var);
         ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragFloat(("##" + name).c_str(), &val, 0.1f)) {
             if (compName == "CameraComponent") {
                 if (name == "nearPlane") {
                     if (val < 0.001f) val = 0.001f;
                     
-                    rttr::variant farVar = access.getter(obj, "farPlane");
-                    if (farVar.is_valid()) {
-                        float farP = farVar.get_value<float>();
+                    ReflectionVariant farVar = access.getter(obj, "farPlane");
+                    if (IsValid(farVar)) {
+                        float farP = MetaValue<float>(farVar);
                         if (farP < val + 0.001f) {
                             access.setter(obj, "farPlane", val + 0.001f);
                         }
                     }
                 }
                 else if (name == "farPlane") {
-                    rttr::variant nearVar = access.getter(obj, "nearPlane");
-                    if (nearVar.is_valid()) {
-                        float nearP = nearVar.get_value<float>();
+                    ReflectionVariant nearVar = access.getter(obj, "nearPlane");
+                    if (IsValid(nearVar)) {
+                        float nearP = MetaValue<float>(nearVar);
                         if (val < nearP + 0.001f) val = nearP + 0.001f;
                     }
                 }
@@ -697,8 +749,8 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
         endEditing();
 		UpdateInspectorDragState();
 	}
-	else if (type == rttr::type::get<int>()) {
-		int val = var.get_value<int>();
+	else if (IsMetaType<int>(type)) {
+		int val = MetaValue<int>(var);
         ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragInt(("##" + name).c_str(), &val)) {
 			access.setter(obj, name, val);
@@ -707,8 +759,8 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
         endEditing();
 		UpdateInspectorDragState();
 	}
-	else if (type == rttr::type::get<std::uint32_t>()) {
-		std::uint32_t val = var.get_value<std::uint32_t>();
+	else if (IsMetaType<std::uint32_t>(type)) {
+		std::uint32_t val = MetaValue<std::uint32_t>(var);
 		int signedValue = static_cast<int>(val);
         ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragInt(("##" + name).c_str(), &signedValue, 1.0f, 0, std::numeric_limits<int>::max())) {
@@ -719,19 +771,19 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 		endEditing();
 		UpdateInspectorDragState();
 	}
-	else if (type == rttr::type::get<bool>()) {
-		bool val = var.get_value<bool>();
+	else if (IsMetaType<bool>(type)) {
+		bool val = MetaValue<bool>(var);
 		if (ImGui::Checkbox(("##" + name).c_str(), &val)) {
             // Checkboxes are instantaneous interactions, so we push the 
             // command immediately.
-            rttr::variant oldB = access.getter(obj, name);
+            ReflectionVariant oldB = access.getter(obj, name);
 			access.setter(obj, name, val);
-            rttr::variant newB = access.getter(obj, name);
+            ReflectionVariant newB = access.getter(obj, name);
             UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldB, newB));
 		}
 	}
-	else if (type == rttr::type::get<std::string>()) {
-		std::string val = var.get_value<std::string>();
+	else if (IsMetaType<std::string>(type)) {
+		std::string val = MetaValue<std::string>(var);
 		char buffer[256];
 		strncpy(buffer, val.c_str(), sizeof(buffer));
         ImGui::SetNextItemWidth(-1.0f);
@@ -751,9 +803,9 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 					TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
 					if (const AssetMetadata* meta = AssetDatabase::Instance().FindAssetByGuid(newId)) {
 						std::string path = meta->sourcePath.generic_string();
-						rttr::variant oldV = access.getter(obj, name);
+						ReflectionVariant oldV = access.getter(obj, name);
 						access.setter(obj, name, path);
-						rttr::variant newV = access.getter(obj, name);
+						ReflectionVariant newV = access.getter(obj, name);
 						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldV, newV));
 					}
 				}
@@ -761,8 +813,8 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 			ImGui::EndDragDropTarget();
 		}
 	}
-	else if (type == rttr::type::get<glm::vec3>()) {
-		glm::vec3 val = var.get_value<glm::vec3>();
+	else if (IsMetaType<glm::vec3>(type)) {
+		glm::vec3 val = MetaValue<glm::vec3>(var);
         ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragFloat3(("##" + name).c_str(), &val.x, 0.1f)) {
 			access.setter(obj, name, val);
@@ -771,8 +823,8 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
         endEditing();
 		UpdateInspectorDragState();
 	}
-	else if (type == rttr::type::get<glm::quat>()) {
-		glm::quat q = var.get_value<glm::quat>();
+	else if (IsMetaType<glm::quat>(type)) {
+		glm::quat q = MetaValue<glm::quat>(var);
 		glm::vec3 euler = glm::degrees(glm::eulerAngles(q));
         ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragFloat3(("##" + name).c_str(), &euler.x, 0.1f)) {
@@ -783,8 +835,8 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
         endEditing();
 		UpdateInspectorDragState();
 	}
-	else if (type == rttr::type::get<TerraEngine::UUID>()) {
-		TerraEngine::UUID val = var.get_value<TerraEngine::UUID>();
+	else if (IsMetaType<TerraEngine::UUID>(type)) {
+		TerraEngine::UUID val = MetaValue<TerraEngine::UUID>(var);
 		std::string label = "None";
 		bool found = false;
 		if (val != TerraEngine::EMPTY_UUID) {
@@ -809,9 +861,9 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 
 		if (ImGui::BeginPopupContextItem()) {
 			if (ImGui::MenuItem("Clear")) {
-				rttr::variant oldId = access.getter(obj, name);
+				ReflectionVariant oldId = access.getter(obj, name);
 				access.setter(obj, name, TerraEngine::EMPTY_UUID);
-				rttr::variant nextId = access.getter(obj, name);
+				ReflectionVariant nextId = access.getter(obj, name);
 				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
 			}
 			ImGui::EndPopup();
@@ -829,9 +881,9 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(expected)) {
 					IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 					TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
-                    rttr::variant oldId = access.getter(obj, name);
+                    ReflectionVariant oldId = access.getter(obj, name);
 					access.setter(obj, name, newId);
-                    rttr::variant nextId = access.getter(obj, name);
+                    ReflectionVariant nextId = access.getter(obj, name);
                     UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
 				}
 			} else {
@@ -840,9 +892,9 @@ void InspectorWindow::DrawProperty(const std::string& compName, rttr::property p
 					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(p)) {
 						IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 						TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
-                        rttr::variant oldId = access.getter(obj, name);
+                        ReflectionVariant oldId = access.getter(obj, name);
 						access.setter(obj, name, newId);
-                        rttr::variant nextId = access.getter(obj, name);
+                        ReflectionVariant nextId = access.getter(obj, name);
                         UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
 						break;
 					}
@@ -1425,82 +1477,82 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 	// Keep undo/redo granular by committing only fields that changed through
 	// this custom inspector layout.
 	auto setFloatPropertyWithUndo = [&](const char* propertyName, float newValue) {
-		rttr::variant oldVariant = access.getter(obj, propertyName);
-		if (!oldVariant.is_valid() || !oldVariant.is_type<float>())
+		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		if (!IsValid(oldVariant) || !IsMetaValueType<float>(oldVariant))
 		{
 			return;
 		}
 
-		const float oldValue = oldVariant.get_value<float>();
+		const float oldValue = MetaValue<float>(oldVariant);
 		if (std::abs(oldValue - newValue) <= 0.0001f)
 		{
 			return;
 		}
 
 		access.setter(obj, propertyName, newValue);
-		rttr::variant nextVariant = access.getter(obj, propertyName);
+		ReflectionVariant nextVariant = access.getter(obj, propertyName);
 		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
 	auto setBoolPropertyWithUndo = [&](const char* propertyName, bool newValue) {
-		rttr::variant oldVariant = access.getter(obj, propertyName);
-		if (!oldVariant.is_valid() || !oldVariant.is_type<bool>())
+		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		if (!IsValid(oldVariant) || !IsMetaValueType<bool>(oldVariant))
 		{
 			return;
 		}
 
-		const bool oldValue = oldVariant.get_value<bool>();
+		const bool oldValue = MetaValue<bool>(oldVariant);
 		if (oldValue == newValue)
 		{
 			return;
 		}
 
 		access.setter(obj, propertyName, newValue);
-		rttr::variant nextVariant = access.getter(obj, propertyName);
+		ReflectionVariant nextVariant = access.getter(obj, propertyName);
 		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
 	auto setUintPropertyWithUndo = [&](const char* propertyName, std::uint32_t newValue) {
-		rttr::variant oldVariant = access.getter(obj, propertyName);
-		if (!oldVariant.is_valid() || !oldVariant.is_type<std::uint32_t>())
+		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		if (!IsValid(oldVariant) || !IsMetaValueType<std::uint32_t>(oldVariant))
 		{
 			return;
 		}
 
-		const std::uint32_t oldValue = oldVariant.get_value<std::uint32_t>();
+		const std::uint32_t oldValue = MetaValue<std::uint32_t>(oldVariant);
 		if (oldValue == newValue)
 		{
 			return;
 		}
 
 		access.setter(obj, propertyName, newValue);
-		rttr::variant nextVariant = access.getter(obj, propertyName);
+		ReflectionVariant nextVariant = access.getter(obj, propertyName);
 		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
 	auto setVec3PropertyWithUndo = [&](const char* propertyName, const glm::vec3& newValue) {
-		rttr::variant oldVariant = access.getter(obj, propertyName);
-		if (!oldVariant.is_valid() || !oldVariant.is_type<glm::vec3>())
+		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		if (!IsValid(oldVariant) || !IsMetaValueType<glm::vec3>(oldVariant))
 		{
 			return;
 		}
 
-		const glm::vec3 oldValue = oldVariant.get_value<glm::vec3>();
+		const glm::vec3 oldValue = MetaValue<glm::vec3>(oldVariant);
 		if (glm::length(oldValue - newValue) <= 0.0001f)
 		{
 			return;
 		}
 
 		access.setter(obj, propertyName, newValue);
-		rttr::variant nextVariant = access.getter(obj, propertyName);
+		ReflectionVariant nextVariant = access.getter(obj, propertyName);
 		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
 	constexpr std::uint32_t kMaxAuthorableType = static_cast<std::uint32_t>(LightType::Area);
 	std::uint32_t encodedType = static_cast<std::uint32_t>(LightType::Point);
-	if (rttr::variant typeVariant = access.getter(obj, "type"); typeVariant.is_valid() && typeVariant.is_type<std::uint32_t>())
+	if (ReflectionVariant typeVariant = access.getter(obj, "type"); IsValid(typeVariant) && IsMetaValueType<std::uint32_t>(typeVariant))
 	{
-		encodedType = typeVariant.get_value<std::uint32_t>();
+		encodedType = MetaValue<std::uint32_t>(typeVariant);
 	}
 	const bool hasUnsupportedType = encodedType > kMaxAuthorableType;
 	std::uint32_t effectiveType = hasUnsupportedType ? static_cast<std::uint32_t>(LightType::Point) : encodedType;
@@ -1539,9 +1591,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             });
 
             std::uint32_t currentAppearance = 0u;
-            if (rttr::variant appVariant = access.getter(obj, "appearance"); appVariant.is_valid() && appVariant.is_type<std::uint32_t>())
+            if (ReflectionVariant appVariant = access.getter(obj, "appearance"); IsValid(appVariant) && IsMetaValueType<std::uint32_t>(appVariant))
             {
-                currentAppearance = appVariant.get_value<std::uint32_t>();
+                currentAppearance = MetaValue<std::uint32_t>(appVariant);
             }
 
             const char* appearanceTypes[] = { "Color", "Filter and Temperature" };
@@ -1554,9 +1606,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             });
 
             glm::vec3 lightColor = glm::vec3(1.0f);
-            if (rttr::variant colorVariant = access.getter(obj, "color"); colorVariant.is_valid() && colorVariant.is_type<glm::vec3>())
+            if (ReflectionVariant colorVariant = access.getter(obj, "color"); IsValid(colorVariant) && IsMetaValueType<glm::vec3>(colorVariant))
             {
-                lightColor = colorVariant.get_value<glm::vec3>();
+                lightColor = MetaValue<glm::vec3>(colorVariant);
             }
             drawLabeledWidget(currentAppearance == 0u ? "Color" : "Filter", [&]() {
                 if (ImGui::ColorEdit3("##Color", &lightColor.x))
@@ -1568,9 +1620,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             if (currentAppearance == 1u)
             {
                 float temperature = 6500.0f;
-                if (rttr::variant tempVariant = access.getter(obj, "temperature"); tempVariant.is_valid() && tempVariant.is_type<float>())
+                if (ReflectionVariant tempVariant = access.getter(obj, "temperature"); IsValid(tempVariant) && IsMetaValueType<float>(tempVariant))
                 {
-                    temperature = tempVariant.get_value<float>();
+                    temperature = MetaValue<float>(tempVariant);
                 }
                 drawLabeledWidget("Temperature", [&]() {
                     if (ImGui::SliderFloat("##Temperature", &temperature, 1000.0f, 20000.0f, "%.0f K"))
@@ -1581,15 +1633,15 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             }
 
             float intensity = 1.0f;
-            if (rttr::variant intensityVariant = access.getter(obj, "intensity"); intensityVariant.is_valid() && intensityVariant.is_type<float>())
+            if (ReflectionVariant intensityVariant = access.getter(obj, "intensity"); IsValid(intensityVariant) && IsMetaValueType<float>(intensityVariant))
             {
-                intensity = intensityVariant.get_value<float>();
+                intensity = MetaValue<float>(intensityVariant);
             }
 
             std::uint32_t currentUnit = 0u;
-            if (rttr::variant unitVariant = access.getter(obj, "unit"); unitVariant.is_valid() && unitVariant.is_type<std::uint32_t>())
+            if (ReflectionVariant unitVariant = access.getter(obj, "unit"); IsValid(unitVariant) && IsMetaValueType<std::uint32_t>(unitVariant))
             {
-                currentUnit = unitVariant.get_value<std::uint32_t>();
+                currentUnit = MetaValue<std::uint32_t>(unitVariant);
             }
 
             const char* intensityFormat = "%.2f";
@@ -1633,9 +1685,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             }
 
             float indirectMultiplier = 1.0f;
-            if (rttr::variant indVariant = access.getter(obj, "indirectMultiplier"); indVariant.is_valid() && indVariant.is_type<float>())
+            if (ReflectionVariant indVariant = access.getter(obj, "indirectMultiplier"); IsValid(indVariant) && IsMetaValueType<float>(indVariant))
             {
-                indirectMultiplier = indVariant.get_value<float>();
+                indirectMultiplier = MetaValue<float>(indVariant);
             }
             drawLabeledWidget("Indirect", [&]() {
                 if (ImGui::DragFloat("##Indirect", &indirectMultiplier, 0.05f, 0.0f, 10.0f))
@@ -1658,9 +1710,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             if (!isDirectional)
             {
                 float range = 10.0f;
-                if (rttr::variant rangeVariant = access.getter(obj, "range"); rangeVariant.is_valid() && rangeVariant.is_type<float>())
+                if (ReflectionVariant rangeVariant = access.getter(obj, "range"); IsValid(rangeVariant) && IsMetaValueType<float>(rangeVariant))
                 {
-                    range = rangeVariant.get_value<float>();
+                    range = MetaValue<float>(rangeVariant);
                 }
                 drawLabeledWidget("Range", [&]() {
                     if (ImGui::DragFloat("##Range", &range, 0.1f, 0.1f, 10000.0f, "%.2f m"))
@@ -1675,13 +1727,13 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             {
                 float innerDegrees = 20.0f;
                 float outerDegrees = 30.0f;
-                if (rttr::variant innerVariant = access.getter(obj, "innerConeAngle"); innerVariant.is_valid() && innerVariant.is_type<float>())
+                if (ReflectionVariant innerVariant = access.getter(obj, "innerConeAngle"); IsValid(innerVariant) && IsMetaValueType<float>(innerVariant))
                 {
-                    innerDegrees = glm::degrees(innerVariant.get_value<float>());
+                    innerDegrees = glm::degrees(MetaValue<float>(innerVariant));
                 }
-                if (rttr::variant outerVariant = access.getter(obj, "outerConeAngle"); outerVariant.is_valid() && outerVariant.is_type<float>())
+                if (ReflectionVariant outerVariant = access.getter(obj, "outerConeAngle"); IsValid(outerVariant) && IsMetaValueType<float>(outerVariant))
                 {
-                    outerDegrees = glm::degrees(outerVariant.get_value<float>());
+                    outerDegrees = glm::degrees(MetaValue<float>(outerVariant));
                 }
 
                 drawLabeledWidget("Inner Angle", [&]() {
@@ -1709,13 +1761,13 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             {
                 float width = 1.0f;
                 float height = 1.0f;
-                if (rttr::variant wVariant = access.getter(obj, "width"); wVariant.is_valid() && wVariant.is_type<float>())
+                if (ReflectionVariant wVariant = access.getter(obj, "width"); IsValid(wVariant) && IsMetaValueType<float>(wVariant))
                 {
-                    width = wVariant.get_value<float>();
+                    width = MetaValue<float>(wVariant);
                 }
-                if (rttr::variant hVariant = access.getter(obj, "height"); hVariant.is_valid() && hVariant.is_type<float>())
+                if (ReflectionVariant hVariant = access.getter(obj, "height"); IsValid(hVariant) && IsMetaValueType<float>(hVariant))
                 {
-                    height = hVariant.get_value<float>();
+                    height = MetaValue<float>(hVariant);
                 }
 
                 drawLabeledWidget("Width", [&]() {
@@ -1740,9 +1792,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
             bool castsShadows = false;
-            if (rttr::variant castVariant = access.getter(obj, "castsShadows"); castVariant.is_valid() && castVariant.is_type<bool>())
+            if (ReflectionVariant castVariant = access.getter(obj, "castsShadows"); IsValid(castVariant) && IsMetaValueType<bool>(castVariant))
             {
-                castsShadows = castVariant.get_value<bool>();
+                castsShadows = MetaValue<bool>(castVariant);
             }
             drawLabeledWidget("Realtime Shadows", [&]() {
                 if (ImGui::Checkbox("##RealtimeShadows", &castsShadows))
@@ -1754,9 +1806,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             if (castsShadows)
             {
                 float shadowStrength = 1.0f;
-                if (rttr::variant strVariant = access.getter(obj, "shadowStrength"); strVariant.is_valid() && strVariant.is_type<float>())
+                if (ReflectionVariant strVariant = access.getter(obj, "shadowStrength"); IsValid(strVariant) && IsMetaValueType<float>(strVariant))
                 {
-                    shadowStrength = strVariant.get_value<float>();
+                    shadowStrength = MetaValue<float>(strVariant);
                 }
                 drawLabeledWidget("Strength", [&]() {
                     if (ImGui::SliderFloat("##Strength", &shadowStrength, 0.0f, 1.0f))
@@ -1766,9 +1818,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                 });
 
                 float shadowBias = 0.005f;
-                if (rttr::variant biasVariant = access.getter(obj, "shadowBias"); biasVariant.is_valid() && biasVariant.is_type<float>())
+                if (ReflectionVariant biasVariant = access.getter(obj, "shadowBias"); IsValid(biasVariant) && IsMetaValueType<float>(biasVariant))
                 {
-                    shadowBias = biasVariant.get_value<float>();
+                    shadowBias = MetaValue<float>(biasVariant);
                 }
                 drawLabeledWidget("Bias", [&]() {
                     if (ImGui::DragFloat("##Bias", &shadowBias, 0.001f, 0.0f, 0.1f, "%.4f"))
@@ -1803,20 +1855,20 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 	};
 
 	auto setStringPropertyWithUndo = [&](const char* propertyName, const std::string& newValue) {
-		rttr::variant oldVariant = access.getter(obj, propertyName);
-		if (!oldVariant.is_valid() || !oldVariant.is_type<std::string>())
+		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		if (!IsValid(oldVariant) || !IsMetaValueType<std::string>(oldVariant))
 		{
 			return;
 		}
 
-		const std::string oldValue = oldVariant.get_value<std::string>();
+		const std::string oldValue = MetaValue<std::string>(oldVariant);
 		if (oldValue == newValue)
 		{
 			return;
 		}
 
 		access.setter(obj, propertyName, newValue);
-		rttr::variant nextVariant = access.getter(obj, propertyName);
+		ReflectionVariant nextVariant = access.getter(obj, propertyName);
 		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
@@ -1898,9 +1950,9 @@ void InspectorWindow::OnGui() {
             
             bool isActive = obj.isActive();
             if (ImGui::Checkbox("##ActiveGlobal", &isActive)) {
-                rttr::variant oldVal = obj.isActive();
+                ReflectionVariant oldVal = obj.isActive();
                 obj.setActive(isActive);
-                rttr::variant newVal = obj.isActive();
+                ReflectionVariant newVal = obj.isActive();
                 UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Active, oldVal, newVal));
             }
             ImGui::PopID();
@@ -1926,9 +1978,9 @@ void InspectorWindow::OnGui() {
             
             bool isStatic = obj.isStatic();
             if (ImGui::Checkbox("Static", &isStatic)) {
-                rttr::variant oldVal = obj.isStatic();
+                ReflectionVariant oldVal = obj.isStatic();
                 obj.setStatic(isStatic);
-                rttr::variant newVal = obj.isStatic();
+                ReflectionVariant newVal = obj.isStatic();
                 UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Static, oldVal, newVal));
             }
 
@@ -1957,9 +2009,9 @@ void InspectorWindow::OnGui() {
                         bool is_selected = (tag == t);
                         if (ImGui::Selectable(t.c_str(), is_selected)) {
                             if (tag != t) {
-                                rttr::variant oldV = tag;
+                                ReflectionVariant oldV = tag;
                                 obj.setTag(t);
-                                rttr::variant newV = t;
+                                ReflectionVariant newV = t;
                                 UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Tag, oldV, newV));
                             }
                         }
@@ -2004,9 +2056,9 @@ void InspectorWindow::OnGui() {
                         bool is_selected = (layer == l);
                         if (ImGui::Selectable(l.c_str(), is_selected)) {
                             if (layer != l) {
-                                rttr::variant oldV = layer;
+                                ReflectionVariant oldV = layer;
                                 obj.setLayer(l);
-                                rttr::variant newV = l;
+                                ReflectionVariant newV = l;
                                 UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Layer, oldV, newV));
                             }
                         }
@@ -2091,11 +2143,14 @@ void InspectorWindow::OnGui() {
                 ImGui::PushID(compName.c_str());
                 
                 bool compActive = true;
-                rttr::type type = rttr::type::get_by_name(compName);
-                rttr::property activeProp = type.get_property("active");
-                if (activeProp.is_valid()) {
-                    rttr::variant var = access.getter(obj, "active");
-                    if (var.is_valid()) compActive = var.get_value<bool>();
+                // Use the reflection type captured by the engine registry so
+                // the editor queries the same EnTT meta context that owns the
+                // component registrations.
+                ReflectionType type = access.reflectionType;
+                ReflectionProperty activeProp = FindMetaProperty(type, "active");
+                if (IsValid(activeProp)) {
+                    ReflectionVariant var = access.getter(obj, "active");
+                    if (IsValid(var)) compActive = MetaValue<bool>(var);
                 }
 
                 bool isOpen = ImGui::GetStateStorage()->GetInt(ImGui::GetID("IsOpen"), 1) != 0;
@@ -2166,10 +2221,10 @@ void InspectorWindow::OnGui() {
                 if (compName != "Transform") {
                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
                     if (ImGui::Checkbox("##compActive", &compActive)) {
-                        if (activeProp.is_valid()) {
-                            rttr::variant oldA = access.getter(obj, "active");
+                        if (IsValid(activeProp)) {
+                            ReflectionVariant oldA = access.getter(obj, "active");
                             access.setter(obj, "active", compActive);
-                            rttr::variant newA = access.getter(obj, "active");
+                            ReflectionVariant newA = access.getter(obj, "active");
                             UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "active", oldA, newA));
                         }
                     }
@@ -2205,8 +2260,8 @@ void InspectorWindow::OnGui() {
                             ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
                             ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
-                            for (auto prop : type.get_properties()) {
-                                if (prop.get_name() == "active") continue;
+                            for (const ReflectionProperty& prop : TerraEngine::Reflection::GetProperties(type)) {
+                                if (MetaPropertyName(prop) == "active") continue;
                                 DrawProperty(compName, prop, obj, access);
                             }
                             ImGui::EndTable();

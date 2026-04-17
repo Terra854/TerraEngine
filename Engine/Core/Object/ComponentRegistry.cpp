@@ -5,20 +5,28 @@
 #include "Components/LightComponent.h"
 #include "Components/MeshRenderComponent.h"
 #include "Components/UIComponent.h"
-#include <rttr/registration>
 
 void ComponentRegistry::RegisterAllComponents() {
 	// Register common GLM types so InspectorWindow can identify them by type
-	rttr::registration::class_<glm::vec3>("glm::vec3")
-		.property("x", &glm::vec3::x)
-		.property("y", &glm::vec3::y)
-		.property("z", &glm::vec3::z);
+	// and preserve the same field names it used with the legacy backend.
+	entt::meta_factory<glm::vec3> vec3Factory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(vec3Factory, "glm::vec3");
+	vec3Factory.template ctor<>();
+	TerraEngine::Reflection::RegisterDataProperty<&glm::vec3::x>(vec3Factory, "x");
+	TerraEngine::Reflection::RegisterDataProperty<&glm::vec3::y>(vec3Factory, "y");
+	TerraEngine::Reflection::RegisterDataProperty<&glm::vec3::z>(vec3Factory, "z");
 
-	rttr::registration::class_<glm::quat>("glm::quat")
-		.property("x", &glm::quat::x)
-		.property("y", &glm::quat::y)
-		.property("z", &glm::quat::z)
-		.property("w", &glm::quat::w);
+	entt::meta_factory<glm::quat> quatFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(quatFactory, "glm::quat");
+	quatFactory.template ctor<>();
+	TerraEngine::Reflection::RegisterDataProperty<&glm::quat::x>(quatFactory, "x");
+	TerraEngine::Reflection::RegisterDataProperty<&glm::quat::y>(quatFactory, "y");
+	TerraEngine::Reflection::RegisterDataProperty<&glm::quat::z>(quatFactory, "z");
+	TerraEngine::Reflection::RegisterDataProperty<&glm::quat::w>(quatFactory, "w");
+
+	entt::meta_factory<TerraEngine::UUID> uuidFactory{};
+	TerraEngine::Reflection::ConfigureTypeMetadata(uuidFactory, "TerraEngine::UUID");
+	uuidFactory.template ctor<>();
 
 	Transform::registerType();
 	ScriptComponent::registerType();

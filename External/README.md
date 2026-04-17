@@ -8,7 +8,6 @@ git submodule update --init --recursive
 
 The submodules track the following upstream releases:
 
-- [RTTR v0.9.6](https://github.com/rttrorg/rttr/tree/v0.9.6)
 - [EnTT v3.15.0](https://github.com/skypjack/entt/tree/v3.15.0)
 - [GLM 1.0.2](https://github.com/g-truc/glm/tree/1.0.2)
 - [GLFW 3.4](https://github.com/glfw/glfw/tree/3.4)
@@ -31,4 +30,4 @@ The following components are provided as pre-built binaries for runtime and tool
 - **dotnet/**: .NET 8.0/10.0 runtime redistributables for the C# scripting system.
 - **dxc/**: DirectX Shader Compiler (DXC) binaries for SPIR-V shader compilation in the `TerraEngineShaderCompiler` tool.
 
-The engine links RTTR, GLFW, and cimgui dynamically and consumes the other projects as static libraries or header-only dependencies.
+The engine links GLFW and cimgui dynamically and consumes the other projects as static libraries or header-only dependencies.

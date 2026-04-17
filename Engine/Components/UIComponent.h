@@ -115,14 +115,13 @@ public:
 		return contentVersion;
 	}
 
-	static void reflect(rttr::registration::class_<UIComponent>& registration)
+	static void reflect(entt::meta_factory<UIComponent>& factory)
 	{
 		// Only serialize authored source paths and visibility. The parsed UI tree
 		// is runtime data that UISystem rebuilds on demand.
-		registration
-			.property("sourceMarkup", &UIComponent::GetSourceMarkup, &UIComponent::SetSourceMarkup)
-			.property("sourceStyle", &UIComponent::GetSourceStyle, &UIComponent::SetSourceStyle)
-			.property("visible", &UIComponent::IsVisible, &UIComponent::SetVisible);
+		TerraEngine::Reflection::RegisterAccessorProperty<&UIComponent::SetSourceMarkup, &UIComponent::GetSourceMarkup>(factory, "sourceMarkup");
+		TerraEngine::Reflection::RegisterAccessorProperty<&UIComponent::SetSourceStyle, &UIComponent::GetSourceStyle>(factory, "sourceStyle");
+		TerraEngine::Reflection::RegisterAccessorProperty<&UIComponent::SetVisible, &UIComponent::IsVisible>(factory, "visible");
 	}
 
 private:

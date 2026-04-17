@@ -1,11 +1,11 @@
 #pragma once
 #include "../Framework/EditorWindow.h"
+#include "Engine/Core/Object/Reflection.h"
 #include <entt/entity/entity.hpp>
 #include <map>
 #include <vector>
 #include <string>
 #include <filesystem>
-#include <rttr/type>
 
 class MainEditorSubsystem;
 class Object;
@@ -22,7 +22,7 @@ protected:
     virtual void OnGui() override;
 
 private:
-	void DrawProperty(const std::string& compName, rttr::property prop, Object& obj, ComponentAccessFunctions& access);
+	void DrawProperty(const std::string& compName, TerraEngine::Reflection::Property prop, Object& obj, ComponentAccessFunctions& access);
 	void DrawScriptComponentInspector(Object& obj);
 	void DrawScriptDropTarget(Object& obj);
 	void DrawLightComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access);

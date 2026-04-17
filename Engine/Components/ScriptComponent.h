@@ -652,11 +652,10 @@ public:
 
 	std::string lastResolvedAssemblyId;
 
-	static void reflect(rttr::registration::class_<ScriptComponent>& registration)
+	static void reflect(entt::meta_factory<ScriptComponent>& factory)
 	{
-		registration
-			.property("BindingsJson", &ScriptComponent::GetBindingsJson, &ScriptComponent::SetBindingsJson)
-			.property("LastResolvedAssemblyId", &ScriptComponent::lastResolvedAssemblyId);
+		TerraEngine::Reflection::RegisterAccessorProperty<&ScriptComponent::SetBindingsJson, &ScriptComponent::GetBindingsJson>(factory, "BindingsJson");
+		TerraEngine::Reflection::RegisterDataProperty<&ScriptComponent::lastResolvedAssemblyId>(factory, "LastResolvedAssemblyId");
 	}
 
 private:

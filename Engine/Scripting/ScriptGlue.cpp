@@ -42,7 +42,7 @@ enum class ScriptType : int
 	Quaternion = 7
 };
 
-static rttr::variant MarshallFromNative(void* data, ScriptType type)
+static TerraEngine::Reflection::Variant MarshallFromNative(void* data, ScriptType type)
 {
     switch (type)
     {
@@ -58,20 +58,20 @@ static rttr::variant MarshallFromNative(void* data, ScriptType type)
 	return {};
 }
 
-static void MarshallToNative(const rttr::variant& var, void* data, ScriptType type)
+static void MarshallToNative(const TerraEngine::Reflection::Variant& var, void* data, ScriptType type)
 {
-    if (!var.is_valid()) return;
+    if (!TerraEngine::Reflection::IsValid(var)) return;
 
     switch (type)
     {
-	case ScriptType::Bool: *static_cast<bool*>(data) = var.convert<bool>(); break;
-	case ScriptType::Int: *static_cast<int*>(data) = var.convert<int>(); break;
-	case ScriptType::Float: *static_cast<float*>(data) = var.convert<float>(); break;
-	case ScriptType::EntityID: *static_cast<uint32_t*>(data) = var.convert<uint32_t>(); break;
-	case ScriptType::Vector2: *static_cast<glm::vec2*>(data) = var.convert<glm::vec2>(); break;
-	case ScriptType::Vector3: *static_cast<glm::vec3*>(data) = var.convert<glm::vec3>(); break;
-	case ScriptType::Vector4: *static_cast<glm::vec4*>(data) = var.convert<glm::vec4>(); break;
-	case ScriptType::Quaternion: *static_cast<glm::quat*>(data) = var.convert<glm::quat>(); break;
+	case ScriptType::Bool: *static_cast<bool*>(data) = TerraEngine::Reflection::ConvertValue<bool>(var); break;
+	case ScriptType::Int: *static_cast<int*>(data) = TerraEngine::Reflection::ConvertValue<int>(var); break;
+	case ScriptType::Float: *static_cast<float*>(data) = TerraEngine::Reflection::ConvertValue<float>(var); break;
+	case ScriptType::EntityID: *static_cast<uint32_t*>(data) = TerraEngine::Reflection::ConvertValue<uint32_t>(var); break;
+	case ScriptType::Vector2: *static_cast<glm::vec2*>(data) = TerraEngine::Reflection::ConvertValue<glm::vec2>(var); break;
+	case ScriptType::Vector3: *static_cast<glm::vec3*>(data) = TerraEngine::Reflection::ConvertValue<glm::vec3>(var); break;
+	case ScriptType::Vector4: *static_cast<glm::vec4*>(data) = TerraEngine::Reflection::ConvertValue<glm::vec4>(var); break;
+	case ScriptType::Quaternion: *static_cast<glm::quat*>(data) = TerraEngine::Reflection::ConvertValue<glm::quat>(var); break;
 	}
 }
 
@@ -124,11 +124,11 @@ static const char* GetMeshRendererAssetReference(uint32_t objectId, std::string_
 		auto& registry = ComponentAccessRegistry();
 		if (auto it = registry.find("MeshRenderComponent"); it != registry.end())
 		{
-			rttr::variant value = it->second.getter(*objOpt, propertyName);
-			if (value.is_type<TerraEngine::UUID>())
+			TerraEngine::Reflection::Variant value = it->second.getter(*objOpt, propertyName);
+			if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(value))
 			{
 				assetReferenceBuffer = ResourceManager::Instance().DescribeAssetReference(
-					value.get_value<TerraEngine::UUID>(),
+					TerraEngine::Reflection::GetValue<TerraEngine::UUID>(value),
 					type).generic_string();
 			}
 		}
@@ -462,7 +462,7 @@ extern "C" {
         if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
             auto& reg = ComponentAccessRegistry();
             if (auto it = reg.find(componentType); it != reg.end()) {
-                rttr::variant val = it->second.getter(*objOpt, propertyName);
+                TerraEngine::Reflection::Variant val = it->second.getter(*objOpt, propertyName);
                 MarshallToNative(val, outValue, static_cast<ScriptType>(type));
             }
         }
@@ -473,7 +473,7 @@ extern "C" {
         if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
             auto& reg = ComponentAccessRegistry();
             if (auto it = reg.find(componentType); it != reg.end()) {
-                rttr::variant val = MarshallFromNative(inValue, static_cast<ScriptType>(type));
+                TerraEngine::Reflection::Variant val = MarshallFromNative(inValue, static_cast<ScriptType>(type));
                 it->second.setter(*objOpt, propertyName, val);
             }
         }
