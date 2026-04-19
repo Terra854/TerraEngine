@@ -6,6 +6,7 @@
 #include "Components/CameraComponent.h"
 #include "Components/MeshRenderComponent.h"
 #include "Components/LightComponent.h"
+#include "Scene/SceneManager.h"
 #include "Core/Object/ObjectManager.h"
 #include "Components/Transform.h"
 #include "Resource/ResourceManager.h"
@@ -34,6 +35,7 @@
 namespace
 {
 	constexpr std::uint32_t kMaxShadowResourceSlots = 4u;
+	const glm::vec3 kSkyReferenceSunDirection = glm::normalize(glm::vec3(0.0f, 0.35f, -1.0f));
 
 	constexpr const char* ResolveRuntimeSettingsFolderName()
 	{
@@ -53,6 +55,29 @@ namespace
 		sanitized.maxShadowLights = std::min(sanitized.maxShadowLights, kMaxShadowResourceSlots);
 		return sanitized;
 	}
+
+	glm::vec3 SafeNormalizeDirection(const glm::vec3& direction, const glm::vec3& fallback)
+	{
+		if (!std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z))
+		{
+			return fallback;
+		}
+
+		const float length = glm::length(direction);
+		if (length <= 0.0001f)
+		{
+			return fallback;
+		}
+
+		return direction / length;
+	}
+
+	glm::vec3 ApplySkyYawOffset(const glm::vec3& direction, float degrees)
+	{
+		const glm::quat yawRotation = glm::angleAxis(glm::radians(degrees), glm::vec3(0.0f, 1.0f, 0.0f));
+		return SafeNormalizeDirection(yawRotation * direction, kSkyReferenceSunDirection);
+	}
+
 }
 
 RenderSystem& RenderSystem::Instance()
@@ -517,6 +542,102 @@ void RenderSystem::Update(float deltaTime)
 		}
 	}
 
+	const SceneSkySettings activeSkySettings = SceneManager::Instance().GetActiveSceneSkySettings();
+	SkyRuntimeState skyRuntimeState{};
+	skyRuntimeState.isValid = true;
+	skyRuntimeState.usingFallback = true;
+	skyRuntimeState.hasProblem = false;
+	skyRuntimeState.dirty = skyStateDirty;
+	skyRuntimeState.forceBlackFallback = !activeSkySettings.enabled;
+	std::string skyIssueMessage;
+
+	const LightEntry* firstDirectionalLight = nullptr;
+	const LightEntry* boundDirectionalLight = nullptr;
+	for (const LightEntry& lightEntry : lights)
+	{
+		if (lightEntry.light.type != LightType::Directional)
+		{
+			continue;
+		}
+
+		if (firstDirectionalLight == nullptr)
+		{
+			firstDirectionalLight = &lightEntry;
+		}
+
+		if (lightEntry.lightId == activeSkySettings.directionalLightObjectId)
+		{
+			boundDirectionalLight = &lightEntry;
+		}
+	}
+
+	glm::vec3 baseSunDirection = kSkyReferenceSunDirection;
+	const LightEntry* resolvedDirectionalLight = nullptr;
+	if (activeSkySettings.enabled)
+	{
+		if (activeSkySettings.directionalLightObjectId != TerraEngine::EMPTY_UUID)
+		{
+			resolvedDirectionalLight = boundDirectionalLight;
+			if (resolvedDirectionalLight == nullptr)
+			{
+				skyRuntimeState.hasProblem = true;
+				skyRuntimeState.forceBlackFallback = true;
+				skyIssueMessage = "Configured sky directional light could not be resolved. Rendering a black background.";
+			}
+		}
+		else
+		{
+			resolvedDirectionalLight = firstDirectionalLight;
+			if (resolvedDirectionalLight == nullptr)
+			{
+				skyRuntimeState.hasProblem = true;
+				skyRuntimeState.forceBlackFallback = true;
+				skyIssueMessage = "Scene sky requires a directional light. Rendering a black background.";
+			}
+		}
+	}
+
+	if (resolvedDirectionalLight != nullptr)
+	{
+		if (const Transform* lightTransform = worldTransforms.find(resolvedDirectionalLight->entity))
+		{
+			const glm::quat lightRotation = glm::normalize(lightTransform->rotation);
+			const glm::vec3 lightForward = lightRotation * glm::vec3(0.0f, 0.0f, -1.0f);
+			baseSunDirection = SafeNormalizeDirection(-lightForward, baseSunDirection);
+		}
+	}
+
+	skyRuntimeState.resolvedSunDirection = ApplySkyYawOffset(baseSunDirection, activeSkySettings.rotationOffsetDegrees);
+
+	if (activeSkySettings.enabled && !skyRuntimeState.forceBlackFallback && !activeSkySettings.sourceAsset.empty())
+	{
+		const TerraEngine::UUID resolvedTextureId = ResourceManager::Instance().ResolveAssetReference(activeSkySettings.sourceAsset, AssetType::Texture);
+		if (resolvedTextureId == TerraEngine::EMPTY_UUID)
+		{
+			skyRuntimeState.hasProblem = true;
+			skyIssueMessage = "Scene sky source could not be resolved. Rendering the fallback background.";
+		}
+		else
+		{
+			skyRuntimeState.resolvedSkyHandle = resolvedTextureId;
+			skyRuntimeState.usingFallback = false;
+		}
+	}
+
+	if (skyRuntimeState.hasProblem)
+	{
+		const std::string issueKey = activeSkySettings.sourceAsset + "|" + skyIssueMessage;
+		if (issueKey != lastLoggedSkyIssueKey)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "[Sky] " << skyIssueMessage << " Source: " << activeSkySettings.sourceAsset);
+			lastLoggedSkyIssueKey = issueKey;
+		}
+	}
+	else
+	{
+		lastLoggedSkyIssueKey.clear();
+	}
+
 	FrameRenderData frameData;
 	frameData.deltaTimeSeconds = deltaTime;
 	frameData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
@@ -524,6 +645,18 @@ void RenderSystem::Update(float deltaTime)
 	frameData.activePreset = currentPreset;
 	frameData.customOverrideActive = (currentPreset == QualityPreset::Custom);
 	frameData.settings = SanitizeRenderSettings(currentSettings);
+	frameData.sky.renderBackground = true;
+	frameData.sky.hasTexture = skyRuntimeState.resolvedSkyHandle != TerraEngine::EMPTY_UUID && !skyRuntimeState.usingFallback;
+	frameData.sky.usingFallback = skyRuntimeState.usingFallback;
+	frameData.sky.forceBlack = skyRuntimeState.forceBlackFallback;
+	frameData.sky.intensity = activeSkySettings.intensity;
+	frameData.sky.exposure = activeSkySettings.exposure;
+	frameData.sky.rotationOffsetDegrees = activeSkySettings.rotationOffsetDegrees;
+	frameData.sky.horizonTint = activeSkySettings.horizonTint;
+	frameData.sky.zenithTint = activeSkySettings.zenithTint;
+	frameData.sky.groundTint = activeSkySettings.groundTint;
+	frameData.sky.sunDirection = skyRuntimeState.resolvedSunDirection;
+	frameData.sky.textureId = skyRuntimeState.resolvedSkyHandle;
 	frameData.lightCandidates = std::move(packedLights);
 	frameData.commands = drawCommands;
 	frameData.uiBatch = UISystem::Instance().GetCombinedFrameBatch();
@@ -563,6 +696,7 @@ void RenderSystem::Update(float deltaTime)
 		blankData.activePreset = currentPreset;
 		blankData.customOverrideActive = (currentPreset == QualityPreset::Custom);
 		blankData.settings = SanitizeRenderSettings(currentSettings);
+		blankData.sky = frameData.sky;
 		vulkan->RenderFrame(blankData, VulkanContext::ViewType::Game);
 	}
 	else
@@ -609,7 +743,10 @@ void RenderSystem::Update(float deltaTime)
 		latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);
 		latestGameBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Game);
 		latestSceneBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Scene);
+		latestSkyRuntimeState = skyRuntimeState;
 	}
+
+	skyStateDirty = false;
 
     ClearOverrideCameras();
 }
@@ -682,7 +819,10 @@ void RenderSystem::Clear()
 		latestSceneStats.viewType = RenderViewType::Scene;
 		latestGameBudgetDiagnostics.viewType = RenderViewType::Game;
 		latestSceneBudgetDiagnostics.viewType = RenderViewType::Scene;
+		latestSkyRuntimeState = {};
 	}
+	skyStateDirty = true;
+	lastLoggedSkyIssueKey.clear();
     ClearOverrideCameras();
 }
 
@@ -713,6 +853,18 @@ FrameBudgetDiagnosticsSnapshot RenderSystem::GetLatestFrameBudgetDiagnostics(Ren
 		return latestSceneBudgetDiagnostics;
 	}
 	return latestGameBudgetDiagnostics;
+}
+
+SkyRuntimeState RenderSystem::GetLatestSkyRuntimeState() const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestSkyRuntimeState;
+}
+
+void RenderSystem::MarkSkyStateDirty()
+{
+	skyStateDirty = true;
+	lastLoggedSkyIssueKey.clear();
 }
 
 void RenderSystem::SetQualityPreset(QualityPreset preset)

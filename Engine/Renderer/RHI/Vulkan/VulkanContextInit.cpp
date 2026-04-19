@@ -159,6 +159,14 @@ void VulkanContext::Impl::Cleanup() {
             vkDestroyPipelineLayout(device, sceneViewGridPipelineLayout, nullptr);
             sceneViewGridPipelineLayout = VK_NULL_HANDLE;
         }
+		if (skyBackgroundPipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, skyBackgroundPipeline, nullptr);
+			skyBackgroundPipeline = VK_NULL_HANDLE;
+		}
+		if (skyBackgroundPipelineLayout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(device, skyBackgroundPipelineLayout, nullptr);
+			skyBackgroundPipelineLayout = VK_NULL_HANDLE;
+		}
     }
 
 	if (device) {

@@ -27,6 +27,7 @@
 #include "../Windows/SceneViewWindow.h"
 #include "../Windows/BuildProfilesWindow.h"
 #include "../Windows/UIBuilderWindow.h"
+#include "../Windows/SkySettingsWindow.h"
 
 namespace
 {
@@ -56,6 +57,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
     m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
     m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
     m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));
+	m_Windows.push_back(std::make_shared<SkySettingsWindow>(this));
 
     UndoRedoSystem::Instance().Initialize(context);
     ScriptCompilationSubsystem::Instance().Initialize(context);
@@ -149,6 +151,7 @@ void MainEditorSubsystem::CapturePlayModeSceneState()
 	nlohmann::json snapshotJson;
 	const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
 	snapshotJson["name"] = activeScene != nullptr ? activeScene->name : "ActiveScene";
+	snapshotJson["sceneSettings"] = Serializer::SerializeSceneRenderSettings(SceneManager::Instance().GetActiveSceneRenderSettings());
 	snapshotJson["objects"] = nlohmann::json::array();
 
 	// Capture the full live hierarchy and reflected component payloads before
@@ -189,6 +192,10 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	}
 
 	ObjectManager::instance().clear();
+	if (snapshotJson.contains("sceneSettings"))
+	{
+		SceneManager::Instance().SetActiveSceneRenderSettings(Serializer::DeserializeSceneRenderSettings(snapshotJson["sceneSettings"]));
+	}
 	if (snapshotJson.contains("objects") && snapshotJson["objects"].is_array())
 	{
 		for (const nlohmann::json& objectJson : snapshotJson["objects"])

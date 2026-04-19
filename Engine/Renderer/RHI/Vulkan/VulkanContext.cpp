@@ -21,6 +21,7 @@
 #include <fstream>
 #include <thread>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 namespace
 {
@@ -984,6 +985,253 @@ void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRe
     vkCmdDraw(cmd, 6, 1, 0, 0); // 6 vertices for fullscreen quad
 }
 
+struct SkyPushConstants
+{
+	glm::vec4 cameraOrientation = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+	glm::vec4 horizonTintIntensity = glm::vec4(1.0f);
+	glm::vec4 zenithTintExposure = glm::vec4(1.0f);
+	glm::vec4 groundTintPadding = glm::vec4(1.0f);
+	glm::vec4 sunDirectionTextureIndex = glm::vec4(0.0f, 0.35f, -1.0f, 0.0f);
+	glm::vec4 skyParams = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+};
+
+void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
+{
+	if (skyBackgroundPipeline != VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	struct LoadedSkyShader
+	{
+		VkShaderModule module = VK_NULL_HANDLE;
+		const char* entryPoint = nullptr;
+	};
+
+	auto loadShader = [&](const std::string& relativePath) -> LoadedSkyShader {
+		LoadedSkyShader loadedShader{};
+		const std::filesystem::path resolvedPath = (ResourceManager::Instance().GetEngineRoot() / relativePath).lexically_normal();
+
+		// Sky shaders now use the same packaged TSPF path as the default mesh
+		// pipeline so task/mesh stages inherit the Vulkan 1.3 target flags and
+		// task-payload patching performed by TerraEngineShaderCompiler.
+		const TerraEngine::UUID shaderId = ResourceManager::Instance().LoadShader(resolvedPath);
+		Shader* shader = ResourceManager::Instance().GetShader(shaderId);
+		if (shader == nullptr || shader->bytecode.empty())
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to load packaged sky shader: " << resolvedPath);
+			return loadedShader;
+		}
+
+		VkShaderModuleCreateInfo createInfo{};
+		createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		createInfo.codeSize = shader->bytecode.size();
+		createInfo.pCode = reinterpret_cast<const std::uint32_t*>(shader->bytecode.data());
+
+		if (vkCreateShaderModule(device, &createInfo, nullptr, &loadedShader.module) != VK_SUCCESS)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << resolvedPath);
+			loadedShader.module = VK_NULL_HANDLE;
+			return loadedShader;
+		}
+
+		loadedShader.entryPoint = shader->stringTable.data() + shader->binary.entryPointOffset;
+		return loadedShader;
+	};
+
+	if (!taskShaderSupported)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Cannot create sky background pipeline without task shader support.");
+		return;
+	}
+
+	const LoadedSkyShader taskShader = loadShader("Shaders/Sky/SkyBackground.task.tspf");
+	const LoadedSkyShader meshShader = loadShader("Shaders/Sky/SkyBackground.mesh.tspf");
+	const LoadedSkyShader fragShader = loadShader("Shaders/Sky/SkyBackground.frag.tspf");
+	if (taskShader.module == VK_NULL_HANDLE || meshShader.module == VK_NULL_HANDLE || fragShader.module == VK_NULL_HANDLE)
+	{
+		if (taskShader.module != VK_NULL_HANDLE)
+		{
+			vkDestroyShaderModule(device, taskShader.module, nullptr);
+		}
+		if (meshShader.module != VK_NULL_HANDLE)
+		{
+			vkDestroyShaderModule(device, meshShader.module, nullptr);
+		}
+		if (fragShader.module != VK_NULL_HANDLE)
+		{
+			vkDestroyShaderModule(device, fragShader.module, nullptr);
+		}
+		return;
+	}
+
+	VkPipelineShaderStageCreateInfo shaderStages[3]{};
+	shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	shaderStages[0].stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+	shaderStages[0].module = taskShader.module;
+	shaderStages[0].pName = taskShader.entryPoint;
+	shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	shaderStages[1].stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+	shaderStages[1].module = meshShader.module;
+	shaderStages[1].pName = meshShader.entryPoint;
+	shaderStages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	shaderStages[2].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	shaderStages[2].module = fragShader.module;
+	shaderStages[2].pName = fragShader.entryPoint;
+
+	VkPipelineViewportStateCreateInfo viewportState{};
+	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewportState.viewportCount = 1;
+	viewportState.scissorCount = 1;
+
+	VkPipelineRasterizationStateCreateInfo rasterizer{};
+	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterizer.depthClampEnable = VK_FALSE;
+	rasterizer.rasterizerDiscardEnable = VK_FALSE;
+	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterizer.lineWidth = 1.0f;
+	rasterizer.cullMode = VK_CULL_MODE_NONE;
+	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	rasterizer.depthBiasEnable = VK_FALSE;
+
+	VkPipelineMultisampleStateCreateInfo multisampling{};
+	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multisampling.sampleShadingEnable = VK_FALSE;
+	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineDepthStencilStateCreateInfo depthStencil{};
+	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depthStencil.depthTestEnable = VK_FALSE;
+	depthStencil.depthWriteEnable = VK_FALSE;
+	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+	depthStencil.depthBoundsTestEnable = VK_FALSE;
+	depthStencil.stencilTestEnable = VK_FALSE;
+
+	VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+	colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	colorBlendAttachment.blendEnable = VK_FALSE;
+
+	VkPipelineColorBlendStateCreateInfo colorBlending{};
+	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	colorBlending.logicOpEnable = VK_FALSE;
+	colorBlending.attachmentCount = 1;
+	colorBlending.pAttachments = &colorBlendAttachment;
+
+	std::array<VkDynamicState, 2> dynamicStates = {
+		VK_DYNAMIC_STATE_VIEWPORT,
+		VK_DYNAMIC_STATE_SCISSOR
+	};
+	VkPipelineDynamicStateCreateInfo dynamicState{};
+	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamicState.dynamicStateCount = static_cast<std::uint32_t>(dynamicStates.size());
+	dynamicState.pDynamicStates = dynamicStates.data();
+
+	VkPushConstantRange pushConstantRange{};
+	pushConstantRange.stageFlags = VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
+	pushConstantRange.offset = 0;
+	pushConstantRange.size = sizeof(SkyPushConstants);
+
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pipelineLayoutInfo.setLayoutCount = 1;
+	pipelineLayoutInfo.pSetLayouts = &globalDescriptorSetLayout;
+	pipelineLayoutInfo.pushConstantRangeCount = 1;
+	pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+	if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &skyBackgroundPipelineLayout) != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create sky background pipeline layout!");
+		vkDestroyShaderModule(device, taskShader.module, nullptr);
+		vkDestroyShaderModule(device, meshShader.module, nullptr);
+		vkDestroyShaderModule(device, fragShader.module, nullptr);
+		return;
+	}
+
+	VkGraphicsPipelineCreateInfo pipelineInfo{};
+	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pipelineInfo.stageCount = 3;
+	pipelineInfo.pStages = shaderStages;
+	pipelineInfo.pVertexInputState = nullptr;
+	pipelineInfo.pInputAssemblyState = nullptr;
+	pipelineInfo.pViewportState = &viewportState;
+	pipelineInfo.pRasterizationState = &rasterizer;
+	pipelineInfo.pMultisampleState = &multisampling;
+	pipelineInfo.pDepthStencilState = &depthStencil;
+	pipelineInfo.pColorBlendState = &colorBlending;
+	pipelineInfo.pDynamicState = &dynamicState;
+	pipelineInfo.layout = skyBackgroundPipelineLayout;
+	pipelineInfo.renderPass = renderPass;
+	pipelineInfo.subpass = 0;
+
+	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skyBackgroundPipeline) != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create sky background pipeline!");
+	}
+
+	vkDestroyShaderModule(device, taskShader.module, nullptr);
+	vkDestroyShaderModule(device, meshShader.module, nullptr);
+	vkDestroyShaderModule(device, fragShader.module, nullptr);
+}
+
+void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRenderData& frameData)
+{
+	if (!frameData.sky.renderBackground || skyBackgroundPipeline == VK_NULL_HANDLE || skyBackgroundPipelineLayout == VK_NULL_HANDLE)
+	{
+		return;
+	}
+
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyBackgroundPipeline);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyBackgroundPipelineLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
+
+	VkViewport viewport{};
+	viewport.x = 0.0f;
+	viewport.y = 0.0f;
+	viewport.width = static_cast<float>(swapchainExtent.width);
+	viewport.height = static_cast<float>(swapchainExtent.height);
+	viewport.minDepth = 0.0f;
+	viewport.maxDepth = 1.0f;
+	vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+	VkRect2D scissor{};
+	scissor.offset = {0, 0};
+	scissor.extent = swapchainExtent;
+	vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+	const glm::mat4 inverseViewMatrix = glm::inverse(frameData.viewMatrix);
+	const glm::quat cameraOrientation = glm::normalize(glm::quat_cast(glm::mat3(inverseViewMatrix)));
+	const float tanHalfFovX = 1.0f / std::max(std::abs(frameData.projectionMatrix[0][0]), 0.0001f);
+	const float tanHalfFovY = 1.0f / std::max(std::abs(frameData.projectionMatrix[1][1]), 0.0001f);
+
+	SkyPushConstants push{};
+	push.cameraOrientation = glm::vec4(cameraOrientation.x, cameraOrientation.y, cameraOrientation.z, cameraOrientation.w);
+	push.horizonTintIntensity = glm::vec4(frameData.sky.horizonTint, frameData.sky.intensity);
+	push.zenithTintExposure = glm::vec4(frameData.sky.zenithTint, frameData.sky.exposure);
+	push.groundTintPadding = glm::vec4(frameData.sky.groundTint, 0.0f);
+	push.sunDirectionTextureIndex = glm::vec4(frameData.sky.sunDirection, 0.0f);
+	std::uint32_t skyFlags = 0u;
+	if (frameData.sky.hasTexture)
+	{
+		skyFlags |= 1u;
+	}
+	if (frameData.sky.forceBlack)
+	{
+		skyFlags |= 2u;
+	}
+	push.skyParams = glm::vec4(tanHalfFovX, tanHalfFovY, glm::radians(frameData.sky.rotationOffsetDegrees), static_cast<float>(skyFlags));
+
+	if (frameData.sky.hasTexture)
+	{
+		EnsureTexture(frameData.sky.textureId);
+		if (const auto textureIndexIt = textureIndexMap.find(frameData.sky.textureId); textureIndexIt != textureIndexMap.end())
+		{
+			push.sunDirectionTextureIndex.w = static_cast<float>(textureIndexIt->second);
+		}
+	}
+
+	vkCmdPushConstants(cmd, skyBackgroundPipelineLayout, VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SkyPushConstants), &push);
+	vkCmdDrawMeshTasksEXT(cmd, 1u, 1u, 1u);
+}
+
 // UI Rendering Implementation
 void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 	auto loadShader = [&](const std::string& path) -> VkShaderModule {
@@ -1632,6 +1880,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		PrepareDrawResources(command);
 	}
 
+	if (frameData.sky.hasTexture && frameData.sky.textureId != TerraEngine::EMPTY_UUID)
+	{
+		impl->EnsureTexture(frameData.sky.textureId);
+	}
+
 	VkCommandBuffer cmd = VK_NULL_HANDLE;
 	const bool useMainCommandBuffer = impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size()
 		|| impl->pendingPrimaryCommandBuffers[impl->currentFrame].empty();
@@ -1690,6 +1943,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	if (view == ViewType::Scene) {
 		impl->CreateSceneViewGridPipeline(renderPassInfo.renderPass);
 	}
+	impl->CreateSkyBackgroundPipeline(renderPassInfo.renderPass);
 
 	const auto EnsureShadowRenderResources = [&]() -> bool {
 		if (impl->directionalShadowDepth.view == VK_NULL_HANDLE
@@ -2501,13 +2755,39 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		}
 	}
 
+	if (frameData.sky.renderBackground)
+	{
+		const size_t workerIndex = secondaryBuffers.size();
+		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
+		VkCommandBuffer skyCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerIndex);
+		if (skyCmd != VK_NULL_HANDLE)
+		{
+			vkResetCommandBuffer(skyCmd, 0);
+
+			VkCommandBufferInheritanceInfo inherit{};
+			inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+			inherit.renderPass = renderPassInfo.renderPass;
+			inherit.subpass = 0;
+			inherit.framebuffer = renderPassInfo.framebuffer;
+
+			VkCommandBufferBeginInfo begin{};
+			begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+			begin.pInheritanceInfo = &inherit;
+
+			vkBeginCommandBuffer(skyCmd, &begin);
+			impl->RenderSkyBackground(skyCmd, frameData);
+			vkEndCommandBuffer(skyCmd);
+			secondaryBuffers.insert(secondaryBuffers.begin(), skyCmd);
+		}
+	}
+
 	// Render grid (Scene View only).
 	if (view == ViewType::Scene) {
-		const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-		const size_t workerCount = std::min(prepared.size(), hw);
-		impl->EnsureWorkerPools(impl->currentFrame, workerCount + 1);
+		const size_t workerIndex = secondaryBuffers.size();
+		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
 
-		VkCommandBuffer gridCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerCount);
+		VkCommandBuffer gridCmd = impl->AcquireWorkerCommandBuffer(impl->currentFrame, workerIndex);
 		if (gridCmd != VK_NULL_HANDLE) {
 			vkResetCommandBuffer(gridCmd, 0);
 

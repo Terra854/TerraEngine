@@ -17,6 +17,7 @@
 #include "Input/InputSystem.h"
 #include "Serializer.h"
 #include "File Formats/TerraEngineMaterialFile.h"
+#include "Renderer/RenderSystem.h"
 #include "Resource/ResourceManager.h"
 #include "Resource/ShaderCollection.h"
 #include "Runtime/ContentMount/ContentMount.h"
@@ -26,6 +27,16 @@
 
 namespace
 {
+	SceneRenderSettings LoadSceneRenderSettingsFromDocument(const SceneDocument& document)
+	{
+		if (const auto sceneSettingsIt = document.parsedJson.find("sceneSettings"); sceneSettingsIt != document.parsedJson.end())
+		{
+			return Serializer::DeserializeSceneRenderSettings(*sceneSettingsIt);
+		}
+
+		return MakeDefaultSceneRenderSettings();
+	}
+
 	void RemoveValidationLights(ObjectManager& objects)
 	{
 		// Validation fixtures need deterministic light ownership, so remove any
@@ -212,9 +223,11 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 	}
 
 	activeSceneId = id;
+	activeSceneRenderSettings = LoadSceneRenderSettingsFromDocument(*doc);
 	// New scenes start clean to avoid showing unsaved changes indicators
 	// immediately after a successful load or swap.
 	activeSceneDirty = false;
+	RenderSystem::Instance().MarkSkyStateDirty();
 	// Log the swap so editors can track which scene is currently bound.
 	TERRAENGINE_LOG(LogLevel::Debug, "Active scene set to id " << ToHexString(id));
 	return true;
@@ -233,6 +246,30 @@ const SceneDocument* SceneManager::GetActiveScene() const
 bool SceneManager::IsActiveSceneDirty() const
 {
 	return activeSceneDirty;
+}
+
+const SceneRenderSettings& SceneManager::GetActiveSceneRenderSettings() const
+{
+	return activeSceneRenderSettings;
+}
+
+void SceneManager::SetActiveSceneRenderSettings(const SceneRenderSettings& settings)
+{
+	activeSceneRenderSettings = SanitizeSceneRenderSettings(settings);
+	activeSceneDirty = true;
+	RenderSystem::Instance().MarkSkyStateDirty();
+}
+
+const SceneSkySettings& SceneManager::GetActiveSceneSkySettings() const
+{
+	return activeSceneRenderSettings.sky;
+}
+
+void SceneManager::SetActiveSceneSkySettings(const SceneSkySettings& settings)
+{
+	activeSceneRenderSettings.sky = SanitizeSceneSkySettings(settings);
+	activeSceneDirty = true;
+	RenderSystem::Instance().MarkSkyStateDirty();
 }
 
 void SceneManager::ForceMarkActiveSceneDirty()
@@ -272,6 +309,7 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 
 	nlohmann::json sceneJson;
 	sceneJson["name"] = activeScene->name;
+	sceneJson["sceneSettings"] = Serializer::SerializeSceneRenderSettings(activeSceneRenderSettings);
 	sceneJson["objects"] = nlohmann::json::array();
 
 	ObjectManager& objManager = ObjectManager::instance();
@@ -335,6 +373,8 @@ void SceneManager::UnloadAll()
 	}
 
 	activeSceneId = TerraEngine::EMPTY_UUID;
+	activeSceneDirty = false;
+	activeSceneRenderSettings = MakeDefaultSceneRenderSettings();
 	// Remove the generated preview entity so repeated initializes do not leave
 	// stray objects in the registry when the manager is reused.
 	if (previewObject)
@@ -383,6 +423,10 @@ void SceneManager::NullifyAssetReferences(const TerraEngine::UUID& assetId)
 			}
 		}
 	);
+
+	// Scene-owned sky sources are stored as friendly asset paths rather than raw
+	// UUIDs, so missing textures degrade through renderer fallback instead of
+	// being hard-cleared during asset deletion.
 }
 
 void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32_t gridDepth, float spacing, float intensity)
@@ -524,7 +568,7 @@ std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesy
 
 	auto document = std::make_unique<SceneDocument>();
 	document->sourcePath = path;
-	document->name = path.stem().string();
+	document->name = parsed.value("name", path.stem().string());
 	document->jsonContents = *jsonText;
 	document->parsedJson = std::move(parsed);
 	document->isPrefab = type == SceneFileType::Prefab;

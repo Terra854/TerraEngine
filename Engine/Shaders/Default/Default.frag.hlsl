@@ -112,6 +112,9 @@ static const float kDirectionalShadowBias = 0.0015f;
 static const float kSpotShadowBias = 0.0020f;
 static const float kPointShadowBias = 0.0050f;
 static const float kAreaShadowBias = 0.0020f;
+// Match the sky system rule: once the sun is roughly ten degrees below the
+// horizon, direct sunlight should no longer illuminate scene geometry.
+static const float kDirectionalLightNightHeight = -0.17364818f;
 
 float3 BuildLightingNormal(float3 vertexNormal, float3 worldPosition, float2 uv, float3 sampledNormal, float normalScale, float4 bakedTangent)
 {
@@ -354,9 +357,20 @@ float3 F_Schlick(float cosTheta, float3 f0)
 	return f0 + (1.0 - f0) * f;
 }
 
+float ComputeDirectionalLightVisibility(float3 lightDir)
+{
+	// The directional light points from the surface toward the sun. When its Y
+	// component falls below the threshold, the sun is far enough under the
+	// horizon that direct sunlight should be fully gone.
+	return smoothstep(kDirectionalLightNightHeight, 0.0f, lightDir.y);
+}
+
 float3 EvaluateDirectionalLight(GPULight light, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
 {
 	const float3 lightDir = SafeNormalize(-light.directionAndRange.xyz, float3(0.0, -1.0, 0.0));
+	const float lightVisibility = ComputeDirectionalLightVisibility(lightDir);
+	if (lightVisibility <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
+
 	const float nDotL = saturate(dot(normal, lightDir));
 	if (nDotL <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
 
@@ -375,7 +389,7 @@ float3 EvaluateDirectionalLight(GPULight light, float3 normal, float3 viewDir, f
 	const float3 diffuse = kD * albedo / kPi;
 
 	const float3 radiance = light.colorAndIntensity.rgb * light.colorAndIntensity.w;
-	return (diffuse + specular) * radiance * nDotL;
+	return (diffuse + specular) * radiance * nDotL * lightVisibility;
 }
 
 float3 EvaluatePointLight(GPULight light, float3 worldPosition, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)

@@ -17,6 +17,7 @@
 #include "Core/Object/Object.h"
 #include "Core/SystemBase.h"
 #include "File Formats/TerraEngineShaderFile.h"
+#include "Renderer/RenderTypes.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
 
@@ -126,6 +127,12 @@ public:
 	
 
 			bool SaveScene(std::optional<std::filesystem::path> path = std::nullopt);
+			// Scene-owned sky settings live outside the object hierarchy, so the
+			// editor and renderer query them through dedicated accessors.
+			const SceneRenderSettings& GetActiveSceneRenderSettings() const;
+			void SetActiveSceneRenderSettings(const SceneRenderSettings& settings);
+			const SceneSkySettings& GetActiveSceneSkySettings() const;
+			void SetActiveSceneSkySettings(const SceneSkySettings& settings);
 
 	
 
@@ -307,6 +314,7 @@ public:
 		TerraEngine::UUID activeSceneId = TerraEngine::EMPTY_UUID;
 
 		bool activeSceneDirty = false;
+		SceneRenderSettings activeSceneRenderSettings = MakeDefaultSceneRenderSettings();
 
 	
 

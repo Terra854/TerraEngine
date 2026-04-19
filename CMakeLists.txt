@@ -606,6 +606,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
 	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
+	Editor/TerraEngine-Editor/Windows/SkySettingsWindow.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
@@ -718,6 +719,7 @@ set(SHADER_COMPILER \"$<TARGET_FILE:TerraEngineShaderCompiler>\")
 set(SHADER_SRC_DIR \"${DEFAULT_SHADER_SRC_DIR}\")
 set(EDITOR_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Editor/Shaders\")
 set(UI_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Engine/Shaders/UI\")
+set(SKY_SHADER_SRC_DIR \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Sky\")
 set(SHADER_INSTALL_ROOT \"${ENGINE_INSTALL_DESTINATION}\")
 set(DXC_PATH \"${TERRAENGINE_DXC_PATH}\")
 
@@ -726,6 +728,7 @@ set(editor_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Editor\")
 set(lighting_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Lighting\")
 set(postprocess_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/PostProcess\")
 set(ui_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/UI\")
+set(sky_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Sky\")
 set(lighting_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Lighting\")
 set(postprocess_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/PostProcess\")
 file(MAKE_DIRECTORY \"\${out_dir}\")
@@ -733,6 +736,7 @@ file(MAKE_DIRECTORY \"\${editor_out_dir}\")
 file(MAKE_DIRECTORY \"\${lighting_out_dir}\")
 file(MAKE_DIRECTORY \"\${postprocess_out_dir}\")
 file(MAKE_DIRECTORY \"\${ui_out_dir}\")
+file(MAKE_DIRECTORY \"\${sky_out_dir}\")
 file(REMOVE
 	\"\${out_dir}/Default.task.spv\"
 	\"\${out_dir}/Default.mesh.spv\"
@@ -753,6 +757,9 @@ file(REMOVE
 	\"\${ui_out_dir}/UI_SDF_Text.frag.spv\"
 	\"\${ui_out_dir}/UI_Textured.vert.spv\"
 	\"\${ui_out_dir}/UI_Textured.frag.spv\"
+	\"\${sky_out_dir}/SkyBackground.task.tspf\"
+	\"\${sky_out_dir}/SkyBackground.mesh.tspf\"
+	\"\${sky_out_dir}/SkyBackground.frag.tspf\"
 	\"\${editor_out_dir}/SceneViewGrid.vert.tspf\"
 	\"\${editor_out_dir}/SceneViewGrid.frag.tspf\")
 
@@ -890,6 +897,30 @@ execute_process(
 )
 if(NOT compile_ui_text_ps EQUAL 0)
     message(FATAL_ERROR \"Failed to compile UI_SDF_Text.hlsl fragment shader during install\")
+endif()
+
+execute_process(
+	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SKY_SHADER_SRC_DIR}/SkyBackground.task.hlsl\" -o \"\${sky_out_dir}/SkyBackground.task.tspf\" -s ts -e TSMain --dxc \"\${DXC_PATH}\"
+	RESULT_VARIABLE compile_sky_ts
+)
+if(NOT compile_sky_ts EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile SkyBackground.task.hlsl with TerraEngineShaderCompiler during install\")
+endif()
+
+execute_process(
+	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SKY_SHADER_SRC_DIR}/SkyBackground.mesh.hlsl\" -o \"\${sky_out_dir}/SkyBackground.mesh.tspf\" -s ms -e MSMain --dxc \"\${DXC_PATH}\"
+	RESULT_VARIABLE compile_sky_ms
+)
+if(NOT compile_sky_ms EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile SkyBackground.mesh.hlsl with TerraEngineShaderCompiler during install\")
+endif()
+
+execute_process(
+	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SKY_SHADER_SRC_DIR}/SkyBackground.frag.hlsl\" -o \"\${sky_out_dir}/SkyBackground.frag.tspf\" -s ps -e PSMain --dxc \"\${DXC_PATH}\"
+	RESULT_VARIABLE compile_sky_ps
+)
+if(NOT compile_sky_ps EQUAL 0)
+	message(FATAL_ERROR \"Failed to compile SkyBackground.frag.hlsl with TerraEngineShaderCompiler during install\")
 endif()
 
 # Compile Grid Shaders using raw DXC (bypassing asset compiler for internal usage)

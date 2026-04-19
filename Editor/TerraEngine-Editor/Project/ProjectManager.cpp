@@ -88,6 +88,20 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
             fs::path scenePath = location / "Assets" / "Scenes" / "Scene.tescene";
             std::ofstream sceneFile(scenePath);
             sceneFile << R"({
+    "name": "Scene",
+    "sceneSettings": {
+        "sky": {
+            "enabled": true,
+            "sourceAsset": "",
+            "intensity": 1.0,
+            "exposure": 1.0,
+            "rotationOffsetDegrees": 0.0,
+            "horizonTint": [0.92, 0.96, 1.0],
+            "zenithTint": [0.20, 0.38, 0.80],
+            "groundTint": [0.10, 0.12, 0.18],
+            "directionalLightObjectId": "00000000000000000000000000000000"
+        }
+    },
     "objects": [
         {
             "name": "Main Camera",

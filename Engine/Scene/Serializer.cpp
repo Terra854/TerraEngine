@@ -4,6 +4,45 @@
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+namespace
+{
+	glm::vec3 ReadVec3OrDefault(const nlohmann::json& jsonValue, const glm::vec3& fallback)
+	{
+		if (!jsonValue.is_array() || jsonValue.size() != 3)
+		{
+			return fallback;
+		}
+
+		glm::vec3 value = fallback;
+		for (std::size_t index = 0; index < 3; ++index)
+		{
+			if (!jsonValue[index].is_number())
+			{
+				return fallback;
+			}
+
+			value[index] = jsonValue[index].get<float>();
+		}
+
+		return value;
+	}
+
+	TerraEngine::UUID ReadUuidOrDefault(const nlohmann::json& jsonValue, const TerraEngine::UUID& fallback)
+	{
+		if (!jsonValue.is_string())
+		{
+			return fallback;
+		}
+
+		if (const auto parsed = TerraEngine::ParseUUID(jsonValue.get<std::string>()))
+		{
+			return *parsed;
+		}
+
+		return fallback;
+	}
+}
+
 nlohmann::json SerializeObjectRecursive(Object& obj) {
     ObjectManager& objManager = ObjectManager::instance();
     nlohmann::json objJson;
@@ -77,6 +116,66 @@ nlohmann::json Serializer::SerializeObject(Object& obj) {
     // snapshot while the recursion proceeds without further locking.
     std::lock_guard lock(ComponentAccessRegistryMutex());
     return SerializeObjectRecursive(obj);
+}
+
+nlohmann::json Serializer::SerializeSceneRenderSettings(const SceneRenderSettings& settings)
+{
+	const SceneRenderSettings sanitizedSettings = SanitizeSceneRenderSettings(settings);
+	nlohmann::json sceneSettingsJson = nlohmann::json::object();
+	nlohmann::json skyJson = nlohmann::json::object();
+
+	skyJson["enabled"] = sanitizedSettings.sky.enabled;
+	skyJson["sourceAsset"] = sanitizedSettings.sky.sourceAsset;
+	skyJson["intensity"] = sanitizedSettings.sky.intensity;
+	skyJson["exposure"] = sanitizedSettings.sky.exposure;
+	skyJson["rotationOffsetDegrees"] = sanitizedSettings.sky.rotationOffsetDegrees;
+	skyJson["horizonTint"] = {
+		sanitizedSettings.sky.horizonTint.x,
+		sanitizedSettings.sky.horizonTint.y,
+		sanitizedSettings.sky.horizonTint.z
+	};
+	skyJson["zenithTint"] = {
+		sanitizedSettings.sky.zenithTint.x,
+		sanitizedSettings.sky.zenithTint.y,
+		sanitizedSettings.sky.zenithTint.z
+	};
+	skyJson["groundTint"] = {
+		sanitizedSettings.sky.groundTint.x,
+		sanitizedSettings.sky.groundTint.y,
+		sanitizedSettings.sky.groundTint.z
+	};
+	skyJson["directionalLightObjectId"] = TerraEngine::ToHexString(sanitizedSettings.sky.directionalLightObjectId);
+
+	sceneSettingsJson["sky"] = std::move(skyJson);
+	return sceneSettingsJson;
+}
+
+SceneRenderSettings Serializer::DeserializeSceneRenderSettings(const nlohmann::json& json)
+{
+	SceneRenderSettings settings = MakeDefaultSceneRenderSettings();
+	if (!json.is_object())
+	{
+		return settings;
+	}
+
+	if (const auto skyIt = json.find("sky"); skyIt != json.end() && skyIt->is_object())
+	{
+		SceneSkySettings sky = settings.sky;
+		sky.enabled = skyIt->value("enabled", sky.enabled);
+		sky.sourceAsset = skyIt->value("sourceAsset", sky.sourceAsset);
+		sky.intensity = skyIt->value("intensity", sky.intensity);
+		sky.exposure = skyIt->value("exposure", sky.exposure);
+		sky.rotationOffsetDegrees = skyIt->value("rotationOffsetDegrees", sky.rotationOffsetDegrees);
+		sky.horizonTint = ReadVec3OrDefault(skyIt->value("horizonTint", nlohmann::json{}), sky.horizonTint);
+		sky.zenithTint = ReadVec3OrDefault(skyIt->value("zenithTint", nlohmann::json{}), sky.zenithTint);
+		sky.groundTint = ReadVec3OrDefault(skyIt->value("groundTint", nlohmann::json{}), sky.groundTint);
+		sky.directionalLightObjectId = ReadUuidOrDefault(
+			skyIt->value("directionalLightObjectId", nlohmann::json{}),
+			sky.directionalLightObjectId);
+		settings.sky = SanitizeSceneSkySettings(sky);
+	}
+
+	return settings;
 }
 
 Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<Object> parent) {

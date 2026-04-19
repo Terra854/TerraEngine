@@ -417,6 +417,8 @@ struct VulkanContext::Impl {
     // Grid Renderer
     VkPipeline sceneViewGridPipeline = VK_NULL_HANDLE;
     VkPipelineLayout sceneViewGridPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline skyBackgroundPipeline = VK_NULL_HANDLE;
+	VkPipelineLayout skyBackgroundPipelineLayout = VK_NULL_HANDLE;
     
     struct GridPushConstants {
         glm::mat4 view;
@@ -427,6 +429,8 @@ struct VulkanContext::Impl {
 
     void CreateSceneViewGridPipeline(VkRenderPass renderPass);
     void RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData);
+	void CreateSkyBackgroundPipeline(VkRenderPass renderPass);
+	void RenderSkyBackground(VkCommandBuffer cmd, const FrameRenderData& frameData);
 
     // UI Rendering
     VkPipeline staticUiPipeline = VK_NULL_HANDLE;

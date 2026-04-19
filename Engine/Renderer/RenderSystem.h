@@ -5,6 +5,7 @@
 #include "Core/Object/ObjectManager.h"
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -46,6 +47,8 @@ public:
 	QualityPreset GetQualityPreset() const { return currentPreset; }
 	void SetRenderSettings(const RenderSettings& settings);
 	const RenderSettings& GetRenderSettings() const { return currentSettings; }
+	SkyRuntimeState GetLatestSkyRuntimeState() const;
+	void MarkSkyStateDirty();
 
 	void LoadSettings();
 	void SaveSettings();
@@ -105,6 +108,9 @@ private:
 	RenderStatsSnapshot latestSceneStats{};
 	FrameBudgetDiagnosticsSnapshot latestGameBudgetDiagnostics{};
 	FrameBudgetDiagnosticsSnapshot latestSceneBudgetDiagnostics{};
+	SkyRuntimeState latestSkyRuntimeState{};
+	bool skyStateDirty = true;
+	std::string lastLoggedSkyIssueKey;
 
 	QualityPreset currentPreset = QualityPreset::High;
 	RenderSettings currentSettings;

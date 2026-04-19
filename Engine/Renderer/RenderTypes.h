@@ -2,8 +2,11 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
+#include <cmath>
 #include <glm/glm.hpp>
+#include <glm/common.hpp>
 #include "Utilities/UUID.h"
 
 enum class RenderViewType : std::uint8_t
@@ -57,6 +60,109 @@ struct RenderSettings
 	std::uint32_t enableIBL = 1u;
 	std::uint32_t anisotropicFiltering = 4u;
 };
+
+// Scene-owned sky authoring data is serialized with each scene so the editor
+// and runtime always consume the same background configuration.
+struct SceneSkySettings
+{
+	bool enabled = true;
+	std::string sourceAsset;
+	float intensity = 1.0f;
+	float exposure = 1.0f;
+	float rotationOffsetDegrees = 0.0f;
+	glm::vec3 horizonTint = glm::vec3(0.92f, 0.96f, 1.0f);
+	glm::vec3 zenithTint = glm::vec3(0.20f, 0.38f, 0.80f);
+	glm::vec3 groundTint = glm::vec3(0.10f, 0.12f, 0.18f);
+	// When this override is empty the renderer automatically uses the first
+	// directional light found in the active scene. A resolved directional light
+	// is always required for non-black sky rendering.
+	TerraEngine::UUID directionalLightObjectId = TerraEngine::EMPTY_UUID;
+};
+
+// Scene-level render settings can grow over time while keeping one explicit
+// root block in scene JSON for the renderer-facing authoring data.
+struct SceneRenderSettings
+{
+	SceneSkySettings sky{};
+};
+
+// Renderer-owned diagnostic state derived from the scene settings. This data
+// is transient and should never be written back into scene files.
+struct SkyRuntimeState
+{
+	bool isValid = true;
+	bool usingFallback = true;
+	bool hasProblem = false;
+	bool dirty = true;
+	bool forceBlackFallback = false;
+	TerraEngine::UUID resolvedSkyHandle = TerraEngine::EMPTY_UUID;
+	glm::vec3 resolvedSunDirection = glm::normalize(glm::vec3(0.0f, 0.35f, -1.0f));
+};
+
+// Compact per-frame sky payload submitted to the renderer background pass.
+struct FrameSkyData
+{
+	bool renderBackground = false;
+	bool hasTexture = false;
+	bool usingFallback = true;
+	bool forceBlack = false;
+	float intensity = 1.0f;
+	float exposure = 1.0f;
+	float rotationOffsetDegrees = 0.0f;
+	glm::vec3 horizonTint = glm::vec3(0.92f, 0.96f, 1.0f);
+	glm::vec3 zenithTint = glm::vec3(0.20f, 0.38f, 0.80f);
+	glm::vec3 groundTint = glm::vec3(0.10f, 0.12f, 0.18f);
+	glm::vec3 sunDirection = glm::normalize(glm::vec3(0.0f, 0.35f, -1.0f));
+	TerraEngine::UUID textureId = TerraEngine::EMPTY_UUID;
+};
+
+inline glm::vec3 ClampSkyTint(const glm::vec3& tint)
+{
+	return glm::clamp(tint, glm::vec3(0.0f), glm::vec3(4.0f));
+}
+
+inline SceneSkySettings MakeDefaultSceneSkySettings()
+{
+	SceneSkySettings settings;
+	settings.enabled = true;
+	settings.sourceAsset.clear();
+	settings.intensity = 1.0f;
+	settings.exposure = 1.0f;
+	settings.rotationOffsetDegrees = 0.0f;
+	settings.horizonTint = glm::vec3(0.92f, 0.96f, 1.0f);
+	settings.zenithTint = glm::vec3(0.20f, 0.38f, 0.80f);
+	settings.groundTint = glm::vec3(0.10f, 0.12f, 0.18f);
+	settings.directionalLightObjectId = TerraEngine::EMPTY_UUID;
+	return settings;
+}
+
+inline SceneSkySettings SanitizeSceneSkySettings(const SceneSkySettings& input)
+{
+	SceneSkySettings sanitized = input;
+	sanitized.intensity = glm::clamp(sanitized.intensity, 0.0f, 16.0f);
+	sanitized.exposure = glm::clamp(sanitized.exposure, 0.0f, 16.0f);
+	sanitized.rotationOffsetDegrees = std::isfinite(sanitized.rotationOffsetDegrees)
+		? glm::clamp(sanitized.rotationOffsetDegrees, -360.0f, 360.0f)
+		: 0.0f;
+	sanitized.horizonTint = ClampSkyTint(sanitized.horizonTint);
+	sanitized.zenithTint = ClampSkyTint(sanitized.zenithTint);
+	sanitized.groundTint = ClampSkyTint(sanitized.groundTint);
+	return sanitized;
+}
+
+inline SceneRenderSettings MakeDefaultSceneRenderSettings()
+{
+	SceneRenderSettings settings;
+	settings.sky = MakeDefaultSceneSkySettings();
+	return settings;
+}
+
+inline SceneRenderSettings SanitizeSceneRenderSettings(const SceneRenderSettings& input)
+{
+	SceneRenderSettings sanitized = input;
+	sanitized.sky = SanitizeSceneSkySettings(input.sky);
+	return sanitized;
+}
 
 struct DrawCommand
 {
@@ -287,6 +393,7 @@ struct FrameRenderData
 	QualityPreset activePreset = QualityPreset::High;
 	bool customOverrideActive = false;
 	RenderSettings settings;
+	FrameSkyData sky;
 	std::vector<FrameLightCandidate> lightCandidates;
 	std::vector<DrawCommand> commands;
 	UIRenderBatch uiBatch;
