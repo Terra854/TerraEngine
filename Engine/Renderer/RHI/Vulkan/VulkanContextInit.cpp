@@ -174,9 +174,12 @@ void VulkanContext::Impl::Cleanup() {
 		vkDestroyImageView(device, defaultTexture.view, nullptr);
 		vkDestroySampler(device, defaultNormalTexture.sampler, nullptr);
 		vkDestroyImageView(device, defaultNormalTexture.view, nullptr);
+		vkDestroySampler(device, defaultMaterialMaskTexture.sampler, nullptr);
+		vkDestroyImageView(device, defaultMaterialMaskTexture.view, nullptr);
 	}
 	vmaDestroyImage(allocator, defaultTexture.image, defaultTexture.allocation);
 	vmaDestroyImage(allocator, defaultNormalTexture.image, defaultNormalTexture.allocation);
+	vmaDestroyImage(allocator, defaultMaterialMaskTexture.image, defaultMaterialMaskTexture.allocation);
 
 	// UI Rendering cleanup
 	if (device) {

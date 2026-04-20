@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <sstream>
 #include <utility>
+#include <algorithm>
+#include <cctype>
 #include <nlohmann/json.hpp>
 
 #include "Core/Logger/Logger.h"
@@ -48,6 +50,23 @@ namespace
 			|| queryPath.has_extension()
 			|| assetReference.find('/') != std::string_view::npos
 			|| assetReference.find('\\') != std::string_view::npos;
+	}
+
+	bool HasNativeExtensionForAssetType(const std::filesystem::path& path, AssetType type)
+	{
+		std::string extension = path.extension().generic_string();
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+		for (std::string_view nativeExtension : SupportedExtensionsForAssetType(type))
+		{
+			if (extension == nativeExtension)
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	std::optional<std::filesystem::path> FindEditorProjectRoot(const std::filesystem::path& assetRoot)
@@ -469,10 +488,15 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 {
 	auto removeFromCache = [&](auto& cache) {
 		std::unique_lock lock(cache.mutex);
-		if (auto it = cache.idToPath.find(id); it != cache.idToPath.end()) {
-			cache.pathToId.erase(it->second);
-			cache.idToPath.erase(it);
+		for (auto it = cache.pathToId.begin(); it != cache.pathToId.end(); ) {
+			if (it->second == id) {
+				it = cache.pathToId.erase(it);
+			}
+			else {
+				++it;
+			}
 		}
+		cache.idToPath.erase(id);
 		cache.resources.erase(id);
 	};
 
@@ -500,12 +524,22 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 
 void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type)
 {
-	const std::string key = NormalizeKey(ResolveAssetPath(path));
+	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+	const bool canBePreferredLoadPath = HasNativeExtensionForAssetType(resolvedPath, type);
 
 	VisitAssetCache(type, [&](auto& cache) {
 		std::unique_lock lock(cache.mutex);
 		cache.pathToId[key] = id;
-		cache.idToPath[id] = key;
+		// Source assets such as .obj are useful aliases for resolving authored
+		// references, but render-time resource loads must use compiled artifacts
+		// such as .temf. Keeping idToPath limited to native formats prevents the
+		// renderer from parsing a source file while its compiler job is still
+		// producing the real runtime payload.
+		if (canBePreferredLoadPath)
+		{
+			cache.idToPath[id] = key;
+		}
 	});
 }
 
@@ -521,10 +555,23 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 		const std::filesystem::path queryPath(assetReference);
 		if (AssetReferenceLooksLikePath(assetReference))
 		{
-			// Explicit paths are resolved literally relative to the asset root.
-			// TerraEngine intentionally does not scan subfolders by filename
-			// because duplicate names across directories are common in projects.
+			// Explicit paths are resolved literally relative to the asset root,
+			// then retried with native runtime extensions. This lets authored
+			// scene data refer to source assets like Models/cube.obj while the
+			// renderer actually loads Models/cube.temf.
 			candidatePaths.push_back(queryPath);
+			if (queryPath.has_extension())
+			{
+				for (std::string_view extension : SupportedExtensionsForAssetType(type))
+				{
+					if (queryPath.extension() != extension)
+					{
+						std::filesystem::path candidate = queryPath;
+						candidate.replace_extension(extension);
+						candidatePaths.push_back(std::move(candidate));
+					}
+				}
+			}
 			return candidatePaths;
 		}
 
@@ -579,6 +626,11 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 	};
 
 	const auto tryLoadExplicitPath = [&](const std::filesystem::path& candidatePath) -> TerraEngine::UUID {
+		if (!HasNativeExtensionForAssetType(candidatePath, type))
+		{
+			return TerraEngine::EMPTY_UUID;
+		}
+
 		switch (type)
 		{
 		case AssetType::Mesh:

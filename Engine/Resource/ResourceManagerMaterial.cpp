@@ -1,5 +1,7 @@
 #include "Resource/ResourceManager.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 
 #include "Core/Logger/Logger.h"
@@ -103,10 +105,25 @@ namespace
 
 		return material;
 	}
+
+	bool IsCompiledMaterialPath(const std::filesystem::path& path)
+	{
+		std::string extension = path.extension().generic_string();
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+		return extension == ".tmat";
+	}
 }
 
 TerraEngine::UUID ResourceManager::LoadMaterial(const std::filesystem::path& path)
 {
+	if (!IsCompiledMaterialPath(path))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping source material load until compiled TMAT is available: " << path);
+		return TerraEngine::EMPTY_UUID;
+	}
+
 	return LoadOrGetCached<Material>(path, materialCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadMaterialFile(*this, resolvedPath);
 	});
@@ -114,6 +131,12 @@ TerraEngine::UUID ResourceManager::LoadMaterial(const std::filesystem::path& pat
 
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadMaterialAsync(const std::filesystem::path& path)
 {
+	if (!IsCompiledMaterialPath(path))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping async source material load until compiled TMAT is available: " << path);
+		return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
+
 	return LoadOrSchedule<Material>(path, materialCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadMaterialFile(*this, resolvedPath);
 	});
@@ -151,13 +174,9 @@ void ResourceManager::ReloadMaterial(const TerraEngine::UUID& id)
 	std::string key;
 	{
 		std::shared_lock lock(materialCache.mutex);
-		for (const auto& [path, uuid] : materialCache.pathToId)
+		if (const auto pathIt = materialCache.idToPath.find(id); pathIt != materialCache.idToPath.end())
 		{
-			if (uuid == id)
-			{
-				key = path;
-				break;
-			}
+			key = pathIt->second;
 		}
 	}
 
@@ -174,6 +193,12 @@ void ResourceManager::ReloadMaterial(const TerraEngine::UUID& id)
 	}
 
 	const std::filesystem::path resolvedPath(key);
+	if (!IsCompiledMaterialPath(resolvedPath))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping material reload from non-TMAT path: " << resolvedPath);
+		return;
+	}
+
 	TERRAENGINE_LOG(LogLevel::Debug, "Reloading material from " << resolvedPath);
 	auto material = LoadMaterialFile(*this, resolvedPath);
 	if (material)

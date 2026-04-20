@@ -1,5 +1,7 @@
 #include "Resource/ResourceManager.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 
 #include "Core/Logger/Logger.h"
@@ -176,10 +178,25 @@ namespace
 
 		return shader;
 	}
+
+	bool IsCompiledShaderPath(const std::filesystem::path& path)
+	{
+		std::string extension = path.extension().generic_string();
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+		return extension == ".tspf";
+	}
 }
 
 TerraEngine::UUID ResourceManager::LoadShader(const std::filesystem::path& path)
 {
+	if (!IsCompiledShaderPath(path))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping source shader load until compiled TSPF is available: " << path);
+		return TerraEngine::EMPTY_UUID;
+	}
+
 	return LoadOrGetCached<Shader>(path, shaderCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadShaderFile(*this, resolvedPath);
 	});
@@ -187,6 +204,12 @@ TerraEngine::UUID ResourceManager::LoadShader(const std::filesystem::path& path)
 
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderAsync(const std::filesystem::path& path)
 {
+	if (!IsCompiledShaderPath(path))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping async source shader load until compiled TSPF is available: " << path);
+		return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
+
 	return LoadOrSchedule<Shader>(path, shaderCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadShaderFile(*this, resolvedPath);
 	});

@@ -386,6 +386,10 @@ struct VulkanContext::Impl {
 
 	VkDescriptorSet offscreenDescriptorSet = VK_NULL_HANDLE;
 	VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
+	// Editor scene/game views store linear lighting before ImGui presents them.
+	// A higher precision format prevents dark point-light falloff from being
+	// quantized into visible bands while still allowing a conservative fallback.
+	VkFormat offscreenColorFormat = VK_FORMAT_UNDEFINED;
 
 	std::unordered_map<TerraEngine::UUID, VulkanMesh> meshCache;
 	std::unordered_map<TerraEngine::UUID, VulkanImage> textureCache;
@@ -394,6 +398,7 @@ struct VulkanContext::Impl {
 
 	VulkanImage defaultTexture;
 	VulkanImage defaultNormalTexture;
+	VulkanImage defaultMaterialMaskTexture;
 	std::vector<std::vector<VkCommandPool>> workerCommandPools; // Per-frame command pools for worker threads
 	std::vector<std::vector<std::vector<VkCommandBuffer>>> workerCommandBuffers; // Per-frame, per-worker secondary command buffers
 	// Track additional primary command buffers allocated when rendering multiple

@@ -3377,12 +3377,39 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 		vkDestroyFramebuffer(device, res.framebuffer, nullptr);
 		vkDestroySampler(device, res.sampler, nullptr);
 	}
+
+	if (offscreenColorFormat == VK_FORMAT_UNDEFINED) {
+		// Scene and game views are sampled by the editor after rendering, so the
+		// format must support both color attachment writes and shader sampling.
+		// The float format preserves smooth HDR/linear-light gradients; SRGB is
+		// the best 8-bit fallback because it allocates more precision to shadows.
+		const VkFormatFeatureFlags requiredFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+		const std::array<VkFormat, 3> candidates = {
+			VK_FORMAT_R16G16B16A16_SFLOAT,
+			VK_FORMAT_R8G8B8A8_SRGB,
+			VK_FORMAT_R8G8B8A8_UNORM
+		};
+
+		for (VkFormat candidate : candidates) {
+			VkFormatProperties properties{};
+			vkGetPhysicalDeviceFormatProperties(physicalDevice, candidate, &properties);
+			if ((properties.optimalTilingFeatures & requiredFeatures) == requiredFeatures) {
+				offscreenColorFormat = candidate;
+				break;
+			}
+		}
+
+		if (offscreenColorFormat == VK_FORMAT_UNDEFINED) {
+			TERRAENGINE_LOG(LogLevel::Warning, "No sampled color-attachment format reported for editor offscreen rendering; falling back to R8G8B8A8_UNORM.");
+			offscreenColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+		}
+	}
 	
 	if (offscreenRenderPass == VK_NULL_HANDLE) {
 		if (vrsFeatures.attachmentFragmentShadingRate) {
 			VkAttachmentDescription2 colorAttachment{};
 			colorAttachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
-			colorAttachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+			colorAttachment.format = offscreenColorFormat;
 			colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 			colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -3465,7 +3492,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 		} else {
 			// Create Render Pass using standard RenderPass API (max compatibility)
 			VkAttachmentDescription colorAttachment{};
-			colorAttachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+			colorAttachment.format = offscreenColorFormat;
 			colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 			colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -3541,7 +3568,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 	imageInfo.extent.depth = 1;
 	imageInfo.mipLevels = 1;
 	imageInfo.arrayLayers = 1;
-	imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+	imageInfo.format = offscreenColorFormat;
 	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -3555,7 +3582,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 	vmaSetAllocationName(allocator, res.allocation, "Offscreen Render Target Image");
 
 	// Create View
-	res.view = CreateImageView(res.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+	res.view = CreateImageView(res.image, offscreenColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
 
 	// Create Framebuffer
 	std::vector<VkImageView> fbAttachments = {
@@ -3694,7 +3721,7 @@ void VulkanContext::Impl::ClearResources() {
 
 	textureIndexMap.clear();
 	freeTextureIndices.clear();
-	nextTextureIndex = 2; // Index 0 is Default White, Index 1 is Default Normal
+	nextTextureIndex = 3; // Slots 0-2 are reserved for white, flat-normal, and material-mask defaults.
 
     // Reset shadow texture indices so they get reallocated on reopen
     directionalShadowTextureIndex = 0;
@@ -3709,6 +3736,9 @@ void VulkanContext::Impl::ClearResources() {
 	}
 	if (defaultNormalTexture.view != VK_NULL_HANDLE) {
 		UpdateGlobalTexture(1, defaultNormalTexture);
+	}
+	if (defaultMaterialMaskTexture.view != VK_NULL_HANDLE) {
+		UpdateGlobalTexture(2, defaultMaterialMaskTexture);
 	}
 
 	materialIndexMap.clear();

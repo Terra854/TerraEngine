@@ -1,6 +1,7 @@
 #include "Resource/ResourceManager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <chrono>
 
@@ -289,10 +290,25 @@ namespace
 
 		return texture;
 	}
+
+	bool IsCompiledTexturePath(const std::filesystem::path& path)
+	{
+		std::string extension = path.extension().generic_string();
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+		return extension == ".tetf";
+	}
 }
 
 TerraEngine::UUID ResourceManager::LoadTexture(const std::filesystem::path& path)
 {
+	if (!IsCompiledTexturePath(path))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping source texture load until compiled TETF is available: " << path);
+		return TerraEngine::EMPTY_UUID;
+	}
+
 	return LoadOrGetCached<Texture>(path, textureCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadTextureFile(*this, resolvedPath);
 	});
@@ -300,6 +316,12 @@ TerraEngine::UUID ResourceManager::LoadTexture(const std::filesystem::path& path
 
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadTextureAsync(const std::filesystem::path& path)
 {
+	if (!IsCompiledTexturePath(path))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping async source texture load until compiled TETF is available: " << path);
+		return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
+
 	return LoadOrSchedule<Texture>(path, textureCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadTextureFile(*this, resolvedPath);
 	});
@@ -310,25 +332,29 @@ std::shared_future<void> ResourceManager::ReloadTexture(const TerraEngine::UUID&
 	std::string key;
 	{
 		std::shared_lock lock(textureCache.mutex);
-		for (const auto& [path, uuid] : textureCache.pathToId)
+		if (const auto pathIt = textureCache.idToPath.find(id); pathIt != textureCache.idToPath.end())
 		{
-			if (uuid == id)
-			{
-				key = path;
-				break;
-			}
+			key = pathIt->second;
 		}
 	}
 
 	if (key.empty())
 	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Cannot reload texture: UUID " << ToHexString(id) << " not found in cache path map.");
+		TERRAENGINE_LOG(LogLevel::Debug, "Cannot reload texture yet: UUID " << ToHexString(id) << " has no compiled TETF path registered.");
 		std::promise<void> p;
 		p.set_value();
 		return p.get_future().share();
 	}
 
 	const std::filesystem::path resolvedPath(key);
+	if (!IsCompiledTexturePath(resolvedPath))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping texture reload from non-TETF path: " << resolvedPath);
+		std::promise<void> p;
+		p.set_value();
+		return p.get_future().share();
+	}
+
 	TERRAENGINE_LOG(LogLevel::Debug, "Reloading texture from " << resolvedPath);
 	
 	auto task = threadPool.createTask([this, key, resolvedPath, id]() {

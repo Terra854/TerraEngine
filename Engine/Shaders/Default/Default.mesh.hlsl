@@ -96,6 +96,26 @@ float4 DecodeOct32Tangent(uint packedValue)
 	return float4(DecodeOct32Normal(packedValue), 1.0);
 }
 
+float3 TransformDirection(float3 localDirection)
+{
+	return normalize(mul((float3x3)SceneUniforms.model, localDirection));
+}
+
+float3 TransformNormal(float3 localNormal)
+{
+	const float3 worldAxisX = mul((float3x3)SceneUniforms.model, float3(1.0f, 0.0f, 0.0f));
+	const float3 worldAxisY = mul((float3x3)SceneUniforms.model, float3(0.0f, 1.0f, 0.0f));
+	const float3 worldAxisZ = mul((float3x3)SceneUniforms.model, float3(0.0f, 0.0f, 1.0f));
+
+	// Normals use inverse scale while positions and tangents use forward scale.
+	// This keeps lighting correct when an object has non-uniform scale without
+	// spending push-constant space on a separate normal matrix.
+	const float3 normalAxisX = worldAxisX / max(dot(worldAxisX, worldAxisX), 1e-8f);
+	const float3 normalAxisY = worldAxisY / max(dot(worldAxisY, worldAxisY), 1e-8f);
+	const float3 normalAxisZ = worldAxisZ / max(dot(worldAxisZ, worldAxisZ), 1e-8f);
+	return normalize(localNormal.x * normalAxisX + localNormal.y * normalAxisY + localNormal.z * normalAxisZ);
+}
+
 uint LoadPrimitiveIndex(uint primitiveElementIndex)
 {
 	const uint alignedByteOffset = primitiveElementIndex & ~3u;
@@ -179,8 +199,8 @@ void EmitMeshlet(
 		outVertex.position = mul(SceneUniforms.viewProj, worldPosition);
 		outVertex.uv = uv;
 		outVertex.worldPosition = worldPosition.xyz;
-		outVertex.normal = normalize(mul((float3x3)SceneUniforms.model, normal));
-		outVertex.tangent = float4(normalize(mul((float3x3)SceneUniforms.model, tangent)), tangentW);
+		outVertex.normal = TransformNormal(normal);
+		outVertex.tangent = float4(TransformDirection(tangent), tangentW);
 		outputVertices[vertexIndex] = outVertex;
 	}
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstring>
 #include <limits>
 
@@ -107,6 +108,15 @@ namespace
 		// Values outside [-1, 1] are treated by the task shader as "disabled".
 		bounds.coneCutoff = 2.0f;
 		bounds.coneApexOffset = 0.0f;
+	}
+
+	bool IsCompiledMeshPath(const std::filesystem::path& path)
+	{
+		std::string extension = path.extension().generic_string();
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+		return extension == ".temf";
 	}
 
 	// Parse a TEMF mesh file from disk and populate spans into the payload.
@@ -551,6 +561,12 @@ namespace
 
 TerraEngine::UUID ResourceManager::LoadMesh(const std::filesystem::path& path)
 {
+	if (!IsCompiledMeshPath(path))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping source mesh load until compiled TEMF is available: " << path);
+		return TerraEngine::EMPTY_UUID;
+	}
+
 	return LoadOrGetCached<Mesh>(path, meshCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadMeshFile(*this, resolvedPath);
 	});
@@ -558,6 +574,12 @@ TerraEngine::UUID ResourceManager::LoadMesh(const std::filesystem::path& path)
 
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadMeshAsync(const std::filesystem::path& path)
 {
+	if (!IsCompiledMeshPath(path))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping async source mesh load until compiled TEMF is available: " << path);
+		return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
+
 	return LoadOrSchedule<Mesh>(path, meshCache, [this](const std::filesystem::path& resolvedPath) {
 		return LoadMeshFile(*this, resolvedPath);
 	});
@@ -568,23 +590,25 @@ void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 	std::string key;
 	{
 		std::shared_lock lock(meshCache.mutex);
-		for (const auto& [path, uuid] : meshCache.pathToId)
+		if (const auto pathIt = meshCache.idToPath.find(id); pathIt != meshCache.idToPath.end())
 		{
-			if (uuid == id)
-			{
-				key = path;
-				break;
-			}
+			key = pathIt->second;
 		}
 	}
 
 	if (key.empty())
 	{
-		TERRAENGINE_LOG(LogLevel::Warning, "Cannot reload mesh: UUID " << ToHexString(id) << " not found in cache path map.");
+		TERRAENGINE_LOG(LogLevel::Debug, "Cannot reload mesh yet: UUID " << ToHexString(id) << " has no compiled TEMF path registered.");
 		return;
 	}
 
 	const std::filesystem::path resolvedPath(key);
+	if (!IsCompiledMeshPath(resolvedPath))
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, "Skipping mesh reload from non-TEMF path: " << resolvedPath);
+		return;
+	}
+
 	TERRAENGINE_LOG(LogLevel::Debug, "Reloading mesh from " << resolvedPath);
 	auto mesh = LoadMeshFile(*this, resolvedPath);
 	if (mesh)

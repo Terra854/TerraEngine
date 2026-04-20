@@ -192,6 +192,57 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 		uint32_t idx = AllocateTextureIndex(); // Should be 1
 		UpdateGlobalTexture(idx, defaultNormalTexture);
 	}
+
+	// 3. Create Default Material Mask Texture (Index 2)
+	{
+		// Mask channels follow the fragment shader convention:
+		// R = occlusion, G = roughness, B = metallic, A = unused. A missing
+		// mask should describe a fully visible, rough, non-metal surface so
+		// untextured primitives receive ordinary diffuse lighting.
+		uint32_t maskPixel = 0xFF00FFFF; // (255, 255, 0, 255)
+		VkDeviceSize imageSize = 4;
+		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Default Material Mask Staging Buffer");
+		void* data;
+		vmaMapMemory(allocator, stagingBuffer.allocation, &data);
+		memcpy(data, &maskPixel, 4);
+		vmaUnmapMemory(allocator, stagingBuffer.allocation);
+
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent = {1, 1, 1};
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+		VmaAllocationCreateInfo allocInfo = {};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		vmaCreateImage(allocator, &imageInfo, &allocInfo, &defaultMaterialMaskTexture.image, &defaultMaterialMaskTexture.allocation, nullptr);
+		vmaSetAllocationName(allocator, defaultMaterialMaskTexture.allocation, "Default Material Mask Texture");
+
+		TransitionImageLayout(defaultMaterialMaskTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		CopyBufferToImage(stagingBuffer.buffer, defaultMaterialMaskTexture.image, 1, 1);
+		TransitionImageLayout(defaultMaterialMaskTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+		defaultMaterialMaskTexture.view = CreateImageView(defaultMaterialMaskTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT);
+
+		VkSamplerCreateInfo samplerInfo{};
+		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerInfo.magFilter = VK_FILTER_LINEAR;
+		samplerInfo.minFilter = VK_FILTER_LINEAR;
+		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		vkCreateSampler(device, &samplerInfo, nullptr, &defaultMaterialMaskTexture.sampler);
+
+		uint32_t idx = AllocateTextureIndex(); // Should be 2
+		UpdateGlobalTexture(idx, defaultMaterialMaskTexture);
+	}
 }
 
 VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* name) {
@@ -706,11 +757,12 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	data.Flags = material->header.flags;
 	data.UVTransform = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f); // Default: Scale 1, Offset 0
 
-	// Initialize indices: 0 is White, 1 is Flat Normal
+	// Initialize texture slots to renderer-owned fallbacks:
+	// 0 = white base color, 1 = flat normal, 2 = non-metal rough material mask.
 	data.BaseColorTextureIndex = 0;
 	data.NormalTextureIndex = 1;
-	data.MaskTextureIndex = 1;
-	data.OcclusionTextureIndex = 1;
+	data.MaskTextureIndex = 2;
+	data.OcclusionTextureIndex = 2;
 	data.EmissiveTextureIndex = 0;
 
 	for (uint32_t i = 0; i < material->header.textureCount; ++i) {
