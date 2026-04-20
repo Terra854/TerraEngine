@@ -753,20 +753,10 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 
     if (!IsValid(var)) return;
 
-    // Static buffers track interaction state across multiple frames while a 
-    // widget is being manipulated.
-    static ReflectionVariant oldValue;
-    static bool isEditing = false;
-    static std::string editingProp;
-    static entt::entity editingEntity = entt::null;
-
     // Snapshot the initial value when the user first interacts with a control.
-    auto startEditing = [&]() {
+    auto startEditing = [&](const ReflectionVariant& initialValue) {
         if (ImGui::IsItemActivated()) {
-            oldValue = access.getter(obj, name);
-            isEditing = true;
-            editingProp = name;
-            editingEntity = obj.EntityId();
+            m_PreEditValue = initialValue;
         }
     };
 
@@ -775,8 +765,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
     auto endEditing = [&]() {
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             ReflectionVariant newVal = access.getter(obj, name);
-            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldValue, newVal));
-            isEditing = false;
+            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, m_PreEditValue, newVal));
         }
     };
 
@@ -812,7 +801,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
             }
 			access.setter(obj, name, val);
 		}
-        startEditing();
+        startEditing(var);
         endEditing();
 		UpdateInspectorDragState();
 	}
@@ -822,7 +811,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		if (ImGui::DragInt(("##" + name).c_str(), &val)) {
 			access.setter(obj, name, val);
 		}
-        startEditing();
+        startEditing(var);
         endEditing();
 		UpdateInspectorDragState();
 	}
@@ -834,7 +823,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 			const std::uint32_t clampedValue = static_cast<std::uint32_t>(std::max(0, signedValue));
 			access.setter(obj, name, clampedValue);
 		}
-		startEditing();
+		startEditing(var);
 		endEditing();
 		UpdateInspectorDragState();
 	}
@@ -857,7 +846,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		if (ImGui::InputText(("##" + name).c_str(), buffer, sizeof(buffer))) {
 			access.setter(obj, name, std::string(buffer));
 		}
-        startEditing();
+        startEditing(var);
         endEditing();
 
 		if (ImGui::BeginDragDropTarget()) {
@@ -886,7 +875,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		if (ImGui::DragFloat3(("##" + name).c_str(), &val.x, 0.1f)) {
 			access.setter(obj, name, val);
 		}
-        startEditing();
+        startEditing(var);
         endEditing();
 		UpdateInspectorDragState();
 	}
@@ -898,7 +887,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 			glm::quat newQ = glm::quat(glm::radians(euler));
 			access.setter(obj, name, newQ);
 		}
-        startEditing();
+        startEditing(var);
         endEditing();
 		UpdateInspectorDragState();
 	}
@@ -1122,7 +1111,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 				return BuildDefaultScriptFieldJson(rootDescriptor);
 			};
 
-			auto commitRootValue = [&](const ScriptFieldDescriptor& rootDescriptor, const nlohmann::json& nextRootValue) -> bool {
+			auto commitRootValue = [&](const ScriptFieldDescriptor& rootDescriptor, const nlohmann::json& nextRootValue, bool pushUndoImmediately) -> bool {
 				if (playMode) {
 					std::string liveWriteError;
 					if (!ScriptingSystem::Instance().WriteLiveBindingValue(static_cast<uint32_t>(obj.EntityId()), binding, rootDescriptor.fieldPath, nextRootValue, &liveWriteError)) {
@@ -1149,7 +1138,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 				storedValue.diagnosticMessage.clear();
 				scriptComponent->SynchronizeStorageFromBindings();
 				const std::string newJson = scriptComponent->GetBindingsJson();
-				if (oldJson != newJson) {
+				if (pushUndoImmediately && oldJson != newJson) {
 					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
 				}
 
@@ -1208,7 +1197,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 								}
 
 								collectionTarget->push_back(descriptor.children.empty() ? nullptr : BuildDefaultScriptFieldJson(descriptor.children.front()));
-								commitRootValue(rootDescriptor, nextRootValue);
+								commitRootValue(rootDescriptor, nextRootValue, true);
 							}
 						}
 					}
@@ -1224,7 +1213,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 										nlohmann::json* collectionTarget = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true);
 										if (collectionTarget != nullptr && collectionTarget->is_array() && elementIndex < collectionTarget->size()) {
 											collectionTarget->erase(collectionTarget->begin() + static_cast<nlohmann::json::difference_type>(elementIndex));
-											commitRootValue(rootDescriptor, nextRootValue);
+											commitRootValue(rootDescriptor, nextRootValue, true);
 										}
 									}
 									ImGui::SameLine();
@@ -1233,7 +1222,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 										nlohmann::json* collectionTarget = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true);
 										if (collectionTarget != nullptr && collectionTarget->is_array()) {
 											std::swap((*collectionTarget)[elementIndex], (*collectionTarget)[elementIndex - 1]);
-											commitRootValue(rootDescriptor, nextRootValue);
+											commitRootValue(rootDescriptor, nextRootValue, true);
 										}
 									}
 									ImGui::SameLine();
@@ -1242,7 +1231,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 										nlohmann::json* collectionTarget = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true);
 										if (collectionTarget != nullptr && collectionTarget->is_array()) {
 											std::swap((*collectionTarget)[elementIndex], (*collectionTarget)[elementIndex + 1]);
-											commitRootValue(rootDescriptor, nextRootValue);
+											commitRootValue(rootDescriptor, nextRootValue, true);
 										}
 									}
 									ImGui::SameLine();
@@ -1267,13 +1256,28 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 					return;
 				}
 
+                auto startEditing = [&]() {
+                    if (ImGui::IsItemActivated()) {
+                        m_PreEditScriptJson = scriptComponent->GetBindingsJson();
+                    }
+                };
+
+                auto endEditing = [&]() {
+                    if (ImGui::IsItemDeactivatedAfterEdit()) {
+                        const std::string newJson = scriptComponent->GetBindingsJson();
+                        if (m_PreEditScriptJson != newJson) {
+                            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", m_PreEditScriptJson, newJson));
+                        }
+                    }
+                };
+
 				if (descriptor.valueKind == "Bool") {
 					bool editedValue = currentValue.is_boolean() ? currentValue.get<bool>() : false;
 					if (ImGui::Checkbox(descriptor.displayName.c_str(), &editedValue) && editable) {
 						nlohmann::json nextRootValue = currentRootValue;
 						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
 							*targetValue = editedValue;
-							commitRootValue(rootDescriptor, nextRootValue);
+							commitRootValue(rootDescriptor, nextRootValue, true);
 						}
 					}
 				} else if (descriptor.valueKind == "Int") {
@@ -1285,9 +1289,11 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 						nlohmann::json nextRootValue = currentRootValue;
 						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
 							*targetValue = editedValue;
-							commitRootValue(rootDescriptor, nextRootValue);
+							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
+                    startEditing();
+                    endEditing();
 					UpdateInspectorDragState();
 				} else if (descriptor.valueKind == "Float") {
 					float editedValue = currentValue.is_number() ? currentValue.get<float>() : 0.0f;
@@ -1298,9 +1304,11 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 						nlohmann::json nextRootValue = currentRootValue;
 						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
 							*targetValue = editedValue;
-							commitRootValue(rootDescriptor, nextRootValue);
+							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
+                    startEditing();
+                    endEditing();
 					UpdateInspectorDragState();
 				} else if (descriptor.valueKind == "String") {
 					std::string editedValue = currentValue.is_string() ? currentValue.get<std::string>() : std::string{};
@@ -1311,9 +1319,11 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 						nlohmann::json nextRootValue = currentRootValue;
 						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
 							*targetValue = std::string(textBuffer);
-							commitRootValue(rootDescriptor, nextRootValue);
+							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
+                    startEditing();
+                    endEditing();
 				} else if (descriptor.valueKind == "MeshAssetReference"
 					|| descriptor.valueKind == "MaterialAssetReference"
 					|| descriptor.valueKind == "TextureAssetReference"
@@ -1326,16 +1336,18 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 						nlohmann::json nextRootValue = currentRootValue;
 						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
 							*targetValue = std::string(textBuffer);
-							commitRootValue(rootDescriptor, nextRootValue);
+							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
+                    startEditing();
+                    endEditing();
 
 					if (ImGui::BeginPopupContextItem()) {
 						if (ImGui::MenuItem("Clear") && editable) {
 							nlohmann::json nextRootValue = currentRootValue;
 							if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
 								*targetValue = std::string{};
-								commitRootValue(rootDescriptor, nextRootValue);
+								commitRootValue(rootDescriptor, nextRootValue, true);
 							}
 						}
 						ImGui::EndPopup();
@@ -1356,7 +1368,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 									nlohmann::json nextRootValue = currentRootValue;
 									if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
 										*targetValue = assetReference;
-										commitRootValue(rootDescriptor, nextRootValue);
+										commitRootValue(rootDescriptor, nextRootValue, true);
 									}
 								}
 							}
@@ -1381,7 +1393,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 						nlohmann::json nextRootValue = currentRootValue;
 						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
 							*targetValue = descriptor.enumOptions[static_cast<std::size_t>(selectedIndex)];
-							commitRootValue(rootDescriptor, nextRootValue);
+							commitRootValue(rootDescriptor, nextRootValue, true);
 						}
 					}
 				} else if (descriptor.valueKind == "Vector2" || descriptor.valueKind == "Vector3" || descriptor.valueKind == "Vector4" || descriptor.valueKind == "Quaternion") {
@@ -1406,9 +1418,11 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 								nextVector.push_back(components[componentIndex]);
 							}
 							*targetValue = std::move(nextVector);
-							commitRootValue(rootDescriptor, nextRootValue);
+							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
+                    startEditing();
+                    endEditing();
 					UpdateInspectorDragState();
 				} else if (descriptor.valueKind == "EntityReference") {
 					int entityId = currentValue.is_number_integer() ? currentValue.get<int>() : 0;
@@ -1416,9 +1430,11 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 						nlohmann::json nextRootValue = currentRootValue;
 						if (nlohmann::json* targetValue = ResolveScriptJsonPath(nextRootValue, rootDescriptor.fieldPath, descriptor.fieldPath, true)) {
 							*targetValue = entityId;
-							commitRootValue(rootDescriptor, nextRootValue);
+							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
+                    startEditing();
+                    endEditing();
 					UpdateInspectorDragState();
 				} else {
 					std::string readOnlyValue = currentValue.is_discarded() ? "None" : currentValue.dump();
@@ -1590,9 +1606,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
         widgetFunc();
     };
 
-	// Keep undo/redo granular by committing only fields that changed through
-	// this custom inspector layout.
-	auto setFloatPropertyWithUndo = [&](const char* propertyName, float newValue) {
+	// Keeping undo/redo efficient by updating live values during interaction
+	// and only committing the final state to the undo stack on deactivation.
+	auto setFloatProperty = [&](const char* propertyName, float newValue) {
 		ReflectionVariant oldVariant = access.getter(obj, propertyName);
 		if (!IsValid(oldVariant) || !IsMetaValueType<float>(oldVariant))
 		{
@@ -1606,11 +1622,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 		}
 
 		access.setter(obj, propertyName, newValue);
-		ReflectionVariant nextVariant = access.getter(obj, propertyName);
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
-	auto setBoolPropertyWithUndo = [&](const char* propertyName, bool newValue) {
+	auto setBoolProperty = [&](const char* propertyName, bool newValue) {
 		ReflectionVariant oldVariant = access.getter(obj, propertyName);
 		if (!IsValid(oldVariant) || !IsMetaValueType<bool>(oldVariant))
 		{
@@ -1624,11 +1638,13 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 		}
 
 		access.setter(obj, propertyName, newValue);
-		ReflectionVariant nextVariant = access.getter(obj, propertyName);
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
+        
+        // Checkboxes are instantaneous, push immediately
+        ReflectionVariant nextVariant = access.getter(obj, propertyName);
+        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
-	auto setUintPropertyWithUndo = [&](const char* propertyName, std::uint32_t newValue) {
+	auto setUintProperty = [&](const char* propertyName, std::uint32_t newValue) {
 		ReflectionVariant oldVariant = access.getter(obj, propertyName);
 		if (!IsValid(oldVariant) || !IsMetaValueType<std::uint32_t>(oldVariant))
 		{
@@ -1642,11 +1658,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 		}
 
 		access.setter(obj, propertyName, newValue);
-		ReflectionVariant nextVariant = access.getter(obj, propertyName);
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
-	auto setVec3PropertyWithUndo = [&](const char* propertyName, const glm::vec3& newValue) {
+	auto setVec3Property = [&](const char* propertyName, const glm::vec3& newValue) {
 		ReflectionVariant oldVariant = access.getter(obj, propertyName);
 		if (!IsValid(oldVariant) || !IsMetaValueType<glm::vec3>(oldVariant))
 		{
@@ -1660,9 +1674,20 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 		}
 
 		access.setter(obj, propertyName, newValue);
-		ReflectionVariant nextVariant = access.getter(obj, propertyName);
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
+
+    auto startEditing = [&](const char* propertyName) {
+        if (ImGui::IsItemActivated()) {
+            m_PreEditValue = access.getter(obj, propertyName);
+        }
+    };
+
+    auto endEditing = [&](const char* propertyName) {
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            ReflectionVariant newVal = access.getter(obj, propertyName);
+            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, m_PreEditValue, newVal));
+        }
+    };
 
 	constexpr std::uint32_t kMaxAuthorableType = static_cast<std::uint32_t>(LightType::Area);
 	std::uint32_t encodedType = static_cast<std::uint32_t>(LightType::Point);
@@ -1702,7 +1727,11 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                 {
                     typeIndex = std::clamp(typeIndex, 0, static_cast<int>(kMaxAuthorableType));
                     effectiveType = static_cast<std::uint32_t>(typeIndex);
-                    setUintPropertyWithUndo("type", effectiveType);
+                    
+                    ReflectionVariant oldV = access.getter(obj, "type");
+                    setUintProperty("type", effectiveType);
+                    ReflectionVariant nextV = access.getter(obj, "type");
+                    UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "type", oldV, nextV));
                 }
             });
 
@@ -1717,7 +1746,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             drawLabeledWidget("Appearance", [&]() {
                 if (ImGui::Combo("##Appearance", &appIndex, appearanceTypes, IM_ARRAYSIZE(appearanceTypes)))
                 {
-                    setUintPropertyWithUndo("appearance", static_cast<std::uint32_t>(appIndex));
+                    ReflectionVariant oldV = access.getter(obj, "appearance");
+                    setUintProperty("appearance", static_cast<std::uint32_t>(appIndex));
+                    ReflectionVariant nextV = access.getter(obj, "appearance");
+                    UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "appearance", oldV, nextV));
                 }
             });
 
@@ -1729,8 +1761,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             drawLabeledWidget(currentAppearance == 0u ? "Color" : "Filter", [&]() {
                 if (ImGui::ColorEdit3("##Color", &lightColor.x))
                 {
-                    setVec3PropertyWithUndo("color", lightColor);
+                    setVec3Property("color", lightColor);
                 }
+                startEditing("color");
+                endEditing("color");
             });
 
             if (currentAppearance == 1u)
@@ -1743,8 +1777,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                 drawLabeledWidget("Temperature", [&]() {
                     if (ImGui::SliderFloat("##Temperature", &temperature, 1000.0f, 20000.0f, "%.0f K"))
                     {
-                        setFloatPropertyWithUndo("temperature", temperature);
+                        setFloatProperty("temperature", temperature);
                     }
+                    startEditing("temperature");
+                    endEditing("temperature");
                 });
             }
 
@@ -1773,8 +1809,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             drawLabeledWidget("Intensity", [&]() {
                 if (ImGui::DragFloat("##Intensity", &intensity, 0.05f, 0.0f, 1000000.0f, intensityFormat))
                 {
-                    setFloatPropertyWithUndo("intensity", std::max(0.0f, intensity));
+                    setFloatProperty("intensity", std::max(0.0f, intensity));
                 }
+                startEditing("intensity");
+                endEditing("intensity");
             });
             UpdateInspectorDragState();
 
@@ -1785,17 +1823,26 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                 drawLabeledWidget("Unit", [&]() {
                     if (ImGui::Combo("##Unit", &unitIndex, lightUnits, IM_ARRAYSIZE(lightUnits)))
                     {
-                        setUintPropertyWithUndo("unit", static_cast<std::uint32_t>(unitIndex));
+                        ReflectionVariant oldUnit = access.getter(obj, "unit");
+                        ReflectionVariant oldInt = access.getter(obj, "intensity");
+
+                        setUintProperty("unit", static_cast<std::uint32_t>(unitIndex));
 
                         // Convert intensity value to maintain perceived brightness
                         if (currentUnit == 0u && unitIndex == 1) // Lumens -> Lux
                         {
-                            setFloatPropertyWithUndo("intensity", std::max(0.0f, intensity / (4.0f * glm::pi<float>())));
+                            setFloatProperty("intensity", std::max(0.0f, intensity / (4.0f * glm::pi<float>())));
                         }
                         else if (currentUnit == 1u && unitIndex == 0) // Lux -> Lumens
                         {
-                            setFloatPropertyWithUndo("intensity", std::max(0.0f, intensity * (4.0f * glm::pi<float>())));
+                            setFloatProperty("intensity", std::max(0.0f, intensity * (4.0f * glm::pi<float>())));
                         }
+
+                        ReflectionVariant newUnit = access.getter(obj, "unit");
+                        ReflectionVariant newInt = access.getter(obj, "intensity");
+                        
+                        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "unit", oldUnit, newUnit));
+                        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "intensity", oldInt, newInt));
                     }
                 });
             }
@@ -1808,8 +1855,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             drawLabeledWidget("Indirect", [&]() {
                 if (ImGui::DragFloat("##Indirect", &indirectMultiplier, 0.05f, 0.0f, 10.0f))
                 {
-                    setFloatPropertyWithUndo("indirectMultiplier", std::max(0.0f, indirectMultiplier));
+                    setFloatProperty("indirectMultiplier", std::max(0.0f, indirectMultiplier));
                 }
+                startEditing("indirectMultiplier");
+                endEditing("indirectMultiplier");
             });
             UpdateInspectorDragState();
 
@@ -1833,8 +1882,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                 drawLabeledWidget("Range", [&]() {
                     if (ImGui::DragFloat("##Range", &range, 0.1f, 0.1f, 10000.0f, "%.2f m"))
                     {
-                        setFloatPropertyWithUndo("range", std::max(0.1f, range));
+                        setFloatProperty("range", std::max(0.1f, range));
                     }
+                    startEditing("range");
+                    endEditing("range");
                 });
                 UpdateInspectorDragState();
             }
@@ -1856,9 +1907,14 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                     if (ImGui::DragFloat("##InnerAngle", &innerDegrees, 0.1f, 0.0f, 89.0f, "%.1f deg")) {
                         innerDegrees = std::clamp(innerDegrees, 0.0f, 89.0f);
                         outerDegrees = std::clamp(outerDegrees, innerDegrees + 0.1f, 89.9f);
-                        setFloatPropertyWithUndo("innerConeAngle", glm::radians(innerDegrees));
-                        setFloatPropertyWithUndo("outerConeAngle", glm::radians(outerDegrees));
+                        setFloatProperty("innerConeAngle", glm::radians(innerDegrees));
+                        setFloatProperty("outerConeAngle", glm::radians(outerDegrees));
                     }
+                    startEditing("innerConeAngle");
+                    endEditing("innerConeAngle");
+                    // Outer angle also changes if inner was pushed past it
+                    startEditing("outerConeAngle");
+                    endEditing("outerConeAngle");
                 });
                 UpdateInspectorDragState();
 
@@ -1866,9 +1922,13 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                     if (ImGui::DragFloat("##OuterAngle", &outerDegrees, 0.1f, 0.1f, 89.9f, "%.1f deg")) {
                         innerDegrees = std::clamp(innerDegrees, 0.0f, 89.0f);
                         outerDegrees = std::clamp(outerDegrees, innerDegrees + 0.1f, 89.9f);
-                        setFloatPropertyWithUndo("innerConeAngle", glm::radians(innerDegrees));
-                        setFloatPropertyWithUndo("outerConeAngle", glm::radians(outerDegrees));
+                        setFloatProperty("innerConeAngle", glm::radians(innerDegrees));
+                        setFloatProperty("outerConeAngle", glm::radians(outerDegrees));
                     }
+                    startEditing("innerConeAngle");
+                    endEditing("innerConeAngle");
+                    startEditing("outerConeAngle");
+                    endEditing("outerConeAngle");
                 });
                 UpdateInspectorDragState();
             }
@@ -1887,12 +1947,16 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                 }
 
                 drawLabeledWidget("Width", [&]() {
-                    if (ImGui::DragFloat("##Width", &width, 0.1f, 0.01f, 1000.0f, "%.2f m")) setFloatPropertyWithUndo("width", std::max(0.01f, width));
+                    if (ImGui::DragFloat("##Width", &width, 0.1f, 0.01f, 1000.0f, "%.2f m")) setFloatProperty("width", std::max(0.01f, width));
+                    startEditing("width");
+                    endEditing("width");
                 });
                 UpdateInspectorDragState();
 
                 drawLabeledWidget("Height", [&]() {
-                    if (ImGui::DragFloat("##Height", &height, 0.1f, 0.01f, 1000.0f, "%.2f m")) setFloatPropertyWithUndo("height", std::max(0.01f, height));
+                    if (ImGui::DragFloat("##Height", &height, 0.1f, 0.01f, 1000.0f, "%.2f m")) setFloatProperty("height", std::max(0.01f, height));
+                    startEditing("height");
+                    endEditing("height");
                 });
                 UpdateInspectorDragState();
             }
@@ -1915,7 +1979,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             drawLabeledWidget("Realtime Shadows", [&]() {
                 if (ImGui::Checkbox("##RealtimeShadows", &castsShadows))
                 {
-                    setBoolPropertyWithUndo("castsShadows", castsShadows);
+                    setBoolProperty("castsShadows", castsShadows);
                 }
             });
 
@@ -1929,8 +1993,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                 drawLabeledWidget("Strength", [&]() {
                     if (ImGui::SliderFloat("##Strength", &shadowStrength, 0.0f, 1.0f))
                     {
-                        setFloatPropertyWithUndo("shadowStrength", std::clamp(shadowStrength, 0.0f, 1.0f));
+                        setFloatProperty("shadowStrength", std::clamp(shadowStrength, 0.0f, 1.0f));
                     }
+                    startEditing("shadowStrength");
+                    endEditing("shadowStrength");
                 });
 
                 float shadowBias = 0.005f;
@@ -1941,8 +2007,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
                 drawLabeledWidget("Bias", [&]() {
                     if (ImGui::DragFloat("##Bias", &shadowBias, 0.001f, 0.0f, 0.1f, "%.4f"))
                     {
-                        setFloatPropertyWithUndo("shadowBias", std::clamp(shadowBias, 0.0f, 0.1f));
+                        setFloatProperty("shadowBias", std::clamp(shadowBias, 0.0f, 0.1f));
                     }
+                    startEditing("shadowBias");
+                    endEditing("shadowBias");
                 });
                 UpdateInspectorDragState();
             }
@@ -1967,8 +2035,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			drawLabeledWidget("Priority", [&]() {
 				if (ImGui::DragFloat("##AuthoredPriority", &authoredPriority, 0.01f, 0.0f, 1000.0f))
 				{
-					setFloatPropertyWithUndo("authoredPriority", std::max(0.0f, authoredPriority));
+					setFloatProperty("authoredPriority", std::max(0.0f, authoredPriority));
 				}
+				startEditing("authoredPriority");
+				endEditing("authoredPriority");
 			});
 			UpdateInspectorDragState();
 
@@ -1980,8 +2050,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			drawLabeledWidget("Stability", [&]() {
 				if (ImGui::DragFloat("##StabilityPreference", &stabilityPreference, 0.01f, 0.0f, 1.0f))
 				{
-					setFloatPropertyWithUndo("stabilityPreference", std::clamp(stabilityPreference, 0.0f, 1.0f));
+					setFloatProperty("stabilityPreference", std::clamp(stabilityPreference, 0.0f, 1.0f));
 				}
+				startEditing("stabilityPreference");
+				endEditing("stabilityPreference");
 			});
 			UpdateInspectorDragState();
 
@@ -2008,7 +2080,7 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 		widgetFunc();
 	};
 
-	auto setStringPropertyWithUndo = [&](const char* propertyName, const std::string& newValue) {
+	auto setStringProperty = [&](const char* propertyName, const std::string& newValue) {
 		ReflectionVariant oldVariant = access.getter(obj, propertyName);
 		if (!IsValid(oldVariant) || !IsMetaValueType<std::string>(oldVariant))
 		{
@@ -2022,9 +2094,20 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 		}
 
 		access.setter(obj, propertyName, newValue);
-		ReflectionVariant nextVariant = access.getter(obj, propertyName);
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
+
+    auto startEditing = [&](const char* propertyName) {
+        if (ImGui::IsItemActivated()) {
+            m_PreEditValue = access.getter(obj, propertyName);
+        }
+    };
+
+    auto endEditing = [&](const char* propertyName) {
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            ReflectionVariant newVal = access.getter(obj, propertyName);
+            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, m_PreEditValue, newVal));
+        }
+    };
 
 	// The custom UIComponent inspector owns its own property table because the
 	// generic component path is bypassed for this specialized multi-asset UI.
@@ -2040,14 +2123,19 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 			markupBuffer[sizeof(markupBuffer) - 1] = '\0';
 			if (ImGui::InputText("##UIComponentSourceMarkup", markupBuffer, sizeof(markupBuffer)))
 			{
-				setStringPropertyWithUndo("sourceMarkup", markupBuffer);
+				setStringProperty("sourceMarkup", markupBuffer);
 			}
+            startEditing("sourceMarkup");
+            endEditing("sourceMarkup");
 
 			if (ImGui::BeginPopupContextItem())
 			{
 				if (ImGui::MenuItem("Clear"))
 				{
-					setStringPropertyWithUndo("sourceMarkup", "");
+					ReflectionVariant oldV = access.getter(obj, "sourceMarkup");
+					setStringProperty("sourceMarkup", "");
+					ReflectionVariant nextV = access.getter(obj, "sourceMarkup");
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "sourceMarkup", oldV, nextV));
 				}
 				ImGui::EndPopup();
 			}
@@ -2060,7 +2148,10 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 					const TerraEngine::UUID assetGuid = *static_cast<const TerraEngine::UUID*>(payload->Data);
 					if (const AssetMetadata* meta = AssetDatabase::Instance().FindAssetByGuid(assetGuid))
 					{
-						setStringPropertyWithUndo("sourceMarkup", meta->sourcePath.generic_string());
+						ReflectionVariant oldV = access.getter(obj, "sourceMarkup");
+						setStringProperty("sourceMarkup", meta->sourcePath.generic_string());
+						ReflectionVariant nextV = access.getter(obj, "sourceMarkup");
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "sourceMarkup", oldV, nextV));
 					}
 				}
 				ImGui::EndDragDropTarget();
@@ -2122,9 +2213,14 @@ void InspectorWindow::OnGui() {
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - staticWidth - ImGui::GetStyle().ItemSpacing.x);
             
             if (ImGui::InputText("##ObjectName", nameBuf, sizeof(nameBuf))) {
-                if (name != nameBuf) {
-                    UndoRedoSystem::Instance().PushCommand(std::make_unique<RenameObjectCommand>(obj.EntityId(), name, nameBuf));
-                    obj.setName(nameBuf);
+                obj.setName(nameBuf);
+            }
+            if (ImGui::IsItemActivated()) {
+                m_PreEditName = name;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                if (m_PreEditName != nameBuf) {
+                    UndoRedoSystem::Instance().PushCommand(std::make_unique<RenameObjectCommand>(obj.EntityId(), m_PreEditName, nameBuf));
                 }
             }
             

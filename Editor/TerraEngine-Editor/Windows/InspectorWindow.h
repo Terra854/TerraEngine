@@ -35,6 +35,10 @@ private:
     MainEditorSubsystem* m_Owner;
     std::map<entt::entity, std::vector<std::string>> m_PerObjectComponentOrders;
     bool m_InspectorValueDragging = false;
+    
+    TerraEngine::Reflection::Variant m_PreEditValue;
+    std::string m_PreEditName;
+    std::string m_PreEditScriptJson;
 
     std::filesystem::path m_LastInspectedAsset;
     std::vector<uint8_t> m_MaterialDataBuffer;
