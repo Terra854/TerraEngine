@@ -755,6 +755,10 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	data.AlphaMode = material->header.alphaMode;
 	data.ShadingModel = material->header.shadingModel;
 	data.Flags = material->header.flags;
+	// Shadow behavior is packed beside the ordinary material parameters so
+	// both the default shading pass and shadow-map pass can make the same
+	// opacity decision without guessing from alpha mode alone.
+	data.ShadowBehavior = static_cast<std::uint32_t>(material->shadowBehavior);
 	data.UVTransform = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f); // Default: Scale 1, Offset 0
 
 	// Initialize texture slots to renderer-owned fallbacks:
@@ -1360,6 +1364,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 		return;
 	}
 
+	const bool shadowPipeline = (renderPass == shadowRenderPass);
 	std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
 	bool hasMeshStage = false;
 	bool hasTaskStage = false;
@@ -1459,14 +1464,19 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	VkViewport viewport{};
 	viewport.x = 0.0f;
 	viewport.y = 0.0f;
-	viewport.width = (float)swapchainExtent.width;
-	viewport.height = (float)swapchainExtent.height;
+	// Graphics pipelines in this renderer use static viewport state. Shadow
+	// pipelines therefore need a viewport sized to the shadow atlas target at
+	// creation time; vkCmdSetViewport is only effective for dynamic pipelines.
+	viewport.width = shadowPipeline ? static_cast<float>(SHADOW_MAP_RESOLUTION) : static_cast<float>(swapchainExtent.width);
+	viewport.height = shadowPipeline ? static_cast<float>(SHADOW_MAP_RESOLUTION) : static_cast<float>(swapchainExtent.height);
 	viewport.minDepth = 0.0f;
 	viewport.maxDepth = 1.0f;
 
 	VkRect2D scissor{};
 	scissor.offset = {0, 0};
-	scissor.extent = swapchainExtent;
+	scissor.extent = shadowPipeline
+		? VkExtent2D{SHADOW_MAP_RESOLUTION, SHADOW_MAP_RESOLUTION}
+		: swapchainExtent;
 
 	VkPipelineViewportStateCreateInfo viewportState{};
 	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -1481,7 +1491,12 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	rasterizer.rasterizerDiscardEnable = VK_FALSE;
 	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
 	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = (materialFlags & DoubleSided) ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
+	// Shadow maps are visibility tests, not final shaded surfaces. Rendering
+	// both sides makes primitive winding and negative scale less likely to make
+	// a blocker disappear from the light's point of view.
+	rasterizer.cullMode = shadowPipeline
+		? VK_CULL_MODE_NONE
+		: ((materialFlags & DoubleSided) ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT);
 	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -1491,7 +1506,10 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
 	VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-	colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	// Shadow pipelines still keep a tiny fragment stage for driver-compatible
+	// depth rendering, but the color attachment is only present to satisfy the
+	// shared render-pass shape and does not need stored color output.
+	colorBlendAttachment.colorWriteMask = shadowPipeline ? 0u : (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
 	colorBlendAttachment.blendEnable = VK_FALSE;
 
 	VkPipelineColorBlendStateCreateInfo colorBlending{};
@@ -1608,7 +1626,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 }
 
 bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
-	std::array<VkDescriptorSetLayoutBinding, 19> bindings{};
+	std::array<VkDescriptorSetLayoutBinding, 22> bindings{};
 	// Textures
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1724,10 +1742,31 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	bindings[18].descriptorCount = 1;
 	bindings[18].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	bindings[18].pImmutableSamplers = nullptr;
+	// Screen-space ambient occlusion produced by GTAO and sampled by blur and material shading.
+	bindings[19].binding = 19;
+	bindings[19].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	bindings[19].descriptorCount = 1;
+	bindings[19].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[19].pImmutableSamplers = nullptr;
+	// Point-light shadows are sampled as cubemaps and cannot share the 2D
+	// bindless texture heap. Keep a small slot array that mirrors the CPU shadow
+	// resource assignment table.
+	bindings[20].binding = 20;
+	bindings[20].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	bindings[20].descriptorCount = MAX_SHADOW_RESOURCE_SLOTS;
+	bindings[20].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[20].pImmutableSamplers = nullptr;
+	// Previous-frame AO is sampled by the bilateral blur pass for temporal
+	// smoothing. It is a separate binding so the raw AO input can keep using 19.
+	bindings[21].binding = 21;
+	bindings[21].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	bindings[21].descriptorCount = 1;
+	bindings[21].stageFlags = VK_SHADER_STAGE_ALL;
+	bindings[21].pImmutableSamplers = nullptr;
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{};
 	bindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	std::array<VkDescriptorBindingFlags, 19> flags = {
+	std::array<VkDescriptorBindingFlags, 22> flags = {
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 0: Textures
 		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 1: Materials (updated mid-frame)
 		0, // 2
@@ -1746,7 +1785,10 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 15: VRS Color
 		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 16: Hi-Z Output
 		0, // 17: Light analysis output
-		0 // 18: Light analysis input
+		0, // 18: Light analysis input
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 19: Ambient occlusion texture
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 20: Point shadow cubemap array
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT // 21: AO temporal history
 	};
 	bindingFlags.bindingCount = static_cast<uint32_t>(flags.size());
 	bindingFlags.pBindingFlags = flags.data();
@@ -1767,7 +1809,7 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	poolSizes[0].descriptorCount = MAX_BINDLESS_TEXTURES * MAX_FRAMES_IN_FLIGHT;
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	poolSizes[1].descriptorCount = 4 * MAX_FRAMES_IN_FLIGHT; // Point shadow + Hi-Z + Depth + VRS Color
+	poolSizes[1].descriptorCount = (6 + MAX_SHADOW_RESOURCE_SLOTS) * MAX_FRAMES_IN_FLIGHT; // Point shadows + Hi-Z + Depth + VRS Color + AO + AO history
 	poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
 	poolSizes[2].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // Point shadow + Hi-Z
 	poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -2061,7 +2103,244 @@ void VulkanContext::Impl::CreateIndirectDrawResources() {
 	}
 }
 
-bool VulkanContext::Impl::EnsureShadowRenderResources() {
+void VulkanContext::Impl::DestroyEnvironmentLightingResources()
+{
+	auto DestroyImage = [&](VulkanImage& image) {
+		if (image.sampler != VK_NULL_HANDLE) {
+			vkDestroySampler(device, image.sampler, nullptr);
+		}
+		if (image.view != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, image.view, nullptr);
+		}
+		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+		}
+		image = {};
+	};
+
+	DestroyImage(environmentIrradianceTexture);
+	DestroyImage(prefilteredEnvironmentTexture);
+	DestroyImage(brdfIntegrationTexture);
+	environmentIrradianceTextureIndex = 0u;
+	prefilteredEnvironmentTextureIndex = 0u;
+	brdfIntegrationTextureIndex = 0u;
+}
+
+void VulkanContext::Impl::CreateEnvironmentLightingResources()
+{
+	if (environmentIrradianceTexture.view != VK_NULL_HANDLE
+		&& prefilteredEnvironmentTexture.view != VK_NULL_HANDLE
+		&& brdfIntegrationTexture.view != VK_NULL_HANDLE) {
+		return;
+	}
+
+	DestroyEnvironmentLightingResources();
+
+	auto CreateFloatTexture = [&](const std::vector<glm::vec4>& texels, uint32_t width, uint32_t height, const char* allocationName, VulkanImage& image) {
+		if (texels.empty() || width == 0u || height == 0u) {
+			return;
+		}
+
+		const VkDeviceSize uploadSize = static_cast<VkDeviceSize>(sizeof(glm::vec4) * texels.size());
+		VulkanBuffer stagingBuffer = CreateBuffer(uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Environment Lighting Staging Buffer");
+		void* mapped = nullptr;
+		if (vmaMapMemory(allocator, stagingBuffer.allocation, &mapped) == VK_SUCCESS) {
+			std::memcpy(mapped, texels.data(), static_cast<size_t>(uploadSize));
+			vmaUnmapMemory(allocator, stagingBuffer.allocation);
+		}
+
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent = { width, height, 1u };
+		imageInfo.mipLevels = 1u;
+		imageInfo.arrayLayers = 1u;
+		imageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
+			vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+			image = {};
+			return;
+		}
+		vmaSetAllocationName(allocator, image.allocation, allocationName);
+
+		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		CopyBufferToImage(stagingBuffer.buffer, image.image, width, height);
+		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+
+		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
+		if (image.view == VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+			image = {};
+			return;
+		}
+
+		VkSamplerCreateInfo samplerInfo{};
+		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerInfo.magFilter = VK_FILTER_LINEAR;
+		samplerInfo.minFilter = VK_FILTER_LINEAR;
+		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.minLod = 0.0f;
+		samplerInfo.maxLod = 1.0f;
+		vkCreateSampler(device, &samplerInfo, nullptr, &image.sampler);
+	};
+
+	// These deterministic fallback textures give the renderer real IBL
+	// descriptors before imported sky probes exist. The material shader can
+	// continue using its procedural fallback without risking unbound resources.
+	CreateFloatTexture({ glm::vec4(0.18f, 0.22f, 0.28f, 1.0f) }, 1u, 1u, "Fallback Environment Irradiance", environmentIrradianceTexture);
+	CreateFloatTexture({ glm::vec4(0.45f, 0.55f, 0.72f, 1.0f) }, 1u, 1u, "Fallback Prefiltered Environment", prefilteredEnvironmentTexture);
+
+	const uint32_t brdfSize = 64u;
+	std::vector<glm::vec4> brdfTexels(brdfSize * brdfSize);
+	for (uint32_t y = 0u; y < brdfSize; ++y) {
+		for (uint32_t x = 0u; x < brdfSize; ++x) {
+			const float roughness = (static_cast<float>(y) + 0.5f) / static_cast<float>(brdfSize);
+			const float nDotV = (static_cast<float>(x) + 0.5f) / static_cast<float>(brdfSize);
+			brdfTexels[y * brdfSize + x] = glm::vec4(1.0f - 0.35f * roughness, nDotV * (1.0f - roughness), 0.0f, 1.0f);
+		}
+	}
+	CreateFloatTexture(brdfTexels, brdfSize, brdfSize, "Fallback BRDF Integration LUT", brdfIntegrationTexture);
+
+	if (environmentIrradianceTexture.view != VK_NULL_HANDLE) {
+		environmentIrradianceTextureIndex = AllocateTextureIndex();
+		UpdateGlobalTexture(environmentIrradianceTextureIndex, environmentIrradianceTexture);
+	}
+	if (prefilteredEnvironmentTexture.view != VK_NULL_HANDLE) {
+		prefilteredEnvironmentTextureIndex = AllocateTextureIndex();
+		UpdateGlobalTexture(prefilteredEnvironmentTextureIndex, prefilteredEnvironmentTexture);
+	}
+	if (brdfIntegrationTexture.view != VK_NULL_HANDLE) {
+		brdfIntegrationTextureIndex = AllocateTextureIndex();
+		UpdateGlobalTexture(brdfIntegrationTextureIndex, brdfIntegrationTexture);
+	}
+}
+
+void VulkanContext::Impl::DestroyAmbientOcclusionResources()
+{
+	auto DestroyImage = [&](VulkanImage& image) {
+		if (image.sampler != VK_NULL_HANDLE) {
+			vkDestroySampler(device, image.sampler, nullptr);
+		}
+		if (image.view != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, image.view, nullptr);
+		}
+		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+		}
+		image = {};
+	};
+
+	DestroyImage(ambientOcclusionRaw);
+	DestroyImage(ambientOcclusionBlurred);
+	DestroyImage(ambientOcclusionHistory);
+	ambientOcclusionWidth = 0u;
+	ambientOcclusionHeight = 0u;
+	ambientOcclusionHistoryValid = false;
+}
+
+void VulkanContext::Impl::CreateAmbientOcclusionResources()
+{
+	const uint32_t width = std::max(swapchainExtent.width, 1u);
+	const uint32_t height = std::max(swapchainExtent.height, 1u);
+	if (ambientOcclusionRaw.image != VK_NULL_HANDLE
+		&& ambientOcclusionBlurred.image != VK_NULL_HANDLE
+		&& ambientOcclusionHistory.image != VK_NULL_HANDLE
+		&& ambientOcclusionWidth == width
+		&& ambientOcclusionHeight == height) {
+		return;
+	}
+
+	DestroyAmbientOcclusionResources();
+
+	auto CreateAoImage = [&](const char* allocationName, VulkanImage& image) {
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent = { width, height, 1u };
+		imageInfo.mipLevels = 1u;
+		imageInfo.arrayLayers = 1u;
+		imageInfo.format = AMBIENT_OCCLUSION_FORMAT;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
+			image = {};
+			return;
+		}
+		vmaSetAllocationName(allocator, image.allocation, allocationName);
+
+		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
+		if (image.view == VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+			image = {};
+			return;
+		}
+
+		// Newly created AO targets start readable so material shading has a
+		// valid white fallback until the first compute dispatch fills them.
+		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	};
+
+	CreateAoImage("GTAO Raw Occlusion", ambientOcclusionRaw);
+	CreateAoImage("GTAO Blurred Occlusion", ambientOcclusionBlurred);
+	CreateAoImage("GTAO History Occlusion", ambientOcclusionHistory);
+	ambientOcclusionWidth = (ambientOcclusionRaw.image != VK_NULL_HANDLE && ambientOcclusionBlurred.image != VK_NULL_HANDLE && ambientOcclusionHistory.image != VK_NULL_HANDLE) ? width : 0u;
+	ambientOcclusionHeight = (ambientOcclusionWidth > 0u) ? height : 0u;
+	ambientOcclusionHistoryValid = false;
+
+	if (ambientOcclusionBlurred.view == VK_NULL_HANDLE || ambientOcclusionHistory.view == VK_NULL_HANDLE) {
+		return;
+	}
+
+	VkDescriptorImageInfo aoInfo{};
+	aoInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	aoInfo.imageView = ambientOcclusionBlurred.view;
+	aoInfo.sampler = VK_NULL_HANDLE;
+
+	VkDescriptorImageInfo historyInfo{};
+	historyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	historyInfo.imageView = ambientOcclusionHistory.view;
+	historyInfo.sampler = VK_NULL_HANDLE;
+
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+		descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrites[0].dstSet = globalDescriptorSets[i];
+		descriptorWrites[0].dstBinding = 19;
+		descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		descriptorWrites[0].descriptorCount = 1;
+		descriptorWrites[0].pImageInfo = &aoInfo;
+
+		descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrites[1].dstSet = globalDescriptorSets[i];
+		descriptorWrites[1].dstBinding = 21;
+		descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		descriptorWrites[1].descriptorCount = 1;
+		descriptorWrites[1].pImageInfo = &historyInfo;
+		vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+	}
+}
+
+bool VulkanContext::Impl::EnsureShadowRenderResources(uint32_t requestedSlotCount) {
+	const uint32_t targetSlotCount = std::clamp(requestedSlotCount, 1u, MAX_SHADOW_RESOURCE_SLOTS);
+	vkDeviceWaitIdle(device);
 	// Rebuilding this block (for example after swapchain recreation) must tear
 	// down stale views/framebuffers before allocating replacement images.
 	auto DestroyFramebuffer = [&](VkFramebuffer& framebuffer) {
@@ -2070,23 +2349,35 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 			framebuffer = VK_NULL_HANDLE;
 		}
 	};
-	DestroyFramebuffer(directionalShadowFramebuffer);
-	DestroyFramebuffer(spotShadowFramebuffer);
-	DestroyFramebuffer(areaShadowFramebuffer);
-	for (VkFramebuffer& framebuffer : pointShadowFaceFramebuffers) {
+	for (VkFramebuffer& framebuffer : directionalShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
-
-	for (VkImageView& faceView : pointShadowDepthFaceViews) {
-		if (faceView != VK_NULL_HANDLE) {
-			vkDestroyImageView(device, faceView, nullptr);
-			faceView = VK_NULL_HANDLE;
+	for (VkFramebuffer& framebuffer : spotShadowFramebuffers) {
+		DestroyFramebuffer(framebuffer);
+	}
+	for (VkFramebuffer& framebuffer : areaShadowFramebuffers) {
+		DestroyFramebuffer(framebuffer);
+	}
+	for (std::array<VkFramebuffer, 6>& faceFramebuffers : pointShadowFaceFramebuffersBySlot) {
+		for (VkFramebuffer& framebuffer : faceFramebuffers) {
+			DestroyFramebuffer(framebuffer);
 		}
 	}
-	for (VkImageView& faceView : pointShadowColorFaceViews) {
-		if (faceView != VK_NULL_HANDLE) {
-			vkDestroyImageView(device, faceView, nullptr);
-			faceView = VK_NULL_HANDLE;
+
+	auto DestroyImageView = [&](VkImageView& imageView) {
+		if (imageView != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, imageView, nullptr);
+			imageView = VK_NULL_HANDLE;
+		}
+	};
+	for (std::array<VkImageView, 6>& faceViews : pointShadowDepthFaceViewsBySlot) {
+		for (VkImageView& faceView : faceViews) {
+			DestroyImageView(faceView);
+		}
+	}
+	for (std::array<VkImageView, 6>& faceViews : pointShadowColorFaceViewsBySlot) {
+		for (VkImageView& faceView : faceViews) {
+			DestroyImageView(faceView);
 		}
 	}
 
@@ -2106,14 +2397,31 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 		image.allocation = VK_NULL_HANDLE;
 	};
 
-	DestroyImage(directionalShadowDepth);
-	DestroyImage(directionalShadowColor);
-	DestroyImage(spotShadowDepth);
-	DestroyImage(spotShadowColor);
-	DestroyImage(areaShadowDepth);
-	DestroyImage(areaShadowColor);
-	DestroyImage(pointShadowCubeDepth);
-	DestroyImage(pointShadowCubeColor);
+	for (VulkanImage& image : directionalShadowDepths) {
+		DestroyImage(image);
+	}
+	for (VulkanImage& image : directionalShadowColors) {
+		DestroyImage(image);
+	}
+	for (VulkanImage& image : spotShadowDepths) {
+		DestroyImage(image);
+	}
+	for (VulkanImage& image : spotShadowColors) {
+		DestroyImage(image);
+	}
+	for (VulkanImage& image : areaShadowDepths) {
+		DestroyImage(image);
+	}
+	for (VulkanImage& image : areaShadowColors) {
+		DestroyImage(image);
+	}
+	for (VulkanImage& image : pointShadowCubeDepths) {
+		DestroyImage(image);
+	}
+	for (VulkanImage& image : pointShadowCubeColors) {
+		DestroyImage(image);
+	}
+	activeShadowResourceSlots = 0u;
 	DestroyImage(ltcAmplitudeTexture);
 	DestroyImage(ltcInverseTexture);
 
@@ -2261,46 +2569,48 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 		vkCreateSampler(device, &samplerInfo, nullptr, &image.sampler);
 	};
 
-	CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, directionalShadowColor, VK_IMAGE_VIEW_TYPE_2D);
-	CreateDepthAttachment2D(shadowWidth, shadowHeight, directionalShadowDepth);
-	CreateShadowSampler(directionalShadowDepth, false);
+	for (uint32_t slotIndex = 0u; slotIndex < targetSlotCount; ++slotIndex) {
+		CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, directionalShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
+		CreateDepthAttachment2D(shadowWidth, shadowHeight, directionalShadowDepths[slotIndex]);
+		CreateShadowSampler(directionalShadowDepths[slotIndex], false);
 
-	CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, spotShadowColor, VK_IMAGE_VIEW_TYPE_2D);
-	CreateDepthAttachment2D(shadowWidth, shadowHeight, spotShadowDepth);
-	CreateShadowSampler(spotShadowDepth, false);
+		CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, spotShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
+		CreateDepthAttachment2D(shadowWidth, shadowHeight, spotShadowDepths[slotIndex]);
+		CreateShadowSampler(spotShadowDepths[slotIndex], false);
 
-	CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, areaShadowColor, VK_IMAGE_VIEW_TYPE_2D);
-	CreateDepthAttachment2D(shadowWidth, shadowHeight, areaShadowDepth);
-	CreateShadowSampler(areaShadowDepth, false);
+		CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, areaShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
+		CreateDepthAttachment2D(shadowWidth, shadowHeight, areaShadowDepths[slotIndex]);
+		CreateShadowSampler(areaShadowDepths[slotIndex], false);
 
-	CreateColorAttachment(pointShadowSize, pointShadowSize, 6u, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, pointShadowCubeColor, VK_IMAGE_VIEW_TYPE_CUBE);
-	CreateDepthAttachmentCube(pointShadowSize, pointShadowCubeDepth);
-	CreateShadowSampler(pointShadowCubeDepth, false);
+		CreateColorAttachment(pointShadowSize, pointShadowSize, 6u, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, pointShadowCubeColors[slotIndex], VK_IMAGE_VIEW_TYPE_CUBE);
+		CreateDepthAttachmentCube(pointShadowSize, pointShadowCubeDepths[slotIndex]);
+		CreateShadowSampler(pointShadowCubeDepths[slotIndex], false);
 
-	for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
-		VkImageViewCreateInfo depthFaceViewInfo{};
-		depthFaceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-		depthFaceViewInfo.image = pointShadowCubeDepth.image;
-		depthFaceViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		depthFaceViewInfo.format = shadowDepthFormat;
-		depthFaceViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-		depthFaceViewInfo.subresourceRange.baseMipLevel = 0;
-		depthFaceViewInfo.subresourceRange.levelCount = 1;
-		depthFaceViewInfo.subresourceRange.baseArrayLayer = faceIndex;
-		depthFaceViewInfo.subresourceRange.layerCount = 1;
-		vkCreateImageView(device, &depthFaceViewInfo, nullptr, &pointShadowDepthFaceViews[faceIndex]);
+		for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
+			VkImageViewCreateInfo depthFaceViewInfo{};
+			depthFaceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			depthFaceViewInfo.image = pointShadowCubeDepths[slotIndex].image;
+			depthFaceViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			depthFaceViewInfo.format = shadowDepthFormat;
+			depthFaceViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+			depthFaceViewInfo.subresourceRange.baseMipLevel = 0;
+			depthFaceViewInfo.subresourceRange.levelCount = 1;
+			depthFaceViewInfo.subresourceRange.baseArrayLayer = faceIndex;
+			depthFaceViewInfo.subresourceRange.layerCount = 1;
+			vkCreateImageView(device, &depthFaceViewInfo, nullptr, &pointShadowDepthFaceViewsBySlot[slotIndex][faceIndex]);
 
-		VkImageViewCreateInfo colorFaceViewInfo{};
-		colorFaceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-		colorFaceViewInfo.image = pointShadowCubeColor.image;
-		colorFaceViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		colorFaceViewInfo.format = swapchainImageFormat;
-		colorFaceViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		colorFaceViewInfo.subresourceRange.baseMipLevel = 0;
-		colorFaceViewInfo.subresourceRange.levelCount = 1;
-		colorFaceViewInfo.subresourceRange.baseArrayLayer = faceIndex;
-		colorFaceViewInfo.subresourceRange.layerCount = 1;
-		vkCreateImageView(device, &colorFaceViewInfo, nullptr, &pointShadowColorFaceViews[faceIndex]);
+			VkImageViewCreateInfo colorFaceViewInfo{};
+			colorFaceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+			colorFaceViewInfo.image = pointShadowCubeColors[slotIndex].image;
+			colorFaceViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			colorFaceViewInfo.format = swapchainImageFormat;
+			colorFaceViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			colorFaceViewInfo.subresourceRange.baseMipLevel = 0;
+			colorFaceViewInfo.subresourceRange.levelCount = 1;
+			colorFaceViewInfo.subresourceRange.baseArrayLayer = faceIndex;
+			colorFaceViewInfo.subresourceRange.layerCount = 1;
+			vkCreateImageView(device, &colorFaceViewInfo, nullptr, &pointShadowColorFaceViewsBySlot[slotIndex][faceIndex]);
+		}
 	}
 
 	auto BindDepthTexture = [&](uint32_t index, const VulkanImage& image) {
@@ -2322,36 +2632,40 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 		}
 	};
 
-	// Register 2D shadow maps into the bindless texture heap so each light type
-	// can provide its sampled shadow-map index through the GPULight payload.
-	directionalShadowTextureIndex = AllocateTextureIndex();
-	BindDepthTexture(directionalShadowTextureIndex, directionalShadowDepth);
-	spotShadowTextureIndex = AllocateTextureIndex();
-	BindDepthTexture(spotShadowTextureIndex, spotShadowDepth);
-	areaShadowTextureIndex = AllocateTextureIndex();
-	BindDepthTexture(areaShadowTextureIndex, areaShadowDepth);
+	// Register every 2D shadow slot into the bindless texture heap. GPULight
+	// carries the resolved texture index after the CPU chooses a slot.
+	for (uint32_t slotIndex = 0u; slotIndex < targetSlotCount; ++slotIndex) {
+		directionalShadowTextureIndices[slotIndex] = AllocateTextureIndex();
+		BindDepthTexture(directionalShadowTextureIndices[slotIndex], directionalShadowDepths[slotIndex]);
+		spotShadowTextureIndices[slotIndex] = AllocateTextureIndex();
+		BindDepthTexture(spotShadowTextureIndices[slotIndex], spotShadowDepths[slotIndex]);
+		areaShadowTextureIndices[slotIndex] = AllocateTextureIndex();
+		BindDepthTexture(areaShadowTextureIndices[slotIndex], areaShadowDepths[slotIndex]);
+	}
 
-	// Point shadows use a dedicated cube binding because the global bindless array
-	// is typed as Texture2D in the fragment shader.
-	VkDescriptorImageInfo pointShadowCubeImageInfo{};
-	pointShadowCubeImageInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	pointShadowCubeImageInfo.imageView = pointShadowCubeDepth.view;
-	pointShadowCubeImageInfo.sampler = VK_NULL_HANDLE;
+	// Point shadows use a dedicated cubemap binding array because the global
+	// bindless heap is declared as Texture2D in shaders.
+	std::vector<VkDescriptorImageInfo> pointShadowCubeImageInfos(targetSlotCount);
+	for (uint32_t slotIndex = 0u; slotIndex < targetSlotCount; ++slotIndex) {
+		pointShadowCubeImageInfos[slotIndex].imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		pointShadowCubeImageInfos[slotIndex].imageView = pointShadowCubeDepths[slotIndex].view;
+		pointShadowCubeImageInfos[slotIndex].sampler = VK_NULL_HANDLE;
+	}
 
 	VkDescriptorImageInfo pointShadowCubeSamplerInfo{};
 	pointShadowCubeSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	pointShadowCubeSamplerInfo.imageView = VK_NULL_HANDLE;
-	pointShadowCubeSamplerInfo.sampler = pointShadowCubeDepth.sampler;
+	pointShadowCubeSamplerInfo.sampler = pointShadowCubeDepths[0].sampler;
 
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		std::array<VkWriteDescriptorSet, 2> pointShadowCubeWrites{};
 		pointShadowCubeWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		pointShadowCubeWrites[0].dstSet = globalDescriptorSets[i];
-		pointShadowCubeWrites[0].dstBinding = 7;
+		pointShadowCubeWrites[0].dstBinding = 20;
 		pointShadowCubeWrites[0].dstArrayElement = 0;
 		pointShadowCubeWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		pointShadowCubeWrites[0].descriptorCount = 1;
-		pointShadowCubeWrites[0].pImageInfo = &pointShadowCubeImageInfo;
+		pointShadowCubeWrites[0].descriptorCount = targetSlotCount;
+		pointShadowCubeWrites[0].pImageInfo = pointShadowCubeImageInfos.data();
 
 		pointShadowCubeWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		pointShadowCubeWrites[1].dstSet = globalDescriptorSets[i];
@@ -2363,6 +2677,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources() {
 
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(pointShadowCubeWrites.size()), pointShadowCubeWrites.data(), 0, nullptr);
 	}
+	activeShadowResourceSlots = targetSlotCount;
 
 	// Build lightweight procedural LTC lookup textures. These are deterministic
 	// fallback tables until authored LUT assets are imported through content.
@@ -2603,6 +2918,113 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 
 	const FrameBudgetDiagnosticsSnapshot gameBudgetDiagnostics = pendingBudgetDiagnosticsBySlot[gameSlot];
 	const FrameBudgetDiagnosticsSnapshot sceneBudgetDiagnostics = pendingBudgetDiagnosticsBySlot[sceneSlot];
+	const auto buildLightingDiagnostics = [this](const FrameBudgetDiagnosticsSnapshot& budgetDiagnostics) {
+		LightingDiagnosticsSnapshot snapshot{};
+		snapshot.viewType = budgetDiagnostics.viewType;
+		snapshot.valid = budgetDiagnostics.valid;
+		snapshot.indirectLightingActive = true;
+		const bool gtaoAvailable = ambientOcclusionBlurred.image != VK_NULL_HANDLE
+			&& ambientOcclusionBlurred.view != VK_NULL_HANDLE
+			&& gtaoComputePipeline != VK_NULL_HANDLE
+			&& gtaoBlurComputePipeline != VK_NULL_HANDLE;
+		snapshot.ambientOcclusionActive = gtaoAvailable;
+
+		LightingDiagnosticEntry shadowEntry{};
+		shadowEntry.category = LightingDiagnosticCategory::Shadow;
+		shadowEntry.status = budgetDiagnostics.shadowReductionOccurred
+			? LightingDiagnosticStatus::Degraded
+			: LightingDiagnosticStatus::Active;
+		shadowEntry.message = budgetDiagnostics.shadowReductionOccurred
+			? "Some shadow-capable retained lights did not receive shadow resources this frame."
+			: "Shadow-capable retained lights are within the active shadow budget.";
+		shadowEntry.recommendedAction = budgetDiagnostics.shadowReductionOccurred
+			? "Increase the shadow light budget, lower shadow demand, or raise important lights' priority."
+			: "";
+		snapshot.entries.push_back(std::move(shadowEntry));
+
+		const auto shadowKindName = [](ShadowResourceKind kind) {
+			switch (kind)
+			{
+			case ShadowResourceKind::DirectionalCascade:
+				return "directional cascade";
+			case ShadowResourceKind::PointCube:
+				return "point cubemap";
+			case ShadowResourceKind::SpotAtlas:
+				return "spot atlas";
+			case ShadowResourceKind::AreaAtlas:
+				return "area atlas";
+			default:
+				return "unsupported shadow resource";
+			}
+		};
+
+		for (const ShadowResourceAssignmentDiagnostic& assignment : budgetDiagnostics.shadowAssignments)
+		{
+			LightingDiagnosticEntry assignmentEntry{};
+			assignmentEntry.category = LightingDiagnosticCategory::Shadow;
+			assignmentEntry.status = assignment.assigned
+				? LightingDiagnosticStatus::Active
+				: LightingDiagnosticStatus::Degraded;
+			assignmentEntry.lightId = assignment.lightId;
+			assignmentEntry.message = assignment.assigned
+				? std::string("Light received ") + shadowKindName(assignment.resourceKind) + " slot " + std::to_string(assignment.resourceSlot) + "."
+				: std::string("Light requested shadows but did not receive a ") + shadowKindName(assignment.resourceKind) + " slot this frame.";
+			if (assignment.reusedPreviousOwner)
+			{
+				assignmentEntry.message += " Reused previous assignment for stability.";
+			}
+			if (assignment.replacedPreviousOwner)
+			{
+				assignmentEntry.message += " Replaced the previous owner of this slot.";
+			}
+			assignmentEntry.recommendedAction = assignment.assigned
+				? ""
+				: "Increase maxShadowLights or raise this light's authored priority.";
+			snapshot.entries.push_back(std::move(assignmentEntry));
+		}
+
+		LightingDiagnosticEntry indirectEntry{};
+		indirectEntry.category = LightingDiagnosticCategory::IndirectLighting;
+		indirectEntry.status = LightingDiagnosticStatus::Active;
+		indirectEntry.message = "Indirect lighting is evaluated separately from hard direct shadow visibility.";
+		snapshot.entries.push_back(std::move(indirectEntry));
+
+		LightingDiagnosticEntry aoEntry{};
+		aoEntry.category = LightingDiagnosticCategory::AmbientOcclusion;
+		aoEntry.status = gtaoAvailable
+			? LightingDiagnosticStatus::Active
+			: LightingDiagnosticStatus::Fallback;
+		aoEntry.message = gtaoAvailable
+			? "GTAO contact darkening is generated before material shading and applied to indirect lighting."
+			: "Contact darkening uses material occlusion until the GTAO compute pass is available.";
+		aoEntry.recommendedAction = gtaoAvailable
+			? ""
+			: "Check GTAO shader packaging and descriptor creation if screen-space contact darkening should be active.";
+		snapshot.entries.push_back(std::move(aoEntry));
+
+		LightingDiagnosticEntry materialEntry{};
+		materialEntry.category = LightingDiagnosticCategory::MaterialShadow;
+		materialEntry.status = LightingDiagnosticStatus::Fallback;
+		materialEntry.message = "Opaque and alpha-cutout materials cast shadows; blended transparent materials currently do not cast shadows.";
+		materialEntry.recommendedAction = "Use Mask alpha mode for cutout objects that must cast silhouette shadows.";
+		snapshot.entries.push_back(std::move(materialEntry));
+
+		LightingDiagnosticEntry budgetEntry{};
+		budgetEntry.category = LightingDiagnosticCategory::Budget;
+		budgetEntry.status = budgetDiagnostics.budgetReductionOccurred
+			? LightingDiagnosticStatus::Degraded
+			: LightingDiagnosticStatus::Active;
+		budgetEntry.message = budgetDiagnostics.budgetReductionOccurred
+			? "The scene exceeded one or more active lighting budgets."
+			: "The scene is within active lighting budgets.";
+		budgetEntry.recommendedAction = budgetDiagnostics.budgetReductionOccurred
+			? "Use quality settings or light priorities to control which lights are retained."
+			: "";
+		snapshot.entries.push_back(std::move(budgetEntry));
+		return snapshot;
+	};
+	const LightingDiagnosticsSnapshot gameLightingDiagnostics = buildLightingDiagnostics(gameBudgetDiagnostics);
+	const LightingDiagnosticsSnapshot sceneLightingDiagnostics = buildLightingDiagnostics(sceneBudgetDiagnostics);
 
 	GpuLightAnalysisViewSnapshot gameLightAnalysis{};
 	GpuLightAnalysisViewSnapshot sceneLightAnalysis{};
@@ -2655,6 +3077,8 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 		latestStatsByView[1] = sceneSnapshot;
 		latestBudgetDiagnosticsByView[0] = gameBudgetDiagnostics;
 		latestBudgetDiagnosticsByView[1] = sceneBudgetDiagnostics;
+		latestLightingDiagnosticsByView[0] = gameLightingDiagnostics;
+		latestLightingDiagnosticsByView[1] = sceneLightingDiagnostics;
 		latestGpuLightAnalysisByView[0] = std::move(gameLightAnalysis);
 		latestGpuLightAnalysisByView[1] = std::move(sceneLightAnalysis);
 		if (clusterSnapshot.valid) {
@@ -2681,6 +3105,12 @@ FrameBudgetDiagnosticsSnapshot VulkanContext::Impl::GetLatestBudgetDiagnostics(R
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestBudgetDiagnosticsByView[index];
+}
+
+LightingDiagnosticsSnapshot VulkanContext::Impl::GetLatestLightingDiagnostics(RenderViewType viewType) const {
+	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestLightingDiagnosticsByView[index];
 }
 
 VulkanContext::Impl::GpuLightAnalysisViewSnapshot VulkanContext::Impl::GetLatestGpuLightAnalysis(RenderViewType viewType) const {

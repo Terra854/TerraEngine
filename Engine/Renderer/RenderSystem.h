@@ -42,6 +42,7 @@ public:
 	bool IsTaskShaderCullingEnabled() const { return taskShaderCullingEnabled; }
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const;
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const;
+	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
 
 	void SetQualityPreset(QualityPreset preset);
 	QualityPreset GetQualityPreset() const { return currentPreset; }
@@ -108,6 +109,8 @@ private:
 	RenderStatsSnapshot latestSceneStats{};
 	FrameBudgetDiagnosticsSnapshot latestGameBudgetDiagnostics{};
 	FrameBudgetDiagnosticsSnapshot latestSceneBudgetDiagnostics{};
+	LightingDiagnosticsSnapshot latestGameLightingDiagnostics{};
+	LightingDiagnosticsSnapshot latestSceneLightingDiagnostics{};
 	SkyRuntimeState latestSkyRuntimeState{};
 	bool skyStateDirty = true;
 	std::string lastLoggedSkyIssueKey;

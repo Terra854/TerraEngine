@@ -703,8 +703,7 @@ else()
     add_compile_options($<$<CONFIG:RELEASE,RELWITHDEBINFO>:-O3 -ffast-math>)
 endif()
 
-set(ENGINE_INSTALL_BASE ${CMAKE_BINARY_DIR}/Build)
-set(ENGINE_INSTALL_DESTINATION ${ENGINE_INSTALL_BASE}/$<CONFIG>)
+set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
 
 set(DEFAULT_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Default")
 	if(WIN32)
@@ -749,6 +748,8 @@ file(REMOVE
 	\"\${lighting_out_dir}/ClusterLightFill.comp.tspf\"
 	\"\${postprocess_out_dir}/HiZGenerate.comp.tspf\"
 	\"\${postprocess_out_dir}/VRSGenerate.comp.tspf\"
+	\"\${postprocess_out_dir}/GTAO.comp.spv\"
+	\"\${postprocess_out_dir}/GTAOBlur.comp.spv\"
 	\"\${ui_out_dir}/UI_Static.vert.spv\"
 	\"\${ui_out_dir}/UI_Static.frag.spv\"
 	\"\${ui_out_dir}/UI_Instanced.vert.spv\"
@@ -849,6 +850,22 @@ execute_process(
 )
 if(NOT compile_vrs EQUAL 0)
     message(FATAL_ERROR \"Failed to compile VRSGenerate.comp.hlsl during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${postprocess_out_dir}/GTAO.comp.spv\" -spirv \"\${postprocess_src_dir}/GTAO.comp.hlsl\"
+    RESULT_VARIABLE compile_gtao
+)
+if(NOT compile_gtao EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile GTAO.comp.hlsl during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${postprocess_out_dir}/GTAOBlur.comp.spv\" -spirv \"\${postprocess_src_dir}/GTAOBlur.comp.hlsl\"
+    RESULT_VARIABLE compile_gtao_blur
+)
+if(NOT compile_gtao_blur EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile GTAOBlur.comp.hlsl during install\")
 endif()
 
 execute_process(

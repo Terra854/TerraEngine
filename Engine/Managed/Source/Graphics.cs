@@ -42,8 +42,32 @@ namespace TerraEngine
         public uint EnableLTC;
         /// <summary> Toggles Image-Based Lighting (IBL). 1 = Enabled, 0 = Disabled. </summary>
         public uint EnableIBL;
+        /// <summary> Scales indirect and environment lighting without changing direct light intensity. </summary>
+        public float IndirectStrength;
+        /// <summary> Scales contact darkening applied to indirect and environment lighting. </summary>
+        public float AmbientOcclusionStrength;
+        /// <summary> Quality tier for contact darkening, where 0 disables the effect and higher values increase fidelity. </summary>
+        public uint AmbientOcclusionQuality;
         /// <summary> Anisotropic filtering level (1 to 16). </summary>
         public uint AnisotropicFiltering;
+    }
+
+    public enum LightingDiagnosticCategory : uint
+    {
+        Shadow = 0,
+        IndirectLighting = 1,
+        AmbientOcclusion = 2,
+        MaterialShadow = 3,
+        Budget = 4
+    }
+
+    public enum LightingDiagnosticStatus : uint
+    {
+        Active = 0,
+        Disabled = 1,
+        Degraded = 2,
+        Fallback = 3,
+        Unavailable = 4
     }
 
     /// <summary>
@@ -73,6 +97,18 @@ namespace TerraEngine
             set => Native_Graphics_SetRenderSettings(ref value);
         }
 
+        /// <summary>
+        /// Returns a compact human-readable lighting diagnostics summary for editor status displays.
+        /// </summary>
+        public static string LightingDiagnosticsSummary
+        {
+            get
+            {
+                IntPtr message = Native_Graphics_GetLightingDiagnosticsSummary(0u);
+                return Marshal.PtrToStringAnsi(message) ?? string.Empty;
+            }
+        }
+
         [DllImport("TerraEngine")]
         private static extern void Native_Graphics_SetQualityPreset(uint preset);
 
@@ -84,5 +120,8 @@ namespace TerraEngine
 
         [DllImport("TerraEngine")]
         private static extern void Native_Graphics_GetRenderSettings(out RenderSettings settings);
+
+        [DllImport("TerraEngine")]
+        private static extern IntPtr Native_Graphics_GetLightingDiagnosticsSummary(uint viewType);
     }
 }

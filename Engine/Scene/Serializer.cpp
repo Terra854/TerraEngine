@@ -147,6 +147,9 @@ nlohmann::json Serializer::SerializeSceneRenderSettings(const SceneRenderSetting
 	skyJson["directionalLightObjectId"] = TerraEngine::ToHexString(sanitizedSettings.sky.directionalLightObjectId);
 
 	sceneSettingsJson["sky"] = std::move(skyJson);
+	sceneSettingsJson["indirectStrength"] = sanitizedSettings.indirectStrength;
+	sceneSettingsJson["ambientOcclusionStrength"] = sanitizedSettings.ambientOcclusionStrength;
+	sceneSettingsJson["ambientOcclusionQuality"] = sanitizedSettings.ambientOcclusionQuality;
 	return sceneSettingsJson;
 }
 
@@ -175,7 +178,11 @@ SceneRenderSettings Serializer::DeserializeSceneRenderSettings(const nlohmann::j
 		settings.sky = SanitizeSceneSkySettings(sky);
 	}
 
-	return settings;
+	settings.indirectStrength = json.value("indirectStrength", settings.indirectStrength);
+	settings.ambientOcclusionStrength = json.value("ambientOcclusionStrength", settings.ambientOcclusionStrength);
+	settings.ambientOcclusionQuality = json.value("ambientOcclusionQuality", settings.ambientOcclusionQuality);
+
+	return SanitizeSceneRenderSettings(settings);
 }
 
 Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<Object> parent) {

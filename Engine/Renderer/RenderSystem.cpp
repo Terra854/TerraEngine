@@ -34,7 +34,6 @@
 
 namespace
 {
-	constexpr std::uint32_t kMaxShadowResourceSlots = 4u;
 	const glm::vec3 kSkyReferenceSunDirection = glm::normalize(glm::vec3(0.0f, 0.35f, -1.0f));
 
 	constexpr const char* ResolveRuntimeSettingsFolderName()
@@ -52,7 +51,13 @@ namespace
 		sanitized.maxDynamicLights = std::min(sanitized.maxDynamicLights, sanitized.maxUploadedLights);
 		sanitized.maxAreaLights = std::min(sanitized.maxAreaLights, sanitized.maxDynamicLights);
 		sanitized.maxShadowLights = std::min(sanitized.maxShadowLights, sanitized.maxDynamicLights);
+		// Shadow maps are allocated lazily by the Vulkan backend, so authoring
+		// budgets may exceed four lights without paying for unused slots.
 		sanitized.maxShadowLights = std::min(sanitized.maxShadowLights, kMaxShadowResourceSlots);
+		sanitized.indirectStrength = std::clamp(sanitized.indirectStrength, 0.0f, 8.0f);
+		sanitized.ambientOcclusionStrength = std::clamp(sanitized.ambientOcclusionStrength, 0.0f, 4.0f);
+		sanitized.ambientOcclusionQuality = std::min(sanitized.ambientOcclusionQuality, 3u);
+		sanitized.enableIBL = sanitized.enableIBL > 0u ? 1u : 0u;
 		return sanitized;
 	}
 
@@ -95,6 +100,8 @@ RenderSystem::RenderSystem()
 	latestSceneStats.viewType = RenderViewType::Scene;
 	latestGameBudgetDiagnostics.viewType = RenderViewType::Game;
 	latestSceneBudgetDiagnostics.viewType = RenderViewType::Scene;
+	latestGameLightingDiagnostics.viewType = RenderViewType::Game;
+	latestSceneLightingDiagnostics.viewType = RenderViewType::Scene;
 }
 
 void RenderSystem::Initialize()
@@ -743,6 +750,8 @@ void RenderSystem::Update(float deltaTime)
 		latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);
 		latestGameBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Game);
 		latestSceneBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Scene);
+		latestGameLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Game);
+		latestSceneLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Scene);
 		latestSkyRuntimeState = skyRuntimeState;
 	}
 
@@ -815,10 +824,14 @@ void RenderSystem::Clear()
 		latestSceneStats = {};
 		latestGameBudgetDiagnostics = {};
 		latestSceneBudgetDiagnostics = {};
+		latestGameLightingDiagnostics = {};
+		latestSceneLightingDiagnostics = {};
 		latestGameStats.viewType = RenderViewType::Game;
 		latestSceneStats.viewType = RenderViewType::Scene;
 		latestGameBudgetDiagnostics.viewType = RenderViewType::Game;
 		latestSceneBudgetDiagnostics.viewType = RenderViewType::Scene;
+		latestGameLightingDiagnostics.viewType = RenderViewType::Game;
+		latestSceneLightingDiagnostics.viewType = RenderViewType::Scene;
 		latestSkyRuntimeState = {};
 	}
 	skyStateDirty = true;
@@ -855,6 +868,16 @@ FrameBudgetDiagnosticsSnapshot RenderSystem::GetLatestFrameBudgetDiagnostics(Ren
 	return latestGameBudgetDiagnostics;
 }
 
+LightingDiagnosticsSnapshot RenderSystem::GetLatestLightingDiagnostics(RenderViewType viewType) const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	if (viewType == RenderViewType::Scene)
+	{
+		return latestSceneLightingDiagnostics;
+	}
+	return latestGameLightingDiagnostics;
+}
+
 SkyRuntimeState RenderSystem::GetLatestSkyRuntimeState() const
 {
 	std::lock_guard<std::mutex> lock(statsMutex);
@@ -887,6 +910,9 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 		currentSettings.maxAreaLights = 0u;
 		currentSettings.enableLTC = 0u;
 		currentSettings.enableIBL = 0u;
+		currentSettings.indirectStrength = 0.35f;
+		currentSettings.ambientOcclusionStrength = 0.5f;
+		currentSettings.ambientOcclusionQuality = 0u;
 		currentSettings.anisotropicFiltering = 1u;
 		break;
 	case QualityPreset::Medium:
@@ -898,6 +924,9 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 		currentSettings.maxAreaLights = 2u;
 		currentSettings.enableLTC = 1u;
 		currentSettings.enableIBL = 1u;
+		currentSettings.indirectStrength = 0.75f;
+		currentSettings.ambientOcclusionStrength = 0.75f;
+		currentSettings.ambientOcclusionQuality = 1u;
 		currentSettings.anisotropicFiltering = 1u;
 		break;
 	case QualityPreset::High:
@@ -909,6 +938,9 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 		currentSettings.maxAreaLights = 4u;
 		currentSettings.enableLTC = 1u;
 		currentSettings.enableIBL = 1u;
+		currentSettings.indirectStrength = 1.0f;
+		currentSettings.ambientOcclusionStrength = 1.0f;
+		currentSettings.ambientOcclusionQuality = 2u;
 		currentSettings.anisotropicFiltering = 4u;
 		break;
 	case QualityPreset::Ultra:
@@ -916,10 +948,13 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 		currentSettings.shadowFilteringSize = 7u;
 		currentSettings.maxUploadedLights = 512u;
 		currentSettings.maxDynamicLights = 256u;
-		currentSettings.maxShadowLights = 4u;
+		currentSettings.maxShadowLights = 8u;
 		currentSettings.maxAreaLights = 8u;
 		currentSettings.enableLTC = 1u;
 		currentSettings.enableIBL = 1u;
+		currentSettings.indirectStrength = 1.25f;
+		currentSettings.ambientOcclusionStrength = 1.25f;
+		currentSettings.ambientOcclusionQuality = 3u;
 		currentSettings.anisotropicFiltering = 16u;
 		break;
 	}
@@ -959,10 +994,13 @@ void RenderSystem::LoadSettings()
 		currentSettings.shadowFilteringSize = s.value("shadowFilteringSize", 5u);
 		currentSettings.maxUploadedLights = s.value("maxUploadedLights", 256u);
 		currentSettings.maxDynamicLights = s.value("maxDynamicLights", 128u);
-		currentSettings.maxShadowLights = s.value("maxShadowLights", 4u);
+		currentSettings.maxShadowLights = s.value("maxShadowLights", 8u);
 		currentSettings.maxAreaLights = s.value("maxAreaLights", 4u);
 		currentSettings.enableLTC = s.value("enableLTC", 1u);
 		currentSettings.enableIBL = s.value("enableIBL", 1u);
+		currentSettings.indirectStrength = s.value("indirectStrength", 1.0f);
+		currentSettings.ambientOcclusionStrength = s.value("ambientOcclusionStrength", 1.0f);
+		currentSettings.ambientOcclusionQuality = s.value("ambientOcclusionQuality", 2u);
 		currentSettings.anisotropicFiltering = s.value("anisotropicFiltering", 4u);
 		currentSettings = SanitizeRenderSettings(currentSettings);
 	}
@@ -998,6 +1036,9 @@ void RenderSystem::SaveSettings()
 		s["maxAreaLights"] = currentSettings.maxAreaLights;
 		s["enableLTC"] = currentSettings.enableLTC;
 		s["enableIBL"] = currentSettings.enableIBL;
+		s["indirectStrength"] = currentSettings.indirectStrength;
+		s["ambientOcclusionStrength"] = currentSettings.ambientOcclusionStrength;
+		s["ambientOcclusionQuality"] = currentSettings.ambientOcclusionQuality;
 		s["anisotropicFiltering"] = currentSettings.anisotropicFiltering;
 		
 		j["settings"] = s;

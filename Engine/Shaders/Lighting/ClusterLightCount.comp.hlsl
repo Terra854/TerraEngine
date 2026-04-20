@@ -8,6 +8,10 @@ struct GPULight
 	float4 coneAnglesAndArea;
 	float4 shadowAndPadding;
 	float4 extraParams;         // x = shadowStrength, y = shadowBias, z = indirectMultiplier, w = authoredPriority
+	float4 shadowMatrixC0;
+	float4 shadowMatrixC1;
+	float4 shadowMatrixC2;
+	float4 shadowMatrixC3;
 };
 
 struct ClusterData

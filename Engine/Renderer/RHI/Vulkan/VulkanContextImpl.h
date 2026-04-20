@@ -126,7 +126,7 @@ struct alignas(16) MaterialData {
 	uint32_t MaskTextureIndex;
 	uint32_t OcclusionTextureIndex;
 	uint32_t EmissiveTextureIndex;
-	uint32_t Padding[1];
+	uint32_t ShadowBehavior;
 };
 
 struct PipelineKey {
@@ -203,10 +203,11 @@ struct VulkanContext::Impl {
 	static constexpr uint32_t MAX_GLOBAL_LIGHTS = 1024;
 	static constexpr uint32_t MAX_LIGHT_CLUSTERS = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
 	static constexpr uint32_t MAX_LIGHT_INDEX_ENTRIES = MAX_LIGHT_CLUSTERS * MAX_GLOBAL_LIGHTS;
-	static constexpr uint32_t MAX_SHADOW_RESOURCE_SLOTS = 4u;
+	static constexpr uint32_t MAX_SHADOW_RESOURCE_SLOTS = kMaxShadowResourceSlots;
 	static constexpr uint32_t SHADOW_MAP_RESOLUTION = 1024u;
 	static constexpr uint32_t POINT_SHADOW_MAP_RESOLUTION = 1024u;
 	static constexpr uint32_t LTC_LUT_RESOLUTION = 64u;
+	static constexpr VkFormat AMBIENT_OCCLUSION_FORMAT = VK_FORMAT_R32_SFLOAT;
 	VkDescriptorSetLayout globalDescriptorSetLayout = VK_NULL_HANDLE;
 	VkDescriptorPool globalDescriptorPool = VK_NULL_HANDLE;
 	std::vector<VkDescriptorSet> globalDescriptorSets;
@@ -224,27 +225,37 @@ struct VulkanContext::Impl {
 				VulkanHiZ hiZ;
 				VulkanVRS vrs;
 				
-				VulkanImage directionalShadowDepth;
-						VulkanImage directionalShadowColor;
-	VkFramebuffer directionalShadowFramebuffer = VK_NULL_HANDLE;
-	uint32_t directionalShadowTextureIndex = 0u;
-	VulkanImage spotShadowDepth;
-	VulkanImage spotShadowColor;
-	VkFramebuffer spotShadowFramebuffer = VK_NULL_HANDLE;
-	uint32_t spotShadowTextureIndex = 0u;
-	VulkanImage areaShadowDepth;
-	VulkanImage areaShadowColor;
-	VkFramebuffer areaShadowFramebuffer = VK_NULL_HANDLE;
-	uint32_t areaShadowTextureIndex = 0u;
-	VulkanImage pointShadowCubeDepth;
-	VulkanImage pointShadowCubeColor;
-	std::array<VkImageView, 6> pointShadowDepthFaceViews{};
-	std::array<VkImageView, 6> pointShadowColorFaceViews{};
-	std::array<VkFramebuffer, 6> pointShadowFaceFramebuffers{};
+	// Shadow resources are slot based rather than type based. A frame can assign
+	// any shadow-capable light to any slot, which lets two lights of the same
+	// type cast shadows at the same time while keeping descriptor usage bounded.
+	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowDepths{};
+	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowColors{};
+	std::array<VkFramebuffer, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowFramebuffers{};
+	std::array<uint32_t, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowTextureIndices{};
+	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> spotShadowDepths{};
+	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> spotShadowColors{};
+	std::array<VkFramebuffer, MAX_SHADOW_RESOURCE_SLOTS> spotShadowFramebuffers{};
+	std::array<uint32_t, MAX_SHADOW_RESOURCE_SLOTS> spotShadowTextureIndices{};
+	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> areaShadowDepths{};
+	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> areaShadowColors{};
+	std::array<VkFramebuffer, MAX_SHADOW_RESOURCE_SLOTS> areaShadowFramebuffers{};
+	std::array<uint32_t, MAX_SHADOW_RESOURCE_SLOTS> areaShadowTextureIndices{};
+	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> pointShadowCubeDepths{};
+	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> pointShadowCubeColors{};
+	std::array<std::array<VkImageView, 6>, MAX_SHADOW_RESOURCE_SLOTS> pointShadowDepthFaceViewsBySlot{};
+	std::array<std::array<VkImageView, 6>, MAX_SHADOW_RESOURCE_SLOTS> pointShadowColorFaceViewsBySlot{};
+	std::array<std::array<VkFramebuffer, 6>, MAX_SHADOW_RESOURCE_SLOTS> pointShadowFaceFramebuffersBySlot{};
+	uint32_t activeShadowResourceSlots = 0u;
 	VulkanImage ltcAmplitudeTexture;
 	VulkanImage ltcInverseTexture;
 	uint32_t ltcAmplitudeTextureIndex = 0u;
 	uint32_t ltcInverseTextureIndex = 0u;
+	VulkanImage environmentIrradianceTexture;
+	VulkanImage prefilteredEnvironmentTexture;
+	VulkanImage brdfIntegrationTexture;
+	uint32_t environmentIrradianceTextureIndex = 0u;
+	uint32_t prefilteredEnvironmentTextureIndex = 0u;
+	uint32_t brdfIntegrationTextureIndex = 0u;
 	VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
 	VkPipelineLayout lightingComputePipelineLayout = VK_NULL_HANDLE;
 	VkPipeline clusterGridComputePipeline = VK_NULL_HANDLE;
@@ -255,8 +266,16 @@ struct VulkanContext::Impl {
 	VkPipeline lightAnalysisComputePipeline = VK_NULL_HANDLE;
 	VkPipeline hiZComputePipeline = VK_NULL_HANDLE;
 	VkPipeline vrsComputePipeline = VK_NULL_HANDLE;
+	VkPipeline gtaoComputePipeline = VK_NULL_HANDLE;
+	VkPipeline gtaoBlurComputePipeline = VK_NULL_HANDLE;
 	VkPipelineLayout hiZPipelineLayout = VK_NULL_HANDLE;
 	VkPipelineLayout vrsPipelineLayout = VK_NULL_HANDLE;
+	VulkanImage ambientOcclusionRaw;
+	VulkanImage ambientOcclusionBlurred;
+	VulkanImage ambientOcclusionHistory;
+	uint32_t ambientOcclusionWidth = 0u;
+	uint32_t ambientOcclusionHeight = 0u;
+	bool ambientOcclusionHistoryValid = false;
 
 	struct GpuLightAnalysisViewSnapshot
 	{
@@ -300,6 +319,7 @@ struct VulkanContext::Impl {
 	std::array<RenderStatsSnapshot, kStatsSlotCount> pendingStatsBySlot{};
 	std::array<FrameBudgetDiagnosticsSnapshot, kStatsViewCount> latestBudgetDiagnosticsByView{};
 	std::array<FrameBudgetDiagnosticsSnapshot, kStatsSlotCount> pendingBudgetDiagnosticsBySlot{};
+	std::array<LightingDiagnosticsSnapshot, kStatsViewCount> latestLightingDiagnosticsByView{};
 	std::array<std::vector<FrameLightCandidate>, kStatsSlotCount> pendingLightAnalysisCandidatesBySlot{};
 	std::array<GpuLightAnalysisViewSnapshot, kStatsViewCount> latestGpuLightAnalysisByView{};
 	std::array<ViewLightingTemporalState, kStatsViewCount> lightingTemporalStateByView{};
@@ -330,10 +350,15 @@ struct VulkanContext::Impl {
 	void CreateCullingBufferResources();
 		void CreateLightingBufferResources();
 		void CreateIndirectDrawResources();
-		bool EnsureShadowRenderResources();
+		void CreateEnvironmentLightingResources();
+		void DestroyEnvironmentLightingResources();
+		void CreateAmbientOcclusionResources();
+		void DestroyAmbientOcclusionResources();
+		bool EnsureShadowRenderResources(uint32_t requestedSlotCount);
 		void UploadLightingData(const std::vector<GPULight>& lights);
 		void UploadLightAnalysisInputData(const std::vector<GPULight>& lights);
 			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView);
+			void GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
@@ -348,6 +373,7 @@ struct VulkanContext::Impl {
 	void PublishCompletedFrameStats(uint32_t frameIndex);
 	RenderStatsSnapshot GetLatestStats(RenderViewType viewType) const;
 	FrameBudgetDiagnosticsSnapshot GetLatestBudgetDiagnostics(RenderViewType viewType) const;
+	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
 	GpuLightAnalysisViewSnapshot GetLatestGpuLightAnalysis(RenderViewType viewType) const;
 	void RecordPendingClusterValidationSnapshot(uint32_t frameIndex, const ClusterValidationSnapshot& snapshot);
 	ClusterValidationSnapshot ReadCompletedClusterValidationSnapshot(uint32_t frameIndex) const;

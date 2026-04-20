@@ -19,12 +19,17 @@ struct MaterialData
 	uint MaskTextureIndex;
 	uint OcclusionTextureIndex;
 	uint EmissiveTextureIndex;
-	uint Padding[1];
+	uint ShadowBehavior;
 };
 
 static const uint kShadingModel_Unlit = 0u;
 static const uint kShadingModel_MetallicRoughness = 1u;
 static const uint kShadingModel_SpecularGlossiness = 2u;
+static const uint kMaterialShadowBehavior_Opaque = 0u;
+static const uint kMaterialShadowBehavior_AlphaCutout = 1u;
+static const uint kMaterialShadowBehavior_TransparentNoShadow = 2u;
+static const uint kMaterialShadowBehavior_TranslucentApproximate = 3u;
+static const uint kMaterialShadowBehavior_EmissiveUsesOpacity = 4u;
 
 struct FrameCullingData
 {
@@ -36,6 +41,7 @@ struct FrameCullingData
 	column_major float4x4 invProjection;
 	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
 	uint4 renderSettings1; // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
+	float4 renderSettings2; // x: indirectStrength, y: aoStrength, z: aoQuality, w: reserved
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
 	uint clusteredLightingValid;
@@ -48,8 +54,12 @@ struct GPULight
 	float4 directionAndRange;   // xyz: direction, w: range
 	float4 colorAndIntensity;   // xyz: color, w: intensity
 	float4 coneAnglesAndArea;   // x: innerCos, y: outerCos, z: width, w: height
-	float4 shadowAndPadding;    // x: castsShadows, y: shadowTex, z: ltcAmp, w: ltcInv
+	float4 shadowAndPadding;    // x: castsShadows, y: shadow texture/point slot, z: ltcAmp, w: ltcInv
 	float4 extraParams;         // x: shadowStrength, y: shadowBias, z: indirectMultiplier, w: authoredPriority
+	float4 shadowMatrixC0;      // Column 0 of the CPU light view-projection matrix
+	float4 shadowMatrixC1;      // Column 1; keeping columns avoids transposing GLM data
+	float4 shadowMatrixC2;      // Column 2; used by directional/spot/area shadow sampling
+	float4 shadowMatrixC3;      // Column 3; point shadows still use cubemap face depth
 };
 
 struct ClusterData
@@ -68,9 +78,10 @@ struct ClusterData
 [[vk::binding(4, 0)]] StructuredBuffer<GPULight> globalLights;
 [[vk::binding(5, 0)]] StructuredBuffer<ClusterData> clusterGrid;
 [[vk::binding(6, 0)]] StructuredBuffer<uint> lightIndices;
-[[vk::binding(7, 0)]] TextureCube pointShadowCube;
 [[vk::binding(8, 0)]] SamplerState pointShadowSampler;
 [[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
+[[vk::binding(19, 0)]] Texture2D<float> ambientOcclusionTexture;
+[[vk::binding(20, 0)]] TextureCube pointShadowCubes[32];
 
 #pragma pack_matrix(column_major)
 
@@ -104,10 +115,12 @@ static const uint kLightTypePoint = 1u;
 static const uint kLightTypeSpot = 2u;
 static const uint kLightTypeAreaRect = 3u;
 static const uint kMaxStatsSlots = 16u;
+static const uint kMaxShadowResourceSlots = 32u;
 static const float kPi = 3.14159265f;
 static const float kDirectionalShadowNear = 0.1f;
 static const float kDirectionalShadowFar = 180.0f;
 static const float kDirectionalShadowExtent = 40.0f;
+static const float kPerspectiveShadowNear = 0.1f;
 static const float kDirectionalShadowBias = 0.0015f;
 static const float kSpotShadowBias = 0.0020f;
 static const float kPointShadowBias = 0.0050f;
@@ -197,6 +210,53 @@ float SampleShadowPCF(Texture2D shadowMap, SamplerState shadowSampler, float2 uv
 	return visibility / weight;
 }
 
+float ComputePerspectiveShadowDepth01(float forwardDistance, float farPlane)
+{
+	const float nearPlane = kPerspectiveShadowNear;
+	const float safeFar = max(farPlane, nearPlane + 0.001f);
+	const float safeDistance = max(forwardDistance, nearPlane);
+	// Spot, point, and area shadow maps are rendered through hardware
+	// perspective projections, so receivers must compare against the same
+	// non-linear depth that the depth attachment stored.
+	return saturate(safeFar / (safeFar - nearPlane) - (safeFar * nearPlane) / ((safeFar - nearPlane) * safeDistance));
+}
+
+float4 TransformShadowClip(GPULight light, float3 worldPosition)
+{
+	const float4 world = float4(worldPosition, 1.0f);
+	// C++ uploads the exact GLM matrix columns that rendered the shadow map.
+	// Multiplying by columns here keeps the receiver projection bit-for-bit in
+	// the same convention as the shadow pass instead of rebuilding it manually.
+	return light.shadowMatrixC0 * world.x
+		+ light.shadowMatrixC1 * world.y
+		+ light.shadowMatrixC2 * world.z
+		+ light.shadowMatrixC3 * world.w;
+}
+
+float SampleProjectedShadowMap(Texture2D shadowMap, SamplerState shadowSampler, GPULight light, FrameCullingData frame, float3 worldPosition, float fallbackBias, float2 texelSize)
+{
+	const float4 shadowClip = TransformShadowClip(light, worldPosition);
+	if (shadowClip.w <= 1e-5f)
+	{
+		return 1.0f;
+	}
+
+	const float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+	if (shadowNdc.z < 0.0f || shadowNdc.z > 1.0f)
+	{
+		return 1.0f;
+	}
+
+	const float2 uv = shadowNdc.xy * 0.5f + 0.5f;
+	if (any(uv < float2(0.0f, 0.0f)) || any(uv > float2(1.0f, 1.0f)))
+	{
+		return 1.0f;
+	}
+
+	const float authoredBias = max(light.extraParams.y, 0.0f);
+	return SampleShadowPCF(shadowMap, shadowSampler, uv, shadowNdc.z, max(fallbackBias, authoredBias), frame.renderSettings0.y, texelSize);
+}
+
 float SampleDirectionalShadow(GPULight light, FrameCullingData frame, float3 worldPosition)
 {
 	if (light.shadowAndPadding.x <= 0.5f || light.shadowAndPadding.y < 0.0f)
@@ -206,27 +266,9 @@ float SampleDirectionalShadow(GPULight light, FrameCullingData frame, float3 wor
 
 	const uint shadowTextureIndex = (uint)(light.shadowAndPadding.y + 0.5f);
 	const uint nonUniformIndex = NonUniformResourceIndex(shadowTextureIndex);
-	const float3 lightDir = SafeNormalize(-light.directionAndRange.xyz, float3(0.0, -1.0, 0.0));
-	const float3 upHint = (abs(dot(lightDir, float3(0.0, 1.0, 0.0))) > 0.95f) ? float3(1.0, 0.0, 0.0) : float3(0.0, 1.0, 0.0);
-	const float3 right = SafeNormalize(cross(upHint, lightDir), float3(1.0, 0.0, 0.0));
-	const float3 up = SafeNormalize(cross(lightDir, right), float3(0.0, 1.0, 0.0));
-	const float3 lightPosition = frame.cameraPositionAndEpsilon.xyz - lightDir * 60.0f;
-	const float3 toPoint = worldPosition - lightPosition;
-
-	const float2 uv = float2(
-		dot(toPoint, right) / (2.0f * kDirectionalShadowExtent) + 0.5f,
-		dot(toPoint, up) / (2.0f * kDirectionalShadowExtent) + 0.5f);
-	if (any(uv < float2(0.0, 0.0)) || any(uv > float2(1.0, 1.0)))
-	{
-		return 1.0f;
-	}
-
-	const float linearDepth = dot(toPoint, lightDir);
-	const float depthNdc = saturate((linearDepth - kDirectionalShadowNear) / (kDirectionalShadowFar - kDirectionalShadowNear));
-	
 	const float res = (float)frame.renderSettings0.x;
 	const float2 texelSize = 1.0f / max(res, 512.0f);
-	return SampleShadowPCF(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], uv, depthNdc, kDirectionalShadowBias, frame.renderSettings0.y, texelSize);
+	return SampleProjectedShadowMap(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], light, frame, worldPosition, kDirectionalShadowBias, texelSize);
 }
 
 float SampleSpotShadow(GPULight light, FrameCullingData frame, float3 worldPosition)
@@ -238,48 +280,28 @@ float SampleSpotShadow(GPULight light, FrameCullingData frame, float3 worldPosit
 
 	const uint shadowTextureIndex = (uint)(light.shadowAndPadding.y + 0.5f);
 	const uint nonUniformIndex = NonUniformResourceIndex(shadowTextureIndex);
-	const float3 lightPos = light.positionAndType.xyz;
-	const float3 forward = SafeNormalize(light.directionAndRange.xyz, float3(0.0, -1.0, 0.0));
-	const float3 upHint = (abs(dot(forward, float3(0.0, 1.0, 0.0))) > 0.95f) ? float3(1.0, 0.0, 0.0) : float3(0.0, 1.0, 0.0);
-	const float3 right = SafeNormalize(cross(upHint, forward), float3(1.0, 0.0, 0.0));
-	const float3 up = SafeNormalize(cross(forward, right), float3(0.0, 1.0, 0.0));
-	const float3 toPoint = worldPosition - lightPos;
-	const float3 lightSpace = float3(dot(toPoint, right), dot(toPoint, up), dot(toPoint, forward));
-	if (lightSpace.z <= 0.0f)
-	{
-		return 1.0f;
-	}
-
-	const float outerCos = clamp(light.coneAnglesAndArea.y, -0.999f, 0.999f);
-	const float tanHalfAngle = sqrt(saturate(1.0f - outerCos * outerCos)) / max(outerCos, 0.001f);
-	const float2 uv = (lightSpace.xy / max(lightSpace.z, 1e-4f)) / max(tanHalfAngle, 1e-3f) * 0.5f + 0.5f;
-	if (any(uv < float2(0.0, 0.0)) || any(uv > float2(1.0, 1.0)))
-	{
-		return 1.0f;
-	}
-
-	const float range = max(light.directionAndRange.w, 0.1f);
-	const float depthNdc = saturate(lightSpace.z / range);
-	
 	const float res = (float)frame.renderSettings0.x;
 	const float2 texelSize = 1.0f / max(res, 512.0f);
-	return SampleShadowPCF(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], uv, depthNdc, kSpotShadowBias, frame.renderSettings0.y, texelSize);
+	return SampleProjectedShadowMap(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], light, frame, worldPosition, kSpotShadowBias, texelSize);
 }
 
 float SamplePointShadow(GPULight light, float3 worldPosition)
 {
-	if (light.shadowAndPadding.x <= 0.5f)
+	if (light.shadowAndPadding.x <= 0.5f || light.shadowAndPadding.y < 0.0f)
 	{
 		return 1.0f;
 	}
 
 	const float3 toPoint = worldPosition - light.positionAndType.xyz;
 	const float3 sampleDir = SafeNormalize(toPoint, float3(0.0, 0.0, 1.0));
-	const float sampledDepth = pointShadowCube.Sample(pointShadowSampler, sampleDir).r;
-	const float distanceToLight = length(toPoint);
+	const uint shadowSlot = min((uint)(light.shadowAndPadding.y + 0.5f), kMaxShadowResourceSlots - 1u);
+	const uint nonUniformSlot = NonUniformResourceIndex(shadowSlot);
+	const float sampledDepth = pointShadowCubes[nonUniformSlot].Sample(pointShadowSampler, sampleDir).r;
+	const float faceForwardDistance = max(max(abs(toPoint.x), abs(toPoint.y)), abs(toPoint.z));
 	const float range = max(light.directionAndRange.w, 0.1f);
-	const float depthNdc = saturate(distanceToLight / range);
-	return (depthNdc - kPointShadowBias) <= sampledDepth ? 1.0f : 0.0f;
+	const float depthNdc = ComputePerspectiveShadowDepth01(faceForwardDistance, range);
+	const float authoredBias = max(light.extraParams.y, 0.0f);
+	return (depthNdc - max(kPointShadowBias, authoredBias)) <= sampledDepth ? 1.0f : 0.0f;
 }
 
 float SampleAreaShadow(GPULight light, FrameCullingData frame, float3 worldPosition)
@@ -291,55 +313,40 @@ float SampleAreaShadow(GPULight light, FrameCullingData frame, float3 worldPosit
 
 	const uint shadowTextureIndex = (uint)(light.shadowAndPadding.y + 0.5f);
 	const uint nonUniformIndex = NonUniformResourceIndex(shadowTextureIndex);
-	const float3 lightPos = light.positionAndType.xyz;
-	const float3 forward = SafeNormalize(light.directionAndRange.xyz, float3(0.0, -1.0, 0.0));
-	const float3 upHint = (abs(dot(forward, float3(0.0, 1.0, 0.0))) > 0.95f) ? float3(1.0, 0.0, 0.0) : float3(0.0, 1.0, 0.0);
-	const float3 right = SafeNormalize(cross(upHint, forward), float3(1.0, 0.0, 0.0));
-	const float3 up = SafeNormalize(cross(forward, right), float3(0.0, 1.0, 0.0));
-	const float3 toPoint = worldPosition - lightPos;
-	const float projectedDepth = dot(toPoint, forward);
-	if (projectedDepth <= 0.0f)
-	{
-		return 1.0f;
-	}
-
 	const float range = max(light.directionAndRange.w, 0.1f);
 	const float width = max(light.coneAnglesAndArea.z, 0.1f);
 	const float height = max(light.coneAnglesAndArea.w, 0.1f);
-	const float2 uv = float2(dot(toPoint, right) / (width * range), dot(toPoint, up) / (height * range)) * 0.5f + 0.5f;
-	if (any(uv < float2(0.0, 0.0)) || any(uv > float2(1.0, 1.0)))
-	{
-		return 1.0f;
-	}
-
-	const float depthNdc = saturate(projectedDepth / range);
 	const float res = (float)frame.renderSettings0.x;
 	const float2 texel = 1.0f / max(res, 512.0f);
 	const float kernelScale = saturate(max(width, height) / max(range, 0.1f)) * 2.0f;
-	
-	return SampleShadowPCF(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], uv, depthNdc, kAreaShadowBias, frame.renderSettings0.y, texel * kernelScale);
+	return SampleProjectedShadowMap(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], light, frame, worldPosition, kAreaShadowBias, texel * kernelScale);
 }
 
 float ComputeShadowFactor(GPULight light, FrameCullingData frame, float3 worldPosition)
 {
 	const uint lightType = (uint)(light.positionAndType.w + 0.5);
+	float rawVisibility = 1.0f;
 	if (lightType == kLightTypeDirectional)
 	{
-		return SampleDirectionalShadow(light, frame, worldPosition);
+		rawVisibility = SampleDirectionalShadow(light, frame, worldPosition);
 	}
-	if (lightType == kLightTypePoint)
+	else if (lightType == kLightTypePoint)
 	{
-		return SamplePointShadow(light, worldPosition);
+		rawVisibility = SamplePointShadow(light, worldPosition);
 	}
-	if (lightType == kLightTypeSpot)
+	else if (lightType == kLightTypeSpot)
 	{
-		return SampleSpotShadow(light, frame, worldPosition);
+		rawVisibility = SampleSpotShadow(light, frame, worldPosition);
 	}
-	if (lightType == kLightTypeAreaRect)
+	else if (lightType == kLightTypeAreaRect)
 	{
-		return SampleAreaShadow(light, frame, worldPosition);
+		rawVisibility = SampleAreaShadow(light, frame, worldPosition);
 	}
-	return 1.0f;
+
+	// LightComponent::shadowStrength is packed in extraParams.x. A strength of
+	// zero intentionally disables darkening while preserving the shadow-map
+	// assignment for diagnostics; one applies the sampled visibility directly.
+	return lerp(1.0f, rawVisibility, saturate(light.extraParams.x));
 }
 
 float D_GGX(float nDotH, float roughness)
@@ -364,13 +371,14 @@ float3 F_Schlick(float cosTheta, float3 f0)
 	return f0 + (1.0 - f0) * f;
 }
 
-float3 EvaluateLocalIndirectDiffuse(GPULight light, float rawNDotL, float attenuation, float3 albedo, float metallic, float roughness)
+float3 EvaluateLocalIndirectDiffuse(GPULight light, FrameCullingData frame, float rawNDotL, float attenuation, float3 albedo, float metallic, float roughness)
 {
 	// Artists can deliberately push this above 1 for editor/debug setups with
 	// low lights. Clamp only the upper bound so accidental huge values do not
 	// flood the scene with distance-attenuated fill.
 	const float indirectMultiplier = clamp(light.extraParams.z, 0.0f, kLocalIndirectMaxMultiplier);
-	if (indirectMultiplier <= 0.0f || attenuation <= 0.0f)
+	const float globalIndirectStrength = saturate(frame.renderSettings2.x / 8.0f) * 8.0f;
+	if (indirectMultiplier <= 0.0f || globalIndirectStrength <= 0.0f || attenuation <= 0.0f)
 	{
 		return float3(0.0f, 0.0f, 0.0f);
 	}
@@ -384,7 +392,7 @@ float3 EvaluateLocalIndirectDiffuse(GPULight light, float rawNDotL, float attenu
 	const float diffuseMaterialWeight = (1.0f - saturate(metallic)) * lerp(0.55f, 1.0f, saturate(roughness));
 	const float3 radiance = light.colorAndIntensity.rgb * light.colorAndIntensity.w;
 	const float3 diffuse = albedo / kPi;
-	return diffuse * radiance * attenuation * bounceVisibility * diffuseMaterialWeight * indirectMultiplier * kLocalIndirectStrength;
+	return diffuse * radiance * attenuation * bounceVisibility * diffuseMaterialWeight * indirectMultiplier * globalIndirectStrength * kLocalIndirectStrength;
 }
 
 float ComputeDirectionalLightVisibility(float3 lightDir)
@@ -430,9 +438,8 @@ float3 EvaluatePointLight(GPULight light, float3 worldPosition, float3 normal, f
 	const float attenuation = ComputePointAttenuation(light, worldPosition);
 	if (attenuation <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
 
-	float3 lighting = EvaluateLocalIndirectDiffuse(light, rawNDotL, attenuation, albedo, metallic, roughness);
 	const float nDotL = saturate(rawNDotL);
-	if (nDotL <= 0.0f) return lighting;
+	if (nDotL <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
 
 	const float3 halfVector = SafeNormalize(lightDir + viewDir, lightDir);
 	const float nDotV = saturate(dot(normal, viewDir)) + 1e-5f;
@@ -449,7 +456,16 @@ float3 EvaluatePointLight(GPULight light, float3 worldPosition, float3 normal, f
 	const float3 diffuse = kD * albedo / kPi;
 
 	const float3 radiance = light.colorAndIntensity.rgb * light.colorAndIntensity.w;
-	return lighting + (diffuse + specular) * radiance * nDotL * attenuation;
+	return (diffuse + specular) * radiance * nDotL * attenuation;
+}
+
+float3 EvaluatePointLightIndirect(GPULight light, FrameCullingData frame, float3 worldPosition, float3 normal, float3 albedo, float metallic, float roughness)
+{
+	const float3 toLight = light.positionAndType.xyz - worldPosition;
+	const float3 lightDir = SafeNormalize(toLight, float3(0.0, -1.0, 0.0));
+	const float rawNDotL = dot(normal, lightDir);
+	const float attenuation = ComputePointAttenuation(light, worldPosition);
+	return EvaluateLocalIndirectDiffuse(light, frame, rawNDotL, attenuation, albedo, metallic, roughness);
 }
 
 float3 EvaluateSpotLight(GPULight light, float3 worldPosition, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
@@ -462,6 +478,18 @@ float3 EvaluateSpotLight(GPULight light, float3 worldPosition, float3 normal, fl
 	const float outerCos = light.coneAnglesAndArea.y;
 	const float coneAttenuation = saturate((cosTheta - outerCos) / max(innerCos - outerCos, 0.0001));
 	return EvaluatePointLight(light, worldPosition, normal, viewDir, albedo, metallic, roughness) * coneAttenuation;
+}
+
+float3 EvaluateSpotLightIndirect(GPULight light, FrameCullingData frame, float3 worldPosition, float3 normal, float3 albedo, float metallic, float roughness)
+{
+	const float3 toLight = light.positionAndType.xyz - worldPosition;
+	const float3 lightDir = SafeNormalize(toLight, float3(0.0, -1.0, 0.0));
+	const float3 spotDir = SafeNormalize(-light.directionAndRange.xyz, float3(0.0, -1.0, 0.0));
+	const float cosTheta = dot(lightDir, spotDir);
+	const float innerCos = light.coneAnglesAndArea.x;
+	const float outerCos = light.coneAnglesAndArea.y;
+	const float coneAttenuation = saturate((cosTheta - outerCos) / max(innerCos - outerCos, 0.0001));
+	return EvaluatePointLightIndirect(light, frame, worldPosition, normal, albedo, metallic, roughness) * coneAttenuation;
 }
 
 float3 EvaluateAreaLightLTC(GPULight light, float3 worldPosition, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
@@ -506,11 +534,19 @@ float3 EvaluateSingleLight(uint lightIndex, PSIn input, FrameCullingData frame, 
 	}
 	if (lightType == kLightTypePoint)
 	{
-		return EvaluatePointLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
+		const float3 directLighting = EvaluatePointLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
+		// The local indirect approximation comes from this same light, so it
+		// must respect blocker visibility. Environment IBL remains separate.
+		const float3 indirectLighting = EvaluatePointLightIndirect(light, frame, input.worldPosition, normal, albedo, metallic, roughness) * shadowFactor;
+		return directLighting + indirectLighting;
 	}
 	if (lightType == kLightTypeSpot)
 	{
-		return EvaluateSpotLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
+		const float3 directLighting = EvaluateSpotLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
+		// Spot bounce is still emitted by the local light, so occluders should
+		// damp it together with the direct spotlight contribution.
+		const float3 indirectLighting = EvaluateSpotLightIndirect(light, frame, input.worldPosition, normal, albedo, metallic, roughness) * shadowFactor;
+		return directLighting + indirectLighting;
 	}
 	if (lightType == kLightTypeAreaRect)
 	{
@@ -521,10 +557,43 @@ float3 EvaluateSingleLight(uint lightIndex, PSIn input, FrameCullingData frame, 
 		else
 		{
 			// Fallback to point light if LTC is disabled
-			return EvaluatePointLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
+			const float3 directLighting = EvaluatePointLight(light, input.worldPosition, normal, viewDir, albedo, metallic, roughness) * shadowFactor;
+			const float3 indirectLighting = EvaluatePointLightIndirect(light, frame, input.worldPosition, normal, albedo, metallic, roughness) * shadowFactor;
+			return directLighting + indirectLighting;
 		}
 	}
 	return float3(0.0, 0.0, 0.0);
+}
+
+float3 EvaluateIBL(FrameCullingData frame, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness, float ambientOcclusion)
+{
+	const float globalIndirectStrength = saturate(frame.renderSettings2.x / 8.0f) * 8.0f;
+	if (globalIndirectStrength <= 0.0f)
+	{
+		return float3(0.0f, 0.0f, 0.0f);
+	}
+
+	const float skyVisibility = saturate(normal.y * 0.5f + 0.5f);
+	const float3 horizon = float3(0.18f, 0.22f, 0.28f);
+	const float3 zenith = float3(0.45f, 0.55f, 0.72f);
+	const float3 ground = float3(0.06f, 0.055f, 0.05f);
+	const float3 irradiance = lerp(ground, lerp(horizon, zenith, skyVisibility), skyVisibility);
+	const float3 diffuse = albedo * (1.0f - saturate(metallic)) * irradiance / kPi;
+	const float3 reflectDir = reflect(-viewDir, normal);
+	const float reflectionWeight = pow(saturate(reflectDir.y * 0.5f + 0.5f), lerp(1.0f, 0.25f, saturate(roughness)));
+	const float3 f0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, saturate(metallic));
+	const float3 specular = f0 * irradiance * reflectionWeight * (1.0f - 0.65f * saturate(roughness));
+	return (diffuse + specular) * globalIndirectStrength * ambientOcclusion;
+}
+
+float SampleScreenAmbientOcclusion(PSIn input, FrameCullingData frame)
+{
+	const float2 viewport = max(frame.clusterDepthAndViewport.zw, float2(1.0f, 1.0f));
+	const int2 maxPixel = int2(max(viewport, float2(1.0f, 1.0f))) - int2(1, 1);
+	const int2 pixel = clamp(int2(input.position.xy), int2(0, 0), maxPixel);
+	// The AO pass stores visibility, not darkness: 1 means fully open and
+	// lower values mean nearby depth created contact occlusion.
+	return saturate(ambientOcclusionTexture.Load(uint3(uint2(pixel), 0)));
 }
 
 float3 BuildHeatmapColor(float normalizedLightCount)
@@ -544,11 +613,19 @@ float4 main(PSIn input) : SV_Target0
 	{
 		clip(finalColor.a - mat.AlphaCutoff);
 	}
+	if (SceneUniforms.vrsActive == 2u)
+	{
+		// Shadow-map rendering only needs alpha testing and a depth write. Return
+		// before material lighting so the shadow pass does not sample the same
+		// shadow maps it is currently updating.
+		return float4(0.0f, 0.0f, 0.0f, 1.0f);
+	}
 
 	const float3 sampledNormal = globalTextures[NonUniformResourceIndex(mat.NormalTextureIndex)].Sample(globalSamplers[NonUniformResourceIndex(mat.NormalTextureIndex)], uv).rgb;
 	const float4 maskSample = globalTextures[NonUniformResourceIndex(mat.MaskTextureIndex)].Sample(globalSamplers[NonUniformResourceIndex(mat.MaskTextureIndex)], uv);
 	const float roughness = saturate(maskSample.g * mat.RoughnessFactor);
 	const float metallic = saturate(maskSample.b * mat.MetallicFactor);
+	const float authoredOcclusion = lerp(1.0f, maskSample.r, saturate(mat.OcclusionStrength));
 	const float3 emissive = globalTextures[NonUniformResourceIndex(mat.EmissiveTextureIndex)].Sample(globalSamplers[NonUniformResourceIndex(mat.EmissiveTextureIndex)], uv).rgb * mat.EmissiveFactor.rgb;
 
 	if (mat.ShadingModel == kShadingModel_Unlit)
@@ -617,8 +694,11 @@ float4 main(PSIn input) : SV_Target0
 	float3 finalLighting = lighting;
 	if (frame.renderSettings1.x > 0u)
 	{
-		// Placeholder for IBL evaluation (Ultra tier)
-		// finalLighting += EvaluateIBL(normal, viewDir, finalColor.rgb, metallic, roughness);
+		const float aoStrength = saturate(frame.renderSettings2.y / 4.0f) * 4.0f;
+		const float aoQualityEnabled = frame.renderSettings2.z > 0.5f ? 1.0f : 0.0f;
+		const float screenOcclusion = lerp(1.0f, SampleScreenAmbientOcclusion(input, frame), aoQualityEnabled);
+		const float indirectOcclusion = lerp(1.0f, authoredOcclusion * screenOcclusion, saturate(aoStrength) * aoQualityEnabled);
+		finalLighting += EvaluateIBL(frame, normal, viewDir, finalColor.rgb, metallic, roughness, indirectOcclusion);
 	}
 
 	return float4(finalLighting + emissive, finalColor.a);

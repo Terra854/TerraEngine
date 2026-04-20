@@ -26,7 +26,9 @@
 namespace
 {
 	constexpr std::uint32_t kMaxSceneDynamicLights = 1024u;
-	constexpr std::uint32_t kMaxShadowResourceSlots = 4u;
+	constexpr float kDirectionalShadowNear = 0.1f;
+	constexpr float kDirectionalShadowFar = 180.0f;
+	constexpr float kDirectionalShadowExtent = 40.0f;
 	constexpr float kTemporalResetDistance = 25.0f;
 	constexpr float kTemporalResetMatrixEpsilon = 0.75f;
 	constexpr std::uint64_t kTemporalStateHistoryFrames = 240u;
@@ -160,6 +162,18 @@ namespace
 		}
 	}
 
+	ShadowResourceKind GetShadowResourceKind(const FrameLightCandidate& candidate)
+	{
+		switch (GetLightType(candidate.gpuLight))
+		{
+		case 0u: return ShadowResourceKind::DirectionalCascade;
+		case 1u: return ShadowResourceKind::PointCube;
+		case 2u: return ShadowResourceKind::SpotAtlas;
+		case 3u: return ShadowResourceKind::AreaAtlas;
+		default: return ShadowResourceKind::Unsupported;
+		}
+	}
+
 	float ComputeSceneInfluenceScore(
 		const FrameLightCandidate& candidate,
 		const glm::vec3& cameraWorldPosition,
@@ -249,15 +263,37 @@ namespace
 		return !MatricesApproximatelyEqual(frameData.projectionMatrix, lastProjectionMatrix, kTemporalResetMatrixEpsilon);
 	}
 
+	glm::vec3 ComputeDirectionalShadowCenter(const GPULight& light, const glm::vec3& cameraWorldPosition)
+	{
+		const glm::vec3 lightDirection = SafeNormalize(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
+		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
+			? glm::vec3(1.0f, 0.0f, 0.0f)
+			: glm::vec3(0.0f, 1.0f, 0.0f);
+		const float texelWorldSize = (kDirectionalShadowExtent * 2.0f) / 1024.0f;
+
+		// Directional shadows follow the camera, but snapping the light-space
+		// center to whole shadow texels keeps the shadow map from crawling as the
+		// camera moves by sub-texel amounts.
+		const glm::vec3 provisionalLightPosition = cameraWorldPosition - lightDirection * 60.0f;
+		const glm::mat4 provisionalView = glm::lookAtRH(provisionalLightPosition, cameraWorldPosition, worldUp);
+		glm::vec4 snappedCenterLightSpace = provisionalView * glm::vec4(cameraWorldPosition, 1.0f);
+		snappedCenterLightSpace.x = std::floor(snappedCenterLightSpace.x / texelWorldSize) * texelWorldSize;
+		snappedCenterLightSpace.y = std::floor(snappedCenterLightSpace.y / texelWorldSize) * texelWorldSize;
+		return glm::vec3(glm::inverse(provisionalView) * snappedCenterLightSpace);
+	}
+
 	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraWorldPosition)
 	{
 		const glm::vec3 lightDirection = SafeNormalize(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
 		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
 			? glm::vec3(1.0f, 0.0f, 0.0f)
 			: glm::vec3(0.0f, 1.0f, 0.0f);
-		const glm::vec3 lightPosition = cameraWorldPosition - lightDirection * 60.0f;
-		glm::mat4 view = glm::lookAtRH(lightPosition, cameraWorldPosition, worldUp);
-		glm::mat4 projection = glm::orthoRH_ZO(-40.0f, 40.0f, -40.0f, 40.0f, 0.1f, 180.0f);
+		const float shadowExtent = kDirectionalShadowExtent;
+		const glm::vec3 snappedCenterWorld = ComputeDirectionalShadowCenter(light, cameraWorldPosition);
+
+		const glm::vec3 lightPosition = snappedCenterWorld - lightDirection * 60.0f;
+		glm::mat4 view = glm::lookAtRH(lightPosition, snappedCenterWorld, worldUp);
+		glm::mat4 projection = glm::orthoRH_ZO(-shadowExtent, shadowExtent, -shadowExtent, shadowExtent, kDirectionalShadowNear, kDirectionalShadowFar);
 		projection[1][1] *= -1.0f;
 		return projection * view;
 	}
@@ -323,6 +359,42 @@ namespace
 		glm::mat4 projection = glm::perspectiveRH_ZO(glm::radians(90.0f), 1.0f, 0.1f, range);
 		projection[1][1] *= -1.0f;
 		return projection * view;
+	}
+
+	void StoreShadowViewProjection(GPULight& light, const glm::mat4& viewProjection)
+	{
+		// GLM stores matrices as columns. Keep that column order in the GPU
+		// payload so the fragment shader can reconstruct the exact same
+		// clip-space position without relying on duplicated light math.
+		light.shadowMatrixC0 = viewProjection[0];
+		light.shadowMatrixC1 = viewProjection[1];
+		light.shadowMatrixC2 = viewProjection[2];
+		light.shadowMatrixC3 = viewProjection[3];
+	}
+
+	glm::mat4 LoadShadowViewProjection(const GPULight& light)
+	{
+		glm::mat4 viewProjection(1.0f);
+		viewProjection[0] = light.shadowMatrixC0;
+		viewProjection[1] = light.shadowMatrixC1;
+		viewProjection[2] = light.shadowMatrixC2;
+		viewProjection[3] = light.shadowMatrixC3;
+		return viewProjection;
+	}
+
+	bool ShouldMaterialCastShadow(MaterialFileShadowBehavior behavior)
+	{
+		// Transparent materials are excluded from the first shadow milestone
+		// because opaque fallback shadows would misrepresent glass, particles,
+		// and other blended surfaces. Cutout and emissive-opacity materials keep
+		// using the material shader clip path so silhouettes remain consistent.
+		switch (behavior)
+		{
+		case MaterialFileShadowBehavior::TransparentNoShadow:
+			return false;
+		default:
+			return true;
+		}
 	}
 }
 
@@ -559,7 +631,7 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 	retainedChurnCount += retainedReplacementCount;
 	result.diagnostics.retainedLightChurnCount = retainedChurnCount;
 
-	std::array<std::optional<ShadowWinner>, MAX_SHADOW_RESOURCE_SLOTS> bestShadowBySlot{};
+	std::vector<ShadowWinner> shadowWinners;
 	for (const ScoredCandidate& scored : scoredCandidates)
 	{
 		if (!retainedMask[scored.uploadedIndex])
@@ -573,20 +645,19 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 			continue;
 		}
 
-		const std::uint32_t shadowSlotIndex = GetShadowSlotIndex(candidate);
-		if (shadowSlotIndex >= MAX_SHADOW_RESOURCE_SLOTS)
-		{
-			continue;
-		}
-
 		ShadowWinner winner{};
 		winner.score = scored.score;
 		winner.uploadedIndex = scored.uploadedIndex;
-		winner.slotIndex = shadowSlotIndex;
-		if (viewState.previousShadowOwners[shadowSlotIndex] == candidate.lightId)
+		winner.slotIndex = kMaxShadowResourceSlots;
+		for (std::uint32_t previousSlotIndex = 0u; previousSlotIndex < MAX_SHADOW_RESOURCE_SLOTS; ++previousSlotIndex)
 		{
-			winner.score += 7500.0f;
-			winner.reuseBonusApplied = true;
+			if (viewState.previousShadowOwners[previousSlotIndex] == candidate.lightId)
+			{
+				winner.score += 7500.0f;
+				winner.slotIndex = previousSlotIndex;
+				winner.reuseBonusApplied = true;
+				break;
+			}
 		}
 
 		const auto temporalIt = viewState.lights.find(candidate.lightId);
@@ -595,21 +666,7 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 			winner.score += 1500.0f;
 		}
 
-		if (!bestShadowBySlot[shadowSlotIndex].has_value()
-			|| winner.score > bestShadowBySlot[shadowSlotIndex]->score
-			|| (winner.score == bestShadowBySlot[shadowSlotIndex]->score && winner.uploadedIndex < bestShadowBySlot[shadowSlotIndex]->uploadedIndex))
-		{
-			bestShadowBySlot[shadowSlotIndex] = winner;
-		}
-	}
-
-	std::vector<ShadowWinner> shadowWinners;
-	for (const std::optional<ShadowWinner>& winner : bestShadowBySlot)
-	{
-		if (winner.has_value())
-		{
-			shadowWinners.push_back(*winner);
-		}
+		shadowWinners.push_back(winner);
 	}
 	std::stable_sort(shadowWinners.begin(), shadowWinners.end(), [](const ShadowWinner& lhs, const ShadowWinner& rhs) {
 		if (lhs.score == rhs.score)
@@ -624,10 +681,45 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 	}
 
 	std::vector<bool> shadowedMask(result.uploadedCandidates.size(), false);
+	std::vector<bool> shadowReuseMask(result.uploadedCandidates.size(), false);
+	std::vector<std::uint32_t> assignedShadowSlots(result.uploadedCandidates.size(), kMaxShadowResourceSlots);
 	std::array<TerraEngine::UUID, MAX_SHADOW_RESOURCE_SLOTS> currentShadowOwners{};
+	std::array<bool, MAX_SHADOW_RESOURCE_SLOTS> usedShadowSlots{};
+	for (ShadowWinner& winner : shadowWinners)
+	{
+		if (winner.reuseBonusApplied && winner.slotIndex < MAX_SHADOW_RESOURCE_SLOTS && !usedShadowSlots[winner.slotIndex])
+		{
+			usedShadowSlots[winner.slotIndex] = true;
+			continue;
+		}
+		winner.reuseBonusApplied = false;
+		winner.slotIndex = kMaxShadowResourceSlots;
+	}
+	for (ShadowWinner& winner : shadowWinners)
+	{
+		if (winner.slotIndex < MAX_SHADOW_RESOURCE_SLOTS)
+		{
+			continue;
+		}
+		for (std::uint32_t slotIndex = 0u; slotIndex < MAX_SHADOW_RESOURCE_SLOTS; ++slotIndex)
+		{
+			if (!usedShadowSlots[slotIndex])
+			{
+				winner.slotIndex = slotIndex;
+				usedShadowSlots[slotIndex] = true;
+				break;
+			}
+		}
+	}
 	for (const ShadowWinner& winner : shadowWinners)
 	{
+		if (winner.slotIndex >= MAX_SHADOW_RESOURCE_SLOTS)
+		{
+			continue;
+		}
 		shadowedMask[winner.uploadedIndex] = true;
+		shadowReuseMask[winner.uploadedIndex] = winner.reuseBonusApplied;
+		assignedShadowSlots[winner.uploadedIndex] = winner.slotIndex;
 		currentShadowOwners[winner.slotIndex] = result.uploadedCandidates[winner.uploadedIndex].lightId;
 		if (winner.reuseBonusApplied)
 		{
@@ -635,6 +727,7 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 		}
 	}
 
+	std::array<bool, MAX_SHADOW_RESOURCE_SLOTS> replacedShadowSlots{};
 	for (std::uint32_t slotIndex = 0u; slotIndex < MAX_SHADOW_RESOURCE_SLOTS; ++slotIndex)
 	{
 		if (viewState.previousShadowOwners[slotIndex] != TerraEngine::EMPTY_UUID
@@ -642,6 +735,7 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 			&& currentShadowOwners[slotIndex] != viewState.previousShadowOwners[slotIndex])
 		{
 			result.diagnostics.shadowReplacementCount += 1u;
+			replacedShadowSlots[slotIndex] = true;
 		}
 	}
 
@@ -656,7 +750,35 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 		if (shadowedMask[uploadedIndex])
 		{
 			result.retainedLights[retainedVectorIndex].gpuLight.shadowAndPadding.x = 1.0f;
+			result.retainedLights[retainedVectorIndex].gpuLight.shadowAndPadding.y = static_cast<float>(assignedShadowSlots[uploadedIndex]);
 			result.diagnostics.shadowedLightCount += 1u;
+		}
+
+		const FrameLightCandidate& retainedCandidate = result.uploadedCandidates[uploadedIndex];
+		if ((retainedCandidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) != 0u)
+		{
+			const std::uint32_t slotIndex = assignedShadowSlots[uploadedIndex] < kMaxShadowResourceSlots
+				? assignedShadowSlots[uploadedIndex]
+				: GetShadowSlotIndex(retainedCandidate);
+
+			ShadowResourceAssignmentDiagnostic assignment{};
+			assignment.lightId = retainedCandidate.lightId;
+			assignment.resourceKind = GetShadowResourceKind(retainedCandidate);
+			assignment.resourceSlot = slotIndex;
+			assignment.frameSerial = frameSerial;
+			assignment.assigned = shadowedMask[uploadedIndex];
+			assignment.reusedPreviousOwner = shadowReuseMask[uploadedIndex];
+			assignment.replacedPreviousOwner = assignment.assigned
+				&& slotIndex < replacedShadowSlots.size()
+				&& replacedShadowSlots[slotIndex];
+			const auto temporalIt = viewState.lights.find(retainedCandidate.lightId);
+			if (temporalIt != viewState.lights.end())
+			{
+				assignment.framesSinceLastSeen = frameSerial - temporalIt->second.lastSeenFrameSerial;
+				assignment.retentionScore = temporalIt->second.lastCompositeScore;
+				assignment.shadowedPreviousFrame = temporalIt->second.shadowedLastFrame;
+			}
+			result.diagnostics.shadowAssignments.push_back(assignment);
 		}
 	}
 
@@ -712,6 +834,8 @@ VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {
 	impl->latestStatsByView[1].viewType = RenderViewType::Scene;
 	impl->latestBudgetDiagnosticsByView[0].viewType = RenderViewType::Game;
 	impl->latestBudgetDiagnosticsByView[1].viewType = RenderViewType::Scene;
+	impl->latestLightingDiagnosticsByView[0].viewType = RenderViewType::Game;
+	impl->latestLightingDiagnosticsByView[1].viewType = RenderViewType::Scene;
 }
 VulkanContext::~VulkanContext() = default;
 
@@ -1945,14 +2069,28 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	}
 	impl->CreateSkyBackgroundPipeline(renderPassInfo.renderPass);
 
+	const RenderViewType renderViewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
+	const uint32_t statsSlotIndex = impl->GetStatsSlotIndex(impl->currentFrame, view);
+	// Apply the long-term preset policy on the CPU before upload so clustered
+	// lighting receives a predictable retained-light list and an independent
+	// shadow subset while the lightweight GPU analysis path observes a larger
+	// uploaded candidate set for the next frame.
+	const VulkanContext::Impl::LightBudgetApplicationResult budgetResult = impl->ApplyFrameLightBudgets(frameData, renderViewType);
+	const uint32_t requestedShadowSlotCount = std::min(budgetResult.diagnostics.shadowLightBudget, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
+
 	const auto EnsureShadowRenderResources = [&]() -> bool {
-		if (impl->directionalShadowDepth.view == VK_NULL_HANDLE
-			|| impl->directionalShadowColor.view == VK_NULL_HANDLE
-			|| impl->spotShadowDepth.view == VK_NULL_HANDLE
-			|| impl->spotShadowColor.view == VK_NULL_HANDLE
-			|| impl->areaShadowDepth.view == VK_NULL_HANDLE
-			|| impl->areaShadowColor.view == VK_NULL_HANDLE) {
-			if (!impl->EnsureShadowRenderResources()) {
+		if (requestedShadowSlotCount == 0u) {
+			return true;
+		}
+		if (impl->activeShadowResourceSlots < requestedShadowSlotCount
+			|| impl->directionalShadowDepths[0].view == VK_NULL_HANDLE
+			|| impl->directionalShadowColors[0].view == VK_NULL_HANDLE
+			|| impl->spotShadowDepths[0].view == VK_NULL_HANDLE
+			|| impl->spotShadowColors[0].view == VK_NULL_HANDLE
+			|| impl->areaShadowDepths[0].view == VK_NULL_HANDLE
+			|| impl->areaShadowColors[0].view == VK_NULL_HANDLE
+			|| impl->pointShadowCubeDepths[0].view == VK_NULL_HANDLE) {
+			if (!impl->EnsureShadowRenderResources(requestedShadowSlotCount)) {
 				return false;
 			}
 		}
@@ -1992,13 +2130,19 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			subpass.pColorAttachments = &colorAttachmentRef;
 			subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
-			VkSubpassDependency dependency{};
-			dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-			dependency.dstSubpass = 0;
-			dependency.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-			dependency.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-			dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-			dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			std::array<VkSubpassDependency, 2> dependencies{};
+			dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+			dependencies[0].dstSubpass = 0;
+			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+			dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[1].srcSubpass = 0;
+			dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+			dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+			dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
 			std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
 			VkRenderPassCreateInfo renderPassInfo{};
@@ -2007,8 +2151,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			renderPassInfo.pAttachments = attachments.data();
 			renderPassInfo.subpassCount = 1;
 			renderPassInfo.pSubpasses = &subpass;
-			renderPassInfo.dependencyCount = 1;
-			renderPassInfo.pDependencies = &dependency;
+			renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+			renderPassInfo.pDependencies = dependencies.data();
 			if (vkCreateRenderPass(impl->device, &renderPassInfo, nullptr, &impl->shadowRenderPass) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Warning, "failed to create shadow render pass");
 				impl->shadowRenderPass = VK_NULL_HANDLE;
@@ -2036,21 +2180,23 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			return vkCreateFramebuffer(impl->device, &framebufferInfo, nullptr, &framebuffer) == VK_SUCCESS;
 		};
 
-		if (!EnsureFramebuffer(impl->directionalShadowFramebuffer, impl->directionalShadowColor.view, impl->directionalShadowDepth.view, shadowWidth, shadowHeight)) {
-			return false;
-		}
-		if (!EnsureFramebuffer(impl->spotShadowFramebuffer, impl->spotShadowColor.view, impl->spotShadowDepth.view, shadowWidth, shadowHeight)) {
-			return false;
-		}
-		if (!EnsureFramebuffer(impl->areaShadowFramebuffer, impl->areaShadowColor.view, impl->areaShadowDepth.view, shadowWidth, shadowHeight)) {
-			return false;
-		}
-		for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
-			if (impl->pointShadowColorFaceViews[faceIndex] == VK_NULL_HANDLE || impl->pointShadowDepthFaceViews[faceIndex] == VK_NULL_HANDLE) {
+		for (uint32_t slotIndex = 0u; slotIndex < impl->activeShadowResourceSlots; ++slotIndex) {
+			if (!EnsureFramebuffer(impl->directionalShadowFramebuffers[slotIndex], impl->directionalShadowColors[slotIndex].view, impl->directionalShadowDepths[slotIndex].view, shadowWidth, shadowHeight)) {
 				return false;
 			}
-			if (!EnsureFramebuffer(impl->pointShadowFaceFramebuffers[faceIndex], impl->pointShadowColorFaceViews[faceIndex], impl->pointShadowDepthFaceViews[faceIndex], pointShadowSize, pointShadowSize)) {
+			if (!EnsureFramebuffer(impl->spotShadowFramebuffers[slotIndex], impl->spotShadowColors[slotIndex].view, impl->spotShadowDepths[slotIndex].view, shadowWidth, shadowHeight)) {
 				return false;
+			}
+			if (!EnsureFramebuffer(impl->areaShadowFramebuffers[slotIndex], impl->areaShadowColors[slotIndex].view, impl->areaShadowDepths[slotIndex].view, shadowWidth, shadowHeight)) {
+				return false;
+			}
+			for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
+				if (impl->pointShadowColorFaceViewsBySlot[slotIndex][faceIndex] == VK_NULL_HANDLE || impl->pointShadowDepthFaceViewsBySlot[slotIndex][faceIndex] == VK_NULL_HANDLE) {
+					return false;
+				}
+				if (!EnsureFramebuffer(impl->pointShadowFaceFramebuffersBySlot[slotIndex][faceIndex], impl->pointShadowColorFaceViewsBySlot[slotIndex][faceIndex], impl->pointShadowDepthFaceViewsBySlot[slotIndex][faceIndex], pointShadowSize, pointShadowSize)) {
+					return false;
+				}
 			}
 		}
 
@@ -2058,14 +2204,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	};
 
 	const bool shadowResourcesReady = EnsureShadowRenderResources();
-
-	const RenderViewType renderViewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
-	const uint32_t statsSlotIndex = impl->GetStatsSlotIndex(impl->currentFrame, view);
-	// Apply the long-term preset policy on the CPU before upload so clustered
-	// lighting receives a predictable retained-light list and an independent
-	// shadow subset while the lightweight GPU analysis path observes a larger
-	// uploaded candidate set for the next frame.
-	const VulkanContext::Impl::LightBudgetApplicationResult budgetResult = impl->ApplyFrameLightBudgets(frameData, renderViewType);
 
 	std::vector<GPULight> analysisLightingPayload;
 	analysisLightingPayload.reserve(budgetResult.uploadedCandidates.size());
@@ -2079,6 +2217,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		GPULight light = candidate.gpuLight;
 		const uint32_t lightType = static_cast<uint32_t>(std::max(0.0f, light.positionAndType.w));
 		const bool castsShadows = light.shadowAndPadding.x > 0.5f;
+		const float assignedShadowSlot = light.shadowAndPadding.y;
 		light.shadowAndPadding.y = -1.0f;
 		light.shadowAndPadding.z = static_cast<float>(impl->ltcAmplitudeTextureIndex);
 		light.shadowAndPadding.w = static_cast<float>(impl->ltcInverseTextureIndex);
@@ -2086,14 +2225,29 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		// resource binding is conditional; non-shadowed retained lights still
 		// contribute direct lighting in the forward pass.
 		if (castsShadows) {
+			// ApplyFrameLightBudgets stores the logical shadow slot in y. Keep
+			// that CPU-side slot before y is repacked as the shader-visible
+			// texture index, otherwise every shadowed light samples slot zero.
+			const uint32_t shadowSlotIndex = static_cast<uint32_t>(std::clamp(assignedShadowSlot, 0.0f, static_cast<float>(VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS - 1u)));
 			if (lightType == 0u) {
-				light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndex);
+				const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(light, frameData.cameraWorldPosition);
+				const glm::vec3 snappedShadowCenter = ComputeDirectionalShadowCenter(light, frameData.cameraWorldPosition);
+				light.positionAndType.x = snappedShadowCenter.x;
+				light.positionAndType.y = snappedShadowCenter.y;
+				light.positionAndType.z = snappedShadowCenter.z;
+				light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndices[shadowSlotIndex]);
+				StoreShadowViewProjection(light, lightViewProjection);
+			}
+			else if (lightType == 1u) {
+				light.shadowAndPadding.y = static_cast<float>(shadowSlotIndex);
 			}
 			else if (lightType == 2u) {
-				light.shadowAndPadding.y = static_cast<float>(impl->spotShadowTextureIndex);
+				light.shadowAndPadding.y = static_cast<float>(impl->spotShadowTextureIndices[shadowSlotIndex]);
+				StoreShadowViewProjection(light, BuildSpotShadowViewProjection(light));
 			}
 			else if (lightType == 3u) {
-				light.shadowAndPadding.y = static_cast<float>(impl->areaShadowTextureIndex);
+				light.shadowAndPadding.y = static_cast<float>(impl->areaShadowTextureIndices[shadowSlotIndex]);
+				StoreShadowViewProjection(light, BuildAreaShadowViewProjection(light));
 			}
 		}
 		lightingPayload.push_back(light);
@@ -2175,6 +2329,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		CreateComputePipeline(impl->lightAnalysisComputePipeline, "Shaders/Lighting/LightCull.comp.spv");
 		CreateComputePipeline(impl->hiZComputePipeline, "Editor/Shaders/PostProcess/HiZGenerate.comp.spv");
 		CreateComputePipeline(impl->vrsComputePipeline, "Editor/Shaders/PostProcess/VRSGenerate.comp.spv");
+		CreateComputePipeline(impl->gtaoComputePipeline, "Editor/Shaders/PostProcess/GTAO.comp.spv");
+		CreateComputePipeline(impl->gtaoBlurComputePipeline, "Editor/Shaders/PostProcess/GTAOBlur.comp.spv");
 	};
 
 	EnsureLightingComputePipelines();
@@ -2204,6 +2360,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		frameData.settings.anisotropicFiltering,
 		budgetResult.diagnostics.shadowLightBudget,
 		budgetResult.diagnostics.uploadedLightBudget);
+	// Upload artist-facing indirect and contact-darkening controls separately
+	// from integer feature flags so HLSL receives the same type and alignment
+	// that the CPU writes into the frame payload.
+	analysisCullingData.renderSettings2 = glm::vec4(
+		frameData.settings.indirectStrength,
+		frameData.settings.ambientOcclusionStrength,
+		static_cast<float>(frameData.settings.ambientOcclusionQuality),
+		0.0f);
 	analysisCullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
 	analysisCullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
 
@@ -2301,6 +2465,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 	// Hi-Z Generation
 	impl->GenerateHiZPyramid(cmd, impl->depthImageView);
+	impl->GenerateAmbientOcclusion(cmd, cullingData);
 
 	// Build the variable-length light list before graphics so clustered shading
 	// reads a fresh contiguous range for every cluster.
@@ -2487,7 +2652,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 		prepared.push_back(std::move(draw));
 
-		if (shadowResourcesReady) {
+		if (shadowResourcesReady && ShouldMaterialCastShadow(material->shadowBehavior)) {
 			TerraEngine::UUID shadowCollectionId = collectionId;
 			VulkanPipeline* shadowPipeline = ResolvePipeline(shadowCollectionId, impl->shadowRenderPass, materialFlags);
 			if (shadowPipeline == nullptr && shadowCollectionId == defaultTaskCollectionId) {
@@ -2503,7 +2668,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 					shadowDraw.pipeline = shadowPipeline;
 					shadowDraw.descriptorSets = {impl->globalDescriptorSets[currentFrame], shadowMeshDescriptorSet};
 					shadowDraw.push = push;
-					// Shadow-map passes never use the cluster heatmap debug branch.
+					// Shadow-map passes use a minimal fragment-shader branch:
+					// alpha-tested materials can still clip, but lighting and
+					// recursive shadow sampling are skipped while depth writes.
+					shadowDraw.push.vrsActive = 2u;
 					shadowDraw.push.taskCullingEnabled = 0u;
 					
 					VkDrawMeshTasksIndirectCommandEXT shadowIndirectCmd{};
@@ -2530,6 +2698,17 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	}
 
 	impl->RecordPendingStats(statsSlotIndex, pendingStats);
+
+	// Shadow-map rendering and the main scene pass both consume the same
+	// indirect draw command buffer. Upload it before any shadow pass records
+	// indirect draws, otherwise the shadow map can render stale or empty draw
+	// commands and blockers will not occlude the light.
+	if (!indirectCommands.empty()) {
+		void* data = nullptr;
+		vmaMapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation, &data);
+		std::memcpy(data, indirectCommands.data(), indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
+		vmaUnmapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation);
+	}
 
 	// If this is a subsequent pass targeting the swapchain (multi-camera),
 	// inject a barrier to wait for the previous pass to finish its writes.
@@ -2560,26 +2739,43 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		);
 	}
 
-	const GPULight* directionalShadowLight = nullptr;
-	const GPULight* pointShadowLight = nullptr;
-	const GPULight* spotShadowLight = nullptr;
-	const GPULight* areaShadowLight = nullptr;
+	struct ShadowLightRecord
+	{
+		const GPULight* light = nullptr;
+		uint32_t type = 0u;
+		uint32_t slot = VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS;
+	};
+	std::vector<ShadowLightRecord> shadowLightRecords;
+	shadowLightRecords.reserve(VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
+	auto FindShadowSlotFromTextureIndex = [](const std::array<uint32_t, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS>& textureIndices, uint32_t textureIndex) -> uint32_t {
+		for (uint32_t slotIndex = 0u; slotIndex < VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS; ++slotIndex) {
+			if (textureIndices[slotIndex] == textureIndex) {
+				return slotIndex;
+			}
+		}
+		return VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS;
+	};
 	for (const GPULight& light : lightingPayload) {
 		if (light.shadowAndPadding.x <= 0.5f) {
 			continue;
 		}
 		const uint32_t lightType = static_cast<uint32_t>(std::max(0.0f, light.positionAndType.w));
-		if (lightType == 0u && directionalShadowLight == nullptr) {
-			directionalShadowLight = &light;
+		const uint32_t shadowPayloadIndex = static_cast<uint32_t>(std::max(0.0f, light.shadowAndPadding.y));
+		uint32_t slotIndex = VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS;
+		if (lightType == 0u) {
+			slotIndex = FindShadowSlotFromTextureIndex(impl->directionalShadowTextureIndices, shadowPayloadIndex);
 		}
-		else if (lightType == 1u && pointShadowLight == nullptr) {
-			pointShadowLight = &light;
+		else if (lightType == 1u) {
+			slotIndex = std::min(shadowPayloadIndex, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS - 1u);
 		}
-		else if (lightType == 2u && spotShadowLight == nullptr) {
-			spotShadowLight = &light;
+		else if (lightType == 2u) {
+			slotIndex = FindShadowSlotFromTextureIndex(impl->spotShadowTextureIndices, shadowPayloadIndex);
 		}
-		else if (lightType == 3u && areaShadowLight == nullptr) {
-			areaShadowLight = &light;
+		else if (lightType == 3u) {
+			slotIndex = FindShadowSlotFromTextureIndex(impl->areaShadowTextureIndices, shadowPayloadIndex);
+		}
+		if (slotIndex < VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS) {
+			shadowLightRecords.push_back({ &light, lightType, slotIndex });
 		}
 	}
 
@@ -2636,23 +2832,28 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	const uint32_t shadowHeight = VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
 	const uint32_t pointShadowSize = VulkanContext::Impl::POINT_SHADOW_MAP_RESOLUTION;
 	if (shadowResourcesReady && impl->shadowRenderPass != VK_NULL_HANDLE && !preparedShadow.empty()) {
-		if (directionalShadowLight != nullptr) {
-			const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(*directionalShadowLight, frameData.cameraWorldPosition);
-			recordedAnyShadowPass = RecordShadowPass(impl->directionalShadowFramebuffer, shadowWidth, shadowHeight, lightViewProjection) || recordedAnyShadowPass;
-		}
-		if (pointShadowLight != nullptr) {
-			for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
-				const glm::mat4 lightViewProjection = BuildPointShadowViewProjection(*pointShadowLight, faceIndex);
-				recordedAnyShadowPass = RecordShadowPass(impl->pointShadowFaceFramebuffers[faceIndex], pointShadowSize, pointShadowSize, lightViewProjection) || recordedAnyShadowPass;
+		for (const ShadowLightRecord& record : shadowLightRecords) {
+			if (record.light == nullptr || record.slot >= VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS) {
+				continue;
 			}
-		}
-		if (spotShadowLight != nullptr) {
-			const glm::mat4 lightViewProjection = BuildSpotShadowViewProjection(*spotShadowLight);
-			recordedAnyShadowPass = RecordShadowPass(impl->spotShadowFramebuffer, shadowWidth, shadowHeight, lightViewProjection) || recordedAnyShadowPass;
-		}
-		if (areaShadowLight != nullptr) {
-			const glm::mat4 lightViewProjection = BuildAreaShadowViewProjection(*areaShadowLight);
-			recordedAnyShadowPass = RecordShadowPass(impl->areaShadowFramebuffer, shadowWidth, shadowHeight, lightViewProjection) || recordedAnyShadowPass;
+			if (record.type == 0u) {
+				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
+				recordedAnyShadowPass = RecordShadowPass(impl->directionalShadowFramebuffers[record.slot], shadowWidth, shadowHeight, lightViewProjection) || recordedAnyShadowPass;
+			}
+			else if (record.type == 1u) {
+				for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
+					const glm::mat4 lightViewProjection = BuildPointShadowViewProjection(*record.light, faceIndex);
+					recordedAnyShadowPass = RecordShadowPass(impl->pointShadowFaceFramebuffersBySlot[record.slot][faceIndex], pointShadowSize, pointShadowSize, lightViewProjection) || recordedAnyShadowPass;
+				}
+			}
+			else if (record.type == 2u) {
+				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
+				recordedAnyShadowPass = RecordShadowPass(impl->spotShadowFramebuffers[record.slot], shadowWidth, shadowHeight, lightViewProjection) || recordedAnyShadowPass;
+			}
+			else if (record.type == 3u) {
+				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
+				recordedAnyShadowPass = RecordShadowPass(impl->areaShadowFramebuffers[record.slot], shadowWidth, shadowHeight, lightViewProjection) || recordedAnyShadowPass;
+			}
 		}
 	}
 
@@ -2671,14 +2872,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			0, nullptr
 		);
 	}
-
-	if (!indirectCommands.empty()) {
-		void* data = nullptr;
-		vmaMapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation, &data);
-		std::memcpy(data, indirectCommands.data(), indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
-		vmaUnmapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation);
-	}
-
+	
 	std::vector<VkCommandBuffer> secondaryBuffers;
 	if (!prepared.empty()) {
 		const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
@@ -3011,6 +3205,208 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 	vkUpdateDescriptorSets(device, 1, &restoreWrite, 0, nullptr);
 }
 
+void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData) {
+	const bool aoEnabled = frameData.renderSettings2.y > 0.001f && frameData.renderSettings2.z > 0.5f;
+	if (!aoEnabled
+		|| gtaoComputePipeline == VK_NULL_HANDLE
+		|| gtaoBlurComputePipeline == VK_NULL_HANDLE
+		|| ambientOcclusionRaw.image == VK_NULL_HANDLE
+		|| ambientOcclusionBlurred.image == VK_NULL_HANDLE
+		|| ambientOcclusionHistory.image == VK_NULL_HANDLE
+		|| ambientOcclusionRaw.view == VK_NULL_HANDLE
+		|| ambientOcclusionBlurred.view == VK_NULL_HANDLE
+		|| ambientOcclusionHistory.view == VK_NULL_HANDLE) {
+		return;
+	}
+
+	const uint32_t width = std::max(ambientOcclusionWidth, 1u);
+	const uint32_t height = std::max(ambientOcclusionHeight, 1u);
+	auto TransitionAoImage = [&](VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = 0u;
+		barrier.subresourceRange.levelCount = 1u;
+		barrier.subresourceRange.baseArrayLayer = 0u;
+		barrier.subresourceRange.layerCount = 1u;
+		barrier.srcAccessMask = srcAccess;
+		barrier.dstAccessMask = dstAccess;
+		vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+	};
+
+	// The AO targets persist across frames in shader-read layout. Each dispatch
+	// temporarily moves one target to GENERAL, writes it, then makes it readable
+	// before the next compute pass or material shading samples it.
+	TransitionAoImage(
+		ambientOcclusionRaw.image,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_ACCESS_SHADER_WRITE_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+	VkDescriptorImageInfo depthInfo{};
+	depthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	depthInfo.imageView = depthImageView;
+	depthInfo.sampler = VK_NULL_HANDLE;
+
+	VkDescriptorImageInfo rawOutputInfo{};
+	rawOutputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	rawOutputInfo.imageView = ambientOcclusionRaw.view;
+	rawOutputInfo.sampler = VK_NULL_HANDLE;
+
+	std::array<VkWriteDescriptorSet, 2> gtaoWrites{};
+	gtaoWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	gtaoWrites[0].dstSet = globalDescriptorSets[currentFrame];
+	gtaoWrites[0].dstBinding = 12;
+	gtaoWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	gtaoWrites[0].descriptorCount = 1;
+	gtaoWrites[0].pImageInfo = &depthInfo;
+
+	gtaoWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	gtaoWrites[1].dstSet = globalDescriptorSets[currentFrame];
+	gtaoWrites[1].dstBinding = 16;
+	gtaoWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	gtaoWrites[1].descriptorCount = 1;
+	gtaoWrites[1].pImageInfo = &rawOutputInfo;
+	vkUpdateDescriptorSets(device, static_cast<uint32_t>(gtaoWrites.size()), gtaoWrites.data(), 0, nullptr);
+
+	struct GTAOPushConstants
+	{
+		glm::uvec2 viewportSize = glm::uvec2(1u);
+		float radiusPixels = 1.0f;
+		float strength = 1.0f;
+	};
+
+	const float quality = std::clamp(frameData.renderSettings2.z, 1.0f, 3.0f);
+	GTAOPushConstants gtaoPush{};
+	gtaoPush.viewportSize = glm::uvec2(width, height);
+	gtaoPush.radiusPixels = 1.0f + quality * 1.5f;
+	gtaoPush.strength = std::clamp(frameData.renderSettings2.y, 0.0f, 4.0f);
+
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lightingComputePipelineLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtaoComputePipeline);
+	vkCmdPushConstants(cmd, lightingComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gtaoPush), &gtaoPush);
+	vkCmdDispatch(cmd, (width + 7u) / 8u, (height + 7u) / 8u, 1u);
+
+	TransitionAoImage(
+		ambientOcclusionRaw.image,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_ACCESS_SHADER_WRITE_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+	TransitionAoImage(
+		ambientOcclusionHistory.image,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_ACCESS_SHADER_WRITE_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+	VkDescriptorImageInfo rawInputInfo{};
+	rawInputInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	rawInputInfo.imageView = ambientOcclusionRaw.view;
+	rawInputInfo.sampler = VK_NULL_HANDLE;
+
+	VkDescriptorImageInfo blurredOutputInfo{};
+	blurredOutputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	blurredOutputInfo.imageView = ambientOcclusionHistory.view;
+	blurredOutputInfo.sampler = VK_NULL_HANDLE;
+
+	VkDescriptorImageInfo historyInputInfo{};
+	historyInputInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	historyInputInfo.imageView = ambientOcclusionBlurred.view;
+	historyInputInfo.sampler = VK_NULL_HANDLE;
+
+	std::array<VkWriteDescriptorSet, 3> blurWrites{};
+	blurWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	blurWrites[0].dstSet = globalDescriptorSets[currentFrame];
+	blurWrites[0].dstBinding = 19;
+	blurWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	blurWrites[0].descriptorCount = 1;
+	blurWrites[0].pImageInfo = &rawInputInfo;
+
+	blurWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	blurWrites[1].dstSet = globalDescriptorSets[currentFrame];
+	blurWrites[1].dstBinding = 16;
+	blurWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	blurWrites[1].descriptorCount = 1;
+	blurWrites[1].pImageInfo = &blurredOutputInfo;
+
+	blurWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	blurWrites[2].dstSet = globalDescriptorSets[currentFrame];
+	blurWrites[2].dstBinding = 21;
+	blurWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	blurWrites[2].descriptorCount = 1;
+	blurWrites[2].pImageInfo = &historyInputInfo;
+	vkUpdateDescriptorSets(device, static_cast<uint32_t>(blurWrites.size()), blurWrites.data(), 0, nullptr);
+
+	struct GTAOBlurPushConstants
+	{
+		glm::uvec2 viewportSize = glm::uvec2(1u);
+		float depthSigma = 0.0025f;
+		float historyBlend = 0.0f;
+	};
+
+	GTAOBlurPushConstants blurPush{};
+	blurPush.viewportSize = glm::uvec2(width, height);
+	blurPush.depthSigma = 0.0025f / quality;
+	// First frame after resize must not sample undefined temporal content; later
+	// frames use a modest blend to suppress flicker without smearing edits.
+	blurPush.historyBlend = ambientOcclusionHistoryValid ? std::clamp(0.35f + quality * 0.1f, 0.0f, 0.65f) : 0.0f;
+
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtaoBlurComputePipeline);
+	vkCmdPushConstants(cmd, lightingComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(blurPush), &blurPush);
+	vkCmdDispatch(cmd, (width + 7u) / 8u, (height + 7u) / 8u, 1u);
+
+	TransitionAoImage(
+		ambientOcclusionHistory.image,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_ACCESS_SHADER_WRITE_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+	std::swap(ambientOcclusionBlurred, ambientOcclusionHistory);
+	ambientOcclusionHistoryValid = true;
+
+	VkDescriptorImageInfo blurredInputInfo{};
+	blurredInputInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	blurredInputInfo.imageView = ambientOcclusionBlurred.view;
+	blurredInputInfo.sampler = VK_NULL_HANDLE;
+
+	VkDescriptorImageInfo nextHistoryInfo{};
+	nextHistoryInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	nextHistoryInfo.imageView = ambientOcclusionHistory.view;
+	nextHistoryInfo.sampler = VK_NULL_HANDLE;
+
+	std::array<VkWriteDescriptorSet, 2> fragmentAoWrites{};
+	fragmentAoWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	fragmentAoWrites[0].dstSet = globalDescriptorSets[currentFrame];
+	fragmentAoWrites[0].dstBinding = 19;
+	fragmentAoWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	fragmentAoWrites[0].descriptorCount = 1;
+	fragmentAoWrites[0].pImageInfo = &blurredInputInfo;
+
+	fragmentAoWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	fragmentAoWrites[1].dstSet = globalDescriptorSets[currentFrame];
+	fragmentAoWrites[1].dstBinding = 21;
+	fragmentAoWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	fragmentAoWrites[1].descriptorCount = 1;
+	fragmentAoWrites[1].pImageInfo = &nextHistoryInfo;
+	vkUpdateDescriptorSets(device, static_cast<uint32_t>(fragmentAoWrites.size()), fragmentAoWrites.data(), 0, nullptr);
+}
+
 void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView) {
 	if (vrsComputePipeline == VK_NULL_HANDLE || vrs.image == VK_NULL_HANDLE) return;
 
@@ -3186,6 +3582,15 @@ FrameBudgetDiagnosticsSnapshot VulkanContext::GetLatestFrameBudgetDiagnostics(Re
 		return snapshot;
 	}
 	return impl->GetLatestBudgetDiagnostics(viewType);
+}
+
+LightingDiagnosticsSnapshot VulkanContext::GetLatestLightingDiagnostics(RenderViewType viewType) const {
+	if (!impl) {
+		LightingDiagnosticsSnapshot snapshot{};
+		snapshot.viewType = viewType;
+		return snapshot;
+	}
+	return impl->GetLatestLightingDiagnostics(viewType);
 }
 
 void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {
@@ -3688,47 +4093,88 @@ void VulkanContext::Impl::ClearResources() {
 		}
 	};
 
-	DestroyFramebuffer(directionalShadowFramebuffer);
-	DestroyFramebuffer(spotShadowFramebuffer);
-	DestroyFramebuffer(areaShadowFramebuffer);
-	for (VkFramebuffer& framebuffer : pointShadowFaceFramebuffers) {
+	for (VkFramebuffer& framebuffer : directionalShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
-
-	for (VkImageView& faceView : pointShadowDepthFaceViews) {
-		if (faceView != VK_NULL_HANDLE) {
-			vkDestroyImageView(device, faceView, nullptr);
-			faceView = VK_NULL_HANDLE;
-		}
+	for (VkFramebuffer& framebuffer : spotShadowFramebuffers) {
+		DestroyFramebuffer(framebuffer);
 	}
-	for (VkImageView& faceView : pointShadowColorFaceViews) {
-		if (faceView != VK_NULL_HANDLE) {
-			vkDestroyImageView(device, faceView, nullptr);
-			faceView = VK_NULL_HANDLE;
+	for (VkFramebuffer& framebuffer : areaShadowFramebuffers) {
+		DestroyFramebuffer(framebuffer);
+	}
+	for (std::array<VkFramebuffer, 6>& faceFramebuffers : pointShadowFaceFramebuffersBySlot) {
+		for (VkFramebuffer& framebuffer : faceFramebuffers) {
+			DestroyFramebuffer(framebuffer);
 		}
 	}
 
-	DestroyVulkanImage(directionalShadowDepth);
-	DestroyVulkanImage(directionalShadowColor);
-	DestroyVulkanImage(spotShadowDepth);
-	DestroyVulkanImage(spotShadowColor);
-	DestroyVulkanImage(areaShadowDepth);
-	DestroyVulkanImage(areaShadowColor);
-	DestroyVulkanImage(pointShadowCubeDepth);
-	DestroyVulkanImage(pointShadowCubeColor);
+	auto DestroyImageView = [&](VkImageView& imageView) {
+		if (imageView != VK_NULL_HANDLE) {
+			vkDestroyImageView(device, imageView, nullptr);
+			imageView = VK_NULL_HANDLE;
+		}
+	};
+	for (std::array<VkImageView, 6>& faceViews : pointShadowDepthFaceViewsBySlot) {
+		for (VkImageView& faceView : faceViews) {
+			DestroyImageView(faceView);
+		}
+	}
+	for (std::array<VkImageView, 6>& faceViews : pointShadowColorFaceViewsBySlot) {
+		for (VkImageView& faceView : faceViews) {
+			DestroyImageView(faceView);
+		}
+	}
+
+	for (VulkanImage& image : directionalShadowDepths) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : directionalShadowColors) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : spotShadowDepths) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : spotShadowColors) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : areaShadowDepths) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : areaShadowColors) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : pointShadowCubeDepths) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : pointShadowCubeColors) {
+		DestroyVulkanImage(image);
+	}
 	DestroyVulkanImage(ltcAmplitudeTexture);
 	DestroyVulkanImage(ltcInverseTexture);
+	DestroyVulkanImage(environmentIrradianceTexture);
+	DestroyVulkanImage(prefilteredEnvironmentTexture);
+	DestroyVulkanImage(brdfIntegrationTexture);
+	DestroyVulkanImage(ambientOcclusionRaw);
+	DestroyVulkanImage(ambientOcclusionBlurred);
+	DestroyVulkanImage(ambientOcclusionHistory);
+	ambientOcclusionWidth = 0u;
+	ambientOcclusionHeight = 0u;
+	ambientOcclusionHistoryValid = false;
 
 	textureIndexMap.clear();
 	freeTextureIndices.clear();
 	nextTextureIndex = 3; // Slots 0-2 are reserved for white, flat-normal, and material-mask defaults.
 
-    // Reset shadow texture indices so they get reallocated on reopen
-    directionalShadowTextureIndex = 0;
-    spotShadowTextureIndex = 0;
-    areaShadowTextureIndex = 0;
+	// Reset shadow texture indices so they get reallocated on reopen.
+	directionalShadowTextureIndices.fill(0u);
+	spotShadowTextureIndices.fill(0u);
+	areaShadowTextureIndices.fill(0u);
+	activeShadowResourceSlots = 0u;
     ltcAmplitudeTextureIndex = 0;
     ltcInverseTextureIndex = 0;
+	environmentIrradianceTextureIndex = 0;
+	prefilteredEnvironmentTextureIndex = 0;
+	brdfIntegrationTextureIndex = 0;
 
 	// Reset default texture descriptors to prevent stale views from being sampled if they were overwritten
 	if (defaultTexture.view != VK_NULL_HANDLE) {

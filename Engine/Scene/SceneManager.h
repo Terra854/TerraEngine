@@ -162,7 +162,7 @@ public:
 			
 						// Manually clear the dirty flag for the active scene.
 						void ClearActiveSceneDirty();
-			
+						void ClearAllDirty();			
 
 	
 
@@ -314,6 +314,7 @@ public:
 		TerraEngine::UUID activeSceneId = TerraEngine::EMPTY_UUID;
 
 		bool activeSceneDirty = false;
+		bool activeSceneSettingsDirty = false;
 		SceneRenderSettings activeSceneRenderSettings = MakeDefaultSceneRenderSettings();
 
 	

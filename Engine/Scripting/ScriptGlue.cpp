@@ -731,6 +731,32 @@ extern "C" {
         }
     }
 
+	const char* Native_Graphics_GetLightingDiagnosticsSummary(uint32_t viewType) {
+		static std::string summary;
+		const RenderViewType renderView = viewType == 1u ? RenderViewType::Scene : RenderViewType::Game;
+		const LightingDiagnosticsSnapshot diagnostics = RenderSystem::Instance().GetLatestLightingDiagnostics(renderView);
+		if (!diagnostics.valid) {
+			summary = "Lighting diagnostics are not available for the latest completed frame.";
+			return summary.c_str();
+		}
+
+		summary.clear();
+		for (const LightingDiagnosticEntry& entry : diagnostics.entries) {
+			if (!summary.empty()) {
+				summary += "\n";
+			}
+			summary += entry.message;
+			if (!entry.recommendedAction.empty()) {
+				summary += " ";
+				summary += entry.recommendedAction;
+			}
+		}
+		if (summary.empty()) {
+			summary = "Lighting diagnostics are active and no degraded state was reported.";
+		}
+		return summary.c_str();
+	}
+
     const char* Native_ResourceManager_GetAssetRoot() {
         static std::string assetRoot;
         assetRoot = ResourceManager::Instance().GetAssetRoot().string();

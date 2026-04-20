@@ -100,6 +100,7 @@ void MainEditorSubsystem::OnProjectOpened() {
     // Set Scene Root to Assets folder so we can load scenes from anywhere inside Assets
     SceneManager::Instance().SetSceneRoot(assetRoot.string());
     ResourceManager::Instance().SetAssetRoot(assetRoot);
+    RenderSystem::Instance().LoadSettings();
     
     // Check for last opened scene
     std::filesystem::path lastScenePath = projectRoot / "Library" / "LastScene.txt";

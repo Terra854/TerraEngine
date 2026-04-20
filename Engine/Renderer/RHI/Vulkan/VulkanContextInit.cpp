@@ -63,9 +63,11 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 		Cleanup();
 		return false;
 	}
+	CreateEnvironmentLightingResources();
 	CreateMaterialBufferResources();
 	CreateCullingBufferResources();
 	CreateLightingBufferResources();
+	CreateAmbientOcclusionResources();
 	CreateIndirectDrawResources();
 
 	workerCommandPools.resize(MAX_FRAMES_IN_FLIGHT);
@@ -80,6 +82,8 @@ void VulkanContext::Impl::Cleanup() {
 		vkDeviceWaitIdle(device);
 	}
 
+	DestroyAmbientOcclusionResources();
+	DestroyEnvironmentLightingResources();
 	hiZ.Destroy(device, allocator);
 	vrs.Destroy(device, allocator);
 
@@ -266,44 +270,67 @@ void VulkanContext::Impl::Cleanup() {
 			vkDestroyPipeline(device, lightAnalysisComputePipeline, nullptr);
 			lightAnalysisComputePipeline = VK_NULL_HANDLE;
 		}
+		if (hiZComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, hiZComputePipeline, nullptr);
+			hiZComputePipeline = VK_NULL_HANDLE;
+		}
+		if (vrsComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, vrsComputePipeline, nullptr);
+			vrsComputePipeline = VK_NULL_HANDLE;
+		}
+		if (gtaoComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, gtaoComputePipeline, nullptr);
+			gtaoComputePipeline = VK_NULL_HANDLE;
+		}
+		if (gtaoBlurComputePipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, gtaoBlurComputePipeline, nullptr);
+			gtaoBlurComputePipeline = VK_NULL_HANDLE;
+		}
 		if (lightingComputePipelineLayout != VK_NULL_HANDLE) {
 			vkDestroyPipelineLayout(device, lightingComputePipelineLayout, nullptr);
 			lightingComputePipelineLayout = VK_NULL_HANDLE;
 		}
-		if (directionalShadowFramebuffer != VK_NULL_HANDLE) {
-			vkDestroyFramebuffer(device, directionalShadowFramebuffer, nullptr);
-			directionalShadowFramebuffer = VK_NULL_HANDLE;
-		}
-		if (spotShadowFramebuffer != VK_NULL_HANDLE) {
-			vkDestroyFramebuffer(device, spotShadowFramebuffer, nullptr);
-			spotShadowFramebuffer = VK_NULL_HANDLE;
-		}
-		if (areaShadowFramebuffer != VK_NULL_HANDLE) {
-			vkDestroyFramebuffer(device, areaShadowFramebuffer, nullptr);
-			areaShadowFramebuffer = VK_NULL_HANDLE;
-		}
-		for (VkFramebuffer& framebuffer : pointShadowFaceFramebuffers) {
+		auto DestroyShadowFramebuffer = [&](VkFramebuffer& framebuffer) {
 			if (framebuffer != VK_NULL_HANDLE) {
 				vkDestroyFramebuffer(device, framebuffer, nullptr);
 				framebuffer = VK_NULL_HANDLE;
 			}
+		};
+		for (VkFramebuffer& framebuffer : directionalShadowFramebuffers) {
+			DestroyShadowFramebuffer(framebuffer);
 		}
-		for (VkImageView& faceView : pointShadowDepthFaceViews) {
-			if (faceView != VK_NULL_HANDLE) {
-				vkDestroyImageView(device, faceView, nullptr);
-				faceView = VK_NULL_HANDLE;
+		for (VkFramebuffer& framebuffer : spotShadowFramebuffers) {
+			DestroyShadowFramebuffer(framebuffer);
+		}
+		for (VkFramebuffer& framebuffer : areaShadowFramebuffers) {
+			DestroyShadowFramebuffer(framebuffer);
+		}
+		for (std::array<VkFramebuffer, 6>& faceFramebuffers : pointShadowFaceFramebuffersBySlot) {
+			for (VkFramebuffer& framebuffer : faceFramebuffers) {
+				DestroyShadowFramebuffer(framebuffer);
 			}
 		}
-		for (VkImageView& faceView : pointShadowColorFaceViews) {
-			if (faceView != VK_NULL_HANDLE) {
-				vkDestroyImageView(device, faceView, nullptr);
-				faceView = VK_NULL_HANDLE;
+		auto DestroyShadowImageView = [&](VkImageView& imageView) {
+			if (imageView != VK_NULL_HANDLE) {
+				vkDestroyImageView(device, imageView, nullptr);
+				imageView = VK_NULL_HANDLE;
+			}
+		};
+		for (std::array<VkImageView, 6>& faceViews : pointShadowDepthFaceViewsBySlot) {
+			for (VkImageView& faceView : faceViews) {
+				DestroyShadowImageView(faceView);
+			}
+		}
+		for (std::array<VkImageView, 6>& faceViews : pointShadowColorFaceViewsBySlot) {
+			for (VkImageView& faceView : faceViews) {
+				DestroyShadowImageView(faceView);
 			}
 		}
 		if (shadowRenderPass != VK_NULL_HANDLE) {
 			vkDestroyRenderPass(device, shadowRenderPass, nullptr);
 			shadowRenderPass = VK_NULL_HANDLE;
 		}
+		activeShadowResourceSlots = 0u;
 	}
 
 	auto DestroyVulkanImage = [&](VulkanImage& image) {
@@ -322,14 +349,30 @@ void VulkanContext::Impl::Cleanup() {
 		image.sampler = VK_NULL_HANDLE;
 	};
 
-	DestroyVulkanImage(directionalShadowDepth);
-	DestroyVulkanImage(directionalShadowColor);
-	DestroyVulkanImage(spotShadowDepth);
-	DestroyVulkanImage(spotShadowColor);
-	DestroyVulkanImage(areaShadowDepth);
-	DestroyVulkanImage(areaShadowColor);
-	DestroyVulkanImage(pointShadowCubeDepth);
-	DestroyVulkanImage(pointShadowCubeColor);
+	for (VulkanImage& image : directionalShadowDepths) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : directionalShadowColors) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : spotShadowDepths) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : spotShadowColors) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : areaShadowDepths) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : areaShadowColors) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : pointShadowCubeDepths) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : pointShadowCubeColors) {
+		DestroyVulkanImage(image);
+	}
 	DestroyVulkanImage(ltcAmplitudeTexture);
 	DestroyVulkanImage(ltcInverseTexture);
 
@@ -352,6 +395,7 @@ void VulkanContext::Impl::Cleanup() {
 	DestroyBufferVector(clusterDepthSSBOs);
 	DestroyBufferVector(lightAnalysisSSBOs);
 	DestroyBufferVector(indirectDrawBuffers);
+	DestroyAmbientOcclusionResources();
 
 	hiZ.Destroy(device, allocator);
 	vrs.Destroy(device, allocator);
@@ -1270,28 +1314,31 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	vkDeviceWaitIdle(device);
 
 	if (device) {
-		if (directionalShadowFramebuffer != VK_NULL_HANDLE) {
-			vkDestroyFramebuffer(device, directionalShadowFramebuffer, nullptr);
-			directionalShadowFramebuffer = VK_NULL_HANDLE;
-		}
-		if (spotShadowFramebuffer != VK_NULL_HANDLE) {
-			vkDestroyFramebuffer(device, spotShadowFramebuffer, nullptr);
-			spotShadowFramebuffer = VK_NULL_HANDLE;
-		}
-		if (areaShadowFramebuffer != VK_NULL_HANDLE) {
-			vkDestroyFramebuffer(device, areaShadowFramebuffer, nullptr);
-			areaShadowFramebuffer = VK_NULL_HANDLE;
-		}
-		for (VkFramebuffer& framebuffer : pointShadowFaceFramebuffers) {
+		auto DestroyShadowFramebuffer = [&](VkFramebuffer& framebuffer) {
 			if (framebuffer != VK_NULL_HANDLE) {
 				vkDestroyFramebuffer(device, framebuffer, nullptr);
 				framebuffer = VK_NULL_HANDLE;
+			}
+		};
+		for (VkFramebuffer& framebuffer : directionalShadowFramebuffers) {
+			DestroyShadowFramebuffer(framebuffer);
+		}
+		for (VkFramebuffer& framebuffer : spotShadowFramebuffers) {
+			DestroyShadowFramebuffer(framebuffer);
+		}
+		for (VkFramebuffer& framebuffer : areaShadowFramebuffers) {
+			DestroyShadowFramebuffer(framebuffer);
+		}
+		for (std::array<VkFramebuffer, 6>& faceFramebuffers : pointShadowFaceFramebuffersBySlot) {
+			for (VkFramebuffer& framebuffer : faceFramebuffers) {
+				DestroyShadowFramebuffer(framebuffer);
 			}
 		}
 		if (shadowRenderPass != VK_NULL_HANDLE) {
 			vkDestroyRenderPass(device, shadowRenderPass, nullptr);
 			shadowRenderPass = VK_NULL_HANDLE;
 		}
+		activeShadowResourceSlots = 0u;
 	}
 	previousClusterValidationSnapshotValid = false;
 
@@ -1377,6 +1424,7 @@ void VulkanContext::Impl::RecreateSwapChain() {
 
 	CreateCullingBufferResources();
 	CreateLightingBufferResources();
+	CreateAmbientOcclusionResources();
 	CreateIndirectDrawResources();
 	UpdateGlobalHiZ(hiZ);
 }

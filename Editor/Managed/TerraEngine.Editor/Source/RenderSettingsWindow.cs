@@ -10,6 +10,13 @@ namespace TerraEngine.Editor
     public class RenderSettingsWindow : EditorWindow
     {
         /// <summary>
+        /// Mirrors the native renderer's point/2D shadow descriptor capacity.
+        /// This removes the old four-light UI clamp while keeping users from
+        /// requesting more shadow maps than the current backend can bind.
+        /// </summary>
+        private const int MaxShadowResourceSlots = 32;
+
+        /// <summary>
         /// Shows a short tooltip for the most recently submitted ImGui item.
         /// This keeps each option description close to its label without
         /// cluttering the layout permanently.
@@ -86,19 +93,19 @@ namespace TerraEngine.Editor
             {
                 settings.MaxDynamicLights = (uint)maxLights;
                 settings.MaxUploadedLights = Math.Max(settings.MaxUploadedLights, settings.MaxDynamicLights);
-                settings.MaxShadowLights = Math.Min(settings.MaxShadowLights, Math.Min(settings.MaxDynamicLights, 4u));
+                settings.MaxShadowLights = Math.Min(settings.MaxShadowLights, Math.Min(settings.MaxDynamicLights, (uint)MaxShadowResourceSlots));
                 settings.MaxAreaLights = Math.Min(settings.MaxAreaLights, settings.MaxDynamicLights);
                 changed = true;
             }
             ShowOptionTooltip("Limits how many lights survive the final screen-aware selection stage for shading in the current frame. Directional lights, shadow-capable lights, authored-priority lights, and strongly visible lights are prioritized when the scene exceeds this budget.");
 
             int maxShadowLights = (int)settings.MaxShadowLights;
-            if (ImGui.SliderInt("Shadow Light Budget", ref maxShadowLights, 0, Math.Max(0, Math.Min(maxLights, 4))))
+            if (ImGui.SliderInt("Shadow Light Budget", ref maxShadowLights, 0, Math.Max(0, Math.Min(maxLights, MaxShadowResourceSlots))))
             {
-                settings.MaxShadowLights = (uint)Math.Clamp(maxShadowLights, 0, Math.Min(maxLights, 4));
+                settings.MaxShadowLights = (uint)Math.Clamp(maxShadowLights, 0, Math.Min(maxLights, MaxShadowResourceSlots));
                 changed = true;
             }
-            ShowOptionTooltip("Limits how many retained lights may still own shadow resources in the current frame. The current renderer reuses one shadow slot per supported light type, so this budget is intentionally clamped to the real slot capacity.");
+            ShowOptionTooltip("Limits how many retained lights may still own shadow resources in the current frame. The renderer allocates slots lazily up to the backend capacity, so raising this budget costs memory only for slots that are actually enabled.");
 
             if (ImGui.CollapsingHeader("Advanced Lighting Overrides"))
             {
@@ -134,6 +141,30 @@ namespace TerraEngine.Editor
                 changed = true;
             }
             ShowOptionTooltip("Toggles image-based lighting contributions that add indirect ambient response to materials.");
+
+            float indirectStrength = settings.IndirectStrength;
+            if (ImGui.SliderFloat("Indirect Strength", ref indirectStrength, 0.0f, 8.0f))
+            {
+                settings.IndirectStrength = Math.Clamp(indirectStrength, 0.0f, 8.0f);
+                changed = true;
+            }
+            ShowOptionTooltip("Scales indirect and environment light without changing direct light intensity.");
+
+            float aoStrength = settings.AmbientOcclusionStrength;
+            if (ImGui.SliderFloat("AO Strength", ref aoStrength, 0.0f, 4.0f))
+            {
+                settings.AmbientOcclusionStrength = Math.Clamp(aoStrength, 0.0f, 4.0f);
+                changed = true;
+            }
+            ShowOptionTooltip("Scales contact darkening applied to indirect/environment lighting.");
+
+            int aoQuality = (int)settings.AmbientOcclusionQuality;
+            if (ImGui.SliderInt("AO Quality", ref aoQuality, 0, 3))
+            {
+                settings.AmbientOcclusionQuality = (uint)Math.Clamp(aoQuality, 0, 3);
+                changed = true;
+            }
+            ShowOptionTooltip("Controls the contact darkening quality tier. Zero disables the planned AO layer.");
 
             ImGui.Separator();
             ImGui.TextDisabled("Textures");

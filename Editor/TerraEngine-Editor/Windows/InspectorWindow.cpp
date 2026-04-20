@@ -1950,6 +1950,44 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
             ImGui::EndTable();
         }
 	}
+
+	// These fields affect which lights survive the renderer's light budget.
+	// They are always useful to inspect, regardless of light type or shadow state.
+	if (ImGui::CollapsingHeader("Culling", sectionFlags))
+	{
+		if (ImGui::BeginTable("LightCulling", 2, ImGuiTableFlags_SizingStretchProp)) {
+			ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+			ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+
+			float authoredPriority = 0.0f;
+			if (ReflectionVariant priorityVariant = access.getter(obj, "authoredPriority"); IsValid(priorityVariant) && IsMetaValueType<float>(priorityVariant))
+			{
+				authoredPriority = MetaValue<float>(priorityVariant);
+			}
+			drawLabeledWidget("Priority", [&]() {
+				if (ImGui::DragFloat("##AuthoredPriority", &authoredPriority, 0.01f, 0.0f, 1000.0f))
+				{
+					setFloatPropertyWithUndo("authoredPriority", std::max(0.0f, authoredPriority));
+				}
+			});
+			UpdateInspectorDragState();
+
+			float stabilityPreference = 0.0f;
+			if (ReflectionVariant stabilityVariant = access.getter(obj, "stabilityPreference"); IsValid(stabilityVariant) && IsMetaValueType<float>(stabilityVariant))
+			{
+				stabilityPreference = MetaValue<float>(stabilityVariant);
+			}
+			drawLabeledWidget("Stability", [&]() {
+				if (ImGui::DragFloat("##StabilityPreference", &stabilityPreference, 0.01f, 0.0f, 1.0f))
+				{
+					setFloatPropertyWithUndo("stabilityPreference", std::clamp(stabilityPreference, 0.0f, 1.0f));
+				}
+			});
+			UpdateInspectorDragState();
+
+			ImGui::EndTable();
+		}
+	}
 }
 
 void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access)
@@ -2106,9 +2144,9 @@ void InspectorWindow::OnGui() {
             // Use a table for alignment
             if (ImGui::BeginTable("TagLayerTable", 4, ImGuiTableFlags_SizingStretchProp)) {
                 ImGui::TableSetupColumn("TagLabel", ImGuiTableColumnFlags_WidthFixed, 30.0f);
-                ImGui::TableSetupColumn("TagValue", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("TagValue", ImGuiTableColumnFlags_WidthStretch, 1.0f);
                 ImGui::TableSetupColumn("LayerLabel", ImGuiTableColumnFlags_WidthFixed, 40.0f);
-                ImGui::TableSetupColumn("LayerValue", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("LayerValue", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 
                 ImGui::TableNextRow();
                 

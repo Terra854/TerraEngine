@@ -24,6 +24,10 @@ namespace TerraEngine.Editor
             ImGui.TextUnformatted($"FPS: {1.0f / _deltaTime:F1}");
             
             ImGui.Separator();
+            ImGui.TextDisabled("Lighting");
+            ImGui.TextWrapped(Graphics.LightingDiagnosticsSummary);
+
+            ImGui.Separator();
 
             if (ImGui.Button("Hello from Abstraction!"))
             {

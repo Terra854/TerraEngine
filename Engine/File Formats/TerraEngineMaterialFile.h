@@ -30,6 +30,19 @@ enum class AlphaMode : std::uint32_t
 	Blend = 2
 };
 
+// Runtime shadow behavior is derived from the material's opacity class for
+// version-1 TMAT files. Keeping this as an explicit file-format enum gives
+// importers and future TMAT versions a stable value set without invalidating
+// existing material binaries.
+enum class MaterialFileShadowBehavior : std::uint32_t
+{
+	Opaque = 0,
+	AlphaCutout = 1,
+	TransparentNoShadow = 2,
+	TranslucentApproximate = 3,
+	EmissiveUsesOpacity = 4
+};
+
 enum class TextureSemantic : std::uint32_t
 {
 	Base = 0,
@@ -62,6 +75,28 @@ enum MaterialFlags : std::uint32_t
 	UseVertexColor = 1u << 1,
 	ReceivesShadows = 1u << 2
 };
+
+inline MaterialFileShadowBehavior DeriveMaterialShadowBehavior(std::uint32_t alphaMode, const float emissiveFactor[3])
+{
+	const bool hasEmissiveOutput =
+		emissiveFactor[0] > 0.0f
+		|| emissiveFactor[1] > 0.0f
+		|| emissiveFactor[2] > 0.0f;
+
+	if (alphaMode == static_cast<std::uint32_t>(AlphaMode::Mask))
+	{
+		return hasEmissiveOutput
+			? MaterialFileShadowBehavior::EmissiveUsesOpacity
+			: MaterialFileShadowBehavior::AlphaCutout;
+	}
+
+	if (alphaMode == static_cast<std::uint32_t>(AlphaMode::Blend))
+	{
+		return MaterialFileShadowBehavior::TransparentNoShadow;
+	}
+
+	return MaterialFileShadowBehavior::Opaque;
+}
 
 #pragma pack(push, 1)
 struct TextureBinding
@@ -115,6 +150,7 @@ struct Material
 {
 	MaterialHeader header{};
 	TerraEngine::UUID shaderCollectionId = TerraEngine::EMPTY_UUID;
+	MaterialFileShadowBehavior shadowBehavior = MaterialFileShadowBehavior::Opaque;
 	std::vector<std::uint8_t> storage;         // Owns the contiguous payload after the header
 	std::span<const TextureBinding> textures;  // Views into storage
 	std::span<const FloatParameter> floats;    // Views into storage

@@ -33,9 +33,48 @@ enum class LightingReductionCategory : std::uint32_t
 	Shadow = 4u
 };
 
+enum class MaterialShadowBehavior : std::uint32_t
+{
+	Opaque = 0u,
+	AlphaCutout = 1u,
+	TransparentNoShadow = 2u,
+	TranslucentApproximate = 3u,
+	EmissiveUsesOpacity = 4u
+};
+
+enum class LightingDiagnosticCategory : std::uint32_t
+{
+	Shadow = 0u,
+	IndirectLighting = 1u,
+	AmbientOcclusion = 2u,
+	MaterialShadow = 3u,
+	Budget = 4u
+};
+
+enum class LightingDiagnosticStatus : std::uint32_t
+{
+	Active = 0u,
+	Disabled = 1u,
+	Degraded = 2u,
+	Fallback = 3u,
+	Unavailable = 4u
+};
+
+enum class ShadowResourceKind : std::uint32_t
+{
+	DirectionalCascade = 0u,
+	PointCube = 1u,
+	SpotAtlas = 2u,
+	AreaAtlas = 3u,
+	Unsupported = 4u
+};
+
 inline constexpr std::uint32_t kFrameLightCandidateFlagShadowCapable = 1u << 0;
 inline constexpr std::uint32_t kFrameLightCandidateFlagSpecialCost = 1u << 1;
 inline constexpr std::uint32_t kFrameLightCandidateFlagDirectional = 1u << 2;
+// Renderer-wide shadow slot capacity. The user-facing budget can be lower per
+// quality preset, but it is no longer restricted to the old four-light limit.
+inline constexpr std::uint32_t kMaxShadowResourceSlots = 32u;
 
 inline constexpr std::uint32_t kGpuLightAnalysisFlagVisible = 1u << 0;
 inline constexpr std::uint32_t kGpuLightAnalysisFlagDirectional = 1u << 1;
@@ -51,13 +90,18 @@ struct RenderSettings
 	// screen-aware selection stage and reach clustered lighting.
 	std::uint32_t maxDynamicLights = 128u;
 	// Scene-wide per-frame cap for how many retained lights may request shadow
-	// resources. The runtime also clamps this against the available shadow slots.
-	std::uint32_t maxShadowLights = 4u;
+	// resources. The runtime grows shadow resources up to kMaxShadowResourceSlots.
+	std::uint32_t maxShadowLights = 8u;
 	// Optional cap for higher-cost area lights inside the retained-light set so
 	// presets can bound expensive lighting classes independently.
 	std::uint32_t maxAreaLights = 4u;
 	std::uint32_t enableLTC = 1u;
 	std::uint32_t enableIBL = 1u;
+	// Controls the strength of environment and local indirect lighting without
+	// changing direct light intensity, which lets authors tune shadow readability.
+	float indirectStrength = 1.0f;
+	float ambientOcclusionStrength = 1.0f;
+	std::uint32_t ambientOcclusionQuality = 2u;
 	std::uint32_t anisotropicFiltering = 4u;
 };
 
@@ -84,6 +128,9 @@ struct SceneSkySettings
 struct SceneRenderSettings
 {
 	SceneSkySettings sky{};
+	float indirectStrength = 1.0f;
+	float ambientOcclusionStrength = 1.0f;
+	std::uint32_t ambientOcclusionQuality = 2u;
 };
 
 // Renderer-owned diagnostic state derived from the scene settings. This data
@@ -154,6 +201,9 @@ inline SceneRenderSettings MakeDefaultSceneRenderSettings()
 {
 	SceneRenderSettings settings;
 	settings.sky = MakeDefaultSceneSkySettings();
+	settings.indirectStrength = 1.0f;
+	settings.ambientOcclusionStrength = 1.0f;
+	settings.ambientOcclusionQuality = 2u;
 	return settings;
 }
 
@@ -161,6 +211,9 @@ inline SceneRenderSettings SanitizeSceneRenderSettings(const SceneRenderSettings
 {
 	SceneRenderSettings sanitized = input;
 	sanitized.sky = SanitizeSceneSkySettings(input.sky);
+	sanitized.indirectStrength = glm::clamp(sanitized.indirectStrength, 0.0f, 8.0f);
+	sanitized.ambientOcclusionStrength = glm::clamp(sanitized.ambientOcclusionStrength, 0.0f, 4.0f);
+	sanitized.ambientOcclusionQuality = glm::clamp(sanitized.ambientOcclusionQuality, 0u, 3u);
 	return sanitized;
 }
 
@@ -202,8 +255,12 @@ struct alignas(16) GPULight
 	glm::vec4 coneAnglesAndArea = glm::vec4(0.0f);     // x = innerCos, y = outerCos, z = width, w = height
 	glm::vec4 shadowAndPadding = glm::vec4(0.0f);      // x = castsShadows flag, y = shadow resource index
 	glm::vec4 extraParams = glm::vec4(0.0f);           // x = shadowStrength, y = shadowBias, z = indirectMultiplier, w = authored priority
+	glm::vec4 shadowMatrixC0 = glm::vec4(0.0f);        // Column 0 of the exact light view-projection used for 2D shadow maps
+	glm::vec4 shadowMatrixC1 = glm::vec4(0.0f);        // Column 1; storing columns mirrors GLM and avoids shader-side matrix transposition
+	glm::vec4 shadowMatrixC2 = glm::vec4(0.0f);        // Column 2; point lights keep using cubemap face projections instead
+	glm::vec4 shadowMatrixC3 = glm::vec4(0.0f);        // Column 3; receivers sample the same projection that rendered the depth map
 };
-static_assert(sizeof(GPULight) == 96, "GPULight layout changed; update shader mirror types.");
+static_assert(sizeof(GPULight) == 160, "GPULight layout changed; update shader mirror types.");
 
 // CPU-side light candidate metadata keeps stable identifiers and author hints
 // beside the GPU payload so temporal retention and diagnostics remain
@@ -286,6 +343,20 @@ struct ClusterValidationSnapshot
 // Lightweight per-frame budgeting summary returned without GPU readback so the
 // editor, QA tools, and validation scripts can verify preset behavior during
 // ordinary runtime sessions.
+struct ShadowResourceAssignmentDiagnostic
+{
+	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+	ShadowResourceKind resourceKind = ShadowResourceKind::Unsupported;
+	std::uint32_t resourceSlot = 0u;
+	std::uint64_t frameSerial = 0u;
+	std::uint64_t framesSinceLastSeen = 0u;
+	float retentionScore = 0.0f;
+	bool assigned = false;
+	bool reusedPreviousOwner = false;
+	bool replacedPreviousOwner = false;
+	bool shadowedPreviousFrame = false;
+};
+
 struct FrameBudgetDiagnosticsSnapshot
 {
 	RenderViewType viewType = RenderViewType::Game;
@@ -309,12 +380,34 @@ struct FrameBudgetDiagnosticsSnapshot
 	std::uint32_t stabilityBiasAppliedCount = 0u;
 	std::uint32_t shadowReuseCount = 0u;
 	std::uint32_t shadowReplacementCount = 0u;
+	// Per-light assignment data explains which shadow-capable retained lights
+	// received a resource this frame and which ones were degraded by the budget.
+	std::vector<ShadowResourceAssignmentDiagnostic> shadowAssignments;
 	bool gpuAssistActive = false;
 	bool customOverrideActive = false;
 	bool budgetReductionOccurred = false;
 	bool uploadedReductionOccurred = false;
 	bool specialReductionOccurred = false;
 	bool shadowReductionOccurred = false;
+	bool shadowPassRecorded = false;
+	bool valid = false;
+};
+
+struct LightingDiagnosticEntry
+{
+	LightingDiagnosticCategory category = LightingDiagnosticCategory::Budget;
+	LightingDiagnosticStatus status = LightingDiagnosticStatus::Active;
+	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+	std::string message;
+	std::string recommendedAction;
+};
+
+struct LightingDiagnosticsSnapshot
+{
+	RenderViewType viewType = RenderViewType::Game;
+	std::vector<LightingDiagnosticEntry> entries;
+	bool indirectLightingActive = false;
+	bool ambientOcclusionActive = false;
 	bool valid = false;
 };
 
@@ -410,12 +503,16 @@ struct alignas(16) FrameCullingDataGPU
 	glm::mat4 invProjection = glm::mat4(1.0f);
 	glm::uvec4 renderSettings0 = glm::uvec4(2048u, 5u, 128u, 1u); // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
 	glm::uvec4 renderSettings1 = glm::uvec4(1u, 4u, 4u, 256u);    // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
+	// x: indirectStrength, y: ambientOcclusionStrength, z: ambientOcclusionQuality, w: reserved.
+	// Keeping this in its own 16-byte vector avoids mixing float tuning values
+	// with integer feature flags, which keeps the shader mirror unambiguous.
+	glm::vec4 renderSettings2 = glm::vec4(1.0f, 1.0f, 2.0f, 0.0f);
 	std::uint32_t globalTaskCullingEnabled = 1u;
 	std::uint32_t taskShaderSupported = 0u;
 	std::uint32_t clusteredLightingValid = 0u;
 	std::uint32_t clusteredLightingOverflowed = 0u;
 };
-static_assert(sizeof(FrameCullingDataGPU) == 320, "Frame culling payload must stay tightly packed for GPU uploads.");
+static_assert(sizeof(FrameCullingDataGPU) == 336, "Frame culling payload must stay tightly packed for GPU uploads.");
 
 // GPU counters written by task shader atomic operations per view/frame slot.
 struct alignas(16) MeshletCullingCountersGPU

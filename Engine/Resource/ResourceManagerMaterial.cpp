@@ -54,6 +54,10 @@ namespace
 		auto material = std::make_unique<Material>();
 		material->header = header;
 		material->shaderCollectionId = header.shaderCollectionId;
+		// Version-1 TMAT files do not store an explicit shadow behavior field,
+		// so the loader derives the least-surprising runtime behavior from the
+		// existing opacity and emissive settings.
+		material->shadowBehavior = DeriveMaterialShadowBehavior(header.alphaMode, header.emissiveFactor);
 		if (material->shaderCollectionId == TerraEngine::EMPTY_UUID)
 		{
 			// Keep the missing shader reference visible so authored TMAT files can be fixed early.

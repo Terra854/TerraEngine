@@ -245,7 +245,7 @@ const SceneDocument* SceneManager::GetActiveScene() const
 
 bool SceneManager::IsActiveSceneDirty() const
 {
-	return activeSceneDirty;
+	return activeSceneDirty || activeSceneSettingsDirty;
 }
 
 const SceneRenderSettings& SceneManager::GetActiveSceneRenderSettings() const
@@ -374,6 +374,7 @@ void SceneManager::UnloadAll()
 
 	activeSceneId = TerraEngine::EMPTY_UUID;
 	activeSceneDirty = false;
+	activeSceneSettingsDirty = false;
 	activeSceneRenderSettings = MakeDefaultSceneRenderSettings();
 	// Remove the generated preview entity so repeated initializes do not leave
 	// stray objects in the registry when the manager is reused.
@@ -734,11 +735,12 @@ TerraEngine::UUID SceneManager::CreateGeneratedMaterial(ResourceManager& resourc
 	binding.uvOffset[0] = 0.0f;
 	binding.uvOffset[1] = 0.0f;
 
-auto material = std::make_unique<Material>();
-material->header = header;
-material->shaderCollectionId = shaderCollectionId;
-material->storage.resize(sizeof(TextureBinding));
-std::memcpy(material->storage.data(), &binding, sizeof(TextureBinding));
+	auto material = std::make_unique<Material>();
+	material->header = header;
+	material->shaderCollectionId = shaderCollectionId;
+	material->shadowBehavior = DeriveMaterialShadowBehavior(header.alphaMode, header.emissiveFactor);
+	material->storage.resize(sizeof(TextureBinding));
+	std::memcpy(material->storage.data(), &binding, sizeof(TextureBinding));
 	material->textures = std::span<const TextureBinding>(reinterpret_cast<const TextureBinding*>(material->storage.data()), header.textureCount);
 	material->floats = std::span<const FloatParameter>();
 
