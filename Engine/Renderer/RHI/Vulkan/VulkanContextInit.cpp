@@ -330,7 +330,9 @@ void VulkanContext::Impl::Cleanup() {
 			vkDestroyRenderPass(device, shadowRenderPass, nullptr);
 			shadowRenderPass = VK_NULL_HANDLE;
 		}
-		activeShadowResourceSlots = 0u;
+		activeShadowResourceRequest = {};
+		shadowStorageRegions.fill({});
+		shadowCacheEntries.clear();
 	}
 
 	auto DestroyVulkanImage = [&](VulkanImage& image) {
@@ -1338,7 +1340,9 @@ void VulkanContext::Impl::RecreateSwapChain() {
 			vkDestroyRenderPass(device, shadowRenderPass, nullptr);
 			shadowRenderPass = VK_NULL_HANDLE;
 		}
-		activeShadowResourceSlots = 0u;
+		activeShadowResourceRequest = {};
+		shadowStorageRegions.fill({});
+		shadowCacheEntries.clear();
 	}
 	previousClusterValidationSnapshotValid = false;
 

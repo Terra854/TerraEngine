@@ -69,6 +69,33 @@ enum class ShadowResourceKind : std::uint32_t
 	Unsupported = 4u
 };
 
+enum class ShadowQualityTier : std::uint32_t
+{
+	FullResolution = 0u,
+	ReducedResolution = 1u,
+	CachedOnly = 2u,
+	Disabled = 3u
+};
+
+enum class ShadowDegradationReason : std::uint32_t
+{
+	None = 0u,
+	LightBudget = 1u,
+	StorageBudget = 2u,
+	AllocationFailure = 3u,
+	UnsupportedLightType = 4u
+};
+
+enum class ShadowRefreshReason : std::uint32_t
+{
+	RenderedThisFrame = 0u,
+	CacheHit = 1u,
+	LightMoved = 2u,
+	ReceiverMoved = 3u,
+	CacheInvalidated = 4u,
+	Unavailable = 5u
+};
+
 inline constexpr std::uint32_t kFrameLightCandidateFlagShadowCapable = 1u << 0;
 inline constexpr std::uint32_t kFrameLightCandidateFlagSpecialCost = 1u << 1;
 inline constexpr std::uint32_t kFrameLightCandidateFlagDirectional = 1u << 2;
@@ -254,13 +281,14 @@ struct alignas(16) GPULight
 	glm::vec4 colorAndIntensity = glm::vec4(0.0f);     // rgb = color, w = scalar intensity
 	glm::vec4 coneAnglesAndArea = glm::vec4(0.0f);     // x = innerCos, y = outerCos, z = width, w = height
 	glm::vec4 shadowAndPadding = glm::vec4(0.0f);      // x = castsShadows flag, y = shadow resource index
+	glm::vec4 shadowRegion = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f); // xy = atlas UV offset, zw = atlas UV scale
 	glm::vec4 extraParams = glm::vec4(0.0f);           // x = shadowStrength, y = shadowBias, z = indirectMultiplier, w = authored priority
 	glm::vec4 shadowMatrixC0 = glm::vec4(0.0f);        // Column 0 of the exact light view-projection used for 2D shadow maps
 	glm::vec4 shadowMatrixC1 = glm::vec4(0.0f);        // Column 1; storing columns mirrors GLM and avoids shader-side matrix transposition
 	glm::vec4 shadowMatrixC2 = glm::vec4(0.0f);        // Column 2; point lights keep using cubemap face projections instead
 	glm::vec4 shadowMatrixC3 = glm::vec4(0.0f);        // Column 3; receivers sample the same projection that rendered the depth map
 };
-static_assert(sizeof(GPULight) == 160, "GPULight layout changed; update shader mirror types.");
+static_assert(sizeof(GPULight) == 176, "GPULight layout changed; update shader mirror types.");
 
 // CPU-side light candidate metadata keeps stable identifiers and author hints
 // beside the GPU payload so temporal retention and diagnostics remain
@@ -348,13 +376,26 @@ struct ShadowResourceAssignmentDiagnostic
 	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
 	ShadowResourceKind resourceKind = ShadowResourceKind::Unsupported;
 	std::uint32_t resourceSlot = 0u;
+	std::uint32_t storageRegionId = 0u;
+	std::uint32_t atlasId = 0u;
+	std::uint32_t regionX = 0u;
+	std::uint32_t regionY = 0u;
+	std::uint32_t regionWidth = 0u;
+	std::uint32_t regionHeight = 0u;
+	std::uint64_t estimatedBytes = 0u;
 	std::uint64_t frameSerial = 0u;
 	std::uint64_t framesSinceLastSeen = 0u;
 	float retentionScore = 0.0f;
+	ShadowQualityTier qualityTier = ShadowQualityTier::FullResolution;
+	ShadowDegradationReason degradationReason = ShadowDegradationReason::None;
+	ShadowRefreshReason refreshReason = ShadowRefreshReason::RenderedThisFrame;
 	bool assigned = false;
 	bool reusedPreviousOwner = false;
 	bool replacedPreviousOwner = false;
 	bool shadowedPreviousFrame = false;
+	bool reusedCachedResult = false;
+	bool refreshedThisFrame = true;
+	bool invalidatedThisFrame = false;
 };
 
 struct FrameBudgetDiagnosticsSnapshot
@@ -372,6 +413,15 @@ struct FrameBudgetDiagnosticsSnapshot
 	std::uint32_t specialLightCount = 0u;
 	std::uint32_t shadowEligibleLightCount = 0u;
 	std::uint32_t shadowedLightCount = 0u;
+	std::uint32_t configuredShadowCapacity = 0u;
+	std::uint32_t activeShadowCount = 0u;
+	std::uint32_t allocatedRegionCount = 0u;
+	std::uint32_t allocated2DRegionCount = 0u;
+	std::uint32_t allocatedPointRegionCount = 0u;
+	std::uint32_t allocatedDirectionalRegionCount = 0u;
+	std::uint32_t allocatedSpotRegionCount = 0u;
+	std::uint32_t allocatedAreaRegionCount = 0u;
+	std::uint64_t estimatedShadowMemoryBytes = 0u;
 	std::uint32_t gpuVisibleCandidateCount = 0u;
 	std::uint32_t retainedDirectionalLightCount = 0u;
 	std::uint32_t retainedAuthoredPriorityLightCount = 0u;
@@ -380,6 +430,11 @@ struct FrameBudgetDiagnosticsSnapshot
 	std::uint32_t stabilityBiasAppliedCount = 0u;
 	std::uint32_t shadowReuseCount = 0u;
 	std::uint32_t shadowReplacementCount = 0u;
+	std::uint32_t cacheReuseCount = 0u;
+	std::uint32_t cacheRefreshCount = 0u;
+	std::uint32_t cacheInvalidationCount = 0u;
+	std::uint32_t degradedShadowCount = 0u;
+	std::uint32_t allocationFailureCount = 0u;
 	// Per-light assignment data explains which shadow-capable retained lights
 	// received a resource this frame and which ones were degraded by the budget.
 	std::vector<ShadowResourceAssignmentDiagnostic> shadowAssignments;

@@ -208,6 +208,69 @@ struct VulkanContext::Impl {
 	static constexpr uint32_t POINT_SHADOW_MAP_RESOLUTION = 1024u;
 	static constexpr uint32_t LTC_LUT_RESOLUTION = 64u;
 	static constexpr VkFormat AMBIENT_OCCLUSION_FORMAT = VK_FORMAT_R32_SFLOAT;
+
+	struct ShadowResourceRequest
+	{
+		std::uint32_t directionalCount = 0u;
+		std::uint32_t spotCount = 0u;
+		std::uint32_t areaCount = 0u;
+		std::uint32_t pointCount = 0u;
+
+		std::uint32_t Total2DCount() const
+		{
+			return directionalCount + spotCount + areaCount;
+		}
+
+		std::uint32_t TotalCount() const
+		{
+			return Total2DCount() + pointCount;
+		}
+
+		bool operator==(const ShadowResourceRequest&) const = default;
+	};
+
+	struct ShadowStorageRegion
+	{
+		// A region describes one live GPU allocation slot or managed sub-region.
+		// The VulkanImage arrays own the actual images; this metadata explains
+		// which logical assignment is allowed to use that memory this frame.
+		ShadowResourceKind resourceKind = ShadowResourceKind::Unsupported;
+		std::uint32_t typedSlot = MAX_SHADOW_RESOURCE_SLOTS;
+		std::uint32_t atlasId = 0u;
+		std::uint32_t x = 0u;
+		std::uint32_t y = 0u;
+		std::uint32_t width = SHADOW_MAP_RESOLUTION;
+		std::uint32_t height = SHADOW_MAP_RESOLUTION;
+		ShadowQualityTier qualityTier = ShadowQualityTier::FullResolution;
+		std::uint64_t estimatedBytes = 0u;
+		bool live = false;
+	};
+
+	enum class ShadowCacheEntryState : std::uint32_t
+	{
+		Invalid = 0u,
+		Assigned = 1u,
+		Cached = 2u,
+		Refreshed = 3u,
+		PendingRelease = 4u
+	};
+
+	struct ShadowCacheEntry
+	{
+		// Cache entries are intentionally conservative: missing or changed
+		// signatures invalidate reuse and force a redraw instead of sampling a
+		// stale shadow. GPU image lifetime remains owned by ShadowStorageRegion.
+		TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+		ShadowResourceKind resourceKind = ShadowResourceKind::Unsupported;
+		std::uint32_t storageRegionId = MAX_SHADOW_RESOURCE_SLOTS;
+		std::uint64_t lightSignature = 0u;
+		std::uint64_t casterSignature = 0u;
+		std::uint64_t viewSignature = 0u;
+		std::uint64_t lastTouchedFrameSerial = 0u;
+		ShadowCacheEntryState state = ShadowCacheEntryState::Invalid;
+		bool valid = false;
+	};
+
 	VkDescriptorSetLayout globalDescriptorSetLayout = VK_NULL_HANDLE;
 	VkDescriptorPool globalDescriptorPool = VK_NULL_HANDLE;
 	std::vector<VkDescriptorSet> globalDescriptorSets;
@@ -225,9 +288,9 @@ struct VulkanContext::Impl {
 				VulkanHiZ hiZ;
 				VulkanVRS vrs;
 				
-	// Shadow resources are slot based rather than type based. A frame can assign
-	// any shadow-capable light to any slot, which lets two lights of the same
-	// type cast shadows at the same time while keeping descriptor usage bounded.
+	// Shadow resources are tracked by live typed demand. The fixed arrays cap
+	// descriptor usage, while activeShadowResourceRequest decides how many
+	// images and framebuffers each light family actually owns this frame.
 	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowDepths{};
 	std::array<VulkanImage, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowColors{};
 	std::array<VkFramebuffer, MAX_SHADOW_RESOURCE_SLOTS> directionalShadowFramebuffers{};
@@ -245,7 +308,9 @@ struct VulkanContext::Impl {
 	std::array<std::array<VkImageView, 6>, MAX_SHADOW_RESOURCE_SLOTS> pointShadowDepthFaceViewsBySlot{};
 	std::array<std::array<VkImageView, 6>, MAX_SHADOW_RESOURCE_SLOTS> pointShadowColorFaceViewsBySlot{};
 	std::array<std::array<VkFramebuffer, 6>, MAX_SHADOW_RESOURCE_SLOTS> pointShadowFaceFramebuffersBySlot{};
-	uint32_t activeShadowResourceSlots = 0u;
+	ShadowResourceRequest activeShadowResourceRequest{};
+	std::array<ShadowStorageRegion, MAX_SHADOW_RESOURCE_SLOTS> shadowStorageRegions{};
+	std::unordered_map<TerraEngine::UUID, ShadowCacheEntry> shadowCacheEntries{};
 	VulkanImage ltcAmplitudeTexture;
 	VulkanImage ltcInverseTexture;
 	uint32_t ltcAmplitudeTextureIndex = 0u;
@@ -354,7 +419,7 @@ struct VulkanContext::Impl {
 		void DestroyEnvironmentLightingResources();
 		void CreateAmbientOcclusionResources();
 		void DestroyAmbientOcclusionResources();
-		bool EnsureShadowRenderResources(uint32_t requestedSlotCount);
+		bool EnsureShadowRenderResources(const ShadowResourceRequest& request);
 		void UploadLightingData(const std::vector<GPULight>& lights);
 		void UploadLightAnalysisInputData(const std::vector<GPULight>& lights);
 			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView);

@@ -55,6 +55,7 @@ struct GPULight
 	float4 colorAndIntensity;   // xyz: color, w: intensity
 	float4 coneAnglesAndArea;   // x: innerCos, y: outerCos, z: width, w: height
 	float4 shadowAndPadding;    // x: castsShadows, y: shadow texture/point slot, z: ltcAmp, w: ltcInv
+	float4 shadowRegion;        // xy: atlas UV offset, zw: atlas UV scale for managed 2D shadow regions
 	float4 extraParams;         // x: shadowStrength, y: shadowBias, z: indirectMultiplier, w: authoredPriority
 	float4 shadowMatrixC0;      // Column 0 of the CPU light view-projection matrix
 	float4 shadowMatrixC1;      // Column 1; keeping columns avoids transposing GLM data
@@ -247,11 +248,13 @@ float SampleProjectedShadowMap(Texture2D shadowMap, SamplerState shadowSampler, 
 		return 1.0f;
 	}
 
-	const float2 uv = shadowNdc.xy * 0.5f + 0.5f;
+	float2 uv = shadowNdc.xy * 0.5f + 0.5f;
 	if (any(uv < float2(0.0f, 0.0f)) || any(uv > float2(1.0f, 1.0f)))
 	{
 		return 1.0f;
 	}
+	const float2 regionScale = max(light.shadowRegion.zw, float2(0.0001f, 0.0001f));
+	uv = light.shadowRegion.xy + uv * regionScale;
 
 	const float authoredBias = max(light.extraParams.y, 0.0f);
 	return SampleShadowPCF(shadowMap, shadowSampler, uv, shadowNdc.z, max(fallbackBias, authoredBias), frame.renderSettings0.y, texelSize);

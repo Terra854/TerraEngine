@@ -67,6 +67,80 @@ namespace
 		}
 	}
 
+	const char* ShadowResourceKindToString(ShadowResourceKind kind)
+	{
+		switch (kind)
+		{
+		case ShadowResourceKind::DirectionalCascade:
+			return "DirectionalCascade";
+		case ShadowResourceKind::PointCube:
+			return "PointCube";
+		case ShadowResourceKind::SpotAtlas:
+			return "SpotAtlas";
+		case ShadowResourceKind::AreaAtlas:
+			return "AreaAtlas";
+		default:
+			return "Unsupported";
+		}
+	}
+
+	const char* ShadowQualityTierToString(ShadowQualityTier tier)
+	{
+		switch (tier)
+		{
+		case ShadowQualityTier::FullResolution:
+			return "FullResolution";
+		case ShadowQualityTier::ReducedResolution:
+			return "ReducedResolution";
+		case ShadowQualityTier::CachedOnly:
+			return "CachedOnly";
+		case ShadowQualityTier::Disabled:
+			return "Disabled";
+		default:
+			return "Unknown";
+		}
+	}
+
+	const char* ShadowDegradationReasonToString(ShadowDegradationReason reason)
+	{
+		switch (reason)
+		{
+		case ShadowDegradationReason::None:
+			return "None";
+		case ShadowDegradationReason::LightBudget:
+			return "LightBudget";
+		case ShadowDegradationReason::StorageBudget:
+			return "StorageBudget";
+		case ShadowDegradationReason::AllocationFailure:
+			return "AllocationFailure";
+		case ShadowDegradationReason::UnsupportedLightType:
+			return "UnsupportedLightType";
+		default:
+			return "Unknown";
+		}
+	}
+
+	const char* ShadowRefreshReasonToString(ShadowRefreshReason reason)
+	{
+		switch (reason)
+		{
+		case ShadowRefreshReason::RenderedThisFrame:
+			return "RenderedThisFrame";
+		case ShadowRefreshReason::CacheHit:
+			return "CacheHit";
+		case ShadowRefreshReason::LightMoved:
+			return "LightMoved";
+		case ShadowRefreshReason::ReceiverMoved:
+			return "ReceiverMoved";
+		case ShadowRefreshReason::CacheInvalidated:
+			return "CacheInvalidated";
+		case ShadowRefreshReason::Unavailable:
+			return "Unavailable";
+		default:
+			return "Unknown";
+		}
+	}
+
 	std::string BuildHashHex(std::uint64_t hashValue)
 	{
 		std::ostringstream stream;
@@ -820,6 +894,10 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 }
 
 void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
+	// Material edits can change alpha clipping or shadow behavior, so cached
+	// shadow results are conservatively invalidated before the material is
+	// rebound.
+	shadowCacheEntries.clear();
 	auto it = materialIndexMap.find(materialId);
 	if (it != materialIndexMap.end()) {
 		freeMaterialIndices.push_back(it->second);
@@ -828,6 +906,9 @@ void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 }
 
 void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
+	// Mesh edits change caster geometry. Clear every cache entry rather than
+	// trying to prove which light was affected.
+	shadowCacheEntries.clear();
 	auto it = meshCache.find(meshId);
 	if (it != meshCache.end()) {
 		// Clear bindless buffer slot
@@ -861,6 +942,9 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 }
 
 void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
+	// Texture edits may affect alpha-tested caster silhouettes, so shadow cache
+	// reuse falls back to refresh after the texture changes.
+	shadowCacheEntries.clear();
 	auto it = textureCache.find(textureId);
 	if (it != textureCache.end()) {
 		// Don't invalidate default texture
@@ -1464,9 +1548,9 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	VkViewport viewport{};
 	viewport.x = 0.0f;
 	viewport.y = 0.0f;
-	// Graphics pipelines in this renderer use static viewport state. Shadow
-	// pipelines therefore need a viewport sized to the shadow atlas target at
-	// creation time; vkCmdSetViewport is only effective for dynamic pipelines.
+	// Viewport and scissor are dynamic so editor window resizing and reduced
+	// shadow targets use the current framebuffer dimensions instead of the size
+	// that happened to be active when the pipeline was created.
 	viewport.width = shadowPipeline ? static_cast<float>(SHADOW_MAP_RESOLUTION) : static_cast<float>(swapchainExtent.width);
 	viewport.height = shadowPipeline ? static_cast<float>(SHADOW_MAP_RESOLUTION) : static_cast<float>(swapchainExtent.height);
 	viewport.minDepth = 0.0f;
@@ -1484,6 +1568,15 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	viewportState.pViewports = &viewport;
 	viewportState.scissorCount = 1;
 	viewportState.pScissors = &scissor;
+
+	std::array<VkDynamicState, 2> dynamicStates = {
+		VK_DYNAMIC_STATE_VIEWPORT,
+		VK_DYNAMIC_STATE_SCISSOR
+	};
+	VkPipelineDynamicStateCreateInfo dynamicState{};
+	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamicState.dynamicStateCount = static_cast<std::uint32_t>(dynamicStates.size());
+	dynamicState.pDynamicStates = dynamicStates.data();
 
 	VkPipelineRasterizationStateCreateInfo rasterizer{};
 	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
@@ -1580,6 +1673,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	pipelineInfo.pMultisampleState = &multisampling;
 	pipelineInfo.pDepthStencilState = &depthStencil;
 	pipelineInfo.pColorBlendState = &colorBlending;
+	pipelineInfo.pDynamicState = &dynamicState;
 	pipelineInfo.layout = pipelineLayout;
 	pipelineInfo.renderPass = renderPass;
 	pipelineInfo.subpass = 0;
@@ -2337,8 +2431,12 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 	}
 }
 
-bool VulkanContext::Impl::EnsureShadowRenderResources(uint32_t requestedSlotCount) {
-	const uint32_t targetSlotCount = std::clamp(requestedSlotCount, 1u, MAX_SHADOW_RESOURCE_SLOTS);
+bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceRequest& request) {
+	ShadowResourceRequest targetRequest{};
+	targetRequest.directionalCount = std::min(request.directionalCount, MAX_SHADOW_RESOURCE_SLOTS);
+	targetRequest.spotCount = std::min(request.spotCount, MAX_SHADOW_RESOURCE_SLOTS);
+	targetRequest.areaCount = std::min(request.areaCount, MAX_SHADOW_RESOURCE_SLOTS);
+	targetRequest.pointCount = std::min(request.pointCount, MAX_SHADOW_RESOURCE_SLOTS);
 	vkDeviceWaitIdle(device);
 	// Rebuilding this block (for example after swapchain recreation) must tear
 	// down stale views/framebuffers before allocating replacement images.
@@ -2420,14 +2518,23 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(uint32_t requestedSlotCoun
 	for (VulkanImage& image : pointShadowCubeColors) {
 		DestroyImage(image);
 	}
-	activeShadowResourceSlots = 0u;
+	activeShadowResourceRequest = {};
+	shadowStorageRegions.fill({});
+	shadowCacheEntries.clear();
 	DestroyImage(ltcAmplitudeTexture);
 	DestroyImage(ltcInverseTexture);
 
+	if (targetRequest.TotalCount() == 0u) {
+		return true;
+	}
+
 	const VkFormat shadowDepthFormat = (depthFormat != VK_FORMAT_UNDEFINED) ? depthFormat : FindDepthFormat();
-	const uint32_t shadowWidth = SHADOW_MAP_RESOLUTION;
-	const uint32_t shadowHeight = SHADOW_MAP_RESOLUTION;
 	const uint32_t pointShadowSize = POINT_SHADOW_MAP_RESOLUTION;
+	const auto Shadow2DRegionSizeForSlot = [](std::uint32_t typedSlot) {
+		// Lower-priority 2D shadows use physically smaller images. This is the
+		// memory-saving step; diagnostics and viewport state mirror this size.
+		return typedSlot >= 16u ? SHADOW_MAP_RESOLUTION / 2u : SHADOW_MAP_RESOLUTION;
+	};
 
 	auto CreateColorAttachment = [&](uint32_t width, uint32_t height, uint32_t layers, VkImageCreateFlags flags, VulkanImage& image, VkImageViewType viewType) {
 		VkImageCreateInfo imageInfo{};
@@ -2568,19 +2675,25 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(uint32_t requestedSlotCoun
 		vkCreateSampler(device, &samplerInfo, nullptr, &image.sampler);
 	};
 
-	for (uint32_t slotIndex = 0u; slotIndex < targetSlotCount; ++slotIndex) {
-		CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, directionalShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
-		CreateDepthAttachment2D(shadowWidth, shadowHeight, directionalShadowDepths[slotIndex]);
+	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
+		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
+		CreateColorAttachment(regionSize, regionSize, 1u, 0u, directionalShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
+		CreateDepthAttachment2D(regionSize, regionSize, directionalShadowDepths[slotIndex]);
 		CreateShadowSampler(directionalShadowDepths[slotIndex], false);
-
-		CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, spotShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
-		CreateDepthAttachment2D(shadowWidth, shadowHeight, spotShadowDepths[slotIndex]);
+	}
+	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {
+		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
+		CreateColorAttachment(regionSize, regionSize, 1u, 0u, spotShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
+		CreateDepthAttachment2D(regionSize, regionSize, spotShadowDepths[slotIndex]);
 		CreateShadowSampler(spotShadowDepths[slotIndex], false);
-
-		CreateColorAttachment(shadowWidth, shadowHeight, 1u, 0u, areaShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
-		CreateDepthAttachment2D(shadowWidth, shadowHeight, areaShadowDepths[slotIndex]);
+	}
+	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex) {
+		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
+		CreateColorAttachment(regionSize, regionSize, 1u, 0u, areaShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
+		CreateDepthAttachment2D(regionSize, regionSize, areaShadowDepths[slotIndex]);
 		CreateShadowSampler(areaShadowDepths[slotIndex], false);
-
+	}
+	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.pointCount; ++slotIndex) {
 		CreateColorAttachment(pointShadowSize, pointShadowSize, 6u, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, pointShadowCubeColors[slotIndex], VK_IMAGE_VIEW_TYPE_CUBE);
 		CreateDepthAttachmentCube(pointShadowSize, pointShadowCubeDepths[slotIndex]);
 		CreateShadowSampler(pointShadowCubeDepths[slotIndex], false);
@@ -2631,52 +2744,99 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(uint32_t requestedSlotCoun
 		}
 	};
 
-	// Register every 2D shadow slot into the bindless texture heap. GPULight
-	// carries the resolved texture index after the CPU chooses a slot.
-	for (uint32_t slotIndex = 0u; slotIndex < targetSlotCount; ++slotIndex) {
+	// Register only the active 2D shadow regions into the bindless texture
+	// heap. Each light stores the resolved texture index after CPU assignment.
+	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
 		directionalShadowTextureIndices[slotIndex] = AllocateTextureIndex();
 		BindDepthTexture(directionalShadowTextureIndices[slotIndex], directionalShadowDepths[slotIndex]);
+	}
+	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {
 		spotShadowTextureIndices[slotIndex] = AllocateTextureIndex();
 		BindDepthTexture(spotShadowTextureIndices[slotIndex], spotShadowDepths[slotIndex]);
+	}
+	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex) {
 		areaShadowTextureIndices[slotIndex] = AllocateTextureIndex();
 		BindDepthTexture(areaShadowTextureIndices[slotIndex], areaShadowDepths[slotIndex]);
 	}
 
 	// Point shadows use a dedicated cubemap binding array because the global
 	// bindless heap is declared as Texture2D in shaders.
-	std::vector<VkDescriptorImageInfo> pointShadowCubeImageInfos(targetSlotCount);
-	for (uint32_t slotIndex = 0u; slotIndex < targetSlotCount; ++slotIndex) {
-		pointShadowCubeImageInfos[slotIndex].imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-		pointShadowCubeImageInfos[slotIndex].imageView = pointShadowCubeDepths[slotIndex].view;
-		pointShadowCubeImageInfos[slotIndex].sampler = VK_NULL_HANDLE;
+	if (targetRequest.pointCount > 0u) {
+		std::vector<VkDescriptorImageInfo> pointShadowCubeImageInfos(targetRequest.pointCount);
+		for (uint32_t slotIndex = 0u; slotIndex < targetRequest.pointCount; ++slotIndex) {
+			pointShadowCubeImageInfos[slotIndex].imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+			pointShadowCubeImageInfos[slotIndex].imageView = pointShadowCubeDepths[slotIndex].view;
+			pointShadowCubeImageInfos[slotIndex].sampler = VK_NULL_HANDLE;
+		}
+
+		VkDescriptorImageInfo pointShadowCubeSamplerInfo{};
+		pointShadowCubeSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		pointShadowCubeSamplerInfo.imageView = VK_NULL_HANDLE;
+		pointShadowCubeSamplerInfo.sampler = pointShadowCubeDepths[0].sampler;
+
+		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+			std::array<VkWriteDescriptorSet, 2> pointShadowCubeWrites{};
+			pointShadowCubeWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			pointShadowCubeWrites[0].dstSet = globalDescriptorSets[i];
+			pointShadowCubeWrites[0].dstBinding = 20;
+			pointShadowCubeWrites[0].dstArrayElement = 0;
+			pointShadowCubeWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			pointShadowCubeWrites[0].descriptorCount = targetRequest.pointCount;
+			pointShadowCubeWrites[0].pImageInfo = pointShadowCubeImageInfos.data();
+
+			pointShadowCubeWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			pointShadowCubeWrites[1].dstSet = globalDescriptorSets[i];
+			pointShadowCubeWrites[1].dstBinding = 8;
+			pointShadowCubeWrites[1].dstArrayElement = 0;
+			pointShadowCubeWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+			pointShadowCubeWrites[1].descriptorCount = 1;
+			pointShadowCubeWrites[1].pImageInfo = &pointShadowCubeSamplerInfo;
+
+			vkUpdateDescriptorSets(device, static_cast<uint32_t>(pointShadowCubeWrites.size()), pointShadowCubeWrites.data(), 0, nullptr);
+		}
 	}
-
-	VkDescriptorImageInfo pointShadowCubeSamplerInfo{};
-	pointShadowCubeSamplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	pointShadowCubeSamplerInfo.imageView = VK_NULL_HANDLE;
-	pointShadowCubeSamplerInfo.sampler = pointShadowCubeDepths[0].sampler;
-
-	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-		std::array<VkWriteDescriptorSet, 2> pointShadowCubeWrites{};
-		pointShadowCubeWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		pointShadowCubeWrites[0].dstSet = globalDescriptorSets[i];
-		pointShadowCubeWrites[0].dstBinding = 20;
-		pointShadowCubeWrites[0].dstArrayElement = 0;
-		pointShadowCubeWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		pointShadowCubeWrites[0].descriptorCount = targetSlotCount;
-		pointShadowCubeWrites[0].pImageInfo = pointShadowCubeImageInfos.data();
-
-		pointShadowCubeWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		pointShadowCubeWrites[1].dstSet = globalDescriptorSets[i];
-		pointShadowCubeWrites[1].dstBinding = 8;
-		pointShadowCubeWrites[1].dstArrayElement = 0;
-		pointShadowCubeWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-		pointShadowCubeWrites[1].descriptorCount = 1;
-		pointShadowCubeWrites[1].pImageInfo = &pointShadowCubeSamplerInfo;
-
-		vkUpdateDescriptorSets(device, static_cast<uint32_t>(pointShadowCubeWrites.size()), pointShadowCubeWrites.data(), 0, nullptr);
+	activeShadowResourceRequest = targetRequest;
+	shadowStorageRegions.fill({});
+	const auto estimateRegionBytes = [&](ShadowResourceKind kind) {
+		constexpr std::uint64_t kDepthBytesPerPixel = 4u;
+		constexpr std::uint64_t kColorBytesPerPixel = 4u;
+		const std::uint64_t texelCount = static_cast<std::uint64_t>(SHADOW_MAP_RESOLUTION) * static_cast<std::uint64_t>(SHADOW_MAP_RESOLUTION);
+		const std::uint64_t pointTexelCount = static_cast<std::uint64_t>(POINT_SHADOW_MAP_RESOLUTION) * static_cast<std::uint64_t>(POINT_SHADOW_MAP_RESOLUTION) * 6u;
+		return (kind == ShadowResourceKind::PointCube ? pointTexelCount : texelCount) * (kDepthBytesPerPixel + kColorBytesPerPixel);
+	};
+	std::uint32_t regionIndex = 0u;
+	auto registerRegion = [&](ShadowResourceKind kind, std::uint32_t typedSlot) {
+		if (regionIndex >= shadowStorageRegions.size()) {
+			return;
+		}
+		const bool reduced2DRegion = kind != ShadowResourceKind::PointCube && typedSlot >= 16u;
+		ShadowStorageRegion& region = shadowStorageRegions[regionIndex++];
+		region.resourceKind = kind;
+		region.typedSlot = typedSlot;
+		region.atlasId = static_cast<std::uint32_t>(kind);
+		region.x = 0u;
+		region.y = 0u;
+		region.width = reduced2DRegion ? Shadow2DRegionSizeForSlot(typedSlot) : SHADOW_MAP_RESOLUTION;
+		region.height = reduced2DRegion ? Shadow2DRegionSizeForSlot(typedSlot) : SHADOW_MAP_RESOLUTION;
+		region.qualityTier = reduced2DRegion ? ShadowQualityTier::ReducedResolution : ShadowQualityTier::FullResolution;
+		region.estimatedBytes = estimateRegionBytes(kind);
+		if (reduced2DRegion) {
+			region.estimatedBytes /= 4u;
+		}
+		region.live = true;
+	};
+	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
+		registerRegion(ShadowResourceKind::DirectionalCascade, slotIndex);
 	}
-	activeShadowResourceSlots = targetSlotCount;
+	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {
+		registerRegion(ShadowResourceKind::SpotAtlas, slotIndex);
+	}
+	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex) {
+		registerRegion(ShadowResourceKind::AreaAtlas, slotIndex);
+	}
+	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.pointCount; ++slotIndex) {
+		registerRegion(ShadowResourceKind::PointCube, slotIndex);
+	}
 
 	// Build lightweight procedural LTC lookup textures. These are deterministic
 	// fallback tables until authored LUT assets are imported through content.
@@ -2940,6 +3100,22 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			? "Increase the shadow light budget, lower shadow demand, or raise important lights' priority."
 			: "";
 		snapshot.entries.push_back(std::move(shadowEntry));
+
+		LightingDiagnosticEntry shadowMemoryEntry{};
+		shadowMemoryEntry.category = LightingDiagnosticCategory::Shadow;
+		shadowMemoryEntry.status = budgetDiagnostics.allocationFailureCount > 0u
+			? LightingDiagnosticStatus::Unavailable
+			: LightingDiagnosticStatus::Active;
+		shadowMemoryEntry.message =
+			"Shadow storage allocated "
+			+ std::to_string(budgetDiagnostics.allocatedRegionCount)
+			+ " active regions for "
+			+ std::to_string(budgetDiagnostics.activeShadowCount)
+			+ " shadowed lights.";
+		shadowMemoryEntry.recommendedAction = budgetDiagnostics.allocationFailureCount > 0u
+			? "Reduce shadow demand or inspect Vulkan allocation failures."
+			: "";
+		snapshot.entries.push_back(std::move(shadowMemoryEntry));
 
 		const auto shadowKindName = [](ShadowResourceKind kind) {
 			switch (kind)
@@ -3305,6 +3481,49 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 		capture["stability_bias_applied_count"] = diagnostics.stabilityBiasAppliedCount;
 		capture["shadow_reuse_count"] = diagnostics.shadowReuseCount;
 		capture["shadow_replacement_count"] = diagnostics.shadowReplacementCount;
+		capture["configured_shadow_capacity"] = diagnostics.configuredShadowCapacity;
+		capture["active_shadow_count"] = diagnostics.activeShadowCount;
+		capture["allocated_shadow_region_count"] = diagnostics.allocatedRegionCount;
+		capture["allocated_shadow_2d_region_count"] = diagnostics.allocated2DRegionCount;
+		capture["allocated_shadow_point_region_count"] = diagnostics.allocatedPointRegionCount;
+		capture["allocated_shadow_directional_region_count"] = diagnostics.allocatedDirectionalRegionCount;
+		capture["allocated_shadow_spot_region_count"] = diagnostics.allocatedSpotRegionCount;
+		capture["allocated_shadow_area_region_count"] = diagnostics.allocatedAreaRegionCount;
+		capture["estimated_shadow_memory_bytes"] = diagnostics.estimatedShadowMemoryBytes;
+		capture["shadow_cache_reuse_count"] = diagnostics.cacheReuseCount;
+		capture["shadow_cache_refresh_count"] = diagnostics.cacheRefreshCount;
+		capture["shadow_cache_invalidation_count"] = diagnostics.cacheInvalidationCount;
+		capture["degraded_shadow_count"] = diagnostics.degradedShadowCount;
+		capture["shadow_allocation_failure_count"] = diagnostics.allocationFailureCount;
+		capture["shadow_pass_recorded"] = diagnostics.shadowPassRecorded;
+		capture["shadow_assignments"] = nlohmann::json::array();
+		for (const ShadowResourceAssignmentDiagnostic& assignment : diagnostics.shadowAssignments) {
+			nlohmann::json assignmentJson;
+			assignmentJson["light_id"] = TerraEngine::ToHexString(assignment.lightId);
+			assignmentJson["resource_kind"] = ShadowResourceKindToString(assignment.resourceKind);
+			assignmentJson["resource_slot"] = assignment.resourceSlot;
+			assignmentJson["storage_region_id"] = assignment.storageRegionId;
+			assignmentJson["atlas_id"] = assignment.atlasId;
+			assignmentJson["region_x"] = assignment.regionX;
+			assignmentJson["region_y"] = assignment.regionY;
+			assignmentJson["region_width"] = assignment.regionWidth;
+			assignmentJson["region_height"] = assignment.regionHeight;
+			assignmentJson["estimated_bytes"] = assignment.estimatedBytes;
+			assignmentJson["frame_serial"] = assignment.frameSerial;
+			assignmentJson["frames_since_last_seen"] = assignment.framesSinceLastSeen;
+			assignmentJson["retention_score"] = assignment.retentionScore;
+			assignmentJson["quality_tier"] = ShadowQualityTierToString(assignment.qualityTier);
+			assignmentJson["degradation_reason"] = ShadowDegradationReasonToString(assignment.degradationReason);
+			assignmentJson["refresh_reason"] = ShadowRefreshReasonToString(assignment.refreshReason);
+			assignmentJson["assigned"] = assignment.assigned;
+			assignmentJson["reused_previous_owner"] = assignment.reusedPreviousOwner;
+			assignmentJson["replaced_previous_owner"] = assignment.replacedPreviousOwner;
+			assignmentJson["shadowed_previous_frame"] = assignment.shadowedPreviousFrame;
+			assignmentJson["reused_cached_result"] = assignment.reusedCachedResult;
+			assignmentJson["refreshed_this_frame"] = assignment.refreshedThisFrame;
+			assignmentJson["invalidated_this_frame"] = assignment.invalidatedThisFrame;
+			capture["shadow_assignments"].push_back(std::move(assignmentJson));
+		}
 		capture["cluster_count"] = snapshot.buildMetadata.clusterCount;
 		capture["active_light_count"] = snapshot.buildMetadata.activeLightCount;
 		capture["light_index_capacity"] = snapshot.buildMetadata.lightIndexCapacity;

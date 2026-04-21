@@ -696,11 +696,22 @@ endif()
 
 if(MSVC)
     # Stronger optimizations for MSVC in Release modes
-    add_compile_options($<$<CONFIG:RELEASE,RELWITHDEBINFO>:/Ot /Ox /GS- /Oi>)
-    add_link_options($<$<CONFIG:RELEASE,RELWITHDEBINFO>:/OPT:REF /OPT:ICF>)
+    add_compile_options(
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Ot>
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Ox>
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/GS->
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/Oi>
+    )
+    add_link_options(
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/OPT:REF>
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:/OPT:ICF>
+    )
 else()
     # Stronger optimizations for GCC/Clang
-    add_compile_options($<$<CONFIG:RELEASE,RELWITHDEBINFO>:-O3 -ffast-math>)
+    add_compile_options(
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-O3>
+        $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-ffast-math>
+    )
 endif()
 
 set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
