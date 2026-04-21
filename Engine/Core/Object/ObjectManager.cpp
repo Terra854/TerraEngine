@@ -41,6 +41,18 @@ Object ObjectManager::makeHandle(entt::entity entityId)
 	return Object(registry, entityId);
 }
 
+void ObjectManager::notifySpatialObjectDirty(entt::entity entityId)
+{
+	// Spatial indexes consume this monotonically increasing revision to decide
+	// when their cached world bounds may be stale. The callback carries the
+	// specific entity for systems that want incremental refreshes.
+	++spatialRevision;
+	if (onSpatialObjectDirty)
+	{
+		onSpatialObjectDirty(entityId);
+	}
+}
+
 // Create a new Object
 Object ObjectManager::createObject(const std::string& name) {
 	// Every entity begins life with a Transform so systems can safely assume
@@ -61,6 +73,7 @@ Object ObjectManager::createObject(const std::string& name) {
 	childrenMap.emplace(object.EntityId(), std::vector<entt::entity>{});
 	
 	// Structured modifications trigger the observer callback to sync dirty state.
+	notifySpatialObjectDirty(object.EntityId());
 	if (onModified) onModified();
 	
 	return object;
@@ -68,6 +81,7 @@ Object ObjectManager::createObject(const std::string& name) {
 
 // Remove an Object
 void ObjectManager::removeObject(Object obj) {
+	notifySpatialObjectDirty(obj.id);
 	// Destroying the entity purges every component attached to it (Transform and any others),
 	// ensuring no dangling component data survives past object lifetime.
 	if (registry.valid(obj.id))
@@ -210,6 +224,7 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 	}
 
 	if (onModified) onModified();
+	notifySpatialObjectDirty(childId);
 
 	return true;
 }
@@ -326,6 +341,7 @@ void ObjectManager::setObjectActive(const Object& obj, bool active)
 	if (auto it = metadataMap.find(obj); it != metadataMap.end())
 	{
 		it->second.active = active;
+		notifySpatialObjectDirty(obj.EntityId());
 		if (onModified) onModified();
 	}
 }
@@ -345,6 +361,7 @@ void ObjectManager::setObjectStatic(const Object& obj, bool isStatic)
 	if (auto it = metadataMap.find(obj); it != metadataMap.end())
 	{
 		it->second.isStatic = isStatic;
+		notifySpatialObjectDirty(obj.EntityId());
 		if (onModified) onModified();
 	}
 }
@@ -426,6 +443,7 @@ void ObjectManager::UpdateEntityUUID(entt::entity entity, const TerraEngine::UUI
 		entityToUuid[entity] = newId;
 		uuidToEntity[newId] = entity;
 	}
+	notifySpatialObjectDirty(entity);
 }
 
 void ObjectManager::detachFromParent(entt::entity childId)

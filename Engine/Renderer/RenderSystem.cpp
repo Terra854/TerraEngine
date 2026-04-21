@@ -36,12 +36,32 @@ namespace
 {
 	const glm::vec3 kSkyReferenceSunDirection = glm::normalize(glm::vec3(0.0f, 0.35f, -1.0f));
 
-	constexpr const char* ResolveRuntimeSettingsFolderName()
+	std::filesystem::path ResolveRuntimeSettingsDirectory()
 	{
-		// Exported builds store writable runtime settings in a short top-level
-		// Settings folder, while editor/project sessions keep the authored
-		// ProjectSettings directory layout unchanged.
-		return ResourceManager::Instance().IsExportRuntime() ? "Settings" : "ProjectSettings";
+		auto& resourceManager = ResourceManager::Instance();
+		// Exported builds keep writable settings beside the packaged runtime,
+		// while editor/project sessions must write next to Assets so authored
+		// ProjectSettings stay in <project>/ProjectSettings.
+		if (resourceManager.IsExportRuntime())
+		{
+			return resourceManager.GetAssetRoot() / "Settings";
+		}
+
+		return resourceManager.GetProjectRoot() / "ProjectSettings";
+	}
+
+	std::filesystem::path ResolveLegacyAssetSettingsPath()
+	{
+		auto& resourceManager = ResourceManager::Instance();
+		if (resourceManager.IsExportRuntime())
+		{
+			return {};
+		}
+
+		// Older builds incorrectly wrote render settings inside Assets. Loading
+		// that file as a fallback preserves a user's settings once, and the next
+		// save writes them back to the corrected project-level directory.
+		return resourceManager.GetAssetRoot() / "ProjectSettings" / "RenderSettings.json";
 	}
 
 	RenderSettings SanitizeRenderSettings(const RenderSettings& input)
@@ -229,6 +249,7 @@ void RenderSystem::Update(float deltaTime)
 			{
 				const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
 				const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
+				const TerraEngine::UUID spatialObjectId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "spatialObjectId");
 				const bool objectTaskCullingEnabled = GetComponentProperty<MeshRenderComponent, bool>(meshComp, "taskShaderCullingEnabled");
 				
 				if (meshId != TerraEngine::EMPTY_UUID && materialId != TerraEngine::EMPTY_UUID)
@@ -240,9 +261,11 @@ void RenderSystem::Update(float deltaTime)
 						MeshRenderComponent reflectedMesh{};
 						reflectedMesh.meshId = meshId;
 						reflectedMesh.materialId = materialId;
+						reflectedMesh.spatialObjectId = spatialObjectId;
 						reflectedMesh.taskShaderCullingEnabled = objectTaskCullingEnabled;
 
-						renderables.push_back({ object.EntityId(), reflectedMesh });
+						const TerraEngine::UUID objectId = spatialObjectId != TerraEngine::EMPTY_UUID ? spatialObjectId : object.getUUID();
+						renderables.push_back({ object.EntityId(), objectId, objManager.isObjectStatic(object), reflectedMesh });
 						if (!localTransforms.contains(object.EntityId()))
 						{
 							Transform reflectedTransform{};
@@ -367,75 +390,110 @@ void RenderSystem::Update(float deltaTime)
 		}
 	}
 
-	// Note: std::vector<DrawCommand> cannot easily use FrameAllocator if we want to return it from tasks/futures 
-	// because moving vectors with different allocators (thread local?) is complex?
-	// Actually FrameArena is singleton, so allocators are compatible.
-	// But std::future/async usage suggests we might want standard heap for result transport OR
-	// we just use FrameVector everywhere. FrameArena is thread-safe?
-	// FrameArena::Allocate is NOT thread safe currently. offset variable is not atomic.
-	
-	// **CRITICAL FIX**: FrameArena is NOT thread safe.
-	// Parallelizing command generation using FrameAllocator in threads requires locking or ThreadLocal arenas.
-	// For now, let's revert to Heap Vector for the parallel result merging, BUT
-	// we can use FrameVector for the `drawCommands` main list if we fill it sequentially.
-	// The tasks return `std::vector<DrawCommand>`. We'll keep that as heap vector to avoid Arena race conditions.
-	// `worldTransforms` is read-only in threads.
+	auto makeModelMatrix = [](const Transform& transform) {
+		glm::mat4 model = glm::mat4(1.0f);
+		model = glm::translate(model, transform.position);
+		model = model * glm::mat4_cast(transform.rotation);
+		model = glm::scale(model, transform.scale);
+		return model;
+	};
 
-	std::vector<DrawCommand> drawCommands;
-	if (!renderables.empty())
+	std::vector<TerraEngine::Scene::SpatialObjectRecord> spatialRecords;
+	std::unordered_map<entt::entity, std::size_t> renderableLookup;
+	spatialRecords.reserve(renderables.size());
+	renderableLookup.reserve(renderables.size());
+	for (std::size_t index = 0; index < renderables.size(); ++index)
 	{
-		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
-		const size_t taskCount = std::min(renderables.size(), workerCount);
-		const size_t chunkSize = (renderables.size() + taskCount - 1) / taskCount;
+		const RenderableEntry& entry = renderables[index];
+		renderableLookup.emplace(entry.entity, index);
+		const Transform& transform = worldTransforms.at(entry.entity);
+		const glm::mat4 model = makeModelMatrix(transform);
+		TerraEngine::Scene::SpatialAABB localBounds = ResourceManager::Instance().GetMeshLocalBounds(entry.mesh.meshId);
+		TerraEngine::Scene::SpatialAABB worldBounds = localBounds.IsUsable()
+			? TerraEngine::Scene::TransformAABB(localBounds, model)
+			: TerraEngine::Scene::MakeFallbackBounds(transform.position, 1.0f);
+		if (!worldBounds.IsUsable())
+		{
+			worldBounds = TerraEngine::Scene::MakeFallbackBounds(transform.position, 1.0f);
+		}
 
+		TerraEngine::Scene::SpatialObjectRecord record{};
+		record.objectId = entry.objectId;
+		record.entity = entry.entity;
+		record.active = true;
+		record.isStatic = entry.isStatic;
+		record.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable | TerraEngine::Scene::SpatialCategoryEditorSelectable;
+		record.worldBounds = worldBounds;
+		record.revision = objManager.GetSpatialRevision();
+		spatialRecords.push_back(record);
+	}
+	spatialIndex.Rebuild(spatialRecords);
+
+	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection) {
+		const TerraEngine::Scene::SpatialFrustum frustum = TerraEngine::Scene::ExtractFrustum(viewProjection);
+		TerraEngine::Scene::SpatialQueryFilter filter{};
+		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
+		filter.collectDiagnostics = true;
+		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
+
+		std::vector<std::size_t> candidateIndices;
+		candidateIndices.reserve(query.hits.size());
+		for (const TerraEngine::Scene::SpatialQueryHit& hit : query.hits)
+		{
+			if (const auto lookup = renderableLookup.find(hit.entity); lookup != renderableLookup.end())
+			{
+				candidateIndices.push_back(lookup->second);
+			}
+		}
+
+		std::vector<DrawCommand> commands;
+		if (candidateIndices.empty())
+		{
+			return commands;
+		}
+
+		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
+		const size_t taskCount = std::min(candidateIndices.size(), workerCount);
+		const size_t chunkSize = (candidateIndices.size() + taskCount - 1) / taskCount;
 		std::vector<std::future<std::vector<DrawCommand>>> futures;
 		futures.reserve(taskCount);
 
 		for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
 		{
 			const size_t start = taskIndex * chunkSize;
-			if (start >= renderables.size()) break;
-			const size_t end = std::min(renderables.size(), start + chunkSize);
-
-			// Pass worldTransforms by reference (read-only access is safe here)
-			// Note: capturing FrameMap by reference is fine.
-			auto task = ThreadPool::instance().createTask([start, end, &renderables, &worldTransforms]() {
-				std::vector<DrawCommand> cmds;
-				cmds.reserve(end - start);
+			if (start >= candidateIndices.size())
+			{
+				break;
+			}
+			const size_t end = std::min(candidateIndices.size(), start + chunkSize);
+			auto task = ThreadPool::instance().createTask([start, end, &candidateIndices, &renderables, &worldTransforms, &makeModelMatrix]() {
+				std::vector<DrawCommand> chunkCommands;
+				chunkCommands.reserve(end - start);
 				for (size_t i = start; i < end; ++i)
 				{
-					const RenderableEntry& entry = renderables[i];
-					// Transform is guaranteed to be in the map now
-					Transform transform = worldTransforms.at(entry.entity);
+					const RenderableEntry& entry = renderables[candidateIndices[i]];
 					const MeshRenderComponent& meshComp = entry.mesh;
 
 					DrawCommand cmd;
 					cmd.meshId = meshComp.meshId;
 					cmd.materialId = meshComp.materialId;
+					cmd.objectId = entry.objectId;
 					cmd.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
-
-					glm::mat4 model = glm::mat4(1.0f);
-					model = glm::translate(model, transform.position);
-					model = model * glm::mat4_cast(transform.rotation);
-					model = glm::scale(model, transform.scale);
-					cmd.modelMatrix = model;
-
-					cmds.push_back(cmd);
+					cmd.modelMatrix = makeModelMatrix(worldTransforms.at(entry.entity));
+					chunkCommands.push_back(cmd);
 				}
-				return cmds;
+				return chunkCommands;
 			});
-
 			futures.push_back(task->getFuture());
 			ThreadPool::instance().enqueue(task);
 		}
-
-		// Stitch results together
 		for (auto& future : futures)
 		{
 			auto chunk = future.get();
-			drawCommands.insert(drawCommands.end(), chunk.begin(), chunk.end());
+			commands.insert(commands.end(), chunk.begin(), chunk.end());
 		}
-	}
+		return commands;
+	};
 
 	// Pack reflected lights in parallel so large scenes keep the CPU upload path
 	// scalable while preserving deterministic ordering and stable light IDs.
@@ -665,19 +723,22 @@ void RenderSystem::Update(float deltaTime)
 	frameData.sky.sunDirection = skyRuntimeState.resolvedSunDirection;
 	frameData.sky.textureId = skyRuntimeState.resolvedSkyHandle;
 	frameData.lightCandidates = std::move(packedLights);
-	frameData.commands = drawCommands;
 	frameData.uiBatch = UISystem::Instance().GetCombinedFrameBatch();
 
 	rhi->SetGlobalTaskShaderCullingEnabled(taskShaderCullingEnabled);
 	rhi->BeginFrame();
 
 	VulkanContext* vulkan = static_cast<VulkanContext*>(rhi.get());
+	TerraEngine::Scene::SpatialDiagnosticsSnapshot sceneSpatialDiagnostics{};
+	TerraEngine::Scene::SpatialDiagnosticsSnapshot gameSpatialDiagnostics{};
 
 	if (hasSceneViewCamera)
 	{
 		frameData.viewMatrix = sceneViewCamera.view;
 		frameData.projectionMatrix = sceneViewCamera.proj;
 		frameData.cameraWorldPosition = sceneViewCamera.pos;
+		frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+		sceneSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 		vulkan->RenderFrame(frameData, VulkanContext::ViewType::Scene);
 	}
 
@@ -688,6 +749,8 @@ void RenderSystem::Update(float deltaTime)
 			frameData.viewMatrix = cam.view;
 			frameData.projectionMatrix = cam.proj;
 			frameData.cameraWorldPosition = cam.pos;
+			frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+			gameSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 			vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);
 		}
 	}
@@ -699,12 +762,13 @@ void RenderSystem::Update(float deltaTime)
 		blankData.cameraWorldPosition = glm::vec3(0.0f);
 		blankData.deltaTimeSeconds = deltaTime;
 		blankData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
-		blankData.cullingEpsilon = 0.001f;
-		blankData.activePreset = currentPreset;
-		blankData.customOverrideActive = (currentPreset == QualityPreset::Custom);
-		blankData.settings = SanitizeRenderSettings(currentSettings);
-		blankData.sky = frameData.sky;
-		vulkan->RenderFrame(blankData, VulkanContext::ViewType::Game);
+			blankData.cullingEpsilon = 0.001f;
+			blankData.activePreset = currentPreset;
+			blankData.customOverrideActive = (currentPreset == QualityPreset::Custom);
+			blankData.settings = SanitizeRenderSettings(currentSettings);
+			blankData.sky = frameData.sky;
+			blankData.commands.clear();
+			vulkan->RenderFrame(blankData, VulkanContext::ViewType::Game);
 	}
 	else
 	{
@@ -738,6 +802,8 @@ void RenderSystem::Update(float deltaTime)
 			frameData.projectionMatrix = glm::perspective(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
 			frameData.projectionMatrix[1][1] *= -1;
 			frameData.cameraWorldPosition = cameraTransform.position;
+			frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+			gameSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 
 			vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);
 		}
@@ -748,6 +814,16 @@ void RenderSystem::Update(float deltaTime)
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestGameStats = rhi->GetLatestRenderStats(RenderViewType::Game);
 		latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);
+		latestGameStats.spatialIndexedObjectCount = gameSpatialDiagnostics.indexedObjectCount;
+		latestGameStats.spatialVisibleCandidateCount = gameSpatialDiagnostics.visibleCandidateCount;
+		latestGameStats.spatialRejectedObjectCount = gameSpatialDiagnostics.rejectedObjectCount;
+		latestGameStats.spatialFallbackObjectCount = gameSpatialDiagnostics.fallbackObjectCount;
+		latestSceneStats.spatialIndexedObjectCount = sceneSpatialDiagnostics.indexedObjectCount;
+		latestSceneStats.spatialVisibleCandidateCount = sceneSpatialDiagnostics.visibleCandidateCount;
+		latestSceneStats.spatialRejectedObjectCount = sceneSpatialDiagnostics.rejectedObjectCount;
+		latestSceneStats.spatialFallbackObjectCount = sceneSpatialDiagnostics.fallbackObjectCount;
+		latestGameSpatialDiagnostics = gameSpatialDiagnostics;
+		latestSceneSpatialDiagnostics = sceneSpatialDiagnostics;
 		latestGameBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Game);
 		latestSceneBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Scene);
 		latestGameLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Game);
@@ -856,6 +932,16 @@ RenderStatsSnapshot RenderSystem::GetLatestRenderStats(RenderViewType viewType) 
 		return latestSceneStats;
 	}
 	return latestGameStats;
+}
+
+TerraEngine::Scene::SpatialDiagnosticsSnapshot RenderSystem::GetLatestSpatialDiagnostics(RenderViewType viewType) const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	if (viewType == RenderViewType::Scene)
+	{
+		return latestSceneSpatialDiagnostics;
+	}
+	return latestGameSpatialDiagnostics;
 }
 
 FrameBudgetDiagnosticsSnapshot RenderSystem::GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const
@@ -973,12 +1059,20 @@ void RenderSystem::SetRenderSettings(const RenderSettings& settings)
 void RenderSystem::LoadSettings()
 {
 	namespace fs = std::filesystem;
-	const fs::path settingsPath = ResourceManager::Instance().GetAssetRoot() / ResolveRuntimeSettingsFolderName() / "RenderSettings.json";
+	fs::path settingsPath = ResolveRuntimeSettingsDirectory() / "RenderSettings.json";
 
 	if (!fs::exists(settingsPath))
 	{
-		SetQualityPreset(QualityPreset::High);
-		return;
+		const fs::path legacySettingsPath = ResolveLegacyAssetSettingsPath();
+		if (!legacySettingsPath.empty() && fs::exists(legacySettingsPath))
+		{
+			settingsPath = legacySettingsPath;
+		}
+		else
+		{
+			SetQualityPreset(QualityPreset::High);
+			return;
+		}
 	}
 
 	try
@@ -1014,7 +1108,7 @@ void RenderSystem::LoadSettings()
 void RenderSystem::SaveSettings()
 {
 	namespace fs = std::filesystem;
-	const fs::path settingsDir = ResourceManager::Instance().GetAssetRoot() / ResolveRuntimeSettingsFolderName();
+	const fs::path settingsDir = ResolveRuntimeSettingsDirectory();
 	const fs::path settingsPath = settingsDir / "RenderSettings.json";
 
 	if (!fs::exists(settingsDir))

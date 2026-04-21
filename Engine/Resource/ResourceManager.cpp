@@ -224,6 +224,39 @@ std::filesystem::path ResourceManager::GetAssetRoot() const
 	return assetRoot;
 }
 
+std::filesystem::path ResourceManager::GetProjectRoot() const
+{
+	// Export runtimes do not have the editor's authored project layout, so the
+	// runtime root doubles as the project root for writable top-level settings.
+	if (IsExportRuntime())
+	{
+		return assetRoot;
+	}
+
+	// Prefer explicit project markers so custom asset-folder names still resolve
+	// correctly when the editor is pointed somewhere inside a project checkout.
+	if (const std::optional<std::filesystem::path> projectRoot = FindEditorProjectRoot(assetRoot))
+	{
+		return *projectRoot;
+	}
+
+	// Fresh projects may not have written ProjectSettings.terra or game.json yet.
+	// In that common case, an Assets asset root still means the project root is
+	// its parent directory.
+	std::string assetFolderName = assetRoot.filename().string();
+	std::transform(assetFolderName.begin(), assetFolderName.end(), assetFolderName.begin(), [](unsigned char value) {
+		return static_cast<char>(std::tolower(value));
+	});
+	if (assetFolderName == "assets" && assetRoot.has_parent_path())
+	{
+		return assetRoot.parent_path();
+	}
+
+	// Fall back to the configured asset root so callers still receive a stable,
+	// normalized directory even if no project markers can be found.
+	return assetRoot;
+}
+
 void ResourceManager::ConfigureExportArchive(const std::filesystem::path& archivePath)
 {
 	if (archivePath.empty()) {

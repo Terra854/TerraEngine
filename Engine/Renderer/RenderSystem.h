@@ -14,6 +14,8 @@
 #include "Components/CameraComponent.h"
 #include "Components/MeshRenderComponent.h"
 #include "Components/LightComponent.h"
+#include "Scene/SpatialDiagnostics.h"
+#include "Scene/SpatialIndex.h"
 
 class RenderSystem : public SystemsBase
 {
@@ -41,6 +43,7 @@ public:
 	void SetTaskShaderCullingEnabled(bool enabled);
 	bool IsTaskShaderCullingEnabled() const { return taskShaderCullingEnabled; }
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const;
+	TerraEngine::Scene::SpatialDiagnosticsSnapshot GetLatestSpatialDiagnostics(RenderViewType viewType) const;
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
 
@@ -95,6 +98,8 @@ private:
 	struct RenderableEntry
 	{
 		entt::entity entity;
+		TerraEngine::UUID objectId;
+		bool isStatic = false;
 		MeshRenderComponent mesh;
 	};
 	struct LightEntry
@@ -105,8 +110,11 @@ private:
 	};
 
 	mutable std::mutex statsMutex;
+	TerraEngine::Scene::SpatialIndex spatialIndex;
 	RenderStatsSnapshot latestGameStats{};
 	RenderStatsSnapshot latestSceneStats{};
+	TerraEngine::Scene::SpatialDiagnosticsSnapshot latestGameSpatialDiagnostics{};
+	TerraEngine::Scene::SpatialDiagnosticsSnapshot latestSceneSpatialDiagnostics{};
 	FrameBudgetDiagnosticsSnapshot latestGameBudgetDiagnostics{};
 	FrameBudgetDiagnosticsSnapshot latestSceneBudgetDiagnostics{};
 	LightingDiagnosticsSnapshot latestGameLightingDiagnostics{};

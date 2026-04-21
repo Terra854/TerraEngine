@@ -446,6 +446,29 @@ namespace
 					return nullptr;
 				}
 
+				const glm::vec3 center(bounds.center[0], bounds.center[1], bounds.center[2]);
+				const glm::vec3 extent(bounds.radius);
+				const auto meshletBounds = TerraEngine::Scene::MakeAABB(center - extent, center + extent, TerraEngine::Scene::SpatialBoundsSource::Mesh);
+				if (mesh->hasLocalBounds)
+				{
+					mesh->localBoundsMin[0] = std::min(mesh->localBoundsMin[0], meshletBounds.min.x);
+					mesh->localBoundsMin[1] = std::min(mesh->localBoundsMin[1], meshletBounds.min.y);
+					mesh->localBoundsMin[2] = std::min(mesh->localBoundsMin[2], meshletBounds.min.z);
+					mesh->localBoundsMax[0] = std::max(mesh->localBoundsMax[0], meshletBounds.max.x);
+					mesh->localBoundsMax[1] = std::max(mesh->localBoundsMax[1], meshletBounds.max.y);
+					mesh->localBoundsMax[2] = std::max(mesh->localBoundsMax[2], meshletBounds.max.z);
+				}
+				else
+				{
+					mesh->hasLocalBounds = true;
+					mesh->localBoundsMin[0] = meshletBounds.min.x;
+					mesh->localBoundsMin[1] = meshletBounds.min.y;
+					mesh->localBoundsMin[2] = meshletBounds.min.z;
+					mesh->localBoundsMax[0] = meshletBounds.max.x;
+					mesh->localBoundsMax[1] = meshletBounds.max.y;
+					mesh->localBoundsMax[2] = meshletBounds.max.z;
+				}
+
 				// Cone validation is fail-safe: invalid payload disables backface culling
 				// for that meshlet instead of rejecting the whole asset.
 				const bool coneInvalid = !IsFiniteFloat(bounds.coneApex[0])
@@ -477,6 +500,13 @@ namespace
 				bounds.coneAxis[1] *= invAxisLength;
 				bounds.coneAxis[2] *= invAxisLength;
 			}
+		}
+		else
+		{
+			// Missing meshlet bounds should not make object-level culling unsafe.
+			// The renderer will include fallback records so visibility remains
+			// correct until the asset pipeline produces precise bounds.
+			mesh->hasLocalBounds = false;
 		}
 
 		const std::uint8_t* primitivePayload = mesh->meshletPrimitiveIndexData.data();
@@ -616,4 +646,21 @@ void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 		std::unique_lock lock(meshCache.mutex);
 		meshCache.resources[id] = std::move(mesh);
 	}
+}
+
+TerraEngine::Scene::SpatialAABB ResourceManager::GetMeshLocalBounds(const TerraEngine::UUID& id)
+{
+	if (Mesh* mesh = GetMesh(id))
+	{
+		if (mesh->hasLocalBounds)
+		{
+			return TerraEngine::Scene::MakeAABB(
+				glm::vec3(mesh->localBoundsMin[0], mesh->localBoundsMin[1], mesh->localBoundsMin[2]),
+				glm::vec3(mesh->localBoundsMax[0], mesh->localBoundsMax[1], mesh->localBoundsMax[2]),
+				TerraEngine::Scene::SpatialBoundsSource::Mesh);
+		}
+		return TerraEngine::Scene::MakeFallbackBounds(glm::vec3(0.0f), 1.0f);
+	}
+
+	return TerraEngine::Scene::MakeInvalidBounds(TerraEngine::Scene::SpatialBoundsSource::Mesh);
 }

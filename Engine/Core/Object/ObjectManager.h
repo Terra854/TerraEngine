@@ -2,6 +2,7 @@
 
 #include <entt/entt.hpp>
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -147,6 +148,10 @@ public:
 	// (creation, deletion, or parenting). This allows external systems like the
 	// SceneManager to track dirty state without tight coupling.
 	void SetOnModifiedCallback(std::function<void()> callback) { onModified = callback; }
+	// Spatial systems need a narrower signal so they can refresh object bounds
+	// without assuming every metadata edit changes placement or visibility.
+	void SetOnSpatialObjectDirtyCallback(std::function<void(entt::entity)> callback) { onSpatialObjectDirty = callback; }
+	std::uint64_t GetSpatialRevision() const { return spatialRevision; }
 
 private:
 	ObjectManager();
@@ -155,6 +160,8 @@ private:
 	friend class Object;
 
 	std::function<void()> onModified;
+	std::function<void(entt::entity)> onSpatialObjectDirty;
+	std::uint64_t spatialRevision = 0;
 	std::unordered_map<Object, ObjectMetadata> metadataMap;
 	entt::registry registry;
 	std::unordered_map<entt::entity, entt::entity> parentMap;
@@ -169,6 +176,7 @@ private:
 	std::vector<std::string> availableLayers;
 
 	Object makeHandle(entt::entity entityId);
+	void notifySpatialObjectDirty(entt::entity entityId);
 	void detachFromParent(entt::entity childId);
 	bool isDescendant(entt::entity ancestor, entt::entity potentialChild) const;
 };

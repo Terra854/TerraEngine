@@ -7,6 +7,7 @@
 #include <cmath>
 #include <glm/glm.hpp>
 #include <glm/common.hpp>
+#include "Scene/SpatialDiagnostics.h"
 #include "Utilities/UUID.h"
 
 enum class RenderViewType : std::uint8_t
@@ -252,6 +253,7 @@ struct DrawCommand
 	std::uint32_t materialIndex = 0u;
 	std::uint32_t meshDataIndex = 0u;
 	std::uint32_t textureIndex = 0u;
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 	bool taskShaderCullingEnabled = true;
 };
 
@@ -594,6 +596,10 @@ struct RenderStatsSnapshot
 	std::uint32_t meshletsDispatched = 0u;
 	std::uint32_t meshletsCulled = 0u;
 	std::uint32_t meshletsCulledHiZ = 0u;
+	std::uint32_t spatialIndexedObjectCount = 0u;
+	std::uint32_t spatialVisibleCandidateCount = 0u;
+	std::uint32_t spatialRejectedObjectCount = 0u;
+	std::uint32_t spatialFallbackObjectCount = 0u;
 	bool taskCullingActive = false;
 	bool hiZActive = false;
 	bool vrsActive = false;

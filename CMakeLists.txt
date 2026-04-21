@@ -38,6 +38,7 @@ set(ENGINE_SOURCES
 	Engine/Resource/ResourceManagerTexture.cpp
 	Engine/Scene/SceneManager.cpp
 	Engine/Scene/Serializer.cpp
+	Engine/Scene/SpatialIndex.cpp
 	Engine/Input/InputSystem.cpp
 	Engine/Input/GLFW/GlfwInputBackend.cpp
 	Engine/Utilities/PlatformUtils.cpp
@@ -87,6 +88,10 @@ set(ENGINE_HEADERS
 	Engine/Components/LightComponent.h
 	Engine/Components/UIComponent.h
 	Engine/Scene/Serializer.h
+	Engine/Scene/SpatialBounds.h
+	Engine/Scene/SpatialDiagnostics.h
+	Engine/Scene/SpatialIndex.h
+	Engine/Scene/SpatialQuery.h
 	Engine/Input/GLFW/GlfwInputBackend.h
 	Engine/Utilities/PlatformUtils.h
 	Engine/Utilities/UUID.h

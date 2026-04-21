@@ -150,4 +150,10 @@ struct Mesh
 	std::vector<MeshletRecord> meshletRecords;
 	std::vector<MeshletSection> meshletSections;
 	std::vector<MeshletBounds> meshletBounds;
+	// Object-level culling needs one conservative mesh bound before the GPU
+	// sees individual meshlets. It is derived during load so render systems can
+	// cheaply transform it into world space without walking every meshlet.
+	bool hasLocalBounds = false;
+	float localBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+	float localBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
 };

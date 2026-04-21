@@ -20,6 +20,7 @@
 #include "Core/Export.h"
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineShaderFile.h"
+#include "Scene/SpatialBounds.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
 
@@ -86,6 +87,11 @@ public:
 	// Inspect the currently configured asset root to help debugging when
 	// resources cannot be found.
 	std::filesystem::path GetAssetRoot() const;
+
+	// Resolve the authored project directory that owns the current asset root.
+	// Editor sessions commonly point assetRoot at <project>/Assets, while
+	// project-level data such as ProjectSettings and game.json live beside it.
+	std::filesystem::path GetProjectRoot() const;
 
 	// Inspect the currently configured engine root so runtime systems can find
 	// bundled engine-owned assets such as shaders and fallback fonts without
@@ -177,6 +183,7 @@ public:
 	// or a subsequent reload replaces the resource.
 	Material* GetMaterial(const TerraEngine::UUID& id);
 	Mesh* GetMesh(const TerraEngine::UUID& id);
+	TerraEngine::Scene::SpatialAABB GetMeshLocalBounds(const TerraEngine::UUID& id);
 	Shader* GetShader(const TerraEngine::UUID& id);
 	ShaderCollection* GetShaderCollection(const TerraEngine::UUID& id);
 	Texture* GetTexture(const TerraEngine::UUID& id);
