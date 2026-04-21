@@ -195,6 +195,18 @@ struct VulkanContext::Impl {
 	bool meshShaderSupported = false;
 	bool taskShaderSupported = false;
 
+	bool UsesVrsAttachment() const
+	{
+		// Editor rendering presents scene/game offscreen textures through ImGui.
+		// A shared VRS attachment can make the UI sample those textures with
+		// stale coarse shading-rate tiles during dock/viewport resizing, so VRS
+		// attachments are reserved for standalone runtime swapchain rendering.
+		return !editorMode
+			&& vrsFeatures.attachmentFragmentShadingRate
+			&& vrsFeatures.pipelineFragmentShadingRate
+			&& vrs.view != VK_NULL_HANDLE;
+	}
+
 	// Bindless Resources
 	static constexpr uint32_t MAX_BINDLESS_TEXTURES = 1024;
 	static constexpr uint32_t MAX_BINDLESS_BUFFERS = 1024;
@@ -370,6 +382,15 @@ struct VulkanContext::Impl {
 		bool valid = false;
 	};
 
+	struct ViewDepthHistoryState
+	{
+		// Hi-Z is built from a depth buffer rendered earlier. The matching
+		// view-projection lets resize and camera-change frames fail open instead
+		// of hiding visible meshlets with stale depth.
+		glm::mat4 lastViewProjectionMatrix = glm::mat4(1.0f);
+		bool valid = false;
+	};
+
 	struct LightBudgetApplicationResult
 	{
 		std::vector<FrameLightCandidate> uploadedCandidates;
@@ -388,6 +409,7 @@ struct VulkanContext::Impl {
 	std::array<std::vector<FrameLightCandidate>, kStatsSlotCount> pendingLightAnalysisCandidatesBySlot{};
 	std::array<GpuLightAnalysisViewSnapshot, kStatsViewCount> latestGpuLightAnalysisByView{};
 	std::array<ViewLightingTemporalState, kStatsViewCount> lightingTemporalStateByView{};
+	std::array<ViewDepthHistoryState, kStatsViewCount> depthHistoryByView{};
 	std::array<ClusterValidationSnapshot, MAX_FRAMES_IN_FLIGHT> pendingClusterValidationByFrame{};
 	ClusterValidationSnapshot previousClusterValidationSnapshot{};
 	bool previousClusterValidationSnapshotValid = false;

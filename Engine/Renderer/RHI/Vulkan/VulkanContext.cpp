@@ -31,6 +31,7 @@ namespace
 	constexpr float kDirectionalShadowExtent = 40.0f;
 	constexpr float kTemporalResetDistance = 25.0f;
 	constexpr float kTemporalResetMatrixEpsilon = 0.75f;
+	constexpr float kDepthHistoryMatrixEpsilon = 0.0005f;
 	constexpr std::uint64_t kTemporalStateHistoryFrames = 240u;
 
 	struct ScoredCandidate
@@ -2117,7 +2118,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 	clearValues[1].depthStencil = {1.0f, 0};
 	clearValues[2].color = {{0, 0, 0, 0}};
-	renderPassInfo.clearValueCount = impl->vrsFeatures.attachmentFragmentShadingRate ? 3 : 2;
+	renderPassInfo.clearValueCount = impl->UsesVrsAttachment() ? 3 : 2;
 	renderPassInfo.pClearValues = clearValues.data();
 
 	// Create Grid Pipeline if needed (lazy init).
@@ -2127,6 +2128,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	impl->CreateSkyBackgroundPipeline(renderPassInfo.renderPass);
 
 	const RenderViewType renderViewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
+	const uint32_t viewIndex = (view == ViewType::Scene) ? 1u : 0u;
 	const uint32_t statsSlotIndex = impl->GetStatsSlotIndex(impl->currentFrame, view);
 	// Apply the long-term preset policy on the CPU before upload so clustered
 	// lighting receives a predictable retained-light list and an independent
@@ -2436,8 +2438,19 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 	EnsureLightingComputePipelines();
 
+	const glm::mat4 currentViewProjection = frameData.projectionMatrix * frameData.viewMatrix;
+	VulkanContext::Impl::ViewDepthHistoryState& depthHistory = impl->depthHistoryByView[viewIndex];
+	const bool firstPrimaryPassForFrame = useMainCommandBuffer;
+	const bool previousDepthMatchesView = !impl->editorMode
+		&& firstPrimaryPassForFrame
+		&& depthHistory.valid
+		&& MatricesApproximatelyEqual(currentViewProjection, depthHistory.lastViewProjectionMatrix, kDepthHistoryMatrixEpsilon);
+	const bool hiZOcclusionActive = previousDepthMatchesView
+		&& impl->hiZ.image != VK_NULL_HANDLE
+		&& impl->hiZ.sampler != VK_NULL_HANDLE;
+
 	FrameCullingDataGPU analysisCullingData{};
-	analysisCullingData.frustumPlanes = BuildFrustumPlanes(frameData.projectionMatrix * frameData.viewMatrix);
+	analysisCullingData.frustumPlanes = BuildFrustumPlanes(currentViewProjection);
 	analysisCullingData.cameraPositionAndEpsilon = glm::vec4(frameData.cameraWorldPosition, std::max(frameData.cullingEpsilon, 0.0001f));
 	analysisCullingData.clusterGridAndLightCount = glm::uvec4(
 		kLightingClusterDimX,
@@ -2467,8 +2480,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	analysisCullingData.renderSettings2 = glm::vec4(
 		frameData.settings.indirectStrength,
 		frameData.settings.ambientOcclusionStrength,
-		static_cast<float>(frameData.settings.ambientOcclusionQuality),
-		0.0f);
+		previousDepthMatchesView ? static_cast<float>(frameData.settings.ambientOcclusionQuality) : 0.0f,
+		hiZOcclusionActive ? 1.0f : 0.0f);
 	analysisCullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
 	analysisCullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
 
@@ -2564,9 +2577,15 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	std::vector<VkDrawMeshTasksIndirectCommandEXT> indirectCommands;
 	indirectCommands.reserve(frameData.commands.size());
 
-	// Hi-Z Generation
+	// Hi-Z is generated from the depth buffer rendered by a previous stable
+	// view. Editor scene/game views share one depth image, so history is disabled
+	// there to prevent one docked viewport from culling against another.
 	impl->GenerateHiZPyramid(cmd, impl->depthImageView);
-	impl->GenerateAmbientOcclusion(cmd, cullingData);
+	if (previousDepthMatchesView) {
+		impl->GenerateAmbientOcclusion(cmd, cullingData);
+	} else {
+		impl->ambientOcclusionHistoryValid = false;
+	}
 
 	// Build the variable-length light list before graphics so clustered shading
 	// reads a fresh contiguous range for every cluster.
@@ -2800,6 +2819,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		pendingStats.triangleCount += (mesh.indexCount / 3u);
 		pendingStats.meshletsTotal += mesh.meshletCount;
 		pendingStats.taskCullingActive = pendingStats.taskCullingActive || activeTaskCulling;
+		pendingStats.hiZActive = pendingStats.hiZActive || hiZOcclusionActive;
+		pendingStats.vrsActive = pendingStats.vrsActive || impl->UsesVrsAttachment();
 
 		// Mesh-only and pass-through fallback paths keep conservative CPU estimates.
 		if (!pipeline->hasTaskStage || !activeTaskCulling) {
@@ -3329,7 +3350,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	vkCmdEndRenderPass(cmd);
 			
 				// VRS Generation for next frame
-				impl->GenerateVRSImage(cmd, (view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);
+				if (impl->UsesVrsAttachment()) {
+					impl->GenerateVRSImage(cmd, (view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);
+				}
 			
 				vkEndCommandBuffer(cmd);
 				// Record the command buffer to be submitted at EndFrame so multiple cameras
@@ -3338,6 +3361,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		impl->pendingPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
 	}
 	impl->pendingPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
+
+	depthHistory.lastViewProjectionMatrix = currentViewProjection;
+	depthHistory.valid = true;
 }
 
 void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView) {
@@ -3987,7 +4013,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	clearValues[1].depthStencil = {1.0f, 0};
 	clearValues[2].color = {{0, 0, 0, 0}};
 
-	renderPassInfo.clearValueCount = impl->vrsFeatures.attachmentFragmentShadingRate ? 3 : 2;
+	renderPassInfo.clearValueCount = impl->UsesVrsAttachment() ? 3 : 2;
 	renderPassInfo.pClearValues = clearValues.data();
 
 	vkCmdBeginRenderPass(uiCmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -4059,6 +4085,9 @@ void VulkanContext::Impl::InitEditorMode() {
 	if (editorMode) return;
 	editorMode = true;
 
+	// Rebuild the swapchain render pass after flipping editorMode so the ImGui
+	// presentation pass does not inherit the runtime VRS attachment.
+	RecreateSwapChain();
 	CreateOffscreenResources(sceneView);
 	CreateOffscreenResources(gameView);
 }
@@ -4099,7 +4128,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 	}
 	
 	if (offscreenRenderPass == VK_NULL_HANDLE) {
-		if (vrsFeatures.attachmentFragmentShadingRate) {
+		if (UsesVrsAttachment()) {
 			VkAttachmentDescription2 colorAttachment{};
 			colorAttachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
 			colorAttachment.format = offscreenColorFormat;
@@ -4282,7 +4311,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 		res.view,
 		depthImageView
 	};
-	if (vrsFeatures.attachmentFragmentShadingRate && vrs.view != VK_NULL_HANDLE) {
+	if (UsesVrsAttachment()) {
 		fbAttachments.push_back(vrs.view);
 	}
 	

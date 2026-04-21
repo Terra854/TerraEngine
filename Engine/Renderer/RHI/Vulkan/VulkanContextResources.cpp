@@ -1655,7 +1655,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 		vrsState.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
 	}
 	
-	if (vrsFeatures.attachmentFragmentShadingRate) {
+	if (UsesVrsAttachment()) {
 		vrsState.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_KHR;
 	} else {
 		vrsState.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
@@ -3057,8 +3057,8 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			gameSnapshot.meshletsCulled = gameCounters.meshletsCulled;
 			gameSnapshot.meshletsCulledHiZ = gameCounters.meshletsCulledHiZ;
 		}
-		gameSnapshot.hiZActive = hiZ.image != VK_NULL_HANDLE;
-		gameSnapshot.vrsActive = vrs.image != VK_NULL_HANDLE;
+		gameSnapshot.hiZActive = gameSnapshot.hiZActive && hiZ.image != VK_NULL_HANDLE;
+		gameSnapshot.vrsActive = gameSnapshot.vrsActive && UsesVrsAttachment();
 	}
 
 	RenderStatsSnapshot sceneSnapshot = pendingStatsBySlot[sceneSlot];
@@ -3071,8 +3071,8 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			sceneSnapshot.meshletsCulled = sceneCounters.meshletsCulled;
 			sceneSnapshot.meshletsCulledHiZ = sceneCounters.meshletsCulledHiZ;
 		}
-		sceneSnapshot.hiZActive = hiZ.image != VK_NULL_HANDLE;
-		sceneSnapshot.vrsActive = vrs.image != VK_NULL_HANDLE;
+		sceneSnapshot.hiZActive = sceneSnapshot.hiZActive && hiZ.image != VK_NULL_HANDLE;
+		sceneSnapshot.vrsActive = sceneSnapshot.vrsActive && UsesVrsAttachment();
 	}
 
 	const FrameBudgetDiagnosticsSnapshot gameBudgetDiagnostics = pendingBudgetDiagnosticsBySlot[gameSlot];

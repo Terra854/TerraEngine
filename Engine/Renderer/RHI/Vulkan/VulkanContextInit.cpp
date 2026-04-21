@@ -831,7 +831,7 @@ bool VulkanContext::Impl::CreateDepthResources() {
 }
 
 bool VulkanContext::Impl::CreateRenderPass() {
-	if (vrsFeatures.attachmentFragmentShadingRate) {
+	if (UsesVrsAttachment()) {
 		// Use RenderPass2 to support VRS attachment
 		VkAttachmentDescription2 colorAttachment{};
 		colorAttachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
@@ -987,7 +987,7 @@ bool VulkanContext::Impl::CreateFramebuffers() {
 			depthImageView
 		};
 
-		if (vrsFeatures.attachmentFragmentShadingRate && vrs.view != VK_NULL_HANDLE) {
+		if (UsesVrsAttachment()) {
 			attachments.push_back(vrs.view);
 		}
 
@@ -1345,6 +1345,9 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		shadowCacheEntries.clear();
 	}
 	previousClusterValidationSnapshotValid = false;
+	for (ViewDepthHistoryState& depthHistory : depthHistoryByView) {
+		depthHistory.valid = false;
+	}
 
 	DestroyPipelines();
 	if (device) {

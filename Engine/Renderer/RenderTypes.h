@@ -558,9 +558,11 @@ struct alignas(16) FrameCullingDataGPU
 	glm::mat4 invProjection = glm::mat4(1.0f);
 	glm::uvec4 renderSettings0 = glm::uvec4(2048u, 5u, 128u, 1u); // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
 	glm::uvec4 renderSettings1 = glm::uvec4(1u, 4u, 4u, 256u);    // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
-	// x: indirectStrength, y: ambientOcclusionStrength, z: ambientOcclusionQuality, w: reserved.
-	// Keeping this in its own 16-byte vector avoids mixing float tuning values
-	// with integer feature flags, which keeps the shader mirror unambiguous.
+	// x: indirectStrength, y: ambientOcclusionStrength, z: ambientOcclusionQuality,
+	// w: 1 when the previous depth buffer matches this view and can be used for
+	// temporal Hi-Z occlusion. Keeping this in its own 16-byte vector avoids
+	// mixing float tuning values with integer feature flags, which keeps the
+	// shader mirror unambiguous.
 	glm::vec4 renderSettings2 = glm::vec4(1.0f, 1.0f, 2.0f, 0.0f);
 	std::uint32_t globalTaskCullingEnabled = 1u;
 	std::uint32_t taskShaderSupported = 0u;

@@ -19,8 +19,9 @@ struct FrameCullingData
 	float4 clusterDepthAndViewport;
 	column_major float4x4 viewMatrix;
 	column_major float4x4 invProjection;
-	uint4 renderSettings0;
-	uint4 renderSettings1;
+	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
+	uint4 renderSettings1; // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
+	float4 renderSettings2; // x: indirectStrength, y: aoStrength, z: aoQuality, w: hiZHistoryValid
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
 	uint clusteredLightingValid;
