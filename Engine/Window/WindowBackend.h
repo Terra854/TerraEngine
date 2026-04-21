@@ -52,4 +52,3 @@
 	// should be safe to call even if initialization failed part way through.
 	virtual void Shutdown() = 0;
 };
-

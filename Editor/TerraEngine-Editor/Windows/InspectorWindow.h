@@ -13,13 +13,13 @@ struct ComponentAccessFunctions;
 
 class InspectorWindow : public EditorWindow {
 public:
-    InspectorWindow(MainEditorSubsystem* owner);
-    
-    // Reports whether a drag control in the inspector is active this frame for cursor wrapping.
+	InspectorWindow(MainEditorSubsystem* owner);
+	
+	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
 	bool IsInspectorValueDragging() const { return m_InspectorValueDragging; }
 
 protected:
-    virtual void OnGui() override;
+	virtual void OnGui() override;
 
 private:
 	void DrawProperty(const std::string& compName, TerraEngine::Reflection::Property prop, Object& obj, ComponentAccessFunctions& access);
@@ -32,19 +32,19 @@ private:
 	void DrawTextureInspector(const std::filesystem::path& path);
 	void UpdateInspectorDragState();
 
-    MainEditorSubsystem* m_Owner;
-    std::map<entt::entity, std::vector<std::string>> m_PerObjectComponentOrders;
-    bool m_InspectorValueDragging = false;
-    
-    TerraEngine::Reflection::Variant m_PreEditValue;
-    std::string m_PreEditName;
-    std::string m_PreEditScriptJson;
+	MainEditorSubsystem* m_Owner;
+	std::map<entt::entity, std::vector<std::string>> m_PerObjectComponentOrders;
+	bool m_InspectorValueDragging = false;
+	
+	TerraEngine::Reflection::Variant m_PreEditValue;
+	std::string m_PreEditName;
+	std::string m_PreEditScriptJson;
 
-    std::filesystem::path m_LastInspectedAsset;
-    std::vector<uint8_t> m_MaterialDataBuffer;
-    std::string m_LastScriptMessage;
-    bool m_LastScriptMessageIsError = false;
+	std::filesystem::path m_LastInspectedAsset;
+	std::vector<uint8_t> m_MaterialDataBuffer;
+	std::string m_LastScriptMessage;
+	bool m_LastScriptMessageIsError = false;
 
-    char m_TagInputBuffer[256] = "";
-    char m_LayerInputBuffer[256] = "";
+	char m_TagInputBuffer[256] = "";
+	char m_LayerInputBuffer[256] = "";
 };

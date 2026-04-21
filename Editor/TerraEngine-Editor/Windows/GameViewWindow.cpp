@@ -12,13 +12,13 @@
 #include <cstdio>
 
 GameViewWindow::GameViewWindow(MainEditorSubsystem* owner)
-    : EditorWindow("Game View"), m_Owner(owner) {
-    m_AspectRatios.push_back({ "Free Aspect", 0.0f, 0.0f, false });
-    m_AspectRatios.push_back({ "16:9 Aspect", 16.0f, 9.0f, false });
-    m_AspectRatios.push_back({ "16:10 Aspect", 16.0f, 10.0f, false });
-    m_AspectRatios.push_back({ "Full HD (1920x1080)", 1920.0f, 1080.0f, true });
-    m_AspectRatios.push_back({ "4K UHD (3840x2160)", 3840.0f, 2160.0f, true });
-    m_AspectRatios.push_back({ "Stand. (4:3)", 4.0f, 3.0f, false });
+	: EditorWindow("Game View"), m_Owner(owner) {
+	m_AspectRatios.push_back({ "Free Aspect", 0.0f, 0.0f, false });
+	m_AspectRatios.push_back({ "16:9 Aspect", 16.0f, 9.0f, false });
+	m_AspectRatios.push_back({ "16:10 Aspect", 16.0f, 10.0f, false });
+	m_AspectRatios.push_back({ "Full HD (1920x1080)", 1920.0f, 1080.0f, true });
+	m_AspectRatios.push_back({ "4K UHD (3840x2160)", 3840.0f, 2160.0f, true });
+	m_AspectRatios.push_back({ "Stand. (4:3)", 4.0f, 3.0f, false });
 }
 
 void GameViewWindow::OnGui() {
@@ -236,4 +236,3 @@ void GameViewWindow::OnGui() {
 		}
 	}
 }
-

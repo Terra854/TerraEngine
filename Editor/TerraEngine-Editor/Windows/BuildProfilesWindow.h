@@ -1,4 +1,4 @@
-// BuildProfilesWindow.h — Editor window for managing export build profiles.
+// BuildProfilesWindow.h â€” Editor window for managing export build profiles.
 //
 // Provides the ImGui-based UI for creating, editing, validating, and running
 // export builds. This window docks into the editor layout alongside other
@@ -65,4 +65,3 @@ private:
 	void StartExport();
 	void StartExportAndRun();
 	};
-

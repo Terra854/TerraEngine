@@ -29,8 +29,8 @@ struct ScriptEditorState {
 };
 
 struct EditorContext {
-    Engine* engine = nullptr;
-    std::shared_ptr<ProjectManager> projectManager;
-    std::shared_ptr<AssetDatabase> assetDatabase;
-    ScriptEditorState scripting;
+	Engine* engine = nullptr;
+	std::shared_ptr<ProjectManager> projectManager;
+	std::shared_ptr<AssetDatabase> assetDatabase;
+	ScriptEditorState scripting;
 };

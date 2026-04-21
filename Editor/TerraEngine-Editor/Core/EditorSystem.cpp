@@ -83,326 +83,326 @@ static void WrapCursorForInspectorDrag(GLFWwindow* window) {
 }
 
 void EditorSystem::Setup(Engine* enginePtr) {
-    if (initialized) return;
+	if (initialized) return;
 
-    // Setup Context
-    context.engine = enginePtr;
-    context.projectManager = std::make_shared<ProjectManager>();
-    // context.assetDatabase = std::make_shared<AssetDatabase>(); // Pending
+	// Setup Context
+	context.engine = enginePtr;
+	context.projectManager = std::make_shared<ProjectManager>();
+	// context.assetDatabase = std::make_shared<AssetDatabase>(); // Pending
 
-    // Create Subsystems
-    projectHub = std::make_shared<ProjectHubSubsystem>();
-    mainEditor = std::make_shared<MainEditorSubsystem>();
+	// Create Subsystems
+	projectHub = std::make_shared<ProjectHubSubsystem>();
+	mainEditor = std::make_shared<MainEditorSubsystem>();
 
-    projectHub->Initialize(context);
-    mainEditor->Initialize(context);
+	projectHub->Initialize(context);
+	mainEditor->Initialize(context);
 
-    // Wire Callbacks
-    projectHub->SetOnProjectLoadedCallback([this]() {
-        // Initialize Asset Database with project root
-        if (context.projectManager->HasActiveProject()) {
-            std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
-            
-            // Set Engine ResourceManager's asset root to the build directory so it can find compiled assets
-            // We do this BEFORE AssetDatabase::Initialize because that triggers ScanProject/RegisterAssetPath
-            ResourceManager::Instance().SetAssetRoot(projectRoot / "Build" / "Assets");
-            
-            AssetDatabase::Instance().Initialize(projectRoot);
-        }
-        // Transition logic
-        mainEditor->OnProjectOpened();
-        pendingLoadLayout = true;
-    });
+	// Wire Callbacks
+	projectHub->SetOnProjectLoadedCallback([this]() {
+		// Initialize Asset Database with project root
+		if (context.projectManager->HasActiveProject()) {
+			std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
+			
+			// Set Engine ResourceManager's asset root to the build directory so it can find compiled assets
+			// We do this BEFORE AssetDatabase::Initialize because that triggers ScanProject/RegisterAssetPath
+			ResourceManager::Instance().SetAssetRoot(projectRoot / "Build" / "Assets");
+			
+			AssetDatabase::Instance().Initialize(projectRoot);
+		}
+		// Transition logic
+		mainEditor->OnProjectOpened();
+		pendingLoadLayout = true;
+	});
 
-    mainEditor->SetOnProjectClosedCallback([this]() {
-        SaveWorkspaceLayout();
+	mainEditor->SetOnProjectClosedCallback([this]() {
+		SaveWorkspaceLayout();
 
-        // Hide all C++ windows
-        auto windows = mainEditor->GetWindows();
-        for (auto& win : windows) {
-            win->SetVisible(false);
-        }
+		// Hide all C++ windows
+		auto windows = mainEditor->GetWindows();
+		for (auto& win : windows) {
+			win->SetVisible(false);
+		}
 
-        // Hide all C# windows
-        HideAllWindows();
+		// Hide all C# windows
+		HideAllWindows();
 
-        // Clear ImGui state for the next project
-        ImGui::LoadIniSettingsFromMemory("");
+		// Clear ImGui state for the next project
+		ImGui::LoadIniSettingsFromMemory("");
 
-        AssetDatabase::Instance().Shutdown();
-        ScriptingSystem::Instance().ClearGameplayAssembly();
-        // Transition logic
-    });
+		AssetDatabase::Instance().Shutdown();
+		ScriptingSystem::Instance().ClearGameplayAssembly();
+		// Transition logic
+	});
 
-    initialized = true;
+	initialized = true;
 }
 
 void EditorSystem::SaveWorkspaceLayout() {
-    if (!context.projectManager->HasActiveProject()) return;
+	if (!context.projectManager->HasActiveProject()) return;
 
-    std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
-    std::filesystem::path userSettingsDir = projectRoot / "UserSettings";
-    if (!std::filesystem::exists(userSettingsDir)) {
-        std::filesystem::create_directories(userSettingsDir);
-    }
+	std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
+	std::filesystem::path userSettingsDir = projectRoot / "UserSettings";
+	if (!std::filesystem::exists(userSettingsDir)) {
+		std::filesystem::create_directories(userSettingsDir);
+	}
 
-    // 1. Save Window Visibility to JSON
-    nlohmann::json layout;
-    layout["windows"] = nlohmann::json::array();
-    
-    auto windows = mainEditor->GetWindows();
-    for (auto& win : windows) {
-        nlohmann::json winJson;
-        winJson["title"] = win->GetTitle();
-        winJson["visible"] = win->IsVisible();
-        layout["windows"].push_back(winJson);
-    }
+	// 1. Save Window Visibility to JSON
+	nlohmann::json layout;
+	layout["windows"] = nlohmann::json::array();
+	
+	auto windows = mainEditor->GetWindows();
+	for (auto& win : windows) {
+		nlohmann::json winJson;
+		winJson["title"] = win->GetTitle();
+		winJson["visible"] = win->IsVisible();
+		layout["windows"].push_back(winJson);
+	}
 
-    // 1b. Save Managed (C#) Windows
-    if (managedGetWindows) {
-        static nlohmann::json* s_layoutPtr = nullptr;
-        s_layoutPtr = &layout;
-        managedGetWindows([](const char* title, int visible) {
-            if (s_layoutPtr && title) {
-                nlohmann::json winJson;
-                winJson["title"] = title;
-                winJson["visible"] = (visible != 0);
-                winJson["managed"] = true;
-                (*s_layoutPtr)["windows"].push_back(winJson);
-            }
-        });
-        s_layoutPtr = nullptr;
-    }
+	// 1b. Save Managed (C#) Windows
+	if (managedGetWindows) {
+		static nlohmann::json* s_layoutPtr = nullptr;
+		s_layoutPtr = &layout;
+		managedGetWindows([](const char* title, int visible) {
+			if (s_layoutPtr && title) {
+				nlohmann::json winJson;
+				winJson["title"] = title;
+				winJson["visible"] = (visible != 0);
+				winJson["managed"] = true;
+				(*s_layoutPtr)["windows"].push_back(winJson);
+			}
+		});
+		s_layoutPtr = nullptr;
+	}
 
-    std::ofstream file(userSettingsDir / "EditorLayout.terra");
-    file << layout.dump(4);
+	std::ofstream file(userSettingsDir / "EditorLayout.terra");
+	file << layout.dump(4);
 
-    // 2. ImGui Docking State (.ini)
-    // We explicitly call save to ensure it's synced to our project-specific file.
-    ImGui::SaveIniSettingsToDisk((userSettingsDir / "EditorLayout.ini").string().c_str());
+	// 2. ImGui Docking State (.ini)
+	// We explicitly call save to ensure it's synced to our project-specific file.
+	ImGui::SaveIniSettingsToDisk((userSettingsDir / "EditorLayout.ini").string().c_str());
 }
 
 void EditorSystem::LoadWorkspaceLayout() {
-    if (!context.projectManager->HasActiveProject()) return;
+	if (!context.projectManager->HasActiveProject()) return;
 
-    std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
-    std::filesystem::path layoutPath = projectRoot / "UserSettings" / "EditorLayout.terra";
-    std::filesystem::path iniPath = projectRoot / "UserSettings" / "EditorLayout.ini";
+	std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
+	std::filesystem::path layoutPath = projectRoot / "UserSettings" / "EditorLayout.terra";
+	std::filesystem::path iniPath = projectRoot / "UserSettings" / "EditorLayout.ini";
 
-    // 1. Load ImGui Docking State
-    if (std::filesystem::exists(iniPath)) {
-        ImGui::LoadIniSettingsFromDisk(iniPath.string().c_str());
-    }
+	// 1. Load ImGui Docking State
+	if (std::filesystem::exists(iniPath)) {
+		ImGui::LoadIniSettingsFromDisk(iniPath.string().c_str());
+	}
 
-    // 2. Load Window Visibility
-    if (std::filesystem::exists(layoutPath)) {
-        try {
-            std::ifstream file(layoutPath);
-            nlohmann::json layout;
-            file >> layout;
+	// 2. Load Window Visibility
+	if (std::filesystem::exists(layoutPath)) {
+		try {
+			std::ifstream file(layoutPath);
+			nlohmann::json layout;
+			file >> layout;
 
-            auto windows = mainEditor->GetWindows();
-            for (const auto& winJson : layout["windows"]) {
-                std::string title = winJson["title"];
-                bool visible = winJson["visible"];
-                bool isManaged = winJson.contains("managed") && winJson["managed"].get<bool>();
+			auto windows = mainEditor->GetWindows();
+			for (const auto& winJson : layout["windows"]) {
+				std::string title = winJson["title"];
+				bool visible = winJson["visible"];
+				bool isManaged = winJson.contains("managed") && winJson["managed"].get<bool>();
 
-                if (isManaged) {
-                    if (managedSetWindowVisibility) {
-                        managedSetWindowVisibility(title.c_str(), visible);
-                    }
-                } else {
-                    for (auto& win : windows) {
-                        if (win->GetTitle() == title) {
-                            win->SetVisible(visible);
-                            break;
-                        }
-                    }
-                }
-            }
-        } catch (...) {
-            TERRAENGINE_LOG(LogLevel::Warning, "Failed to load EditorLayout.terra");
-        }
-    }
+				if (isManaged) {
+					if (managedSetWindowVisibility) {
+						managedSetWindowVisibility(title.c_str(), visible);
+					}
+				} else {
+					for (auto& win : windows) {
+						if (win->GetTitle() == title) {
+							win->SetVisible(visible);
+							break;
+						}
+					}
+				}
+			}
+		} catch (...) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Failed to load EditorLayout.terra");
+		}
+	}
 }
 
 void EditorSystem::Initialize() {
-    // Initialize ImGui and Backends
-    
-    // 1. Get Vulkan Context
-    auto& renderSystem = RenderSystem::Instance();
-    auto* rhi = renderSystem.GetContext();
-    auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
-    if (!vulkan) {
-        // Log Error
-        return;
-    }
-    
-    vulkan->EnableEditorMode();
-    VulkanContext::EditorHandles handles;
-    vulkan->GetEditorHandles(handles);
+	// Initialize ImGui and Backends
+	
+	// 1. Get Vulkan Context
+	auto& renderSystem = RenderSystem::Instance();
+	auto* rhi = renderSystem.GetContext();
+	auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
+	if (!vulkan) {
+		// Log Error
+		return;
+	}
+	
+	vulkan->EnableEditorMode();
+	VulkanContext::EditorHandles handles;
+	vulkan->GetEditorHandles(handles);
 
-    // 2. Get Window
-    auto& windowSystem = WindowSystem::Instance();
-    GLFWwindow* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
+	// 2. Get Window
+	auto& windowSystem = WindowSystem::Instance();
+	GLFWwindow* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
 
-    // Register Drop Callback safely using static map
-    g_EditorSystems[window] = this;
-    
-    // 3. Init ImGui
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    io.IniFilename = nullptr; // Disable default auto-save to imgui.ini, we handle it per-project
+	// Register Drop Callback safely using static map
+	g_EditorSystems[window] = this;
+	
+	// 3. Init ImGui
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO(); (void)io;
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+	io.IniFilename = nullptr; // Disable default auto-save to imgui.ini, we handle it per-project
 
-    ImGui::StyleColorsDark();
+	ImGui::StyleColorsDark();
 
-    // 4. Init Backends
-    // IMPORTANT: InstallCallbacks = false to prevent overwriting Engine's callbacks
-    ImGui_ImplGlfw_InitForVulkan(window, false);
-    
-    // 5. Chain Callbacks
-    g_PrevResizeCallback = glfwSetFramebufferSizeCallback(window, [](GLFWwindow* w, int width, int height) {
-        if (g_PrevResizeCallback) g_PrevResizeCallback(w, width, height);
-    });
+	// 4. Init Backends
+	// IMPORTANT: InstallCallbacks = false to prevent overwriting Engine's callbacks
+	ImGui_ImplGlfw_InitForVulkan(window, false);
+	
+	// 5. Chain Callbacks
+	g_PrevResizeCallback = glfwSetFramebufferSizeCallback(window, [](GLFWwindow* w, int width, int height) {
+		if (g_PrevResizeCallback) g_PrevResizeCallback(w, width, height);
+	});
 
-    g_PrevMouseButtonCallback = glfwSetMouseButtonCallback(window, [](GLFWwindow* w, int button, int action, int mods) {
-        if (g_PrevMouseButtonCallback) g_PrevMouseButtonCallback(w, button, action, mods);
-        ImGui_ImplGlfw_MouseButtonCallback(w, button, action, mods);
-    });
+	g_PrevMouseButtonCallback = glfwSetMouseButtonCallback(window, [](GLFWwindow* w, int button, int action, int mods) {
+		if (g_PrevMouseButtonCallback) g_PrevMouseButtonCallback(w, button, action, mods);
+		ImGui_ImplGlfw_MouseButtonCallback(w, button, action, mods);
+	});
 
-    g_PrevScrollCallback = glfwSetScrollCallback(window, [](GLFWwindow* w, double xoffset, double yoffset) {
-        if (g_PrevScrollCallback) g_PrevScrollCallback(w, xoffset, yoffset);
-        ImGui_ImplGlfw_ScrollCallback(w, xoffset, yoffset);
-    });
+	g_PrevScrollCallback = glfwSetScrollCallback(window, [](GLFWwindow* w, double xoffset, double yoffset) {
+		if (g_PrevScrollCallback) g_PrevScrollCallback(w, xoffset, yoffset);
+		ImGui_ImplGlfw_ScrollCallback(w, xoffset, yoffset);
+	});
 
-    g_PrevKeyCallback = glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int scancode, int action, int mods) {
-        if (g_PrevKeyCallback) g_PrevKeyCallback(w, key, scancode, action, mods);
-        ImGui_ImplGlfw_KeyCallback(w, key, scancode, action, mods);
-    });
+	g_PrevKeyCallback = glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int scancode, int action, int mods) {
+		if (g_PrevKeyCallback) g_PrevKeyCallback(w, key, scancode, action, mods);
+		ImGui_ImplGlfw_KeyCallback(w, key, scancode, action, mods);
+	});
 
-    g_PrevCharCallback = glfwSetCharCallback(window, [](GLFWwindow* w, unsigned int c) {
-        if (g_PrevCharCallback) g_PrevCharCallback(w, c);
-        ImGui_ImplGlfw_CharCallback(w, c);
-    });
+	g_PrevCharCallback = glfwSetCharCallback(window, [](GLFWwindow* w, unsigned int c) {
+		if (g_PrevCharCallback) g_PrevCharCallback(w, c);
+		ImGui_ImplGlfw_CharCallback(w, c);
+	});
 
-    g_PrevCloseCallback = glfwSetWindowCloseCallback(window, [](GLFWwindow* w) {
-        if (g_EditorSystems.count(w)) {
-            EditorSystem* self = g_EditorSystems[w];
-            if (self->mainEditor) {
-                if (SceneManager::Instance().IsActiveSceneDirty()) {
-                    glfwSetWindowShouldClose(w, GLFW_FALSE); // Stop immediate closure
-                    self->mainEditor->RequestExit();
-                    return;
-                }
-            }
-        }
-        if (g_PrevCloseCallback) g_PrevCloseCallback(w);
-    });
-    
-    // Restore/Chain Drop Callback
-    g_PrevDropCallback = glfwSetDropCallback(window, [](GLFWwindow* w, int count, const char** paths) {
-         if (g_EditorSystems.count(w)) {
-             EditorSystem* self = g_EditorSystems[w];
-             if (self && self->context.projectManager->HasActiveProject()) {
-                std::filesystem::path assetRoot = AssetDatabase::Instance().GetAssetRoot();
-                for (int i = 0; i < count; i++) {
-                    std::filesystem::path src = paths[i];
-                    if (std::filesystem::exists(src)) {
-                        try {
-                            std::filesystem::copy(src, assetRoot / src.filename(), std::filesystem::copy_options::overwrite_existing);
-                        } catch (...) {}
-                    }
-                }
-            }
-         }
-    });
-    
-    ImGui_ImplVulkan_InitInfo init_info = {};
-    init_info.Instance = (VkInstance)handles.instance;
-    init_info.PhysicalDevice = (VkPhysicalDevice)handles.physicalDevice;
-    init_info.Device = (VkDevice)handles.device;
-    init_info.QueueFamily = handles.queueFamily;
-    init_info.Queue = (VkQueue)handles.queue;
-    init_info.PipelineCache = VK_NULL_HANDLE;
-    init_info.DescriptorPool = (VkDescriptorPool)handles.descriptorPool;
-    init_info.MinImageCount = handles.minImageCount;
-    init_info.ImageCount = handles.imageCount;
-    init_info.Allocator = nullptr;
-    init_info.CheckVkResultFn = nullptr;
-    init_info.PipelineInfoMain.RenderPass = (VkRenderPass)handles.renderPass;
-    init_info.PipelineInfoMain.Subpass = 0;
-    init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-    
-    // Load Vulkan functions
-    std::pair<PFN_vkGetInstanceProcAddr, VkInstance> loaderParams = {
-        (PFN_vkGetInstanceProcAddr)handles.vkGetInstanceProcAddr,
-        (VkInstance)handles.instance
-    };
-    ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, [](const char* function_name, void* user_data) {
-        auto* p = (std::pair<PFN_vkGetInstanceProcAddr, VkInstance>*)user_data;
-        return p->first(p->second, function_name);
-    }, &loaderParams);
-    
-    ImGui_ImplVulkan_Init(&init_info);
-    
-    if (projectHub) projectHub->OnBackendReady();
-    if (mainEditor) mainEditor->OnBackendReady();
+	g_PrevCloseCallback = glfwSetWindowCloseCallback(window, [](GLFWwindow* w) {
+		if (g_EditorSystems.count(w)) {
+			EditorSystem* self = g_EditorSystems[w];
+			if (self->mainEditor) {
+				if (SceneManager::Instance().IsActiveSceneDirty()) {
+					glfwSetWindowShouldClose(w, GLFW_FALSE); // Stop immediate closure
+					self->mainEditor->RequestExit();
+					return;
+				}
+			}
+		}
+		if (g_PrevCloseCallback) g_PrevCloseCallback(w);
+	});
+	
+	// Restore/Chain Drop Callback
+	g_PrevDropCallback = glfwSetDropCallback(window, [](GLFWwindow* w, int count, const char** paths) {
+		if (g_EditorSystems.count(w)) {
+			EditorSystem* self = g_EditorSystems[w];
+			if (self && self->context.projectManager->HasActiveProject()) {
+				std::filesystem::path assetRoot = AssetDatabase::Instance().GetAssetRoot();
+				for (int i = 0; i < count; i++) {
+					std::filesystem::path src = paths[i];
+					if (std::filesystem::exists(src)) {
+						try {
+							std::filesystem::copy(src, assetRoot / src.filename(), std::filesystem::copy_options::overwrite_existing);
+						} catch (...) {}
+					}
+				}
+			}
+		}
+	});
+	
+	ImGui_ImplVulkan_InitInfo init_info = {};
+	init_info.Instance = (VkInstance)handles.instance;
+	init_info.PhysicalDevice = (VkPhysicalDevice)handles.physicalDevice;
+	init_info.Device = (VkDevice)handles.device;
+	init_info.QueueFamily = handles.queueFamily;
+	init_info.Queue = (VkQueue)handles.queue;
+	init_info.PipelineCache = VK_NULL_HANDLE;
+	init_info.DescriptorPool = (VkDescriptorPool)handles.descriptorPool;
+	init_info.MinImageCount = handles.minImageCount;
+	init_info.ImageCount = handles.imageCount;
+	init_info.Allocator = nullptr;
+	init_info.CheckVkResultFn = nullptr;
+	init_info.PipelineInfoMain.RenderPass = (VkRenderPass)handles.renderPass;
+	init_info.PipelineInfoMain.Subpass = 0;
+	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+	
+	// Load Vulkan functions
+	std::pair<PFN_vkGetInstanceProcAddr, VkInstance> loaderParams = {
+		(PFN_vkGetInstanceProcAddr)handles.vkGetInstanceProcAddr,
+		(VkInstance)handles.instance
+	};
+	ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, [](const char* function_name, void* user_data) {
+		auto* p = (std::pair<PFN_vkGetInstanceProcAddr, VkInstance>*)user_data;
+		return p->first(p->second, function_name);
+	}, &loaderParams);
+	
+	ImGui_ImplVulkan_Init(&init_info);
+	
+	if (projectHub) projectHub->OnBackendReady();
+	if (mainEditor) mainEditor->OnBackendReady();
 
-    // --- Initialize .NET Host and Load Editor Assembly ---
-    std::filesystem::path cwd = std::filesystem::current_path();
-    std::filesystem::path binDir;
-    
-    if (std::filesystem::exists(cwd / "Managed" / "TerraEngine.Editor.runtimeconfig.json")) {
-        binDir = cwd / "Managed";
+	// --- Initialize .NET Host and Load Editor Assembly ---
+	std::filesystem::path cwd = std::filesystem::current_path();
+	std::filesystem::path binDir;
+	
+	if (std::filesystem::exists(cwd / "Managed" / "TerraEngine.Editor.runtimeconfig.json")) {
+		binDir = cwd / "Managed";
 	} else {
 		binDir = cwd / "Editor" / "Managed"; 
 		TERRAENGINE_LOG(LogLevel::Warning, "[DotNet] Could not find runtimeconfig.json in " << cwd << " or subdirectories.");
 	}
 
-    binDir = std::filesystem::absolute(binDir);
-    std::filesystem::path dllPath = binDir / "TerraEngine.Editor.dll";
+	binDir = std::filesystem::absolute(binDir);
+	std::filesystem::path dllPath = binDir / "TerraEngine.Editor.dll";
 
 	if (!DotNetHost::Instance().Initialize(dllPath)) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to initialize .NET Host with assembly: " << dllPath);
 	} else {
-        managedInitialize = (ManagedInitFn)DotNetHost::Instance().GetManagedFunction(
-            dllPath,
-            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-            L"Initialize"
-        );
-        managedUpdate = (ManagedUpdateFn)DotNetHost::Instance().GetManagedFunction(
-            dllPath,
-            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-            L"Update"
-        );
-        managedShutdown = (ManagedShutdownFn)DotNetHost::Instance().GetManagedFunction(
-            dllPath,
-            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-            L"Shutdown"
-        );
-        managedDrawWindowMenu = (ManagedDrawWindowMenuFn)DotNetHost::Instance().GetManagedFunction(
-            dllPath,
-            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-            L"DrawWindowMenu"
-        );
-        managedGetWindows = (ManagedGetWindowsFn)DotNetHost::Instance().GetManagedFunction(
-            dllPath,
-            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-            L"GetManagedWindows"
-        );
-        managedSetWindowVisibility = (ManagedSetWindowVisibilityFn)DotNetHost::Instance().GetManagedFunction(
-            dllPath,
-            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-            L"SetWindowVisibility"
-        );
-        managedHideAllWindows = (ManagedHideAllWindowsFn)DotNetHost::Instance().GetManagedFunction(
-            dllPath,
-            L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-            L"HideAllWindows"
-        );
+		managedInitialize = (ManagedInitFn)DotNetHost::Instance().GetManagedFunction(
+			dllPath,
+			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+			L"Initialize"
+		);
+		managedUpdate = (ManagedUpdateFn)DotNetHost::Instance().GetManagedFunction(
+			dllPath,
+			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+			L"Update"
+		);
+		managedShutdown = (ManagedShutdownFn)DotNetHost::Instance().GetManagedFunction(
+			dllPath,
+			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+			L"Shutdown"
+		);
+		managedDrawWindowMenu = (ManagedDrawWindowMenuFn)DotNetHost::Instance().GetManagedFunction(
+			dllPath,
+			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+			L"DrawWindowMenu"
+		);
+		managedGetWindows = (ManagedGetWindowsFn)DotNetHost::Instance().GetManagedFunction(
+			dllPath,
+			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+			L"GetManagedWindows"
+		);
+		managedSetWindowVisibility = (ManagedSetWindowVisibilityFn)DotNetHost::Instance().GetManagedFunction(
+			dllPath,
+			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+			L"SetWindowVisibility"
+		);
+		managedHideAllWindows = (ManagedHideAllWindowsFn)DotNetHost::Instance().GetManagedFunction(
+			dllPath,
+			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
+			L"HideAllWindows"
+		);
 
 		if (managedInitialize) {
 			managedInitialize(ImGui::GetCurrentContext());
@@ -411,97 +411,97 @@ void EditorSystem::Initialize() {
 }
 
 void EditorSystem::Update(float deltaTime) {
-    if (!initialized) return;
+	if (!initialized) return;
 
-    if (pendingLoadLayout) {
-        LoadWorkspaceLayout();
-        pendingLoadLayout = false;
-    }
+	if (pendingLoadLayout) {
+		LoadWorkspaceLayout();
+		pendingLoadLayout = false;
+	}
 
-    if (pendingSaveLayout) {
-        SaveWorkspaceLayout();
-        pendingSaveLayout = false;
-    }
+	if (pendingSaveLayout) {
+		SaveWorkspaceLayout();
+		pendingSaveLayout = false;
+	}
 
-    ImGui_ImplVulkan_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
-    ImGui::NewFrame();
-    
-    if (context.projectManager->HasActiveProject()) {
-        AssetDatabase::Instance().Update();
-        mainEditor->Update(deltaTime);
-        mainEditor->DrawUI();
+	ImGui_ImplVulkan_NewFrame();
+	ImGui_ImplGlfw_NewFrame();
+	ImGui::NewFrame();
+	
+	if (context.projectManager->HasActiveProject()) {
+		AssetDatabase::Instance().Update();
+		mainEditor->Update(deltaTime);
+		mainEditor->DrawUI();
 		if (mainEditor && mainEditor->IsInspectorValueDragging()) {
 			auto& windowSystem = WindowSystem::Instance();
 			GLFWwindow* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
 			WrapCursorForInspectorDrag(window);
 		}
-    } else {
-        ScriptingSystem::Instance().UpdateInspectorWatch(std::nullopt, context.scripting.selectionVersion);
-        projectHub->Update(deltaTime);
-        projectHub->DrawUI();
-    }
+	} else {
+		ScriptingSystem::Instance().UpdateInspectorWatch(std::nullopt, context.scripting.selectionVersion);
+		projectHub->Update(deltaTime);
+		projectHub->DrawUI();
+	}
 
-    if (managedUpdate) {
-        managedUpdate(deltaTime);
-    }
-    
-    ImGui::Render();
-    
-    auto& renderSystem = RenderSystem::Instance();
-    auto* rhi = renderSystem.GetContext();
-    auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
-    if (vulkan) {
-        vulkan->PresentEditor([](void* cmd){
-             ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);
-        });
-    }
+	if (managedUpdate) {
+		managedUpdate(deltaTime);
+	}
+	
+	ImGui::Render();
+	
+	auto& renderSystem = RenderSystem::Instance();
+	auto* rhi = renderSystem.GetContext();
+	auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
+	if (vulkan) {
+		vulkan->PresentEditor([](void* cmd){
+			ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);
+		});
+	}
 }
 
 void EditorSystem::Shutdown() {
-    SaveWorkspaceLayout();
-    if (managedShutdown) {
-        managedShutdown();
-    }
+	SaveWorkspaceLayout();
+	if (managedShutdown) {
+		managedShutdown();
+	}
 
-    auto& renderSystem = RenderSystem::Instance();
-    if (auto* rhi = renderSystem.GetContext()) {
-        rhi->WaitIdle();
-    }
-    
-    ImGui_ImplVulkan_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+	auto& renderSystem = RenderSystem::Instance();
+	if (auto* rhi = renderSystem.GetContext()) {
+		rhi->WaitIdle();
+	}
+	
+	ImGui_ImplVulkan_Shutdown();
+	ImGui_ImplGlfw_Shutdown();
+	ImGui::DestroyContext();
 
-    if (mainEditor) mainEditor->Shutdown();
-    if (projectHub) projectHub->Shutdown();
-    
-    AssetDatabase::Instance().Shutdown();
-    context.projectManager.reset();
-    
-    initialized = false;
+	if (mainEditor) mainEditor->Shutdown();
+	if (projectHub) projectHub->Shutdown();
+	
+	AssetDatabase::Instance().Shutdown();
+	context.projectManager.reset();
+	
+	initialized = false;
 }
 
 std::string EditorSystem::SystemName() {
-    return "EditorSystem";
+	return "EditorSystem";
 }
 
 void EditorSystem::DrawWindowMenu() {
-    if (managedDrawWindowMenu) {
-        managedDrawWindowMenu();
-    } else {
-        ImGui::TextDisabled("Managed menu hook not loaded");
-    }
+	if (managedDrawWindowMenu) {
+		managedDrawWindowMenu();
+	} else {
+		ImGui::TextDisabled("Managed menu hook not loaded");
+	}
 }
 
 void EditorSystem::HideAllWindows() {
-    if (managedHideAllWindows) {
-        managedHideAllWindows();
-    }
+	if (managedHideAllWindows) {
+		managedHideAllWindows();
+	}
 }
 
 void EditorSystem::GetManagedWindows(void (*callback)(const char*, int)) {
-    if (managedGetWindows) {
-        managedGetWindows(callback);
-    }
+	if (managedGetWindows) {
+		managedGetWindows(callback);
+	}
 }

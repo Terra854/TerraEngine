@@ -61,7 +61,7 @@ namespace
 		return true;
 	}
 
-    std::filesystem::path DefaultDxcPath(const std::filesystem::path& executablePath)
+	std::filesystem::path DefaultDxcPath(const std::filesystem::path& executablePath)
 	{
 #if defined(_WIN32)
 		const std::filesystem::path localName = std::filesystem::path("dxc.exe");
@@ -81,7 +81,7 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-    const std::filesystem::path exePath = std::filesystem::absolute(argv[0]);
+	const std::filesystem::path exePath = std::filesystem::absolute(argv[0]);
 	const std::filesystem::path dxcPath = args.dxcPathOverride.empty() ? DefaultDxcPath(exePath) : args.dxcPathOverride;
 
 	if(CompileShader(args.input, args.output, args.stage, args.targetProfile, args.entryPoint, dxcPath))

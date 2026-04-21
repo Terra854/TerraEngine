@@ -133,11 +133,11 @@ namespace {
 }
 
 bool IsSupportedTextureSourceExtension(const std::filesystem::path& filePath) {
-    const std::string ext = NormalizeExtension(filePath);
-    return std::find(
-        kSupportedTextureSourceExtensions.begin(),
-        kSupportedTextureSourceExtensions.end(),
-        std::string_view(ext)) != kSupportedTextureSourceExtensions.end();
+	const std::string ext = NormalizeExtension(filePath);
+	return std::find(
+		kSupportedTextureSourceExtensions.begin(),
+		kSupportedTextureSourceExtensions.end(),
+		std::string_view(ext)) != kSupportedTextureSourceExtensions.end();
 }
 
 std::string GetSupportedTextureSourceExtensionsText() {
@@ -341,4 +341,3 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	out.write(reinterpret_cast<const char*>(&crc), sizeof(crc));
 	return static_cast<bool>(out);
 }
-

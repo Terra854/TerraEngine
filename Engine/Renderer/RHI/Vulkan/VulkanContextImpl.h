@@ -389,26 +389,26 @@ struct VulkanContext::Impl {
 	uint32_t AllocateMaterialIndex();
 
 	// Editor / Offscreen Resources
-    struct PushConstants {
-	    alignas(16) glm::mat4 viewProj;
-        alignas(16) glm::mat4 model;
-	    uint32_t textureIndex;
-	    uint32_t materialIndex;
+	struct PushConstants {
+	alignas(16) glm::mat4 viewProj;
+		alignas(16) glm::mat4 model;
+	uint32_t textureIndex;
+	uint32_t materialIndex;
 		uint32_t taskCullingEnabled;
 		uint32_t statsSlotIndex;
 		float cullingEpsilon;
 		float padding[3];
-    };
+	};
 
-    struct OffscreenResources {
-	    VkImage image = VK_NULL_HANDLE;
-	    VmaAllocation allocation = VK_NULL_HANDLE;
-	    VkImageView view = VK_NULL_HANDLE;
-	    VkSampler sampler = VK_NULL_HANDLE;
-	    VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    };
-    OffscreenResources sceneView;
-    OffscreenResources gameView;
+	struct OffscreenResources {
+	VkImage image = VK_NULL_HANDLE;
+	VmaAllocation allocation = VK_NULL_HANDLE;
+	VkImageView view = VK_NULL_HANDLE;
+	VkSampler sampler = VK_NULL_HANDLE;
+	VkFramebuffer framebuffer = VK_NULL_HANDLE;
+	};
+	OffscreenResources sceneView;
+	OffscreenResources gameView;
 
 	VkDescriptorSet offscreenDescriptorSet = VK_NULL_HANDLE;
 	VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
@@ -443,48 +443,48 @@ struct VulkanContext::Impl {
 	void InitEditorMode();
 	void CreateOffscreenResources(OffscreenResources& res);
 	void RecreateOffscreenResources(); // Handle resize
-    void ClearResources();
+	void ClearResources();
 
-    // Grid Renderer
-    VkPipeline sceneViewGridPipeline = VK_NULL_HANDLE;
-    VkPipelineLayout sceneViewGridPipelineLayout = VK_NULL_HANDLE;
+	// Grid Renderer
+	VkPipeline sceneViewGridPipeline = VK_NULL_HANDLE;
+	VkPipelineLayout sceneViewGridPipelineLayout = VK_NULL_HANDLE;
 	VkPipeline skyBackgroundPipeline = VK_NULL_HANDLE;
 	VkPipelineLayout skyBackgroundPipelineLayout = VK_NULL_HANDLE;
-    
-    struct GridPushConstants {
-        glm::mat4 view;
-        glm::mat4 proj;
-        glm::mat4 inverseView;
-        glm::mat4 inverseProj;
-    };
+	
+	struct GridPushConstants {
+		glm::mat4 view;
+		glm::mat4 proj;
+		glm::mat4 inverseView;
+		glm::mat4 inverseProj;
+	};
 
-    void CreateSceneViewGridPipeline(VkRenderPass renderPass);
-    void RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData);
+	void CreateSceneViewGridPipeline(VkRenderPass renderPass);
+	void RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData);
 	void CreateSkyBackgroundPipeline(VkRenderPass renderPass);
 	void RenderSkyBackground(VkCommandBuffer cmd, const FrameRenderData& frameData);
 
-    // UI Rendering
-    VkPipeline staticUiPipeline = VK_NULL_HANDLE;
-    VkPipelineLayout staticUiPipelineLayout = VK_NULL_HANDLE;
-    VkPipeline instancedUiPipeline = VK_NULL_HANDLE;
-    VkPipelineLayout instancedUiPipelineLayout = VK_NULL_HANDLE;
-    VkPipeline sdfTextPipeline = VK_NULL_HANDLE;
-    VkPipelineLayout sdfTextPipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout uiFontDescriptorSetLayout = VK_NULL_HANDLE;
-    VkDescriptorSet uiFontDescriptorSet = VK_NULL_HANDLE;
-    VulkanImage uiFontAtlasImage{};
-    int uiFontAtlasWidth = 0;
-    int uiFontAtlasHeight = 0;
-    float uiFontAtlasPixelHeight = 48.0f;
-    UIRenderer uiTextRenderer;
+	// UI Rendering
+	VkPipeline staticUiPipeline = VK_NULL_HANDLE;
+	VkPipelineLayout staticUiPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline instancedUiPipeline = VK_NULL_HANDLE;
+	VkPipelineLayout instancedUiPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline sdfTextPipeline = VK_NULL_HANDLE;
+	VkPipelineLayout sdfTextPipelineLayout = VK_NULL_HANDLE;
+	VkDescriptorSetLayout uiFontDescriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorSet uiFontDescriptorSet = VK_NULL_HANDLE;
+	VulkanImage uiFontAtlasImage{};
+	int uiFontAtlasWidth = 0;
+	int uiFontAtlasHeight = 0;
+	float uiFontAtlasPixelHeight = 48.0f;
+	UIRenderer uiTextRenderer;
 
-    // Re-usable UI buffers (resized dynamically)
-    VulkanBuffer uiStaticVertexBuffer{};
-    VulkanBuffer uiInstanceBuffer{};
-    VulkanBuffer uiSdfVertexBuffer{};
+	// Re-usable UI buffers (resized dynamically)
+	VulkanBuffer uiStaticVertexBuffer{};
+	VulkanBuffer uiInstanceBuffer{};
+	VulkanBuffer uiSdfVertexBuffer{};
 
-    void CreateUIPipelines(VkRenderPass renderPass);
-    void RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch);
+	void CreateUIPipelines(VkRenderPass renderPass);
+	void RenderUI(VkCommandBuffer cmd, const UIRenderBatch& batch);
 
 	bool CreateInstance();
 	void PopulateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& createInfo);

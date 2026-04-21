@@ -48,4 +48,3 @@
 	virtual std::pair<double, double> GetCursorPosition() const = 0;
 	virtual void SetCursorPosition(double x, double y) = 0;
 };
-

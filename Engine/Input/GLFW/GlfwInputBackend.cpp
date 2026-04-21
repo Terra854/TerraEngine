@@ -471,4 +471,3 @@ KeyState GlfwInputBackend::TranslateStateFromGlfw(int glfwAction)
 		default: return KeyState::Idle;
 	}
 }
-

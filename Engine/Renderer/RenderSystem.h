@@ -36,7 +36,7 @@ public:
 	void ReloadTexture(const TerraEngine::UUID& textureId);
 
 	void DeleteResource(const TerraEngine::UUID& id);
-    
+	
 	void Clear();
 	void SetTaskShaderCullingEnabled(bool enabled);
 	bool IsTaskShaderCullingEnabled() const { return taskShaderCullingEnabled; }
@@ -56,23 +56,23 @@ public:
 
 	RHIContext* GetContext() const { return rhi.get(); }
 
-    struct OverrideCameraData {
-        glm::mat4 view;
-        glm::mat4 proj;
-        glm::vec3 pos;
-    };
+	struct OverrideCameraData {
+		glm::mat4 view;
+		glm::mat4 proj;
+		glm::vec3 pos;
+	};
 	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
 		sceneViewCamera = OverrideCameraData{view, proj, pos};
 		hasSceneViewCamera = true;
 	}
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
-    void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
-        gameViewCameras.push_back({view, proj, pos});
-    }
-    void ClearOverrideCameras() {
-        hasSceneViewCamera = false;
-        gameViewCameras.clear();
-    }
+	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
+		gameViewCameras.push_back({view, proj, pos});
+	}
+	void ClearOverrideCameras() {
+		hasSceneViewCamera = false;
+		gameViewCameras.clear();
+	}
 
 private:
 	RenderSystem();
@@ -82,21 +82,21 @@ private:
 	bool taskShaderCullingEnabled = true;
 	bool editorModeEnabled = false;
 
-    bool hasSceneViewCamera = false;
-    OverrideCameraData sceneViewCamera;
-    std::vector<OverrideCameraData> gameViewCameras;
+	bool hasSceneViewCamera = false;
+	OverrideCameraData sceneViewCamera;
+	std::vector<OverrideCameraData> gameViewCameras;
 
-    // Internal structs for data gathering
-    struct CameraEntry
-    {
-        entt::entity entity;
-        CameraComponent camera;
-    };
-    struct RenderableEntry
-    {
-        entt::entity entity;
-        MeshRenderComponent mesh;
-    };
+	// Internal structs for data gathering
+	struct CameraEntry
+	{
+		entt::entity entity;
+		CameraComponent camera;
+	};
+	struct RenderableEntry
+	{
+		entt::entity entity;
+		MeshRenderComponent mesh;
+	};
 	struct LightEntry
 	{
 		entt::entity entity;

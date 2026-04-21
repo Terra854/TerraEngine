@@ -132,37 +132,37 @@ void VulkanContext::Impl::Cleanup() {
 	}
 	textureCache.clear();
 
-    auto DestroyOffscreenResources = [&](OffscreenResources& res) {
-        if (res.image != VK_NULL_HANDLE) {
-            if (device) {
-                vkDestroySampler(device, res.sampler, nullptr);
-                vkDestroyFramebuffer(device, res.framebuffer, nullptr);
-                vkDestroyImageView(device, res.view, nullptr);
-            }
-            vmaDestroyImage(allocator, res.image, res.allocation);
-            res = {};
-        }
-    };
+	auto DestroyOffscreenResources = [&](OffscreenResources& res) {
+		if (res.image != VK_NULL_HANDLE) {
+			if (device) {
+				vkDestroySampler(device, res.sampler, nullptr);
+				vkDestroyFramebuffer(device, res.framebuffer, nullptr);
+				vkDestroyImageView(device, res.view, nullptr);
+			}
+			vmaDestroyImage(allocator, res.image, res.allocation);
+			res = {};
+		}
+	};
 
-    DestroyOffscreenResources(sceneView);
-    DestroyOffscreenResources(gameView);
-    
-    if (device && offscreenRenderPass != VK_NULL_HANDLE) {
-        vkDestroyRenderPass(device, offscreenRenderPass, nullptr);
-        offscreenRenderPass = VK_NULL_HANDLE;
-    }
+	DestroyOffscreenResources(sceneView);
+	DestroyOffscreenResources(gameView);
+	
+	if (device && offscreenRenderPass != VK_NULL_HANDLE) {
+		vkDestroyRenderPass(device, offscreenRenderPass, nullptr);
+		offscreenRenderPass = VK_NULL_HANDLE;
+	}
 
 	DestroyPipelines();
 
-    if (device) {
-        if (sceneViewGridPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, sceneViewGridPipeline, nullptr);
-            sceneViewGridPipeline = VK_NULL_HANDLE;
-        }
-        if (sceneViewGridPipelineLayout != VK_NULL_HANDLE) {
-            vkDestroyPipelineLayout(device, sceneViewGridPipelineLayout, nullptr);
-            sceneViewGridPipelineLayout = VK_NULL_HANDLE;
-        }
+	if (device) {
+		if (sceneViewGridPipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(device, sceneViewGridPipeline, nullptr);
+			sceneViewGridPipeline = VK_NULL_HANDLE;
+		}
+		if (sceneViewGridPipelineLayout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(device, sceneViewGridPipelineLayout, nullptr);
+			sceneViewGridPipelineLayout = VK_NULL_HANDLE;
+		}
 		if (skyBackgroundPipeline != VK_NULL_HANDLE) {
 			vkDestroyPipeline(device, skyBackgroundPipeline, nullptr);
 			skyBackgroundPipeline = VK_NULL_HANDLE;
@@ -171,7 +171,7 @@ void VulkanContext::Impl::Cleanup() {
 			vkDestroyPipelineLayout(device, skyBackgroundPipelineLayout, nullptr);
 			skyBackgroundPipelineLayout = VK_NULL_HANDLE;
 		}
-    }
+	}
 
 	if (device) {
 		vkDestroySampler(device, defaultTexture.sampler, nullptr);
@@ -408,17 +408,17 @@ void VulkanContext::Impl::Cleanup() {
 			vkDestroyFence(device, inFlightFences[i], nullptr);
 		}
 	}
-    renderFinishedSemaphores.clear();
-    imageAvailableSemaphores.clear();
-    uiSemaphores.clear();
-    inFlightFences.clear();
+	renderFinishedSemaphores.clear();
+	imageAvailableSemaphores.clear();
+	uiSemaphores.clear();
+	inFlightFences.clear();
 
 	if (device) {
 		vkDestroyImageView(device, depthImageView, nullptr);
 		vmaDestroyImage(allocator, depthImage, depthImageAllocation);
-        depthImageView = VK_NULL_HANDLE;
-        depthImage = VK_NULL_HANDLE;
-        depthImageAllocation = VK_NULL_HANDLE;
+		depthImageView = VK_NULL_HANDLE;
+		depthImage = VK_NULL_HANDLE;
+		depthImageAllocation = VK_NULL_HANDLE;
 	}
 
 	if (device) {
@@ -432,9 +432,9 @@ void VulkanContext::Impl::Cleanup() {
 		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 		vkDestroyDescriptorPool(device, globalDescriptorPool, nullptr);
 		vkDestroyDescriptorSetLayout(device, globalDescriptorSetLayout, nullptr);
-        descriptorPool = VK_NULL_HANDLE;
-        globalDescriptorPool = VK_NULL_HANDLE;
-        globalDescriptorSetLayout = VK_NULL_HANDLE;
+		descriptorPool = VK_NULL_HANDLE;
+		globalDescriptorPool = VK_NULL_HANDLE;
+		globalDescriptorSetLayout = VK_NULL_HANDLE;
 	}
 
 	if (allocator) vmaDestroyAllocator(allocator);

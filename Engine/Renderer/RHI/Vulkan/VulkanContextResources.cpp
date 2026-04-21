@@ -572,8 +572,8 @@ void VulkanContext::Impl::EnsureWorkerPools(uint32_t frameIndex, size_t workerCo
 }
 
 VkCommandBuffer VulkanContext::Impl::AcquirePrimaryCommandBuffer(uint32_t frameIndex) {
-    if (frameIndex >= commandBuffers.size()) return VK_NULL_HANDLE;
-    return commandBuffers[frameIndex];
+	if (frameIndex >= commandBuffers.size()) return VK_NULL_HANDLE;
+	return commandBuffers[frameIndex];
 }
 
 VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIndex, size_t workerIndex) {
@@ -1816,7 +1816,6 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	poolSizes[3].descriptorCount = (9 + MAX_BINDLESS_BUFFERS) * MAX_FRAMES_IN_FLIGHT;
 	poolSizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	poolSizes[4].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // VRS Image + Hi-Z Output
-
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -3420,15 +3419,15 @@ void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 }
 
 void VulkanContext::Impl::UpdateGlobalHiZ(const VulkanHiZ& hiZ) {
-    if (hiZ.fullView == VK_NULL_HANDLE) return;
+	if (hiZ.fullView == VK_NULL_HANDLE) return;
 
-    VkDescriptorImageInfo imageInfo{};
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imageInfo.imageView = hiZ.fullView;
-    imageInfo.sampler = VK_NULL_HANDLE;
+	VkDescriptorImageInfo imageInfo{};
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	imageInfo.imageView = hiZ.fullView;
+	imageInfo.sampler = VK_NULL_HANDLE;
 
-    VkDescriptorImageInfo samplerInfo{};
-    samplerInfo.sampler = hiZ.sampler;
+	VkDescriptorImageInfo samplerInfo{};
+	samplerInfo.sampler = hiZ.sampler;
 
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		VkWriteDescriptorSet writes[2]{};

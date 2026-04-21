@@ -24,31 +24,30 @@ public:
 private:
 	EditorContext context;
 	std::shared_ptr<ProjectHubSubsystem> projectHub;
-    std::shared_ptr<MainEditorSubsystem> mainEditor;
+	std::shared_ptr<MainEditorSubsystem> mainEditor;
 
-    // Managed Editor Hooks
-    typedef void (*ManagedInitFn)(void*);
-    typedef void (*ManagedUpdateFn)(float);
-    typedef void (*ManagedShutdownFn)();
-    typedef void (*ManagedDrawWindowMenuFn)();
-    typedef void (*ManagedGetWindowsFn)(void (*callback)(const char*, int));
-    typedef void (*ManagedSetWindowVisibilityFn)(const char*, int);
-    typedef void (*ManagedHideAllWindowsFn)();
+	// Managed Editor Hooks
+	typedef void (*ManagedInitFn)(void*);
+	typedef void (*ManagedUpdateFn)(float);
+	typedef void (*ManagedShutdownFn)();
+	typedef void (*ManagedDrawWindowMenuFn)();
+	typedef void (*ManagedGetWindowsFn)(void (*callback)(const char*, int));
+	typedef void (*ManagedSetWindowVisibilityFn)(const char*, int);
+	typedef void (*ManagedHideAllWindowsFn)();
 
-    ManagedInitFn managedInitialize = nullptr;
-    ManagedUpdateFn managedUpdate = nullptr;
-    ManagedShutdownFn managedShutdown = nullptr;
-    ManagedDrawWindowMenuFn managedDrawWindowMenu = nullptr;
-    ManagedGetWindowsFn managedGetWindows = nullptr;
-    ManagedSetWindowVisibilityFn managedSetWindowVisibility = nullptr;
-    ManagedHideAllWindowsFn managedHideAllWindows = nullptr;
+	ManagedInitFn managedInitialize = nullptr;
+	ManagedUpdateFn managedUpdate = nullptr;
+	ManagedShutdownFn managedShutdown = nullptr;
+	ManagedDrawWindowMenuFn managedDrawWindowMenu = nullptr;
+	ManagedGetWindowsFn managedGetWindows = nullptr;
+	ManagedSetWindowVisibilityFn managedSetWindowVisibility = nullptr;
+	ManagedHideAllWindowsFn managedHideAllWindows = nullptr;
 
-    bool initialized = false;
-    bool pendingLoadLayout = false;
-    bool pendingSaveLayout = false;
+	bool initialized = false;
+	bool pendingLoadLayout = false;
+	bool pendingSaveLayout = false;
 public:
-    void DrawWindowMenu();
-    void HideAllWindows();
-    void GetManagedWindows(void (*callback)(const char*, int));
+	void DrawWindowMenu();
+	void HideAllWindows();
+	void GetManagedWindows(void (*callback)(const char*, int));
 };
-

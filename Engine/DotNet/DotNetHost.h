@@ -25,69 +25,69 @@ struct ManagedVTable;
  */
 class TERRAENGINE_API DotNetHost {
 public:
-    static DotNetHost& Instance();
+	static DotNetHost& Instance();
 
-    /**
-     * @brief Initializes the .NET runtime (editor mode via hostfxr).
-     * @param assemblyPath Path to the managed assembly (.dll).
-     * @return true if initialization was successful, false otherwise.
-     */
-    bool Initialize(const std::filesystem::path& assemblyPath);
+	/**
+	 * @brief Initializes the .NET runtime (editor mode via hostfxr).
+	 * @param assemblyPath Path to the managed assembly (.dll).
+	 * @return true if initialization was successful, false otherwise.
+	 */
+	bool Initialize(const std::filesystem::path& assemblyPath);
 
-    /**
-     * @brief Initializes the managed runtime in export mode by loading a NativeAOT
-     *        shared library and calling its InitManagedRuntime entry point.
-     * @param nativeAotLibaryPath Absolute path to the NativeAOT .dll.
-     * @param outTable Pointer to the ManagedVTable struct to populate.
-     * @return true if the NativeAOT library loaded and the VTable was populated.
-     */
-    bool InitializeExportRuntime(const std::filesystem::path& nativeAotLibaryPath, ManagedVTable* outTable);
+	/**
+	 * @brief Initializes the managed runtime in export mode by loading a NativeAOT
+	 *        shared library and calling its InitManagedRuntime entry point.
+	 * @param nativeAotLibaryPath Absolute path to the NativeAOT .dll.
+	 * @param outTable Pointer to the ManagedVTable struct to populate.
+	 * @return true if the NativeAOT library loaded and the VTable was populated.
+	 */
+	bool InitializeExportRuntime(const std::filesystem::path& nativeAotLibaryPath, ManagedVTable* outTable);
 
-    /**
-     * @brief Loads a managed assembly and provides a function pointer to a static method.
-     * @param assemblyPath Absolute path to the .dll assembly.
-     * @param typeName Fully qualified name of the type (e.g., "Namespace.Class, AssemblyName").
-     * @param methodName Name of the static method to retrieve.
-     * @param delegateTypeName Fully qualified name of the delegate type (standard is UNMANAGED_CALLERS_ONLY_METHOD).
-     * @return Pointer to the managed function, or nullptr on failure.
-     */
-    void* GetManagedFunction(
-        const std::filesystem::path& assemblyPath,
-        const std::wstring& typeName,
-        const std::wstring& methodName,
-        const std::wstring& delegateTypeName = L"");
+	/**
+	 * @brief Loads a managed assembly and provides a function pointer to a static method.
+	 * @param assemblyPath Absolute path to the .dll assembly.
+	 * @param typeName Fully qualified name of the type (e.g., "Namespace.Class, AssemblyName").
+	 * @param methodName Name of the static method to retrieve.
+	 * @param delegateTypeName Fully qualified name of the delegate type (standard is UNMANAGED_CALLERS_ONLY_METHOD).
+	 * @return Pointer to the managed function, or nullptr on failure.
+	 */
+	void* GetManagedFunction(
+		const std::filesystem::path& assemblyPath,
+		const std::wstring& typeName,
+		const std::wstring& methodName,
+		const std::wstring& delegateTypeName = L"");
 
-    /**
-     * @brief Shuts down the .NET runtime and cleans up hostfxr resources.
-     */
-    void Shutdown();
+	/**
+	 * @brief Shuts down the .NET runtime and cleans up hostfxr resources.
+	 */
+	void Shutdown();
 
-    bool IsInitialized() const { return initialized; }
+	bool IsInitialized() const { return initialized; }
 
-    /// Returns true when the host was initialized in export-mode (NativeAOT).
-    bool IsExportMode() const { return exportMode; }
-    const std::string& GetLastNativeError() const { return m_LastNativeError; }
+	/// Returns true when the host was initialized in export-mode (NativeAOT).
+	bool IsExportMode() const { return exportMode; }
+	const std::string& GetLastNativeError() const { return m_LastNativeError; }
 
 private:
-    DotNetHost() = default;
-    ~DotNetHost();
+	DotNetHost() = default;
+	~DotNetHost();
 
-    void* LoadNativeLibrary(const std::filesystem::path& path);
-    void* GetNativeExport(void* libraryHandle, const char* exportName);
-    void FreeNativeLibrary(void* libraryHandle);
-    void SetNativeError(const std::string& message);
+	void* LoadNativeLibrary(const std::filesystem::path& path);
+	void* GetNativeExport(void* libraryHandle, const char* exportName);
+	void FreeNativeLibrary(void* libraryHandle);
+	void SetNativeError(const std::string& message);
 
-    bool load_hostfxr(const std::filesystem::path& searchPath = "");
+	bool load_hostfxr(const std::filesystem::path& searchPath = "");
 
-    void* hostfxr_handle = nullptr;
-    load_assembly_and_get_function_pointer_fn load_assembly_and_get_function_pointer = nullptr;
-    void* context_handle = nullptr;
+	void* hostfxr_handle = nullptr;
+	load_assembly_and_get_function_pointer_fn load_assembly_and_get_function_pointer = nullptr;
+	void* context_handle = nullptr;
 
-    bool initialized = false;
+	bool initialized = false;
 
-    // Export-mode state: the NativeAOT library handle stays alive for the
-    // entire engine session so the managed GC heap remains valid.
-    void* nativeAotLibraryHandle = nullptr;
-    bool exportMode = false;
-    std::string m_LastNativeError;
+	// Export-mode state: the NativeAOT library handle stays alive for the
+	// entire engine session so the managed GC heap remains valid.
+	void* nativeAotLibraryHandle = nullptr;
+	bool exportMode = false;
+	std::string m_LastNativeError;
 };

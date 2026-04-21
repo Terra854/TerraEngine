@@ -34,17 +34,17 @@ public:
 	bool isStatic() const;
 	void setStatic(bool isStatic);
 
-    // Component management with EnTT
-    template<typename T, typename... Args>
-    T& addComponent(Args&&... args) {
-        return registry->emplace<T>(id, std::forward<Args>(args)...);
-    }
+	// Component management with EnTT
+	template<typename T, typename... Args>
+	T& addComponent(Args&&... args) {
+		return registry->emplace<T>(id, std::forward<Args>(args)...);
+	}
 
-    // Function to get a component
-    template<typename T>
-    T* getComponent() {
-        return registry->try_get<T>(id);
-    }
+	// Function to get a component
+	template<typename T>
+	T* getComponent() {
+		return registry->try_get<T>(id);
+	}
 
 	// Function to remove a component
 	template<typename T>
@@ -56,25 +56,24 @@ public:
 	// when building UI lists or other external bookkeeping.
 	entt::entity EntityId() const { return id; }
 
-    // Needed for using Object as a key in std::unordered_map
-    bool operator==(const Object& other) const {
-        return id == other.id;
-    }
+	// Needed for using Object as a key in std::unordered_map
+	bool operator==(const Object& other) const {
+		return id == other.id;
+	}
 
 private:
-    friend struct std::hash<Object>;
-    friend class ObjectManager; // Needed to delete objects
-    entt::entity id{}; // EnTT entity ID
-    entt::registry* registry{};
+	friend struct std::hash<Object>;
+	friend class ObjectManager; // Needed to delete objects
+	entt::entity id{}; // EnTT entity ID
+	entt::registry* registry{};
 };
-
 
 // Needed for using Object as a key in std::unordered_map
 namespace std {
-    template<>
-    struct hash<Object> {
-        std::size_t operator()(const Object& k) const {
-            return static_cast<std::size_t>(k.id);
-        }
-    };
+	template<>
+	struct hash<Object> {
+		std::size_t operator()(const Object& k) const {
+			return static_cast<std::size_t>(k.id);
+		}
+	};
 }

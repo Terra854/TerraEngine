@@ -8,16 +8,16 @@ class Object;
 
 class HierarchyWindow : public EditorWindow {
 public:
-    HierarchyWindow(MainEditorSubsystem* owner);
-    
+	HierarchyWindow(MainEditorSubsystem* owner);
+	
 protected:
-    virtual void OnGui() override;
+	virtual void OnGui() override;
 
 private:
-    void DrawEntityNode(Object& obj);
-    
-    MainEditorSubsystem* m_Owner;
-    std::string m_SearchFilter;
-    entt::entity m_ContextEntityId = entt::null;
-    bool m_OpenEntityMenu = false;
+	void DrawEntityNode(Object& obj);
+	
+	MainEditorSubsystem* m_Owner;
+	std::string m_SearchFilter;
+	entt::entity m_ContextEntityId = entt::null;
+	bool m_OpenEntityMenu = false;
 };

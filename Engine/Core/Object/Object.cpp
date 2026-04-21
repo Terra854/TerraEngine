@@ -67,5 +67,3 @@ void Object::setStatic(bool isStatic)
 {
 	ObjectManager::instance().setObjectStatic(*this, isStatic);
 }
-
-

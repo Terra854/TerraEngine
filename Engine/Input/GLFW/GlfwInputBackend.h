@@ -47,4 +47,3 @@ private:
 	static Key TranslateKeyFromGlfw(int glfwKey);
 	static KeyState TranslateStateFromGlfw(int glfwAction);
 };
-

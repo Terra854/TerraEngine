@@ -176,4 +176,3 @@ void InputSystem::HandleScroll(double xOffset, double yOffset)
 {
 	scrollDelta = {xOffset, yOffset};
 }
-

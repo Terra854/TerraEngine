@@ -32,4 +32,3 @@ public:
 		TerraEngine::Reflection::RegisterDataProperty<&Transform::scale>(factory, "Scale");
 	}
 };
-

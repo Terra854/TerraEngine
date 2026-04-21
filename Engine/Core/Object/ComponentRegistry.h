@@ -2,5 +2,5 @@
 #include "Core/Export.h"
 
 namespace ComponentRegistry {
-    TERRAENGINE_API void RegisterAllComponents();
+	TERRAENGINE_API void RegisterAllComponents();
 }

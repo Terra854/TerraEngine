@@ -65,4 +65,3 @@ class TERRAENGINE_API Engine {
 		ObjectManager& objManager = ObjectManager::instance();
 		ThreadPool& pool = ThreadPool::instance();
 };
-

@@ -166,7 +166,6 @@ void SkySettingsWindow::OnGui()
 	}
 	ImGui::EndDisabled();
 
-
 	if (changed)
 	{
 		SceneManager::Instance().SetActiveSceneSkySettings(settings);

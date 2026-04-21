@@ -1302,7 +1302,6 @@ bool CompileMesh(
 		const std::uint32_t packedPosition = PackR10G10B10A2Snorm(qPosition, vertex.tangentW);
 		const std::uint32_t packedNormal   = PackOct32Normal(qNormal);
 
-		
 		std::array<float, 3> tangentVec = {vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]};
 		const std::uint32_t packedTangent = PackOct32Normal(tangentVec);
 		

@@ -83,9 +83,9 @@ private:
 
 // Macro to simplify logging while capturing source file, line, and function signature.
 #define TERRAENGINE_LOG(level, message) do {                                 \
-    if (Logger::Instance().ShouldLog(level)) {                               \
-        std::ostringstream _terraengine_os;                                  \
-        _terraengine_os << message;                                          \
-        Logger::Instance().Log(level, __FILE__, __LINE__, LOG_FUNCTION, _terraengine_os.str());\
-    }                                                                        \
+	if (Logger::Instance().ShouldLog(level)) {                               \
+		std::ostringstream _terraengine_os;                                  \
+		_terraengine_os << message;                                          \
+		Logger::Instance().Log(level, __FILE__, __LINE__, LOG_FUNCTION, _terraengine_os.str());\
+	}                                                                        \
 } while(0)

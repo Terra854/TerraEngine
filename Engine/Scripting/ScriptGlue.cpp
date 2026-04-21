@@ -81,8 +81,8 @@ enum class ScriptType : int
 
 static TerraEngine::Reflection::Variant MarshallFromNative(void* data, ScriptType type)
 {
-    switch (type)
-    {
+	switch (type)
+	{
 	case ScriptType::Bool: return *static_cast<bool*>(data);
 	case ScriptType::Int: return *static_cast<int*>(data);
 	case ScriptType::Float: return *static_cast<float*>(data);
@@ -97,10 +97,10 @@ static TerraEngine::Reflection::Variant MarshallFromNative(void* data, ScriptTyp
 
 static void MarshallToNative(const TerraEngine::Reflection::Variant& var, void* data, ScriptType type)
 {
-    if (!TerraEngine::Reflection::IsValid(var)) return;
+	if (!TerraEngine::Reflection::IsValid(var)) return;
 
-    switch (type)
-    {
+	switch (type)
+	{
 	case ScriptType::Bool: *static_cast<bool*>(data) = TerraEngine::Reflection::ConvertValue<bool>(var); break;
 	case ScriptType::Int: *static_cast<int*>(data) = TerraEngine::Reflection::ConvertValue<int>(var); break;
 	case ScriptType::Float: *static_cast<float*>(data) = TerraEngine::Reflection::ConvertValue<float>(var); break;
@@ -408,10 +408,10 @@ void SetApplicationEditorStopPlayModeCallback(ApplicationEditorStopPlayModeCallb
 
 extern "C" {
 
-    void Native_Log(int level, const char* message, const char* function, int line) {
-        LogLevel logLevel = static_cast<LogLevel>(level);
-        Logger::Instance().Log(logLevel, "C#", line, function, message, true);
-    }
+	void Native_Log(int level, const char* message, const char* function, int line) {
+		LogLevel logLevel = static_cast<LogLevel>(level);
+		Logger::Instance().Log(logLevel, "C#", line, function, message, true);
+	}
 
 	void Native_Application_Quit() {
 		if (ScriptingSystem::Instance().IsExportMode()) {
@@ -466,18 +466,18 @@ extern "C" {
 		return WriteApplicationReturnText(ResourceManager::Instance().GetVersion());
 	}
 
-    uint32_t Native_Object_Create(const char* name) {
-        std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-        Object obj = ObjectManager::instance().createObject(name ? name : "New Object");
-        return static_cast<uint32_t>(obj.EntityId());
-    }
+	uint32_t Native_Object_Create(const char* name) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		Object obj = ObjectManager::instance().createObject(name ? name : "New Object");
+		return static_cast<uint32_t>(obj.EntityId());
+	}
 
-    void Native_Object_Destroy(uint32_t objectId) {
-        std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-            ObjectManager::instance().removeObject(*objOpt);
-        }
-    }
+	void Native_Object_Destroy(uint32_t objectId) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			ObjectManager::instance().removeObject(*objOpt);
+		}
+	}
 
 	const char* Native_Object_GetName(uint32_t objectId) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
@@ -542,28 +542,28 @@ extern "C" {
 		SetMeshRendererAssetReference(objectId, "materialId", AssetType::Material, assetReference);
 	}
 
-    bool Native_HasComponent(uint32_t objectId, const char* componentType) {
-        std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-            auto& reg = ComponentAccessRegistry();
-            if (auto it = reg.find(componentType); it != reg.end()) {
-                return it->second.hasComponent(*objOpt);
-            }
-        }
-        return false;
-    }
+	bool Native_HasComponent(uint32_t objectId, const char* componentType) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			auto& reg = ComponentAccessRegistry();
+			if (auto it = reg.find(componentType); it != reg.end()) {
+				return it->second.hasComponent(*objOpt);
+			}
+		}
+		return false;
+	}
 
-    bool Native_AddComponent(uint32_t objectId, const char* componentType) {
-        std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-            auto& reg = ComponentAccessRegistry();
-            if (auto it = reg.find(componentType); it != reg.end()) {
-                it->second.addComponent(*objOpt);
-                return true;
-            }
-        }
-        return false;
-    }
+	bool Native_AddComponent(uint32_t objectId, const char* componentType) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			auto& reg = ComponentAccessRegistry();
+			if (auto it = reg.find(componentType); it != reg.end()) {
+				it->second.addComponent(*objOpt);
+				return true;
+			}
+		}
+		return false;
+	}
 
 	bool Native_ScriptComponent_AddBinding(uint32_t objectId, const char* className) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
@@ -689,47 +689,47 @@ extern "C" {
 		return false;
 	}
 
-    void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type) {
-        std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-            auto& reg = ComponentAccessRegistry();
-            if (auto it = reg.find(componentType); it != reg.end()) {
-                TerraEngine::Reflection::Variant val = it->second.getter(*objOpt, propertyName);
-                MarshallToNative(val, outValue, static_cast<ScriptType>(type));
-            }
-        }
-    }
+	void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			auto& reg = ComponentAccessRegistry();
+			if (auto it = reg.find(componentType); it != reg.end()) {
+				TerraEngine::Reflection::Variant val = it->second.getter(*objOpt, propertyName);
+				MarshallToNative(val, outValue, static_cast<ScriptType>(type));
+			}
+		}
+	}
 
-    void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type) {
-        std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-        if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-            auto& reg = ComponentAccessRegistry();
-            if (auto it = reg.find(componentType); it != reg.end()) {
-                TerraEngine::Reflection::Variant val = MarshallFromNative(inValue, static_cast<ScriptType>(type));
-                it->second.setter(*objOpt, propertyName, val);
-            }
-        }
-    }
+	void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type) {
+		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			auto& reg = ComponentAccessRegistry();
+			if (auto it = reg.find(componentType); it != reg.end()) {
+				TerraEngine::Reflection::Variant val = MarshallFromNative(inValue, static_cast<ScriptType>(type));
+				it->second.setter(*objOpt, propertyName, val);
+			}
+		}
+	}
 
-    void Native_Graphics_SetQualityPreset(uint32_t preset) {
-        RenderSystem::Instance().SetQualityPreset(static_cast<QualityPreset>(preset));
-    }
+	void Native_Graphics_SetQualityPreset(uint32_t preset) {
+		RenderSystem::Instance().SetQualityPreset(static_cast<QualityPreset>(preset));
+	}
 
-    uint32_t Native_Graphics_GetQualityPreset() {
-        return static_cast<uint32_t>(RenderSystem::Instance().GetQualityPreset());
-    }
+	uint32_t Native_Graphics_GetQualityPreset() {
+		return static_cast<uint32_t>(RenderSystem::Instance().GetQualityPreset());
+	}
 
-    void Native_Graphics_SetRenderSettings(RenderSettings* settings) {
-        if (settings) {
-            RenderSystem::Instance().SetRenderSettings(*settings);
-        }
-    }
+	void Native_Graphics_SetRenderSettings(RenderSettings* settings) {
+		if (settings) {
+			RenderSystem::Instance().SetRenderSettings(*settings);
+		}
+	}
 
-    void Native_Graphics_GetRenderSettings(RenderSettings* outSettings) {
-        if (outSettings) {
-            *outSettings = RenderSystem::Instance().GetRenderSettings();
-        }
-    }
+	void Native_Graphics_GetRenderSettings(RenderSettings* outSettings) {
+		if (outSettings) {
+			*outSettings = RenderSystem::Instance().GetRenderSettings();
+		}
+	}
 
 	const char* Native_Graphics_GetLightingDiagnosticsSummary(uint32_t viewType) {
 		static std::string summary;
@@ -757,11 +757,11 @@ extern "C" {
 		return summary.c_str();
 	}
 
-    const char* Native_ResourceManager_GetAssetRoot() {
-        static std::string assetRoot;
-        assetRoot = ResourceManager::Instance().GetAssetRoot().string();
-        return assetRoot.c_str();
-    }
+	const char* Native_ResourceManager_GetAssetRoot() {
+		static std::string assetRoot;
+		assetRoot = ResourceManager::Instance().GetAssetRoot().string();
+		return assetRoot.c_str();
+	}
 
 	bool Native_Input_IsKeyPressed(int key) {
 		return InputSystem::Instance().IsKeyPressed(static_cast<Key>(key));
@@ -1138,4 +1138,3 @@ extern "C" {
 	}
 
 }
-

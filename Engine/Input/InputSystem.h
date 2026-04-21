@@ -58,4 +58,3 @@ private:
 	bool configured = false;
 	bool initialized = false;
 };
-

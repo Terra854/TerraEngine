@@ -660,84 +660,84 @@ const nlohmann::json* ResolveScriptJsonPath(const nlohmann::json& rootValue, std
 // previous and next values to allow bidirectional state switching.
 class ModifyComponentCommand : public ICommand {
 public:
-    ModifyComponentCommand(entt::entity entity, const std::string& component, const std::string& property, ReflectionVariant oldVal, ReflectionVariant newVal)
-        : m_Uuid(ObjectManager::instance().getUUID(entity)), m_Component(component), m_Property(property), m_OldValue(oldVal), m_NewValue(newVal) {}
+	ModifyComponentCommand(entt::entity entity, const std::string& component, const std::string& property, ReflectionVariant oldVal, ReflectionVariant newVal)
+		: m_Uuid(ObjectManager::instance().getUUID(entity)), m_Component(component), m_Property(property), m_OldValue(oldVal), m_NewValue(newVal) {}
 
-    void Undo() override {
-        ApplyValue(m_OldValue);
-    }
+	void Undo() override {
+		ApplyValue(m_OldValue);
+	}
 
-    void Redo() override {
-        ApplyValue(m_NewValue);
-    }
+	void Redo() override {
+		ApplyValue(m_NewValue);
+	}
 
-    std::string GetName() const override {
-        return "Modify " + m_Component + "." + m_Property;
-    }
+	std::string GetName() const override {
+		return "Modify " + m_Component + "." + m_Property;
+	}
 
 private:
-    void ApplyValue(const ReflectionVariant& val) {
-        if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
-            auto& reg = ComponentAccessRegistry();
-            if (reg.count(m_Component)) {
-                // Setters handle thread-safety internally via component mutexes.
-                reg[m_Component].setter(*obj, m_Property, val);
-            }
-        }
-    }
+	void ApplyValue(const ReflectionVariant& val) {
+		if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
+			auto& reg = ComponentAccessRegistry();
+			if (reg.count(m_Component)) {
+				// Setters handle thread-safety internally via component mutexes.
+				reg[m_Component].setter(*obj, m_Property, val);
+			}
+		}
+	}
 
-    TerraEngine::UUID m_Uuid;
-    std::string m_Component;
-    std::string m_Property;
-    ReflectionVariant m_OldValue;
-    ReflectionVariant m_NewValue;
+	TerraEngine::UUID m_Uuid;
+	std::string m_Component;
+	std::string m_Property;
+	ReflectionVariant m_OldValue;
+	ReflectionVariant m_NewValue;
 };
 
 enum class ObjectMetadataField {
-    Tag,
-    Layer,
-    Active,
-    Static
+	Tag,
+	Layer,
+	Active,
+	Static
 };
 
 class ModifyObjectMetadataCommand : public ICommand {
 public:
-    ModifyObjectMetadataCommand(entt::entity entity, ObjectMetadataField field, ReflectionVariant oldVal, ReflectionVariant newVal)
-        : m_Uuid(ObjectManager::instance().getUUID(entity)), m_Field(field), m_OldValue(oldVal), m_NewValue(newVal) {}
+	ModifyObjectMetadataCommand(entt::entity entity, ObjectMetadataField field, ReflectionVariant oldVal, ReflectionVariant newVal)
+		: m_Uuid(ObjectManager::instance().getUUID(entity)), m_Field(field), m_OldValue(oldVal), m_NewValue(newVal) {}
 
-    void Undo() override { ApplyValue(m_OldValue); }
-    void Redo() override { ApplyValue(m_NewValue); }
+	void Undo() override { ApplyValue(m_OldValue); }
+	void Redo() override { ApplyValue(m_NewValue); }
 
-    std::string GetName() const override {
-        switch (m_Field) {
-            case ObjectMetadataField::Tag: return "Modify Object Tag";
-            case ObjectMetadataField::Layer: return "Modify Object Layer";
-            case ObjectMetadataField::Active: return "Modify Object Active State";
-            case ObjectMetadataField::Static: return "Modify Object Static State";
-        }
-        return "Modify Object Metadata";
-    }
+	std::string GetName() const override {
+		switch (m_Field) {
+			case ObjectMetadataField::Tag: return "Modify Object Tag";
+			case ObjectMetadataField::Layer: return "Modify Object Layer";
+			case ObjectMetadataField::Active: return "Modify Object Active State";
+			case ObjectMetadataField::Static: return "Modify Object Static State";
+		}
+		return "Modify Object Metadata";
+	}
 
 private:
-    void ApplyValue(const ReflectionVariant& val) {
-        if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
-            switch (m_Field) {
-                case ObjectMetadataField::Tag: obj->setTag(MetaValue<std::string>(val)); break;
-                case ObjectMetadataField::Layer: obj->setLayer(MetaValue<std::string>(val)); break;
-                case ObjectMetadataField::Active: obj->setActive(MetaValue<bool>(val)); break;
-                case ObjectMetadataField::Static: obj->setStatic(MetaValue<bool>(val)); break;
-            }
-        }
-    }
+	void ApplyValue(const ReflectionVariant& val) {
+		if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
+			switch (m_Field) {
+				case ObjectMetadataField::Tag: obj->setTag(MetaValue<std::string>(val)); break;
+				case ObjectMetadataField::Layer: obj->setLayer(MetaValue<std::string>(val)); break;
+				case ObjectMetadataField::Active: obj->setActive(MetaValue<bool>(val)); break;
+				case ObjectMetadataField::Static: obj->setStatic(MetaValue<bool>(val)); break;
+			}
+		}
+	}
 
-    TerraEngine::UUID m_Uuid;
-    ObjectMetadataField m_Field;
-    ReflectionVariant m_OldValue;
-    ReflectionVariant m_NewValue;
+	TerraEngine::UUID m_Uuid;
+	ObjectMetadataField m_Field;
+	ReflectionVariant m_OldValue;
+	ReflectionVariant m_NewValue;
 };
 
 InspectorWindow::InspectorWindow(MainEditorSubsystem* owner)
-    : EditorWindow("Inspector"), m_Owner(owner) {
+	: EditorWindow("Inspector"), m_Owner(owner) {
 }
 
 void InspectorWindow::UpdateInspectorDragState() {
@@ -751,74 +751,74 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	ReflectionVariant var = access.getter(obj, name);
 	ReflectionType type = MetaPropertyType(prop);
 
-    if (!IsValid(var)) return;
+	if (!IsValid(var)) return;
 
-    // Snapshot the initial value when the user first interacts with a control.
-    auto startEditing = [&](const ReflectionVariant& initialValue) {
-        if (ImGui::IsItemActivated()) {
-            m_PreEditValue = initialValue;
-        }
-    };
+	// Snapshot the initial value when the user first interacts with a control.
+	auto startEditing = [&](const ReflectionVariant& initialValue) {
+		if (ImGui::IsItemActivated()) {
+			m_PreEditValue = initialValue;
+		}
+	};
 
-    // Push the command to the UndoRedoSystem once the interaction is finalized
-    // (e.g. mouse button released after a drag).
-    auto endEditing = [&]() {
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
-            ReflectionVariant newVal = access.getter(obj, name);
-            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, m_PreEditValue, newVal));
-        }
-    };
+	// Push the command to the UndoRedoSystem once the interaction is finalized
+	// (e.g. mouse button released after a drag).
+	auto endEditing = [&]() {
+		if (ImGui::IsItemDeactivatedAfterEdit()) {
+			ReflectionVariant newVal = access.getter(obj, name);
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, m_PreEditValue, newVal));
+		}
+	};
 
-    ImGui::TableNextRow();
-    ImGui::TableSetColumnIndex(0);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(name.c_str());
-    ImGui::TableSetColumnIndex(1);
+	ImGui::TableNextRow();
+	ImGui::TableSetColumnIndex(0);
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted(name.c_str());
+	ImGui::TableSetColumnIndex(1);
 
 	if (IsMetaType<float>(type)) {
 		float val = MetaValue<float>(var);
-        ImGui::SetNextItemWidth(-1.0f);
+		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragFloat(("##" + name).c_str(), &val, 0.1f)) {
-            if (compName == "CameraComponent") {
-                if (name == "nearPlane") {
-                    if (val < 0.001f) val = 0.001f;
-                    
-                    ReflectionVariant farVar = access.getter(obj, "farPlane");
-                    if (IsValid(farVar)) {
-                        float farP = MetaValue<float>(farVar);
-                        if (farP < val + 0.001f) {
-                            access.setter(obj, "farPlane", val + 0.001f);
-                        }
-                    }
-                }
-                else if (name == "farPlane") {
-                    ReflectionVariant nearVar = access.getter(obj, "nearPlane");
-                    if (IsValid(nearVar)) {
-                        float nearP = MetaValue<float>(nearVar);
-                        if (val < nearP + 0.001f) val = nearP + 0.001f;
-                    }
-                }
-            }
+			if (compName == "CameraComponent") {
+				if (name == "nearPlane") {
+					if (val < 0.001f) val = 0.001f;
+					
+					ReflectionVariant farVar = access.getter(obj, "farPlane");
+					if (IsValid(farVar)) {
+						float farP = MetaValue<float>(farVar);
+						if (farP < val + 0.001f) {
+							access.setter(obj, "farPlane", val + 0.001f);
+						}
+					}
+				}
+				else if (name == "farPlane") {
+					ReflectionVariant nearVar = access.getter(obj, "nearPlane");
+					if (IsValid(nearVar)) {
+						float nearP = MetaValue<float>(nearVar);
+						if (val < nearP + 0.001f) val = nearP + 0.001f;
+					}
+				}
+			}
 			access.setter(obj, name, val);
 		}
-        startEditing(var);
-        endEditing();
+		startEditing(var);
+		endEditing();
 		UpdateInspectorDragState();
 	}
 	else if (IsMetaType<int>(type)) {
 		int val = MetaValue<int>(var);
-        ImGui::SetNextItemWidth(-1.0f);
+		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragInt(("##" + name).c_str(), &val)) {
 			access.setter(obj, name, val);
 		}
-        startEditing(var);
-        endEditing();
+		startEditing(var);
+		endEditing();
 		UpdateInspectorDragState();
 	}
 	else if (IsMetaType<std::uint32_t>(type)) {
 		std::uint32_t val = MetaValue<std::uint32_t>(var);
 		int signedValue = static_cast<int>(val);
-        ImGui::SetNextItemWidth(-1.0f);
+		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragInt(("##" + name).c_str(), &signedValue, 1.0f, 0, std::numeric_limits<int>::max())) {
 			const std::uint32_t clampedValue = static_cast<std::uint32_t>(std::max(0, signedValue));
 			access.setter(obj, name, clampedValue);
@@ -830,24 +830,24 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	else if (IsMetaType<bool>(type)) {
 		bool val = MetaValue<bool>(var);
 		if (ImGui::Checkbox(("##" + name).c_str(), &val)) {
-            // Checkboxes are instantaneous interactions, so we push the 
-            // command immediately.
-            ReflectionVariant oldB = access.getter(obj, name);
+			// Checkboxes are instantaneous interactions, so we push the 
+			// command immediately.
+			ReflectionVariant oldB = access.getter(obj, name);
 			access.setter(obj, name, val);
-            ReflectionVariant newB = access.getter(obj, name);
-            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldB, newB));
+			ReflectionVariant newB = access.getter(obj, name);
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldB, newB));
 		}
 	}
 	else if (IsMetaType<std::string>(type)) {
 		std::string val = MetaValue<std::string>(var);
 		char buffer[256];
 		strncpy(buffer, val.c_str(), sizeof(buffer));
-        ImGui::SetNextItemWidth(-1.0f);
+		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::InputText(("##" + name).c_str(), buffer, sizeof(buffer))) {
 			access.setter(obj, name, std::string(buffer));
 		}
-        startEditing(var);
-        endEditing();
+		startEditing(var);
+		endEditing();
 
 		if (ImGui::BeginDragDropTarget()) {
 			const char* expected = nullptr;
@@ -871,24 +871,24 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	}
 	else if (IsMetaType<glm::vec3>(type)) {
 		glm::vec3 val = MetaValue<glm::vec3>(var);
-        ImGui::SetNextItemWidth(-1.0f);
+		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragFloat3(("##" + name).c_str(), &val.x, 0.1f)) {
 			access.setter(obj, name, val);
 		}
-        startEditing(var);
-        endEditing();
+		startEditing(var);
+		endEditing();
 		UpdateInspectorDragState();
 	}
 	else if (IsMetaType<glm::quat>(type)) {
 		glm::quat q = MetaValue<glm::quat>(var);
 		glm::vec3 euler = glm::degrees(glm::eulerAngles(q));
-        ImGui::SetNextItemWidth(-1.0f);
+		ImGui::SetNextItemWidth(-1.0f);
 		if (ImGui::DragFloat3(("##" + name).c_str(), &euler.x, 0.1f)) {
 			glm::quat newQ = glm::quat(glm::radians(euler));
 			access.setter(obj, name, newQ);
 		}
-        startEditing(var);
-        endEditing();
+		startEditing(var);
+		endEditing();
 		UpdateInspectorDragState();
 	}
 	else if (IsMetaType<TerraEngine::UUID>(type)) {
@@ -937,10 +937,10 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(expected)) {
 					IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 					TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
-                    ReflectionVariant oldId = access.getter(obj, name);
+					ReflectionVariant oldId = access.getter(obj, name);
 					access.setter(obj, name, newId);
-                    ReflectionVariant nextId = access.getter(obj, name);
-                    UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
+					ReflectionVariant nextId = access.getter(obj, name);
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
 				}
 			} else {
 				// Generic UUID property, accept any asset payload
@@ -948,10 +948,10 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(p)) {
 						IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 						TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
-                        ReflectionVariant oldId = access.getter(obj, name);
+						ReflectionVariant oldId = access.getter(obj, name);
 						access.setter(obj, name, newId);
-                        ReflectionVariant nextId = access.getter(obj, name);
-                        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
+						ReflectionVariant nextId = access.getter(obj, name);
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
 						break;
 					}
 				}
@@ -1256,20 +1256,20 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 					return;
 				}
 
-                auto startEditing = [&]() {
-                    if (ImGui::IsItemActivated()) {
-                        m_PreEditScriptJson = scriptComponent->GetBindingsJson();
-                    }
-                };
+				auto startEditing = [&]() {
+					if (ImGui::IsItemActivated()) {
+						m_PreEditScriptJson = scriptComponent->GetBindingsJson();
+					}
+				};
 
-                auto endEditing = [&]() {
-                    if (ImGui::IsItemDeactivatedAfterEdit()) {
-                        const std::string newJson = scriptComponent->GetBindingsJson();
-                        if (m_PreEditScriptJson != newJson) {
-                            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", m_PreEditScriptJson, newJson));
-                        }
-                    }
-                };
+				auto endEditing = [&]() {
+					if (ImGui::IsItemDeactivatedAfterEdit()) {
+						const std::string newJson = scriptComponent->GetBindingsJson();
+						if (m_PreEditScriptJson != newJson) {
+							UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", m_PreEditScriptJson, newJson));
+						}
+					}
+				};
 
 				if (descriptor.valueKind == "Bool") {
 					bool editedValue = currentValue.is_boolean() ? currentValue.get<bool>() : false;
@@ -1292,8 +1292,8 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
-                    startEditing();
-                    endEditing();
+					startEditing();
+					endEditing();
 					UpdateInspectorDragState();
 				} else if (descriptor.valueKind == "Float") {
 					float editedValue = currentValue.is_number() ? currentValue.get<float>() : 0.0f;
@@ -1307,8 +1307,8 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
-                    startEditing();
-                    endEditing();
+					startEditing();
+					endEditing();
 					UpdateInspectorDragState();
 				} else if (descriptor.valueKind == "String") {
 					std::string editedValue = currentValue.is_string() ? currentValue.get<std::string>() : std::string{};
@@ -1322,8 +1322,8 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
-                    startEditing();
-                    endEditing();
+					startEditing();
+					endEditing();
 				} else if (descriptor.valueKind == "MeshAssetReference"
 					|| descriptor.valueKind == "MaterialAssetReference"
 					|| descriptor.valueKind == "TextureAssetReference"
@@ -1339,8 +1339,8 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
-                    startEditing();
-                    endEditing();
+					startEditing();
+					endEditing();
 
 					if (ImGui::BeginPopupContextItem()) {
 						if (ImGui::MenuItem("Clear") && editable) {
@@ -1421,8 +1421,8 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
-                    startEditing();
-                    endEditing();
+					startEditing();
+					endEditing();
 					UpdateInspectorDragState();
 				} else if (descriptor.valueKind == "EntityReference") {
 					int entityId = currentValue.is_number_integer() ? currentValue.get<int>() : 0;
@@ -1433,8 +1433,8 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 							commitRootValue(rootDescriptor, nextRootValue, false);
 						}
 					}
-                    startEditing();
-                    endEditing();
+					startEditing();
+					endEditing();
 					UpdateInspectorDragState();
 				} else {
 					std::string readOnlyValue = currentValue.is_discarded() ? "None" : currentValue.dump();
@@ -1596,15 +1596,15 @@ void InspectorWindow::DrawScriptDropTarget(Object& obj) {
 
 void InspectorWindow::DrawLightComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access)
 {
-    auto drawLabeledWidget = [&](const char* label, auto widgetFunc) {
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(label);
-        ImGui::TableSetColumnIndex(1);
-        ImGui::SetNextItemWidth(-1.0f);
-        widgetFunc();
-    };
+	auto drawLabeledWidget = [&](const char* label, auto widgetFunc) {
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted(label);
+		ImGui::TableSetColumnIndex(1);
+		ImGui::SetNextItemWidth(-1.0f);
+		widgetFunc();
+	};
 
 	// Keeping undo/redo efficient by updating live values during interaction
 	// and only committing the final state to the undo stack on deactivation.
@@ -1638,10 +1638,10 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 		}
 
 		access.setter(obj, propertyName, newValue);
-        
-        // Checkboxes are instantaneous, push immediately
-        ReflectionVariant nextVariant = access.getter(obj, propertyName);
-        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
+		
+		// Checkboxes are instantaneous, push immediately
+		ReflectionVariant nextVariant = access.getter(obj, propertyName);
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
 	};
 
 	auto setUintProperty = [&](const char* propertyName, std::uint32_t newValue) {
@@ -1676,18 +1676,18 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 		access.setter(obj, propertyName, newValue);
 	};
 
-    auto startEditing = [&](const char* propertyName) {
-        if (ImGui::IsItemActivated()) {
-            m_PreEditValue = access.getter(obj, propertyName);
-        }
-    };
+	auto startEditing = [&](const char* propertyName) {
+		if (ImGui::IsItemActivated()) {
+			m_PreEditValue = access.getter(obj, propertyName);
+		}
+	};
 
-    auto endEditing = [&](const char* propertyName) {
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
-            ReflectionVariant newVal = access.getter(obj, propertyName);
-            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, m_PreEditValue, newVal));
-        }
-    };
+	auto endEditing = [&](const char* propertyName) {
+		if (ImGui::IsItemDeactivatedAfterEdit()) {
+			ReflectionVariant newVal = access.getter(obj, propertyName);
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, m_PreEditValue, newVal));
+		}
+	};
 
 	constexpr std::uint32_t kMaxAuthorableType = static_cast<std::uint32_t>(LightType::Area);
 	std::uint32_t encodedType = static_cast<std::uint32_t>(LightType::Point);
@@ -1705,318 +1705,318 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 	const ImGuiTreeNodeFlags sectionFlags = ImGuiTreeNodeFlags_DefaultOpen;
 	if (ImGui::CollapsingHeader("General", sectionFlags))
 	{
-        if (ImGui::BeginTable("LightGeneral", 2, ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
-            ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+		if (ImGui::BeginTable("LightGeneral", 2, ImGuiTableFlags_SizingStretchProp)) {
+			ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+			ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
-            const char* lightTypes[] = { "Directional", "Point", "Spot", "Area" };
-            if (hasUnsupportedType)
-            {
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::TableSetColumnIndex(1);
-                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.24f, 1.0f), "Unsupported legacy light type value: %u", encodedType);
-                ImGui::TextUnformatted("Select a supported type to replace it.");
-            }
+			const char* lightTypes[] = { "Directional", "Point", "Spot", "Area" };
+			if (hasUnsupportedType)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.24f, 1.0f), "Unsupported legacy light type value: %u", encodedType);
+				ImGui::TextUnformatted("Select a supported type to replace it.");
+			}
 
-            int typeIndex = hasUnsupportedType
-                ? static_cast<int>(LightType::Point)
-                : static_cast<int>(effectiveType);
-            drawLabeledWidget("Type", [&]() {
-                if (ImGui::Combo("##Type", &typeIndex, lightTypes, IM_ARRAYSIZE(lightTypes)))
-                {
-                    typeIndex = std::clamp(typeIndex, 0, static_cast<int>(kMaxAuthorableType));
-                    effectiveType = static_cast<std::uint32_t>(typeIndex);
-                    
-                    ReflectionVariant oldV = access.getter(obj, "type");
-                    setUintProperty("type", effectiveType);
-                    ReflectionVariant nextV = access.getter(obj, "type");
-                    UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "type", oldV, nextV));
-                }
-            });
+			int typeIndex = hasUnsupportedType
+				? static_cast<int>(LightType::Point)
+				: static_cast<int>(effectiveType);
+			drawLabeledWidget("Type", [&]() {
+				if (ImGui::Combo("##Type", &typeIndex, lightTypes, IM_ARRAYSIZE(lightTypes)))
+				{
+					typeIndex = std::clamp(typeIndex, 0, static_cast<int>(kMaxAuthorableType));
+					effectiveType = static_cast<std::uint32_t>(typeIndex);
+					
+					ReflectionVariant oldV = access.getter(obj, "type");
+					setUintProperty("type", effectiveType);
+					ReflectionVariant nextV = access.getter(obj, "type");
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "type", oldV, nextV));
+				}
+			});
 
-            std::uint32_t currentAppearance = 0u;
-            if (ReflectionVariant appVariant = access.getter(obj, "appearance"); IsValid(appVariant) && IsMetaValueType<std::uint32_t>(appVariant))
-            {
-                currentAppearance = MetaValue<std::uint32_t>(appVariant);
-            }
+			std::uint32_t currentAppearance = 0u;
+			if (ReflectionVariant appVariant = access.getter(obj, "appearance"); IsValid(appVariant) && IsMetaValueType<std::uint32_t>(appVariant))
+			{
+				currentAppearance = MetaValue<std::uint32_t>(appVariant);
+			}
 
-            const char* appearanceTypes[] = { "Color", "Filter and Temperature" };
-            int appIndex = static_cast<int>(currentAppearance);
-            drawLabeledWidget("Appearance", [&]() {
-                if (ImGui::Combo("##Appearance", &appIndex, appearanceTypes, IM_ARRAYSIZE(appearanceTypes)))
-                {
-                    ReflectionVariant oldV = access.getter(obj, "appearance");
-                    setUintProperty("appearance", static_cast<std::uint32_t>(appIndex));
-                    ReflectionVariant nextV = access.getter(obj, "appearance");
-                    UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "appearance", oldV, nextV));
-                }
-            });
+			const char* appearanceTypes[] = { "Color", "Filter and Temperature" };
+			int appIndex = static_cast<int>(currentAppearance);
+			drawLabeledWidget("Appearance", [&]() {
+				if (ImGui::Combo("##Appearance", &appIndex, appearanceTypes, IM_ARRAYSIZE(appearanceTypes)))
+				{
+					ReflectionVariant oldV = access.getter(obj, "appearance");
+					setUintProperty("appearance", static_cast<std::uint32_t>(appIndex));
+					ReflectionVariant nextV = access.getter(obj, "appearance");
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "appearance", oldV, nextV));
+				}
+			});
 
-            glm::vec3 lightColor = glm::vec3(1.0f);
-            if (ReflectionVariant colorVariant = access.getter(obj, "color"); IsValid(colorVariant) && IsMetaValueType<glm::vec3>(colorVariant))
-            {
-                lightColor = MetaValue<glm::vec3>(colorVariant);
-            }
-            drawLabeledWidget(currentAppearance == 0u ? "Color" : "Filter", [&]() {
-                if (ImGui::ColorEdit3("##Color", &lightColor.x))
-                {
-                    setVec3Property("color", lightColor);
-                }
-                startEditing("color");
-                endEditing("color");
-            });
+			glm::vec3 lightColor = glm::vec3(1.0f);
+			if (ReflectionVariant colorVariant = access.getter(obj, "color"); IsValid(colorVariant) && IsMetaValueType<glm::vec3>(colorVariant))
+			{
+				lightColor = MetaValue<glm::vec3>(colorVariant);
+			}
+			drawLabeledWidget(currentAppearance == 0u ? "Color" : "Filter", [&]() {
+				if (ImGui::ColorEdit3("##Color", &lightColor.x))
+				{
+					setVec3Property("color", lightColor);
+				}
+				startEditing("color");
+				endEditing("color");
+			});
 
-            if (currentAppearance == 1u)
-            {
-                float temperature = 6500.0f;
-                if (ReflectionVariant tempVariant = access.getter(obj, "temperature"); IsValid(tempVariant) && IsMetaValueType<float>(tempVariant))
-                {
-                    temperature = MetaValue<float>(tempVariant);
-                }
-                drawLabeledWidget("Temperature", [&]() {
-                    if (ImGui::SliderFloat("##Temperature", &temperature, 1000.0f, 20000.0f, "%.0f K"))
-                    {
-                        setFloatProperty("temperature", temperature);
-                    }
-                    startEditing("temperature");
-                    endEditing("temperature");
-                });
-            }
+			if (currentAppearance == 1u)
+			{
+				float temperature = 6500.0f;
+				if (ReflectionVariant tempVariant = access.getter(obj, "temperature"); IsValid(tempVariant) && IsMetaValueType<float>(tempVariant))
+				{
+					temperature = MetaValue<float>(tempVariant);
+				}
+				drawLabeledWidget("Temperature", [&]() {
+					if (ImGui::SliderFloat("##Temperature", &temperature, 1000.0f, 20000.0f, "%.0f K"))
+					{
+						setFloatProperty("temperature", temperature);
+					}
+					startEditing("temperature");
+					endEditing("temperature");
+				});
+			}
 
-            float intensity = 1.0f;
-            if (ReflectionVariant intensityVariant = access.getter(obj, "intensity"); IsValid(intensityVariant) && IsMetaValueType<float>(intensityVariant))
-            {
-                intensity = MetaValue<float>(intensityVariant);
-            }
+			float intensity = 1.0f;
+			if (ReflectionVariant intensityVariant = access.getter(obj, "intensity"); IsValid(intensityVariant) && IsMetaValueType<float>(intensityVariant))
+			{
+				intensity = MetaValue<float>(intensityVariant);
+			}
 
-            std::uint32_t currentUnit = 0u;
-            if (ReflectionVariant unitVariant = access.getter(obj, "unit"); IsValid(unitVariant) && IsMetaValueType<std::uint32_t>(unitVariant))
-            {
-                currentUnit = MetaValue<std::uint32_t>(unitVariant);
-            }
+			std::uint32_t currentUnit = 0u;
+			if (ReflectionVariant unitVariant = access.getter(obj, "unit"); IsValid(unitVariant) && IsMetaValueType<std::uint32_t>(unitVariant))
+			{
+				currentUnit = MetaValue<std::uint32_t>(unitVariant);
+			}
 
-            const char* intensityFormat = "%.2f";
-            if (isDirectional)
-            {
-                intensityFormat = "%.2f lux";
-            }
-            else
-            {
-                intensityFormat = currentUnit == 0u ? "%.2f lm" : "%.2f lux";
-            }
+			const char* intensityFormat = "%.2f";
+			if (isDirectional)
+			{
+				intensityFormat = "%.2f lux";
+			}
+			else
+			{
+				intensityFormat = currentUnit == 0u ? "%.2f lm" : "%.2f lux";
+			}
 
-            drawLabeledWidget("Intensity", [&]() {
-                if (ImGui::DragFloat("##Intensity", &intensity, 0.05f, 0.0f, 1000000.0f, intensityFormat))
-                {
-                    setFloatProperty("intensity", std::max(0.0f, intensity));
-                }
-                startEditing("intensity");
-                endEditing("intensity");
-            });
-            UpdateInspectorDragState();
+			drawLabeledWidget("Intensity", [&]() {
+				if (ImGui::DragFloat("##Intensity", &intensity, 0.05f, 0.0f, 1000000.0f, intensityFormat))
+				{
+					setFloatProperty("intensity", std::max(0.0f, intensity));
+				}
+				startEditing("intensity");
+				endEditing("intensity");
+			});
+			UpdateInspectorDragState();
 
-            if (!isDirectional)
-            {
-                const char* lightUnits[] = { "Lumens", "Lux" };
-                int unitIndex = std::clamp(static_cast<int>(currentUnit), 0, 1);
-                drawLabeledWidget("Unit", [&]() {
-                    if (ImGui::Combo("##Unit", &unitIndex, lightUnits, IM_ARRAYSIZE(lightUnits)))
-                    {
-                        ReflectionVariant oldUnit = access.getter(obj, "unit");
-                        ReflectionVariant oldInt = access.getter(obj, "intensity");
+			if (!isDirectional)
+			{
+				const char* lightUnits[] = { "Lumens", "Lux" };
+				int unitIndex = std::clamp(static_cast<int>(currentUnit), 0, 1);
+				drawLabeledWidget("Unit", [&]() {
+					if (ImGui::Combo("##Unit", &unitIndex, lightUnits, IM_ARRAYSIZE(lightUnits)))
+					{
+						ReflectionVariant oldUnit = access.getter(obj, "unit");
+						ReflectionVariant oldInt = access.getter(obj, "intensity");
 
-                        setUintProperty("unit", static_cast<std::uint32_t>(unitIndex));
+						setUintProperty("unit", static_cast<std::uint32_t>(unitIndex));
 
-                        // Convert intensity value to maintain perceived brightness
-                        if (currentUnit == 0u && unitIndex == 1) // Lumens -> Lux
-                        {
-                            setFloatProperty("intensity", std::max(0.0f, intensity / (4.0f * glm::pi<float>())));
-                        }
-                        else if (currentUnit == 1u && unitIndex == 0) // Lux -> Lumens
-                        {
-                            setFloatProperty("intensity", std::max(0.0f, intensity * (4.0f * glm::pi<float>())));
-                        }
+						// Convert intensity value to maintain perceived brightness
+						if (currentUnit == 0u && unitIndex == 1) // Lumens -> Lux
+						{
+							setFloatProperty("intensity", std::max(0.0f, intensity / (4.0f * glm::pi<float>())));
+						}
+						else if (currentUnit == 1u && unitIndex == 0) // Lux -> Lumens
+						{
+							setFloatProperty("intensity", std::max(0.0f, intensity * (4.0f * glm::pi<float>())));
+						}
 
-                        ReflectionVariant newUnit = access.getter(obj, "unit");
-                        ReflectionVariant newInt = access.getter(obj, "intensity");
-                        
-                        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "unit", oldUnit, newUnit));
-                        UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "intensity", oldInt, newInt));
-                    }
-                });
-            }
+						ReflectionVariant newUnit = access.getter(obj, "unit");
+						ReflectionVariant newInt = access.getter(obj, "intensity");
+						
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "unit", oldUnit, newUnit));
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "intensity", oldInt, newInt));
+					}
+				});
+			}
 
-            float indirectMultiplier = 1.0f;
-            if (ReflectionVariant indVariant = access.getter(obj, "indirectMultiplier"); IsValid(indVariant) && IsMetaValueType<float>(indVariant))
-            {
-                indirectMultiplier = MetaValue<float>(indVariant);
-            }
-            drawLabeledWidget("Indirect", [&]() {
-                if (ImGui::DragFloat("##Indirect", &indirectMultiplier, 0.05f, 0.0f, 10.0f))
-                {
-                    setFloatProperty("indirectMultiplier", std::max(0.0f, indirectMultiplier));
-                }
-                startEditing("indirectMultiplier");
-                endEditing("indirectMultiplier");
-            });
-            UpdateInspectorDragState();
+			float indirectMultiplier = 1.0f;
+			if (ReflectionVariant indVariant = access.getter(obj, "indirectMultiplier"); IsValid(indVariant) && IsMetaValueType<float>(indVariant))
+			{
+				indirectMultiplier = MetaValue<float>(indVariant);
+			}
+			drawLabeledWidget("Indirect", [&]() {
+				if (ImGui::DragFloat("##Indirect", &indirectMultiplier, 0.05f, 0.0f, 10.0f))
+				{
+					setFloatProperty("indirectMultiplier", std::max(0.0f, indirectMultiplier));
+				}
+				startEditing("indirectMultiplier");
+				endEditing("indirectMultiplier");
+			});
+			UpdateInspectorDragState();
 
-            ImGui::EndTable();
-        }
+			ImGui::EndTable();
+		}
 	}
 
 	if (ImGui::CollapsingHeader("Shape", sectionFlags))
 	{
-        if (ImGui::BeginTable("LightShape", 2, ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
-            ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+		if (ImGui::BeginTable("LightShape", 2, ImGuiTableFlags_SizingStretchProp)) {
+			ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+			ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
-            if (!isDirectional)
-            {
-                float range = 10.0f;
-                if (ReflectionVariant rangeVariant = access.getter(obj, "range"); IsValid(rangeVariant) && IsMetaValueType<float>(rangeVariant))
-                {
-                    range = MetaValue<float>(rangeVariant);
-                }
-                drawLabeledWidget("Range", [&]() {
-                    if (ImGui::DragFloat("##Range", &range, 0.1f, 0.1f, 10000.0f, "%.2f m"))
-                    {
-                        setFloatProperty("range", std::max(0.1f, range));
-                    }
-                    startEditing("range");
-                    endEditing("range");
-                });
-                UpdateInspectorDragState();
-            }
+			if (!isDirectional)
+			{
+				float range = 10.0f;
+				if (ReflectionVariant rangeVariant = access.getter(obj, "range"); IsValid(rangeVariant) && IsMetaValueType<float>(rangeVariant))
+				{
+					range = MetaValue<float>(rangeVariant);
+				}
+				drawLabeledWidget("Range", [&]() {
+					if (ImGui::DragFloat("##Range", &range, 0.1f, 0.1f, 10000.0f, "%.2f m"))
+					{
+						setFloatProperty("range", std::max(0.1f, range));
+					}
+					startEditing("range");
+					endEditing("range");
+				});
+				UpdateInspectorDragState();
+			}
 
-            if (isSpot)
-            {
-                float innerDegrees = 20.0f;
-                float outerDegrees = 30.0f;
-                if (ReflectionVariant innerVariant = access.getter(obj, "innerConeAngle"); IsValid(innerVariant) && IsMetaValueType<float>(innerVariant))
-                {
-                    innerDegrees = glm::degrees(MetaValue<float>(innerVariant));
-                }
-                if (ReflectionVariant outerVariant = access.getter(obj, "outerConeAngle"); IsValid(outerVariant) && IsMetaValueType<float>(outerVariant))
-                {
-                    outerDegrees = glm::degrees(MetaValue<float>(outerVariant));
-                }
+			if (isSpot)
+			{
+				float innerDegrees = 20.0f;
+				float outerDegrees = 30.0f;
+				if (ReflectionVariant innerVariant = access.getter(obj, "innerConeAngle"); IsValid(innerVariant) && IsMetaValueType<float>(innerVariant))
+				{
+					innerDegrees = glm::degrees(MetaValue<float>(innerVariant));
+				}
+				if (ReflectionVariant outerVariant = access.getter(obj, "outerConeAngle"); IsValid(outerVariant) && IsMetaValueType<float>(outerVariant))
+				{
+					outerDegrees = glm::degrees(MetaValue<float>(outerVariant));
+				}
 
-                drawLabeledWidget("Inner Angle", [&]() {
-                    if (ImGui::DragFloat("##InnerAngle", &innerDegrees, 0.1f, 0.0f, 89.0f, "%.1f deg")) {
-                        innerDegrees = std::clamp(innerDegrees, 0.0f, 89.0f);
-                        outerDegrees = std::clamp(outerDegrees, innerDegrees + 0.1f, 89.9f);
-                        setFloatProperty("innerConeAngle", glm::radians(innerDegrees));
-                        setFloatProperty("outerConeAngle", glm::radians(outerDegrees));
-                    }
-                    startEditing("innerConeAngle");
-                    endEditing("innerConeAngle");
-                    // Outer angle also changes if inner was pushed past it
-                    startEditing("outerConeAngle");
-                    endEditing("outerConeAngle");
-                });
-                UpdateInspectorDragState();
+				drawLabeledWidget("Inner Angle", [&]() {
+					if (ImGui::DragFloat("##InnerAngle", &innerDegrees, 0.1f, 0.0f, 89.0f, "%.1f deg")) {
+						innerDegrees = std::clamp(innerDegrees, 0.0f, 89.0f);
+						outerDegrees = std::clamp(outerDegrees, innerDegrees + 0.1f, 89.9f);
+						setFloatProperty("innerConeAngle", glm::radians(innerDegrees));
+						setFloatProperty("outerConeAngle", glm::radians(outerDegrees));
+					}
+					startEditing("innerConeAngle");
+					endEditing("innerConeAngle");
+					// Outer angle also changes if inner was pushed past it
+					startEditing("outerConeAngle");
+					endEditing("outerConeAngle");
+				});
+				UpdateInspectorDragState();
 
-                drawLabeledWidget("Outer Angle", [&]() {
-                    if (ImGui::DragFloat("##OuterAngle", &outerDegrees, 0.1f, 0.1f, 89.9f, "%.1f deg")) {
-                        innerDegrees = std::clamp(innerDegrees, 0.0f, 89.0f);
-                        outerDegrees = std::clamp(outerDegrees, innerDegrees + 0.1f, 89.9f);
-                        setFloatProperty("innerConeAngle", glm::radians(innerDegrees));
-                        setFloatProperty("outerConeAngle", glm::radians(outerDegrees));
-                    }
-                    startEditing("innerConeAngle");
-                    endEditing("innerConeAngle");
-                    startEditing("outerConeAngle");
-                    endEditing("outerConeAngle");
-                });
-                UpdateInspectorDragState();
-            }
+				drawLabeledWidget("Outer Angle", [&]() {
+					if (ImGui::DragFloat("##OuterAngle", &outerDegrees, 0.1f, 0.1f, 89.9f, "%.1f deg")) {
+						innerDegrees = std::clamp(innerDegrees, 0.0f, 89.0f);
+						outerDegrees = std::clamp(outerDegrees, innerDegrees + 0.1f, 89.9f);
+						setFloatProperty("innerConeAngle", glm::radians(innerDegrees));
+						setFloatProperty("outerConeAngle", glm::radians(outerDegrees));
+					}
+					startEditing("innerConeAngle");
+					endEditing("innerConeAngle");
+					startEditing("outerConeAngle");
+					endEditing("outerConeAngle");
+				});
+				UpdateInspectorDragState();
+			}
 
-            if (isArea)
-            {
-                float width = 1.0f;
-                float height = 1.0f;
-                if (ReflectionVariant wVariant = access.getter(obj, "width"); IsValid(wVariant) && IsMetaValueType<float>(wVariant))
-                {
-                    width = MetaValue<float>(wVariant);
-                }
-                if (ReflectionVariant hVariant = access.getter(obj, "height"); IsValid(hVariant) && IsMetaValueType<float>(hVariant))
-                {
-                    height = MetaValue<float>(hVariant);
-                }
+			if (isArea)
+			{
+				float width = 1.0f;
+				float height = 1.0f;
+				if (ReflectionVariant wVariant = access.getter(obj, "width"); IsValid(wVariant) && IsMetaValueType<float>(wVariant))
+				{
+					width = MetaValue<float>(wVariant);
+				}
+				if (ReflectionVariant hVariant = access.getter(obj, "height"); IsValid(hVariant) && IsMetaValueType<float>(hVariant))
+				{
+					height = MetaValue<float>(hVariant);
+				}
 
-                drawLabeledWidget("Width", [&]() {
-                    if (ImGui::DragFloat("##Width", &width, 0.1f, 0.01f, 1000.0f, "%.2f m")) setFloatProperty("width", std::max(0.01f, width));
-                    startEditing("width");
-                    endEditing("width");
-                });
-                UpdateInspectorDragState();
+				drawLabeledWidget("Width", [&]() {
+					if (ImGui::DragFloat("##Width", &width, 0.1f, 0.01f, 1000.0f, "%.2f m")) setFloatProperty("width", std::max(0.01f, width));
+					startEditing("width");
+					endEditing("width");
+				});
+				UpdateInspectorDragState();
 
-                drawLabeledWidget("Height", [&]() {
-                    if (ImGui::DragFloat("##Height", &height, 0.1f, 0.01f, 1000.0f, "%.2f m")) setFloatProperty("height", std::max(0.01f, height));
-                    startEditing("height");
-                    endEditing("height");
-                });
-                UpdateInspectorDragState();
-            }
+				drawLabeledWidget("Height", [&]() {
+					if (ImGui::DragFloat("##Height", &height, 0.1f, 0.01f, 1000.0f, "%.2f m")) setFloatProperty("height", std::max(0.01f, height));
+					startEditing("height");
+					endEditing("height");
+				});
+				UpdateInspectorDragState();
+			}
 
-            ImGui::EndTable();
-        }
+			ImGui::EndTable();
+		}
 	}
 
 	if (ImGui::CollapsingHeader("Shadows", sectionFlags))
 	{
-        if (ImGui::BeginTable("LightShadows", 2, ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
-            ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+		if (ImGui::BeginTable("LightShadows", 2, ImGuiTableFlags_SizingStretchProp)) {
+			ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+			ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
-            bool castsShadows = false;
-            if (ReflectionVariant castVariant = access.getter(obj, "castsShadows"); IsValid(castVariant) && IsMetaValueType<bool>(castVariant))
-            {
-                castsShadows = MetaValue<bool>(castVariant);
-            }
-            drawLabeledWidget("Realtime Shadows", [&]() {
-                if (ImGui::Checkbox("##RealtimeShadows", &castsShadows))
-                {
-                    setBoolProperty("castsShadows", castsShadows);
-                }
-            });
+			bool castsShadows = false;
+			if (ReflectionVariant castVariant = access.getter(obj, "castsShadows"); IsValid(castVariant) && IsMetaValueType<bool>(castVariant))
+			{
+				castsShadows = MetaValue<bool>(castVariant);
+			}
+			drawLabeledWidget("Realtime Shadows", [&]() {
+				if (ImGui::Checkbox("##RealtimeShadows", &castsShadows))
+				{
+					setBoolProperty("castsShadows", castsShadows);
+				}
+			});
 
-            if (castsShadows)
-            {
-                float shadowStrength = 1.0f;
-                if (ReflectionVariant strVariant = access.getter(obj, "shadowStrength"); IsValid(strVariant) && IsMetaValueType<float>(strVariant))
-                {
-                    shadowStrength = MetaValue<float>(strVariant);
-                }
-                drawLabeledWidget("Strength", [&]() {
-                    if (ImGui::SliderFloat("##Strength", &shadowStrength, 0.0f, 1.0f))
-                    {
-                        setFloatProperty("shadowStrength", std::clamp(shadowStrength, 0.0f, 1.0f));
-                    }
-                    startEditing("shadowStrength");
-                    endEditing("shadowStrength");
-                });
+			if (castsShadows)
+			{
+				float shadowStrength = 1.0f;
+				if (ReflectionVariant strVariant = access.getter(obj, "shadowStrength"); IsValid(strVariant) && IsMetaValueType<float>(strVariant))
+				{
+					shadowStrength = MetaValue<float>(strVariant);
+				}
+				drawLabeledWidget("Strength", [&]() {
+					if (ImGui::SliderFloat("##Strength", &shadowStrength, 0.0f, 1.0f))
+					{
+						setFloatProperty("shadowStrength", std::clamp(shadowStrength, 0.0f, 1.0f));
+					}
+					startEditing("shadowStrength");
+					endEditing("shadowStrength");
+				});
 
-                float shadowBias = 0.005f;
-                if (ReflectionVariant biasVariant = access.getter(obj, "shadowBias"); IsValid(biasVariant) && IsMetaValueType<float>(biasVariant))
-                {
-                    shadowBias = MetaValue<float>(biasVariant);
-                }
-                drawLabeledWidget("Bias", [&]() {
-                    if (ImGui::DragFloat("##Bias", &shadowBias, 0.001f, 0.0f, 0.1f, "%.4f"))
-                    {
-                        setFloatProperty("shadowBias", std::clamp(shadowBias, 0.0f, 0.1f));
-                    }
-                    startEditing("shadowBias");
-                    endEditing("shadowBias");
-                });
-                UpdateInspectorDragState();
-            }
+				float shadowBias = 0.005f;
+				if (ReflectionVariant biasVariant = access.getter(obj, "shadowBias"); IsValid(biasVariant) && IsMetaValueType<float>(biasVariant))
+				{
+					shadowBias = MetaValue<float>(biasVariant);
+				}
+				drawLabeledWidget("Bias", [&]() {
+					if (ImGui::DragFloat("##Bias", &shadowBias, 0.001f, 0.0f, 0.1f, "%.4f"))
+					{
+						setFloatProperty("shadowBias", std::clamp(shadowBias, 0.0f, 0.1f));
+					}
+					startEditing("shadowBias");
+					endEditing("shadowBias");
+				});
+				UpdateInspectorDragState();
+			}
 
-            ImGui::EndTable();
-        }
+			ImGui::EndTable();
+		}
 	}
 
 	// These fields affect which lights survive the renderer's light budget.
@@ -2096,18 +2096,18 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 		access.setter(obj, propertyName, newValue);
 	};
 
-    auto startEditing = [&](const char* propertyName) {
-        if (ImGui::IsItemActivated()) {
-            m_PreEditValue = access.getter(obj, propertyName);
-        }
-    };
+	auto startEditing = [&](const char* propertyName) {
+		if (ImGui::IsItemActivated()) {
+			m_PreEditValue = access.getter(obj, propertyName);
+		}
+	};
 
-    auto endEditing = [&](const char* propertyName) {
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
-            ReflectionVariant newVal = access.getter(obj, propertyName);
-            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, m_PreEditValue, newVal));
-        }
-    };
+	auto endEditing = [&](const char* propertyName) {
+		if (ImGui::IsItemDeactivatedAfterEdit()) {
+			ReflectionVariant newVal = access.getter(obj, propertyName);
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, m_PreEditValue, newVal));
+		}
+	};
 
 	// The custom UIComponent inspector owns its own property table because the
 	// generic component path is bypassed for this specialized multi-asset UI.
@@ -2125,8 +2125,8 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 			{
 				setStringProperty("sourceMarkup", markupBuffer);
 			}
-            startEditing("sourceMarkup");
-            endEditing("sourceMarkup");
+			startEditing("sourceMarkup");
+			endEditing("sourceMarkup");
 
 			if (ImGui::BeginPopupContextItem())
 			{
@@ -2164,222 +2164,222 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 
 void InspectorWindow::OnGui() {
 	m_InspectorValueDragging = false;
-    
-    auto selectedAsset = m_Owner->GetSelectedAsset();
-    if (selectedAsset) {
-        std::string ext = selectedAsset->extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+	
+	auto selectedAsset = m_Owner->GetSelectedAsset();
+	if (selectedAsset) {
+		std::string ext = selectedAsset->extension().string();
+		std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-        if (ext == ".tmat") {
-            DrawMaterialInspector(*selectedAsset);
-        } else if (IsSupportedMeshSourceExtension(*selectedAsset)) {
-            DrawMeshInspector(*selectedAsset);
-        } else if (IsSupportedTextureSourceExtension(*selectedAsset)) {
-            DrawTextureInspector(*selectedAsset);
-        } else {
-             ImGui::Text("Selected Asset: %s", selectedAsset->filename().string().c_str());
-        }
-        return;
-    }
+		if (ext == ".tmat") {
+			DrawMaterialInspector(*selectedAsset);
+		} else if (IsSupportedMeshSourceExtension(*selectedAsset)) {
+			DrawMeshInspector(*selectedAsset);
+		} else if (IsSupportedTextureSourceExtension(*selectedAsset)) {
+			DrawTextureInspector(*selectedAsset);
+		} else {
+			ImGui::Text("Selected Asset: %s", selectedAsset->filename().string().c_str());
+		}
+		return;
+	}
 
-    auto selectedEntity = m_Owner->GetSelectedEntity();
-    if (selectedEntity) {
-        auto& objManager = ObjectManager::instance();
-        if (auto objOpt = objManager.getObject(*selectedEntity)) {
-            Object obj = *objOpt;
-            
-            auto& accessReg = ComponentAccessRegistry();
+	auto selectedEntity = m_Owner->GetSelectedEntity();
+	if (selectedEntity) {
+		auto& objManager = ObjectManager::instance();
+		if (auto objOpt = objManager.getObject(*selectedEntity)) {
+			Object obj = *objOpt;
+			
+			auto& accessReg = ComponentAccessRegistry();
 
-            // Header: Active Checkbox, Name Input, Static Checkbox
-            ImGui::PushID("InspectorHeaderTop");
-            
-            bool isActive = obj.isActive();
-            if (ImGui::Checkbox("##ActiveGlobal", &isActive)) {
-                ReflectionVariant oldVal = obj.isActive();
-                obj.setActive(isActive);
-                ReflectionVariant newVal = obj.isActive();
-                UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Active, oldVal, newVal));
-            }
-            ImGui::PopID();
-            
-            ImGui::SameLine();
-            
-            std::string name = obj.getName();
-            char nameBuf[256];
-            strncpy(nameBuf, name.c_str(), sizeof(nameBuf));
-            
-            // Calculate width for name input: available width minus "Static" checkbox width
-            float staticWidth = ImGui::CalcTextSize("Static").x + ImGui::GetStyle().ItemSpacing.x + ImGui::GetFrameHeight();
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - staticWidth - ImGui::GetStyle().ItemSpacing.x);
-            
-            if (ImGui::InputText("##ObjectName", nameBuf, sizeof(nameBuf))) {
-                obj.setName(nameBuf);
-            }
-            if (ImGui::IsItemActivated()) {
-                m_PreEditName = name;
-            }
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                if (m_PreEditName != nameBuf) {
-                    UndoRedoSystem::Instance().PushCommand(std::make_unique<RenameObjectCommand>(obj.EntityId(), m_PreEditName, nameBuf));
-                }
-            }
-            
-            ImGui::SameLine();
-            
-            bool isStatic = obj.isStatic();
-            if (ImGui::Checkbox("Static", &isStatic)) {
-                ReflectionVariant oldVal = obj.isStatic();
-                obj.setStatic(isStatic);
-                ReflectionVariant newVal = obj.isStatic();
-                UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Static, oldVal, newVal));
-            }
+			// Header: Active Checkbox, Name Input, Static Checkbox
+			ImGui::PushID("InspectorHeaderTop");
+			
+			bool isActive = obj.isActive();
+			if (ImGui::Checkbox("##ActiveGlobal", &isActive)) {
+				ReflectionVariant oldVal = obj.isActive();
+				obj.setActive(isActive);
+				ReflectionVariant newVal = obj.isActive();
+				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Active, oldVal, newVal));
+			}
+			ImGui::PopID();
+			
+			ImGui::SameLine();
+			
+			std::string name = obj.getName();
+			char nameBuf[256];
+			strncpy(nameBuf, name.c_str(), sizeof(nameBuf));
+			
+			// Calculate width for name input: available width minus "Static" checkbox width
+			float staticWidth = ImGui::CalcTextSize("Static").x + ImGui::GetStyle().ItemSpacing.x + ImGui::GetFrameHeight();
+			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - staticWidth - ImGui::GetStyle().ItemSpacing.x);
+			
+			if (ImGui::InputText("##ObjectName", nameBuf, sizeof(nameBuf))) {
+				obj.setName(nameBuf);
+			}
+			if (ImGui::IsItemActivated()) {
+				m_PreEditName = name;
+			}
+			if (ImGui::IsItemDeactivatedAfterEdit()) {
+				if (m_PreEditName != nameBuf) {
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<RenameObjectCommand>(obj.EntityId(), m_PreEditName, nameBuf));
+				}
+			}
+			
+			ImGui::SameLine();
+			
+			bool isStatic = obj.isStatic();
+			if (ImGui::Checkbox("Static", &isStatic)) {
+				ReflectionVariant oldVal = obj.isStatic();
+				obj.setStatic(isStatic);
+				ReflectionVariant newVal = obj.isStatic();
+				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Static, oldVal, newVal));
+			}
 
-            // Tag and Layer
-            ImGui::Spacing();
-            
-            // Use a table for alignment
-            if (ImGui::BeginTable("TagLayerTable", 4, ImGuiTableFlags_SizingStretchProp)) {
-                ImGui::TableSetupColumn("TagLabel", ImGuiTableColumnFlags_WidthFixed, 30.0f);
-                ImGui::TableSetupColumn("TagValue", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-                ImGui::TableSetupColumn("LayerLabel", ImGuiTableColumnFlags_WidthFixed, 40.0f);
-                ImGui::TableSetupColumn("LayerValue", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+			// Tag and Layer
+			ImGui::Spacing();
+			
+			// Use a table for alignment
+			if (ImGui::BeginTable("TagLayerTable", 4, ImGuiTableFlags_SizingStretchProp)) {
+				ImGui::TableSetupColumn("TagLabel", ImGuiTableColumnFlags_WidthFixed, 30.0f);
+				ImGui::TableSetupColumn("TagValue", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+				ImGui::TableSetupColumn("LayerLabel", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+				ImGui::TableSetupColumn("LayerValue", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 
-                ImGui::TableNextRow();
-                
-                ImGui::TableSetColumnIndex(0);
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextDisabled("Tag");
-                
-                ImGui::TableSetColumnIndex(1);
-                std::string tag = obj.getTag();
-                ImGui::SetNextItemWidth(-1.0f);
-                if (ImGui::BeginCombo("##TagCombo", tag.c_str())) {
-                    const auto& tags = objManager.getAvailableTags();
-                    for (const auto& t : tags) {
-                        bool is_selected = (tag == t);
-                        if (ImGui::Selectable(t.c_str(), is_selected)) {
-                            if (tag != t) {
-                                ReflectionVariant oldV = tag;
-                                obj.setTag(t);
-                                ReflectionVariant newV = t;
-                                UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Tag, oldV, newV));
-                            }
-                        }
-                        if (is_selected) ImGui::SetItemDefaultFocus();
-                    }
-                    
-                    ImGui::Separator();
-                    if (ImGui::Selectable("Add Tag...")) {
-                        ImGui::OpenPopup("AddTagPopup");
-                        memset(m_TagInputBuffer, 0, sizeof(m_TagInputBuffer));
-                    }
-                    
-                    ImGui::EndCombo();
-                }
+				ImGui::TableNextRow();
+				
+				ImGui::TableSetColumnIndex(0);
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextDisabled("Tag");
+				
+				ImGui::TableSetColumnIndex(1);
+				std::string tag = obj.getTag();
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::BeginCombo("##TagCombo", tag.c_str())) {
+					const auto& tags = objManager.getAvailableTags();
+					for (const auto& t : tags) {
+						bool is_selected = (tag == t);
+						if (ImGui::Selectable(t.c_str(), is_selected)) {
+							if (tag != t) {
+								ReflectionVariant oldV = tag;
+								obj.setTag(t);
+								ReflectionVariant newV = t;
+								UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Tag, oldV, newV));
+							}
+						}
+						if (is_selected) ImGui::SetItemDefaultFocus();
+					}
+					
+					ImGui::Separator();
+					if (ImGui::Selectable("Add Tag...")) {
+						ImGui::OpenPopup("AddTagPopup");
+						memset(m_TagInputBuffer, 0, sizeof(m_TagInputBuffer));
+					}
+					
+					ImGui::EndCombo();
+				}
 
-                if (ImGui::BeginPopup("AddTagPopup")) {
-                    ImGui::Text("New Tag Name:");
-                    ImGui::InputText("##NewTagName", m_TagInputBuffer, sizeof(m_TagInputBuffer));
-                    if (ImGui::Button("Add") || (ImGui::IsKeyPressed(ImGuiKey_Enter))) {
-                        if (strlen(m_TagInputBuffer) > 0) {
-                            objManager.registerTag(m_TagInputBuffer);
-                        }
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Cancel")) {
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::EndPopup();
-                }
+				if (ImGui::BeginPopup("AddTagPopup")) {
+					ImGui::Text("New Tag Name:");
+					ImGui::InputText("##NewTagName", m_TagInputBuffer, sizeof(m_TagInputBuffer));
+					if (ImGui::Button("Add") || (ImGui::IsKeyPressed(ImGuiKey_Enter))) {
+						if (strlen(m_TagInputBuffer) > 0) {
+							objManager.registerTag(m_TagInputBuffer);
+						}
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Cancel")) {
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::EndPopup();
+				}
 
-                ImGui::TableSetColumnIndex(2);
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextDisabled("Layer");
-                
-                ImGui::TableSetColumnIndex(3);
-                std::string layer = obj.getLayer();
-                ImGui::SetNextItemWidth(-1.0f);
-                if (ImGui::BeginCombo("##LayerCombo", layer.c_str())) {
-                    const auto& layers = objManager.getAvailableLayers();
-                    for (const auto& l : layers) {
-                        bool is_selected = (layer == l);
-                        if (ImGui::Selectable(l.c_str(), is_selected)) {
-                            if (layer != l) {
-                                ReflectionVariant oldV = layer;
-                                obj.setLayer(l);
-                                ReflectionVariant newV = l;
-                                UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Layer, oldV, newV));
-                            }
-                        }
-                        if (is_selected) ImGui::SetItemDefaultFocus();
-                    }
+				ImGui::TableSetColumnIndex(2);
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextDisabled("Layer");
+				
+				ImGui::TableSetColumnIndex(3);
+				std::string layer = obj.getLayer();
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::BeginCombo("##LayerCombo", layer.c_str())) {
+					const auto& layers = objManager.getAvailableLayers();
+					for (const auto& l : layers) {
+						bool is_selected = (layer == l);
+						if (ImGui::Selectable(l.c_str(), is_selected)) {
+							if (layer != l) {
+								ReflectionVariant oldV = layer;
+								obj.setLayer(l);
+								ReflectionVariant newV = l;
+								UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Layer, oldV, newV));
+							}
+						}
+						if (is_selected) ImGui::SetItemDefaultFocus();
+					}
 
-                    ImGui::Separator();
-                    if (ImGui::Selectable("Add Layer...")) {
-                        ImGui::OpenPopup("AddLayerPopup");
-                        memset(m_LayerInputBuffer, 0, sizeof(m_LayerInputBuffer));
-                    }
+					ImGui::Separator();
+					if (ImGui::Selectable("Add Layer...")) {
+						ImGui::OpenPopup("AddLayerPopup");
+						memset(m_LayerInputBuffer, 0, sizeof(m_LayerInputBuffer));
+					}
 
-                    ImGui::EndCombo();
-                }
+					ImGui::EndCombo();
+				}
 
-                if (ImGui::BeginPopup("AddLayerPopup")) {
-                    ImGui::Text("New Layer Name:");
-                    ImGui::InputText("##NewLayerName", m_LayerInputBuffer, sizeof(m_LayerInputBuffer));
-                    if (ImGui::Button("Add") || (ImGui::IsKeyPressed(ImGuiKey_Enter))) {
-                        if (strlen(m_LayerInputBuffer) > 0) {
-                            objManager.registerLayer(m_LayerInputBuffer);
-                        }
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Cancel")) {
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::EndPopup();
-                }
+				if (ImGui::BeginPopup("AddLayerPopup")) {
+					ImGui::Text("New Layer Name:");
+					ImGui::InputText("##NewLayerName", m_LayerInputBuffer, sizeof(m_LayerInputBuffer));
+					if (ImGui::Button("Add") || (ImGui::IsKeyPressed(ImGuiKey_Enter))) {
+						if (strlen(m_LayerInputBuffer) > 0) {
+							objManager.registerLayer(m_LayerInputBuffer);
+						}
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Cancel")) {
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::EndPopup();
+				}
 
-                ImGui::EndTable();
-            }
-            
-            ImGui::Separator();
-            
-            std::vector<std::string>& inspectorComponentOrder = m_PerObjectComponentOrders[obj.EntityId()];
-            
-            std::unordered_set<std::string> activeComponents;
-            bool hasTransform = false;
-            for (auto& [compName, access] : accessReg) {
-                if (access.hasComponent(obj)) {
-                    activeComponents.insert(compName);
-                    if (compName == "Transform") hasTransform = true;
-                }
-            }
+				ImGui::EndTable();
+			}
+			
+			ImGui::Separator();
+			
+			std::vector<std::string>& inspectorComponentOrder = m_PerObjectComponentOrders[obj.EntityId()];
+			
+			std::unordered_set<std::string> activeComponents;
+			bool hasTransform = false;
+			for (auto& [compName, access] : accessReg) {
+				if (access.hasComponent(obj)) {
+					activeComponents.insert(compName);
+					if (compName == "Transform") hasTransform = true;
+				}
+			}
 
-            for (auto it = inspectorComponentOrder.begin(); it != inspectorComponentOrder.end(); ) {
-                if (activeComponents.find(*it) == activeComponents.end()) it = inspectorComponentOrder.erase(it);
-                else ++it;
-            }
-            for (const auto& compName : activeComponents) {
-                bool found = false;
-                for (const auto& existing : inspectorComponentOrder) if (existing == compName) found = true;
-                if (!found) inspectorComponentOrder.push_back(compName);
-            }
+			for (auto it = inspectorComponentOrder.begin(); it != inspectorComponentOrder.end(); ) {
+				if (activeComponents.find(*it) == activeComponents.end()) it = inspectorComponentOrder.erase(it);
+				else ++it;
+			}
+			for (const auto& compName : activeComponents) {
+				bool found = false;
+				for (const auto& existing : inspectorComponentOrder) if (existing == compName) found = true;
+				if (!found) inspectorComponentOrder.push_back(compName);
+			}
 
-            if (hasTransform) {
-                auto it = std::find(inspectorComponentOrder.begin(), inspectorComponentOrder.end(), "Transform");
-                if (it != inspectorComponentOrder.end() && it != inspectorComponentOrder.begin()) {
-                    inspectorComponentOrder.erase(it);
-                    inspectorComponentOrder.insert(inspectorComponentOrder.begin(), "Transform");
-                } else if (it == inspectorComponentOrder.end()) {
-                    inspectorComponentOrder.insert(inspectorComponentOrder.begin(), "Transform");
-                }
-            }
+			if (hasTransform) {
+				auto it = std::find(inspectorComponentOrder.begin(), inspectorComponentOrder.end(), "Transform");
+				if (it != inspectorComponentOrder.end() && it != inspectorComponentOrder.begin()) {
+					inspectorComponentOrder.erase(it);
+					inspectorComponentOrder.insert(inspectorComponentOrder.begin(), "Transform");
+				} else if (it == inspectorComponentOrder.end()) {
+					inspectorComponentOrder.insert(inspectorComponentOrder.begin(), "Transform");
+				}
+			}
 
-            for (size_t i = 0; i < inspectorComponentOrder.size(); ++i) {
-                std::string compName = inspectorComponentOrder[i];
-                if (accessReg.find(compName) == accessReg.end()) continue;
-                ComponentAccessFunctions& access = accessReg[compName];
+			for (size_t i = 0; i < inspectorComponentOrder.size(); ++i) {
+				std::string compName = inspectorComponentOrder[i];
+				if (accessReg.find(compName) == accessReg.end()) continue;
+				ComponentAccessFunctions& access = accessReg[compName];
 				if (compName == "Script") {
 					// ScriptComponent is just the serialized backing store. Draw each
 					// script binding as its own Unity-style component block instead.
@@ -2388,110 +2388,110 @@ void InspectorWindow::OnGui() {
 				}
 				const std::string displayName = BuildDisplayComponentName(compName);
 
-                if (!access.hasComponent(obj)) continue; 
+				if (!access.hasComponent(obj)) continue; 
 
-                ImGui::PushID(compName.c_str());
-                
-                bool compActive = true;
-                // Use the reflection type captured by the engine registry so
-                // the editor queries the same EnTT meta context that owns the
-                // component registrations.
-                ReflectionType type = access.reflectionType;
-                ReflectionProperty activeProp = FindMetaProperty(type, "active");
-                if (IsValid(activeProp)) {
-                    ReflectionVariant var = access.getter(obj, "active");
-                    if (IsValid(var)) compActive = MetaValue<bool>(var);
-                }
+				ImGui::PushID(compName.c_str());
+				
+				bool compActive = true;
+				// Use the reflection type captured by the engine registry so
+				// the editor queries the same EnTT meta context that owns the
+				// component registrations.
+				ReflectionType type = access.reflectionType;
+				ReflectionProperty activeProp = FindMetaProperty(type, "active");
+				if (IsValid(activeProp)) {
+					ReflectionVariant var = access.getter(obj, "active");
+					if (IsValid(var)) compActive = MetaValue<bool>(var);
+				}
 
-                bool isOpen = ImGui::GetStateStorage()->GetInt(ImGui::GetID("IsOpen"), 1) != 0;
-                ImVec2 p = ImGui::GetCursorScreenPos();
-                float availWidth = ImGui::GetContentRegionAvail().x;
-                float lineHeight = ImGui::GetFrameHeight();
+				bool isOpen = ImGui::GetStateStorage()->GetInt(ImGui::GetID("IsOpen"), 1) != 0;
+				ImVec2 p = ImGui::GetCursorScreenPos();
+				float availWidth = ImGui::GetContentRegionAvail().x;
+				float lineHeight = ImGui::GetFrameHeight();
 
-                ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + availWidth, p.y + lineHeight), ImGui::GetColorU32(ImGuiCol_Header));
+				ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + availWidth, p.y + lineHeight), ImGui::GetColorU32(ImGuiCol_Header));
 
-                ImGui::SetNextItemAllowOverlap();
-                if (ImGui::InvisibleButton("##header_bg", ImVec2(availWidth, lineHeight))) {
-                    isOpen = !isOpen;
-                    ImGui::GetStateStorage()->SetInt(ImGui::GetID("IsOpen"), isOpen);
-                }
+				ImGui::SetNextItemAllowOverlap();
+				if (ImGui::InvisibleButton("##header_bg", ImVec2(availWidth, lineHeight))) {
+					isOpen = !isOpen;
+					ImGui::GetStateStorage()->SetInt(ImGui::GetID("IsOpen"), isOpen);
+				}
 
-                if (compName != "Transform") {
-                    if (ImGui::BeginPopupContextItem("ComponentSettings")) {
-                        if (ImGui::MenuItem("Remove Component")) {
-                            UndoRedoSystem::Instance().PushCommand(std::make_unique<RemoveComponentCommand>(obj.EntityId(), compName));
-                            access.removeComponent(obj);
-                        }
-                        ImGui::EndPopup();
-                    }
-                }
+				if (compName != "Transform") {
+					if (ImGui::BeginPopupContextItem("ComponentSettings")) {
+						if (ImGui::MenuItem("Remove Component")) {
+							UndoRedoSystem::Instance().PushCommand(std::make_unique<RemoveComponentCommand>(obj.EntityId(), compName));
+							access.removeComponent(obj);
+						}
+						ImGui::EndPopup();
+					}
+				}
 
-                if (!access.hasComponent(obj)) {
-                    ImGui::PopID();
-                    continue;
-                }
+				if (!access.hasComponent(obj)) {
+					ImGui::PopID();
+					continue;
+				}
 
-                if (compName != "Transform") {
-                    if (ImGui::BeginDragDropSource()) {
-                        int sourceIdx = (int)i;
-                        ImGui::SetDragDropPayload("COMPONENT_ORDER", &sourceIdx, sizeof(int));
-                        ImGui::Text("Reorder %s", displayName.c_str());
-                        ImGui::EndDragDropSource();
-                    }
-                    if (ImGui::BeginDragDropTarget()) {
-                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("COMPONENT_ORDER")) {
-                            int sourceIdx = *(const int*)payload->Data;
-                            int targetIdx = (int)i;
-                            if (sourceIdx >= 0 && sourceIdx < inspectorComponentOrder.size() && targetIdx < inspectorComponentOrder.size()) {
-                                std::string sourceName = inspectorComponentOrder[sourceIdx];
-                                if (sourceName != "Transform") {
-                                    if (sourceIdx < targetIdx) {
-                                        inspectorComponentOrder.insert(inspectorComponentOrder.begin() + targetIdx + 1, sourceName);
-                                        inspectorComponentOrder.erase(inspectorComponentOrder.begin() + sourceIdx);
-                                    } else if (sourceIdx > targetIdx) {
-                                        inspectorComponentOrder.insert(inspectorComponentOrder.begin() + targetIdx, sourceName);
-                                        inspectorComponentOrder.erase(inspectorComponentOrder.begin() + sourceIdx + 1);
-                                    }
-                                }
-                            }
-                        }
-                        ImGui::EndDragDropTarget();
-                    }
-                }
+				if (compName != "Transform") {
+					if (ImGui::BeginDragDropSource()) {
+						int sourceIdx = (int)i;
+						ImGui::SetDragDropPayload("COMPONENT_ORDER", &sourceIdx, sizeof(int));
+						ImGui::Text("Reorder %s", displayName.c_str());
+						ImGui::EndDragDropSource();
+					}
+					if (ImGui::BeginDragDropTarget()) {
+						if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("COMPONENT_ORDER")) {
+							int sourceIdx = *(const int*)payload->Data;
+							int targetIdx = (int)i;
+							if (sourceIdx >= 0 && sourceIdx < inspectorComponentOrder.size() && targetIdx < inspectorComponentOrder.size()) {
+								std::string sourceName = inspectorComponentOrder[sourceIdx];
+								if (sourceName != "Transform") {
+									if (sourceIdx < targetIdx) {
+										inspectorComponentOrder.insert(inspectorComponentOrder.begin() + targetIdx + 1, sourceName);
+										inspectorComponentOrder.erase(inspectorComponentOrder.begin() + sourceIdx);
+									} else if (sourceIdx > targetIdx) {
+										inspectorComponentOrder.insert(inspectorComponentOrder.begin() + targetIdx, sourceName);
+										inspectorComponentOrder.erase(inspectorComponentOrder.begin() + sourceIdx + 1);
+									}
+								}
+							}
+						}
+						ImGui::EndDragDropTarget();
+					}
+				}
 
-                ImGui::SetCursorScreenPos(p);
-                ImGui::Dummy(ImVec2(2, 0)); ImGui::SameLine(); 
-                if (ImGui::ArrowButton("##arrow", isOpen ? ImGuiDir_Down : ImGuiDir_Right)) {
-                    isOpen = !isOpen;
-                    ImGui::GetStateStorage()->SetInt(ImGui::GetID("IsOpen"), isOpen);
-                }
+				ImGui::SetCursorScreenPos(p);
+				ImGui::Dummy(ImVec2(2, 0)); ImGui::SameLine(); 
+				if (ImGui::ArrowButton("##arrow", isOpen ? ImGuiDir_Down : ImGuiDir_Right)) {
+					isOpen = !isOpen;
+					ImGui::GetStateStorage()->SetInt(ImGui::GetID("IsOpen"), isOpen);
+				}
 
-                ImGui::SameLine();
-                
-                if (compName != "Transform") {
-                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
-                    if (ImGui::Checkbox("##compActive", &compActive)) {
-                        if (IsValid(activeProp)) {
-                            ReflectionVariant oldA = access.getter(obj, "active");
-                            access.setter(obj, "active", compActive);
-                            ReflectionVariant newA = access.getter(obj, "active");
-                            UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "active", oldA, newA));
-                        }
-                    }
-                    ImGui::PopStyleColor();
-                } else {
-                    ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), 0)); 
-                }
+				ImGui::SameLine();
+				
+				if (compName != "Transform") {
+					ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+					if (ImGui::Checkbox("##compActive", &compActive)) {
+						if (IsValid(activeProp)) {
+							ReflectionVariant oldA = access.getter(obj, "active");
+							access.setter(obj, "active", compActive);
+							ReflectionVariant newA = access.getter(obj, "active");
+							UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "active", oldA, newA));
+						}
+					}
+					ImGui::PopStyleColor();
+				} else {
+					ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), 0)); 
+				}
 
-                ImGui::SameLine();
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextUnformatted(displayName.c_str());
+				ImGui::SameLine();
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextUnformatted(displayName.c_str());
 
-                ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + lineHeight));
-                ImGui::Dummy(ImVec2(0,0));
+				ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + lineHeight));
+				ImGui::Dummy(ImVec2(0,0));
 
-                if (isOpen) {
-                    ImGui::Indent();
+				if (isOpen) {
+					ImGui::Indent();
 					if (compName == "LightComponent")
 					{
 						DrawLightComponentInspector(compName, obj, access);
@@ -2506,431 +2506,431 @@ void InspectorWindow::OnGui() {
 					}
 					else
 					{
-                        if (ImGui::BeginTable("PropertyTable", 2, ImGuiTableFlags_SizingStretchProp)) {
-                            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
-                            ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+						if (ImGui::BeginTable("PropertyTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+							ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+							ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
-                            for (const ReflectionProperty& prop : TerraEngine::Reflection::GetProperties(type)) {
-                                if (MetaPropertyName(prop) == "active") continue;
-                                DrawProperty(compName, prop, obj, access);
-                            }
-                            ImGui::EndTable();
-                        }
+							for (const ReflectionProperty& prop : TerraEngine::Reflection::GetProperties(type)) {
+								if (MetaPropertyName(prop) == "active") continue;
+								DrawProperty(compName, prop, obj, access);
+							}
+							ImGui::EndTable();
+						}
 					}
-                    ImGui::Unindent();
-                }
-                ImGui::Separator();
-                ImGui::PopID();
-            }
-            ImGui::Spacing();
-            DrawScriptDropTarget(obj);
-            ImGui::Spacing();
+					ImGui::Unindent();
+				}
+				ImGui::Separator();
+				ImGui::PopID();
+			}
+			ImGui::Spacing();
+			DrawScriptDropTarget(obj);
+			ImGui::Spacing();
 
-            float availWidth = ImGui::GetContentRegionAvail().x;
-            if (ImGui::Button("Add Component", ImVec2(availWidth, 0))) {
-                ImGui::OpenPopup("AddComponentPopup");
-            }
+			float availWidth = ImGui::GetContentRegionAvail().x;
+			if (ImGui::Button("Add Component", ImVec2(availWidth, 0))) {
+				ImGui::OpenPopup("AddComponentPopup");
+			}
 
-            if (ImGui::BeginPopup("AddComponentPopup")) {
-                static char searchBuf[64] = "";
-                ImGui::InputTextWithHint("##CompSearch", "Search...", searchBuf, IM_ARRAYSIZE(searchBuf));
-                
-                ImGui::Separator();
+			if (ImGui::BeginPopup("AddComponentPopup")) {
+				static char searchBuf[64] = "";
+				ImGui::InputTextWithHint("##CompSearch", "Search...", searchBuf, IM_ARRAYSIZE(searchBuf));
+				
+				ImGui::Separator();
 
-                std::vector<std::string> availableComponents;
-                for (auto& [name, access] : accessReg) {
-                    if (name != "Script" && !access.hasComponent(obj)) {
-                        availableComponents.push_back(name);
-                    }
-                }
+				std::vector<std::string> availableComponents;
+				for (auto& [name, access] : accessReg) {
+					if (name != "Script" && !access.hasComponent(obj)) {
+						availableComponents.push_back(name);
+					}
+				}
 				std::sort(availableComponents.begin(), availableComponents.end(), [](const std::string& lhs, const std::string& rhs) {
 					return BuildDisplayComponentName(lhs) < BuildDisplayComponentName(rhs);
 				});
 
-                for (const auto& compName : availableComponents) {
+				for (const auto& compName : availableComponents) {
 					const std::string displayName = BuildDisplayComponentName(compName);
-                    if (searchBuf[0] != '\0') {
-                        std::string lowerName = compName;
+					if (searchBuf[0] != '\0') {
+						std::string lowerName = compName;
 						std::string lowerDisplayName = displayName;
-                        std::string lowerFilter = searchBuf;
-                        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+						std::string lowerFilter = searchBuf;
+						std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
 						std::transform(lowerDisplayName.begin(), lowerDisplayName.end(), lowerDisplayName.begin(), ::tolower);
-                        std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
+						std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
 						if (lowerName.find(lowerFilter) == std::string::npos
 							&& lowerDisplayName.find(lowerFilter) == std::string::npos) continue;
-                    }
+					}
 
 					ImGui::PushID(compName.c_str());
-                    if (ImGui::Selectable(displayName.c_str())) {
-                        UndoRedoSystem::Instance().PushCommand(std::make_unique<AddComponentCommand>(obj.EntityId(), compName));
-                        accessReg[compName].addComponent(obj);
-                        ImGui::CloseCurrentPopup();
-                    }
+					if (ImGui::Selectable(displayName.c_str())) {
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<AddComponentCommand>(obj.EntityId(), compName));
+						accessReg[compName].addComponent(obj);
+						ImGui::CloseCurrentPopup();
+					}
 					ImGui::PopID();
-                }
-                ImGui::EndPopup();
-            }
+				}
+				ImGui::EndPopup();
+			}
 
-        } else {
-            m_Owner->SetSelectedEntity(std::nullopt);
-        }
-    }
+		} else {
+			m_Owner->SetSelectedEntity(std::nullopt);
+		}
+	}
 }
 
 void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
-    if (m_LastInspectedAsset != path) {
-        m_LastInspectedAsset = path;
-        std::ifstream in(path, std::ios::binary | std::ios::ate);
-        if (in.is_open()) {
-            std::streamsize size = in.tellg();
-            in.seekg(0, std::ios::beg);
-            m_MaterialDataBuffer.resize(size);
-            if (!in.read((char*)m_MaterialDataBuffer.data(), size)) {
-                m_MaterialDataBuffer.clear();
-            }
-        }
-    }
+	if (m_LastInspectedAsset != path) {
+		m_LastInspectedAsset = path;
+		std::ifstream in(path, std::ios::binary | std::ios::ate);
+		if (in.is_open()) {
+			std::streamsize size = in.tellg();
+			in.seekg(0, std::ios::beg);
+			m_MaterialDataBuffer.resize(size);
+			if (!in.read((char*)m_MaterialDataBuffer.data(), size)) {
+				m_MaterialDataBuffer.clear();
+			}
+		}
+	}
 
-    if (m_MaterialDataBuffer.size() < sizeof(MaterialHeader)) {
-        ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid material file!");
-        return;
-    }
+	if (m_MaterialDataBuffer.size() < sizeof(MaterialHeader)) {
+		ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid material file!");
+		return;
+	}
 
-    MaterialHeader* header = (MaterialHeader*)m_MaterialDataBuffer.data();
-    bool changed = false;
+	MaterialHeader* header = (MaterialHeader*)m_MaterialDataBuffer.data();
+	bool changed = false;
 
-    ImGui::Text("Material: %s", path.filename().string().c_str());
-    ImGui::Separator();
+	ImGui::Text("Material: %s", path.filename().string().c_str());
+	ImGui::Separator();
 
-    if (ImGui::BeginTable("MaterialSettings", 2, ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
-        ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+	if (ImGui::BeginTable("MaterialSettings", 2, ImGuiTableFlags_SizingStretchProp)) {
+		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+		ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
-        auto drawLabeledWidget = [&](const char* label, auto widgetFunc) {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(label);
-            ImGui::TableSetColumnIndex(1);
-            ImGui::SetNextItemWidth(-1.0f);
-            widgetFunc();
-        };
+		auto drawLabeledWidget = [&](const char* label, auto widgetFunc) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::SetNextItemWidth(-1.0f);
+			widgetFunc();
+		};
 
-        // Shading Model
-        const char* shadingModels[] = { "Unlit", "MetallicRoughness", "SpecularGlossiness" };
-        int shadingModelIdx = (int)header->shadingModel;
-        drawLabeledWidget("Shading Model", [&]() {
-            if (ImGui::Combo("##ShadingModel", &shadingModelIdx, shadingModels, IM_ARRAYSIZE(shadingModels))) {
-                header->shadingModel = (uint32_t)shadingModelIdx;
-                changed = true;
-            }
-        });
+		// Shading Model
+		const char* shadingModels[] = { "Unlit", "MetallicRoughness", "SpecularGlossiness" };
+		int shadingModelIdx = (int)header->shadingModel;
+		drawLabeledWidget("Shading Model", [&]() {
+			if (ImGui::Combo("##ShadingModel", &shadingModelIdx, shadingModels, IM_ARRAYSIZE(shadingModels))) {
+				header->shadingModel = (uint32_t)shadingModelIdx;
+				changed = true;
+			}
+		});
 
-        // Alpha Mode
-        const char* alphaModes[] = { "Opaque", "Mask", "Blend" };
-        int alphaModeIdx = (int)header->alphaMode;
-        drawLabeledWidget("Alpha Mode", [&]() {
-            if (ImGui::Combo("##AlphaMode", &alphaModeIdx, alphaModes, IM_ARRAYSIZE(alphaModes))) {
-                header->alphaMode = (uint32_t)alphaModeIdx;
-                changed = true;
-            }
-        });
+		// Alpha Mode
+		const char* alphaModes[] = { "Opaque", "Mask", "Blend" };
+		int alphaModeIdx = (int)header->alphaMode;
+		drawLabeledWidget("Alpha Mode", [&]() {
+			if (ImGui::Combo("##AlphaMode", &alphaModeIdx, alphaModes, IM_ARRAYSIZE(alphaModes))) {
+				header->alphaMode = (uint32_t)alphaModeIdx;
+				changed = true;
+			}
+		});
 
-        if (header->alphaMode == (uint32_t)AlphaMode::Mask) {
-            drawLabeledWidget("Alpha Cutoff", [&]() {
-                if (ImGui::DragFloat("##AlphaCutoff", &header->alphaCutoff, 0.01f, 0.0f, 1.0f)) changed = true;
-            });
-        }
+		if (header->alphaMode == (uint32_t)AlphaMode::Mask) {
+			drawLabeledWidget("Alpha Cutoff", [&]() {
+				if (ImGui::DragFloat("##AlphaCutoff", &header->alphaCutoff, 0.01f, 0.0f, 1.0f)) changed = true;
+			});
+		}
 
-        // Shader Collection
-        {
-            TerraEngine::UUID currentShaderId = header->shaderCollectionId;
-            std::string shaderName = "None";
-            bool shaderExists = false;
-            if (currentShaderId != TerraEngine::EMPTY_UUID) {
-                for (const auto& [path, meta] : AssetDatabase::Instance().GetAssets()) {
-                    if (meta.guid == currentShaderId) {
-                        shaderName = path.filename().string();
-                        shaderExists = true;
-                        break;
-                    }
-                }
-                if (shaderName == "None" && currentShaderId == ResourceManager::Instance().GetDefaultShaderCollectionID()) {
-                    shaderName = "Default Shader";
-                    shaderExists = true;
-                }
+		// Shader Collection
+		{
+			TerraEngine::UUID currentShaderId = header->shaderCollectionId;
+			std::string shaderName = "None";
+			bool shaderExists = false;
+			if (currentShaderId != TerraEngine::EMPTY_UUID) {
+				for (const auto& [path, meta] : AssetDatabase::Instance().GetAssets()) {
+					if (meta.guid == currentShaderId) {
+						shaderName = path.filename().string();
+						shaderExists = true;
+						break;
+					}
+				}
+				if (shaderName == "None" && currentShaderId == ResourceManager::Instance().GetDefaultShaderCollectionID()) {
+					shaderName = "Default Shader";
+					shaderExists = true;
+				}
 
-                if (!shaderExists) {
-                    shaderName = "(Missing)";
-                }
-            }
+				if (!shaderExists) {
+					shaderName = "(Missing)";
+				}
+			}
 
-            drawLabeledWidget("Shader", [&]() {
-                char buf[128];
-                strncpy(buf, shaderName.c_str(), sizeof(buf));
-                if (currentShaderId != TerraEngine::EMPTY_UUID && !shaderExists) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0, 0, 1));
-                ImGui::InputText("##shader", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
-                if (currentShaderId != TerraEngine::EMPTY_UUID && !shaderExists) ImGui::PopStyleColor();
+			drawLabeledWidget("Shader", [&]() {
+				char buf[128];
+				strncpy(buf, shaderName.c_str(), sizeof(buf));
+				if (currentShaderId != TerraEngine::EMPTY_UUID && !shaderExists) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0, 0, 1));
+				ImGui::InputText("##shader", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
+				if (currentShaderId != TerraEngine::EMPTY_UUID && !shaderExists) ImGui::PopStyleColor();
 
-                if (ImGui::BeginDragDropTarget()) {
-                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_SHADER")) {
-                        header->shaderCollectionId = *(const TerraEngine::UUID*)payload->Data;
-                        changed = true;
-                    }
-                    ImGui::EndDragDropTarget();
-                }
-                if (ImGui::BeginPopupContextItem("shader_context")) {
-                    if (ImGui::MenuItem("Set Default")) {
-                        header->shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
-                        changed = true;
-                    }
-                    if (ImGui::MenuItem("Clear")) {
-                        header->shaderCollectionId = TerraEngine::EMPTY_UUID;
-                        changed = true;
-                    }
-                    ImGui::EndPopup();
-                }
-            });
-        }
+				if (ImGui::BeginDragDropTarget()) {
+					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_SHADER")) {
+						header->shaderCollectionId = *(const TerraEngine::UUID*)payload->Data;
+						changed = true;
+					}
+					ImGui::EndDragDropTarget();
+				}
+				if (ImGui::BeginPopupContextItem("shader_context")) {
+					if (ImGui::MenuItem("Set Default")) {
+						header->shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
+						changed = true;
+					}
+					if (ImGui::MenuItem("Clear")) {
+						header->shaderCollectionId = TerraEngine::EMPTY_UUID;
+						changed = true;
+					}
+					ImGui::EndPopup();
+				}
+			});
+		}
 
-        drawLabeledWidget("Base Color", [&]() {
-            if (ImGui::ColorEdit4("##BaseColor", header->baseColorFactor)) changed = true;
-        });
+		drawLabeledWidget("Base Color", [&]() {
+			if (ImGui::ColorEdit4("##BaseColor", header->baseColorFactor)) changed = true;
+		});
 
-        drawLabeledWidget("Metallic", [&]() {
-            if (ImGui::DragFloat("##Metallic", &header->metallicFactor, 0.01f, 0.0f, 1.0f)) changed = true;
-        });
+		drawLabeledWidget("Metallic", [&]() {
+			if (ImGui::DragFloat("##Metallic", &header->metallicFactor, 0.01f, 0.0f, 1.0f)) changed = true;
+		});
 
-        drawLabeledWidget("Roughness", [&]() {
-            if (ImGui::DragFloat("##Roughness", &header->roughnessFactor, 0.01f, 0.0f, 1.0f)) changed = true;
-        });
-        
-        drawLabeledWidget("Emissive", [&]() {
-            if (ImGui::ColorEdit3("##Emissive", header->emissiveFactor)) changed = true;
-        });
-        
-        drawLabeledWidget("Normal Scale", [&]() {
-            if (ImGui::DragFloat("##NormalScale", &header->normalScale, 0.01f)) changed = true;
-        });
+		drawLabeledWidget("Roughness", [&]() {
+			if (ImGui::DragFloat("##Roughness", &header->roughnessFactor, 0.01f, 0.0f, 1.0f)) changed = true;
+		});
+		
+		drawLabeledWidget("Emissive", [&]() {
+			if (ImGui::ColorEdit3("##Emissive", header->emissiveFactor)) changed = true;
+		});
+		
+		drawLabeledWidget("Normal Scale", [&]() {
+			if (ImGui::DragFloat("##NormalScale", &header->normalScale, 0.01f)) changed = true;
+		});
 
-        drawLabeledWidget("Occlusion", [&]() {
-            if (ImGui::DragFloat("##Occlusion", &header->occlusionStrength, 0.01f, 0.0f, 1.0f)) changed = true;
-        });
+		drawLabeledWidget("Occlusion", [&]() {
+			if (ImGui::DragFloat("##Occlusion", &header->occlusionStrength, 0.01f, 0.0f, 1.0f)) changed = true;
+		});
 
-        ImGui::EndTable();
-    }
+		ImGui::EndTable();
+	}
 
-    ImGui::Separator();
-    ImGui::Text("Textures");
+	ImGui::Separator();
+	ImGui::Text("Textures");
 
-    auto drawTextureSlot = [&](const char* label, TextureSemantic semantic) {
-        TextureBinding* targetBinding = nullptr;
-        TextureBinding* allBindings = (TextureBinding*)(m_MaterialDataBuffer.data() + header->textureArrayOffset);
-        
-        for (uint32_t i = 0; i < header->textureCount; ++i) {
-            if (allBindings[i].semantic == semantic) {
-                targetBinding = &allBindings[i];
-                break;
-            }
-        }
+	auto drawTextureSlot = [&](const char* label, TextureSemantic semantic) {
+		TextureBinding* targetBinding = nullptr;
+		TextureBinding* allBindings = (TextureBinding*)(m_MaterialDataBuffer.data() + header->textureArrayOffset);
+		
+		for (uint32_t i = 0; i < header->textureCount; ++i) {
+			if (allBindings[i].semantic == semantic) {
+				targetBinding = &allBindings[i];
+				break;
+			}
+		}
 
-        TerraEngine::UUID currentId = targetBinding ? targetBinding->textureUuid : TerraEngine::EMPTY_UUID;
-        std::string assetName = "None";
-        bool assetExists = false;
-        if (currentId != TerraEngine::EMPTY_UUID) {
-            for (const auto& [path, meta] : AssetDatabase::Instance().GetAssets()) {
-                if (meta.guid == currentId) {
-                    assetName = path.filename().string();
-                    assetExists = true;
-                    break;
-                }
-            }
-            if (!assetExists) {
-                assetName = "(Missing)";
-            }
-        }
+		TerraEngine::UUID currentId = targetBinding ? targetBinding->textureUuid : TerraEngine::EMPTY_UUID;
+		std::string assetName = "None";
+		bool assetExists = false;
+		if (currentId != TerraEngine::EMPTY_UUID) {
+			for (const auto& [path, meta] : AssetDatabase::Instance().GetAssets()) {
+				if (meta.guid == currentId) {
+					assetName = path.filename().string();
+					assetExists = true;
+					break;
+				}
+			}
+			if (!assetExists) {
+				assetName = "(Missing)";
+			}
+		}
 
-        ImGui::PushID(label);
-        
-        if (ImGui::BeginTable("TextureSlotTable", 2, ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
-            ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::PushID(label);
+		
+		if (ImGui::BeginTable("TextureSlotTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+			ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+			ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(label);
-            ImGui::TableSetColumnIndex(1);
-            ImGui::SetNextItemWidth(-1.0f);
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::SetNextItemWidth(-1.0f);
 
-            char buf[128];
-            strncpy(buf, assetName.c_str(), sizeof(buf));
-            if (currentId != TerraEngine::EMPTY_UUID && !assetExists) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0, 0, 1));
-            ImGui::InputText("##tex", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
-            if (currentId != TerraEngine::EMPTY_UUID && !assetExists) ImGui::PopStyleColor();
+			char buf[128];
+			strncpy(buf, assetName.c_str(), sizeof(buf));
+			if (currentId != TerraEngine::EMPTY_UUID && !assetExists) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0, 0, 1));
+			ImGui::InputText("##tex", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
+			if (currentId != TerraEngine::EMPTY_UUID && !assetExists) ImGui::PopStyleColor();
 
-            if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_TEXTURE")) {
-                    TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
-                    
-                    if (!targetBinding) {
-                        // Add new binding
-                        size_t insertPos = header->textureArrayOffset + (header->textureCount * sizeof(TextureBinding));
-                        m_MaterialDataBuffer.insert(m_MaterialDataBuffer.begin() + insertPos, sizeof(TextureBinding), 0);
-                        
-                        // CRITICAL: Re-acquire ALL pointers after resize as buffer may have moved
-                        header = (MaterialHeader*)m_MaterialDataBuffer.data();
-                        targetBinding = (TextureBinding*)(m_MaterialDataBuffer.data() + insertPos);
-                        
-                        targetBinding->semantic = semantic;
-                        targetBinding->samplerFilter = SamplerFilter::Bilinear;
-                        targetBinding->addressU = SamplerAddressMode::Repeat;
-                        targetBinding->addressV = SamplerAddressMode::Repeat;
-                        targetBinding->addressW = SamplerAddressMode::Repeat;
-                        targetBinding->uvScale[0] = 1.0f; targetBinding->uvScale[1] = 1.0f;
-                        
-                        header->textureCount++;
-                        header->floatParameterOffset += sizeof(TextureBinding);
-                    }
-                    
-                    targetBinding->textureUuid = newId;
-                    changed = true;
-                }
-                ImGui::EndDragDropTarget();
-            }
+			if (ImGui::BeginDragDropTarget()) {
+				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_TEXTURE")) {
+					TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
+					
+					if (!targetBinding) {
+						// Add new binding
+						size_t insertPos = header->textureArrayOffset + (header->textureCount * sizeof(TextureBinding));
+						m_MaterialDataBuffer.insert(m_MaterialDataBuffer.begin() + insertPos, sizeof(TextureBinding), 0);
+						
+						// CRITICAL: Re-acquire ALL pointers after resize as buffer may have moved
+						header = (MaterialHeader*)m_MaterialDataBuffer.data();
+						targetBinding = (TextureBinding*)(m_MaterialDataBuffer.data() + insertPos);
+						
+						targetBinding->semantic = semantic;
+						targetBinding->samplerFilter = SamplerFilter::Bilinear;
+						targetBinding->addressU = SamplerAddressMode::Repeat;
+						targetBinding->addressV = SamplerAddressMode::Repeat;
+						targetBinding->addressW = SamplerAddressMode::Repeat;
+						targetBinding->uvScale[0] = 1.0f; targetBinding->uvScale[1] = 1.0f;
+						
+						header->textureCount++;
+						header->floatParameterOffset += sizeof(TextureBinding);
+					}
+					
+					targetBinding->textureUuid = newId;
+					changed = true;
+				}
+				ImGui::EndDragDropTarget();
+			}
 
-            if (targetBinding && ImGui::BeginPopupContextItem()) {
-                if (ImGui::MenuItem("Clear")) {
-                    TextureBinding* allBindings = (TextureBinding*)(m_MaterialDataBuffer.data() + header->textureArrayOffset);
-                    int index = -1;
-                    for (uint32_t i = 0; i < header->textureCount; ++i) {
-                        if (&allBindings[i] == targetBinding) {
-                            index = i;
-                            break;
-                        }
-                    }
+			if (targetBinding && ImGui::BeginPopupContextItem()) {
+				if (ImGui::MenuItem("Clear")) {
+					TextureBinding* allBindings = (TextureBinding*)(m_MaterialDataBuffer.data() + header->textureArrayOffset);
+					int index = -1;
+					for (uint32_t i = 0; i < header->textureCount; ++i) {
+						if (&allBindings[i] == targetBinding) {
+							index = i;
+							break;
+						}
+					}
 
-                    if (index != -1) {
-                        size_t bindingOffset = header->textureArrayOffset + (index * sizeof(TextureBinding));
-                        m_MaterialDataBuffer.erase(m_MaterialDataBuffer.begin() + bindingOffset, m_MaterialDataBuffer.begin() + bindingOffset + sizeof(TextureBinding));
+					if (index != -1) {
+						size_t bindingOffset = header->textureArrayOffset + (index * sizeof(TextureBinding));
+						m_MaterialDataBuffer.erase(m_MaterialDataBuffer.begin() + bindingOffset, m_MaterialDataBuffer.begin() + bindingOffset + sizeof(TextureBinding));
 
-                        // Re-acquire header after modification
-                        header = (MaterialHeader*)m_MaterialDataBuffer.data();
-                        header->textureCount--;
-                        header->floatParameterOffset -= sizeof(TextureBinding);
-                        changed = true;
+						// Re-acquire header after modification
+						header = (MaterialHeader*)m_MaterialDataBuffer.data();
+						header->textureCount--;
+						header->floatParameterOffset -= sizeof(TextureBinding);
+						changed = true;
 
-                        targetBinding = nullptr;
-                    }
-                }
-                ImGui::EndPopup();
-            }
+						targetBinding = nullptr;
+					}
+				}
+				ImGui::EndPopup();
+			}
 
-            if (targetBinding && assetExists) {
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(1); // Indent within the second column
-                
-                ImGui::SetNextItemWidth(-1.0f);
-                if (ImGui::DragFloat2("##UVScale", targetBinding->uvScale, 0.01f)) changed = true;
-                ImGui::SameLine(); ImGui::Text("UV Scale");
+			if (targetBinding && assetExists) {
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(1); // Indent within the second column
+				
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::DragFloat2("##UVScale", targetBinding->uvScale, 0.01f)) changed = true;
+				ImGui::SameLine(); ImGui::Text("UV Scale");
 
-                ImGui::SetNextItemWidth(-1.0f);
-                if (ImGui::DragFloat2("##UVOffset", targetBinding->uvOffset, 0.01f)) changed = true;
-                ImGui::SameLine(); ImGui::Text("UV Offset");
-                
-                const char* filters[] = { "Nearest", "Bilinear", "Trilinear", "Anisotropic" };
-                int filterIdx = (int)targetBinding->samplerFilter;
-                ImGui::SetNextItemWidth(-1.0f);
-                if (ImGui::Combo("##Filter", &filterIdx, filters, IM_ARRAYSIZE(filters))) {
-                    targetBinding->samplerFilter = (SamplerFilter)filterIdx;
-                    changed = true;
-                }
-            }
-            ImGui::EndTable();
-        }
-        ImGui::PopID();
-    };
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::DragFloat2("##UVOffset", targetBinding->uvOffset, 0.01f)) changed = true;
+				ImGui::SameLine(); ImGui::Text("UV Offset");
+				
+				const char* filters[] = { "Nearest", "Bilinear", "Trilinear", "Anisotropic" };
+				int filterIdx = (int)targetBinding->samplerFilter;
+				ImGui::SetNextItemWidth(-1.0f);
+				if (ImGui::Combo("##Filter", &filterIdx, filters, IM_ARRAYSIZE(filters))) {
+					targetBinding->samplerFilter = (SamplerFilter)filterIdx;
+					changed = true;
+				}
+			}
+			ImGui::EndTable();
+		}
+		ImGui::PopID();
+	};
 
-    drawTextureSlot("Base Map", TextureSemantic::Base);
-    drawTextureSlot("Normal Map", TextureSemantic::Normal);
-    drawTextureSlot("Metallic Roughness", TextureSemantic::MetallicRoughness);
-    drawTextureSlot("Occlusion", TextureSemantic::Occlusion);
-    drawTextureSlot("Emissive", TextureSemantic::Emissive);
+	drawTextureSlot("Base Map", TextureSemantic::Base);
+	drawTextureSlot("Normal Map", TextureSemantic::Normal);
+	drawTextureSlot("Metallic Roughness", TextureSemantic::MetallicRoughness);
+	drawTextureSlot("Occlusion", TextureSemantic::Occlusion);
+	drawTextureSlot("Emissive", TextureSemantic::Emissive);
 
-    ImGui::Separator();
-    
-    // Material Flags
-    if (ImGui::BeginTable("MaterialFlags", 2, ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
-        ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
+	ImGui::Separator();
+	
+	// Material Flags
+	if (ImGui::BeginTable("MaterialFlags", 2, ImGuiTableFlags_SizingStretchProp)) {
+		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+		ImGui::TableSetupColumn("Widget", ImGuiTableColumnFlags_WidthStretch);
 
-        auto drawLabeledCheckbox = [&](const char* label, bool& value, auto onValueChange) {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(label);
-            ImGui::TableSetColumnIndex(1);
-            if (ImGui::Checkbox(("##" + std::string(label)).c_str(), &value)) {
-                onValueChange(value);
-                changed = true;
-            }
-        };
+		auto drawLabeledCheckbox = [&](const char* label, bool& value, auto onValueChange) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			if (ImGui::Checkbox(("##" + std::string(label)).c_str(), &value)) {
+				onValueChange(value);
+				changed = true;
+			}
+		};
 
-        bool doubleSided = (header->flags & DoubleSided) != 0;
-        drawLabeledCheckbox("Double Sided", doubleSided, [&](bool val) {
-            if (val) header->flags |= DoubleSided;
-            else header->flags &= ~DoubleSided;
-        });
+		bool doubleSided = (header->flags & DoubleSided) != 0;
+		drawLabeledCheckbox("Double Sided", doubleSided, [&](bool val) {
+			if (val) header->flags |= DoubleSided;
+			else header->flags &= ~DoubleSided;
+		});
 
-        bool useVertexColor = (header->flags & UseVertexColor) != 0;
-        drawLabeledCheckbox("Use Vertex Color", useVertexColor, [&](bool val) {
-            if (val) header->flags |= UseVertexColor;
-            else header->flags &= ~UseVertexColor;
-        });
+		bool useVertexColor = (header->flags & UseVertexColor) != 0;
+		drawLabeledCheckbox("Use Vertex Color", useVertexColor, [&](bool val) {
+			if (val) header->flags |= UseVertexColor;
+			else header->flags &= ~UseVertexColor;
+		});
 
-        bool receivesShadows = (header->flags & ReceivesShadows) != 0;
-        drawLabeledCheckbox("Receives Shadows", receivesShadows, [&](bool val) {
-            if (val) header->flags |= ReceivesShadows;
-            else header->flags &= ~ReceivesShadows;
-        });
+		bool receivesShadows = (header->flags & ReceivesShadows) != 0;
+		drawLabeledCheckbox("Receives Shadows", receivesShadows, [&](bool val) {
+			if (val) header->flags |= ReceivesShadows;
+			else header->flags &= ~ReceivesShadows;
+		});
 
-        ImGui::EndTable();
-    }
+		ImGui::EndTable();
+	}
 
-    if (changed) {
-        std::ofstream outFile(path, std::ios::binary);
-        if (outFile.is_open()) {
-            outFile.write(reinterpret_cast<const char*>(m_MaterialDataBuffer.data()), static_cast<std::streamsize>(m_MaterialDataBuffer.size()));
-            outFile.close();
+	if (changed) {
+		std::ofstream outFile(path, std::ios::binary);
+		if (outFile.is_open()) {
+			outFile.write(reinterpret_cast<const char*>(m_MaterialDataBuffer.data()), static_cast<std::streamsize>(m_MaterialDataBuffer.size()));
+			outFile.close();
 
-            // Notify ResourceManager to reload this material from disk
-            auto& assets = AssetDatabase::Instance().GetAssets();
-            auto it = assets.find(std::filesystem::absolute(path));
-            if (it != assets.end()) {
-                ResourceManager::Instance().ReloadMaterial(it->second.guid);
-            }
-        }
-    }
+			// Notify ResourceManager to reload this material from disk
+			auto& assets = AssetDatabase::Instance().GetAssets();
+			auto it = assets.find(std::filesystem::absolute(path));
+			if (it != assets.end()) {
+				ResourceManager::Instance().ReloadMaterial(it->second.guid);
+			}
+		}
+	}
 }
 
 void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
-    ImGui::Text("Mesh Asset: %s", path.filename().string().c_str());
-    ImGui::Separator();
+	ImGui::Text("Mesh Asset: %s", path.filename().string().c_str());
+	ImGui::Separator();
 
-    auto& assets = AssetDatabase::Instance().GetAssets();
-    auto it = assets.find(std::filesystem::absolute(path));
-    if (it == assets.end()) {
-        ImGui::TextColored(ImVec4(1, 1, 0, 1), "Asset not found in database.");
-        return;
-    }
+	auto& assets = AssetDatabase::Instance().GetAssets();
+	auto it = assets.find(std::filesystem::absolute(path));
+	if (it == assets.end()) {
+		ImGui::TextColored(ImVec4(1, 1, 0, 1), "Asset not found in database.");
+		return;
+	}
 
-    const AssetMetadata& meta = it->second;
-    std::filesystem::path fullCompiledPath = AssetDatabase::Instance().GetBuildRoot() / meta.compiledPath;
+	const AssetMetadata& meta = it->second;
+	std::filesystem::path fullCompiledPath = AssetDatabase::Instance().GetBuildRoot() / meta.compiledPath;
 
-    if (meta.compiledPath.empty() || !std::filesystem::exists(fullCompiledPath)) {
-        ImGui::TextColored(ImVec4(1, 1, 0, 1), "Compiled mesh file (.temf) not found.");
-        return;
-    }
+	if (meta.compiledPath.empty() || !std::filesystem::exists(fullCompiledPath)) {
+		ImGui::TextColored(ImVec4(1, 1, 0, 1), "Compiled mesh file (.temf) not found.");
+		return;
+	}
 
 	MeshHeader header{};
 	std::ifstream in(fullCompiledPath, std::ios::binary);
@@ -2949,169 +2949,169 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 		ImGui::TextWrapped("This build accepts only direct-replacement TEMF version %u. Recompile all mesh assets.", (uint32_t)kMeshCurrentVersion);
 	}
 
-    auto drawInfoRow = [](const char* label, const char* value) {
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
-        ImGui::TextUnformatted(label);
-        ImGui::TableSetColumnIndex(1);
-        ImGui::TextUnformatted(value);
-    };
+	auto drawInfoRow = [](const char* label, const char* value) {
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::TextUnformatted(label);
+		ImGui::TableSetColumnIndex(1);
+		ImGui::TextUnformatted(value);
+	};
 
-    auto drawInfoRowU32 = [&](const char* label, uint32_t value) {
-        drawInfoRow(label, std::to_string(value).c_str());
-    };
+	auto drawInfoRowU32 = [&](const char* label, uint32_t value) {
+		drawInfoRow(label, std::to_string(value).c_str());
+	};
 
 	ImGui::Text("Compiled Info (.temf - meshlet only)");
-    if (ImGui::BeginTable("MeshInfoTable", 2, ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
-        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+	if (ImGui::BeginTable("MeshInfoTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
+		ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
 
-        drawInfoRowU32("Version", (uint32_t)header.version);
-        drawInfoRowU32("Meshlet Vertices", header.meshletVertexCount);
-        drawInfoRowU32("Meshlet Vertex Remap Entries", header.meshletVertexRemapCount);
-        
-        const char* remapEncodingLabel = "invalid";
-        if (static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding) == MeshletRemapEncoding::Uint16) remapEncodingLabel = "u16";
-        else if (static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding) == MeshletRemapEncoding::Uint32) remapEncodingLabel = "u32";
-        drawInfoRow("Remap Encoding", remapEncodingLabel);
+		drawInfoRowU32("Version", (uint32_t)header.version);
+		drawInfoRowU32("Meshlet Vertices", header.meshletVertexCount);
+		drawInfoRowU32("Meshlet Vertex Remap Entries", header.meshletVertexRemapCount);
+		
+		const char* remapEncodingLabel = "invalid";
+		if (static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding) == MeshletRemapEncoding::Uint16) remapEncodingLabel = "u16";
+		else if (static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding) == MeshletRemapEncoding::Uint32) remapEncodingLabel = "u32";
+		drawInfoRow("Remap Encoding", remapEncodingLabel);
 
-        drawInfoRowU32("Meshlet Primitive Indices", header.meshletPrimitiveIndexCount);
-        drawInfoRowU32("Meshlets", header.meshletCount);
-        drawInfoRowU32("Meshlet Sections", header.meshletSectionCount);
-        drawInfoRowU32("Meshlet Bounds", header.meshletBoundsCount);
-        
-        char flagsBuf[16];
-        snprintf(flagsBuf, sizeof(flagsBuf), "0x%08X", header.meshletFlags);
-        drawInfoRow("Meshlet Flags", flagsBuf);
+		drawInfoRowU32("Meshlet Primitive Indices", header.meshletPrimitiveIndexCount);
+		drawInfoRowU32("Meshlets", header.meshletCount);
+		drawInfoRowU32("Meshlet Sections", header.meshletSectionCount);
+		drawInfoRowU32("Meshlet Bounds", header.meshletBoundsCount);
+		
+		char flagsBuf[16];
+		snprintf(flagsBuf, sizeof(flagsBuf), "0x%08X", header.meshletFlags);
+		drawInfoRow("Meshlet Flags", flagsBuf);
 
-        ImGui::EndTable();
-    }
+		ImGui::EndTable();
+	}
 
 	ImGui::Spacing();
 	if (ImGui::CollapsingHeader("Meshlet Payload", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (ImGui::BeginTable("MeshPayloadTable", 2, ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
-            ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+		if (ImGui::BeginTable("MeshPayloadTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+			ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
+			ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
 
-            drawInfoRowU32("Header Size", header.headerSize);
-            drawInfoRowU32("Vertex Payload Offset", header.meshletVertexDataOffset);
-            drawInfoRowU32("Vertex Remap Payload Offset", header.meshletVertexRemapDataOffset);
-            drawInfoRowU32("Primitive Index Payload Offset", header.meshletPrimitiveIndexDataOffset);
-            drawInfoRowU32("Meshlet Table Offset", header.meshletTableOffset);
-            drawInfoRowU32("Meshlet Section Offset", header.meshletSectionOffset);
-            drawInfoRowU32("Meshlet Bounds Offset", header.meshletBoundsOffset);
+			drawInfoRowU32("Header Size", header.headerSize);
+			drawInfoRowU32("Vertex Payload Offset", header.meshletVertexDataOffset);
+			drawInfoRowU32("Vertex Remap Payload Offset", header.meshletVertexRemapDataOffset);
+			drawInfoRowU32("Primitive Index Payload Offset", header.meshletPrimitiveIndexDataOffset);
+			drawInfoRowU32("Meshlet Table Offset", header.meshletTableOffset);
+			drawInfoRowU32("Meshlet Section Offset", header.meshletSectionOffset);
+			drawInfoRowU32("Meshlet Bounds Offset", header.meshletBoundsOffset);
 
-            ImGui::EndTable();
-        }
+			ImGui::EndTable();
+		}
 	}
 
 	if (ImGui::CollapsingHeader("Bounds & Quantization", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (ImGui::BeginTable("MeshQuantTable", 2, ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
-            ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+		if (ImGui::BeginTable("MeshQuantTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+			ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
+			ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
 
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%.3f, %.3f, %.3f", header.quantization.positionOffset[0], header.quantization.positionOffset[1], header.quantization.positionOffset[2]);
-            drawInfoRow("Center", buf);
-            snprintf(buf, sizeof(buf), "%.3f, %.3f, %.3f", header.quantization.positionScale[0], header.quantization.positionScale[1], header.quantization.positionScale[2]);
-            drawInfoRow("Extent", buf);
-            snprintf(buf, sizeof(buf), "%.3f, %.3f", header.quantization.uvOffset[0], header.quantization.uvOffset[1]);
-            drawInfoRow("UV Min", buf);
-            snprintf(buf, sizeof(buf), "%.3f, %.3f", header.quantization.uvScale[0], header.quantization.uvScale[1]);
-            drawInfoRow("UV Scale", buf);
+			char buf[64];
+			snprintf(buf, sizeof(buf), "%.3f, %.3f, %.3f", header.quantization.positionOffset[0], header.quantization.positionOffset[1], header.quantization.positionOffset[2]);
+			drawInfoRow("Center", buf);
+			snprintf(buf, sizeof(buf), "%.3f, %.3f, %.3f", header.quantization.positionScale[0], header.quantization.positionScale[1], header.quantization.positionScale[2]);
+			drawInfoRow("Extent", buf);
+			snprintf(buf, sizeof(buf), "%.3f, %.3f", header.quantization.uvOffset[0], header.quantization.uvOffset[1]);
+			drawInfoRow("UV Min", buf);
+			snprintf(buf, sizeof(buf), "%.3f, %.3f", header.quantization.uvScale[0], header.quantization.uvScale[1]);
+			drawInfoRow("UV Scale", buf);
 
-            ImGui::EndTable();
-        }
+			ImGui::EndTable();
+		}
 	}
 }
 
 void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
-    ImGui::Text("Texture Asset: %s", path.filename().string().c_str());
-    ImGui::Separator();
+	ImGui::Text("Texture Asset: %s", path.filename().string().c_str());
+	ImGui::Separator();
 
-    auto& assets = AssetDatabase::Instance().GetAssets();
-    auto it = assets.find(std::filesystem::absolute(path));
-    if (it == assets.end()) {
-        ImGui::TextColored(ImVec4(1, 1, 0, 1), "Asset not found in database.");
-        return;
-    }
+	auto& assets = AssetDatabase::Instance().GetAssets();
+	auto it = assets.find(std::filesystem::absolute(path));
+	if (it == assets.end()) {
+		ImGui::TextColored(ImVec4(1, 1, 0, 1), "Asset not found in database.");
+		return;
+	}
 
-    if (AssetDatabase::Instance().IsAssetCompiling(std::filesystem::absolute(path))) {
-        ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.6f, 0.8f, 1.0f));
-        // Use a negative fraction animated by time to show an indeterminate progress bar
-        ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(), ImVec2(-1, 0), "Compiling...");
-        ImGui::PopStyleColor();
-        return;
-    }
+	if (AssetDatabase::Instance().IsAssetCompiling(std::filesystem::absolute(path))) {
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.6f, 0.8f, 1.0f));
+		// Use a negative fraction animated by time to show an indeterminate progress bar
+		ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(), ImVec2(-1, 0), "Compiling...");
+		ImGui::PopStyleColor();
+		return;
+	}
 
-    const AssetMetadata& meta = it->second;
-    std::filesystem::path fullCompiledPath = AssetDatabase::Instance().GetBuildRoot() / meta.compiledPath;
+	const AssetMetadata& meta = it->second;
+	std::filesystem::path fullCompiledPath = AssetDatabase::Instance().GetBuildRoot() / meta.compiledPath;
 
-    if (meta.compiledPath.empty() || !std::filesystem::exists(fullCompiledPath)) {
-        ImGui::TextColored(ImVec4(1, 1, 0, 1), "Compiled texture file (.tetf) not found.");
-        return;
-    }
+	if (meta.compiledPath.empty() || !std::filesystem::exists(fullCompiledPath)) {
+		ImGui::TextColored(ImVec4(1, 1, 0, 1), "Compiled texture file (.tetf) not found.");
+		return;
+	}
 
-    TETFHeader header{};
-    TETFDesc desc{};
-    std::ifstream in(fullCompiledPath, std::ios::binary);
-    if (in.is_open()) {
-        in.read((char*)&header, sizeof(TETFHeader));
-        if (header.magic == kMagic) {
-            std::vector<TETFChunkEntry> chunks(header.chunkCount);
-            in.seekg(header.tocOffset, std::ios::beg);
-            in.read((char*)chunks.data(), chunks.size() * sizeof(TETFChunkEntry));
-            
-            bool foundDesc = false;
-            uint32_t descFourCC = MakeFourCC('D', 'E', 'S', 'C');
-            for (const auto& chunk : chunks) {
-                if (chunk.id == descFourCC) {
-                    in.seekg(chunk.offset, std::ios::beg);
-                    in.read((char*)&desc, sizeof(TETFDesc));
-                    foundDesc = true;
-                    break;
-                }
-            }
+	TETFHeader header{};
+	TETFDesc desc{};
+	std::ifstream in(fullCompiledPath, std::ios::binary);
+	if (in.is_open()) {
+		in.read((char*)&header, sizeof(TETFHeader));
+		if (header.magic == kMagic) {
+			std::vector<TETFChunkEntry> chunks(header.chunkCount);
+			in.seekg(header.tocOffset, std::ios::beg);
+			in.read((char*)chunks.data(), chunks.size() * sizeof(TETFChunkEntry));
+			
+			bool foundDesc = false;
+			uint32_t descFourCC = MakeFourCC('D', 'E', 'S', 'C');
+			for (const auto& chunk : chunks) {
+				if (chunk.id == descFourCC) {
+					in.seekg(chunk.offset, std::ios::beg);
+					in.read((char*)&desc, sizeof(TETFDesc));
+					foundDesc = true;
+					break;
+				}
+			}
 
-            if (!foundDesc) {
-                ImGui::TextColored(ImVec4(1, 0, 0, 1), "DESC chunk not found in TETF!");
-                return;
-            }
-        } else {
-            ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid TETF header!");
-            return;
-        }
-    }
+			if (!foundDesc) {
+				ImGui::TextColored(ImVec4(1, 0, 0, 1), "DESC chunk not found in TETF!");
+				return;
+			}
+		} else {
+			ImGui::TextColored(ImVec4(1, 0, 0, 1), "Invalid TETF header!");
+			return;
+		}
+	}
 
 	ImGui::Text("Compiled Info (.tetf)");
-    if (ImGui::BeginTable("TextureInfoTable", 2, ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
-        ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+	if (ImGui::BeginTable("TextureInfoTable", 2, ImGuiTableFlags_SizingStretchProp)) {
+		ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+		ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
 
-        auto drawRow = [](const char* label, const char* value) {
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(label);
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(value);
-        };
+		auto drawRow = [](const char* label, const char* value) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(value);
+		};
 
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%u x %u", (uint32_t)desc.width, (uint32_t)desc.height);
-        drawRow("Dimensions", buf);
+		char buf[64];
+		snprintf(buf, sizeof(buf), "%u x %u", (uint32_t)desc.width, (uint32_t)desc.height);
+		drawRow("Dimensions", buf);
 
-        if (desc.depth > 1) drawRow("Depth", std::to_string(desc.depth).c_str());
-        if (desc.layers > 1) drawRow("Layers", std::to_string(desc.layers).c_str());
-        drawRow("Mips", std::to_string(desc.mipCount).c_str());
+		if (desc.depth > 1) drawRow("Depth", std::to_string(desc.depth).c_str());
+		if (desc.layers > 1) drawRow("Layers", std::to_string(desc.layers).c_str());
+		drawRow("Mips", std::to_string(desc.mipCount).c_str());
 
-        drawRow("Format", VkFormatToString(desc.vkFormat));
+		drawRow("Format", VkFormatToString(desc.vkFormat));
 
-        const char* semantics[] = { "Unknown", "Color", "Data" };
-        if (desc.semantic < 3) drawRow("Semantic", semantics[desc.semantic]);
+		const char* semantics[] = { "Unknown", "Color", "Data" };
+		if (desc.semantic < 3) drawRow("Semantic", semantics[desc.semantic]);
 
-        ImGui::EndTable();
-    }
+		ImGui::EndTable();
+	}
 
 	ImGui::Spacing();
 	ImGui::Text("Import Settings");
