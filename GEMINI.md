@@ -1,4 +1,4 @@
-# TerraEngine
+﻿# TerraEngine
 
 TerraEngine is a modern C++20 game engine built with Vulkan. It is designed with a focus on modularity, performance (using a task-based thread pool), and a data-driven architecture. The engine is built as a shared library (`TerraEngine-Engine`) which is linked by a Launcher (`TerraEngine-Launcher`) and various offline asset compilation tools.
 
@@ -9,7 +9,7 @@ TerraEngine is a modern C++20 game engine built with Vulkan. It is designed with
 *   **Windowing/Input:** GLFW
 *   **Math:** GLM
 *   **ECS:** EnTT
-*   **Reflection:** RTTR
+*   **Reflection:** EnTT Meta (`entt::meta`)
 *   **Serialization:** nlohmann/json
 *   **Shader Compilation:** DXC (DirectX Shader Compiler)
 

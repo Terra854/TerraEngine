@@ -1,4 +1,4 @@
-# TerraEngine Contributor Guide
+﻿# TerraEngine Contributor Guide
 
 Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you add, modify, or review code. They ensure consistent build behavior, documentation quality, and runtime performance across the project.
 
@@ -10,7 +10,7 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 ## Code Quality & Documentation
 1. **Explain with comments** – Any code you touch must contain clear, beginner-friendly comments explaining intent, inputs, outputs, and tricky logic. Prioritize maintainability over brevity.
 2. **Task-based multithreading** – Architect new features around task/job systems that can run across multiple threads. Avoid single-threaded bottlenecks; where sequential execution is unavoidable, justify it in comments.
-3. **C++ style** – Prefer modern C++17+ constructs, RAII, and smart pointers. Keep headers minimal and avoid macros when a typed construct suffices.
+3. **C++ style** – Target C++20 as the minimum language baseline. Prefer RAII and smart pointers, keep headers minimal, and avoid macros when a typed construct suffices.
 4. **Component architecture** – Every engine component must follow the CRTP pattern via `Component<Derived>` in `Engine/Core/Object/Component.h`. Provide a `static constexpr std::string_view kComponentName` and register properties through the optional `Derived::reflect` helper when reflection metadata is required.
 5. **Systems inheritance** – All engine systems must inherit from `SystemsBase` to ensure consistent lifecycle handling and extensibility across modules.
 6. **Indent requirements** – Indentation must use a single tab level.
@@ -22,6 +22,7 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 ## Testing & Verification
 1. Provide reproducible instructions (README or per-feature docs) describing how to configure, build, install, and run relevant tests/demos from a clean checkout.
 2. When adding features affecting rendering or threading, include stress or regression tests demonstrating correctness under multithreaded loads.
+3. After all implementation tasks are complete, run a test compile of the codebase before finishing so the changed code is proven to compile successfully.
 
 ## Pull Request Expectations
 1. Reference this guide in PR descriptions to confirm compliance (self-contained deps, shaders separated, comments present, install step executed).
