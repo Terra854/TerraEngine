@@ -600,6 +600,12 @@ struct RenderStatsSnapshot
 	std::uint32_t spatialVisibleCandidateCount = 0u;
 	std::uint32_t spatialRejectedObjectCount = 0u;
 	std::uint32_t spatialFallbackObjectCount = 0u;
+	TerraEngine::Scene::SpatialRefreshMode spatialRefreshMode = TerraEngine::Scene::SpatialRefreshMode::Uninitialized;
+	std::uint32_t spatialAddedObjectCount = 0u;
+	std::uint32_t spatialUpdatedObjectCount = 0u;
+	std::uint32_t spatialRemovedObjectCount = 0u;
+	std::uint32_t spatialUnchangedObjectCount = 0u;
+	std::uint32_t spatialFullRefreshObjectCount = 0u;
 	bool taskCullingActive = false;
 	bool hiZActive = false;
 	bool vrsActive = false;

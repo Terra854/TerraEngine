@@ -15,25 +15,57 @@ namespace TerraEngine::Scene
 		{
 			return record.worldBounds.state == SpatialBoundsState::Fallback || record.worldBounds.state == SpatialBoundsState::Invalid;
 		}
+
+		[[nodiscard]] bool BoundsEquivalent(const SpatialAABB& left, const SpatialAABB& right)
+		{
+			return left.state == right.state
+				&& left.source == right.source
+				&& left.min.x == right.min.x
+				&& left.min.y == right.min.y
+				&& left.min.z == right.min.z
+				&& left.max.x == right.max.x
+				&& left.max.y == right.max.y
+				&& left.max.z == right.max.z;
+		}
+
+		[[nodiscard]] bool RecordsEquivalent(const SpatialObjectRecord& left, const SpatialObjectRecord& right)
+		{
+			return left.objectId == right.objectId
+				&& left.entity == right.entity
+				&& left.active == right.active
+				&& left.isStatic == right.isStatic
+				&& left.categoryMask == right.categoryMask
+				&& left.revision == right.revision
+				&& BoundsEquivalent(left.worldBounds, right.worldBounds);
+		}
 	}
 
 	void SpatialIndex::Clear()
 	{
 		nodes.clear();
 		recordsById.clear();
+		nodeByObjectId.clear();
 		fallbackObjectIds.clear();
 		dirtyObjectIds.clear();
 		diagnostics = {};
+		hasBuiltIndex = false;
 	}
 
 	void SpatialIndex::Rebuild(const std::vector<SpatialObjectRecord>& records)
 	{
 		const auto start = std::chrono::steady_clock::now();
 		Clear();
+		hasBuiltIndex = true;
+		ResetRefreshCounters(SpatialRefreshMode::Full);
+		diagnostics.fullRefreshObjectCount = static_cast<std::uint32_t>(records.size());
 
 		SpatialAABB rootBounds{};
 		for (const SpatialObjectRecord& record : records)
 		{
+			if (record.objectId == TerraEngine::EMPTY_UUID)
+			{
+				continue;
+			}
 			recordsById[record.objectId] = record;
 			diagnostics.indexedObjectCount++;
 			diagnostics.staticObjectCount += record.isStatic ? 1u : 0u;
@@ -41,6 +73,7 @@ namespace TerraEngine::Scene
 			if (!record.worldBounds.IsUsable() || IsFallbackRecord(record))
 			{
 				fallbackObjectIds.push_back(record.objectId);
+				nodeByObjectId[record.objectId] = -1;
 				diagnostics.fallbackObjectCount++;
 				continue;
 			}
@@ -64,7 +97,7 @@ namespace TerraEngine::Scene
 		const int root = CreateNode(rootBounds, 0);
 		for (const SpatialObjectRecord& record : records)
 		{
-			if (record.worldBounds.IsUsable() && !IsFallbackRecord(record))
+			if (record.objectId != TerraEngine::EMPTY_UUID && record.worldBounds.IsUsable() && !IsFallbackRecord(record))
 			{
 				InsertObject(root, record);
 			}
@@ -72,6 +105,129 @@ namespace TerraEngine::Scene
 
 		const auto end = std::chrono::steady_clock::now();
 		diagnostics.dirtyObjectCount = static_cast<std::uint32_t>(dirtyObjectIds.size());
+		diagnostics.lastUpdateDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
+	}
+
+	void SpatialIndex::Refresh(const std::vector<SpatialObjectRecord>& records, bool forceFullRefresh)
+	{
+		if (forceFullRefresh || !hasBuiltIndex)
+		{
+			Rebuild(records);
+			return;
+		}
+
+		const auto start = std::chrono::steady_clock::now();
+		std::unordered_map<TerraEngine::UUID, SpatialObjectRecord> latestRecords;
+		latestRecords.reserve(records.size());
+		bool duplicateObjectIdFound = false;
+		for (const SpatialObjectRecord& record : records)
+		{
+			if (record.objectId == TerraEngine::EMPTY_UUID)
+			{
+				continue;
+			}
+			const auto insertResult = latestRecords.emplace(record.objectId, record);
+			if (!insertResult.second)
+			{
+				duplicateObjectIdFound = true;
+				break;
+			}
+		}
+
+		if (duplicateObjectIdFound)
+		{
+			Rebuild(records);
+			return;
+		}
+
+		std::vector<TerraEngine::UUID> removedObjectIds;
+		std::vector<SpatialObjectRecord> addedRecords;
+		std::vector<SpatialObjectRecord> updatedRecords;
+		removedObjectIds.reserve(recordsById.size());
+		addedRecords.reserve(latestRecords.size());
+		updatedRecords.reserve(latestRecords.size());
+
+		for (const auto& entry : recordsById)
+		{
+			const TerraEngine::UUID& objectId = entry.first;
+			if (latestRecords.find(objectId) == latestRecords.end())
+			{
+				removedObjectIds.push_back(objectId);
+			}
+		}
+
+		std::uint32_t unchangedCount = 0;
+		for (const auto& [objectId, record] : latestRecords)
+		{
+			const auto existing = recordsById.find(objectId);
+			if (existing == recordsById.end())
+			{
+				addedRecords.push_back(record);
+				continue;
+			}
+			if (dirtyObjectIds.find(objectId) != dirtyObjectIds.end() || !RecordsEquivalent(existing->second, record))
+			{
+				updatedRecords.push_back(record);
+				continue;
+			}
+			unchangedCount++;
+		}
+
+		bool requiresFullRefresh = false;
+		for (const SpatialObjectRecord& record : addedRecords)
+		{
+			requiresFullRefresh = requiresFullRefresh || !CanRefreshRecordIncrementally(record);
+		}
+		for (const SpatialObjectRecord& record : updatedRecords)
+		{
+			requiresFullRefresh = requiresFullRefresh || !CanRefreshRecordIncrementally(record);
+		}
+		if (requiresFullRefresh)
+		{
+			Rebuild(records);
+			return;
+		}
+
+		if (removedObjectIds.empty() && addedRecords.empty() && updatedRecords.empty())
+		{
+			ResetRefreshCounters(SpatialRefreshMode::Unchanged);
+			diagnostics.unchangedObjectCount = unchangedCount;
+			diagnostics.dirtyObjectCount = 0u;
+			diagnostics.visibleCandidateCount = 0u;
+			diagnostics.rejectedObjectCount = 0u;
+			RecalculateStoredDiagnostics();
+			dirtyObjectIds.clear();
+			const auto end = std::chrono::steady_clock::now();
+			diagnostics.lastUpdateDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
+			return;
+		}
+
+		for (const TerraEngine::UUID& objectId : removedObjectIds)
+		{
+			RemoveStoredRecord(objectId);
+		}
+		for (const SpatialObjectRecord& record : updatedRecords)
+		{
+			RemoveStoredRecord(record.objectId);
+			InsertStoredRecord(record);
+		}
+		for (const SpatialObjectRecord& record : addedRecords)
+		{
+			InsertStoredRecord(record);
+		}
+
+		ResetRefreshCounters(SpatialRefreshMode::Incremental);
+		diagnostics.addedObjectCount = static_cast<std::uint32_t>(addedRecords.size());
+		diagnostics.updatedObjectCount = static_cast<std::uint32_t>(updatedRecords.size());
+		diagnostics.removedObjectCount = static_cast<std::uint32_t>(removedObjectIds.size());
+		diagnostics.unchangedObjectCount = unchangedCount;
+		diagnostics.dirtyObjectCount = 0u;
+		diagnostics.visibleCandidateCount = 0u;
+		diagnostics.rejectedObjectCount = 0u;
+		RecalculateStoredDiagnostics();
+		dirtyObjectIds.clear();
+
+		const auto end = std::chrono::steady_clock::now();
 		diagnostics.lastUpdateDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
 	}
 
@@ -182,6 +338,98 @@ namespace TerraEngine::Scene
 		}
 		writableNode.objectIds.push_back(record.objectId);
 		std::sort(writableNode.objectIds.begin(), writableNode.objectIds.end(), UuidLess);
+		nodeByObjectId[record.objectId] = nodeIndex;
+	}
+
+	bool SpatialIndex::InsertStoredRecord(const SpatialObjectRecord& record)
+	{
+		if (record.objectId == TerraEngine::EMPTY_UUID)
+		{
+			return false;
+		}
+
+		recordsById[record.objectId] = record;
+		if (!record.worldBounds.IsUsable() || IsFallbackRecord(record))
+		{
+			fallbackObjectIds.push_back(record.objectId);
+			std::sort(fallbackObjectIds.begin(), fallbackObjectIds.end(), UuidLess);
+			nodeByObjectId[record.objectId] = -1;
+			return true;
+		}
+
+		if (nodes.empty())
+		{
+			return false;
+		}
+
+		InsertObject(0, record);
+		return true;
+	}
+
+	bool SpatialIndex::RemoveStoredRecord(const TerraEngine::UUID& objectId)
+	{
+		const auto membership = nodeByObjectId.find(objectId);
+		if (membership == nodeByObjectId.end())
+		{
+			return recordsById.erase(objectId) > 0u;
+		}
+
+		if (membership->second < 0)
+		{
+			fallbackObjectIds.erase(std::remove(fallbackObjectIds.begin(), fallbackObjectIds.end(), objectId), fallbackObjectIds.end());
+		}
+		else
+		{
+			std::vector<TerraEngine::UUID>& objectIds = nodes[static_cast<std::size_t>(membership->second)].objectIds;
+			objectIds.erase(std::remove(objectIds.begin(), objectIds.end(), objectId), objectIds.end());
+		}
+
+		nodeByObjectId.erase(membership);
+		recordsById.erase(objectId);
+		return true;
+	}
+
+	bool SpatialIndex::CanRefreshRecordIncrementally(const SpatialObjectRecord& record) const
+	{
+		if (!record.worldBounds.IsUsable() || IsFallbackRecord(record))
+		{
+			return true;
+		}
+
+		// The query traversal starts at the current root loose bounds. Any new
+		// indexable record outside that root could be missed by queries, so fall
+		// back to a full rebuild to grow the tree around the latest aggregate.
+		return !nodes.empty() && Contains(nodes.front().looseBounds, record.worldBounds);
+	}
+
+	void SpatialIndex::RecalculateStoredDiagnostics()
+	{
+		diagnostics.indexedObjectCount = static_cast<std::uint32_t>(recordsById.size());
+		diagnostics.staticObjectCount = 0u;
+		diagnostics.dynamicObjectCount = 0u;
+		for (const auto& entry : recordsById)
+		{
+			const SpatialObjectRecord& record = entry.second;
+			diagnostics.staticObjectCount += record.isStatic ? 1u : 0u;
+			diagnostics.dynamicObjectCount += record.isStatic ? 0u : 1u;
+		}
+
+		diagnostics.fallbackObjectCount = static_cast<std::uint32_t>(fallbackObjectIds.size());
+		diagnostics.largeObjectCount = 0u;
+		if (!nodes.empty() && nodes.front().objectIds.size() > kNodeSplitObjectCount)
+		{
+			diagnostics.largeObjectCount = static_cast<std::uint32_t>(nodes.front().objectIds.size());
+		}
+	}
+
+	void SpatialIndex::ResetRefreshCounters(SpatialRefreshMode mode)
+	{
+		diagnostics.refreshMode = mode;
+		diagnostics.addedObjectCount = 0u;
+		diagnostics.updatedObjectCount = 0u;
+		diagnostics.removedObjectCount = 0u;
+		diagnostics.unchangedObjectCount = 0u;
+		diagnostics.fullRefreshObjectCount = 0u;
 	}
 
 	int SpatialIndex::FindContainingChild(const Node& node, const SpatialAABB& bounds) const

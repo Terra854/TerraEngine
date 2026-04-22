@@ -16,6 +16,10 @@ namespace TerraEngine::Scene
 	public:
 		void Clear();
 		void Rebuild(const std::vector<SpatialObjectRecord>& records);
+		// Refresh compares the latest complete renderable snapshot against the
+		// cached records. It mutates only changed entries when that is safe and
+		// falls back to a full rebuild when root bounds must be recalculated.
+		void Refresh(const std::vector<SpatialObjectRecord>& records, bool forceFullRefresh = false);
 		void MarkDirty(const TerraEngine::UUID& objectId);
 
 		[[nodiscard]] SpatialQueryResult QueryAABB(const SpatialAABB& area, const SpatialQueryFilter& filter = {}) const;
@@ -57,12 +61,19 @@ namespace TerraEngine::Scene
 
 		std::vector<Node> nodes;
 		std::unordered_map<TerraEngine::UUID, SpatialObjectRecord> recordsById;
+		std::unordered_map<TerraEngine::UUID, int> nodeByObjectId;
 		std::vector<TerraEngine::UUID> fallbackObjectIds;
 		std::unordered_set<TerraEngine::UUID> dirtyObjectIds;
 		mutable SpatialDiagnosticsSnapshot diagnostics{};
+		bool hasBuiltIndex = false;
 
 		int CreateNode(const SpatialAABB& tightBounds, std::uint32_t depth);
 		void InsertObject(int nodeIndex, const SpatialObjectRecord& record);
+		bool InsertStoredRecord(const SpatialObjectRecord& record);
+		bool RemoveStoredRecord(const TerraEngine::UUID& objectId);
+		bool CanRefreshRecordIncrementally(const SpatialObjectRecord& record) const;
+		void RecalculateStoredDiagnostics();
+		void ResetRefreshCounters(SpatialRefreshMode mode);
 		[[nodiscard]] int FindContainingChild(const Node& node, const SpatialAABB& bounds) const;
 		[[nodiscard]] SpatialAABB MakeChildBounds(const SpatialAABB& parentBounds, int childIndex) const;
 		[[nodiscard]] SpatialAABB MakeLooseBounds(const SpatialAABB& tightBounds) const;

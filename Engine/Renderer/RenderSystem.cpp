@@ -427,7 +427,7 @@ void RenderSystem::Update(float deltaTime)
 		record.revision = objManager.GetSpatialRevision();
 		spatialRecords.push_back(record);
 	}
-	spatialIndex.Rebuild(spatialRecords);
+	spatialIndex.Refresh(spatialRecords);
 
 	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection) {
 		const TerraEngine::Scene::SpatialFrustum frustum = TerraEngine::Scene::ExtractFrustum(viewProjection);
@@ -818,10 +818,22 @@ void RenderSystem::Update(float deltaTime)
 		latestGameStats.spatialVisibleCandidateCount = gameSpatialDiagnostics.visibleCandidateCount;
 		latestGameStats.spatialRejectedObjectCount = gameSpatialDiagnostics.rejectedObjectCount;
 		latestGameStats.spatialFallbackObjectCount = gameSpatialDiagnostics.fallbackObjectCount;
+		latestGameStats.spatialRefreshMode = gameSpatialDiagnostics.refreshMode;
+		latestGameStats.spatialAddedObjectCount = gameSpatialDiagnostics.addedObjectCount;
+		latestGameStats.spatialUpdatedObjectCount = gameSpatialDiagnostics.updatedObjectCount;
+		latestGameStats.spatialRemovedObjectCount = gameSpatialDiagnostics.removedObjectCount;
+		latestGameStats.spatialUnchangedObjectCount = gameSpatialDiagnostics.unchangedObjectCount;
+		latestGameStats.spatialFullRefreshObjectCount = gameSpatialDiagnostics.fullRefreshObjectCount;
 		latestSceneStats.spatialIndexedObjectCount = sceneSpatialDiagnostics.indexedObjectCount;
 		latestSceneStats.spatialVisibleCandidateCount = sceneSpatialDiagnostics.visibleCandidateCount;
 		latestSceneStats.spatialRejectedObjectCount = sceneSpatialDiagnostics.rejectedObjectCount;
 		latestSceneStats.spatialFallbackObjectCount = sceneSpatialDiagnostics.fallbackObjectCount;
+		latestSceneStats.spatialRefreshMode = sceneSpatialDiagnostics.refreshMode;
+		latestSceneStats.spatialAddedObjectCount = sceneSpatialDiagnostics.addedObjectCount;
+		latestSceneStats.spatialUpdatedObjectCount = sceneSpatialDiagnostics.updatedObjectCount;
+		latestSceneStats.spatialRemovedObjectCount = sceneSpatialDiagnostics.removedObjectCount;
+		latestSceneStats.spatialUnchangedObjectCount = sceneSpatialDiagnostics.unchangedObjectCount;
+		latestSceneStats.spatialFullRefreshObjectCount = sceneSpatialDiagnostics.fullRefreshObjectCount;
 		latestGameSpatialDiagnostics = gameSpatialDiagnostics;
 		latestSceneSpatialDiagnostics = sceneSpatialDiagnostics;
 		latestGameBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Game);
