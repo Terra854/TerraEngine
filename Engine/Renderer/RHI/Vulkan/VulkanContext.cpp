@@ -2003,6 +2003,30 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 	const uint32_t currentFrame = impl->currentFrame;
 
+	// Editor Scene and Game views currently share the same per-frame lighting,
+	// clustering, and shadow upload buffers. Command buffers are submitted later
+	// in EndFrame, so recording a second view without draining the first would
+	// let the CPU overwrite those shared buffers before the GPU executes the
+	// earlier pass. That made the Scene view sample the Game camera's shadow
+	// payload once both views were active. Submitting and idling here keeps each
+	// editor view bound to the data it was recorded with until the renderer grows
+	// dedicated per-view buffer snapshots.
+	if (impl->editorMode
+		&& currentFrame < impl->pendingPrimaryCommandBuffers.size()
+		&& !impl->pendingPrimaryCommandBuffers[currentFrame].empty()) {
+		auto& pendingCmds = impl->pendingPrimaryCommandBuffers[currentFrame];
+		VkSubmitInfo pendingSubmitInfo{};
+		pendingSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		pendingSubmitInfo.commandBufferCount = static_cast<uint32_t>(pendingCmds.size());
+		pendingSubmitInfo.pCommandBuffers = pendingCmds.data();
+		if (vkQueueSubmit(impl->graphicsQueue, 1, &pendingSubmitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to submit intermediate editor view command buffers before recording the next view");
+			return;
+		}
+		vkQueueWaitIdle(impl->graphicsQueue);
+		pendingCmds.clear();
+	}
+
 	if (!impl->editorMode && !impl->swapchainImageAcquired) {
 		return;
 	}
