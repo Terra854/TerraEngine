@@ -257,6 +257,14 @@ struct DrawCommand
 	bool taskShaderCullingEnabled = true;
 };
 
+// Each shadow-casting light receives its own filtered draw list so shadow
+// passes only visit meshes that can actually intersect that light's coverage.
+struct ShadowDrawList
+{
+	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+	std::vector<DrawCommand> commands;
+};
+
 struct PushConstants
 {
 	glm::mat4 viewProj;
@@ -437,6 +445,11 @@ struct FrameBudgetDiagnosticsSnapshot
 	std::uint32_t cacheInvalidationCount = 0u;
 	std::uint32_t degradedShadowCount = 0u;
 	std::uint32_t allocationFailureCount = 0u;
+	// These counters explain how much the shadow-caster list shrank once lights
+	// stopped reusing the camera-visible draw list as a proxy.
+	std::uint32_t cameraVisibleShadowCasterCount = 0u;
+	std::uint32_t lightVisibleShadowCasterCount = 0u;
+	std::uint32_t shadowDrawSubmissionCount = 0u;
 	// Per-light assignment data explains which shadow-capable retained lights
 	// received a resource this frame and which ones were degraded by the budget.
 	std::vector<ShadowResourceAssignmentDiagnostic> shadowAssignments;
@@ -546,6 +559,9 @@ struct FrameRenderData
 	FrameSkyData sky;
 	std::vector<FrameLightCandidate> lightCandidates;
 	std::vector<DrawCommand> commands;
+	// Per-light shadow lists are separate from the main camera-visible list so
+	// shadow passes can cull against each light instead of the active camera.
+	std::vector<ShadowDrawList> shadowDrawLists;
 	UIRenderBatch uiBatch;
 };
 

@@ -35,6 +35,9 @@
 namespace
 {
 	const glm::vec3 kSkyReferenceSunDirection = glm::normalize(glm::vec3(0.0f, 0.35f, -1.0f));
+	constexpr float kDirectionalShadowNear = 0.1f;
+	constexpr float kDirectionalShadowFar = 180.0f;
+	constexpr float kDirectionalShadowExtent = 40.0f;
 
 	std::filesystem::path ResolveRuntimeSettingsDirectory()
 	{
@@ -101,6 +104,82 @@ namespace
 	{
 		const glm::quat yawRotation = glm::angleAxis(glm::radians(degrees), glm::vec3(0.0f, 1.0f, 0.0f));
 		return SafeNormalizeDirection(yawRotation * direction, kSkyReferenceSunDirection);
+	}
+
+	glm::vec3 SafeNormalizeShadowDirection(const glm::vec3& value, const glm::vec3& fallback)
+	{
+		const float length = glm::length(value);
+		if (!std::isfinite(length) || length <= 0.00001f)
+		{
+			return fallback;
+		}
+
+		return value / length;
+	}
+
+	glm::vec3 ComputeDirectionalShadowCenter(const GPULight& light, const glm::vec3& cameraWorldPosition)
+	{
+		const glm::vec3 lightDirection = SafeNormalizeShadowDirection(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
+		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
+			? glm::vec3(1.0f, 0.0f, 0.0f)
+			: glm::vec3(0.0f, 1.0f, 0.0f);
+		const float texelWorldSize = (kDirectionalShadowExtent * 2.0f) / 1024.0f;
+
+		// Matching the Vulkan light-space snap keeps CPU culling aligned with the
+		// exact shadow map coverage that the GPU will render.
+		const glm::vec3 provisionalLightPosition = cameraWorldPosition - lightDirection * 60.0f;
+		const glm::mat4 provisionalView = glm::lookAtRH(provisionalLightPosition, cameraWorldPosition, worldUp);
+		glm::vec4 snappedCenterLightSpace = provisionalView * glm::vec4(cameraWorldPosition, 1.0f);
+		snappedCenterLightSpace.x = std::floor(snappedCenterLightSpace.x / texelWorldSize) * texelWorldSize;
+		snappedCenterLightSpace.y = std::floor(snappedCenterLightSpace.y / texelWorldSize) * texelWorldSize;
+		return glm::vec3(glm::inverse(provisionalView) * snappedCenterLightSpace);
+	}
+
+	glm::mat4 BuildDirectionalShadowViewProjection(const GPULight& light, const glm::vec3& cameraWorldPosition)
+	{
+		const glm::vec3 lightDirection = SafeNormalizeShadowDirection(-glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
+		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
+			? glm::vec3(1.0f, 0.0f, 0.0f)
+			: glm::vec3(0.0f, 1.0f, 0.0f);
+		const glm::vec3 snappedCenterWorld = ComputeDirectionalShadowCenter(light, cameraWorldPosition);
+		const glm::vec3 lightPosition = snappedCenterWorld - lightDirection * 60.0f;
+		glm::mat4 view = glm::lookAtRH(lightPosition, snappedCenterWorld, worldUp);
+		glm::mat4 projection = glm::orthoRH_ZO(-kDirectionalShadowExtent, kDirectionalShadowExtent, -kDirectionalShadowExtent, kDirectionalShadowExtent, kDirectionalShadowNear, kDirectionalShadowFar);
+		projection[1][1] *= -1.0f;
+		return projection * view;
+	}
+
+	glm::mat4 BuildSpotShadowViewProjection(const GPULight& light)
+	{
+		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
+		const glm::vec3 lightDirection = SafeNormalizeShadowDirection(glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
+		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
+			? glm::vec3(1.0f, 0.0f, 0.0f)
+			: glm::vec3(0.0f, 1.0f, 0.0f);
+		const float range = std::max(light.directionAndRange.w, 0.5f);
+		const float outerConeCos = std::clamp(light.coneAnglesAndArea.y, -0.999f, 0.999f);
+		const float outerAngleRadians = std::max(0.1f, std::acos(outerConeCos) * 2.0f);
+		glm::mat4 view = glm::lookAtRH(lightPosition, lightPosition + lightDirection, worldUp);
+		glm::mat4 projection = glm::perspectiveRH_ZO(outerAngleRadians, 1.0f, 0.1f, range);
+		projection[1][1] *= -1.0f;
+		return projection * view;
+	}
+
+	glm::mat4 BuildAreaShadowViewProjection(const GPULight& light)
+	{
+		const glm::vec3 lightPosition = glm::vec3(light.positionAndType);
+		const glm::vec3 lightDirection = SafeNormalizeShadowDirection(glm::vec3(light.directionAndRange), glm::vec3(0.0f, -1.0f, 0.0f));
+		const glm::vec3 worldUp = (std::abs(glm::dot(lightDirection, glm::vec3(0.0f, 1.0f, 0.0f))) > 0.95f)
+			? glm::vec3(1.0f, 0.0f, 0.0f)
+			: glm::vec3(0.0f, 1.0f, 0.0f);
+		const float range = std::max(light.directionAndRange.w, 0.5f);
+		const float width = std::max(light.coneAnglesAndArea.z, 0.5f);
+		const float height = std::max(light.coneAnglesAndArea.w, 0.5f);
+		const float fov = std::atan2(std::max(width, height), range) * 2.0f;
+		glm::mat4 view = glm::lookAtRH(lightPosition, lightPosition + lightDirection, worldUp);
+		glm::mat4 projection = glm::perspectiveRH_ZO(fov, 1.0f, 0.1f, range);
+		projection[1][1] *= -1.0f;
+		return projection * view;
 	}
 
 }
@@ -429,13 +508,48 @@ void RenderSystem::Update(float deltaTime)
 	}
 	spatialIndex.Refresh(spatialRecords);
 
-	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection) {
-		const TerraEngine::Scene::SpatialFrustum frustum = TerraEngine::Scene::ExtractFrustum(viewProjection);
-		TerraEngine::Scene::SpatialQueryFilter filter{};
-		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
-		filter.collectDiagnostics = true;
-		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
+	std::vector<DrawCommand> renderableDrawCommands(renderables.size());
+	if (!renderables.empty())
+	{
+		// Build one reusable draw command per renderable so camera views and
+		// shadow queries can cheaply select subsets without rebuilding models.
+		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
+		const size_t taskCount = std::min(renderables.size(), workerCount);
+		const size_t chunkSize = (renderables.size() + taskCount - 1) / taskCount;
+		std::vector<std::future<void>> futures;
+		futures.reserve(taskCount);
+		for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
+		{
+			const size_t start = taskIndex * chunkSize;
+			if (start >= renderables.size())
+			{
+				break;
+			}
+			const size_t end = std::min(renderables.size(), start + chunkSize);
+			auto task = ThreadPool::instance().createTask([start, end, &renderables, &renderableDrawCommands, &worldTransforms, &makeModelMatrix]() {
+				for (size_t index = start; index < end; ++index)
+				{
+					const RenderableEntry& entry = renderables[index];
+					const MeshRenderComponent& meshComp = entry.mesh;
+					DrawCommand command{};
+					command.meshId = meshComp.meshId;
+					command.materialId = meshComp.materialId;
+					command.objectId = entry.objectId;
+					command.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
+					command.modelMatrix = makeModelMatrix(worldTransforms.at(entry.entity));
+					renderableDrawCommands[index] = command;
+				}
+			});
+			futures.push_back(task->getFuture());
+			ThreadPool::instance().enqueue(task);
+		}
+		for (auto& future : futures)
+		{
+			future.get();
+		}
+	}
 
+	auto collectCandidateIndices = [&](const TerraEngine::Scene::SpatialQueryResult& query) {
 		std::vector<std::size_t> candidateIndices;
 		candidateIndices.reserve(query.hits.size());
 		for (const TerraEngine::Scene::SpatialQueryHit& hit : query.hits)
@@ -445,54 +559,26 @@ void RenderSystem::Update(float deltaTime)
 				candidateIndices.push_back(lookup->second);
 			}
 		}
+		return candidateIndices;
+	};
 
+	auto buildDrawCommandsFromCandidateIndices = [&](const std::vector<std::size_t>& candidateIndices) {
 		std::vector<DrawCommand> commands;
-		if (candidateIndices.empty())
+		commands.reserve(candidateIndices.size());
+		for (const std::size_t candidateIndex : candidateIndices)
 		{
-			return commands;
-		}
-
-		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
-		const size_t taskCount = std::min(candidateIndices.size(), workerCount);
-		const size_t chunkSize = (candidateIndices.size() + taskCount - 1) / taskCount;
-		std::vector<std::future<std::vector<DrawCommand>>> futures;
-		futures.reserve(taskCount);
-
-		for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
-		{
-			const size_t start = taskIndex * chunkSize;
-			if (start >= candidateIndices.size())
-			{
-				break;
-			}
-			const size_t end = std::min(candidateIndices.size(), start + chunkSize);
-			auto task = ThreadPool::instance().createTask([start, end, &candidateIndices, &renderables, &worldTransforms, &makeModelMatrix]() {
-				std::vector<DrawCommand> chunkCommands;
-				chunkCommands.reserve(end - start);
-				for (size_t i = start; i < end; ++i)
-				{
-					const RenderableEntry& entry = renderables[candidateIndices[i]];
-					const MeshRenderComponent& meshComp = entry.mesh;
-
-					DrawCommand cmd;
-					cmd.meshId = meshComp.meshId;
-					cmd.materialId = meshComp.materialId;
-					cmd.objectId = entry.objectId;
-					cmd.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
-					cmd.modelMatrix = makeModelMatrix(worldTransforms.at(entry.entity));
-					chunkCommands.push_back(cmd);
-				}
-				return chunkCommands;
-			});
-			futures.push_back(task->getFuture());
-			ThreadPool::instance().enqueue(task);
-		}
-		for (auto& future : futures)
-		{
-			auto chunk = future.get();
-			commands.insert(commands.end(), chunk.begin(), chunk.end());
+			commands.push_back(renderableDrawCommands[candidateIndex]);
 		}
 		return commands;
+	};
+
+	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection) {
+		const TerraEngine::Scene::SpatialFrustum frustum = TerraEngine::Scene::ExtractFrustum(viewProjection);
+		TerraEngine::Scene::SpatialQueryFilter filter{};
+		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
+		filter.collectDiagnostics = true;
+		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
+		return buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
 	};
 
 	// Pack reflected lights in parallel so large scenes keep the CPU upload path
@@ -606,6 +692,54 @@ void RenderSystem::Update(float deltaTime)
 			packedLights.insert(packedLights.end(), chunk.begin(), chunk.end());
 		}
 	}
+
+	auto buildShadowDrawLists = [&](const glm::vec3& cameraWorldPosition) {
+		std::vector<ShadowDrawList> shadowDrawLists;
+		shadowDrawLists.reserve(packedLights.size());
+		TerraEngine::Scene::SpatialQueryFilter filter{};
+		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
+
+		for (const FrameLightCandidate& candidate : packedLights)
+		{
+			if ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) == 0u)
+			{
+				continue;
+			}
+
+			ShadowDrawList shadowDrawList{};
+			shadowDrawList.lightId = candidate.lightId;
+
+			const std::uint32_t lightType = static_cast<std::uint32_t>(std::max(candidate.gpuLight.positionAndType.w, 0.0f) + 0.5f);
+			TerraEngine::Scene::SpatialQueryResult query{};
+			if (lightType == static_cast<std::uint32_t>(LightType::Directional))
+			{
+				const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(candidate.gpuLight, cameraWorldPosition);
+				query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
+			}
+			else if (lightType == static_cast<std::uint32_t>(LightType::Point))
+			{
+				TerraEngine::Scene::SpatialSphere lightBounds{};
+				lightBounds.center = glm::vec3(candidate.gpuLight.positionAndType);
+				lightBounds.radius = std::max(candidate.gpuLight.directionAndRange.w, 0.5f);
+				query = spatialIndex.QuerySphere(lightBounds, filter);
+			}
+			else if (lightType == static_cast<std::uint32_t>(LightType::Spot))
+			{
+				const glm::mat4 lightViewProjection = BuildSpotShadowViewProjection(candidate.gpuLight);
+				query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
+			}
+			else if (lightType == static_cast<std::uint32_t>(LightType::Area))
+			{
+				const glm::mat4 lightViewProjection = BuildAreaShadowViewProjection(candidate.gpuLight);
+				query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
+			}
+
+			shadowDrawList.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
+			shadowDrawLists.push_back(std::move(shadowDrawList));
+		}
+
+		return shadowDrawLists;
+	};
 
 	const SceneSkySettings activeSkySettings = SceneManager::Instance().GetActiveSceneSkySettings();
 	SkyRuntimeState skyRuntimeState{};
@@ -738,6 +872,7 @@ void RenderSystem::Update(float deltaTime)
 		frameData.projectionMatrix = sceneViewCamera.proj;
 		frameData.cameraWorldPosition = sceneViewCamera.pos;
 		frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+		frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 		sceneSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 		vulkan->RenderFrame(frameData, VulkanContext::ViewType::Scene);
 	}
@@ -750,6 +885,7 @@ void RenderSystem::Update(float deltaTime)
 			frameData.projectionMatrix = cam.proj;
 			frameData.cameraWorldPosition = cam.pos;
 			frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 			gameSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 			vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);
 		}
@@ -768,6 +904,7 @@ void RenderSystem::Update(float deltaTime)
 			blankData.settings = SanitizeRenderSettings(currentSettings);
 			blankData.sky = frameData.sky;
 			blankData.commands.clear();
+			blankData.shadowDrawLists.clear();
 			vulkan->RenderFrame(blankData, VulkanContext::ViewType::Game);
 	}
 	else
@@ -803,6 +940,7 @@ void RenderSystem::Update(float deltaTime)
 			frameData.projectionMatrix[1][1] *= -1;
 			frameData.cameraWorldPosition = cameraTransform.position;
 			frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 			gameSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 
 			vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);

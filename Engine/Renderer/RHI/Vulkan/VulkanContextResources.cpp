@@ -3495,6 +3495,9 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 		capture["shadow_cache_invalidation_count"] = diagnostics.cacheInvalidationCount;
 		capture["degraded_shadow_count"] = diagnostics.degradedShadowCount;
 		capture["shadow_allocation_failure_count"] = diagnostics.allocationFailureCount;
+		capture["camera_visible_shadow_caster_count"] = diagnostics.cameraVisibleShadowCasterCount;
+		capture["light_visible_shadow_caster_count"] = diagnostics.lightVisibleShadowCasterCount;
+		capture["shadow_draw_submission_count"] = diagnostics.shadowDrawSubmissionCount;
 		capture["shadow_pass_recorded"] = diagnostics.shadowPassRecorded;
 		capture["shadow_assignments"] = nlohmann::json::array();
 		for (const ShadowResourceAssignmentDiagnostic& assignment : diagnostics.shadowAssignments) {

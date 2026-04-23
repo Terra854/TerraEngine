@@ -2061,6 +2061,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	for (const auto& command : frameData.commands) {
 		PrepareDrawResources(command);
 	}
+	for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
+		for (const DrawCommand& command : shadowDrawList.commands) {
+			PrepareDrawResources(command);
+		}
+	}
 
 	if (frameData.sky.hasTexture && frameData.sky.textureId != TerraEngine::EMPTY_UUID)
 	{
@@ -2574,8 +2579,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	}
 
 	// Prepare Indirect Buffer
+	std::size_t shadowCommandSourceCount = 0u;
+	for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
+		shadowCommandSourceCount += shadowDrawList.commands.size();
+	}
 	std::vector<VkDrawMeshTasksIndirectCommandEXT> indirectCommands;
-	indirectCommands.reserve(frameData.commands.size());
+	// Reserve both the main-view commands and the light-specific shadow lists so
+	// per-light culling does not thrash the indirect-command buffer on CPU.
+	indirectCommands.reserve(frameData.commands.size() + shadowCommandSourceCount);
 
 	// Hi-Z is generated from the depth buffer rendered by a previous stable
 	// view. Editor scene/game views share one depth image, so history is disabled
@@ -2643,6 +2654,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	prepared.reserve(frameData.commands.size());
 	std::vector<PreparedDraw> preparedShadow;
 	preparedShadow.reserve(frameData.commands.size());
+	struct PreparedShadowList {
+		TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+		std::vector<PreparedDraw> draws;
+	};
+	std::vector<PreparedShadowList> preparedShadowLists;
+	preparedShadowLists.reserve(frameData.shadowDrawLists.size());
 
 	RenderStatsSnapshot pendingStats{};
 	pendingStats.viewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
@@ -2828,6 +2845,108 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		}
 	}
 
+	for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
+		PreparedShadowList preparedList{};
+		preparedList.lightId = shadowDrawList.lightId;
+		preparedList.draws.reserve(shadowDrawList.commands.size());
+
+		// The renderer already asked the spatial index for one list per light.
+		// Rebuilding the shadow draws from that list preserves the culling win
+		// all the way through pipeline selection and indirect submission.
+		for (const DrawCommand& command : shadowDrawList.commands) {
+			Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
+			if (material == nullptr || !shadowResourcesReady || !ShouldMaterialCastShadow(material->shadowBehavior)) {
+				continue;
+			}
+
+			auto meshIt = impl->meshCache.find(command.meshId);
+			if (meshIt == impl->meshCache.end()) {
+				continue;
+			}
+
+			VulkanMesh& mesh = meshIt->second;
+			if (mesh.meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
+				|| mesh.meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
+				|| mesh.meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
+				|| mesh.indexBuffer.buffer == VK_NULL_HANDLE
+				|| mesh.meshletBuffer.buffer == VK_NULL_HANDLE
+				|| mesh.meshletCount == 0) {
+				continue;
+			}
+
+			uint32_t materialFlags = material->header.flags;
+			TerraEngine::UUID collectionId = material->header.shaderCollectionId;
+			if (collectionId == TerraEngine::EMPTY_UUID) {
+				collectionId = defaultMeshCollectionId;
+			}
+			if (collectionId == defaultMeshCollectionId && defaultTaskPipelineAvailable) {
+				collectionId = defaultTaskCollectionId;
+			}
+
+			TerraEngine::UUID shadowCollectionId = collectionId;
+			VulkanPipeline* shadowPipeline = ResolvePipeline(shadowCollectionId, impl->shadowRenderPass, materialFlags);
+			if (shadowPipeline == nullptr && shadowCollectionId == defaultTaskCollectionId) {
+				shadowCollectionId = defaultMeshCollectionId;
+				shadowPipeline = ResolvePipeline(shadowCollectionId, impl->shadowRenderPass, materialFlags);
+			}
+			if (shadowPipeline == nullptr) {
+				continue;
+			}
+
+			VkDescriptorSet shadowMeshDescriptorSet = impl->EnsureMeshDescriptorSet(command.meshId, *shadowPipeline);
+			if (shadowMeshDescriptorSet == VK_NULL_HANDLE) {
+				continue;
+			}
+
+			PreparedDraw shadowDraw{};
+			shadowDraw.mesh = &mesh;
+			shadowDraw.pipeline = shadowPipeline;
+			shadowDraw.meshId = command.meshId;
+			shadowDraw.materialId = command.materialId;
+			shadowDraw.descriptorSets = {impl->globalDescriptorSets[currentFrame], shadowMeshDescriptorSet};
+			shadowDraw.push.viewProj = frameData.projectionMatrix * frameData.viewMatrix;
+			shadowDraw.push.model = command.modelMatrix;
+			shadowDraw.push.materialIndex = 0u;
+			if (impl->materialIndexMap.contains(command.materialId)) {
+				shadowDraw.push.materialIndex = impl->materialIndexMap[command.materialId];
+			}
+			shadowDraw.push.meshDataIndex = mesh.bindlessIndex;
+			shadowDraw.push.textureIndex = 0u;
+			if (material->header.textureCount > 0 && !material->textures.empty()) {
+				const TerraEngine::UUID textureId = material->textures[0].textureUuid;
+				if (impl->textureIndexMap.contains(textureId)) {
+					shadowDraw.push.textureIndex = impl->textureIndexMap[textureId];
+				}
+			}
+			shadowDraw.push.vrsActive = 2u;
+			shadowDraw.push.taskCullingEnabled = 0u;
+			shadowDraw.push.statsSlotIndex = statsSlotIndex;
+			shadowDraw.push.cullingEpsilon = std::max(frameData.cullingEpsilon, 0.0001f);
+			shadowDraw.materialFlags = materialFlags;
+
+			const uint32_t kTaskBatchSize = 32u;
+			const uint32_t taskGroupCount = shadowPipeline->hasTaskStage
+				? ((mesh.meshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
+				: mesh.meshletCount;
+			VkDrawMeshTasksIndirectCommandEXT shadowIndirectCmd{};
+			shadowIndirectCmd.groupCountX = taskGroupCount;
+			shadowIndirectCmd.groupCountY = 1u;
+			shadowIndirectCmd.groupCountZ = 1u;
+			shadowDraw.indirectBufferIndex = static_cast<uint32_t>(indirectCommands.size());
+			indirectCommands.push_back(shadowIndirectCmd);
+
+			preparedList.draws.push_back(std::move(shadowDraw));
+		}
+
+		preparedShadowLists.push_back(std::move(preparedList));
+	}
+
+	pendingBudgetDiagnostics.cameraVisibleShadowCasterCount = static_cast<std::uint32_t>(preparedShadow.size());
+	pendingBudgetDiagnostics.lightVisibleShadowCasterCount = 0u;
+	for (const PreparedShadowList& preparedList : preparedShadowLists) {
+		pendingBudgetDiagnostics.lightVisibleShadowCasterCount += static_cast<std::uint32_t>(preparedList.draws.size());
+	}
+
 	impl->RecordPendingStats(statsSlotIndex, pendingStats);
 
 	// Shadow-map rendering and the main scene pass both consume the same
@@ -2878,17 +2997,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		HashVec4(signature, light.shadowMatrixC3);
 		return signature;
 	};
-	const auto BuildViewShadowSignature = [&]() {
+	const auto BuildCasterShadowSignature = [&](const std::vector<PreparedDraw>& draws) {
 		std::uint64_t signature = 1469598103934665603ull;
-		HashVec4(signature, glm::vec4(frameData.cameraWorldPosition, 1.0f));
-		HashMat4(signature, frameData.viewMatrix);
-		HashMat4(signature, frameData.projectionMatrix);
-		return signature;
-	};
-	const auto BuildCasterShadowSignature = [&]() {
-		std::uint64_t signature = 1469598103934665603ull;
-		HashCombine(signature, static_cast<std::uint64_t>(preparedShadow.size()));
-		for (const PreparedDraw& draw : preparedShadow) {
+		HashCombine(signature, static_cast<std::uint64_t>(draws.size()));
+		for (const PreparedDraw& draw : draws) {
 			HashUUID(signature, draw.meshId);
 			HashUUID(signature, draw.materialId);
 			HashMat4(signature, draw.push.model);
@@ -2897,8 +3009,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		}
 		return signature;
 	};
-	const std::uint64_t casterShadowSignature = BuildCasterShadowSignature();
-	const std::uint64_t viewShadowSignature = BuildViewShadowSignature();
 
 	// If this is a subsequent pass targeting the swapchain (multi-camera),
 	// inject a barrier to wait for the previous pass to finish its writes.
@@ -2933,6 +3043,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	{
 		const GPULight* light = nullptr;
 		TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+		const std::vector<PreparedDraw>* preparedDraws = nullptr;
 		uint32_t type = 0u;
 		uint32_t slot = VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS;
 		std::uint32_t atlasId = 0u;
@@ -2941,8 +3052,26 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		std::uint32_t regionWidth = VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
 		std::uint32_t regionHeight = VulkanContext::Impl::SHADOW_MAP_RESOLUTION;
 		std::uint64_t lightSignature = 0u;
+		std::uint64_t casterSignature = 0u;
+		std::uint64_t viewSignature = 0u;
 		bool reusedCachedResult = false;
 		bool invalidatedThisFrame = false;
+	};
+	const auto BuildRecordViewShadowSignature = [&](const ShadowLightRecord& record) {
+		std::uint64_t signature = 1469598103934665603ull;
+		if (record.light == nullptr) {
+			return signature;
+		}
+
+		if (record.type == 1u) {
+			for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
+				HashMat4(signature, BuildPointShadowViewProjection(*record.light, faceIndex));
+			}
+		}
+		else {
+			HashMat4(signature, LoadShadowViewProjection(*record.light));
+		}
+		return signature;
 	};
 	std::vector<ShadowLightRecord> shadowLightRecords;
 	shadowLightRecords.reserve(VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS);
@@ -2982,6 +3111,19 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			record.type = lightType;
 			record.slot = slotIndex;
 			record.lightSignature = BuildLightShadowSignature(light);
+			for (const PreparedShadowList& preparedList : preparedShadowLists) {
+				if (preparedList.lightId == retainedCandidate.lightId) {
+					record.preparedDraws = &preparedList.draws;
+					record.casterSignature = BuildCasterShadowSignature(preparedList.draws);
+					break;
+				}
+			}
+			if (record.preparedDraws == nullptr) {
+				static const std::vector<PreparedDraw> kEmptyPreparedShadowDraws{};
+				record.preparedDraws = &kEmptyPreparedShadowDraws;
+				record.casterSignature = BuildCasterShadowSignature(*record.preparedDraws);
+			}
+			record.viewSignature = BuildRecordViewShadowSignature(record);
 			if (const ShadowResourceAssignmentDiagnostic* assignment = FindShadowAssignment(retainedCandidate.lightId)) {
 				record.atlasId = assignment->atlasId;
 				record.regionX = assignment->regionX;
@@ -3017,8 +3159,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			&& cacheEntry.resourceKind == recordKind
 			&& cacheEntry.storageRegionId == record.slot
 			&& cacheEntry.lightSignature == record.lightSignature
-			&& cacheEntry.casterSignature == casterShadowSignature
-			&& cacheEntry.viewSignature == viewShadowSignature;
+			&& cacheEntry.casterSignature == record.casterSignature
+			&& cacheEntry.viewSignature == record.viewSignature;
 
 		if (cacheMatches) {
 			record.reusedCachedResult = true;
@@ -3036,8 +3178,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			cacheEntry.resourceKind = recordKind;
 			cacheEntry.storageRegionId = record.slot;
 			cacheEntry.lightSignature = record.lightSignature;
-			cacheEntry.casterSignature = casterShadowSignature;
-			cacheEntry.viewSignature = viewShadowSignature;
+			cacheEntry.casterSignature = record.casterSignature;
+			cacheEntry.viewSignature = record.viewSignature;
 			cacheEntry.lastTouchedFrameSerial = diagnosticsFrameSerial;
 			cacheEntry.state = VulkanContext::Impl::ShadowCacheEntryState::Refreshed;
 			cacheEntry.valid = true;
@@ -3057,8 +3199,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		}
 	}
 
-	auto RecordShadowDraws = [&](const glm::mat4& lightViewProjection) {
-		for (const PreparedDraw& draw : preparedShadow) {
+	auto RecordShadowDraws = [&](const std::vector<PreparedDraw>& shadowDraws, const glm::mat4& lightViewProjection) {
+		std::uint32_t recordedDrawCount = 0u;
+		for (const PreparedDraw& draw : shadowDraws) {
 			if (draw.pipeline == nullptr
 				|| draw.pipeline->pipeline == VK_NULL_HANDLE
 				|| draw.pipeline->layout == VK_NULL_HANDLE
@@ -3078,7 +3221,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 
 			VkDeviceSize offset = draw.indirectBufferIndex * sizeof(VkDrawMeshTasksIndirectCommandEXT);
 			vkCmdDrawMeshTasksIndirectEXT(cmd, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
+			recordedDrawCount += 1u;
 		}
+		return recordedDrawCount;
 	};
 
 	auto RecordShadowPass = [&](VkFramebuffer framebuffer, uint32_t width, uint32_t height, const ShadowLightRecord& record, const glm::mat4& lightViewProjection) -> bool {
@@ -3113,13 +3258,17 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		shadowScissor.offset = { static_cast<std::int32_t>(record.regionX), static_cast<std::int32_t>(record.regionY) };
 		shadowScissor.extent = { std::min(record.regionWidth, width), std::min(record.regionHeight, height) };
 		vkCmdSetScissor(cmd, 0u, 1u, &shadowScissor);
-		RecordShadowDraws(lightViewProjection);
+		const std::vector<PreparedDraw>& shadowDraws = (record.preparedDraws != nullptr)
+			? *record.preparedDraws
+			: preparedShadow;
+		pendingBudgetDiagnostics.shadowDrawSubmissionCount += RecordShadowDraws(shadowDraws, lightViewProjection);
 		vkCmdEndRenderPass(cmd);
 		return true;
 	};
 
 	bool recordedAnyShadowPass = false;
 	const uint32_t pointShadowSize = VulkanContext::Impl::POINT_SHADOW_MAP_RESOLUTION;
+	pendingBudgetDiagnostics.shadowDrawSubmissionCount = 0u;
 	if (shadowResourcesReady && impl->shadowRenderPass != VK_NULL_HANDLE && !shadowLightRecords.empty()) {
 		for (const ShadowLightRecord& record : shadowLightRecords) {
 			if (record.light == nullptr || record.slot >= VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS) {
