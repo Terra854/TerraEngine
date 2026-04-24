@@ -31,6 +31,20 @@ struct FrameCullingData
 [[vk::binding(2, 0)]] StructuredBuffer<FrameCullingData> frameCullingData;
 [[vk::binding(5, 0)]] RWStructuredBuffer<ClusterData> clusterGrid;
 
+struct ClusterBuildPushConstants
+{
+	uint cullingSlotIndex;
+	uint lightDataOffset;
+	uint clusterDataOffset;
+	uint lightIndexOffset;
+	uint clusterDepthOffset;
+	uint3 padding0;
+	uint4 padding1;
+	uint4 padding2;
+};
+
+[[vk::push_constant]] ConstantBuffer<ClusterBuildPushConstants> clusterPush;
+
 // The cluster grid is small (3456 entries), so a single deterministic scan is
 // cheap and keeps offset generation stable across repeated validation runs.
 [numthreads(1, 1, 1)]
@@ -41,16 +55,16 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 		return;
 	}
 
-	const FrameCullingData frame = frameCullingData[0];
+	const FrameCullingData frame = frameCullingData[clusterPush.cullingSlotIndex];
 	const uint3 gridDim = frame.clusterGridAndLightCount.xyz;
 	const uint clusterCount = gridDim.x * gridDim.y * gridDim.z;
 
 	uint runningOffset = 0u;
 	for (uint clusterIndex = 0u; clusterIndex < clusterCount; ++clusterIndex)
 	{
-		ClusterData cluster = clusterGrid[clusterIndex];
+		ClusterData cluster = clusterGrid[clusterPush.clusterDataOffset + clusterIndex];
 		cluster.offset = runningOffset;
 		runningOffset += cluster.count;
-		clusterGrid[clusterIndex] = cluster;
+		clusterGrid[clusterPush.clusterDataOffset + clusterIndex] = cluster;
 	}
 }

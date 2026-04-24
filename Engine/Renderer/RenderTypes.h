@@ -16,6 +16,50 @@ enum class RenderViewType : std::uint8_t
 	Scene = 1
 };
 
+enum class RenderOutputKind : std::uint8_t
+{
+	GameView = 0,
+	SceneView = 1,
+	MainRuntimeView = 2,
+	OffscreenTexture = 3,
+	ValidationOnly = 4
+};
+
+enum class RenderOutputPriority : std::uint8_t
+{
+	Required = 0,
+	Optional = 1
+};
+
+enum class RenderSnapshotState : std::uint8_t
+{
+	Requested = 0,
+	Acquired = 1,
+	Prepared = 2,
+	Recorded = 3,
+	Submitted = 4,
+	Completed = 5,
+	Released = 6,
+	Fallback = 7
+};
+
+enum class RenderSnapshotFallbackReason : std::uint8_t
+{
+	None = 0,
+	BudgetExhausted = 1,
+	AllocationFailure = 2,
+	UnsupportedTarget = 3,
+	Recovery = 4
+};
+
+enum class RenderSnapshotFallbackResult : std::uint8_t
+{
+	None = 0,
+	SerializedSafely = 1,
+	SkippedOptionalOutput = 2,
+	FrameRecovery = 3
+};
+
 enum class QualityPreset : std::uint32_t
 {
 	Low = 0,
@@ -276,7 +320,10 @@ struct PushConstants
 	std::uint32_t taskCullingEnabled = 0u;
 	std::uint32_t statsSlotIndex = 0u;
 	float cullingEpsilon = 0.001f;
-	float padding = 0.0f;
+	std::uint32_t lightDataOffset = 0u;
+	std::uint32_t clusterDataOffset = 0u;
+	std::uint32_t lightIndexOffset = 0u;
+	std::uint32_t indirectDrawOffset = 0u;
 };
 
 inline constexpr std::uint32_t kLightingClusterDimX = 16u;
@@ -344,6 +391,8 @@ struct ClusterLightBuildMetadata
 	std::uint32_t clusterCount = 0u;
 	std::uint32_t activeLightCount = 0u;
 	std::uint32_t lightIndexCapacity = 0u;
+	std::uint32_t clusterDataOffset = 0u;
+	std::uint32_t lightIndexOffset = 0u;
 	std::uint32_t usedIndexCount = 0u;
 	std::uint32_t actualAssignedLightCount = 0u;
 	std::uint32_t emptyClusterCount = 0u;
@@ -563,6 +612,84 @@ struct FrameRenderData
 	// shadow passes can cull against each light instead of the active camera.
 	std::vector<ShadowDrawList> shadowDrawLists;
 	UIRenderBatch uiBatch;
+};
+
+struct RenderOutputRequest
+{
+	// Describes one renderer output before command recording starts. Today the
+	// main producers are the editor Scene/Game views; future RenderTexture
+	// cameras can use the same fields to request their own isolated payloads.
+	RenderOutputKind kind = RenderOutputKind::GameView;
+	RenderOutputPriority priority = RenderOutputPriority::Required;
+	RenderViewType diagnosticsView = RenderViewType::Game;
+	glm::uvec2 targetSize = glm::uvec2(0u);
+	std::uint32_t outputId = 0u;
+};
+
+struct RenderSnapshotHandle
+{
+	// A handle points at one fixed slice inside every per-frame GPU buffer that
+	// can change while views are queued. Offsets are element offsets, not byte
+	// offsets, so shaders can add them directly to structured-buffer indices.
+	std::uint32_t slotIndex = 0u;
+	std::uint32_t statsSlotIndex = 0u;
+	std::uint32_t lightDataOffset = 0u;
+	std::uint32_t lightAnalysisInputOffset = 0u;
+	std::uint32_t clusterDataOffset = 0u;
+	std::uint32_t lightIndexOffset = 0u;
+	std::uint32_t clusterDepthOffset = 0u;
+	std::uint32_t indirectDrawOffset = 0u;
+	RenderSnapshotState state = RenderSnapshotState::Requested;
+	bool valid = false;
+};
+
+struct RenderSnapshotOwnerSummary
+{
+	// Diagnostics copy the ownership result by value after a frame completes.
+	// This lets editor tools inspect which output owned which snapshot without
+	// touching Vulkan objects or renderer-owned lifetime state.
+	RenderOutputKind kind = RenderOutputKind::GameView;
+	RenderOutputPriority priority = RenderOutputPriority::Required;
+	RenderSnapshotState state = RenderSnapshotState::Requested;
+	glm::uvec2 targetSize = glm::uvec2(0u);
+	std::uint32_t outputId = 0u;
+	std::uint32_t slotIndex = 0u;
+	bool lightingIsolated = false;
+	bool cullingIsolated = false;
+	bool clusteringIsolated = false;
+	bool shadowAssignmentsIsolated = false;
+	bool indirectDrawsIsolated = false;
+};
+
+struct RenderSnapshotFallbackEvent
+{
+	// Fallback events are exceptional paths. Normal warmed-up rendering should
+	// not use them; when the finite snapshot budget is exhausted, these fields
+	// explain whether a required output serialized safely or an optional output
+	// was skipped instead of reusing another view's mutable buffers.
+	RenderOutputKind kind = RenderOutputKind::GameView;
+	RenderSnapshotFallbackReason reason = RenderSnapshotFallbackReason::None;
+	RenderSnapshotFallbackResult result = RenderSnapshotFallbackResult::None;
+	std::uint32_t outputId = 0u;
+	bool required = true;
+};
+
+struct RenderSnapshotDiagnosticsSnapshot
+{
+	// Snapshot diagnostics are cheap CPU-side counters and owner records. They
+	// are intentionally separate from frame captures so tests and editor panels
+	// can detect unsafe sharing before a visual corruption report is needed.
+	std::uint32_t activeSnapshotCount = 0u;
+	std::uint32_t completedSnapshotCount = 0u;
+	std::uint32_t peakSnapshotCount = 0u;
+	std::uint32_t maxSnapshotsPerFrame = 0u;
+	std::vector<RenderSnapshotOwnerSummary> ownerSummaries;
+	std::vector<RenderSnapshotFallbackEvent> fallbackEvents;
+	bool lightingIsolationValid = true;
+	bool clusterIsolationValid = true;
+	bool shadowIsolationValid = true;
+	bool indirectDrawIsolationValid = true;
+	bool valid = false;
 };
 
 // GPU-facing frustum/camera payload consumed by the task shader path.

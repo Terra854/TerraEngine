@@ -862,9 +862,19 @@ void RenderSystem::Update(float deltaTime)
 	rhi->SetGlobalTaskShaderCullingEnabled(taskShaderCullingEnabled);
 	rhi->BeginFrame();
 
-	VulkanContext* vulkan = static_cast<VulkanContext*>(rhi.get());
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot sceneSpatialDiagnostics{};
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot gameSpatialDiagnostics{};
+	// Convert each camera submission into an explicit output owner so the RHI
+	// can give Scene, Game, and future offscreen cameras independent snapshot
+	// ranges instead of inferring ownership from call order alone.
+	auto makeOutputRequest = [](RenderOutputKind kind, RenderViewType diagnosticsView, std::uint32_t outputId) {
+		RenderOutputRequest request{};
+		request.kind = kind;
+		request.priority = RenderOutputPriority::Required;
+		request.diagnosticsView = diagnosticsView;
+		request.outputId = outputId;
+		return request;
+	};
 
 	if (hasSceneViewCamera)
 	{
@@ -874,7 +884,7 @@ void RenderSystem::Update(float deltaTime)
 		frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
 		frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 		sceneSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
-		vulkan->RenderFrame(frameData, VulkanContext::ViewType::Scene);
+		rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::SceneView, RenderViewType::Scene, 1u));
 	}
 
 	if (!gameViewCameras.empty())
@@ -887,7 +897,7 @@ void RenderSystem::Update(float deltaTime)
 			frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 			gameSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
-			vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);
+			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
 		}
 	}
 	else if (cameras.empty())
@@ -905,7 +915,7 @@ void RenderSystem::Update(float deltaTime)
 			blankData.sky = frameData.sky;
 			blankData.commands.clear();
 			blankData.shadowDrawLists.clear();
-			vulkan->RenderFrame(blankData, VulkanContext::ViewType::Game);
+			rhi->RenderFrame(blankData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
 	}
 	else
 	{
@@ -943,7 +953,7 @@ void RenderSystem::Update(float deltaTime)
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 			gameSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 
-			vulkan->RenderFrame(frameData, VulkanContext::ViewType::Game);
+			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u));
 		}
 	}
 	rhi->EndFrame();
@@ -978,6 +988,7 @@ void RenderSystem::Update(float deltaTime)
 		latestSceneBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Scene);
 		latestGameLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Game);
 		latestSceneLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Scene);
+		latestRenderSnapshotDiagnostics = rhi->GetLatestRenderSnapshotDiagnostics();
 		latestSkyRuntimeState = skyRuntimeState;
 	}
 
@@ -1052,6 +1063,7 @@ void RenderSystem::Clear()
 		latestSceneBudgetDiagnostics = {};
 		latestGameLightingDiagnostics = {};
 		latestSceneLightingDiagnostics = {};
+		latestRenderSnapshotDiagnostics = {};
 		latestGameStats.viewType = RenderViewType::Game;
 		latestSceneStats.viewType = RenderViewType::Scene;
 		latestGameBudgetDiagnostics.viewType = RenderViewType::Game;
@@ -1112,6 +1124,12 @@ LightingDiagnosticsSnapshot RenderSystem::GetLatestLightingDiagnostics(RenderVie
 		return latestSceneLightingDiagnostics;
 	}
 	return latestGameLightingDiagnostics;
+}
+
+RenderSnapshotDiagnosticsSnapshot RenderSystem::GetLatestRenderSnapshotDiagnostics() const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestRenderSnapshotDiagnostics;
 }
 
 SkyRuntimeState RenderSystem::GetLatestSkyRuntimeState() const

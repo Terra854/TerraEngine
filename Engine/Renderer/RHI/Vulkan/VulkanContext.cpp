@@ -915,6 +915,16 @@ void VulkanContext::BeginFrame() {
 	vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
 	// The waited frame slot is now complete, so snapshot its GPU counters for UI stats.
 	impl->PublishCompletedFrameStats(impl->currentFrame);
+	{
+		std::lock_guard<std::mutex> lock(impl->statsMutex);
+		impl->latestRenderSnapshotDiagnostics = impl->pendingRenderSnapshotDiagnostics;
+		for (RenderSnapshotOwnerSummary& owner : impl->latestRenderSnapshotDiagnostics.ownerSummaries) {
+			if (owner.state == RenderSnapshotState::Submitted || owner.state == RenderSnapshotState::Recorded) {
+				owner.state = RenderSnapshotState::Completed;
+			}
+		}
+		impl->latestRenderSnapshotDiagnostics.completedSnapshotCount = static_cast<std::uint32_t>(impl->latestRenderSnapshotDiagnostics.ownerSummaries.size());
+	}
 
 	// Release any extra primary command buffers used for prior camera passes
 	// now that the fence guarantees they are idle.
@@ -928,6 +938,10 @@ void VulkanContext::BeginFrame() {
 	if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 		impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 	}
+	impl->activeRenderSnapshot = {};
+	impl->pendingRenderSnapshotDiagnostics = {};
+	impl->pendingRenderSnapshotDiagnostics.valid = true;
+	impl->pendingRenderSnapshotDiagnostics.maxSnapshotsPerFrame = VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
 	if (impl->currentFrame < impl->retiredBuffersByFrame.size()) {
 		auto& retiredBuffers = impl->retiredBuffersByFrame[impl->currentFrame];
 		for (VulkanBuffer& retiredBuffer : retiredBuffers) {
@@ -1997,34 +2011,68 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 	vkCmdDraw(cmd, static_cast<uint32_t>(textVertices.size() / 8), 1, 0, 0);
 }
 
+void VulkanContext::RenderFrame(const FrameRenderData& frameData, const RenderOutputRequest& outputRequest) {
+	const ViewType view = (outputRequest.diagnosticsView == RenderViewType::Scene)
+		? ViewType::Scene
+		: ViewType::Game;
+	RenderFrame(frameData, view, outputRequest);
+}
+
 void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view) {
+	RenderOutputRequest outputRequest{};
+	outputRequest.kind = (view == ViewType::Scene) ? RenderOutputKind::SceneView : RenderOutputKind::GameView;
+	outputRequest.priority = RenderOutputPriority::Required;
+	outputRequest.diagnosticsView = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
+	RenderFrame(frameData, view, outputRequest);
+}
+
+void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {
 	// Skip rendering if initialization failed so we do not spam validation errors.
 	if (!impl->initialized || impl->skipFrame) return;
 
 	const uint32_t currentFrame = impl->currentFrame;
 
-	// Editor Scene and Game views currently share the same per-frame lighting,
-	// clustering, and shadow upload buffers. Command buffers are submitted later
-	// in EndFrame, so recording a second view without draining the first would
-	// let the CPU overwrite those shared buffers before the GPU executes the
-	// earlier pass. That made the Scene view sample the Game camera's shadow
-	// payload once both views were active. Submitting and idling here keeps each
-	// editor view bound to the data it was recorded with until the renderer grows
-	// dedicated per-view buffer snapshots.
-	if (impl->editorMode
-		&& currentFrame < impl->pendingPrimaryCommandBuffers.size()
-		&& !impl->pendingPrimaryCommandBuffers[currentFrame].empty()) {
-		auto& pendingCmds = impl->pendingPrimaryCommandBuffers[currentFrame];
+	if (currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {
+		impl->pendingPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
+	}
+	auto& pendingCmdsForSnapshot = impl->pendingPrimaryCommandBuffers[currentFrame];
+	uint32_t snapshotSlotIndex = static_cast<uint32_t>(pendingCmdsForSnapshot.size());
+	if (snapshotSlotIndex >= VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME) {
+		RenderSnapshotFallbackEvent fallback{};
+		fallback.kind = outputRequest.kind;
+		fallback.reason = RenderSnapshotFallbackReason::BudgetExhausted;
+		fallback.outputId = outputRequest.outputId;
+		fallback.required = outputRequest.priority == RenderOutputPriority::Required;
+
+		if (outputRequest.priority == RenderOutputPriority::Optional) {
+			fallback.result = RenderSnapshotFallbackResult::SkippedOptionalOutput;
+			impl->pendingRenderSnapshotDiagnostics.fallbackEvents.push_back(fallback);
+			return;
+		}
+
+		if (!impl->editorMode) {
+			fallback.result = RenderSnapshotFallbackResult::FrameRecovery;
+			impl->pendingRenderSnapshotDiagnostics.fallbackEvents.push_back(fallback);
+			TERRAENGINE_LOG(LogLevel::Error, "Render snapshot budget exhausted for a required runtime output; skipping the pass to avoid shared-buffer corruption.");
+			return;
+		}
+
+		// Budget exhaustion is the only remaining correctness fallback that may
+		// serialize editor views. Normal scene/game rendering stays queued and
+		// uses separate snapshot ranges below.
 		VkSubmitInfo pendingSubmitInfo{};
 		pendingSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		pendingSubmitInfo.commandBufferCount = static_cast<uint32_t>(pendingCmds.size());
-		pendingSubmitInfo.pCommandBuffers = pendingCmds.data();
+		pendingSubmitInfo.commandBufferCount = static_cast<uint32_t>(pendingCmdsForSnapshot.size());
+		pendingSubmitInfo.pCommandBuffers = pendingCmdsForSnapshot.data();
 		if (vkQueueSubmit(impl->graphicsQueue, 1, &pendingSubmitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Error, "failed to submit intermediate editor view command buffers before recording the next view");
+			TERRAENGINE_LOG(LogLevel::Error, "failed to submit intermediate editor view command buffers after snapshot budget exhaustion");
 			return;
 		}
 		vkQueueWaitIdle(impl->graphicsQueue);
-		pendingCmds.clear();
+		pendingCmdsForSnapshot.clear();
+		fallback.result = RenderSnapshotFallbackResult::SerializedSafely;
+		impl->pendingRenderSnapshotDiagnostics.fallbackEvents.push_back(fallback);
+		snapshotSlotIndex = 0u;
 	}
 
 	if (!impl->editorMode && !impl->swapchainImageAcquired) {
@@ -2159,6 +2207,37 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	const RenderViewType renderViewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
 	const uint32_t viewIndex = (view == ViewType::Scene) ? 1u : 0u;
 	const uint32_t statsSlotIndex = impl->GetStatsSlotIndex(impl->currentFrame, view);
+	RenderSnapshotHandle renderSnapshot{};
+	renderSnapshot.slotIndex = snapshotSlotIndex;
+	renderSnapshot.statsSlotIndex = statsSlotIndex;
+	renderSnapshot.lightDataOffset = impl->GetSnapshotLightDataOffset(snapshotSlotIndex);
+	renderSnapshot.lightAnalysisInputOffset = impl->GetSnapshotLightAnalysisInputOffset(snapshotSlotIndex);
+	renderSnapshot.clusterDataOffset = impl->GetSnapshotClusterDataOffset(snapshotSlotIndex);
+	renderSnapshot.lightIndexOffset = impl->GetSnapshotLightIndexOffset(snapshotSlotIndex);
+	renderSnapshot.clusterDepthOffset = impl->GetSnapshotClusterDepthOffset(snapshotSlotIndex);
+	renderSnapshot.indirectDrawOffset = impl->GetSnapshotIndirectDrawOffset(snapshotSlotIndex);
+	renderSnapshot.state = RenderSnapshotState::Acquired;
+	renderSnapshot.valid = true;
+	impl->activeRenderSnapshot = renderSnapshot;
+	impl->pendingRenderSnapshotDiagnostics.valid = true;
+	impl->pendingRenderSnapshotDiagnostics.maxSnapshotsPerFrame = VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
+	impl->pendingRenderSnapshotDiagnostics.activeSnapshotCount += 1u;
+	impl->pendingRenderSnapshotDiagnostics.peakSnapshotCount = std::max(
+		impl->pendingRenderSnapshotDiagnostics.peakSnapshotCount,
+		impl->pendingRenderSnapshotDiagnostics.activeSnapshotCount);
+	RenderSnapshotOwnerSummary ownerSummary{};
+	ownerSummary.kind = outputRequest.kind;
+	ownerSummary.priority = outputRequest.priority;
+	ownerSummary.state = RenderSnapshotState::Acquired;
+	ownerSummary.targetSize = outputRequest.targetSize;
+	ownerSummary.outputId = outputRequest.outputId;
+	ownerSummary.slotIndex = snapshotSlotIndex;
+	ownerSummary.lightingIsolated = true;
+	ownerSummary.cullingIsolated = true;
+	ownerSummary.clusteringIsolated = true;
+	ownerSummary.shadowAssignmentsIsolated = true;
+	ownerSummary.indirectDrawsIsolated = true;
+	impl->pendingRenderSnapshotDiagnostics.ownerSummaries.push_back(ownerSummary);
 	// Apply the long-term preset policy on the CPU before upload so clustered
 	// lighting receives a predictable retained-light list and an independent
 	// shadow subset while the lightweight GPU analysis path observes a larger
@@ -2548,13 +2627,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		{
 			std::uint32_t lightCount = 0u;
 			std::uint32_t outputOffset = 0u;
-			std::uint32_t padding[14]{};
+			std::uint32_t inputOffset = 0u;
+			std::uint32_t cullingSlotIndex = 0u;
+			std::uint32_t padding[12]{};
 		};
 
 		impl->UploadLightAnalysisInputData(analysisLightingPayload);
 		impl->RecordPendingLightAnalysisCandidates(statsSlotIndex, budgetResult.uploadedCandidates);
 		impl->UpdateFrameCullingData(statsSlotIndex, analysisCullingData);
-		impl->UpdateFrameCullingData(0u, analysisCullingData);
 
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSets[currentFrame], 0, nullptr);
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightAnalysisComputePipeline);
@@ -2562,6 +2642,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		AnalysisPushConstants push{};
 		push.lightCount = static_cast<std::uint32_t>(std::min<size_t>(analysisLightingPayload.size(), VulkanContext::Impl::MAX_GLOBAL_LIGHTS));
 		push.outputOffset = statsSlotIndex * VulkanContext::Impl::MAX_GLOBAL_LIGHTS;
+		push.inputOffset = renderSnapshot.lightAnalysisInputOffset;
+		push.cullingSlotIndex = statsSlotIndex;
 		vkCmdPushConstants(cmd, impl->lightingComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 		vkCmdDispatch(cmd, std::max<uint32_t>((push.lightCount + 63u) / 64u, 1u), 1u, 1u);
 
@@ -2580,9 +2662,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	cullingData.clusteredLightingOverflowed = 0u;
 
 	impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
-	// Compute lighting shaders read slot 0 explicitly, so mirror the latest
-	// frame culling payload there in addition to the per-view stats slot.
-	impl->UpdateFrameCullingData(0u, cullingData);
 	impl->ResetMeshletCounters(statsSlotIndex);
 
 	FrameBudgetDiagnosticsSnapshot pendingBudgetDiagnostics = budgetResult.diagnostics;
@@ -2598,6 +2677,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		pendingClusterValidation.buildMetadata.lightIndexCapacity = static_cast<uint32_t>(std::min<std::uint64_t>(
 			static_cast<std::uint64_t>(clusterCount) * static_cast<std::uint64_t>(cullingData.clusterGridAndLightCount.w),
 			static_cast<std::uint64_t>(VulkanContext::Impl::MAX_LIGHT_INDEX_ENTRIES)));
+		pendingClusterValidation.buildMetadata.clusterDataOffset = renderSnapshot.clusterDataOffset;
+		pendingClusterValidation.buildMetadata.lightIndexOffset = renderSnapshot.lightIndexOffset;
 		pendingClusterValidation.buildMetadata.clusteredLightingAvailable = clusteredLightingAvailable;
 		impl->RecordPendingClusterValidationSnapshot(currentFrame, pendingClusterValidation);
 	}
@@ -2625,7 +2706,24 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	// Build the variable-length light list before graphics so clustered shading
 	// reads a fresh contiguous range for every cluster.
 	if (clusteredLightingAvailable) {
+		struct ClusterBuildPushConstants
+		{
+			std::uint32_t cullingSlotIndex = 0u;
+			std::uint32_t lightDataOffset = 0u;
+			std::uint32_t clusterDataOffset = 0u;
+			std::uint32_t lightIndexOffset = 0u;
+			std::uint32_t clusterDepthOffset = 0u;
+			std::uint32_t padding[11]{};
+		};
+		ClusterBuildPushConstants clusterPush{};
+		clusterPush.cullingSlotIndex = statsSlotIndex;
+		clusterPush.lightDataOffset = renderSnapshot.lightDataOffset;
+		clusterPush.clusterDataOffset = renderSnapshot.clusterDataOffset;
+		clusterPush.lightIndexOffset = renderSnapshot.lightIndexOffset;
+		clusterPush.clusterDepthOffset = renderSnapshot.clusterDepthOffset;
+
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout, 0, 1, &impl->globalDescriptorSets[currentFrame], 0, nullptr);
+		vkCmdPushConstants(cmd, impl->lightingComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(clusterPush), &clusterPush);
 
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->clusterGridComputePipeline);
 		vkCmdDispatch(cmd, (kLightingClusterDimX + 7u) / 8u, (kLightingClusterDimY + 7u) / 8u, std::max<uint32_t>(kLightingClusterDimZ, 1u));
@@ -2793,6 +2891,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		push.taskCullingEnabled = activeTaskCulling ? 1u : 0u;
 		push.statsSlotIndex = statsSlotIndex;
 		push.cullingEpsilon = std::max(frameData.cullingEpsilon, 0.0001f);
+		push.lightDataOffset = renderSnapshot.lightDataOffset;
+		push.clusterDataOffset = renderSnapshot.clusterDataOffset;
+		push.lightIndexOffset = renderSnapshot.lightIndexOffset;
+		push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
 
 		PreparedDraw draw{};
 		draw.mesh = &mesh;
@@ -2946,6 +3048,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 			shadowDraw.push.taskCullingEnabled = 0u;
 			shadowDraw.push.statsSlotIndex = statsSlotIndex;
 			shadowDraw.push.cullingEpsilon = std::max(frameData.cullingEpsilon, 0.0001f);
+			shadowDraw.push.lightDataOffset = renderSnapshot.lightDataOffset;
+			shadowDraw.push.clusterDataOffset = renderSnapshot.clusterDataOffset;
+			shadowDraw.push.lightIndexOffset = renderSnapshot.lightIndexOffset;
+			shadowDraw.push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
 			shadowDraw.materialFlags = materialFlags;
 
 			const uint32_t kTaskBatchSize = 32u;
@@ -2980,7 +3086,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 	if (!indirectCommands.empty()) {
 		void* data = nullptr;
 		vmaMapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation, &data);
-		std::memcpy(data, indirectCommands.data(), indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
+		auto* snapshotIndirectCommands = static_cast<VkDrawMeshTasksIndirectCommandEXT*>(data) + renderSnapshot.indirectDrawOffset;
+		std::memcpy(snapshotIndirectCommands, indirectCommands.data(), indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
 		vmaUnmapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation);
 	}
 
@@ -3243,7 +3350,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 				vkCmdPushConstants(cmd, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &shadowPush);
 			}
 
-			VkDeviceSize offset = draw.indirectBufferIndex * sizeof(VkDrawMeshTasksIndirectCommandEXT);
+			VkDeviceSize offset = static_cast<VkDeviceSize>(draw.push.indirectDrawOffset + draw.indirectBufferIndex) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
 			vkCmdDrawMeshTasksIndirectEXT(cmd, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
 			recordedDrawCount += 1u;
 		}
@@ -3413,7 +3520,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 						vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &draw.push);
 					}
 
-					VkDeviceSize offset = draw.indirectBufferIndex * sizeof(VkDrawMeshTasksIndirectCommandEXT);
+					VkDeviceSize offset = static_cast<VkDeviceSize>(draw.push.indirectDrawOffset + draw.indirectBufferIndex) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
 					vkCmdDrawMeshTasksIndirectEXT(secondary, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
 				}
 				vkEndCommandBuffer(secondary);
@@ -3534,6 +3641,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 		impl->pendingPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
 	}
 	impl->pendingPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
+	impl->activeRenderSnapshot.state = RenderSnapshotState::Recorded;
+	if (!impl->pendingRenderSnapshotDiagnostics.ownerSummaries.empty()) {
+		impl->pendingRenderSnapshotDiagnostics.ownerSummaries.back().state = RenderSnapshotState::Recorded;
+	}
 
 	depthHistory.lastViewProjectionMatrix = currentViewProjection;
 	depthHistory.valid = true;
@@ -4004,7 +4115,7 @@ void VulkanContext::EndFrame() {
 	if (impl->editorMode) {
 		// In Editor Mode, we defer the frame fence signal to the UI pass (PresentEditor)
 		// so the frame is considered "in flight" until the UI is also done.
-		VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+	VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
 		if (submitResult != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
 			impl->RecreateSwapChain();
@@ -4017,6 +4128,11 @@ void VulkanContext::EndFrame() {
 			TERRAENGINE_LOG(LogLevel::Error, "[Vulkan] QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.");
 			impl->RecreateSwapChain();
 			return;
+		}
+	}
+	for (RenderSnapshotOwnerSummary& owner : impl->pendingRenderSnapshotDiagnostics.ownerSummaries) {
+		if (owner.state == RenderSnapshotState::Recorded) {
+			owner.state = RenderSnapshotState::Submitted;
 		}
 	}
 
@@ -4078,6 +4194,14 @@ LightingDiagnosticsSnapshot VulkanContext::GetLatestLightingDiagnostics(RenderVi
 		return snapshot;
 	}
 	return impl->GetLatestLightingDiagnostics(viewType);
+}
+
+RenderSnapshotDiagnosticsSnapshot VulkanContext::GetLatestRenderSnapshotDiagnostics() const {
+	if (!impl) {
+		return {};
+	}
+	std::lock_guard<std::mutex> lock(impl->statsMutex);
+	return impl->latestRenderSnapshotDiagnostics;
 }
 
 void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {

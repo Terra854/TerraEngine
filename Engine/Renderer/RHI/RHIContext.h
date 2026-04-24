@@ -14,6 +14,11 @@ public:
 	virtual void Initialize(WindowSystem& windowSystem) = 0;
 	virtual void BeginFrame() = 0;
 	virtual void RenderFrame(const FrameRenderData& frameData) = 0;
+	virtual void RenderFrame(const FrameRenderData& frameData, const RenderOutputRequest& outputRequest)
+	{
+		(void)outputRequest;
+		RenderFrame(frameData);
+	}
 	virtual void EndFrame() = 0;
 	virtual void SetGlobalTaskShaderCullingEnabled(bool enabled) {}
 	virtual bool IsTaskShaderSupported() const { return false; }
@@ -34,6 +39,10 @@ public:
 		LightingDiagnosticsSnapshot snapshot{};
 		snapshot.viewType = viewType;
 		return snapshot;
+	}
+	virtual RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const
+	{
+		return {};
 	}
 	virtual void InvalidateMaterial(const TerraEngine::UUID& materialId) {}
 	virtual void InvalidateMesh(const TerraEngine::UUID& meshId) {}

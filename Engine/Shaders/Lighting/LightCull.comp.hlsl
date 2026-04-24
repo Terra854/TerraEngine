@@ -44,8 +44,8 @@ struct AnalysisPushConstants
 {
 	uint lightCount;
 	uint outputOffset;
-	uint padding0;
-	uint padding1;
+	uint inputOffset;
+	uint cullingSlotIndex;
 	uint4 paddingBlock0;
 	uint4 paddingBlock1;
 	uint4 paddingBlock2;
@@ -88,8 +88,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 		return;
 	}
 
-	const FrameCullingData frame = frameCullingData[0];
-	const GPULight light = analysisLights[lightIndex];
+	const FrameCullingData frame = frameCullingData[analysisPush.cullingSlotIndex];
+	const GPULight light = analysisLights[analysisPush.inputOffset + lightIndex];
 	const uint lightType = (uint)(light.positionAndType.w + 0.5f);
 	const float intensity = max(light.colorAndIntensity.w, 0.0f);
 

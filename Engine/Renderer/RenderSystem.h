@@ -46,6 +46,7 @@ public:
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot GetLatestSpatialDiagnostics(RenderViewType viewType) const;
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
+	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const;
 
 	void SetQualityPreset(QualityPreset preset);
 	QualityPreset GetQualityPreset() const { return currentPreset; }
@@ -119,6 +120,7 @@ private:
 	FrameBudgetDiagnosticsSnapshot latestSceneBudgetDiagnostics{};
 	LightingDiagnosticsSnapshot latestGameLightingDiagnostics{};
 	LightingDiagnosticsSnapshot latestSceneLightingDiagnostics{};
+	RenderSnapshotDiagnosticsSnapshot latestRenderSnapshotDiagnostics{};
 	SkyRuntimeState latestSkyRuntimeState{};
 	bool skyStateDirty = true;
 	std::string lastLoggedSkyIssueKey;

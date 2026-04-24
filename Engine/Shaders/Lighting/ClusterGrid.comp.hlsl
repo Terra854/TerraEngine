@@ -31,13 +31,27 @@ struct FrameCullingData
 [[vk::binding(2, 0)]] StructuredBuffer<FrameCullingData> frameCullingData;
 [[vk::binding(5, 0)]] RWStructuredBuffer<ClusterData> clusterGrid;
 
+struct ClusterBuildPushConstants
+{
+	uint cullingSlotIndex;
+	uint lightDataOffset;
+	uint clusterDataOffset;
+	uint lightIndexOffset;
+	uint clusterDepthOffset;
+	uint3 padding0;
+	uint4 padding1;
+	uint4 padding2;
+};
+
+[[vk::push_constant]] ConstantBuffer<ClusterBuildPushConstants> clusterPush;
+
 // Builds a dense 3D cluster table where each cluster reserves a contiguous
 // segment in the flat light-index list. This pass currently stores metadata
 // only and is intentionally conservative for correctness-first integration.
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-	const FrameCullingData frame = frameCullingData[0];
+	const FrameCullingData frame = frameCullingData[clusterPush.cullingSlotIndex];
 	const uint3 gridDim = frame.clusterGridAndLightCount.xyz;
 	if (dispatchThreadId.x >= gridDim.x || dispatchThreadId.y >= gridDim.y || dispatchThreadId.z >= gridDim.z)
 	{
@@ -88,5 +102,5 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	cluster.minBoundsPadding = 0.0;
 	cluster.maxBounds = maxB;
 	cluster.maxBoundsPadding = 0.0;
-	clusterGrid[clusterIndex] = cluster;
+	clusterGrid[clusterPush.clusterDataOffset + clusterIndex] = cluster;
 }

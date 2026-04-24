@@ -39,10 +39,13 @@ struct PushConstants
 	uint meshDataIndex;
 	uint textureIndex;
 	uint vrsActive;
+	uint taskCullingEnabled;
+	uint statsSlotIndex;
 	float cullingEpsilon;
-	float padding0;
-	float padding1;
-	float padding2;
+	uint lightDataOffset;
+	uint clusterDataOffset;
+	uint lightIndexOffset;
+	uint indirectDrawOffset;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;

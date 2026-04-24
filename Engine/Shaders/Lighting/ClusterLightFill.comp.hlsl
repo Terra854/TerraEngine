@@ -58,6 +58,20 @@ static const uint kCullThreadCount = 64u;
 [[vk::binding(5, 0)]] RWStructuredBuffer<ClusterData> clusterGrid;
 [[vk::binding(6, 0)]] RWStructuredBuffer<uint> lightIndices;
 
+struct ClusterBuildPushConstants
+{
+	uint cullingSlotIndex;
+	uint lightDataOffset;
+	uint clusterDataOffset;
+	uint lightIndexOffset;
+	uint clusterDepthOffset;
+	uint3 padding0;
+	uint4 padding1;
+	uint4 padding2;
+};
+
+[[vk::push_constant]] ConstantBuffer<ClusterBuildPushConstants> clusterPush;
+
 groupshared uint gWriteCount;
 
 bool SphereIntersectsAABB(float3 center, float radius, float3 minB, float3 maxB)
@@ -72,7 +86,7 @@ bool SphereIntersectsAABB(float3 center, float radius, float3 minB, float3 maxB)
 [numthreads(kCullThreadCount, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
-	const FrameCullingData frame = frameCullingData[0];
+	const FrameCullingData frame = frameCullingData[clusterPush.cullingSlotIndex];
 	const uint3 gridDim = frame.clusterGridAndLightCount.xyz;
 	const uint clusterCount = gridDim.x * gridDim.y * gridDim.z;
 	const uint clusterIndex = groupId.x;
@@ -91,7 +105,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 	}
 	GroupMemoryBarrierWithGroupSync();
 
-	const ClusterData currentCluster = clusterGrid[clusterIndex];
+	const ClusterData currentCluster = clusterGrid[clusterPush.clusterDataOffset + clusterIndex];
 	const uint lightCount = frame.clusterGridAndLightCount.w;
 	if (currentCluster.count == 0u)
 	{
@@ -100,7 +114,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 
 	for (uint lightIndex = groupThreadId.x; lightIndex < lightCount; lightIndex += kCullThreadCount)
 	{
-		const GPULight light = globalLights[lightIndex];
+		const GPULight light = globalLights[clusterPush.lightDataOffset + lightIndex];
 		const uint lightType = (uint)(light.positionAndType.w + 0.5f);
 
 		bool intersects = false;
@@ -128,7 +142,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 			InterlockedAdd(gWriteCount, 1u, slot);
 			if (slot < currentCluster.count)
 			{
-				lightIndices[currentCluster.offset + slot] = lightIndex;
+				lightIndices[clusterPush.lightIndexOffset + currentCluster.offset + slot] = lightIndex;
 			}
 		}
 	}

@@ -57,6 +57,20 @@ static const uint kCullThreadCount = 64u;
 [[vk::binding(4, 0)]] StructuredBuffer<GPULight> globalLights;
 [[vk::binding(5, 0)]] RWStructuredBuffer<ClusterData> clusterGrid;
 
+struct ClusterBuildPushConstants
+{
+	uint cullingSlotIndex;
+	uint lightDataOffset;
+	uint clusterDataOffset;
+	uint lightIndexOffset;
+	uint clusterDepthOffset;
+	uint3 padding0;
+	uint4 padding1;
+	uint4 padding2;
+};
+
+[[vk::push_constant]] ConstantBuffer<ClusterBuildPushConstants> clusterPush;
+
 groupshared uint gVisibleCount;
 
 bool SphereIntersectsAABB(float3 center, float radius, float3 minB, float3 maxB)
@@ -72,7 +86,7 @@ bool SphereIntersectsAABB(float3 center, float radius, float3 minB, float3 maxB)
 [numthreads(kCullThreadCount, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
-	const FrameCullingData frame = frameCullingData[0];
+	const FrameCullingData frame = frameCullingData[clusterPush.cullingSlotIndex];
 	const uint3 gridDim = frame.clusterGridAndLightCount.xyz;
 	const uint clusterCount = gridDim.x * gridDim.y * gridDim.z;
 	const uint clusterIndex = groupId.x;
@@ -92,12 +106,12 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 	}
 	GroupMemoryBarrierWithGroupSync();
 
-	const ClusterData currentCluster = clusterGrid[clusterIndex];
+	const ClusterData currentCluster = clusterGrid[clusterPush.clusterDataOffset + clusterIndex];
 	const uint lightCount = frame.clusterGridAndLightCount.w;
 
 	for (uint lightIndex = groupThreadId.x; lightIndex < lightCount; lightIndex += kCullThreadCount)
 	{
-		const GPULight light = globalLights[lightIndex];
+		const GPULight light = globalLights[clusterPush.lightDataOffset + lightIndex];
 		const uint lightType = (uint)(light.positionAndType.w + 0.5f);
 
 		bool intersects = false;
@@ -129,8 +143,8 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 
 	if (groupThreadId.x == 0u)
 	{
-		clusterGrid[clusterIndex].offset = 0u;
-		clusterGrid[clusterIndex].count = gVisibleCount;
-		clusterGrid[clusterIndex].padding = uint2(0u, 0u);
+		clusterGrid[clusterPush.clusterDataOffset + clusterIndex].offset = 0u;
+		clusterGrid[clusterPush.clusterDataOffset + clusterIndex].count = gVisibleCount;
+		clusterGrid[clusterPush.clusterDataOffset + clusterIndex].padding = uint2(0u, 0u);
 	}
 }

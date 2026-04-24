@@ -215,6 +215,10 @@ struct VulkanContext::Impl {
 	static constexpr uint32_t MAX_GLOBAL_LIGHTS = 1024;
 	static constexpr uint32_t MAX_LIGHT_CLUSTERS = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
 	static constexpr uint32_t MAX_LIGHT_INDEX_ENTRIES = MAX_LIGHT_CLUSTERS * MAX_GLOBAL_LIGHTS;
+	// Each queued view gets an independent slice of the mutable per-pass
+	// buffers. The fixed cap bounds VRAM use while covering editor scene/game
+	// rendering plus several future offscreen camera targets.
+	static constexpr uint32_t MAX_RENDER_SNAPSHOTS_PER_FRAME = 8u;
 	static constexpr uint32_t MAX_SHADOW_RESOURCE_SLOTS = kMaxShadowResourceSlots;
 	static constexpr uint32_t SHADOW_MAP_RESOLUTION = 1024u;
 	static constexpr uint32_t POINT_SHADOW_MAP_RESOLUTION = 1024u;
@@ -411,6 +415,9 @@ struct VulkanContext::Impl {
 	std::array<ViewLightingTemporalState, kStatsViewCount> lightingTemporalStateByView{};
 	std::array<ViewDepthHistoryState, kStatsViewCount> depthHistoryByView{};
 	std::array<ClusterValidationSnapshot, MAX_FRAMES_IN_FLIGHT> pendingClusterValidationByFrame{};
+	RenderSnapshotHandle activeRenderSnapshot{};
+	RenderSnapshotDiagnosticsSnapshot pendingRenderSnapshotDiagnostics{};
+	RenderSnapshotDiagnosticsSnapshot latestRenderSnapshotDiagnostics{};
 	ClusterValidationSnapshot previousClusterValidationSnapshot{};
 	bool previousClusterValidationSnapshotValid = false;
 	std::filesystem::path clusterValidationCapturePath = std::filesystem::path("Tools") / "LightingValidation" / "results" / "latest-cluster-validation.json";
@@ -450,6 +457,12 @@ struct VulkanContext::Impl {
 	
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
 	
+	uint32_t GetSnapshotLightDataOffset(uint32_t slotIndex) const { return slotIndex * MAX_GLOBAL_LIGHTS; }
+	uint32_t GetSnapshotLightAnalysisInputOffset(uint32_t slotIndex) const { return slotIndex * MAX_GLOBAL_LIGHTS; }
+	uint32_t GetSnapshotClusterDataOffset(uint32_t slotIndex) const { return slotIndex * MAX_LIGHT_CLUSTERS; }
+	uint32_t GetSnapshotLightIndexOffset(uint32_t slotIndex) const { return slotIndex * MAX_LIGHT_INDEX_ENTRIES; }
+	uint32_t GetSnapshotClusterDepthOffset(uint32_t slotIndex) const { return slotIndex * kLightingClusterDimX * kLightingClusterDimY; }
+	uint32_t GetSnapshotIndirectDrawOffset(uint32_t slotIndex) const { return slotIndex * MAX_BINDLESS_DRAWS; }
 	void UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData);
 	LightBudgetApplicationResult ApplyFrameLightBudgets(const FrameRenderData& frameData, RenderViewType viewType);
 	MeshletCullingCountersGPU ReadMeshletCounters(uint32_t statsSlotIndex) const;
@@ -481,10 +494,13 @@ struct VulkanContext::Impl {
 		alignas(16) glm::mat4 model;
 	uint32_t textureIndex;
 	uint32_t materialIndex;
-		uint32_t taskCullingEnabled;
-		uint32_t statsSlotIndex;
-		float cullingEpsilon;
-		float padding[3];
+	uint32_t taskCullingEnabled;
+	uint32_t statsSlotIndex;
+	float cullingEpsilon;
+	uint32_t lightDataOffset;
+	uint32_t clusterDataOffset;
+	uint32_t lightIndexOffset;
+	uint32_t indirectDrawOffset;
 	};
 
 	struct OffscreenResources {

@@ -2033,10 +2033,10 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 }
 
 void VulkanContext::Impl::CreateLightingBufferResources() {
-	const VkDeviceSize lightBufferSize = static_cast<VkDeviceSize>(sizeof(GPULight) * MAX_GLOBAL_LIGHTS);
-	const VkDeviceSize clusterBufferSize = static_cast<VkDeviceSize>(sizeof(ClusterData) * MAX_LIGHT_CLUSTERS);
-	const VkDeviceSize lightIndexBufferSize = static_cast<VkDeviceSize>(sizeof(uint32_t) * MAX_LIGHT_INDEX_ENTRIES);
-	const VkDeviceSize clusterDepthBufferSize = static_cast<VkDeviceSize>(sizeof(float) * 2 * kLightingClusterDimX * kLightingClusterDimY);
+	const VkDeviceSize lightBufferSize = static_cast<VkDeviceSize>(sizeof(GPULight) * MAX_GLOBAL_LIGHTS * MAX_RENDER_SNAPSHOTS_PER_FRAME);
+	const VkDeviceSize clusterBufferSize = static_cast<VkDeviceSize>(sizeof(ClusterData) * MAX_LIGHT_CLUSTERS * MAX_RENDER_SNAPSHOTS_PER_FRAME);
+	const VkDeviceSize lightIndexBufferSize = static_cast<VkDeviceSize>(sizeof(uint32_t) * MAX_LIGHT_INDEX_ENTRIES * MAX_RENDER_SNAPSHOTS_PER_FRAME);
+	const VkDeviceSize clusterDepthBufferSize = static_cast<VkDeviceSize>(sizeof(float) * 2 * kLightingClusterDimX * kLightingClusterDimY * MAX_RENDER_SNAPSHOTS_PER_FRAME);
 	const VkDeviceSize lightAnalysisBufferSize = static_cast<VkDeviceSize>(sizeof(GPULightAnalysisRecord) * MAX_GLOBAL_LIGHTS * kStatsSlotCount);
 
 	clusterValidationCaptureEnabled = IsClusterValidationCaptureEnabledFromEnvironment();
@@ -2077,7 +2077,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 
 			void* mappedLightIndices = nullptr;
 			if (vmaMapMemory(allocator, lightIndexSSBOs[i].allocation, &mappedLightIndices) == VK_SUCCESS) {
-				std::fill_n(static_cast<std::uint32_t*>(mappedLightIndices), MAX_LIGHT_INDEX_ENTRIES, 0xFFFFFFFFu);
+				std::fill_n(static_cast<std::uint32_t*>(mappedLightIndices), MAX_LIGHT_INDEX_ENTRIES * MAX_RENDER_SNAPSHOTS_PER_FRAME, 0xFFFFFFFFu);
 				vmaFlushAllocation(allocator, lightIndexSSBOs[i].allocation, 0, lightIndexBufferSize);
 				vmaUnmapMemory(allocator, lightIndexSSBOs[i].allocation);
 			}
@@ -2189,7 +2189,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 }
 
 void VulkanContext::Impl::CreateIndirectDrawResources() {
-	VkDeviceSize indirectBufferSize = MAX_BINDLESS_DRAWS * sizeof(VkDrawMeshTasksIndirectCommandEXT);
+	VkDeviceSize indirectBufferSize = MAX_BINDLESS_DRAWS * MAX_RENDER_SNAPSHOTS_PER_FRAME * sizeof(VkDrawMeshTasksIndirectCommandEXT);
 	indirectDrawBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		indirectDrawBuffers[i] = CreateBuffer(indirectBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -2936,15 +2936,18 @@ void VulkanContext::Impl::UploadLightingData(const std::vector<GPULight>& lights
 	}
 
 	const uint32_t clampedLightCount = static_cast<uint32_t>(std::min<size_t>(lights.size(), MAX_GLOBAL_LIGHTS));
+	const uint32_t lightOffset = activeRenderSnapshot.valid ? activeRenderSnapshot.lightDataOffset : 0u;
 
 	void* mappedLights = nullptr;
 	if (vmaMapMemory(allocator, globalLightSSBOs[currentFrame].allocation, &mappedLights) == VK_SUCCESS) {
-		auto* gpuLights = static_cast<GPULight*>(mappedLights);
+		auto* gpuLights = static_cast<GPULight*>(mappedLights) + lightOffset;
 		std::fill(gpuLights, gpuLights + MAX_GLOBAL_LIGHTS, GPULight{});
 		if (clampedLightCount > 0u) {
 			std::memcpy(gpuLights, lights.data(), sizeof(GPULight) * clampedLightCount);
 		}
-		vmaFlushAllocation(allocator, globalLightSSBOs[currentFrame].allocation, 0, VK_WHOLE_SIZE);
+		const VkDeviceSize byteOffset = static_cast<VkDeviceSize>(lightOffset) * sizeof(GPULight);
+		const VkDeviceSize byteSize = static_cast<VkDeviceSize>(MAX_GLOBAL_LIGHTS) * sizeof(GPULight);
+		vmaFlushAllocation(allocator, globalLightSSBOs[currentFrame].allocation, byteOffset, byteSize);
 		vmaUnmapMemory(allocator, globalLightSSBOs[currentFrame].allocation);
 	}
 }
@@ -2955,15 +2958,18 @@ void VulkanContext::Impl::UploadLightAnalysisInputData(const std::vector<GPULigh
 	}
 
 	const uint32_t clampedLightCount = static_cast<uint32_t>(std::min<size_t>(lights.size(), MAX_GLOBAL_LIGHTS));
+	const uint32_t lightOffset = activeRenderSnapshot.valid ? activeRenderSnapshot.lightAnalysisInputOffset : 0u;
 
 	void* mappedLights = nullptr;
 	if (vmaMapMemory(allocator, lightAnalysisInputSSBOs[currentFrame].allocation, &mappedLights) == VK_SUCCESS) {
-		auto* gpuLights = static_cast<GPULight*>(mappedLights);
+		auto* gpuLights = static_cast<GPULight*>(mappedLights) + lightOffset;
 		std::fill(gpuLights, gpuLights + MAX_GLOBAL_LIGHTS, GPULight{});
 		if (clampedLightCount > 0u) {
 			std::memcpy(gpuLights, lights.data(), sizeof(GPULight) * clampedLightCount);
 		}
-		vmaFlushAllocation(allocator, lightAnalysisInputSSBOs[currentFrame].allocation, 0, VK_WHOLE_SIZE);
+		const VkDeviceSize byteOffset = static_cast<VkDeviceSize>(lightOffset) * sizeof(GPULight);
+		const VkDeviceSize byteSize = static_cast<VkDeviceSize>(MAX_GLOBAL_LIGHTS) * sizeof(GPULight);
+		vmaFlushAllocation(allocator, lightAnalysisInputSSBOs[currentFrame].allocation, byteOffset, byteSize);
 		vmaUnmapMemory(allocator, lightAnalysisInputSSBOs[currentFrame].allocation);
 	}
 }
@@ -3336,10 +3342,11 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 		return snapshot;
 	}
 
+	const VkDeviceSize clusterReadOffset = static_cast<VkDeviceSize>(snapshot.buildMetadata.clusterDataOffset) * sizeof(ClusterData);
 	const VkDeviceSize clusterReadSize = static_cast<VkDeviceSize>(sizeof(ClusterData) * clusterCount);
-	vmaInvalidateAllocation(allocator, clusterBuffer.allocation, 0, clusterReadSize);
+	vmaInvalidateAllocation(allocator, clusterBuffer.allocation, clusterReadOffset, clusterReadSize);
 
-	const ClusterData* clusterGridData = static_cast<const ClusterData*>(mappedClusters);
+	const ClusterData* clusterGridData = static_cast<const ClusterData*>(mappedClusters) + snapshot.buildMetadata.clusterDataOffset;
 	std::uint64_t rangeHash = kClusterRangeHashOffset;
 	std::uint32_t usedIndexCount = 0u;
 	std::uint32_t actualAssignedLightCount = 0u;
@@ -3387,10 +3394,11 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	if (usedIndexCount > 0u) {
 		void* mappedLightIndices = nullptr;
 		if (vmaMapMemory(allocator, lightIndexBuffer.allocation, &mappedLightIndices) == VK_SUCCESS) {
+			const VkDeviceSize lightIndexReadOffset = static_cast<VkDeviceSize>(snapshot.buildMetadata.lightIndexOffset) * sizeof(std::uint32_t);
 			const VkDeviceSize lightIndexReadSize = static_cast<VkDeviceSize>(sizeof(std::uint32_t) * usedIndexCount);
-			vmaInvalidateAllocation(allocator, lightIndexBuffer.allocation, 0, lightIndexReadSize);
+			vmaInvalidateAllocation(allocator, lightIndexBuffer.allocation, lightIndexReadOffset, lightIndexReadSize);
 
-			const std::uint32_t* lightIndexData = static_cast<const std::uint32_t*>(mappedLightIndices);
+			const std::uint32_t* lightIndexData = static_cast<const std::uint32_t*>(mappedLightIndices) + snapshot.buildMetadata.lightIndexOffset;
 			for (std::uint32_t entryIndex = 0u; entryIndex < usedIndexCount; ++entryIndex) {
 				const std::uint32_t lightIndex = lightIndexData[entryIndex];
 				if (lightIndex == 0xFFFFFFFFu || lightIndex >= snapshot.buildMetadata.activeLightCount) {

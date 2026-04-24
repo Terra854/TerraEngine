@@ -26,11 +26,25 @@ struct FrameCullingData
 [[vk::binding(13, 0)]] RWStructuredBuffer<ClusterDepth> clusterDepthBounds;
 [[vk::binding(2, 0)]] StructuredBuffer<FrameCullingData> frameCullingData;
 
+struct ClusterBuildPushConstants
+{
+	uint cullingSlotIndex;
+	uint lightDataOffset;
+	uint clusterDataOffset;
+	uint lightIndexOffset;
+	uint clusterDepthOffset;
+	uint3 padding0;
+	uint4 padding1;
+	uint4 padding2;
+};
+
+[[vk::push_constant]] ConstantBuffer<ClusterBuildPushConstants> clusterPush;
+
 // This shader computes the min/max depth of pixels in each tile.
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    const FrameCullingData frame = frameCullingData[0];
+    const FrameCullingData frame = frameCullingData[clusterPush.cullingSlotIndex];
     const float2 viewportSize = frame.clusterDepthAndViewport.zw;
     const uint3 gridDim = frame.clusterGridAndLightCount.xyz;
     
@@ -68,10 +82,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     
     if (!anyPixel) {
         // No geometry in this tile column
-        clusterDepthBounds[tileIndex].minDepth = 1.0;
-        clusterDepthBounds[tileIndex].maxDepth = 1.0;
+        clusterDepthBounds[clusterPush.clusterDepthOffset + tileIndex].minDepth = 1.0;
+        clusterDepthBounds[clusterPush.clusterDepthOffset + tileIndex].maxDepth = 1.0;
     } else {
-        clusterDepthBounds[tileIndex].minDepth = minZ;
-        clusterDepthBounds[tileIndex].maxDepth = maxZ;
+        clusterDepthBounds[clusterPush.clusterDepthOffset + tileIndex].minDepth = minZ;
+        clusterDepthBounds[clusterPush.clusterDepthOffset + tileIndex].maxDepth = maxZ;
     }
 }

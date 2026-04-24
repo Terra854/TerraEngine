@@ -16,12 +16,14 @@ public:
 	void RenderFrame(const FrameRenderData& frameData) override {
 		RenderFrame(frameData, ViewType::Game);
 	}
+	void RenderFrame(const FrameRenderData& frameData, const RenderOutputRequest& outputRequest) override;
 	void EndFrame() override;
 	void SetGlobalTaskShaderCullingEnabled(bool enabled) override;
 	bool IsTaskShaderSupported() const override;
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const override;
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const override;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const override;
+	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const override;
 	void InvalidateMaterial(const TerraEngine::UUID& materialId) override;
 	void InvalidateMesh(const TerraEngine::UUID& meshId) override;
 	void InvalidateTexture(const TerraEngine::UUID& textureId) override;
@@ -38,6 +40,7 @@ public:
 	void Resize(int width, int height, ViewType view = ViewType::Game);
 
 	virtual void RenderFrame(const FrameRenderData& frameData, ViewType view);
+	virtual void RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest);
 
 	// Editor / ImGui Integration
 	struct EditorHandles {

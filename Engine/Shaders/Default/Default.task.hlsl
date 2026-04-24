@@ -75,7 +75,10 @@ struct PushConstants
 	uint taskCullingEnabled;
 	uint statsSlotIndex;
 	float cullingEpsilon;
-	float padding;
+	uint lightDataOffset;
+	uint clusterDataOffset;
+	uint lightIndexOffset;
+	uint indirectDrawOffset;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;

@@ -97,7 +97,10 @@ struct PushConstants
 	uint taskCullingEnabled;
 	uint statsSlotIndex;
 	float cullingEpsilon;
-	float padding;
+	uint lightDataOffset;
+	uint clusterDataOffset;
+	uint lightIndexOffset;
+	uint indirectDrawOffset;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
@@ -528,7 +531,7 @@ float3 EvaluateAreaLightLTC(GPULight light, float3 worldPosition, float3 normal,
 
 float3 EvaluateSingleLight(uint lightIndex, PSIn input, FrameCullingData frame, float3 normal, float3 viewDir, float3 albedo, float metallic, float roughness)
 {
-	const GPULight light = globalLights[lightIndex];
+	const GPULight light = globalLights[SceneUniforms.lightDataOffset + lightIndex];
 	const uint lightType = (uint)(light.positionAndType.w + 0.5);
 	const float shadowFactor = ComputeShadowFactor(light, frame, input.worldPosition);
 	if (lightType == kLightTypeDirectional)
@@ -642,7 +645,7 @@ float4 main(PSIn input) : SV_Target0
 	const float3 normal = BuildLightingNormal(input.normal, input.worldPosition, uv, sampledNormal, mat.NormalScale, input.tangent);
 	const float3 viewDir = normalize(frame.cameraPositionAndEpsilon.xyz - input.worldPosition);
 	const uint clusterIndex = ComputeClusterIndex(input, frame);
-	const ClusterData cluster = clusterGrid[clusterIndex];
+	const ClusterData cluster = clusterGrid[SceneUniforms.clusterDataOffset + clusterIndex];
 	const bool clusteredLightingAvailable = frame.clusteredLightingValid > 0u && frame.clusteredLightingOverflowed == 0u;
 
 	float3 lighting = float3(0.0, 0.0, 0.0);
@@ -653,7 +656,7 @@ float4 main(PSIn input) : SV_Target0
 		[loop]
 		for (uint lane = 0u; lane < cluster.count; ++lane)
 		{
-			const uint lightIndex = lightIndices[cluster.offset + lane];
+			const uint lightIndex = lightIndices[SceneUniforms.lightIndexOffset + cluster.offset + lane];
 			if (lightIndex == 0xFFFFFFFFu || lightIndex >= lightCount)
 			{
 				continue;
