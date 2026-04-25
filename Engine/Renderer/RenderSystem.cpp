@@ -11,6 +11,8 @@
 #include "Components/Transform.h"
 #include "Resource/ResourceManager.h"
 #include "ThreadPool/ThreadPool.h"
+#include "Profiling/Profiler.h"
+#include "Profiling/ProfilerScope.h"
 #include "Core/Memory/FrameArena.h"
 #include "Core/Memory/FlatMap.h"
 #include "UI/UISystem.h"
@@ -239,6 +241,7 @@ void RenderSystem::Update(float deltaTime)
 	if (!initialized) {
 		return;
 	}
+	TERRAENGINE_PROFILE_SCOPE("RenderSystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 
 	// Standalone runtime UI should track the real framebuffer size. In the
 	// editor, however, the Game View is letterboxed inside an ImGui window and
@@ -246,6 +249,7 @@ void RenderSystem::Update(float deltaTime)
 	// would make UI layout and hit testing react to the wrong rectangle.
 	if (!editorModeEnabled)
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Sync Runtime Viewport", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		if (auto* windowHandle = static_cast<GLFWwindow*>(WindowSystem::Instance().GetNativeHandle()))
 		{
 			int framebufferWidth = 0;
@@ -259,40 +263,19 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	// Reset the frame allocator at the start of the frame logic
-	FrameArena::Instance().Reset();
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reset Frame Arena", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		FrameArena::Instance().Reset();
+	}
 
 	// Capture all transforms first so hierarchical world transforms can be derived for cameras and renderables.
 	FrameMap<entt::entity, Transform> localTransforms;
 	localTransforms.reserve(1000); // Guess initial size
 
-	objManager.forEachObjectWithComponents<Transform>(
-		[&](Object object, Transform& transform)
-		{
-			Transform reflectedTransform{};
-			reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-			reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-			reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-			localTransforms.emplace(object.EntityId(), reflectedTransform);
-		}
-	);
-
-	// Snapshot camera components so view/projection data is sourced from
-	// authored entities instead of the legacy hardcoded values.
-	FrameVector<CameraEntry> cameras;
-	cameras.reserve(10);
-
-	objManager.forEachObjectWithComponents<Transform, CameraComponent>(
-		[&](Object object, Transform& transform, CameraComponent& cameraComp)
-		{
-			CameraComponent reflectedCamera{};
-			reflectedCamera.verticalFovDegrees = GetComponentProperty<CameraComponent, float>(cameraComp, "verticalFovDegrees");
-			reflectedCamera.aspectRatio = GetComponentProperty<CameraComponent, float>(cameraComp, "aspectRatio");
-			reflectedCamera.nearPlane = GetComponentProperty<CameraComponent, float>(cameraComp, "nearPlane");
-			reflectedCamera.farPlane = GetComponentProperty<CameraComponent, float>(cameraComp, "farPlane");
-			reflectedCamera.up = GetComponentProperty<CameraComponent, glm::vec3>(cameraComp, "up");
-
-			cameras.push_back({ object.EntityId(), reflectedCamera });
-			if (!localTransforms.contains(object.EntityId()))
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Transforms", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		objManager.forEachObjectWithComponents<Transform>(
+			[&](Object object, Transform& transform)
 			{
 				Transform reflectedTransform{};
 				reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
@@ -300,8 +283,38 @@ void RenderSystem::Update(float deltaTime)
 				reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
 				localTransforms.emplace(object.EntityId(), reflectedTransform);
 			}
-		}
-	);
+		);
+	}
+
+	// Snapshot camera components so view/projection data is sourced from
+	// authored entities instead of the legacy hardcoded values.
+	FrameVector<CameraEntry> cameras;
+	cameras.reserve(10);
+
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		objManager.forEachObjectWithComponents<Transform, CameraComponent>(
+			[&](Object object, Transform& transform, CameraComponent& cameraComp)
+			{
+				CameraComponent reflectedCamera{};
+				reflectedCamera.verticalFovDegrees = GetComponentProperty<CameraComponent, float>(cameraComp, "verticalFovDegrees");
+				reflectedCamera.aspectRatio = GetComponentProperty<CameraComponent, float>(cameraComp, "aspectRatio");
+				reflectedCamera.nearPlane = GetComponentProperty<CameraComponent, float>(cameraComp, "nearPlane");
+				reflectedCamera.farPlane = GetComponentProperty<CameraComponent, float>(cameraComp, "farPlane");
+				reflectedCamera.up = GetComponentProperty<CameraComponent, glm::vec3>(cameraComp, "up");
+
+				cameras.push_back({ object.EntityId(), reflectedCamera });
+				if (!localTransforms.contains(object.EntityId()))
+				{
+					Transform reflectedTransform{};
+					reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+					reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+					reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+					localTransforms.emplace(object.EntityId(), reflectedTransform);
+				}
+			}
+		);
+	}
 	// Throttle warning spam so missing cameras do not flood the console every frame.
 	static bool loggedMissingCamera = false;
 	if (cameras.empty() && !hasSceneViewCamera)
@@ -323,6 +336,7 @@ void RenderSystem::Update(float deltaTime)
 
 	if (!cameras.empty() || hasSceneViewCamera)
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Renderables", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
 			[&](Object object, Transform& transform, MeshRenderComponent& meshComp)
 			{
@@ -363,51 +377,54 @@ void RenderSystem::Update(float deltaTime)
 	// touching the entity registry after this point.
 	FrameVector<LightEntry> lights;
 	lights.reserve(256);
-	objManager.forEachObjectWithComponents<Transform, LightComponent>(
-		[&](Object object, Transform& transform, LightComponent& lightComp)
-		{
-			LightComponent reflectedLight{};
-			const std::uint32_t encodedType = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "type");
-			if (encodedType > static_cast<std::uint32_t>(LightType::Area))
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Lights", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		objManager.forEachObjectWithComponents<Transform, LightComponent>(
+			[&](Object object, Transform& transform, LightComponent& lightComp)
 			{
-				// Unsupported legacy light types are intentionally skipped so they
-				// are not silently remapped to another runtime behavior.
-				return;
+				LightComponent reflectedLight{};
+				const std::uint32_t encodedType = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "type");
+				if (encodedType > static_cast<std::uint32_t>(LightType::Area))
+				{
+					// Unsupported legacy light types are intentionally skipped so they
+					// are not silently remapped to another runtime behavior.
+					return;
+				}
+				reflectedLight.type = static_cast<LightType>(encodedType);
+				
+				const std::uint32_t encodedUnit = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "unit");
+				reflectedLight.unit = static_cast<LightUnit>(encodedUnit);
+
+				const std::uint32_t encodedAppearance = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "appearance");
+				reflectedLight.appearance = static_cast<LightAppearance>(encodedAppearance);
+
+				reflectedLight.color = GetComponentProperty<LightComponent, glm::vec3>(lightComp, "color");
+				reflectedLight.temperature = GetComponentProperty<LightComponent, float>(lightComp, "temperature");
+				reflectedLight.intensity = GetComponentProperty<LightComponent, float>(lightComp, "intensity");
+				reflectedLight.range = GetComponentProperty<LightComponent, float>(lightComp, "range");
+				reflectedLight.innerConeAngle = GetComponentProperty<LightComponent, float>(lightComp, "innerConeAngle");
+				reflectedLight.outerConeAngle = GetComponentProperty<LightComponent, float>(lightComp, "outerConeAngle");
+				reflectedLight.width = GetComponentProperty<LightComponent, float>(lightComp, "width");
+				reflectedLight.height = GetComponentProperty<LightComponent, float>(lightComp, "height");
+				reflectedLight.castsShadows = GetComponentProperty<LightComponent, bool>(lightComp, "castsShadows");
+				reflectedLight.shadowStrength = GetComponentProperty<LightComponent, float>(lightComp, "shadowStrength");
+				reflectedLight.shadowBias = GetComponentProperty<LightComponent, float>(lightComp, "shadowBias");
+				reflectedLight.indirectMultiplier = GetComponentProperty<LightComponent, float>(lightComp, "indirectMultiplier");
+				reflectedLight.authoredPriority = GetComponentProperty<LightComponent, float>(lightComp, "authoredPriority");
+				reflectedLight.stabilityPreference = GetComponentProperty<LightComponent, float>(lightComp, "stabilityPreference");
+
+				lights.push_back({ object.EntityId(), object.getUUID(), reflectedLight });
+				if (!localTransforms.contains(object.EntityId()))
+				{
+					Transform reflectedTransform{};
+					reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
+					reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
+					reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
+					localTransforms.emplace(object.EntityId(), reflectedTransform);
+				}
 			}
-			reflectedLight.type = static_cast<LightType>(encodedType);
-			
-			const std::uint32_t encodedUnit = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "unit");
-			reflectedLight.unit = static_cast<LightUnit>(encodedUnit);
-
-			const std::uint32_t encodedAppearance = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "appearance");
-			reflectedLight.appearance = static_cast<LightAppearance>(encodedAppearance);
-
-			reflectedLight.color = GetComponentProperty<LightComponent, glm::vec3>(lightComp, "color");
-			reflectedLight.temperature = GetComponentProperty<LightComponent, float>(lightComp, "temperature");
-			reflectedLight.intensity = GetComponentProperty<LightComponent, float>(lightComp, "intensity");
-			reflectedLight.range = GetComponentProperty<LightComponent, float>(lightComp, "range");
-			reflectedLight.innerConeAngle = GetComponentProperty<LightComponent, float>(lightComp, "innerConeAngle");
-			reflectedLight.outerConeAngle = GetComponentProperty<LightComponent, float>(lightComp, "outerConeAngle");
-			reflectedLight.width = GetComponentProperty<LightComponent, float>(lightComp, "width");
-			reflectedLight.height = GetComponentProperty<LightComponent, float>(lightComp, "height");
-			reflectedLight.castsShadows = GetComponentProperty<LightComponent, bool>(lightComp, "castsShadows");
-			reflectedLight.shadowStrength = GetComponentProperty<LightComponent, float>(lightComp, "shadowStrength");
-			reflectedLight.shadowBias = GetComponentProperty<LightComponent, float>(lightComp, "shadowBias");
-			reflectedLight.indirectMultiplier = GetComponentProperty<LightComponent, float>(lightComp, "indirectMultiplier");
-			reflectedLight.authoredPriority = GetComponentProperty<LightComponent, float>(lightComp, "authoredPriority");
-			reflectedLight.stabilityPreference = GetComponentProperty<LightComponent, float>(lightComp, "stabilityPreference");
-
-			lights.push_back({ object.EntityId(), object.getUUID(), reflectedLight });
-			if (!localTransforms.contains(object.EntityId()))
-			{
-				Transform reflectedTransform{};
-				reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-				reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-				reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-				localTransforms.emplace(object.EntityId(), reflectedTransform);
-			}
-		}
-	);
+		);
+	}
 
 	// Cache of computed world transforms to avoid recomputing during traversal.
 	FrameMap<entt::entity, Transform> worldTransforms;
@@ -453,6 +470,7 @@ void RenderSystem::Update(float deltaTime)
 
 	// Pre-compute world transforms
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Resolve World Transforms", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		VisitingStack visiting;
 		visiting.reserve(16);
 		for (const auto& entry : renderables)
@@ -479,38 +497,42 @@ void RenderSystem::Update(float deltaTime)
 
 	std::vector<TerraEngine::Scene::SpatialObjectRecord> spatialRecords;
 	std::unordered_map<entt::entity, std::size_t> renderableLookup;
-	spatialRecords.reserve(renderables.size());
-	renderableLookup.reserve(renderables.size());
-	for (std::size_t index = 0; index < renderables.size(); ++index)
 	{
-		const RenderableEntry& entry = renderables[index];
-		renderableLookup.emplace(entry.entity, index);
-		const Transform& transform = worldTransforms.at(entry.entity);
-		const glm::mat4 model = makeModelMatrix(transform);
-		TerraEngine::Scene::SpatialAABB localBounds = ResourceManager::Instance().GetMeshLocalBounds(entry.mesh.meshId);
-		TerraEngine::Scene::SpatialAABB worldBounds = localBounds.IsUsable()
-			? TerraEngine::Scene::TransformAABB(localBounds, model)
-			: TerraEngine::Scene::MakeFallbackBounds(transform.position, 1.0f);
-		if (!worldBounds.IsUsable())
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Refresh Spatial Index", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		spatialRecords.reserve(renderables.size());
+		renderableLookup.reserve(renderables.size());
+		for (std::size_t index = 0; index < renderables.size(); ++index)
 		{
-			worldBounds = TerraEngine::Scene::MakeFallbackBounds(transform.position, 1.0f);
-		}
+			const RenderableEntry& entry = renderables[index];
+			renderableLookup.emplace(entry.entity, index);
+			const Transform& transform = worldTransforms.at(entry.entity);
+			const glm::mat4 model = makeModelMatrix(transform);
+			TerraEngine::Scene::SpatialAABB localBounds = ResourceManager::Instance().GetMeshLocalBounds(entry.mesh.meshId);
+			TerraEngine::Scene::SpatialAABB worldBounds = localBounds.IsUsable()
+				? TerraEngine::Scene::TransformAABB(localBounds, model)
+				: TerraEngine::Scene::MakeFallbackBounds(transform.position, 1.0f);
+			if (!worldBounds.IsUsable())
+			{
+				worldBounds = TerraEngine::Scene::MakeFallbackBounds(transform.position, 1.0f);
+			}
 
-		TerraEngine::Scene::SpatialObjectRecord record{};
-		record.objectId = entry.objectId;
-		record.entity = entry.entity;
-		record.active = true;
-		record.isStatic = entry.isStatic;
-		record.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable | TerraEngine::Scene::SpatialCategoryEditorSelectable;
-		record.worldBounds = worldBounds;
-		record.revision = objManager.GetSpatialRevision();
-		spatialRecords.push_back(record);
+			TerraEngine::Scene::SpatialObjectRecord record{};
+			record.objectId = entry.objectId;
+			record.entity = entry.entity;
+			record.active = true;
+			record.isStatic = entry.isStatic;
+			record.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable | TerraEngine::Scene::SpatialCategoryEditorSelectable;
+			record.worldBounds = worldBounds;
+			record.revision = objManager.GetSpatialRevision();
+			spatialRecords.push_back(record);
+		}
+		spatialIndex.Refresh(spatialRecords);
 	}
-	spatialIndex.Refresh(spatialRecords);
 
 	std::vector<DrawCommand> renderableDrawCommands(renderables.size());
 	if (!renderables.empty())
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Build one reusable draw command per renderable so camera views and
 		// shadow queries can cheaply select subsets without rebuilding models.
 		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
@@ -527,6 +549,7 @@ void RenderSystem::Update(float deltaTime)
 			}
 			const size_t end = std::min(renderables.size(), start + chunkSize);
 			auto task = ThreadPool::instance().createTask([start, end, &renderables, &renderableDrawCommands, &worldTransforms, &makeModelMatrix]() {
+					TERRAENGINE_PROFILE_SCOPE("RenderSystem Task: Build Draw Command Chunk", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
 				for (size_t index = start; index < end; ++index)
 				{
 					const RenderableEntry& entry = renderables[index];
@@ -573,6 +596,7 @@ void RenderSystem::Update(float deltaTime)
 	};
 
 	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection) {
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Frustum Cull Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const TerraEngine::Scene::SpatialFrustum frustum = TerraEngine::Scene::ExtractFrustum(viewProjection);
 		TerraEngine::Scene::SpatialQueryFilter filter{};
 		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
@@ -586,6 +610,7 @@ void RenderSystem::Update(float deltaTime)
 	std::vector<FrameLightCandidate> packedLights;
 	if (!lights.empty())
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Pack Lights", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
 		const size_t taskCount = std::min(lights.size(), workerCount);
 		const size_t chunkSize = (lights.size() + taskCount - 1) / taskCount;
@@ -603,6 +628,7 @@ void RenderSystem::Update(float deltaTime)
 			const size_t end = std::min(lights.size(), start + chunkSize);
 
 			auto task = ThreadPool::instance().createTask([start, end, &lights, &worldTransforms]() {
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem Task: Pack Light Chunk", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
 				std::vector<FrameLightCandidate> chunkLights;
 				chunkLights.reserve(end - start);
 
@@ -694,6 +720,7 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	auto buildShadowDrawLists = [&](const glm::vec3& cameraWorldPosition) {
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		std::vector<ShadowDrawList> shadowDrawLists;
 		shadowDrawLists.reserve(packedLights.size());
 		TerraEngine::Scene::SpatialQueryFilter filter{};
@@ -741,103 +768,107 @@ void RenderSystem::Update(float deltaTime)
 		return shadowDrawLists;
 	};
 
-	const SceneSkySettings activeSkySettings = SceneManager::Instance().GetActiveSceneSkySettings();
 	SkyRuntimeState skyRuntimeState{};
-	skyRuntimeState.isValid = true;
-	skyRuntimeState.usingFallback = true;
-	skyRuntimeState.hasProblem = false;
-	skyRuntimeState.dirty = skyStateDirty;
-	skyRuntimeState.forceBlackFallback = !activeSkySettings.enabled;
-	std::string skyIssueMessage;
-
-	const LightEntry* firstDirectionalLight = nullptr;
-	const LightEntry* boundDirectionalLight = nullptr;
-	for (const LightEntry& lightEntry : lights)
 	{
-		if (lightEntry.light.type != LightType::Directional)
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Resolve Sky State", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		const SceneSkySettings activeSkySettings = SceneManager::Instance().GetActiveSceneSkySettings();
+		skyRuntimeState.isValid = true;
+		skyRuntimeState.usingFallback = true;
+		skyRuntimeState.hasProblem = false;
+		skyRuntimeState.dirty = skyStateDirty;
+		skyRuntimeState.forceBlackFallback = !activeSkySettings.enabled;
+		std::string skyIssueMessage;
+
+		const LightEntry* firstDirectionalLight = nullptr;
+		const LightEntry* boundDirectionalLight = nullptr;
+		for (const LightEntry& lightEntry : lights)
 		{
-			continue;
+			if (lightEntry.light.type != LightType::Directional)
+			{
+				continue;
+			}
+
+			if (firstDirectionalLight == nullptr)
+			{
+				firstDirectionalLight = &lightEntry;
+			}
+
+			if (lightEntry.lightId == activeSkySettings.directionalLightObjectId)
+			{
+				boundDirectionalLight = &lightEntry;
+			}
 		}
 
-		if (firstDirectionalLight == nullptr)
+		glm::vec3 baseSunDirection = kSkyReferenceSunDirection;
+		const LightEntry* resolvedDirectionalLight = nullptr;
+		if (activeSkySettings.enabled)
 		{
-			firstDirectionalLight = &lightEntry;
+			if (activeSkySettings.directionalLightObjectId != TerraEngine::EMPTY_UUID)
+			{
+				resolvedDirectionalLight = boundDirectionalLight;
+				if (resolvedDirectionalLight == nullptr)
+				{
+					skyRuntimeState.hasProblem = true;
+					skyRuntimeState.forceBlackFallback = true;
+					skyIssueMessage = "Configured sky directional light could not be resolved. Rendering a black background.";
+				}
+			}
+			else
+			{
+				resolvedDirectionalLight = firstDirectionalLight;
+				if (resolvedDirectionalLight == nullptr)
+				{
+					skyRuntimeState.hasProblem = true;
+					skyRuntimeState.forceBlackFallback = true;
+					skyIssueMessage = "Scene sky requires a directional light. Rendering a black background.";
+				}
+			}
 		}
 
-		if (lightEntry.lightId == activeSkySettings.directionalLightObjectId)
+		if (resolvedDirectionalLight != nullptr)
 		{
-			boundDirectionalLight = &lightEntry;
+			if (const Transform* lightTransform = worldTransforms.find(resolvedDirectionalLight->entity))
+			{
+				const glm::quat lightRotation = glm::normalize(lightTransform->rotation);
+				const glm::vec3 lightForward = lightRotation * glm::vec3(0.0f, 0.0f, -1.0f);
+				baseSunDirection = SafeNormalizeDirection(-lightForward, baseSunDirection);
+			}
 		}
-	}
 
-	glm::vec3 baseSunDirection = kSkyReferenceSunDirection;
-	const LightEntry* resolvedDirectionalLight = nullptr;
-	if (activeSkySettings.enabled)
-	{
-		if (activeSkySettings.directionalLightObjectId != TerraEngine::EMPTY_UUID)
+		skyRuntimeState.resolvedSunDirection = ApplySkyYawOffset(baseSunDirection, activeSkySettings.rotationOffsetDegrees);
+
+		if (activeSkySettings.enabled && !skyRuntimeState.forceBlackFallback && !activeSkySettings.sourceAsset.empty())
 		{
-			resolvedDirectionalLight = boundDirectionalLight;
-			if (resolvedDirectionalLight == nullptr)
+			const TerraEngine::UUID resolvedTextureId = ResourceManager::Instance().ResolveAssetReference(activeSkySettings.sourceAsset, AssetType::Texture);
+			if (resolvedTextureId == TerraEngine::EMPTY_UUID)
 			{
 				skyRuntimeState.hasProblem = true;
-				skyRuntimeState.forceBlackFallback = true;
-				skyIssueMessage = "Configured sky directional light could not be resolved. Rendering a black background.";
+				skyIssueMessage = "Scene sky source could not be resolved. Rendering the fallback background.";
+			}
+			else
+			{
+				skyRuntimeState.resolvedSkyHandle = resolvedTextureId;
+				skyRuntimeState.usingFallback = false;
+			}
+		}
+
+		if (skyRuntimeState.hasProblem)
+		{
+			const std::string issueKey = activeSkySettings.sourceAsset + "|" + skyIssueMessage;
+			if (issueKey != lastLoggedSkyIssueKey)
+			{
+				TERRAENGINE_LOG(LogLevel::Warning, "[Sky] " << skyIssueMessage << " Source: " << activeSkySettings.sourceAsset);
+				lastLoggedSkyIssueKey = issueKey;
 			}
 		}
 		else
 		{
-			resolvedDirectionalLight = firstDirectionalLight;
-			if (resolvedDirectionalLight == nullptr)
-			{
-				skyRuntimeState.hasProblem = true;
-				skyRuntimeState.forceBlackFallback = true;
-				skyIssueMessage = "Scene sky requires a directional light. Rendering a black background.";
-			}
+			lastLoggedSkyIssueKey.clear();
 		}
-	}
-
-	if (resolvedDirectionalLight != nullptr)
-	{
-		if (const Transform* lightTransform = worldTransforms.find(resolvedDirectionalLight->entity))
-		{
-			const glm::quat lightRotation = glm::normalize(lightTransform->rotation);
-			const glm::vec3 lightForward = lightRotation * glm::vec3(0.0f, 0.0f, -1.0f);
-			baseSunDirection = SafeNormalizeDirection(-lightForward, baseSunDirection);
-		}
-	}
-
-	skyRuntimeState.resolvedSunDirection = ApplySkyYawOffset(baseSunDirection, activeSkySettings.rotationOffsetDegrees);
-
-	if (activeSkySettings.enabled && !skyRuntimeState.forceBlackFallback && !activeSkySettings.sourceAsset.empty())
-	{
-		const TerraEngine::UUID resolvedTextureId = ResourceManager::Instance().ResolveAssetReference(activeSkySettings.sourceAsset, AssetType::Texture);
-		if (resolvedTextureId == TerraEngine::EMPTY_UUID)
-		{
-			skyRuntimeState.hasProblem = true;
-			skyIssueMessage = "Scene sky source could not be resolved. Rendering the fallback background.";
-		}
-		else
-		{
-			skyRuntimeState.resolvedSkyHandle = resolvedTextureId;
-			skyRuntimeState.usingFallback = false;
-		}
-	}
-
-	if (skyRuntimeState.hasProblem)
-	{
-		const std::string issueKey = activeSkySettings.sourceAsset + "|" + skyIssueMessage;
-		if (issueKey != lastLoggedSkyIssueKey)
-		{
-			TERRAENGINE_LOG(LogLevel::Warning, "[Sky] " << skyIssueMessage << " Source: " << activeSkySettings.sourceAsset);
-			lastLoggedSkyIssueKey = issueKey;
-		}
-	}
-	else
-	{
-		lastLoggedSkyIssueKey.clear();
 	}
 
 	FrameRenderData frameData;
+	const SceneSkySettings activeSkySettings = SceneManager::Instance().GetActiveSceneSkySettings();
 	frameData.deltaTimeSeconds = deltaTime;
 	frameData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
 	frameData.cullingEpsilon = 0.001f;
@@ -857,10 +888,16 @@ void RenderSystem::Update(float deltaTime)
 	frameData.sky.sunDirection = skyRuntimeState.resolvedSunDirection;
 	frameData.sky.textureId = skyRuntimeState.resolvedSkyHandle;
 	frameData.lightCandidates = std::move(packedLights);
-	frameData.uiBatch = UISystem::Instance().GetCombinedFrameBatch();
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Fetch UI Batch", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		frameData.uiBatch = UISystem::Instance().GetCombinedFrameBatch();
+	}
 
 	rhi->SetGlobalTaskShaderCullingEnabled(taskShaderCullingEnabled);
-	rhi->BeginFrame();
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: RHI Begin Frame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		rhi->BeginFrame();
+	}
 
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot sceneSpatialDiagnostics{};
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot gameSpatialDiagnostics{};
@@ -878,6 +915,7 @@ void RenderSystem::Update(float deltaTime)
 
 	if (hasSceneViewCamera)
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Scene View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		frameData.viewMatrix = sceneViewCamera.view;
 		frameData.projectionMatrix = sceneViewCamera.proj;
 		frameData.cameraWorldPosition = sceneViewCamera.pos;
@@ -889,6 +927,7 @@ void RenderSystem::Update(float deltaTime)
 
 	if (!gameViewCameras.empty())
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Game View Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		for (const auto& cam : gameViewCameras)
 		{
 			frameData.viewMatrix = cam.view;
@@ -902,6 +941,7 @@ void RenderSystem::Update(float deltaTime)
 	}
 	else if (cameras.empty())
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Blank Game View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		FrameRenderData blankData{};
 		blankData.viewMatrix = glm::mat4(1.0f);
 		blankData.projectionMatrix = glm::mat4(1.0f);
@@ -919,6 +959,7 @@ void RenderSystem::Update(float deltaTime)
 	}
 	else
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Runtime Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		for (size_t cameraIndex = 0; cameraIndex < cameras.size(); ++cameraIndex)
 		{
 			const entt::entity cameraEntity = cameras[cameraIndex].entity;
@@ -956,9 +997,13 @@ void RenderSystem::Update(float deltaTime)
 			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u));
 		}
 	}
-	rhi->EndFrame();
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: RHI End Frame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		rhi->EndFrame();
+	}
 
 	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Publish Render Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestGameStats = rhi->GetLatestRenderStats(RenderViewType::Game);
 		latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);
@@ -990,6 +1035,7 @@ void RenderSystem::Update(float deltaTime)
 		latestSceneLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Scene);
 		latestRenderSnapshotDiagnostics = rhi->GetLatestRenderSnapshotDiagnostics();
 		latestSkyRuntimeState = skyRuntimeState;
+		TerraEngine::Profiling::Profiler::Instance().RecordRenderStats(latestGameStats, latestSceneStats);
 	}
 
 	skyStateDirty = false;

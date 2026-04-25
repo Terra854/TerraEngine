@@ -1,5 +1,6 @@
 #include "ThreadPool.h"
 #include "Core/Logger/Logger.h"
+#include "Profiling/Profiler.h"
 
 ThreadPool& ThreadPool::instance() {
 	static ThreadPool instance;
@@ -49,10 +50,13 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
 			{
 				std::unique_lock<std::mutex> lock(queue_mutex);
 				tasks.emplace([task]() {
+					TerraEngine::Profiling::Profiler::Instance().RecordTaskStarted("ThreadPool Task");
 					task->run();
+					TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished();
 				});
 			} // Release the lock asap when done to minimize the chances of deadlocks
 
+			TerraEngine::Profiling::Profiler::Instance().RecordTaskQueued();
 			this->completeTask(task);  // Call the completion logic after task execution
 		}
 		condition.notify_one();  // Notify a worker thread that a task is available

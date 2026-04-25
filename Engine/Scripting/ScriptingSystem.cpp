@@ -3,6 +3,7 @@
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
 #include "DotNet/DotNetHost.h"
+#include "Profiling/ProfilerScope.h"
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
@@ -485,8 +486,10 @@ void ScriptingSystem::SetRunning(bool running)
 }
 
 void ScriptingSystem::Update(float deltaTime) {
+	TERRAENGINE_PROFILE_SCOPE("ScriptingSystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	m_LastDeltaTime = deltaTime;
 	if (m_ExportMode) {
+		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Export Runtime Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		UpdateExportMode(deltaTime);
 		return;
 	}
@@ -496,6 +499,7 @@ void ScriptingSystem::Update(float deltaTime) {
 	}
 
 	if (m_Paused) {
+		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Pause/Step Handling", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		if (m_StepFrames > 0) {
 			m_StepFrames--;
 		} else {
@@ -511,24 +515,28 @@ void ScriptingSystem::Update(float deltaTime) {
 	};
 
 	std::vector<ScriptBatchItem> allBindings;
-	auto& objectManager = ObjectManager::instance();
-	for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>()) {
-		ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
-		if (scriptComponent == nullptr || !scriptComponent->active) {
-			continue;
-		}
-
-		auto guard = scriptComponent->acquireReadLock();
-		for (const ScriptBinding& binding : scriptComponent->GetBindings()) {
-			if (!binding.enabled || binding.className.empty()) {
+	{
+		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Collect Script Bindings", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		auto& objectManager = ObjectManager::instance();
+		for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>()) {
+			ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+			if (scriptComponent == nullptr || !scriptComponent->active) {
 				continue;
 			}
 
-			allBindings.push_back({ static_cast<uint32_t>(object.EntityId()), binding.bindingId, binding.className });
+			auto guard = scriptComponent->acquireReadLock();
+			for (const ScriptBinding& binding : scriptComponent->GetBindings()) {
+				if (!binding.enabled || binding.className.empty()) {
+					continue;
+				}
+
+				allBindings.push_back({ static_cast<uint32_t>(object.EntityId()), binding.bindingId, binding.className });
+			}
 		}
 	}
 
 	if (!allBindings.empty()) {
+		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Dispatch Script Batches", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const std::size_t threadCount = std::max<std::size_t>(1, ThreadPool::instance().getThreadCount());
 		const std::size_t targetTaskCount = threadCount * 4;
 		std::size_t batchSize = allBindings.size() / std::max<std::size_t>(1, targetTaskCount);
@@ -544,6 +552,7 @@ void ScriptingSystem::Update(float deltaTime) {
 			currentBatch.push_back(item);
 			if (currentBatch.size() >= batchSize) {
 				auto task = ThreadPool::instance().createTask([items = std::move(currentBatch), this, deltaTime]() {
+					TERRAENGINE_PROFILE_SCOPE("ScriptingSystem Task: Managed Update Batch", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
 					for (const ScriptBatchItem& entry : items) {
 						managedUpdateScript(entry.objectId, entry.bindingId.c_str(), entry.className.c_str(), deltaTime);
 					}
@@ -557,6 +566,7 @@ void ScriptingSystem::Update(float deltaTime) {
 
 		if (!currentBatch.empty()) {
 			auto task = ThreadPool::instance().createTask([items = std::move(currentBatch), this, deltaTime]() {
+				TERRAENGINE_PROFILE_SCOPE("ScriptingSystem Task: Managed Update Batch", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
 				for (const ScriptBatchItem& entry : items) {
 					managedUpdateScript(entry.objectId, entry.bindingId.c_str(), entry.className.c_str(), deltaTime);
 				}
@@ -566,11 +576,15 @@ void ScriptingSystem::Update(float deltaTime) {
 		}
 
 		for (std::future<void>& future : futures) {
+			TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Wait Script Batch", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			future.get();
 		}
 	}
 
-	RefreshWatchedBindingSnapshots(deltaTime);
+	{
+		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Refresh Watched Bindings", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		RefreshWatchedBindingSnapshots(deltaTime);
+	}
 }
 
 void ScriptingSystem::Shutdown() {

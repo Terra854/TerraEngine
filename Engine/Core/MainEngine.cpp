@@ -9,6 +9,8 @@
 #include "Window/GLFW/GlfwWindowBackend.h"
 #include "Window/WindowSystem.h"
 #include "Object/ComponentRegistry.h"
+#include "Profiling/Profiler.h"
+#include "Profiling/ProfilerScope.h"
 #include "Resource/ResourceManager.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Scripting/ScriptGlue.h"
@@ -81,11 +83,6 @@ void Engine::Initialize()
 	SceneManager& sceneManager = SceneManager::Instance();
 	systems.push_back(&sceneManager);
 
-	// RenderSystem consumes scene data and produces frames.
-	RenderSystem& renderSystem = RenderSystem::Instance();
-	renderSystem.SetEditorModeEnabled(editorMode);
-	systems.push_back(&renderSystem);
-
 	// ScriptingSystem manages the .NET runtime and gameplay scripts.
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 	systems.push_back(&scriptingSystem);
@@ -94,6 +91,11 @@ void Engine::Initialize()
 	// after gameplay and scene state have been updated for the current frame.
 	UISystem& uiSystem = UISystem::Instance();
 	systems.push_back(&uiSystem);
+
+	// RenderSystem consumes scene data and produces frames.
+	RenderSystem& renderSystem = RenderSystem::Instance();
+	renderSystem.SetEditorModeEnabled(editorMode);
+	systems.push_back(&renderSystem);
 
 	std::size_t initializedSystemCount = 0;
 	bool editorSystemInitialized = false;
@@ -145,13 +147,22 @@ bool Engine::Update(float deltaTime)
 		return false;
 	}
 
-	// Run each registered system. Systems can consult the engine's
-	// state or the delta time if they need it for frame dependent
-	// calculations.
-	for (auto* system : systems) {
-		system->Update(deltaTime);
+	// The profiler UI is editor-only, but captures measure engine systems only.
+	// Editor UI/update work runs after EndFrame so editor overhead is not mixed
+	// into engine frame analysis.
+	TerraEngine::Profiling::Profiler::Instance().BeginFrame();
+	{
+		TERRAENGINE_PROFILE_SCOPE("Engine::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+
+		// Run each registered system with an individual named scope. The system
+		// name is copied by the profiler at scope construction time, so the
+		// temporary string remains valid for the marker label.
+		for (auto* system : systems) {
+			system->Update(deltaTime);
+		}
 	}
-	
+	TerraEngine::Profiling::Profiler::Instance().EndFrame();
+
 	if (editorMode) {
 		editorSystem->Update(deltaTime);
 	}

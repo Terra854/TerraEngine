@@ -5,6 +5,7 @@
 #include "Core/Object/ObjectManager.h"
 #include "Input/InputCodes.h"
 #include "Input/InputSystem.h"
+#include "Profiling/ProfilerScope.h"
 #include "Resource/ResourceManager.h"
 #include "Scripting/ScriptingSystem.h"
 #include "ThreadPool/ThreadPool.h"
@@ -132,12 +133,16 @@ void UISystem::Initialize()
 
 void UISystem::Update(float deltaTime)
 {
+	TERRAENGINE_PROFILE_SCOPE("UISystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	if (!initialized_)
 	{
 		return;
 	}
 
-	IntegrateReadyBuilds();
+	{
+		TERRAENGINE_PROFILE_SCOPE("UISystem: Integrate Ready Builds", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		IntegrateReadyBuilds();
+	}
 
 	const glm::vec2 viewportSize = GetFallbackViewportSize();
 	PointerState pointerState;
@@ -167,14 +172,18 @@ void UISystem::Update(float deltaTime)
 	}
 
 	std::vector<std::pair<entt::entity, UIComponent*>> liveComponents;
-	ObjectManager::instance().forEachObjectWithComponents<UIComponent>([&](Object object, UIComponent& component) {
-		if (component.IsVisible())
-		{
-			liveComponents.emplace_back(object.EntityId(), &component);
-		}
-	});
+	{
+		TERRAENGINE_PROFILE_SCOPE("UISystem: Collect UI Components", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		ObjectManager::instance().forEachObjectWithComponents<UIComponent>([&](Object object, UIComponent& component) {
+			if (component.IsVisible())
+			{
+				liveComponents.emplace_back(object.EntityId(), &component);
+			}
+		});
+	}
 
 	{
+		TERRAENGINE_PROFILE_SCOPE("UISystem: Update Documents and Input", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		std::lock_guard<std::mutex> lock(stateMutex_);
 
 		std::unordered_set<entt::entity> liveEntities;
@@ -230,9 +239,15 @@ void UISystem::Update(float deltaTime)
 				// Managed runtime UI mutations mark the tree dirty in place, so the
 				// system must recompute Yoga layout and rebuild the draw batch even
 				// when no authored asset file changed this frame.
-				layoutEngine_.ComputeLayout(state.root, viewportSize);
+				{
+					TERRAENGINE_PROFILE_SCOPE("UISystem: Recompute Dirty Layout", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+					layoutEngine_.ComputeLayout(state.root, viewportSize);
+				}
 				state.root->ClearDirtyRecursive();
-				state.batch = renderer_.BuildBatch(state.root, viewportSize);
+				{
+					TERRAENGINE_PROFILE_SCOPE("UISystem: Rebuild Dirty Batch", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+					state.batch = renderer_.BuildBatch(state.root, viewportSize);
+				}
 			}
 
 			const bool viewportChanged = std::abs(state.viewportSize.x - viewportSize.x) > 0.1f ||
@@ -243,9 +258,15 @@ void UISystem::Update(float deltaTime)
 				// batch rebuild. Re-reading the authored files on every resize was
 				// pure churn and caused avoidable stalls in both the editor and
 				// exported runtime.
-				layoutEngine_.ComputeLayout(state.root, viewportSize);
+				{
+					TERRAENGINE_PROFILE_SCOPE("UISystem: Recompute Resized Layout", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+					layoutEngine_.ComputeLayout(state.root, viewportSize);
+				}
 				state.root->ClearDirtyRecursive();
-				state.batch = renderer_.BuildBatch(state.root, viewportSize);
+				{
+					TERRAENGINE_PROFILE_SCOPE("UISystem: Rebuild Resized Batch", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+					state.batch = renderer_.BuildBatch(state.root, viewportSize);
+				}
 				state.viewportSize = viewportSize;
 				continue;
 			}
@@ -294,7 +315,10 @@ void UISystem::Update(float deltaTime)
 		previousLeftButtonDown_ = pointerState.insideViewport && pointerState.leftButtonDown;
 	}
 
-	RefreshCombinedBatch();
+	{
+		TERRAENGINE_PROFILE_SCOPE("UISystem: Refresh Combined Batch", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		RefreshCombinedBatch();
+	}
 }
 
 void UISystem::Shutdown()
@@ -456,6 +480,7 @@ UISystem::UIBuildResult UISystem::BuildDocumentFromSources(
 	const UIElement::Ptr& existingRoot,
 	const glm::vec2& viewportSize) const
 {
+	TERRAENGINE_PROFILE_SCOPE("UISystem: Build Document From Sources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	UIBuildResult result;
 
 	try
@@ -471,6 +496,7 @@ UISystem::UIBuildResult UISystem::BuildDocumentFromSources(
 
 		if (!markupPath.empty())
 		{
+			TERRAENGINE_PROFILE_SCOPE("UISystem: Parse Markup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			result.root = parser_.ParseMarkupFile(resolvePath(markupPath));
 		}
 		else if (existingRoot)
@@ -496,6 +522,7 @@ UISystem::UIBuildResult UISystem::BuildDocumentFromSources(
 			std::vector<UIStyleRule> combinedRules;
 			for (const std::string& resolvedStylePath : resolvedStylePaths)
 			{
+				TERRAENGINE_PROFILE_SCOPE("UISystem: Parse Style", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				std::vector<UIStyleRule> styleRules = parser_.ParseStyleFile(resolvePath(resolvedStylePath));
 				const std::size_t orderOffset = combinedRules.size();
 				for (UIStyleRule& rule : styleRules)
@@ -513,9 +540,15 @@ UISystem::UIBuildResult UISystem::BuildDocumentFromSources(
 			parser_.ApplyStyles(result.root, {});
 		}
 
-		layoutEngine_.ComputeLayout(result.root, viewportSize);
+		{
+			TERRAENGINE_PROFILE_SCOPE("UISystem: Compute Document Layout", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			layoutEngine_.ComputeLayout(result.root, viewportSize);
+		}
 		result.root->ClearDirtyRecursive();
-		result.batch = renderer_.BuildBatch(result.root, viewportSize);
+		{
+			TERRAENGINE_PROFILE_SCOPE("UISystem: Build Document Batch", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			result.batch = renderer_.BuildBatch(result.root, viewportSize);
+		}
 	}
 	catch (const std::exception& exception)
 	{

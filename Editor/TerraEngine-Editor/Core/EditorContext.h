@@ -8,6 +8,7 @@
 class Engine;
 class ProjectManager;
 class AssetDatabase;
+class EditorProfilerService;
 
 // Lightweight scripting snapshot shared across editor windows. This avoids
 // having every window query multiple subsystems during each ImGui draw pass.
@@ -32,5 +33,6 @@ struct EditorContext {
 	Engine* engine = nullptr;
 	std::shared_ptr<ProjectManager> projectManager;
 	std::shared_ptr<AssetDatabase> assetDatabase;
+	std::shared_ptr<EditorProfilerService> editorProfiler;
 	ScriptEditorState scripting;
 };

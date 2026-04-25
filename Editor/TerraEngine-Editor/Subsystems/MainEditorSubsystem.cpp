@@ -4,6 +4,7 @@
 #include "EditorSystem.h"
 #include "ScriptCompilationSubsystem.h"
 #include "UndoRedoSystem.h"
+#include "../Profiling/EditorProfilerService.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -26,6 +27,7 @@
 #include "../Windows/GameViewWindow.h"
 #include "../Windows/SceneViewWindow.h"
 #include "../Windows/BuildProfilesWindow.h"
+#include "../Windows/ProfilerWindow.h"
 #include "../Windows/UIBuilderWindow.h"
 #include "../Windows/SkySettingsWindow.h"
 
@@ -50,12 +52,15 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	ResourceManager::Instance().SetEngineRoot(std::filesystem::current_path());
 	
 	// Initialize Windows
+	context.editorProfiler = std::make_shared<EditorProfilerService>();
+	context.editorProfiler->Initialize(context);
 	m_Windows.push_back(std::make_shared<HierarchyWindow>(this));
 	m_Windows.push_back(std::make_shared<InspectorWindow>(this));
 	m_Windows.push_back(std::make_shared<ProjectBrowserWindow>(this));
 	m_Windows.push_back(std::make_shared<GameViewWindow>(this));
 	m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
 	m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
+	m_Windows.push_back(std::make_shared<ProfilerWindow>(this));
 	m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));
 	m_Windows.push_back(std::make_shared<SkySettingsWindow>(this));
 
@@ -81,6 +86,9 @@ void MainEditorSubsystem::OnProjectOpened() {
 	
 	if (auto buildProfiles = GetWindow<BuildProfilesWindow>()) {
 		buildProfiles->OnProjectOpened();
+	}
+	if (ctx->editorProfiler) {
+		ctx->editorProfiler->OnProjectOpened();
 	}
 
 	if (auto uiBuilder = GetWindow<UIBuilderWindow>()) {
@@ -279,6 +287,10 @@ void MainEditorSubsystem::Shutdown() {
 	SetApplicationEditorStopPlayModeCallback(nullptr);
 	ScriptCompilationSubsystem::Instance().Shutdown();
 	UndoRedoSystem::Instance().Shutdown();
+	if (ctx != nullptr && ctx->editorProfiler) {
+		ctx->editorProfiler->Shutdown();
+		ctx->editorProfiler.reset();
+	}
 	ctx = nullptr;
 	m_Windows.clear();
 }
@@ -816,6 +828,9 @@ void MainEditorSubsystem::CloseCurrentProject() {
 	
 	// Trigger callbacks BEFORE closing the project in ProjectManager
 	// so that subsystems can save data to the project directory.
+	if (ctx && ctx->editorProfiler) {
+		ctx->editorProfiler->OnProjectClosed();
+	}
 	if (onProjectClosed) onProjectClosed();
 
 	// Close Project

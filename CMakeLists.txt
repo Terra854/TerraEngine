@@ -45,6 +45,8 @@ set(ENGINE_SOURCES
 	Engine/Window/WindowSystem.cpp
 	Engine/Window/GLFW/GlfwWindowBackend.cpp
 	Engine/ThreadPool/ThreadPool.cpp
+	Engine/Profiling/Profiler.cpp
+	Engine/Profiling/ProfilerCapture.cpp
 	Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
@@ -100,6 +102,9 @@ set(ENGINE_HEADERS
 	Engine/Window/WindowSystem.h
 	Engine/Window/GLFW/GlfwWindowBackend.h
 	Engine/ThreadPool/ThreadPool.h
+	Engine/Profiling/Profiler.h
+	Engine/Profiling/ProfilerCapture.h
+	Engine/Profiling/ProfilerScope.h
 	Engine/Renderer/RenderSystem.h
 	Engine/Renderer/RenderTypes.h
 	Engine/Renderer/RHI/RHIDefinitions.h
@@ -603,6 +608,8 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp
 	Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp
 	Editor/TerraEngine-Editor/Assets/FileWatcher.cpp
+	Editor/TerraEngine-Editor/Profiling/EditorProfilerService.cpp
+	Editor/TerraEngine-Editor/Profiling/ProfilerCaptureStore.cpp
 	Editor/TerraEngine-Editor/Framework/EditorWindow.cpp
 	Editor/TerraEngine-Editor/Windows/HierarchyWindow.cpp
 	Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp
@@ -610,6 +617,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
+	Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp
 	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SkySettingsWindow.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
@@ -641,6 +649,7 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Project
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
 		${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuizmo
 		${IMGUI_FILE_DIALOG_DIR}
