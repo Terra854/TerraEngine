@@ -1,3 +1,8 @@
+// GameViewWindow.cpp — Game View Window Implementation
+//
+// Implements the editor window that renders the live game output, allowing developers to test gameplay within the editor.
+// It manages the transition between editor and game camera modes and provides runtime performance statistics.
+
 #include "GameViewWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -21,15 +26,19 @@ GameViewWindow::GameViewWindow(MainEditorSubsystem* owner)
 	m_AspectRatios.push_back({ "Stand. (4:3)", 4.0f, 3.0f, false });
 }
 
+// GameViewWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GameViewWindow::OnGui() {
 	// --- Toolbar ---
 	ImGui::SetNextItemWidth(150.0f);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginCombo("##aspect", m_AspectRatios[m_SelectedAspectRatioIndex].Name.c_str())) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (int i = 0; i < static_cast<int>(m_AspectRatios.size()); i++) {
 			bool isSelected = (m_SelectedAspectRatioIndex == i);
 			if (ImGui::Selectable(m_AspectRatios[i].Name.c_str(), isSelected)) {
 				m_SelectedAspectRatioIndex = i;
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (isSelected) ImGui::SetItemDefaultFocus();
 		}
 		ImGui::EndCombo();
@@ -51,6 +60,7 @@ void GameViewWindow::OnGui() {
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, m_StatsToggleHoverBg);
 	ImGui::PushStyleColor(ImGuiCol_ButtonActive, m_StatsToggleActiveBg);
 	ImGui::PushStyleColor(ImGuiCol_Text, m_StatsToggleText);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Stats")) {
 		m_Stats = !m_Stats;
 	}
@@ -66,9 +76,11 @@ void GameViewWindow::OnGui() {
 
 	ImVec2 imageSize = availableSize;
 	AspectRatio& option = m_AspectRatios[m_SelectedAspectRatioIndex];
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (option.Width > 0 && option.Height > 0) {
 		float targetRatio = option.Width / option.Height;
 		float currentRatio = availableSize.x / availableSize.y;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (currentRatio > targetRatio) {
 			imageSize.x = availableSize.y * targetRatio;
 			imageSize.y = availableSize.y;
@@ -88,6 +100,7 @@ void GameViewWindow::OnGui() {
 
 	auto cameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
 	bool hasCameras = !cameras.empty();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto obj : cameras) {
 		Transform* transform = obj.getComponent<Transform>();
 		CameraComponent* camera = obj.getComponent<CameraComponent>();
@@ -98,6 +111,7 @@ void GameViewWindow::OnGui() {
 		const glm::vec3 defaultForward(0.0f, 0.0f, -1.0f);
 		const glm::vec3 forward = rot * defaultForward;
 		glm::vec3 up = rot * camera->up;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (glm::length(up) < 0.0001f) up = glm::vec3(0.0f, 1.0f, 0.0f);
 
 		glm::mat4 view = glm::lookAt(pos, pos + forward, glm::normalize(up));
@@ -114,6 +128,7 @@ void GameViewWindow::OnGui() {
 
 	ImVec2 imageMin = cursorPos;
 	ImVec2 imageMax = ImVec2(cursorPos.x + availableSize.x, cursorPos.y + availableSize.y);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (texID && hasCameras) {
 		float xOffset = (availableSize.x - imageSize.x) * 0.5f;
 		float yOffset = (availableSize.y - imageSize.y) * 0.5f;
@@ -131,6 +146,7 @@ void GameViewWindow::OnGui() {
 			&& mousePosition.y >= imageMin.y
 			&& mousePosition.y <= imageMax.y;
 		glm::vec2 localPointerPosition(-1.0f, -1.0f);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (pointerInsideImage)
 		{
 			const glm::vec2 rawLocalPointerPosition(mousePosition.x - imageMin.x, mousePosition.y - imageMin.y);
@@ -162,6 +178,7 @@ void GameViewWindow::OnGui() {
 		ImGui::Text("%s", text);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_Stats) {
 		RenderStatsSnapshot stats{};
 		const bool statsReady = (m_Owner != nullptr) && m_Owner->TryGetGameViewRenderStats(stats) && texID != nullptr && hasCameras;
@@ -178,6 +195,7 @@ void GameViewWindow::OnGui() {
 		char line9[96];
 		char line10[96];
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (statsReady) {
 			const std::uint32_t displayedCulled = stats.taskCullingActive ? stats.meshletsCulled : 0u;
 			const std::uint32_t displayedDispatched = stats.taskCullingActive ? stats.meshletsDispatched : stats.meshletsTotal;
@@ -210,7 +228,9 @@ void GameViewWindow::OnGui() {
 		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7, line8, line9, line10};
 		float textWidth = 0.0f;
 		int lineCount = 0;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const char* line : lines) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (line == nullptr || line[0] == '\0') {
 				continue;
 			}
@@ -227,7 +247,9 @@ void GameViewWindow::OnGui() {
 
 		drawList->AddRectFilled(panelMin, panelMax, IM_COL32(35, 35, 35, 195), 4.0f);
 		float textY = panelMin.y + panelPadding;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const char* line : lines) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (line == nullptr || line[0] == '\0') {
 				continue;
 			}

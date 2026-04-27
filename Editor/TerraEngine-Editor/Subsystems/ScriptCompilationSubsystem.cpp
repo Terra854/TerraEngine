@@ -1,3 +1,7 @@
+// ScriptCompilationSubsystem.cpp — Managed script compilation implementation
+//
+// Implements the script build coordination logic, including debounce-aware rebuild requests and automated reference synchronization. It manages the transition of engine states during a build, ensuring that gameplay is safely paused and reloaded when the Assembly-CSharp DLL is updated.
+
 #include "ScriptCompilationSubsystem.h"
 
 #include "../Assets/AssetDatabase.h"
@@ -18,16 +22,19 @@ namespace
 {
 	constexpr float kScriptBuildDebounceSeconds = 0.25f;
 
+	// BuildProfileToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string BuildProfileToString(ScriptBuildProfile profile)
 	{
 		return profile == ScriptBuildProfile::Debug ? "Debug" : "Release";
 	}
 
+	// BuildProfileToWideString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::wstring BuildProfileToWideString(ScriptBuildProfile profile)
 	{
 		return profile == ScriptBuildProfile::Debug ? L"Debug" : L"Release";
 	}
 
+	// CoordinatorStateToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string CoordinatorStateToString(ScriptCoordinatorState state)
 	{
 		switch (state)
@@ -50,6 +57,7 @@ namespace
 	}
 
 #if defined(_WIN32)
+	// RunProcessCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool RunProcessCapture(const std::filesystem::path& workingDirectory, const std::wstring& commandLine, std::string& output, DWORD& exitCode)
 	{
 		SECURITY_ATTRIBUTES securityAttributes{};
@@ -58,6 +66,7 @@ namespace
 
 		HANDLE readHandle = nullptr;
 		HANDLE writeHandle = nullptr;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!CreatePipe(&readHandle, &writeHandle, &securityAttributes, 0))
 		{
 			return false;
@@ -88,6 +97,7 @@ namespace
 			&processInfo);
 
 		CloseHandle(writeHandle);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!started)
 		{
 			CloseHandle(readHandle);
@@ -96,6 +106,7 @@ namespace
 
 		std::array<char, 4096> buffer{};
 		DWORD bytesRead = 0;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		while (ReadFile(readHandle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr) && bytesRead > 0)
 		{
 			output.append(buffer.data(), bytesRead);
@@ -118,12 +129,14 @@ ScriptCompilationSubsystem& ScriptCompilationSubsystem::Instance()
 	return instance;
 }
 
+// ScriptCompilationSubsystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::Initialize(EditorContext& context)
 {
 	m_Context = &context;
 	UpdateSharedState();
 }
 
+// ScriptCompilationSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::Update(float deltaTime)
 {
 	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
@@ -131,6 +144,7 @@ void ScriptCompilationSubsystem::Update(float deltaTime)
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_BuildInFlight && m_ActiveBuild.valid() && m_ActiveBuild.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
 	{
 		ScriptBuildResult result = m_ActiveBuild.get();
@@ -138,9 +152,11 @@ void ScriptCompilationSubsystem::Update(float deltaTime)
 		HandleCompletedBuild(std::move(result));
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_BuildInFlight && m_Status.queuedBuild)
 	{
 		m_DebounceTimer -= deltaTime;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_DebounceTimer <= 0.0f)
 		{
 			BeginBuild();
@@ -150,10 +166,12 @@ void ScriptCompilationSubsystem::Update(float deltaTime)
 	UpdateSharedState();
 }
 
+// ScriptCompilationSubsystem::DrawUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::DrawUI()
 {
 }
 
+// ScriptCompilationSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::Shutdown()
 {
 	if (m_BuildInFlight && m_ActiveBuild.valid())
@@ -170,11 +188,13 @@ void ScriptCompilationSubsystem::Shutdown()
 	m_WasPausedBeforeBuild = false;
 }
 
+// ScriptCompilationSubsystem::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ScriptCompilationSubsystem::GetName() const
 {
 	return "Script Compilation";
 }
 
+// ScriptCompilationSubsystem::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::OnProjectOpened()
 {
 	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
@@ -190,6 +210,7 @@ void ScriptCompilationSubsystem::OnProjectOpened()
 	ScriptingSystem::Instance().ClearGameplayAssembly();
 
 	std::string workspaceError;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_WorkspaceService.EnsureWorkspace(&workspaceError))
 	{
 		// Generate the root solution immediately so new projects can open in
@@ -201,6 +222,7 @@ void ScriptCompilationSubsystem::OnProjectOpened()
 	RequestBuild(ScriptBuildReason::ProjectOpen);
 }
 
+// ScriptCompilationSubsystem::OnProjectClosed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::OnProjectClosed()
 {
 	m_Status = ScriptCompilationStatus{};
@@ -212,6 +234,7 @@ void ScriptCompilationSubsystem::OnProjectClosed()
 	UpdateSharedState();
 }
 
+// ScriptCompilationSubsystem::RequestBuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::RequestBuild(ScriptBuildReason reason)
 {
 	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
@@ -238,6 +261,7 @@ void ScriptCompilationSubsystem::RequestBuild(ScriptBuildReason reason)
 	UpdateSharedState();
 }
 
+// ScriptCompilationSubsystem::NotifyScriptSourceChanged is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::NotifyScriptSourceChanged(const std::filesystem::path& scriptPath)
 {
 	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
@@ -253,6 +277,7 @@ void ScriptCompilationSubsystem::NotifyScriptSourceChanged(const std::filesystem
 	RequestBuild(ScriptBuildReason::FileChange);
 }
 
+// ScriptCompilationSubsystem::CreateScriptAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptCompilationSubsystem::CreateScriptAsset(const std::filesystem::path& destinationDirectory, const std::string& className, std::filesystem::path& outCreatedPath, std::string* outError)
 {
 	if (!m_WorkspaceService.CreateScriptFromTemplate(destinationDirectory, className, outCreatedPath, outError))
@@ -265,10 +290,12 @@ bool ScriptCompilationSubsystem::CreateScriptAsset(const std::filesystem::path& 
 	return true;
 }
 
+// ScriptCompilationSubsystem::OpenScript is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptCompilationSubsystem::OpenScript(const std::filesystem::path& scriptPath, std::string* outError)
 {
 	if (m_Context == nullptr || m_Context->projectManager == nullptr)
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outError)
 		{
 			*outError = "Project manager state is unavailable.";
@@ -279,11 +306,13 @@ bool ScriptCompilationSubsystem::OpenScript(const std::filesystem::path& scriptP
 	return m_WorkspaceService.OpenScriptInExternalEditor(scriptPath, m_Context->projectManager->GetExternalScriptEditorCommand(), outError);
 }
 
+// ScriptCompilationSubsystem::OpenWorkspace is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptCompilationSubsystem::OpenWorkspace(std::string* outError)
 {
 	return OpenScript({}, outError);
 }
 
+// ScriptCompilationSubsystem::RegenerateWorkspace is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptCompilationSubsystem::RegenerateWorkspace(std::string* outError)
 {
 	if (!m_WorkspaceService.RegenerateWorkspace(outError))
@@ -295,26 +324,31 @@ bool ScriptCompilationSubsystem::RegenerateWorkspace(std::string* outError)
 	return true;
 }
 
+// ScriptCompilationSubsystem::GetStatus is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const ScriptCompilationStatus& ScriptCompilationSubsystem::GetStatus() const
 {
 	return m_Status;
 }
 
+// ScriptCompilationSubsystem::GetWorkspaceService is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const ScriptWorkspaceService& ScriptCompilationSubsystem::GetWorkspaceService() const
 {
 	return m_WorkspaceService;
 }
 
+// ScriptCompilationSubsystem::IsBusy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptCompilationSubsystem::IsBusy() const
 {
 	return m_Status.state == ScriptCoordinatorState::Building || m_Status.state == ScriptCoordinatorState::Reloading;
 }
 
+// ScriptCompilationSubsystem::ShouldBlockEditorInteraction is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptCompilationSubsystem::ShouldBlockEditorInteraction() const
 {
 	return IsBusy();
 }
 
+// ScriptCompilationSubsystem::PrepareForBuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::PrepareForBuild()
 {
 	auto& scriptingSystem = ScriptingSystem::Instance();
@@ -322,6 +356,7 @@ void ScriptCompilationSubsystem::PrepareForBuild()
 	m_WasPausedBeforeBuild = scriptingSystem.IsPaused();
 	m_ShouldRestorePausedGameplayState = m_WasRunningBeforeBuild;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_WasRunningBeforeBuild && !m_WasPausedBeforeBuild)
 	{
 		// Pause the active gameplay session while TerraEngine unloads and rebuilds
@@ -330,6 +365,7 @@ void ScriptCompilationSubsystem::PrepareForBuild()
 		TERRAENGINE_LOG(LogLevel::Info, "Paused gameplay script execution while Assembly-CSharp recompiles.");
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (scriptingSystem.HasLoadedGameplayAssembly())
 	{
 		const std::filesystem::path activeAssemblyPath = scriptingSystem.GetLoadedGameplayAssemblyPath();
@@ -338,6 +374,7 @@ void ScriptCompilationSubsystem::PrepareForBuild()
 	}
 }
 
+// ScriptCompilationSubsystem::RestorePausedGameplayState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::RestorePausedGameplayState()
 {
 	if (m_ShouldRestorePausedGameplayState)
@@ -350,9 +387,11 @@ void ScriptCompilationSubsystem::RestorePausedGameplayState()
 	m_WasPausedBeforeBuild = false;
 }
 
+// ScriptCompilationSubsystem::TryReloadWorkspaceAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptCompilationSubsystem::TryReloadWorkspaceAssembly(std::string* outError)
 {
 	const std::filesystem::path assemblyPath = m_WorkspaceService.GetAssemblyPath();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (assemblyPath.empty() || !std::filesystem::exists(assemblyPath))
 	{
 		if (outError)
@@ -369,6 +408,7 @@ bool ScriptCompilationSubsystem::TryReloadWorkspaceAssembly(std::string* outErro
 	if (!ScriptingSystem::Instance().LoadGameplayAssembly(assemblyPath, &loadError))
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to reload the project gameplay assembly from " << assemblyPath << " after the failed compile: " << loadError);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outError)
 		{
 			*outError = loadError;
@@ -377,6 +417,7 @@ bool ScriptCompilationSubsystem::TryReloadWorkspaceAssembly(std::string* outErro
 	}
 
 	TERRAENGINE_LOG(LogLevel::Info, "Reloaded the project gameplay assembly from " << assemblyPath << " after the failed compile.");
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (outError)
 	{
 		outError->clear();
@@ -384,12 +425,15 @@ bool ScriptCompilationSubsystem::TryReloadWorkspaceAssembly(std::string* outErro
 	return true;
 }
 
+// ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets()
 {
 	auto& assetDatabase = AssetDatabase::Instance();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (Object object : ObjectManager::instance().getObjectsWithComponents<ScriptComponent>())
 	{
 		ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (scriptComponent == nullptr)
 		{
 			continue;
@@ -397,14 +441,17 @@ void ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets()
 
 		bool bindingsChanged = false;
 		auto guard = scriptComponent->acquireWriteLock();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (ScriptBinding& binding : scriptComponent->GetBindings())
 		{
 			const AssetMetadata* assetMetadata = binding.assetGuid == TerraEngine::EMPTY_UUID
 				? nullptr
 				: assetDatabase.FindAssetByGuid(binding.assetGuid);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (assetMetadata == nullptr && !binding.className.empty())
 			{
 				assetMetadata = assetDatabase.FindScriptAssetByFullName(binding.className);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (assetMetadata != nullptr && binding.assetGuid != assetMetadata->guid)
 				{
 					// Recover from script renames that previously regenerated the
@@ -415,18 +462,21 @@ void ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets()
 					bindingsChanged = true;
 				}
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (assetMetadata == nullptr)
 			{
 				continue;
 			}
 
 			const auto fullNameIt = assetMetadata->settings.find("scriptFullName");
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (fullNameIt == assetMetadata->settings.end() || !fullNameIt->is_string())
 			{
 				continue;
 			}
 
 			const std::string resolvedFullName = fullNameIt->get<std::string>();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (resolvedFullName.empty() || binding.className == resolvedFullName)
 			{
 				continue;
@@ -440,6 +490,7 @@ void ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets()
 			bindingsChanged = true;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (bindingsChanged)
 		{
 			scriptComponent->SynchronizeStorageFromBindings();
@@ -447,6 +498,7 @@ void ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets()
 	}
 }
 
+// ScriptCompilationSubsystem::BeginBuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::BeginBuild()
 {
 	// Ensure the project workspace has the latest engine references before
@@ -473,9 +525,11 @@ void ScriptCompilationSubsystem::BeginBuild()
 	UpdateSharedState();
 }
 
+// ScriptCompilationSubsystem::HandleCompletedBuild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 {
 	m_Status.lastBuildOutput = result.buildOutput;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!result.buildOutput.empty())
 	{
 		// Mirror dotnet's stdout/stderr into the editor log so script rebuilds are
@@ -483,18 +537,21 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 		TERRAENGINE_LOG(LogLevel::Info, "Assembly-CSharp build output:\n" << result.buildOutput);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!result.success)
 	{
 		m_Status.state = ScriptCoordinatorState::Failed;
 		m_Status.lastSummary = result.failureMessage;
 		TERRAENGINE_LOG(LogLevel::Error, "Assembly-CSharp build failed: " << result.failureMessage);
 		std::string reloadError;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (TryReloadWorkspaceAssembly(&reloadError))
 		{
 			m_Status.gameplayAssemblyLoaded = ScriptingSystem::Instance().HasLoadedGameplayAssembly();
 			m_Status.activeAssemblyPath = ScriptingSystem::Instance().GetLoadedGameplayAssemblyPath();
 			m_Status.lastSummary += " Reloaded the existing project Assembly-CSharp.dll.";
 		}
+		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (!reloadError.empty())
 		{
 			m_Status.lastSummary += " " + reloadError;
@@ -513,6 +570,7 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 	SynchronizeBoundScriptTypesFromAssets();
 
 	std::string reloadError;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ScriptingSystem::Instance().LoadGameplayAssembly(result.assemblyPath, &reloadError))
 	{
 		m_Status.state = ScriptCoordinatorState::Failed;
@@ -536,6 +594,7 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 	UpdateSharedState();
 }
 
+// ScriptCompilationSubsystem::UpdateSharedState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptCompilationSubsystem::UpdateSharedState()
 {
 	if (m_Context == nullptr)
@@ -547,6 +606,7 @@ void ScriptCompilationSubsystem::UpdateSharedState()
 		m_Context->scripting.coordinatorState != CoordinatorStateToString(m_Status.state)
 		|| m_Context->scripting.gameplayAssemblyLoaded != m_Status.gameplayAssemblyLoaded
 		|| m_Context->scripting.activeAssemblyPath != m_Status.activeAssemblyPath;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (stateChanged)
 	{
 		m_Context->scripting.selectionVersion++;
@@ -559,11 +619,13 @@ void ScriptCompilationSubsystem::UpdateSharedState()
 	m_Context->scripting.activeAssemblyPath = m_Status.activeAssemblyPath;
 }
 
+// ScriptCompilationSubsystem::RunBuildJob is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBuildJob(ScriptBuildProfile profile)
 {
 	ScriptBuildResult result;
 	result.profile = profile;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_Context == nullptr || m_Context->projectManager == nullptr || !m_Context->projectManager->HasActiveProject())
 	{
 		result.failureMessage = "No open project is available for Assembly-CSharp generation.";
@@ -571,6 +633,7 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 	}
 
 	std::string workspaceError;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_WorkspaceService.EnsureWorkspace(&workspaceError))
 	{
 		result.failureMessage = workspaceError;
@@ -586,6 +649,7 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 		return result;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (exitCode != 0)
 	{
 		result.failureMessage = "dotnet build failed for Assembly-CSharp.";

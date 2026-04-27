@@ -1,3 +1,7 @@
+// MeshCompiler.h — Mesh compilation pipeline interface
+//
+// Defines the interface and reporting structures for the offline mesh compilation pipeline. It provides functions for identifying supported mesh source formats and converting them into the engine's optimized meshlet-based TEMF format.
+
 #pragma once
 
 #include <cstdint>

@@ -54,6 +54,7 @@ namespace TerraEngine.Export
 
 		public static unsafe bool TryWriteValue<T>(void* destination, int valueSize, T value) where T : unmanaged
 		{
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (destination == null || valueSize != sizeof(T))
 			{
 				return false;
@@ -66,6 +67,7 @@ namespace TerraEngine.Export
 		public static unsafe bool TryReadValue<T>(void* source, int valueSize, out T value) where T : unmanaged
 		{
 			value = default;
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (source == null || valueSize != sizeof(T))
 			{
 				return false;
@@ -75,6 +77,7 @@ namespace TerraEngine.Export
 			return true;
 		}
 
+		// TryWriteString bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static unsafe bool TryWriteString(void* destination, int valueSize, string? value)
 		{
 			if (destination == null || valueSize <= 0)
@@ -98,9 +101,11 @@ namespace TerraEngine.Export
 			return true;
 		}
 
+		// TryReadString bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static unsafe bool TryReadString(void* source, int valueSize, out string value)
 		{
 			value = string.Empty;
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (source == null || valueSize <= 0)
 			{
 				return false;
@@ -113,6 +118,7 @@ namespace TerraEngine.Export
 				++length;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (length == 0)
 			{
 				return true;
@@ -128,6 +134,7 @@ namespace TerraEngine.Export
 			return true;
 		}
 
+		// CopyUtf8Name bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static unsafe void CopyUtf8Name(ref ExportFieldDescriptor descriptor, string name)
 		{
 			byte[] utf8Name = Encoding.UTF8.GetBytes(name ?? string.Empty);
@@ -144,6 +151,7 @@ namespace TerraEngine.Export
 			}
 		}
 
+		// CopyUtf8Name bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static unsafe void CopyUtf8Name(byte* destination, int capacity, string name)
 		{
 			if (destination == null || capacity <= 0)

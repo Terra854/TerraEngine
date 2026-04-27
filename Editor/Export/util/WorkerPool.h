@@ -1,3 +1,7 @@
+// WorkerPool.h — TEPAK task-based worker pool interface
+//
+// Defines a reusable worker pool for managing background tasks during archive creation and extraction. It utilizes a thread-safe task queue and condition variables to coordinate parallel processing across multiple CPU cores.
+
 #pragma once
 
 #include <condition_variable>

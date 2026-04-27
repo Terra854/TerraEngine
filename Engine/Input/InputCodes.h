@@ -1,3 +1,10 @@
+// InputCodes.h — Platform-agnostic definitions for keys and input states.
+//
+// This file defines the enumerations for all supported keyboard keys, mouse
+// buttons, and their possible interaction states (Idle, Pressed, Released, Held).
+// These definitions provide a consistent vocabulary for input handling across
+// the entire engine and scripting API.
+
 #pragma once
 
 #include <cstddef>
@@ -157,11 +164,13 @@ enum class MouseButton {
 	Count
 };
 
+// KeyCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 constexpr std::size_t KeyCount()
 {
 	return static_cast<std::size_t>(Key::Count);
 }
 
+// MouseButtonCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 constexpr std::size_t MouseButtonCount()
 {
 	return static_cast<std::size_t>(MouseButton::Count);

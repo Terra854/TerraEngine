@@ -1,3 +1,10 @@
+// MainEngine.cpp — Implementation of the core engine facade and main loop.
+//
+// This file implements the primary Engine class methods, including the main Run
+// loop, system initialization, and per-frame update logic. It coordinates the
+// lifecycle of all major engine subsystems such as rendering, scripting, input,
+// and the windowing system.
+
 #include "MainEngine.h"
 #include "SystemBase.h"
 #include "Logger/Logger.h"
@@ -27,23 +34,27 @@ void Engine::Run()
 	
 	while(true) {
 		const double deltaSeconds = frameTimer.Tick();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!Update((float)deltaSeconds)) break;
 	}
 	
 	Shutdown();
 }
 
+// Engine::SignalShutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::SignalShutdown()
 {
 	running = false;
 }
 
+// Engine::SetEditorMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::SetEditorMode(SystemsBase* system)
 {
 	editorSystem = system;
 	editorMode = true;
 }
 
+// Engine::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::Initialize()
 {
 	// Register the currently booting engine instance so script glue can signal
@@ -106,11 +117,13 @@ void Engine::Initialize()
 		sceneManager.SetSceneRoot(resourceManager.GetAssetRoot());
 		sceneManager.SetStartupScene(resourceManager.GetConfiguredStartupScene().value_or(std::filesystem::path{}));
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto* system : systems) {
 			system->Initialize();
 			initializedSystemCount++;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (editorMode) {
 			editorSystem->Initialize();
 			editorSystemInitialized = true;
@@ -124,10 +137,12 @@ void Engine::Initialize()
 			editorSystem->Shutdown();
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		while (initializedSystemCount > 0) {
 			systems[--initializedSystemCount]->Shutdown();
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (resourceManagerInitialized) {
 			resourceManager.Shutdown();
 		}
@@ -141,6 +156,7 @@ void Engine::Initialize()
 	TERRAENGINE_LOG(LogLevel::Info, "Setup complete!");
 }
 
+// Engine::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool Engine::Update(float deltaTime)
 {
 	if (!running) {
@@ -163,6 +179,7 @@ bool Engine::Update(float deltaTime)
 	}
 	TerraEngine::Profiling::Profiler::Instance().EndFrame();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (editorMode) {
 		editorSystem->Update(deltaTime);
 	}
@@ -184,12 +201,14 @@ bool Engine::Update(float deltaTime)
 	return true;
 }
 
+// Engine::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::Shutdown()
 {
 	if (editorMode) {
 		editorSystem->Shutdown();
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto it = systems.rbegin(); it != systems.rend(); ++it) {
 		(*it)->Shutdown();
 	}

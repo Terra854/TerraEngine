@@ -1,5 +1,13 @@
+// MeshRenderer.cs — Managed API for mesh rendering components and asset binding.
+//
+// This file defines the managed MeshRenderer class, which allows scripts to
+// assign mesh and material assets to scene objects. It bridges the managed
+// asset references to the native MeshRenderComponent and handles the resolution
+// of asset names to internal engine identifiers.
+
 namespace TerraEngine
 {
+	// MeshRenderer is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class MeshRenderer : Component
 	{
 		// Scripts work with readable asset names/paths while the engine bridge

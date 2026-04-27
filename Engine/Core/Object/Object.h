@@ -1,3 +1,10 @@
+// Object.h — Handle-based interface for scene entities in the ECS.
+//
+// This file defines the Object class, which wraps an EnTT entity identifier and
+// a registry pointer to provide a consistent API for entity manipulation. It
+// manages component lifecycle and provides stable access to entity-specific
+// metadata through the ObjectManager.
+
 #pragma once
 
 #include <entt/entt.hpp>
@@ -72,6 +79,7 @@ private:
 namespace std {
 	template<>
 	struct hash<Object> {
+		// operator is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		std::size_t operator()(const Object& k) const {
 			return static_cast<std::size_t>(k.id);
 		}

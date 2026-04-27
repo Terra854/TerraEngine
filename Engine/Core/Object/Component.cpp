@@ -1,3 +1,10 @@
+// Component.cpp — Implementation of the centralized component access registry.
+//
+// This file provides the storage for the component access functions that allow
+// the engine and editor to interact with components via name-based lookups. It
+// ensures that component registration is shared across module boundaries using
+// a thread-safe registry implementation.
+
 #include "Component.h"
 
 #include <unordered_map>
@@ -11,6 +18,7 @@ std::unordered_map<std::string, ComponentAccessFunctions>& ComponentAccessRegist
 	return registry;
 }
 
+// ComponentAccessRegistryMutex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::mutex& ComponentAccessRegistryMutex()
 {
 	static std::mutex mutex;

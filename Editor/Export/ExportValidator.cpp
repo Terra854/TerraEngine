@@ -1,4 +1,6 @@
-// ExportValidator.cpp — Pre-export validation implementation.
+// ExportValidator.cpp — Pre-export validation implementation
+//
+// Implements the validation rules for build profiles and C# source code, utilizing regex-based scanning to detect unsupported reflection or dynamic binder usage. It aggregates findings into a diagnostic report used to prevent failed or unstable exported builds.
 
 #include "ExportValidator.h"
 
@@ -28,19 +30,23 @@ static void AddDiagnostic(ExportValidationResult& result,
 	diag.line = line;
 	result.diagnostics.push_back(std::move(diag));
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (severity == ExportDiagnosticSeverity::Error) {
 		result.errorCount++;
 		result.passed = false;
 	}
+	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (severity == ExportDiagnosticSeverity::Warning) {
 		result.warningCount++;
 	}
 }
 
+// ShouldScanManagedSourceFile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static bool ShouldScanManagedSourceFile(const std::filesystem::path& projectRoot, const std::filesystem::path& filePath)
 {
 	std::error_code ec;
 	const std::filesystem::path relativePath = std::filesystem::relative(filePath, projectRoot, ec);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ec)
 	{
 		return true;
@@ -54,9 +60,11 @@ static bool ShouldScanManagedSourceFile(const std::filesystem::path& projectRoot
 		&& normalized.rfind("UserSettings/", 0) != 0;
 }
 
+// CalculateLineNumber is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static int CalculateLineNumber(std::string_view text, std::size_t characterOffset)
 {
 	int lineNumber = 1;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t index = 0; index < std::min(characterOffset, text.size()); ++index)
 	{
 		if (text[index] == '\n')
@@ -68,11 +76,13 @@ static int CalculateLineNumber(std::string_view text, std::size_t characterOffse
 	return lineNumber;
 }
 
+// IsCSharpIdentifierCharacter is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static bool IsCSharpIdentifierCharacter(char value)
 {
 	return std::isalnum(static_cast<unsigned char>(value)) != 0 || value == '_';
 }
 
+// ContainsCSharpToken is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static bool ContainsCSharpToken(std::string_view text, std::string_view token)
 {
 	if (token.empty() || text.size() < token.size())
@@ -81,9 +91,11 @@ static bool ContainsCSharpToken(std::string_view text, std::string_view token)
 	}
 
 	std::size_t searchStart = 0;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (searchStart < text.size())
 	{
 		const std::size_t matchIndex = text.find(token, searchStart);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (matchIndex == std::string_view::npos)
 		{
 			return false;
@@ -95,6 +107,7 @@ static bool ContainsCSharpToken(std::string_view text, std::string_view token)
 			&& (IsCSharpIdentifierCharacter(text[matchIndex - 1]) || text[matchIndex - 1] == '@');
 		const std::size_t tokenEnd = matchIndex + token.size();
 		const bool hasIdentifierAfter = tokenEnd < text.size() && IsCSharpIdentifierCharacter(text[tokenEnd]);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!hasIdentifierBefore && !hasIdentifierAfter)
 		{
 			return true;
@@ -106,10 +119,12 @@ static bool ContainsCSharpToken(std::string_view text, std::string_view token)
 	return false;
 }
 
+// StripCSharpCommentsAndLiterals is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 {
 	std::string sanitized(text);
 
+	// ScanState names the supported states explicitly so serialization and switches stay readable.
 	enum class ScanState
 	{
 		Code,
@@ -121,14 +136,17 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 	};
 
 	ScanState state = ScanState::Code;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t index = 0; index < sanitized.size(); ++index)
 	{
 		char& current = sanitized[index];
 		const char next = (index + 1) < sanitized.size() ? sanitized[index + 1] : '\0';
 
+		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (state)
 		{
 		case ScanState::Code:
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (current == '/' && next == '/')
 			{
 				current = ' ';
@@ -136,6 +154,7 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 				state = ScanState::LineComment;
 				++index;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current == '/' && next == '*')
 			{
 				current = ' ';
@@ -143,6 +162,7 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 				state = ScanState::BlockComment;
 				++index;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current == '@' && next == '"')
 			{
 				current = ' ';
@@ -150,11 +170,13 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 				state = ScanState::VerbatimStringLiteral;
 				++index;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current == '"')
 			{
 				current = ' ';
 				state = ScanState::StringLiteral;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current == '\'')
 			{
 				current = ' ';
@@ -163,6 +185,7 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 			break;
 
 		case ScanState::LineComment:
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (current == '\n')
 			{
 				state = ScanState::Code;
@@ -174,6 +197,7 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 			break;
 
 		case ScanState::BlockComment:
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (current == '*' && next == '/')
 			{
 				current = ' ';
@@ -181,6 +205,7 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 				state = ScanState::Code;
 				++index;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current != '\n' && current != '\r')
 			{
 				current = ' ';
@@ -188,20 +213,24 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 			break;
 
 		case ScanState::StringLiteral:
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (current == '\\' && next != '\0')
 			{
 				current = ' ';
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (sanitized[index + 1] != '\n' && sanitized[index + 1] != '\r')
 				{
 					sanitized[index + 1] = ' ';
 				}
 				++index;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current == '"')
 			{
 				current = ' ';
 				state = ScanState::Code;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current != '\n' && current != '\r')
 			{
 				current = ' ';
@@ -209,17 +238,20 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 			break;
 
 		case ScanState::VerbatimStringLiteral:
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (current == '"' && next == '"')
 			{
 				current = ' ';
 				sanitized[index + 1] = ' ';
 				++index;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current == '"')
 			{
 				current = ' ';
 				state = ScanState::Code;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current != '\n' && current != '\r')
 			{
 				current = ' ';
@@ -227,20 +259,24 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 			break;
 
 		case ScanState::CharLiteral:
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (current == '\\' && next != '\0')
 			{
 				current = ' ';
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (sanitized[index + 1] != '\n' && sanitized[index + 1] != '\r')
 				{
 					sanitized[index + 1] = ' ';
 				}
 				++index;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current == '\'')
 			{
 				current = ' ';
 				state = ScanState::Code;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (current != '\n' && current != '\r')
 			{
 				current = ' ';
@@ -252,6 +288,7 @@ static std::string StripCSharpCommentsAndLiterals(std::string_view text)
 	return sanitized;
 }
 
+// IsSupportedNativeAotFieldType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static bool IsSupportedNativeAotFieldType(std::string typeName)
 {
 	typeName.erase(std::remove_if(typeName.begin(), typeName.end(), [](unsigned char value) {
@@ -259,11 +296,13 @@ static bool IsSupportedNativeAotFieldType(std::string typeName)
 	}), typeName.end());
 
 	const std::size_t lastScope = typeName.find_last_of(':');
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (lastScope != std::string::npos)
 	{
 		typeName = typeName.substr(lastScope + 1);
 	}
 	const std::size_t lastDot = typeName.find_last_of('.');
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (lastDot != std::string::npos)
 	{
 		typeName = typeName.substr(lastDot + 1);
@@ -289,18 +328,21 @@ ExportValidationResult ExportValidator::ValidateProfile(const BuildProfile& prof
 	ExportValidationResult result;
 
 	// Name must be non-empty.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (profile.name.empty()) {
 		AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 			"Profile", "Build profile name cannot be empty.");
 	}
 
 	// ID must exist.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (profile.id.empty()) {
 		AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 			"Profile", "Build profile ID is missing. Save the profile to generate one.");
 	}
 
 	// Output directory should be set.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (profile.outputDirectory.empty()) {
 		AddDiagnostic(result, ExportDiagnosticSeverity::Warning,
 			"Profile", "Output directory is not set. A default will be used.");
@@ -321,6 +363,7 @@ ExportValidationResult ExportValidator::ValidateProfile(const BuildProfile& prof
 ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesystem::path& projectRoot) const {
 	ExportValidationResult result;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (projectRoot.empty() || !std::filesystem::exists(projectRoot)) {
 		AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 			"ManagedSource", "Project root directory does not exist: " + projectRoot.string());
@@ -339,14 +382,17 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 
 	uint32_t scannedFiles = 0;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& entry : std::filesystem::recursive_directory_iterator(projectDir)) {
 		if (!entry.is_regular_file()) continue;
 		if (entry.path().extension() != ".cs") continue;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!ShouldScanManagedSourceFile(projectRoot, entry.path())) continue;
 
 		scannedFiles++;
 
 		std::ifstream file(entry.path());
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!file) continue;
 
 		const std::string fileText((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -354,10 +400,12 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 		std::istringstream lineStream(sanitizedFileText);
 		std::string line;
 		int lineNumber = 0;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		while (std::getline(lineStream, line)) {
 			lineNumber++;
 
 			// Check for reflection usage.
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::regex_search(line, reflectionPattern)) {
 				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 					"ManagedSource",
@@ -365,6 +413,7 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 						entry.path().string(), lineNumber);
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::regex_search(line, reflectionEmitPattern)) {
 				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 					"ManagedSource",
@@ -373,6 +422,7 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 			}
 
 			// Check for dynamic keyword usage.
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ContainsCSharpToken(line, "dynamic")) {
 				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 					"ManagedSource",
@@ -381,11 +431,13 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 			}
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::sregex_iterator matchIt(sanitizedFileText.begin(), sanitizedFileText.end(), serializedFieldPattern), endIt; matchIt != endIt; ++matchIt) {
 			const std::smatch& match = *matchIt;
 			const std::string typeName = match[1].str();
 			const int fieldLine = CalculateLineNumber(sanitizedFileText, static_cast<std::size_t>(match.position(1)));
 			const bool obviousCollectionShape = typeName.find('<') != std::string::npos || typeName.find('[') != std::string::npos;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (obviousCollectionShape || !IsSupportedNativeAotFieldType(typeName)) {
 				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
 					"ManagedSource",
@@ -407,11 +459,13 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 ExportValidationResult ExportValidator::ValidateAll(const BuildProfile& profile, const std::filesystem::path& projectRoot) const {
 	ExportValidationResult result = ValidateProfile(profile);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (profile.enableManagedCompilation) {
 		auto sourceResult = ValidateManagedSource(projectRoot);
 		
 		result.errorCount += sourceResult.errorCount;
 		result.warningCount += sourceResult.warningCount;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!sourceResult.passed) {
 			result.passed = false;
 		}

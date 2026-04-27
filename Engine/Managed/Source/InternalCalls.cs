@@ -1,3 +1,10 @@
+// InternalCalls.cs — Central hub for managed-to-native engine communication.
+//
+// This file implements the primary bridge between the C# scripting layer and
+// the C++ engine core. It handles assembly loading, script instance lifecycle,
+// data serialization for the inspector, and provides the low-level P/Invoke
+// declarations for all engine services exposed to managed code.
+
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -9,6 +16,7 @@ using System.Text.Json.Serialization;
 
 namespace TerraEngine
 {
+	// ScriptType is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal enum ScriptType : int
 	{
 		Bool = 0,
@@ -36,6 +44,7 @@ namespace TerraEngine
 		public string DiagnosticMessage { get; set; } = string.Empty;
 	}
 
+	// ScriptBindingPayload is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal sealed class ScriptBindingPayload
 	{
 		public string BindingId { get; set; } = string.Empty;
@@ -44,6 +53,7 @@ namespace TerraEngine
 		public List<ScriptFieldValuePayload> SerializedValues { get; set; } = new();
 	}
 
+	// LiveFieldSnapshotPayload is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal sealed class LiveFieldSnapshotPayload
 	{
 		public string FieldPath { get; set; } = string.Empty;
@@ -54,6 +64,7 @@ namespace TerraEngine
 		public long LastObservedVersion { get; set; }
 	}
 
+	// LiveBindingSnapshotPayload is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal sealed class LiveBindingSnapshotPayload
 	{
 		public string BindingId { get; set; } = string.Empty;
@@ -65,6 +76,7 @@ namespace TerraEngine
 		public List<ScriptFieldDiagnosticPayload> Diagnostics { get; set; } = new();
 	}
 
+	// BridgeWriteResultPayload is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal sealed class BridgeWriteResultPayload
 	{
 		public bool Success { get; set; }
@@ -75,6 +87,7 @@ namespace TerraEngine
 		public long SnapshotVersion { get; set; }
 	}
 
+	// MigrationFieldValuePayload is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal sealed class MigrationFieldValuePayload
 	{
 		public string FieldName { get; set; } = string.Empty;
@@ -88,6 +101,7 @@ namespace TerraEngine
 		public string DiagnosticMessage { get; set; } = string.Empty;
 	}
 
+	// MigrationResultPayload is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal sealed class MigrationResultPayload
 	{
 		public List<MigrationFieldValuePayload> Fields { get; set; } = new();
@@ -98,6 +112,7 @@ namespace TerraEngine
 		public List<ScriptFieldDiagnosticPayload> Diagnostics { get; set; } = new();
 	}
 
+	// InternalCalls is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public static class InternalCalls
 	{
 		private sealed class NativeUtf8ReturnBuffer
@@ -111,10 +126,12 @@ namespace TerraEngine
 				return WriteText(JsonSerializer.Serialize(payload, s_jsonOptions));
 			}
 
+			// WriteText bridges managed callers to engine state; validate arguments before forwarding to native code.
 			public IntPtr WriteText(string text)
 			{
 				lock (_syncRoot)
 				{
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (_pinnedBuffer.IsAllocated)
 					{
 						_pinnedBuffer.Free();
@@ -129,6 +146,7 @@ namespace TerraEngine
 			}
 		}
 
+		// ScriptInstanceState is the managed-facing contract for this subsystem; keep it predictable for scripts.
 		private sealed class ScriptInstanceState
 		{
 			// bindingId, not objectId, is the stable key because one object may
@@ -154,6 +172,7 @@ namespace TerraEngine
 			WriteIndented = false
 		};
 
+		// ReadNativeUtf8 bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static string ReadNativeUtf8(IntPtr nativeText)
 		{
 			// Script glue returns pointers into static or thread-local UTF-8
@@ -172,6 +191,7 @@ namespace TerraEngine
 		private static Dictionary<string, ScriptTypeDescriptorPayload> _descriptorCache = new(StringComparer.Ordinal);
 		private static Dictionary<string, ScriptInstanceState> _scriptInstances = new(StringComparer.Ordinal);
 
+		// DrainScriptInstances bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static List<ScriptInstanceState> DrainScriptInstances()
 		{
 			lock (s_bridgeSync)
@@ -182,6 +202,7 @@ namespace TerraEngine
 			}
 		}
 
+		// DisposeScriptInstances bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void DisposeScriptInstances()
 		{
 			foreach (ScriptInstanceState scriptState in DrainScriptInstances())
@@ -194,6 +215,7 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// Initialize bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static void Initialize()
 		{
 			try
@@ -207,11 +229,13 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// LoadGameplayAssembly bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static int LoadGameplayAssembly(IntPtr assemblyPathPtr)
 		{
 			try
 			{
 				string assemblyPath = Marshal.PtrToStringAnsi(assemblyPathPtr) ?? string.Empty;
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (string.IsNullOrWhiteSpace(assemblyPath))
 				{
 					Log.Error("LoadGameplayAssembly was called with an empty Assembly-CSharp path.");
@@ -234,6 +258,7 @@ namespace TerraEngine
 					_descriptorCache = new Dictionary<string, ScriptTypeDescriptorPayload>(StringComparer.Ordinal);
 					_scriptInstances = new Dictionary<string, ScriptInstanceState>(StringComparer.Ordinal);
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (previousContext != null)
 					{
 						previousContext.Unload();
@@ -255,6 +280,7 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// UnloadGameplayAssembly bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static void UnloadGameplayAssembly()
 		{
 			DisposeScriptInstances();
@@ -265,6 +291,7 @@ namespace TerraEngine
 				_attachableTypes.Clear();
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (_gameplayLoadContext != null)
 			{
 				_gameplayLoadContext.Unload();
@@ -279,6 +306,7 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// ResetGameplaySession bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static void ResetGameplaySession()
 		{
 			// Stop should discard every managed runtime instance while keeping the
@@ -287,6 +315,7 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// IsScriptTypeAttachable bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static int IsScriptTypeAttachable(IntPtr classNamePtr)
 		{
 			string className = Marshal.PtrToStringAnsi(classNamePtr) ?? string.Empty;
@@ -297,11 +326,13 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// DescribeBindingType bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static IntPtr DescribeBindingType(IntPtr classNamePtr)
 		{
 			try
 			{
 				string className = Marshal.PtrToStringAnsi(classNamePtr) ?? string.Empty;
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!TryResolveScriptType(className, out Type? scriptType))
 				{
 					return s_descriptorReturnBuffer.WriteJson(new ScriptTypeDescriptorPayload
@@ -344,12 +375,14 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// ReadLiveBindingValues bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static IntPtr ReadLiveBindingValues(uint objectId, IntPtr bindingIdPtr, IntPtr classNamePtr)
 		{
 			try
 			{
 				string bindingId = Marshal.PtrToStringAnsi(bindingIdPtr) ?? string.Empty;
 				string className = Marshal.PtrToStringAnsi(classNamePtr) ?? string.Empty;
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (string.IsNullOrWhiteSpace(bindingId) || string.IsNullOrWhiteSpace(className))
 				{
 					return s_snapshotReturnBuffer.WriteJson(new LiveBindingSnapshotPayload
@@ -361,6 +394,7 @@ namespace TerraEngine
 					});
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!TryResolveScriptType(className, out Type? scriptType))
 				{
 					return s_snapshotReturnBuffer.WriteJson(new LiveBindingSnapshotPayload
@@ -384,6 +418,7 @@ namespace TerraEngine
 				}
 
 				ScriptInstanceState? scriptState = GetInstanceState(bindingId);
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (scriptState == null || scriptState.ObjectId != objectId)
 				{
 					return s_snapshotReturnBuffer.WriteJson(new LiveBindingSnapshotPayload
@@ -423,6 +458,7 @@ namespace TerraEngine
 					foreach (ScriptFieldDescriptorPayload rootDescriptor in descriptor.Fields)
 					{
 						FieldInfo? field = FindSerializableField(scriptState.ScriptType, rootDescriptor.SerializedName);
+						// Validate this condition before crossing into native or editor state that may outlive the managed object.
 						if (field == null)
 						{
 							continue;
@@ -447,6 +483,7 @@ namespace TerraEngine
 							DiffersFromAuthored = differs,
 							LastObservedVersion = scriptState.ObservedVersion
 						});
+						// Validate this condition before crossing into native or editor state that may outlive the managed object.
 						if (differs)
 						{
 							snapshot.RuntimeOverrideCount++;
@@ -479,6 +516,7 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// WriteLiveBindingValue bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static IntPtr WriteLiveBindingValue(uint objectId, IntPtr bindingIdPtr, IntPtr fieldPathPtr, IntPtr valueJsonPtr)
 		{
 			try
@@ -486,6 +524,7 @@ namespace TerraEngine
 				string bindingId = Marshal.PtrToStringAnsi(bindingIdPtr) ?? string.Empty;
 				string fieldPath = Marshal.PtrToStringAnsi(fieldPathPtr) ?? string.Empty;
 				string valueJson = Marshal.PtrToStringAnsi(valueJsonPtr) ?? string.Empty;
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (string.IsNullOrWhiteSpace(bindingId) || string.IsNullOrWhiteSpace(fieldPath))
 				{
 					return s_writeReturnBuffer.WriteJson(new BridgeWriteResultPayload
@@ -498,6 +537,7 @@ namespace TerraEngine
 				}
 
 				ScriptInstanceState? scriptState = GetInstanceState(bindingId);
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (scriptState == null || scriptState.ObjectId != objectId)
 				{
 					return s_writeReturnBuffer.WriteJson(new BridgeWriteResultPayload
@@ -509,6 +549,7 @@ namespace TerraEngine
 					});
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!TryResolveScriptType(scriptState.ClassName, out Type? scriptType))
 				{
 					return s_writeReturnBuffer.WriteJson(new BridgeWriteResultPayload
@@ -521,6 +562,7 @@ namespace TerraEngine
 				}
 
 				FieldInfo? field = FindSerializableField(scriptType!, fieldPath);
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (field == null)
 				{
 					return s_writeReturnBuffer.WriteJson(new BridgeWriteResultPayload
@@ -535,6 +577,7 @@ namespace TerraEngine
 				using JsonDocument valueDocument = string.IsNullOrWhiteSpace(valueJson)
 					? JsonDocument.Parse("null")
 					: JsonDocument.Parse(valueJson);
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!TryConvertJsonToType(field.FieldType, valueDocument.RootElement, out object? convertedValue, out string errorMessage))
 				{
 					return s_writeReturnBuffer.WriteJson(new BridgeWriteResultPayload
@@ -576,6 +619,7 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// MigrateBindingAuthoredState bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static IntPtr MigrateBindingAuthoredState(IntPtr classNamePtr, IntPtr serializedValuesJsonPtr)
 		{
 			try
@@ -583,6 +627,7 @@ namespace TerraEngine
 				string className = Marshal.PtrToStringAnsi(classNamePtr) ?? string.Empty;
 				string serializedValuesJson = Marshal.PtrToStringAnsi(serializedValuesJsonPtr) ?? "[]";
 				List<ScriptFieldValuePayload> storedValues = DeserializeFieldValues(serializedValuesJson);
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!TryResolveScriptType(className, out Type? scriptType))
 				{
 					return s_migrationReturnBuffer.WriteJson(BuildBrokenMigrationResult(className, storedValues, "The active gameplay assembly no longer exposes this script type."));
@@ -599,6 +644,7 @@ namespace TerraEngine
 				foreach (ScriptFieldValuePayload storedValue in storedValues)
 				{
 					string stablePath = GetStableFieldPath(storedValue);
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (!descriptorLookup.TryGetValue(stablePath, out ScriptFieldDescriptorPayload? rootDescriptor))
 					{
 						result.Fields.Add(new MigrationFieldValuePayload
@@ -628,11 +674,13 @@ namespace TerraEngine
 					}
 
 					FieldInfo? field = FindSerializableField(scriptType!, rootDescriptor.SerializedName);
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (field == null)
 					{
 						continue;
 					}
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (!TryConvertJsonToType(field.FieldType, storedValue.Value, out object? convertedValue, out string errorMessage))
 					{
 						result.Fields.Add(new MigrationFieldValuePayload
@@ -676,6 +724,7 @@ namespace TerraEngine
 						SourceTypeFingerprint = rootDescriptor.TypeFingerprint
 					});
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (compatibility == "Migrated")
 					{
 						result.ConvertedFieldPaths.Add(rootDescriptor.FieldPath);
@@ -685,6 +734,7 @@ namespace TerraEngine
 						result.PreservedFieldPaths.Add(rootDescriptor.FieldPath);
 					}
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (rootDescriptor.HiddenInInspector)
 					{
 						result.HiddenStoredFieldPaths.Add(rootDescriptor.FieldPath);
@@ -714,10 +764,12 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// UpdateScript bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static void UpdateScript(uint objectId, IntPtr bindingIdPtr, IntPtr classNamePtr, float deltaTime)
 		{
 			try
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (_gameplayAssembly == null)
 				{
 					return;
@@ -725,11 +777,13 @@ namespace TerraEngine
 
 				string bindingId = Marshal.PtrToStringAnsi(bindingIdPtr) ?? string.Empty;
 				string className = Marshal.PtrToStringAnsi(classNamePtr) ?? string.Empty;
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (string.IsNullOrWhiteSpace(bindingId) || string.IsNullOrWhiteSpace(className))
 				{
 					return;
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!TryResolveScriptType(className, out Type? scriptType))
 				{
 					Log.Error($"Could not find compiled gameplay script class {className} in the active Assembly-CSharp catalog.");
@@ -740,6 +794,7 @@ namespace TerraEngine
 				bool createdState = false;
 				lock (s_bridgeSync)
 				{
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (!_scriptInstances.TryGetValue(bindingId, out scriptState!))
 					{
 						if (Activator.CreateInstance(scriptType!) is not Script script)
@@ -770,12 +825,14 @@ namespace TerraEngine
 					scriptState.ClassName = className;
 					scriptState.Instance.BindEngineInstance(objectId, bindingId);
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (createdState || !string.Equals(scriptState.LastHydratedSignature, authoredSignature, StringComparison.Ordinal))
 					{
 						HydrateScriptInstance(scriptState.Instance, scriptState.ScriptType, bindingPayload);
 						scriptState.LastHydratedSignature = authoredSignature;
 					}
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (createdState)
 					{
 						scriptState.Instance.InvokeCreated();
@@ -792,6 +849,7 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// DispatchNativeUIEvent bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static void DispatchNativeUIEvent(IntPtr elementHandle, int eventType, float pointerX, float pointerY)
 		{
 			try
@@ -804,6 +862,7 @@ namespace TerraEngine
 			}
 		}
 
+		// TryResolveScriptType bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool TryResolveScriptType(string className, out Type? scriptType)
 		{
 			lock (s_bridgeSync)
@@ -812,10 +871,12 @@ namespace TerraEngine
 			}
 		}
 
+		// GetOrCreateDescriptor bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static ScriptTypeDescriptorPayload GetOrCreateDescriptor(string className, Type scriptType)
 		{
 			lock (s_bridgeSync)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (_descriptorCache.TryGetValue(className, out ScriptTypeDescriptorPayload? descriptor))
 				{
 					return descriptor;
@@ -828,6 +889,7 @@ namespace TerraEngine
 			}
 		}
 
+		// PopulateDescriptorDefaultValues bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void PopulateDescriptorDefaultValues(Type scriptType, ScriptTypeDescriptorPayload descriptor)
 		{
 			// Create one detached sample instance so the inspector can reflect the
@@ -836,6 +898,7 @@ namespace TerraEngine
 			foreach (ScriptFieldDescriptorPayload rootDescriptor in descriptor.Fields)
 			{
 				FieldInfo? field = FindSerializableField(scriptType, rootDescriptor.SerializedName);
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (field == null)
 				{
 					continue;
@@ -846,10 +909,12 @@ namespace TerraEngine
 			}
 		}
 
+		// PopulateDescriptorDefaultValues bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void PopulateDescriptorDefaultValues(ScriptFieldDescriptorPayload descriptor, Type valueType, object? value)
 		{
 			descriptor.DefaultValue = ConvertRuntimeValueToPayload(value, valueType);
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (descriptor.ContainerKind == "NestedObject")
 			{
 				// Nested children read from the sampled object when present. When a
@@ -859,6 +924,7 @@ namespace TerraEngine
 				foreach (ScriptFieldDescriptorPayload childDescriptor in descriptor.Children)
 				{
 					FieldInfo? childField = FindSerializableField(valueType, childDescriptor.SerializedName);
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (childField == null)
 					{
 						continue;
@@ -871,6 +937,7 @@ namespace TerraEngine
 				return;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (descriptor.ContainerKind == "Collection"
 				&& descriptor.Children.Count > 0
 				&& ScriptReflection.TryGetCollectionElementType(valueType, out Type? elementType, out _)
@@ -883,15 +950,18 @@ namespace TerraEngine
 			}
 		}
 
+		// TryCreateDescriptorSample bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static object? TryCreateDescriptorSample(Type valueType)
 		{
 			try
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (valueType == typeof(string))
 				{
 					return string.Empty;
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (valueType.IsArray)
 				{
 					Type? elementType = valueType.GetElementType();
@@ -906,6 +976,7 @@ namespace TerraEngine
 			}
 		}
 
+		// GetInstanceState bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static ScriptInstanceState? GetInstanceState(string bindingId)
 		{
 			lock (s_bridgeSync)
@@ -915,6 +986,7 @@ namespace TerraEngine
 			}
 		}
 
+		// GetBindingPayload bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static ScriptBindingPayload GetBindingPayload(uint objectId, string bindingId)
 		{
 			// The native ScriptComponent owns the authored JSON. Managed code pulls
@@ -935,12 +1007,14 @@ namespace TerraEngine
 			};
 		}
 
+		// BuildAuthoredValueLookup bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static Dictionary<string, ScriptFieldValuePayload> BuildAuthoredValueLookup(ScriptBindingPayload bindingPayload)
 		{
 			var lookup = new Dictionary<string, ScriptFieldValuePayload>(StringComparer.Ordinal);
 			foreach (ScriptFieldValuePayload value in bindingPayload.SerializedValues)
 			{
 				string stablePath = GetStableFieldPath(value);
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!lookup.ContainsKey(stablePath))
 				{
 					lookup[stablePath] = value;
@@ -950,6 +1024,7 @@ namespace TerraEngine
 			return lookup;
 		}
 
+		// HydrateScriptInstance bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void HydrateScriptInstance(Script instance, Type scriptType, ScriptBindingPayload bindingPayload)
 		{
 			// Reapply authored values after reloads or inspector edits so the live
@@ -958,22 +1033,26 @@ namespace TerraEngine
 			ScriptTypeDescriptorPayload descriptor = GetOrCreateDescriptor(bindingPayload.ClassName, scriptType);
 			foreach (ScriptFieldDescriptorPayload rootDescriptor in descriptor.Fields)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!authoredLookup.TryGetValue(rootDescriptor.FieldPath, out ScriptFieldValuePayload? authoredValue))
 				{
 					continue;
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (string.Equals(authoredValue.Compatibility, "Broken", StringComparison.OrdinalIgnoreCase))
 				{
 					continue;
 				}
 
 				FieldInfo? field = FindSerializableField(scriptType, rootDescriptor.SerializedName);
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (field == null)
 				{
 					continue;
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!TryConvertJsonToType(field.FieldType, authoredValue.Value, out object? convertedValue, out _))
 				{
 					continue;
@@ -983,11 +1062,13 @@ namespace TerraEngine
 			}
 		}
 
+		// FindSerializableField bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static FieldInfo? FindSerializableField(Type scriptType, string fieldPath)
 		{
 			string rootFieldName = ExtractRootFieldPath(fieldPath);
 			foreach (FieldInfo field in ScriptReflection.GetEligibleFields(scriptType))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (string.Equals(field.Name, rootFieldName, StringComparison.Ordinal))
 				{
 					return field;
@@ -997,6 +1078,7 @@ namespace TerraEngine
 			return null;
 		}
 
+		// ExtractRootFieldPath bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static string ExtractRootFieldPath(string fieldPath)
 		{
 			if (string.IsNullOrWhiteSpace(fieldPath))
@@ -1010,11 +1092,13 @@ namespace TerraEngine
 			return cutIndex < 0 ? fieldPath : fieldPath[..cutIndex];
 		}
 
+		// GetStableFieldPath bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static string GetStableFieldPath(ScriptFieldValuePayload payload)
 		{
 			return string.IsNullOrWhiteSpace(payload.FieldPath) ? payload.FieldName : payload.FieldPath;
 		}
 
+		// DeserializeFieldValues bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static List<ScriptFieldValuePayload> DeserializeFieldValues(string serializedValuesJson)
 		{
 			if (string.IsNullOrWhiteSpace(serializedValuesJson))
@@ -1025,6 +1109,7 @@ namespace TerraEngine
 			return JsonSerializer.Deserialize<List<ScriptFieldValuePayload>>(serializedValuesJson, s_jsonOptions) ?? new List<ScriptFieldValuePayload>();
 		}
 
+		// BuildBrokenMigrationResult bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static MigrationResultPayload BuildBrokenMigrationResult(string className, IEnumerable<ScriptFieldValuePayload> storedValues, string reason)
 		{
 			var result = new MigrationResultPayload();
@@ -1058,6 +1143,7 @@ namespace TerraEngine
 			return result;
 		}
 
+		// ConvertRuntimeValueToPayload bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static object? ConvertRuntimeValueToPayload(object? value, Type valueType)
 		{
 			if (value == null)
@@ -1065,46 +1151,54 @@ namespace TerraEngine
 				return null;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(bool) || valueType == typeof(int) || valueType == typeof(float) || valueType == typeof(string) || valueType == typeof(uint))
 			{
 				return value;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType.IsEnum)
 			{
 				string? enumName = Enum.GetName(valueType, value);
 				return enumName is not null ? enumName : Convert.ToInt32(value);
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Vector2))
 			{
 				Vector2 vector = (Vector2)value;
 				return new[] { vector.X, vector.Y };
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Vector3))
 			{
 				Vector3 vector = (Vector3)value;
 				return new[] { vector.X, vector.Y, vector.Z };
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Vector4))
 			{
 				Vector4 vector = (Vector4)value;
 				return new[] { vector.X, vector.Y, vector.Z, vector.W };
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Quaternion))
 			{
 				Quaternion rotation = (Quaternion)value;
 				return new[] { rotation.X, rotation.Y, rotation.Z, rotation.W };
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Object))
 			{
 				return ((Object)value).ID;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (ScriptReflection.TryGetCollectionElementType(valueType, out Type? elementType, out _))
 			{
 				var list = new List<object?>();
@@ -1115,6 +1209,7 @@ namespace TerraEngine
 				return list;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (ScriptReflection.IsNestedSerializableType(valueType))
 			{
 				var objectPayload = new Dictionary<string, object?>(StringComparer.Ordinal);
@@ -1128,6 +1223,7 @@ namespace TerraEngine
 			return value.ToString();
 		}
 
+		// TryConvertJsonToType bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool TryConvertJsonToType(Type targetType, JsonElement jsonValue, out object? convertedValue, out string errorMessage)
 		{
 			errorMessage = string.Empty;
@@ -1146,6 +1242,7 @@ namespace TerraEngine
 			}
 			else if (targetType == typeof(int))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.Number && jsonValue.TryGetInt32(out int intValue))
 				{
 					convertedValue = intValue;
@@ -1154,6 +1251,7 @@ namespace TerraEngine
 			}
 			else if (targetType == typeof(float))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.Number)
 				{
 					convertedValue = jsonValue.GetSingle();
@@ -1162,6 +1260,7 @@ namespace TerraEngine
 			}
 			else if (targetType == typeof(string))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.String)
 				{
 					convertedValue = jsonValue.GetString() ?? string.Empty;
@@ -1173,6 +1272,7 @@ namespace TerraEngine
 			}
 			else if (targetType == typeof(uint))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.Number && jsonValue.TryGetUInt32(out uint uintValue))
 				{
 					convertedValue = uintValue;
@@ -1181,12 +1281,14 @@ namespace TerraEngine
 			}
 			else if (targetType == typeof(Object))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.Null)
 				{
 					convertedValue = new Object(Object.InvalidID);
 					return true;
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.Number && jsonValue.TryGetUInt32(out uint objectId))
 				{
 					convertedValue = new Object(objectId);
@@ -1195,9 +1297,11 @@ namespace TerraEngine
 			}
 			else if (targetType.IsEnum)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.String)
 				{
 					string enumName = jsonValue.GetString() ?? string.Empty;
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (Enum.TryParse(targetType, enumName, ignoreCase: false, out object? enumValue))
 					{
 						convertedValue = enumValue;
@@ -1212,6 +1316,7 @@ namespace TerraEngine
 			}
 			else if (targetType == typeof(Vector2))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (TryReadFloatArray(jsonValue, 2, out float[] values))
 				{
 					convertedValue = new Vector2(values[0], values[1]);
@@ -1220,6 +1325,7 @@ namespace TerraEngine
 			}
 			else if (targetType == typeof(Vector3))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (TryReadFloatArray(jsonValue, 3, out float[] values))
 				{
 					convertedValue = new Vector3(values[0], values[1], values[2]);
@@ -1228,6 +1334,7 @@ namespace TerraEngine
 			}
 			else if (targetType == typeof(Vector4))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (TryReadFloatArray(jsonValue, 4, out float[] values))
 				{
 					convertedValue = new Vector4(values[0], values[1], values[2], values[3]);
@@ -1236,6 +1343,7 @@ namespace TerraEngine
 			}
 			else if (targetType == typeof(Quaternion))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (TryReadFloatArray(jsonValue, 4, out float[] values))
 				{
 					convertedValue = new Quaternion(values[0], values[1], values[2], values[3]);
@@ -1244,11 +1352,13 @@ namespace TerraEngine
 			}
 			else if (ScriptReflection.TryGetCollectionElementType(targetType, out Type? elementType, out string collectionKind))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.Array)
 				{
 					var convertedItems = new List<object?>();
 					foreach (JsonElement element in jsonValue.EnumerateArray())
 					{
+						// Validate this condition before crossing into native or editor state that may outlive the managed object.
 						if (!TryConvertJsonToType(elementType!, element, out object? convertedItem, out string childError))
 						{
 							errorMessage = childError;
@@ -1258,6 +1368,7 @@ namespace TerraEngine
 						convertedItems.Add(convertedItem);
 					}
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (string.Equals(collectionKind, "Array", StringComparison.Ordinal))
 					{
 						Array array = Array.CreateInstance(elementType!, convertedItems.Count);
@@ -1280,22 +1391,26 @@ namespace TerraEngine
 			}
 			else if (ScriptReflection.IsNestedSerializableType(targetType))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.Null && !targetType.IsValueType)
 				{
 					convertedValue = null;
 					return true;
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (jsonValue.ValueKind == JsonValueKind.Object)
 				{
 					object nestedInstance = Activator.CreateInstance(targetType)!;
 					foreach (FieldInfo field in ScriptReflection.GetEligibleFields(targetType))
 					{
+						// Validate this condition before crossing into native or editor state that may outlive the managed object.
 						if (!jsonValue.TryGetProperty(field.Name, out JsonElement childJson))
 						{
 							continue;
 						}
 
+						// Validate this condition before crossing into native or editor state that may outlive the managed object.
 						if (!TryConvertJsonToType(field.FieldType, childJson, out object? childValue, out string childError))
 						{
 							errorMessage = childError;
@@ -1314,9 +1429,11 @@ namespace TerraEngine
 			return false;
 		}
 
+		// TryReadFloatArray bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool TryReadFloatArray(JsonElement jsonValue, int expectedLength, out float[] values)
 		{
 			values = Array.Empty<float>();
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (jsonValue.ValueKind != JsonValueKind.Array)
 			{
 				return false;
@@ -1325,6 +1442,7 @@ namespace TerraEngine
 			var list = new List<float>();
 			foreach (JsonElement item in jsonValue.EnumerateArray())
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (item.ValueKind != JsonValueKind.Number)
 				{
 					return false;
@@ -1333,6 +1451,7 @@ namespace TerraEngine
 				list.Add(item.GetSingle());
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (list.Count != expectedLength)
 			{
 				return false;
@@ -1342,6 +1461,7 @@ namespace TerraEngine
 			return true;
 		}
 
+		// ConvertJsonElementToPlainObject bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static object? ConvertJsonElementToPlainObject(JsonElement value)
 		{
 			switch (value.ValueKind)
@@ -1353,6 +1473,7 @@ namespace TerraEngine
 			case JsonValueKind.False:
 				return value.GetBoolean();
 			case JsonValueKind.Number:
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (value.TryGetInt64(out long longValue))
 				{
 					return longValue;
@@ -1381,177 +1502,235 @@ namespace TerraEngine
 		}
 
 		[DllImport("TerraEngine")]
+		// Native_Log bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Log(int level, string message, string function, int line);
 
 		[DllImport("TerraEngine")]
+		// Native_Application_Quit bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Application_Quit();
 
 		[DllImport("TerraEngine")]
+		// Native_Application_OpenURL bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Application_OpenURL(string url);
 
 		[DllImport("TerraEngine")]
+		// Native_Application_GetPersistentDataPath bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_Application_GetPersistentDataPath();
 
 		[DllImport("TerraEngine")]
+		// Native_Application_GetStreamingAssetsPath bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_Application_GetStreamingAssetsPath();
 
 		[DllImport("TerraEngine")]
+		// Native_Application_IsEditor bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_Application_IsEditor();
 
 		[DllImport("TerraEngine")]
+		// Native_Application_GetPlatform bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern uint Native_Application_GetPlatform();
 
 		[DllImport("TerraEngine")]
+		// Native_Application_GetProductName bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_Application_GetProductName();
 
 		[DllImport("TerraEngine")]
+		// Native_Application_GetVersion bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_Application_GetVersion();
 
 		[DllImport("TerraEngine")]
+		// Native_Object_Create bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern uint Native_Object_Create(string? name);
 
 		[DllImport("TerraEngine")]
+		// Native_Object_Destroy bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Object_Destroy(uint objectId);
 
 		[DllImport("TerraEngine")]
+		// Native_Object_Find bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern uint Native_Object_Find(string name);
 
 		[DllImport("TerraEngine")]
+		// Native_Object_FindWithTag bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern uint Native_Object_FindWithTag(string tag);
 
 		[DllImport("TerraEngine")]
+		// Native_MeshRenderer_GetMesh bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_MeshRenderer_GetMesh(uint objectId);
 
 		[DllImport("TerraEngine")]
+		// Native_MeshRenderer_SetMesh bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_MeshRenderer_SetMesh(uint objectId, string assetReference);
 
 		[DllImport("TerraEngine")]
+		// Native_MeshRenderer_GetMaterial bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_MeshRenderer_GetMaterial(uint objectId);
 
 		[DllImport("TerraEngine")]
+		// Native_MeshRenderer_SetMaterial bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_MeshRenderer_SetMaterial(uint objectId, string assetReference);
 
 		[DllImport("TerraEngine")]
+		// Native_HasComponent bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_HasComponent(uint objectId, string componentType);
 
 		[DllImport("TerraEngine")]
+		// Native_AddComponent bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_AddComponent(uint objectId, string componentType);
 
 		[DllImport("TerraEngine")]
+		// Native_GetComponentProperty bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern unsafe void Native_GetComponentProperty(uint objectId, string componentType, string propertyName, void* outValue, int type);
 
 		[DllImport("TerraEngine")]
+		// Native_SetComponentProperty bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern unsafe void Native_SetComponentProperty(uint objectId, string componentType, string propertyName, void* inValue, int type);
 
 		[DllImport("TerraEngine")]
+		// Native_ScriptComponent_AddBinding bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_ScriptComponent_AddBinding(uint objectId, string className);
 
 		[DllImport("TerraEngine")]
+		// Native_ScriptComponent_HasBinding bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_ScriptComponent_HasBinding(uint objectId, string className);
 
 		[DllImport("TerraEngine")]
+		// Native_ScriptComponent_GetBindingPayload bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_ScriptComponent_GetBindingPayload(uint objectId, string bindingId);
 
 		[DllImport("TerraEngine")]
+		// Native_ScriptComponent_SetBindingValue bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_ScriptComponent_SetBindingValue(uint objectId, string bindingId, string fieldPath, string valueKind, string valueJson, string compatibility, string sourceTypeFingerprint);
 
 		[DllImport("TerraEngine")]
+		// Native_ScriptComponent_RemoveBindingValue bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_ScriptComponent_RemoveBindingValue(uint objectId, string bindingId, string fieldPath);
 
 		[DllImport("TerraEngine")]
+		// Native_Object_GetName bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_Object_GetName(uint objectId);
 
 		[DllImport("TerraEngine")]
+		// Native_Object_SetName bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Object_SetName(uint objectId, string name);
 
 		[DllImport("TerraEngine")]
+		// Native_Input_IsKeyPressed bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_Input_IsKeyPressed(int key);
 
 		[DllImport("TerraEngine")]
+		// Native_Input_IsMouseButtonPressed bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_Input_IsMouseButtonPressed(int button);
 
 		[DllImport("TerraEngine")]
+		// Native_Input_GetMousePosition bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_Input_GetMousePosition(out double x, out double y);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_WasElementClicked bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_UI_WasElementClicked(string elementId);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_IsElementHovered bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_UI_IsElementHovered(string elementId);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_GetInteractionFrame bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern ulong Native_UI_GetInteractionFrame();
 
 		[DllImport("TerraEngine")]
+		// Native_UI_CreateElement bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_UI_CreateElement(int elementType);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_ReleaseHandle bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_ReleaseHandle(IntPtr elementHandle);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_GetRootElement bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_UI_GetRootElement(uint objectId);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_FindElementById bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_UI_FindElementById(IntPtr elementHandle, string elementId);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_GetElementType bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern int Native_UI_GetElementType(IntPtr elementHandle);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_IsHandleAlive bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_UI_IsHandleAlive(IntPtr elementHandle);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_GetElementId bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_UI_GetElementId(IntPtr elementHandle);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_SetElementId bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_SetElementId(IntPtr elementHandle, string elementId);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_GetElementText bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_UI_GetElementText(IntPtr elementHandle);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_SetElementText bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_SetElementText(IntPtr elementHandle, string text);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_GetElementVisible bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_UI_GetElementVisible(IntPtr elementHandle);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_SetElementVisible bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_SetElementVisible(IntPtr elementHandle, bool visible);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_AddChild bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_AddChild(IntPtr parentHandle, IntPtr childHandle);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_RemoveChild bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_RemoveChild(IntPtr parentHandle, IntPtr childHandle);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_ClearChildren bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_ClearChildren(IntPtr parentHandle);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_SetStyleFloat bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_SetStyleFloat(IntPtr elementHandle, int property, float value);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_GetStyleFloat bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern float Native_UI_GetStyleFloat(IntPtr elementHandle, int property);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_SetStyleColor bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_SetStyleColor(IntPtr elementHandle, int property, float x, float y, float z, float w);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_GetStyleColor bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern void Native_UI_GetStyleColor(IntPtr elementHandle, int property, out float x, out float y, out float z, out float w);
 
 		[DllImport("TerraEngine")]
+		// Native_UI_SetEventCallback bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_UI_SetEventCallback(IntPtr elementHandle, int eventType, bool enabled);
 
 		[DllImport("TerraEngine")]
+		// Native_Scene_LoadScene bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_Scene_LoadScene(string path);
 
 		[DllImport("TerraEngine")]
+		// Native_Scene_LoadPrefab bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_Scene_LoadPrefab(string path);
 
 		[DllImport("TerraEngine")]
+		// Native_Scene_SetActiveScene bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_Scene_SetActiveScene(string uuid);
 
 		[DllImport("TerraEngine")]
+		// Native_Time_GetDeltaTime bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern float Native_Time_GetDeltaTime();
 	}
 }

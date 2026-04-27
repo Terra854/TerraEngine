@@ -1,3 +1,9 @@
+// PlatformUtils.h — Platform-specific utility functions.
+//
+// This file declares utility functions that wrap OS-specific APIs for common
+// tasks such as retrieving persistent data paths, opening URLs in the default
+// browser, and performing string conversions (e.g., UTF-8 to wide string).
+
 #pragma once
 
 #include <cstdint>

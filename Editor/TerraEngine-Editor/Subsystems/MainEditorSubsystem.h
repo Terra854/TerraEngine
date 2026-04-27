@@ -1,3 +1,7 @@
+// MainEditorSubsystem.h — Core editor workspace system
+//
+// Defines the primary workspace system responsible for managing the main editor UI and active project state. it coordinates between the various editor windows, handles scene opening requests, and manages the transition into and out of play mode.
+
 #pragma once
 
 #include <functional>
@@ -15,6 +19,7 @@
 
 class Object;
 
+// class MainEditorSubsystem groups related state and operations so callers have one documented contract.
 class MainEditorSubsystem : public IEditorSubsystem {
 public:
 	virtual void Initialize(EditorContext& context) override;
@@ -22,6 +27,7 @@ public:
 	virtual void Update(float deltaTime) override;
 	virtual void DrawUI() override;
 	virtual void Shutdown() override;
+	// GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual std::string GetName() const override { return "Main Editor"; }
 
 	void OnProjectOpened();
@@ -31,11 +37,13 @@ public:
 	bool IsInspectorValueDragging() const;
 
 	// API for Windows
+	// GetContext is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	EditorContext* GetContext() const { return ctx; }
 
 	std::optional<entt::entity> GetSelectedEntity() const { return selectedEntity; }
 	void SetSelectedEntity(std::optional<entt::entity> entity);
 
+	// GetSelectedAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::optional<std::filesystem::path> GetSelectedAsset() const { return selectedAsset; }
 	void SetSelectedAsset(std::optional<std::filesystem::path> asset);
 	
@@ -47,13 +55,17 @@ public:
 	void RequestCloseProject();
 	void RequestExit();
 
+	// GetSceneTextureID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void* GetSceneTextureID() const { return sceneTextureID; }
 	void* GetGameTextureID() const { return gameTextureID; }
 	bool TryGetGameViewRenderStats(RenderStatsSnapshot& outStats) const;
 
 	template<typename T>
+	// GetWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::shared_ptr<T> GetWindow() const {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto& win : m_Windows) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto casted = std::dynamic_pointer_cast<T>(win)) {
 				return casted;
 			}
@@ -61,6 +73,7 @@ public:
 		return nullptr;
 	}
 
+	// GetWindows is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::vector<std::shared_ptr<EditorWindow>>& GetWindows() const { return m_Windows; }
 
 private:
@@ -93,6 +106,7 @@ private:
 	std::optional<std::filesystem::path> selectedAsset;
 	std::filesystem::path m_CurrentScenePath;
 
+	// PendingAction names the supported states explicitly so serialization and switches stay readable.
 	enum class PendingAction {
 		None,
 		OpenScene,

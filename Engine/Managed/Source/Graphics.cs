@@ -1,3 +1,10 @@
+// Graphics.cs — Managed API for global rendering settings and quality presets.
+//
+// This file defines the C# interface for controlling the engine's renderer,
+// including shadow resolution, light budgets, and ambient occlusion settings.
+// It allows scripts to query and modify graphics quality presets and provides
+// access to real-time lighting diagnostics for editor status displays.
+
 using System;
 using System.Runtime.InteropServices;
 
@@ -52,6 +59,7 @@ namespace TerraEngine
         public uint AnisotropicFiltering;
     }
 
+    // LightingDiagnosticCategory is the managed-facing contract for this subsystem; keep it predictable for scripts.
     public enum LightingDiagnosticCategory : uint
     {
         Shadow = 0,
@@ -61,6 +69,7 @@ namespace TerraEngine
         Budget = 4
     }
 
+    // LightingDiagnosticStatus is the managed-facing contract for this subsystem; keep it predictable for scripts.
     public enum LightingDiagnosticStatus : uint
     {
         Active = 0,
@@ -110,18 +119,23 @@ namespace TerraEngine
         }
 
         [DllImport("TerraEngine")]
+        // Native_Graphics_SetQualityPreset bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static extern void Native_Graphics_SetQualityPreset(uint preset);
 
         [DllImport("TerraEngine")]
+        // Native_Graphics_GetQualityPreset bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static extern QualityPreset Native_Graphics_GetQualityPreset();
 
         [DllImport("TerraEngine")]
+        // Native_Graphics_SetRenderSettings bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static extern void Native_Graphics_SetRenderSettings(ref RenderSettings settings);
 
         [DllImport("TerraEngine")]
+        // Native_Graphics_GetRenderSettings bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static extern void Native_Graphics_GetRenderSettings(out RenderSettings settings);
 
         [DllImport("TerraEngine")]
+        // Native_Graphics_GetLightingDiagnosticsSummary bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static extern IntPtr Native_Graphics_GetLightingDiagnosticsSummary(uint viewType);
     }
 }

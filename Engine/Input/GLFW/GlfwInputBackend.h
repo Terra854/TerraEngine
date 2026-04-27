@@ -1,3 +1,10 @@
+// GlfwInputBackend.h — Interface for the GLFW-based input backend adapter.
+//
+// This file declares the GlfwInputBackend class, which provides a bridge between
+// the GLFW windowing library and the engine's InputSystem. It maintains the
+// necessary state and callback mappings to capture and route raw platform
+// input events to the appropriate engine systems.
+
 #pragma once
 
 #include <functional>
@@ -19,6 +26,7 @@ public:
 	GlfwInputBackend() = default;
 	~GlfwInputBackend() override = default;
 
+	// BackendName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string BackendName() const override { return "GLFW"; }
 	void SetWindowHandle(void* windowHandle) override;
 	void Initialize() override;

@@ -1,3 +1,7 @@
+// ProfilerCaptureStore.h — Profiler capture storage management
+//
+// Manages the discovery and persistence of profiler capture files within a project. it provides helpers for generating deterministic capture paths, validating project-relative locations, and listing available artifacts for the editor UI.
+
 #pragma once
 
 #include "Engine/Profiling/ProfilerCapture.h"

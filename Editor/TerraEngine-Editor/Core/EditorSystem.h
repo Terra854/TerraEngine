@@ -1,3 +1,7 @@
+// EditorSystem.h — Main editor system orchestrator
+//
+// Defines the primary system responsible for managing the editor's lifecycle, UI rendering, and managed code integration. it coordinates between the project hub, the main editor workspace, and the .NET host.
+
 #pragma once
 
 #include "Core/SystemBase.h"
@@ -6,6 +10,7 @@
 
 class ProjectHubSubsystem;
 class MainEditorSubsystem;
+// class Engine groups related state and operations so callers have one documented contract.
 class Engine;
 
 class EditorSystem : public SystemsBase {

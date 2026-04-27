@@ -1,3 +1,7 @@
+// Launch.cpp — Main engine launcher and entry point
+//
+// This file serves as the executable entry point for the TerraEngine launcher, responsible for initializing the core engine and bootstrapping export-mode resources. It handles executable path resolution, configures the initial resource mounts, and manages the handoff to the MainEngine runtime loop.
+
 #include <array>
 #include <filesystem>
 #include <exception>
@@ -21,6 +25,7 @@
 namespace {
 namespace fs = std::filesystem;
 
+// ResolveExecutablePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 fs::path ResolveExecutablePath(const char* argv0) {
 #ifdef _WIN32
 	// Query the OS for the real executable path so exported builds keep working
@@ -32,6 +37,7 @@ fs::path ResolveExecutablePath(const char* argv0) {
 	}
 #endif
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (argv0 != nullptr && argv0[0] != '\0') {
 		return fs::absolute(fs::path(argv0));
 	}
@@ -39,6 +45,7 @@ fs::path ResolveExecutablePath(const char* argv0) {
 	return fs::current_path();
 }
 
+// ResolveManagedLibraryPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 fs::path ResolveManagedLibraryPath(const fs::path& executableDirectory) {
 	// Exported builds always place the NativeAOT gameplay library in Managed/
 	// using the fixed Assembly-CSharp name, so the launcher can derive it
@@ -46,15 +53,18 @@ fs::path ResolveManagedLibraryPath(const fs::path& executableDirectory) {
 	return executableDirectory / "Managed" / "Assembly-CSharp.dll";
 }
 
+// ConfigureExportBootstrap is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ConfigureExportBootstrap(const char* argv0) {
 	const fs::path executablePath = ResolveExecutablePath(argv0);
 	const fs::path executableDirectory = executablePath.parent_path();
 	const fs::path archivePath = executableDirectory / (executablePath.stem().string() + ".tepak");
 	const fs::path managedLibraryPath = ResolveManagedLibraryPath(executableDirectory);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!fs::exists(archivePath)) {
 		throw std::runtime_error("Export archive not found beside the launcher: " + archivePath.string());
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!fs::exists(managedLibraryPath)) {
 		throw std::runtime_error("NativeAOT gameplay runtime not found: " + managedLibraryPath.string());
 	}

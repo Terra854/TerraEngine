@@ -1,3 +1,7 @@
+// EditorContext.h — Shared editor state and context
+//
+// Centralizes the shared handles and lightweight state snapshots used across the editor's subsystems and windows. it provides a unified context for accessing the engine instance, project manager, and active scripting state.
+
 #pragma once
 
 #include <cstdint>
@@ -8,6 +12,7 @@
 class Engine;
 class ProjectManager;
 class AssetDatabase;
+// class EditorProfilerService groups related state and operations so callers have one documented contract.
 class EditorProfilerService;
 
 // Lightweight scripting snapshot shared across editor windows. This avoids
@@ -29,6 +34,7 @@ struct ScriptEditorState {
 	std::string activeEditedFieldPath;
 };
 
+// struct EditorContext groups related state and operations so callers have one documented contract.
 struct EditorContext {
 	Engine* engine = nullptr;
 	std::shared_ptr<ProjectManager> projectManager;

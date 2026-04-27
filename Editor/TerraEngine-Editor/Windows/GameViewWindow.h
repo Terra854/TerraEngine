@@ -1,3 +1,7 @@
+// GameViewWindow.h — Editor game view window interface
+//
+// Defines the editor window responsible for presenting the live game output. it provides controls for aspect ratio selection, display scaling, and toggling runtime statistics or gizmos within the editor workspace.
+
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include <vector>
@@ -6,6 +10,7 @@
 
 class MainEditorSubsystem;
 
+// class GameViewWindow groups related state and operations so callers have one documented contract.
 class GameViewWindow : public EditorWindow {
 public:
 	GameViewWindow(MainEditorSubsystem* owner);
@@ -16,6 +21,7 @@ protected:
 private:
 	MainEditorSubsystem* m_Owner;
 
+	// struct AspectRatio groups related state and operations so callers have one documented contract.
 	struct AspectRatio {
 		std::string Name;
 		float Width;

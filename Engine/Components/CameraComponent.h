@@ -1,3 +1,10 @@
+// CameraComponent.h — Component defining perspective and orthographic camera parameters.
+//
+// This component stores field of view, aspect ratio, and clipping plane data used
+// by the renderer to construct view and projection matrices. It integrates with
+// the engine's reflection system to allow real-time adjustment of camera
+// properties through the editor or scripts.
+
 #pragma once
 
 #include <string_view>

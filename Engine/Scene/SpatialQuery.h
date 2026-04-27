@@ -1,3 +1,9 @@
+// SpatialQuery.h — Spatial Query Data Structures
+//
+// Defines the types and filter structures used to perform spatial queries against the scene.
+// It supports various query shapes such as frustums, spheres, and raycasts for visibility and picking.
+// The results are used by the renderer for culling and by the editor for object selection.
+
 #pragma once
 
 #include <cstdint>
@@ -10,6 +16,7 @@
 
 namespace TerraEngine::Scene
 {
+	// SpatialObjectCategory names the supported states explicitly so serialization and switches stay readable.
 	enum SpatialObjectCategory : std::uint32_t
 	{
 		SpatialCategoryNone = 0u,
@@ -20,12 +27,14 @@ namespace TerraEngine::Scene
 		SpatialCategoryAll = 0xffffffffu
 	};
 
+	// SpatialSortMode names the supported states explicitly so serialization and switches stay readable.
 	enum class SpatialSortMode : std::uint8_t
 	{
 		StableIdentity,
 		DistanceAscending
 	};
 
+	// struct SpatialObjectRecord groups related state and operations so callers have one documented contract.
 	struct SpatialObjectRecord
 	{
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
@@ -37,6 +46,7 @@ namespace TerraEngine::Scene
 		std::uint64_t revision = 0;
 	};
 
+	// struct SpatialQueryFilter groups related state and operations so callers have one documented contract.
 	struct SpatialQueryFilter
 	{
 		bool includeInactive = false;
@@ -46,6 +56,7 @@ namespace TerraEngine::Scene
 		bool collectDiagnostics = false;
 	};
 
+	// struct SpatialQueryHit groups related state and operations so callers have one documented contract.
 	struct SpatialQueryHit
 	{
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
@@ -55,6 +66,7 @@ namespace TerraEngine::Scene
 		bool fallback = false;
 	};
 
+	// struct SpatialQueryResult groups related state and operations so callers have one documented contract.
 	struct SpatialQueryResult
 	{
 		std::vector<SpatialQueryHit> hits;

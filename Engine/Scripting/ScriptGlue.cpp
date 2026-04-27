@@ -1,3 +1,5 @@
+// ScriptGlue.cpp — Contains the Script Glue file-specific types, helper functions, and module integration code implementation for native script glue, exported C# vtables, and scripting system lifecycle state.
+
 #include "ScriptGlue.h"
 #include "Core/Logger/Logger.h"
 #include "Core/MainEngine.h"
@@ -37,6 +39,7 @@ Engine* g_ApplicationHostEngine = nullptr;
 ApplicationEditorStopPlayModeCallback g_ApplicationEditorStopCallback = nullptr;
 thread_local std::string g_UIBridgeReturnBuffer;
 
+// ManagedUIStyleProperty names the supported states explicitly so serialization and switches stay readable.
 enum class ManagedUIStyleProperty : int
 {
 	Width = 0,
@@ -45,6 +48,7 @@ enum class ManagedUIStyleProperty : int
 	BackgroundColor = 3
 };
 
+// struct ManagedUIElementHandle groups related state and operations so callers have one documented contract.
 struct ManagedUIElementHandle
 {
 	std::weak_ptr<UIElement> weakElement;
@@ -57,6 +61,7 @@ std::once_flag g_UIEventDispatchResolveOnce;
 bool g_UIEventDispatchResolveAttempted = false;
 bool g_UIEventDispatchUnavailableLogged = false;
 
+// ManagedUIEventType names the supported states explicitly so serialization and switches stay readable.
 enum class ManagedUIEventType : int
 {
 	Click = 0,
@@ -67,6 +72,7 @@ enum class ManagedUIEventType : int
 using ManagedUIDispatchEventFn = void (*)(void*, int, float, float);
 ManagedUIDispatchEventFn g_ManagedUIDispatchEvent = nullptr;
 
+// ScriptType names the supported states explicitly so serialization and switches stay readable.
 enum class ScriptType : int
 {
 	Bool = 0,
@@ -79,6 +85,7 @@ enum class ScriptType : int
 	Quaternion = 7
 };
 
+// MarshallFromNative is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static TerraEngine::Reflection::Variant MarshallFromNative(void* data, ScriptType type)
 {
 	switch (type)
@@ -95,10 +102,12 @@ static TerraEngine::Reflection::Variant MarshallFromNative(void* data, ScriptTyp
 	return {};
 }
 
+// MarshallToNative is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void MarshallToNative(const TerraEngine::Reflection::Variant& var, void* data, ScriptType type)
 {
 	if (!TerraEngine::Reflection::IsValid(var)) return;
 
+	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (type)
 	{
 	case ScriptType::Bool: *static_cast<bool*>(data) = TerraEngine::Reflection::ConvertValue<bool>(var); break;
@@ -112,6 +121,7 @@ static void MarshallToNative(const TerraEngine::Reflection::Variant& var, void* 
 	}
 }
 
+// ResolveBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static ScriptBinding* ResolveBinding(Object& object, const char* bindingId)
 {
 	if (bindingId == nullptr || bindingId[0] == '\0')
@@ -120,6 +130,7 @@ static ScriptBinding* ResolveBinding(Object& object, const char* bindingId)
 	}
 
 	ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (scriptComponent == nullptr)
 	{
 		return nullptr;
@@ -128,46 +139,55 @@ static ScriptBinding* ResolveBinding(Object& object, const char* bindingId)
 	return scriptComponent->FindBinding(bindingId);
 }
 
+// InvalidObjectId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static uint32_t InvalidObjectId()
 {
 	return static_cast<uint32_t>(entt::null);
 }
 
+// WriteApplicationReturnText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static const char* WriteApplicationReturnText(std::string text)
 {
 	g_ApplicationReturnBuffer = std::move(text);
 	return g_ApplicationReturnBuffer.c_str();
 }
 
+// WriteUIBridgeReturnText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static const char* WriteUIBridgeReturnText(std::string text)
 {
 	g_UIBridgeReturnBuffer = std::move(text);
 	return g_UIBridgeReturnBuffer.c_str();
 }
 
+// GetApplicationHostEngine is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static Engine* GetApplicationHostEngine()
 {
 	std::lock_guard<std::mutex> lock(g_ApplicationBridgeMutex);
 	return g_ApplicationHostEngine;
 }
 
+// GetApplicationEditorStopCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static ApplicationEditorStopPlayModeCallback GetApplicationEditorStopCallback()
 {
 	std::lock_guard<std::mutex> lock(g_ApplicationBridgeMutex);
 	return g_ApplicationEditorStopCallback;
 }
 
+// GetMeshRendererAssetReference is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static const char* GetMeshRendererAssetReference(uint32_t objectId, std::string_view propertyName, AssetType type)
 {
 	static thread_local std::string assetReferenceBuffer;
 	assetReferenceBuffer.clear();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId)))
 	{
 		auto& registry = ComponentAccessRegistry();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto it = registry.find("MeshRenderComponent"); it != registry.end())
 		{
 			TerraEngine::Reflection::Variant value = it->second.getter(*objOpt, propertyName);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(value))
 			{
 				assetReferenceBuffer = ResourceManager::Instance().DescribeAssetReference(
@@ -180,17 +200,21 @@ static const char* GetMeshRendererAssetReference(uint32_t objectId, std::string_
 	return assetReferenceBuffer.c_str();
 }
 
+// SetMeshRendererAssetReference is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void SetMeshRendererAssetReference(uint32_t objectId, std::string_view propertyName, AssetType type, const char* assetReference)
 {
 	if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId)))
 	{
 		auto& registry = ComponentAccessRegistry();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto it = registry.find("MeshRenderComponent"); it != registry.end())
 		{
 			TerraEngine::UUID resolvedId = TerraEngine::EMPTY_UUID;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (assetReference != nullptr && assetReference[0] != '\0')
 			{
 				resolvedId = ResourceManager::Instance().ResolveAssetReference(assetReference, type);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (resolvedId == TerraEngine::EMPTY_UUID)
 				{
 					TERRAENGINE_LOG(LogLevel::Warning,
@@ -205,11 +229,13 @@ static void SetMeshRendererAssetReference(uint32_t objectId, std::string_view pr
 	}
 }
 
+// ForgetUIHandleIndexLocked is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void ForgetUIHandleIndexLocked(ManagedUIElementHandle* handle)
 {
 	for (auto iterator = g_UIHandleIndex.begin(); iterator != g_UIHandleIndex.end();)
 	{
 		iterator->second.erase(handle);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (iterator->second.empty())
 		{
 			iterator = g_UIHandleIndex.erase(iterator);
@@ -221,18 +247,21 @@ static void ForgetUIHandleIndexLocked(ManagedUIElementHandle* handle)
 	}
 }
 
+// BindUIHandleToElement is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void BindUIHandleToElement(ManagedUIElementHandle* handle, const std::shared_ptr<UIElement>& element, bool keepDetachedOwnership)
 {
 	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
 	ForgetUIHandleIndexLocked(handle);
 	handle->weakElement = element;
 	handle->ownedElement = keepDetachedOwnership ? element : nullptr;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (element)
 	{
 		g_UIHandleIndex[element.get()].insert(handle);
 	}
 }
 
+// CreateUIHandle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static ManagedUIElementHandle* CreateUIHandle(const std::shared_ptr<UIElement>& element, bool keepDetachedOwnership)
 {
 	if (!element)
@@ -245,6 +274,7 @@ static ManagedUIElementHandle* CreateUIHandle(const std::shared_ptr<UIElement>& 
 	return handle;
 }
 
+// ResolveUIHandle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::shared_ptr<UIElement> ResolveUIHandle(void* handlePointer)
 {
 	if (handlePointer == nullptr)
@@ -254,6 +284,7 @@ static std::shared_ptr<UIElement> ResolveUIHandle(void* handlePointer)
 
 	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
 	ManagedUIElementHandle* handle = static_cast<ManagedUIElementHandle*>(handlePointer);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (handle->ownedElement)
 	{
 		return handle->ownedElement;
@@ -262,6 +293,7 @@ static std::shared_ptr<UIElement> ResolveUIHandle(void* handlePointer)
 	return handle->weakElement.lock();
 }
 
+// PromoteDetachedUIOwnership is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void PromoteDetachedUIOwnership(const std::shared_ptr<UIElement>& element)
 {
 	if (!element)
@@ -270,6 +302,7 @@ static void PromoteDetachedUIOwnership(const std::shared_ptr<UIElement>& element
 	}
 
 	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto iterator = g_UIHandleIndex.find(element.get()); iterator != g_UIHandleIndex.end())
 	{
 		for (ManagedUIElementHandle* handle : iterator->second)
@@ -279,6 +312,7 @@ static void PromoteDetachedUIOwnership(const std::shared_ptr<UIElement>& element
 	}
 }
 
+// DropDetachedUIOwnership is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void DropDetachedUIOwnership(const std::shared_ptr<UIElement>& element)
 {
 	if (!element)
@@ -287,6 +321,7 @@ static void DropDetachedUIOwnership(const std::shared_ptr<UIElement>& element)
 	}
 
 	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto iterator = g_UIHandleIndex.find(element.get()); iterator != g_UIHandleIndex.end())
 	{
 		for (ManagedUIElementHandle* handle : iterator->second)
@@ -296,6 +331,7 @@ static void DropDetachedUIOwnership(const std::shared_ptr<UIElement>& element)
 	}
 }
 
+// RefreshManagedElementStyle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void RefreshManagedElementStyle(UIElement& element)
 {
 	// Runtime setters act like inline style overrides layered on top of the
@@ -305,6 +341,7 @@ static void RefreshManagedElementStyle(UIElement& element)
 	element.MarkDirty();
 }
 
+// ResolveManagedBridgeAssemblyPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::filesystem::path ResolveManagedBridgeAssemblyPath()
 {
 	const std::filesystem::path current = std::filesystem::current_path();
@@ -314,6 +351,7 @@ static std::filesystem::path ResolveManagedBridgeAssemblyPath()
 		current.parent_path() / "Editor" / "Managed" / "TerraEngine.CSharp.dll"
 	};
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const std::filesystem::path& candidate : candidates)
 	{
 		if (std::filesystem::exists(candidate))
@@ -325,10 +363,12 @@ static std::filesystem::path ResolveManagedBridgeAssemblyPath()
 	return candidates[0];
 }
 
+// ResolveManagedUIEventDispatcher is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static ManagedUIDispatchEventFn ResolveManagedUIEventDispatcher()
 {
 	std::call_once(g_UIEventDispatchResolveOnce, []() {
 		g_UIEventDispatchResolveAttempted = true;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!DotNetHost::Instance().IsInitialized() || DotNetHost::Instance().IsExportMode())
 		{
 			return;
@@ -340,6 +380,7 @@ static ManagedUIDispatchEventFn ResolveManagedUIEventDispatcher()
 			L"DispatchNativeUIEvent"));
 	});
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (g_ManagedUIDispatchEvent == nullptr && g_UIEventDispatchResolveAttempted && !g_UIEventDispatchUnavailableLogged)
 	{
 		g_UIEventDispatchUnavailableLogged = true;
@@ -350,9 +391,11 @@ static ManagedUIDispatchEventFn ResolveManagedUIEventDispatcher()
 	return g_ManagedUIDispatchEvent;
 }
 
+// FindFirstUIHandleForElement is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static ManagedUIElementHandle* FindFirstUIHandleForElement(UIElement& element)
 {
 	std::lock_guard<std::mutex> lock(g_UIHandleMutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto iterator = g_UIHandleIndex.find(&element); iterator != g_UIHandleIndex.end() && !iterator->second.empty())
 	{
 		return *iterator->second.begin();
@@ -361,15 +404,18 @@ static ManagedUIElementHandle* FindFirstUIHandleForElement(UIElement& element)
 	return nullptr;
 }
 
+// DispatchManagedUIEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void DispatchManagedUIEvent(UIElement& element, ManagedUIEventType eventType, const glm::vec2& pointerPosition)
 {
 	ManagedUIDispatchEventFn dispatcher = ResolveManagedUIEventDispatcher();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (dispatcher == nullptr)
 	{
 		return;
 	}
 
 	ManagedUIElementHandle* handle = FindFirstUIHandleForElement(element);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (handle == nullptr)
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "[UI] Tried to dispatch an event for element '" << element.id << "' without an active managed handle.");
@@ -379,27 +425,32 @@ static void DispatchManagedUIEvent(UIElement& element, ManagedUIEventType eventT
 	dispatcher(handle, static_cast<int>(eventType), pointerPosition.x, pointerPosition.y);
 }
 
+// DispatchManagedClickEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void DispatchManagedClickEvent(UIElement& element, const glm::vec2& pointerPosition)
 {
 	DispatchManagedUIEvent(element, ManagedUIEventType::Click, pointerPosition);
 }
 
+// DispatchManagedMouseEnterEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void DispatchManagedMouseEnterEvent(UIElement& element, const glm::vec2& pointerPosition)
 {
 	DispatchManagedUIEvent(element, ManagedUIEventType::MouseEnter, pointerPosition);
 }
 
+// DispatchManagedMouseLeaveEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void DispatchManagedMouseLeaveEvent(UIElement& element, const glm::vec2& pointerPosition)
 {
 	DispatchManagedUIEvent(element, ManagedUIEventType::MouseLeave, pointerPosition);
 }
 
+// SetApplicationHostEngine is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SetApplicationHostEngine(Engine* engine)
 {
 	std::lock_guard<std::mutex> lock(g_ApplicationBridgeMutex);
 	g_ApplicationHostEngine = engine;
 }
 
+// SetApplicationEditorStopPlayModeCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SetApplicationEditorStopPlayModeCallback(ApplicationEditorStopPlayModeCallback callback)
 {
 	std::lock_guard<std::mutex> lock(g_ApplicationBridgeMutex);
@@ -408,11 +459,13 @@ void SetApplicationEditorStopPlayModeCallback(ApplicationEditorStopPlayModeCallb
 
 extern "C" {
 
+	// Native_Log is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Log(int level, const char* message, const char* function, int line) {
 		LogLevel logLevel = static_cast<LogLevel>(level);
 		Logger::Instance().Log(logLevel, "C#", line, function, message, true);
 	}
 
+	// Native_Application_Quit is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Application_Quit() {
 		if (ScriptingSystem::Instance().IsExportMode()) {
 			if (Engine* hostEngine = GetApplicationHostEngine()) {
@@ -424,6 +477,7 @@ extern "C" {
 			return;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ApplicationEditorStopPlayModeCallback stopPlayMode = GetApplicationEditorStopCallback()) {
 			stopPlayMode();
 			return;
@@ -436,42 +490,51 @@ extern "C" {
 		ScriptingSystem::Instance().SetPaused(false);
 	}
 
+	// Native_Application_OpenURL is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Application_OpenURL(const char* url) {
 		TerraEngine::PlatformUtils::OpenUrl(url != nullptr ? url : "");
 	}
 
+	// Native_Application_GetPersistentDataPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_Application_GetPersistentDataPath() {
 		const std::filesystem::path persistentDataPath = TerraEngine::PlatformUtils::GetPersistentDataPath(
 			ResourceManager::Instance().GetProductName());
 		return WriteApplicationReturnText(persistentDataPath.string());
 	}
 
+	// Native_Application_GetStreamingAssetsPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_Application_GetStreamingAssetsPath() {
 		return WriteApplicationReturnText(ResourceManager::Instance().GetAssetRoot().string());
 	}
 
+	// Native_Application_IsEditor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_Application_IsEditor() {
 		return !ScriptingSystem::Instance().IsExportMode();
 	}
 
+	// Native_Application_GetPlatform is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t Native_Application_GetPlatform() {
 		return static_cast<std::uint32_t>(TerraEngine::PlatformUtils::GetRuntimePlatform());
 	}
 
+	// Native_Application_GetProductName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_Application_GetProductName() {
 		return WriteApplicationReturnText(ResourceManager::Instance().GetProductName());
 	}
 
+	// Native_Application_GetVersion is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_Application_GetVersion() {
 		return WriteApplicationReturnText(ResourceManager::Instance().GetVersion());
 	}
 
+	// Native_Object_Create is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t Native_Object_Create(const char* name) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		Object obj = ObjectManager::instance().createObject(name ? name : "New Object");
 		return static_cast<uint32_t>(obj.EntityId());
 	}
 
+	// Native_Object_Destroy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Object_Destroy(uint32_t objectId) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
@@ -479,9 +542,11 @@ extern "C" {
 		}
 	}
 
+	// Native_Object_GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_Object_GetName(uint32_t objectId) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		static thread_local std::string nameBuffer;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			nameBuffer = ObjectManager::instance().getObjectName(*objOpt);
 			return nameBuffer.c_str();
@@ -489,6 +554,7 @@ extern "C" {
 		return "";
 	}
 
+	// Native_Object_SetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Object_SetName(uint32_t objectId, const char* name) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
@@ -496,12 +562,14 @@ extern "C" {
 		}
 	}
 
+	// Native_Object_Find is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t Native_Object_Find(const char* name) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (name == nullptr || name[0] == '\0') {
 			return InvalidObjectId();
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto objOpt = ObjectManager::instance().FindObjectByName(name)) {
 			return static_cast<uint32_t>(objOpt->EntityId());
 		}
@@ -509,12 +577,14 @@ extern "C" {
 		return InvalidObjectId();
 	}
 
+	// Native_Object_FindWithTag is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t Native_Object_FindWithTag(const char* tag) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (tag == nullptr || tag[0] == '\0') {
 			return InvalidObjectId();
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto objOpt = ObjectManager::instance().FindObjectByTag(tag)) {
 			return static_cast<uint32_t>(objOpt->EntityId());
 		}
@@ -522,30 +592,36 @@ extern "C" {
 		return InvalidObjectId();
 	}
 
+	// Native_MeshRenderer_GetMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_MeshRenderer_GetMesh(uint32_t objectId) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		return GetMeshRendererAssetReference(objectId, "meshId", AssetType::Mesh);
 	}
 
+	// Native_MeshRenderer_SetMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_MeshRenderer_SetMesh(uint32_t objectId, const char* assetReference) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		SetMeshRendererAssetReference(objectId, "meshId", AssetType::Mesh, assetReference);
 	}
 
+	// Native_MeshRenderer_GetMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_MeshRenderer_GetMaterial(uint32_t objectId) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		return GetMeshRendererAssetReference(objectId, "materialId", AssetType::Material);
 	}
 
+	// Native_MeshRenderer_SetMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_MeshRenderer_SetMaterial(uint32_t objectId, const char* assetReference) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		SetMeshRendererAssetReference(objectId, "materialId", AssetType::Material, assetReference);
 	}
 
+	// Native_HasComponent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_HasComponent(uint32_t objectId, const char* componentType) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			auto& reg = ComponentAccessRegistry();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto it = reg.find(componentType); it != reg.end()) {
 				return it->second.hasComponent(*objOpt);
 			}
@@ -553,10 +629,12 @@ extern "C" {
 		return false;
 	}
 
+	// Native_AddComponent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_AddComponent(uint32_t objectId, const char* componentType) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			auto& reg = ComponentAccessRegistry();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto it = reg.find(componentType); it != reg.end()) {
 				it->second.addComponent(*objOpt);
 				return true;
@@ -565,12 +643,14 @@ extern "C" {
 		return false;
 	}
 
+	// Native_ScriptComponent_AddBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_ScriptComponent_AddBinding(uint32_t objectId, const char* className) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (className == nullptr || className[0] == '\0') {
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>();
 			if (scriptComponent == nullptr) {
@@ -585,12 +665,14 @@ extern "C" {
 		return false;
 	}
 
+	// Native_ScriptComponent_HasBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_ScriptComponent_HasBinding(uint32_t objectId, const char* className) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (className == nullptr || className[0] == '\0') {
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
 				auto guard = scriptComponent->acquireReadLock();
@@ -601,16 +683,20 @@ extern "C" {
 		return false;
 	}
 
+	// Native_ScriptComponent_GetBindingPayload is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_ScriptComponent_GetBindingPayload(uint32_t objectId, const char* bindingId) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		g_ScriptBindingPayloadBuffer.clear();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (bindingId == nullptr || bindingId[0] == '\0') {
 			return g_ScriptBindingPayloadBuffer.c_str();
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
 				auto guard = scriptComponent->acquireReadLock();
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (const ScriptBinding* binding = scriptComponent->FindBinding(bindingId)) {
 					// Return the authored binding payload only. Live runtime state is
 					// reconstructed on demand inside the managed bridge.
@@ -622,12 +708,14 @@ extern "C" {
 		return g_ScriptBindingPayloadBuffer.c_str();
 	}
 
+	// Native_ScriptComponent_SetBindingValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_ScriptComponent_SetBindingValue(uint32_t objectId, const char* bindingId, const char* fieldPath, const char* valueKind, const char* valueJson, const char* compatibility, const char* sourceTypeFingerprint) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (bindingId == nullptr || bindingId[0] == '\0' || fieldPath == nullptr || fieldPath[0] == '\0' || valueJson == nullptr) {
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>();
 			if (scriptComponent == nullptr) {
@@ -636,6 +724,7 @@ extern "C" {
 
 			auto guard = scriptComponent->acquireWriteLock();
 			ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (binding == nullptr) {
 				return false;
 			}
@@ -651,6 +740,7 @@ extern "C" {
 
 			fieldValue.fieldPath = fieldPath;
 			fieldValue.fieldName = fieldPath;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (valueKind != nullptr) {
 				fieldValue.valueKind = valueKind;
 			}
@@ -664,12 +754,14 @@ extern "C" {
 		return false;
 	}
 
+	// Native_ScriptComponent_RemoveBindingValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_ScriptComponent_RemoveBindingValue(uint32_t objectId, const char* bindingId, const char* fieldPath) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (bindingId == nullptr || bindingId[0] == '\0' || fieldPath == nullptr || fieldPath[0] == '\0') {
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>();
 			if (scriptComponent == nullptr) {
@@ -678,6 +770,7 @@ extern "C" {
 
 			auto guard = scriptComponent->acquireWriteLock();
 			ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (binding == nullptr || !binding->RemoveSerializedValue(fieldPath)) {
 				return false;
 			}
@@ -689,10 +782,12 @@ extern "C" {
 		return false;
 	}
 
+	// Native_GetComponentProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			auto& reg = ComponentAccessRegistry();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto it = reg.find(componentType); it != reg.end()) {
 				TerraEngine::Reflection::Variant val = it->second.getter(*objOpt, propertyName);
 				MarshallToNative(val, outValue, static_cast<ScriptType>(type));
@@ -700,10 +795,12 @@ extern "C" {
 		}
 	}
 
+	// Native_SetComponentProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			auto& reg = ComponentAccessRegistry();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto it = reg.find(componentType); it != reg.end()) {
 				TerraEngine::Reflection::Variant val = MarshallFromNative(inValue, static_cast<ScriptType>(type));
 				it->second.setter(*objOpt, propertyName, val);
@@ -711,72 +808,88 @@ extern "C" {
 		}
 	}
 
+	// Native_Graphics_SetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Graphics_SetQualityPreset(uint32_t preset) {
 		RenderSystem::Instance().SetQualityPreset(static_cast<QualityPreset>(preset));
 	}
 
+	// Native_Graphics_GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t Native_Graphics_GetQualityPreset() {
 		return static_cast<uint32_t>(RenderSystem::Instance().GetQualityPreset());
 	}
 
+	// Native_Graphics_SetRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Graphics_SetRenderSettings(RenderSettings* settings) {
 		if (settings) {
 			RenderSystem::Instance().SetRenderSettings(*settings);
 		}
 	}
 
+	// Native_Graphics_GetRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Graphics_GetRenderSettings(RenderSettings* outSettings) {
 		if (outSettings) {
 			*outSettings = RenderSystem::Instance().GetRenderSettings();
 		}
 	}
 
+	// Native_Graphics_GetLightingDiagnosticsSummary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_Graphics_GetLightingDiagnosticsSummary(uint32_t viewType) {
 		static std::string summary;
 		const RenderViewType renderView = viewType == 1u ? RenderViewType::Scene : RenderViewType::Game;
 		const LightingDiagnosticsSnapshot diagnostics = RenderSystem::Instance().GetLatestLightingDiagnostics(renderView);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!diagnostics.valid) {
 			summary = "Lighting diagnostics are not available for the latest completed frame.";
 			return summary.c_str();
 		}
 
 		summary.clear();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const LightingDiagnosticEntry& entry : diagnostics.entries) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!summary.empty()) {
 				summary += "\n";
 			}
 			summary += entry.message;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!entry.recommendedAction.empty()) {
 				summary += " ";
 				summary += entry.recommendedAction;
 			}
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (summary.empty()) {
 			summary = "Lighting diagnostics are active and no degraded state was reported.";
 		}
 		return summary.c_str();
 	}
 
+	// Native_ResourceManager_GetAssetRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_ResourceManager_GetAssetRoot() {
 		static std::string assetRoot;
 		assetRoot = ResourceManager::Instance().GetAssetRoot().string();
 		return assetRoot.c_str();
 	}
 
+	// Native_Input_IsKeyPressed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_Input_IsKeyPressed(int key) {
 		return InputSystem::Instance().IsKeyPressed(static_cast<Key>(key));
 	}
 
+	// Native_Input_IsMouseButtonPressed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_Input_IsMouseButtonPressed(int button) {
 		return InputSystem::Instance().IsMouseButtonPressed(static_cast<MouseButton>(button));
 	}
 
+	// Native_Input_GetMousePosition is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Input_GetMousePosition(double* outX, double* outY) {
 		auto [x, y] = InputSystem::Instance().GetCursorPosition();
 		if (outX) *outX = x;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outY) *outY = y;
 	}
 
+	// Native_UI_WasElementClicked is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_UI_WasElementClicked(const char* elementId) {
 		if (elementId == nullptr || elementId[0] == '\0') {
 			return false;
@@ -785,6 +898,7 @@ extern "C" {
 		return UISystem::Instance().WasElementClicked(elementId);
 	}
 
+	// Native_UI_IsElementHovered is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_UI_IsElementHovered(const char* elementId) {
 		if (elementId == nullptr || elementId[0] == '\0') {
 			return false;
@@ -793,16 +907,19 @@ extern "C" {
 		return UISystem::Instance().IsElementHovered(elementId);
 	}
 
+	// Native_UI_GetInteractionFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint64_t Native_UI_GetInteractionFrame() {
 		return UISystem::Instance().GetInteractionFrame();
 	}
 
+	// Native_UI_CreateElement is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void* Native_UI_CreateElement(int elementType) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		UIElement::Ptr element = UIElement::CreateDefault(static_cast<UIElementType>(elementType));
 		return CreateUIHandle(element, true);
 	}
 
+	// Native_UI_ReleaseHandle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_ReleaseHandle(void* elementHandle) {
 		if (elementHandle == nullptr) {
 			return;
@@ -814,15 +931,18 @@ extern "C" {
 		delete handle;
 	}
 
+	// Native_UI_GetRootElement is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void* Native_UI_GetRootElement(uint32_t objectId) {
 		{
 			std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 				UIComponent* component = object->getComponent<UIComponent>();
 				if (component == nullptr) {
 					return nullptr;
 				}
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (UIElement::Ptr root = component->GetRoot()) {
 					return CreateUIHandle(root, false);
 				}
@@ -832,6 +952,7 @@ extern "C" {
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			if (UIComponent* component = object->getComponent<UIComponent>()) {
 				UISystem::Instance().EnsureDocumentReady(object->EntityId(), *component);
@@ -839,6 +960,7 @@ extern "C" {
 		}
 
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			UIComponent* component = object->getComponent<UIComponent>();
 			if (component == nullptr) {
@@ -846,6 +968,7 @@ extern "C" {
 			}
 
 			UIElement::Ptr root = component->GetRoot();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!root) {
 				root = UIElement::Create(UIElementType::Root);
 				root->typeName = "UIRoot";
@@ -859,6 +982,7 @@ extern "C" {
 		return nullptr;
 	}
 
+	// Native_UI_FindElementById is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void* Native_UI_FindElementById(void* elementHandle, const char* elementId) {
 		if (elementId == nullptr || elementId[0] == '\0') {
 			return nullptr;
@@ -866,6 +990,7 @@ extern "C" {
 
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		UIElement::Ptr element = ResolveUIHandle(elementHandle);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!element) {
 			return nullptr;
 		}
@@ -873,6 +998,7 @@ extern "C" {
 		return CreateUIHandle(element->FindById(elementId), false);
 	}
 
+	// Native_UI_GetElementType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	int Native_UI_GetElementType(void* elementHandle) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
@@ -882,11 +1008,13 @@ extern "C" {
 		return static_cast<int>(UIElementType::VisualElement);
 	}
 
+	// Native_UI_IsHandleAlive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_UI_IsHandleAlive(void* elementHandle) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		return ResolveUIHandle(elementHandle) != nullptr;
 	}
 
+	// Native_UI_GetElementId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_UI_GetElementId(void* elementHandle) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
@@ -896,6 +1024,7 @@ extern "C" {
 		return WriteUIBridgeReturnText({});
 	}
 
+	// Native_UI_SetElementId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_SetElementId(void* elementHandle, const char* elementId) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
@@ -904,6 +1033,7 @@ extern "C" {
 		}
 	}
 
+	// Native_UI_GetElementText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_UI_GetElementText(void* elementHandle) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
@@ -913,6 +1043,7 @@ extern "C" {
 		return WriteUIBridgeReturnText({});
 	}
 
+	// Native_UI_SetElementText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_SetElementText(void* elementHandle, const char* text) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
@@ -921,6 +1052,7 @@ extern "C" {
 		}
 	}
 
+	// Native_UI_GetElementVisible is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_UI_GetElementVisible(void* elementHandle) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
@@ -930,6 +1062,7 @@ extern "C" {
 		return false;
 	}
 
+	// Native_UI_SetElementVisible is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_SetElementVisible(void* elementHandle, bool visible) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
@@ -937,49 +1070,60 @@ extern "C" {
 		}
 	}
 
+	// Native_UI_AddChild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_AddChild(void* parentHandle, void* childHandle) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		UIElement::Ptr parent = ResolveUIHandle(parentHandle);
 		UIElement::Ptr child = ResolveUIHandle(childHandle);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!parent || !child) {
 			return;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (parent->InsertChild(parent->children.size(), child)) {
 			DropDetachedUIOwnership(child);
 		}
 	}
 
+	// Native_UI_RemoveChild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_RemoveChild(void* parentHandle, void* childHandle) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		UIElement::Ptr parent = ResolveUIHandle(parentHandle);
 		UIElement::Ptr child = ResolveUIHandle(childHandle);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!parent || !child) {
 			return;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (parent->RemoveChild(child)) {
 			PromoteDetachedUIOwnership(child);
 		}
 	}
 
+	// Native_UI_ClearChildren is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_ClearChildren(void* parentHandle) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		UIElement::Ptr parent = ResolveUIHandle(parentHandle);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!parent) {
 			return;
 		}
 
 		std::vector<UIElement::Ptr> detachedChildren = parent->children;
 		parent->ClearChildren();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const UIElement::Ptr& child : detachedChildren) {
 			PromoteDetachedUIOwnership(child);
 		}
 	}
 
+	// Native_UI_SetStyleFloat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_SetStyleFloat(void* elementHandle, int property, float value) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			// Dispatch by explicit engine state so each case documents one supported behavior.
 			switch (static_cast<ManagedUIStyleProperty>(property)) {
 			case ManagedUIStyleProperty::Width:
 				element->inlineStyle.width = UIValue::Points(value);
@@ -997,9 +1141,11 @@ extern "C" {
 		}
 	}
 
+	// Native_UI_GetStyleFloat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	float Native_UI_GetStyleFloat(void* elementHandle, int property) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
+			// Dispatch by explicit engine state so each case documents one supported behavior.
 			switch (static_cast<ManagedUIStyleProperty>(property)) {
 			case ManagedUIStyleProperty::Width:
 				return element->displayStyle.width.has_value() ? element->displayStyle.width->value : 0.0f;
@@ -1013,10 +1159,12 @@ extern "C" {
 		return 0.0f;
 	}
 
+	// Native_UI_SetStyleColor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_SetStyleColor(void* elementHandle, int property, float x, float y, float z, float w) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
 			const glm::vec4 color(x, y, z, w);
+			// Dispatch by explicit engine state so each case documents one supported behavior.
 			switch (static_cast<ManagedUIStyleProperty>(property)) {
 			case ManagedUIStyleProperty::Color:
 				element->inlineStyle.color = color;
@@ -1034,15 +1182,19 @@ extern "C" {
 		}
 	}
 
+	// Native_UI_GetStyleColor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_UI_GetStyleColor(void* elementHandle, int property, float* outX, float* outY, float* outZ, float* outW) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		std::array<float*, 4> outputs = { outX, outY, outZ, outW };
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (float* output : outputs) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (output != nullptr) {
 				*output = 0.0f;
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (UIElement::Ptr element = ResolveUIHandle(elementHandle)) {
 			std::optional<glm::vec4> color;
 			switch (static_cast<ManagedUIStyleProperty>(property)) {
@@ -1056,28 +1208,36 @@ extern "C" {
 				return;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (color.has_value()) {
 				if (outX) *outX = color->x;
 				if (outY) *outY = color->y;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (outZ) *outZ = color->z;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (outW) *outW = color->w;
 			}
 		}
 	}
 
+	// Native_UI_SetEventCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_UI_SetEventCallback(void* elementHandle, int eventType, bool enabled) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		UIElement::Ptr element = ResolveUIHandle(elementHandle);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!element) {
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ResolveManagedUIEventDispatcher() == nullptr) {
 			return false;
 		}
 
 		UIElement::UIEventCallback callback = nullptr;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (enabled) {
+			// Dispatch by explicit engine state so each case documents one supported behavior.
 			switch (static_cast<ManagedUIEventType>(eventType)) {
 			case ManagedUIEventType::Click:
 				callback = &DispatchManagedClickEvent;
@@ -1093,6 +1253,7 @@ extern "C" {
 			}
 		}
 
+		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (static_cast<ManagedUIEventType>(eventType)) {
 		case ManagedUIEventType::Click:
 			element->OnClick = callback;
@@ -1110,6 +1271,7 @@ extern "C" {
 		return true;
 	}
 
+	// Native_Scene_LoadScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_Scene_LoadScene(const char* path) {
 		static thread_local std::string uuidBuffer;
 		if (path == nullptr) return "";
@@ -1118,6 +1280,7 @@ extern "C" {
 		return uuidBuffer.c_str();
 	}
 
+	// Native_Scene_LoadPrefab is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_Scene_LoadPrefab(const char* path) {
 		static thread_local std::string uuidBuffer;
 		if (path == nullptr) return "";
@@ -1126,13 +1289,16 @@ extern "C" {
 		return uuidBuffer.c_str();
 	}
 
+	// Native_Scene_SetActiveScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_Scene_SetActiveScene(const char* uuidHex) {
 		if (uuidHex == nullptr) return false;
 		auto id = TerraEngine::ParseUUID(uuidHex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!id) return false;
 		return SceneManager::Instance().SetActiveScene(*id);
 	}
 
+	// Native_Time_GetDeltaTime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	float Native_Time_GetDeltaTime() {
 		return ScriptingSystem::Instance().GetLastDeltaTime();
 	}

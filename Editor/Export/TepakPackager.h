@@ -1,8 +1,6 @@
-// TepakPackager.h — TEPAK archive creation wrapper for the export pipeline.
+// TepakPackager.h — TEPAK archive packaging interface
 //
-// Wraps the TEPAK PackWriter API to produce a .tepak archive from the project's
-// compiled asset tree. The packager translates BuildProfile settings into a
-// PackagingRequest and provides progress callbacks for the UI.
+// Provides a wrapper for creating TEPAK archives as part of the export process. it defines the progress reporting and result structures used to communicate the status of asset packaging to the editor UI.
 
 #pragma once
 
@@ -28,6 +26,7 @@ struct PackageProgress {
 using PackageProgressCallback = std::function<void(const PackageProgress&)>;
 
 /// Result of a packaging operation.
+// struct PackageResult groups related state and operations so callers have one documented contract.
 struct PackageResult {
 	bool success = false;
 	std::filesystem::path outputPath;
@@ -38,6 +37,7 @@ struct PackageResult {
 };
 
 /// Creates TEPAK archives from project assets for export builds.
+// class TepakPackager groups related state and operations so callers have one documented contract.
 class TepakPackager {
 public:
 	/// Packages the given asset directory into a .tepak archive using the

@@ -1,3 +1,7 @@
+// EditorSystem.cpp — Main editor system implementation
+//
+// Implements the editor's core logic, including ImGui initialization, workspace layout management, and event callback chaining. It manages the loading of the managed editor assembly and provides the bridge between native engine events and C# UI windows.
+
 #include "EditorSystem.h"
 #include "ProjectHubSubsystem.h"
 #include "MainEditorSubsystem.h"
@@ -44,6 +48,7 @@ static void WrapCursorForInspectorDrag(GLFWwindow* window) {
 	int width = 0;
 	int height = 0;
 	glfwGetWindowSize(window, &width, &height);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (width <= 4 || height <= 4) {
 		return;
 	}
@@ -57,6 +62,7 @@ static void WrapCursorForInspectorDrag(GLFWwindow* window) {
 	const double maxY = static_cast<double>(height - 1);
 	bool wrapped = false;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (mouseX <= wrapPadding) {
 		mouseX = maxX - wrapPadding;
 		wrapped = true;
@@ -65,6 +71,7 @@ static void WrapCursorForInspectorDrag(GLFWwindow* window) {
 		wrapped = true;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (mouseY <= wrapPadding) {
 		mouseY = maxY - wrapPadding;
 		wrapped = true;
@@ -73,6 +80,7 @@ static void WrapCursorForInspectorDrag(GLFWwindow* window) {
 		wrapped = true;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (wrapped) {
 		glfwSetCursorPos(window, mouseX, mouseY);
 		ImGuiIO& io = ImGui::GetIO();
@@ -82,6 +90,7 @@ static void WrapCursorForInspectorDrag(GLFWwindow* window) {
 	}
 }
 
+// EditorSystem::Setup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::Setup(Engine* enginePtr) {
 	if (initialized) return;
 
@@ -137,11 +146,13 @@ void EditorSystem::Setup(Engine* enginePtr) {
 	initialized = true;
 }
 
+// EditorSystem::SaveWorkspaceLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::SaveWorkspaceLayout() {
 	if (!context.projectManager->HasActiveProject()) return;
 
 	std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
 	std::filesystem::path userSettingsDir = projectRoot / "UserSettings";
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(userSettingsDir)) {
 		std::filesystem::create_directories(userSettingsDir);
 	}
@@ -151,6 +162,7 @@ void EditorSystem::SaveWorkspaceLayout() {
 	layout["windows"] = nlohmann::json::array();
 	
 	auto windows = mainEditor->GetWindows();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& win : windows) {
 		nlohmann::json winJson;
 		winJson["title"] = win->GetTitle();
@@ -159,10 +171,12 @@ void EditorSystem::SaveWorkspaceLayout() {
 	}
 
 	// 1b. Save Managed (C#) Windows
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedGetWindows) {
 		static nlohmann::json* s_layoutPtr = nullptr;
 		s_layoutPtr = &layout;
 		managedGetWindows([](const char* title, int visible) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (s_layoutPtr && title) {
 				nlohmann::json winJson;
 				winJson["title"] = title;
@@ -182,6 +196,7 @@ void EditorSystem::SaveWorkspaceLayout() {
 	ImGui::SaveIniSettingsToDisk((userSettingsDir / "EditorLayout.ini").string().c_str());
 }
 
+// EditorSystem::LoadWorkspaceLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::LoadWorkspaceLayout() {
 	if (!context.projectManager->HasActiveProject()) return;
 
@@ -190,11 +205,13 @@ void EditorSystem::LoadWorkspaceLayout() {
 	std::filesystem::path iniPath = projectRoot / "UserSettings" / "EditorLayout.ini";
 
 	// 1. Load ImGui Docking State
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(iniPath)) {
 		ImGui::LoadIniSettingsFromDisk(iniPath.string().c_str());
 	}
 
 	// 2. Load Window Visibility
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(layoutPath)) {
 		try {
 			std::ifstream file(layoutPath);
@@ -202,17 +219,21 @@ void EditorSystem::LoadWorkspaceLayout() {
 			file >> layout;
 
 			auto windows = mainEditor->GetWindows();
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const auto& winJson : layout["windows"]) {
 				std::string title = winJson["title"];
 				bool visible = winJson["visible"];
 				bool isManaged = winJson.contains("managed") && winJson["managed"].get<bool>();
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (isManaged) {
 					if (managedSetWindowVisibility) {
 						managedSetWindowVisibility(title.c_str(), visible);
 					}
 				} else {
+					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 					for (auto& win : windows) {
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (win->GetTitle() == title) {
 							win->SetVisible(visible);
 							break;
@@ -226,6 +247,7 @@ void EditorSystem::LoadWorkspaceLayout() {
 	}
 }
 
+// EditorSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::Initialize() {
 	// Initialize ImGui and Backends
 	
@@ -233,6 +255,7 @@ void EditorSystem::Initialize() {
 	auto& renderSystem = RenderSystem::Instance();
 	auto* rhi = renderSystem.GetContext();
 	auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!vulkan) {
 		// Log Error
 		return;
@@ -269,29 +292,35 @@ void EditorSystem::Initialize() {
 	});
 
 	g_PrevMouseButtonCallback = glfwSetMouseButtonCallback(window, [](GLFWwindow* w, int button, int action, int mods) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (g_PrevMouseButtonCallback) g_PrevMouseButtonCallback(w, button, action, mods);
 		ImGui_ImplGlfw_MouseButtonCallback(w, button, action, mods);
 	});
 
 	g_PrevScrollCallback = glfwSetScrollCallback(window, [](GLFWwindow* w, double xoffset, double yoffset) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (g_PrevScrollCallback) g_PrevScrollCallback(w, xoffset, yoffset);
 		ImGui_ImplGlfw_ScrollCallback(w, xoffset, yoffset);
 	});
 
 	g_PrevKeyCallback = glfwSetKeyCallback(window, [](GLFWwindow* w, int key, int scancode, int action, int mods) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (g_PrevKeyCallback) g_PrevKeyCallback(w, key, scancode, action, mods);
 		ImGui_ImplGlfw_KeyCallback(w, key, scancode, action, mods);
 	});
 
 	g_PrevCharCallback = glfwSetCharCallback(window, [](GLFWwindow* w, unsigned int c) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (g_PrevCharCallback) g_PrevCharCallback(w, c);
 		ImGui_ImplGlfw_CharCallback(w, c);
 	});
 
 	g_PrevCloseCallback = glfwSetWindowCloseCallback(window, [](GLFWwindow* w) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (g_EditorSystems.count(w)) {
 			EditorSystem* self = g_EditorSystems[w];
 			if (self->mainEditor) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (SceneManager::Instance().IsActiveSceneDirty()) {
 					glfwSetWindowShouldClose(w, GLFW_FALSE); // Stop immediate closure
 					self->mainEditor->RequestExit();
@@ -299,6 +328,7 @@ void EditorSystem::Initialize() {
 				}
 			}
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (g_PrevCloseCallback) g_PrevCloseCallback(w);
 	});
 	
@@ -306,10 +336,12 @@ void EditorSystem::Initialize() {
 	g_PrevDropCallback = glfwSetDropCallback(window, [](GLFWwindow* w, int count, const char** paths) {
 		if (g_EditorSystems.count(w)) {
 			EditorSystem* self = g_EditorSystems[w];
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (self && self->context.projectManager->HasActiveProject()) {
 				std::filesystem::path assetRoot = AssetDatabase::Instance().GetAssetRoot();
 				for (int i = 0; i < count; i++) {
 					std::filesystem::path src = paths[i];
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (std::filesystem::exists(src)) {
 						try {
 							std::filesystem::copy(src, assetRoot / src.filename(), std::filesystem::copy_options::overwrite_existing);
@@ -348,6 +380,7 @@ void EditorSystem::Initialize() {
 	
 	ImGui_ImplVulkan_Init(&init_info);
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (projectHub) projectHub->OnBackendReady();
 	if (mainEditor) mainEditor->OnBackendReady();
 
@@ -355,6 +388,7 @@ void EditorSystem::Initialize() {
 	std::filesystem::path cwd = std::filesystem::current_path();
 	std::filesystem::path binDir;
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(cwd / "Managed" / "TerraEngine.Editor.runtimeconfig.json")) {
 		binDir = cwd / "Managed";
 	} else {
@@ -365,6 +399,7 @@ void EditorSystem::Initialize() {
 	binDir = std::filesystem::absolute(binDir);
 	std::filesystem::path dllPath = binDir / "TerraEngine.Editor.dll";
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!DotNetHost::Instance().Initialize(dllPath)) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to initialize .NET Host with assembly: " << dllPath);
 	} else {
@@ -404,20 +439,24 @@ void EditorSystem::Initialize() {
 			L"HideAllWindows"
 		);
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (managedInitialize) {
 			managedInitialize(ImGui::GetCurrentContext());
 		}
 	}
 }
 
+// EditorSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::Update(float deltaTime) {
 	if (!initialized) return;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (pendingLoadLayout) {
 		LoadWorkspaceLayout();
 		pendingLoadLayout = false;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (pendingSaveLayout) {
 		SaveWorkspaceLayout();
 		pendingSaveLayout = false;
@@ -427,10 +466,12 @@ void EditorSystem::Update(float deltaTime) {
 	ImGui_ImplGlfw_NewFrame();
 	ImGui::NewFrame();
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (context.projectManager->HasActiveProject()) {
 		AssetDatabase::Instance().Update();
 		mainEditor->Update(deltaTime);
 		mainEditor->DrawUI();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (mainEditor && mainEditor->IsInspectorValueDragging()) {
 			auto& windowSystem = WindowSystem::Instance();
 			GLFWwindow* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
@@ -442,6 +483,7 @@ void EditorSystem::Update(float deltaTime) {
 		projectHub->DrawUI();
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedUpdate) {
 		managedUpdate(deltaTime);
 	}
@@ -451,6 +493,7 @@ void EditorSystem::Update(float deltaTime) {
 	auto& renderSystem = RenderSystem::Instance();
 	auto* rhi = renderSystem.GetContext();
 	auto* vulkan = dynamic_cast<VulkanContext*>(rhi);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vulkan) {
 		vulkan->PresentEditor([](void* cmd){
 			ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);
@@ -458,6 +501,7 @@ void EditorSystem::Update(float deltaTime) {
 	}
 }
 
+// EditorSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::Shutdown() {
 	SaveWorkspaceLayout();
 	if (managedShutdown) {
@@ -465,6 +509,7 @@ void EditorSystem::Shutdown() {
 	}
 
 	auto& renderSystem = RenderSystem::Instance();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto* rhi = renderSystem.GetContext()) {
 		rhi->WaitIdle();
 	}
@@ -473,6 +518,7 @@ void EditorSystem::Shutdown() {
 	ImGui_ImplGlfw_Shutdown();
 	ImGui::DestroyContext();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (mainEditor) mainEditor->Shutdown();
 	if (projectHub) projectHub->Shutdown();
 	
@@ -482,10 +528,12 @@ void EditorSystem::Shutdown() {
 	initialized = false;
 }
 
+// EditorSystem::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string EditorSystem::SystemName() {
 	return "EditorSystem";
 }
 
+// EditorSystem::DrawWindowMenu is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::DrawWindowMenu() {
 	if (managedDrawWindowMenu) {
 		managedDrawWindowMenu();
@@ -494,12 +542,14 @@ void EditorSystem::DrawWindowMenu() {
 	}
 }
 
+// EditorSystem::HideAllWindows is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::HideAllWindows() {
 	if (managedHideAllWindows) {
 		managedHideAllWindows();
 	}
 }
 
+// EditorSystem::GetManagedWindows is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::GetManagedWindows(void (*callback)(const char*, int)) {
 	if (managedGetWindows) {
 		managedGetWindows(callback);

@@ -1,3 +1,9 @@
+// SceneManager.cpp — Scene Lifecycle Manager Implementation
+//
+// Implements the core logic for managing the engine's scene lifecycle and active document state.
+// It handles the asynchronous loading of scene files and coordinates with the ECS and Resource systems to populate the world.
+// This module ensures that scene transitions are handled safely and that all runtime systems are correctly synchronized.
+
 #include "Scene/SceneManager.h"
 
 #include <algorithm>
@@ -27,6 +33,7 @@
 
 namespace
 {
+	// LoadSceneRenderSettingsFromDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	SceneRenderSettings LoadSceneRenderSettingsFromDocument(const SceneDocument& document)
 	{
 		if (const auto sceneSettingsIt = document.parsedJson.find("sceneSettings"); sceneSettingsIt != document.parsedJson.end())
@@ -37,6 +44,7 @@ namespace
 		return MakeDefaultSceneRenderSettings();
 	}
 
+	// RemoveValidationLights is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void RemoveValidationLights(ObjectManager& objects)
 	{
 		// Validation fixtures need deterministic light ownership, so remove any
@@ -48,6 +56,7 @@ namespace
 		}
 	}
 
+	// ConfigureValidationPointLight is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ConfigureValidationPointLight(Object lightObject, const glm::vec3& position, const glm::vec3& color, float intensity, float range)
 	{
 		if (Transform* transform = lightObject.getComponent<Transform>())
@@ -64,6 +73,7 @@ namespace
 	}
 }
 
+// SceneManager::Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 SceneManager& SceneManager::Instance()
 {
 	static SceneManager instance;
@@ -73,6 +83,7 @@ SceneManager& SceneManager::Instance()
 	SceneManager::~SceneManager() = default;
 
 SceneManager::SceneManager()
+	// threadPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: threadPool(ThreadPool::instance())
 {
 	// Default to the process working directory so authored scene paths can be
@@ -80,6 +91,7 @@ SceneManager::SceneManager()
 	sceneRoot = std::filesystem::current_path();
 }
 
+// SceneManager::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::Initialize()
 {
 	// Clear any stale tracking in case the manager is restarted during a hot
@@ -94,6 +106,7 @@ void SceneManager::Initialize()
 	if (!m_StartupScene.empty())
 	{
 		const auto id = LoadScene(m_StartupScene);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (id != TerraEngine::EMPTY_UUID)
 		{
 			SetActiveScene(id);
@@ -110,6 +123,7 @@ void SceneManager::Initialize()
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager initialized with root " << sceneRoot);
 }
 
+// SceneManager::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::Update(float deltaTime)
 {
 	// No per-frame updates currently required for the static scene management
@@ -122,11 +136,13 @@ void SceneManager::Shutdown()
 	UnloadAll();
 }
 
+// SceneManager::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string SceneManager::SystemName()
 {
 	return "SceneManager";
 }
 
+// SceneManager::SetSceneRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::SetSceneRoot(const std::filesystem::path& root)
 {
 	// Normalize immediately so repeated calls with different relative forms map
@@ -136,21 +152,25 @@ void SceneManager::SetSceneRoot(const std::filesystem::path& root)
 	TERRAENGINE_LOG(LogLevel::Debug, "Scene root set to " << sceneRoot);
 }
 
+// SceneManager::GetSceneRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path SceneManager::GetSceneRoot() const
 {
 	return sceneRoot;
 }
 
+// SceneManager::SetStartupScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::SetStartupScene(const std::filesystem::path& path)
 {
 	m_StartupScene = path;
 }
 
+// SceneManager::GetStartupScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path SceneManager::GetStartupScene() const
 {
 	return m_StartupScene;
 }
 
+// SceneManager::LoadScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID SceneManager::LoadScene(const std::filesystem::path& path)
 {
 	// Trace synchronous scene requests to help diagnose cache behavior during authoring.
@@ -160,6 +180,7 @@ TerraEngine::UUID SceneManager::LoadScene(const std::filesystem::path& path)
 	}, SceneFileType::Scene);
 }
 
+// SceneManager::LoadPrefab is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID SceneManager::LoadPrefab(const std::filesystem::path& path)
 {
 	// Trace synchronous prefab requests so missing assets are obvious at debug verbosity.
@@ -169,6 +190,7 @@ TerraEngine::UUID SceneManager::LoadPrefab(const std::filesystem::path& path)
 	}, SceneFileType::Prefab);
 }
 
+// SceneManager::LoadSceneAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_future<TerraEngine::UUID> SceneManager::LoadSceneAsync(const std::filesystem::path& path)
 {
 	// Debug logging clarifies when background scene streaming is requested.
@@ -178,6 +200,7 @@ std::shared_future<TerraEngine::UUID> SceneManager::LoadSceneAsync(const std::fi
 	}, SceneFileType::Scene);
 }
 
+// SceneManager::LoadPrefabAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_future<TerraEngine::UUID> SceneManager::LoadPrefabAsync(const std::filesystem::path& path)
 {
 	// Debug logging clarifies when background prefab streaming is requested.
@@ -187,16 +210,19 @@ std::shared_future<TerraEngine::UUID> SceneManager::LoadPrefabAsync(const std::f
 	}, SceneFileType::Prefab);
 }
 
+// SceneManager::GetScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const SceneDocument* SceneManager::GetScene(const TerraEngine::UUID& id) const
 {
 	return GetResourceById(id, sceneCache);
 }
 
+// SceneManager::GetPrefab is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const SceneDocument* SceneManager::GetPrefab(const TerraEngine::UUID& id) const
 {
 	return GetResourceById(id, prefabCache);
 }
 
+// SceneManager::SetActiveScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 {
 	// The active scene must already be loaded; callers can invoke the async
@@ -211,12 +237,15 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 	ObjectManager& objManager = ObjectManager::instance();
 	objManager.clear();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (doc->parsedJson.contains("objects")) {
 		for (const auto& objJson : doc->parsedJson["objects"]) {
 			Serializer::DeserializeObject(objJson);
 		}
 	}
+	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (doc->parsedJson.contains("entities")) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& objJson : doc->parsedJson["entities"]) {
 			Serializer::DeserializeObject(objJson);
 		}
@@ -233,6 +262,7 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 	return true;
 }
 
+// SceneManager::GetActiveScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const SceneDocument* SceneManager::GetActiveScene() const
 {
 	if (activeSceneId == TerraEngine::EMPTY_UUID)
@@ -243,16 +273,19 @@ const SceneDocument* SceneManager::GetActiveScene() const
 	return GetScene(activeSceneId);
 }
 
+// SceneManager::IsActiveSceneDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SceneManager::IsActiveSceneDirty() const
 {
 	return activeSceneDirty || activeSceneSettingsDirty;
 }
 
+// SceneManager::GetActiveSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const SceneRenderSettings& SceneManager::GetActiveSceneRenderSettings() const
 {
 	return activeSceneRenderSettings;
 }
 
+// SceneManager::SetActiveSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::SetActiveSceneRenderSettings(const SceneRenderSettings& settings)
 {
 	activeSceneRenderSettings = SanitizeSceneRenderSettings(settings);
@@ -260,11 +293,13 @@ void SceneManager::SetActiveSceneRenderSettings(const SceneRenderSettings& setti
 	RenderSystem::Instance().MarkSkyStateDirty();
 }
 
+// SceneManager::GetActiveSceneSkySettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const SceneSkySettings& SceneManager::GetActiveSceneSkySettings() const
 {
 	return activeSceneRenderSettings.sky;
 }
 
+// SceneManager::SetActiveSceneSkySettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::SetActiveSceneSkySettings(const SceneSkySettings& settings)
 {
 	activeSceneRenderSettings.sky = SanitizeSceneSkySettings(settings);
@@ -272,19 +307,23 @@ void SceneManager::SetActiveSceneSkySettings(const SceneSkySettings& settings)
 	RenderSystem::Instance().MarkSkyStateDirty();
 }
 
+// SceneManager::ForceMarkActiveSceneDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::ForceMarkActiveSceneDirty()
 {
 	activeSceneDirty = true;
 }
 
+// SceneManager::ClearActiveSceneDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::ClearActiveSceneDirty()
 {
 	activeSceneDirty = false;
 }
 
+// SceneManager::SaveScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 {
 	const SceneDocument* activeScene = GetActiveScene();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!activeScene)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "No active scene to save.");
@@ -303,6 +342,7 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 		targetPath = activeScene->sourcePath;
 	}
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!targetPath.is_absolute()) {
 		targetPath = ResolveScenePath(targetPath);
 	}
@@ -322,6 +362,7 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 	}
 
 	std::ofstream file(targetPath);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!file.is_open()) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to open file for writing: " << targetPath);
 		return false;
@@ -337,6 +378,7 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 	if (!path.has_value() || *path == activeScene->sourcePath)
 	{
 		std::unique_lock lock(sceneCache.mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto it = sceneCache.resources.find(activeSceneId); it != sceneCache.resources.end())
 		{
 			if (it->second)
@@ -354,6 +396,7 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 	return true;
 }
 
+// SceneManager::UnloadAll is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::UnloadAll()
 {
 	// Acquire locks in a stable order to avoid deadlocks if multiple threads
@@ -378,11 +421,13 @@ void SceneManager::UnloadAll()
 	activeSceneRenderSettings = MakeDefaultSceneRenderSettings();
 	// Remove the generated preview entity so repeated initializes do not leave
 	// stray objects in the registry when the manager is reused.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (previewObject)
 	{
 		ObjectManager::instance().removeObject(*previewObject);
 		previewObject.reset();
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (previewCamera)
 	{
 		ObjectManager::instance().removeObject(*previewCamera);
@@ -397,6 +442,7 @@ void SceneManager::UnloadAll()
 	TERRAENGINE_LOG(LogLevel::Debug, "SceneManager caches cleared");
 }
 
+// SceneManager::NullifyAssetReferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::NullifyAssetReferences(const TerraEngine::UUID& assetId)
 {
 	ObjectManager::instance().forEachObjectWithComponents<MeshRenderComponent>(
@@ -406,18 +452,21 @@ void SceneManager::NullifyAssetReferences(const TerraEngine::UUID& assetId)
 			const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
 			const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (meshId == assetId)
 			{
 				SetComponentProperty(meshComp, "meshId", TerraEngine::EMPTY_UUID);
 				changed = true;
 			}
 			
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (materialId == assetId)
 			{
 				SetComponentProperty(meshComp, "materialId", TerraEngine::EMPTY_UUID);
 				changed = true;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (changed)
 			{
 				activeSceneDirty = true;
@@ -442,12 +491,14 @@ void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32
 	const float centerZ = static_cast<float>(safeGridDepth - 1u) * 0.5f;
 
 	// Spawn in a deterministic pattern so benchmark runs are directly comparable.
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t z = 0; z < safeGridDepth; ++z)
 	{
 		for (std::uint32_t x = 0; x < safeGridWidth; ++x)
 		{
 			auto lightObject = objects.createObject("StressPointLight");
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (Transform* transform = lightObject.getComponent<Transform>())
 			{
 				const float worldX = (static_cast<float>(x) - centerX) * safeSpacing;
@@ -472,6 +523,7 @@ void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32
 	TERRAENGINE_LOG(LogLevel::Info, "Spawned stress test light grid with " << (safeGridWidth * safeGridDepth) << " point lights.");
 }
 
+// SceneManager::SpawnClusterBinDenseFixture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::SpawnClusterBinDenseFixture()
 {
 	ObjectManager& objects = ObjectManager::instance();
@@ -507,6 +559,7 @@ void SceneManager::SpawnClusterBinDenseFixture()
 	TERRAENGINE_LOG(LogLevel::Info, "Spawned dense cluster-bin validation fixture with " << kDenseLightCount << " point lights.");
 }
 
+// SceneManager::SpawnClusterBinSparseFixture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::SpawnClusterBinSparseFixture()
 {
 	ObjectManager& objects = ObjectManager::instance();
@@ -520,6 +573,7 @@ void SceneManager::SpawnClusterBinSparseFixture()
 	const float centerX = static_cast<float>(kSparseWidth - 1u) * 0.5f;
 	const float centerZ = static_cast<float>(kSparseDepth - 1u) * 0.5f;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t z = 0u; z < kSparseDepth; ++z)
 	{
 		for (std::uint32_t x = 0u; x < kSparseWidth; ++x)
@@ -546,9 +600,11 @@ void SceneManager::SpawnClusterBinSparseFixture()
 	TERRAENGINE_LOG(LogLevel::Info, "Spawned sparse cluster-bin validation fixture with " << (kSparseWidth * kSparseDepth) << " point lights.");
 }
 
+// SceneManager::LoadSceneDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesystem::path& path, SceneFileType type)
 {
 	const auto jsonText = ReadJsonFile(path, type);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!jsonText)
 	{
 		return nullptr;
@@ -578,6 +634,7 @@ std::unique_ptr<SceneDocument> SceneManager::LoadSceneDocument(const std::filesy
 	return document;
 }
 
+// SceneManager::ReadJsonFile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<std::string> SceneManager::ReadJsonFile(const std::filesystem::path& path, SceneFileType type) const
 {
 	if (!ValidateExtension(path, type))
@@ -587,15 +644,18 @@ std::optional<std::string> SceneManager::ReadJsonFile(const std::filesystem::pat
 	}
 
 	// In export builds, attempt to read the JSON document from the TEPAK archive.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ContentMount::Instance().IsMounted())
 	{
 		const std::filesystem::path absolutePath = ResolveScenePath(path);
 		const std::filesystem::path logicalPath = absolutePath.lexically_relative(sceneRoot);
 		const std::string logicalPathString = logicalPath.generic_string();
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ContentMount::Instance().Exists(logicalPathString))
 		{
 			const std::vector<uint8_t> bytes = ContentMount::Instance().ReadAll(logicalPathString);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!bytes.empty())
 			{
 				TERRAENGINE_LOG(LogLevel::Debug, "Reading scene file from mount: " << logicalPathString);
@@ -607,6 +667,7 @@ std::optional<std::string> SceneManager::ReadJsonFile(const std::filesystem::pat
 	}
 
 	std::ifstream file(path, std::ios::binary);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!file)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to open scene file from disk: " << path);
@@ -617,6 +678,7 @@ std::optional<std::string> SceneManager::ReadJsonFile(const std::filesystem::pat
 	buffer << file.rdbuf();
 	std::string jsonText = buffer.str();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (jsonText.empty())
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Scene file is empty: " << path);
@@ -626,11 +688,13 @@ std::optional<std::string> SceneManager::ReadJsonFile(const std::filesystem::pat
 	return jsonText;
 }
 
+// SceneManager::ValidateExtension is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SceneManager::ValidateExtension(const std::filesystem::path& path, SceneFileType type) const
 {
 	std::string extension = path.extension().string();
 	std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (type == SceneFileType::Scene)
 	{
 		return extension == ".tescene";
@@ -639,6 +703,7 @@ bool SceneManager::ValidateExtension(const std::filesystem::path& path, SceneFil
 	return extension == ".teprefab";
 }
 
+// SceneManager::ResolveScenePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path SceneManager::ResolveScenePath(const std::filesystem::path& path) const
 {
 	if (path.is_absolute())
@@ -649,6 +714,7 @@ std::filesystem::path SceneManager::ResolveScenePath(const std::filesystem::path
 	return (sceneRoot / path).lexically_normal();
 }
 
+// SceneManager::NormalizeKey is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string SceneManager::NormalizeKey(const std::filesystem::path& path) const
 {
 	// Using generic_string keeps path separators consistent on Windows and POSIX
@@ -656,6 +722,7 @@ std::string SceneManager::NormalizeKey(const std::filesystem::path& path) const
 	return path.lexically_normal().generic_string();
 }
 
+// SceneManager::PreparePreviewAssets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::PreparePreviewAssets()
 {
 	ResourceManager& resources = ResourceManager::Instance();
@@ -669,6 +736,7 @@ void SceneManager::PreparePreviewAssets()
 	}
 
 	previewTextureId = resources.LoadTexture("texture.tetf");
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (resources.GetTexture(previewTextureId) == nullptr)
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Preview texture (texture.tetf) failed to load; material will fall back to defaults.");
@@ -693,6 +761,7 @@ void SceneManager::PreparePreviewAssets()
 	SpawnPreviewCamera();
 }
 
+// SceneManager::CreateGeneratedMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID SceneManager::CreateGeneratedMaterial(ResourceManager& resources, const std::string& name, const TerraEngine::UUID& textureId, const TerraEngine::UUID& shaderCollectionId)
 {
 	// Build a minimal in-memory material that binds the preview texture to the base color slot so
@@ -747,6 +816,7 @@ TerraEngine::UUID SceneManager::CreateGeneratedMaterial(ResourceManager& resourc
 	return resources.RegisterMaterial(name, std::move(material));
 }
 
+// SceneManager::SpawnPreviewObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const TerraEngine::UUID& materialId, const TerraEngine::UUID& textureId)
 {
 	ObjectManager& objects = ObjectManager::instance();
@@ -771,6 +841,7 @@ void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const Ter
 	SetComponentProperty(renderComponent, "materialId", materialId);
 }
 
+// SceneManager::SpawnPreviewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::SpawnPreviewCamera()
 {
 	ObjectManager& objects = ObjectManager::instance();
@@ -796,6 +867,7 @@ void SceneManager::SpawnPreviewCamera()
 	SetComponentProperty(camera, "up", glm::vec3(0.0f, 1.0f, 0.0f));
 }
 
+// SceneManager::GetPreviewTransform is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 Transform* SceneManager::GetPreviewTransform()
 {
 	if (!previewObject)

@@ -1,3 +1,7 @@
+// ScriptRegistryGenerator.cs — Roslyn source generator for script registration
+//
+// Implements a C# source generator that automatically discovers script types and generates the registration code required for NativeAOT export. It performs static analysis on the codebase to build field accessors and ensure unique script identifiers for the export runtime.
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -10,6 +14,7 @@ using Microsoft.CodeAnalysis.Text;
 namespace TerraEngine.Export.Generator
 {
 	[Generator]
+	// ScriptRegistryGenerator is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public sealed class ScriptRegistryGenerator : ISourceGenerator
 	{
 		private static readonly DiagnosticDescriptor s_collisionDiagnostic = new(
@@ -28,15 +33,18 @@ namespace TerraEngine.Export.Generator
 			defaultSeverity: DiagnosticSeverity.Error,
 			isEnabledByDefault: true);
 
+		// Initialize bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public void Initialize(GeneratorInitializationContext context)
 		{
 		}
 
+		// Execute bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public void Execute(GeneratorExecutionContext context)
 		{
 			INamedTypeSymbol? scriptBaseType = context.Compilation.GetTypeByMetadataName("TerraEngine.Script");
 			INamedTypeSymbol? serializeFieldAttribute = context.Compilation.GetTypeByMetadataName("TerraEngine.SerializeFieldAttribute");
 			INamedTypeSymbol? nonSerializedAttribute = context.Compilation.GetTypeByMetadataName("System.NonSerializedAttribute");
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (scriptBaseType == null || serializeFieldAttribute == null || nonSerializedAttribute == null)
 			{
 				return;
@@ -49,6 +57,7 @@ namespace TerraEngine.Export.Generator
 			context.AddSource("TerraEngine_Export_Generated.g.cs", SourceText.From(BuildGeneratedSource(models), Encoding.UTF8));
 		}
 
+		// DiscoverScriptTypes bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static List<ScriptTypeModel> DiscoverScriptTypes(
 			GeneratorExecutionContext context,
 			INamedTypeSymbol scriptBaseType,
@@ -62,21 +71,25 @@ namespace TerraEngine.Export.Generator
 				SemanticModel semanticModel = context.Compilation.GetSemanticModel(syntaxTree);
 				foreach (ClassDeclarationSyntax classDeclaration in syntaxTree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>())
 				{
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (semanticModel.GetDeclaredSymbol(classDeclaration) is not INamedTypeSymbol typeSymbol)
 					{
 						continue;
 					}
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (!InheritsFrom(typeSymbol, scriptBaseType))
 					{
 						continue;
 					}
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (typeSymbol.TypeKind != TypeKind.Class || typeSymbol.IsGenericType || typeSymbol.ContainingType != null)
 					{
 						continue;
 					}
 
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (discoveredTypes.ContainsKey(typeSymbol))
 					{
 						continue;
@@ -108,11 +121,13 @@ namespace TerraEngine.Export.Generator
 				.ToList();
 		}
 
+		// ReportCollisions bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void ReportCollisions(GeneratorExecutionContext context, IEnumerable<ScriptTypeModel> models)
 		{
 			var seenIds = new Dictionary<ulong, ScriptTypeModel>();
 			foreach (ScriptTypeModel model in models.Where(model => model.IsAttachable))
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (seenIds.TryGetValue(model.ScriptId, out ScriptTypeModel? previous))
 				{
 					if (!string.Equals(previous.FullTypeName, model.FullTypeName, StringComparison.Ordinal))
@@ -131,10 +146,12 @@ namespace TerraEngine.Export.Generator
 			}
 		}
 
+		// ReportMissingPartialTypes bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void ReportMissingPartialTypes(GeneratorExecutionContext context, IEnumerable<ScriptTypeModel> models)
 		{
 			foreach (ScriptTypeModel model in models)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (model.OwnFields.Count == 0 || model.IsPartial)
 				{
 					continue;
@@ -147,6 +164,7 @@ namespace TerraEngine.Export.Generator
 			}
 		}
 
+		// ResolveHelperChains bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void ResolveHelperChains(IReadOnlyList<ScriptTypeModel> models)
 		{
 			var map = new Dictionary<INamedTypeSymbol, ScriptTypeModel>(SymbolEqualityComparer.Default);
@@ -159,6 +177,7 @@ namespace TerraEngine.Export.Generator
 			{
 				model.HelperBaseModel = FindNearestHelperBase(map, model.Symbol.BaseType);
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (model.OwnFields.Count > 0 && model.IsPartial)
 				{
 					model.AccessorProviderModel = model;
@@ -170,17 +189,20 @@ namespace TerraEngine.Export.Generator
 			}
 		}
 
+		// FindNearestHelperBase bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static ScriptTypeModel? FindNearestHelperBase(
 			IReadOnlyDictionary<INamedTypeSymbol, ScriptTypeModel> models,
 			INamedTypeSymbol? baseType)
 		{
 			for (INamedTypeSymbol? current = baseType; current != null; current = current.BaseType)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!models.TryGetValue(current, out ScriptTypeModel? model))
 				{
 					continue;
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (model.OwnFields.Count > 0 && model.IsPartial)
 				{
 					return model;
@@ -190,6 +212,7 @@ namespace TerraEngine.Export.Generator
 			return null;
 		}
 
+		// CollectSupportedOwnFields bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static List<ExportFieldModel> CollectSupportedOwnFields(
 			INamedTypeSymbol typeSymbol,
 			INamedTypeSymbol serializeFieldAttribute,
@@ -205,6 +228,7 @@ namespace TerraEngine.Export.Generator
 			var supportedFields = new List<ExportFieldModel>();
 			foreach (IFieldSymbol field in fields)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!TryCreateFieldModel(field, out ExportFieldModel? model))
 				{
 					continue;
@@ -216,11 +240,13 @@ namespace TerraEngine.Export.Generator
 			return supportedFields;
 		}
 
+		// ShouldSerializeField bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool ShouldSerializeField(
 			IFieldSymbol field,
 			INamedTypeSymbol serializeFieldAttribute,
 			INamedTypeSymbol nonSerializedAttribute)
 		{
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (field.IsStatic || field.IsConst || field.IsReadOnly)
 			{
 				return false;
@@ -228,12 +254,14 @@ namespace TerraEngine.Export.Generator
 
 			foreach (AttributeData attribute in field.GetAttributes())
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (SymbolEqualityComparer.Default.Equals(attribute.AttributeClass, nonSerializedAttribute))
 				{
 					return false;
 				}
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (field.DeclaredAccessibility == Accessibility.Public)
 			{
 				return true;
@@ -241,6 +269,7 @@ namespace TerraEngine.Export.Generator
 
 			foreach (AttributeData attribute in field.GetAttributes())
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (SymbolEqualityComparer.Default.Equals(attribute.AttributeClass, serializeFieldAttribute))
 				{
 					return true;
@@ -250,34 +279,40 @@ namespace TerraEngine.Export.Generator
 			return false;
 		}
 
+		// TryCreateFieldModel bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool TryCreateFieldModel(IFieldSymbol field, out ExportFieldModel? model)
 		{
 			model = null;
 			ITypeSymbol fieldType = field.Type;
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (fieldType.SpecialType == SpecialType.System_Boolean)
 			{
 				model = CreateFieldModel(field, "bool", "global::TerraEngine.Export.ExportFieldValueKind.Bool", 1);
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (fieldType.SpecialType == SpecialType.System_Int32)
 			{
 				model = CreateFieldModel(field, "int", "global::TerraEngine.Export.ExportFieldValueKind.Int", 4);
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (fieldType.SpecialType == SpecialType.System_Single)
 			{
 				model = CreateFieldModel(field, "float", "global::TerraEngine.Export.ExportFieldValueKind.Float", 4);
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (fieldType.SpecialType == SpecialType.System_UInt32)
 			{
 				model = CreateFieldModel(field, "uint", "global::TerraEngine.Export.ExportFieldValueKind.EntityReference", 4);
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (fieldType.SpecialType == SpecialType.System_String)
 			{
 				model = CreateFieldModel(field, "string", "global::TerraEngine.Export.ExportFieldValueKind.String", 256);
@@ -285,24 +320,28 @@ namespace TerraEngine.Export.Generator
 			}
 
 			string qualifiedName = fieldType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (string.Equals(qualifiedName, "global::TerraEngine.Vector2", StringComparison.Ordinal))
 			{
 				model = CreateFieldModel(field, "global::TerraEngine.Vector2", "global::TerraEngine.Export.ExportFieldValueKind.Vector2", 8);
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (string.Equals(qualifiedName, "global::TerraEngine.Vector3", StringComparison.Ordinal))
 			{
 				model = CreateFieldModel(field, "global::TerraEngine.Vector3", "global::TerraEngine.Export.ExportFieldValueKind.Vector3", 12);
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (string.Equals(qualifiedName, "global::TerraEngine.Vector4", StringComparison.Ordinal))
 			{
 				model = CreateFieldModel(field, "global::TerraEngine.Vector4", "global::TerraEngine.Export.ExportFieldValueKind.Vector4", 16);
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (string.Equals(qualifiedName, "global::TerraEngine.Quaternion", StringComparison.Ordinal))
 			{
 				model = CreateFieldModel(field, "global::TerraEngine.Quaternion", "global::TerraEngine.Export.ExportFieldValueKind.Quaternion", 16);
@@ -312,6 +351,7 @@ namespace TerraEngine.Export.Generator
 			return false;
 		}
 
+		// CreateFieldModel bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static ExportFieldModel CreateFieldModel(IFieldSymbol field, string typeName, string valueKindExpression, int valueSize)
 		{
 			return new ExportFieldModel
@@ -324,10 +364,12 @@ namespace TerraEngine.Export.Generator
 			};
 		}
 
+		// InheritsFrom bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool InheritsFrom(INamedTypeSymbol typeSymbol, INamedTypeSymbol baseType)
 		{
 			for (INamedTypeSymbol? current = typeSymbol; current != null; current = current.BaseType)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (SymbolEqualityComparer.Default.Equals(current, baseType))
 				{
 					return true;
@@ -337,6 +379,7 @@ namespace TerraEngine.Export.Generator
 			return false;
 		}
 
+		// IsAttachable bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool IsAttachable(INamedTypeSymbol typeSymbol, INamedTypeSymbol scriptBaseType)
 		{
 			return typeSymbol.TypeKind == TypeKind.Class
@@ -346,15 +389,18 @@ namespace TerraEngine.Export.Generator
 				&& typeSymbol.ContainingType == null;
 		}
 
+		// IsPartial bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool IsPartial(INamedTypeSymbol typeSymbol)
 		{
 			foreach (SyntaxReference declarationReference in typeSymbol.DeclaringSyntaxReferences)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (declarationReference.GetSyntax() is not ClassDeclarationSyntax declaration)
 				{
 					continue;
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (declaration.Modifiers.Any(modifier => modifier.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PartialKeyword)))
 				{
 					return true;
@@ -364,6 +410,7 @@ namespace TerraEngine.Export.Generator
 			return false;
 		}
 
+		// BuildTypeModifiers bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static string BuildTypeModifiers(INamedTypeSymbol typeSymbol)
 		{
 			var tokens = new List<string>();
@@ -380,6 +427,7 @@ namespace TerraEngine.Export.Generator
 				break;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (typeSymbol.IsAbstract)
 			{
 				tokens.Add("abstract");
@@ -392,6 +440,7 @@ namespace TerraEngine.Export.Generator
 			return string.Join(" ", tokens);
 		}
 
+		// ComputeFnv64 bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static ulong ComputeFnv64(string text)
 		{
 			const ulong offsetBasis = 14695981039346656037UL;
@@ -407,6 +456,7 @@ namespace TerraEngine.Export.Generator
 			return hash;
 		}
 
+		// BuildGeneratedSource bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static string BuildGeneratedSource(IReadOnlyList<ScriptTypeModel> models)
 		{
 			var source = new StringBuilder();
@@ -421,6 +471,7 @@ namespace TerraEngine.Export.Generator
 
 			foreach (ScriptTypeModel model in models)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!model.IsPartial || model.OwnFields.Count == 0)
 				{
 					continue;
@@ -433,6 +484,7 @@ namespace TerraEngine.Export.Generator
 			return source.ToString();
 		}
 
+		// EmitHelperPartial bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void EmitHelperPartial(StringBuilder source, ScriptTypeModel model)
 		{
 			if (!string.IsNullOrEmpty(model.NamespaceName))
@@ -480,6 +532,7 @@ namespace TerraEngine.Export.Generator
 
 			source.AppendLine("\t\tinternal static void __TerraEngine_GetFieldValue(global::TerraEngine.Script instance, int fieldIndex, void* valueBuffer, int valueSize)");
 			source.AppendLine("\t\t{");
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (model.HelperBaseModel != null)
 			{
 				source.AppendLine("\t\t\tif (fieldIndex < __TerraEngine_BaseFieldCount)");
@@ -496,6 +549,7 @@ namespace TerraEngine.Export.Generator
 				ExportFieldModel field = model.OwnFields[index];
 				source.Append("\t\t\tcase ").Append(index.ToString(CultureInfo.InvariantCulture)).AppendLine(":");
 				source.AppendLine("\t\t\t{");
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (string.Equals(field.TypeName, "string", StringComparison.Ordinal))
 				{
 					source.Append("\t\t\t\tglobal::TerraEngine.Export.ExportBridge.TryWriteString(valueBuffer, valueSize, typedInstance.")
@@ -517,6 +571,7 @@ namespace TerraEngine.Export.Generator
 
 			source.AppendLine("\t\tinternal static void __TerraEngine_SetFieldValue(global::TerraEngine.Script instance, int fieldIndex, void* valueBuffer, int valueSize)");
 			source.AppendLine("\t\t{");
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (model.HelperBaseModel != null)
 			{
 				source.AppendLine("\t\t\tif (fieldIndex < __TerraEngine_BaseFieldCount)");
@@ -533,6 +588,7 @@ namespace TerraEngine.Export.Generator
 				ExportFieldModel field = model.OwnFields[index];
 				source.Append("\t\t\tcase ").Append(index.ToString(CultureInfo.InvariantCulture)).AppendLine(":");
 				source.AppendLine("\t\t\t{");
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (string.Equals(field.TypeName, "string", StringComparison.Ordinal))
 				{
 					source.AppendLine("\t\t\t\tif (global::TerraEngine.Export.ExportBridge.TryReadString(valueBuffer, valueSize, out string nextValue))");
@@ -553,6 +609,7 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine("\t\t}");
 			source.Append('\t').AppendLine("}");
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (!string.IsNullOrEmpty(model.NamespaceName))
 			{
 				source.AppendLine("}");
@@ -561,6 +618,7 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine();
 		}
 
+		// EmitRegistry bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void EmitRegistry(StringBuilder source, IReadOnlyList<ScriptTypeModel> models)
 		{
 			source.AppendLine("namespace TerraEngine.Export.Generated");
@@ -612,6 +670,7 @@ namespace TerraEngine.Export.Generator
 				string fieldArrayExpression;
 				string getAccessorExpression;
 				string setAccessorExpression;
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (model.AccessorProviderModel != null)
 				{
 					fieldArrayExpression = model.AccessorProviderModel.QualifiedTypeName + ".__TerraEngine_ExportFieldDescriptors";
@@ -883,11 +942,13 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine("}");
 		}
 
+		// EscapeStringLiteral bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static string EscapeStringLiteral(string value)
 		{
 			return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 		}
 
+		// ScriptTypeModel is the managed-facing contract for this subsystem; keep it predictable for scripts.
 		private sealed class ScriptTypeModel
 		{
 			public INamedTypeSymbol Symbol { get; set; } = null!;
@@ -905,6 +966,7 @@ namespace TerraEngine.Export.Generator
 			public ScriptTypeModel? AccessorProviderModel { get; set; }
 		}
 
+		// ExportFieldModel is the managed-facing contract for this subsystem; keep it predictable for scripts.
 		private sealed class ExportFieldModel
 		{
 			public string FieldName { get; set; } = string.Empty;

@@ -1,3 +1,10 @@
+// UIStyle.h — Core data structures for UI styling and layout properties.
+//
+// This file defines the UIStyle structure and associated enums that represent
+// CSS-like properties. It includes support for layout (flexbox), visual
+// appearance (colors, borders), and transforms, along with helper types for
+// values (pixels vs percentages) and edge offsets.
+
 #pragma once
 
 #include <glm/vec2.hpp>
@@ -18,6 +25,7 @@ enum class UIElementType
 	Image,
 };
 
+// UISelectorKind names the supported states explicitly so serialization and switches stay readable.
 enum class UISelectorKind
 {
 	Root,
@@ -26,24 +34,28 @@ enum class UISelectorKind
 	Id,
 };
 
+// UIPseudoState names the supported states explicitly so serialization and switches stay readable.
 enum class UIPseudoState
 {
 	None,
 	Hover,
 };
 
+// UISelectorValidityState names the supported states explicitly so serialization and switches stay readable.
 enum class UISelectorValidityState
 {
 	Valid,
 	RecoverableError,
 };
 
+// UIFlexDirection names the supported states explicitly so serialization and switches stay readable.
 enum class UIFlexDirection
 {
 	Row,
 	Column,
 };
 
+// UIJustifyContent names the supported states explicitly so serialization and switches stay readable.
 enum class UIJustifyContent
 {
 	FlexStart,
@@ -53,6 +65,7 @@ enum class UIJustifyContent
 	SpaceAround,
 };
 
+// UIAlignItems names the supported states explicitly so serialization and switches stay readable.
 enum class UIAlignItems
 {
 	Stretch,
@@ -62,6 +75,7 @@ enum class UIAlignItems
 };
 
 // Numeric layout values can be authored as points, percentages, or `auto`.
+// struct UIValue groups related state and operations so callers have one documented contract.
 struct UIValue
 {
 	enum class Unit
@@ -93,6 +107,7 @@ struct UIEdgeValues
 	static UIEdgeValues All(const UIValue& value);
 };
 
+// struct UITransformProperties groups related state and operations so callers have one documented contract.
 struct UITransformProperties
 {
 	std::optional<glm::vec2> translate;
@@ -128,6 +143,7 @@ struct UIStyle
 	[[nodiscard]] bool HasRenderableBackground() const;
 };
 
+// struct UIStyleRule groups related state and operations so callers have one documented contract.
 struct UIStyleRule
 {
 	std::string selectorText;

@@ -1,3 +1,8 @@
+// HierarchyWindow.h — Scene Hierarchy Window Definition
+//
+// Defines the HierarchyWindow class, which provides a tree view of all entities in the current scene.
+// It allows users to select, parent, and manage entities, communicating selection changes to the EditorContext.
+
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include <string>
@@ -6,6 +11,7 @@
 class MainEditorSubsystem;
 class Object;
 
+// class HierarchyWindow groups related state and operations so callers have one documented contract.
 class HierarchyWindow : public EditorWindow {
 public:
 	HierarchyWindow(MainEditorSubsystem* owner);

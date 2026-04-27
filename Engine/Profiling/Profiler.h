@@ -1,3 +1,5 @@
+// Profiler.h — Contains declarations for the Profiler file-specific types, helper functions, and module integration code used by runtime profiling sessions, timing markers, capture serialization, and scope helpers.
+
 #pragma once
 
 #include "Profiling/ProfilerCapture.h"
@@ -12,6 +14,7 @@ struct RenderStatsSnapshot;
 
 namespace TerraEngine::Profiling
 {
+// class Profiler groups related state and operations so callers have one documented contract.
 class Profiler
 {
 public:

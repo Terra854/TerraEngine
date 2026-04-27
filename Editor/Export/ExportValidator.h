@@ -1,8 +1,6 @@
-// ExportValidator.h — Pre-export validation for build profiles and managed source.
+// ExportValidator.h — Pre-export validation system
 //
-// The validator runs before the export pipeline to catch configuration errors
-// and unsupported managed code patterns early. Results are presented in the
-// BuildProfilesWindow as a diagnostic list.
+// Defines the diagnostic levels and interface for the pre-export validation system. It provides mechanisms for checking build profile integrity and scanning managed source code for patterns incompatible with NativeAOT.
 
 #pragma once
 
@@ -19,6 +17,7 @@ enum class ExportDiagnosticSeverity : uint32_t {
 };
 
 /// One discrete finding from the pre-export validation pass.
+// struct ExportDiagnostic groups related state and operations so callers have one documented contract.
 struct ExportDiagnostic {
 	ExportDiagnosticSeverity severity = ExportDiagnosticSeverity::Info;
 	std::string category;   // e.g. "Profile", "ManagedSource", "Assets"
@@ -28,6 +27,7 @@ struct ExportDiagnostic {
 };
 
 /// Aggregated result of one validation pass.
+// struct ExportValidationResult groups related state and operations so callers have one documented contract.
 struct ExportValidationResult {
 	bool passed = true;      // false if any Error-level diagnostics exist
 	uint32_t errorCount = 0;

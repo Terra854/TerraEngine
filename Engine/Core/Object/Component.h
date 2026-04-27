@@ -1,3 +1,10 @@
+// Component.h — Base template and registration utilities for the engine's component system.
+//
+// This file defines the CRTP-based Component base class, providing automatic
+// registration with the reflection system and type-safe data access. It also
+// implements the infrastructure for runtime component manipulation, serialization,
+// and thread-safe property access using EnTT and nlohmann/json.
+
 #pragma once
 
 #include <memory>
@@ -26,16 +33,19 @@ struct component_has_custom_name : std::false_type
 };
 
 template <typename T>
+// struct component_has_custom_name groups related state and operations so callers have one documented contract.
 struct component_has_custom_name<T, std::void_t<decltype(T::kComponentName)>> : std::true_type
 {
 };
 
 template <typename T, typename = void>
+// struct component_has_reflect groups related state and operations so callers have one documented contract.
 struct component_has_reflect : std::false_type
 {
 };
 
 template <typename T>
+// struct component_has_reflect groups related state and operations so callers have one documented contract.
 struct component_has_reflect<T, std::void_t<decltype(T::reflect(std::declval<entt::meta_factory<T>&>()))>> : std::true_type
 {
 };
@@ -44,6 +54,7 @@ template <typename T>
 inline constexpr bool component_has_reflect_v = component_has_reflect<T>::value;
 
 template <typename T>
+// component_name_for is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline std::string component_name_for()
 {
 	if constexpr (component_has_custom_name<T>::value)
@@ -76,6 +87,7 @@ TERRAENGINE_API std::unordered_map<std::string, ComponentAccessFunctions>& Compo
 TERRAENGINE_API std::mutex& ComponentAccessRegistryMutex();
 
 template <typename ComponentType>
+// RegisterComponentAccess is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RegisterComponentAccess(const std::string& name)
 {
 	// Populate the access registry once per component type so callers can
@@ -101,6 +113,7 @@ void RegisterComponentAccess(const std::string& name)
 
 		auto guard = component->acquireReadLock();
 		TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), property);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TerraEngine::Reflection::IsValid(prop))
 		{
 			return {};
@@ -120,6 +133,7 @@ void RegisterComponentAccess(const std::string& name)
 
 		auto guard = component->acquireWriteLock();
 		TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), property);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TerraEngine::Reflection::IsValid(prop))
 		{
 			return false;
@@ -134,6 +148,7 @@ void RegisterComponentAccess(const std::string& name)
 
 	functions.addComponent = [](Object& object) -> void
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!object.getComponent<ComponentType>()) {
 			object.addComponent<ComponentType>();
 		}
@@ -148,27 +163,33 @@ void RegisterComponentAccess(const std::string& name)
 	{
 		nlohmann::json compJson = nlohmann::json::object();
 		ComponentType* component = object.getComponent<ComponentType>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!component) return compJson;
 
 		auto guard = component->acquireReadLock();
 		TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType<ComponentType>();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const TerraEngine::Reflection::Property& prop : TerraEngine::Reflection::GetProperties(type))
 		{
 			std::string propName = TerraEngine::Reflection::GetPropertyName(prop);
 			TerraEngine::Reflection::Variant val = TerraEngine::Reflection::GetPropertyValue(prop, *component);
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (TerraEngine::Reflection::IsType<float>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<float>(val);
 			else if (TerraEngine::Reflection::IsType<int>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<int>(val);
 			else if (TerraEngine::Reflection::IsType<bool>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<bool>(val);
 			else if (TerraEngine::Reflection::IsType<std::string>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<std::string>(val);
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (TerraEngine::Reflection::IsType<glm::vec3>(val)) {
 				auto v = TerraEngine::Reflection::GetValue<glm::vec3>(val);
 				compJson[propName] = { v.x, v.y, v.z };
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (TerraEngine::Reflection::IsType<glm::quat>(val)) {
 				auto q = TerraEngine::Reflection::GetValue<glm::quat>(val);
 				compJson[propName] = { q.w, q.x, q.y, q.z };
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(val)) {
 				auto uuid = TerraEngine::Reflection::GetValue<TerraEngine::UUID>(val);
 				compJson[propName] = TerraEngine::ToHexString(uuid);
@@ -180,20 +201,26 @@ void RegisterComponentAccess(const std::string& name)
 	functions.deserialize = [](Object& object, const nlohmann::json& compData) -> void
 	{
 		ComponentType* component = object.getComponent<ComponentType>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!component) return;
 
 		auto guard = component->acquireWriteLock();
 		TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType<ComponentType>();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto& [propName, propVal] : compData.items())
 		{
 			TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(type, propName);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (TerraEngine::Reflection::IsValid(prop))
 			{
 				TerraEngine::Reflection::Variant val;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (propVal.is_number_float()) val = propVal.get<float>();
 				else if (propVal.is_number_integer()) val = propVal.get<int>();
 				else if (propVal.is_boolean()) val = propVal.get<bool>();
+				// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 				else if (propVal.is_string()) {
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(TerraEngine::Reflection::GetPropertyType(prop))) {
 						auto parsed = TerraEngine::ParseUUID(propVal.get<std::string>());
 						if (parsed) val = *parsed;
@@ -202,17 +229,22 @@ void RegisterComponentAccess(const std::string& name)
 						val = propVal.get<std::string>();
 					}
 				}
+				// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 				else if (propVal.is_array()) {
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (propVal.size() == 3) {
 						val = glm::vec3(propVal[0], propVal[1], propVal[2]);
 					}
+					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 					else if (propVal.size() == 4) {
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (TerraEngine::Reflection::IsType<glm::quat>(TerraEngine::Reflection::GetPropertyType(prop))) {
 							val = glm::quat(propVal[0], propVal[1], propVal[2], propVal[3]);
 						}
 					}
 				}
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (TerraEngine::Reflection::IsValid(val)) {
 					TerraEngine::Reflection::SetPropertyValue(prop, *component, val);
 				}
@@ -231,11 +263,13 @@ T GetComponentProperty(ComponentType& component, std::string_view propertyName)
 {
 	auto guard = component.acquireReadLock();
 	TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), propertyName);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TerraEngine::Reflection::IsValid(prop))
 	{
 		return T{};
 	}
 	TerraEngine::Reflection::Variant value = TerraEngine::Reflection::GetPropertyValue(prop, component);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TerraEngine::Reflection::IsType<T>(value))
 	{
 		return T{};
@@ -244,10 +278,12 @@ T GetComponentProperty(ComponentType& component, std::string_view propertyName)
 }
 
 template <typename ComponentType, typename ValueType>
+// SetComponentProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SetComponentProperty(ComponentType& component, std::string_view propertyName, ValueType&& value)
 {
 	auto guard = component.acquireWriteLock();
 	TerraEngine::Reflection::Property prop = TerraEngine::Reflection::FindProperty(TerraEngine::Reflection::ResolveType<ComponentType>(), propertyName);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TerraEngine::Reflection::IsValid(prop))
 	{
 		return;
@@ -279,6 +315,7 @@ public:
 	}
 
 	Component(const Component& other)
+		// active is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		: active(other.active)
 	{
 		// The mutex is recreated so cloned components do not share locking
@@ -293,6 +330,7 @@ public:
 
 	Component& operator=(const Component& other)
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (this != &other)
 		{
 			// Assignments also reset the mutex so a fresh component copy does
@@ -310,6 +348,7 @@ public:
 
 	Component& operator=(Component&&) noexcept = default;
 
+	// registerType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	static void registerType()
 	{
 		ensureRegistration();
@@ -342,6 +381,7 @@ protected:
 			factory.template ctor<>();
 			TerraEngine::Reflection::RegisterDataProperty<&Derived::active>(factory, "active");
 
+			// constexpr is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			if constexpr (component_has_reflect_v<Derived>)
 			{
 				Derived::reflect(factory);

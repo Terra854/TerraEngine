@@ -1,3 +1,5 @@
+// ProfilerCapture.cpp — Contains the Profiler Capture file-specific types, helper functions, and module integration code implementation for runtime profiling sessions, timing markers, capture serialization, and scope helpers.
+
 #include "Profiling/ProfilerCapture.h"
 
 #include <algorithm>
@@ -14,6 +16,7 @@ namespace
 {
 constexpr std::uint32_t kProfilerCaptureVersion = 1u;
 
+// ModuleIdToStableName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ModuleIdToStableName(ProfilerModuleId moduleId)
 {
 	switch (moduleId)
@@ -26,12 +29,14 @@ std::string ModuleIdToStableName(ProfilerModuleId moduleId)
 	return "cpu_engine";
 }
 
+// TryModuleIdFromStableName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<ProfilerModuleId> TryModuleIdFromStableName(const std::string& value)
 {
 	if (value == "cpu_engine")
 	{
 		return ProfilerModuleId::CpuEngine;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (value == "task_execution")
 	{
 		return ProfilerModuleId::TaskExecution;
@@ -39,6 +44,7 @@ std::optional<ProfilerModuleId> TryModuleIdFromStableName(const std::string& val
 	return std::nullopt;
 }
 
+// ToLocalTime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::tm ToLocalTime(std::time_t timeValue)
 {
 	std::tm result{};
@@ -50,6 +56,7 @@ std::tm ToLocalTime(std::time_t timeValue)
 	return result;
 }
 
+// SettingsToJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 nlohmann::json SettingsToJson(const ProfilerCaptureSettings& settings)
 {
 	return {
@@ -62,6 +69,7 @@ nlohmann::json SettingsToJson(const ProfilerCaptureSettings& settings)
 	};
 }
 
+// SettingsFromJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ProfilerCaptureSettings SettingsFromJson(const nlohmann::json& json)
 {
 	ProfilerCaptureSettings settings{};
@@ -75,6 +83,7 @@ ProfilerCaptureSettings SettingsFromJson(const nlohmann::json& json)
 }
 }
 
+// ToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const char* ToString(ProfilerSessionState state)
 {
 	switch (state)
@@ -99,6 +108,7 @@ const char* ToString(ProfilerSessionState state)
 	return "Unknown";
 }
 
+// ToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const char* ToString(ProfilerModuleId moduleId)
 {
 	switch (moduleId)
@@ -111,6 +121,7 @@ const char* ToString(ProfilerModuleId moduleId)
 	return "CPU/Engine";
 }
 
+// MakeTimestampForFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string MakeTimestampForFileName()
 {
 	const auto now = std::chrono::system_clock::now();
@@ -121,6 +132,7 @@ std::string MakeTimestampForFileName()
 	return stream.str();
 }
 
+// MakeReadableTimestamp is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string MakeReadableTimestamp()
 {
 	const auto now = std::chrono::system_clock::now();
@@ -131,11 +143,13 @@ std::string MakeReadableTimestamp()
 	return stream.str();
 }
 
+// AnyModuleEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool AnyModuleEnabled(const ProfilerCaptureSettings& settings)
 {
 	return settings.cpuEngineEnabled || settings.taskExecutionEnabled;
 }
 
+// MakeDefaultModuleSummaries is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<ProfilerModuleSummary> MakeDefaultModuleSummaries(const ProfilerCaptureSettings& settings)
 {
 	std::vector<ProfilerModuleSummary> modules;
@@ -150,14 +164,17 @@ std::vector<ProfilerModuleSummary> MakeDefaultModuleSummaries(const ProfilerCapt
 	return modules;
 }
 
+// TrimFrameBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCaptureSettings& settings)
 {
 	const std::size_t maxFrames = std::max<std::size_t>(1u, settings.maxFrames);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (frames.size() > maxFrames)
 	{
 		frames.erase(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(frames.size() - maxFrames));
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (settings.maxDurationSeconds > 0.0 && !frames.empty())
 	{
 		const double newestStart = frames.back().frameStartMs;
@@ -165,6 +182,7 @@ void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCap
 		const auto firstKept = std::find_if(frames.begin(), frames.end(), [cutoff](const ProfilerFrameRecord& frame) {
 			return frame.frameStartMs >= cutoff;
 		});
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (firstKept != frames.begin())
 		{
 			frames.erase(frames.begin(), firstKept);
@@ -172,6 +190,7 @@ void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCap
 	}
 }
 
+// SaveCaptureDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::filesystem::path& path, std::string& outError)
 {
 	try
@@ -190,6 +209,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 		};
 		json["frames"] = nlohmann::json::array();
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ProfilerFrameRecord& frame : document.frames)
 		{
 			nlohmann::json frameJson;
@@ -198,6 +218,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 			frameJson["durationMs"] = frame.durationMs;
 			frameJson["complete"] = frame.complete;
 			frameJson["modules"] = nlohmann::json::array();
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const ProfilerModuleSummary& module : frame.moduleSummaries)
 			{
 				nlohmann::json moduleJson;
@@ -205,6 +226,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 				moduleJson["available"] = module.available;
 				moduleJson["totalMs"] = module.totalMs;
 				moduleJson["metrics"] = nlohmann::json::array();
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (const ProfilerMetric& metric : module.metrics)
 				{
 					moduleJson["metrics"].push_back({{"name", metric.name}, {"value", metric.value}, {"unit", metric.unit}});
@@ -212,6 +234,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 				frameJson["modules"].push_back(std::move(moduleJson));
 			}
 			frameJson["samples"] = nlohmann::json::array();
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const ProfilerSample& sample : frame.samples)
 			{
 				frameJson["samples"].push_back({
@@ -232,6 +255,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 		}
 
 		std::ofstream output(path, std::ios::binary | std::ios::trunc);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!output)
 		{
 			outError = "Failed to open profiler capture for writing.";
@@ -247,11 +271,13 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 	}
 }
 
+// LoadCaptureDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocument& outDocument, std::string& outError)
 {
 	try
 	{
 		std::ifstream input(path, std::ios::binary);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!input)
 		{
 			outError = "Failed to open profiler capture for reading.";
@@ -260,11 +286,13 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 
 		nlohmann::json json;
 		input >> json;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (json.value("format", std::string{}) != "TerraEngineProfilerCapture")
 		{
 			outError = "File is not a TerraEngine profiler capture.";
 			return false;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (json.value("payloadVersion", 0u) != kProfilerCaptureVersion)
 		{
 			outError = "Profiler capture format version is unsupported.";
@@ -283,6 +311,7 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 		document.metadata.settings = SettingsFromJson(metadata.value("settings", nlohmann::json::object()));
 		document.metadata.settings.captureMode = ProfilerCaptureMode::LoadedReadOnly;
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const nlohmann::json& frameJson : json.value("frames", nlohmann::json::array()))
 		{
 			ProfilerFrameRecord frame;
@@ -290,11 +319,13 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 			frame.frameStartMs = frameJson.value("frameStartMs", 0.0);
 			frame.durationMs = frameJson.value("durationMs", 0.0);
 			frame.complete = frameJson.value("complete", true);
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const nlohmann::json& moduleJson : frameJson.value("modules", nlohmann::json::array()))
 			{
 				ProfilerModuleSummary module;
 				const std::string moduleName = moduleJson.value("moduleId", "");
 				const std::optional<ProfilerModuleId> moduleId = TryModuleIdFromStableName(moduleName);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!moduleId.has_value())
 				{
 					outError = "Profiler capture contains an unknown module id: " + moduleName;
@@ -303,6 +334,7 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 				module.moduleId = *moduleId;
 				module.available = moduleJson.value("available", false);
 				module.totalMs = moduleJson.value("totalMs", 0.0);
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (const nlohmann::json& metricJson : moduleJson.value("metrics", nlohmann::json::array()))
 				{
 					module.metrics.push_back({
@@ -313,6 +345,7 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 				}
 				frame.moduleSummaries.push_back(std::move(module));
 			}
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const nlohmann::json& sampleJson : frameJson.value("samples", nlohmann::json::array()))
 			{
 				ProfilerSample sample;
@@ -320,6 +353,7 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 				sample.parentSampleId = sampleJson.value("parentSampleId", 0ull);
 				const std::string moduleName = sampleJson.value("moduleId", "");
 				const std::optional<ProfilerModuleId> moduleId = TryModuleIdFromStableName(moduleName);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!moduleId.has_value())
 				{
 					outError = "Profiler capture contains an unknown sample module id: " + moduleName;
@@ -349,6 +383,7 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 	}
 }
 
+// TryReadCaptureArtifact is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool TryReadCaptureArtifact(const std::filesystem::path& path, ProfilerCaptureArtifact& outArtifact)
 {
 	ProfilerCaptureDocument document;
@@ -356,6 +391,7 @@ bool TryReadCaptureArtifact(const std::filesystem::path& path, ProfilerCaptureAr
 	outArtifact = {};
 	outArtifact.absolutePath = path;
 	outArtifact.fileName = path.filename().string();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!LoadCaptureDocument(path, document, error))
 	{
 		outArtifact.supported = false;

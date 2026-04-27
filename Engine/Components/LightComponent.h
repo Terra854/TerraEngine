@@ -1,3 +1,10 @@
+// LightComponent.h — Component defining light source properties for scene illumination.
+//
+// Supports directional, point, spot, and area lights with configurable intensity,
+// color, temperature, and shadow settings. The component data is mirrored to GPU
+// light payloads each frame and is fully exposed to the reflection system for
+// authoring and serialization.
+
 #pragma once
 
 #include <cstdint>
@@ -19,12 +26,14 @@ enum class LightType : std::uint32_t
 	Area = 3u
 };
 
+// LightUnit names the supported states explicitly so serialization and switches stay readable.
 enum class LightUnit : std::uint32_t
 {
 	Lumens = 0u,
 	Lux = 1u
 };
 
+// LightAppearance names the supported states explicitly so serialization and switches stay readable.
 enum class LightAppearance : std::uint32_t
 {
 	Color = 0u,
@@ -32,6 +41,7 @@ enum class LightAppearance : std::uint32_t
 };
 
 // Scene light component mirrored to GPU light payloads each frame.
+// struct LightComponent groups related state and operations so callers have one documented contract.
 struct LightComponent : public Component<LightComponent>
 {
 	static constexpr std::string_view kComponentName = "LightComponent";
@@ -81,11 +91,13 @@ struct LightComponent : public Component<LightComponent>
 		TerraEngine::Reflection::RegisterDataProperty<&LightComponent::stabilityPreference>(factory, "stabilityPreference");
 	}
 
+	// GetTypeValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t GetTypeValue() const
 	{
 		return static_cast<std::uint32_t>(type);
 	}
 
+	// SetTypeValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetTypeValue(std::uint32_t encodedType)
 	{
 		// Preserve the serialized raw value so unsupported legacy types are not
@@ -93,35 +105,42 @@ struct LightComponent : public Component<LightComponent>
 		type = static_cast<LightType>(encodedType);
 	}
 
+	// GetUnitValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t GetUnitValue() const
 	{
 		return static_cast<std::uint32_t>(unit);
 	}
 
+	// SetUnitValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetUnitValue(std::uint32_t encodedUnit)
 	{
 		unit = static_cast<LightUnit>(encodedUnit);
 	}
 
+	// GetAppearanceValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t GetAppearanceValue() const
 	{
 		return static_cast<std::uint32_t>(appearance);
 	}
 
+	// SetAppearanceValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetAppearanceValue(std::uint32_t encodedAppearance)
 	{
 		appearance = static_cast<LightAppearance>(encodedAppearance);
 	}
 
+	// KelvinToRGB is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	static glm::vec3 KelvinToRGB(float kelvin)
 	{
 		float temp = kelvin / 100.0f;
 		float r, g, b;
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (temp <= 66.0f)
 		{
 			r = 1.0f;
 			g = std::clamp((99.4708025861f * std::log(temp) - 161.1195681661f) / 255.0f, 0.0f, 1.0f);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (temp <= 19.0f)
 			{
 				b = 0.0f;

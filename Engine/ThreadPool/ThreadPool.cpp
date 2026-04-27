@@ -1,3 +1,5 @@
+// ThreadPool.cpp — Contains the Thread Pool queue state, worker coordination, and synchronization helpers implementation for task queue storage, worker thread lifecycle, and synchronization primitives.
+
 #include "ThreadPool.h"
 #include "Core/Logger/Logger.h"
 #include "Profiling/Profiler.h"
@@ -7,6 +9,7 @@ ThreadPool& ThreadPool::instance() {
 	return instance;
 }
 
+// ThreadPool::initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::initialize() {
 	const size_t hardwareThreads = std::thread::hardware_concurrency();
 
@@ -19,11 +22,13 @@ void ThreadPool::initialize() {
 	}
 }
 
+// ThreadPool::shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::shutdown()
 {
 	stop = true;
 
 	condition.notify_all();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::thread& worker : workers) {
 		worker.join();
 	}
@@ -39,11 +44,13 @@ void ThreadPool::shutdown()
 }
 
 // Enqueue a task; handle its dependencies automatically
+// ThreadPool::enqueue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
 	if (task->unresolvedDependencies == -1) {
 		task->unresolvedDependencies = static_cast<int>(task->dependenciesList.size());
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (task->unresolvedDependencies == 0) {
 		{
 			// Lock the queue mutex to ensure exclusive access to the task queue
@@ -62,23 +69,27 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
 		condition.notify_one();  // Notify a worker thread that a task is available
 	}
 	else {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto& dependentTask : task->dependenciesList) {
 			enqueue(dependentTask);
 		}
 	}
 }
 
+// ThreadPool::AllocateVoidTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_ptr<Task<void>> ThreadPool::AllocateVoidTask(std::function<void()> func)
 {
 	Task<void>* ptr = nullptr;
 	{
 		std::lock_guard<std::mutex> lock(poolMutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!voidTaskPool.empty()) {
 			ptr = voidTaskPool.back();
 			voidTaskPool.pop_back();
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ptr) {
 		ptr = new Task<void>(std::move(func));
 	} else {
@@ -91,6 +102,7 @@ std::shared_ptr<Task<void>> ThreadPool::AllocateVoidTask(std::function<void()> f
 	});
 }
 
+// ThreadPool::ReleaseVoidTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::ReleaseVoidTask(Task<void>* task)
 {
 	std::lock_guard<std::mutex> lock(poolMutex);
@@ -98,6 +110,7 @@ void ThreadPool::ReleaseVoidTask(Task<void>* task)
 }
 
 // Notify that a task has completed; decrement unresolvedDependencies of the parent task
+// ThreadPool::completeTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::completeTask(std::shared_ptr<ITask> completedTask) {
 	if (auto parent = completedTask->getParentTask().lock()) {
 		// Atomically decrements the unresolvedDependencies and returns the previous value.
@@ -126,6 +139,7 @@ void ThreadPool::workerThread(int threadNum)
 			std::unique_lock<std::mutex> lock(this->queue_mutex);
 			this->condition.wait(lock,
 				[this] { return this->stop || !this->tasks.empty(); });
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (this->stop && this->tasks.empty()) {
 				// Record that the worker is exiting after processing its last job.
 				TERRAENGINE_LOG(LogLevel::Info, "Worker thread no. " << threadNum << " shutting down.");

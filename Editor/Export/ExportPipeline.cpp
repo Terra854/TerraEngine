@@ -1,4 +1,6 @@
-// ExportPipeline.cpp — Export pipeline orchestrator implementation.
+// ExportPipeline.cpp — Export build process implementation
+//
+// Implements the detailed steps of the export pipeline, including project manifest generation, script binding rewrites for NativeAOT, and output directory staging. It manages the execution of external tools like the dotnet CLI and handles progress reporting throughout the build process.
 
 #include "ExportPipeline.h"
 
@@ -28,6 +30,7 @@ static void EmitProgress(ExportProgressCallback& cb, ExportPhase phase, float pr
 	cb(p);
 }
 
+// ResolveOutputDirectory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::filesystem::path ResolveOutputDirectory(const BuildProfile& profile, const std::filesystem::path& projectRoot) {
 	if (!profile.outputDirectory.empty()) {
 		return profile.outputDirectory;
@@ -36,6 +39,7 @@ static std::filesystem::path ResolveOutputDirectory(const BuildProfile& profile,
 	return projectRoot / "Builds" / profile.name;
 }
 
+// ResolveProjectExportName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::string ResolveProjectExportName(const std::filesystem::path& projectRoot, const BuildProfile& profile) {
 	// Export artifacts are named after the project directory so the launcher can
 	// deterministically resolve "<ProjectName>.tepak" back to the matching
@@ -48,29 +52,35 @@ static std::string ResolveProjectExportName(const std::filesystem::path& project
 	return projectName;
 }
 
+// ResolveLauncherFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::string ResolveLauncherFileName(const std::string& projectName, ExportPlatform platform) {
 	return platform == ExportPlatform::Windows ? projectName + ".exe" : projectName;
 }
 
+// ResolveArchiveFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::string ResolveArchiveFileName(const std::string& projectName) {
 	return projectName + ".tepak";
 }
 
+// RemoveIfExists is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void RemoveIfExists(const std::filesystem::path& path) {
 	std::error_code errorCode;
 	std::filesystem::remove(path, errorCode);
 }
 
+// RemoveDirectoryIfExists is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void RemoveDirectoryIfExists(const std::filesystem::path& path) {
 	std::error_code errorCode;
 	std::filesystem::remove_all(path, errorCode);
 }
 
+// RemoveDebugSymbolFiles is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void RemoveDebugSymbolFiles(const std::filesystem::path& rootDirectory) {
 	if (!std::filesystem::exists(rootDirectory)) {
 		return;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& entry : std::filesystem::recursive_directory_iterator(rootDirectory)) {
 		if (!entry.is_regular_file()) {
 			continue;
@@ -85,11 +95,13 @@ static void RemoveDebugSymbolFiles(const std::filesystem::path& rootDirectory) {
 	}
 }
 
+// struct ProjectManifestMetadata groups related state and operations so callers have one documented contract.
 struct ProjectManifestMetadata {
 	std::string name = "TerraEngine";
 	std::string version = "1.0.0";
 };
 
+// LoadProjectManifestMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem::path& projectRoot) {
 	ProjectManifestMetadata metadata;
 	if (!projectRoot.filename().string().empty()) {
@@ -97,17 +109,20 @@ static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem
 	}
 
 	const std::filesystem::path manifestPath = projectRoot / "game.json";
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(manifestPath)) {
 		return metadata;
 	}
 
 	try {
 		std::ifstream input(manifestPath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!input) {
 			return metadata;
 		}
 
 		const nlohmann::json manifest = nlohmann::json::parse(input);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto nameIt = manifest.find("name"); nameIt != manifest.end() && nameIt->is_string()) {
 			const std::string manifestName = nameIt->get<std::string>();
 			if (!manifestName.empty()) {
@@ -115,6 +130,7 @@ static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto versionIt = manifest.find("version"); versionIt != manifest.end() && versionIt->is_string()) {
 			const std::string manifestVersion = versionIt->get<std::string>();
 			if (!manifestVersion.empty()) {
@@ -130,10 +146,12 @@ static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem
 	return metadata;
 }
 
+// ComputeExportScriptId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static uint64_t ComputeExportScriptId(const std::string& className) {
 	const uint64_t fnvOffsetBasis = 14695981039346656037ULL;
 	const uint64_t fnvPrime = 1099511628211ULL;
 	uint64_t hash = fnvOffsetBasis;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (unsigned char value : className) {
 		hash ^= static_cast<uint64_t>(value);
 		hash *= fnvPrime;
@@ -141,26 +159,32 @@ static uint64_t ComputeExportScriptId(const std::string& className) {
 	return hash;
 }
 
+// RewriteBindingPayloads is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static bool RewriteBindingPayloads(nlohmann::json& node, std::unordered_map<uint64_t, std::string>& observedScriptIds, std::string& outError) {
 	if (node.is_object()) {
 		if (node.contains("components") && node["components"].is_object()) {
 			nlohmann::json& components = node["components"];
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (components.contains("Script") && components["Script"].is_object()) {
 				nlohmann::json& scriptComponent = components["Script"];
 				if (scriptComponent.contains("BindingsJson") && scriptComponent["BindingsJson"].is_string()) {
 					nlohmann::json bindings = nlohmann::json::parse(scriptComponent["BindingsJson"].get<std::string>(), nullptr, false);
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (bindings.is_discarded() || !bindings.is_array()) {
 						outError = "Failed to parse Script.BindingsJson during export staging.";
 						return false;
 					}
 
+					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 					for (nlohmann::json& binding : bindings) {
 						if (!binding.is_object()) {
 							continue;
 						}
 
 						const std::string className = binding.value("className", std::string{});
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (className.empty()) {
+							// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 							if (binding.contains("scriptId") && binding["scriptId"].is_number_unsigned()) {
 								continue;
 							}
@@ -170,6 +194,7 @@ static bool RewriteBindingPayloads(nlohmann::json& node, std::unordered_map<uint
 						}
 
 						const uint64_t scriptId = ComputeExportScriptId(className);
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (auto existing = observedScriptIds.find(scriptId); existing != observedScriptIds.end() && existing->second != className) {
 							outError = "NativeAOT export failed because script hash collision " + std::to_string(scriptId) + " maps both '" + existing->second + "' and '" + className + "'.";
 							return false;
@@ -185,14 +210,18 @@ static bool RewriteBindingPayloads(nlohmann::json& node, std::unordered_map<uint
 			}
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto& [_, child] : node.items()) {
 			if (!RewriteBindingPayloads(child, observedScriptIds, outError)) {
 				return false;
 			}
 		}
 	}
+	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (node.is_array()) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (nlohmann::json& child : node) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!RewriteBindingPayloads(child, observedScriptIds, outError)) {
 				return false;
 			}
@@ -202,43 +231,51 @@ static bool RewriteBindingPayloads(nlohmann::json& node, std::unordered_map<uint
 	return true;
 }
 
+// RewriteStagedScriptBindings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static bool RewriteStagedScriptBindings(const std::filesystem::path& stagingDir, std::string& outError) {
 	std::unordered_map<uint64_t, std::string> observedScriptIds;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& entry : std::filesystem::recursive_directory_iterator(stagingDir)) {
 		if (!entry.is_regular_file()) {
 			continue;
 		}
 
 		const std::filesystem::path extension = entry.path().extension();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (extension != ".tescene" && extension != ".teprefab") {
 			continue;
 		}
 
 		std::ifstream input(entry.path());
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!input) {
 			outError = "Failed to open staged asset for script rewrite: " + entry.path().string();
 			return false;
 		}
 
 		nlohmann::json assetJson = nlohmann::json::parse(input, nullptr, false);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (assetJson.is_discarded()) {
 			outError = "Failed to parse staged asset JSON: " + entry.path().string();
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!RewriteBindingPayloads(assetJson, observedScriptIds, outError)) {
 			outError += " File: " + entry.path().string();
 			return false;
 		}
 
 		std::ofstream output(entry.path(), std::ios::trunc);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!output) {
 			outError = "Failed to write staged asset after script rewrite: " + entry.path().string();
 			return false;
 		}
 
 		output << assetJson.dump(4);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!output.good()) {
 			outError = "Failed to flush staged asset after script rewrite: " + entry.path().string();
 			return false;
@@ -266,6 +303,7 @@ ExportResult ExportPipeline::Execute(
 
 	try {
 		// Phase 1: Validation
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!RunValidation(profile, projectRoot, result, progressCallback)) {
 			result.totalElapsedSeconds = std::chrono::duration<double>(
 				std::chrono::steady_clock::now() - startTime).count();
@@ -275,6 +313,7 @@ ExportResult ExportPipeline::Execute(
 		}
 
 		// Phase 2: Managed compilation
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (profile.enableManagedCompilation) {
 			if (!RunManagedCompilation(profile, projectRoot, result, progressCallback)) {
 				result.totalElapsedSeconds = std::chrono::duration<double>(
@@ -286,6 +325,7 @@ ExportResult ExportPipeline::Execute(
 		}
 
 		// Phase 3: Asset staging
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!RunAssetStaging(profile, projectRoot, stagingDir, result, progressCallback)) {
 			std::filesystem::remove_all(stagingDir);
 			result.totalElapsedSeconds = std::chrono::duration<double>(
@@ -296,6 +336,7 @@ ExportResult ExportPipeline::Execute(
 		}
 
 		// Phase 4: Asset packaging
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!RunAssetPackaging(profile, stagingDir, result, progressCallback)) {
 			std::filesystem::remove_all(stagingDir);
 			result.totalElapsedSeconds = std::chrono::duration<double>(
@@ -309,6 +350,7 @@ ExportResult ExportPipeline::Execute(
 		std::filesystem::remove_all(stagingDir);
 
 		// Phase 5: Output staging
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!RunOutputStaging(profile, projectRoot, result, progressCallback)) {
 			result.totalElapsedSeconds = std::chrono::duration<double>(
 				std::chrono::steady_clock::now() - startTime).count();
@@ -343,6 +385,7 @@ bool ExportPipeline::RunValidation(const BuildProfile& profile, const std::files
 
 	result.validationResult = m_Validator.ValidateAll(profile, projectRoot);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!result.validationResult.passed) {
 		result.errorMessage = "Pre-export validation failed with " +
 			std::to_string(result.validationResult.errorCount) + " error(s).";
@@ -402,6 +445,7 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 	std::filesystem::path obsoleteExportDir = projectRoot / "Project" / "Internal" / "Export";
 	if (std::filesystem::exists(obsoleteExportDir)) {
 		try {
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(obsoleteExportDir)) {
 				std::filesystem::permissions(entry, std::filesystem::perms::all);
 			}
@@ -411,6 +455,7 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 			return false;
 		}
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(obsoleteExportDir)) {
 		result.errorMessage = "CRITICAL: Obsolete 'Project/Internal/Export' folder still exists. Please manually delete it to prevent C# compiler conflicts.";
 		return false;
@@ -432,12 +477,15 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 		<< " -p:DefineConstants=TERRAENGINE_EXPORT"
 		<< " -o \"" << managedOutputDir.string() << "\"";
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (profile.stripNativeAotOutput) {
 		cmd << " -p:StripSymbols=true";
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!profile.includeDebugSymbols) {
 		cmd << " -p:DebugType=none";
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!profile.additionalPublishArgs.empty()) {
 		cmd << " " << profile.additionalPublishArgs;
 	}
@@ -452,6 +500,7 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 		return false;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!profile.includeDebugSymbols) {
 		RemoveDebugSymbolFiles(managedOutputDir);
 	}
@@ -471,6 +520,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		"Staging assets for packaging...");
 
 	try {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(stagingDir)) {
 			std::filesystem::remove_all(stagingDir);
 		}
@@ -497,6 +547,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 				if (!entry.is_regular_file()) continue;
 				
 				// Exclude .meta files from the exported build.
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (entry.path().extension() == ".meta") continue;
 
 				auto relative = std::filesystem::relative(entry.path(), rawAssets);
@@ -534,6 +585,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		if (std::filesystem::exists(rawAssets)) {
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(rawAssets)) {
 				if (!entry.is_regular_file()) continue;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (entry.path().extension() != ".meta") continue;
 
 				try {
@@ -544,20 +596,24 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					std::string importer = meta.value("importerName", "");
 					std::string compiledPath = meta.value("compiledPath", "");
 
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (guid.empty()) continue;
 
 					AssetType type;
 					bool supported = true;
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (importer == "MeshImporter") type = AssetType::Mesh;
 					else if (importer == "TextureImporter") type = AssetType::Texture;
 					else if (importer == "MaterialImporter") type = AssetType::Material;
 					else supported = false;
 
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (supported) {
 						StagedAsset asset;
 						asset.guid = guid;
 						asset.type = type;
 
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (!compiledPath.empty()) {
 							// The compiled path is relative to the Build/Assets/ directory,
 							// which matches our stagingDir layout.
@@ -602,6 +658,7 @@ bool ExportPipeline::RunAssetPackaging(const BuildProfile& profile,
 	EmitProgress(progressCallback, ExportPhase::Packaging, 0.50f,
 		"Packaging assets into TEPAK archive...");
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(stagingDir)) {
 		result.errorMessage = "Asset staging directory not found: " + stagingDir.string();
 		return false;
@@ -621,6 +678,7 @@ bool ExportPipeline::RunAssetPackaging(const BuildProfile& profile,
 	if (progressCallback) {
 		packageCallback = [&progressCallback](const PackageProgress& p) {
 			float fraction = 0.0f;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (p.totalEntries > 0) {
 				fraction = static_cast<float>(p.completedEntries) /
 					static_cast<float>(p.totalEntries);
@@ -634,6 +692,7 @@ bool ExportPipeline::RunAssetPackaging(const BuildProfile& profile,
 
 	result.packageResult = m_Packager.Package(stagingDir, tepakPath, profile, packageCallback);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!result.packageResult.success) {
 		result.errorMessage = result.packageResult.errorMessage;
 		return false;
@@ -668,6 +727,7 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 	if (archiveFileName != "content.tepak") {
 		RemoveIfExists(outputDir / "content.tepak");
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (legacyLauncherFileName != launcherFileName) {
 		RemoveIfExists(outputDir / legacyLauncherFileName);
 	}
@@ -680,6 +740,7 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 		std::filesystem::path engineBuildDir = editorDir.parent_path();
 		
 		std::filesystem::path launcherSrc = engineBuildDir / "Launcher" / "TerraEngine-Launcher.exe";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(launcherSrc)) {
 			std::filesystem::copy_file(launcherSrc, outputDir / launcherFileName, std::filesystem::copy_options::overwrite_existing);
 		}
@@ -688,9 +749,11 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 		std::vector<std::string> engineDlls = { "TerraEngine.dll", "glfw3.dll" };
 		for (const auto& dll : engineDlls) {
 			std::filesystem::path dllSrc = engineBuildDir / "Launcher" / dll;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!std::filesystem::exists(dllSrc)) {
 				dllSrc = engineBuildDir / "Engine" / dll;
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::filesystem::exists(dllSrc)) {
 				try {
 					std::filesystem::copy_file(dllSrc, outputDir / dll, std::filesystem::copy_options::overwrite_existing);
@@ -719,6 +782,7 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 			RemoveDirectoryIfExists(shadersDest);
 			std::filesystem::create_directories(shadersDest);
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(shadersSrc)) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!entry.is_regular_file()) continue;
 				auto relative = std::filesystem::relative(entry.path(), shadersSrc);
 				if (!relative.empty() && relative.begin()->string() == "Editor") {
@@ -741,7 +805,9 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 			std::filesystem::path fontsDest = outputDir / "Fonts";
 			RemoveDirectoryIfExists(fontsDest);
 			std::filesystem::create_directories(fontsDest);
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(fontsSrc)) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!entry.is_regular_file()) continue;
 				auto relative = std::filesystem::relative(entry.path(), fontsSrc);
 				auto dest = fontsDest / relative;
@@ -773,9 +839,11 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		const ProjectManifestMetadata projectMetadata = LoadProjectManifestMetadata(projectRoot);
 		manifest["name"] = projectMetadata.name;
 		manifest["version"] = projectMetadata.version;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!profile.startupScene.empty()) {
 			manifest["startupScene"] = profile.startupScene;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!profile.includedScenes.empty()) {
 			manifest["scenes"] = profile.includedScenes;
 		}
@@ -793,6 +861,7 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 
 		const auto manifestPath = targetDirectory / "game.json";
 		std::ofstream out(manifestPath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!out) {
 			return false;
 		}

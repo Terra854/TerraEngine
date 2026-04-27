@@ -1,3 +1,7 @@
+// ShaderCompiler.h — Shader compilation pipeline interface
+//
+// Provides the interface for compiling HLSL source files into the engine's internal TSPF shader format. It defines the main entry point for the offline shader compiler tool.
+
 #pragma once
 
 #include <filesystem>

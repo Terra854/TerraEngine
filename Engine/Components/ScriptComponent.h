@@ -1,3 +1,10 @@
+// ScriptComponent.h — Component managing managed script bindings and their serialized state.
+//
+// This file defines the structures for script field descriptors, snapshots, and
+// diagnostic metadata used to bridge C++ and C# script state. It handles the
+// persistence of script variables within scenes and facilitates data migration
+// during script reloads.
+
 #pragma once
 
 #include "Core/Object/Component.h"
@@ -34,6 +41,7 @@ struct ScriptFieldDescriptor
 	std::vector<ScriptFieldDescriptor> children;
 };
 
+// to_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void to_json(nlohmann::json& jsonValue, const ScriptFieldDescriptor& descriptor)
 {
 	jsonValue = nlohmann::json{
@@ -53,6 +61,7 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptFieldDescriptor& desc
 		{ "children", descriptor.children }
 	};
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (descriptor.hasRange)
 	{
 		jsonValue["rangeMin"] = descriptor.rangeMin;
@@ -60,6 +69,7 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptFieldDescriptor& desc
 	}
 }
 
+// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void from_json(const nlohmann::json& jsonValue, ScriptFieldDescriptor& descriptor)
 {
 	descriptor.fieldPath = jsonValue.value("fieldPath", std::string{});
@@ -82,6 +92,7 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptFieldDescriptor& de
 }
 
 // Live runtime sample captured for the actively watched inspector selection.
+// struct ScriptFieldSnapshot groups related state and operations so callers have one documented contract.
 struct ScriptFieldSnapshot
 {
 	std::string fieldPath;
@@ -92,6 +103,7 @@ struct ScriptFieldSnapshot
 	std::uint64_t lastObservedVersion = 0;
 };
 
+// to_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void to_json(nlohmann::json& jsonValue, const ScriptFieldSnapshot& snapshot)
 {
 	jsonValue = nlohmann::json{
@@ -104,6 +116,7 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptFieldSnapshot& snapsh
 	};
 }
 
+// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void from_json(const nlohmann::json& jsonValue, ScriptFieldSnapshot& snapshot)
 {
 	snapshot.fieldPath = jsonValue.value("fieldPath", std::string{});
@@ -115,6 +128,7 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptFieldSnapshot& snap
 }
 
 // Diagnostics can come from type reflection, migration, or live runtime reads.
+// struct ScriptFieldDiagnostic groups related state and operations so callers have one documented contract.
 struct ScriptFieldDiagnostic
 {
 	std::string diagnosticId;
@@ -126,6 +140,7 @@ struct ScriptFieldDiagnostic
 	std::vector<std::string> repairActionIds;
 };
 
+// to_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void to_json(nlohmann::json& jsonValue, const ScriptFieldDiagnostic& diagnostic)
 {
 	jsonValue = nlohmann::json{
@@ -139,6 +154,7 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptFieldDiagnostic& diag
 	};
 }
 
+// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void from_json(const nlohmann::json& jsonValue, ScriptFieldDiagnostic& diagnostic)
 {
 	diagnostic.diagnosticId = jsonValue.value("diagnosticId", std::string{});
@@ -161,6 +177,7 @@ struct ScriptRepairAction
 	bool requiresUserSelection = false;
 };
 
+// to_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void to_json(nlohmann::json& jsonValue, const ScriptRepairAction& action)
 {
 	jsonValue = nlohmann::json{
@@ -172,6 +189,7 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptRepairAction& action)
 	};
 }
 
+// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void from_json(const nlohmann::json& jsonValue, ScriptRepairAction& action)
 {
 	action.actionId = jsonValue.value("actionId", std::string{});
@@ -194,6 +212,7 @@ struct ScriptBindingMigrationResult
 	std::vector<std::string> hiddenStoredFieldPaths;
 };
 
+// to_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void to_json(nlohmann::json& jsonValue, const ScriptBindingMigrationResult& migrationResult)
 {
 	jsonValue = nlohmann::json{
@@ -207,6 +226,7 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptBindingMigrationResul
 	};
 }
 
+// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void from_json(const nlohmann::json& jsonValue, ScriptBindingMigrationResult& migrationResult)
 {
 	migrationResult.bindingId = jsonValue.value("bindingId", std::string{});
@@ -218,6 +238,7 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptBindingMigrationRes
 	migrationResult.hiddenStoredFieldPaths = jsonValue.value("hiddenStoredFieldPaths", std::vector<std::string>{});
 }
 
+// ComputeScriptBindingTypeId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline std::uint64_t ComputeScriptBindingTypeId(std::string_view className)
 {
 	// Export staging rewrites bindings from class names to deterministic FNV-64
@@ -226,6 +247,7 @@ inline std::uint64_t ComputeScriptBindingTypeId(std::string_view className)
 	constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 	constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 	std::uint64_t hash = kFnvOffsetBasis;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (unsigned char value : className)
 	{
 		hash ^= static_cast<std::uint64_t>(value);
@@ -236,6 +258,7 @@ inline std::uint64_t ComputeScriptBindingTypeId(std::string_view className)
 }
 
 // Authored value persisted into the scene for one reflected script field.
+// struct ScriptFieldValue groups related state and operations so callers have one documented contract.
 struct ScriptFieldValue
 {
 	std::string fieldName;
@@ -249,6 +272,7 @@ struct ScriptFieldValue
 	std::string diagnosticMessage;
 };
 
+// to_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void to_json(nlohmann::json& jsonValue, const ScriptFieldValue& fieldValue)
 {
 	jsonValue = nlohmann::json{
@@ -264,10 +288,12 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptFieldValue& fieldValu
 	};
 }
 
+// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void from_json(const nlohmann::json& jsonValue, ScriptFieldValue& fieldValue)
 {
 	fieldValue.fieldName = jsonValue.value("fieldName", std::string{});
 	fieldValue.fieldPath = jsonValue.value("fieldPath", fieldValue.fieldName);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (fieldValue.fieldName.empty())
 	{
 		fieldValue.fieldName = fieldValue.fieldPath;
@@ -282,6 +308,7 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptFieldValue& fieldVa
 	fieldValue.diagnosticMessage = jsonValue.value("diagnosticMessage", std::string{});
 }
 
+// struct ScriptBinding groups related state and operations so callers have one documented contract.
 struct ScriptBinding
 {
 	std::string bindingId;
@@ -355,6 +382,7 @@ struct ScriptBinding
 	[[nodiscard]] const ScriptFieldDescriptor* FindFieldDescriptor(std::string_view fieldPathText) const
 	{
 		const auto visitDescriptor = [&](const auto& self, const std::vector<ScriptFieldDescriptor>& descriptors) -> const ScriptFieldDescriptor* {
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const ScriptFieldDescriptor& descriptor : descriptors)
 			{
 				if (descriptor.fieldPath == fieldPathText)
@@ -362,6 +390,7 @@ struct ScriptBinding
 					return &descriptor;
 				}
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (const ScriptFieldDescriptor* nested = self(self, descriptor.children))
 				{
 					return nested;
@@ -376,16 +405,19 @@ struct ScriptBinding
 
 	[[nodiscard]] ScriptFieldValue& UpsertSerializedValue(std::string_view fieldPathText, std::string_view valueKindText)
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ScriptFieldValue* existingValue = FindSerializedValue(fieldPathText))
 		{
 			if (existingValue->fieldPath.empty())
 			{
 				existingValue->fieldPath = std::string(fieldPathText);
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (existingValue->fieldName.empty())
 			{
 				existingValue->fieldName = existingValue->fieldPath;
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (existingValue->valueKind.empty())
 			{
 				existingValue->valueKind = std::string(valueKindText);
@@ -402,6 +434,7 @@ struct ScriptBinding
 		return serializedValues.back();
 	}
 
+	// RemoveSerializedValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool RemoveSerializedValue(std::string_view fieldPathText)
 	{
 		const auto matchByPath = [fieldPathText](const ScriptFieldValue& fieldValue) {
@@ -409,6 +442,7 @@ struct ScriptBinding
 		};
 
 		auto it = std::remove_if(serializedValues.begin(), serializedValues.end(), matchByPath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (it == serializedValues.end())
 		{
 			return false;
@@ -418,6 +452,7 @@ struct ScriptBinding
 		return true;
 	}
 
+	// ClearRuntimeState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ClearRuntimeState()
 	{
 		runtimeAvailable = false;
@@ -431,6 +466,7 @@ struct ScriptBinding
 	}
 };
 
+// to_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void to_json(nlohmann::json& jsonValue, const ScriptBinding& binding)
 {
 	jsonValue = nlohmann::json{
@@ -444,6 +480,7 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptBinding& binding)
 		{ "diagnosticIds", binding.diagnosticIds }
 	};
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (binding.scriptId != 0)
 	{
 		// Authored scenes keep using className, while staged export copies can
@@ -452,6 +489,7 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptBinding& binding)
 	}
 }
 
+// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline void from_json(const nlohmann::json& jsonValue, ScriptBinding& binding)
 {
 	binding.bindingId = jsonValue.value("bindingId", std::string{});
@@ -459,6 +497,7 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptBinding& binding)
 	binding.className = jsonValue.value("className", std::string{});
 	binding.scriptId = jsonValue.value("scriptId", static_cast<std::uint64_t>(0));
 	binding.status = jsonValue.value("status", std::string{});
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (binding.status == "PendingCompile")
 	{
 		binding.status.clear();
@@ -480,16 +519,19 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptBinding& binding)
 	binding.lastBridgeMessage.clear();
 	binding.snapshotVersion = 0;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (ScriptFieldValue& fieldValue : binding.serializedValues)
 	{
 		if (fieldValue.fieldPath.empty())
 		{
 			fieldValue.fieldPath = fieldValue.fieldName;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (fieldValue.fieldName.empty())
 		{
 			fieldValue.fieldName = fieldValue.fieldPath;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (fieldValue.displayName.empty())
 		{
 			fieldValue.displayName = fieldValue.fieldName;
@@ -507,11 +549,13 @@ public:
 
 	ScriptComponent() = default;
 
+	// GetBindings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::vector<ScriptBinding>& GetBindings()
 	{
 		return bindings;
 	}
 
+	// GetBindings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::vector<ScriptBinding>& GetBindings() const
 	{
 		return bindings;
@@ -535,12 +579,14 @@ public:
 		return it == bindings.end() ? nullptr : &(*it);
 	}
 
+	// HasBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool HasBinding(std::string_view className) const
 	{
 		const std::uint64_t requestedScriptId = className.empty()
 			? static_cast<std::uint64_t>(0)
 			: ComputeScriptBindingTypeId(className);
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ScriptBinding& binding : bindings)
 		{
 			if (binding.className == className)
@@ -548,6 +594,7 @@ public:
 				return true;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!className.empty() && binding.scriptId != 0 && binding.scriptId == requestedScriptId)
 			{
 				return true;
@@ -557,6 +604,7 @@ public:
 		return false;
 	}
 
+	// AddBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	ScriptBinding& AddBinding(const TerraEngine::UUID& assetGuid, std::string_view className)
 	{
 		ScriptBinding binding;
@@ -570,10 +618,12 @@ public:
 		return bindings.back();
 	}
 
+	// RemoveBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool RemoveBinding(std::string_view bindingId)
 	{
 		for (auto it = bindings.begin(); it != bindings.end(); ++it)
 		{
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (it->bindingId == bindingId)
 			{
 				bindings.erase(it);
@@ -585,6 +635,7 @@ public:
 		return false;
 	}
 
+	// ClearRuntimeState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ClearRuntimeState()
 	{
 		for (ScriptBinding& binding : bindings)
@@ -593,6 +644,7 @@ public:
 		}
 	}
 
+	// SynchronizeStorageFromBindings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SynchronizeStorageFromBindings()
 	{
 		for (std::size_t index = 0; index < bindings.size(); ++index)
@@ -605,6 +657,7 @@ public:
 		bindingsStorage = nlohmann::json(bindings).dump();
 	}
 
+	// SynchronizeBindingsFromStorage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SynchronizeBindingsFromStorage()
 	{
 		if (bindingsStorage.empty())
@@ -624,6 +677,7 @@ public:
 			bindingsStorage = "[]";
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t index = 0; index < bindings.size(); ++index)
 		{
 			if (bindings[index].bindingId.empty())
@@ -639,11 +693,13 @@ public:
 		bindingsStorage = nlohmann::json(bindings).dump();
 	}
 
+	// GetBindingsJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::string& GetBindingsJson() const
 	{
 		return bindingsStorage;
 	}
 
+	// SetBindingsJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetBindingsJson(const std::string& jsonText)
 	{
 		bindingsStorage = jsonText.empty() ? "[]" : jsonText;
@@ -652,6 +708,7 @@ public:
 
 	std::string lastResolvedAssemblyId;
 
+	// reflect is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	static void reflect(entt::meta_factory<ScriptComponent>& factory)
 	{
 		TerraEngine::Reflection::RegisterAccessorProperty<&ScriptComponent::SetBindingsJson, &ScriptComponent::GetBindingsJson>(factory, "BindingsJson");

@@ -1,3 +1,7 @@
+// PackValidator.h — TEPAK archive validation interface
+//
+// Provides the interface for performing structural and integrity checks on TEPAK archives. It supports deep readback validation, ensuring that all extents and entries can be correctly reconstructed and match their recorded hashes.
+
 #pragma once
 
 #include "TEPAK/PackTypes.h"

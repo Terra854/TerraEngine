@@ -1,3 +1,10 @@
+// UIElement.h — Base class for all nodes in the UI visual tree.
+//
+// This file defines the core UIElement structure which maintains the hierarchy,
+// layout properties, and styling state for UI components. It serves as the
+// fundamental building block for the engine's retained-mode UI system,
+// coordinating between the parser and the layout engine.
+
 #pragma once
 
 #include "UIStyle.h"

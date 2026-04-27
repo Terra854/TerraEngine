@@ -1,3 +1,10 @@
+// MeshRenderComponent.h — Component linking mesh and material assets for rendering.
+//
+// This component maintains references to authored mesh and material resources by
+// their UUIDs and provides spatial identity for culling operations. It serves as
+// the primary bridge between scene objects and the renderer's geometry processing
+// pipeline.
+
 #pragma once
 
 #include <string_view>

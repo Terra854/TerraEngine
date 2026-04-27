@@ -1,3 +1,5 @@
+// ArchiveWorkflow.h — Contains declarations for the Archive Workflow file-specific types, helper functions, and module integration code used by runtime TEPAK metadata parsing, extent reads, and mounted archive lookup flow.
+
 #pragma once
 
 #include "TEPAK/PackTypes.h"

@@ -1,3 +1,7 @@
+// CodecProvider.h — TEPAK compression codec provider interface
+//
+// Defines the interface for compression selection, dictionary preparation, and content hashing within the TEPAK system. It provides the abstractions needed to share zstd contexts and digested dictionary tables across multiple worker threads.
+
 #pragma once
 
 #include "TEPAK/PackTypes.h"
@@ -30,6 +34,7 @@ public:
 
 private:
 	friend class CodecProvider;
+	// struct Impl groups related state and operations so callers have one documented contract.
 	struct Impl;
 	std::shared_ptr<const Impl> m_impl;
 };
@@ -50,6 +55,7 @@ public:
 
 private:
 	friend class CodecProvider;
+	// struct Impl groups related state and operations so callers have one documented contract.
 	struct Impl;
 	std::shared_ptr<const Impl> m_impl;
 };
@@ -96,6 +102,7 @@ public:
 		const PreparedDecompressionDictionary* preparedDictionary = nullptr) const;
 
 private:
+	// struct Impl groups related state and operations so callers have one documented contract.
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
 };

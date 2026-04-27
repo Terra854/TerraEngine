@@ -1,3 +1,9 @@
+// ResourceManagerShaderCollection.cpp — Shader Collection Management Implementation
+//
+// Implements the management of shader collection resources, which group related shader stages.
+// It handles the loading and parsing of shader collection configuration files and manages the associated shader stage assets.
+// This module provides the high-level shader definitions used by the material system and the graphics pipeline.
+
 #include "Resource/ResourceManager.h"
 
 #include <sstream>
@@ -11,6 +17,7 @@
 
 namespace
 {
+	// struct StageRequest groups related state and operations so callers have one documented contract.
 	struct StageRequest
 	{
 		ShaderStage stage = ShaderStage::Vertex;
@@ -23,6 +30,7 @@ namespace
 	std::string BuildShaderCollectionKey(const std::vector<StageRequest>& stages)
 	{
 		std::ostringstream combined;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const StageRequest& request : stages)
 		{
 			combined << static_cast<std::uint32_t>(request.stage) << ":" << request.key << ";";
@@ -41,6 +49,7 @@ namespace
 			return true;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vertexShader.outputs.empty())
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "Fragment shader requests inputs but vertex shader exposes no outputs.");
@@ -48,14 +57,17 @@ namespace
 		}
 
 		std::unordered_map<std::uint32_t, const StageIOAttribute*> outputsByLocation;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const StageIOAttribute& output : vertexShader.outputs)
 		{
 			outputsByLocation.emplace(output.location, &output);
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const StageIOAttribute& input : fragmentShader.inputs)
 		{
 			const auto found = outputsByLocation.find(input.location);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (found == outputsByLocation.end())
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "Fragment input at location " << input.location << " is not provided by the vertex shader.");
@@ -63,6 +75,7 @@ namespace
 			}
 
 			const StageIOAttribute* source = found->second;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (input.componentType != source->componentType || input.componentCount != source->componentCount)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "Fragment input at location " << input.location << " does not match vertex output type/width.");
@@ -79,16 +92,19 @@ namespace
 	std::unique_ptr<ShaderCollection> LoadShaderCollectionStages(ResourceManager& manager, const std::vector<StageRequest>& stages)
 	{
 		auto collection = std::make_unique<ShaderCollection>();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const StageRequest& request : stages)
 		{
 			const TerraEngine::UUID shaderId = manager.LoadShader(request.path);
 			Shader* shader = manager.GetShader(shaderId);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (shader == nullptr)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "Failed to load shader stage from " << request.path);
 				return nullptr;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (shader->reflection.source.stage != static_cast<std::uint32_t>(request.stage))
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "Shader " << request.path << " reports stage " << shader->reflection.source.stage << " but stage " << static_cast<std::uint32_t>(request.stage) << " was requested.");
@@ -106,16 +122,19 @@ namespace
 		Shader* fragmentShader = nullptr;
 		for (const ShaderCollection::StageBinding& binding : collection->stages)
 		{
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (binding.stage == ShaderStage::Vertex)
 			{
 				vertexShader = manager.GetShader(binding.shaderId);
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (binding.stage == ShaderStage::Fragment)
 			{
 				fragmentShader = manager.GetShader(binding.shaderId);
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vertexShader && fragmentShader && !ValidateInterfaceCompatibility(*vertexShader, *fragmentShader))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "Vertex and fragment stages in shader collection are incompatible; collection will not be created.");
@@ -126,10 +145,12 @@ namespace
 	}
 }
 
+// ResourceManager::LoadShaderCollection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID ResourceManager::LoadShaderCollection(const std::vector<ShaderStagePath>& stagePaths)
 {
 	std::vector<StageRequest> stages;
 	stages.reserve(stagePaths.size());
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ShaderStagePath& stagePath : stagePaths)
 	{
 		StageRequest request{};
@@ -141,6 +162,7 @@ TerraEngine::UUID ResourceManager::LoadShaderCollection(const std::vector<Shader
 
 	const std::string key = BuildShaderCollectionKey(stages);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto cached = ResolveCached(key, shaderCollectionCache))
 	{
 		return *cached;
@@ -153,10 +175,12 @@ TerraEngine::UUID ResourceManager::LoadShaderCollection(const std::vector<Shader
 	return FinalizeLoad(key, shaderCollectionCache, id, std::move(collection));
 }
 
+// ResourceManager::LoadShaderCollectionAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderCollectionAsync(const std::vector<ShaderStagePath>& stagePaths)
 {
 	std::vector<StageRequest> stages;
 	stages.reserve(stagePaths.size());
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ShaderStagePath& stagePath : stagePaths)
 	{
 		StageRequest request{};
@@ -170,6 +194,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderCollectionAsync
 
 	{
 		std::shared_lock lock(shaderCollectionCache.mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto existing = shaderCollectionCache.pathToId.find(key); existing != shaderCollectionCache.pathToId.end())
 		{
 			if (shaderCollectionCache.resources.find(existing->second) != shaderCollectionCache.resources.end())
@@ -178,6 +203,7 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadShaderCollectionAsync
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto pending = shaderCollectionCache.inFlight.find(key); pending != shaderCollectionCache.inFlight.end())
 		{
 			return pending->second;

@@ -1,5 +1,13 @@
+// Script.cs — Managed base class for gameplay scripts with lifecycle hooks.
+//
+// This file defines the Script class, which provides the standard lifecycle
+// callbacks (OnAwake, OnStart, OnUpdate, etc.) used by gameplay code. It
+// implements the dispatch logic that mirrors MonoBehaviour-style semantics,
+// ensuring consistent execution patterns for all managed scripts.
+
 namespace TerraEngine
 {
+	// Script is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class Script : Component
 	{
 		private bool _enabled = true;
@@ -25,11 +33,15 @@ namespace TerraEngine
 
 		internal string BindingId { get; set; } = string.Empty;
 
+		// OnAwake bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public virtual void OnAwake() { }
 		public virtual void OnEnable() { }
 		public virtual void OnStart() { }
+		// OnUpdate bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public virtual void OnUpdate() { }
+		// OnDisable bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public virtual void OnDisable() { }
+		// OnDestroy bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public virtual void OnDestroy() { }
 
 		/// <summary>
@@ -53,6 +65,7 @@ namespace TerraEngine
 		{
 			_ = deltaTime;
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (Enabled != _enableCallbackActive)
 			{
 				if (Enabled)
@@ -68,6 +81,7 @@ namespace TerraEngine
 				}
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (!Enabled)
 			{
 				return;
@@ -88,6 +102,7 @@ namespace TerraEngine
 		public void InvokeCreated()
 		{
 			OnAwake();
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (Enabled)
 			{
 				OnEnable();
@@ -99,6 +114,7 @@ namespace TerraEngine
 			}
 		}
 
+		// InvokeStartIfNeeded bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public void InvokeStartIfNeeded()
 		{
 			if (_started)
@@ -110,10 +126,12 @@ namespace TerraEngine
 			OnStart();
 		}
 
+		// InvokeDestroyed bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public void InvokeDestroyed()
 		{
 			// Destroy should mirror a real shutdown sequence so gameplay cleanup
 			// sees Disable before Destroy when the script was active.
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (_enableCallbackActive)
 			{
 				OnDisable();
@@ -123,6 +141,7 @@ namespace TerraEngine
 			OnDestroy();
 		}
 
+		// ResetLifecycle bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public void ResetLifecycle()
 		{
 			_started = false;

@@ -1,3 +1,10 @@
+// Timer.h — High-resolution timer for frame delta measurements.
+//
+// This file defines the lightweight FrameTimer class, which is used by the main
+// engine loop to track frame duration. It is designed to be independent of other
+// engine systems, making it suitable for low-level timing tasks across the
+// codebase.
+
 #pragma once
 
 #include <chrono>

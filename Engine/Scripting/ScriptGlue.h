@@ -1,3 +1,5 @@
+// ScriptGlue.h — Contains declarations for the Script Glue file-specific types, helper functions, and module integration code used by native script glue, exported C# vtables, and scripting system lifecycle state.
+
 #pragma once
 
 #include "Core/Export.h"

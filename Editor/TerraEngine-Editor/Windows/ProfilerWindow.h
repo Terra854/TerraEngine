@@ -1,3 +1,9 @@
+// ProfilerWindow.h — Profiler Window Definition
+//
+// Defines the ProfilerWindow class, which manages the UI state and rendering logic for the editor's profiling interface.
+// It inherits from EditorWindow and integrates with the engine's profiling systems to visualize performance data.
+// The class handles capturing and displaying timing information for various engine subsystems.
+
 #pragma once
 
 #include "../Framework/EditorWindow.h"
@@ -5,6 +11,7 @@
 
 class MainEditorSubsystem;
 
+// class ProfilerWindow groups related state and operations so callers have one documented contract.
 class ProfilerWindow : public EditorWindow
 {
 public:

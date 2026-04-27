@@ -1,3 +1,8 @@
+// ProjectBrowserWindow.h — Project Browser Window Definition
+//
+// Defines the ProjectBrowserWindow class, providing a filesystem-like interface for managing project assets.
+// It supports file navigation, asset importing, and organization within the project's directory structure.
+
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include <array>
@@ -6,6 +11,7 @@
 
 class MainEditorSubsystem;
 
+// class ProjectBrowserWindow groups related state and operations so callers have one documented contract.
 class ProjectBrowserWindow : public EditorWindow {
 public:
 	ProjectBrowserWindow(MainEditorSubsystem* owner);

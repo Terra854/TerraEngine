@@ -1,8 +1,6 @@
-// BuildProfilesWindow.h â€” Editor window for managing export build profiles.
+// BuildProfilesWindow.h — Export build profiles editor window
 //
-// Provides the ImGui-based UI for creating, editing, validating, and running
-// export builds. This window docks into the editor layout alongside other
-// editor windows.
+// Defines the UI for managing project export configurations. it provides an interface for editing build settings, running pre-export validation, and initiating the full export pipeline for different target platforms.
 
 #pragma once
 
@@ -16,6 +14,7 @@
 
 class MainEditorSubsystem;
 
+// class BuildProfilesWindow groups related state and operations so callers have one documented contract.
 class BuildProfilesWindow : public EditorWindow {
 public:
 	BuildProfilesWindow(MainEditorSubsystem* owner);

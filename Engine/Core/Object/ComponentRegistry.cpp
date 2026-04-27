@@ -1,3 +1,10 @@
+// ComponentRegistry.cpp — Implementation of the global component registration logic.
+//
+// This file serves as the central location for registering all native engine
+// components and common math types with the reflection system. It ensures that
+// basic types like vectors, quaternions, and UUIDs are correctly described for
+// use in the editor and serialization pipelines.
+
 #include "ComponentRegistry.h"
 #include "Components/Transform.h"
 #include "Components/ScriptComponent.h"

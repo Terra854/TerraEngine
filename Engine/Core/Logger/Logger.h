@@ -1,3 +1,10 @@
+// Logger.h — Interface for the engine's multi-threaded logging system.
+//
+// This file declares the Logger singleton and supporting structures for recording
+// diagnostic messages with severity levels and source location metadata. It
+// provides macros for convenient logging across the engine and defines the
+// asynchronous processing model for log entries.
+
 #pragma once
 #include <iostream>
 #include <queue>
@@ -20,6 +27,7 @@ enum class LogLevel {
 };
 
 // Structure for holding a log entry.
+// struct LogEntry groups related state and operations so callers have one documented contract.
 struct LogEntry {
 	std::chrono::system_clock::time_point timestamp; // When the log was generated.
 	LogLevel level;                                  // Severity level of the log.
@@ -30,9 +38,11 @@ struct LogEntry {
 	bool isManaged = false;                          // Whether the log originated from managed code (C#).
 };
 
+// class Logger groups related state and operations so callers have one documented contract.
 class Logger {
 public:
 	// Retrieve the singleton instance.
+	// Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	static Logger& Instance() {
 		static Logger instance;
 		return instance;
@@ -46,7 +56,9 @@ public:
 	void Log(LogLevel level, const std::string& file, int line, const std::string& functionSignature, const std::string& message, bool isManaged = false);
 
 	void SetMinLogLevel(LogLevel level) { minLevel = level; }
+	// GetMinLogLevel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	LogLevel GetMinLogLevel() const { return minLevel; }
+	// ShouldLog is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool ShouldLog(LogLevel level) const { return level >= minLevel; }
 
 	// Gracefully shutdown the logger thread.

@@ -1,3 +1,9 @@
+// VulkanContext.h — Vulkan RHI Context Definition
+//
+// Defines the Vulkan-specific implementation of the RHIContext interface.
+// It provides the public API for the Vulkan backend, including frame rendering entry points and resource invalidation hooks.
+// The class serves as the primary interface between the high-level RenderSystem and the Vulkan graphics API.
+
 #pragma once
 
 #include "../RHIContext.h"
@@ -13,6 +19,7 @@ public:
 
 	void Initialize(WindowSystem& windowSystem) override;
 	void BeginFrame() override;
+	// RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void RenderFrame(const FrameRenderData& frameData) override {
 		RenderFrame(frameData, ViewType::Game);
 	}
@@ -32,6 +39,7 @@ public:
 	void Shutdown() override;
 	void ClearResources() override;
 
+	// ViewType names the supported states explicitly so serialization and switches stay readable.
 	enum class ViewType {
 		Game,
 		Scene
@@ -43,6 +51,7 @@ public:
 	virtual void RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest);
 
 	// Editor / ImGui Integration
+	// struct EditorHandles groups related state and operations so callers have one documented contract.
 	struct EditorHandles {
 		void* instance = nullptr;
 		void* physicalDevice = nullptr;
@@ -67,6 +76,7 @@ public:
 	void PresentEditor(std::function<void(void*)> renderUI);
 
 private:
+	// struct Impl groups related state and operations so callers have one documented contract.
 	struct Impl;
 	std::unique_ptr<Impl> impl;
 };

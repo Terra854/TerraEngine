@@ -1,3 +1,7 @@
+// ArchiveWorkflow.h — TEPAK archive workflow definitions
+//
+// Defines the core structures and internal functions for the TEPAK archive system, including the OpenedPack and StreamedWriteState types. it coordinates between inventory discovery, pack planning, and the final read/write operations.
+
 #pragma once
 
 #include "TEPAK/PackTypes.h"

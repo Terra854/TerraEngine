@@ -1,3 +1,9 @@
+// VulkanCommonIncludes.h — Common Vulkan Backend Includes
+//
+// Centralizes the necessary headers and configuration for the Vulkan backend implementation.
+// It includes Volk for function loading, VMA for memory management, and other standard Vulkan and GLFW headers.
+// This ensures consistent compiler settings and inclusion order across all Vulkan-related translation units.
+
 #pragma once
 
 // Shared Vulkan/VMA include points so every translation unit uses the same

@@ -1,3 +1,7 @@
+// EditorWindow.cs — Base class for managed editor windows
+//
+// Defines the core abstraction for windows within the managed editor framework. It provides properties for title and visibility, and manages the ImGui lifecycle by wrapping the native Begin/End calls around an abstract OnGui method.
+
     using System;
 using Hexa.NET.ImGui;
 
@@ -14,6 +18,7 @@ namespace TerraEngine.Editor.Framework
             Title = title;
         }
 
+        // Draw bridges managed callers to engine state; validate arguments before forwarding to native code.
         public void Draw()
         {
             if (!IsVisible) return;
@@ -28,9 +33,11 @@ namespace TerraEngine.Editor.Framework
             {
                 // Standard Context Menu on the window background
                 /*
+                // Validate this condition before crossing into native or editor state that may outlive the managed object.
                 if (ImGui.BeginPopupContextItem())
                 {
                     OnContextMenu();
+                    // Validate this condition before crossing into native or editor state that may outlive the managed object.
                     if (ImGui.MenuItem("Close"))
                     {
                         IsVisible = false;
@@ -39,6 +46,7 @@ namespace TerraEngine.Editor.Framework
                 }
                 */
 
+                // Validate this condition before crossing into native or editor state that may outlive the managed object.
                 if (expanded)
                 {
                     OnGui();
@@ -52,6 +60,7 @@ namespace TerraEngine.Editor.Framework
 
         private bool _isVisible = true;
 
+        // OnGui bridges managed callers to engine state; validate arguments before forwarding to native code.
         protected abstract void OnGui();
         protected virtual void OnContextMenu() { }
     }

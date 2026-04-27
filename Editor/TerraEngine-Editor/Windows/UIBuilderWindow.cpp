@@ -1,3 +1,8 @@
+// UIBuilderWindow.cpp — UI Builder Window Implementation
+//
+// Implements the visual UI editing interface, supporting drag-and-drop element placement and property editing.
+// It generates and parses UI configuration files that are used by the engine's runtime UI system.
+
 #include "UIBuilderWindow.h"
 
 #include "AssetDatabase.h"
@@ -22,6 +27,7 @@ namespace
 {
 constexpr char kCreateStyleSheetDialogKey[] = "CreateUIStyleSheetDlg";
 
+// ToImColor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ImU32 ToImColor(const glm::vec4& color)
 {
 	return IM_COL32(
@@ -31,6 +37,7 @@ ImU32 ToImColor(const glm::vec4& color)
 		static_cast<int>(std::clamp(color.a, 0.0f, 1.0f) * 255.0f));
 }
 
+// CopyStringToBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void CopyStringToBuffer(const std::string& source, char* destination, std::size_t destinationSize)
 {
 	if (destination == nullptr || destinationSize == 0)
@@ -41,6 +48,7 @@ void CopyStringToBuffer(const std::string& source, char* destination, std::size_
 	std::snprintf(destination, destinationSize, "%s", source.c_str());
 }
 
+// IsPathInsideRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool IsPathInsideRoot(const std::filesystem::path& root, const std::filesystem::path& candidate)
 {
 	if (root.empty() || candidate.empty())
@@ -50,6 +58,7 @@ bool IsPathInsideRoot(const std::filesystem::path& root, const std::filesystem::
 
 	std::error_code errorCode;
 	const std::filesystem::path relativePath = std::filesystem::relative(candidate, root, errorCode);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (errorCode)
 	{
 		return false;
@@ -59,6 +68,7 @@ bool IsPathInsideRoot(const std::filesystem::path& root, const std::filesystem::
 	return !generic.empty() && generic.rfind("..", 0) != 0;
 }
 
+// NormalizeToAssetRelativePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path NormalizeToAssetRelativePath(const std::filesystem::path& assetRoot, const std::filesystem::path& authoredPath)
 {
 	if (authoredPath.empty())
@@ -66,15 +76,18 @@ std::filesystem::path NormalizeToAssetRelativePath(const std::filesystem::path& 
 		return {};
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!authoredPath.is_absolute())
 	{
 		return authoredPath.lexically_normal();
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (IsPathInsideRoot(assetRoot, authoredPath))
 	{
 		std::error_code errorCode;
 		const std::filesystem::path relativePath = std::filesystem::relative(authoredPath, assetRoot, errorCode);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!errorCode)
 		{
 			return relativePath.lexically_normal();
@@ -84,6 +97,7 @@ std::filesystem::path NormalizeToAssetRelativePath(const std::filesystem::path& 
 	return authoredPath.lexically_normal();
 }
 
+// BuildDisplayName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string BuildDisplayName(const std::filesystem::path& assetPath, std::string_view fallbackName)
 {
 	if (assetPath.empty())
@@ -95,6 +109,7 @@ std::string BuildDisplayName(const std::filesystem::path& assetPath, std::string
 	return fileName.empty() ? assetPath.generic_string() : fileName.string();
 }
 
+// InferStylePathFromMarkup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path InferStylePathFromMarkup(const std::filesystem::path& markupPath)
 {
 	std::filesystem::path stylePath = markupPath;
@@ -102,6 +117,7 @@ std::filesystem::path InferStylePathFromMarkup(const std::filesystem::path& mark
 	return stylePath;
 }
 
+// TryGetLastWriteTime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<std::filesystem::file_time_type> TryGetLastWriteTime(const std::filesystem::path& filePath)
 {
 	if (filePath.empty() || !std::filesystem::exists(filePath))
@@ -111,6 +127,7 @@ std::optional<std::filesystem::file_time_type> TryGetLastWriteTime(const std::fi
 
 	std::error_code errorCode;
 	const std::filesystem::file_time_type writeTime = std::filesystem::last_write_time(filePath, errorCode);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (errorCode)
 	{
 		return std::nullopt;
@@ -119,6 +136,7 @@ std::optional<std::filesystem::file_time_type> TryGetLastWriteTime(const std::fi
 	return writeTime;
 }
 
+// CreateEmptyRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 UIElement::Ptr CreateEmptyRoot()
 {
 	UIElement::Ptr root = UIElement::Create(UIElementType::Root);
@@ -126,6 +144,7 @@ UIElement::Ptr CreateEmptyRoot()
 	return root;
 }
 
+// DrawUIBatchPreview is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void DrawUIBatchPreview(const UIRenderBatch& batch, ImDrawList* drawList, const ImVec2& imageMin, const ImVec2& imageSize)
 {
 	if ((batch.viewportSize.x <= 0.0f || batch.viewportSize.y <= 0.0f) || drawList == nullptr)
@@ -136,6 +155,7 @@ void DrawUIBatchPreview(const UIRenderBatch& batch, ImDrawList* drawList, const 
 	const ImVec2 scale(imageSize.x / batch.viewportSize.x, imageSize.y / batch.viewportSize.y);
 	drawList->PushClipRect(imageMin, ImVec2(imageMin.x + imageSize.x, imageMin.y + imageSize.y), true);
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const UIStaticQuad& quad : batch.staticQuads)
 	{
 		const ImVec2 min(imageMin.x + (quad.position.x * scale.x), imageMin.y + (quad.position.y * scale.y));
@@ -143,6 +163,7 @@ void DrawUIBatchPreview(const UIRenderBatch& batch, ImDrawList* drawList, const 
 		drawList->AddRectFilled(min, max, ToImColor(quad.color), quad.cornerRadius * std::min(scale.x, scale.y));
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const UITextRun& textRun : batch.textRuns)
 	{
 		const ImVec2 position(imageMin.x + (textRun.position.x * scale.x), imageMin.y + (textRun.position.y * scale.y));
@@ -152,18 +173,21 @@ void DrawUIBatchPreview(const UIRenderBatch& batch, ImDrawList* drawList, const 
 	drawList->PopClipRect();
 }
 
+// GetPreviewElementMin is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 glm::vec2 GetPreviewElementMin(const UIElement& element)
 {
 	const glm::vec2 translate = element.displayStyle.transform.translate.value_or(glm::vec2(0.0f, 0.0f));
 	return element.calculatedPosition + translate;
 }
 
+// GetPreviewElementSize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 glm::vec2 GetPreviewElementSize(const UIElement& element)
 {
 	const float scale = element.displayStyle.transform.scale.value_or(1.0f);
 	return element.calculatedSize * scale;
 }
 
+// BuildElementPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool BuildElementPath(const UIElement::Ptr& root, const UIElement* target, std::vector<std::size_t>& outPath)
 {
 	if (!root || target == nullptr)
@@ -171,15 +195,18 @@ bool BuildElementPath(const UIElement::Ptr& root, const UIElement* target, std::
 		return false;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (root.get() == target)
 	{
 		outPath.clear();
 		return true;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t index = 0; index < root->children.size(); ++index)
 	{
 		std::vector<std::size_t> childPath;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (BuildElementPath(root->children[index], target, childPath))
 		{
 			outPath.clear();
@@ -192,9 +219,11 @@ bool BuildElementPath(const UIElement::Ptr& root, const UIElement* target, std::
 	return false;
 }
 
+// ResolveElementAtPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 UIElement::Ptr ResolveElementAtPath(const UIElement::Ptr& root, const std::vector<std::size_t>& path)
 {
 	UIElement::Ptr current = root;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t index : path)
 	{
 		if (!current || index >= current->children.size())
@@ -208,6 +237,7 @@ UIElement::Ptr ResolveElementAtPath(const UIElement::Ptr& root, const std::vecto
 	return current;
 }
 
+// HitTestPreviewElement is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool HitTestPreviewElement(const UIElement::Ptr& element, const glm::vec2& localPoint, std::vector<std::size_t>& currentPath, std::vector<std::size_t>& outPath)
 {
 	if (!element)
@@ -221,15 +251,18 @@ bool HitTestPreviewElement(const UIElement::Ptr& element, const glm::vec2& local
 		&& localPoint.y >= min.y
 		&& localPoint.x <= max.x
 		&& localPoint.y <= max.y;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!inside)
 	{
 		return false;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t reverseIndex = element->children.size(); reverseIndex > 0; --reverseIndex)
 	{
 		const std::size_t childIndex = reverseIndex - 1;
 		currentPath.push_back(childIndex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (HitTestPreviewElement(element->children[childIndex], localPoint, currentPath, outPath))
 		{
 			return true;
@@ -241,15 +274,18 @@ bool HitTestPreviewElement(const UIElement::Ptr& element, const glm::vec2& local
 	return true;
 }
 
+// SelectorTargetsElement is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SelectorTargetsElement(const UIStyleRule& rule, const UIElement& element)
 {
 	// The inspector must only offer rules that can actually affect the selected
 	// element; otherwise the user ends up editing an unrelated selector.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (rule.validity != UISelectorValidityState::Valid)
 	{
 		return false;
 	}
 
+	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (rule.selectorKind)
 	{
 	case UISelectorKind::Root:
@@ -264,6 +300,7 @@ bool SelectorTargetsElement(const UIStyleRule& rule, const UIElement& element)
 	}
 }
 
+// FindElementByPointer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 UIElement::Ptr FindElementByPointer(const UIElement::Ptr& root, const UIElement* target)
 {
 	if (!root || target == nullptr)
@@ -271,11 +308,13 @@ UIElement::Ptr FindElementByPointer(const UIElement::Ptr& root, const UIElement*
 		return nullptr;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (root.get() == target)
 	{
 		return root;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const UIElement::Ptr& child : root->children)
 	{
 		if (UIElement::Ptr found = FindElementByPointer(child, target))
@@ -318,6 +357,7 @@ constexpr std::array<const char*, 5> kAlignItemsLabels = {
 	"Flex End",
 };
 
+// FlexDirectionToIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 int FlexDirectionToIndex(const std::optional<UIFlexDirection>& value)
 {
 	if (!value.has_value())
@@ -328,6 +368,7 @@ int FlexDirectionToIndex(const std::optional<UIFlexDirection>& value)
 	return *value == UIFlexDirection::Row ? 1 : 2;
 }
 
+// JustifyContentToIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 int JustifyContentToIndex(const std::optional<UIJustifyContent>& value)
 {
 	if (!value.has_value())
@@ -335,6 +376,7 @@ int JustifyContentToIndex(const std::optional<UIJustifyContent>& value)
 		return 0;
 	}
 
+	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (*value)
 	{
 	case UIJustifyContent::FlexStart: return 1;
@@ -346,6 +388,7 @@ int JustifyContentToIndex(const std::optional<UIJustifyContent>& value)
 	}
 }
 
+// AlignItemsToIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 int AlignItemsToIndex(const std::optional<UIAlignItems>& value)
 {
 	if (!value.has_value())
@@ -353,6 +396,7 @@ int AlignItemsToIndex(const std::optional<UIAlignItems>& value)
 		return 0;
 	}
 
+	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (*value)
 	{
 	case UIAlignItems::Stretch: return 1;
@@ -365,15 +409,18 @@ int AlignItemsToIndex(const std::optional<UIAlignItems>& value)
 }
 
 UIBuilderWindow::UIBuilderWindow(MainEditorSubsystem* owner)
+	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: EditorWindow("UI Builder")
 	, m_Owner(owner)
 {
 	CreateNewDocumentInternal();
 }
 
+// UIBuilderWindow::OpenMarkupDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::OpenMarkupDocument(const std::filesystem::path& markupPath)
 {
 	SetVisible(true);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (HasUnsavedChanges())
 	{
 		BeginPrompt(UIBuilderPendingPrompt::OpenMarkupAsset, markupPath);
@@ -383,6 +430,7 @@ void UIBuilderWindow::OpenMarkupDocument(const std::filesystem::path& markupPath
 	OpenMarkupDocumentInternal(markupPath);
 }
 
+// UIBuilderWindow::ResetForProjectOpen is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::ResetForProjectOpen()
 {
 	ClearPrompt();
@@ -390,6 +438,7 @@ void UIBuilderWindow::ResetForProjectOpen()
 	m_StatusMessage = "Project opened. Double-click a .tuiml asset or load a UIComponent to begin editing.";
 }
 
+// UIBuilderWindow::OnCloseRequested is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UIBuilderWindow::OnCloseRequested()
 {
 	if (!HasUnsavedChanges())
@@ -401,6 +450,7 @@ bool UIBuilderWindow::OnCloseRequested()
 	return false;
 }
 
+// UIBuilderWindow::RequestNewDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::RequestNewDocument()
 {
 	if (HasUnsavedChanges())
@@ -412,18 +462,21 @@ void UIBuilderWindow::RequestNewDocument()
 	CreateNewDocumentInternal();
 }
 
+// UIBuilderWindow::RequestLoadSelectedComponent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::RequestLoadSelectedComponent()
 {
 	SetVisible(true);
 	const std::optional<entt::entity> selectedEntity = m_Owner == nullptr
 		? std::optional<entt::entity>{}
 		: m_Owner->GetSelectedEntity();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!selectedEntity.has_value())
 	{
 		m_StatusMessage = "Select an object with a UIComponent first.";
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (HasUnsavedChanges())
 	{
 		BeginPrompt(UIBuilderPendingPrompt::LoadSelectedComponent, {}, *selectedEntity);
@@ -433,11 +486,13 @@ void UIBuilderWindow::RequestLoadSelectedComponent()
 	LoadSelectedComponentInternal(*selectedEntity);
 }
 
+// UIBuilderWindow::GetMarkupAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path UIBuilderWindow::GetMarkupAssetPath() const
 {
 	return m_DocumentSession.internalPath;
 }
 
+// UIBuilderWindow::GetStyleAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path UIBuilderWindow::GetStyleAssetPath() const
 {
 	if (const StyleSheetSession* selectedSession = GetSelectedStyleSheetSession())
@@ -448,6 +503,7 @@ std::filesystem::path UIBuilderWindow::GetStyleAssetPath() const
 	return {};
 }
 
+// UIBuilderWindow::ResolveAuthoredPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path UIBuilderWindow::ResolveAuthoredPath(const std::filesystem::path& authoredPath) const
 {
 	if (authoredPath.empty())
@@ -455,6 +511,7 @@ std::filesystem::path UIBuilderWindow::ResolveAuthoredPath(const std::filesystem
 		return {};
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (authoredPath.is_absolute())
 	{
 		return authoredPath;
@@ -463,11 +520,13 @@ std::filesystem::path UIBuilderWindow::ResolveAuthoredPath(const std::filesystem
 	return ResourceManager::Instance().GetAssetRoot() / authoredPath;
 }
 
+// UIBuilderWindow::GetMarkupDisplayName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string UIBuilderWindow::GetMarkupDisplayName() const
 {
 	return m_DocumentSession.displayName;
 }
 
+// UIBuilderWindow::GetStyleSheetDisplayName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string UIBuilderWindow::GetStyleSheetDisplayName() const
 {
 	if (const StyleSheetSession* selectedSession = GetSelectedStyleSheetSession())
@@ -478,9 +537,11 @@ std::string UIBuilderWindow::GetStyleSheetDisplayName() const
 	return m_DocumentSession.styleSheets.empty() ? "None" : m_DocumentSession.styleSheets.front().displayName;
 }
 
+// UIBuilderWindow::RefreshSessionDisplayNames is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::RefreshSessionDisplayNames()
 {
 	m_DocumentSession.displayName = BuildDisplayName(m_DocumentSession.internalPath, "Unsaved UI");
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (StyleSheetSession& styleSession : m_DocumentSession.styleSheets)
 	{
 		if (!styleSession.attached)
@@ -489,6 +550,7 @@ void UIBuilderWindow::RefreshSessionDisplayNames()
 			continue;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!styleSession.internalPath.empty())
 		{
 			styleSession.displayName = BuildDisplayName(styleSession.internalPath, "StyleSheet");
@@ -500,12 +562,15 @@ void UIBuilderWindow::RefreshSessionDisplayNames()
 	}
 }
 
+// UIBuilderWindow::CaptureSessionRevisions is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::CaptureSessionRevisions()
 {
 	m_DocumentSession.revisionStamp = TryGetLastWriteTime(ResolveAuthoredPath(m_DocumentSession.internalPath));
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (StyleSheetSession& styleSession : m_DocumentSession.styleSheets)
 	{
 		styleSession.revisionStamp = std::nullopt;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (styleSession.attached || styleSession.removeOnNextSave)
 		{
 			styleSession.revisionStamp = TryGetLastWriteTime(ResolveAuthoredPath(styleSession.internalPath));
@@ -513,9 +578,11 @@ void UIBuilderWindow::CaptureSessionRevisions()
 	}
 }
 
+// UIBuilderWindow::MarkDocumentDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::MarkDocumentDirty(std::string_view reason)
 {
 	m_DocumentSession.dirty = true;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!reason.empty())
 	{
 		m_StatusMessage = std::string(reason);
@@ -523,15 +590,18 @@ void UIBuilderWindow::MarkDocumentDirty(std::string_view reason)
 	QueuePreviewRefresh();
 }
 
+// UIBuilderWindow::MarkStyleSheetDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::MarkStyleSheetDirty(std::string_view reason)
 {
 	StyleSheetSession* styleSession = GetSelectedStyleSheetSession();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (styleSession == nullptr)
 	{
 		const int styleSheetIndex = EnsureSelectedStyleSheetSession();
 		styleSession = styleSheetIndex >= 0 ? &m_DocumentSession.styleSheets[static_cast<std::size_t>(styleSheetIndex)] : nullptr;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (styleSession == nullptr)
 	{
 		return;
@@ -541,6 +611,7 @@ void UIBuilderWindow::MarkStyleSheetDirty(std::string_view reason)
 	styleSession->dirty = true;
 	styleSession->removeOnNextSave = false;
 	RefreshSessionDisplayNames();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!reason.empty())
 	{
 		m_StatusMessage = std::string(reason);
@@ -548,6 +619,7 @@ void UIBuilderWindow::MarkStyleSheetDirty(std::string_view reason)
 	QueuePreviewRefresh();
 }
 
+// UIBuilderWindow::HasUnsavedChanges is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UIBuilderWindow::HasUnsavedChanges() const
 {
 	if (m_DocumentSession.dirty)
@@ -561,11 +633,13 @@ bool UIBuilderWindow::HasUnsavedChanges() const
 		[](const StyleSheetSession& styleSession) { return styleSession.dirty; });
 }
 
+// UIBuilderWindow::QueuePreviewRefresh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::QueuePreviewRefresh()
 {
 	m_PreviewDirty = true;
 }
 
+// UIBuilderWindow::ApplyWorkingStyles is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::ApplyWorkingStyles()
 {
 	if (!m_DocumentSession.root)
@@ -577,9 +651,11 @@ void UIBuilderWindow::ApplyWorkingStyles()
 	QueuePreviewRefresh();
 }
 
+// UIBuilderWindow::CreateStyleRule is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UIBuilderWindow::CreateStyleRule(std::string_view selectorText, bool selectNewRule)
 {
 	const int styleSheetIndex = EnsureSelectedStyleSheetSession();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (styleSheetIndex < 0)
 	{
 		m_StatusMessage = "Create or attach a stylesheet before adding selectors.";
@@ -587,6 +663,7 @@ bool UIBuilderWindow::CreateStyleRule(std::string_view selectorText, bool select
 	}
 
 	UIStyleRule parsedRule;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_Parser.TryParseSelector(selectorText, parsedRule))
 	{
 		m_StatusMessage = "Unsupported selector. Use :root, element names, #ids, .classes, and optional :hover.";
@@ -596,6 +673,7 @@ bool UIBuilderWindow::CreateStyleRule(std::string_view selectorText, bool select
 	StyleSheetSession& styleSession = m_DocumentSession.styleSheets[static_cast<std::size_t>(styleSheetIndex)];
 	parsedRule.order = styleSession.rules.size();
 	styleSession.rules.push_back(std::move(parsedRule));
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectNewRule)
 	{
 		SelectStyleRule(styleSheetIndex, static_cast<int>(styleSession.rules.size()) - 1);
@@ -605,6 +683,7 @@ bool UIBuilderWindow::CreateStyleRule(std::string_view selectorText, bool select
 	return true;
 }
 
+// UIBuilderWindow::SelectStyleRule is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::SelectStyleRule(int styleSheetIndex, int styleRuleIndex, bool focusStyleSheet)
 {
 	if (styleSheetIndex < 0 || styleSheetIndex >= static_cast<int>(m_DocumentSession.styleSheets.size()))
@@ -615,6 +694,7 @@ void UIBuilderWindow::SelectStyleRule(int styleSheetIndex, int styleRuleIndex, b
 	}
 
 	const StyleSheetSession& styleSession = m_DocumentSession.styleSheets[static_cast<std::size_t>(styleSheetIndex)];
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (styleRuleIndex < 0 || styleRuleIndex >= static_cast<int>(styleSession.rules.size()))
 	{
 		m_WorkspaceState.selectedStyleSheetIndex = styleSheetIndex;
@@ -624,12 +704,14 @@ void UIBuilderWindow::SelectStyleRule(int styleSheetIndex, int styleRuleIndex, b
 
 	m_WorkspaceState.selectedStyleSheetIndex = styleSheetIndex;
 	m_WorkspaceState.selectedSelectorIndex = styleRuleIndex;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (focusStyleSheet)
 	{
 		m_WorkspaceState.activePanel = UIBuilderPanelFocus::StyleSheets;
 	}
 }
 
+// UIBuilderWindow::SetSelectedElement is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::SetSelectedElement(const UIElement::Ptr& element, UIBuilderPanelFocus focus)
 {
 	// Unity treats element and selector inspection as separate modes, so moving
@@ -640,14 +722,17 @@ void UIBuilderWindow::SetSelectedElement(const UIElement::Ptr& element, UIBuilde
 	m_WorkspaceState.activePanel = focus;
 }
 
+// UIBuilderWindow::CollectMatchingRuleIndices is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<MatchingStyleRuleReference> UIBuilderWindow::CollectMatchingRuleIndices(const UIElement& element) const
 {
 	std::vector<MatchingStyleRuleReference> matchingIndices;
 	// Keep the rule list in stylesheet order so later tie-breaking can respect
 	// the same precedence the runtime uses when multiple selectors match.
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t styleSheetIndex = 0; styleSheetIndex < m_DocumentSession.styleSheets.size(); ++styleSheetIndex)
 	{
 		const StyleSheetSession& styleSession = m_DocumentSession.styleSheets[styleSheetIndex];
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t index = 0; index < styleSession.rules.size(); ++index)
 		{
 			if (SelectorTargetsElement(styleSession.rules[index], element))
@@ -663,6 +748,7 @@ std::vector<MatchingStyleRuleReference> UIBuilderWindow::CollectMatchingRuleIndi
 	return matchingIndices;
 }
 
+// UIBuilderWindow::EnsureSelectedStyleSheetSession is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 int UIBuilderWindow::EnsureSelectedStyleSheetSession()
 {
 	if (m_WorkspaceState.selectedStyleSheetIndex >= 0
@@ -671,6 +757,7 @@ int UIBuilderWindow::EnsureSelectedStyleSheetSession()
 		return m_WorkspaceState.selectedStyleSheetIndex;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_DocumentSession.styleSheets.empty())
 	{
 		m_WorkspaceState.selectedStyleSheetIndex = 0;
@@ -682,6 +769,7 @@ int UIBuilderWindow::EnsureSelectedStyleSheetSession()
 	return -1;
 }
 
+// UIBuilderWindow::GetSelectedStyleSheetSession is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 StyleSheetSession* UIBuilderWindow::GetSelectedStyleSheetSession()
 {
 	if (m_WorkspaceState.selectedStyleSheetIndex < 0
@@ -693,6 +781,7 @@ StyleSheetSession* UIBuilderWindow::GetSelectedStyleSheetSession()
 	return &m_DocumentSession.styleSheets[static_cast<std::size_t>(m_WorkspaceState.selectedStyleSheetIndex)];
 }
 
+// UIBuilderWindow::GetSelectedStyleSheetSession is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const StyleSheetSession* UIBuilderWindow::GetSelectedStyleSheetSession() const
 {
 	if (m_WorkspaceState.selectedStyleSheetIndex < 0
@@ -704,12 +793,15 @@ const StyleSheetSession* UIBuilderWindow::GetSelectedStyleSheetSession() const
 	return &m_DocumentSession.styleSheets[static_cast<std::size_t>(m_WorkspaceState.selectedStyleSheetIndex)];
 }
 
+// UIBuilderWindow::BuildCombinedStyleRules is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<UIStyleRule> UIBuilderWindow::BuildCombinedStyleRules() const
 {
 	std::vector<UIStyleRule> combinedRules;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const StyleSheetSession& styleSession : m_DocumentSession.styleSheets)
 	{
 		const std::size_t orderOffset = combinedRules.size();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const UIStyleRule& rule : styleSession.rules)
 		{
 			UIStyleRule copiedRule = rule;
@@ -721,9 +813,11 @@ std::vector<UIStyleRule> UIBuilderWindow::BuildCombinedStyleRules() const
 	return combinedRules;
 }
 
+// UIBuilderWindow::SuggestNewStyleSheetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path UIBuilderWindow::SuggestNewStyleSheetPath() const
 {
 	const std::filesystem::path markupPath = ResolveAuthoredPath(m_DocumentSession.internalPath);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (markupPath.empty())
 	{
 		return {};
@@ -740,6 +834,7 @@ std::filesystem::path UIBuilderWindow::SuggestNewStyleSheetPath() const
 			});
 	};
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!pathAlreadyUsed(candidate))
 	{
 		return candidate;
@@ -747,9 +842,11 @@ std::filesystem::path UIBuilderWindow::SuggestNewStyleSheetPath() const
 
 	const std::filesystem::path parentPath = candidate.parent_path();
 	const std::string baseName = candidate.stem().string();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int suffixIndex = 2; suffixIndex < 128; ++suffixIndex)
 	{
 		const std::filesystem::path numberedCandidate = parentPath / (baseName + "-" + std::to_string(suffixIndex) + ".tuss");
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!pathAlreadyUsed(numberedCandidate))
 		{
 			return numberedCandidate;
@@ -759,6 +856,7 @@ std::filesystem::path UIBuilderWindow::SuggestNewStyleSheetPath() const
 	return candidate;
 }
 
+// UIBuilderWindow::AttachStyleSheetAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UIBuilderWindow::AttachStyleSheetAsset(const std::filesystem::path& stylePath, bool selectAttachedSheet)
 {
 	if (stylePath.empty())
@@ -778,6 +876,7 @@ bool UIBuilderWindow::AttachStyleSheetAsset(const std::filesystem::path& stylePa
 			return !styleSession.internalPath.empty()
 				&& ResolveAuthoredPath(styleSession.internalPath).lexically_normal() == resolvedStylePath.lexically_normal();
 		});
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (existingIterator != m_DocumentSession.styleSheets.end())
 	{
 		if (selectAttachedSheet)
@@ -793,6 +892,7 @@ bool UIBuilderWindow::AttachStyleSheetAsset(const std::filesystem::path& stylePa
 	newSession.internalPath = normalizedStylePath;
 	newSession.displayName = BuildDisplayName(normalizedStylePath, "StyleSheet");
 	newSession.removeOnNextSave = false;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(resolvedStylePath))
 	{
 		if (!m_Parser.TryParseStyleFile(resolvedStylePath, newSession.rules, newSession.loadError))
@@ -807,6 +907,7 @@ bool UIBuilderWindow::AttachStyleSheetAsset(const std::filesystem::path& stylePa
 
 	m_DocumentSession.styleSheets.push_back(std::move(newSession));
 	const int attachedIndex = static_cast<int>(m_DocumentSession.styleSheets.size()) - 1;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectAttachedSheet)
 	{
 		m_WorkspaceState.selectedStyleSheetIndex = attachedIndex;
@@ -817,6 +918,7 @@ bool UIBuilderWindow::AttachStyleSheetAsset(const std::filesystem::path& stylePa
 	CaptureSessionRevisions();
 	ApplyWorkingStyles();
 	MarkDocumentDirty("Attached stylesheet: " + resolvedStylePath.filename().string());
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_StatusMessage.empty())
 	{
 		m_StatusMessage = "Attached stylesheet: " + resolvedStylePath.filename().string();
@@ -824,9 +926,11 @@ bool UIBuilderWindow::AttachStyleSheetAsset(const std::filesystem::path& stylePa
 	return true;
 }
 
+// UIBuilderWindow::GetSelectedStyleRule is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 UIStyleRule* UIBuilderWindow::GetSelectedStyleRule()
 {
 	StyleSheetSession* styleSession = GetSelectedStyleSheetSession();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (styleSession == nullptr
 		|| m_WorkspaceState.selectedSelectorIndex < 0
 		|| m_WorkspaceState.selectedSelectorIndex >= static_cast<int>(styleSession->rules.size()))
@@ -837,9 +941,11 @@ UIStyleRule* UIBuilderWindow::GetSelectedStyleRule()
 	return &styleSession->rules[static_cast<std::size_t>(m_WorkspaceState.selectedSelectorIndex)];
 }
 
+// UIBuilderWindow::GetSelectedStyleRule is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const UIStyleRule* UIBuilderWindow::GetSelectedStyleRule() const
 {
 	const StyleSheetSession* styleSession = GetSelectedStyleSheetSession();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (styleSession == nullptr
 		|| m_WorkspaceState.selectedSelectorIndex < 0
 		|| m_WorkspaceState.selectedSelectorIndex >= static_cast<int>(styleSession->rules.size()))
@@ -850,6 +956,7 @@ const UIStyleRule* UIBuilderWindow::GetSelectedStyleRule() const
 	return &styleSession->rules[static_cast<std::size_t>(m_WorkspaceState.selectedSelectorIndex)];
 }
 
+// UIBuilderWindow::GetSelectedWorkingElement is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 UIElement::Ptr UIBuilderWindow::GetSelectedWorkingElement() const
 {
 	if (UIElement::Ptr selected = m_WorkspaceState.selectedElement.lock())
@@ -860,6 +967,7 @@ UIElement::Ptr UIBuilderWindow::GetSelectedWorkingElement() const
 	return m_DocumentSession.root;
 }
 
+// UIBuilderWindow::GetSelectedInsertionParent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 UIElement::Ptr UIBuilderWindow::GetSelectedInsertionParent() const
 {
 	if (UIElement::Ptr selected = GetSelectedWorkingElement())
@@ -870,6 +978,7 @@ UIElement::Ptr UIBuilderWindow::GetSelectedInsertionParent() const
 	return m_DocumentSession.root;
 }
 
+// UIBuilderWindow::OpenMarkupDocumentInternal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UIBuilderWindow::OpenMarkupDocumentInternal(const std::filesystem::path& markupPath)
 {
 	m_StatusMessage.clear();
@@ -881,6 +990,7 @@ bool UIBuilderWindow::OpenMarkupDocumentInternal(const std::filesystem::path& ma
 	nextSession.internalPath = NormalizeToAssetRelativePath(assetRoot, resolvedMarkupPath);
 
 	std::string markupError;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_Parser.TryParseMarkupFile(resolvedMarkupPath, nextSession.root, markupError))
 	{
 		nextSession.root = CreateEmptyRoot();
@@ -888,6 +998,7 @@ bool UIBuilderWindow::OpenMarkupDocumentInternal(const std::filesystem::path& ma
 	}
 
 	std::vector<std::filesystem::path> authoredStylePaths;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (nextSession.root && !nextSession.root->styleSheetSources.empty())
 	{
 		for (const std::string& styleSource : nextSession.root->styleSheetSources)
@@ -898,18 +1009,21 @@ bool UIBuilderWindow::OpenMarkupDocumentInternal(const std::filesystem::path& ma
 	else
 	{
 		const std::filesystem::path inferredStylePath = InferStylePathFromMarkup(resolvedMarkupPath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(inferredStylePath))
 		{
 			authoredStylePaths.push_back(NormalizeToAssetRelativePath(assetRoot, inferredStylePath));
 		}
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const std::filesystem::path& authoredStylePath : authoredStylePaths)
 	{
 		StyleSheetSession styleSession;
 		styleSession.attached = true;
 		styleSession.internalPath = authoredStylePath;
 		const std::filesystem::path resolvedAuthoredStylePath = ResolveAuthoredPath(authoredStylePath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!m_Parser.TryParseStyleFile(resolvedAuthoredStylePath, styleSession.rules, styleSession.loadError))
 		{
 			m_StatusMessage = "Loaded the document, but one stylesheet needs attention: " + styleSession.loadError;
@@ -920,9 +1034,11 @@ bool UIBuilderWindow::OpenMarkupDocumentInternal(const std::filesystem::path& ma
 
 	{
 		std::vector<UIStyleRule> combinedRules;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const StyleSheetSession& styleSession : nextSession.styleSheets)
 		{
 			const std::size_t orderOffset = combinedRules.size();
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const UIStyleRule& rule : styleSession.rules)
 			{
 				UIStyleRule copiedRule = rule;
@@ -944,6 +1060,7 @@ bool UIBuilderWindow::OpenMarkupDocumentInternal(const std::filesystem::path& ma
 	m_NewSelectorBuffer[0] = '\0';
 	QueuePreviewRefresh();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_StatusMessage.empty())
 	{
 		m_StatusMessage = "Loaded UI asset: " + resolvedMarkupPath.filename().string();
@@ -953,18 +1070,22 @@ bool UIBuilderWindow::OpenMarkupDocumentInternal(const std::filesystem::path& ma
 	return true;
 }
 
+// UIBuilderWindow::LoadSelectedComponentInternal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 {
 	m_StatusMessage.clear();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_Owner == nullptr)
 	{
 		m_StatusMessage = "Select an object with a UIComponent first.";
 		return false;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (targetEntity == entt::null)
 	{
 		const std::optional<entt::entity> selectedEntity = m_Owner->GetSelectedEntity();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!selectedEntity.has_value())
 		{
 			m_StatusMessage = "Select an object with a UIComponent first.";
@@ -976,6 +1097,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 
 	const entt::entity entity = targetEntity;
 	auto object = ObjectManager::instance().getObject(entity);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!object.has_value())
 	{
 		m_StatusMessage = "The selected object no longer exists.";
@@ -983,6 +1105,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 	}
 
 	UIComponent* component = object->getComponent<UIComponent>();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (component == nullptr)
 	{
 		m_StatusMessage = "The selected object does not have a UIComponent.";
@@ -994,6 +1117,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 	nextSession.entryContext = UIBuilderEntryContext::SceneComponent;
 	nextSession.sceneEntity = entity;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (component->HasSourceMarkup())
 	{
 		const std::filesystem::path authoredMarkupPath(component->GetSourceMarkup());
@@ -1001,6 +1125,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 		nextSession.internalPath = NormalizeToAssetRelativePath(assetRoot, resolvedMarkupPath);
 
 		std::string markupError;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!m_Parser.TryParseMarkupFile(resolvedMarkupPath, nextSession.root, markupError))
 		{
 			if (component->GetRoot())
@@ -1015,6 +1140,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (nextSession.root && !nextSession.root->styleSheetSources.empty())
 		{
 			for (const std::string& styleSource : nextSession.root->styleSheetSources)
@@ -1027,6 +1153,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 		else
 		{
 			const std::filesystem::path inferredStylePath = InferStylePathFromMarkup(resolvedMarkupPath);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::filesystem::exists(inferredStylePath))
 			{
 				nextSession.styleSheets.push_back(StyleSheetSession{
@@ -1035,10 +1162,12 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 			}
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (StyleSheetSession& styleSession : nextSession.styleSheets)
 		{
 			const std::filesystem::path resolvedStylePath = ResolveAuthoredPath(styleSession.internalPath);
 			styleSession.attached = true;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::filesystem::exists(resolvedStylePath))
 			{
 				if (!m_Parser.TryParseStyleFile(resolvedStylePath, styleSession.rules, styleSession.loadError))
@@ -1053,6 +1182,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 			}
 		}
 	}
+	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (component->GetRoot())
 	{
 		nextSession.root = component->GetRoot()->Clone();
@@ -1065,9 +1195,11 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 
 	{
 		std::vector<UIStyleRule> combinedRules;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const StyleSheetSession& styleSession : nextSession.styleSheets)
 		{
 			const std::size_t orderOffset = combinedRules.size();
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const UIStyleRule& rule : styleSession.rules)
 			{
 				UIStyleRule copiedRule = rule;
@@ -1089,6 +1221,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 	m_NewSelectorBuffer[0] = '\0';
 	QueuePreviewRefresh();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_StatusMessage.empty())
 	{
 		m_StatusMessage = "Loaded the selected UIComponent into the builder.";
@@ -1098,6 +1231,7 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 	return true;
 }
 
+// UIBuilderWindow::CreateNewDocumentInternal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::CreateNewDocumentInternal()
 {
 	m_StatusMessage.clear();
@@ -1125,6 +1259,7 @@ void UIBuilderWindow::CreateNewDocumentInternal()
 	nextSession.styleSheets.front().attached = true;
 	const auto appendRule = [&](std::string_view selectorText, const auto& configureRule) {
 		UIStyleRule rule;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!m_Parser.TryParseSelector(selectorText, rule))
 		{
 			return;
@@ -1178,6 +1313,7 @@ void UIBuilderWindow::CreateNewDocumentInternal()
 	m_StatusMessage = "Created a new sample UI document. Double-click a .tuiml asset to edit a saved file.";
 }
 
+// UIBuilderWindow::SaveWorkingDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UIBuilderWindow::SaveWorkingDocument()
 {
 	if (!m_DocumentSession.root)
@@ -1187,6 +1323,7 @@ bool UIBuilderWindow::SaveWorkingDocument()
 	}
 
 	std::filesystem::path markupPath = GetMarkupAssetPath();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (markupPath.empty())
 	{
 		m_StatusMessage = "Open a .tuiml asset from the Project Browser before saving.";
@@ -1198,6 +1335,7 @@ bool UIBuilderWindow::SaveWorkingDocument()
 	std::filesystem::create_directories(resolvedMarkupPath.parent_path());
 	std::vector<std::filesystem::path> savedStylePaths;
 	std::size_t writtenStyleSheetCount = 0;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (StyleSheetSession& styleSession : m_DocumentSession.styleSheets)
 	{
 		if (styleSession.removeOnNextSave && !styleSession.internalPath.empty())
@@ -1210,11 +1348,13 @@ bool UIBuilderWindow::SaveWorkingDocument()
 		}
 
 		const bool shouldWriteStyleSheet = styleSession.attached || !styleSession.rules.empty();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!shouldWriteStyleSheet)
 		{
 			continue;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (styleSession.internalPath.empty())
 		{
 			styleSession.internalPath = NormalizeToAssetRelativePath(assetRoot, SuggestNewStyleSheetPath());
@@ -1224,6 +1364,7 @@ bool UIBuilderWindow::SaveWorkingDocument()
 		std::filesystem::create_directories(resolvedStylePath.parent_path());
 
 		std::ofstream styleOutput(resolvedStylePath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!styleOutput)
 		{
 			m_StatusMessage = "Failed to open the stylesheet file for writing.";
@@ -1238,6 +1379,7 @@ bool UIBuilderWindow::SaveWorkingDocument()
 	}
 
 	m_DocumentSession.root->styleSheetSources.clear();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const std::filesystem::path& savedStylePath : savedStylePaths)
 	{
 		m_DocumentSession.root->styleSheetSources.push_back(savedStylePath.generic_string());
@@ -1245,6 +1387,7 @@ bool UIBuilderWindow::SaveWorkingDocument()
 
 	const std::string serializedMarkup = UISystem::Instance().SerializeMarkup(m_DocumentSession.root);
 	std::ofstream markupOutput(resolvedMarkupPath);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!markupOutput)
 	{
 		m_StatusMessage = "Failed to open the markup file for writing.";
@@ -1254,10 +1397,12 @@ bool UIBuilderWindow::SaveWorkingDocument()
 	markupOutput << serializedMarkup;
 	markupOutput.close();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_DocumentSession.sceneEntity != entt::null)
 	{
 		if (auto object = ObjectManager::instance().getObject(m_DocumentSession.sceneEntity))
 		{
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (UIComponent* component = object->getComponent<UIComponent>())
 			{
 				// UIComponent now points only at the authored .tuiml asset. Any
@@ -1272,6 +1417,7 @@ bool UIBuilderWindow::SaveWorkingDocument()
 
 	m_DocumentSession.internalPath = NormalizeToAssetRelativePath(assetRoot, resolvedMarkupPath);
 	m_DocumentSession.dirty = false;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (StyleSheetSession& styleSession : m_DocumentSession.styleSheets)
 	{
 		styleSession.dirty = false;
@@ -1287,6 +1433,7 @@ bool UIBuilderWindow::SaveWorkingDocument()
 					&& !styleSession.removeOnNextSave;
 			}),
 		m_DocumentSession.styleSheets.end());
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_WorkspaceState.selectedStyleSheetIndex >= static_cast<int>(m_DocumentSession.styleSheets.size()))
 	{
 		m_WorkspaceState.selectedStyleSheetIndex = m_DocumentSession.styleSheets.empty()
@@ -1303,9 +1450,11 @@ bool UIBuilderWindow::SaveWorkingDocument()
 	return true;
 }
 
+// UIBuilderWindow::DetachStyleSheetSession is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::DetachStyleSheetSession()
 {
 	StyleSheetSession* styleSession = GetSelectedStyleSheetSession();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (styleSession == nullptr)
 	{
 		m_StatusMessage = "Select a stylesheet to detach.";
@@ -1323,9 +1472,11 @@ void UIBuilderWindow::DetachStyleSheetSession()
 	RefreshSessionDisplayNames();
 }
 
+// UIBuilderWindow::AttachSiblingStyleSheet is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::AttachSiblingStyleSheet()
 {
 	const std::filesystem::path markupPath = ResolveAuthoredPath(m_DocumentSession.internalPath);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (markupPath.empty())
 	{
 		m_StatusMessage = "Save or open a .tuiml asset before attaching a sibling stylesheet.";
@@ -1333,6 +1484,7 @@ void UIBuilderWindow::AttachSiblingStyleSheet()
 	}
 
 	const std::filesystem::path resolvedStylePath = InferStylePathFromMarkup(markupPath);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(resolvedStylePath))
 	{
 		m_StatusMessage = "No sibling .tuss stylesheet was found next to the current .tuiml asset.";
@@ -1341,9 +1493,11 @@ void UIBuilderWindow::AttachSiblingStyleSheet()
 	AttachStyleSheetAsset(NormalizeToAssetRelativePath(ResourceManager::Instance().GetAssetRoot(), resolvedStylePath));
 }
 
+// UIBuilderWindow::RequestCreateStyleSheetAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::RequestCreateStyleSheetAsset()
 {
 	const std::filesystem::path assetRoot = ResourceManager::Instance().GetAssetRoot();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (assetRoot.empty())
 	{
 		m_StatusMessage = "Open a project before creating a stylesheet asset.";
@@ -1351,6 +1505,7 @@ void UIBuilderWindow::RequestCreateStyleSheetAsset()
 	}
 
 	std::filesystem::path suggestedPath = SuggestNewStyleSheetPath();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (suggestedPath.empty())
 	{
 		// New documents do not have a saved .tuiml path yet, so fall back to a
@@ -1379,6 +1534,7 @@ void UIBuilderWindow::RequestCreateStyleSheetAsset()
 		config);
 }
 
+// UIBuilderWindow::BeginPrompt is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::BeginPrompt(UIBuilderPendingPrompt kind, const std::filesystem::path& markupPath, entt::entity sceneEntity)
 {
 	m_PromptState.kind = kind;
@@ -1389,18 +1545,22 @@ void UIBuilderWindow::BeginPrompt(UIBuilderPendingPrompt kind, const std::filesy
 	m_ShouldOpenPromptPopup = true;
 }
 
+// UIBuilderWindow::ClearPrompt is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::ClearPrompt()
 {
 	m_PromptState = {};
 	m_ShouldOpenPromptPopup = false;
 }
 
+// UIBuilderWindow::ReloadCurrentSessionFromSource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::ReloadCurrentSessionFromSource()
 {
 	SetVisible(true);
+	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (m_DocumentSession.entryContext)
 	{
 	case UIBuilderEntryContext::AssetBrowser:
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!m_DocumentSession.internalPath.empty())
 		{
 			OpenMarkupDocumentInternal(m_DocumentSession.internalPath);
@@ -1416,11 +1576,13 @@ void UIBuilderWindow::ReloadCurrentSessionFromSource()
 	}
 }
 
+// UIBuilderWindow::RestoreCleanSessionAfterCloseDiscard is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::RestoreCleanSessionAfterCloseDiscard()
 {
 	switch (m_DocumentSession.entryContext)
 	{
 	case UIBuilderEntryContext::AssetBrowser:
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!m_DocumentSession.internalPath.empty())
 		{
 			OpenMarkupDocumentInternal(m_DocumentSession.internalPath);
@@ -1428,6 +1590,7 @@ void UIBuilderWindow::RestoreCleanSessionAfterCloseDiscard()
 		}
 		break;
 	case UIBuilderEntryContext::SceneComponent:
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_DocumentSession.sceneEntity != entt::null)
 		{
 			LoadSelectedComponentInternal(m_DocumentSession.sceneEntity);
@@ -1442,6 +1605,7 @@ void UIBuilderWindow::RestoreCleanSessionAfterCloseDiscard()
 	CreateNewDocumentInternal();
 }
 
+// UIBuilderWindow::CheckForExternalChanges is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::CheckForExternalChanges()
 {
 	if (m_PromptState.kind != UIBuilderPendingPrompt::None)
@@ -1456,11 +1620,13 @@ void UIBuilderWindow::CheckForExternalChanges()
 		&& (!currentMarkupRevision.has_value() || *currentMarkupRevision != *m_DocumentSession.revisionStamp);
 
 	bool styleChanged = false;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const StyleSheetSession& styleSession : m_DocumentSession.styleSheets)
 	{
 		const std::optional<std::filesystem::file_time_type> currentStyleRevision = TryGetLastWriteTime(ResolveAuthoredPath(styleSession.internalPath));
 		const bool currentSheetChanged = styleSession.revisionStamp.has_value()
 			&& (!currentStyleRevision.has_value() || *currentStyleRevision != *styleSession.revisionStamp);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (currentSheetChanged)
 		{
 			styleChanged = true;
@@ -1468,6 +1634,7 @@ void UIBuilderWindow::CheckForExternalChanges()
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (markupChanged || styleChanged)
 	{
 		m_PromptState.kind = UIBuilderPendingPrompt::ExternalReload;
@@ -1477,6 +1644,7 @@ void UIBuilderWindow::CheckForExternalChanges()
 	}
 }
 
+// UIBuilderWindow::RebuildPreviewIfNeeded is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::RebuildPreviewIfNeeded(const ImVec2& previewSize)
 {
 	if (!m_DocumentSession.root)
@@ -1487,6 +1655,7 @@ void UIBuilderWindow::RebuildPreviewIfNeeded(const ImVec2& previewSize)
 	}
 
 	const glm::vec2 viewportSize(previewSize.x, previewSize.y);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_PreviewDirty
 		&& std::abs(m_WorkspaceState.previewViewport.x - viewportSize.x) < 0.01f
 		&& std::abs(m_WorkspaceState.previewViewport.y - viewportSize.y) < 0.01f)
@@ -1503,6 +1672,7 @@ void UIBuilderWindow::RebuildPreviewIfNeeded(const ImVec2& previewSize)
 	m_PreviewDirty = false;
 }
 
+// UIBuilderWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::OnGui()
 {
 	if (ImGui::Button("Load Selected UI"))
@@ -1510,11 +1680,13 @@ void UIBuilderWindow::OnGui()
 		RequestLoadSelectedComponent();
 	}
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("New Document"))
 	{
 		RequestNewDocument();
 	}
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Save"))
 	{
 		SaveWorkingDocument();
@@ -1524,11 +1696,13 @@ void UIBuilderWindow::OnGui()
 	ImGui::SameLine();
 	ImGui::TextDisabled("StyleSheets: %zu", m_DocumentSession.styleSheets.size());
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_StatusMessage.empty())
 	{
 		ImGui::TextWrapped("%s", m_StatusMessage.c_str());
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_DocumentSession.root)
 	{
 		CreateNewDocumentInternal();
@@ -1536,6 +1710,7 @@ void UIBuilderWindow::OnGui()
 
 	CheckForExternalChanges();
 	SyncSelectedElementHover();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_DocumentSession.root && m_DocumentSession.root->AdvanceAnimationRecursive(ImGui::GetIO().DeltaTime))
 	{
 		QueuePreviewRefresh();
@@ -1552,6 +1727,7 @@ void UIBuilderWindow::OnGui()
 	ImGui::BeginChild("UIBuilderHierarchyPanel", ImVec2(0.0f, 0.0f), true);
 	ImGui::TextUnformatted("Hierarchy");
 	ImGui::Separator();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_DocumentSession.root)
 	{
 		DrawHierarchyNode(m_DocumentSession.root);
@@ -1577,6 +1753,7 @@ void UIBuilderWindow::OnGui()
 
 	DrawPendingPromptModal();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_ShouldHideWindowNextFrame)
 	{
 		m_ShouldHideWindowNextFrame = false;
@@ -1585,18 +1762,21 @@ void UIBuilderWindow::OnGui()
 	}
 }
 
+// UIBuilderWindow::DrawLibraryPanel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::DrawLibraryPanel()
 {
 	ImGui::TextUnformatted("Library");
 	ImGui::Separator();
 
 	int selectedCategory = static_cast<int>(m_WorkspaceState.libraryCategory);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Combo("Category", &selectedCategory, kLibraryCategoryLabels.data(), static_cast<int>(kLibraryCategoryLabels.size())))
 	{
 		m_WorkspaceState.libraryCategory = static_cast<UIBuilderLibraryCategory>(selectedCategory);
 	}
 
 	const auto canShowType = [&](UIElementType type) {
+		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (m_WorkspaceState.libraryCategory)
 		{
 		case UIBuilderLibraryCategory::All: return true;
@@ -1610,11 +1790,13 @@ void UIBuilderWindow::DrawLibraryPanel()
 
 	const auto addElementFromLibrary = [&](UIElementType type) {
 		UIElement::Ptr parent = GetSelectedInsertionParent();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!parent)
 		{
 			parent = m_DocumentSession.root;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!parent)
 		{
 			return;
@@ -1627,18 +1809,22 @@ void UIBuilderWindow::DrawLibraryPanel()
 		MarkDocumentDirty("Added " + element->typeName + " from the Library.");
 	};
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (canShowType(UIElementType::VisualElement) && ImGui::Button("VisualElement", ImVec2(-1.0f, 0.0f)))
 	{
 		addElementFromLibrary(UIElementType::VisualElement);
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (canShowType(UIElementType::Label) && ImGui::Button("Label", ImVec2(-1.0f, 0.0f)))
 	{
 		addElementFromLibrary(UIElementType::Label);
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (canShowType(UIElementType::Button) && ImGui::Button("Button", ImVec2(-1.0f, 0.0f)))
 	{
 		addElementFromLibrary(UIElementType::Button);
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (canShowType(UIElementType::Image) && ImGui::Button("Image", ImVec2(-1.0f, 0.0f)))
 	{
 		addElementFromLibrary(UIElementType::Image);
@@ -1648,6 +1834,7 @@ void UIBuilderWindow::DrawLibraryPanel()
 	ImGui::TextDisabled("Selected parent: %s", GetSelectedInsertionParent() ? GetSelectedInsertionParent()->GetDisplayLabel().c_str() : "None");
 }
 
+// UIBuilderWindow::DrawHierarchyNode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::DrawHierarchyNode(const UIElement::Ptr& element)
 {
 	if (!element)
@@ -1662,11 +1849,13 @@ void UIBuilderWindow::DrawHierarchyNode(const UIElement::Ptr& element)
 		| ImGuiTreeNodeFlags_SpanAvailWidth;
 
 	const bool opened = ImGui::TreeNodeEx(static_cast<void*>(element.get()), flags, "%s", element->GetDisplayLabel().c_str());
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::IsItemClicked())
 	{
 		SetSelectedElement(element, UIBuilderPanelFocus::Hierarchy);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginDragDropSource())
 	{
 		const UIElement* payloadPointer = element.get();
@@ -1675,11 +1864,13 @@ void UIBuilderWindow::DrawHierarchyNode(const UIElement::Ptr& element)
 		ImGui::EndDragDropSource();
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginDragDropTarget())
 	{
 		if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("UIBUILDER_ELEMENT"))
 		{
 			const UIElement* draggedPointer = *static_cast<const UIElement* const*>(payload->Data);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (UIElement::Ptr draggedElement = FindElementByPointer(m_DocumentSession.root, draggedPointer))
 			{
 				if (draggedElement != element && draggedElement->ReparentTo(element))
@@ -1693,6 +1884,7 @@ void UIBuilderWindow::DrawHierarchyNode(const UIElement::Ptr& element)
 		ImGui::EndDragDropTarget();
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (opened)
 	{
 		for (const UIElement::Ptr& child : element->children)
@@ -1703,6 +1895,7 @@ void UIBuilderWindow::DrawHierarchyNode(const UIElement::Ptr& element)
 	}
 }
 
+// UIBuilderWindow::DrawPreviewPanel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::DrawPreviewPanel()
 {
 	ImGui::TextUnformatted("Preview");
@@ -1718,8 +1911,11 @@ void UIBuilderWindow::DrawPreviewPanel()
 	ImDrawList* drawList = ImGui::GetWindowDrawList();
 	drawList->AddRectFilled(previewMin, ImVec2(previewMin.x + previewSize.x, previewMin.y + previewSize.y), IM_COL32(20, 20, 20, 255), 4.0f);
 	drawList->PushClipRect(previewMin, ImVec2(previewMin.x + previewSize.x, previewMin.y + previewSize.y), true);
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (float y = 0.0f; y < previewSize.y; y += 16.0f) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (float x = 0.0f; x < previewSize.x; x += 16.0f) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if ((static_cast<int>(x / 16.0f) + static_cast<int>(y / 16.0f)) % 2 == 0) {
 				ImVec2 pMin(previewMin.x + x, previewMin.y + y);
 				ImVec2 pMax(pMin.x + 16.0f, pMin.y + 16.0f);
@@ -1732,9 +1928,11 @@ void UIBuilderWindow::DrawPreviewPanel()
 	RebuildPreviewIfNeeded(previewSize);
 	DrawUIBatchPreview(m_PreviewBatch, drawList, previewMin, previewSize);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (UIElement::Ptr selected = GetSelectedWorkingElement())
 	{
 		std::vector<std::size_t> selectedPath;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (BuildElementPath(m_DocumentSession.root, selected.get(), selectedPath))
 		{
 			if (UIElement::Ptr previewSelected = ResolveElementAtPath(m_PreviewRoot, selectedPath))
@@ -1749,12 +1947,14 @@ void UIBuilderWindow::DrawPreviewPanel()
 	}
 
 	ImGui::InvisibleButton("UIBuilderPreviewCanvas", previewSize);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_PreviewRoot)
 	{
 		const ImVec2 mousePosition = ImGui::GetMousePos();
 		const glm::vec2 localPoint(mousePosition.x - previewMin.x, mousePosition.y - previewMin.y);
 		std::vector<std::size_t> currentPath;
 		std::vector<std::size_t> hitPath;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (HitTestPreviewElement(m_PreviewRoot, localPoint, currentPath, hitPath))
 		{
 			if (UIElement::Ptr resolved = ResolveElementAtPath(m_DocumentSession.root, hitPath))
@@ -1765,51 +1965,64 @@ void UIBuilderWindow::DrawPreviewPanel()
 	}
 }
 
+// UIBuilderWindow::DrawStyleSheetPanel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::DrawStyleSheetPanel()
 {
 	ImGui::Text("StyleSheets - %zu attached", m_DocumentSession.styleSheets.size());
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("+"))
 	{
 		ImGui::OpenPopup("AddStyleSelectorPopup");
 	}
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Create"))
 	{
 		RequestCreateStyleSheetAsset();
 	}
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Attach Sibling"))
 	{
 		AttachSiblingStyleSheet();
 	}
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Detach") && GetSelectedStyleSheetSession() != nullptr)
 	{
 		BeginPrompt(UIBuilderPendingPrompt::DetachStyleSheet);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (const StyleSheetSession* selectedSession = GetSelectedStyleSheetSession())
 	{
 		ImGui::SameLine();
 		ImGui::TextDisabled("Active: %s", selectedSession->displayName.c_str());
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginPopup("AddStyleSelectorPopup"))
 	{
 		if (ImGui::MenuItem(":root")) { CreateStyleRule(":root"); }
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::MenuItem("VisualElement")) { CreateStyleRule("VisualElement"); }
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::MenuItem("Button")) { CreateStyleRule("Button"); }
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::MenuItem("Label")) { CreateStyleRule("Label"); }
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::MenuItem("Image")) { CreateStyleRule("Image"); }
 
 		if (UIElement::Ptr selectedElement = GetSelectedWorkingElement())
 		{
 			ImGui::Separator();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!selectedElement->id.empty() && ImGui::MenuItem(("#" + selectedElement->id).c_str()))
 			{
 				CreateStyleRule("#" + selectedElement->id);
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!selectedElement->classList.empty() && ImGui::MenuItem(("." + selectedElement->classList.front()).c_str()))
 			{
 				CreateStyleRule("." + selectedElement->classList.front());
@@ -1819,6 +2032,7 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 	}
 
 	ImGui::SetNextItemWidth(-1.0f);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::InputTextWithHint("##NewSelector", "Add new selector...", m_NewSelectorBuffer, sizeof(m_NewSelectorBuffer), ImGuiInputTextFlags_EnterReturnsTrue))
 	{
 		if (CreateStyleRule(m_NewSelectorBuffer))
@@ -1827,17 +2041,20 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGuiFileDialog::Instance()->Display(kCreateStyleSheetDialogKey))
 	{
 		if (ImGuiFileDialog::Instance()->IsOk())
 		{
 			const std::filesystem::path assetRoot = ResourceManager::Instance().GetAssetRoot();
 			std::filesystem::path selectedPath = ImGuiFileDialog::Instance()->GetFilePathName(IGFD_ResultMode_AddIfNoFileExt);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (selectedPath.extension() != ".tuss")
 			{
 				selectedPath.replace_extension(".tuss");
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!IsPathInsideRoot(assetRoot, selectedPath))
 			{
 				m_StatusMessage = "Create stylesheets inside the project's asset folder.";
@@ -1845,6 +2062,7 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 			else
 			{
 				const std::filesystem::path normalizedStylePath = NormalizeToAssetRelativePath(assetRoot, selectedPath);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (std::filesystem::exists(selectedPath))
 				{
 					AttachStyleSheetAsset(normalizedStylePath);
@@ -1853,6 +2071,7 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 				{
 					std::filesystem::create_directories(selectedPath.parent_path());
 					std::ofstream styleOutput(selectedPath);
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (!styleOutput)
 					{
 						m_StatusMessage = "Failed to create the stylesheet file.";
@@ -1862,6 +2081,7 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 						styleOutput << m_Parser.SerializeStyles(std::vector<UIStyleRule>{});
 						styleOutput.close();
 
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (AttachStyleSheetAsset(normalizedStylePath))
 						{
 							m_StatusMessage = "Created stylesheet: " + selectedPath.filename().string();
@@ -1875,15 +2095,18 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 	}
 
 	ImGui::BeginChild("StyleSheetSelectorList", ImVec2(0.0f, 150.0f), true);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_DocumentSession.styleSheets.empty())
 	{
 		ImGui::TextDisabled("No stylesheets attached. Create one, attach a sibling, or drag a .tuss asset here.");
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginDragDropTarget())
 		{
 			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_TUSS"))
 			{
 				IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 				const TerraEngine::UUID assetGuid = *static_cast<const TerraEngine::UUID*>(payload->Data);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (const AssetMetadata* meta = AssetDatabase::Instance().FindAssetByGuid(assetGuid))
 				{
 					AttachStyleSheetAsset(meta->sourcePath);
@@ -1895,17 +2118,20 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 		return;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t styleSheetIndex = 0; styleSheetIndex < m_DocumentSession.styleSheets.size(); ++styleSheetIndex)
 	{
 		StyleSheetSession& styleSession = m_DocumentSession.styleSheets[styleSheetIndex];
 		ImGui::PushID(static_cast<int>(styleSheetIndex));
 		ImGuiTreeNodeFlags treeFlags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_WorkspaceState.selectedStyleSheetIndex == static_cast<int>(styleSheetIndex))
 		{
 			treeFlags |= ImGuiTreeNodeFlags_Selected;
 		}
 
 		const bool sheetOpen = ImGui::TreeNodeEx("##StyleSheetTree", treeFlags, "%s", styleSession.displayName.c_str());
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::IsItemClicked())
 		{
 			m_WorkspaceState.selectedStyleSheetIndex = static_cast<int>(styleSheetIndex);
@@ -1913,11 +2139,13 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 			m_WorkspaceState.activePanel = UIBuilderPanelFocus::StyleSheets;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!styleSession.loadError.empty())
 		{
 			ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", styleSession.loadError.c_str());
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (sheetOpen)
 		{
 			if (styleSession.rules.empty())
@@ -1925,6 +2153,7 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 				ImGui::TextDisabled("No selectors in this stylesheet yet.");
 			}
 
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::size_t index = 0; index < styleSession.rules.size(); ++index)
 			{
 				const UIStyleRule& rule = styleSession.rules[index];
@@ -1935,27 +2164,32 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 					: ImVec4(1.0f, 0.75f, 0.35f, 1.0f);
 
 				ImGui::PushStyleColor(ImGuiCol_Text, ruleColor);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::Selectable(rule.selectorText.c_str(), isSelected))
 				{
 					SelectStyleRule(static_cast<int>(styleSheetIndex), static_cast<int>(index));
 				}
 				ImGui::PopStyleColor();
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::IsItemHovered() && !rule.validationMessage.empty())
 				{
 					ImGui::SetTooltip("%s", rule.validationMessage.c_str());
 				}
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::BeginPopupContextItem())
 				{
 					if (ImGui::MenuItem("Delete Selector"))
 					{
 						styleSession.rules.erase(styleSession.rules.begin() + static_cast<std::ptrdiff_t>(index));
+						// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 						for (std::size_t reorderIndex = 0; reorderIndex < styleSession.rules.size(); ++reorderIndex)
 						{
 							styleSession.rules[reorderIndex].order = reorderIndex;
 						}
 
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (m_WorkspaceState.selectedStyleSheetIndex == static_cast<int>(styleSheetIndex)
 							&& m_WorkspaceState.selectedSelectorIndex >= static_cast<int>(styleSession.rules.size()))
 						{
@@ -1976,12 +2210,14 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 		ImGui::PopID();
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginDragDropTarget())
 	{
 		if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_TUSS"))
 		{
 			IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 			const TerraEngine::UUID assetGuid = *static_cast<const TerraEngine::UUID*>(payload->Data);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (const AssetMetadata* meta = AssetDatabase::Instance().FindAssetByGuid(assetGuid))
 			{
 				AttachStyleSheetAsset(meta->sourcePath);
@@ -1992,6 +2228,7 @@ void UIBuilderWindow::DrawStyleSheetPanel()
 	ImGui::EndChild();
 }
 
+// UIBuilderWindow::DrawStyleEditor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 {
 	bool changed = false;
@@ -1999,6 +2236,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 
 	const auto unsetOptional = [&](const char* buttonId, auto& optionalValue) {
 		ImGui::SameLine();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::SmallButton(buttonId) && optionalValue.has_value())
 		{
 			optionalValue.reset();
@@ -2020,6 +2258,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 	int justifyContentIndex = JustifyContentToIndex(style.justifyContent);
 	int alignItemsIndex = AlignItemsToIndex(style.alignItems);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::DragFloat("Width", &width, 1.0f, 0.0f, 4096.0f))
 	{
 		style.width = UIValue::Points(width);
@@ -2027,6 +2266,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 	}
 	unsetOptional("Unset##Width", style.width);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::DragFloat("Height", &height, 1.0f, 0.0f, 4096.0f))
 	{
 		style.height = UIValue::Points(height);
@@ -2034,6 +2274,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 	}
 	unsetOptional("Unset##Height", style.height);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Combo("Flex Direction", &flexDirectionIndex, kFlexDirectionLabels.data(), static_cast<int>(kFlexDirectionLabels.size())))
 	{
 		if (flexDirectionIndex == 0)
@@ -2046,6 +2287,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 		}
 		changed = true;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Combo("Justify Content", &justifyContentIndex, kJustifyContentLabels.data(), static_cast<int>(kJustifyContentLabels.size())))
 	{
 		switch (justifyContentIndex)
@@ -2059,6 +2301,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 		}
 		changed = true;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Combo("Align Items", &alignItemsIndex, kAlignItemsLabels.data(), static_cast<int>(kAlignItemsLabels.size())))
 	{
 		switch (alignItemsIndex)
@@ -2072,6 +2315,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 		changed = true;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::DragFloat("Font Size", &fontSize, 1.0f, 8.0f, 128.0f))
 	{
 		style.fontSize = fontSize;
@@ -2079,6 +2323,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 	}
 	unsetOptional("Unset##FontSize", style.fontSize);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::DragFloat("Corner Radius", &borderRadius, 0.5f, 0.0f, 64.0f))
 	{
 		style.borderRadius = borderRadius;
@@ -2086,6 +2331,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 	}
 	unsetOptional("Unset##CornerRadius", style.borderRadius);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::DragFloat("Opacity", &opacity, 0.01f, 0.0f, 1.0f))
 	{
 		style.opacity = opacity;
@@ -2093,6 +2339,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 	}
 	unsetOptional("Unset##Opacity", style.opacity);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::ColorEdit4("Background", &backgroundColor.x))
 	{
 		style.backgroundColor = backgroundColor;
@@ -2100,6 +2347,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 	}
 	unsetOptional("Unset##Background", style.backgroundColor);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::ColorEdit4("Foreground", &foregroundColor.x))
 	{
 		style.color = foregroundColor;
@@ -2107,36 +2355,42 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 	}
 	unsetOptional("Unset##Foreground", style.color);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::DragFloat2("Translate", &translate.x, 1.0f, -4096.0f, 4096.0f))
 	{
 		style.transform.translate = translate;
 		changed = true;
 	}
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::SmallButton("Unset##Translate") && style.transform.translate.has_value())
 	{
 		style.transform.translate.reset();
 		changed = true;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::DragFloat("Scale", &scale, 0.01f, 0.01f, 16.0f))
 	{
 		style.transform.scale = scale;
 		changed = true;
 	}
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::SmallButton("Unset##Scale") && style.transform.scale.has_value())
 	{
 		style.transform.scale.reset();
 		changed = true;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::DragFloat("Rotation", &rotation, 1.0f, -360.0f, 360.0f))
 	{
 		style.transform.rotationDegrees = rotation;
 		changed = true;
 	}
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::SmallButton("Unset##Rotation") && style.transform.rotationDegrees.has_value())
 	{
 		style.transform.rotationDegrees.reset();
@@ -2147,6 +2401,7 @@ bool UIBuilderWindow::DrawStyleEditor(UIStyle& style)
 	return changed;
 }
 
+// UIBuilderWindow::DrawElementInspector is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 {
 	ImGui::Text("Inspector - %s", selected->GetDisplayLabel().c_str());
@@ -2164,6 +2419,7 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 	ImGui::TextUnformatted("Attributes");
 	ImGui::Separator();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::InputText("Name", idBuffer, sizeof(idBuffer)))
 	{
 		selected->id = idBuffer;
@@ -2171,6 +2427,7 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 		selected->MarkDirty();
 		MarkDocumentDirty("Updated the selected element name.");
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::InputText("Text", textBuffer, sizeof(textBuffer)))
 	{
 		selected->text = textBuffer;
@@ -2178,6 +2435,7 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 		MarkDocumentDirty("Updated the selected element text.");
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selected->type == UIElementType::Image)
 	{
 		if (ImGui::InputText("Image Source", sourceBuffer, sizeof(sourceBuffer)))
@@ -2187,12 +2445,14 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 			MarkDocumentDirty("Updated the selected image source.");
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginDragDropTarget())
 		{
 			if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_TEXTURE"))
 			{
 				IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 				const TerraEngine::UUID assetGuid = *static_cast<const TerraEngine::UUID*>(payload->Data);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (const AssetMetadata* meta = AssetDatabase::Instance().FindAssetByGuid(assetGuid))
 				{
 					selected->source = meta->sourcePath.filename().string();
@@ -2208,6 +2468,7 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 	ImGui::TextUnformatted("Element Actions");
 	ImGui::Separator();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selected->parent != nullptr && ImGui::Button("Duplicate"))
 	{
 		UIElement::Ptr clone = selected->Clone();
@@ -2223,9 +2484,11 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 		MarkDocumentDirty("Duplicated the selected element.");
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selected->parent != nullptr)
 	{
 		ImGui::SameLine();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Remove"))
 		{
 			UIElement::Ptr parent = selected->parent->shared_from_this();
@@ -2237,10 +2500,12 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 		}
 
 		ImGui::SameLine();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Move Up"))
 		{
 			UIElement::Ptr parent = selected->parent->shared_from_this();
 			const auto iterator = std::find(parent->children.begin(), parent->children.end(), selected);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (iterator != parent->children.begin() && iterator != parent->children.end())
 			{
 				const std::size_t index = static_cast<std::size_t>(std::distance(parent->children.begin(), iterator));
@@ -2251,10 +2516,12 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 		}
 
 		ImGui::SameLine();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Move Down"))
 		{
 			UIElement::Ptr parent = selected->parent->shared_from_this();
 			const auto iterator = std::find(parent->children.begin(), parent->children.end(), selected);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (iterator != parent->children.end() && (iterator + 1) != parent->children.end())
 			{
 				const std::size_t index = static_cast<std::size_t>(std::distance(parent->children.begin(), iterator));
@@ -2264,9 +2531,11 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (selected->parent->parent != nullptr && ImGui::Button("Promote To Parent"))
 		{
 			UIElement::Ptr newParent = selected->parent->parent->shared_from_this();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (selected->ReparentTo(newParent))
 			{
 				ApplyWorkingStyles();
@@ -2280,6 +2549,7 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 	ImGui::Separator();
 
 	ImGui::TextDisabled("Active StyleSheet: %s", GetStyleSheetDisplayName().c_str());
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::InputTextWithHint("Style Class List", "Add style classes...", classBuffer, sizeof(classBuffer)))
 	{
 		selected->SetClassListFromString(classBuffer);
@@ -2289,12 +2559,15 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 	}
 
 	const auto findClassSelectorIndex = [&](std::string_view className) -> MatchingStyleRuleReference {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t styleSheetIndex = 0; styleSheetIndex < m_DocumentSession.styleSheets.size(); ++styleSheetIndex)
 		{
 			const StyleSheetSession& styleSession = m_DocumentSession.styleSheets[styleSheetIndex];
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::size_t ruleIndex = 0; ruleIndex < styleSession.rules.size(); ++ruleIndex)
 			{
 				const UIStyleRule& rule = styleSession.rules[ruleIndex];
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (rule.validity == UISelectorValidityState::Valid
 					&& rule.selectorKind == UISelectorKind::Class
 					&& rule.pseudoState == UIPseudoState::None
@@ -2311,11 +2584,13 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 		return {};
 	};
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!selected->classList.empty())
 	{
 		ImGui::TextDisabled("Style Class Labels");
 		// Unity exposes class labels directly from the element inspector so the
 		// author can jump into the owning selector instead of editing a stale one.
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t classIndex = 0; classIndex < selected->classList.size(); ++classIndex)
 		{
 			if (classIndex > 0)
@@ -2332,6 +2607,7 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 			ImGui::SmallButton(classLabel.c_str());
 			ImGui::PopStyleColor(3);
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::IsItemHovered())
 			{
 				if (classHasSelector)
@@ -2344,12 +2620,14 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 				}
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			{
 				if (classHasSelector)
 				{
 					SelectStyleRule(classSelectorIndex.styleSheetIndex, classSelectorIndex.ruleIndex);
 				}
+				// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 				else if (CreateStyleRule(classLabel))
 				{
 					m_StatusMessage = "Created selector " + classLabel + " from the selected element class.";
@@ -2364,12 +2642,14 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 
 	const std::vector<MatchingStyleRuleReference> matchingRuleIndices = CollectMatchingRuleIndices(*selected);
 	ImGui::TextDisabled("Matching Selectors");
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (matchingRuleIndices.empty())
 	{
 		ImGui::TextDisabled("No selectors from the attached stylesheets currently match this element.");
 	}
 	else
 	{
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const MatchingStyleRuleReference& matchingRule : matchingRuleIndices)
 		{
 			const StyleSheetSession& styleSession = m_DocumentSession.styleSheets[static_cast<std::size_t>(matchingRule.styleSheetIndex)];
@@ -2378,6 +2658,7 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 				&& matchingRule.styleSheetIndex == m_WorkspaceState.selectedStyleSheetIndex
 				&& matchingRule.ruleIndex == m_WorkspaceState.selectedSelectorIndex;
 			const std::string selectorLabel = styleSession.displayName + " / " + rule.selectorText;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::Selectable(selectorLabel.c_str(), isSelectedRule))
 			{
 				SelectStyleRule(matchingRule.styleSheetIndex, matchingRule.ruleIndex);
@@ -2390,6 +2671,7 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 	ImGui::Separator();
 	// Element selections edit inline styles so stylesheet changes only happen
 	// after the user explicitly selects a USS selector.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (DrawStyleEditor(selected->inlineStyle))
 	{
 		ApplyWorkingStyles();
@@ -2398,6 +2680,7 @@ void UIBuilderWindow::DrawElementInspector(const UIElement::Ptr& selected)
 	}
 }
 
+// UIBuilderWindow::DrawSelectorInspector is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::DrawSelectorInspector(UIStyleRule& selectedRule)
 {
 	ImGui::Text("Inspector - %s", selectedRule.selectorText.c_str());
@@ -2408,14 +2691,17 @@ void UIBuilderWindow::DrawSelectorInspector(UIStyleRule& selectedRule)
 
 	char selectorBuffer[128];
 	CopyStringToBuffer(selectedRule.selectorText, selectorBuffer, sizeof(selectorBuffer));
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectedRule.validity != UISelectorValidityState::Valid && !selectedRule.validationMessage.empty())
 	{
 		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "%s", selectedRule.validationMessage.c_str());
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::InputText("Selector", selectorBuffer, sizeof(selectorBuffer), ImGuiInputTextFlags_EnterReturnsTrue))
 	{
 		UIStyleRule parsedSelector;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_Parser.TryParseSelector(selectorBuffer, parsedSelector))
 		{
 			parsedSelector.style = selectedRule.style;
@@ -2437,6 +2723,7 @@ void UIBuilderWindow::DrawSelectorInspector(UIStyleRule& selectedRule)
 	ImGui::TextUnformatted("Styles");
 	ImGui::Separator();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (DrawStyleEditor(selectedRule.style))
 	{
 		ApplyWorkingStyles();
@@ -2444,10 +2731,12 @@ void UIBuilderWindow::DrawSelectorInspector(UIStyleRule& selectedRule)
 	}
 }
 
+// UIBuilderWindow::DrawInspector is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::DrawInspector()
 {
 	if (m_WorkspaceState.activePanel == UIBuilderPanelFocus::StyleSheets)
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (UIStyleRule* selectedRule = GetSelectedStyleRule())
 		{
 			DrawSelectorInspector(*selectedRule);
@@ -2456,6 +2745,7 @@ void UIBuilderWindow::DrawInspector()
 	}
 
 	UIElement::Ptr selected = GetSelectedWorkingElement();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!selected)
 	{
 		ImGui::TextUnformatted("Select a UI element from the hierarchy or preview.");
@@ -2465,6 +2755,7 @@ void UIBuilderWindow::DrawInspector()
 	DrawElementInspector(selected);
 }
 
+// UIBuilderWindow::SyncSelectedElementHover is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::SyncSelectedElementHover()
 {
 	if (!m_DocumentSession.root)
@@ -2473,12 +2764,14 @@ void UIBuilderWindow::SyncSelectedElementHover()
 	}
 
 	const auto clearRecursive = [](const auto& self, const UIElement::Ptr& element) -> void {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!element)
 		{
 			return;
 		}
 
 		element->SetHoverState(false);
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const UIElement::Ptr& child : element->children)
 		{
 			self(self, child);
@@ -2486,6 +2779,7 @@ void UIBuilderWindow::SyncSelectedElementHover()
 	};
 	clearRecursive(clearRecursive, m_DocumentSession.root);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_WorkspaceState.previewHover)
 	{
 		if (UIElement::Ptr selected = GetSelectedWorkingElement())
@@ -2496,6 +2790,7 @@ void UIBuilderWindow::SyncSelectedElementHover()
 	}
 }
 
+// UIBuilderWindow::DrawPendingPromptModal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UIBuilderWindow::DrawPendingPromptModal()
 {
 	if (m_ShouldOpenPromptPopup)
@@ -2504,11 +2799,13 @@ void UIBuilderWindow::DrawPendingPromptModal()
 		m_ShouldOpenPromptPopup = false;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ImGui::BeginPopupModal("UI Builder Pending Action", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
 		return;
 	}
 
+	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (m_PromptState.kind)
 	{
 	case UIBuilderPendingPrompt::CloseWindow:
@@ -2517,6 +2814,7 @@ void UIBuilderWindow::DrawPendingPromptModal()
 	case UIBuilderPendingPrompt::LoadSelectedComponent:
 		ImGui::TextWrapped("This action would discard unsaved UI Builder changes.");
 		ImGui::Separator();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Save", ImVec2(120.0f, 0.0f)))
 		{
 			if (SaveWorkingDocument())
@@ -2527,6 +2825,7 @@ void UIBuilderWindow::DrawPendingPromptModal()
 				const entt::entity pendingSceneEntity = m_PromptState.targetSceneEntity;
 				ClearPrompt();
 
+				// Dispatch by explicit engine state so each case documents one supported behavior.
 				switch (resolvedKind)
 				{
 				case UIBuilderPendingPrompt::CloseWindow:
@@ -2547,6 +2846,7 @@ void UIBuilderWindow::DrawPendingPromptModal()
 			}
 		}
 		ImGui::SameLine();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Discard", ImVec2(120.0f, 0.0f)))
 		{
 			ImGui::CloseCurrentPopup();
@@ -2555,6 +2855,7 @@ void UIBuilderWindow::DrawPendingPromptModal()
 			const entt::entity pendingSceneEntity = m_PromptState.targetSceneEntity;
 			ClearPrompt();
 
+			// Dispatch by explicit engine state so each case documents one supported behavior.
 			switch (resolvedKind)
 			{
 			case UIBuilderPendingPrompt::CloseWindow:
@@ -2575,6 +2876,7 @@ void UIBuilderWindow::DrawPendingPromptModal()
 			}
 		}
 		ImGui::SameLine();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
 		{
 			ImGui::CloseCurrentPopup();
@@ -2585,7 +2887,9 @@ void UIBuilderWindow::DrawPendingPromptModal()
 
 	case UIBuilderPendingPrompt::ExternalReload:
 		ImGui::TextWrapped("The current UI document changed on disk while the builder was open.");
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_PromptState.markupExternallyChanged) { ImGui::BulletText("The .tuiml document changed externally."); }
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_PromptState.styleExternallyChanged) { ImGui::BulletText("One or more attached .tuss stylesheets changed externally."); }
 		ImGui::Separator();
 		if (ImGui::Button("Reload", ImVec2(120.0f, 0.0f)))
@@ -2595,6 +2899,7 @@ void UIBuilderWindow::DrawPendingPromptModal()
 			ReloadCurrentSessionFromSource();
 		}
 		ImGui::SameLine();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Keep Current", ImVec2(120.0f, 0.0f)))
 		{
 			ImGui::CloseCurrentPopup();
@@ -2603,6 +2908,7 @@ void UIBuilderWindow::DrawPendingPromptModal()
 			ClearPrompt();
 		}
 		ImGui::SameLine();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
 		{
 			ImGui::CloseCurrentPopup();
@@ -2614,6 +2920,7 @@ void UIBuilderWindow::DrawPendingPromptModal()
 		ImGui::TextWrapped("Detach the current stylesheet from this document?");
 		ImGui::TextWrapped("The detached stylesheet reference will be removed on the next save so reopened .tuiml assets stay detached.");
 		ImGui::Separator();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Detach", ImVec2(120.0f, 0.0f)))
 		{
 			ImGui::CloseCurrentPopup();
@@ -2621,6 +2928,7 @@ void UIBuilderWindow::DrawPendingPromptModal()
 			ClearPrompt();
 		}
 		ImGui::SameLine();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
 		{
 			ImGui::CloseCurrentPopup();

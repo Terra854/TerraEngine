@@ -1,3 +1,5 @@
+// Profiler.cpp — Contains the Profiler file-specific types, helper functions, and module integration code implementation for runtime profiling sessions, timing markers, capture serialization, and scope helpers.
+
 #include "Profiling/Profiler.h"
 
 #include "Renderer/RenderTypes.h"
@@ -12,6 +14,7 @@ namespace TerraEngine::Profiling
 {
 namespace
 {
+// struct ThreadSampleState groups related state and operations so callers have one documented contract.
 struct ThreadSampleState
 {
 	std::vector<ProfilerSample> openSamples;
@@ -19,6 +22,7 @@ struct ThreadSampleState
 
 thread_local ThreadSampleState t_sampleState;
 
+// CurrentThreadLabel is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string CurrentThreadLabel()
 {
 	std::ostringstream stream;
@@ -26,10 +30,12 @@ std::string CurrentThreadLabel()
 	return stream.str();
 }
 
+// FindModule is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ProfilerModuleSummary* FindModule(std::vector<ProfilerModuleSummary>& modules, ProfilerModuleId moduleId)
 {
 	for (ProfilerModuleSummary& module : modules)
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (module.moduleId == moduleId)
 		{
 			return &module;
@@ -38,10 +44,12 @@ ProfilerModuleSummary* FindModule(std::vector<ProfilerModuleSummary>& modules, P
 	return nullptr;
 }
 
+// AddOrReplaceMetric is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AddOrReplaceMetric(ProfilerModuleSummary& module, std::string name, double value, std::string unit)
 {
 	for (ProfilerMetric& metric : module.metrics)
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metric.name == name)
 		{
 			metric.value = value;
@@ -53,17 +61,20 @@ void AddOrReplaceMetric(ProfilerModuleSummary& module, std::string name, double 
 }
 }
 
+// Profiler::Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 Profiler& Profiler::Instance()
 {
 	static Profiler profiler;
 	return profiler;
 }
 
+// Profiler::StartRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const ProfilerCaptureSettings& requestedSettings)
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	settings = requestedSettings;
 	settings.captureMode = ProfilerCaptureMode::LiveRolling;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!AnyModuleEnabled(settings))
 	{
 		settings.cpuEngineEnabled = true;
@@ -89,9 +100,11 @@ void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const Pro
 	state = ProfilerSessionState::Recording;
 }
 
+// Profiler::PauseRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::PauseRecording()
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state == ProfilerSessionState::Recording)
 	{
 		state = ProfilerSessionState::Paused;
@@ -99,9 +112,11 @@ void Profiler::PauseRecording()
 	}
 }
 
+// Profiler::ResumeRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::ResumeRecording()
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state == ProfilerSessionState::Paused)
 	{
 		state = ProfilerSessionState::Recording;
@@ -109,9 +124,11 @@ void Profiler::ResumeRecording()
 	}
 }
 
+// Profiler::FinishRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ProfilerCaptureDocument Profiler::FinishRecording()
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (currentFrame.has_value())
 	{
 		currentFrame->complete = false;
@@ -128,6 +145,7 @@ ProfilerCaptureDocument Profiler::FinishRecording()
 	return document;
 }
 
+// Profiler::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::Clear()
 {
 	std::lock_guard<std::mutex> lock(mutex);
@@ -140,6 +158,7 @@ void Profiler::Clear()
 	lastError.clear();
 }
 
+// Profiler::LoadDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::LoadDocument(const ProfilerCaptureDocument& loadedDocument)
 {
 	std::lock_guard<std::mutex> lock(mutex);
@@ -153,14 +172,17 @@ void Profiler::LoadDocument(const ProfilerCaptureDocument& loadedDocument)
 	lastError.clear();
 }
 
+// Profiler::BeginFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::BeginFrame()
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state != ProfilerSessionState::Recording)
 	{
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (currentFrame.has_value())
 	{
 		currentFrame->complete = false;
@@ -178,15 +200,18 @@ void Profiler::BeginFrame()
 	t_sampleState.openSamples.clear();
 }
 
+// Profiler::EndFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::EndFrame()
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state != ProfilerSessionState::Recording || !currentFrame.has_value())
 	{
 		return;
 	}
 
 	currentFrame->durationMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - currentFrameStart).count();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (!t_sampleState.openSamples.empty())
 	{
 		ProfilerSample sample = t_sampleState.openSamples.back();
@@ -201,9 +226,11 @@ void Profiler::EndFrame()
 	currentFrame.reset();
 }
 
+// Profiler::BeginSample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel)
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state != ProfilerSessionState::Recording || !currentFrame.has_value() || !settings.recordMarkers)
 	{
 		return;
@@ -221,9 +248,11 @@ void Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const ch
 	t_sampleState.openSamples.push_back(std::move(sample));
 }
 
+// Profiler::EndSample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::EndSample()
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state != ProfilerSessionState::Recording || !currentFrame.has_value() || t_sampleState.openSamples.empty())
 	{
 		return;
@@ -235,15 +264,18 @@ void Profiler::EndSample()
 	currentFrame->samples.push_back(std::move(sample));
 }
 
+// Profiler::RecordRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::RecordRenderStats(const RenderStatsSnapshot& gameStats, const RenderStatsSnapshot& sceneStats)
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!currentFrame.has_value() || state != ProfilerSessionState::Recording)
 	{
 		return;
 	}
 
 	ProfilerModuleSummary* engineCpu = FindModule(currentFrame->moduleSummaries, ProfilerModuleId::CpuEngine);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (engineCpu == nullptr)
 	{
 		return;
@@ -257,12 +289,14 @@ void Profiler::RecordRenderStats(const RenderStatsSnapshot& gameStats, const Ren
 	AddOrReplaceMetric(*engineCpu, "Scene triangles", static_cast<double>(sceneStats.triangleCount), "count");
 }
 
+// Profiler::RecordTaskQueued is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::RecordTaskQueued()
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	++queuedTaskCount;
 }
 
+// Profiler::RecordTaskStarted is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::RecordTaskStarted(const char* taskLabel)
 {
 	{
@@ -272,6 +306,7 @@ void Profiler::RecordTaskStarted(const char* taskLabel)
 	BeginSample("ThreadPool Task", ProfilerModuleId::TaskExecution, taskLabel);
 }
 
+// Profiler::RecordTaskFinished is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::RecordTaskFinished()
 {
 	EndSample();
@@ -279,28 +314,33 @@ void Profiler::RecordTaskFinished()
 	++finishedTaskCount;
 }
 
+// Profiler::SelectFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::SelectFrame(std::uint64_t frameIndex)
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	selectedFrameIndex = frameIndex;
 }
 
+// Profiler::GetState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ProfilerSessionState Profiler::GetState() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return state;
 }
 
+// Profiler::GetSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ProfilerCaptureSettings Profiler::GetSettings() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return settings;
 }
 
+// Profiler::GetDocumentSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ProfilerCaptureDocument Profiler::GetDocumentSnapshot() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	ProfilerCaptureDocument snapshot = document;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (currentFrame.has_value())
 	{
 		snapshot.frames.push_back(*currentFrame);
@@ -308,10 +348,12 @@ ProfilerCaptureDocument Profiler::GetDocumentSnapshot() const
 	return snapshot;
 }
 
+// Profiler::GetFramesSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<ProfilerFrameRecord> Profiler::GetFramesSnapshot() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	std::vector<ProfilerFrameRecord> frames = document.frames;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (currentFrame.has_value())
 	{
 		frames.push_back(*currentFrame);
@@ -319,9 +361,11 @@ std::vector<ProfilerFrameRecord> Profiler::GetFramesSnapshot() const
 	return frames;
 }
 
+// Profiler::GetSelectedFrameSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<ProfilerFrameRecord> Profiler::GetSelectedFrameSnapshot() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!selectedFrameIndex.has_value())
 	{
 		if (!document.frames.empty())
@@ -330,6 +374,7 @@ std::optional<ProfilerFrameRecord> Profiler::GetSelectedFrameSnapshot() const
 		}
 		return currentFrame;
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ProfilerFrameRecord& frame : document.frames)
 	{
 		if (frame.frameIndex == *selectedFrameIndex)
@@ -337,6 +382,7 @@ std::optional<ProfilerFrameRecord> Profiler::GetSelectedFrameSnapshot() const
 			return frame;
 		}
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (currentFrame.has_value() && currentFrame->frameIndex == *selectedFrameIndex)
 	{
 		return currentFrame;
@@ -344,35 +390,41 @@ std::optional<ProfilerFrameRecord> Profiler::GetSelectedFrameSnapshot() const
 	return std::nullopt;
 }
 
+// Profiler::GetSourcePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<std::filesystem::path> Profiler::GetSourcePath() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return document.sourcePath;
 }
 
+// Profiler::GetLastError is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string Profiler::GetLastError() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return lastError;
 }
 
+// Profiler::GetStatusText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string Profiler::GetStatusText() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return statusText;
 }
 
+// Profiler::IsCapturing is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool Profiler::IsCapturing() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return state == ProfilerSessionState::Recording || state == ProfilerSessionState::Paused;
 }
 
+// Profiler::NowMs is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 double Profiler::NowMs() const
 {
 	return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sessionStart).count();
 }
 
+// Profiler::AggregateSamplesForFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 {
 	for (ProfilerModuleSummary& module : frame.moduleSummaries)
@@ -380,6 +432,7 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 		module.totalMs = 0.0;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ProfilerSample& sample : frame.samples)
 	{
 		if (ProfilerModuleSummary* module = FindModule(frame.moduleSummaries, sample.moduleId))
@@ -389,6 +442,7 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ProfilerModuleSummary* engineCpu = FindModule(frame.moduleSummaries, ProfilerModuleId::CpuEngine))
 	{
 		engineCpu->available = settings.cpuEngineEnabled;
@@ -397,6 +451,7 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 			return sample.moduleId == ProfilerModuleId::CpuEngine;
 		})), "count");
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ProfilerModuleSummary* tasks = FindModule(frame.moduleSummaries, ProfilerModuleId::TaskExecution))
 	{
 		tasks->available = settings.taskExecutionEnabled;
@@ -406,6 +461,7 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 	}
 
 	std::sort(frame.samples.begin(), frame.samples.end(), [](const ProfilerSample& left, const ProfilerSample& right) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (left.startMs == right.startMs)
 		{
 			return left.depth < right.depth;

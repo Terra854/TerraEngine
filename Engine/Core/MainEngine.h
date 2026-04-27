@@ -1,3 +1,10 @@
+// MainEngine.h — Core engine facade and application lifecycle interface.
+//
+// This file defines the Engine class, which serves as the primary interface for
+// the launcher to initialize and run the engine. It manages the collection of
+// active systems, handles frame timing, and provides access to core engine
+// features like the ObjectManager and ThreadPool.
+
 #pragma once
 #include <iostream>
 #include <vector>
@@ -41,8 +48,11 @@ class TERRAENGINE_API Engine {
 		void Shutdown();
 
 		template <typename T>
+		// GetSystem is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		T* GetSystem() {
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (auto* system : systems) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (T* typedSystem = dynamic_cast<T*>(system)) {
 					return typedSystem;
 				}
@@ -50,6 +60,7 @@ class TERRAENGINE_API Engine {
 			return nullptr;
 		}
 
+		// GetEditorSystem is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		SystemsBase* GetEditorSystem() { return editorSystem; }
 
 	private:

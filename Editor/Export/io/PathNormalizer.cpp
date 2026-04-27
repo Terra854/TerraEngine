@@ -1,3 +1,7 @@
+// PathNormalizer.cpp — TEPAK path normalization implementation
+//
+// Implements the detailed path processing logic, ensuring logical paths are stored in a stable, platform-independent format. It handles the discovery of packaging inventories and manages the selection of files for shared dictionary training.
+
 #include "io/PathNormalizer.h"
 #include "io/PathText.h"
 
@@ -12,6 +16,7 @@ namespace {
 constexpr std::size_t kSampleBytesPerFile = 32U * 1024U;
 constexpr std::size_t kMaxDictionarySampleBytes = 64U * 1024U * 1024U;
 
+// IsSelected is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool IsSelected(const tepak::PackagingRequest& request, const std::filesystem::path& path) {
 	if (request.entrySelectionRules.empty()) {
 		return true;
@@ -25,12 +30,14 @@ bool IsSelected(const tepak::PackagingRequest& request, const std::filesystem::p
 	});
 }
 
+// IsDictionarySampleEligible is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool IsDictionarySampleEligible(const std::string& assetClass) {
 	// Audio and video are usually already compressed, so sampling them tends to
 	// waste training budget without improving a shared dictionary.
 	return assetClass != "audio" && assetClass != "video";
 }
 
+// ReadDictionarySample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 tepak::ByteBuffer ReadDictionarySample(const std::filesystem::path& path, std::size_t bytesToRead) {
 	// Only the front slice of each file is sampled because TEPAK wants a cheap,
 	// bounded training set rather than another full-file buffering pass.
@@ -39,6 +46,7 @@ tepak::ByteBuffer ReadDictionarySample(const std::filesystem::path& path, std::s
 	if (!stream) {
 		throw std::runtime_error("Failed to open staged file sample: " + tepak::io::PathToUtf8String(path));
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (bytesToRead > 0U) {
 		stream.read(reinterpret_cast<char*>(sample.data()), static_cast<std::streamsize>(bytesToRead));
 		if (!stream) {
@@ -48,11 +56,13 @@ tepak::ByteBuffer ReadDictionarySample(const std::filesystem::path& path, std::s
 	return sample;
 }
 
+// ParentDirectoryPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ParentDirectoryPath(std::string_view normalizedPath) {
 	const auto separator = normalizedPath.rfind('/');
 	return separator == std::string_view::npos ? std::string{} : std::string(normalizedPath.substr(0U, separator));
 }
 
+// struct DirectoryAccumulator groups related state and operations so callers have one documented contract.
 struct DirectoryAccumulator final {
 	std::string normalizedPath;
 	std::string parentPath;
@@ -64,6 +74,7 @@ struct DirectoryAccumulator final {
 
 namespace tepak::io {
 
+// NormalizeRelativePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string NormalizeRelativePath(const std::filesystem::path& inputRoot, const std::filesystem::path& sourcePath) {
 	// TEPAK stores logical paths in a stable archive-wide form so different
 	// source directory spellings do not create duplicate entries.
@@ -73,11 +84,13 @@ std::string NormalizeRelativePath(const std::filesystem::path& inputRoot, const 
 	}
 
 	std::vector<std::string> segments;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& segment : relativePath) {
 		const auto text = PathToUtf8String(segment);
 		if (text == ".") {
 			continue;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (text == "..") {
 			throw std::runtime_error("Normalized paths may not traverse above the input root.");
 		}
@@ -85,7 +98,9 @@ std::string NormalizeRelativePath(const std::filesystem::path& inputRoot, const 
 	}
 
 	std::string normalized;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t index = 0; index < segments.size(); ++index) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (index > 0U) {
 			normalized.push_back('/');
 		}
@@ -96,16 +111,20 @@ std::string NormalizeRelativePath(const std::filesystem::path& inputRoot, const 
 	return normalized;
 }
 
+// NormalizeLookupPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string NormalizeLookupPath(std::string_view logicalPath) {
 	std::string normalized;
 	normalized.reserve(logicalPath.size());
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const char value : logicalPath) {
 		normalized.push_back(value == '\\' ? '/' : value);
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (!normalized.empty() && normalized.front() == '/') {
 		normalized.erase(normalized.begin());
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (normalized.starts_with("./")) {
 		normalized.erase(0U, 2U);
 	}
@@ -113,6 +132,7 @@ std::string NormalizeLookupPath(std::string_view logicalPath) {
 	return normalized;
 }
 
+// ExtractLeafName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ExtractLeafName(std::string_view normalizedPath) {
 	if (normalizedPath.empty()) {
 		return {};
@@ -122,11 +142,13 @@ std::string ExtractLeafName(std::string_view normalizedPath) {
 	return separator == std::string_view::npos ? std::string(normalizedPath) : std::string(normalizedPath.substr(separator + 1U));
 }
 
+// EnumerateDirectoryPaths is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<std::string> EnumerateDirectoryPaths(std::string_view normalizedFilePath) {
 	std::vector<std::string> directories;
 	std::string current;
 	// "meshes/props/cube.obj" contributes "meshes" and "meshes/props" so the
 	// archive can recreate implicit directories from file paths alone.
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const char value : normalizedFilePath) {
 		if (value == '/') {
 			if (!current.empty()) {
@@ -138,6 +160,7 @@ std::vector<std::string> EnumerateDirectoryPaths(std::string_view normalizedFile
 	return directories;
 }
 
+// DetectAssetClass is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 	std::string extension = PathToUtf8String(sourcePath.extension());
 	LowercaseAsciiInPlace(extension);
@@ -147,30 +170,38 @@ std::string DetectAssetClass(const std::filesystem::path& sourcePath) {
 	if (extension == ".vert" || extension == ".frag" || extension == ".comp" || extension == ".hlsl" || extension == ".glsl") {
 		return "shader";
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (extension == ".png" || extension == ".jpg" || extension == ".jpeg" || extension == ".dds" || extension == ".ktx" || extension == ".hdr" || extension == ".exr") {
 		return "texture";
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (extension == ".obj" || extension == ".gltf" || extension == ".glb" || extension == ".mesh" || extension == ".temf") {
 		return "mesh";
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (extension == ".wav" || extension == ".flac" || extension == ".ogg" || extension == ".mp3" || extension == ".m4a" || extension == ".wma") {
 		return "audio";
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (extension == ".y4m" || extension == ".avi" || extension == ".mov" || extension == ".mp4" || extension == ".mkv" || extension == ".webm" || extension == ".flv") {
 		return "video";
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (extension == ".json" || extension == ".txt" || extension == ".xml" || extension == ".csv" || extension == ".bin") {
 		return "data";
 	}
 	return "other";
 }
 
+// DiscoverPackagingInventory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& request) {
 	// The discovery pass keeps only file metadata and bounded dictionary samples
 	// in memory so archive size no longer dictates export memory usage.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(request.inputRoot)) {
 		throw std::runtime_error("The input root does not exist.");
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::is_directory(request.inputRoot)) {
 		throw std::runtime_error("The input root must be a directory.");
 	}
@@ -180,10 +211,12 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 	std::unordered_set<std::string> filePaths;
 	std::unordered_set<std::string> directoryPaths;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& entry : std::filesystem::recursive_directory_iterator(request.inputRoot)) {
 		if (!entry.is_regular_file()) {
 			continue;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!IsSelected(request, entry.path())) {
 			continue;
 		}
@@ -195,10 +228,12 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 		stagedFile.assetClass = DetectAssetClass(entry.path());
 		stagedFile.logicalSize = entry.file_size();
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!filePaths.insert(stagedFile.normalizedPath).second) {
 			throw std::runtime_error("Duplicate normalized path detected: " + stagedFile.normalizedPath);
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& directoryPath : EnumerateDirectoryPaths(stagedFile.normalizedPath)) {
 			directoryPaths.insert(directoryPath);
 		}
@@ -207,10 +242,12 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 		discoveredFiles.push_back(std::move(stagedFile));
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (discoveredFiles.empty()) {
 		throw std::runtime_error("The staged input set does not contain any eligible files.");
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& directoryPath : directoryPaths) {
 		if (filePaths.contains(directoryPath)) {
 			throw std::runtime_error("A normalized file path collides with an implied directory path: " + directoryPath);
@@ -221,17 +258,20 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 	directories.emplace("", DirectoryAccumulator{});
 	directories[""].normalizedPath = "";
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& directoryPath : directoryPaths) {
 		auto& accumulator = directories[directoryPath];
 		accumulator.normalizedPath = directoryPath;
 		accumulator.parentPath = ParentDirectoryPath(directoryPath);
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& stagedFile : discoveredFiles) {
 		const auto parentPath = ParentDirectoryPath(stagedFile.normalizedPath);
 		directories[parentPath].childFiles.push_back(std::move(stagedFile));
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& [path, accumulator] : directories) {
 		if (path.empty()) {
 			continue;
@@ -240,6 +280,7 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 		parent.childDirectories.push_back(path);
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& [path, accumulator] : directories) {
 		std::sort(accumulator.childDirectories.begin(), accumulator.childDirectories.end(), [](const std::string& left, const std::string& right) {
 			const auto leftName = ExtractLeafName(left);
@@ -258,11 +299,13 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 	std::unordered_map<std::string, std::uint32_t> childDirectoryCount;
 	// Breadth-first directory order guarantees that each directory's children
 	// occupy one contiguous span later in the serialized directory table.
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t index = 0U; index < directoryOrder.size(); ++index) {
 		const auto& directoryPath = directoryOrder[index];
 		const auto& children = directories.at(directoryPath).childDirectories;
 		firstChildDirectoryIndex[directoryPath] = static_cast<std::uint32_t>(directoryOrder.size());
 		childDirectoryCount[directoryPath] = static_cast<std::uint32_t>(children.size());
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& childPath : children) {
 			directoryOrder.push_back(childPath);
 		}
@@ -270,10 +313,12 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 
 	std::unordered_map<std::string, std::uint32_t> directoryIds;
 	inventory.directories.reserve(directoryOrder.size());
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t directoryId = 0U; directoryId < directoryOrder.size(); ++directoryId) {
 		directoryIds.emplace(directoryOrder[directoryId], directoryId);
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t directoryId = 0U; directoryId < directoryOrder.size(); ++directoryId) {
 		const auto& directoryPath = directoryOrder[directoryId];
 		const auto& accumulator = directories.at(directoryPath);
@@ -286,12 +331,14 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 		inventory.directories.push_back(std::move(node));
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& node : inventory.directories) {
 		const auto& files = directories.at(node.normalizedPath).childFiles;
 		node.firstChildFileIndex = static_cast<std::uint32_t>(inventory.stagedFiles.size());
 		node.childFileCount = static_cast<std::uint32_t>(files.size());
 		// Files are appended directory by directory so each directory node can
 		// point at a contiguous file span in the final file table.
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& file : files) {
 			auto orderedFile = file;
 			orderedFile.parentDirectoryId = node.directoryId;
@@ -299,6 +346,7 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (request.enableCompression && request.enableDictionaryTraining) {
 		// Raw-only packs never consult a dictionary, so sampling would only add
 		// avoidable resident memory and planning work before the first byte is written.
@@ -310,6 +358,7 @@ model::PackagingInventory DiscoverPackagingInventory(const PackagingRequest& req
 
 			const auto sampleSize = static_cast<std::size_t>(std::min<std::uint64_t>(stagedFile.logicalSize, kSampleBytesPerFile));
 			const auto cappedSampleSize = std::min<std::size_t>(sampleSize, kMaxDictionarySampleBytes - sampledBytes);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (cappedSampleSize == 0U) {
 				continue;
 			}

@@ -1,3 +1,8 @@
+// SkySettingsWindow.cpp — Sky Settings Window Implementation
+//
+// Implements the environmental configuration UI, exposing parameters for the engine's sky and lighting systems.
+// It provides real-time adjustment of atmospheric scattering, sun direction, and ambient lighting intensity.
+
 #include "SkySettingsWindow.h"
 
 #include "../Assets/AssetDatabase.h"
@@ -16,18 +21,22 @@
 
 namespace
 {
+	// struct DirectionalLightOption groups related state and operations so callers have one documented contract.
 	struct DirectionalLightOption
 	{
 		TerraEngine::UUID id = TerraEngine::EMPTY_UUID;
 		std::string name;
 	};
 
+	// CollectDirectionalLights is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::vector<DirectionalLightOption> CollectDirectionalLights()
 	{
 		std::vector<DirectionalLightOption> options;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (Object object : ObjectManager::instance().getObjectsWithComponents<LightComponent>())
 		{
 			LightComponent* light = object.getComponent<LightComponent>();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (light == nullptr || light->type != LightType::Directional)
 			{
 				continue;
@@ -44,10 +53,12 @@ namespace
 }
 
 SkySettingsWindow::SkySettingsWindow(MainEditorSubsystem* owner)
+	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: EditorWindow("Sky Settings"), m_Owner(owner)
 {
 }
 
+// SkySettingsWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SkySettingsWindow::OnGui()
 {
 	if (m_Owner == nullptr || m_Owner->GetContext() == nullptr || !m_Owner->GetContext()->projectManager->HasActiveProject())
@@ -57,6 +68,7 @@ void SkySettingsWindow::OnGui()
 	}
 
 	const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (activeScene == nullptr)
 	{
 		ImGui::TextDisabled("Open a scene to author the sky.");
@@ -76,6 +88,7 @@ void SkySettingsWindow::OnGui()
 	char sourceBuffer[512]{};
 	const std::string sourceAssetString = settings.sourceAsset;
 	std::memcpy(sourceBuffer, sourceAssetString.c_str(), std::min(sourceAssetString.size(), sizeof(sourceBuffer) - 1));
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::InputText("Sky Source", sourceBuffer, sizeof(sourceBuffer)))
 	{
 		settings.sourceAsset = sourceBuffer;
@@ -83,17 +96,20 @@ void SkySettingsWindow::OnGui()
 	}
 
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Clear Source"))
 	{
 		settings.sourceAsset.clear();
 		changed = true;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginDragDropTarget())
 	{
 		if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_TEXTURE"))
 		{
 			const TerraEngine::UUID assetGuid = *static_cast<const TerraEngine::UUID*>(payload->Data);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (const AssetMetadata* metadata = AssetDatabase::Instance().FindAssetByGuid(assetGuid))
 			{
 				// Store the project-relative source path so ResourceManager can
@@ -115,6 +131,7 @@ void SkySettingsWindow::OnGui()
 
 	const std::vector<DirectionalLightOption> directionalLights = CollectDirectionalLights();
 	std::string currentLightLabel = directionalLights.empty() ? "<No Directional Light>" : "<Auto First Directional Light>";
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const DirectionalLightOption& option : directionalLights)
 	{
 		if (option.id == settings.directionalLightObjectId)
@@ -124,6 +141,7 @@ void SkySettingsWindow::OnGui()
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginCombo("Directional Light", currentLightLabel.c_str()))
 	{
 		if (ImGui::Selectable("<Auto First Directional Light>", settings.directionalLightObjectId == TerraEngine::EMPTY_UUID))
@@ -132,6 +150,7 @@ void SkySettingsWindow::OnGui()
 			changed = true;
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const DirectionalLightOption& option : directionalLights)
 		{
 			if (ImGui::Selectable(option.name.c_str(), option.id == settings.directionalLightObjectId))
@@ -143,19 +162,23 @@ void SkySettingsWindow::OnGui()
 		ImGui::EndCombo();
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Use Automatic Light"))
 	{
 		settings.directionalLightObjectId = TerraEngine::EMPTY_UUID;
 		changed = true;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (const std::optional<entt::entity> selectedEntity = m_Owner->GetSelectedEntity(); selectedEntity.has_value())
 	{
 		if (auto selectedObject = ObjectManager::instance().getObject(*selectedEntity))
 		{
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (LightComponent* light = selectedObject->getComponent<LightComponent>(); light != nullptr && light->type == LightType::Directional)
 			{
 				ImGui::SameLine();
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::Button("Use Selected Light"))
 				{
 					settings.directionalLightObjectId = selectedObject->getUUID();
@@ -166,6 +189,7 @@ void SkySettingsWindow::OnGui()
 	}
 	ImGui::EndDisabled();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (changed)
 	{
 		SceneManager::Instance().SetActiveSceneSkySettings(settings);

@@ -1,3 +1,10 @@
+// UILayoutEngine.h — Wrapper for the Yoga layout engine integration.
+//
+// This file defines the UILayoutEngine class, which acts as a bridge between the
+// engine's UIElement tree and the Facebook Yoga flexbox library. It manages
+// Yoga node lifecycles and provides high-level functions to compute the size
+// and position of all elements in a UI hierarchy.
+
 #pragma once
 
 #include "UIElement.h"

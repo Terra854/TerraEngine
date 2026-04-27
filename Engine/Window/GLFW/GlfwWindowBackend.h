@@ -1,3 +1,5 @@
+// GlfwWindowBackend.h — Contains declarations for the Glfw Window Backend backend adapter state and platform/API translation code used by GLFW window creation, callbacks, and platform window event translation.
+
 #pragma once
 
 #include <functional>
@@ -22,6 +24,7 @@
 		GlfwWindowBackend();
 		~GlfwWindowBackend() override;
 
+		// BackendName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		std::string BackendName() const override { return "GLFW"; }
 		void Initialize(const WindowConfig& config) override;
 		void PollEvents() override;

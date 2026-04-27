@@ -1,3 +1,8 @@
+// UIBuilderWindow.h — UI Builder Window Definition
+//
+// Defines the UIBuilderWindow class, a specialized editor for creating and layouting in-game user interfaces.
+// It provides a visual canvas for arranging UI elements and configuring their styling and behavior.
+
 #pragma once
 
 #include "../Framework/EditorWindow.h"
@@ -16,6 +21,7 @@
 
 class MainEditorSubsystem;
 
+// UIBuilderEntryContext names the supported states explicitly so serialization and switches stay readable.
 enum class UIBuilderEntryContext
 {
 	Unsaved,
@@ -23,6 +29,7 @@ enum class UIBuilderEntryContext
 	SceneComponent,
 };
 
+// UIBuilderPanelFocus names the supported states explicitly so serialization and switches stay readable.
 enum class UIBuilderPanelFocus
 {
 	Library,
@@ -32,6 +39,7 @@ enum class UIBuilderPanelFocus
 	StyleSheets,
 };
 
+// UIBuilderPendingPrompt names the supported states explicitly so serialization and switches stay readable.
 enum class UIBuilderPendingPrompt
 {
 	None,
@@ -43,6 +51,7 @@ enum class UIBuilderPendingPrompt
 	DetachStyleSheet,
 };
 
+// UIBuilderLibraryCategory names the supported states explicitly so serialization and switches stay readable.
 enum class UIBuilderLibraryCategory
 {
 	All,
@@ -52,6 +61,7 @@ enum class UIBuilderLibraryCategory
 	Media,
 };
 
+// struct StyleSheetSession groups related state and operations so callers have one documented contract.
 struct StyleSheetSession
 {
 	std::filesystem::path internalPath;
@@ -64,6 +74,7 @@ struct StyleSheetSession
 	std::string loadError;
 };
 
+// struct BuilderDocumentSession groups related state and operations so callers have one documented contract.
 struct BuilderDocumentSession
 {
 	std::filesystem::path internalPath;
@@ -76,6 +87,7 @@ struct BuilderDocumentSession
 	std::vector<StyleSheetSession> styleSheets;
 };
 
+// struct BuilderWorkspaceState groups related state and operations so callers have one documented contract.
 struct BuilderWorkspaceState
 {
 	std::weak_ptr<UIElement> selectedElement;
@@ -87,6 +99,7 @@ struct BuilderWorkspaceState
 	bool previewHover = false;
 };
 
+// struct UIBuilderPromptState groups related state and operations so callers have one documented contract.
 struct UIBuilderPromptState
 {
 	UIBuilderPendingPrompt kind = UIBuilderPendingPrompt::None;
@@ -96,6 +109,7 @@ struct UIBuilderPromptState
 	bool styleExternallyChanged = false;
 };
 
+// struct MatchingStyleRuleReference groups related state and operations so callers have one documented contract.
 struct MatchingStyleRuleReference
 {
 	int styleSheetIndex = -1;

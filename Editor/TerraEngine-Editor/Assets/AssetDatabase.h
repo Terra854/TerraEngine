@@ -1,3 +1,7 @@
+// AssetDatabase.h — Editor asset database management
+//
+// Defines the interface for the editor's asset database, responsible for tracking source assets, managing their metadata, and coordinating compilation. it handles asset GUID lookups, importer mapping, and provides a central registry for all project resources.
+
 #pragma once
 
 #include "Utilities/UUID.h"
@@ -20,6 +24,7 @@ struct AssetMetadata {
 	nlohmann::json settings; // Importer-specific settings
 };
 
+// class AssetDatabase groups related state and operations so callers have one documented contract.
 class AssetDatabase {
 public:
 	static AssetDatabase& Instance();
@@ -38,6 +43,7 @@ public:
 	void DeleteAsset(const std::filesystem::path& sourcePath);
 
 	// Getters
+	// GetAssets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::map<std::filesystem::path, AssetMetadata>& GetAssets() const { return assets; }
 	std::filesystem::path GetAssetRoot() const { return assetRoot; }
 	std::filesystem::path GetBuildRoot() const { return buildRoot; }
@@ -46,6 +52,7 @@ public:
 	std::string GetScriptFullName(const TerraEngine::UUID& guid) const;
 	void SetScriptCompileState(const std::string& compileState, const std::string& summary);
 
+	// IsCompiling is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsCompiling() const { return !asyncJobs.empty(); }
 	bool IsAssetCompiling(const std::filesystem::path& absSourcePath) const;
 	size_t GetCompileJobsCount() const { return asyncJobs.size(); }
@@ -80,12 +87,14 @@ private:
 	FileWatcher fileWatcher;
 	
 	// Debouncing
+	// struct PendingEvent groups related state and operations so callers have one documented contract.
 	struct PendingEvent {
 		FileStatus status;
 		float timer; // Seconds until process
 	};
 	std::map<std::filesystem::path, PendingEvent> pendingEvents;
 
+	// struct AsyncCompileJob groups related state and operations so callers have one documented contract.
 	struct AsyncCompileJob {
 		AssetMetadata metadata;
 		std::future<bool> future;
@@ -94,6 +103,7 @@ private:
 	};
 	std::vector<AsyncCompileJob> asyncJobs;
 
+	// struct RecentlyRemovedAsset groups related state and operations so callers have one documented contract.
 	struct RecentlyRemovedAsset {
 		AssetMetadata metadata;
 		std::filesystem::path absSourcePath;

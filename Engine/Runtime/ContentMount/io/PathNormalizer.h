@@ -1,3 +1,5 @@
+// PathNormalizer.h — Contains declarations for the Path Normalizer file-specific types, helper functions, and module integration code used by runtime content path normalization and UTF path conversion utilities.
+
 #pragma once
 
 #include "TEPAK/PackTypes.h"

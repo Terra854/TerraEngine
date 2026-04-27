@@ -1,3 +1,7 @@
+// EditorProfilerService.cpp — Editor profiling service implementation
+//
+// Implements the profiling session management logic, including background tasks for saving and loading large capture documents. It integrates with the engine's main thread pool to ensure that capture processing doesn't block the editor UI.
+
 #include "EditorProfilerService.h"
 
 #include "../Core/EditorContext.h"
@@ -12,18 +16,21 @@ using TerraEngine::Profiling::ProfilerCaptureDocument;
 using TerraEngine::Profiling::ProfilerCaptureSettings;
 using TerraEngine::Profiling::ProfilerSessionState;
 
+// EditorProfilerService::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::Initialize(EditorContext& context)
 {
 	ctx = &context;
 	OnProjectOpened();
 }
 
+// EditorProfilerService::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::Shutdown()
 {
 	OnProjectClosed();
 	ctx = nullptr;
 }
 
+// EditorProfilerService::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::OnProjectOpened()
 {
 	if (!ctx || !ctx->projectManager || !ctx->projectManager->HasActiveProject())
@@ -41,6 +48,7 @@ void EditorProfilerService::OnProjectOpened()
 	RefreshCaptureList();
 }
 
+// EditorProfilerService::OnProjectClosed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::OnProjectClosed()
 {
 	Profiler::Instance().Clear();
@@ -53,10 +61,12 @@ void EditorProfilerService::OnProjectClosed()
 	lastError.clear();
 }
 
+// EditorProfilerService::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::Update(float)
 {
 }
 
+// EditorProfilerService::StartRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::StartRecording()
 {
 	if (!HasActiveProject())
@@ -76,6 +86,7 @@ void EditorProfilerService::StartRecording()
 	lastError.clear();
 }
 
+// EditorProfilerService::PauseRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::PauseRecording()
 {
 	Profiler::Instance().PauseRecording();
@@ -83,6 +94,7 @@ void EditorProfilerService::PauseRecording()
 	statusText = "Paused";
 }
 
+// EditorProfilerService::ResumeRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::ResumeRecording()
 {
 	Profiler::Instance().ResumeRecording();
@@ -90,6 +102,7 @@ void EditorProfilerService::ResumeRecording()
 	statusText = "Recording";
 }
 
+// EditorProfilerService::FinishCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::FinishCapture()
 {
 	if (!HasActiveProject())
@@ -98,6 +111,7 @@ void EditorProfilerService::FinishCapture()
 	}
 
 	ProfilerCaptureDocument document = Profiler::Instance().FinishRecording();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (document.frames.empty())
 	{
 		std::lock_guard<std::mutex> lock(mutex);
@@ -118,9 +132,11 @@ void EditorProfilerService::FinishCapture()
 	auto task = ThreadPool::instance().createTask([this, document, generation]() mutable {
 		std::filesystem::path savedPath;
 		std::string error;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!captureStore.SaveNewCapture(document, savedPath, error))
 		{
 			std::lock_guard<std::mutex> lock(mutex);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (generation == projectGeneration)
 			{
 				busy = false;
@@ -131,9 +147,11 @@ void EditorProfilerService::FinishCapture()
 		}
 
 		ProfilerCaptureDocument loadedDocument;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!captureStore.LoadCapture(savedPath, loadedDocument, error))
 		{
 			std::lock_guard<std::mutex> lock(mutex);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (generation == projectGeneration)
 			{
 				busy = false;
@@ -147,6 +165,7 @@ void EditorProfilerService::FinishCapture()
 		Profiler::Instance().LoadDocument(loadedDocument);
 
 		std::lock_guard<std::mutex> lock(mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (generation == projectGeneration)
 		{
 			captures = std::move(refreshedCaptures);
@@ -158,6 +177,7 @@ void EditorProfilerService::FinishCapture()
 	ThreadPool::instance().enqueue(task);
 }
 
+// EditorProfilerService::Clear is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::Clear()
 {
 	Profiler::Instance().Clear();
@@ -167,6 +187,7 @@ void EditorProfilerService::Clear()
 	lastError.clear();
 }
 
+// EditorProfilerService::RefreshCaptureList is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::RefreshCaptureList()
 {
 	if (!HasActiveProject())
@@ -186,6 +207,7 @@ void EditorProfilerService::RefreshCaptureList()
 		std::string error;
 		auto refreshed = captureStore.ListCaptures(error);
 		std::lock_guard<std::mutex> lock(mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (generation == projectGeneration)
 		{
 			captures = std::move(refreshed);
@@ -197,6 +219,7 @@ void EditorProfilerService::RefreshCaptureList()
 	ThreadPool::instance().enqueue(task);
 }
 
+// EditorProfilerService::LoadCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath)
 {
 	if (!HasActiveProject())
@@ -216,9 +239,11 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 	auto task = ThreadPool::instance().createTask([this, generation, capturePath]() {
 		ProfilerCaptureDocument document;
 		std::string error;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!captureStore.LoadCapture(capturePath, document, error))
 		{
 			std::lock_guard<std::mutex> lock(mutex);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (generation == projectGeneration)
 			{
 				lastError = error;
@@ -230,6 +255,7 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 
 		Profiler::Instance().LoadDocument(document);
 		std::lock_guard<std::mutex> lock(mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (generation == projectGeneration)
 		{
 			statusText = "Loaded capture";
@@ -240,52 +266,61 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 	ThreadPool::instance().enqueue(task);
 }
 
+// EditorProfilerService::GetState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ProfilerSessionState EditorProfilerService::GetState() const
 {
 	return Profiler::Instance().GetState();
 }
 
+// EditorProfilerService::GetStatusText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string EditorProfilerService::GetStatusText() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return statusText;
 }
 
+// EditorProfilerService::GetLastError is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string EditorProfilerService::GetLastError() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return lastError;
 }
 
+// EditorProfilerService::GetCaptureList is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> EditorProfilerService::GetCaptureList() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return captures;
 }
 
+// EditorProfilerService::HasActiveProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool EditorProfilerService::HasActiveProject() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return captureStore.HasProjectRoot();
 }
 
+// EditorProfilerService::IsBusy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool EditorProfilerService::IsBusy() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return busy;
 }
 
+// EditorProfilerService::GetProfilerDirectory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path EditorProfilerService::GetProfilerDirectory() const
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	return captureStore.GetProfilerDirectory();
 }
 
+// EditorProfilerService::MakeMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::Profiling::ProfilerCaptureMetadata EditorProfilerService::MakeMetadata() const
 {
 	TerraEngine::Profiling::ProfilerCaptureMetadata metadata;
 	metadata.terraEngineVersion = "TerraEngine";
 	metadata.startedAt = TerraEngine::Profiling::MakeReadableTimestamp();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ctx && ctx->projectManager && ctx->projectManager->HasActiveProject())
 	{
 		const auto root = ctx->projectManager->GetProjectRoot();

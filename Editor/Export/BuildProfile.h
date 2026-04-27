@@ -1,9 +1,6 @@
-// BuildProfile.h — Data model for exported build configurations.
+// BuildProfile.h — Build profile configuration data
 //
-// A BuildProfile defines all the settings needed to produce one exported build:
-// target platform, NativeAOT publish parameters, TEPAK packaging options, and
-// output directory. Profiles are serialised as JSON files so they survive across
-// editor sessions and can be committed to version control alongside the project.
+// Defines the data structures and enumerations for managing exported build configurations. It handles the serialization and deserialization of build profiles, including target platform settings, compression presets, and NativeAOT publish parameters.
 
 #pragma once
 
@@ -19,6 +16,7 @@ enum class ExportPlatform : uint32_t {
 };
 
 /// Compression preset for TEPAK packaging.
+// CompressionPreset names the supported states explicitly so serialization and switches stay readable.
 enum class CompressionPreset : uint32_t {
 	None   = 0,  // No compression, fastest export
 	Fast   = 1,  // zstd level 3
@@ -27,6 +25,7 @@ enum class CompressionPreset : uint32_t {
 };
 
 /// One build profile that the user can create, edit, and export from the editor.
+// struct BuildProfile groups related state and operations so callers have one documented contract.
 struct BuildProfile {
 	/// Human-readable name shown in the BuildProfilesWindow and CLI.
 	std::string name = "Default";

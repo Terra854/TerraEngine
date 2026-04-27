@@ -1,3 +1,5 @@
+// WorkerPool.h — Contains declarations for the Worker Pool queue state, worker coordination, and synchronization helpers used by binary IO helpers and worker coordination used by runtime content reads.
+
 #pragma once
 
 #include <condition_variable>

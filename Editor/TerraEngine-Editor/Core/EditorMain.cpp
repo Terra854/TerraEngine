@@ -1,3 +1,7 @@
+// EditorMain.cpp — Native editor entry point
+//
+// Contains the main function for the native editor executable, responsible for initializing the engine and handing off control to the EditorSystem. it establishes the primary loop and ensures the editor mode is correctly registered with the rendering backend.
+
 #include <iostream>
 #include <vector>
 

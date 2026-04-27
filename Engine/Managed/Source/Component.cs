@@ -1,7 +1,15 @@
+// Component.cs — Managed base class for all C# script components.
+//
+// This file defines the foundational Component class for the managed scripting
+// environment. It provides the infrastructure for accessing related components,
+// the parent object, and provides the bridge for reading and writing reflected
+// properties on native engine components.
+
 using System;
 
 namespace TerraEngine
 {
+	// Component is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class Component
 	{
 		public Object Object { get; internal set; } = null!;
@@ -21,6 +29,7 @@ namespace TerraEngine
 		{
 			T value = default;
 			ScriptType type = GetScriptType<T>();
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (type == (ScriptType)(-1))
 			{
 				Log.Error($"Unsupported type for property {propertyName}");
@@ -34,6 +43,7 @@ namespace TerraEngine
 		protected unsafe void SetProperty<T>(string propertyName, T value) where T : unmanaged
 		{
 			ScriptType type = GetScriptType<T>();
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (type == (ScriptType)(-1))
 			{
 				Log.Error($"Unsupported type for property {propertyName}");
@@ -43,6 +53,7 @@ namespace TerraEngine
 			InternalCalls.Native_SetComponentProperty(Object.ID, ResolveNativeComponentTypeName(GetType()), propertyName, &value, (int)type);
 		}
 
+		// ResolveNativeComponentTypeName bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static string ResolveNativeComponentTypeName(Type managedType)
 		{
 			// Managed API names stay short and idiomatic while native reflection
@@ -65,10 +76,15 @@ namespace TerraEngine
 			if (type == typeof(bool)) return ScriptType.Bool;
 			if (type == typeof(int)) return ScriptType.Int;
 			if (type == typeof(float)) return ScriptType.Float;
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (type == typeof(uint)) return ScriptType.EntityID;
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (type == typeof(Vector2)) return ScriptType.Vector2;
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (type == typeof(Vector3)) return ScriptType.Vector3;
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (type == typeof(Vector4)) return ScriptType.Vector4;
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (type == typeof(Quaternion)) return ScriptType.Quaternion;
 			return (ScriptType)(-1);
 		}

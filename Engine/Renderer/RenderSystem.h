@@ -1,3 +1,9 @@
+// RenderSystem.h — Render System Definition
+//
+// Defines the RenderSystem class, the primary high-level coordinator for all engine rendering operations.
+// It manages the frame lifecycle, integrates with the RHI to submit commands to the GPU, and handles scene-to-renderer data synchronization.
+// The system oversees specialized features like deferred shading, shadow mapping, and post-processing.
+
 #pragma once
 
 #include "Core/SystemBase.h"
@@ -41,6 +47,7 @@ public:
 	
 	void Clear();
 	void SetTaskShaderCullingEnabled(bool enabled);
+	// IsTaskShaderCullingEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsTaskShaderCullingEnabled() const { return taskShaderCullingEnabled; }
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const;
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot GetLatestSpatialDiagnostics(RenderViewType viewType) const;
@@ -49,6 +56,7 @@ public:
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const;
 
 	void SetQualityPreset(QualityPreset preset);
+	// GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	QualityPreset GetQualityPreset() const { return currentPreset; }
 	void SetRenderSettings(const RenderSettings& settings);
 	const RenderSettings& GetRenderSettings() const { return currentSettings; }
@@ -58,6 +66,7 @@ public:
 	void LoadSettings();
 	void SaveSettings();
 
+	// GetContext is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	RHIContext* GetContext() const { return rhi.get(); }
 
 	struct OverrideCameraData {
@@ -65,14 +74,18 @@ public:
 		glm::mat4 proj;
 		glm::vec3 pos;
 	};
+	// SetSceneViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
 		sceneViewCamera = OverrideCameraData{view, proj, pos};
 		hasSceneViewCamera = true;
 	}
+	// SetEditorModeEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
+	// SetGameViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
 		gameViewCameras.push_back({view, proj, pos});
 	}
+	// ClearOverrideCameras is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ClearOverrideCameras() {
 		hasSceneViewCamera = false;
 		gameViewCameras.clear();
@@ -91,11 +104,13 @@ private:
 	std::vector<OverrideCameraData> gameViewCameras;
 
 	// Internal structs for data gathering
+	// struct CameraEntry groups related state and operations so callers have one documented contract.
 	struct CameraEntry
 	{
 		entt::entity entity;
 		CameraComponent camera;
 	};
+	// struct RenderableEntry groups related state and operations so callers have one documented contract.
 	struct RenderableEntry
 	{
 		entt::entity entity;
@@ -103,6 +118,7 @@ private:
 		bool isStatic = false;
 		MeshRenderComponent mesh;
 	};
+	// struct LightEntry groups related state and operations so callers have one documented contract.
 	struct LightEntry
 	{
 		entt::entity entity;

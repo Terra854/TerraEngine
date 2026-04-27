@@ -1,5 +1,13 @@
+// Camera.cs — Managed API for camera components and perspective settings.
+//
+// This file defines the managed Camera class, allowing scripts to manipulate
+// perspective parameters like Field of View and clipping planes. It provides
+// idiomatic C# properties that wrap the underlying native CameraComponent
+// state managed by the renderer.
+
 namespace TerraEngine
 {
+	// Camera is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class Camera : Component
 	{
 		// These wrappers translate the engine's reflected property names into the

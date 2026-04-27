@@ -1,3 +1,10 @@
+// TerraEngineMaterialFile.h — Binary format definition for material assets (TMAT).
+//
+// This file defines the on-disk and in-memory structures for the engine's custom
+// material format. It includes definitions for shading models, alpha modes, and
+// texture bindings, ensuring that material data is packed efficiently for
+// fast loading and GPU binding.
+
 #pragma once
 
 #include <cstddef>
@@ -16,6 +23,7 @@ constexpr std::uint16_t kMaterialCurrentVersion = 1;
 constexpr std::size_t kMaxTextureBindings = 8;
 constexpr std::size_t kMaxFloatParameters = 16;
 
+// ShadingModel names the supported states explicitly so serialization and switches stay readable.
 enum class ShadingModel : std::uint32_t
 {
 	Unlit = 0,
@@ -23,6 +31,7 @@ enum class ShadingModel : std::uint32_t
 	SpecularGlossiness = 2
 };
 
+// AlphaMode names the supported states explicitly so serialization and switches stay readable.
 enum class AlphaMode : std::uint32_t
 {
 	Opaque = 0,
@@ -43,6 +52,7 @@ enum class MaterialFileShadowBehavior : std::uint32_t
 	EmissiveUsesOpacity = 4
 };
 
+// TextureSemantic names the supported states explicitly so serialization and switches stay readable.
 enum class TextureSemantic : std::uint32_t
 {
 	Base = 0,
@@ -53,6 +63,7 @@ enum class TextureSemantic : std::uint32_t
 	Height = 5
 };
 
+// SamplerFilter names the supported states explicitly so serialization and switches stay readable.
 enum class SamplerFilter : std::uint32_t
 {
 	Nearest = 0,
@@ -61,6 +72,7 @@ enum class SamplerFilter : std::uint32_t
 	Anisotropic = 3
 };
 
+// SamplerAddressMode names the supported states explicitly so serialization and switches stay readable.
 enum class SamplerAddressMode : std::uint32_t
 {
 	Repeat = 0,
@@ -69,6 +81,7 @@ enum class SamplerAddressMode : std::uint32_t
 	ClampToBorder = 3
 };
 
+// MaterialFlags names the supported states explicitly so serialization and switches stay readable.
 enum MaterialFlags : std::uint32_t
 {
 	DoubleSided = 1u << 0,
@@ -76,6 +89,7 @@ enum MaterialFlags : std::uint32_t
 	ReceivesShadows = 1u << 2
 };
 
+// DeriveMaterialShadowBehavior is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline MaterialFileShadowBehavior DeriveMaterialShadowBehavior(std::uint32_t alphaMode, const float emissiveFactor[3])
 {
 	const bool hasEmissiveOutput =
@@ -83,6 +97,7 @@ inline MaterialFileShadowBehavior DeriveMaterialShadowBehavior(std::uint32_t alp
 		|| emissiveFactor[1] > 0.0f
 		|| emissiveFactor[2] > 0.0f;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (alphaMode == static_cast<std::uint32_t>(AlphaMode::Mask))
 	{
 		return hasEmissiveOutput
@@ -90,6 +105,7 @@ inline MaterialFileShadowBehavior DeriveMaterialShadowBehavior(std::uint32_t alp
 			: MaterialFileShadowBehavior::AlphaCutout;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (alphaMode == static_cast<std::uint32_t>(AlphaMode::Blend))
 	{
 		return MaterialFileShadowBehavior::TransparentNoShadow;
@@ -99,6 +115,7 @@ inline MaterialFileShadowBehavior DeriveMaterialShadowBehavior(std::uint32_t alp
 }
 
 #pragma pack(push, 1)
+// struct TextureBinding groups related state and operations so callers have one documented contract.
 struct TextureBinding
 {
 	TextureSemantic semantic;        // Binary layout remains uint32_t
@@ -112,6 +129,7 @@ struct TextureBinding
 	float uvOffset[2];               // Additive offset applied after scaling
 };
 
+// struct FloatParameter groups related state and operations so callers have one documented contract.
 struct FloatParameter
 {
 	std::uint32_t nameId;          // Stable identifier for the target uniform/constant buffer slot
@@ -120,6 +138,7 @@ struct FloatParameter
 };
 
 // On-disk header placed at the start of every TMAT blob.
+// struct MaterialHeader groups related state and operations so callers have one documented contract.
 struct MaterialHeader
 {
 	char magic[4];
@@ -146,6 +165,7 @@ struct MaterialHeader
 static_assert(sizeof(MaterialHeader) <= 256, "TMAT header should remain compact");
 
 // In-memory representation of a fully loaded material file.
+// struct Material groups related state and operations so callers have one documented contract.
 struct Material
 {
 	MaterialHeader header{};

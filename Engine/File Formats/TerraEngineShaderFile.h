@@ -1,3 +1,10 @@
+// TerraEngineShaderFile.h — Binary format definition for shader program assets (TSPF).
+//
+// This file defines the container format for precompiled shader stages and their
+// reflection metadata. It stores descriptor set layouts, push constant ranges,
+// and SPIR-V/DXIL bytecode, allowing the resource system to build pipelines
+// without expensive runtime shader inspection.
+
 #pragma once
 
 #include <cstdint>
@@ -13,11 +20,13 @@ constexpr std::uint32_t kShaderMagicValue = 0x46505354u; // 'TSPF' little endian
 constexpr std::uint16_t kShaderCurrentVersion = 1;
 constexpr std::uint32_t kInvalidStringOffset = 0xFFFFFFFFu;
 
+// ShaderSourceLanguage names the supported states explicitly so serialization and switches stay readable.
 enum class ShaderSourceLanguage : std::uint32_t
 {
 	HLSL = 0
 };
 
+// ShaderBinaryFormat names the supported states explicitly so serialization and switches stay readable.
 enum class ShaderBinaryFormat : std::uint32_t
 {
 	Unknown = 0,
@@ -25,6 +34,7 @@ enum class ShaderBinaryFormat : std::uint32_t
 	DXIL = 2
 };
 
+// ShaderStage names the supported states explicitly so serialization and switches stay readable.
 enum class ShaderStage : std::uint32_t
 {
 	Vertex = 0,
@@ -43,6 +53,7 @@ enum class ShaderStage : std::uint32_t
 	Callable = 13
 };
 
+// IoComponentType names the supported states explicitly so serialization and switches stay readable.
 enum class IoComponentType : std::uint32_t
 {
 	Unknown = 0,
@@ -52,6 +63,7 @@ enum class IoComponentType : std::uint32_t
 	Bool = 4
 };
 
+// DescriptorType names the supported states explicitly so serialization and switches stay readable.
 enum class DescriptorType : std::uint32_t
 {
 	UniformBuffer = 0,
@@ -66,12 +78,14 @@ enum class DescriptorType : std::uint32_t
 
 using StageVisibilityMask = std::uint32_t;
 
+// StageToMask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline constexpr StageVisibilityMask StageToMask(ShaderStage stage)
 {
 	return 1u << static_cast<std::uint32_t>(stage);
 }
 
 #pragma pack(push, 1)
+// struct ShaderStageSource groups related state and operations so callers have one documented contract.
 struct ShaderStageSource
 {
 	std::uint32_t language;           // ShaderSourceLanguage
@@ -81,6 +95,7 @@ struct ShaderStageSource
 	std::uint32_t targetProfileOffset; // String table offset to the target profile (e.g. "vs_6_8")
 };
 
+// struct StageIOAttribute groups related state and operations so callers have one documented contract.
 struct StageIOAttribute
 {
 	std::uint32_t location;           // Location decoration on the input/output variable
@@ -89,6 +104,7 @@ struct StageIOAttribute
 	std::uint32_t nameOffset;         // Optional string table offset with the variable name (kInvalidStringOffset when absent)
 };
 
+// struct DescriptorBinding groups related state and operations so callers have one documented contract.
 struct DescriptorBinding
 {
 	std::uint32_t binding;            // Binding index within the set
@@ -98,6 +114,7 @@ struct DescriptorBinding
 	std::uint32_t nameOffset;         // Optional identifier from reflection (string table)
 };
 
+// struct DescriptorSetLayoutDesc groups related state and operations so callers have one documented contract.
 struct DescriptorSetLayoutDesc
 {
 	std::uint32_t setIndex;
@@ -105,6 +122,7 @@ struct DescriptorSetLayoutDesc
 	std::uint32_t bindingCount;
 };
 
+// struct PushConstantRange groups related state and operations so callers have one documented contract.
 struct PushConstantRange
 {
 	std::uint32_t offsetBytes;
@@ -113,6 +131,7 @@ struct PushConstantRange
 };
 
 // Reflection block for the single stage stored in a TSPF file.
+// struct ShaderReflection groups related state and operations so callers have one documented contract.
 struct ShaderReflection
 {
 	ShaderStageSource source;
@@ -127,6 +146,7 @@ struct ShaderReflection
 };
 
 // Precompiled stage payload produced by the offline shader pipeline.
+// struct CompiledStageBinary groups related state and operations so callers have one documented contract.
 struct CompiledStageBinary
 {
 	std::uint32_t format;            // ShaderBinaryFormat
@@ -137,6 +157,7 @@ struct CompiledStageBinary
 };
 
 // On-disk header placed at the start of every TSPF blob.
+// struct ShaderHeader groups related state and operations so callers have one documented contract.
 struct ShaderHeader
 {
 	char magic[4];

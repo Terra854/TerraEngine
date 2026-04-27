@@ -1,3 +1,7 @@
+// TextureCompiler.cpp — Texture compilation pipeline implementation
+//
+// Implements the texture processing and compression logic using stb_image for loading and BasisU for UASTC compression. It handles the creation of a specialized KTX2-based container optimized for fast streaming and GPU upload.
+
 #include "TextureCompiler.h"
 #include <algorithm>
 #include <array>
@@ -44,11 +48,13 @@ namespace {
 		".ppm",
 		".pgm"};
 
+	// AlignUp32 is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t AlignUp32(std::uint32_t value, std::uint32_t alignment) {
 		const std::uint32_t mask = alignment - 1;
 		return (value + mask) & ~mask;
 	}
 
+	// NormalizeExtension is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string NormalizeExtension(const std::filesystem::path& filePath) {
 		std::string ext = filePath.extension().string();
 		std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
@@ -57,6 +63,7 @@ namespace {
 		return ext;
 	}
 
+	// InitializeBasisu is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void InitializeBasisu() {
 		static bool initialized = false;
 		if (!initialized) {
@@ -65,10 +72,13 @@ namespace {
 		}
 	}
 
+	// GetCrc32Table is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::uint32_t* GetCrc32Table() {
 		static std::uint32_t table[256];
 		static bool initialized = false;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!initialized) {
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::uint32_t i = 0; i < 256; ++i) {
 				std::uint32_t crc = i;
 				for (int j = 0; j < 8; ++j) {
@@ -83,6 +93,7 @@ namespace {
 		return table;
 	}
 
+	// UpdateCrc32 is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t UpdateCrc32(std::uint32_t crc, const std::uint8_t* data, std::size_t size) {
 		const std::uint32_t* table = GetCrc32Table();
 		for (std::size_t i = 0; i < size; ++i) {
@@ -92,12 +103,14 @@ namespace {
 		return crc;
 	}
 
+	// WriteBytesAndUpdateCrc is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool WriteBytesAndUpdateCrc(std::ofstream& out, std::uint32_t& runningCrc, const void* data, std::size_t size) {
 		if (size == 0) {
 			return true;
 		}
 
 		out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!out) {
 			return false;
 		}
@@ -106,6 +119,7 @@ namespace {
 		return true;
 	}
 
+	// WritePaddingAndUpdateCrc is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool WritePaddingAndUpdateCrc(std::ofstream& out, std::uint32_t& runningCrc, std::uint64_t targetOffset) {
 		const std::streamoff currentOffset = static_cast<std::streamoff>(out.tellp());
 		if (currentOffset < 0) {
@@ -113,15 +127,18 @@ namespace {
 		}
 
 		std::uint64_t current = static_cast<std::uint64_t>(currentOffset);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (current >= targetOffset) {
 			return true;
 		}
 
 		const std::array<std::uint8_t, 4096> zeroBytes{};
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		while (current < targetOffset) {
 			const std::size_t chunkSize = static_cast<std::size_t>(std::min<std::uint64_t>(
 				targetOffset - current,
 				static_cast<std::uint64_t>(zeroBytes.size())));
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!WriteBytesAndUpdateCrc(out, runningCrc, zeroBytes.data(), chunkSize)) {
 				return false;
 			}
@@ -132,6 +149,7 @@ namespace {
 	}
 }
 
+// IsSupportedTextureSourceExtension is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool IsSupportedTextureSourceExtension(const std::filesystem::path& filePath) {
 	const std::string ext = NormalizeExtension(filePath);
 	return std::find(
@@ -140,9 +158,11 @@ bool IsSupportedTextureSourceExtension(const std::filesystem::path& filePath) {
 		std::string_view(ext)) != kSupportedTextureSourceExtensions.end();
 }
 
+// GetSupportedTextureSourceExtensionsText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string GetSupportedTextureSourceExtensionsText() {
 	std::string result;
 	for (std::size_t index = 0; index < kSupportedTextureSourceExtensions.size(); ++index) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!result.empty()) {
 			result += ", ";
 		}
@@ -151,12 +171,14 @@ std::string GetSupportedTextureSourceExtensionsText() {
 	return result;
 }
 
+// ComputeCrc32 is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::uint32_t ComputeCrc32(const std::uint8_t* data, size_t size) {
 	std::uint32_t crc = 0xFFFFFFFFu;
 	crc = UpdateCrc32(crc, data, size);
 	return crc ^ 0xFFFFFFFFu;
 }
 
+// CompileTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality, bool generateMipmaps, TextureFilterType filter) {
 	InitializeBasisu();
 
@@ -164,6 +186,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	int height = 0;
 	int channels = 0;
 	std::uint8_t* pixels = stbi_load(input.string().c_str(), &width, &height, &channels, 4);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!pixels) {
 		std::cerr << "Failed to load image: " << input << " (" << stbi_failure_reason() << ")\n";
 		return false;
@@ -188,6 +211,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	params.m_mip_gen = generateMipmaps;
 	params.m_mip_srgb = isSRGB;
 
+	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (filter) {
 		case TextureFilterType::Box: params.m_mip_filter = "box"; break;
 		case TextureFilterType::Triangle: params.m_mip_filter = "tent"; break;
@@ -206,12 +230,14 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	params.m_pJob_pool = &jpool;
 
 	basisu::basis_compressor compressor;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!compressor.init(params)) {
 		std::cerr << "Failed to initialize basis compressor\n";
 		return false;
 	}
 
 	const basisu::basis_compressor::error_code result = compressor.process();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (result != basisu::basis_compressor::cECSuccess) {
 		std::cerr << "Basis compression failed with error code: " << result << "\n";
 		return false;
@@ -231,6 +257,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	std::vector<TETFLevelEntry> levelTable(mipCount);
 
 	const std::size_t levelIndexBytes = static_cast<std::size_t>(mipCount) * sizeof(basist::ktx2_level_index);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (sizeof(basist::ktx2_header) + levelIndexBytes > ktx2Data.size()) {
 		std::cerr << "KTX2 level table overruns encoded data for " << input << "\n";
 		return false;
@@ -239,9 +266,11 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	const basist::ktx2_level_index* levelIndex = reinterpret_cast<const basist::ktx2_level_index*>(ktx2Data.data() + sizeof(basist::ktx2_header));
 
 	std::uint64_t totalUastcSize = 0;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t i = 0; i < mipCount; ++i) {
 		const std::uint64_t ktxOffset = levelIndex[i].m_byte_offset.get_uint64();
 		const std::uint64_t ktxSize = levelIndex[i].m_byte_length.get_uint64();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if ((ktxOffset + ktxSize) > static_cast<std::uint64_t>(ktx2Data.size())) {
 			std::cerr << "KTX2 mip payload overruns encoded data for " << input << "\n";
 			return false;
@@ -296,12 +325,14 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	header.totalSize = totalSize;
 
 	std::ofstream out(output, std::ios::binary | std::ios::trunc);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!out) {
 		std::cerr << "Failed to open output path: " << output << "\n";
 		return false;
 	}
 
 	std::uint32_t runningCrc = 0xFFFFFFFFu;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!WriteBytesAndUpdateCrc(out, runningCrc, &header, sizeof(header))
 		|| !WritePaddingAndUpdateCrc(out, runningCrc, header.tocOffset)
 		|| !WriteBytesAndUpdateCrc(out, runningCrc, entries.data(), entries.size() * sizeof(TETFChunkEntry))
@@ -313,9 +344,11 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 		return false;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t i = 0; i < mipCount; ++i) {
 		const std::uint64_t ktxOffset = levelIndex[i].m_byte_offset.get_uint64();
 		const std::uint64_t ktxSize = levelIndex[i].m_byte_length.get_uint64();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!WriteBytesAndUpdateCrc(
 				out,
 				runningCrc,
@@ -326,6 +359,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!WritePaddingAndUpdateCrc(out, runningCrc, header.totalSize)) {
 		std::cerr << "Failed to finalize padded texture output: " << output << "\n";
 		return false;
@@ -333,6 +367,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 
 	const std::uint32_t crc = runningCrc ^ 0xFFFFFFFFu;
 	out.seekp(static_cast<std::streamoff>(offsetof(TETFHeader, fileCrc32)), std::ios::beg);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!out) {
 		std::cerr << "Failed to seek back for CRC patch: " << output << "\n";
 		return false;

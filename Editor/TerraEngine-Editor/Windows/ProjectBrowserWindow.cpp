@@ -1,3 +1,8 @@
+// ProjectBrowserWindow.cpp — Project Browser Window Implementation
+//
+// Implements the asset management UI, including folder navigation, file searching, and thumbnail rendering.
+// It interacts with the operating system's filesystem and the engine's resource management systems to handle asset lifecycle.
+
 #include "ProjectBrowserWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
@@ -23,10 +28,12 @@ const char* kDefaultUIMarkup = R"(<UIRoot>
 </UIRoot>
 )";
 
+// MakeUniqueAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path MakeUniqueAssetPath(const std::filesystem::path& directory, const std::string& baseName, const std::string& extension)
 {
 	std::filesystem::path candidatePath = directory / (baseName + extension);
 	int duplicateIndex = 1;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (std::filesystem::exists(candidatePath))
 	{
 		candidatePath = directory / (baseName + " (" + std::to_string(duplicateIndex++) + ")" + extension);
@@ -35,6 +42,7 @@ std::filesystem::path MakeUniqueAssetPath(const std::filesystem::path& directory
 	return candidatePath;
 }
 
+// OpenMarkupAssetInBuilder is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void OpenMarkupAssetInBuilder(MainEditorSubsystem* owner, const std::filesystem::path& markupPath)
 {
 	if (owner == nullptr)
@@ -42,6 +50,7 @@ void OpenMarkupAssetInBuilder(MainEditorSubsystem* owner, const std::filesystem:
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::shared_ptr<UIBuilderWindow> uiBuilder = owner->GetWindow<UIBuilderWindow>())
 	{
 		uiBuilder->OpenMarkupDocument(std::filesystem::absolute(markupPath));
@@ -50,14 +59,17 @@ void OpenMarkupAssetInBuilder(MainEditorSubsystem* owner, const std::filesystem:
 }
 
 ProjectBrowserWindow::ProjectBrowserWindow(MainEditorSubsystem* owner)
+	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: EditorWindow("Project Browser"), m_Owner(owner) {
 	std::fill(m_NewScriptName.begin(), m_NewScriptName.end(), '\0');
 }
 
+// ProjectBrowserWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::OnGui() {
 	if (ImGuiFileDialog::Instance()->Display("ImportAssetDlg")) {
 		if (ImGuiFileDialog::Instance()->IsOk()) {
 			std::filesystem::path filePath = ImGuiFileDialog::Instance()->GetFilePathName();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::filesystem::exists(filePath)) {
 				std::filesystem::path dest = AssetDatabase::Instance().GetAssetRoot() / filePath.filename();
 				try {
@@ -70,28 +82,34 @@ void ProjectBrowserWindow::OnGui() {
 		ImGuiFileDialog::Instance()->Close();
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_Owner->GetContext() && m_Owner->GetContext()->projectManager->HasActiveProject()) {
 		std::filesystem::path root = AssetDatabase::Instance().GetAssetRoot();
 		if (m_CurrentDirectory.empty() || !std::filesystem::exists(m_CurrentDirectory)) {
 			m_CurrentDirectory = root;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Add")) {
 			ImGui::OpenPopup("AddAssetPopup");
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginPopup("AddAssetPopup")) {
 			if (ImGui::MenuItem("Folder")) {
 				std::filesystem::path newFolderPath = m_CurrentDirectory / "New Folder";
 				int i = 1;
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				while (std::filesystem::exists(newFolderPath)) {
 					newFolderPath = m_CurrentDirectory / ("New Folder (" + std::to_string(i++) + ")");
 				}
 				std::filesystem::create_directory(newFolderPath);
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("Material (.tmat)")) {
 				std::filesystem::path newMatPath = m_CurrentDirectory / "New Material.tmat";
 				int i = 1;
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				while (std::filesystem::exists(newMatPath)) {
 					newMatPath = m_CurrentDirectory / ("New Material (" + std::to_string(i++) + ").tmat");
 				}
@@ -122,10 +140,12 @@ void ProjectBrowserWindow::OnGui() {
 
 				m_Owner->SetSelectedAsset(std::filesystem::absolute(newMatPath));
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("UI Markup (.tuiml)")) {
 				const std::filesystem::path markupPath = MakeUniqueAssetPath(m_CurrentDirectory, "New UI", ".tuiml");
 
 				std::ofstream markupOutput(markupPath);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (markupOutput) {
 					// UI markup is the only file created from the asset browser.
 					// Stylesheets are attached later from the UI Builder itself.
@@ -133,6 +153,7 @@ void ProjectBrowserWindow::OnGui() {
 					m_Owner->SetSelectedAsset(std::filesystem::absolute(markupPath));
 				}
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("C# Script (.cs)")) {
 				std::fill(m_NewScriptName.begin(), m_NewScriptName.end(), '\0');
 				const char* defaultName = "NewScript";
@@ -147,12 +168,14 @@ void ProjectBrowserWindow::OnGui() {
 		char searchBuf[128];
 		strncpy(searchBuf, m_SearchFilter.c_str(), sizeof(searchBuf));
 		ImGui::SetNextItemWidth(200);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::InputTextWithHint("##Search", "Search...", searchBuf, IM_ARRAYSIZE(searchBuf))) {
 			m_SearchFilter = searchBuf;
 		}
 
 		ImGui::Separator();
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginTable("BrowserSplit", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV)) {
 			ImGui::TableSetupColumn("Tree", ImGuiTableColumnFlags_WidthFixed, 200.0f);
 			ImGui::TableSetupColumn("Content", ImGuiTableColumnFlags_WidthStretch);
@@ -160,11 +183,13 @@ void ProjectBrowserWindow::OnGui() {
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(0);
 			
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::filesystem::exists(root)) {
 				ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
 				if (root == m_CurrentDirectory) rootFlags |= ImGuiTreeNodeFlags_Selected;
 				
 				bool open = ImGui::TreeNodeEx("Assets", rootFlags);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::IsItemClicked()) m_CurrentDirectory = root;
 				
 				if (open) {
@@ -175,6 +200,7 @@ void ProjectBrowserWindow::OnGui() {
 
 			ImGui::TableSetColumnIndex(1);
 			
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::filesystem::exists(m_CurrentDirectory)) {
 				DrawDirectoryContent(m_CurrentDirectory);
 			}
@@ -187,43 +213,52 @@ void ProjectBrowserWindow::OnGui() {
 			ImGui::EndTable();
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_ShowDeleteModal) {
 			ImGui::OpenPopup("Delete Asset?");
 			m_ShowDeleteModal = false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginPopupModal("Delete Asset?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
 			ImGui::Text("Are you sure you want to delete '%s'?", m_AssetToDelete.filename().string().c_str());
 			ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "This action cannot be undone!");
 			ImGui::Separator();
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::Button("Delete", ImVec2(120, 0))) {
 				AssetDatabase::Instance().DeleteAsset(m_AssetToDelete);
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::SetItemDefaultFocus();
 			ImGui::SameLine();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::Button("Cancel", ImVec2(120, 0))) {
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_ShowCreateScriptModal) {
 			ImGui::OpenPopup("Create C# Script");
 			m_ShowCreateScriptModal = false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginPopupModal("Create C# Script", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
 			ImGui::Text("New scripts are created in the currently selected asset folder.");
 			ImGui::InputText("Class Name", m_NewScriptName.data(), m_NewScriptName.size());
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!m_CreateScriptError.empty()) {
 				ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", m_CreateScriptError.c_str());
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::Button("Create", ImVec2(120, 0))) {
 				std::filesystem::path createdPath;
 				std::string error;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ScriptCompilationSubsystem::Instance().CreateScriptAsset(m_CurrentDirectory, m_NewScriptName.data(), createdPath, &error)) {
 					m_Owner->SetSelectedAsset(std::filesystem::absolute(createdPath));
 					ImGui::CloseCurrentPopup();
@@ -232,6 +267,7 @@ void ProjectBrowserWindow::OnGui() {
 				}
 			}
 			ImGui::SameLine();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::Button("Cancel", ImVec2(120, 0))) {
 				ImGui::CloseCurrentPopup();
 			}
@@ -240,9 +276,11 @@ void ProjectBrowserWindow::OnGui() {
 	}
 }
 
+// ProjectBrowserWindow::DrawDirectoryTree is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::DrawDirectoryTree(const std::filesystem::path& path) {
 	if (!std::filesystem::exists(path)) return;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& entry : std::filesystem::directory_iterator(path)) {
 		if (entry.path().extension() == ".meta") continue;
 		if (!entry.is_directory()) continue;
@@ -250,15 +288,18 @@ void ProjectBrowserWindow::DrawDirectoryTree(const std::filesystem::path& path) 
 		std::string filename = entry.path().filename().string();
 		
 		ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ImGuiTreeNodeFlags_SpanAvailWidth;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (entry.path() == m_CurrentDirectory) {
 			flags |= ImGuiTreeNodeFlags_Selected;
 		}
 
 		bool open = ImGui::TreeNodeEx(filename.c_str(), flags);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::IsItemClicked()) {
 			m_CurrentDirectory = entry.path();
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (open) {
 			DrawDirectoryTree(entry.path());
 			ImGui::TreePop();
@@ -266,33 +307,41 @@ void ProjectBrowserWindow::DrawDirectoryTree(const std::filesystem::path& path) 
 	}
 }
 
+// ProjectBrowserWindow::DrawDirectoryContent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& path) {
 	float cellSize = m_ThumbnailSize + m_Padding;
 	float panelWidth = ImGui::GetContentRegionAvail().x;
 	int columnCount = (int)(panelWidth / cellSize);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (columnCount < 1) columnCount = 1;
 
 	std::vector<std::filesystem::directory_entry> entries;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& entry : std::filesystem::directory_iterator(path)) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (entry.path().extension() == ".meta") continue;
 		entries.push_back(entry);
 	}
 
 	std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (a.is_directory() != b.is_directory()) {
 			return a.is_directory() > b.is_directory(); // Directories first
 		}
 		return a.path().filename().string() < b.path().filename().string();
 	});
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginTable("ContentTable", columnCount)) {
 		for (const auto& entry : entries) {
 			std::string filename = entry.path().filename().string();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!m_SearchFilter.empty()) {
 				std::string lowerFilename = filename;
 				std::string lowerFilter = m_SearchFilter;
 				std::transform(lowerFilename.begin(), lowerFilename.end(), lowerFilename.begin(), ::tolower);
 				std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (lowerFilename.find(lowerFilter) == std::string::npos) continue;
 			}
 
@@ -301,6 +350,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 			ImGui::PushID(filename.c_str());
 			
 			std::string icon = entry.is_directory() ? "[DIR]" : "[FILE]";
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!entry.is_directory() && entry.path().extension() == ".cs") {
 				icon = "[C#]";
 			} else if (!entry.is_directory() && entry.path().extension() == ".tuiml") {
@@ -309,24 +359,29 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 			
 			bool isSelected = false;
 			auto currentSelected = m_Owner->GetSelectedAsset();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (currentSelected && *currentSelected == std::filesystem::absolute(entry.path())) {
 				isSelected = true;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (isSelected) {
 				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
 			}
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::Button(icon.c_str(), ImVec2(m_ThumbnailSize, m_ThumbnailSize))) {
 					if (!entry.is_directory()) {
 						m_Owner->SetSelectedAsset(std::filesystem::absolute(entry.path()));
 					}
 				}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (isSelected) {
 				ImGui::PopStyleColor();
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::BeginPopupContextWindow()) {
 				if (ImGui::MenuItem("Delete")) {
 					m_AssetToDelete = std::filesystem::absolute(entry.path());
@@ -341,11 +396,13 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				if (entry.is_directory()) {
 					m_CurrentDirectory = entry.path();
 				} else {
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (entry.path().extension() == ".tescene") {
 						auto projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
 						auto assetRoot = projectRoot / "Assets";
 						std::error_code ec;
 						auto relPath = std::filesystem::relative(entry.path(), assetRoot, ec);
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (!ec) {
 							m_Owner->RequestOpenScene(relPath);
 						} else {
@@ -359,14 +416,17 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				}
 			}
 			
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!entry.is_directory() && ImGui::BeginDragDropSource()) {
 				auto& assets = AssetDatabase::Instance().GetAssets();
 				auto it = assets.find(std::filesystem::absolute(entry.path()));
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (it != assets.end()) {
 					TerraEngine::UUID guid = it->second.guid;
 					const std::string& importer = it->second.importerName;
 					const char* payloadType = "ASSET_GUID";
 					
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (importer == "MeshImporter") payloadType = "ASSET_MESH";
 					else if (importer == "TextureImporter") payloadType = "ASSET_TEXTURE";
 					else if (importer == "ShaderImporter") payloadType = "ASSET_SHADER";
@@ -388,6 +448,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 	}
 }
 
+// ProjectBrowserWindow::Reset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::Reset() {
 	m_CurrentDirectory.clear();
 }

@@ -1,3 +1,5 @@
+// ScriptReflection.cs — Contains the managed Script Reflection API surface, properties, native-call bindings, and script/editor workflow helpers for C# scripting API types that mirror native engine objects, components, and services.
+
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -7,6 +9,7 @@ namespace TerraEngine
 {
 	// Collectible load contexts let TerraEngine swap gameplay assemblies at
 	// runtime without restarting the editor process after each successful save.
+	// GameplayScriptLoadContext is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal sealed class GameplayScriptLoadContext : AssemblyLoadContext
 	{
 		private static readonly Assembly s_engineBridgeAssembly = typeof(Script).Assembly;
@@ -19,16 +22,19 @@ namespace TerraEngine
 			_dependencyResolver = new AssemblyDependencyResolver(mainAssemblyPath);
 		}
 
+		// Load bridges managed callers to engine state; validate arguments before forwarding to native code.
 		protected override Assembly? Load(AssemblyName assemblyName)
 		{
 			// Reuse the already loaded engine bridge so gameplay Script types inherit
 			// from the same TerraEngine.Script identity across every reload.
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (string.Equals(assemblyName.Name, s_engineBridgeAssemblyName, StringComparison.Ordinal))
 			{
 				return s_engineBridgeAssembly;
 			}
 
 			string? resolvedAssemblyPath = _dependencyResolver.ResolveAssemblyToPath(assemblyName);
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (resolvedAssemblyPath != null)
 			{
 				return LoadFromAssemblyPath(resolvedAssemblyPath);
@@ -37,9 +43,11 @@ namespace TerraEngine
 			return null;
 		}
 
+		// LoadUnmanagedDll bridges managed callers to engine state; validate arguments before forwarding to native code.
 		protected override IntPtr LoadUnmanagedDll(string unmanagedDllName)
 		{
 			string? resolvedPath = _dependencyResolver.ResolveUnmanagedDllToPath(unmanagedDllName);
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (resolvedPath != null)
 			{
 				return LoadUnmanagedDllFromPath(resolvedPath);
@@ -58,6 +66,7 @@ namespace TerraEngine
 		public List<ScriptFieldDiagnosticPayload> Diagnostics { get; set; } = new();
 	}
 
+	// ScriptFieldDescriptorPayload is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal sealed class ScriptFieldDescriptorPayload
 	{
 		public string FieldPath { get; set; } = string.Empty;
@@ -78,6 +87,7 @@ namespace TerraEngine
 		public List<ScriptFieldDescriptorPayload> Children { get; set; } = new();
 	}
 
+	// ScriptFieldDiagnosticPayload is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal sealed class ScriptFieldDiagnosticPayload
 	{
 		public string DiagnosticId { get; set; } = string.Empty;
@@ -89,6 +99,7 @@ namespace TerraEngine
 		public List<string> RepairActionIds { get; set; } = new();
 	}
 
+	// ScriptReflection is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public static class ScriptReflection
 	{
 		public static bool IsAttachableScriptType(Type? type)
@@ -100,9 +111,11 @@ namespace TerraEngine
 				&& typeof(Script).IsAssignableFrom(type);
 		}
 
+		// BuildAttachableTypeCatalog bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static Dictionary<string, Type> BuildAttachableTypeCatalog(Assembly? assembly)
 		{
 			var catalog = new Dictionary<string, Type>(StringComparer.Ordinal);
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (assembly == null)
 			{
 				return catalog;
@@ -110,6 +123,7 @@ namespace TerraEngine
 
 			foreach (Type type in assembly.GetTypes())
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!IsAttachableScriptType(type))
 				{
 					continue;
@@ -122,6 +136,7 @@ namespace TerraEngine
 			return catalog;
 		}
 
+		// DescribeScriptType bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static ScriptTypeDescriptorPayload DescribeScriptType(Type? type)
 		{
 			var payload = new ScriptTypeDescriptorPayload
@@ -129,6 +144,7 @@ namespace TerraEngine
 				FullTypeName = type?.FullName ?? type?.Name ?? string.Empty
 			};
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (!IsAttachableScriptType(type))
 			{
 				if (!string.IsNullOrWhiteSpace(payload.FullTypeName))
@@ -154,6 +170,7 @@ namespace TerraEngine
 			return payload;
 		}
 
+		// NicifyIdentifier bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static string NicifyIdentifier(string identifier)
 		{
 			if (string.IsNullOrWhiteSpace(identifier))
@@ -165,6 +182,7 @@ namespace TerraEngine
 			for (int index = 0; index < identifier.Length; ++index)
 			{
 				char current = identifier[index];
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (current == '_' || current == '-')
 				{
 					if (characters.Count > 0 && characters[^1] != ' ')
@@ -175,6 +193,7 @@ namespace TerraEngine
 				}
 
 				bool shouldInsertSpace = false;
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (index > 0 && characters.Count > 0 && characters[^1] != ' ')
 				{
 					char previous = identifier[index - 1];
@@ -186,6 +205,7 @@ namespace TerraEngine
 						|| (char.IsLetter(current) && char.IsDigit(previous));
 				}
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (shouldInsertSpace)
 				{
 					characters.Add(' ');
@@ -197,6 +217,7 @@ namespace TerraEngine
 			return new string(characters.ToArray());
 		}
 
+		// GetEligibleFields bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static IEnumerable<FieldInfo> GetEligibleFields(Type type)
 		{
 			var inheritance = new Stack<Type>();
@@ -220,6 +241,7 @@ namespace TerraEngine
 			}
 		}
 
+		// ShouldSerializeField bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool ShouldSerializeField(FieldInfo field)
 		{
 			if (field.IsStatic || field.IsInitOnly || field.IsLiteral)
@@ -227,6 +249,7 @@ namespace TerraEngine
 				return false;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (field.IsDefined(typeof(NonSerializedAttribute), inherit: true))
 			{
 				return false;
@@ -235,6 +258,7 @@ namespace TerraEngine
 			return field.IsPublic || field.IsDefined(typeof(SerializeFieldAttribute), inherit: true);
 		}
 
+		// BuildDescriptorForField bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static ScriptFieldDescriptorPayload BuildDescriptorForField(FieldInfo field, string fieldPath, ref int nextOrder, List<ScriptFieldDiagnosticPayload> diagnostics, HashSet<Type> recursionGuard)
 		{
 			RangeAttribute? range = field.GetCustomAttribute<RangeAttribute>(inherit: true);
@@ -255,6 +279,7 @@ namespace TerraEngine
 				assetReference);
 		}
 
+		// BuildDescriptorForType bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static ScriptFieldDescriptorPayload BuildDescriptorForType(Type valueType, string fieldPath, string serializedName, string displayName, ref int nextOrder, List<ScriptFieldDiagnosticPayload> diagnostics, HashSet<Type> recursionGuard, bool hiddenInInspector, string tooltip, RangeAttribute? range, AssetReferenceAttribute? assetReference)
 		{
 			var descriptor = new ScriptFieldDescriptorPayload
@@ -269,12 +294,14 @@ namespace TerraEngine
 				Editable = !hiddenInInspector
 			};
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (TryConfigureScalarDescriptor(valueType, descriptor, range, assetReference))
 			{
 				FinalizeDescriptor(descriptor);
 				return descriptor;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType.IsEnum)
 			{
 				descriptor.ValueKind = "Enum";
@@ -284,6 +311,7 @@ namespace TerraEngine
 				return descriptor;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (TryGetCollectionElementType(valueType, out Type? elementType, out string collectionKind))
 			{
 				descriptor.ValueKind = collectionKind;
@@ -308,12 +336,14 @@ namespace TerraEngine
 				return descriptor;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (IsNestedSerializableType(valueType))
 			{
 				descriptor.ValueKind = "NestedObject";
 				descriptor.ContainerKind = "NestedObject";
 				descriptor.ReadOnlyReason = hiddenInInspector ? "Hidden in inspector." : string.Empty;
 
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (!recursionGuard.Add(valueType))
 				{
 					descriptor.ValueKind = "Unsupported";
@@ -359,11 +389,13 @@ namespace TerraEngine
 			return descriptor;
 		}
 
+		// FinalizeDescriptor bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static void FinalizeDescriptor(ScriptFieldDescriptorPayload descriptor)
 		{
 			if (descriptor.HiddenInInspector)
 			{
 				descriptor.Editable = false;
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (string.IsNullOrWhiteSpace(descriptor.ReadOnlyReason))
 				{
 					descriptor.ReadOnlyReason = "Hidden in inspector.";
@@ -371,6 +403,7 @@ namespace TerraEngine
 			}
 		}
 
+		// TryConfigureScalarDescriptor bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool TryConfigureScalarDescriptor(Type valueType, ScriptFieldDescriptorPayload descriptor, RangeAttribute? range, AssetReferenceAttribute? assetReference)
 		{
 			if (valueType == typeof(bool))
@@ -379,6 +412,7 @@ namespace TerraEngine
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(int))
 			{
 				descriptor.ValueKind = "Int";
@@ -387,6 +421,7 @@ namespace TerraEngine
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(float))
 			{
 				descriptor.ValueKind = "Float";
@@ -395,6 +430,7 @@ namespace TerraEngine
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(string))
 			{
 				descriptor.ValueKind = assetReference?.AssetKind switch
@@ -408,30 +444,35 @@ namespace TerraEngine
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Vector2))
 			{
 				descriptor.ValueKind = "Vector2";
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Vector3))
 			{
 				descriptor.ValueKind = "Vector3";
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Vector4))
 			{
 				descriptor.ValueKind = "Vector4";
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Quaternion))
 			{
 				descriptor.ValueKind = "Quaternion";
 				return true;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType == typeof(Object) || valueType == typeof(uint))
 			{
 				descriptor.ValueKind = "EntityReference";
@@ -441,6 +482,7 @@ namespace TerraEngine
 			return false;
 		}
 
+		// EnumerateNestedFields bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static IEnumerable<FieldInfo> EnumerateNestedFields(Type type)
 		{
 			foreach (FieldInfo field in GetEligibleFields(type))
@@ -449,6 +491,7 @@ namespace TerraEngine
 			}
 		}
 
+		// IsNestedSerializableType bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static bool IsNestedSerializableType(Type valueType)
 		{
 			if (valueType.IsPrimitive || valueType.IsEnum || valueType == typeof(string))
@@ -456,11 +499,13 @@ namespace TerraEngine
 				return false;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (typeof(Script).IsAssignableFrom(valueType) || typeof(Component).IsAssignableFrom(valueType) || valueType == typeof(Object))
 			{
 				return false;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (TryGetCollectionElementType(valueType, out _, out _))
 			{
 				return false;
@@ -469,6 +514,7 @@ namespace TerraEngine
 			return valueType.IsValueType || valueType.IsDefined(typeof(SerializableAttribute), inherit: false);
 		}
 
+		// TryGetCollectionElementType bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static bool TryGetCollectionElementType(Type valueType, out Type? elementType, out string collectionKind)
 		{
 			if (valueType.IsArray)
@@ -478,6 +524,7 @@ namespace TerraEngine
 				return elementType != null;
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (valueType.IsGenericType && valueType.GetGenericTypeDefinition() == typeof(List<>))
 			{
 				elementType = valueType.GetGenericArguments()[0];
@@ -490,17 +537,20 @@ namespace TerraEngine
 			return false;
 		}
 
+		// BuildTypeFingerprint bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static string BuildTypeFingerprint(Type type)
 		{
 			return type.AssemblyQualifiedName ?? type.FullName ?? type.Name;
 		}
 
+		// BuildUnsupportedReason bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static string BuildUnsupportedReason(Type unsupportedType)
 		{
 			string displayName = unsupportedType.FullName ?? unsupportedType.Name;
 			return $"TerraEngine does not yet expose a safe default inspector for {displayName}. The field stays visible as a diagnostic so authored data is not silently lost.";
 		}
 
+		// CreateDiagnostic bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static ScriptFieldDiagnosticPayload CreateDiagnostic(string diagnosticId, string fieldPath, string scope, string severity, string code, string message)
 		{
 			return new ScriptFieldDiagnosticPayload

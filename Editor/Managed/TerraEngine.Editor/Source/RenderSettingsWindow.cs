@@ -1,3 +1,7 @@
+// RenderSettingsWindow.cs — Managed render settings configuration window
+//
+// Implements a specialized editor window for configuring global graphics and rendering quality settings. It provides a user interface for adjusting lighting budgets, shadow resolutions, and image-based lighting parameters, syncing changes back to the native renderer.
+
 using Hexa.NET.ImGui;
 using System;
 using TerraEngine.Editor.Framework;
@@ -45,15 +49,18 @@ namespace TerraEngine.Editor
             var currentPreset = Graphics.QualityPreset;
             var settings = Graphics.RenderSettings;
 
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.BeginCombo("Quality Preset", currentPreset.ToString()))
             {
                 foreach (QualityPreset preset in Enum.GetValues(typeof(QualityPreset)))
                 {
                     bool isSelected = (currentPreset == preset);
+                    // Validate this condition before crossing into native or editor state that may outlive the managed object.
                     if (ImGui.Selectable(preset.ToString(), isSelected))
                     {
                         Graphics.QualityPreset = preset;
                     }
+                    // Validate this condition before crossing into native or editor state that may outlive the managed object.
                     if (isSelected)
                     {
                         ImGui.SetItemDefaultFocus();
@@ -71,6 +78,7 @@ namespace TerraEngine.Editor
             ShowOptionTooltip("Options in this section control uploaded candidates, retained shading lights, shadow ownership, and costly lighting classes.");
             
             int shadowRes = (int)settings.ShadowResolution;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.InputInt("Shadow Resolution", ref shadowRes))
             {
                 settings.ShadowResolution = (uint)Math.Max(128, shadowRes);
@@ -79,9 +87,11 @@ namespace TerraEngine.Editor
             ShowOptionTooltip("Sets the resolution used for generated shadow maps. Higher values improve sharpness but increase memory and GPU cost.");
 
             int filterSize = (int)settings.ShadowFilteringSize;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.SliderInt("Shadow PCF Kernel", ref filterSize, 1, 15))
             {
                 // Force odd numbers for centered kernels
+                // Validate this condition before crossing into native or editor state that may outlive the managed object.
                 if (filterSize % 2 == 0) filterSize++;
                 settings.ShadowFilteringSize = (uint)filterSize;
                 changed = true;
@@ -89,6 +99,7 @@ namespace TerraEngine.Editor
             ShowOptionTooltip("Controls the size of the percentage-closer filtering kernel. Larger kernels soften shadow edges but cost more samples.");
 
             int maxLights = (int)settings.MaxDynamicLights;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.SliderInt("Retained Light Budget", ref maxLights, 0, 1024))
             {
                 settings.MaxDynamicLights = (uint)maxLights;
@@ -100,6 +111,7 @@ namespace TerraEngine.Editor
             ShowOptionTooltip("Limits how many lights survive the final screen-aware selection stage for shading in the current frame. Directional lights, shadow-capable lights, authored-priority lights, and strongly visible lights are prioritized when the scene exceeds this budget.");
 
             int maxShadowLights = (int)settings.MaxShadowLights;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.SliderInt("Shadow Light Budget", ref maxShadowLights, 0, Math.Max(0, Math.Min(maxLights, MaxShadowResourceSlots))))
             {
                 settings.MaxShadowLights = (uint)Math.Clamp(maxShadowLights, 0, Math.Min(maxLights, MaxShadowResourceSlots));
@@ -107,9 +119,11 @@ namespace TerraEngine.Editor
             }
             ShowOptionTooltip("Limits how many retained lights may still own shadow resources in the current frame. The renderer allocates slots lazily up to the backend capacity, so raising this budget costs memory only for slots that are actually enabled.");
 
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.CollapsingHeader("Advanced Lighting Overrides"))
             {
                 int maxUploadedLights = (int)settings.MaxUploadedLights;
+                // Validate this condition before crossing into native or editor state that may outlive the managed object.
                 if (ImGui.SliderInt("Uploaded Light Budget", ref maxUploadedLights, Math.Max(1, maxLights), 1024))
                 {
                     settings.MaxUploadedLights = (uint)Math.Max(maxUploadedLights, maxLights);
@@ -118,6 +132,7 @@ namespace TerraEngine.Editor
                 ShowOptionTooltip("Controls how many candidate lights are uploaded into the lightweight GPU analysis stage before the final retained-light list is chosen. Raising this can improve heavy-scene selection quality at additional per-frame cost.");
 
                 int maxAreaLights = (int)settings.MaxAreaLights;
+                // Validate this condition before crossing into native or editor state that may outlive the managed object.
                 if (ImGui.SliderInt("Area Light Budget", ref maxAreaLights, 0, Math.Max(0, maxLights)))
                 {
                     settings.MaxAreaLights = (uint)Math.Clamp(maxAreaLights, 0, maxLights);
@@ -127,6 +142,7 @@ namespace TerraEngine.Editor
             }
 
             bool enableLTC = settings.EnableLTC > 0;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.Checkbox("Enable Area Lights (LTC)", ref enableLTC))
             {
                 settings.EnableLTC = enableLTC ? 1u : 0u;
@@ -135,6 +151,7 @@ namespace TerraEngine.Editor
             ShowOptionTooltip("Enables Linearly Transformed Cosines for rectangular area lights. Disable this to reduce cost if area lights are not needed.");
 
             bool enableIBL = settings.EnableIBL > 0;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.Checkbox("Enable Indirect (IBL)", ref enableIBL))
             {
                 settings.EnableIBL = enableIBL ? 1u : 0u;
@@ -143,6 +160,7 @@ namespace TerraEngine.Editor
             ShowOptionTooltip("Toggles image-based lighting contributions that add indirect ambient response to materials.");
 
             float indirectStrength = settings.IndirectStrength;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.SliderFloat("Indirect Strength", ref indirectStrength, 0.0f, 8.0f))
             {
                 settings.IndirectStrength = Math.Clamp(indirectStrength, 0.0f, 8.0f);
@@ -151,6 +169,7 @@ namespace TerraEngine.Editor
             ShowOptionTooltip("Scales indirect and environment light without changing direct light intensity.");
 
             float aoStrength = settings.AmbientOcclusionStrength;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.SliderFloat("AO Strength", ref aoStrength, 0.0f, 4.0f))
             {
                 settings.AmbientOcclusionStrength = Math.Clamp(aoStrength, 0.0f, 4.0f);
@@ -159,6 +178,7 @@ namespace TerraEngine.Editor
             ShowOptionTooltip("Scales contact darkening applied to indirect/environment lighting.");
 
             int aoQuality = (int)settings.AmbientOcclusionQuality;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.SliderInt("AO Quality", ref aoQuality, 0, 3))
             {
                 settings.AmbientOcclusionQuality = (uint)Math.Clamp(aoQuality, 0, 3);
@@ -171,6 +191,7 @@ namespace TerraEngine.Editor
             ShowOptionTooltip("Texture settings affect sampling quality rather than clustered-lighting behavior.");
 
             int aniso = (int)settings.AnisotropicFiltering;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (ImGui.SliderInt("Anisotropic Filtering", ref aniso, 1, 16))
             {
                 settings.AnisotropicFiltering = (uint)aniso;
@@ -178,6 +199,7 @@ namespace TerraEngine.Editor
             }
             ShowOptionTooltip("Improves texture clarity at grazing view angles. Higher values increase texture sampling cost.");
 
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (changed)
             {
                 Graphics.RenderSettings = settings;

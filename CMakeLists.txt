@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 string(REPLACE "\\" "/" TERRAENGINE_NORMALIZED_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
+# Configure-time guard: select platform or option behavior before generating build files.
 if(TERRAENGINE_NORMALIZED_INSTALL_PREFIX MATCHES [[/External/[^/]+/install/?$]])
 	# Older build trees inherited a dependency-specific install prefix. Reset it
 	# so regenerated caches no longer carry obsolete third-party paths forward.
@@ -15,6 +16,7 @@ endif()
 
 include(ProcessorCount)
 ProcessorCount(TERRAENGINE_CPU_COUNT)
+# Configure-time guard: select platform or option behavior before generating build files.
 if(TERRAENGINE_CPU_COUNT GREATER 0 AND NOT DEFINED CMAKE_BUILD_PARALLEL_LEVEL)
 	# Default to using all detected CPU cores for builds so compilation scales with
 	# available hardware without requiring callers to remember -j/--parallel
@@ -157,15 +159,19 @@ set(BASISU_SOURCES
 	External/basisu/zstd/zstd.c
 )
 
+# Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_library(basisu STATIC ${BASISU_SOURCES})
-target_include_directories(basisu PUBLIC 
-	External/basisu/encoder 
-	External/basisu/transcoder 
+target_include_directories(basisu PUBLIC
+	External/basisu/encoder
+	External/basisu/transcoder
 	External/basisu/zstd
 	External/basisu/encoder/3rdparty
 )
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_compile_definitions(basisu PUBLIC BASISU_SUPPORT_ENCODING=1 BASISD_SUPPORT_KTX2=1 BASISD_SUPPORT_KTX2_ZSTD=0)
+# Configure-time guard: select platform or option behavior before generating build files.
 if(MSVC)
+	# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 	target_compile_options(basisu PRIVATE /W0 /FS)
 endif()
 
@@ -182,6 +188,7 @@ set(TEPAK_EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/External")
 add_subdirectory("${TEPAK_EXTERNAL_DIR}/xxhash/build/cmake" "${CMAKE_BINARY_DIR}/xxhash")
 add_subdirectory("${TEPAK_EXTERNAL_DIR}/zstd/build/cmake" "${CMAKE_BINARY_DIR}/zstd")
 
+# Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_library(TerraEngine-Engine SHARED
 	${ENGINE_SOURCES}
 	${ENGINE_HEADERS}
@@ -222,11 +229,13 @@ set(PUGIXML_BUILD_TESTS OFF CACHE BOOL "Disable pugixml tests" FORCE)
 set(PUGIXML_INSTALL OFF CACHE BOOL "Disable pugixml install target" FORCE)
 add_subdirectory(External/pugixml)
 set(BUILD_SHARED_LIBS ${TERRAENGINE_BUILD_SHARED_LIBS_SAVED_PUGI} CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
+# Configure-time guard: select platform or option behavior before generating build files.
 if(TARGET pugixml-static)
 	set_target_properties(pugixml-static PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 endif()
 
 # --- volk --------------------------------------------------------------------
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT DEFINED VULKAN_HEADERS_INSTALL_DIR)
 	set(VULKAN_HEADERS_INSTALL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/Vulkan-Headers)
 endif()
@@ -290,9 +299,11 @@ set(BUILD_SHARED_LIBS ${TERRAENGINE_BUILD_SHARED_LIBS_SAVED} CACHE BOOL "Prefer 
 set_target_properties(assimp PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 
 # --- mikktspace --------------------------------------------------------------
+# Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_library(mikktspace STATIC External/mikktspace/mikktspace.c External/mikktspace/mikktspace.h)
 target_include_directories(mikktspace PUBLIC External/mikktspace)
 if(MSVC)
+	# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 	target_compile_options(mikktspace PRIVATE /W0) # Disable warnings for external C code
 else()
 	target_compile_options(mikktspace PRIVATE -w)
@@ -300,6 +311,7 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_link_libraries(TerraEngine-Engine
 	PUBLIC
 		Threads::Threads
@@ -318,12 +330,15 @@ target_link_libraries(TerraEngine-Engine
 		xxhash
 )
 
+# Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)
 	# PlatformUtils uses ShellExecuteW/SHGetKnownFolderPath so the engine must
 	# link the corresponding Windows SDK libraries explicitly.
+	# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 	target_link_libraries(TerraEngine-Engine PRIVATE shell32 ole32)
 endif()
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_compile_definitions(TerraEngine-Engine
 	PUBLIC
 		TERRAENGINE_SHARED
@@ -340,6 +355,7 @@ target_compile_definitions(TerraEngine-Engine
 set_target_properties(TerraEngine-Engine PROPERTIES OUTPUT_NAME "TerraEngine")
 set_target_properties(TerraEngine-Engine PROPERTIES DEBUG_POSTFIX "")
 
+# Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)
 	# Ensure Windows generates an import library even if individual symbols are
 	# not manually decorated; this pairs with the TERRAENGINE_API macro so the
@@ -352,7 +368,7 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine"
 source_group("External/basisu" FILES ${BASISU_SOURCES})
 
 # --- Managed Source ----------------------------------------------------------
-# The following files are managed C# source files. CMake will generate the 
+# The following files are managed C# source files. CMake will generate the
 # .sln and .csproj files for these during the build process if configured.
 
 set(DOTNET_RUNTIME_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/External/dotnet/runtime/src/native/corehost)
@@ -389,6 +405,7 @@ set(NETHOST_SOURCES
     ${DOTNET_RUNTIME_ROOT}/fxr/fx_ver.cpp
 )
 
+# Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)
     list(APPEND NETHOST_SOURCES ${DOTNET_RUNTIME_ROOT}/hostmisc/pal.windows.cpp)
     list(APPEND NETHOST_SOURCES ${DOTNET_RUNTIME_ROOT}/hostmisc/longfile.windows.cpp)
@@ -396,8 +413,9 @@ else()
     list(APPEND NETHOST_SOURCES ${DOTNET_RUNTIME_ROOT}/hostmisc/pal.unix.cpp)
 endif()
 
+# Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_library(nethost STATIC ${NETHOST_SOURCES})
-target_include_directories(nethost PUBLIC 
+target_include_directories(nethost PUBLIC
     ${DOTNET_RUNTIME_ROOT}
     ${DOTNET_RUNTIME_ROOT}/hostmisc
     ${DOTNET_RUNTIME_ROOT}/nethost
@@ -405,13 +423,16 @@ target_include_directories(nethost PUBLIC
     ${DOTNET_RUNTIME_ROOT}/..
     ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost
 )
-target_compile_definitions(nethost PUBLIC 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
+target_compile_definitions(nethost PUBLIC
     NETHOST_USE_AS_STATIC
 )
-target_compile_definitions(nethost PRIVATE 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
+target_compile_definitions(nethost PRIVATE
     FEATURE_LIBHOST
 )
 
+# Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)
     target_compile_definitions(nethost PRIVATE TARGET_WINDOWS TARGET_AMD64)
 endif()
@@ -482,10 +503,12 @@ add_dependencies(TerraEngine.Editor.Managed TerraEngine.Managed.Output)
 add_dependencies(TerraEngine.Editor.Managed TerraEngine)
 add_dependencies(TerraEngine.Editor.Managed TerraEngine.Export.Generator)
 
+# Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_executable(TerraEngine-Launcher
     ${LAUNCHER_SOURCES}
 )
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_link_libraries(TerraEngine-Launcher
     PRIVATE
         TerraEngine-Engine
@@ -500,27 +523,32 @@ add_dependencies(TerraEngine-Launcher
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Launcher PREFIX "TerraEngine-Launcher" FILES ${LAUNCHER_SOURCES})
 
 # --- Editor Tools ------------------------------------------------------------
+# Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_executable(TerraEngineMeshCompiler
 	Editor/TerraEngineMeshCompiler.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
 )
 
+# Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_executable(TerraEngineTextureCompiler
 	Editor/TerraEngineTextureCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 )
 
+# Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_executable(TerraEngineShaderCompiler
 	Editor/TerraEngineShaderCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
 )
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_include_directories(TerraEngineMeshCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
 )
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_link_libraries(TerraEngineMeshCompiler
 	PRIVATE
 		meshoptimizer
@@ -528,6 +556,7 @@ target_link_libraries(TerraEngineMeshCompiler
 		mikktspace
 )
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_include_directories(TerraEngineTextureCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
@@ -537,11 +566,13 @@ target_include_directories(TerraEngineTextureCompiler
 		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/zstd
 )
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_link_libraries(TerraEngineTextureCompiler
 	PRIVATE
 		basisu
 )
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_include_directories(TerraEngineShaderCompiler
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
@@ -557,7 +588,7 @@ add_subdirectory(External/cimgui)
 
 # Ensure cimgui exports C++ ImGui symbols so TerraEngine-Editor can use them.
 # Also clear postfixes so managed wrappers can find the DLL by its expected name.
-set_target_properties(cimgui PROPERTIES 
+set_target_properties(cimgui PROPERTIES
 	DEBUG_POSTFIX ""
 	PREFIX ""
 )
@@ -566,30 +597,34 @@ set_target_properties(cimgui PROPERTIES
 # into the cimgui.dll itself instead of the Editor.
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui)
 
-target_sources(cimgui PRIVATE 
+target_sources(cimgui PRIVATE
 	External/ImGuizmo/ImGuizmo.cpp
 	${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
 	${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
 )
 
-target_include_directories(cimgui PRIVATE 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
+target_include_directories(cimgui PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}
 	External/ImGuizmo
 	${IMGUI_DIR}/backends
 )
 
 # Ensure consistent DLL linkage macros for all symbols exported by cimgui.dll
-target_compile_definitions(cimgui 
-	PRIVATE 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
+target_compile_definitions(cimgui
+	PRIVATE
 		"IMGUI_API=__declspec(dllexport)"
 		"IMGUI_IMPL_API=extern \"C\" __declspec(dllexport)"
 		IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 )
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_compile_definitions(cimgui INTERFACE
 		"IMGUI_API=__declspec(dllimport)"
 		"IMGUI_IMPL_API=extern \"C\" __declspec(dllimport)"
 )
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_link_libraries(cimgui glfw Vulkan::Headers)
 
 set_target_properties(glfw PROPERTIES DEBUG_POSTFIX "")
@@ -642,6 +677,7 @@ add_executable(TerraEngine-Editor
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 )
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_include_directories(TerraEngine-Editor
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}
@@ -661,22 +697,26 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/Export
 )
 
-target_compile_definitions(TerraEngine-Editor PRIVATE 
-	IMGUI_IMPL_VULKAN_NO_PROTOTYPES 
-	USE_STD_FILESYSTEM 
-	GLM_ENABLE_EXPERIMENTAL 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
+target_compile_definitions(TerraEngine-Editor PRIVATE
+	IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+	USE_STD_FILESYSTEM
+	GLM_ENABLE_EXPERIMENTAL
 	BASISU_SUPPORT_ENCODING=1
 	# Required by copied TEPAK sources for export asset packaging
 	XXH_STATIC_LINKING_ONLY
 	ZSTD_STATIC_LINKING_ONLY
 )
 
+# Configure-time guard: select platform or option behavior before generating build files.
 if(MSVC)
 	# The editor target builds a large number of C++ files directly, including
 	# vendored sources, so /FS avoids transient Debug PDB write races on Windows.
+	# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 	target_compile_options(TerraEngine-Editor PRIVATE /FS)
 endif()
 
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_link_libraries(TerraEngine-Editor
 	PRIVATE
 		TerraEngine-Engine
@@ -708,6 +748,7 @@ if(ipo_supported)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ON)
 endif()
 
+# Configure-time guard: select platform or option behavior before generating build files.
 if(MSVC)
     # Stronger optimizations for MSVC in Release modes
     add_compile_options(
@@ -731,6 +772,7 @@ endif()
 set(ENGINE_INSTALL_DESTINATION ${CMAKE_BINARY_DIR}/Build)
 
 set(DEFAULT_SHADER_SRC_DIR "${CMAKE_SOURCE_DIR}/Engine/Shaders/Default")
+	# Configure-time guard: select platform or option behavior before generating build files.
 	if(WIN32)
 		set(TERRAENGINE_DXC_PATH "${CMAKE_SOURCE_DIR}/External/dxc/windows/bin/x64/dxc.exe")
 	else()
@@ -793,6 +835,7 @@ execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.task.hlsl\" -o \"\${out_dir}/Default.task.tspf\" -s ts --dxc \"\${DXC_PATH}\"
 	RESULT_VARIABLE compile_ts
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ts EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile Default.task.hlsl with TerraEngineShaderCompiler during install\")
 endif()
@@ -801,6 +844,7 @@ execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.mesh.hlsl\" -o \"\${out_dir}/Default.mesh.tspf\" -s ms --dxc \"\${DXC_PATH}\"
 	RESULT_VARIABLE compile_ms
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ms EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile Default.mesh.hlsl with TerraEngineShaderCompiler during install\")
 endif()
@@ -809,6 +853,7 @@ execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SHADER_SRC_DIR}/Default.frag.hlsl\" -o \"\${out_dir}/Default.frag.tspf\" -s ps --dxc \"\${DXC_PATH}\"
 	RESULT_VARIABLE compile_ps
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ps EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile Default.frag.hlsl with TerraEngineShaderCompiler during install\")
 endif()
@@ -817,6 +862,7 @@ execute_process(
 	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterGrid.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterGrid.comp.hlsl\"
 	RESULT_VARIABLE compile_cluster_grid
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_cluster_grid EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile ClusterGrid.comp.hlsl during install\")
 endif()
@@ -825,6 +871,7 @@ execute_process(
 	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterDepthMask.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterDepthMask.comp.hlsl\"
 	RESULT_VARIABLE compile_cluster_depth
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_cluster_depth EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile ClusterDepthMask.comp.hlsl during install\")
 endif()
@@ -833,6 +880,7 @@ execute_process(
 	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/LightCull.comp.spv\" -spirv \"\${lighting_src_dir}/LightCull.comp.hlsl\"
 	RESULT_VARIABLE compile_light_cull
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_light_cull EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile LightCull.comp.hlsl during install\")
 endif()
@@ -841,6 +889,7 @@ execute_process(
 	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterLightCount.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterLightCount.comp.hlsl\"
 	RESULT_VARIABLE compile_cluster_count
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_cluster_count EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile ClusterLightCount.comp.hlsl during install\")
 endif()
@@ -849,6 +898,7 @@ execute_process(
 	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterLightPrefix.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterLightPrefix.comp.hlsl\"
 	RESULT_VARIABLE compile_cluster_prefix
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_cluster_prefix EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile ClusterLightPrefix.hlsl during install\")
 endif()
@@ -857,6 +907,7 @@ execute_process(
 	COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${lighting_out_dir}/ClusterLightFill.comp.spv\" -spirv \"\${lighting_src_dir}/ClusterLightFill.comp.hlsl\"
 	RESULT_VARIABLE compile_cluster_fill
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_cluster_fill EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile ClusterLightFill.comp.hlsl during install\")
 endif()
@@ -865,6 +916,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${postprocess_out_dir}/HiZGenerate.comp.spv\" -spirv \"\${postprocess_src_dir}/HiZGenerate.comp.hlsl\"
     RESULT_VARIABLE compile_hiz
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_hiz EQUAL 0)
     message(FATAL_ERROR \"Failed to compile HiZGenerate.comp.hlsl during install\")
 endif()
@@ -873,6 +925,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${postprocess_out_dir}/VRSGenerate.comp.spv\" -spirv \"\${postprocess_src_dir}/VRSGenerate.comp.hlsl\"
     RESULT_VARIABLE compile_vrs
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_vrs EQUAL 0)
     message(FATAL_ERROR \"Failed to compile VRSGenerate.comp.hlsl during install\")
 endif()
@@ -881,6 +934,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${postprocess_out_dir}/GTAO.comp.spv\" -spirv \"\${postprocess_src_dir}/GTAO.comp.hlsl\"
     RESULT_VARIABLE compile_gtao
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_gtao EQUAL 0)
     message(FATAL_ERROR \"Failed to compile GTAO.comp.hlsl during install\")
 endif()
@@ -889,6 +943,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${postprocess_out_dir}/GTAOBlur.comp.spv\" -spirv \"\${postprocess_src_dir}/GTAOBlur.comp.hlsl\"
     RESULT_VARIABLE compile_gtao_blur
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_gtao_blur EQUAL 0)
     message(FATAL_ERROR \"Failed to compile GTAOBlur.comp.hlsl during install\")
 endif()
@@ -897,6 +952,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_Static.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Static.hlsl\"
     RESULT_VARIABLE compile_ui_static_vs
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ui_static_vs EQUAL 0)
     message(FATAL_ERROR \"Failed to compile UI_Static.hlsl vertex shader during install\")
 endif()
@@ -905,6 +961,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMain -Fo \"\${ui_out_dir}/UI_Static.frag.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Static.hlsl\"
     RESULT_VARIABLE compile_ui_static_ps
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ui_static_ps EQUAL 0)
     message(FATAL_ERROR \"Failed to compile UI_Static.hlsl fragment shader during install\")
 endif()
@@ -913,6 +970,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_Instanced.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Instanced.hlsl\"
     RESULT_VARIABLE compile_ui_instanced_vs
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ui_instanced_vs EQUAL 0)
     message(FATAL_ERROR \"Failed to compile UI_Instanced.hlsl vertex shader during install\")
 endif()
@@ -921,6 +979,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMain -Fo \"\${ui_out_dir}/UI_Instanced.frag.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_Instanced.hlsl\"
     RESULT_VARIABLE compile_ui_instanced_ps
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ui_instanced_ps EQUAL 0)
     message(FATAL_ERROR \"Failed to compile UI_Instanced.hlsl fragment shader during install\")
 endif()
@@ -929,6 +988,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${ui_out_dir}/UI_SDF_Text.vert.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_SDF_Text.hlsl\"
     RESULT_VARIABLE compile_ui_text_vs
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ui_text_vs EQUAL 0)
     message(FATAL_ERROR \"Failed to compile UI_SDF_Text.hlsl vertex shader during install\")
 endif()
@@ -937,6 +997,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMain -Fo \"\${ui_out_dir}/UI_SDF_Text.frag.spv\" -spirv \"\${UI_SHADER_SRC_DIR}/UI_SDF_Text.hlsl\"
     RESULT_VARIABLE compile_ui_text_ps
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_ui_text_ps EQUAL 0)
     message(FATAL_ERROR \"Failed to compile UI_SDF_Text.hlsl fragment shader during install\")
 endif()
@@ -945,6 +1006,7 @@ execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SKY_SHADER_SRC_DIR}/SkyBackground.task.hlsl\" -o \"\${sky_out_dir}/SkyBackground.task.tspf\" -s ts -e TSMain --dxc \"\${DXC_PATH}\"
 	RESULT_VARIABLE compile_sky_ts
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_sky_ts EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile SkyBackground.task.hlsl with TerraEngineShaderCompiler during install\")
 endif()
@@ -953,6 +1015,7 @@ execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SKY_SHADER_SRC_DIR}/SkyBackground.mesh.hlsl\" -o \"\${sky_out_dir}/SkyBackground.mesh.tspf\" -s ms -e MSMain --dxc \"\${DXC_PATH}\"
 	RESULT_VARIABLE compile_sky_ms
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_sky_ms EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile SkyBackground.mesh.hlsl with TerraEngineShaderCompiler during install\")
 endif()
@@ -961,6 +1024,7 @@ execute_process(
 	COMMAND \"\${SHADER_COMPILER}\" -i \"\${SKY_SHADER_SRC_DIR}/SkyBackground.frag.hlsl\" -o \"\${sky_out_dir}/SkyBackground.frag.tspf\" -s ps -e PSMain --dxc \"\${DXC_PATH}\"
 	RESULT_VARIABLE compile_sky_ps
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_sky_ps EQUAL 0)
 	message(FATAL_ERROR \"Failed to compile SkyBackground.frag.hlsl with TerraEngineShaderCompiler during install\")
 endif()
@@ -970,6 +1034,7 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T vs_6_0 -E VSMain -Fo \"\${editor_out_dir}/SceneViewGrid.vert.spv\" -spirv \"\${EDITOR_SHADER_SRC_DIR}/SceneViewGrid.hlsl\"
     RESULT_VARIABLE compile_grid_vs
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_grid_vs EQUAL 0)
     message(FATAL_ERROR \"Failed to compile SceneViewGrid.vert.spv during install\")
 endif()
@@ -978,18 +1043,23 @@ execute_process(
     COMMAND \"\${DXC_PATH}\" -T ps_6_0 -E PSMainWithDepth -Fo \"\${editor_out_dir}/SceneViewGrid.frag.spv\" -spirv \"\${EDITOR_SHADER_SRC_DIR}/SceneViewGrid.hlsl\"
     RESULT_VARIABLE compile_grid_ps
 )
+# Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_grid_ps EQUAL 0)
     message(FATAL_ERROR \"Failed to compile SceneViewGrid.frag.spv during install\")
 endif()
 ")
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(SCRIPT "${SHADER_INSTALL_SCRIPT}")
+	# Configure-time guard: select platform or option behavior before generating build files.
 	if(TARGET install)
 		add_dependencies(install TerraEngineShaderCompiler)
 	endif()
 
+	# Configure-time guard: select platform or option behavior before generating build files.
 	if(WIN32)
 		# Keep the Windows install tree focused on runtime files only; the import library
 		# stays in the build tree while the DLL is delivered via the runtime destination.
+		# Install rule: every code change must keep the install tree reproducible for downstream users.
 		install(TARGETS TerraEngine-Engine
 			RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
@@ -997,6 +1067,7 @@ endif()
 			INCLUDES DESTINATION ${ENGINE_INSTALL_DESTINATION}/include
 		)
 	else()
+		# Install rule: every code change must keep the install tree reproducible for downstream users.
 		install(TARGETS TerraEngine-Engine
 			RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 			LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
@@ -1006,64 +1077,75 @@ endif()
 		)
 	endif()
 
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 		OPTIONAL
 	)
 
 	# --- Launcher Install ---
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(TARGETS TerraEngine-Launcher
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
 		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
 	)
 
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
 		OPTIONAL
 	)
-	
+
 	# Install Engine DLLs to Launcher folder so it can run
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_FILE:TerraEngine-Engine>
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
 	)
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
 		OPTIONAL
 	)
 
 	# --- Editor Install ---
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(TARGETS TerraEngine-Editor
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
-	
+
 	# Install Engine DLLs to Editor folder so it can run
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_FILE:TerraEngine-Engine>
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 		OPTIONAL
 	)
 
 	# Install Managed Assemblies to Editor (Self-Contained)
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(DIRECTORY "${MANAGED_OUTPUT_DIR}/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Managed"
 		PATTERN "runtimes" EXCLUDE
 	)
 
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/Templates/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Project/Templates"
 	)
 
-	# Install Engine's export-mode interop sources as templates so the editor 
+	# Install Engine's export-mode interop sources as templates so the editor
 	# can reliably sync them into user projects.
 	install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/Source/Export/"
 		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Editor/Project/Templates/Export"
 		FILES_MATCHING PATTERN "*.cs"
 	)
-	
+
 	# Install cimgui (TerraEngine-ImGui)
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
 	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
 
@@ -1073,39 +1155,47 @@ endif()
 		${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui/misc/fonts/Roboto-Medium.ttf
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Fonts
 	)
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES
 		${CMAKE_CURRENT_SOURCE_DIR}/External/cimgui/imgui/misc/fonts/Roboto-Medium.ttf
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher/Fonts
 	)
 
 	# Install dependencies (glfw) to both
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(TARGETS glfw
-		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine 
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 		LIBRARY DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
 	)
 	# Copy to Launcher/Editor/Managed
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
 
+# Install rule: every code change must keep the install tree reproducible for downstream users.
 install(TARGETS TerraEngineMeshCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 )
+# Install rule: every code change must keep the install tree reproducible for downstream users.
 install(TARGETS TerraEngineTextureCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 )
+# Install rule: every code change must keep the install tree reproducible for downstream users.
 install(TARGETS TerraEngineShaderCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 )
 
+# Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)
 	install(PROGRAMS
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/windows/bin/x64/dxc.exe
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/windows/bin/x64/dxcompiler.dll
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/windows/bin/x64/dxil.dll
@@ -1113,11 +1203,13 @@ if(WIN32)
 	)
 	# Also need DXC for Launcher? No, Launcher just runs. Editor compiles.
 else()
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(PROGRAMS
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/bin/dxc
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
 	# Ship the DXC runtime libraries beside the compiler binary so it can run without system installs.
+	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxcompiler.so
 		${CMAKE_CURRENT_SOURCE_DIR}/External/dxc/linux/lib/libdxil.so

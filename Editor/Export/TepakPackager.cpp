@@ -1,8 +1,6 @@
-// TepakPackager.cpp — TEPAK archive packaging for the export pipeline.
+// TepakPackager.cpp — TEPAK archive packaging implementation
 //
-// Uses TEPAK first-party source code copied into Editor/Export/ so the editor
-// build is self-contained. TEPAK's third-party dependencies (zstd, xxhash)
-// are sourced from TEPAK/External/ via CMake include paths.
+// Implements the asset packaging logic by interfacing with the TEPAK PackWriter API. It translates build profile settings into packaging requests, manages worker thread allocation, and handles zstd compression level mapping for optimized archive creation.
 
 #include "TepakPackager.h"
 
@@ -40,6 +38,7 @@ PackageResult TepakPackager::Package(
 	const auto startTime = std::chrono::steady_clock::now();
 
 	// Ensure the asset directory exists.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(assetDirectory) ||
 		!std::filesystem::is_directory(assetDirectory)) {
 		result.success = false;
@@ -63,6 +62,7 @@ PackageResult TepakPackager::Package(
 	request.enableDictionaryTraining = compressEnabled;
 
 	// Worker count: 0 means auto-detect (use hardware concurrency).
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (profile.tepakWorkerCount == 0) {
 		const auto hwThreads = std::thread::hardware_concurrency();
 		request.workerCount = hwThreads > 0 ? hwThreads : 4;

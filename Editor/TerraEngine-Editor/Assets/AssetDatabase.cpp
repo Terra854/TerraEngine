@@ -1,3 +1,7 @@
+// AssetDatabase.cpp — Editor asset database implementation
+//
+// Implements the asset lifecycle management including automated project scanning, metadata persistence, and asynchronous asset compilation. It integrates with the filesystem watcher to detect external changes and syncs the database with the engine's resource manager.
+
 #include "AssetDatabase.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "Engine/Core/Logger/Logger.h"
@@ -22,6 +26,7 @@ using json = nlohmann::json;
 namespace {
 	constexpr auto kRecentlyRemovedAssetRetention = std::chrono::seconds(5);
 
+	// UuidToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string UuidToString(const TerraEngine::UUID& uuid) {
 		std::ostringstream oss;
 		for (const auto& byte : uuid) {
@@ -30,15 +35,18 @@ namespace {
 		return oss.str();
 	}
 
+	// StringToUuid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	TerraEngine::UUID StringToUuid(const std::string& str) {
 		TerraEngine::UUID uuid;
 		if (str.length() != uuid.size() * 2) return TerraEngine::EMPTY_UUID;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t i = 0; i < uuid.size(); ++i) {
 			uuid[i] = static_cast<std::uint8_t>(std::stoul(str.substr(i * 2, 2), nullptr, 16));
 		}
 		return uuid;
 	}
 
+	// ReadScriptMetadataString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string ReadScriptMetadataString(const AssetMetadata& metadata, const char* key) {
 		const auto settingIt = metadata.settings.find(key);
 		if (settingIt == metadata.settings.end() || !settingIt->is_string()) {
@@ -49,6 +57,7 @@ namespace {
 	}
 }
 
+// AssetDatabase::Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 AssetDatabase& AssetDatabase::Instance() {
 	static AssetDatabase instance;
 	return instance;
@@ -57,11 +66,13 @@ AssetDatabase& AssetDatabase::Instance() {
 AssetDatabase::AssetDatabase() {}
 AssetDatabase::~AssetDatabase() {}
 
+// AssetDatabase::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	this->projectRoot = std::filesystem::absolute(projectRootPath);
 	this->assetRoot = this->projectRoot / "Assets";
 	this->buildRoot = this->projectRoot / "Build" / "Assets";
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(assetRoot)) std::filesystem::create_directories(assetRoot);
 	if (!std::filesystem::exists(buildRoot)) std::filesystem::create_directories(buildRoot);
 
@@ -76,12 +87,14 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	fileWatcher.Start(assetRoot);
 }
 
+// AssetDatabase::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Shutdown() {
 	fileWatcher.Stop();
 	assets.clear();
 	recentlyRemovedAssets.clear();
 }
 
+// AssetDatabase::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Update() {
 	PruneRecentlyRemovedAssets();
 
@@ -98,6 +111,7 @@ void AssetDatabase::Update() {
 	float dt = 0.016f;
 
 	auto it = pendingEvents.begin();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (it != pendingEvents.end()) {
 		it->second.timer -= dt;
 		if (it->second.timer <= 0.0f) {
@@ -109,9 +123,11 @@ void AssetDatabase::Update() {
 	}
 
 	// Process Async Jobs
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto jobIt = asyncJobs.begin(); jobIt != asyncJobs.end(); ) {
 		if (jobIt->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
 			bool compiled = jobIt->future.get();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!compiled) {
 				TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << jobIt->absSourcePath);
 			} else {
@@ -123,8 +139,11 @@ void AssetDatabase::Update() {
 		}
 	}
 }
+// AssetDatabase::IsAssetCompiling is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool AssetDatabase::IsAssetCompiling(const std::filesystem::path& absSourcePath) const {
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& job : asyncJobs) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (job.absSourcePath == absSourcePath) {
 			return true;
 		}
@@ -132,6 +151,7 @@ bool AssetDatabase::IsAssetCompiling(const std::filesystem::path& absSourcePath)
 	return false;
 }
 
+// AssetDatabase::OnFileEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::OnFileEvent(const std::filesystem::path& path, FileStatus status) {
 	// Ignore .meta files and directories
 	if (path.extension() == ".meta") return;
@@ -140,10 +160,12 @@ void AssetDatabase::OnFileEvent(const std::filesystem::path& path, FileStatus st
 
 	std::string extension = path.extension().string();
 	std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (extension == ".cs") {
 		ScriptCompilationSubsystem::Instance().NotifyScriptSourceChanged(path);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (status == FileStatus::Created || status == FileStatus::Modified) {
 		if (std::filesystem::exists(path)) {
 			ImportAsset(path);
@@ -153,19 +175,24 @@ void AssetDatabase::OnFileEvent(const std::filesystem::path& path, FileStatus st
 	}
 }
 
+// AssetDatabase::ScanProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::ScanProject() {
 	// 1. Cleanup orphaned .meta files
 	if (std::filesystem::exists(assetRoot)) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& entry : std::filesystem::recursive_directory_iterator(assetRoot)) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (entry.path().extension() == ".meta") {
 				std::filesystem::path sourcePath = entry.path();
 				sourcePath.replace_extension(""); // Remove .meta extension to get source
 				
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!std::filesystem::exists(sourcePath)) {
 					// Orphaned meta found
 					AssetMetadata tempMeta;
 					// Try to load to delete compiled asset
 					if (LoadMetadata(entry.path(), tempMeta)) {
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (!tempMeta.compiledPath.empty()) {
 							std::filesystem::path fullCompiled = buildRoot / tempMeta.compiledPath;
 							if (std::filesystem::exists(fullCompiled)) std::filesystem::remove(fullCompiled);
@@ -179,9 +206,11 @@ void AssetDatabase::ScanProject() {
 	}
 
 	// 2. Import existing assets (Sync DB with Disk)
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(assetRoot)) {
 		for (const auto& entry : std::filesystem::recursive_directory_iterator(assetRoot)) {
 			if (entry.is_regular_file()) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (entry.path().extension() == ".meta") continue;
 				ImportAsset(std::filesystem::absolute(entry.path()));
 			}
@@ -189,9 +218,11 @@ void AssetDatabase::ScanProject() {
 	}
 }
 
+// AssetDatabase::ImportAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool force) {
 	const auto absSourcePath = std::filesystem::absolute(sourcePath);
 	if (absSourcePath.extension() == ".meta") return;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::is_directory(absSourcePath)) return;
 
 	const std::string importerName = GetImporterName(absSourcePath);
@@ -202,15 +233,18 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 	bool metadataValid = false;
 
 	// 1. Prefer in-memory metadata if we are forcing or it already exists
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (assets.count(absSourcePath)) {
 		metadata = assets[absSourcePath];
 		metadataValid = true;
 	} 
 	// 2. Otherwise try loading from disk
+	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (std::filesystem::exists(metaFilePath)) {
 		metadataValid = LoadMetadata(metaFilePath, metadata);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!metadataValid) {
 		if (!TryReuseRecentlyRemovedScriptMetadata(absSourcePath, metadata)) {
 			GenerateDefaultMetadata(absSourcePath, metadata);
@@ -219,6 +253,7 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 	} else if (!force) {
 		// Check timestamp only if not forcing
 		auto currentModTime = std::filesystem::last_write_time(absSourcePath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (currentModTime > metadata.lastModified) {
 			needsImport = true;
 			metadata.lastModified = currentModTime;
@@ -230,6 +265,7 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 	metadata.sourcePath = std::filesystem::relative(absSourcePath, assetRoot);
 	metadata.importerName = importerName;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (metadata.importerName == "ScriptImporter") {
 		UpdateScriptMetadata(absSourcePath, metadata);
 	}
@@ -238,6 +274,7 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 	std::filesystem::path relativeSourcePath = std::filesystem::relative(absSourcePath, assetRoot);
 	std::filesystem::path compiledRelativePath = relativeSourcePath;
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (metadata.importerName == "MeshImporter") compiledRelativePath.replace_extension(".temf");
 	else if (metadata.importerName == "TextureImporter") compiledRelativePath.replace_extension(".tetf");
 	else if (metadata.importerName == "ShaderImporter") compiledRelativePath.replace_extension(".tspf");
@@ -254,10 +291,12 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 		std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
 
 		if (needsImport || !std::filesystem::exists(fullCompiledPath)) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!std::filesystem::exists(fullCompiledPath.parent_path())) {
 				std::filesystem::create_directories(fullCompiledPath.parent_path());
 			}
 			
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (metadata.importerName == "TextureImporter") {
 				auto future = std::async(std::launch::async, [this, metadata]() {
 					return CompileAsset(metadata);
@@ -266,6 +305,7 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 				return; // Defer registration until async job finishes
 			} else {
 				bool compiled = CompileAsset(metadata);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!compiled) {
 					TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << absSourcePath);
 				}
@@ -276,6 +316,7 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 	FinishImport(metadata, absSourcePath, needsImport);
 }
 
+// AssetDatabase::FinishImport is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport) {
 	// Always save metadata
 	SaveMetadata(metadata);
@@ -295,12 +336,17 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 	assets[absSourcePath] = metadata;
 
 	// Register with Engine ResourceManager so it can resolve GUIDs to compiled paths
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!metadata.compiledPath.empty()) {
 		AssetType type;
 		bool known = false;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.importerName == "MeshImporter") { type = AssetType::Mesh; known = true; }
+		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "TextureImporter") { type = AssetType::Texture; known = true; }
+		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "MaterialImporter") { type = AssetType::Material; known = true; }
+		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "ShaderImporter") { type = AssetType::ShaderCollection; known = true; }
 
 		if (known) {
@@ -311,6 +357,7 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 			std::filesystem::path fullCompiled = buildRoot / metadata.compiledPath;
 			ResourceManager::Instance().RegisterAssetPath(metadata.guid, fullCompiled, type);
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (needsImport) {
 				if (type == AssetType::Material) {
 					RenderSystem::Instance().ReloadMaterial(metadata.guid);
@@ -324,9 +371,11 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 	}
 }
 
+// AssetDatabase::DeleteAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::DeleteAsset(const std::filesystem::path& sourcePath) {
 	const auto absPath = std::filesystem::absolute(sourcePath);
 	auto it = assets.find(absPath);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (it == assets.end()) return;
 
 	AssetMetadata metadata = it->second;
@@ -351,6 +400,7 @@ void AssetDatabase::DeleteAsset(const std::filesystem::path& sourcePath) {
 	}
 }
 
+// AssetDatabase::GenerateDefaultMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::GenerateDefaultMetadata(const std::filesystem::path& sourcePath, AssetMetadata& outMetadata) {
 	outMetadata.guid = TerraEngine::GenerateUUID();
 	outMetadata.lastModified = std::filesystem::last_write_time(sourcePath);
@@ -358,6 +408,7 @@ void AssetDatabase::GenerateDefaultMetadata(const std::filesystem::path& sourceP
 	outMetadata.sourcePath = std::filesystem::relative(sourcePath, assetRoot);
 	outMetadata.settings = json::object(); 
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (outMetadata.importerName == "TextureImporter") {
 		outMetadata.settings["generateMipmaps"] = true;
 		outMetadata.settings["filterType"] = "Lanczos";
@@ -365,6 +416,7 @@ void AssetDatabase::GenerateDefaultMetadata(const std::filesystem::path& sourceP
 		outMetadata.settings["semantic"] = "color";
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (outMetadata.importerName == "ScriptImporter") {
 		outMetadata.settings["compileStatus"] = "Unknown";
 		outMetadata.settings["scriptClassName"] = "";
@@ -374,20 +426,27 @@ void AssetDatabase::GenerateDefaultMetadata(const std::filesystem::path& sourceP
 	}
 }
 
+// AssetDatabase::GetImporterName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath) const {
 	std::string ext = filePath.extension().string();
 	std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (IsSupportedMeshSourceExtension(filePath)) return "MeshImporter";
 	if (IsSupportedTextureSourceExtension(filePath)) return "TextureImporter";
 	if (ext == ".hlsl" || ext == ".glsl") return "ShaderImporter";
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ext == ".tmat") return "MaterialImporter";
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ext == ".cs") return "ScriptImporter";
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ext == ".tuiml") return "UIImporter";
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ext == ".tuss") return "StyleImporter";
 	return "GenericImporter";
 }
 
+// AssetDatabase::UpdateScriptMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::UpdateScriptMetadata(const std::filesystem::path& sourcePath, AssetMetadata& metadata) {
 	std::ifstream input(sourcePath);
 	if (!input) {
@@ -421,6 +480,7 @@ void AssetDatabase::UpdateScriptMetadata(const std::filesystem::path& sourcePath
 	metadata.settings["isAttachable"] = derivesFromScript;
 }
 
+// AssetDatabase::PruneRecentlyRemovedAssets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::PruneRecentlyRemovedAssets() {
 	// Remove rename tombstones once the short reconciliation window expires so
 	// the cache cannot grow unbounded during long editor sessions.
@@ -435,6 +495,7 @@ void AssetDatabase::PruneRecentlyRemovedAssets() {
 		recentlyRemovedAssets.end());
 }
 
+// AssetDatabase::TryReuseRecentlyRemovedScriptMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool AssetDatabase::TryReuseRecentlyRemovedScriptMetadata(const std::filesystem::path& sourcePath, AssetMetadata& outMetadata) {
 	if (GetImporterName(sourcePath) != "ScriptImporter") {
 		return false;
@@ -446,15 +507,18 @@ bool AssetDatabase::TryReuseRecentlyRemovedScriptMetadata(const std::filesystem:
 	UpdateScriptMetadata(sourcePath, currentScriptMetadata);
 
 	const std::string currentFullName = ReadScriptMetadataString(currentScriptMetadata, "scriptFullName");
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (currentFullName.empty()) {
 		return false;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto it = recentlyRemovedAssets.begin(); it != recentlyRemovedAssets.end(); ++it) {
 		if (it->metadata.importerName != "ScriptImporter") {
 			continue;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ReadScriptMetadataString(it->metadata, "scriptFullName") != currentFullName) {
 			continue;
 		}
@@ -473,6 +537,7 @@ bool AssetDatabase::TryReuseRecentlyRemovedScriptMetadata(const std::filesystem:
 	return false;
 }
 
+// AssetDatabase::LoadMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool AssetDatabase::LoadMetadata(const std::filesystem::path& metaFilePath, AssetMetadata& outMetadata) {
 	std::ifstream file(metaFilePath);
 	if (!file.is_open()) return false;
@@ -487,14 +552,17 @@ bool AssetDatabase::LoadMetadata(const std::filesystem::path& metaFilePath, Asse
 		outMetadata.lastModified = std::filesystem::file_time_type(FileDuration(storedTicks));
 		outMetadata.sourcePath = j["sourcePath"].get<std::string>();
 		outMetadata.compiledPath = j["compiledPath"].get<std::string>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("settings")) outMetadata.settings = j["settings"];
 		return true;
 	} catch (...) { return false; }
 }
 
+// AssetDatabase::SaveMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool AssetDatabase::SaveMetadata(const AssetMetadata& metadata) {
 	std::filesystem::path metaFilePath = (assetRoot / metadata.sourcePath).string() + ".meta";
 	std::ofstream file(metaFilePath);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!file.is_open()) return false;
 	try {
 		json j;
@@ -510,6 +578,7 @@ bool AssetDatabase::SaveMetadata(const AssetMetadata& metadata) {
 	} catch (...) { return false; }
 }
 
+// AssetDatabase::CompileAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 	if (metadata.compiledPath.empty()) return true;
 
@@ -522,27 +591,33 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 
 	TERRAENGINE_LOG(LogLevel::Info, "Compiling Asset via Internal Compiler: " << fullSourcePath);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (metadata.importerName == "MeshImporter") {
 		return CompileMesh(fullSourcePath, fullCompiledPath);
 	} 
+	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (metadata.importerName == "TextureImporter") {
 		std::string semanticStr = "color";
 		if (metadata.settings.contains("semantic")) semanticStr = metadata.settings["semantic"];
 		
 		TextureFileSemantic semantic = TextureFileSemantic::Color;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (semanticStr == "data") semantic = TextureFileSemantic::Data;
 
 		std::uint32_t quality = 1; // Balanced
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.settings.contains("quality")) {
 			quality = static_cast<std::uint32_t>(metadata.settings["quality"].get<int>());
 		}
 
 		bool generateMipmaps = true;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.settings.contains("generateMipmaps")) {
 			generateMipmaps = metadata.settings["generateMipmaps"].get<bool>();
 		}
 
 		TextureFilterType filter = TextureFilterType::Lanczos;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.settings.contains("filterType")) {
 			std::string filterStr = metadata.settings["filterType"];
 			if (filterStr == "Box") filter = TextureFilterType::Box;
@@ -553,14 +628,17 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 		
 		return CompileTexture(fullSourcePath, fullCompiledPath, semantic, quality, generateMipmaps, filter);
 	} 
+	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (metadata.importerName == "ShaderImporter") {
 		std::string stage = "vs";
 		if (metadata.settings.contains("stage")) stage = metadata.settings["stage"];
 		else { 
 			std::string fn = fullSourcePath.filename().string();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (fn.find("frag") != std::string::npos || fn.find("pixel") != std::string::npos) stage = "ps";
 		}
 		std::string target = "";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.settings.contains("target")) target = metadata.settings["target"];
 		std::string entry = "main";
 		if (metadata.settings.contains("entryPoint")) entry = metadata.settings["entryPoint"];
@@ -569,10 +647,12 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 		std::filesystem::path toolsDir = projectRoot / "out/build/Build/Debug"; 
 		
 		// Try relative to project root
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!std::filesystem::exists(toolsDir / "dxc.exe") && !std::filesystem::exists(toolsDir / "dxc")) {
 			toolsDir = std::filesystem::current_path();
 		}
 		// Try specific VS18 path
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!std::filesystem::exists(toolsDir / "dxc.exe") && !std::filesystem::exists(toolsDir / "dxc")) {
 			toolsDir = projectRoot / "out/build_vs_18/Build/Editor";
 		}
@@ -594,12 +674,15 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 	}
 }
 
+// AssetDatabase::RemoveAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 	const auto absPath = std::filesystem::absolute(sourcePath);
 	auto it = assets.find(absPath);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (it != assets.end()) {
 		const auto& metadata = it->second;
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.importerName == "ScriptImporter") {
 			// Keep a short-lived tombstone so a rename can reattach the script
 			// to its previous metadata and preserve the original GUID.
@@ -608,9 +691,13 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 
 		AssetType type;
 		bool knownResource = false;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.importerName == "MeshImporter") { type = AssetType::Mesh; knownResource = true; }
+		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "TextureImporter") { type = AssetType::Texture; knownResource = true; }
+		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "MaterialImporter") { type = AssetType::Material; knownResource = true; }
+		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "ShaderImporter") { type = AssetType::ShaderCollection; knownResource = true; }
 
 		if (knownResource) {
@@ -618,17 +705,20 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		}
 
 		std::error_code ec;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!metadata.compiledPath.empty()) {
 			std::filesystem::path fullCompiled = buildRoot / metadata.compiledPath;
 			if (std::filesystem::exists(fullCompiled)) std::filesystem::remove(fullCompiled, ec);
 		}
 		
 		std::filesystem::path meta = absPath.string() + ".meta";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(meta)) std::filesystem::remove(meta, ec);
 		assets.erase(it);
 	}
 }
 
+// AssetDatabase::FindAssetByGuid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const AssetMetadata* AssetDatabase::FindAssetByGuid(const TerraEngine::UUID& guid) const {
 	for (const auto& [path, metadata] : assets) {
 		if (metadata.guid == guid) {
@@ -639,21 +729,26 @@ const AssetMetadata* AssetDatabase::FindAssetByGuid(const TerraEngine::UUID& gui
 	return nullptr;
 }
 
+// AssetDatabase::FindScriptAssetByFullName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const AssetMetadata* AssetDatabase::FindScriptAssetByFullName(std::string_view fullName) const {
 	if (fullName.empty()) {
 		return nullptr;
 	}
 
 	const AssetMetadata* match = nullptr;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& [path, metadata] : assets) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (metadata.importerName != "ScriptImporter") {
 			continue;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ReadScriptMetadataString(metadata, "scriptFullName") != fullName) {
 			continue;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (match != nullptr) {
 			return nullptr;
 		}
@@ -664,6 +759,7 @@ const AssetMetadata* AssetDatabase::FindScriptAssetByFullName(std::string_view f
 	return match;
 }
 
+// AssetDatabase::GetScriptFullName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string AssetDatabase::GetScriptFullName(const TerraEngine::UUID& guid) const {
 	if (const AssetMetadata* metadata = FindAssetByGuid(guid)) {
 		if (metadata->settings.contains("scriptFullName")) {
@@ -674,6 +770,7 @@ std::string AssetDatabase::GetScriptFullName(const TerraEngine::UUID& guid) cons
 	return {};
 }
 
+// AssetDatabase::SetScriptCompileState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::SetScriptCompileState(const std::string& compileState, const std::string& summary) {
 	for (auto& [path, metadata] : assets) {
 		if (metadata.importerName != "ScriptImporter") {

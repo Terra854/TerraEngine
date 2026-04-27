@@ -1,3 +1,5 @@
+// Debug.h — Contains declarations for the Debug constants, type definitions, and lightweight declarations used by module-specific declarations, data, and implementation details.
+
 #pragma once
 
 #if defined(DEBUG) | defined(_DEBUG)

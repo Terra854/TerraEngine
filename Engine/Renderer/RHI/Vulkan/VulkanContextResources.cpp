@@ -1,3 +1,9 @@
+// VulkanContextResources.cpp — Vulkan Resource Management Implementation
+//
+// Implements the management of persistent and transient GPU resources within the Vulkan backend.
+// This includes the allocation of buffers, creation of image views, and management of descriptor sets and pipeline states.
+// It provides specialized caches for meshes, textures, and materials to optimize GPU resource utilization and performance.
+
 #include "VulkanContextImpl.h"
 
 #include <algorithm>
@@ -18,17 +24,20 @@ namespace
 	constexpr std::uint64_t kClusterRangeHashOffset = 1469598103934665603ull;
 	constexpr std::uint64_t kClusterRangeHashPrime = 1099511628211ull;
 
+	// HashClusterRangeValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void HashClusterRangeValue(std::uint64_t& hashValue, std::uint64_t input)
 	{
 		hashValue ^= input;
 		hashValue *= kClusterRangeHashPrime;
 	}
 
+	// RenderViewTypeToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* RenderViewTypeToString(RenderViewType viewType)
 	{
 		return (viewType == RenderViewType::Scene) ? "Scene" : "Game";
 	}
 
+	// QualityPresetToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* QualityPresetToString(QualityPreset preset)
 	{
 		switch (preset)
@@ -48,6 +57,7 @@ namespace
 		}
 	}
 
+	// LightingReductionCategoryToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* LightingReductionCategoryToString(LightingReductionCategory category)
 	{
 		switch (category)
@@ -67,6 +77,7 @@ namespace
 		}
 	}
 
+	// ShadowResourceKindToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* ShadowResourceKindToString(ShadowResourceKind kind)
 	{
 		switch (kind)
@@ -84,6 +95,7 @@ namespace
 		}
 	}
 
+	// ShadowQualityTierToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* ShadowQualityTierToString(ShadowQualityTier tier)
 	{
 		switch (tier)
@@ -101,6 +113,7 @@ namespace
 		}
 	}
 
+	// ShadowDegradationReasonToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* ShadowDegradationReasonToString(ShadowDegradationReason reason)
 	{
 		switch (reason)
@@ -120,6 +133,7 @@ namespace
 		}
 	}
 
+	// ShadowRefreshReasonToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* ShadowRefreshReasonToString(ShadowRefreshReason reason)
 	{
 		switch (reason)
@@ -141,6 +155,7 @@ namespace
 		}
 	}
 
+	// BuildHashHex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string BuildHashHex(std::uint64_t hashValue)
 	{
 		std::ostringstream stream;
@@ -148,6 +163,7 @@ namespace
 		return stream.str();
 	}
 
+	// IsTruthyEnvironmentValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsTruthyEnvironmentValue(const char* value)
 	{
 		if (value == nullptr || value[0] == '\0')
@@ -156,6 +172,7 @@ namespace
 		}
 
 		std::string normalizedValue;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const char* cursor = value; *cursor != '\0'; ++cursor)
 		{
 			normalizedValue.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*cursor))));
@@ -167,12 +184,14 @@ namespace
 			|| normalizedValue == "on";
 	}
 
+	// IsClusterValidationCaptureEnabledFromEnvironment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsClusterValidationCaptureEnabledFromEnvironment()
 	{
 		return IsTruthyEnvironmentValue(std::getenv("TERRAENGINE_CLUSTER_VALIDATION_CAPTURE"));
 	}
 }
 
+// VulkanContext::Impl::CreateDefaultTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateDefaultTexture() {
 	// 1. Create Default White Texture (Index 0)
 	{
@@ -319,6 +338,7 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 	}
 }
 
+// VulkanContext::Impl::CreateBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* name) {
 	VkBufferCreateInfo bufferInfo{};
 	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -331,10 +351,12 @@ VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageF
 
 	VulkanBuffer buffer;
 	buffer.size = size;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffer.buffer, &buffer.allocation, nullptr) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create buffer!");
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (name) {
 		vmaSetAllocationName(allocator, buffer.allocation, name);
 	}
@@ -342,6 +364,7 @@ VulkanBuffer VulkanContext::Impl::CreateBuffer(VkDeviceSize size, VkBufferUsageF
 	return buffer;
 }
 
+// VulkanContext::Impl::DestroyBufferImmediate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::DestroyBufferImmediate(VulkanBuffer& buffer)
 {
 	if (buffer.buffer != VK_NULL_HANDLE && buffer.allocation != VK_NULL_HANDLE)
@@ -352,6 +375,7 @@ void VulkanContext::Impl::DestroyBufferImmediate(VulkanBuffer& buffer)
 	buffer = {};
 }
 
+// VulkanContext::Impl::RetireBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RetireBuffer(VulkanBuffer& buffer)
 {
 	if (buffer.buffer == VK_NULL_HANDLE || buffer.allocation == VK_NULL_HANDLE)
@@ -360,6 +384,7 @@ void VulkanContext::Impl::RetireBuffer(VulkanBuffer& buffer)
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (retiredBuffersByFrame.size() < MAX_FRAMES_IN_FLIGHT)
 	{
 		retiredBuffersByFrame.resize(MAX_FRAMES_IN_FLIGHT);
@@ -372,6 +397,7 @@ void VulkanContext::Impl::RetireBuffer(VulkanBuffer& buffer)
 	buffer = {};
 }
 
+// VulkanContext::Impl::CopyBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
@@ -382,6 +408,7 @@ void VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkD
 	EndSingleTimeCommands(commandBuffer);
 }
 
+// VulkanContext::Impl::BeginSingleTimeCommands is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkCommandBuffer VulkanContext::Impl::BeginSingleTimeCommands() {
 	VkCommandBufferAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -401,6 +428,7 @@ VkCommandBuffer VulkanContext::Impl::BeginSingleTimeCommands() {
 	return commandBuffer;
 }
 
+// VulkanContext::Impl::EndSingleTimeCommands is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 	vkEndCommandBuffer(commandBuffer);
 
@@ -415,6 +443,7 @@ void VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 	vkFreeCommandBuffers(device, commandPools[currentFrame], 1, &commandBuffer);
 }
 
+// VulkanContext::Impl::TransitionImageLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
@@ -427,10 +456,12 @@ void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 	barrier.image = image;
 
 	// Determine aspect mask based on format
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (newLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL || 
 		format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT || 
 		format == VK_FORMAT_D24_UNORM_S8_UINT) {
 		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT) {
 			barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
 		}
@@ -446,6 +477,7 @@ void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 	VkPipelineStageFlags sourceStage;
 	VkPipelineStageFlags destinationStage;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
 		barrier.srcAccessMask = 0;
 		barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -492,6 +524,7 @@ void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 	EndSingleTimeCommands(commandBuffer);
 }
 
+// VulkanContext::Impl::CopyBufferToImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
@@ -515,6 +548,7 @@ void VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint
 	EndSingleTimeCommands(commandBuffer);
 }
 
+// VulkanContext::Impl::CreateImageView is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags) {
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -528,6 +562,7 @@ VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format,
 	viewInfo.subresourceRange.layerCount = 1;
 
 	VkImageView imageView;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreateImageView(device, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create texture image view!");
 	}
@@ -535,10 +570,13 @@ VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format,
 	return imageView;
 }
 
+// VulkanContext::Impl::StageVisibilityToVulkan is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkShaderStageFlags VulkanContext::Impl::StageVisibilityToVulkan(StageVisibilityMask visibility) {
 	VkShaderStageFlags flags = 0;
 	for (std::uint32_t bit = 0; bit < 32; ++bit) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if ((visibility & (1u << bit)) == 0) continue;
+		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (static_cast<ShaderStage>(bit)) {
 			case ShaderStage::Vertex: flags |= VK_SHADER_STAGE_VERTEX_BIT; break;
 			case ShaderStage::Fragment: flags |= VK_SHADER_STAGE_FRAGMENT_BIT; break;
@@ -554,6 +592,7 @@ VkShaderStageFlags VulkanContext::Impl::StageVisibilityToVulkan(StageVisibilityM
 	return flags;
 }
 
+// VulkanContext::Impl::MapDescriptorType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkDescriptorType VulkanContext::Impl::MapDescriptorType(DescriptorType type) {
 	switch (type) {
 		case DescriptorType::UniformBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -568,30 +607,36 @@ VkDescriptorType VulkanContext::Impl::MapDescriptorType(DescriptorType type) {
 	}
 }
 
+// VulkanContext::Impl::DestroyPipelines is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::DestroyPipelines() {
 	// Mesh descriptor sets are allocated from per-pipeline set layouts, so they
 	// must be freed before the corresponding layouts are destroyed.
 	std::vector<VkDescriptorSet> meshDescriptorSets;
 	for (auto& [meshId, mesh] : meshCache) {
 		for (const auto& [layout, descriptorSet] : mesh.descriptorSetsByLayout) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (descriptorSet != VK_NULL_HANDLE) {
 				meshDescriptorSets.push_back(descriptorSet);
 			}
 		}
 		mesh.descriptorSetsByLayout.clear();
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!meshDescriptorSets.empty() && device != VK_NULL_HANDLE && descriptorPool != VK_NULL_HANDLE) {
 		vkFreeDescriptorSets(device, descriptorPool, static_cast<uint32_t>(meshDescriptorSets.size()), meshDescriptorSets.data());
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& outerEntry : pipelineCache) {
 		auto& map = outerEntry.second;
 		for (auto& innerEntry : map) {
 			VulkanPipeline& pipe = innerEntry.second;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (device) {
 				vkDestroyPipeline(device, pipe.pipeline, nullptr);
 				vkDestroyPipelineLayout(device, pipe.layout, nullptr);
 				// Start from 1 to skip the global descriptor set layout (index 0) which is shared and destroyed in Cleanup
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (size_t i = 1; i < pipe.setLayouts.size(); ++i) {
 					vkDestroyDescriptorSetLayout(device, pipe.setLayouts[i], nullptr);
 				}
@@ -601,14 +646,18 @@ void VulkanContext::Impl::DestroyPipelines() {
 	pipelineCache.clear();
 }
 
+// VulkanContext::Impl::DestroyWorkerPools is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::DestroyWorkerPools() {
 	if (!device) return;
 	for (size_t frameIndex = 0; frameIndex < workerCommandPools.size(); ++frameIndex) {
 		auto& framePools = workerCommandPools[frameIndex];
 		std::vector<std::vector<VkCommandBuffer>> emptyBuffers;
 		auto& frameBuffers = (frameIndex < workerCommandBuffers.size()) ? workerCommandBuffers[frameIndex] : emptyBuffers;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t poolIndex = 0; poolIndex < framePools.size(); ++poolIndex) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!framePools[poolIndex]) continue;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (poolIndex < frameBuffers.size() && !frameBuffers[poolIndex].empty()) {
 				vkFreeCommandBuffers(device, framePools[poolIndex], static_cast<uint32_t>(frameBuffers[poolIndex].size()), frameBuffers[poolIndex].data());
 				frameBuffers[poolIndex].clear();
@@ -620,10 +669,12 @@ void VulkanContext::Impl::DestroyWorkerPools() {
 	workerCommandBuffers.clear();
 }
 
+// VulkanContext::Impl::EnsureWorkerPools is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureWorkerPools(uint32_t frameIndex, size_t workerCount) {
 	if (workerCommandPools.size() <= frameIndex) {
 		workerCommandPools.resize(frameIndex + 1);
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (workerCommandBuffers.size() <= frameIndex) {
 		workerCommandBuffers.resize(frameIndex + 1);
 	}
@@ -632,6 +683,7 @@ void VulkanContext::Impl::EnsureWorkerPools(uint32_t frameIndex, size_t workerCo
 	auto& frameBuffers = workerCommandBuffers[frameIndex];
 	QueueFamilyIndices indices = FindQueueFamilies(physicalDevice);
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (framePools.size() < workerCount) {
 		VkCommandPoolCreateInfo poolInfo{};
 		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -645,25 +697,30 @@ void VulkanContext::Impl::EnsureWorkerPools(uint32_t frameIndex, size_t workerCo
 	}
 }
 
+// VulkanContext::Impl::AcquirePrimaryCommandBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkCommandBuffer VulkanContext::Impl::AcquirePrimaryCommandBuffer(uint32_t frameIndex) {
 	if (frameIndex >= commandBuffers.size()) return VK_NULL_HANDLE;
 	return commandBuffers[frameIndex];
 }
 
+// VulkanContext::Impl::AcquireWorkerCommandBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIndex, size_t workerIndex) {
 	auto& framePools = workerCommandPools[frameIndex];
 	auto& frameBuffers = workerCommandBuffers[frameIndex];
 	
 	// Ensure tracking structures are sized correctly
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (workerBufferUsage.size() <= frameIndex) workerBufferUsage.resize(frameIndex + 1);
 	if (workerBufferUsage[frameIndex].size() <= workerIndex) workerBufferUsage[frameIndex].resize(workerIndex + 1, 0);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (frameBuffers.size() <= workerIndex) frameBuffers.resize(workerIndex + 1);
 
 	size_t& usageIndex = workerBufferUsage[frameIndex][workerIndex];
 	std::vector<VkCommandBuffer>& buffers = frameBuffers[workerIndex];
 
 	// reuse existing buffer if available at this usage index
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (usageIndex < buffers.size()) {
 		return buffers[usageIndex++];
 	}
@@ -675,6 +732,7 @@ VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIn
 	allocInfo.commandBufferCount = 1;
 
 	VkCommandBuffer secondary = VK_NULL_HANDLE;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkAllocateCommandBuffers(device, &allocInfo, &secondary) != VK_SUCCESS) {
 		return VK_NULL_HANDLE;
 	}
@@ -683,10 +741,12 @@ VkCommandBuffer VulkanContext::Impl::AcquireWorkerCommandBuffer(uint32_t frameIn
 	return secondary;
 }
 
+// VulkanContext::Impl::MapTextureFormat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkFormat VulkanContext::Impl::MapTextureFormat(uint32_t vkFormat) {
 	return static_cast<VkFormat>(vkFormat);
 }
 
+// VulkanContext::Impl::EnsureTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	if (textureCache.contains(textureId)) {
 		if (!textureIndexMap.contains(textureId)) {
@@ -698,9 +758,11 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	}
 
 	Texture* cpuTexture = ResourceManager::Instance().GetTexture(textureId);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!cpuTexture) return;
 	
 	// Ensure we have transcoded UASTC data
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (cpuTexture->transcodedData.empty())
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Texture " << ToHexString(textureId) << " has no transcoded payload data.");
@@ -735,6 +797,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	VmaAllocationCreateInfo allocInfo = {};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &vImage.image, &vImage.allocation, nullptr) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create image for texture");
 		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
@@ -769,6 +832,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
 	vImage.view = CreateImageView(vImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vImage.view == VK_NULL_HANDLE) {
 		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
 		return;
@@ -784,6 +848,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 	samplerInfo.maxAnisotropy = 1.0f;
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreateSampler(device, &samplerInfo, nullptr, &vImage.sampler) != VK_SUCCESS) {
 		vkDestroyImageView(device, vImage.view, nullptr);
 		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
@@ -798,14 +863,17 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	UpdateGlobalTexture(index, vImage);
 }
 
+// VulkanContext::Impl::EnsureMaterialDescriptorSets is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId) {
 	// No longer returns descriptor sets, but acts as an upload mechanism for material data.
 	// The return value is kept for now to minimize API breakage, but it will be empty besides the global set.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (materialIndexMap.contains(materialId)) {
 		return { globalDescriptorSets[currentFrame] };
 	}
 
 	Material* material = ResourceManager::Instance().GetMaterial(materialId);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!material) return { globalDescriptorSets[currentFrame] };
 	
 	MaterialData data{};
@@ -843,16 +911,19 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	data.OcclusionTextureIndex = 2;
 	data.EmissiveTextureIndex = 0;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t i = 0; i < material->header.textureCount; ++i) {
 		const auto& binding = material->textures[i];
 		if (binding.textureUuid == TerraEngine::EMPTY_UUID) continue;
 
 		EnsureTexture(binding.textureUuid);
 		uint32_t gpuIndex = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (textureIndexMap.contains(binding.textureUuid)) {
 			gpuIndex = textureIndexMap[binding.textureUuid];
 		}
 
+		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (binding.semantic) {
 			case TextureSemantic::Base:         
 				data.BaseColorTextureIndex = gpuIndex; 
@@ -883,6 +954,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	copyRegion.srcOffset = 0;
 	copyRegion.dstOffset = materialIndex * sizeof(MaterialData);
 	copyRegion.size = bufferSize;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
 	}
@@ -893,6 +965,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	return { globalDescriptorSets[currentFrame] };
 }
 
+// VulkanContext::Impl::InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 	// Material edits can change alpha clipping or shadow behavior, so cached
 	// shadow results are conservatively invalidated before the material is
@@ -905,6 +978,7 @@ void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 	}
 }
 
+// VulkanContext::Impl::InvalidateMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 	// Mesh edits change caster geometry. Clear every cache entry rather than
 	// trying to prove which light was affected.
@@ -915,14 +989,18 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 		UpdateGlobalBuffer(it->second.bindlessIndex, VK_NULL_HANDLE, 0, 0);
 		freeBufferIndices.push_back(it->second.bindlessIndex);
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!it->second.descriptorSetsByLayout.empty() && descriptorPool != VK_NULL_HANDLE) {
 			std::vector<VkDescriptorSet> descriptorSets;
 			descriptorSets.reserve(it->second.descriptorSetsByLayout.size());
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const auto& [layout, set] : it->second.descriptorSetsByLayout) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (set != VK_NULL_HANDLE) {
 					descriptorSets.push_back(set);
 				}
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!descriptorSets.empty()) {
 				vkFreeDescriptorSets(device, descriptorPool, static_cast<uint32_t>(descriptorSets.size()), descriptorSets.data());
 			}
@@ -930,6 +1008,7 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 		}
 		vmaDestroyBuffer(allocator, it->second.meshShaderVertexBuffer.buffer, it->second.meshShaderVertexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshletVertexRemapBuffer.buffer, it->second.meshletVertexRemapBuffer.allocation);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (it->second.meshSkinningBuffer.buffer != VK_NULL_HANDLE) {
 			vmaDestroyBuffer(allocator, it->second.meshSkinningBuffer.buffer, it->second.meshSkinningBuffer.allocation);
 		}
@@ -941,6 +1020,7 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 	}
 }
 
+// VulkanContext::Impl::InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
 	// Texture edits may affect alpha-tested caster silhouettes, so shadow cache
 	// reuse falls back to refresh after the texture changes.
@@ -948,6 +1028,7 @@ void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
 	auto it = textureCache.find(textureId);
 	if (it != textureCache.end()) {
 		// Don't invalidate default texture
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (it->second.image == defaultTexture.image) return;
 
 		vkDestroySampler(device, it->second.sampler, nullptr);
@@ -961,16 +1042,19 @@ void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
 	EnsureTexture(textureId);
 }
 
+// VulkanContext::Impl::InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::InvalidateResource(TerraEngine::UUID id) {
 	InvalidateMesh(id);
 	InvalidateTexture(id);
 	InvalidateMaterial(id);
 }
 
+// VulkanContext::Impl::EnsureMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	if (meshCache.contains(meshId)) return;
 	
 	Mesh* cpuMesh = ResourceManager::Instance().GetMesh(meshId);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!cpuMesh) return;
 
 	const VkDeviceSize packedVertexSize = static_cast<VkDeviceSize>(cpuMesh->meshletVertexData.size());
@@ -981,6 +1065,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	const VkDeviceSize meshletBoundsSize = static_cast<VkDeviceSize>(cpuMesh->meshletBounds.size() * sizeof(MeshletBounds));
 	const bool hasBoundsPayload = meshletBoundsSize > 0;
 	const VkDeviceSize boundsUploadSize = hasBoundsPayload ? meshletBoundsSize : static_cast<VkDeviceSize>(sizeof(MeshletBounds));
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (packedVertexSize == 0
 		|| vertexRemapSize == 0
 		|| primitiveIndexSize == 0
@@ -993,17 +1078,20 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 
 	const uint32_t packedStride = cpuMesh->header.layout.strideBytes;
 	const uint32_t meshletVertexCount = cpuMesh->header.meshletVertexCount;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (packedStride != kMeshletPackedVertexStrideBytes || meshletVertexCount == 0) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload has invalid packed vertex stride/count for UUID " << ToHexString(meshId));
 		return;
 	}
 
 	const VkDeviceSize expectedVertexBytes = static_cast<VkDeviceSize>(packedStride) * static_cast<VkDeviceSize>(meshletVertexCount);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (expectedVertexBytes != packedVertexSize) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload packed vertex range is truncated for UUID " << ToHexString(meshId));
 		return;
 	}
 
+	// struct MeshDecodeInfo groups related state and operations so callers have one documented contract.
 	struct MeshDecodeInfo
 	{
 		float positionOffset[4];
@@ -1043,6 +1131,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	vmaUnmapMemory(allocator, stagingVertexRemap.allocation);
 
 	VulkanBuffer stagingSkinning = { VK_NULL_HANDLE, VK_NULL_HANDLE, 0 };
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (skinningDataSize > 0)
 	{
 		stagingSkinning = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
@@ -1063,6 +1152,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 
 	VulkanBuffer stagingMeshletBounds = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 	vmaMapMemory(allocator, stagingMeshletBounds.allocation, &data);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasBoundsPayload)
 	{
 		memcpy(data, cpuMesh->meshletBounds.data(), static_cast<size_t>(meshletBoundsSize));
@@ -1099,6 +1189,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 
 	CopyBuffer(stagingPackedVertex.buffer, vMesh.meshShaderVertexBuffer.buffer, packedVertexSize);
 	CopyBuffer(stagingVertexRemap.buffer, vMesh.meshletVertexRemapBuffer.buffer, vertexRemapSize);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (skinningDataSize > 0)
 	{
 		CopyBuffer(stagingSkinning.buffer, vMesh.meshSkinningBuffer.buffer, skinningDataSize);
@@ -1110,6 +1201,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 
 	vmaDestroyBuffer(allocator, stagingPackedVertex.buffer, stagingPackedVertex.allocation);
 	vmaDestroyBuffer(allocator, stagingVertexRemap.buffer, stagingVertexRemap.allocation);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (skinningDataSize > 0)
 	{
 		vmaDestroyBuffer(allocator, stagingSkinning.buffer, stagingSkinning.allocation);
@@ -1125,17 +1217,20 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	meshCache[meshId] = vMesh;
 }
 
+// VulkanContext::Impl::EnsureMeshDescriptorSet is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline) {
 	auto meshIt = meshCache.find(meshId);
 	if (meshIt == meshCache.end()) {
 		return VK_NULL_HANDLE;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (pipeline.setLayouts.size() <= 1 || pipeline.setLayouts[1] == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh shader pipeline is missing descriptor set layout 1 for mesh payload buffers.");
 		return VK_NULL_HANDLE;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (pipeline.bindingsPerSet.size() <= 1) {
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh shader pipeline is missing reflected binding metadata for descriptor set 1.");
 		return VK_NULL_HANDLE;
@@ -1143,7 +1238,9 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 
 	const auto& meshBindings = pipeline.bindingsPerSet[1];
 	auto HasStorageBinding = [&](uint32_t bindingIndex) -> bool {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const DescriptorBinding& binding : meshBindings) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (binding.binding == bindingIndex) {
 				return binding.type == static_cast<uint32_t>(DescriptorType::StorageBuffer);
 			}
@@ -1164,6 +1261,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	}
 
 	VulkanMesh& mesh = meshIt->second;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (mesh.meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
 		|| mesh.meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
 		|| mesh.meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
@@ -1173,6 +1271,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 		return VK_NULL_HANDLE;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (HasStorageBinding(5) && mesh.meshletBoundsBuffer.buffer == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Mesh descriptor requires bounds binding 5 but meshlet bounds payload is unavailable.");
 		return VK_NULL_HANDLE;
@@ -1180,6 +1279,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 
 	const VkDescriptorSetLayout layout = pipeline.setLayouts[1];
 	auto cachedSetIt = mesh.descriptorSetsByLayout.find(layout);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (cachedSetIt != mesh.descriptorSetsByLayout.end() && cachedSetIt->second != VK_NULL_HANDLE) {
 		return cachedSetIt->second;
 	}
@@ -1191,6 +1291,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	allocInfo.pSetLayouts = &layout;
 
 	VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to allocate mesh descriptor set for mesh shader pipeline.");
 		return VK_NULL_HANDLE;
@@ -1228,6 +1329,7 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 
 	VkDescriptorBufferInfo skinningInfo{};
 	bool hasSkinning = mesh.meshSkinningBuffer.buffer != VK_NULL_HANDLE;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasSkinning)
 	{
 		skinningInfo.buffer = mesh.meshSkinningBuffer.buffer;
@@ -1250,11 +1352,13 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	w.dstBinding = 3; w.pBufferInfo = &vertexRemapInfo; writes.push_back(w);
 	w.dstBinding = 4; w.pBufferInfo = &decodeInfo; writes.push_back(w);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (HasStorageBinding(5))
 	{
 		w.dstBinding = 5; w.pBufferInfo = &boundsInfo; writes.push_back(w);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasSkinning && HasStorageBinding(6))
 	{
 		w.dstBinding = 6; w.pBufferInfo = &skinningInfo; writes.push_back(w);
@@ -1265,12 +1369,14 @@ VkDescriptorSet VulkanContext::Impl::EnsureMeshDescriptorSet(TerraEngine::UUID m
 	return descriptorSet;
 }
 
+// VulkanContext::Impl::BuildPipelineLayouts is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collection, std::vector<VkDescriptorSetLayout>& setLayouts, std::vector<std::vector<DescriptorBinding>>& bindingsPerSet, std::vector<VkPushConstantRange>& pushConstants, bool& supportsDefaultPushConstants) {
 	if (globalDescriptorSetLayout == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "Global descriptor set layout is not initialized; cannot build reflected pipeline layouts.");
 		return false;
 	}
 
+	// struct AggregatedBinding groups related state and operations so callers have one documented contract.
 	struct AggregatedBinding {
 		DescriptorBinding binding{};
 		VkShaderStageFlags stages = 0;
@@ -1281,6 +1387,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 	std::map<std::pair<uint32_t, uint32_t>, VkShaderStageFlags> pushConstantMerge;
 	supportsDefaultPushConstants = false;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& stage : collection.stages) {
 		Shader* shader = ResourceManager::Instance().GetShader(stage.shaderId);
 		if (!shader) {
@@ -1288,12 +1395,15 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 			return false;
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const DescriptorSetLayoutDesc& setDesc : shader->descriptorSets) {
 			for (uint32_t idx = 0; idx < setDesc.bindingCount; ++idx) {
 				const uint32_t bindingIndex = setDesc.firstBinding + idx;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (bindingIndex >= shader->descriptorBindings.size()) continue;
 			const DescriptorBinding& srcBinding = shader->descriptorBindings[bindingIndex];
 			auto& aggregated = setBindings[setDesc.setIndex][srcBinding.binding];
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!aggregated.initialized) {
 				aggregated.binding = srcBinding;
 				if (aggregated.binding.arrayCount == 0) {
@@ -1301,11 +1411,13 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 				}
 				aggregated.initialized = true;
 			} else {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (aggregated.binding.type != srcBinding.type || aggregated.binding.arrayCount != srcBinding.arrayCount) {
 					TERRAENGINE_LOG(LogLevel::Warning, "Descriptor binding mismatch across stages for set " << setDesc.setIndex << ", binding " << srcBinding.binding);
 				}
 				}
 				StageVisibilityMask visibility = srcBinding.visibility;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (visibility == 0) {
 					visibility = StageToMask(static_cast<ShaderStage>(shader->reflection.source.stage));
 				}
@@ -1313,6 +1425,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 			}
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const PushConstantRange& pc : shader->pushConstants) {
 			StageVisibilityMask visibility = pc.visibility;
 			if (visibility == 0) {
@@ -1321,6 +1434,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 			const VkShaderStageFlags vkStages = StageVisibilityToVulkan(visibility);
 			std::pair<uint32_t, uint32_t> key = {pc.offsetBytes, pc.sizeBytes};
 			pushConstantMerge[key] |= vkStages;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (pc.offsetBytes == 0
 				&& pc.sizeBytes >= sizeof(PushConstants)
 				&& (vkStages & VK_SHADER_STAGE_MESH_BIT_EXT)) {
@@ -1329,6 +1443,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		}
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& [key, stages] : pushConstantMerge) {
 		VkPushConstantRange range{};
 		range.offset = key.first;
@@ -1337,6 +1452,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		pushConstants.push_back(range);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (pushConstants.empty()) {
 		VkPushConstantRange fallback{};
 		fallback.offset = 0;
@@ -1350,6 +1466,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 	setLayouts.push_back(globalDescriptorSetLayout);
 	bindingsPerSet.push_back({}); 
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& [setIndex, bindingMap] : setBindings) {
 		if (setIndex == 0) continue; // Skip Set 0, handled globally
 
@@ -1371,6 +1488,7 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		vkBindings.reserve(bindingMap.size());
 		storedBindings.reserve(bindingMap.size());
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& [bindingNumber, aggregated] : bindingMap) {
 			VkDescriptorSetLayoutBinding vkBinding{};
 			vkBinding.binding = bindingNumber;
@@ -1387,14 +1505,17 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 		layoutInfo.pBindings = vkBindings.data();
 
 		VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to create descriptor set layout from reflection");
 			for (size_t i = 1; i < setLayouts.size(); ++i) { // Start from 1 to avoid destroying global layout
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (setLayouts[i] != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device, setLayouts[i], nullptr);
 			}
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (setLayouts.size() <= setIndex) {
 			setLayouts.resize(setIndex + 1, VK_NULL_HANDLE);
 			bindingsPerSet.resize(setIndex + 1);
@@ -1406,19 +1527,23 @@ bool VulkanContext::Impl::BuildPipelineLayouts(const ShaderCollection& collectio
 	return true;
 }
 
+// VulkanContext::Impl::EnsurePipeline is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass, uint32_t materialFlags) {
 	PipelineKey key = { shaderCollectionId, materialFlags };
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (renderPass == VK_NULL_HANDLE) {
 		TERRAENGINE_LOG(LogLevel::Error, "Cannot ensure pipeline: render pass handle is null.");
 		return;
 	}
 
 	auto passIt = pipelineCache.find(renderPass);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (passIt != pipelineCache.end()) {
 		auto cachedPipelineIt = passIt->second.find(key);
 		if (cachedPipelineIt != passIt->second.end()) {
 			VulkanPipeline& cached = cachedPipelineIt->second;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (cached.pipeline != VK_NULL_HANDLE && cached.layout != VK_NULL_HANDLE) {
 				return;
 			}
@@ -1429,10 +1554,13 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 				if (cached.pipeline != VK_NULL_HANDLE) {
 					vkDestroyPipeline(device, cached.pipeline, nullptr);
 				}
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (cached.layout != VK_NULL_HANDLE) {
 					vkDestroyPipelineLayout(device, cached.layout, nullptr);
 				}
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (size_t layoutIndex = 1; layoutIndex < cached.setLayouts.size(); ++layoutIndex) {
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (cached.setLayouts[layoutIndex] != VK_NULL_HANDLE) {
 						vkDestroyDescriptorSetLayout(device, cached.setLayouts[layoutIndex], nullptr);
 					}
@@ -1443,6 +1571,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	}
 	
 	ShaderCollection* collection = ResourceManager::Instance().GetShaderCollection(shaderCollectionId);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!collection) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to build graphics pipeline: shader collection not found.");
 		return;
@@ -1452,6 +1581,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
 	bool hasMeshStage = false;
 	bool hasTaskStage = false;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& stage : collection->stages) {
 		Shader* shader = ResourceManager::Instance().GetShader(stage.shaderId);
 		if (shader) {
@@ -1461,6 +1591,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 			createInfo.pCode = reinterpret_cast<const uint32_t*>(shader->bytecode.data());
 
 			VkShaderModule shaderModule;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
 				TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module");
 				continue;
@@ -1468,10 +1599,13 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 			
 			VkPipelineShaderStageCreateInfo stageInfo{};
 			stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (stage.stage == ShaderStage::Fragment) {
 				stageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (stage.stage == ShaderStage::Mesh) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!meshShaderSupported) {
 					TERRAENGINE_LOG(LogLevel::Error, "Cannot build mesh pipeline because mesh shader support is unavailable on this device.");
 					vkDestroyShaderModule(device, shaderModule, nullptr);
@@ -1480,7 +1614,9 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 				stageInfo.stage = VK_SHADER_STAGE_MESH_BIT_EXT;
 				hasMeshStage = true;
 			}
+			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (stage.stage == ShaderStage::Task) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!taskShaderSupported) {
 					TERRAENGINE_LOG(LogLevel::Error, "Cannot build task shader stage because task shader support is unavailable on this device.");
 					vkDestroyShaderModule(device, shaderModule, nullptr);
@@ -1501,11 +1637,13 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (shaderStages.empty()) {
 		TERRAENGINE_LOG(LogLevel::Error, "No shader stages available to build pipeline");
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!hasMeshStage) {
 		TERRAENGINE_LOG(LogLevel::Error, "Graphics pipeline must include a mesh stage in this renderer.");
 		for (auto& stage : shaderStages) {
@@ -1514,6 +1652,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasTaskStage && !hasMeshStage) {
 		TERRAENGINE_LOG(LogLevel::Error, "Shader collection includes a task stage without a mesh stage.");
 		for (auto& stage : shaderStages) {
@@ -1526,7 +1665,9 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	std::vector<std::vector<DescriptorBinding>> bindingsPerSet;
 	std::vector<VkPushConstantRange> pushConstants;
 	bool supportsDefaultPushConstants = false;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!BuildPipelineLayouts(*collection, setLayouts, bindingsPerSet, pushConstants, supportsDefaultPushConstants)) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto& stage : shaderStages) {
 			vkDestroyShaderModule(device, stage.module, nullptr);
 		}
@@ -1632,12 +1773,16 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	pipelineLayoutInfo.pPushConstantRanges = pushConstants.data();
 
 	VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t layoutIndex = 1; layoutIndex < setLayouts.size(); ++layoutIndex) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (setLayouts[layoutIndex] != VK_NULL_HANDLE) {
 				vkDestroyDescriptorSetLayout(device, setLayouts[layoutIndex], nullptr);
 			}
 		}
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto& stage : shaderStages) {
 			vkDestroyShaderModule(device, stage.module, nullptr);
 		}
@@ -1649,12 +1794,14 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	vrsState.sType = VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR;
 	vrsState.fragmentSize = { 1, 1 };
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vrsFeatures.primitiveFragmentShadingRate) {
 		vrsState.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_KHR;
 	} else {
 		vrsState.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
 	}
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (UsesVrsAttachment()) {
 		vrsState.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_MIN_KHR;
 	} else {
@@ -1680,13 +1827,17 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
 	VkPipeline graphicsPipeline = VK_NULL_HANDLE;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t layoutIndex = 1; layoutIndex < setLayouts.size(); ++layoutIndex) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (setLayouts[layoutIndex] != VK_NULL_HANDLE) {
 				vkDestroyDescriptorSetLayout(device, setLayouts[layoutIndex], nullptr);
 			}
 		}
 		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto& stage : shaderStages) {
 			vkDestroyShaderModule(device, stage.module, nullptr);
 		}
@@ -1694,14 +1845,17 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 		return;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& stage : shaderStages) {
 		vkDestroyShaderModule(device, stage.module, nullptr);
 	}
 
 	VkShaderStageFlags defaultPushConstantStages = 0;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const VkPushConstantRange& range : pushConstants) {
 		defaultPushConstantStages |= range.stageFlags;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (defaultPushConstantStages == 0) {
 		defaultPushConstantStages = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	}
@@ -1719,6 +1873,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	pipelineCache[renderPass][key] = std::move(pipeline);
 }
 
+// VulkanContext::Impl::CreateGlobalDescriptorResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	std::array<VkDescriptorSetLayoutBinding, 22> bindings{};
 	// Textures
@@ -1894,6 +2049,7 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
 	layoutInfo.pNext = &bindingFlags;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &globalDescriptorSetLayout) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create global descriptor set layout!");
 		return false;
@@ -1918,12 +2074,14 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
 	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &globalDescriptorPool) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to create global descriptor pool!");
 		return false;
 	}
 
 	globalDescriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		VkDescriptorSetAllocateInfo allocInfo{};
 		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -1931,6 +2089,7 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 		allocInfo.descriptorSetCount = 1;
 		allocInfo.pSetLayouts = &globalDescriptorSetLayout;
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vkAllocateDescriptorSets(device, &allocInfo, &globalDescriptorSets[i]) != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "Failed to allocate global descriptor set for frame " << i);
 			return false;
@@ -1940,9 +2099,11 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	return true;
 }
 
+// VulkanContext::Impl::CreateMaterialBufferResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateMaterialBufferResources() {
 	VkDeviceSize bufferSize = sizeof(MaterialData) * MAX_BINDLESS_MATERIALS;
 	globalMaterialSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		globalMaterialSSBOs[i] = CreateBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
@@ -1964,6 +2125,7 @@ void VulkanContext::Impl::CreateMaterialBufferResources() {
 	}
 }
 
+// VulkanContext::Impl::CreateCullingBufferResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateCullingBufferResources() {
 	const VkDeviceSize frameDataBufferSize = static_cast<VkDeviceSize>(sizeof(FrameCullingDataGPU) * kStatsSlotCount);
 	const VkDeviceSize countersBufferSize = static_cast<VkDeviceSize>(sizeof(MeshletCullingCountersGPU) * kStatsSlotCount);
@@ -1971,14 +2133,17 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 	globalFrameCullingSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
 	globalMeshletCountersSSBOs.resize(MAX_FRAMES_IN_FLIGHT);
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		globalFrameCullingSSBOs[i] = CreateBuffer(frameDataBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 		globalMeshletCountersSSBOs[i] = CreateBuffer(countersBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
 		FrameCullingDataGPU defaultFrameData{};
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (uint32_t slotIndex = 0; slotIndex < kStatsSlotCount; ++slotIndex) {
 			// Initialize all slots for this frame's buffer
 			void* mapped = nullptr;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (vmaMapMemory(allocator, globalFrameCullingSSBOs[i].allocation, &mapped) == VK_SUCCESS) {
 				const VkDeviceSize offset = static_cast<VkDeviceSize>(slotIndex) * sizeof(FrameCullingDataGPU);
 				std::memcpy(static_cast<std::uint8_t*>(mapped) + offset, &defaultFrameData, sizeof(FrameCullingDataGPU));
@@ -2015,14 +2180,17 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(std::size(writes)), writes, 0, nullptr);
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t viewIndex = 0; viewIndex < kStatsViewCount; ++viewIndex) {
 		latestStatsByView[viewIndex] = {};
 		latestStatsByView[viewIndex].viewType = (viewIndex == 0u) ? RenderViewType::Game : RenderViewType::Scene;
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t slotIndex = 0; slotIndex < kStatsSlotCount; ++slotIndex) {
 		pendingStatsBySlot[slotIndex] = {};
 		pendingStatsBySlot[slotIndex].viewType = (slotIndex % kStatsViewCount == 0u) ? RenderViewType::Game : RenderViewType::Scene;
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (ClusterValidationSnapshot& snapshot : pendingClusterValidationByFrame) {
 		snapshot = {};
 		snapshot.viewType = RenderViewType::Game;
@@ -2032,6 +2200,7 @@ void VulkanContext::Impl::CreateCullingBufferResources() {
 	previousClusterValidationSnapshotValid = false;
 }
 
+// VulkanContext::Impl::CreateLightingBufferResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateLightingBufferResources() {
 	const VkDeviceSize lightBufferSize = static_cast<VkDeviceSize>(sizeof(GPULight) * MAX_GLOBAL_LIGHTS * MAX_RENDER_SNAPSHOTS_PER_FRAME);
 	const VkDeviceSize clusterBufferSize = static_cast<VkDeviceSize>(sizeof(ClusterData) * MAX_LIGHT_CLUSTERS * MAX_RENDER_SNAPSHOTS_PER_FRAME);
@@ -2040,6 +2209,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 	const VkDeviceSize lightAnalysisBufferSize = static_cast<VkDeviceSize>(sizeof(GPULightAnalysisRecord) * MAX_GLOBAL_LIGHTS * kStatsSlotCount);
 
 	clusterValidationCaptureEnabled = IsClusterValidationCaptureEnabledFromEnvironment();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (clusterValidationCaptureEnabled) {
 		TERRAENGINE_LOG(LogLevel::Info, "Cluster validation capture enabled via TERRAENGINE_CLUSTER_VALIDATION_CAPTURE. Lighting buffers will remain CPU-visible for frame-end readback.");
 	}
@@ -2055,6 +2225,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		? VMA_MEMORY_USAGE_CPU_TO_GPU
 		: VMA_MEMORY_USAGE_GPU_ONLY;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		// Light uploads are CPU-driven every frame, so this buffer must remain
 		// CPU-visible regardless of whether validation capture is active.
@@ -2065,6 +2236,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		clusterDepthSSBOs[i] = CreateBuffer(clusterDepthBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, clusterBufferMemoryUsage);
 		lightAnalysisSSBOs[i] = CreateBuffer(lightAnalysisBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU, "Light Analysis Buffer");
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (clusterValidationCaptureEnabled) {
 			// Validation mode seeds buffers with deterministic defaults so the
 			// frame-end readback code can flag incomplete writes immediately.
@@ -2076,6 +2248,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 			}
 
 			void* mappedLightIndices = nullptr;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (vmaMapMemory(allocator, lightIndexSSBOs[i].allocation, &mappedLightIndices) == VK_SUCCESS) {
 				std::fill_n(static_cast<std::uint32_t*>(mappedLightIndices), MAX_LIGHT_INDEX_ENTRIES * MAX_RENDER_SNAPSHOTS_PER_FRAME, 0xFFFFFFFFu);
 				vmaFlushAllocation(allocator, lightIndexSSBOs[i].allocation, 0, lightIndexBufferSize);
@@ -2083,6 +2256,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 			}
 
 			void* mappedClusterDepth = nullptr;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (vmaMapMemory(allocator, clusterDepthSSBOs[i].allocation, &mappedClusterDepth) == VK_SUCCESS) {
 				std::fill_n(static_cast<float*>(mappedClusterDepth), static_cast<size_t>(clusterDepthBufferSize / sizeof(float)), 1.0f);
 				vmaFlushAllocation(allocator, clusterDepthSSBOs[i].allocation, 0, clusterDepthBufferSize);
@@ -2091,6 +2265,7 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		}
 
 		void* mappedLightAnalysis = nullptr;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vmaMapMemory(allocator, lightAnalysisSSBOs[i].allocation, &mappedLightAnalysis) == VK_SUCCESS) {
 			std::memset(mappedLightAnalysis, 0, static_cast<size_t>(lightAnalysisBufferSize));
 			vmaFlushAllocation(allocator, lightAnalysisSSBOs[i].allocation, 0, lightAnalysisBufferSize);
@@ -2188,23 +2363,29 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 	UploadLightingData({});
 }
 
+// VulkanContext::Impl::CreateIndirectDrawResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateIndirectDrawResources() {
 	VkDeviceSize indirectBufferSize = MAX_BINDLESS_DRAWS * MAX_RENDER_SNAPSHOTS_PER_FRAME * sizeof(VkDrawMeshTasksIndirectCommandEXT);
 	indirectDrawBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		indirectDrawBuffers[i] = CreateBuffer(indirectBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 	}
 }
 
+// VulkanContext::Impl::DestroyEnvironmentLightingResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::DestroyEnvironmentLightingResources()
 {
 	auto DestroyImage = [&](VulkanImage& image) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, image.sampler, nullptr);
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, image.view, nullptr);
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 		}
@@ -2219,6 +2400,7 @@ void VulkanContext::Impl::DestroyEnvironmentLightingResources()
 	brdfIntegrationTextureIndex = 0u;
 }
 
+// VulkanContext::Impl::CreateEnvironmentLightingResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateEnvironmentLightingResources()
 {
 	if (environmentIrradianceTexture.view != VK_NULL_HANDLE
@@ -2230,6 +2412,7 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 	DestroyEnvironmentLightingResources();
 
 	auto CreateFloatTexture = [&](const std::vector<glm::vec4>& texels, uint32_t width, uint32_t height, const char* allocationName, VulkanImage& image) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (texels.empty() || width == 0u || height == 0u) {
 			return;
 		}
@@ -2237,6 +2420,7 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 		const VkDeviceSize uploadSize = static_cast<VkDeviceSize>(sizeof(glm::vec4) * texels.size());
 		VulkanBuffer stagingBuffer = CreateBuffer(uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Environment Lighting Staging Buffer");
 		void* mapped = nullptr;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vmaMapMemory(allocator, stagingBuffer.allocation, &mapped) == VK_SUCCESS) {
 			std::memcpy(mapped, texels.data(), static_cast<size_t>(uploadSize));
 			vmaUnmapMemory(allocator, stagingBuffer.allocation);
@@ -2257,6 +2441,7 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 			image = {};
@@ -2270,6 +2455,7 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
 		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.view == VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 			image = {};
@@ -2297,7 +2483,9 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 
 	const uint32_t brdfSize = 64u;
 	std::vector<glm::vec4> brdfTexels(brdfSize * brdfSize);
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t y = 0u; y < brdfSize; ++y) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (uint32_t x = 0u; x < brdfSize; ++x) {
 			const float roughness = (static_cast<float>(y) + 0.5f) / static_cast<float>(brdfSize);
 			const float nDotV = (static_cast<float>(x) + 0.5f) / static_cast<float>(brdfSize);
@@ -2306,29 +2494,36 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 	}
 	CreateFloatTexture(brdfTexels, brdfSize, brdfSize, "Fallback BRDF Integration LUT", brdfIntegrationTexture);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (environmentIrradianceTexture.view != VK_NULL_HANDLE) {
 		environmentIrradianceTextureIndex = AllocateTextureIndex();
 		UpdateGlobalTexture(environmentIrradianceTextureIndex, environmentIrradianceTexture);
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (prefilteredEnvironmentTexture.view != VK_NULL_HANDLE) {
 		prefilteredEnvironmentTextureIndex = AllocateTextureIndex();
 		UpdateGlobalTexture(prefilteredEnvironmentTextureIndex, prefilteredEnvironmentTexture);
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (brdfIntegrationTexture.view != VK_NULL_HANDLE) {
 		brdfIntegrationTextureIndex = AllocateTextureIndex();
 		UpdateGlobalTexture(brdfIntegrationTextureIndex, brdfIntegrationTexture);
 	}
 }
 
+// VulkanContext::Impl::DestroyAmbientOcclusionResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::DestroyAmbientOcclusionResources()
 {
 	auto DestroyImage = [&](VulkanImage& image) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, image.sampler, nullptr);
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, image.view, nullptr);
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 		}
@@ -2343,10 +2538,12 @@ void VulkanContext::Impl::DestroyAmbientOcclusionResources()
 	ambientOcclusionHistoryValid = false;
 }
 
+// VulkanContext::Impl::CreateAmbientOcclusionResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateAmbientOcclusionResources()
 {
 	const uint32_t width = std::max(swapchainExtent.width, 1u);
 	const uint32_t height = std::max(swapchainExtent.height, 1u);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ambientOcclusionRaw.image != VK_NULL_HANDLE
 		&& ambientOcclusionBlurred.image != VK_NULL_HANDLE
 		&& ambientOcclusionHistory.image != VK_NULL_HANDLE
@@ -2373,6 +2570,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			image = {};
 			return;
@@ -2380,6 +2578,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		vmaSetAllocationName(allocator, image.allocation, allocationName);
 
 		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.view == VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 			image = {};
@@ -2398,6 +2597,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 	ambientOcclusionHeight = (ambientOcclusionWidth > 0u) ? height : 0u;
 	ambientOcclusionHistoryValid = false;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ambientOcclusionBlurred.view == VK_NULL_HANDLE || ambientOcclusionHistory.view == VK_NULL_HANDLE) {
 		return;
 	}
@@ -2412,6 +2612,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 	historyInfo.imageView = ambientOcclusionHistory.view;
 	historyInfo.sampler = VK_NULL_HANDLE;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
 		descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2431,6 +2632,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 	}
 }
 
+// VulkanContext::Impl::EnsureShadowRenderResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceRequest& request) {
 	ShadowResourceRequest targetRequest{};
 	targetRequest.directionalCount = std::min(request.directionalCount, MAX_SHADOW_RESOURCE_SLOTS);
@@ -2446,47 +2648,60 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 			framebuffer = VK_NULL_HANDLE;
 		}
 	};
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VkFramebuffer& framebuffer : directionalShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VkFramebuffer& framebuffer : spotShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VkFramebuffer& framebuffer : areaShadowFramebuffers) {
 		DestroyFramebuffer(framebuffer);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::array<VkFramebuffer, 6>& faceFramebuffers : pointShadowFaceFramebuffersBySlot) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (VkFramebuffer& framebuffer : faceFramebuffers) {
 			DestroyFramebuffer(framebuffer);
 		}
 	}
 
 	auto DestroyImageView = [&](VkImageView& imageView) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (imageView != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, imageView, nullptr);
 			imageView = VK_NULL_HANDLE;
 		}
 	};
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::array<VkImageView, 6>& faceViews : pointShadowDepthFaceViewsBySlot) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (VkImageView& faceView : faceViews) {
 			DestroyImageView(faceView);
 		}
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::array<VkImageView, 6>& faceViews : pointShadowColorFaceViewsBySlot) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (VkImageView& faceView : faceViews) {
 			DestroyImageView(faceView);
 		}
 	}
 
 	auto DestroyImage = [&](VulkanImage& image) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.sampler != VK_NULL_HANDLE) {
 			vkDestroySampler(device, image.sampler, nullptr);
 			image.sampler = VK_NULL_HANDLE;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.view != VK_NULL_HANDLE) {
 			vkDestroyImageView(device, image.view, nullptr);
 			image.view = VK_NULL_HANDLE;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.image != VK_NULL_HANDLE && image.allocation != VK_NULL_HANDLE) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 		}
@@ -2494,27 +2709,35 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		image.allocation = VK_NULL_HANDLE;
 	};
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VulkanImage& image : directionalShadowDepths) {
 		DestroyImage(image);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VulkanImage& image : directionalShadowColors) {
 		DestroyImage(image);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VulkanImage& image : spotShadowDepths) {
 		DestroyImage(image);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VulkanImage& image : spotShadowColors) {
 		DestroyImage(image);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VulkanImage& image : areaShadowDepths) {
 		DestroyImage(image);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VulkanImage& image : areaShadowColors) {
 		DestroyImage(image);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VulkanImage& image : pointShadowCubeDepths) {
 		DestroyImage(image);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (VulkanImage& image : pointShadowCubeColors) {
 		DestroyImage(image);
 	}
@@ -2524,6 +2747,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	DestroyImage(ltcAmplitudeTexture);
 	DestroyImage(ltcInverseTexture);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (targetRequest.TotalCount() == 0u) {
 		return true;
 	}
@@ -2555,6 +2779,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			image.image = VK_NULL_HANDLE;
 			image.allocation = VK_NULL_HANDLE;
@@ -2572,6 +2797,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		viewInfo.subresourceRange.levelCount = 1;
 		viewInfo.subresourceRange.baseArrayLayer = 0;
 		viewInfo.subresourceRange.layerCount = layers;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vkCreateImageView(device, &viewInfo, nullptr, &image.view) != VK_SUCCESS) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 			image.image = VK_NULL_HANDLE;
@@ -2598,6 +2824,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			image.image = VK_NULL_HANDLE;
 			image.allocation = VK_NULL_HANDLE;
@@ -2626,6 +2853,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			image.image = VK_NULL_HANDLE;
 			image.allocation = VK_NULL_HANDLE;
@@ -2643,6 +2871,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		viewInfo.subresourceRange.levelCount = 1;
 		viewInfo.subresourceRange.baseArrayLayer = 0;
 		viewInfo.subresourceRange.layerCount = 6;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vkCreateImageView(device, &viewInfo, nullptr, &image.view) != VK_SUCCESS) {
 			vmaDestroyImage(allocator, image.image, image.allocation);
 			image.image = VK_NULL_HANDLE;
@@ -2652,6 +2881,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	};
 
 	auto CreateShadowSampler = [&](VulkanImage& image, bool useCompareSampler) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (image.image == VK_NULL_HANDLE) {
 			return;
 		}
@@ -2675,29 +2905,34 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		vkCreateSampler(device, &samplerInfo, nullptr, &image.sampler);
 	};
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
 		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
 		CreateColorAttachment(regionSize, regionSize, 1u, 0u, directionalShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
 		CreateDepthAttachment2D(regionSize, regionSize, directionalShadowDepths[slotIndex]);
 		CreateShadowSampler(directionalShadowDepths[slotIndex], false);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {
 		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
 		CreateColorAttachment(regionSize, regionSize, 1u, 0u, spotShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
 		CreateDepthAttachment2D(regionSize, regionSize, spotShadowDepths[slotIndex]);
 		CreateShadowSampler(spotShadowDepths[slotIndex], false);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex) {
 		const std::uint32_t regionSize = Shadow2DRegionSizeForSlot(slotIndex);
 		CreateColorAttachment(regionSize, regionSize, 1u, 0u, areaShadowColors[slotIndex], VK_IMAGE_VIEW_TYPE_2D);
 		CreateDepthAttachment2D(regionSize, regionSize, areaShadowDepths[slotIndex]);
 		CreateShadowSampler(areaShadowDepths[slotIndex], false);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.pointCount; ++slotIndex) {
 		CreateColorAttachment(pointShadowSize, pointShadowSize, 6u, VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, pointShadowCubeColors[slotIndex], VK_IMAGE_VIEW_TYPE_CUBE);
 		CreateDepthAttachmentCube(pointShadowSize, pointShadowCubeDepths[slotIndex]);
 		CreateShadowSampler(pointShadowCubeDepths[slotIndex], false);
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
 			VkImageViewCreateInfo depthFaceViewInfo{};
 			depthFaceViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -2731,6 +2966,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		imageInfo.imageView = image.view;
 		imageInfo.sampler = image.sampler;
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 			VkWriteDescriptorSet descriptorWrite{};
 			descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2750,10 +2986,12 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		directionalShadowTextureIndices[slotIndex] = AllocateTextureIndex();
 		BindDepthTexture(directionalShadowTextureIndices[slotIndex], directionalShadowDepths[slotIndex]);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {
 		spotShadowTextureIndices[slotIndex] = AllocateTextureIndex();
 		BindDepthTexture(spotShadowTextureIndices[slotIndex], spotShadowDepths[slotIndex]);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex) {
 		areaShadowTextureIndices[slotIndex] = AllocateTextureIndex();
 		BindDepthTexture(areaShadowTextureIndices[slotIndex], areaShadowDepths[slotIndex]);
@@ -2774,6 +3012,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		pointShadowCubeSamplerInfo.imageView = VK_NULL_HANDLE;
 		pointShadowCubeSamplerInfo.sampler = pointShadowCubeDepths[0].sampler;
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 			std::array<VkWriteDescriptorSet, 2> pointShadowCubeWrites{};
 			pointShadowCubeWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2806,6 +3045,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	};
 	std::uint32_t regionIndex = 0u;
 	auto registerRegion = [&](ShadowResourceKind kind, std::uint32_t typedSlot) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (regionIndex >= shadowStorageRegions.size()) {
 			return;
 		}
@@ -2820,20 +3060,25 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 		region.height = reduced2DRegion ? Shadow2DRegionSizeForSlot(typedSlot) : SHADOW_MAP_RESOLUTION;
 		region.qualityTier = reduced2DRegion ? ShadowQualityTier::ReducedResolution : ShadowQualityTier::FullResolution;
 		region.estimatedBytes = estimateRegionBytes(kind);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (reduced2DRegion) {
 			region.estimatedBytes /= 4u;
 		}
 		region.live = true;
 	};
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.directionalCount; ++slotIndex) {
 		registerRegion(ShadowResourceKind::DirectionalCascade, slotIndex);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.spotCount; ++slotIndex) {
 		registerRegion(ShadowResourceKind::SpotAtlas, slotIndex);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.areaCount; ++slotIndex) {
 		registerRegion(ShadowResourceKind::AreaAtlas, slotIndex);
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t slotIndex = 0u; slotIndex < targetRequest.pointCount; ++slotIndex) {
 		registerRegion(ShadowResourceKind::PointCube, slotIndex);
 	}
@@ -2869,6 +3114,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 		VmaAllocationCreateInfo allocInfo{};
 		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
 			vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 			image.image = VK_NULL_HANDLE;
@@ -2904,7 +3150,9 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	const uint32_t lutSize = LTC_LUT_RESOLUTION;
 	std::vector<glm::vec4> amplitudeLut(lutSize * lutSize, glm::vec4(1.0f));
 	std::vector<glm::vec4> inverseLut(lutSize * lutSize, glm::vec4(0.0f));
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t y = 0u; y < lutSize; ++y) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (uint32_t x = 0u; x < lutSize; ++x) {
 			const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(lutSize);
 			const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(lutSize);
@@ -2918,10 +3166,12 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	CreateLtcLookupTexture(amplitudeLut, ltcAmplitudeTexture);
 	CreateLtcLookupTexture(inverseLut, ltcInverseTexture);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ltcAmplitudeTexture.image != VK_NULL_HANDLE) {
 		ltcAmplitudeTextureIndex = AllocateTextureIndex();
 		UpdateGlobalTexture(ltcAmplitudeTextureIndex, ltcAmplitudeTexture);
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ltcInverseTexture.image != VK_NULL_HANDLE) {
 		ltcInverseTextureIndex = AllocateTextureIndex();
 		UpdateGlobalTexture(ltcInverseTextureIndex, ltcInverseTexture);
@@ -2930,6 +3180,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	return true;
 }
 
+// VulkanContext::Impl::UploadLightingData is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UploadLightingData(const std::vector<GPULight>& lights) {
 	if (globalLightSSBOs.empty() || globalLightSSBOs[currentFrame].buffer == VK_NULL_HANDLE) {
 		return;
@@ -2939,9 +3190,11 @@ void VulkanContext::Impl::UploadLightingData(const std::vector<GPULight>& lights
 	const uint32_t lightOffset = activeRenderSnapshot.valid ? activeRenderSnapshot.lightDataOffset : 0u;
 
 	void* mappedLights = nullptr;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vmaMapMemory(allocator, globalLightSSBOs[currentFrame].allocation, &mappedLights) == VK_SUCCESS) {
 		auto* gpuLights = static_cast<GPULight*>(mappedLights) + lightOffset;
 		std::fill(gpuLights, gpuLights + MAX_GLOBAL_LIGHTS, GPULight{});
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (clampedLightCount > 0u) {
 			std::memcpy(gpuLights, lights.data(), sizeof(GPULight) * clampedLightCount);
 		}
@@ -2952,6 +3205,7 @@ void VulkanContext::Impl::UploadLightingData(const std::vector<GPULight>& lights
 	}
 }
 
+// VulkanContext::Impl::UploadLightAnalysisInputData is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UploadLightAnalysisInputData(const std::vector<GPULight>& lights) {
 	if (lightAnalysisInputSSBOs.empty() || lightAnalysisInputSSBOs[currentFrame].buffer == VK_NULL_HANDLE) {
 		return;
@@ -2961,9 +3215,11 @@ void VulkanContext::Impl::UploadLightAnalysisInputData(const std::vector<GPULigh
 	const uint32_t lightOffset = activeRenderSnapshot.valid ? activeRenderSnapshot.lightAnalysisInputOffset : 0u;
 
 	void* mappedLights = nullptr;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vmaMapMemory(allocator, lightAnalysisInputSSBOs[currentFrame].allocation, &mappedLights) == VK_SUCCESS) {
 		auto* gpuLights = static_cast<GPULight*>(mappedLights) + lightOffset;
 		std::fill(gpuLights, gpuLights + MAX_GLOBAL_LIGHTS, GPULight{});
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (clampedLightCount > 0u) {
 			std::memcpy(gpuLights, lights.data(), sizeof(GPULight) * clampedLightCount);
 		}
@@ -2974,6 +3230,7 @@ void VulkanContext::Impl::UploadLightAnalysisInputData(const std::vector<GPULigh
 	}
 }
 
+// VulkanContext::Impl::ResetMeshletCounters is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::ResetMeshletCounters(uint32_t statsSlotIndex) {
 	if (globalMeshletCountersSSBOs.empty() || globalMeshletCountersSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
 		return;
@@ -2981,6 +3238,7 @@ void VulkanContext::Impl::ResetMeshletCounters(uint32_t statsSlotIndex) {
 
 	MeshletCullingCountersGPU counters{};
 	void* mapped = nullptr;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vmaMapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation, &mapped) != VK_SUCCESS) {
 		return;
 	}
@@ -2990,12 +3248,14 @@ void VulkanContext::Impl::ResetMeshletCounters(uint32_t statsSlotIndex) {
 	vmaUnmapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation);
 }
 
+// VulkanContext::Impl::UpdateFrameCullingData is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData) {
 	if (globalFrameCullingSSBOs.empty() || globalFrameCullingSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
 		return;
 	}
 
 	void* mapped = nullptr;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vmaMapMemory(allocator, globalFrameCullingSSBOs[currentFrame].allocation, &mapped) != VK_SUCCESS) {
 		return;
 	}
@@ -3005,6 +3265,7 @@ void VulkanContext::Impl::UpdateFrameCullingData(uint32_t statsSlotIndex, const 
 	vmaUnmapMemory(allocator, globalFrameCullingSSBOs[currentFrame].allocation);
 }
 
+// VulkanContext::Impl::ReadMeshletCounters is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 MeshletCullingCountersGPU VulkanContext::Impl::ReadMeshletCounters(uint32_t statsSlotIndex) const {
 	MeshletCullingCountersGPU counters{};
 	if (globalMeshletCountersSSBOs.empty() || globalMeshletCountersSSBOs[currentFrame].buffer == VK_NULL_HANDLE || statsSlotIndex >= kStatsSlotCount) {
@@ -3012,6 +3273,7 @@ MeshletCullingCountersGPU VulkanContext::Impl::ReadMeshletCounters(uint32_t stat
 	}
 
 	void* mapped = nullptr;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vmaMapMemory(allocator, globalMeshletCountersSSBOs[currentFrame].allocation, &mapped) != VK_SUCCESS) {
 		return counters;
 	}
@@ -3022,12 +3284,14 @@ MeshletCullingCountersGPU VulkanContext::Impl::ReadMeshletCounters(uint32_t stat
 	return counters;
 }
 
+// VulkanContext::Impl::GetStatsSlotIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 uint32_t VulkanContext::Impl::GetStatsSlotIndex(uint32_t frameIndex, VulkanContext::ViewType view) const {
 	const uint32_t clampedFrameIndex = std::min(frameIndex, kMaxStatsFrameSlots - 1u);
 	const uint32_t viewIndex = (view == VulkanContext::ViewType::Game) ? 0u : 1u;
 	return clampedFrameIndex * kStatsViewCount + viewIndex;
 }
 
+// VulkanContext::Impl::RecordPendingStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RecordPendingStats(uint32_t statsSlotIndex, const RenderStatsSnapshot& snapshot) {
 	if (statsSlotIndex >= kStatsSlotCount) {
 		return;
@@ -3035,6 +3299,7 @@ void VulkanContext::Impl::RecordPendingStats(uint32_t statsSlotIndex, const Rend
 	pendingStatsBySlot[statsSlotIndex] = snapshot;
 }
 
+// VulkanContext::Impl::RecordPendingBudgetDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RecordPendingBudgetDiagnostics(uint32_t statsSlotIndex, const FrameBudgetDiagnosticsSnapshot& snapshot) {
 	if (statsSlotIndex >= kStatsSlotCount) {
 		return;
@@ -3042,6 +3307,7 @@ void VulkanContext::Impl::RecordPendingBudgetDiagnostics(uint32_t statsSlotIndex
 	pendingBudgetDiagnosticsBySlot[statsSlotIndex] = snapshot;
 }
 
+// VulkanContext::Impl::RecordPendingLightAnalysisCandidates is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RecordPendingLightAnalysisCandidates(uint32_t statsSlotIndex, const std::vector<FrameLightCandidate>& candidates) {
 	if (statsSlotIndex >= kStatsSlotCount) {
 		return;
@@ -3049,12 +3315,14 @@ void VulkanContext::Impl::RecordPendingLightAnalysisCandidates(uint32_t statsSlo
 	pendingLightAnalysisCandidatesBySlot[statsSlotIndex] = candidates;
 }
 
+// VulkanContext::Impl::PublishCompletedFrameStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	const uint32_t gameSlot = GetStatsSlotIndex(frameIndex, VulkanContext::ViewType::Game);
 	const uint32_t sceneSlot = GetStatsSlotIndex(frameIndex, VulkanContext::ViewType::Scene);
 
 	RenderStatsSnapshot gameSnapshot = pendingStatsBySlot[gameSlot];
 	const MeshletCullingCountersGPU gameCounters = ReadMeshletCounters(gameSlot);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (gameSnapshot.valid) {
 		const bool useGpuCounters = (gameCounters.meshletsTotal > 0u) || (gameSnapshot.meshletsTotal == 0u);
 		if (useGpuCounters) {
@@ -3069,6 +3337,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 
 	RenderStatsSnapshot sceneSnapshot = pendingStatsBySlot[sceneSlot];
 	const MeshletCullingCountersGPU sceneCounters = ReadMeshletCounters(sceneSlot);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (sceneSnapshot.valid) {
 		const bool useGpuCounters = (sceneCounters.meshletsTotal > 0u) || (sceneSnapshot.meshletsTotal == 0u);
 		if (useGpuCounters) {
@@ -3124,6 +3393,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 		snapshot.entries.push_back(std::move(shadowMemoryEntry));
 
 		const auto shadowKindName = [](ShadowResourceKind kind) {
+			// Dispatch by explicit engine state so each case documents one supported behavior.
 			switch (kind)
 			{
 			case ShadowResourceKind::DirectionalCascade:
@@ -3139,6 +3409,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			}
 		};
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ShadowResourceAssignmentDiagnostic& assignment : budgetDiagnostics.shadowAssignments)
 		{
 			LightingDiagnosticEntry assignmentEntry{};
@@ -3150,10 +3421,12 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			assignmentEntry.message = assignment.assigned
 				? std::string("Light received ") + shadowKindName(assignment.resourceKind) + " slot " + std::to_string(assignment.resourceSlot) + "."
 				: std::string("Light requested shadows but did not receive a ") + shadowKindName(assignment.resourceKind) + " slot this frame.";
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (assignment.reusedPreviousOwner)
 			{
 				assignmentEntry.message += " Reused previous assignment for stability.";
 			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (assignment.replacedPreviousOwner)
 			{
 				assignmentEntry.message += " Replaced the previous owner of this slot.";
@@ -3209,19 +3482,23 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 
 	GpuLightAnalysisViewSnapshot gameLightAnalysis{};
 	GpuLightAnalysisViewSnapshot sceneLightAnalysis{};
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (frameIndex < lightAnalysisSSBOs.size() && lightAnalysisSSBOs[frameIndex].buffer != VK_NULL_HANDLE) {
 		const VulkanBuffer& analysisBuffer = lightAnalysisSSBOs[frameIndex];
 		void* mappedAnalysis = nullptr;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vmaMapMemory(allocator, analysisBuffer.allocation, &mappedAnalysis) == VK_SUCCESS) {
 			vmaInvalidateAllocation(allocator, analysisBuffer.allocation, 0, analysisBuffer.size);
 			const auto* analysisRecords = static_cast<const GPULightAnalysisRecord*>(mappedAnalysis);
 			const auto readSnapshot = [&](uint32_t statsSlotIndex) {
 				GpuLightAnalysisViewSnapshot snapshot{};
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (statsSlotIndex >= pendingLightAnalysisCandidatesBySlot.size()) {
 					return snapshot;
 				}
 
 				const std::vector<FrameLightCandidate>& candidates = pendingLightAnalysisCandidatesBySlot[statsSlotIndex];
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (candidates.empty()) {
 					snapshot.valid = true;
 					return snapshot;
@@ -3230,9 +3507,11 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 				const std::size_t clampedCount = std::min<std::size_t>(candidates.size(), MAX_GLOBAL_LIGHTS);
 				const std::size_t baseIndex = static_cast<std::size_t>(statsSlotIndex) * static_cast<std::size_t>(MAX_GLOBAL_LIGHTS);
 				snapshot.recordsByLightId.reserve(clampedCount);
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (std::size_t lightIndex = 0; lightIndex < clampedCount; ++lightIndex) {
 					const GPULightAnalysisRecord& record = analysisRecords[baseIndex + lightIndex];
 					snapshot.recordsByLightId.emplace(candidates[lightIndex].lightId, record);
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if ((record.flags & kGpuLightAnalysisFlagVisible) != 0u) {
 						snapshot.visibleCandidateCount += 1u;
 					}
@@ -3248,6 +3527,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	}
 
 	ClusterValidationSnapshot clusterSnapshot{};
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (clusterValidationCaptureEnabled) {
 		clusterSnapshot = ReadCompletedClusterValidationSnapshot(frameIndex);
 	}
@@ -3262,12 +3542,14 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 		latestLightingDiagnosticsByView[1] = sceneLightingDiagnostics;
 		latestGpuLightAnalysisByView[0] = std::move(gameLightAnalysis);
 		latestGpuLightAnalysisByView[1] = std::move(sceneLightAnalysis);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (clusterSnapshot.valid) {
 			previousClusterValidationSnapshot = clusterSnapshot;
 			previousClusterValidationSnapshotValid = true;
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (clusterSnapshot.valid) {
 		const FrameBudgetDiagnosticsSnapshot& captureDiagnostics = (clusterSnapshot.viewType == RenderViewType::Scene)
 			? sceneBudgetDiagnostics
@@ -3276,30 +3558,35 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	}
 }
 
+// VulkanContext::Impl::GetLatestStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 RenderStatsSnapshot VulkanContext::Impl::GetLatestStats(RenderViewType viewType) const {
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestStatsByView[index];
 }
 
+// VulkanContext::Impl::GetLatestBudgetDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 FrameBudgetDiagnosticsSnapshot VulkanContext::Impl::GetLatestBudgetDiagnostics(RenderViewType viewType) const {
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestBudgetDiagnosticsByView[index];
 }
 
+// VulkanContext::Impl::GetLatestLightingDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 LightingDiagnosticsSnapshot VulkanContext::Impl::GetLatestLightingDiagnostics(RenderViewType viewType) const {
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestLightingDiagnosticsByView[index];
 }
 
+// VulkanContext::Impl::GetLatestGpuLightAnalysis is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VulkanContext::Impl::GpuLightAnalysisViewSnapshot VulkanContext::Impl::GetLatestGpuLightAnalysis(RenderViewType viewType) const {
 	const uint32_t index = (viewType == RenderViewType::Scene) ? 1u : 0u;
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestGpuLightAnalysisByView[index];
 }
 
+// VulkanContext::Impl::RecordPendingClusterValidationSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RecordPendingClusterValidationSnapshot(uint32_t frameIndex, const ClusterValidationSnapshot& snapshot) {
 	if (frameIndex >= pendingClusterValidationByFrame.size()) {
 		return;
@@ -3307,19 +3594,23 @@ void VulkanContext::Impl::RecordPendingClusterValidationSnapshot(uint32_t frameI
 	pendingClusterValidationByFrame[frameIndex] = snapshot;
 }
 
+// VulkanContext::Impl::ReadCompletedClusterValidationSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSnapshot(uint32_t frameIndex) const {
 	if (!clusterValidationCaptureEnabled) {
 		return {};
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (frameIndex >= pendingClusterValidationByFrame.size()) {
 		return {};
 	}
 
 	ClusterValidationSnapshot snapshot = pendingClusterValidationByFrame[frameIndex];
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!snapshot.valid || !snapshot.buildMetadata.clusteredLightingAvailable) {
 		return snapshot;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (frameIndex >= clusterGridSSBOs.size() || frameIndex >= lightIndexSSBOs.size()) {
 		snapshot.valid = false;
 		return snapshot;
@@ -3327,6 +3618,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 
 	const VulkanBuffer& clusterBuffer = clusterGridSSBOs[frameIndex];
 	const VulkanBuffer& lightIndexBuffer = lightIndexSSBOs[frameIndex];
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (clusterBuffer.buffer == VK_NULL_HANDLE || lightIndexBuffer.buffer == VK_NULL_HANDLE) {
 		snapshot.valid = false;
 		return snapshot;
@@ -3337,6 +3629,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	snapshot.ranges.reserve(clusterCount);
 
 	void* mappedClusters = nullptr;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vmaMapMemory(allocator, clusterBuffer.allocation, &mappedClusters) != VK_SUCCESS) {
 		snapshot.valid = false;
 		return snapshot;
@@ -3354,6 +3647,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	std::uint32_t maxClusterLightCount = 0u;
 	std::uint32_t outOfBoundsRangeCount = 0u;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t clusterIndex = 0u; clusterIndex < clusterCount; ++clusterIndex) {
 		const ClusterData& cluster = clusterGridData[clusterIndex];
 		const std::uint64_t rangeEnd = static_cast<std::uint64_t>(cluster.offset) + static_cast<std::uint64_t>(cluster.count);
@@ -3367,17 +3661,20 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 		rangeSnapshot.outOfBounds = outOfBounds;
 		snapshot.ranges.push_back(rangeSnapshot);
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (cluster.count == 0u) {
 			emptyClusterCount += 1u;
 		}
 		maxClusterLightCount = std::max(maxClusterLightCount, cluster.count);
 		actualAssignedLightCount += cluster.count;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (rangeEnd > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
 			usedIndexCount = std::numeric_limits<std::uint32_t>::max();
 		}
 		else {
 			usedIndexCount = std::max(usedIndexCount, static_cast<std::uint32_t>(rangeEnd));
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outOfBounds) {
 			outOfBoundsRangeCount += 1u;
 		}
@@ -3391,6 +3688,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	vmaUnmapMemory(allocator, clusterBuffer.allocation);
 
 	std::uint32_t invalidLightIndexCount = 0u;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (usedIndexCount > 0u) {
 		void* mappedLightIndices = nullptr;
 		if (vmaMapMemory(allocator, lightIndexBuffer.allocation, &mappedLightIndices) == VK_SUCCESS) {
@@ -3399,6 +3697,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 			vmaInvalidateAllocation(allocator, lightIndexBuffer.allocation, lightIndexReadOffset, lightIndexReadSize);
 
 			const std::uint32_t* lightIndexData = static_cast<const std::uint32_t*>(mappedLightIndices) + snapshot.buildMetadata.lightIndexOffset;
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::uint32_t entryIndex = 0u; entryIndex < usedIndexCount; ++entryIndex) {
 				const std::uint32_t lightIndex = lightIndexData[entryIndex];
 				if (lightIndex == 0xFFFFFFFFu || lightIndex >= snapshot.buildMetadata.activeLightCount) {
@@ -3411,13 +3710,16 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	}
 
 	std::uint32_t determinismMismatchCount = 0u;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (previousClusterValidationSnapshotValid
 		&& previousClusterValidationSnapshot.viewType == snapshot.viewType
 		&& previousClusterValidationSnapshot.ranges.size() == snapshot.ranges.size()
 		&& previousClusterValidationSnapshot.buildMetadata.activeLightCount == snapshot.buildMetadata.activeLightCount) {
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t rangeIndex = 0; rangeIndex < snapshot.ranges.size(); ++rangeIndex) {
 			const ClusterLightRangeSnapshot& currentRange = snapshot.ranges[rangeIndex];
 			const ClusterLightRangeSnapshot& previousRange = previousClusterValidationSnapshot.ranges[rangeIndex];
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (currentRange.offset != previousRange.offset
 				|| currentRange.count != previousRange.count
 				|| currentRange.outOfBounds != previousRange.outOfBounds) {
@@ -3439,6 +3741,7 @@ ClusterValidationSnapshot VulkanContext::Impl::ReadCompletedClusterValidationSna
 	return snapshot;
 }
 
+// VulkanContext::Impl::WriteClusterValidationCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationSnapshot& snapshot, const FrameBudgetDiagnosticsSnapshot& diagnostics) const {
 	if (!clusterValidationCaptureEnabled || !snapshot.valid) {
 		return;
@@ -3447,6 +3750,7 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 	try {
 		namespace fs = std::filesystem;
 		const fs::path outputPath = clusterValidationCapturePath;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outputPath.has_parent_path()) {
 			fs::create_directories(outputPath.parent_path());
 		}
@@ -3508,6 +3812,7 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 		capture["shadow_draw_submission_count"] = diagnostics.shadowDrawSubmissionCount;
 		capture["shadow_pass_recorded"] = diagnostics.shadowPassRecorded;
 		capture["shadow_assignments"] = nlohmann::json::array();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ShadowResourceAssignmentDiagnostic& assignment : diagnostics.shadowAssignments) {
 			nlohmann::json assignmentJson;
 			assignmentJson["light_id"] = TerraEngine::ToHexString(assignment.lightId);
@@ -3553,6 +3858,7 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 		capture["range_hash_hex"] = BuildHashHex(snapshot.buildMetadata.rangeHash);
 		capture["ranges"] = nlohmann::json::array();
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ClusterLightRangeSnapshot& range : snapshot.ranges) {
 			nlohmann::json rangeJson;
 			rangeJson["cluster_index"] = range.clusterIndex;
@@ -3570,12 +3876,14 @@ void VulkanContext::Impl::WriteClusterValidationCapture(const ClusterValidationS
 	}
 }
 
+// VulkanContext::Impl::AllocateTextureIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 uint32_t VulkanContext::Impl::AllocateTextureIndex() {
 	if (!freeTextureIndices.empty()) {
 		uint32_t index = freeTextureIndices.back();
 		freeTextureIndices.pop_back();
 		return index;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (nextTextureIndex >= MAX_BINDLESS_TEXTURES) {
 		TERRAENGINE_LOG(LogLevel::Error, "Max bindless textures exceeded!");
 		return 0; // Return default texture
@@ -3583,12 +3891,14 @@ uint32_t VulkanContext::Impl::AllocateTextureIndex() {
 	return nextTextureIndex++;
 }
 
+// VulkanContext::Impl::AllocateMaterialIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 	if (!freeMaterialIndices.empty()) {
 		uint32_t index = freeMaterialIndices.back();
 		freeMaterialIndices.pop_back();
 		return index;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (nextMaterialIndex >= MAX_BINDLESS_MATERIALS) {
 		TERRAENGINE_LOG(LogLevel::Error, "Max bindless materials exceeded!");
 		return 0; 
@@ -3596,12 +3906,14 @@ uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 	return nextMaterialIndex++;
 }
 
+// VulkanContext::Impl::UpdateGlobalTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalTexture(uint32_t index, const VulkanImage& image) {
 	VkDescriptorImageInfo imageInfo{};
 	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	imageInfo.imageView = image.view;
 	imageInfo.sampler = image.sampler;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		VkWriteDescriptorSet descriptorWrite{};
 		descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3616,24 +3928,28 @@ void VulkanContext::Impl::UpdateGlobalTexture(uint32_t index, const VulkanImage&
 	}
 }
 
+// VulkanContext::Impl::AllocateBufferIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 uint32_t VulkanContext::Impl::AllocateBufferIndex() {
 	if (!freeBufferIndices.empty()) {
 		uint32_t index = freeBufferIndices.back();
 		freeBufferIndices.pop_back();
 		return index;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (nextBufferIndex >= MAX_BINDLESS_BUFFERS) {
 		throw std::runtime_error("Exceeded MAX_BINDLESS_BUFFERS!");
 	}
 	return nextBufferIndex++;
 }
 
+// VulkanContext::Impl::UpdateGlobalBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range) {
 	VkDescriptorBufferInfo bufferInfo{};
 	bufferInfo.buffer = buffer;
 	bufferInfo.offset = offset;
 	bufferInfo.range = range;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		VkWriteDescriptorSet descriptorWrite{};
 		descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -3648,6 +3964,7 @@ void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 	}
 }
 
+// VulkanContext::Impl::UpdateGlobalHiZ is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalHiZ(const VulkanHiZ& hiZ) {
 	if (hiZ.fullView == VK_NULL_HANDLE) return;
 
@@ -3659,6 +3976,7 @@ void VulkanContext::Impl::UpdateGlobalHiZ(const VulkanHiZ& hiZ) {
 	VkDescriptorImageInfo samplerInfo{};
 	samplerInfo.sampler = hiZ.sampler;
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 		VkWriteDescriptorSet writes[2]{};
 		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;

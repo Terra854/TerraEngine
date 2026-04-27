@@ -1,3 +1,9 @@
+// ShaderCollection.h — Shader Collection Data Structures
+//
+// Defines the data structures used to represent and group multiple shader stages into a cohesive collection.
+// It provides types for stage-specific shader IDs and metadata required for pipeline creation.
+// These collections serve as the high-level representation of materials' visual programs in the engine.
+
 #pragma once
 
 #include <filesystem>

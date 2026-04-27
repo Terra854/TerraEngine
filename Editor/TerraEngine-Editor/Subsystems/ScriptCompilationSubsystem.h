@@ -1,3 +1,7 @@
+// ScriptCompilationSubsystem.h — Managed script compilation coordinator
+//
+// Defines the subsystem responsible for coordinating C# project builds and hot reloads. It maintains the build status, manages asynchronous dotnet build tasks, and ensures that the engine's scripting runtime is correctly synchronized with the project's source code.
+
 #pragma once
 
 #include "IEditorSubsystem.h"
@@ -13,6 +17,7 @@ enum class ScriptBuildProfile
 	Debug
 };
 
+// ScriptCoordinatorState names the supported states explicitly so serialization and switches stay readable.
 enum class ScriptCoordinatorState
 {
 	Idle,
@@ -23,6 +28,7 @@ enum class ScriptCoordinatorState
 	Failed
 };
 
+// ScriptBuildReason names the supported states explicitly so serialization and switches stay readable.
 enum class ScriptBuildReason
 {
 	ProjectOpen,
@@ -30,6 +36,7 @@ enum class ScriptBuildReason
 	ManualRefresh
 };
 
+// struct ScriptCompilationStatus groups related state and operations so callers have one documented contract.
 struct ScriptCompilationStatus
 {
 	// High-level state mirrored into the editor UI and asset metadata so the
@@ -74,6 +81,7 @@ public:
 	[[nodiscard]] bool ShouldBlockEditorInteraction() const;
 
 private:
+	// struct ScriptBuildResult groups related state and operations so callers have one documented contract.
 	struct ScriptBuildResult
 	{
 		// Result returned from the async dotnet build worker back onto the editor

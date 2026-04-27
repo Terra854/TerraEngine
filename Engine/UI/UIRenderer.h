@@ -1,3 +1,10 @@
+// UIRenderer.h — Backend-agnostic UI batch generator.
+//
+// This file defines the UIRenderer class, which traverses the UI visual tree
+// and generates flattened render batches. It handles text shaping using STB
+// TrueType and prepares geometry and material data for the engine's main
+// renderer.
+
 #pragma once
 
 #include "UIElement.h"
@@ -21,6 +28,7 @@ struct UIFontGlyph
 	float advance = 0.0f;
 };
 
+// struct UIFontAtlas groups related state and operations so callers have one documented contract.
 struct UIFontAtlas
 {
 	bool ready = false;
@@ -31,6 +39,7 @@ struct UIFontAtlas
 	std::unordered_map<char, UIFontGlyph> glyphs;
 };
 
+// class UIRenderer groups related state and operations so callers have one documented contract.
 class UIRenderer
 {
 public:

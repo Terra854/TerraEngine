@@ -1,3 +1,5 @@
+// ContentMount.h — Contains declarations for the Content Mount file-specific types, helper functions, and module integration code used by mounted content registration, lookup, and byte-loading services.
+
 // ContentMount.h — Runtime content-access abstraction for TEPAK archives.
 //
 // In exported builds the ContentMount replaces the filesystem-based resource access
@@ -81,6 +83,7 @@ public:
 	static ContentMount& Instance();
 
 private:
+	// struct Impl groups related state and operations so callers have one documented contract.
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
 };

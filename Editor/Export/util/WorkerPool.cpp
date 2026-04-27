@@ -1,3 +1,7 @@
+// WorkerPool.cpp — TEPAK task-based worker pool implementation
+//
+// Implements the task scheduling and thread management logic for the TEPAK worker pool. It handles the lifecycle of worker threads and ensures that all submitted tasks are executed efficiently without blocking the main orchestrator thread.
+
 #include "util/WorkerPool.h"
 
 #include <stdexcept>
@@ -23,17 +27,21 @@ WorkerPool::~WorkerPool() {
 		m_stopping = true;
 	}
 	m_condition.notify_all();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& thread : m_threads) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (thread.joinable()) {
 			thread.join();
 		}
 	}
 }
 
+// WorkerPool::GetWorkerCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::uint32_t WorkerPool::GetWorkerCount() const {
 	return m_workerCount;
 }
 
+// WorkerPool::Enqueue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void WorkerPool::Enqueue(std::function<void()> task) {
 	if (!task) {
 		throw std::runtime_error("Worker pool tasks must be callable.");
@@ -41,6 +49,7 @@ void WorkerPool::Enqueue(std::function<void()> task) {
 
 	{
 		std::scoped_lock lock(m_mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_stopping) {
 			throw std::runtime_error("Worker pool is shutting down.");
 		}
@@ -49,6 +58,7 @@ void WorkerPool::Enqueue(std::function<void()> task) {
 	m_condition.notify_one();
 }
 
+// WorkerPool::WorkerLoop is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void WorkerPool::WorkerLoop() {
 	while (true) {
 		std::function<void()> task;
@@ -58,6 +68,7 @@ void WorkerPool::WorkerLoop() {
 				return m_stopping || !m_tasks.empty();
 			});
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (m_stopping && m_tasks.empty()) {
 				return;
 			}

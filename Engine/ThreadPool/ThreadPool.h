@@ -1,3 +1,5 @@
+// ThreadPool.h — Contains declarations for the Thread Pool queue state, worker coordination, and synchronization helpers used by task queue storage, worker thread lifecycle, and synchronization primitives.
+
 #pragma once
 #include <atomic>
 #include <condition_variable>
@@ -15,6 +17,7 @@
 class ThreadPool;
 
 // Interface for a task
+// struct ITask groups related state and operations so callers have one documented contract.
 struct ITask {
 	std::atomic<int> unresolvedDependencies = -1;
 	std::vector<std::shared_ptr<ITask>> dependenciesList;
@@ -32,12 +35,14 @@ struct ITask {
 };
 
 template <typename ReturnType>
+// struct Task groups related state and operations so callers have one documented contract.
 struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>> {
 	std::function<ReturnType()> taskFunc;
 	std::promise<ReturnType> taskPromise;
 	std::weak_ptr<ITask> parentTask; // Weak pointer to the parent task to avoid increasing reference count
 
 	Task(std::function<ReturnType()> func)
+		// ITask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		: ITask(), taskFunc(std::move(func)), parentTask() {}
 
 	std::shared_ptr<ITask> clone() const override {
@@ -45,6 +50,7 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 		auto clonedTask = std::make_shared<Task<ReturnType>>(taskFunc);
 
 		// Clone each dependency in the dependenciesList
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& dependency : this->dependenciesList) {
 			auto clonedDependency = dependency->clone();
 			clonedTask->dependenciesList.push_back(clonedDependency);
@@ -54,6 +60,7 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 		return clonedTask;
 	}
 
+	// run is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void run() override {
 		try {
 			if constexpr (std::is_void_v<ReturnType>) {
@@ -69,10 +76,12 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 		}
 	}
 
+	// setParentTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void setParentTask(std::weak_ptr<ITask> parent) override {
 		parentTask = parent;
 	}
 
+	// getParentTask is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::weak_ptr<ITask> getParentTask() override {
 		return parentTask;
 	}
@@ -88,10 +97,12 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 	}
 
 	// Delete all dependencies from this task
+	// clearDependencies is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void clearDependencies() {
 		dependenciesList.clear();
 	}
 	
+	// reset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void reset(std::function<ReturnType()> func) {
 		taskFunc = std::move(func);
 		taskPromise = std::promise<ReturnType>();
@@ -100,11 +111,13 @@ struct Task : public ITask, public std::enable_shared_from_this<Task<ReturnType>
 		parentTask.reset();
 	}
 
+	// getFuture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::future<ReturnType> getFuture() {
 		return taskPromise.get_future();
 	}
 };
 
+// class ThreadPool groups related state and operations so callers have one documented contract.
 class ThreadPool {
 public:
 	static ThreadPool& instance();
@@ -124,6 +137,7 @@ public:
 		using ReturnType = std::invoke_result_t<Func, Args...>;
 		auto boundFunc = std::bind(std::forward<Func>(func), std::forward<Args>(args)...);
 		
+		// constexpr is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		if constexpr (std::is_void_v<ReturnType>) {
 			return AllocateVoidTask(std::move(boundFunc));
 		} else {
@@ -137,6 +151,7 @@ public:
 	std::shared_ptr<Task<void>> AllocateVoidTask(std::function<void()> func);
 	void ReleaseVoidTask(Task<void>* task);
 
+	// getThreadCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	size_t getThreadCount() const { return workers.size(); }
 
 private:

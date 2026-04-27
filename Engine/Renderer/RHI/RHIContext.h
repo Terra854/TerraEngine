@@ -1,3 +1,9 @@
+// RHIContext.h — Renderer Hardware Interface Context Definition
+//
+// Defines the base RHIContext interface, establishing the contract for graphics backend implementations.
+// It provides abstract methods for resource management, frame submission, and state synchronization.
+// This allows the high-level renderer to remain agnostic of the specific graphics API being used (e.g., Vulkan).
+
 #pragma once
 
 #include "RHIDefinitions.h"
@@ -6,6 +12,7 @@
 
 class WindowSystem;
 
+// class TERRAENGINE_API groups related state and operations so callers have one documented contract.
 class TERRAENGINE_API RHIContext
 {
 public:
@@ -14,40 +21,52 @@ public:
 	virtual void Initialize(WindowSystem& windowSystem) = 0;
 	virtual void BeginFrame() = 0;
 	virtual void RenderFrame(const FrameRenderData& frameData) = 0;
+	// RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void RenderFrame(const FrameRenderData& frameData, const RenderOutputRequest& outputRequest)
 	{
 		(void)outputRequest;
 		RenderFrame(frameData);
 	}
 	virtual void EndFrame() = 0;
+	// SetGlobalTaskShaderCullingEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void SetGlobalTaskShaderCullingEnabled(bool enabled) {}
+	// IsTaskShaderSupported is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual bool IsTaskShaderSupported() const { return false; }
+	// GetLatestRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const
 	{
 		RenderStatsSnapshot snapshot{};
 		snapshot.viewType = viewType;
 		return snapshot;
 	}
+	// GetLatestFrameBudgetDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const
 	{
 		FrameBudgetDiagnosticsSnapshot snapshot{};
 		snapshot.viewType = viewType;
 		return snapshot;
 	}
+	// GetLatestLightingDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const
 	{
 		LightingDiagnosticsSnapshot snapshot{};
 		snapshot.viewType = viewType;
 		return snapshot;
 	}
+	// GetLatestRenderSnapshotDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const
 	{
 		return {};
 	}
+	// InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void InvalidateMaterial(const TerraEngine::UUID& materialId) {}
+	// InvalidateMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void InvalidateMesh(const TerraEngine::UUID& meshId) {}
+	// InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void InvalidateTexture(const TerraEngine::UUID& textureId) {}
+	// InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void InvalidateResource(const TerraEngine::UUID& id) {}
+	// ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void ClearResources() {}
 	virtual void WaitIdle() = 0;
 	virtual void Shutdown() = 0;

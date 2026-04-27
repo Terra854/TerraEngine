@@ -1,3 +1,10 @@
+// DotNetHost.h — Interface for the engine's .NET runtime hosting layer.
+//
+// This file declares the DotNetHost singleton, which manages the lifecycle and
+// initialization of the .NET runtime within the engine. It provides methods for
+// loading managed assemblies and retrieving function pointers, supporting both
+// dynamic development environments and high-performance exported builds.
+
 #pragma once
 
 #include "Core/Export.h"
@@ -65,6 +72,7 @@ public:
 	bool IsInitialized() const { return initialized; }
 
 	/// Returns true when the host was initialized in export-mode (NativeAOT).
+	// IsExportMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsExportMode() const { return exportMode; }
 	const std::string& GetLastNativeError() const { return m_LastNativeError; }
 

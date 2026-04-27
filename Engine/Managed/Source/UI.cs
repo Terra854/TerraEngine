@@ -1,8 +1,11 @@
+// UI.cs — Contains the managed UI API surface, properties, native-call bindings, and script/editor workflow helpers for C# scripting API types that mirror native engine objects, components, and services.
+
 using System;
 using System.Collections.Generic;
 
 namespace TerraEngine
 {
+	// UIElementType is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public enum UIElementType : int
 	{
 		Root = 0,
@@ -12,6 +15,7 @@ namespace TerraEngine
 		Image = 4
 	}
 
+	// UIEventType is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public enum UIEventType : int
 	{
 		Click = 0,
@@ -19,6 +23,7 @@ namespace TerraEngine
 		MouseLeave = 2
 	}
 
+	// UIStyleProperty is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal enum UIStyleProperty : int
 	{
 		Width = 0,
@@ -34,10 +39,12 @@ namespace TerraEngine
 		public static bool WasElementClicked(string elementId)
 			=> !string.IsNullOrWhiteSpace(elementId) && InternalCalls.Native_UI_WasElementClicked(elementId);
 
+		// IsElementHovered bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static bool IsElementHovered(string elementId)
 			=> !string.IsNullOrWhiteSpace(elementId) && InternalCalls.Native_UI_IsElementHovered(elementId);
 	}
 
+	// IStyle is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public interface IStyle
 	{
 		float Width { get; set; }
@@ -46,6 +53,7 @@ namespace TerraEngine
 		Vector4 BackgroundColor { get; set; }
 	}
 
+	// UIStyle is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public sealed class UIStyle : IStyle
 	{
 		private readonly VisualElement _owner;
@@ -114,6 +122,7 @@ namespace TerraEngine
 		}
 	}
 
+	// UIEvent is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class UIEvent
 	{
 		public VisualElement Target { get; }
@@ -128,6 +137,7 @@ namespace TerraEngine
 		}
 	}
 
+	// PointerEvent is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class PointerEvent : UIEvent
 	{
 		internal PointerEvent(VisualElement target, Vector2 mousePosition, UIEventType type)
@@ -136,6 +146,7 @@ namespace TerraEngine
 		}
 	}
 
+	// ClickEvent is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public sealed class ClickEvent : PointerEvent
 	{
 		internal ClickEvent(VisualElement target, Vector2 mousePosition)
@@ -144,6 +155,7 @@ namespace TerraEngine
 		}
 	}
 
+	// MouseEnterEvent is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public sealed class MouseEnterEvent : PointerEvent
 	{
 		internal MouseEnterEvent(VisualElement target, Vector2 mousePosition)
@@ -152,6 +164,7 @@ namespace TerraEngine
 		}
 	}
 
+	// MouseLeaveEvent is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public sealed class MouseLeaveEvent : PointerEvent
 	{
 		internal MouseLeaveEvent(VisualElement target, Vector2 mousePosition)
@@ -160,6 +173,7 @@ namespace TerraEngine
 		}
 	}
 
+	// VisualElement is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class VisualElement : IDisposable
 	{
 		private bool _disposed;
@@ -272,9 +286,11 @@ namespace TerraEngine
 
 		public IStyle Style => _style ??= new UIStyle(this);
 
+		// Add bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public void Add(VisualElement child)
 		{
 			EnsureAlive(nameof(Add));
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (child == null)
 			{
 				throw new ArgumentNullException(nameof(child));
@@ -284,9 +300,11 @@ namespace TerraEngine
 			InternalCalls.Native_UI_AddChild(NativeHandle, child.NativeHandle);
 		}
 
+		// Remove bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public void Remove(VisualElement child)
 		{
 			EnsureAlive(nameof(Remove));
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (child == null)
 			{
 				throw new ArgumentNullException(nameof(child));
@@ -296,15 +314,18 @@ namespace TerraEngine
 			InternalCalls.Native_UI_RemoveChild(NativeHandle, child.NativeHandle);
 		}
 
+		// Clear bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public void Clear()
 		{
 			EnsureAlive(nameof(Clear));
 			InternalCalls.Native_UI_ClearChildren(NativeHandle);
 		}
 
+		// Q bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public VisualElement? Q(string id)
 		{
 			EnsureAlive(nameof(Q));
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (string.IsNullOrWhiteSpace(id))
 			{
 				return null;
@@ -322,12 +343,14 @@ namespace TerraEngine
 			&& NativeHandle != IntPtr.Zero
 			&& InternalCalls.Native_UI_IsHandleAlive(NativeHandle);
 
+		// Dispose bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public void Dispose()
 		{
 			Dispose(true);
 			GC.SuppressFinalize(this);
 		}
 
+		// Dispose bridges managed callers to engine state; validate arguments before forwarding to native code.
 		protected virtual void Dispose(bool disposing)
 		{
 			if (_disposed)
@@ -336,6 +359,7 @@ namespace TerraEngine
 			}
 
 			UIBridge.Unregister(this);
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (NativeHandle != IntPtr.Zero)
 			{
 				InternalCalls.Native_UI_ReleaseHandle(NativeHandle);
@@ -345,6 +369,7 @@ namespace TerraEngine
 			_disposed = true;
 		}
 
+		// WrapHandle bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static VisualElement? WrapHandle(IntPtr nativeHandle)
 		{
 			if (nativeHandle == IntPtr.Zero)
@@ -361,6 +386,7 @@ namespace TerraEngine
 			};
 		}
 
+		// EnsureAlive bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal void EnsureAlive(string operation)
 		{
 			if (IsAlive)
@@ -371,10 +397,12 @@ namespace TerraEngine
 			throw new InvalidOperationException($"UI element handle is stale during {operation}. Query the element again from the current UI tree.");
 		}
 
+		// ConfigureEventBridge bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private void ConfigureEventBridge(UIEventType eventType, bool enabled)
 		{
 			EnsureAlive(nameof(ConfigureEventBridge));
 			bool nativeRegistered = InternalCalls.Native_UI_SetEventCallback(NativeHandle, (int)eventType, enabled);
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (!nativeRegistered && enabled)
 			{
 				_usesPollingFallback = true;
@@ -385,6 +413,7 @@ namespace TerraEngine
 			}
 		}
 
+		// PumpInteractionEvents bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal void PumpInteractionEvents()
 		{
 			if (!IsAlive || !_usesPollingFallback)
@@ -393,6 +422,7 @@ namespace TerraEngine
 			}
 
 			string id = Id;
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (string.IsNullOrWhiteSpace(id))
 			{
 				_lastHovered = false;
@@ -401,6 +431,7 @@ namespace TerraEngine
 
 			Vector2 mousePosition = Input.MousePosition;
 			bool hovered = UI.IsElementHovered(id);
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (hovered && !_lastHovered)
 			{
 				_mouseEnter?.Invoke(new MouseEnterEvent(this, mousePosition));
@@ -410,6 +441,7 @@ namespace TerraEngine
 				_mouseLeave?.Invoke(new MouseLeaveEvent(this, mousePosition));
 			}
 
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (UI.WasElementClicked(id))
 			{
 				_clicked?.Invoke(new ClickEvent(this, mousePosition));
@@ -418,6 +450,7 @@ namespace TerraEngine
 			_lastHovered = hovered;
 		}
 
+		// DispatchNativeEvent bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal void DispatchNativeEvent(UIEventType eventType, Vector2 pointerPosition)
 		{
 			switch (eventType)
@@ -435,6 +468,7 @@ namespace TerraEngine
 		}
 	}
 
+	// Button is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class Button : VisualElement
 	{
 		public Button()
@@ -462,6 +496,7 @@ namespace TerraEngine
 		}
 	}
 
+	// Label is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class Label : VisualElement
 	{
 		public Label()
@@ -489,10 +524,12 @@ namespace TerraEngine
 		}
 	}
 
+	// UIComponent is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class UIComponent : Component
 	{
 		private VisualElement? _cachedRoot;
 
+		// GetRoot bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public VisualElement GetRoot()
 		{
 			if (_cachedRoot != null && _cachedRoot.IsAlive)
@@ -506,6 +543,7 @@ namespace TerraEngine
 		}
 	}
 
+	// UIBridge is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	internal static class UIBridge
 	{
 		private static readonly object s_syncRoot = new();
@@ -513,6 +551,7 @@ namespace TerraEngine
 		private static readonly Dictionary<nint, WeakReference<VisualElement>> s_elementsByHandle = new();
 		private static ulong s_lastProcessedFrame;
 
+		// Register bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static void Register(VisualElement element)
 		{
 			lock (s_syncRoot)
@@ -522,12 +561,14 @@ namespace TerraEngine
 			}
 		}
 
+		// Unregister bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static void Unregister(VisualElement element)
 		{
 			lock (s_syncRoot)
 			{
 				for (int index = s_knownElements.Count - 1; index >= 0; --index)
 				{
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (!s_knownElements[index].TryGetTarget(out VisualElement? knownElement) || ReferenceEquals(knownElement, element))
 					{
 						s_knownElements.RemoveAt(index);
@@ -538,9 +579,11 @@ namespace TerraEngine
 			}
 		}
 
+		// PumpPendingEvents bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static void PumpPendingEvents()
 		{
 			ulong frame = InternalCalls.Native_UI_GetInteractionFrame();
+			// Validate this condition before crossing into native or editor state that may outlive the managed object.
 			if (frame == s_lastProcessedFrame)
 			{
 				return;
@@ -551,6 +594,7 @@ namespace TerraEngine
 			{
 				for (int index = s_knownElements.Count - 1; index >= 0; --index)
 				{
+					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (!s_knownElements[index].TryGetTarget(out VisualElement? element) || !element.IsAlive)
 					{
 						s_knownElements.RemoveAt(index);
@@ -569,11 +613,13 @@ namespace TerraEngine
 			s_lastProcessedFrame = frame;
 		}
 
+		// DispatchNativeEvent bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static void DispatchNativeEvent(IntPtr elementHandle, UIEventType eventType, Vector2 pointerPosition)
 		{
 			VisualElement? target = null;
 			lock (s_syncRoot)
 			{
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
 				if (s_elementsByHandle.TryGetValue(elementHandle, out WeakReference<VisualElement>? weakElement))
 				{
 					if (!weakElement.TryGetTarget(out target) || !target.IsAlive)

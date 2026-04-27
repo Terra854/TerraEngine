@@ -1,3 +1,10 @@
+// UIParser.h — Parser for XML-based markup and CSS-like stylesheets.
+//
+// This file defines the UIParser class, which is responsible for converting
+// authored XML files and style definitions into a live UIElement visual tree.
+// It handles attribute parsing, class-based styling, and asset reference
+// resolution for UI components.
+
 #pragma once
 
 #include "UIElement.h"

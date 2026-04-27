@@ -1,3 +1,10 @@
+// UISystem.h — Main orchestrator for the engine's UI subsystem.
+//
+// This file defines the UISystem class, which manages the lifecycle of UI
+// documents, handles user input (mouse/keyboard) for UI interaction, and
+// coordinates between the parser, layout engine, and renderer. It supports
+// asynchronous document builds and maintains the global UI render state.
+
 #pragma once
 
 #include "Core/SystemBase.h"
@@ -22,6 +29,7 @@ class UIComponent;
 class UISystem : public SystemsBase
 {
 public:
+	// struct UIBuildResult groups related state and operations so callers have one documented contract.
 	struct UIBuildResult
 	{
 		UIElement::Ptr root;
@@ -59,6 +67,7 @@ public:
 private:
 	UISystem() = default;
 
+	// struct UIDocumentState groups related state and operations so callers have one documented contract.
 	struct UIDocumentState
 	{
 		std::uint64_t contentVersion = 0;
@@ -70,6 +79,7 @@ private:
 		std::string lastError;
 	};
 
+	// struct PointerState groups related state and operations so callers have one documented contract.
 	struct PointerState
 	{
 		glm::vec2 position = glm::vec2(0.0f);

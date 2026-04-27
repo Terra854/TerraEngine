@@ -1,3 +1,7 @@
+// ProjectSettings.h — Project-specific configuration settings
+//
+// Defines the data structure for project-specific settings that are persisted within the project directory. it currently serves as a placeholder for extensible project configurations and utilizes nlohmann/json for automated serialization.
+
 #pragma once
 
 #include <nlohmann/json.hpp>

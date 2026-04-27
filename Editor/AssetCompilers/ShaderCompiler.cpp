@@ -1,3 +1,7 @@
+// ShaderCompiler.cpp — Shader compilation pipeline implementation
+//
+// Manages the shader compilation process by invoking the DirectX Shader Compiler (DXC) and processing the resulting SPIR-V bytecode. It performs reflection on the compiled shaders to extract layout information and packages everything into a versioned binary format.
+
 #include "ShaderCompiler.h"
 #include <array>
 #include <algorithm>
@@ -35,6 +39,7 @@ namespace {
 	constexpr std::uint32_t kSpirvExecutionModelTaskEXT = 5364u;
 	constexpr std::uint32_t kSpirvStorageClassTaskPayloadWorkgroupEXT = 5402u;
 
+	// PatchTaskEmitPayload is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool PatchTaskEmitPayload(std::vector<std::uint8_t>& bytecode) {
 		// DXC currently emits OpEmitMeshTasksEXT without payload id. Vulkan validation
 		// requires the task payload variable to be passed explicitly when mesh stage
@@ -50,6 +55,7 @@ namespace {
 			return value;
 		};
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ReadWord(0) != kSpirvMagicNumber) {
 			return false;
 		}
@@ -58,14 +64,17 @@ namespace {
 		bool hasTaskEntryPoint = false;
 		bool requiresPatch = false;
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t i = 5; i < wordCount;) {
 			const std::uint32_t instructionWord = ReadWord(i);
 			const std::uint16_t opcode = static_cast<std::uint16_t>(instructionWord & 0xFFFFu);
 			const std::uint16_t instructionWordCount = static_cast<std::uint16_t>(instructionWord >> 16);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (instructionWordCount == 0 || (i + instructionWordCount) > wordCount) {
 				return false;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (opcode == kSpirvOpEntryPoint && instructionWordCount >= 3 && ReadWord(i + 1) == kSpirvExecutionModelTaskEXT) {
 				hasTaskEntryPoint = true;
 			} else if (opcode == kSpirvOpVariable && instructionWordCount >= 4 && ReadWord(i + 3) == kSpirvStorageClassTaskPayloadWorkgroupEXT) {
@@ -77,9 +86,11 @@ namespace {
 			i += instructionWordCount;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!requiresPatch) {
 			return true;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!hasTaskEntryPoint || taskPayloadVariables.empty()) {
 			return false;
 		}
@@ -87,15 +98,18 @@ namespace {
 		const std::uint32_t payloadVariableId = taskPayloadVariables.front();
 		std::vector<std::uint32_t> patchedWords;
 		patchedWords.reserve(wordCount + 16);
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t headerWord = 0; headerWord < 5; ++headerWord) {
 			patchedWords.push_back(ReadWord(headerWord));
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t i = 5; i < wordCount;) {
 			const std::uint32_t instructionWord = ReadWord(i);
 			const std::uint16_t opcode = static_cast<std::uint16_t>(instructionWord & 0xFFFFu);
 			const std::uint16_t instructionWordCount = static_cast<std::uint16_t>(instructionWord >> 16);
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (opcode == kSpirvOpEmitMeshTasksEXT && instructionWordCount == 4) {
 				patchedWords.push_back((5u << 16) | kSpirvOpEmitMeshTasksEXT);
 				patchedWords.push_back(ReadWord(i + 1));
@@ -103,6 +117,7 @@ namespace {
 				patchedWords.push_back(ReadWord(i + 3));
 				patchedWords.push_back(payloadVariableId);
 			} else {
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (std::size_t wordIndex = 0; wordIndex < instructionWordCount; ++wordIndex) {
 					patchedWords.push_back(ReadWord(i + wordIndex));
 				}
@@ -116,6 +131,7 @@ namespace {
 		return true;
 	}
 
+	// ToLower is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string ToLower(std::string s) {
 		for (char& c : s) {
 			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -123,38 +139,56 @@ namespace {
 		return s;
 	}
 
+	// DefaultProfileForStage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string DefaultProfileForStage(const std::string& stage) {
 		const std::string s = ToLower(stage);
 		if (s == "vs") return "vs_6_8";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "ps" || s == "fs") return "ps_6_8";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "cs") return "cs_6_8";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "gs") return "gs_6_8";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "hs") return "hs_6_8";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "ds") return "ds_6_8";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "ms") return "ms_6_8";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "ts" || s == "as") return "as_6_8";
 		return "vs_6_8";
 	}
 
+	// StageEnum is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::optional<ShaderStage> StageEnum(const std::string& stage) {
 		const std::string s = ToLower(stage);
 		if (s == "vs") return ShaderStage::Vertex;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "ps" || s == "fs") return ShaderStage::Fragment;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "cs") return ShaderStage::Compute;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "gs") return ShaderStage::Geometry;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "hs") return ShaderStage::TessellationControl;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "ds") return ShaderStage::TessellationEvaluation;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "ms") return ShaderStage::Mesh;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (s == "ts" || s == "as") return ShaderStage::Task;
 		return std::nullopt;
 	}
 
+	// Quote is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string Quote(const std::filesystem::path& p) {
 		std::ostringstream oss;
 		oss << "\"" << p.string() << "\"";
 		return oss.str();
 	}
 
+	// RunDxc is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool RunDxc(const std::filesystem::path& input, const std::filesystem::path& dxcPath, const std::filesystem::path& tempSpv, const std::string& target, const std::string& entryPoint) {
 #if defined(_WIN32)
 		auto ToWide = [](const std::filesystem::path& p) -> std::wstring {
@@ -178,12 +212,14 @@ namespace {
 
 		std::vector<const wchar_t*> cargs;
 		cargs.reserve(wideArgs.size() + 1);
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const std::wstring& w : wideArgs) {
 			cargs.push_back(w.c_str());
 		}
 		cargs.push_back(nullptr);
 
 		const intptr_t code = _wspawnv(_P_WAIT, dxcPath.wstring().c_str(), cargs.data());
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (code != 0) {
 			std::cerr << "dxc failed with exit code " << code << "\n";
 			return false;
@@ -198,6 +234,7 @@ namespace {
 			<< " " << Quote(input);
 
 		const int code = std::system(cmd.str().c_str());
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (code != 0) {
 			std::cerr << "dxc failed with exit code " << code << "\n";
 			return false;
@@ -209,6 +246,7 @@ namespace {
 	struct StringTableBuilder {
 		std::vector<char> data;
 
+		// Add is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		std::uint32_t Add(const std::string& value) {
 			const std::uint32_t offset = static_cast<std::uint32_t>(data.size());
 			data.insert(data.end(), value.begin(), value.end());
@@ -232,6 +270,7 @@ namespace {
 		std::uint32_t sampledKind = 0;
 	};
 
+	// struct Decorations groups related state and operations so callers have one documented contract.
 	struct Decorations {
 		std::optional<std::uint32_t> location;
 		std::optional<std::uint32_t> binding;
@@ -239,12 +278,14 @@ namespace {
 		bool builtIn = false;
 	};
 
+	// struct DescriptorBindingEntry groups related state and operations so callers have one documented contract.
 	struct DescriptorBindingEntry {
 		std::uint32_t set = 0;
 		DescriptorBinding binding{};
 		std::string name;
 	};
 
+	// struct IoEntry groups related state and operations so callers have one documented contract.
 	struct IoEntry {
 		std::uint32_t location = 0;
 		IoComponentType componentType = IoComponentType::Unknown;
@@ -252,15 +293,18 @@ namespace {
 		std::string name;
 	};
 
+	// struct ReflectionResult groups related state and operations so callers have one documented contract.
 	struct ReflectionResult {
 		std::vector<IoEntry> inputs;
 		std::vector<IoEntry> outputs;
 		std::vector<DescriptorBindingEntry> descriptorBindings;
 	};
 
+	// class SpirvReflection groups related state and operations so callers have one documented contract.
 	class SpirvReflection {
 	public:
 		bool Reflect(const std::vector<std::uint8_t>& bytecode, ShaderStage stage, ReflectionResult& out) const {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (bytecode.size() < sizeof(std::uint32_t) * 5) return false;
 
 			const std::size_t wordCount = bytecode.size() / sizeof(std::uint32_t);
@@ -273,6 +317,7 @@ namespace {
 			std::unordered_map<std::uint32_t, std::vector<std::string>> memberNames;
 			std::unordered_map<std::uint32_t, std::uint32_t> constants;
 
+			// struct VariableInfo groups related state and operations so callers have one documented contract.
 			struct VariableInfo {
 				std::uint32_t id = 0;
 				std::uint32_t typeId = 0;
@@ -286,28 +331,35 @@ namespace {
 				return std::string(begin, std::find(begin, end, '\0'));
 			};
 
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::size_t i = 5; i < wordCount;) {
 				const std::uint32_t opWord = words[i];
 				const std::uint16_t op = static_cast<std::uint16_t>(opWord & 0xFFFFu);
 				const std::uint16_t count = static_cast<std::uint16_t>(opWord >> 16);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (count == 0) return false;
 
 				switch (op) {
 				case 5: // OpName
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (count >= 3) idNames[words[i + 1]] = readString(i + 2);
 					break;
 				case 6: // OpMemberName
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (count >= 4) {
 						uint32_t tid = words[i + 1];
 						uint32_t midx = words[i + 2];
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (memberNames[tid].size() <= midx) memberNames[tid].resize(midx + 1);
 						memberNames[tid][midx] = readString(i + 3);
 					}
 					break;
 				case 71: // OpDecorate
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (count >= 3) {
 						Decorations& dec = idDecorations[words[i + 1]];
 						uint32_t d = words[i + 2];
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (d == 30 && count >= 4) dec.location = words[i + 3];
 						else if (d == 11) dec.builtIn = true;
 						else if (d == 33 && count >= 4) dec.binding = words[i + 3];
@@ -315,9 +367,11 @@ namespace {
 					}
 					break;
 				case 72: // OpMemberDecorate
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (count >= 5) {
 						uint32_t tid = words[i + 1];
 						uint32_t midx = words[i + 2];
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (memberDecorations[tid].size() <= midx) memberDecorations[tid].resize(midx + 1);
 						Decorations& dec = memberDecorations[tid][midx];
 						if (words[i + 3] == 30 && count >= 5) dec.location = words[i + 4];
@@ -325,6 +379,7 @@ namespace {
 					}
 					break;
 				case 59: // OpVariable
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (count >= 4) variables.push_back({ words[i + 2], words[i + 1], words[i + 3] });
 					break;
 				case 20: types[words[i + 1]] = { TypeInfo::Kind::Bool, IoComponentType::Bool }; break;
@@ -333,6 +388,7 @@ namespace {
 				case 23: // Vector
 				{
 					TypeInfo info{}; info.kind = TypeInfo::Kind::Vector; info.typeId = words[i + 2]; info.componentCount = words[i + 3];
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (types.count(info.typeId)) info.component = types[info.typeId].component;
 					types[words[i + 1]] = info;
 					break;
@@ -352,6 +408,7 @@ namespace {
 				case 30: // Struct
 				{
 					TypeInfo info{}; info.kind = TypeInfo::Kind::Struct;
+					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 					for (uint16_t m = 2; m < count; ++m) info.members.push_back(words[i + m]);
 					types[words[i + 1]] = info;
 					break;
@@ -366,6 +423,7 @@ namespace {
 				case 25: 
 				{
 					TypeInfo info{}; info.kind = TypeInfo::Kind::Image; info.typeId = words[i + 2];
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (count >= 9) info.sampledKind = words[i + 7];
 					types[words[i + 1]] = info;
 					break;
@@ -384,12 +442,15 @@ namespace {
 			std::function<std::optional<std::pair<IoComponentType, std::uint32_t>>(std::uint32_t)> resolveScalar;
 			resolveScalar = [&](std::uint32_t typeId) -> std::optional<std::pair<IoComponentType, std::uint32_t>> {
 				auto iter = types.find(typeId);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if(iter == types.end()) return std::nullopt;
 				const TypeInfo& info = iter->second;
 				switch(info.kind) {
 				case TypeInfo::Kind::Bool: case TypeInfo::Kind::Int: case TypeInfo::Kind::UInt: case TypeInfo::Kind::Float: return std::make_pair(info.component, 1u);
 				case TypeInfo::Kind::Vector:
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if(info.component == IoComponentType::Unknown) {
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if(const auto base = resolveScalar(info.typeId)) return std::make_pair(base->first, info.componentCount);
 						return std::nullopt;
 					}
@@ -401,14 +462,18 @@ namespace {
 
 			const StageVisibilityMask visibilityMask = StageToMask(stage);
 
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const VariableInfo& var : variables) {
 				const Decorations varDeco = idDecorations[var.id];
 				if (varDeco.builtIn) continue;
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (varDeco.binding && varDeco.descriptorSet && (var.storageClass == 2 || var.storageClass == 0 || var.storageClass == 12)) {
 					if (!types.count(var.typeId)) continue;
 					const TypeInfo& ptrType = types[var.typeId];
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (ptrType.kind != TypeInfo::Kind::Pointer) continue;
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (!types.count(ptrType.typeId)) continue;
 					const TypeInfo& pointee = types[ptrType.typeId];
 
@@ -418,31 +483,39 @@ namespace {
 					entry.binding.arrayCount = 1;
 					entry.binding.visibility = visibilityMask;
 
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (pointee.kind == TypeInfo::Kind::SampledImage) entry.binding.type = static_cast<uint32_t>(DescriptorType::CombinedImageSampler);
 					else if (pointee.kind == TypeInfo::Kind::Sampler) entry.binding.type = static_cast<uint32_t>(DescriptorType::Sampler);
 					else if (pointee.kind == TypeInfo::Kind::Image) entry.binding.type = static_cast<uint32_t>(pointee.sampledKind == 2 ? DescriptorType::StorageImage : DescriptorType::SampledImage);
 					else if (var.storageClass == 12) entry.binding.type = static_cast<uint32_t>(DescriptorType::StorageBuffer);
 					else entry.binding.type = static_cast<uint32_t>(DescriptorType::UniformBuffer);
 
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (pointee.kind == TypeInfo::Kind::Array && constants.count(pointee.arrayLengthId)) entry.binding.arrayCount = constants[pointee.arrayLengthId];
 					if (idNames.count(var.id)) entry.name = idNames[var.id];
 					out.descriptorBindings.push_back(entry);
 				}
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (var.storageClass != 1 && var.storageClass != 3) continue;
 				std::vector<IoEntry>& target = (var.storageClass == 1) ? out.inputs : out.outputs;
 				if (!types.count(var.typeId)) continue;
 				const TypeInfo& varType = types[var.typeId];
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (varType.kind == TypeInfo::Kind::Pointer) {
 					if (!types.count(varType.typeId)) continue;
 					const TypeInfo& base = types[varType.typeId];
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (base.kind == TypeInfo::Kind::Struct) {
+						// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 						for (size_t m = 0; m < base.members.size(); ++m) {
+							// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 							if (!types.count(base.members[m])) continue;
 							const Decorations mDeco = (m < memberDecorations[varType.typeId].size()) ? memberDecorations[varType.typeId][m] : Decorations{};
 							if (mDeco.builtIn || !mDeco.location) continue;
 							const auto scalar = resolveScalar(base.members[m]);
+							// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 							if (!scalar) continue;
 							IoEntry entry{}; entry.location = *mDeco.location; entry.componentType = scalar->first; entry.componentCount = scalar->second;
 							if (m < memberNames[varType.typeId].size()) entry.name = memberNames[varType.typeId][m];
@@ -450,6 +523,7 @@ namespace {
 						}
 					} else {
 						const auto scalar = resolveScalar(varType.typeId);
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (scalar && varDeco.location) {
 							IoEntry entry{}; entry.location = *varDeco.location; entry.componentType = scalar->first; entry.componentCount = scalar->second;
 							if (idNames.count(var.id)) entry.name = idNames[var.id];
@@ -463,6 +537,7 @@ namespace {
 	};
 } // namespace
 
+// CompileShader is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool CompileShader(const std::filesystem::path& input, const std::filesystem::path& output, const std::string& stage, const std::string& targetProfile, const std::string& entryPoint, const std::filesystem::path& dxcPath) {
 	if (!std::filesystem::exists(dxcPath)) {
 		std::cerr << "Cannot find dxc: " << dxcPath << "\n";
@@ -470,6 +545,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	}
 
 	const auto stageOpt = StageEnum(stage);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!stageOpt) {
 		std::cerr << "Unsupported stage: " << stage << "\n";
 		return false;
@@ -478,6 +554,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	const std::filesystem::path tempSpv = std::filesystem::path(output).replace_extension(".spv");
 	const std::string target = targetProfile.empty() ? DefaultProfileForStage(stage) : targetProfile;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!RunDxc(input, dxcPath, tempSpv, target, entryPoint)) {
 		return false;
 	}
@@ -488,6 +565,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	};
 
 	std::ifstream spvFile(tempSpv, std::ios::binary | std::ios::ate);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!spvFile) {
 		std::cerr << "Failed to read compiled bytecode: " << tempSpv << "\n";
 		CleanupTempSpv();
@@ -497,6 +575,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	spvFile.seekg(0);
 	std::vector<std::uint8_t> bytecode(static_cast<std::size_t>(spvSize));
 	spvFile.read(reinterpret_cast<char*>(bytecode.data()), spvSize);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!spvFile) {
 		std::cerr << "Failed to load compiled SPIR-V bytes: " << tempSpv << "\n";
 		CleanupTempSpv();
@@ -521,11 +600,13 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 
 	SpirvReflection reflector;
 	ReflectionResult reflected{};
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!reflector.Reflect(bytecode, *stageOpt, reflected)) {
 		std::cerr << "Reflection failed; writing minimal metadata instead.\n";
 	}
 
 	std::vector<StageIOAttribute> stageInputs;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const IoEntry& inp : reflected.inputs) {
 		StageIOAttribute attr{}; attr.location = inp.location; attr.componentCount = inp.componentCount; attr.componentType = static_cast<uint32_t>(inp.componentType);
 		attr.nameOffset = inp.name.empty() ? kInvalidStringOffset : strings.Add(inp.name);
@@ -533,6 +614,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	}
 
 	std::vector<StageIOAttribute> stageOutputs;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const IoEntry& outp : reflected.outputs) {
 		StageIOAttribute attr{}; attr.location = outp.location; attr.componentCount = outp.componentCount; attr.componentType = static_cast<uint32_t>(outp.componentType);
 		attr.nameOffset = outp.name.empty() ? kInvalidStringOffset : strings.Add(outp.name);
@@ -546,7 +628,9 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 
 	std::vector<DescriptorBinding> descriptorBindings;
 	std::vector<DescriptorSetLayoutDesc> descriptorSets;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const DescriptorBindingEntry& entry : descriptorEntries) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (descriptorSets.empty() || descriptorSets.back().setIndex != entry.set) {
 			DescriptorSetLayoutDesc setDesc{}; setDesc.setIndex = entry.set; setDesc.firstBinding = static_cast<uint32_t>(descriptorBindings.size());
 			descriptorSets.push_back(setDesc);
@@ -567,11 +651,13 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 
 	std::uint64_t payloadCursor = headerSize + sizeof(ShaderReflection);
 	const auto ReservePayloadBlock = [&payloadCursor](std::uint64_t byteCount, std::uint32_t& outOffset) -> bool {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (byteCount == 0) {
 			outOffset = 0;
 			return true;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (payloadCursor > std::numeric_limits<std::uint32_t>::max()) {
 			return false;
 		}
@@ -587,6 +673,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	std::uint32_t stageOutputsOffset = 0;
 	std::uint32_t compiledBinaryOffset = 0;
 	std::uint32_t stringOffset = 0;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ReservePayloadBlock(descriptorSetsBytes, descriptorSetsOffset)
 		|| !ReservePayloadBlock(descriptorBindingsBytes, descriptorBindingsOffset)
 		|| !ReservePayloadBlock(stageInputsBytes, stageInputsOffset)
@@ -637,6 +724,7 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	header.compiledBinarySize = binary.bytecodeSize;
 
 	std::ofstream out(output, std::ios::binary | std::ios::trunc);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!out) {
 		std::cerr << "Failed to open output file: " << output << "\n";
 		CleanupTempSpv();
@@ -650,19 +738,24 @@ bool CompileShader(const std::filesystem::path& input, const std::filesystem::pa
 	if (!descriptorSets.empty()) {
 		out.write(reinterpret_cast<const char*>(descriptorSets.data()), static_cast<std::streamsize>(descriptorSetsBytes));
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!descriptorBindings.empty()) {
 		out.write(reinterpret_cast<const char*>(descriptorBindings.data()), static_cast<std::streamsize>(descriptorBindingsBytes));
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!stageInputs.empty()) {
 		out.write(reinterpret_cast<const char*>(stageInputs.data()), static_cast<std::streamsize>(stageInputsBytes));
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!stageOutputs.empty()) {
 		out.write(reinterpret_cast<const char*>(stageOutputs.data()), static_cast<std::streamsize>(stageOutputsBytes));
 	}
 	out.write(reinterpret_cast<const char*>(&binary), sizeof(binary));
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!bytecode.empty()) {
 		out.write(reinterpret_cast<const char*>(bytecode.data()), static_cast<std::streamsize>(bytecodeBytes));
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!strings.data.empty()) {
 		out.write(strings.data.data(), static_cast<std::streamsize>(strings.data.size()));
 	}

@@ -1,3 +1,5 @@
+// ScriptingSystem.cpp — Contains the Scripting System system state, startup/shutdown hooks, and per-frame work implementation for native script glue, exported C# vtables, and scripting system lifecycle state.
+
 #include "ScriptingSystem.h"
 
 #include "Core/Logger/Logger.h"
@@ -24,10 +26,12 @@ namespace
 	constexpr float kLiveInspectorRefreshSeconds = 0.25f;
 	constexpr std::size_t kMaxExportFieldValueBytes = 256;
 
+	// FnvHash64 is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint64_t FnvHash64(const std::string& text) {
 		const uint64_t FnvOffsetBasis = 14695981039346656037ULL;
 		const uint64_t FnvPrime = 1099511628211ULL;
 		uint64_t hash = FnvOffsetBasis;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (char c : text) {
 			hash ^= static_cast<uint64_t>(static_cast<unsigned char>(c));
 			hash *= FnvPrime;
@@ -35,9 +39,11 @@ namespace
 		return hash;
 	}
 
+	// ExtractExportFieldName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string ExtractExportFieldName(const ExportFieldDescriptor& descriptor)
 	{
 		std::size_t nameLength = 0;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		while (nameLength < sizeof(descriptor.nameUtf8) && descriptor.nameUtf8[nameLength] != '\0')
 		{
 			++nameLength;
@@ -45,15 +51,18 @@ namespace
 		return std::string(descriptor.nameUtf8, descriptor.nameUtf8 + nameLength);
 	}
 
+	// ExtractRootFieldPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string ExtractRootFieldPath(std::string_view fieldPath)
 	{
 		const std::size_t dotIndex = fieldPath.find('.');
 		const std::size_t bracketIndex = fieldPath.find('[');
 		std::size_t cutIndex = std::string_view::npos;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (dotIndex != std::string_view::npos)
 		{
 			cutIndex = dotIndex;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (bracketIndex != std::string_view::npos)
 		{
 			cutIndex = cutIndex == std::string_view::npos ? bracketIndex : std::min(cutIndex, bracketIndex);
@@ -64,6 +73,7 @@ namespace
 			: std::string(fieldPath.substr(0, cutIndex));
 	}
 
+	// TryBuildExportFieldBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool TryBuildExportFieldBuffer(const ScriptFieldValue& fieldValue, const ExportFieldDescriptor& descriptor, std::array<std::byte, kMaxExportFieldValueBytes>& buffer)
 	{
 		buffer.fill(std::byte{ 0 });
@@ -71,10 +81,12 @@ namespace
 
 		try
 		{
+			// Dispatch by explicit engine state so each case documents one supported behavior.
 			switch (valueKind)
 			{
 			case ExportFieldValueKind::Bool:
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!fieldValue.value.is_boolean() || descriptor.valueSize != sizeof(bool))
 				{
 					return false;
@@ -86,6 +98,7 @@ namespace
 			}
 			case ExportFieldValueKind::Int:
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!fieldValue.value.is_number_integer() || descriptor.valueSize != sizeof(int))
 				{
 					return false;
@@ -97,6 +110,7 @@ namespace
 			}
 			case ExportFieldValueKind::Float:
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!fieldValue.value.is_number() || descriptor.valueSize != sizeof(float))
 				{
 					return false;
@@ -108,10 +122,12 @@ namespace
 			}
 			case ExportFieldValueKind::EntityReference:
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!fieldValue.value.is_number_unsigned() && !fieldValue.value.is_number_integer())
 				{
 					return false;
 				}
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (descriptor.valueSize != sizeof(uint32_t))
 				{
 					return false;
@@ -123,6 +139,7 @@ namespace
 			}
 			case ExportFieldValueKind::Vector2:
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!fieldValue.value.is_array() || fieldValue.value.size() != 2 || descriptor.valueSize != sizeof(glm::vec2))
 				{
 					return false;
@@ -136,6 +153,7 @@ namespace
 			}
 			case ExportFieldValueKind::Vector3:
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!fieldValue.value.is_array() || fieldValue.value.size() != 3 || descriptor.valueSize != sizeof(glm::vec3))
 				{
 					return false;
@@ -150,6 +168,7 @@ namespace
 			}
 			case ExportFieldValueKind::Vector4:
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!fieldValue.value.is_array() || fieldValue.value.size() != 4 || descriptor.valueSize != sizeof(glm::vec4))
 				{
 					return false;
@@ -165,6 +184,7 @@ namespace
 			}
 			case ExportFieldValueKind::Quaternion:
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!fieldValue.value.is_array() || fieldValue.value.size() != 4 || descriptor.valueSize != sizeof(glm::quat))
 				{
 					return false;
@@ -180,6 +200,7 @@ namespace
 			}
 			case ExportFieldValueKind::String:
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (descriptor.valueSize <= 0 || static_cast<std::size_t>(descriptor.valueSize) > buffer.size())
 				{
 					return false;
@@ -188,6 +209,7 @@ namespace
 				const std::string value = fieldValue.value.is_null()
 					? std::string{}
 					: fieldValue.value.is_string() ? fieldValue.value.get<std::string>() : std::string{};
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!fieldValue.value.is_null() && !fieldValue.value.is_string())
 				{
 					return false;
@@ -207,6 +229,7 @@ namespace
 		return false;
 	}
 
+	// ApplyExportBindingValues is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ApplyExportBindingValues(const ManagedVTable& vtable, const ScriptBinding& binding, void* handle, uint64_t scriptId)
 	{
 		if (handle == nullptr || vtable.setFieldValue == nullptr || vtable.getFieldCount == nullptr || vtable.getFieldDescriptors == nullptr)
@@ -215,6 +238,7 @@ namespace
 		}
 
 		const int32_t fieldCount = vtable.getFieldCount(scriptId);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (fieldCount <= 0)
 		{
 			return;
@@ -223,6 +247,7 @@ namespace
 		std::vector<ExportFieldDescriptor> descriptors(static_cast<std::size_t>(fieldCount));
 		vtable.getFieldDescriptors(scriptId, descriptors.data(), fieldCount);
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ScriptFieldValue& fieldValue : binding.serializedValues)
 		{
 			const std::string rootFieldName = ExtractRootFieldPath(fieldValue.fieldPath.empty() ? fieldValue.fieldName : fieldValue.fieldPath);
@@ -230,6 +255,7 @@ namespace
 			auto descriptorIt = std::find_if(descriptors.begin(), descriptors.end(), [&](const ExportFieldDescriptor& descriptor) {
 				return descriptor.nameHash == fieldNameHash || ExtractExportFieldName(descriptor) == rootFieldName;
 			});
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (descriptorIt == descriptors.end())
 			{
 				TERRAENGINE_LOG(LogLevel::Warning, "[Scripting] Export hydration skipped unknown field '" << rootFieldName << "' on binding " << binding.bindingId);
@@ -237,6 +263,7 @@ namespace
 			}
 
 			std::array<std::byte, kMaxExportFieldValueBytes> valueBuffer{};
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!TryBuildExportFieldBuffer(fieldValue, *descriptorIt, valueBuffer))
 			{
 				TERRAENGINE_LOG(LogLevel::Warning, "[Scripting] Export hydration could not decode field '" << rootFieldName << "' on binding " << binding.bindingId);
@@ -247,6 +274,7 @@ namespace
 		}
 	}
 
+	// struct ManagedDescriptorResponse groups related state and operations so callers have one documented contract.
 	struct ManagedDescriptorResponse
 	{
 		std::string fullTypeName;
@@ -254,6 +282,7 @@ namespace
 		std::vector<ScriptFieldDiagnostic> diagnostics;
 	};
 
+	// struct ManagedSnapshotResponse groups related state and operations so callers have one documented contract.
 	struct ManagedSnapshotResponse
 	{
 		std::string bindingId;
@@ -265,6 +294,7 @@ namespace
 		std::vector<ScriptFieldDiagnostic> diagnostics;
 	};
 
+	// struct ManagedWriteResponse groups related state and operations so callers have one documented contract.
 	struct ManagedWriteResponse
 	{
 		bool success = false;
@@ -275,12 +305,14 @@ namespace
 		std::uint64_t snapshotVersion = 0;
 	};
 
+	// struct PendingBindingSnapshotRefresh groups related state and operations so callers have one documented contract.
 	struct PendingBindingSnapshotRefresh
 	{
 		std::string bindingId;
 		std::string className;
 	};
 
+	// IsRuntimeSnapshotDiagnostic is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsRuntimeSnapshotDiagnostic(const ScriptFieldDiagnostic& diagnostic)
 	{
 		return diagnostic.code == "InstanceUnavailable"
@@ -288,6 +320,7 @@ namespace
 			|| diagnostic.code == "InvalidType";
 	}
 
+	// struct ManagedMigrationResponse groups related state and operations so callers have one documented contract.
 	struct ManagedMigrationResponse
 	{
 		std::vector<ScriptFieldValue> fields;
@@ -298,6 +331,7 @@ namespace
 		std::vector<ScriptFieldDiagnostic> diagnostics;
 	};
 
+	// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void from_json(const nlohmann::json& jsonValue, ManagedDescriptorResponse& response)
 	{
 		response.fullTypeName = jsonValue.value("fullTypeName", std::string{});
@@ -305,6 +339,7 @@ namespace
 		response.diagnostics = jsonValue.value("diagnostics", std::vector<ScriptFieldDiagnostic>{});
 	}
 
+	// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void from_json(const nlohmann::json& jsonValue, ManagedSnapshotResponse& response)
 	{
 		response.bindingId = jsonValue.value("bindingId", std::string{});
@@ -316,6 +351,7 @@ namespace
 		response.diagnostics = jsonValue.value("diagnostics", std::vector<ScriptFieldDiagnostic>{});
 	}
 
+	// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void from_json(const nlohmann::json& jsonValue, ManagedWriteResponse& response)
 	{
 		response.success = jsonValue.value("success", false);
@@ -326,6 +362,7 @@ namespace
 		response.snapshotVersion = jsonValue.value("snapshotVersion", static_cast<std::uint64_t>(0));
 	}
 
+	// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void from_json(const nlohmann::json& jsonValue, ManagedMigrationResponse& response)
 	{
 		response.fields = jsonValue.value("fields", std::vector<ScriptFieldValue>{});
@@ -337,6 +374,7 @@ namespace
 	}
 
 	template <typename ResponseType>
+	// ParseManagedResponse is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool ParseManagedResponse(const char* payloadText, ResponseType& outResponse)
 	{
 		if (payloadText == nullptr || payloadText[0] == '\0')
@@ -355,20 +393,24 @@ namespace
 		}
 	}
 
+	// BuildRepairActionId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string BuildRepairActionId(std::string_view kind, std::string_view bindingId, std::string_view targetPath)
 	{
 		return std::string(kind) + ":" + std::string(bindingId) + ":" + std::string(targetPath);
 	}
 }
 
+// ScriptingSystem::Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ScriptingSystem& ScriptingSystem::Instance() {
 	static ScriptingSystem instance;
 	return instance;
 }
 
+// ScriptingSystem::ConfigureExportRuntime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::ConfigureExportRuntime(const std::filesystem::path& nativeAotLibraryPath) {
 	// Store the absolute path up front so later system initialization does not
 	// depend on whatever the current working directory happens to be then.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (nativeAotLibraryPath.empty()) {
 		m_ConfiguredExportRuntimePath.reset();
 		return;
@@ -377,14 +419,17 @@ void ScriptingSystem::ConfigureExportRuntime(const std::filesystem::path& native
 	m_ConfiguredExportRuntimePath = fs::absolute(nativeAotLibraryPath);
 }
 
+// ScriptingSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::Initialize() {
 	TERRAENGINE_LOG(LogLevel::Info, "Initializing Scripting System...");
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_ExportMode) {
 		TERRAENGINE_LOG(LogLevel::Info, "Scripting System already initialized in export mode. Skipping standard hostfxr initialization.");
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_ConfiguredExportRuntimePath.has_value()) {
 		// Export builds still discover the NativeAOT library in the launcher,
 		// but the actual runtime load now happens here so scripting is brought
@@ -392,6 +437,7 @@ void ScriptingSystem::Initialize() {
 		ManagedVTable vtable{};
 		if (!DotNetHost::Instance().InitializeExportRuntime(*m_ConfiguredExportRuntimePath, &vtable)) {
 			const std::string hostDiagnostic = DotNetHost::Instance().GetLastNativeError();
+			// std::runtime_error is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			throw std::runtime_error(hostDiagnostic.empty()
 				? "Failed to initialize NativeAOT export runtime from " + m_ConfiguredExportRuntimePath->string()
 				: hostDiagnostic);
@@ -403,11 +449,13 @@ void ScriptingSystem::Initialize() {
 
 	const fs::path bridgeAssemblyPath = ResolveManagedBridgeAssemblyPath();
 	const fs::path runtimeConfigPath = bridgeAssemblyPath.parent_path() / "TerraEngine.CSharp.runtimeconfig.json";
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!fs::exists(bridgeAssemblyPath) || !fs::exists(runtimeConfigPath)) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Could not find the managed TerraEngine.CSharp bridge beside the running executable. Scripting will stay disabled.");
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!DotNetHost::Instance().Initialize(bridgeAssemblyPath)) {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to initialize the embedded .NET runtime host.");
 		return;
@@ -454,6 +502,7 @@ void ScriptingSystem::Initialize() {
 		L"TerraEngine.InternalCalls, TerraEngine.CSharp",
 		L"MigrateBindingAuthoredState"));
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedInit != nullptr) {
 		managedInit();
 		TERRAENGINE_LOG(LogLevel::Info, "Scripting System initialized successfully.");
@@ -462,6 +511,7 @@ void ScriptingSystem::Initialize() {
 	}
 }
 
+// ScriptingSystem::SetRunning is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::SetRunning(bool running)
 {
 	if (m_Running == running)
@@ -470,6 +520,7 @@ void ScriptingSystem::SetRunning(bool running)
 	}
 
 	m_Running = running;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_Running)
 	{
 		if (managedResetGameplaySession != nullptr)
@@ -485,19 +536,23 @@ void ScriptingSystem::SetRunning(bool running)
 	}
 }
 
+// ScriptingSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::Update(float deltaTime) {
 	TERRAENGINE_PROFILE_SCOPE("ScriptingSystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 	m_LastDeltaTime = deltaTime;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_ExportMode) {
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Export Runtime Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		UpdateExportMode(deltaTime);
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedUpdateScript == nullptr || !m_GameplayAssemblyLoaded || !m_Running) {
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_Paused) {
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Pause/Step Handling", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		if (m_StepFrames > 0) {
@@ -508,6 +563,7 @@ void ScriptingSystem::Update(float deltaTime) {
 		}
 	}
 
+	// struct ScriptBatchItem groups related state and operations so callers have one documented contract.
 	struct ScriptBatchItem {
 		uint32_t objectId = 0;
 		std::string bindingId;
@@ -518,6 +574,7 @@ void ScriptingSystem::Update(float deltaTime) {
 	{
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Collect Script Bindings", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		auto& objectManager = ObjectManager::instance();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>()) {
 			ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
 			if (scriptComponent == nullptr || !scriptComponent->active) {
@@ -525,7 +582,9 @@ void ScriptingSystem::Update(float deltaTime) {
 			}
 
 			auto guard = scriptComponent->acquireReadLock();
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const ScriptBinding& binding : scriptComponent->GetBindings()) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!binding.enabled || binding.className.empty()) {
 					continue;
 				}
@@ -535,6 +594,7 @@ void ScriptingSystem::Update(float deltaTime) {
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!allBindings.empty()) {
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Dispatch Script Batches", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const std::size_t threadCount = std::max<std::size_t>(1, ThreadPool::instance().getThreadCount());
@@ -548,11 +608,13 @@ void ScriptingSystem::Update(float deltaTime) {
 		std::vector<ScriptBatchItem> currentBatch;
 		currentBatch.reserve(batchSize);
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ScriptBatchItem& item : allBindings) {
 			currentBatch.push_back(item);
 			if (currentBatch.size() >= batchSize) {
 				auto task = ThreadPool::instance().createTask([items = std::move(currentBatch), this, deltaTime]() {
 					TERRAENGINE_PROFILE_SCOPE("ScriptingSystem Task: Managed Update Batch", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
+					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 					for (const ScriptBatchItem& entry : items) {
 						managedUpdateScript(entry.objectId, entry.bindingId.c_str(), entry.className.c_str(), deltaTime);
 					}
@@ -564,9 +626,11 @@ void ScriptingSystem::Update(float deltaTime) {
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!currentBatch.empty()) {
 			auto task = ThreadPool::instance().createTask([items = std::move(currentBatch), this, deltaTime]() {
 				TERRAENGINE_PROFILE_SCOPE("ScriptingSystem Task: Managed Update Batch", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (const ScriptBatchItem& entry : items) {
 					managedUpdateScript(entry.objectId, entry.bindingId.c_str(), entry.className.c_str(), deltaTime);
 				}
@@ -575,6 +639,7 @@ void ScriptingSystem::Update(float deltaTime) {
 			ThreadPool::instance().enqueue(task);
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::future<void>& future : futures) {
 			TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Wait Script Batch", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			future.get();
@@ -587,6 +652,7 @@ void ScriptingSystem::Update(float deltaTime) {
 	}
 }
 
+// ScriptingSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::Shutdown() {
 	ClearGameplayAssembly();
 
@@ -595,12 +661,14 @@ void ScriptingSystem::Shutdown() {
 	std::vector<void*> handlesToDestroy;
 	{
 		std::scoped_lock lock(m_ExportInstancesMutex);
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ExportScriptInstance& instance : m_ExportInstances)
 		{
 			handlesToDestroy.push_back(instance.handle);
 		}
 		m_ExportInstances.clear();
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (void* handle : handlesToDestroy)
 	{
 		if (m_ExportVTable.destroyScript != nullptr && handle != nullptr)
@@ -614,14 +682,17 @@ void ScriptingSystem::Shutdown() {
 	DotNetHost::Instance().Shutdown();
 }
 
+// ScriptingSystem::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ScriptingSystem::SystemName() {
 	return "ScriptingSystem";
 }
 
+// ScriptingSystem::LoadGameplayAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assemblyPath, std::string* outError) {
 	if (managedLoadGameplayAssembly == nullptr) {
 		const std::string message = "The managed gameplay assembly loader is unavailable because TerraEngine.CSharp did not expose LoadGameplayAssembly.";
 		m_LastGameplayDiagnostic = message;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outError) {
 			*outError = message;
 		}
@@ -629,18 +700,22 @@ bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assembly
 	}
 
 	const std::string assemblyPathString = fs::absolute(assemblyPath).string();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!fs::exists(assemblyPathString)) {
 		const std::string message = "Assembly-CSharp.dll was expected at " + assemblyPathString + " but does not exist.";
 		m_LastGameplayDiagnostic = message;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outError) {
 			*outError = message;
 		}
 		return false;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedLoadGameplayAssembly(assemblyPathString.c_str()) == 0) {
 		const std::string message = "TerraEngine.CSharp rejected the gameplay assembly reload for " + assemblyPathString + ".";
 		m_LastGameplayDiagnostic = message;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outError) {
 			*outError = message;
 		}
@@ -654,6 +729,7 @@ bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assembly
 	return true;
 }
 
+// ScriptingSystem::ClearGameplayAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::ClearGameplayAssembly() {
 	if (managedUnloadGameplayAssembly != nullptr) {
 		managedUnloadGameplayAssembly();
@@ -666,6 +742,7 @@ void ScriptingSystem::ClearGameplayAssembly() {
 	ClearRuntimeInspectorState();
 }
 
+// ScriptingSystem::IsScriptTypeAttachable is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptingSystem::IsScriptTypeAttachable(const std::string& className) const {
 	if (managedIsAttachableScriptType == nullptr || className.empty()) {
 		return false;
@@ -674,6 +751,7 @@ bool ScriptingSystem::IsScriptTypeAttachable(const std::string& className) const
 	return managedIsAttachableScriptType(className.c_str()) != 0;
 }
 
+// ScriptingSystem::InitializeBindingMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::InitializeBindingMetadata(ScriptBinding& binding)
 {
 	binding.fullTypeName = binding.className;
@@ -684,6 +762,7 @@ void ScriptingSystem::InitializeBindingMetadata(ScriptBinding& binding)
 	binding.migrationResult = {};
 	binding.lastBridgeMessage.clear();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_GameplayAssemblyLoaded || !IsScriptTypeAttachable(binding.className))
 	{
 		binding.status.clear();
@@ -702,6 +781,7 @@ void ScriptingSystem::InitializeBindingMetadata(ScriptBinding& binding)
 	PopulateBindingRepairActions(binding);
 }
 
+// ScriptingSystem::RebuildRestoredSceneBindings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::RebuildRestoredSceneBindings()
 {
 	if (!m_GameplayAssemblyLoaded)
@@ -717,22 +797,26 @@ void ScriptingSystem::RebuildRestoredSceneBindings()
 	RefreshBindingStatuses();
 }
 
+// ScriptingSystem::UpdateInspectorWatch is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::UpdateInspectorWatch(std::optional<uint32_t> objectId, std::uint64_t selectionVersion)
 {
 	std::scoped_lock lock(m_InspectorWatchMutex);
 	const bool changed = m_InspectorWatchState.watchedObjectId != objectId || m_InspectorWatchState.selectionVersion != selectionVersion;
 	m_InspectorWatchState.watchedObjectId = objectId;
 	m_InspectorWatchState.selectionVersion = selectionVersion;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (changed)
 	{
 		m_InspectorWatchState.refreshCountdownSeconds = 0.0f;
 	}
 }
 
+// ScriptingSystem::WriteLiveBindingValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptingSystem::WriteLiveBindingValue(uint32_t objectId, ScriptBinding& binding, std::string_view fieldPath, const nlohmann::json& value, std::string* outError)
 {
 	if (managedWriteLiveBindingValue == nullptr || !m_GameplayAssemblyLoaded)
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outError)
 		{
 			*outError = "The live script write bridge is unavailable because TerraEngine.CSharp did not expose WriteLiveBindingValue.";
@@ -741,6 +825,7 @@ bool ScriptingSystem::WriteLiveBindingValue(uint32_t objectId, ScriptBinding& bi
 	}
 
 	ManagedWriteResponse response;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ParseManagedResponse(managedWriteLiveBindingValue(objectId, binding.bindingId.c_str(), std::string(fieldPath).c_str(), value.dump().c_str()), response))
 	{
 		if (outError)
@@ -751,6 +836,7 @@ bool ScriptingSystem::WriteLiveBindingValue(uint32_t objectId, ScriptBinding& bi
 	}
 
 	binding.lastBridgeMessage = response.message;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!response.success)
 	{
 		if (outError)
@@ -769,6 +855,7 @@ bool ScriptingSystem::WriteLiveBindingValue(uint32_t objectId, ScriptBinding& bi
 	runtimeOverride.value = response.value.is_null() ? value : response.value;
 	runtimeOverride.compatibility = "RuntimeOnly";
 	runtimeOverride.persistenceState = "RuntimeOnly";
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ScriptFieldValue* existingOverride = binding.FindRuntimeOverride(fieldPath))
 	{
 		*existingOverride = runtimeOverride;
@@ -793,6 +880,7 @@ bool ScriptingSystem::WriteLiveBindingValue(uint32_t objectId, ScriptBinding& bi
 	auto snapshotIt = std::find_if(binding.liveSnapshots.begin(), binding.liveSnapshots.end(), [fieldPath](const ScriptFieldSnapshot& snapshot) {
 		return snapshot.fieldPath == fieldPath;
 	});
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (snapshotIt != binding.liveSnapshots.end())
 	{
 		*snapshotIt = std::move(updatedSnapshot);
@@ -805,13 +893,16 @@ bool ScriptingSystem::WriteLiveBindingValue(uint32_t objectId, ScriptBinding& bi
 	return true;
 }
 
+// ScriptingSystem::RefreshBindingStatuses is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::RefreshBindingStatuses() {
 	const std::string previousAssemblyId = m_LoadedGameplayAssemblyPath.string();
 	for (Object object : ObjectManager::instance().getObjectsWithComponents<ScriptComponent>()) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>()) {
 			auto guard = scriptComponent->acquireWriteLock();
 			for (ScriptBinding& binding : scriptComponent->GetBindings()) {
 				binding.fullTypeName = binding.className;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (IsScriptTypeAttachable(binding.className)) {
 					binding.status = "Attached";
 					RefreshBindingDescriptor(binding);
@@ -833,17 +924,20 @@ void ScriptingSystem::RefreshBindingStatuses() {
 	}
 }
 
+// ScriptingSystem::RefreshBindingDescriptor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::RefreshBindingDescriptor(ScriptBinding& binding)
 {
 	binding.fieldDescriptors.clear();
 	binding.diagnostics.clear();
 	binding.diagnosticIds.clear();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (managedDescribeBindingType == nullptr || binding.className.empty())
 	{
 		return;
 	}
 
 	ManagedDescriptorResponse response;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ParseManagedResponse(managedDescribeBindingType(binding.className.c_str()), response))
 	{
 		binding.lastBridgeMessage = "Failed to parse the managed descriptor payload for " + binding.className + ".";
@@ -853,6 +947,7 @@ void ScriptingSystem::RefreshBindingDescriptor(ScriptBinding& binding)
 	binding.fullTypeName = response.fullTypeName.empty() ? binding.className : response.fullTypeName;
 	binding.fieldDescriptors = std::move(response.fields);
 	binding.diagnostics = std::move(response.diagnostics);
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ScriptFieldDiagnostic& diagnostic : binding.diagnostics)
 	{
 		if (!diagnostic.diagnosticId.empty())
@@ -862,6 +957,7 @@ void ScriptingSystem::RefreshBindingDescriptor(ScriptBinding& binding)
 	}
 }
 
+// ScriptingSystem::MigrateBindingAuthoredValues is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::MigrateBindingAuthoredValues(ScriptBinding& binding, const std::string& previousAssemblyId)
 {
 	if (managedMigrateBindingAuthoredState == nullptr || binding.className.empty())
@@ -870,6 +966,7 @@ void ScriptingSystem::MigrateBindingAuthoredValues(ScriptBinding& binding, const
 	}
 
 	ManagedMigrationResponse response;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ParseManagedResponse(managedMigrateBindingAuthoredState(binding.className.c_str(), nlohmann::json(binding.serializedValues).dump().c_str()), response))
 	{
 		binding.lastBridgeMessage = "Failed to parse the managed migration payload for " + binding.className + ".";
@@ -877,13 +974,16 @@ void ScriptingSystem::MigrateBindingAuthoredValues(ScriptBinding& binding, const
 	}
 
 	binding.serializedValues = std::move(response.fields);
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (ScriptFieldValue& fieldValue : binding.serializedValues)
 	{
 		if (fieldValue.displayName.empty())
 		{
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (const ScriptFieldDescriptor* descriptor = binding.FindFieldDescriptor(fieldValue.fieldPath))
 			{
 				fieldValue.displayName = descriptor->displayName;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (fieldValue.valueKind.empty())
 				{
 					fieldValue.valueKind = descriptor->valueKind;
@@ -904,6 +1004,7 @@ void ScriptingSystem::MigrateBindingAuthoredValues(ScriptBinding& binding, const
 	binding.migrationResult.brokenFieldPaths = std::move(response.brokenFieldPaths);
 	binding.migrationResult.hiddenStoredFieldPaths = std::move(response.hiddenStoredFieldPaths);
 	binding.diagnostics.insert(binding.diagnostics.end(), response.diagnostics.begin(), response.diagnostics.end());
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ScriptFieldDiagnostic& diagnostic : response.diagnostics)
 	{
 		if (!diagnostic.diagnosticId.empty())
@@ -913,10 +1014,12 @@ void ScriptingSystem::MigrateBindingAuthoredValues(ScriptBinding& binding, const
 	}
 }
 
+// ScriptingSystem::PopulateBindingRepairActions is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::PopulateBindingRepairActions(ScriptBinding& binding)
 {
 	binding.repairActions.clear();
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ScriptFieldValue& fieldValue : binding.serializedValues)
 	{
 		if (fieldValue.compatibility != "Broken")
@@ -940,6 +1043,7 @@ void ScriptingSystem::PopulateBindingRepairActions(ScriptBinding& binding)
 		});
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!binding.runtimeOverrides.empty())
 	{
 		binding.repairActions.push_back({
@@ -958,6 +1062,7 @@ void ScriptingSystem::PopulateBindingRepairActions(ScriptBinding& binding)
 		});
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (binding.status == "BrokenType")
 	{
 		binding.repairActions.push_back({
@@ -970,17 +1075,20 @@ void ScriptingSystem::PopulateBindingRepairActions(ScriptBinding& binding)
 	}
 }
 
+// ScriptingSystem::RefreshWatchedBindingSnapshots is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 {
 	std::optional<uint32_t> watchedObjectId;
 	{
 		std::scoped_lock lock(m_InspectorWatchMutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!m_InspectorWatchState.watchedObjectId.has_value())
 		{
 			return;
 		}
 
 		m_InspectorWatchState.refreshCountdownSeconds -= deltaTime;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_InspectorWatchState.refreshCountdownSeconds > 0.0f)
 		{
 			return;
@@ -990,18 +1098,21 @@ void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 		watchedObjectId = m_InspectorWatchState.watchedObjectId;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!watchedObjectId.has_value())
 	{
 		return;
 	}
 
 	auto watchedObject = ObjectManager::instance().getObject(static_cast<entt::entity>(*watchedObjectId));
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!watchedObject.has_value())
 	{
 		return;
 	}
 
 	ScriptComponent* scriptComponent = watchedObject->getComponent<ScriptComponent>();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (scriptComponent == nullptr)
 	{
 		return;
@@ -1011,6 +1122,7 @@ void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 	{
 		auto guard = scriptComponent->acquireReadLock();
 		pendingRefreshes.reserve(scriptComponent->GetBindings().size());
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ScriptBinding& binding : scriptComponent->GetBindings())
 		{
 			if (!binding.enabled || binding.className.empty())
@@ -1042,11 +1154,13 @@ void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 
 		auto guard = scriptComponent->acquireWriteLock();
 		ScriptBinding* binding = scriptComponent->FindBinding(pendingRefresh.bindingId);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (binding == nullptr || !binding->enabled || binding->className != pendingRefresh.className)
 		{
 			continue;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!parsedResponse)
 		{
 			binding->lastBridgeMessage = "Failed to parse the managed live snapshot payload for " + pendingRefresh.className + ".";
@@ -1067,6 +1181,7 @@ void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 				return IsRuntimeSnapshotDiagnostic(diagnostic);
 			}),
 			binding->diagnostics.end());
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ScriptFieldDiagnostic& diagnostic : response.diagnostics)
 		{
 			if (!IsRuntimeSnapshotDiagnostic(diagnostic))
@@ -1079,12 +1194,14 @@ void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 					&& existing.code == diagnostic.code
 					&& existing.fieldPath == diagnostic.fieldPath;
 			});
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (existingDiagnostic == binding->diagnostics.end())
 			{
 				binding->diagnostics.push_back(diagnostic);
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!binding->runtimeAvailable && binding->status.empty())
 		{
 			binding->status = "InstanceUnavailable";
@@ -1094,14 +1211,17 @@ void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 	}
 }
 
+// ScriptingSystem::ClearRuntimeInspectorState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::ClearRuntimeInspectorState()
 {
 	for (Object object : ObjectManager::instance().getObjectsWithComponents<ScriptComponent>())
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>())
 		{
 			auto guard = scriptComponent->acquireWriteLock();
 			scriptComponent->ClearRuntimeState();
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (ScriptBinding& binding : scriptComponent->GetBindings())
 			{
 				if (binding.status == "LiveReady" || binding.status == "InstanceUnavailable")
@@ -1113,10 +1233,12 @@ void ScriptingSystem::ClearRuntimeInspectorState()
 	}
 }
 
+// ScriptingSystem::SetAllBindingStatuses is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::SetAllBindingStatuses(const std::string& statusText) {
 	for (Object object : ObjectManager::instance().getObjectsWithComponents<ScriptComponent>()) {
 		if (ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>()) {
 			auto guard = scriptComponent->acquireWriteLock();
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (ScriptBinding& binding : scriptComponent->GetBindings()) {
 				binding.status = statusText;
 			}
@@ -1126,6 +1248,7 @@ void ScriptingSystem::SetAllBindingStatuses(const std::string& statusText) {
 	}
 }
 
+// ScriptingSystem::ResolveManagedBridgeAssemblyPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ScriptingSystem::ResolveManagedBridgeAssemblyPath() const {
 	const fs::path current = fs::current_path();
 	const fs::path candidates[] = {
@@ -1134,6 +1257,7 @@ std::filesystem::path ScriptingSystem::ResolveManagedBridgeAssemblyPath() const 
 		current.parent_path() / "Editor" / "Managed" / "TerraEngine.CSharp.dll"
 	};
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const fs::path& candidate : candidates) {
 		if (fs::exists(candidate)) {
 			return candidate;
@@ -1143,6 +1267,7 @@ std::filesystem::path ScriptingSystem::ResolveManagedBridgeAssemblyPath() const 
 	return candidates[0];
 }
 
+// ScriptingSystem::InitializeExportMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::InitializeExportMode(const ManagedVTable& vtable) {
 	TERRAENGINE_LOG(LogLevel::Info, "Initializing Scripting System in export mode (VTable v" << vtable.version << ")...");
 
@@ -1158,6 +1283,7 @@ void ScriptingSystem::InitializeExportMode(const ManagedVTable& vtable) {
 	TERRAENGINE_LOG(LogLevel::Debug, "  invokeUpdate: " << (void*)m_ExportVTable.invokeUpdate);
 
 	// Query the registry to learn what script types are available.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_ExportVTable.getScriptCount != nullptr) {
 		const int32_t count = m_ExportVTable.getScriptCount();
 		TERRAENGINE_LOG(LogLevel::Info, "Export runtime provides " << count << " registered script type(s).");
@@ -1170,6 +1296,7 @@ void ScriptingSystem::InitializeExportMode(const ManagedVTable& vtable) {
 	TERRAENGINE_LOG(LogLevel::Info, "Scripting System (export mode) initialized successfully.");
 }
 
+// ScriptingSystem::UpdateExportMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	// Export-mode update dispatches through the VTable function pointers.
 	// The threading model mirrors the editor runtime: bindings are gathered,
@@ -1178,6 +1305,7 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 		return;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_Paused) {
 		if (m_StepFrames > 0) {
 			m_StepFrames--;
@@ -1187,6 +1315,7 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	}
 
 	// Collect active script bindings from the ECS, same as editor mode.
+	// struct ExportBatchItem groups related state and operations so callers have one documented contract.
 	struct ExportBatchItem {
 		uint32_t objectId = 0;
 		uint64_t scriptId = 0;
@@ -1198,19 +1327,24 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	std::vector<ExportBatchItem> allBindings;
 	auto& objectManager = ObjectManager::instance();
 	size_t objectsWithScripts = 0;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>()) {
 		objectsWithScripts++;
 		ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (scriptComponent == nullptr || !scriptComponent->active) {
 			continue;
 		}
 
 		auto guard = scriptComponent->acquireReadLock();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ScriptBinding& binding : scriptComponent->GetBindings()) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!binding.enabled) {
 				continue;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (binding.scriptId == 0) {
 				TERRAENGINE_LOG(LogLevel::Error, "[Scripting] Export binding " << binding.bindingId << " on object " << static_cast<uint32_t>(object.EntityId()) << " is missing staged scriptId data.");
 				continue;
@@ -1235,6 +1369,7 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 					&& item.bindingId == instance.bindingId
 					&& item.scriptId == instance.scriptId;
 			});
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!stillActive) {
 				staleInstances.push_back(instance);
 			}
@@ -1243,21 +1378,26 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 		m_ExportInstances.erase(staleBegin, m_ExportInstances.end());
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ExportScriptInstance& instance : staleInstances) {
 		if (instance.handle == nullptr) {
 			continue;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (instance.started && m_ExportVTable.invokeDisable != nullptr) {
 			m_ExportVTable.invokeDisable(instance.handle);
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_ExportVTable.destroyScript != nullptr) {
 			m_ExportVTable.destroyScript(instance.handle);
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (allBindings.empty()) {
 		if (objectsWithScripts > 0) {
 			static bool loggedOnce = false;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!loggedOnce) {
 				TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Found " << objectsWithScripts << " objects with ScriptComponents, but 0 enabled bindings.");
 				loggedOnce = true;
@@ -1271,18 +1411,21 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	std::vector<ExportBatchItem> pendingCreations;
 	{
 		std::scoped_lock lock(m_ExportInstancesMutex);
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const ExportBatchItem& item : allBindings) {
 			auto instanceIt = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& instance) {
 				return instance.objectId == item.objectId
 					&& instance.bindingId == item.bindingId
 					&& instance.scriptId == item.scriptId;
 			});
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (instanceIt == m_ExportInstances.end()) {
 				pendingCreations.push_back(item);
 			}
 		}
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ExportBatchItem& item : pendingCreations) {
 		if (m_ExportVTable.createScript == nullptr) {
 			break;
@@ -1290,6 +1433,7 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 
 		TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Creating instance for " << item.className << " (ID: " << item.scriptId << ") on object " << item.objectId);
 		void* handle = m_ExportVTable.createScript(item.scriptId, item.objectId);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (handle == nullptr) {
 			TERRAENGINE_LOG(LogLevel::Error, "[Scripting] createScript returned NULL for " << item.className << " (ID: " << item.scriptId << ")");
 			continue;
@@ -1301,6 +1445,7 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 		stagedBinding.scriptId = item.scriptId;
 		stagedBinding.serializedValues = item.serializedValues;
 		ApplyExportBindingValues(m_ExportVTable, stagedBinding, handle, item.scriptId);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_ExportVTable.invokeAwake != nullptr) {
 			m_ExportVTable.invokeAwake(handle);
 		}
@@ -1329,6 +1474,7 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	auto dispatchBatch = [&](std::vector<ExportBatchItem> items) {
 		auto task = ThreadPool::instance().createTask([items = std::move(items), this, deltaTime]() {
 			std::scoped_lock lock(m_ExportInstancesMutex);
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const ExportBatchItem& entry : items) {
 				auto it = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& inst) {
 					return inst.objectId == entry.objectId
@@ -1336,11 +1482,13 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 						&& inst.scriptId == entry.scriptId;
 				});
 
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (it != m_ExportInstances.end()) {
 					if (!it->started) {
 						if (m_ExportVTable.invokeStart) m_ExportVTable.invokeStart(it->handle);
 						it->started = true;
 					}
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (m_ExportVTable.invokeUpdate) m_ExportVTable.invokeUpdate(it->handle, deltaTime);
 				}
 			}
@@ -1349,6 +1497,7 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 		ThreadPool::instance().enqueue(task);
 	};
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const ExportBatchItem& item : allBindings) {
 		currentBatch.push_back(item);
 		if (currentBatch.size() >= batchSize) {
@@ -1358,10 +1507,12 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!currentBatch.empty()) {
 		dispatchBatch(std::move(currentBatch));
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::future<void>& future : futures) {
 		future.get();
 	}

@@ -1,3 +1,10 @@
+// InputBackend.h — Abstract interface for engine input backend adapters.
+//
+// This file defines the IInputBackend interface, which serves as the contract
+// for any hardware or library-specific input implementation. By abstracting the
+// backend, the engine can remain platform-agnostic while still providing robust
+// support for different windowing and input libraries.
+
 #pragma once
 
 #include <functional>

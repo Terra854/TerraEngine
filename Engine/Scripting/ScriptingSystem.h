@@ -1,3 +1,5 @@
+// ScriptingSystem.h — Contains declarations for the Scripting System system state, startup/shutdown hooks, and per-frame work used by native script glue, exported C# vtables, and scripting system lifecycle state.
+
 #pragma once
 
 #include "Core/SystemBase.h"
@@ -25,7 +27,9 @@ public:
 	void ConfigureExportRuntime(const std::filesystem::path& nativeAotLibraryPath);
 
 	void SetRunning(bool running);
+	// SetPaused is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetPaused(bool paused) { m_Paused = paused; }
+	// Step is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Step(int frames = 1) { m_StepFrames = frames; }
 
 	[[nodiscard]] bool IsRunning() const { return m_Running; }
@@ -46,6 +50,7 @@ public:
 	bool WriteLiveBindingValue(uint32_t objectId, ScriptBinding& binding, std::string_view fieldPath, const nlohmann::json& value, std::string* outError = nullptr);
 
 private:
+	// struct InspectorWatchState groups related state and operations so callers have one documented contract.
 	struct InspectorWatchState
 	{
 		// The live inspector only polls the currently selected object so runtime

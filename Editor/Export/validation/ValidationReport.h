@@ -1,3 +1,7 @@
+// ValidationReport.h — TEPAK validation reporting interface
+//
+// Defines the interface for collecting and managing findings during an archive validation pass. It provides helpers for adding discrete diagnostics to a validation report, enabling detailed feedback on archive health and compliance.
+
 #pragma once
 
 #include "TEPAK/PackTypes.h"

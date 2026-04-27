@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 
 namespace TerraEngine.Export
 {
+	// ExportFieldValueKind is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public enum ExportFieldValueKind : int
 	{
 		Bool = 0,

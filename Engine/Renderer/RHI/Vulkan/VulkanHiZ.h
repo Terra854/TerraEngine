@@ -1,3 +1,9 @@
+// VulkanHiZ.h — Vulkan Hierarchical Z-Buffer Wrapper
+//
+// Defines the Vulkan implementation of a Hierarchical Z-buffer (Hi-Z) for efficient occlusion culling.
+// It manages a depth pyramid image, its mip-level views, and the samplers required for depth reduction passes.
+// The Hi-Z pyramid is used to accelerate visibility tests and improve overall rendering performance.
+
 #pragma once
 
 #include "VulkanCommonIncludes.h"

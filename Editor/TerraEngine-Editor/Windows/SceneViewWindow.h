@@ -1,3 +1,8 @@
+// SceneViewWindow.h — Scene View Window Definition
+//
+// Defines the SceneViewWindow class, which provides the primary 3D viewport for scene editing and navigation.
+// It manages the camera used for editor rendering and handles input for spatial manipulation of entities.
+
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include <glm/glm.hpp>
@@ -5,6 +10,7 @@
 
 class MainEditorSubsystem;
 
+// class SceneViewWindow groups related state and operations so callers have one documented contract.
 class SceneViewWindow : public EditorWindow {
 public:
 	SceneViewWindow(MainEditorSubsystem* owner);

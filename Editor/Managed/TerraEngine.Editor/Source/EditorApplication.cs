@@ -1,3 +1,7 @@
+// EditorApplication.cs — Managed editor application entry point
+//
+// Coordinates the lifecycle of the managed editor environment, including ImGui context initialization and subsystem updates. It provides the UnmanagedCallersOnly entry points for the native engine to invoke managed logic for rendering, menu handling, and shutdown.
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -14,6 +18,7 @@ namespace TerraEngine.Editor
         private static RenderSettingsWindow _renderSettingsWindow = null!;
 
         [UnmanagedCallersOnly]
+        // Initialize bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void Initialize(IntPtr imguiContext)
         {
             if (_initialized) return;
@@ -39,6 +44,7 @@ namespace TerraEngine.Editor
             _initialized = true;
         }
 
+        // EnsureWindowsRegistered bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static void EnsureWindowsRegistered()
         {
             if (_statusWindow == null)
@@ -47,6 +53,7 @@ namespace TerraEngine.Editor
                 WindowManager.RegisterWindow(_statusWindow);
             }
 
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (_renderSettingsWindow == null)
             {
                 _renderSettingsWindow = new RenderSettingsWindow();
@@ -55,6 +62,7 @@ namespace TerraEngine.Editor
         }
 
         [UnmanagedCallersOnly]
+        // Update bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void Update(float deltaTime)
         {
             if (!_initialized) return;
@@ -64,6 +72,7 @@ namespace TerraEngine.Editor
                 EnsureWindowsRegistered();
 
                 // Update specific window data if needed
+                // Validate this condition before crossing into native or editor state that may outlive the managed object.
                 if (_statusWindow != null)
                 {
                     _statusWindow.UpdateData(deltaTime);
@@ -79,6 +88,7 @@ namespace TerraEngine.Editor
         }
 
         [UnmanagedCallersOnly]
+        // DrawWindowMenu bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void DrawWindowMenu()
         {
             try
@@ -91,12 +101,14 @@ namespace TerraEngine.Editor
                 {
                     count++;
                     bool visible = window.IsVisible;
+                    // Validate this condition before crossing into native or editor state that may outlive the managed object.
                     if (ImGui.MenuItem(window.Title, "", ref visible))
                     {
                         window.IsVisible = visible;
                     }
                 }
 
+                // Validate this condition before crossing into native or editor state that may outlive the managed object.
                 if (count == 0)
                 {
                     ImGui.TextDisabled("No registered C# windows");
@@ -109,6 +121,7 @@ namespace TerraEngine.Editor
         }
 
         [UnmanagedCallersOnly]
+        // Shutdown bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void Shutdown()
         {
             try
@@ -123,6 +136,7 @@ namespace TerraEngine.Editor
         }
 
         [UnmanagedCallersOnly]
+        // GetManagedWindows bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void GetManagedWindows(delegate* unmanaged<IntPtr, int, void> callback)
         {
             try
@@ -142,16 +156,19 @@ namespace TerraEngine.Editor
         }
 
         [UnmanagedCallersOnly]
+        // SetWindowVisibility bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void SetWindowVisibility(IntPtr titlePtr, int visible)
         {
             try
             {
                 EnsureWindowsRegistered();
                 string? title = Marshal.PtrToStringAnsi(titlePtr);
+                // Validate this condition before crossing into native or editor state that may outlive the managed object.
                 if (title == null) return;
 
                 foreach (var window in WindowManager.GetWindows())
                 {
+                    // Validate this condition before crossing into native or editor state that may outlive the managed object.
                     if (window.Title == title)
                     {
                         window.IsVisible = visible != 0;
@@ -166,6 +183,7 @@ namespace TerraEngine.Editor
         }
 
         [UnmanagedCallersOnly]
+        // HideAllWindows bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void HideAllWindows()
         {
             try

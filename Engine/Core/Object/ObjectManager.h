@@ -1,3 +1,10 @@
+// ObjectManager.h — Interface for the engine's central entity and hierarchy manager.
+//
+// This file declares the ObjectManager singleton, which acts as the authoritative
+// source for all scene entities and their relationships. It manages object
+// metadata, hierarchy tracking, and coordinate space conversions for parent-child
+// relationships, while providing observers for tracking scene modifications.
+
 #pragma once
 
 #include <entt/entt.hpp>
@@ -23,6 +30,7 @@ struct ObjectMetadata {
 	bool isStatic = false;
 };
 
+// class ObjectManager groups related state and operations so callers have one documented contract.
 class ObjectManager {
 public:
 	static ObjectManager& instance();
@@ -71,11 +79,13 @@ public:
 	void setObjectStatic(const Object& obj, bool isStatic);
 
 	// Get the list of all globally available tags defined in the project.
+	// getAvailableTags is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::vector<std::string>& getAvailableTags() const { return availableTags; }
 	// Register a new gameplay tag to the global project list.
 	void registerTag(const std::string& tag);
 
 	// Get the list of all globally available layers defined in the project.
+	// getAvailableLayers is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::vector<std::string>& getAvailableLayers() const { return availableLayers; }
 	// Register a new system layer to the global project list.
 	void registerLayer(const std::string& layer);
@@ -107,6 +117,7 @@ public:
 	{
 		registry.view<Components...>().each([&](entt::entity entity, Components&... comps) {
 			auto obj = makeHandle(entity);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (isObjectActive(obj) && (comps.active && ...)) {
 				func(obj, comps...);
 			}
@@ -120,9 +131,11 @@ public:
 		std::vector<Object> objects;
 
 		auto view = registry.view<Components...>();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto entity : view)
 		{
 			auto obj = makeHandle(entity);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!isObjectActive(obj)) continue;
 
 			// Retrieve components to check their active state
@@ -142,6 +155,7 @@ public:
 
 	void clear();
 
+	// getRegistry is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	entt::registry& getRegistry() { return registry; }
 
 	// Registers a callback that fires whenever the scene graph structure changes
@@ -150,6 +164,7 @@ public:
 	void SetOnModifiedCallback(std::function<void()> callback) { onModified = callback; }
 	// Spatial systems need a narrower signal so they can refresh object bounds
 	// without assuming every metadata edit changes placement or visibility.
+	// SetOnSpatialObjectDirtyCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetOnSpatialObjectDirtyCallback(std::function<void(entt::entity)> callback) { onSpatialObjectDirty = callback; }
 	std::uint64_t GetSpatialRevision() const { return spatialRevision; }
 

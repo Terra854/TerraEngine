@@ -1,3 +1,10 @@
+// TerraEngineMeshFile.h — Binary format definition for meshlet-based geometry (TEMF).
+//
+// This file defines the custom mesh format used by TerraEngine, optimized for
+// modern meshlet-based rendering pipelines. It includes vertex attribute
+// definitions, quantization parameters, and meshlet record structures used for
+// efficient culling and GPU-driven rendering.
+
 #pragma once
 
 #include <cstddef>
@@ -19,6 +26,7 @@ constexpr std::uint32_t kMeshletMaxTriangles = 124;
 constexpr std::uint32_t kMeshletHeaderFlagHasBounds = 1u << 0u;
 
 // Vertex attribute semantics mirror typical DCC exports and describe what the data represents.
+// AttributeSemantic names the supported states explicitly so serialization and switches stay readable.
 enum class AttributeSemantic : std::uint32_t
 {
 	Position = 0,
@@ -30,6 +38,7 @@ enum class AttributeSemantic : std::uint32_t
 };
 
 // Encoded formats supported by the toolkit; extend when additional precision is required.
+// AttributeFormat names the supported states explicitly so serialization and switches stay readable.
 enum class AttributeFormat : std::uint32_t
 {
 	R10G10B10A2Snorm = 1,
@@ -46,6 +55,7 @@ enum class MeshletRemapEncoding : std::uint32_t
 	Uint16 = 1
 };
 
+// GetRemapElementSizeBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 constexpr std::uint32_t GetRemapElementSizeBytes(MeshletRemapEncoding encoding)
 {
 	return encoding == MeshletRemapEncoding::Uint16 ? static_cast<std::uint32_t>(sizeof(std::uint16_t)) : static_cast<std::uint32_t>(sizeof(std::uint32_t));
@@ -62,6 +72,7 @@ struct VertexAttribute
 };
 
 // Full vertex declaration stored in the header so viewers know how to decode the stream.
+// struct VertexLayout groups related state and operations so callers have one documented contract.
 struct VertexLayout
 {
 	std::uint32_t strideBytes;
@@ -70,6 +81,7 @@ struct VertexLayout
 };
 
 // Parameters required to denormalize packed positions/UVs back into model space.
+// struct QuantizationInfo groups related state and operations so callers have one documented contract.
 struct QuantizationInfo
 {
 	float positionOffset[3];  // Center of the bounding box
@@ -79,6 +91,7 @@ struct QuantizationInfo
 };
 
 // Per-meshlet table entry. Offsets/counts point into packed meshlet streams.
+// struct MeshletRecord groups related state and operations so callers have one documented contract.
 struct MeshletRecord
 {
 	std::uint32_t vertexOffset;          // Offset into meshlet vertex remap stream.
@@ -88,6 +101,7 @@ struct MeshletRecord
 };
 
 // Maps a render section to a contiguous range of meshlets.
+// struct MeshletSection groups related state and operations so callers have one documented contract.
 struct MeshletSection
 {
 	std::uint32_t meshletOffset;
@@ -95,6 +109,7 @@ struct MeshletSection
 };
 
 // Optional per-meshlet sphere + cone bounds for visibility/culling work.
+// struct MeshletBounds groups related state and operations so callers have one documented contract.
 struct MeshletBounds
 {
 	float center[3];
@@ -106,6 +121,7 @@ struct MeshletBounds
 };
 
 // Final on-disk header that prefixes every meshlet-only TEMF file.
+// struct MeshHeader groups related state and operations so callers have one documented contract.
 struct MeshHeader
 {
 	char magic[4];

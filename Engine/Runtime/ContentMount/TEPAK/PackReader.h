@@ -1,3 +1,5 @@
+// PackReader.h — Contains declarations for the Pack Reader read-side state, parsing helpers, and data extraction flow used by public runtime TEPAK reader and archive type declarations.
+
 #pragma once
 
 #include "TEPAK/PackTypes.h"
@@ -46,6 +48,7 @@ public:
 	void Extract(std::string_view logicalPath, const std::filesystem::path& outputDirectory, std::uint32_t workerCount = 1U) const;
 
 private:
+	// struct Impl groups related state and operations so callers have one documented contract.
 	struct Impl;
 	std::shared_ptr<Impl> m_impl;
 };

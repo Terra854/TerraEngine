@@ -1,3 +1,9 @@
+// SpatialIndex.h — Spatial Partitioning System Definition
+//
+// Defines the SpatialIndex class, which organizes scene entities for efficient spatial retrieval.
+// It maintains a high-performance acceleration structure that is updated as objects move or are modified.
+// This system is critical for optimizing rendering visibility, physics broadphase, and editor interactions.
+
 #pragma once
 
 #include <array>
@@ -11,6 +17,7 @@
 
 namespace TerraEngine::Scene
 {
+	// class SpatialIndex groups related state and operations so callers have one documented contract.
 	class SpatialIndex
 	{
 	public:
@@ -29,6 +36,7 @@ namespace TerraEngine::Scene
 		[[nodiscard]] SpatialDiagnosticsSnapshot GetDiagnosticsSnapshot() const;
 
 	private:
+		// struct Node groups related state and operations so callers have one documented contract.
 		struct Node
 		{
 			SpatialAABB looseBounds{};
@@ -38,6 +46,7 @@ namespace TerraEngine::Scene
 			std::uint32_t depth = 0;
 		};
 
+		// QueryKind names the supported states explicitly so serialization and switches stay readable.
 		enum class QueryKind : std::uint8_t
 		{
 			AABB,
@@ -46,6 +55,7 @@ namespace TerraEngine::Scene
 			Ray
 		};
 
+		// struct QueryShape groups related state and operations so callers have one documented contract.
 		struct QueryShape
 		{
 			QueryKind kind = QueryKind::AABB;

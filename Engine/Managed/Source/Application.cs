@@ -1,3 +1,10 @@
+// Application.cs — Managed API for application-level state and OS integration.
+//
+// This file provides the C# interface for accessing global application properties
+// such as data paths, platform identifiers, and project metadata. It bridges
+// managed gameplay scripts to the engine's native application services via
+// internal calls and provides common utilities like URL opening.
+
 namespace TerraEngine
 {
 	/// <summary>

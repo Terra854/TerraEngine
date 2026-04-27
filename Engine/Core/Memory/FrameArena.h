@@ -1,3 +1,10 @@
+// FrameArena.h — Linear allocator for high-performance, frame-scoped memory management.
+//
+// This file implements a singleton arena allocator that provides fast, contiguous
+// memory blocks that are reset at the end of each frame. It includes an
+// STL-compatible allocator wrapper, allowing engine systems and containers to
+// perform transient allocations with zero individual deallocation cost.
+
 #pragma once
 
 #include <vector>
@@ -7,6 +14,7 @@
 
 class FrameArena {
 public:
+	// Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	static FrameArena& Instance() {
 		static FrameArena instance;
 		return instance;
@@ -15,11 +23,13 @@ public:
 	FrameArena(const FrameArena&) = delete;
 	FrameArena& operator=(const FrameArena&) = delete;
 
+	// Allocate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void* Allocate(size_t size, size_t alignment = 8) {
 		// Align the current pointer
 		size_t padding = (alignment - (offset % alignment)) % alignment;
 		size_t newOffset = offset + padding;
 		
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (newOffset + size > bufferSize) {
 			// Fallback to heap if arena is full (or handle error)
 			// For now, let's just assert or expand. Expanding implies a list of buffers.
@@ -35,10 +45,12 @@ public:
 	}
 
 	template<typename T>
+	// NewArray is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	T* NewArray(size_t count) {
 		return static_cast<T*>(Allocate(sizeof(T) * count, alignof(T)));
 	}
 
+	// Reset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Reset() {
 		offset = 0;
 		// Free fallback blocks if any
@@ -51,6 +63,7 @@ private:
 		buffer.resize(bufferSize);
 	}
 
+	// AllocateSlow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void* AllocateSlow(size_t size, size_t alignment) {
 		// Fallback allocation strategy for when the main block is full.
 		// We create a dedicated block for this allocation.
@@ -79,12 +92,14 @@ public:
 	using value_type = T;
 
 	FrameAllocator() = default;
+	// FrameAllocator is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	template <typename U> FrameAllocator(const FrameAllocator<U>&) {}
 
 	T* allocate(size_t n) {
 		return static_cast<T*>(FrameArena::Instance().Allocate(n * sizeof(T), alignof(T)));
 	}
 
+	// deallocate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void deallocate(T*, size_t) {
 		// No-op: memory is freed when arena resets
 	}

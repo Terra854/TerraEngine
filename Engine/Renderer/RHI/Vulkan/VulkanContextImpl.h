@@ -1,3 +1,9 @@
+// VulkanContextImpl.h — Vulkan Backend Implementation Details
+//
+// Defines the private implementation state for the VulkanContext, encapsulating internal handles and caches.
+// It includes definitions for descriptor layouts, pipeline keys, and frame-specific synchronization objects.
+// This header serves as the internal bridge between the public VulkanContext API and the detailed Vulkan backend logic.
+
 #pragma once
 
 #include "VulkanContext.h"
@@ -48,16 +54,19 @@ inline const std::vector<const char*> deviceExtensions = {
 };
 
 // Queue family indices used to set up graphics/present queues.
+// struct QueueFamilyIndices groups related state and operations so callers have one documented contract.
 struct QueueFamilyIndices {
 	std::optional<uint32_t> graphicsFamily;
 	std::optional<uint32_t> presentFamily;
 
+	// isComplete is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool isComplete() {
 		return graphicsFamily.has_value() && presentFamily.has_value();
 	}
 };
 
 // Swap chain capabilities returned by physical devices.
+// struct SwapChainSupportDetails groups related state and operations so callers have one documented contract.
 struct SwapChainSupportDetails {
 	VkSurfaceCapabilitiesKHR capabilities;
 	std::vector<VkSurfaceFormatKHR> formats;
@@ -65,6 +74,7 @@ struct SwapChainSupportDetails {
 };
 
 // GPU buffer wrapper that keeps the VMA allocation alongside the VkBuffer.
+// struct VulkanBuffer groups related state and operations so callers have one documented contract.
 struct VulkanBuffer {
 	VkBuffer buffer;
 	VmaAllocation allocation;
@@ -72,6 +82,7 @@ struct VulkanBuffer {
 };
 
 // GPU image wrapper for textures and attachments.
+// struct VulkanImage groups related state and operations so callers have one documented contract.
 struct VulkanImage {
 	VkImage image;
 	VmaAllocation allocation;
@@ -80,6 +91,7 @@ struct VulkanImage {
 };
 
 // Mesh buffers cached on the GPU.
+// struct VulkanMesh groups related state and operations so callers have one documented contract.
 struct VulkanMesh {
 	VulkanBuffer meshShaderVertexBuffer;
 	VulkanBuffer meshletVertexRemapBuffer;
@@ -97,6 +109,7 @@ struct VulkanMesh {
 };
 
 // Pipeline pairing with its layout to avoid redundant lookups.
+// struct VulkanPipeline groups related state and operations so callers have one documented contract.
 struct VulkanPipeline {
 	VkPipeline pipeline;
 	VkPipelineLayout layout;
@@ -109,6 +122,7 @@ struct VulkanPipeline {
 };
 
 // Must match shader definition
+// struct alignas groups related state and operations so callers have one documented contract.
 struct alignas(16) MaterialData {
 	glm::vec4 BaseColorFactor;
 	glm::vec4 EmissiveFactor;
@@ -129,6 +143,7 @@ struct alignas(16) MaterialData {
 	uint32_t ShadowBehavior;
 };
 
+// struct PipelineKey groups related state and operations so callers have one documented contract.
 struct PipelineKey {
 	TerraEngine::UUID shaderCollectionId;
 	uint32_t materialFlags;
@@ -138,6 +153,7 @@ struct PipelineKey {
 	}
 };
 
+// struct PipelineKeyHash groups related state and operations so callers have one documented contract.
 struct PipelineKeyHash {
 	std::size_t operator()(const PipelineKey& k) const {
 		std::size_t h1 = std::hash<TerraEngine::UUID>{}(k.shaderCollectionId);
@@ -146,6 +162,7 @@ struct PipelineKeyHash {
 	}
 };
 
+// struct VulkanContext groups related state and operations so callers have one documented contract.
 struct VulkanContext::Impl {
 	VkInstance instance = VK_NULL_HANDLE;
 	VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
@@ -195,6 +212,7 @@ struct VulkanContext::Impl {
 	bool meshShaderSupported = false;
 	bool taskShaderSupported = false;
 
+	// UsesVrsAttachment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool UsesVrsAttachment() const
 	{
 		// Editor rendering presents scene/game offscreen textures through ImGui.
@@ -225,6 +243,7 @@ struct VulkanContext::Impl {
 	static constexpr uint32_t LTC_LUT_RESOLUTION = 64u;
 	static constexpr VkFormat AMBIENT_OCCLUSION_FORMAT = VK_FORMAT_R32_SFLOAT;
 
+	// struct ShadowResourceRequest groups related state and operations so callers have one documented contract.
 	struct ShadowResourceRequest
 	{
 		std::uint32_t directionalCount = 0u;
@@ -232,11 +251,13 @@ struct VulkanContext::Impl {
 		std::uint32_t areaCount = 0u;
 		std::uint32_t pointCount = 0u;
 
+		// Total2DCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		std::uint32_t Total2DCount() const
 		{
 			return directionalCount + spotCount + areaCount;
 		}
 
+		// TotalCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		std::uint32_t TotalCount() const
 		{
 			return Total2DCount() + pointCount;
@@ -245,6 +266,7 @@ struct VulkanContext::Impl {
 		bool operator==(const ShadowResourceRequest&) const = default;
 	};
 
+	// struct ShadowStorageRegion groups related state and operations so callers have one documented contract.
 	struct ShadowStorageRegion
 	{
 		// A region describes one live GPU allocation slot or managed sub-region.
@@ -262,6 +284,7 @@ struct VulkanContext::Impl {
 		bool live = false;
 	};
 
+	// ShadowCacheEntryState names the supported states explicitly so serialization and switches stay readable.
 	enum class ShadowCacheEntryState : std::uint32_t
 	{
 		Invalid = 0u,
@@ -271,6 +294,7 @@ struct VulkanContext::Impl {
 		PendingRelease = 4u
 	};
 
+	// struct ShadowCacheEntry groups related state and operations so callers have one documented contract.
 	struct ShadowCacheEntry
 	{
 		// Cache entries are intentionally conservative: missing or changed
@@ -358,6 +382,7 @@ struct VulkanContext::Impl {
 	uint32_t ambientOcclusionHeight = 0u;
 	bool ambientOcclusionHistoryValid = false;
 
+	// struct GpuLightAnalysisViewSnapshot groups related state and operations so callers have one documented contract.
 	struct GpuLightAnalysisViewSnapshot
 	{
 		std::unordered_map<TerraEngine::UUID, GPULightAnalysisRecord> recordsByLightId;
@@ -365,6 +390,7 @@ struct VulkanContext::Impl {
 		bool valid = false;
 	};
 
+	// struct TemporalLightSelectionState groups related state and operations so callers have one documented contract.
 	struct TemporalLightSelectionState
 	{
 		float lastCompositeScore = 0.0f;
@@ -375,6 +401,7 @@ struct VulkanContext::Impl {
 		bool shadowedLastFrame = false;
 	};
 
+	// struct ViewLightingTemporalState groups related state and operations so callers have one documented contract.
 	struct ViewLightingTemporalState
 	{
 		std::unordered_map<TerraEngine::UUID, TemporalLightSelectionState> lights;
@@ -386,6 +413,7 @@ struct VulkanContext::Impl {
 		bool valid = false;
 	};
 
+	// struct ViewDepthHistoryState groups related state and operations so callers have one documented contract.
 	struct ViewDepthHistoryState
 	{
 		// Hi-Z is built from a depth buffer rendered earlier. The matching
@@ -395,6 +423,7 @@ struct VulkanContext::Impl {
 		bool valid = false;
 	};
 
+	// struct LightBudgetApplicationResult groups related state and operations so callers have one documented contract.
 	struct LightBudgetApplicationResult
 	{
 		std::vector<FrameLightCandidate> uploadedCandidates;
@@ -457,11 +486,15 @@ struct VulkanContext::Impl {
 	
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
 	
+	// GetSnapshotLightDataOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t GetSnapshotLightDataOffset(uint32_t slotIndex) const { return slotIndex * MAX_GLOBAL_LIGHTS; }
 	uint32_t GetSnapshotLightAnalysisInputOffset(uint32_t slotIndex) const { return slotIndex * MAX_GLOBAL_LIGHTS; }
 	uint32_t GetSnapshotClusterDataOffset(uint32_t slotIndex) const { return slotIndex * MAX_LIGHT_CLUSTERS; }
+	// GetSnapshotLightIndexOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t GetSnapshotLightIndexOffset(uint32_t slotIndex) const { return slotIndex * MAX_LIGHT_INDEX_ENTRIES; }
+	// GetSnapshotClusterDepthOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t GetSnapshotClusterDepthOffset(uint32_t slotIndex) const { return slotIndex * kLightingClusterDimX * kLightingClusterDimY; }
+	// GetSnapshotIndirectDrawOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t GetSnapshotIndirectDrawOffset(uint32_t slotIndex) const { return slotIndex * MAX_BINDLESS_DRAWS; }
 	void UpdateFrameCullingData(uint32_t statsSlotIndex, const FrameCullingDataGPU& frameData);
 	LightBudgetApplicationResult ApplyFrameLightBudgets(const FrameRenderData& frameData, RenderViewType viewType);
@@ -489,6 +522,7 @@ struct VulkanContext::Impl {
 	uint32_t AllocateMaterialIndex();
 
 	// Editor / Offscreen Resources
+	// struct PushConstants groups related state and operations so callers have one documented contract.
 	struct PushConstants {
 	alignas(16) glm::mat4 viewProj;
 		alignas(16) glm::mat4 model;
@@ -503,6 +537,7 @@ struct VulkanContext::Impl {
 	uint32_t indirectDrawOffset;
 	};
 
+	// struct OffscreenResources groups related state and operations so callers have one documented contract.
 	struct OffscreenResources {
 	VkImage image = VK_NULL_HANDLE;
 	VmaAllocation allocation = VK_NULL_HANDLE;
@@ -554,6 +589,7 @@ struct VulkanContext::Impl {
 	VkPipeline skyBackgroundPipeline = VK_NULL_HANDLE;
 	VkPipelineLayout skyBackgroundPipelineLayout = VK_NULL_HANDLE;
 	
+	// struct GridPushConstants groups related state and operations so callers have one documented contract.
 	struct GridPushConstants {
 		glm::mat4 view;
 		glm::mat4 proj;

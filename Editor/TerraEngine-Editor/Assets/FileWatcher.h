@@ -1,3 +1,7 @@
+// FileWatcher.h — Cross-platform filesystem watcher
+//
+// Provides a threaded file watcher for monitoring project directory changes. it supports OS-specific backends for efficient notification delivery and maintains a thread-safe event queue for the editor to process.
+
 #pragma once
 
 #include <filesystem>
@@ -16,11 +20,13 @@ enum class FileStatus {
 	Erased
 };
 
+// struct FileEvent groups related state and operations so callers have one documented contract.
 struct FileEvent {
 	std::filesystem::path path;
 	FileStatus status;
 };
 
+// class FileWatcher groups related state and operations so callers have one documented contract.
 class FileWatcher {
 public:
 	using Callback = std::function<void(std::filesystem::path, FileStatus)>;

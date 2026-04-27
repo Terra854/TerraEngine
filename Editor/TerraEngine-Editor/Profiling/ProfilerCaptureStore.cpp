@@ -1,3 +1,7 @@
+// ProfilerCaptureStore.cpp — Profiler capture storage implementation
+//
+// Implements the filesystem operations for the profiler capture store, ensuring captures are saved to and loaded from the designated project directory. It handles path normalization and performs basic integrity checks on capture metadata during listing.
+
 #include "ProfilerCaptureStore.h"
 
 #include <algorithm>
@@ -5,10 +9,12 @@
 
 namespace
 {
+// WeaklyCanonicalOrAbsolute is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path WeaklyCanonicalOrAbsolute(const std::filesystem::path& path)
 {
 	std::error_code ec;
 	std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ec)
 	{
 		return canonical;
@@ -16,12 +22,14 @@ std::filesystem::path WeaklyCanonicalOrAbsolute(const std::filesystem::path& pat
 	return std::filesystem::absolute(path);
 }
 
+// PathStartsWith is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool PathStartsWith(const std::filesystem::path& path, const std::filesystem::path& parent)
 {
 	const std::filesystem::path normalizedPath = WeaklyCanonicalOrAbsolute(path);
 	const std::filesystem::path normalizedParent = WeaklyCanonicalOrAbsolute(parent);
 	auto pathIt = normalizedPath.begin();
 	auto parentIt = normalizedParent.begin();
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (; parentIt != normalizedParent.end(); ++parentIt, ++pathIt)
 	{
 		if (pathIt == normalizedPath.end() || *pathIt != *parentIt)
@@ -38,6 +46,7 @@ ProfilerCaptureStore::ProfilerCaptureStore(std::filesystem::path projectRoot)
 	SetProjectRoot(projectRoot);
 }
 
+// ProfilerCaptureStore::SetProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProfilerCaptureStore::SetProjectRoot(const std::filesystem::path& projectRoot)
 {
 	if (projectRoot.empty())
@@ -48,16 +57,19 @@ void ProfilerCaptureStore::SetProjectRoot(const std::filesystem::path& projectRo
 	root = WeaklyCanonicalOrAbsolute(projectRoot);
 }
 
+// ProfilerCaptureStore::ClearProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProfilerCaptureStore::ClearProjectRoot()
 {
 	root.clear();
 }
 
+// ProfilerCaptureStore::HasProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ProfilerCaptureStore::HasProjectRoot() const
 {
 	return !root.empty();
 }
 
+// ProfilerCaptureStore::GetProfilerDirectory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ProfilerCaptureStore::GetProfilerDirectory() const
 {
 	if (root.empty())
@@ -67,6 +79,7 @@ std::filesystem::path ProfilerCaptureStore::GetProfilerDirectory() const
 	return root / "Profiler";
 }
 
+// ProfilerCaptureStore::SaveNewCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ProfilerCaptureStore::SaveNewCapture(TerraEngine::Profiling::ProfilerCaptureDocument document, std::filesystem::path& outPath, std::string& outError) const
 {
 	if (root.empty())
@@ -76,6 +89,7 @@ bool ProfilerCaptureStore::SaveNewCapture(TerraEngine::Profiling::ProfilerCaptur
 	}
 
 	const std::filesystem::path profilerDirectory = GetProfilerDirectory();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!IsPathInsideProject(profilerDirectory))
 	{
 		outError = "Profiler directory is outside the opened project.";
@@ -84,6 +98,7 @@ bool ProfilerCaptureStore::SaveNewCapture(TerraEngine::Profiling::ProfilerCaptur
 
 	std::error_code ec;
 	std::filesystem::create_directories(profilerDirectory, ec);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ec)
 	{
 		outError = "Failed to create project Profiler directory: " + ec.message();
@@ -91,6 +106,7 @@ bool ProfilerCaptureStore::SaveNewCapture(TerraEngine::Profiling::ProfilerCaptur
 	}
 
 	std::filesystem::path capturePath = MakeCapturePath(document);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!IsPathInsideProject(capturePath))
 	{
 		outError = "Profiler capture path is outside the opened project.";
@@ -100,6 +116,7 @@ bool ProfilerCaptureStore::SaveNewCapture(TerraEngine::Profiling::ProfilerCaptur
 	document.sourcePath = capturePath;
 	document.metadata.projectPathHint = root.string();
 	document.metadata.savedAt = TerraEngine::Profiling::MakeReadableTimestamp();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TerraEngine::Profiling::SaveCaptureDocument(document, capturePath, outError))
 	{
 		return false;
@@ -109,6 +126,7 @@ bool ProfilerCaptureStore::SaveNewCapture(TerraEngine::Profiling::ProfilerCaptur
 	return true;
 }
 
+// ProfilerCaptureStore::LoadCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ProfilerCaptureStore::LoadCapture(const std::filesystem::path& capturePath, TerraEngine::Profiling::ProfilerCaptureDocument& outDocument, std::string& outError) const
 {
 	if (root.empty())
@@ -116,12 +134,14 @@ bool ProfilerCaptureStore::LoadCapture(const std::filesystem::path& capturePath,
 		outError = "No project is open.";
 		return false;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!IsPathInsideProject(capturePath) || !PathStartsWith(capturePath, GetProfilerDirectory()))
 	{
 		outError = "Profiler captures can only be loaded from the opened project's Profiler folder.";
 		return false;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TerraEngine::Profiling::LoadCaptureDocument(capturePath, outDocument, outError))
 	{
 		return false;
@@ -130,17 +150,20 @@ bool ProfilerCaptureStore::LoadCapture(const std::filesystem::path& capturePath,
 	return true;
 }
 
+// ProfilerCaptureStore::ListCaptures is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStore::ListCaptures(std::string& outError) const
 {
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures;
 	outError.clear();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (root.empty())
 	{
 		return captures;
 	}
 
 	const std::filesystem::path profilerDirectory = GetProfilerDirectory();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!IsPathInsideProject(profilerDirectory))
 	{
 		outError = "Profiler directory is outside the opened project.";
@@ -148,11 +171,13 @@ std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStor
 	}
 
 	std::error_code ec;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(profilerDirectory, ec))
 	{
 		return captures;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(profilerDirectory, ec))
 	{
 		if (ec)
@@ -160,6 +185,7 @@ std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStor
 			outError = ec.message();
 			break;
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!entry.is_regular_file() || entry.path().extension() != ".teprof")
 		{
 			continue;
@@ -167,6 +193,7 @@ std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStor
 
 		TerraEngine::Profiling::ProfilerCaptureArtifact artifact;
 		TerraEngine::Profiling::TryReadCaptureArtifact(entry.path(), artifact);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (artifact.supported)
 		{
 			captures.push_back(std::move(artifact));
@@ -179,6 +206,7 @@ std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStor
 	return captures;
 }
 
+// ProfilerCaptureStore::IsPathInsideProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ProfilerCaptureStore::IsPathInsideProject(const std::filesystem::path& path) const
 {
 	if (root.empty() || path.empty())
@@ -188,9 +216,11 @@ bool ProfilerCaptureStore::IsPathInsideProject(const std::filesystem::path& path
 	return PathStartsWith(path, root);
 }
 
+// ProfilerCaptureStore::MakeCapturePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ProfilerCaptureStore::MakeCapturePath(const TerraEngine::Profiling::ProfilerCaptureDocument& document) const
 {
 	std::string projectName = document.metadata.projectName.empty() ? "Capture" : document.metadata.projectName;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (char& character : projectName)
 	{
 		if (character == '/' || character == '\\' || character == ':' || character == '*' || character == '?' || character == '"' || character == '<' || character == '>' || character == '|')

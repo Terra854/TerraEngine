@@ -1,3 +1,7 @@
+// TextureCompiler.h — Texture compilation pipeline interface
+//
+// Defines the interface for the offline texture compilation system, supporting various source image formats. It specifies the configuration options for texture semantical mapping, quality levels, and mipmap generation.
+
 #pragma once
 
 #include <filesystem>

@@ -1,3 +1,9 @@
+// VulkanHiZ.cpp — Vulkan Hierarchical Z-Buffer Implementation
+//
+// Implements the creation and management of the Hi-Z pyramid image and its associated Vulkan resources.
+// It provides the backend logic for building depth-reduction mipmaps and releasing resources during shutdown or resizing.
+// This module is essential for implementing GPU-driven occlusion culling and other visibility optimizations.
+
 #include "VulkanHiZ.h"
 #include <cmath>
 #include <algorithm>
@@ -26,6 +32,7 @@ void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenW
 	VmaAllocationCreateInfo allocInfo = {};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image, &allocation, nullptr) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create Hi-Z image!");
 	}
@@ -43,12 +50,14 @@ void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenW
 		viewInfo.subresourceRange.baseArrayLayer = 0;
 		viewInfo.subresourceRange.layerCount = 1;
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vkCreateImageView(device, &viewInfo, nullptr, &fullView) != VK_SUCCESS) {
 			throw std::runtime_error("failed to create Hi-Z full image view!");
 		}
 	}
 
 	mipViews.resize(mipLevels);
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t i = 0; i < mipLevels; i++) {
 		VkImageViewCreateInfo viewInfo{};
 		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -61,6 +70,7 @@ void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenW
 		viewInfo.subresourceRange.baseArrayLayer = 0;
 		viewInfo.subresourceRange.layerCount = 1;
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vkCreateImageView(device, &viewInfo, nullptr, &mipViews[i]) != VK_SUCCESS) {
 			throw std::runtime_error("failed to create Hi-Z image view!");
 		}
@@ -77,25 +87,30 @@ void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenW
 	samplerInfo.minLod = 0.0f;
 	samplerInfo.maxLod = static_cast<float>(mipLevels);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreateSampler(device, &samplerInfo, nullptr, &sampler) != VK_SUCCESS) {
 		throw std::runtime_error("failed to create Hi-Z sampler!");
 	}
 }
 
+// VulkanHiZ::Destroy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanHiZ::Destroy(VkDevice device, VmaAllocator allocator) {
 	if (fullView != VK_NULL_HANDLE) {
 		vkDestroyImageView(device, fullView, nullptr);
 		fullView = VK_NULL_HANDLE;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (sampler != VK_NULL_HANDLE) {
 		vkDestroySampler(device, sampler, nullptr);
 		sampler = VK_NULL_HANDLE;
 	}
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto view : mipViews) {
 		vkDestroyImageView(device, view, nullptr);
 	}
 	mipViews.clear();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (image != VK_NULL_HANDLE) {
 		vmaDestroyImage(allocator, image, allocation);
 		image = VK_NULL_HANDLE;

@@ -1,3 +1,10 @@
+// GlfwInputBackend.cpp — Implementation of the GLFW-based input backend adapter.
+//
+// This file implements the translation of GLFW window callbacks into the engine's
+// agnostic input system. It handles keyboard events, mouse movements, button
+// clicks, and scroll offsets, ensuring that platform-specific input data is
+// normalized for use by the core engine and scripting systems.
+
 #include "GlfwInputBackend.h"
 
 #include <stdexcept>
@@ -16,12 +23,14 @@ namespace {
 	}
 }
 
+// GlfwInputBackend::SetWindowHandle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwInputBackend::SetWindowHandle(void* windowHandle)
 {
 	window = static_cast<GLFWwindow*>(windowHandle);
 	TERRAENGINE_LOG(LogLevel::Debug, "GLFW input backend received window handle " << window);
 }
 
+// GlfwInputBackend::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwInputBackend::Initialize()
 {
 	if (!window) {
@@ -33,16 +42,19 @@ void GlfwInputBackend::Initialize()
 	glfwSetKeyCallback(window, [](GLFWwindow* glfwWindow, int key, int /*scancode*/, int action, int /*mods*/) {
 		auto& registry = BackendRegistry();
 		auto it = registry.find(glfwWindow);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (it == registry.end()) {
 			return;
 		}
 		
 		GlfwInputBackend* backend = it->second;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!backend || !backend->keyCallback) {
 			return;
 		}
 		
 		const Key engineKey = TranslateKeyFromGlfw(key);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (engineKey == Key::Unknown) {
 			return;
 		}
@@ -54,16 +66,19 @@ void GlfwInputBackend::Initialize()
 	glfwSetMouseButtonCallback(window, [](GLFWwindow* glfwWindow, int button, int action, int /*mods*/) {
 		auto& registry = BackendRegistry();
 		auto it = registry.find(glfwWindow);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (it == registry.end()) {
 			return;
 		}
 		
 		GlfwInputBackend* backend = it->second;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!backend || !backend->mouseButtonCallback) {
 			return;
 		}
 		
 		MouseButton mappedButton = MouseButton::Left;
+		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (button) {
 			case GLFW_MOUSE_BUTTON_1: mappedButton = MouseButton::Left; break;
 			case GLFW_MOUSE_BUTTON_2: mappedButton = MouseButton::Right; break;
@@ -84,11 +99,13 @@ void GlfwInputBackend::Initialize()
 	glfwSetCursorPosCallback(window, [](GLFWwindow* glfwWindow, double x, double y) {
 		auto& registry = BackendRegistry();
 		auto it = registry.find(glfwWindow);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (it == registry.end()) {
 			return;
 		}
 		
 		GlfwInputBackend* backend = it->second;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (backend && backend->cursorCallback) {
 			backend->cursorCallback(x, y);
 		}
@@ -97,11 +114,13 @@ void GlfwInputBackend::Initialize()
 	glfwSetScrollCallback(window, [](GLFWwindow* glfwWindow, double xOffset, double yOffset) {
 		auto& registry = BackendRegistry();
 		auto it = registry.find(glfwWindow);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (it == registry.end()) {
 			return;
 		}
 		
 		GlfwInputBackend* backend = it->second;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (backend && backend->scrollCallback) {
 			backend->scrollCallback(xOffset, yOffset);
 		}
@@ -110,6 +129,7 @@ void GlfwInputBackend::Initialize()
 	TERRAENGINE_LOG(LogLevel::Debug, "GLFW input backend initialized and callbacks registered");
 }
 
+// GlfwInputBackend::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwInputBackend::Update()
 {
 	// GLFW surfaces input changes through callbacks and direct queries, so no
@@ -118,6 +138,7 @@ void GlfwInputBackend::Update()
 
 void GlfwInputBackend::Shutdown()
 {
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!window) {
 		return;
 	}
@@ -133,29 +154,35 @@ void GlfwInputBackend::Shutdown()
 	TERRAENGINE_LOG(LogLevel::Debug, "GLFW input backend shutdown and callbacks cleared");
 }
 
+// GlfwInputBackend::SetKeyCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwInputBackend::SetKeyCallback(std::function<void(Key, KeyState)> onKeyEvent)
 {
 	keyCallback = std::move(onKeyEvent);
 }
 
+// GlfwInputBackend::SetMouseButtonCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwInputBackend::SetMouseButtonCallback(std::function<void(MouseButton, KeyState)> onMouseButton)
 {
 	mouseButtonCallback = std::move(onMouseButton);
 }
 
+// GlfwInputBackend::SetCursorPositionCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwInputBackend::SetCursorPositionCallback(std::function<void(double, double)> onCursorMove)
 {
 	cursorCallback = std::move(onCursorMove);
 }
 
+// GlfwInputBackend::SetScrollCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwInputBackend::SetScrollCallback(std::function<void(double, double)> onScroll)
 {
 	scrollCallback = std::move(onScroll);
 }
 
+// GlfwInputBackend::IsKeyPressed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool GlfwInputBackend::IsKeyPressed(Key key) const
 {
 	const int glfwKey = TranslateKeyToGlfw(key);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (glfwKey == GLFW_KEY_UNKNOWN || !window) {
 		return false;
 	}
@@ -164,9 +191,11 @@ bool GlfwInputBackend::IsKeyPressed(Key key) const
 	return state == GLFW_PRESS || state == GLFW_REPEAT;
 }
 
+// GlfwInputBackend::IsMouseButtonPressed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool GlfwInputBackend::IsMouseButtonPressed(MouseButton button) const
 {
 	const int glfwButton = TranslateMouseButtonToGlfw(button);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (glfwButton < 0 || !window) {
 		return false;
 	}
@@ -175,10 +204,12 @@ bool GlfwInputBackend::IsMouseButtonPressed(MouseButton button) const
 	return state == GLFW_PRESS || state == GLFW_REPEAT;
 }
 
+// GlfwInputBackend::GetCursorPosition is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::pair<double, double> GlfwInputBackend::GetCursorPosition() const
 {
 	double x = 0.0;
 	double y = 0.0;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (window) {
 		glfwGetCursorPos(window, &x, &y);
 	}
@@ -186,6 +217,7 @@ std::pair<double, double> GlfwInputBackend::GetCursorPosition() const
 	return {x, y};
 }
 
+// GlfwInputBackend::SetCursorPosition is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwInputBackend::SetCursorPosition(double x, double y)
 {
 	if (window) {
@@ -193,6 +225,7 @@ void GlfwInputBackend::SetCursorPosition(double x, double y)
 	}
 }
 
+// GlfwInputBackend::TranslateKeyToGlfw is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 int GlfwInputBackend::TranslateKeyToGlfw(Key key)
 {
 	switch (key) {
@@ -320,6 +353,7 @@ int GlfwInputBackend::TranslateKeyToGlfw(Key key)
 	}
 }
 
+// GlfwInputBackend::TranslateMouseButtonToGlfw is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 int GlfwInputBackend::TranslateMouseButtonToGlfw(MouseButton button)
 {
 	switch (button) {
@@ -335,6 +369,7 @@ int GlfwInputBackend::TranslateMouseButtonToGlfw(MouseButton button)
 	}
 }
 
+// GlfwInputBackend::TranslateKeyFromGlfw is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 Key GlfwInputBackend::TranslateKeyFromGlfw(int glfwKey)
 {
 	switch (glfwKey) {
@@ -462,6 +497,7 @@ Key GlfwInputBackend::TranslateKeyFromGlfw(int glfwKey)
 	}
 }
 
+// GlfwInputBackend::TranslateStateFromGlfw is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 KeyState GlfwInputBackend::TranslateStateFromGlfw(int glfwAction)
 {
 	switch (glfwAction) {

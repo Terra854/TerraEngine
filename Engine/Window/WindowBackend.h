@@ -1,3 +1,5 @@
+// WindowBackend.h — Contains declarations for the Window Backend backend adapter state and platform/API translation code used by window configuration, backend contracts, and high-level window system state.
+
 #pragma once
 
 #include <functional>

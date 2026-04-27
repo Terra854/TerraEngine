@@ -1,3 +1,10 @@
+// Export.h — Macros for managing symbol visibility across shared library boundaries.
+//
+// This file defines the TERRAENGINE_API macro, which handles __declspec(dllexport)
+// and __declspec(dllimport) on Windows builds to ensure correct linking. It is
+// essential for exposing engine symbols from the shared library to the launcher,
+// editor, and other external modules.
+
 // Centralized export/import macro for the TerraEngine shared library.
 // When building the engine DLL on Windows, we must explicitly mark all public
 // symbols with dllexport so consumers such as the launcher can link against

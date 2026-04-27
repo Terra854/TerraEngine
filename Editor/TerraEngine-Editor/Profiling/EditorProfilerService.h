@@ -1,3 +1,7 @@
+// EditorProfilerService.h — Editor profiling service interface
+//
+// Defines the high-level service for managing engine profiling sessions within the editor. it handles the coordination of capture recordings, session persistence via the ProfilerCaptureStore, and asynchronous loading of profile artifacts.
+
 #pragma once
 
 #include "ProfilerCaptureStore.h"
@@ -10,6 +14,7 @@
 
 struct EditorContext;
 
+// class EditorProfilerService groups related state and operations so callers have one documented contract.
 class EditorProfilerService
 {
 public:

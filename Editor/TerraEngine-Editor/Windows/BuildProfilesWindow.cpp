@@ -1,3 +1,7 @@
+// BuildProfilesWindow.cpp — Export build profiles window implementation
+//
+// Implements the ImGui-based interface for build profile management. It handles profile lifecycle actions like creation, duplication, and deletion, and integrates with the ThreadPool to run the export process in the background.
+
 // BuildProfilesWindow.cpp — ImGui implementation for the build profiles editor window.
 
 #define IMGUI_DEFINE_MATH_OPERATORS
@@ -17,14 +21,17 @@ namespace
 {
 	constexpr float kProfileListWidth = 220.0f;
 
+	// CollectProjectScenePaths is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::vector<std::string> CollectProjectScenePaths(const std::filesystem::path& projectRoot)
 	{
 		std::vector<std::string> scenePaths;
 		const std::filesystem::path assetsRoot = projectRoot / "Assets";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!std::filesystem::exists(assetsRoot)) {
 			return scenePaths;
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& entry : std::filesystem::recursive_directory_iterator(assetsRoot)) {
 			if (!entry.is_regular_file() || entry.path().extension() != ".tescene") {
 				continue;
@@ -32,6 +39,7 @@ namespace
 
 			std::error_code ec;
 			std::string scenePath = std::filesystem::relative(entry.path(), assetsRoot, ec).generic_string();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!ec && !scenePath.empty()) {
 				scenePaths.push_back(std::move(scenePath));
 			}
@@ -41,6 +49,7 @@ namespace
 		return scenePaths;
 	}
 
+	// DrawSectionHeader is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void DrawSectionHeader(const char* title)
 	{
 		ImGui::TextUnformatted(title);
@@ -49,6 +58,7 @@ namespace
 }
 
 BuildProfilesWindow::BuildProfilesWindow(MainEditorSubsystem* owner)
+	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: EditorWindow("Build Profiles", false), m_Owner(owner)
 {
 	// Default profile directory is relative to the editor working directory.
@@ -56,11 +66,13 @@ BuildProfilesWindow::BuildProfilesWindow(MainEditorSubsystem* owner)
 	LoadProfiles();
 }
 
+// BuildProfilesWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::OnGui() {
 	constexpr ImGuiTableFlags layoutFlags =
 		ImGuiTableFlags_SizingFixedFit |
 		ImGuiTableFlags_NoSavedSettings;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginTable("BuildProfileLayout", 2, layoutFlags, ImGui::GetContentRegionAvail())) {
 		ImGui::TableSetupColumn("Profiles", ImGuiTableColumnFlags_WidthFixed, kProfileListWidth);
 		ImGui::TableSetupColumn("Editor", ImGuiTableColumnFlags_WidthStretch);
@@ -73,6 +85,7 @@ void BuildProfilesWindow::OnGui() {
 
 		ImGui::TableSetColumnIndex(1);
 		ImGui::BeginChild("BuildProfilesContent", ImVec2(0, 0), true);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_SelectedProfileIndex >= 0 && m_SelectedProfileIndex < static_cast<int>(m_Profiles.size())) {
 			DrawProfileEditor();
 			ImGui::Spacing();
@@ -102,10 +115,12 @@ void BuildProfilesWindow::DrawProfileList() {
 		for (int i = 0; i < static_cast<int>(m_Profiles.size()); i++) {
 			const auto& profile = m_Profiles[i];
 			std::string label = profile.name;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (profile.isDirty) {
 				label += " *";
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::Selectable(label.c_str(), m_SelectedProfileIndex == i)) {
 				// Auto-save the previously selected profile if dirty
 				if (m_SelectedProfileIndex >= 0 && m_SelectedProfileIndex < static_cast<int>(m_Profiles.size()) && m_Profiles[m_SelectedProfileIndex].isDirty) {
@@ -122,15 +137,19 @@ void BuildProfilesWindow::DrawProfileList() {
 	ImGui::Spacing();
 
 	// Action buttons below the list.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("New", ImVec2(0, 0))) {
 		CreateNewProfile();
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Duplicate", ImVec2(0, 0))) {
 		DuplicateSelectedProfile();
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Delete", ImVec2(0, 0))) {
 		DeleteSelectedProfile();
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Refresh", ImVec2(0, 0))) {
 		LoadProfiles();
 	}
@@ -163,11 +182,13 @@ void BuildProfilesWindow::DrawProfileEditor() {
 	char outputBuf[512] = {};
 	std::string outputStr = profile.outputDirectory.string();
 	std::copy_n(outputStr.begin(), std::min<size_t>(outputStr.size(), sizeof(outputBuf) - 1), outputBuf);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::InputText("Output Dir", outputBuf, sizeof(outputBuf))) {
 		profile.outputDirectory = outputBuf;
 		profile.isDirty = true;
 	}
 	ImGui::SameLine();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("...##OutputDir")) {
 		IGFD::FileDialogConfig config;
 		std::filesystem::path projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
@@ -185,6 +206,7 @@ void BuildProfilesWindow::DrawProfileEditor() {
 		profile.isDirty = true;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginCombo("Startup Scene", profile.startupScene.empty() ? "<No scenes found>" : profile.startupScene.c_str())) {
 		for (const auto& scenePath : scenePaths) {
 			if (ImGui::Selectable(scenePath.c_str(), profile.startupScene == scenePath)) {
@@ -198,12 +220,15 @@ void BuildProfilesWindow::DrawProfileEditor() {
 	ImGui::Spacing();
 
 	// Compilation settings
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Checkbox("Enable Managed Compilation", &profile.enableManagedCompilation)) {
 		profile.isDirty = true;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Checkbox("Include Debug Symbols", &profile.includeDebugSymbols)) {
 		profile.isDirty = true;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Checkbox("Strip NativeAOT Output", &profile.stripNativeAotOutput)) {
 		profile.isDirty = true;
 	}
@@ -216,12 +241,14 @@ void BuildProfilesWindow::DrawProfileEditor() {
 	DrawSectionHeader("TEPAK Settings");
 	const char* presetItems[] = { "None", "Fast", "Normal", "Best" };
 	int presetIndex = static_cast<int>(profile.compressionPreset);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Combo("Compression", &presetIndex, presetItems, IM_ARRAYSIZE(presetItems))) {
 		profile.compressionPreset = static_cast<CompressionPreset>(presetIndex);
 		profile.isDirty = true;
 	}
 
 	int workers = static_cast<int>(profile.tepakWorkerCount);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::InputInt("Workers (0=auto)", &workers)) {
 			profile.tepakWorkerCount = static_cast<uint32_t>(std::max(0, workers));
 			profile.isDirty = true;
@@ -232,18 +259,22 @@ void BuildProfilesWindow::DrawProfileEditor() {
 	ImGui::Spacing();
 
 	// Save button is optional now due to auto-save, but keeping it for explicit saves
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Save Profile")) {
 		SaveSelectedProfile();
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (profile.isDirty) {
 		ImGui::SameLine();
 		ImGui::TextDisabled("Unsaved changes (auto-saves on change)");
 	}
 
 	// Handle File Dialog
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGuiFileDialog::Instance()->Display("ChooseOutputDir")) {
 		if (ImGuiFileDialog::Instance()->IsOk()) {
 			std::string selectedPath = ImGuiFileDialog::Instance()->GetFilePathName();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (selectedPath.empty()) {
 				selectedPath = ImGuiFileDialog::Instance()->GetCurrentPath();
 			}
@@ -259,10 +290,12 @@ void BuildProfilesWindow::DrawProfileEditor() {
 void BuildProfilesWindow::DrawValidationPanel() {
 	DrawSectionHeader("Validation");
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Validate")) {
 		RunValidation();
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_HasValidationResult) {
 		ImGui::SameLine();
 		if (m_LastValidationResult.passed) {
@@ -276,11 +309,13 @@ void BuildProfilesWindow::DrawValidationPanel() {
 		}
 
 		// Show diagnostic list.
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!m_LastValidationResult.diagnostics.empty()) {
 			if (ImGui::BeginChild("ValidationDiagnostics", ImVec2(0, 120), true)) {
 				for (const auto& diag : m_LastValidationResult.diagnostics) {
 					ImVec4 color;
 					const char* prefix;
+					// Dispatch by explicit engine state so each case documents one supported behavior.
 					switch (diag.severity) {
 					case ExportDiagnosticSeverity::Error:
 						color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
@@ -297,6 +332,7 @@ void BuildProfilesWindow::DrawValidationPanel() {
 					}
 					ImGui::TextColored(color, "%s %s: %s", prefix,
 						diag.category.c_str(), diag.message.c_str());
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (!diag.filePath.empty()) {
 						ImGui::SameLine();
 						ImGui::TextDisabled("(%s:%d)", diag.filePath.c_str(), diag.line);
@@ -313,6 +349,7 @@ void BuildProfilesWindow::DrawValidationPanel() {
 void BuildProfilesWindow::DrawExportPanel() {
 	DrawSectionHeader("Export");
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_ExportInProgress) {
 		// Show progress bar and status.
 		ImGui::ProgressBar(m_CurrentProgress.overallProgress,
@@ -320,14 +357,17 @@ void BuildProfilesWindow::DrawExportPanel() {
 			m_CurrentProgress.statusMessage.c_str());
 	}
 	else {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Export Build", ImVec2(-1, 30))) {
 			StartExport();
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Build And Run", ImVec2(-1, 30))) {
 			StartExportAndRun();
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_HasExportResult && !m_ExportInProgress) {
 		ImGui::Spacing();
 		if (m_LastExportResult.success) {
@@ -335,6 +375,7 @@ void BuildProfilesWindow::DrawExportPanel() {
 				"Export succeeded in %.1fs", m_LastExportResult.totalElapsedSeconds);
 			ImGui::TextDisabled("Output: %s", m_LastExportResult.outputDirectory.string().c_str());
 			
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (m_RunAfterExport) {
 				m_RunAfterExport = false;
 				std::string launcherPath = (m_LastExportResult.outputDirectory / "TerraEngine-Launcher.exe").string();
@@ -366,6 +407,7 @@ void BuildProfilesWindow::CreateNewProfile() {
 	m_SelectedProfileIndex = static_cast<int>(m_Profiles.size()) - 1;
 }
 
+// BuildProfilesWindow::DuplicateSelectedProfile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::DuplicateSelectedProfile() {
 	if (m_SelectedProfileIndex < 0 || m_SelectedProfileIndex >= static_cast<int>(m_Profiles.size())) {
 		return;
@@ -380,12 +422,14 @@ void BuildProfilesWindow::DuplicateSelectedProfile() {
 	m_SelectedProfileIndex = static_cast<int>(m_Profiles.size()) - 1;
 }
 
+// BuildProfilesWindow::DeleteSelectedProfile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::DeleteSelectedProfile() {
 	if (m_SelectedProfileIndex < 0 || m_SelectedProfileIndex >= static_cast<int>(m_Profiles.size())) {
 		return;
 	}
 
 	const auto& profile = m_Profiles[m_SelectedProfileIndex];
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!profile.filePath.empty() && std::filesystem::exists(profile.filePath)) {
 		std::filesystem::remove(profile.filePath);
 	}
@@ -397,23 +441,27 @@ void BuildProfilesWindow::DeleteSelectedProfile() {
 	m_HasExportResult = false;
 }
 
+// BuildProfilesWindow::SaveSelectedProfile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::SaveSelectedProfile() {
 	if (m_SelectedProfileIndex < 0 || m_SelectedProfileIndex >= static_cast<int>(m_Profiles.size())) {
 		return;
 	}
 
 	auto& profile = m_Profiles[m_SelectedProfileIndex];
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (profile.id.empty()) {
 		profile.id = GenerateBuildProfileId();
 	}
 
 	const auto path = m_ProfileDirectory / (profile.id + ".json");
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (SaveBuildProfile(profile, path)) {
 		profile.filePath = path;
 		profile.isDirty = false;
 	}
 }
 
+// BuildProfilesWindow::AutoSaveDirtyProfiles is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::AutoSaveDirtyProfiles() {
 	// A simple timer-based or full list validation approach could be here.
 	// For now, if the currently selected profile is dirty, keep a flag or save occasionally.
@@ -427,9 +475,11 @@ void BuildProfilesWindow::LoadProfiles() {
 	m_HasExportResult = false;
 }
 
+// BuildProfilesWindow::OnProjectOpened is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::OnProjectOpened() {
 	if (m_Owner && m_Owner->GetContext() && m_Owner->GetContext()->projectManager->HasActiveProject()) {
 		m_ProfileDirectory = m_Owner->GetContext()->projectManager->GetProjectRoot() / "BuildProfiles";
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!std::filesystem::exists(m_ProfileDirectory)) {
 			std::filesystem::create_directories(m_ProfileDirectory);
 		}
@@ -437,6 +487,7 @@ void BuildProfilesWindow::OnProjectOpened() {
 	}
 }
 
+// BuildProfilesWindow::RunValidation is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::RunValidation() {
 	if (m_SelectedProfileIndex < 0 || m_SelectedProfileIndex >= static_cast<int>(m_Profiles.size())) {
 		return;
@@ -448,10 +499,12 @@ void BuildProfilesWindow::RunValidation() {
 	m_HasValidationResult = true;
 }
 
+// BuildProfilesWindow::StartExport is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::StartExport() {
 	if (m_SelectedProfileIndex < 0 || m_SelectedProfileIndex >= static_cast<int>(m_Profiles.size())) {
 		return;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_ExportInProgress) {
 		return;
 	}
@@ -471,6 +524,7 @@ void BuildProfilesWindow::StartExport() {
 	auto exportTask = ThreadPool::instance().createTask([this, profile, projectRoot]() {
 		// Unload the gameplay assembly before starting managed compilation to
 		// avoid file locks on Assembly-CSharp.dll.
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (profile.enableManagedCompilation) {
 			ScriptingSystem::Instance().ClearGameplayAssembly();
 		}
@@ -479,6 +533,7 @@ void BuildProfilesWindow::StartExport() {
 		m_LastExportResult = pipeline.Execute(profile, projectRoot,
 			[this](const ExportProgress& progress) {
 				m_CurrentProgress = progress;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (progress.finished) {
 					m_ExportInProgress = false;
 					m_HasExportResult = true;
@@ -494,6 +549,7 @@ void BuildProfilesWindow::StartExport() {
 		m_HasExportResult = true;
 
 		// Re-trigger a script build/reload to restore editor functionality.
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (profile.enableManagedCompilation) {
 			ScriptCompilationSubsystem::Instance().RequestBuild(ScriptBuildReason::ManualRefresh);
 		}
@@ -501,6 +557,7 @@ void BuildProfilesWindow::StartExport() {
 	ThreadPool::instance().enqueue(exportTask);
 }
 
+// BuildProfilesWindow::StartExportAndRun is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void BuildProfilesWindow::StartExportAndRun() {
 	StartExport();
 	if (m_ExportInProgress) {

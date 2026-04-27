@@ -1,9 +1,12 @@
+// ProfilerScope.h — Contains declarations for the Profiler Scope file-specific types, helper functions, and module integration code used by runtime profiling sessions, timing markers, capture serialization, and scope helpers.
+
 #pragma once
 
 #include "Profiling/Profiler.h"
 
 namespace TerraEngine::Profiling
 {
+// class ProfilerScope groups related state and operations so callers have one documented contract.
 class ProfilerScope
 {
 public:
@@ -15,6 +18,7 @@ public:
 
 	~ProfilerScope()
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (active)
 		{
 			Profiler::Instance().EndSample();

@@ -1,3 +1,10 @@
+// InputSystem.h — Interface for the engine's central input management system.
+//
+// This file declares the InputSystem class, which acts as the authoritative source
+// for all input state within the engine. It manages the lifecycle of the active
+// input backend and provides a normalized API for systems and scripts to
+// interrogate input events in a backend-independent manner.
+
 #pragma once
 
 #include <array>

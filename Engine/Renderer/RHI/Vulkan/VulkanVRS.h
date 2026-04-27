@@ -1,3 +1,9 @@
+// VulkanVRS.h — Vulkan Variable Rate Shading Wrapper
+//
+// Defines the Vulkan-specific implementation of Variable Rate Shading (VRS) support.
+// It manages the shading rate image, its memory allocation, and the necessary views for integration into the render pass.
+// This allows the renderer to dynamically adjust pixel shading frequency across different regions of the frame for improved performance.
+
 #pragma once
 
 #include "VulkanCommonIncludes.h"

@@ -1,5 +1,8 @@
+// Transform.cs — Contains the managed Transform API surface, properties, native-call bindings, and script/editor workflow helpers for C# scripting API types that mirror native engine objects, components, and services.
+
 namespace TerraEngine
 {
+    // Transform is the managed-facing contract for this subsystem; keep it predictable for scripts.
     public class Transform : Component
     {
         public Vector3 Position

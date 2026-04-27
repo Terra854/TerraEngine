@@ -1,3 +1,5 @@
+// ExportVTable.h — Contains declarations for the Export V Table file-specific types, helper functions, and module integration code used by native script glue, exported C# vtables, and scripting system lifecycle state.
+
 // ExportVTable.h — C-compatible interop contract for NativeAOT exported builds.
 //
 // In exported (NativeAOT) builds the managed gameplay layer compiles ahead-of-time
@@ -32,6 +34,7 @@ enum class ExportFieldValueKind : int32_t {
 	String = 8
 };
 
+// struct ExportFieldDescriptor groups related state and operations so callers have one documented contract.
 struct ExportFieldDescriptor {
 	int32_t   fieldIndex;       // Zero-based index within the script type
 	int32_t   valueKind;        // ExportFieldValueKind value for this field

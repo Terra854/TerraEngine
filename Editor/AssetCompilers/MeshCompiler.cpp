@@ -1,3 +1,7 @@
+// MeshCompiler.cpp — Mesh compilation pipeline implementation
+//
+// Implements the mesh compilation logic, including source file importing via Assimp, normal smoothing, and tangent generation. It utilizes meshoptimizer for meshlet generation and packs the final data into a high-performance binary format suitable for GPU-driven rendering.
+
 #include "MeshCompiler.h"
 
 #include <algorithm>
@@ -39,12 +43,14 @@ namespace
 		".ply",
 		".stl"};
 
+	// AlignUp is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t AlignUp(std::uint32_t value, std::uint32_t alignment)
 	{
 		const std::uint32_t mask = alignment - 1u;
 		return (value + mask) & ~mask;
 	}
 
+	// struct QuantizedVertexKey groups related state and operations so callers have one documented contract.
 	struct QuantizedVertexKey
 	{
 		std::int32_t positionX;
@@ -69,6 +75,7 @@ namespace
 		}
 	};
 
+	// struct QuantizedVertexKeyHasher groups related state and operations so callers have one documented contract.
 	struct QuantizedVertexKeyHasher
 	{
 		std::size_t operator()(const QuantizedVertexKey& key) const noexcept
@@ -90,6 +97,7 @@ namespace
 		}
 	};
 
+	// struct VertexRaw groups related state and operations so callers have one documented contract.
 	struct VertexRaw
 	{
 		std::array<float, 3> position;
@@ -99,6 +107,7 @@ namespace
 		float tangentW = 1.0f; // Sign for bitangent calculation
 	};
 
+	// struct FaceInfo groups related state and operations so callers have one documented contract.
 	struct FaceInfo
 	{
 		std::array<uint32_t, 3> indices;
@@ -114,6 +123,7 @@ namespace
 		outFaces.clear();
 		outFaces.reserve(indices.size() / 3);
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t i = 0; i < indices.size(); i += 3)
 		{
 			FaceInfo face;
@@ -132,6 +142,7 @@ namespace
 			float nz = e1[0] * e2[1] - e1[1] * e2[0];
 
 			float length = std::sqrt(nx * nx + ny * ny + nz * nz);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (length > 1e-9f)
 			{
 				face.faceNormal = {nx / length, ny / length, nz / length};
@@ -147,6 +158,7 @@ namespace
 		}
 	}
 
+	// SmoothNormals is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SmoothNormals(std::vector<VertexRaw>& unindexedVertices, const std::vector<std::uint32_t>& unindexedIndices, float smoothingAngleDeg, float weldThreshold)
 	{
 		const float cosThreshold = std::cos(smoothingAngleDeg * (kPi / 180.0f));
@@ -163,7 +175,9 @@ namespace
 			uint32_t faceIdx;
 
 			bool operator<(const CornerInfo& other) const {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (x != other.x) return x < other.x;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (y != other.y) return y < other.y;
 				return z < other.z;
 			}
@@ -173,6 +187,7 @@ namespace
 		};
 
 		std::vector<CornerInfo> corners(unindexedVertices.size());
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (uint32_t i = 0; i < unindexedVertices.size(); ++i) {
 			const auto& pos = unindexedVertices[i].position;
 			corners[i] = {
@@ -187,9 +202,11 @@ namespace
 		std::sort(corners.begin(), corners.end());
 
 		// Process each run of identical positions
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t i = 0; i < corners.size(); )
 		{
 			size_t runEnd = i + 1;
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			while (runEnd < corners.size() && corners[runEnd] == corners[i]) {
 				runEnd++;
 			}
@@ -206,6 +223,7 @@ namespace
 			std::vector<uint32_t> assignedGroup(runLength, 0xFFFFFFFF);
 			uint32_t groupCount = 0;
 
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (size_t j = 0; j < runLength; ++j)
 			{
 				if (assignedGroup[j] != 0xFFFFFFFF) continue;
@@ -214,6 +232,7 @@ namespace
 				assignedGroup[j] = currentGroup;
 
 				std::vector<size_t> stack = { j };
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				while (!stack.empty())
 				{
 					size_t aIdx = stack.back();
@@ -221,6 +240,7 @@ namespace
 
 					const auto& normalA = faces[corners[i + aIdx].faceIdx].faceNormal;
 
+					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 					for (size_t k = 0; k < runLength; ++k)
 					{
 						if (assignedGroup[k] != 0xFFFFFFFF) continue;
@@ -228,6 +248,7 @@ namespace
 						const auto& normalB = faces[corners[i + k].faceIdx].faceNormal;
 						float dot = normalA[0] * normalB[0] + normalA[1] * normalB[1] + normalA[2] * normalB[2];
 
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (dot >= cosThreshold)
 						{
 							assignedGroup[k] = currentGroup;
@@ -238,16 +259,19 @@ namespace
 			}
 
 			// Calculate average normal for each group and assign
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (uint32_t g = 0; g < groupCount; ++g)
 			{
 				float nx = 0, ny = 0, nz = 0;
 				uint32_t firstFaceIdx = 0xFFFFFFFF;
 
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (size_t j = 0; j < runLength; ++j)
 				{
 					if (assignedGroup[j] == g)
 					{
 						uint32_t fIdx = corners[i + j].faceIdx;
+						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (firstFaceIdx == 0xFFFFFFFF) firstFaceIdx = fIdx;
 
 						float area = faces[fIdx].area;
@@ -259,6 +283,7 @@ namespace
 
 				float mag = std::sqrt(nx * nx + ny * ny + nz * nz);
 				std::array<float, 3> finalNormal;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (mag > 1e-9f) {
 					finalNormal = {nx / mag, ny / mag, nz / mag};
 				} else {
@@ -266,6 +291,7 @@ namespace
 				}
 
 				// Assign to all vertices in this group
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (size_t j = 0; j < runLength; ++j)
 				{
 					if (assignedGroup[j] == g)
@@ -279,6 +305,7 @@ namespace
 		}
 	}
 	// MikkTSpace interface implementation
+	// struct MikkContext groups related state and operations so callers have one documented contract.
 	struct MikkContext
 	{
 		std::vector<VertexRaw>* vertices;
@@ -287,17 +314,20 @@ namespace
 		std::vector<uint32_t> outIndices;
 	};
 
+	// MikkGetNumFaces is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	int MikkGetNumFaces(const SMikkTSpaceContext* pContext)
 	{
 		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
 		return static_cast<int>(ctx->indices->size() / 3);
 	}
 
+	// MikkGetNumVerticesOfFace is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	int MikkGetNumVerticesOfFace(const SMikkTSpaceContext* pContext, const int iFace)
 	{
 		return 3;
 	}
 
+	// MikkGetPosition is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void MikkGetPosition(const SMikkTSpaceContext* pContext, float fvPosOut[], const int iFace, const int iVert)
 	{
 		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
@@ -306,6 +336,7 @@ namespace
 		fvPosOut[0] = pos[0]; fvPosOut[1] = pos[1]; fvPosOut[2] = pos[2];
 	}
 
+	// MikkGetNormal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void MikkGetNormal(const SMikkTSpaceContext* pContext, float fvNormOut[], const int iFace, const int iVert)
 	{
 		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
@@ -314,6 +345,7 @@ namespace
 		fvNormOut[0] = norm[0]; fvNormOut[1] = norm[1]; fvNormOut[2] = norm[2];
 	}
 
+	// MikkGetTexCoord is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void MikkGetTexCoord(const SMikkTSpaceContext* pContext, float fvTexcOut[], const int iFace, const int iVert)
 	{
 		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
@@ -322,6 +354,7 @@ namespace
 		fvTexcOut[0] = uv[0]; fvTexcOut[1] = uv[1];
 	}
 
+	// MikkSetTSpaceBasic is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void MikkSetTSpaceBasic(const SMikkTSpaceContext* pContext, const float fvTangent[], const float fSign, const int iFace, const int iVert)
 	{
 		auto* ctx = static_cast<MikkContext*>(pContext->m_pUserData);
@@ -331,6 +364,7 @@ namespace
 		v.tangentW = fSign;
 	}
 
+	// GenerateTangents is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void GenerateTangents(std::vector<VertexRaw>& vertices, std::vector<std::uint32_t>& indices)
 	{
 		MikkContext mikkCtx;
@@ -354,6 +388,7 @@ namespace
 		genTangSpaceDefault(&context);
 	}
 
+	// struct MeshletBuildOutput groups related state and operations so callers have one documented contract.
 	struct MeshletBuildOutput
 	{
 		std::vector<std::uint32_t> vertexRemapIndices;
@@ -363,6 +398,7 @@ namespace
 		std::vector<MeshletBounds> meshletBounds;
 	};
 
+	// NormalizeExtension is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string NormalizeExtension(const std::filesystem::path& filePath)
 	{
 		std::string ext = filePath.extension().string();
@@ -372,6 +408,7 @@ namespace
 		return ext;
 	}
 
+	// ShouldFlipTexcoordV is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool ShouldFlipTexcoordV(const std::filesystem::path& inputPath)
 	{
 		// Preserve the legacy OBJ behavior exactly so the importer swap does not
@@ -379,6 +416,7 @@ namespace
 		return NormalizeExtension(inputPath) == ".obj";
 	}
 
+	// ExtractPosition is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::array<float, 3> ExtractPosition(const aiVector3D& value)
 	{
 		return {
@@ -387,6 +425,7 @@ namespace
 			value.z};
 	}
 
+	// ExtractNormal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::array<float, 3> ExtractNormal(const aiMesh& mesh, unsigned int vertexIndex)
 	{
 		if (!mesh.HasNormals())
@@ -401,6 +440,7 @@ namespace
 			normal.z};
 	}
 
+	// ExtractTexcoord is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::array<float, 2> ExtractTexcoord(const aiMesh& mesh, unsigned int vertexIndex, bool flipV)
 	{
 		if (!mesh.HasTextureCoords(0))
@@ -426,6 +466,7 @@ namespace
 		outRawIndices.clear();
 		outHasUv = false;
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!IsSupportedMeshSourceExtension(input))
 		{
 			std::cerr << "Unsupported mesh source format '" << input.extension().string()
@@ -444,6 +485,7 @@ namespace
 			| aiProcess_FindInvalidData;
 
 		const aiScene* scene = importer.ReadFile(input.string(), importFlags);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (scene == nullptr || scene->mRootNode == nullptr || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) != 0u)
 		{
 			std::cerr << "Error: " << importer.GetErrorString() << "\n";
@@ -452,14 +494,17 @@ namespace
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (scene->HasAnimations())
 		{
 			std::cerr << "Warning: ignoring animation data while compiling static mesh source '" << input << "'.\n";
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (scene->HasLights())
 		{
 			std::cerr << "Warning: ignoring light data while compiling static mesh source '" << input << "'.\n";
 		}
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (scene->HasCameras())
 		{
 			std::cerr << "Warning: ignoring camera data while compiling static mesh source '" << input << "'.\n";
@@ -474,11 +519,13 @@ namespace
 		for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex)
 		{
 			const aiMesh* mesh = scene->mMeshes[meshIndex];
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (mesh == nullptr || mesh->mNumVertices == 0 || mesh->mNumFaces == 0)
 			{
 				continue;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (mesh->HasBones() && !warnedAboutBones)
 			{
 				std::cerr << "Warning: ignoring skinning weights and bones while compiling static mesh source '" << input << "'.\n";
@@ -488,18 +535,22 @@ namespace
 			const bool meshHasUv = mesh->HasTextureCoords(0);
 			outHasUv = outHasUv || meshHasUv;
 
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (unsigned int faceIndex = 0; faceIndex < mesh->mNumFaces; ++faceIndex)
 			{
 				const aiFace& face = mesh->mFaces[faceIndex];
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (face.mNumIndices != 3u)
 				{
 					++skippedNonTriangleFaces;
 					continue;
 				}
 
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (unsigned int localIndex = 0; localIndex < face.mNumIndices; ++localIndex)
 				{
 					const unsigned int vertexIndex = face.mIndices[localIndex];
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (vertexIndex >= mesh->mNumVertices)
 					{
 						std::cerr << "Error: imported mesh face references a vertex outside the source vertex array.\n";
@@ -518,12 +569,14 @@ namespace
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (skippedNonTriangleFaces > 0u)
 		{
 			std::cerr << "Warning: skipped " << skippedNonTriangleFaces
 				<< " non-triangle faces while normalizing source mesh '" << input << "'.\n";
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outRawIndices.empty())
 		{
 			std::cerr << "No triangle geometry found in source mesh: " << input << "\n";
@@ -535,6 +588,7 @@ namespace
 		return true;
 	}
 
+	// QuantizeFloat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::int32_t QuantizeFloat(float value, float scale)
 	{
 		return static_cast<std::int32_t>(std::round(value * scale));
@@ -558,6 +612,7 @@ namespace
 			QuantizeFloat(uv[1], 4096.0f)};
 	}
 
+	// PackR10G10B10A2Snorm is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t PackR10G10B10A2Snorm(const std::array<float, 3>& value, float w = 0.0f)
 	{
 		const auto clamp = [](float input) {
@@ -582,6 +637,7 @@ namespace
 		return (wBits << 30) | (z << 20) | (y << 10) | x;
 	}
 
+	// PackOct32Normal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t PackOct32Normal(const std::array<float, 3>& n)
 	{
 		// Octahedral encoding maps a unit vector to a 2D point in a [-1, 1] square.
@@ -590,6 +646,7 @@ namespace
 		float x = n[0] / l1;
 		float y = n[1] / l1;
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (n[2] < 0.0f)
 		{
 			float oldX = x;
@@ -606,6 +663,7 @@ namespace
 		return (to16(y) << 16) | to16(x);
 	}
 
+	// PackR16G16Unorm is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::uint32_t PackR16G16Unorm(const std::array<float, 2>& value)
 	{
 		const auto clamp = [](float input) {
@@ -623,6 +681,7 @@ namespace
 		return (y << 16) | x;
 	}
 
+	// TryConvertCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool TryConvertCount(std::size_t value, const char* label, std::uint32_t& outValue)
 	{
 		if (value > std::numeric_limits<std::uint32_t>::max())
@@ -645,10 +704,12 @@ namespace
 		outBytes.resize(remapIndices.size() * static_cast<std::size_t>(elementSize));
 		std::uint8_t* writeCursor = outBytes.data();
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::uint32_t remapValue : remapIndices)
 		{
 			if (encoding == MeshletRemapEncoding::Uint16)
 			{
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (remapValue > std::numeric_limits<std::uint16_t>::max())
 				{
 					std::cerr << "u16 remap encoding overflow for vertex index " << remapValue << ".\n";
@@ -670,6 +731,7 @@ namespace
 	}
 
 	template <typename T>
+	// ReleaseVectorMemory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ReleaseVectorMemory(std::vector<T>& values)
 	{
 		// Swap with an empty vector so the allocator can release large transient
@@ -677,9 +739,11 @@ namespace
 		std::vector<T>().swap(values);
 	}
 
+	// ComputeFileHashHex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string ComputeFileHashHex(const std::filesystem::path& filePath)
 	{
 		std::ifstream in(filePath, std::ios::binary);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!in)
 		{
 			return {};
@@ -688,10 +752,12 @@ namespace
 		std::uint64_t hash = 1469598103934665603ull;
 		const std::uint64_t prime = 1099511628211ull;
 		std::array<char, 4096> buffer{};
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		while (in)
 		{
 			in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
 			const std::streamsize readCount = in.gcount();
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::streamsize index = 0; index < readCount; ++index)
 			{
 				hash ^= static_cast<std::uint8_t>(buffer[static_cast<std::size_t>(index)]);
@@ -704,15 +770,18 @@ namespace
 		return out.str();
 	}
 
+	// WritePadding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void WritePadding(std::ofstream& out, std::uint32_t targetOffset)
 	{
 		const std::streamoff currentOffset = static_cast<std::streamoff>(out.tellp());
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (currentOffset < 0)
 		{
 			throw std::runtime_error("Failed to query output stream position");
 		}
 
 		const std::uint32_t current = static_cast<std::uint32_t>(currentOffset);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (targetOffset <= current)
 		{
 			return;
@@ -720,6 +789,7 @@ namespace
 
 		const std::array<char, 4096> zeroBytes{};
 		std::uint32_t remaining = targetOffset - current;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		while (remaining > 0u)
 		{
 			const std::size_t chunkSize = std::min<std::size_t>(remaining, zeroBytes.size());
@@ -728,10 +798,12 @@ namespace
 		}
 	}
 
+	// ValidateFixedGpuLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool ValidateFixedGpuLayout(const MeshHeader& header)
 	{
 		// The direct-replacement format intentionally keeps one fixed layout so
 		// runtime never has to branch or repack bytes for mesh shader uploads.
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.layout.strideBytes != kMeshletPackedVertexStrideBytes)
 		{
 			std::cerr << "Unexpected packed vertex stride. Expected " << kMeshletPackedVertexStrideBytes
@@ -739,6 +811,7 @@ namespace
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.layout.attributeCount != 4u)
 		{
 			std::cerr << "Unexpected packed vertex attribute count. Expected 4, got "
@@ -764,10 +837,12 @@ namespace
 				static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
 				12u}};
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t attributeIndex = 0; attributeIndex < 4u; ++attributeIndex)
 		{
 			const VertexAttribute& current = header.layout.attributes[attributeIndex];
 			const VertexAttribute& expected = expectedLayout[attributeIndex];
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (current.semantic != expected.semantic
 				|| current.format != expected.format
 				|| current.offsetBytes != expected.offsetBytes)
@@ -777,12 +852,14 @@ namespace
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (kMeshletPrimitiveIndexSizeBytes != sizeof(std::uint8_t))
 		{
 			std::cerr << "Primitive stream element width must stay fixed at uint8.\n";
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (kMeshletMaxVertices > std::numeric_limits<std::uint8_t>::max())
 		{
 			std::cerr << "Meshlet max vertices must fit uint8 primitive elements.\n";
@@ -792,6 +869,7 @@ namespace
 		return true;
 	}
 
+	// struct PayloadLayout groups related state and operations so callers have one documented contract.
 	struct PayloadLayout
 	{
 		std::uint32_t vertexBytes = 0;
@@ -822,6 +900,7 @@ namespace
 		PayloadLayout& outLayout)
 	{
 		const auto TryToU32 = [](std::size_t value, const char* label, std::uint32_t& outValue) -> bool {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (value > std::numeric_limits<std::uint32_t>::max())
 			{
 				std::cerr << "Payload size overflow for " << label << ": " << value << ".\n";
@@ -832,6 +911,7 @@ namespace
 			return true;
 		};
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryToU32(vertexBytes, "vertex stream", outLayout.vertexBytes)
 			|| !TryToU32(vertexRemapBytes, "remap stream", outLayout.vertexRemapBytes)
 			|| !TryToU32(skinningBytes, "skinning stream", outLayout.skinningBytes)
@@ -876,6 +956,7 @@ namespace
 		const std::vector<MeshletBounds>& meshletBounds)
 	{
 		std::ofstream out(outputPath, std::ios::binary);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!out)
 		{
 			throw std::runtime_error("Failed to open output file: " + outputPath.string());
@@ -889,6 +970,7 @@ namespace
 		WritePadding(out, header.meshletVertexRemapDataOffset);
 		out.write(reinterpret_cast<const char*>(vertexRemapData.data()), static_cast<std::streamsize>(vertexRemapData.size()));
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!skinningData.empty())
 		{
 			WritePadding(out, header.meshletSkinningDataOffset);
@@ -904,6 +986,7 @@ namespace
 		WritePadding(out, header.meshletSectionOffset);
 		out.write(reinterpret_cast<const char*>(meshletSections.data()), static_cast<std::streamsize>(meshletSections.size() * sizeof(MeshletSection)));
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!meshletBounds.empty())
 		{
 			WritePadding(out, header.meshletBoundsOffset);
@@ -917,12 +1000,14 @@ namespace
 		bool includeBounds,
 		MeshletBuildOutput& output)
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vertices.empty() || indices.empty())
 		{
 			std::cerr << "Cannot build meshlets from empty vertex/index payload.\n";
 			return false;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if ((indices.size() % 3u) != 0u)
 		{
 			std::cerr << "Non-triangulated primitive output detected before meshlet build.\n";
@@ -948,6 +1033,7 @@ namespace
 			kMeshletMaxTriangles,
 			0.0f);
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (meshletCount == 0)
 		{
 			std::cerr << "meshoptimizer failed to generate any meshlets.\n";
@@ -956,6 +1042,7 @@ namespace
 
 		meshlets.resize(meshletCount);
 		output.meshletRecords.reserve(meshletCount);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (includeBounds)
 		{
 			output.meshletBounds.reserve(meshletCount);
@@ -964,6 +1051,7 @@ namespace
 		output.primitiveIndices.reserve(indices.size());
 
 		// Keep this loop sequential to preserve deterministic byte offsets in output artifacts.
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const meshopt_Meshlet& sourceMeshlet : meshlets)
 		{
 			if (sourceMeshlet.vertex_count == 0 || sourceMeshlet.triangle_count == 0)
@@ -979,6 +1067,7 @@ namespace
 				sourceMeshlet.vertex_count);
 
 			MeshletRecord record{};
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!TryConvertCount(output.vertexRemapIndices.size(), "meshlet vertex remap offset", record.vertexOffset))
 			{
 				return false;
@@ -986,9 +1075,11 @@ namespace
 
 			record.vertexCount = sourceMeshlet.vertex_count;
 
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::size_t localVertex = 0; localVertex < sourceMeshlet.vertex_count; ++localVertex)
 			{
 				const std::uint32_t sourceVertex = meshletVertices[sourceMeshlet.vertex_offset + localVertex];
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (sourceVertex >= vertices.size())
 				{
 					std::cerr << "meshoptimizer vertex indirection points outside source vertex array.\n";
@@ -998,6 +1089,7 @@ namespace
 				output.vertexRemapIndices.push_back(sourceVertex);
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!TryConvertCount(output.primitiveIndices.size(), "meshlet primitive offset", record.primitiveIndexOffset))
 			{
 				return false;
@@ -1005,9 +1097,11 @@ namespace
 
 			record.primitiveIndexCount = sourceMeshlet.triangle_count * 3u;
 
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::size_t localPrimitive = 0; localPrimitive < static_cast<std::size_t>(record.primitiveIndexCount); ++localPrimitive)
 			{
 				const std::uint8_t localVertex = meshletTriangles[sourceMeshlet.triangle_offset + localPrimitive];
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (localVertex >= sourceMeshlet.vertex_count)
 				{
 					std::cerr << "meshoptimizer triangle payload references an out-of-range local vertex.\n";
@@ -1019,6 +1113,7 @@ namespace
 
 			output.meshletRecords.push_back(record);
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (includeBounds)
 			{
 				const meshopt_Bounds computedBounds = meshopt_computeMeshletBounds(
@@ -1046,6 +1141,7 @@ namespace
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (output.primitiveIndices.empty() || (output.primitiveIndices.size() % 3u) != 0u)
 		{
 			std::cerr << "Meshlet primitive stream is empty or non-triangulated after meshlet build.\n";
@@ -1054,6 +1150,7 @@ namespace
 
 		MeshletSection section{};
 		section.meshletOffset = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryConvertCount(output.meshletRecords.size(), "meshlet section meshlet count", section.meshletCount))
 		{
 			return false;
@@ -1064,6 +1161,7 @@ namespace
 	}
 }
 
+// IsSupportedMeshSourceExtension is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool IsSupportedMeshSourceExtension(const std::filesystem::path& filePath)
 {
 	const std::string ext = NormalizeExtension(filePath);
@@ -1073,9 +1171,11 @@ bool IsSupportedMeshSourceExtension(const std::filesystem::path& filePath)
 		std::string_view(ext)) != kSupportedMeshSourceExtensions.end();
 }
 
+// GetSupportedMeshSourceExtensionsText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string GetSupportedMeshSourceExtensionsText()
 {
 	std::string result;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t index = 0; index < kSupportedMeshSourceExtensions.size(); ++index)
 	{
 		if (!result.empty())
@@ -1101,12 +1201,14 @@ bool CompileMesh(
 	report.assetPath = input;
 	report.formatVersion = kMeshCurrentVersion;
 	report.sourceHashHex = ComputeFileHashHex(input);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(input))
 	{
 		report.sourceBytes = std::filesystem::file_size(input);
 	}
 
 	const auto FinalizeReport = [&](bool result) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outReport != nullptr)
 		{
 			*outReport = report;
@@ -1117,6 +1219,7 @@ bool CompileMesh(
 	std::vector<VertexRaw> rawVertices;
 	std::vector<std::uint32_t> rawIndices;
 	bool hasUv = false;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ImportSourceMesh(input, report, rawVertices, rawIndices, hasUv))
 	{
 		return FinalizeReport(false);
@@ -1167,6 +1270,7 @@ bool CompileMesh(
 		std::numeric_limits<float>::lowest(),
 		std::numeric_limits<float>::lowest()};
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& v : vertices)
 	{
 		for (int component = 0; component < 3; ++component)
@@ -1180,6 +1284,7 @@ bool CompileMesh(
 		maxUv[1] = std::max(maxUv[1], v.uv[1]);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (indices.empty())
 	{
 		std::cerr << "No geometry found in source mesh: " << input << "\n";
@@ -1188,6 +1293,7 @@ bool CompileMesh(
 		return FinalizeReport(false);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if ((indices.size() % 3u) != 0u)
 	{
 		std::cerr << "MeshCompiler generated non-triangulated primitive output for source mesh: " << input << "\n";
@@ -1197,6 +1303,7 @@ bool CompileMesh(
 	}
 
 	MeshletBuildOutput meshletPayload{};
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!BuildMeshletPayload(vertices, indices, includeMeshletBounds, meshletPayload))
 	{
 		report.status = "compile_fail";
@@ -1215,6 +1322,7 @@ bool CompileMesh(
 	header.version = kMeshCurrentVersion;
 	header.headerSize = static_cast<std::uint32_t>(sizeof(MeshHeader));
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TryConvertCount(vertices.size(), "meshlet global vertex count", header.meshletVertexCount)
 		|| !TryConvertCount(meshletPayload.vertexRemapIndices.size(), "meshlet vertex remap count", header.meshletVertexRemapCount)
 		|| !TryConvertCount(meshletPayload.primitiveIndices.size(), "meshlet primitive index count", header.meshletPrimitiveIndexCount)
@@ -1255,6 +1363,7 @@ bool CompileMesh(
 
 	report.meshletGlobalVertexCount = header.meshletVertexCount;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ValidateFixedGpuLayout(header))
 	{
 		report.status = "compile_fail";
@@ -1262,6 +1371,7 @@ bool CompileMesh(
 		return FinalizeReport(false);
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int component = 0; component < 3; ++component)
 	{
 		header.quantization.positionOffset[component] = (minPos[component] + maxPos[component]) * 0.5f;
@@ -1278,6 +1388,7 @@ bool CompileMesh(
 	std::uint8_t* vertexWriteCursor = vertexData.data();
 
 	// Keep packing deterministic so binary assets remain stable across repeated runs.
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const VertexRaw& vertex : vertices)
 	{
 		std::array<float, 3> qPosition{
@@ -1287,6 +1398,7 @@ bool CompileMesh(
 
 		std::array<float, 3> qNormal = vertex.normal;
 		const float normalLengthSq = qNormal[0] * qNormal[0] + qNormal[1] * qNormal[1] + qNormal[2] * qNormal[2];
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (normalLengthSq > 0.0f)
 		{
 			const float invNormalLength = 1.0f / std::sqrt(normalLengthSq);
@@ -1329,6 +1441,7 @@ bool CompileMesh(
 	}
 
 	// The remap stream maps meshlet-local vertex indices to shared global vertices.
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::size_t remapIndex = 0; remapIndex < meshletPayload.vertexRemapIndices.size(); ++remapIndex)
 	{
 		if (meshletPayload.vertexRemapIndices[remapIndex] >= header.meshletVertexCount)
@@ -1342,6 +1455,7 @@ bool CompileMesh(
 
 	const MeshletRemapEncoding remapEncoding = static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding);
 	std::vector<std::uint8_t> remapData;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!BuildRemapStream(meshletPayload.vertexRemapIndices, remapEncoding, remapData))
 	{
 		report.status = "compile_fail";
@@ -1354,6 +1468,7 @@ bool CompileMesh(
 	report.usedU16RemapEncoding = (remapEncoding == MeshletRemapEncoding::Uint16);
 
 	PayloadLayout payloadLayout{};
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TryBuildPayloadLayout(
 		header,
 		vertexData.size(),
@@ -1392,11 +1507,13 @@ bool CompileMesh(
 			meshletPayload.meshletSections,
 			meshletPayload.meshletBounds);
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(output))
 		{
 			report.outputBytes = std::filesystem::file_size(output);
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (report.sourceBytes > 0)
 		{
 			report.compressionRatio = static_cast<double>(report.outputBytes) / static_cast<double>(report.sourceBytes);

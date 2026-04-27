@@ -1,3 +1,8 @@
+// InspectorWindow.h — Object Inspector Window Definition
+//
+// Defines the InspectorWindow class, which displays and allows editing of properties for the currently selected entity or asset.
+// It uses the engine's reflection system to dynamically generate UI controls for various component types and data fields.
+
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include "Engine/Core/Object/Reflection.h"
@@ -9,6 +14,7 @@
 
 class MainEditorSubsystem;
 class Object;
+// struct ComponentAccessFunctions groups related state and operations so callers have one documented contract.
 struct ComponentAccessFunctions;
 
 class InspectorWindow : public EditorWindow {
@@ -16,6 +22,7 @@ public:
 	InspectorWindow(MainEditorSubsystem* owner);
 	
 	// Reports whether a drag control in the inspector is active this frame for cursor wrapping.
+	// IsInspectorValueDragging is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsInspectorValueDragging() const { return m_InspectorValueDragging; }
 
 protected:

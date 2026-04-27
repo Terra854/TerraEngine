@@ -1,3 +1,5 @@
+// WindowSystem.cpp — Contains the Window System system state, startup/shutdown hooks, and per-frame work implementation for window configuration, backend contracts, and high-level window system state.
+
 #include "WindowSystem.h"
 
 #include <stdexcept>
@@ -13,6 +15,7 @@ WindowSystem& WindowSystem::Instance()
 	return instance;
 }
 
+// WindowSystem::Configure is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void WindowSystem::Configure(std::unique_ptr<IWindowBackend> backendInstance, WindowConfig config, std::function<void()> shutdownCallback)
 {
 	// Store the dependencies up front so Initialize can safely boot the backend
@@ -26,6 +29,7 @@ void WindowSystem::Configure(std::unique_ptr<IWindowBackend> backendInstance, Wi
 	TERRAENGINE_LOG(LogLevel::Debug, "WindowSystem configured with backend " << (backend ? backend->BackendName() : "null"));
 }
 
+// WindowSystem::GetNativeHandle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void* WindowSystem::GetNativeHandle() const
 {
 	if (!backend) {
@@ -35,18 +39,21 @@ void* WindowSystem::GetNativeHandle() const
 	return backend->GetNativeHandle();
 }
 
+// WindowSystem::SetResizeCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void WindowSystem::SetResizeCallback(std::function<void(int, int)> callback)
 {
 	if (!backend) return;
 	backend->SetResizeCallback(std::move(callback));
 }
 
+// WindowSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void WindowSystem::Initialize()
 {
 	if (!configured) {
 		throw std::runtime_error("WindowSystem must be configured before initialization.");
 	}
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!backend) {
 		throw std::runtime_error("WindowSystem requires a valid backend.");
 	}
@@ -66,6 +73,7 @@ void WindowSystem::Initialize()
 	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem initialized using backend: " << backend->BackendName());
 }
 
+// WindowSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void WindowSystem::Update(float deltaTime)
 {
 	if (!initialized) {
@@ -74,9 +82,11 @@ void WindowSystem::Update(float deltaTime)
 
 	backend->PollEvents();
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (backend->ShouldClose()) {
 		// Respect the request from the OS/user to close the application.
 		TERRAENGINE_LOG(LogLevel::Debug, "Window backend " << backend->BackendName() << " requested application shutdown");
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (onShutdownRequested) {
 			onShutdownRequested();
 		}
@@ -85,6 +95,7 @@ void WindowSystem::Update(float deltaTime)
 	backend->SwapBuffers();
 }
 
+// WindowSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void WindowSystem::Shutdown()
 {
 	if (!backend) {
@@ -97,6 +108,7 @@ void WindowSystem::Shutdown()
 	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem shutdown complete (backend " << backend->BackendName() << ").");
 }
 
+// WindowSystem::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string WindowSystem::SystemName()
 {
 	return "WindowSystem";

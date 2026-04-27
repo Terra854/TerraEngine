@@ -1,8 +1,16 @@
+// Scene.cs — Managed API for scene and prefab lifecycle management.
+//
+// This file provides the C# interface for loading and switching between scenes
+// and prefabs. It coordinates with the native SceneManager to handle asset
+// resolution and runtime scene graph updates, allowing scripts to control the
+// high-level organization of the gameplay environment.
+
 using System;
 using System.Runtime.InteropServices;
 
 namespace TerraEngine
 {
+	// Scene is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public static class Scene
 	{
 		public static string LoadScene(string path)
@@ -10,23 +18,28 @@ namespace TerraEngine
 			return InternalCalls.ReadNativeUtf8(Native_Scene_LoadScene(path));
 		}
 
+		// LoadPrefab bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static string LoadPrefab(string path)
 		{
 			return InternalCalls.ReadNativeUtf8(Native_Scene_LoadPrefab(path));
 		}
 
+        // SetActiveScene bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static bool SetActiveScene(string uuid)
         {
             return Native_Scene_SetActiveScene(uuid);
         }
 
 		[DllImport("TerraEngine")]
+		// Native_Scene_LoadScene bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static extern IntPtr Native_Scene_LoadScene(string path);
 
 		[DllImport("TerraEngine")]
+		// Native_Scene_LoadPrefab bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static extern IntPtr Native_Scene_LoadPrefab(string path);
 
         [DllImport("TerraEngine")]
+        // Native_Scene_SetActiveScene bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static extern bool Native_Scene_SetActiveScene(string uuid);
     }
 }

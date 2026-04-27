@@ -1,3 +1,7 @@
+// PathNormalizer.h — TEPAK path normalization interface
+//
+// Provides the interface for portable path normalization and asset class detection within the TEPAK system. it defines the mechanisms for inventory discovery and path-to-UTF8 conversion.
+
 #pragma once
 
 #include "TEPAK/PackTypes.h"

@@ -1,3 +1,9 @@
+// SceneManager.h — Scene Lifecycle Manager Definition
+//
+// Defines the SceneManager class, which oversees the loading, activation, and management of engine scenes.
+// It maintains the active scene document and coordinates transitions between different scene states.
+// The manager acts as the primary interface for scene-level operations, including asset resolution and document lifecycle.
+
 #pragma once
 
 #include <filesystem>
@@ -134,6 +140,7 @@ public:
 	void SpawnClusterBinSparseFixture();
 
 private:
+	// SceneFileType names the supported states explicitly so serialization and switches stay readable.
 	enum class SceneFileType
 	{
 		Scene,
@@ -143,6 +150,7 @@ private:
 	SceneManager();
 
 	template <typename Resource>
+	// struct SceneCache groups related state and operations so callers have one documented contract.
 	struct SceneCache
 	{
 		std::unordered_map<std::string, TerraEngine::UUID> pathToId;
@@ -228,6 +236,7 @@ private:
 	static constexpr float kPreviewMaxZoomOut = -2.5f;
 };
 
+// SceneManager::MakeReadyFuture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline std::shared_future<TerraEngine::UUID> SceneManager::MakeReadyFuture(const TerraEngine::UUID& id)
 {
 	std::promise<TerraEngine::UUID> promise;
@@ -236,18 +245,22 @@ inline std::shared_future<TerraEngine::UUID> SceneManager::MakeReadyFuture(const
 }
 
 template <typename Resource>
+// SceneManager::ResolveCached is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<TerraEngine::UUID> SceneManager::ResolveCached(const std::string& key, SceneCache<Resource>& cache)
 {
 	std::shared_lock lock(cache.mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
 	{
 		const TerraEngine::UUID& id = existing->second;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (cache.resources.find(id) != cache.resources.end())
 		{
 			return id;
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto pending = cache.inFlight.find(key); pending != cache.inFlight.end())
 	{
 		auto future = pending->second;
@@ -259,9 +272,11 @@ std::optional<TerraEngine::UUID> SceneManager::ResolveCached(const std::string& 
 }
 
 template <typename Resource>
+// SceneManager::EnsureResourceId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID SceneManager::EnsureResourceId(const std::string& key, SceneCache<Resource>& cache)
 {
 	std::unique_lock lock(cache.mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
 	{
 		return existing->second;
@@ -273,9 +288,11 @@ TerraEngine::UUID SceneManager::EnsureResourceId(const std::string& key, SceneCa
 }
 
 template <typename Resource>
+// SceneManager::GetResourceById is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const Resource* SceneManager::GetResourceById(const TerraEngine::UUID& id, const SceneCache<Resource>& cache) const
 {
 	std::shared_lock lock(cache.mutex);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto existing = cache.resources.find(id); existing != cache.resources.end())
 	{
 		return existing->second.get();
@@ -285,11 +302,13 @@ const Resource* SceneManager::GetResourceById(const TerraEngine::UUID& id, const
 }
 
 template <typename Resource>
+// SceneManager::FinalizeLoad is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID SceneManager::FinalizeLoad(const std::string& key, SceneCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource)
 {
 	std::unique_lock lock(cache.mutex);
 	cache.pathToId[key] = id;
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (resource)
 	{
 		cache.resources[id] = std::move(resource);
@@ -304,11 +323,13 @@ TerraEngine::UUID SceneManager::FinalizeLoad(const std::string& key, SceneCache<
 }
 
 template <typename Resource>
+// SceneManager::LoadOrGetCached is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID SceneManager::LoadOrGetCached(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type)
 {
 	const std::filesystem::path resolvedPath = ResolveScenePath(path);
 	const std::string key = NormalizeKey(resolvedPath);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto cached = ResolveCached(key, cache))
 	{
 		return *cached;
@@ -320,6 +341,7 @@ TerraEngine::UUID SceneManager::LoadOrGetCached(const std::filesystem::path& pat
 }
 
 template <typename Resource>
+// SceneManager::LoadOrSchedule is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_future<TerraEngine::UUID> SceneManager::LoadOrSchedule(const std::filesystem::path& path, SceneCache<Resource>& cache, const LoaderFunction<Resource>& loader, SceneFileType type)
 {
 	const std::filesystem::path resolvedPath = ResolveScenePath(path);
@@ -327,6 +349,7 @@ std::shared_future<TerraEngine::UUID> SceneManager::LoadOrSchedule(const std::fi
 
 	{
 		std::shared_lock lock(cache.mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto existing = cache.pathToId.find(key); existing != cache.pathToId.end())
 		{
 			if (cache.resources.find(existing->second) != cache.resources.end())
@@ -335,6 +358,7 @@ std::shared_future<TerraEngine::UUID> SceneManager::LoadOrSchedule(const std::fi
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto pending = cache.inFlight.find(key); pending != cache.inFlight.end())
 		{
 			return pending->second;

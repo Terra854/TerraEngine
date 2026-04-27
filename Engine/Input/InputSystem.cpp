@@ -1,3 +1,10 @@
+// InputSystem.cpp — Implementation of the central input management system.
+//
+// This file implements the InputSystem singleton, which coordinates with the
+// active input backend to track and expose the global state of the keyboard and
+// mouse. It provides high-level query functions for checking key presses and
+// cursor positions, serving as the primary input interface for gameplay code.
+
 #include "InputSystem.h"
 
 #include <stdexcept>
@@ -14,6 +21,7 @@ InputSystem& InputSystem::Instance()
 	return instance;
 }
 
+// InputSystem::Configure is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InputSystem::Configure(std::unique_ptr<IInputBackend> backendInstance)
 {
 	backend = std::move(backendInstance);
@@ -26,6 +34,7 @@ void InputSystem::Configure(std::unique_ptr<IInputBackend> backendInstance)
 		state = KeyState::Idle;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& state : mouseButtonStates) {
 		state = KeyState::Idle;
 	}
@@ -33,12 +42,14 @@ void InputSystem::Configure(std::unique_ptr<IInputBackend> backendInstance)
 	scrollDelta = {0.0, 0.0};
 }
 
+// InputSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InputSystem::Initialize()
 {
 	if (!configured) {
 		throw std::runtime_error("InputSystem must be configured before initialization.");
 	}
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!backend) {
 		throw std::runtime_error("InputSystem requires a valid backend.");
 	}
@@ -75,6 +86,7 @@ void InputSystem::Initialize()
 	TERRAENGINE_LOG(LogLevel::Info, "InputSystem initialized using backend: " << backend->BackendName());
 }
 
+// InputSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InputSystem::Update(float deltaTime)
 {
 	if (!initialized) {
@@ -84,6 +96,7 @@ void InputSystem::Update(float deltaTime)
 	backend->Update();
 }
 
+// InputSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InputSystem::Shutdown()
 {
 	if (!backend) {
@@ -96,14 +109,17 @@ void InputSystem::Shutdown()
 	TERRAENGINE_LOG(LogLevel::Info, "InputSystem shutdown complete (backend " << backend->BackendName() << ").");
 }
 
+// InputSystem::SystemName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string InputSystem::SystemName()
 {
 	return "InputSystem";
 }
 
+// InputSystem::GetKeyState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 KeyState InputSystem::GetKeyState(Key key) const
 {
 	const auto index = static_cast<std::size_t>(key);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (index >= keyStates.size()) {
 		return KeyState::Idle;
 	}
@@ -111,15 +127,18 @@ KeyState InputSystem::GetKeyState(Key key) const
 	return keyStates[index];
 }
 
+// InputSystem::IsKeyPressed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool InputSystem::IsKeyPressed(Key key) const
 {
 	const auto state = GetKeyState(key);
 	return state == KeyState::Pressed || state == KeyState::Held;
 }
 
+// InputSystem::IsMouseButtonPressed is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool InputSystem::IsMouseButtonPressed(MouseButton button) const
 {
 	const auto index = static_cast<std::size_t>(button);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (index >= mouseButtonStates.size()) {
 		return false;
 	}
@@ -128,28 +147,34 @@ bool InputSystem::IsMouseButtonPressed(MouseButton button) const
 	return state == KeyState::Pressed || state == KeyState::Held;
 }
 
+// InputSystem::GetCursorPosition is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::pair<double, double> InputSystem::GetCursorPosition() const
 {
 	return cursorPosition;
 }
 
+// InputSystem::SetCursorPosition is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InputSystem::SetCursorPosition(double x, double y)
 {
 	cursorPosition = {x, y};
 	
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (backend) {
 		backend->SetCursorPosition(x, y);
 	}
 }
 
+// InputSystem::GetScrollDelta is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::pair<double, double> InputSystem::GetScrollDelta() const
 {
 	return scrollDelta;
 }
 
+// InputSystem::HandleKeyEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InputSystem::HandleKeyEvent(Key key, KeyState state)
 {
 	const auto index = static_cast<std::size_t>(key);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (index >= keyStates.size()) {
 		return;
 	}
@@ -157,9 +182,11 @@ void InputSystem::HandleKeyEvent(Key key, KeyState state)
 	keyStates[index] = state;
 }
 
+// InputSystem::HandleMouseButtonEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InputSystem::HandleMouseButtonEvent(MouseButton button, KeyState state)
 {
 	const auto index = static_cast<std::size_t>(button);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (index >= mouseButtonStates.size()) {
 		return;
 	}
@@ -167,11 +194,13 @@ void InputSystem::HandleMouseButtonEvent(MouseButton button, KeyState state)
 	mouseButtonStates[index] = state;
 }
 
+// InputSystem::HandleCursorMove is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InputSystem::HandleCursorMove(double x, double y)
 {
 	cursorPosition = {x, y};
 }
 
+// InputSystem::HandleScroll is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InputSystem::HandleScroll(double xOffset, double yOffset)
 {
 	scrollDelta = {xOffset, yOffset};

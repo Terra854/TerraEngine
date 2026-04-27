@@ -1,3 +1,7 @@
+// PackTypes.h — TEPAK common type definitions
+//
+// Centralizes the core enumerations and data structures used across the TEPAK system. It includes definitions for storage modes, validation severities, directory nodes, and progress reporting structures that facilitate communication between the archive library and its callers.
+
 #pragma once
 
 #include <cstdint>
@@ -10,6 +14,7 @@
 namespace tepak {
 
 // StorageMode records how one extent was stored inside the pack payload region.
+// StorageMode names the supported states explicitly so serialization and switches stay readable.
 enum class StorageMode : std::uint32_t {
 	Raw = 0,
 	Zstd = 1,
@@ -17,6 +22,7 @@ enum class StorageMode : std::uint32_t {
 };
 
 // ValidationSeverity lets tooling distinguish informational notes from failures.
+// ValidationSeverity names the supported states explicitly so serialization and switches stay readable.
 enum class ValidationSeverity : std::uint32_t {
 	Info = 0,
 	Warning = 1,
@@ -24,6 +30,7 @@ enum class ValidationSeverity : std::uint32_t {
 };
 
 // PackNodeKind identifies whether a directory listing child is a file or folder.
+// PackNodeKind names the supported states explicitly so serialization and switches stay readable.
 enum class PackNodeKind : std::uint32_t {
 	Directory = 0,
 	File = 1,
@@ -44,6 +51,7 @@ struct DictionaryProfile final {
 };
 
 // PackExtent describes one independently decodable byte range inside the pack.
+// struct PackExtent groups related state and operations so callers have one documented contract.
 struct PackExtent final {
 	// fileOffset is the byte offset inside the logical file, while storedOffset
 	// is the byte offset inside the archive payload region.
@@ -57,6 +65,7 @@ struct PackExtent final {
 };
 
 // DirectoryNode stores one logical directory and the table spans of its children.
+// struct DirectoryNode groups related state and operations so callers have one documented contract.
 struct DirectoryNode final {
 	std::uint32_t directoryId = 0;
 	std::uint32_t parentDirectoryId = kInvalidDirectoryId;
@@ -71,6 +80,7 @@ struct DirectoryNode final {
 };
 
 // DirectoryChild is the lightweight view returned when listing a directory.
+// struct DirectoryChild groups related state and operations so callers have one documented contract.
 struct DirectoryChild final {
 	PackNodeKind kind = PackNodeKind::File;
 	std::string normalizedPath;
@@ -79,12 +89,14 @@ struct DirectoryChild final {
 };
 
 // DirectoryListingResult contains one directory and its immediate children.
+// struct DirectoryListingResult groups related state and operations so callers have one documented contract.
 struct DirectoryListingResult final {
 	std::string normalizedPath;
 	std::vector<DirectoryChild> children;
 };
 
 // PackEntry stores one logical file plus the span of extents that reconstruct it.
+// struct PackEntry groups related state and operations so callers have one documented contract.
 struct PackEntry final {
 	std::uint32_t fileId = 0;
 	std::uint32_t parentDirectoryId = kInvalidDirectoryId;
@@ -177,6 +189,7 @@ struct PackagingRequest final {
 };
 
 // ValidationFinding records one concrete issue discovered during validation.
+// struct ValidationFinding groups related state and operations so callers have one documented contract.
 struct ValidationFinding final {
 	ValidationSeverity severity = ValidationSeverity::Info;
 	std::string category;
@@ -187,6 +200,7 @@ struct ValidationFinding final {
 };
 
 // ValidationReport is the complete result of one validation pass.
+// struct ValidationReport groups related state and operations so callers have one documented contract.
 struct ValidationReport final {
 	std::filesystem::path packPath;
 	bool validationStatus = false;
@@ -212,6 +226,7 @@ struct PackWriteResult final {
 };
 
 // PackInspectResult is the lighter metadata bundle returned by PackReader::Inspect.
+// struct PackInspectResult groups related state and operations so callers have one documented contract.
 struct PackInspectResult final {
 	PackDescriptor descriptor;
 	DictionaryProfile dictionary;

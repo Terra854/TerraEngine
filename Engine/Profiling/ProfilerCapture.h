@@ -1,3 +1,5 @@
+// ProfilerCapture.h — Contains declarations for the Profiler Capture file-specific types, helper functions, and module integration code used by runtime profiling sessions, timing markers, capture serialization, and scope helpers.
+
 #pragma once
 
 #include <cstdint>
@@ -8,6 +10,7 @@
 
 namespace TerraEngine::Profiling
 {
+// ProfilerSessionState names the supported states explicitly so serialization and switches stay readable.
 enum class ProfilerSessionState : std::uint8_t
 {
 	Idle,
@@ -20,12 +23,14 @@ enum class ProfilerSessionState : std::uint8_t
 	Error
 };
 
+// ProfilerModuleId names the supported states explicitly so serialization and switches stay readable.
 enum class ProfilerModuleId : std::uint8_t
 {
 	CpuEngine,
 	TaskExecution
 };
 
+// ProfilerCaptureMode names the supported states explicitly so serialization and switches stay readable.
 enum class ProfilerCaptureMode : std::uint8_t
 {
 	LiveRolling,
@@ -33,6 +38,7 @@ enum class ProfilerCaptureMode : std::uint8_t
 	LoadedReadOnly
 };
 
+// struct ProfilerCaptureSettings groups related state and operations so callers have one documented contract.
 struct ProfilerCaptureSettings
 {
 	bool cpuEngineEnabled = true;
@@ -44,6 +50,7 @@ struct ProfilerCaptureSettings
 	ProfilerCaptureMode captureMode = ProfilerCaptureMode::LiveRolling;
 };
 
+// struct ProfilerMetric groups related state and operations so callers have one documented contract.
 struct ProfilerMetric
 {
 	std::string name;
@@ -51,6 +58,7 @@ struct ProfilerMetric
 	std::string unit;
 };
 
+// struct ProfilerModuleSummary groups related state and operations so callers have one documented contract.
 struct ProfilerModuleSummary
 {
 	ProfilerModuleId moduleId = ProfilerModuleId::CpuEngine;
@@ -59,6 +67,7 @@ struct ProfilerModuleSummary
 	std::vector<ProfilerMetric> metrics;
 };
 
+// struct ProfilerSample groups related state and operations so callers have one documented contract.
 struct ProfilerSample
 {
 	std::uint64_t sampleId = 0u;
@@ -74,6 +83,7 @@ struct ProfilerSample
 	bool complete = true;
 };
 
+// struct ProfilerFrameRecord groups related state and operations so callers have one documented contract.
 struct ProfilerFrameRecord
 {
 	std::uint64_t frameIndex = 0u;
@@ -84,6 +94,7 @@ struct ProfilerFrameRecord
 	std::vector<ProfilerSample> samples;
 };
 
+// struct ProfilerCaptureMetadata groups related state and operations so callers have one documented contract.
 struct ProfilerCaptureMetadata
 {
 	std::string terraEngineVersion = "unknown";
@@ -95,6 +106,7 @@ struct ProfilerCaptureMetadata
 	ProfilerCaptureSettings settings;
 };
 
+// struct ProfilerCaptureArtifact groups related state and operations so callers have one documented contract.
 struct ProfilerCaptureArtifact
 {
 	std::string fileName;
@@ -107,6 +119,7 @@ struct ProfilerCaptureArtifact
 	std::string status;
 };
 
+// struct ProfilerCaptureDocument groups related state and operations so callers have one documented contract.
 struct ProfilerCaptureDocument
 {
 	ProfilerCaptureMetadata metadata;

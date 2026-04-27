@@ -1,3 +1,9 @@
+// SpatialDiagnostics.h — Spatial System Diagnostic Types
+//
+// Defines the structures used to capture and report performance metrics for the spatial partitioning system.
+// It tracks statistics such as object counts, query times, and structure health for both editor and runtime analysis.
+// These diagnostics help developers tune spatial parameters and identify performance bottlenecks in large scenes.
+
 #pragma once
 
 #include <cstdint>
@@ -15,6 +21,7 @@ namespace TerraEngine::Scene
 		Full
 	};
 
+	// struct SpatialDiagnosticsSnapshot groups related state and operations so callers have one documented contract.
 	struct SpatialDiagnosticsSnapshot
 	{
 		std::uint32_t indexedObjectCount = 0;

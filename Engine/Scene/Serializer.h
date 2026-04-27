@@ -1,3 +1,9 @@
+// Serializer.h — Scene Serialization System Definition
+//
+// Defines the core logic and records used for translating scene data between runtime objects and persistent storage.
+// It handles the conversion of entities, components, and properties to and from the engine's standard JSON formats.
+// The system ensures that scene state is correctly preserved during saves and accurately restored during loads.
+
 #pragma once
 
 #include "Core/Object/Object.h"

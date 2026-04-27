@@ -1,3 +1,7 @@
+// ProjectManager.h — Editor project lifecycle management
+//
+// Defines the primary manager responsible for creating, loading, and tracking the active editor project. it maintains the project root path, handles the persistence of project-specific settings, and manages the global list of recent projects.
+
 #pragma once
 
 #include "ProjectSettings.h"
@@ -12,6 +16,7 @@ enum class ProjectTemplate {
 	ThreeD
 };
 
+// class ProjectManager groups related state and operations so callers have one documented contract.
 class ProjectManager {
 public:
 	ProjectManager();

@@ -1,3 +1,7 @@
+// UndoRedoSystem.h — Editor undo and redo system interface
+//
+// Defines the core interface and command structures for tracking reversible editor actions. it maintains a history of atomic operations like object creation, deletion, and property changes, allowing users to navigate through past scene states.
+
 #pragma once
 
 #include "IEditorSubsystem.h"
@@ -50,6 +54,7 @@ private:
 	nlohmann::json m_Json;
 };
 
+// class RenameObjectCommand groups related state and operations so callers have one documented contract.
 class RenameObjectCommand : public ICommand {
 public:
 	RenameObjectCommand(entt::entity entity, const std::string& oldName, const std::string& newName);
@@ -63,6 +68,7 @@ private:
 	std::string m_NewName;
 };
 
+// class AddComponentCommand groups related state and operations so callers have one documented contract.
 class AddComponentCommand : public ICommand {
 public:
 	AddComponentCommand(entt::entity entity, const std::string& componentName);
@@ -75,6 +81,7 @@ private:
 	std::string m_ComponentName;
 };
 
+// class RemoveComponentCommand groups related state and operations so callers have one documented contract.
 class RemoveComponentCommand : public ICommand {
 public:
 	RemoveComponentCommand(entt::entity entity, const std::string& componentName);
@@ -88,6 +95,7 @@ private:
 	nlohmann::json m_ComponentJson;
 };
 
+// class ChangeTransformCommand groups related state and operations so callers have one documented contract.
 class ChangeTransformCommand : public ICommand {
 public:
 	ChangeTransformCommand(entt::entity entity, const glm::vec3& oldPos, const glm::quat& oldRot, const glm::vec3& oldScale,
@@ -114,6 +122,7 @@ public:
 	void Update(float deltaTime) override;
 	void DrawUI() override;
 	void Shutdown() override;
+	// GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string GetName() const override { return "Undo/Redo System"; }
 
 	// Adds a new action to the history. This clears any currently available 

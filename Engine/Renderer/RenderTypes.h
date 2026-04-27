@@ -1,3 +1,9 @@
+// RenderTypes.h — Core Rendering Type Definitions
+//
+// Defines the foundational data structures and constants used throughout the rendering pipeline.
+// This includes vertex layouts, material parameters, lighting structures, and frame-level configuration types.
+// These types provide a common language between the scene representation and the low-level graphics API.
+
 #pragma once
 
 #include <array>
@@ -16,6 +22,7 @@ enum class RenderViewType : std::uint8_t
 	Scene = 1
 };
 
+// RenderOutputKind names the supported states explicitly so serialization and switches stay readable.
 enum class RenderOutputKind : std::uint8_t
 {
 	GameView = 0,
@@ -25,12 +32,14 @@ enum class RenderOutputKind : std::uint8_t
 	ValidationOnly = 4
 };
 
+// RenderOutputPriority names the supported states explicitly so serialization and switches stay readable.
 enum class RenderOutputPriority : std::uint8_t
 {
 	Required = 0,
 	Optional = 1
 };
 
+// RenderSnapshotState names the supported states explicitly so serialization and switches stay readable.
 enum class RenderSnapshotState : std::uint8_t
 {
 	Requested = 0,
@@ -43,6 +52,7 @@ enum class RenderSnapshotState : std::uint8_t
 	Fallback = 7
 };
 
+// RenderSnapshotFallbackReason names the supported states explicitly so serialization and switches stay readable.
 enum class RenderSnapshotFallbackReason : std::uint8_t
 {
 	None = 0,
@@ -52,6 +62,7 @@ enum class RenderSnapshotFallbackReason : std::uint8_t
 	Recovery = 4
 };
 
+// RenderSnapshotFallbackResult names the supported states explicitly so serialization and switches stay readable.
 enum class RenderSnapshotFallbackResult : std::uint8_t
 {
 	None = 0,
@@ -60,6 +71,7 @@ enum class RenderSnapshotFallbackResult : std::uint8_t
 	FrameRecovery = 3
 };
 
+// QualityPreset names the supported states explicitly so serialization and switches stay readable.
 enum class QualityPreset : std::uint32_t
 {
 	Low = 0,
@@ -69,6 +81,7 @@ enum class QualityPreset : std::uint32_t
 	Custom = 4
 };
 
+// LightingReductionCategory names the supported states explicitly so serialization and switches stay readable.
 enum class LightingReductionCategory : std::uint32_t
 {
 	None = 0u,
@@ -78,6 +91,7 @@ enum class LightingReductionCategory : std::uint32_t
 	Shadow = 4u
 };
 
+// MaterialShadowBehavior names the supported states explicitly so serialization and switches stay readable.
 enum class MaterialShadowBehavior : std::uint32_t
 {
 	Opaque = 0u,
@@ -87,6 +101,7 @@ enum class MaterialShadowBehavior : std::uint32_t
 	EmissiveUsesOpacity = 4u
 };
 
+// LightingDiagnosticCategory names the supported states explicitly so serialization and switches stay readable.
 enum class LightingDiagnosticCategory : std::uint32_t
 {
 	Shadow = 0u,
@@ -96,6 +111,7 @@ enum class LightingDiagnosticCategory : std::uint32_t
 	Budget = 4u
 };
 
+// LightingDiagnosticStatus names the supported states explicitly so serialization and switches stay readable.
 enum class LightingDiagnosticStatus : std::uint32_t
 {
 	Active = 0u,
@@ -105,6 +121,7 @@ enum class LightingDiagnosticStatus : std::uint32_t
 	Unavailable = 4u
 };
 
+// ShadowResourceKind names the supported states explicitly so serialization and switches stay readable.
 enum class ShadowResourceKind : std::uint32_t
 {
 	DirectionalCascade = 0u,
@@ -114,6 +131,7 @@ enum class ShadowResourceKind : std::uint32_t
 	Unsupported = 4u
 };
 
+// ShadowQualityTier names the supported states explicitly so serialization and switches stay readable.
 enum class ShadowQualityTier : std::uint32_t
 {
 	FullResolution = 0u,
@@ -122,6 +140,7 @@ enum class ShadowQualityTier : std::uint32_t
 	Disabled = 3u
 };
 
+// ShadowDegradationReason names the supported states explicitly so serialization and switches stay readable.
 enum class ShadowDegradationReason : std::uint32_t
 {
 	None = 0u,
@@ -131,6 +150,7 @@ enum class ShadowDegradationReason : std::uint32_t
 	UnsupportedLightType = 4u
 };
 
+// ShadowRefreshReason names the supported states explicitly so serialization and switches stay readable.
 enum class ShadowRefreshReason : std::uint32_t
 {
 	RenderedThisFrame = 0u,
@@ -151,6 +171,7 @@ inline constexpr std::uint32_t kMaxShadowResourceSlots = 32u;
 inline constexpr std::uint32_t kGpuLightAnalysisFlagVisible = 1u << 0;
 inline constexpr std::uint32_t kGpuLightAnalysisFlagDirectional = 1u << 1;
 
+// struct RenderSettings groups related state and operations so callers have one documented contract.
 struct RenderSettings
 {
 	std::uint32_t shadowResolution = 2048u;
@@ -219,6 +240,7 @@ struct SkyRuntimeState
 };
 
 // Compact per-frame sky payload submitted to the renderer background pass.
+// struct FrameSkyData groups related state and operations so callers have one documented contract.
 struct FrameSkyData
 {
 	bool renderBackground = false;
@@ -235,11 +257,13 @@ struct FrameSkyData
 	TerraEngine::UUID textureId = TerraEngine::EMPTY_UUID;
 };
 
+// ClampSkyTint is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline glm::vec3 ClampSkyTint(const glm::vec3& tint)
 {
 	return glm::clamp(tint, glm::vec3(0.0f), glm::vec3(4.0f));
 }
 
+// MakeDefaultSceneSkySettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline SceneSkySettings MakeDefaultSceneSkySettings()
 {
 	SceneSkySettings settings;
@@ -255,6 +279,7 @@ inline SceneSkySettings MakeDefaultSceneSkySettings()
 	return settings;
 }
 
+// SanitizeSceneSkySettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline SceneSkySettings SanitizeSceneSkySettings(const SceneSkySettings& input)
 {
 	SceneSkySettings sanitized = input;
@@ -269,6 +294,7 @@ inline SceneSkySettings SanitizeSceneSkySettings(const SceneSkySettings& input)
 	return sanitized;
 }
 
+// MakeDefaultSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline SceneRenderSettings MakeDefaultSceneRenderSettings()
 {
 	SceneRenderSettings settings;
@@ -279,6 +305,7 @@ inline SceneRenderSettings MakeDefaultSceneRenderSettings()
 	return settings;
 }
 
+// SanitizeSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline SceneRenderSettings SanitizeSceneRenderSettings(const SceneRenderSettings& input)
 {
 	SceneRenderSettings sanitized = input;
@@ -289,6 +316,7 @@ inline SceneRenderSettings SanitizeSceneRenderSettings(const SceneRenderSettings
 	return sanitized;
 }
 
+// struct DrawCommand groups related state and operations so callers have one documented contract.
 struct DrawCommand
 {
 	TerraEngine::UUID meshId;
@@ -309,6 +337,7 @@ struct ShadowDrawList
 	std::vector<DrawCommand> commands;
 };
 
+// struct PushConstants groups related state and operations so callers have one documented contract.
 struct PushConstants
 {
 	glm::mat4 viewProj;
@@ -331,6 +360,7 @@ inline constexpr std::uint32_t kLightingClusterDimY = 9u;
 inline constexpr std::uint32_t kLightingClusterDimZ = 24u;
 
 // Compact light payload uploaded once per frame and consumed by forward shaders.
+// struct alignas groups related state and operations so callers have one documented contract.
 struct alignas(16) GPULight
 {
 	glm::vec4 positionAndType = glm::vec4(0.0f);       // xyz = position, w = type enum value
@@ -370,6 +400,7 @@ struct alignas(16) GPULightAnalysisRecord
 static_assert(sizeof(GPULightAnalysisRecord) == 16, "GPU light analysis layout changed; update shader mirrors.");
 
 // Cluster table entry mapping one cluster to a segment of the flat light-index list.
+// struct alignas groups related state and operations so callers have one documented contract.
 struct alignas(16) ClusterData
 {
 	std::uint32_t offset = 0u;
@@ -457,6 +488,7 @@ struct ShadowResourceAssignmentDiagnostic
 	bool invalidatedThisFrame = false;
 };
 
+// struct FrameBudgetDiagnosticsSnapshot groups related state and operations so callers have one documented contract.
 struct FrameBudgetDiagnosticsSnapshot
 {
 	RenderViewType viewType = RenderViewType::Game;
@@ -512,6 +544,7 @@ struct FrameBudgetDiagnosticsSnapshot
 	bool valid = false;
 };
 
+// struct LightingDiagnosticEntry groups related state and operations so callers have one documented contract.
 struct LightingDiagnosticEntry
 {
 	LightingDiagnosticCategory category = LightingDiagnosticCategory::Budget;
@@ -521,6 +554,7 @@ struct LightingDiagnosticEntry
 	std::string recommendedAction;
 };
 
+// struct LightingDiagnosticsSnapshot groups related state and operations so callers have one documented contract.
 struct LightingDiagnosticsSnapshot
 {
 	RenderViewType viewType = RenderViewType::Game;
@@ -572,6 +606,7 @@ struct UIImageRun
 	float cornerRadius = 0.0f;
 };
 
+// struct UIRenderBatch groups related state and operations so callers have one documented contract.
 struct UIRenderBatch
 {
 	glm::vec2 viewportSize = glm::vec2(0.0f, 0.0f);
@@ -580,6 +615,7 @@ struct UIRenderBatch
 	std::vector<UITextRun> textRuns;
 	std::vector<UIImageRun> imageRuns;
 
+	// Append is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Append(const UIRenderBatch& other)
 	{
 		if (viewportSize.x <= 0.0f || viewportSize.y <= 0.0f)
@@ -594,6 +630,7 @@ struct UIRenderBatch
 	}
 };
 
+// struct FrameRenderData groups related state and operations so callers have one documented contract.
 struct FrameRenderData
 {
 	glm::mat4 viewMatrix;
@@ -614,6 +651,7 @@ struct FrameRenderData
 	UIRenderBatch uiBatch;
 };
 
+// struct RenderOutputRequest groups related state and operations so callers have one documented contract.
 struct RenderOutputRequest
 {
 	// Describes one renderer output before command recording starts. Today the
@@ -626,6 +664,7 @@ struct RenderOutputRequest
 	std::uint32_t outputId = 0u;
 };
 
+// struct RenderSnapshotHandle groups related state and operations so callers have one documented contract.
 struct RenderSnapshotHandle
 {
 	// A handle points at one fixed slice inside every per-frame GPU buffer that
@@ -643,6 +682,7 @@ struct RenderSnapshotHandle
 	bool valid = false;
 };
 
+// struct RenderSnapshotOwnerSummary groups related state and operations so callers have one documented contract.
 struct RenderSnapshotOwnerSummary
 {
 	// Diagnostics copy the ownership result by value after a frame completes.
@@ -661,6 +701,7 @@ struct RenderSnapshotOwnerSummary
 	bool indirectDrawsIsolated = false;
 };
 
+// struct RenderSnapshotFallbackEvent groups related state and operations so callers have one documented contract.
 struct RenderSnapshotFallbackEvent
 {
 	// Fallback events are exceptional paths. Normal warmed-up rendering should
@@ -674,6 +715,7 @@ struct RenderSnapshotFallbackEvent
 	bool required = true;
 };
 
+// struct RenderSnapshotDiagnosticsSnapshot groups related state and operations so callers have one documented contract.
 struct RenderSnapshotDiagnosticsSnapshot
 {
 	// Snapshot diagnostics are cheap CPU-side counters and owner records. They
@@ -693,6 +735,7 @@ struct RenderSnapshotDiagnosticsSnapshot
 };
 
 // GPU-facing frustum/camera payload consumed by the task shader path.
+// struct alignas groups related state and operations so callers have one documented contract.
 struct alignas(16) FrameCullingDataGPU
 {
 	std::array<glm::vec4, 6> frustumPlanes{};
@@ -717,6 +760,7 @@ struct alignas(16) FrameCullingDataGPU
 static_assert(sizeof(FrameCullingDataGPU) == 336, "Frame culling payload must stay tightly packed for GPU uploads.");
 
 // GPU counters written by task shader atomic operations per view/frame slot.
+// struct alignas groups related state and operations so callers have one documented contract.
 struct alignas(16) MeshletCullingCountersGPU
 {
 	std::uint32_t meshletsTotal = 0u;

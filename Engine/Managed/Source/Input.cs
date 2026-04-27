@@ -1,8 +1,16 @@
+// Input.cs — Managed API for keyboard and mouse input handling.
+//
+// This file provides the C# interface for querying the state of the keyboard and
+// mouse. It includes enumerations for all supported keys and buttons and
+// provides simple static methods for checking if an input is currently active,
+// mirroring the core engine's input system.
+
 using System;
 using System.Runtime.InteropServices;
 
 namespace TerraEngine
 {
+    // Key is the managed-facing contract for this subsystem; keep it predictable for scripts.
     public enum Key : int
     {
         Unknown = 0,
@@ -128,6 +136,7 @@ namespace TerraEngine
         Menu
     }
 
+    // MouseButton is the managed-facing contract for this subsystem; keep it predictable for scripts.
     public enum MouseButton : int
     {
         Left = 0,
@@ -140,6 +149,7 @@ namespace TerraEngine
         Button8
     }
 
+    // Input is the managed-facing contract for this subsystem; keep it predictable for scripts.
     public static class Input
     {
         public static bool IsKeyPressed(Key key)
@@ -147,6 +157,7 @@ namespace TerraEngine
             return Native_Input_IsKeyPressed((int)key);
         }
 
+        // IsMouseButtonPressed bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static bool IsMouseButtonPressed(MouseButton button)
         {
             return Native_Input_IsMouseButtonPressed((int)button);
@@ -163,12 +174,15 @@ namespace TerraEngine
         }
 
         [DllImport("TerraEngine")]
+        // Native_Input_IsKeyPressed bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static extern bool Native_Input_IsKeyPressed(int key);
 
         [DllImport("TerraEngine")]
+        // Native_Input_IsMouseButtonPressed bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static extern bool Native_Input_IsMouseButtonPressed(int button);
 
         [DllImport("TerraEngine")]
+        // Native_Input_GetMousePosition bridges managed callers to engine state; validate arguments before forwarding to native code.
         private static extern void Native_Input_GetMousePosition(out double x, out double y);
     }
 }

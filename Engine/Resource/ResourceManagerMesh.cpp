@@ -1,3 +1,9 @@
+// ResourceManagerMesh.cpp — Mesh Resource Management Implementation
+//
+// Implements the specialized logic for loading and managing mesh geometry resources.
+// It handles the parsing of high-performance mesh formats, including meshlet generation and vertex data quantization.
+// This module provides the geometric data required by the renderer for both standard and GPU-driven drawing paths.
+
 #include "Resource/ResourceManager.h"
 
 #include <algorithm>
@@ -11,6 +17,7 @@
 
 namespace
 {
+	// TryMultiply is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool TryMultiply(std::size_t lhs, std::size_t rhs, std::size_t& outValue)
 	{
 		if (lhs != 0 && rhs > (std::numeric_limits<std::size_t>::max() / lhs))
@@ -22,6 +29,7 @@ namespace
 		return true;
 	}
 
+	// TryAdd is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool TryAdd(std::size_t lhs, std::size_t rhs, std::size_t& outValue)
 	{
 		if (rhs > (std::numeric_limits<std::size_t>::max() - lhs))
@@ -33,6 +41,7 @@ namespace
 		return true;
 	}
 
+	// ResolvePayloadRange is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool ResolvePayloadRange(const MeshHeader& header, std::size_t payloadSize, std::uint32_t absoluteOffset, std::size_t byteCount, const std::filesystem::path& resolvedPath, const char* rangeName, std::size_t& outRelativeOffset)
 	{
 		if (absoluteOffset < header.headerSize)
@@ -42,6 +51,7 @@ namespace
 		}
 
 		const std::size_t relativeOffset = static_cast<std::size_t>(absoluteOffset - header.headerSize);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (relativeOffset > payloadSize)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF " << rangeName << " offset exceeds payload in " << resolvedPath);
@@ -49,6 +59,7 @@ namespace
 		}
 
 		std::size_t rangeEnd = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryAdd(relativeOffset, byteCount, rangeEnd) || rangeEnd > payloadSize)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF " << rangeName << " range overruns payload in " << resolvedPath);
@@ -67,14 +78,17 @@ namespace
 	{
 		outDecoded.resize(remapCount);
 		const std::size_t elementSize = static_cast<std::size_t>(GetRemapElementSizeBytes(encoding));
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t remapIndex = 0; remapIndex < remapCount; ++remapIndex)
 		{
 			std::size_t byteOffset = 0;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!TryMultiply(remapIndex, elementSize, byteOffset))
 			{
 				return false;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (encoding == MeshletRemapEncoding::Uint16)
 			{
 				std::uint16_t packed = 0;
@@ -92,11 +106,13 @@ namespace
 		return true;
 	}
 
+	// IsFiniteFloat is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsFiniteFloat(float value)
 	{
 		return std::isfinite(value) != 0;
 	}
 
+	// DisableConeData is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void DisableConeData(MeshletBounds& bounds)
 	{
 		bounds.coneApex[0] = bounds.center[0];
@@ -110,6 +126,7 @@ namespace
 		bounds.coneApexOffset = 0.0f;
 	}
 
+	// IsCompiledMeshPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool IsCompiledMeshPath(const std::filesystem::path& path)
 	{
 		std::string extension = path.extension().generic_string();
@@ -125,6 +142,7 @@ namespace
 	std::unique_ptr<Mesh> LoadMeshFile(ResourceManager& manager, const std::filesystem::path& resolvedPath)
 	{
 		const auto fileBytes = manager.ReadFileBytes(resolvedPath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (fileBytes.size() < sizeof(MeshHeader))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF file is too small: " << resolvedPath);
@@ -136,6 +154,7 @@ namespace
 
 		std::uint32_t magic = 0;
 		std::memcpy(&magic, header.magic, sizeof(magic));
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (magic != kMeshMagicValue)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF magic mismatch in " << resolvedPath);
@@ -143,6 +162,7 @@ namespace
 		}
 
 		// Direct replacement intentionally rejects every non-current layout.
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.version != kMeshCurrentVersion)
 		{
 			TERRAENGINE_LOG(LogLevel::Error,
@@ -152,12 +172,14 @@ namespace
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.layout.attributeCount > kMaxVertexAttributes)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF vertex attribute count exceeds limit in " << resolvedPath);
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.layout.strideBytes != kMeshletPackedVertexStrideBytes)
 		{
 			TERRAENGINE_LOG(LogLevel::Error,
@@ -167,6 +189,7 @@ namespace
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.layout.attributeCount != 4u)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF packed vertex layout must expose exactly 4 attributes in " << resolvedPath);
@@ -191,10 +214,12 @@ namespace
 				static_cast<std::uint32_t>(AttributeFormat::R16G16Unorm),
 				12u}};
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t layoutIndex = 0; layoutIndex < 4u; ++layoutIndex)
 		{
 			const VertexAttribute& current = header.layout.attributes[layoutIndex];
 			const VertexAttribute& expected = expectedLayout[layoutIndex];
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (current.semantic != expected.semantic
 				|| current.format != expected.format
 				|| current.offsetBytes != expected.offsetBytes)
@@ -205,18 +230,21 @@ namespace
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.headerSize > fileBytes.size())
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF headerSize exceeds file length for " << resolvedPath);
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.headerSize < sizeof(MeshHeader))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF headerSize is smaller than MeshHeader in " << resolvedPath);
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.meshletVertexCount == 0
 			|| header.meshletVertexRemapCount == 0
 			|| header.meshletPrimitiveIndexCount == 0
@@ -226,17 +254,20 @@ namespace
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.meshletSectionCount == 0)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF requires at least one meshlet section in " << resolvedPath);
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if ((header.meshletVertexDataOffset % kMeshletVertexDataAlignmentBytes) != 0u)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF vertex stream offset must be 16-byte aligned in " << resolvedPath);
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.meshletSkinningDataCount != 0)
 		{
 			if ((header.meshletSkinningDataOffset % kMeshletIndexDataAlignmentBytes) != 0u)
@@ -245,6 +276,7 @@ namespace
 				return nullptr;
 			}
 			
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (header.meshletSkinningDataCount != header.meshletVertexCount)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TEMF skinning count must match vertex count in " << resolvedPath);
@@ -252,12 +284,14 @@ namespace
 			}
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if ((header.meshletVertexRemapDataOffset % kMeshletIndexDataAlignmentBytes) != 0u)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF vertex remap stream offset must be 4-byte aligned in " << resolvedPath);
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if ((header.meshletPrimitiveIndexDataOffset % kMeshletIndexDataAlignmentBytes) != 0u)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF primitive stream offset must be 4-byte aligned in " << resolvedPath);
@@ -265,12 +299,14 @@ namespace
 		}
 
 		// Primitive entries are meshlet-local uint8 elements and must remain triangle-aligned.
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if ((header.meshletPrimitiveIndexCount % 3u) != 0u)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet primitive index count must be a multiple of 3 in " << resolvedPath);
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if ((header.meshletFlags & ~kMeshletHeaderFlagHasBounds) != 0u)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshletFlags has unsupported bits in " << resolvedPath);
@@ -278,12 +314,14 @@ namespace
 		}
 
 		const MeshletRemapEncoding remapEncoding = static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (remapEncoding != MeshletRemapEncoding::Uint16 && remapEncoding != MeshletRemapEncoding::Uint32)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF remap encoding is invalid in " << resolvedPath);
 			return nullptr;
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (remapEncoding == MeshletRemapEncoding::Uint16
 			&& header.meshletVertexCount > static_cast<std::uint32_t>(std::numeric_limits<std::uint16_t>::max()))
 		{
@@ -292,6 +330,7 @@ namespace
 		}
 
 		const bool boundsPresent = (header.meshletFlags & kMeshletHeaderFlagHasBounds) != 0u;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (boundsPresent)
 		{
 			if (header.meshletBoundsCount != header.meshletCount || header.meshletBoundsOffset == 0u)
@@ -300,12 +339,14 @@ namespace
 				return nullptr;
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if ((header.meshletBoundsOffset % kMeshletIndexDataAlignmentBytes) != 0u)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TEMF bounds payload offset must be 4-byte aligned in " << resolvedPath);
 				return nullptr;
 			}
 		}
+		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (header.meshletBoundsCount != 0u || header.meshletBoundsOffset != 0u)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF bounds payload must be fully absent when bounds flag is not set in " << resolvedPath);
@@ -313,6 +354,7 @@ namespace
 		}
 
 		std::size_t vertexBytes = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryMultiply(static_cast<std::size_t>(header.layout.strideBytes), static_cast<std::size_t>(header.meshletVertexCount), vertexBytes))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF vertex payload size overflow in " << resolvedPath);
@@ -320,6 +362,7 @@ namespace
 		}
 
 		std::size_t skinningBytes = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryMultiply(static_cast<std::size_t>(header.meshletSkinningDataCount), 8ULL, skinningBytes))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF skinning payload size overflow in " << resolvedPath);
@@ -327,6 +370,7 @@ namespace
 		}
 
 		std::size_t vertexRemapBytes = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryMultiply(
 			static_cast<std::size_t>(header.meshletVertexRemapCount),
 			static_cast<std::size_t>(GetRemapElementSizeBytes(remapEncoding)),
@@ -337,6 +381,7 @@ namespace
 		}
 
 		std::size_t primitiveIndexBytes = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryMultiply(static_cast<std::size_t>(header.meshletPrimitiveIndexCount), static_cast<std::size_t>(kMeshletPrimitiveIndexSizeBytes), primitiveIndexBytes))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF primitive index payload size overflow in " << resolvedPath);
@@ -344,6 +389,7 @@ namespace
 		}
 
 		std::size_t meshletTableBytes = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryMultiply(static_cast<std::size_t>(header.meshletCount), sizeof(MeshletRecord), meshletTableBytes))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet table size overflow in " << resolvedPath);
@@ -351,6 +397,7 @@ namespace
 		}
 
 		std::size_t meshletSectionBytes = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryMultiply(static_cast<std::size_t>(header.meshletSectionCount), sizeof(MeshletSection), meshletSectionBytes))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet section table size overflow in " << resolvedPath);
@@ -358,6 +405,7 @@ namespace
 		}
 
 		std::size_t meshletBoundsBytes = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!TryMultiply(static_cast<std::size_t>(header.meshletBoundsCount), sizeof(MeshletBounds), meshletBoundsBytes))
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet bounds table size overflow in " << resolvedPath);
@@ -374,42 +422,49 @@ namespace
 		const std::uint8_t* payload = mesh->storage.data();
 
 		std::size_t vertexPayloadOffset = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!ResolvePayloadRange(header, payloadSize, header.meshletVertexDataOffset, vertexBytes, resolvedPath, "meshlet vertex data", vertexPayloadOffset))
 		{
 			return nullptr;
 		}
 
 		std::size_t vertexRemapPayloadOffset = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!ResolvePayloadRange(header, payloadSize, header.meshletVertexRemapDataOffset, vertexRemapBytes, resolvedPath, "meshlet vertex remap data", vertexRemapPayloadOffset))
 		{
 			return nullptr;
 		}
 
 		std::size_t primitivePayloadOffset = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!ResolvePayloadRange(header, payloadSize, header.meshletPrimitiveIndexDataOffset, primitiveIndexBytes, resolvedPath, "meshlet primitive index data", primitivePayloadOffset))
 		{
 			return nullptr;
 		}
 
 		std::size_t meshletTableOffset = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!ResolvePayloadRange(header, payloadSize, header.meshletTableOffset, meshletTableBytes, resolvedPath, "meshlet table", meshletTableOffset))
 		{
 			return nullptr;
 		}
 
 		std::size_t meshletSectionOffset = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!ResolvePayloadRange(header, payloadSize, header.meshletSectionOffset, meshletSectionBytes, resolvedPath, "meshlet section table", meshletSectionOffset))
 		{
 			return nullptr;
 		}
 
 		std::size_t meshletBoundsOffset = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.meshletBoundsCount != 0 && !ResolvePayloadRange(header, payloadSize, header.meshletBoundsOffset, meshletBoundsBytes, resolvedPath, "meshlet bounds table", meshletBoundsOffset))
 		{
 			return nullptr;
 		}
 
 		std::size_t skinningPayloadOffset = 0;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.meshletSkinningDataCount != 0 && !ResolvePayloadRange(header, payloadSize, header.meshletSkinningDataOffset, skinningBytes, resolvedPath, "meshlet skinning data", skinningPayloadOffset))
 		{
 			return nullptr;
@@ -428,14 +483,17 @@ namespace
 		mesh->meshletSections.resize(header.meshletSectionCount);
 		std::memcpy(mesh->meshletSections.data(), payload + meshletSectionOffset, meshletSectionBytes);
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (header.meshletBoundsCount != 0)
 		{
 			mesh->meshletBounds.resize(header.meshletBoundsCount);
 			std::memcpy(mesh->meshletBounds.data(), payload + meshletBoundsOffset, meshletBoundsBytes);
 
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::size_t boundsIndex = 0; boundsIndex < mesh->meshletBounds.size(); ++boundsIndex)
 			{
 				MeshletBounds& bounds = mesh->meshletBounds[boundsIndex];
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!IsFiniteFloat(bounds.center[0])
 					|| !IsFiniteFloat(bounds.center[1])
 					|| !IsFiniteFloat(bounds.center[2])
@@ -449,6 +507,7 @@ namespace
 				const glm::vec3 center(bounds.center[0], bounds.center[1], bounds.center[2]);
 				const glm::vec3 extent(bounds.radius);
 				const auto meshletBounds = TerraEngine::Scene::MakeAABB(center - extent, center + extent, TerraEngine::Scene::SpatialBoundsSource::Mesh);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (mesh->hasLocalBounds)
 				{
 					mesh->localBoundsMin[0] = std::min(mesh->localBoundsMin[0], meshletBounds.min.x);
@@ -479,6 +538,7 @@ namespace
 					|| !IsFiniteFloat(bounds.coneAxis[2])
 					|| !IsFiniteFloat(bounds.coneCutoff)
 					|| !IsFiniteFloat(bounds.coneApexOffset);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (coneInvalid)
 				{
 					TERRAENGINE_LOG(LogLevel::Warning, "TEMF meshlet bounds[" << boundsIndex << "] has invalid cone data; disabling cone backface culling for this meshlet.");
@@ -489,6 +549,7 @@ namespace
 				const float axisLengthSq = bounds.coneAxis[0] * bounds.coneAxis[0]
 					+ bounds.coneAxis[1] * bounds.coneAxis[1]
 					+ bounds.coneAxis[2] * bounds.coneAxis[2];
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (axisLengthSq < 1e-8f)
 				{
 					DisableConeData(bounds);
@@ -512,9 +573,11 @@ namespace
 		const std::uint8_t* primitivePayload = mesh->meshletPrimitiveIndexData.data();
 
 		std::vector<std::uint8_t> primitiveCoverage(static_cast<std::size_t>(header.meshletPrimitiveIndexCount), 0u);
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t meshletIndex = 0; meshletIndex < mesh->meshletRecords.size(); ++meshletIndex)
 		{
 			const MeshletRecord& meshlet = mesh->meshletRecords[meshletIndex];
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (meshlet.vertexCount == 0
 				|| meshlet.primitiveIndexCount == 0
 				|| meshlet.vertexCount > kMeshletMaxVertices
@@ -526,6 +589,7 @@ namespace
 			}
 
 			std::size_t meshletVertexEnd = 0;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!TryAdd(static_cast<std::size_t>(meshlet.vertexOffset), static_cast<std::size_t>(meshlet.vertexCount), meshletVertexEnd)
 				|| meshletVertexEnd > header.meshletVertexRemapCount)
 			{
@@ -534,6 +598,7 @@ namespace
 			}
 
 			std::size_t meshletPrimitiveEnd = 0;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!TryAdd(static_cast<std::size_t>(meshlet.primitiveIndexOffset), static_cast<std::size_t>(meshlet.primitiveIndexCount), meshletPrimitiveEnd)
 				|| meshletPrimitiveEnd > header.meshletPrimitiveIndexCount)
 			{
@@ -541,6 +606,7 @@ namespace
 				return nullptr;
 			}
 
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (std::size_t primitive = static_cast<std::size_t>(meshlet.primitiveIndexOffset); primitive < meshletPrimitiveEnd; ++primitive)
 			{
 				if (primitiveCoverage[primitive] != 0u)
@@ -551,6 +617,7 @@ namespace
 				}
 
 				const std::uint8_t localVertex = primitivePayload[primitive];
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (localVertex >= meshlet.vertexCount)
 				{
 					TERRAENGINE_LOG(LogLevel::Error, "TEMF primitive stream references out-of-range local vertex in meshlet[" << meshletIndex << "] for " << resolvedPath);
@@ -562,15 +629,18 @@ namespace
 		}
 
 		const bool hasPrimitiveUnderrun = std::any_of(primitiveCoverage.begin(), primitiveCoverage.end(), [](std::uint8_t value) { return value == 0u; });
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (hasPrimitiveUnderrun)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet table overrun/underrun due to uncovered primitive indices in " << resolvedPath);
 			return nullptr;
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::size_t sectionIndex = 0; sectionIndex < mesh->meshletSections.size(); ++sectionIndex)
 		{
 			const MeshletSection& section = mesh->meshletSections[sectionIndex];
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (section.meshletCount == 0)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet section[" << sectionIndex << "] has zero meshlets in " << resolvedPath);
@@ -578,6 +648,7 @@ namespace
 			}
 
 			std::size_t sectionEnd = 0;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!TryAdd(static_cast<std::size_t>(section.meshletOffset), static_cast<std::size_t>(section.meshletCount), sectionEnd) || sectionEnd > header.meshletCount)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet section[" << sectionIndex << "] references out-of-range meshlets in " << resolvedPath);
@@ -589,6 +660,7 @@ namespace
 	}
 }
 
+// ResourceManager::LoadMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID ResourceManager::LoadMesh(const std::filesystem::path& path)
 {
 	if (!IsCompiledMeshPath(path))
@@ -602,6 +674,7 @@ TerraEngine::UUID ResourceManager::LoadMesh(const std::filesystem::path& path)
 	});
 }
 
+// ResourceManager::LoadMeshAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::shared_future<TerraEngine::UUID> ResourceManager::LoadMeshAsync(const std::filesystem::path& path)
 {
 	if (!IsCompiledMeshPath(path))
@@ -615,17 +688,20 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadMeshAsync(const std::
 	});
 }
 
+// ResourceManager::ReloadMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 {
 	std::string key;
 	{
 		std::shared_lock lock(meshCache.mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (const auto pathIt = meshCache.idToPath.find(id); pathIt != meshCache.idToPath.end())
 		{
 			key = pathIt->second;
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (key.empty())
 	{
 		TERRAENGINE_LOG(LogLevel::Debug, "Cannot reload mesh yet: UUID " << ToHexString(id) << " has no compiled TEMF path registered.");
@@ -633,6 +709,7 @@ void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 	}
 
 	const std::filesystem::path resolvedPath(key);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!IsCompiledMeshPath(resolvedPath))
 	{
 		TERRAENGINE_LOG(LogLevel::Debug, "Skipping mesh reload from non-TEMF path: " << resolvedPath);
@@ -641,6 +718,7 @@ void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 
 	TERRAENGINE_LOG(LogLevel::Debug, "Reloading mesh from " << resolvedPath);
 	auto mesh = LoadMeshFile(*this, resolvedPath);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (mesh)
 	{
 		std::unique_lock lock(meshCache.mutex);
@@ -648,10 +726,12 @@ void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 	}
 }
 
+// ResourceManager::GetMeshLocalBounds is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::Scene::SpatialAABB ResourceManager::GetMeshLocalBounds(const TerraEngine::UUID& id)
 {
 	if (Mesh* mesh = GetMesh(id))
 	{
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (mesh->hasLocalBounds)
 		{
 			return TerraEngine::Scene::MakeAABB(

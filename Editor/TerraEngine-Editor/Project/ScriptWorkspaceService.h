@@ -1,3 +1,7 @@
+// ScriptWorkspaceService.h — Managed code workspace management
+//
+// Defines the service responsible for maintaining the on-disk C# solution and project files for a game project. it ensures that the Assembly-CSharp workspace is correctly configured with required engine references and provides mechanisms for launching external IDEs.
+
 #pragma once
 
 #include <filesystem>
@@ -10,6 +14,7 @@ enum class ScriptWorkspaceHealth
 	Broken
 };
 
+// struct ScriptWorkspaceStatus groups related state and operations so callers have one documented contract.
 struct ScriptWorkspaceStatus
 {
 	// "Missing" means no project is open yet, "Healthy" means the generated

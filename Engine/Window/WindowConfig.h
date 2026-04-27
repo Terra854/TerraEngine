@@ -1,3 +1,5 @@
+// WindowConfig.h — Contains declarations for the Window Config constants, type definitions, and lightweight declarations used by window configuration, backend contracts, and high-level window system state.
+
 #pragma once
 
 #include <string>

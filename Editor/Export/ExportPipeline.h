@@ -1,9 +1,6 @@
-// ExportPipeline.h — Top-level orchestrator for the export build process.
+// ExportPipeline.h — Export build process orchestrator
 //
-// The ExportPipeline drives the full export workflow: validation, NativeAOT
-// compilation, TEPAK packaging, and output staging. It coordinates between
-// ExportValidator, TepakPackager, and the dotnet CLI to produce a self-contained
-// exported build folder matching the layout in contracts/export-output-layout.md.
+// Orchestrates the complete end-to-end export workflow for TerraEngine projects. It coordinates between validation, managed code compilation, asset staging, and final TEPAK packaging to produce a self-contained runtime distribution.
 
 #pragma once
 
@@ -29,6 +26,7 @@ enum class ExportPhase : uint32_t {
 };
 
 /// Progress report emitted by the export pipeline.
+// struct ExportProgress groups related state and operations so callers have one documented contract.
 struct ExportProgress {
 	ExportPhase phase = ExportPhase::Idle;
 	float       overallProgress = 0.0f; // 0.0 – 1.0
@@ -39,6 +37,7 @@ struct ExportProgress {
 using ExportProgressCallback = std::function<void(const ExportProgress&)>;
 
 /// Full result of one export pipeline invocation.
+// struct ExportResult groups related state and operations so callers have one documented contract.
 struct ExportResult {
 	bool success = false;
 	std::filesystem::path outputDirectory;
@@ -49,6 +48,7 @@ struct ExportResult {
 };
 
 /// Orchestrates the complete export build pipeline.
+// class ExportPipeline groups related state and operations so callers have one documented contract.
 class ExportPipeline {
 public:
 	/// Runs the full export pipeline synchronously and returns the result.
@@ -96,6 +96,7 @@ private:
 		const std::filesystem::path& projectRoot,
 		const std::filesystem::path& targetDirectory);
 
+	// struct StagedAsset groups related state and operations so callers have one documented contract.
 	struct StagedAsset {
 		std::string guid;
 		std::string path;

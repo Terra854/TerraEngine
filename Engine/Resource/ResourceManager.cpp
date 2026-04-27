@@ -1,3 +1,9 @@
+// ResourceManager.cpp — Resource Manager System Implementation
+//
+// Implements the core logic for the ResourceManager, managing asset directories and resource registries.
+// It coordinates the loading of different asset formats and integrates with the renderer to synchronize GPU resources.
+// This module handles project-level asset resolution and serves as the primary gateway for content consumption.
+
 #include "Resource/ResourceManager.h"
 #include "Renderer/RenderSystem.h"
 
@@ -26,6 +32,7 @@ namespace
 	constexpr std::string_view kDefaultManifestProductName = "TerraEngine";
 	constexpr std::string_view kDefaultManifestVersion = "1.0.0";
 
+	// SupportedExtensionsForAssetType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::vector<std::string_view> SupportedExtensionsForAssetType(AssetType type)
 	{
 		switch (type)
@@ -43,6 +50,7 @@ namespace
 		return {};
 	}
 
+	// AssetReferenceLooksLikePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool AssetReferenceLooksLikePath(std::string_view assetReference)
 	{
 		const std::filesystem::path queryPath(assetReference);
@@ -52,12 +60,14 @@ namespace
 			|| assetReference.find('\\') != std::string_view::npos;
 	}
 
+	// HasNativeExtensionForAssetType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool HasNativeExtensionForAssetType(const std::filesystem::path& path, AssetType type)
 	{
 		std::string extension = path.extension().generic_string();
 		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
 			return static_cast<char>(std::tolower(value));
 		});
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::string_view nativeExtension : SupportedExtensionsForAssetType(type))
 		{
 			if (extension == nativeExtension)
@@ -69,6 +79,7 @@ namespace
 		return false;
 	}
 
+	// FindEditorProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::optional<std::filesystem::path> FindEditorProjectRoot(const std::filesystem::path& assetRoot)
 	{
 		if (assetRoot.empty())
@@ -77,6 +88,7 @@ namespace
 		}
 
 		std::filesystem::path cursor = assetRoot.lexically_normal();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (int depth = 0; depth < 6; ++depth)
 		{
 			if (std::filesystem::exists(cursor / "ProjectSettings" / "ProjectSettings.terra")
@@ -86,6 +98,7 @@ namespace
 			}
 
 			const std::filesystem::path parent = cursor.parent_path();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (parent.empty() || parent == cursor)
 			{
 				break;
@@ -98,6 +111,7 @@ namespace
 	}
 }
 
+// ResourceManager::Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ResourceManager& ResourceManager::Instance()
 {
 	static ResourceManager instance;
@@ -109,6 +123,7 @@ ResourceManager& ResourceManager::Instance()
 ResourceManager::~ResourceManager() = default;
 
 ResourceManager::ResourceManager()
+	// threadPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: threadPool(ThreadPool::instance())
 {
 	assetRoot = std::filesystem::current_path();
@@ -118,6 +133,7 @@ ResourceManager::ResourceManager()
 	basist::uastc_init();
 }
 
+// ResourceManager::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::Initialize()
 {
 	// Each engine session starts with a fresh startup-scene override so stale
@@ -125,12 +141,14 @@ void ResourceManager::Initialize()
 	m_ConfiguredStartupScene.reset();
 	ResetManifestMetadata();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_ConfiguredExportArchivePath.has_value()) {
 		return;
 	}
 
 	try {
 		const std::filesystem::path archivePath = *m_ConfiguredExportArchivePath;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!std::filesystem::exists(archivePath)) {
 			throw std::runtime_error("Configured TEPAK archive does not exist: " + archivePath.string());
 		}
@@ -142,11 +160,13 @@ void ResourceManager::Initialize()
 			throw std::runtime_error("Failed to mount TEPAK archive: " + archivePath.string());
 		}
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!ContentMount::Instance().Exists("game.json")) {
 			throw std::runtime_error("Mounted TEPAK archive is missing game.json: " + archivePath.string());
 		}
 
 		const std::vector<uint8_t> manifestBytes = ContentMount::Instance().ReadAll("game.json");
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (manifestBytes.empty()) {
 			throw std::runtime_error("game.json inside TEPAK archive is empty: " + archivePath.string());
 		}
@@ -155,6 +175,7 @@ void ResourceManager::Initialize()
 		const nlohmann::json manifest = nlohmann::json::parse(manifestText);
 		ApplyManifestMetadata(manifest, archivePath.stem().string());
 
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (manifest.contains("startupScene")) {
 			m_ConfiguredStartupScene = manifest["startupScene"].get<std::string>();
 		}
@@ -169,6 +190,7 @@ void ResourceManager::Initialize()
 					const std::string path = assetEntry.value("path", "");
 					const uint32_t typeInt = assetEntry.value("type", 0u);
 
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (auto guid = TerraEngine::ParseUUID(guidStr)) {
 						RegisterAssetPath(*guid, path, static_cast<AssetType>(typeInt));
 					}
@@ -189,23 +211,27 @@ void ResourceManager::Initialize()
 	}
 }
 
+// ResourceManager::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::Shutdown()
 {
 	m_ConfiguredStartupScene.reset();
 	ResetManifestMetadata();
 	ClearCaches();
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ContentMount::Instance().IsMounted()) {
 		ContentMount::Instance().Unmount();
 	}
 }
 
+// ResourceManager::SetEngineRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::SetEngineRoot(const std::filesystem::path& engineRootPath)
 {
 	engineRoot = engineRootPath.lexically_normal();
 	TERRAENGINE_LOG(LogLevel::Debug, "Engine root set to " << engineRoot);
 }
 
+// ResourceManager::SetAssetRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::SetAssetRoot(const std::filesystem::path& assetRootPath)
 {
 	// Normalize immediately so the cache keys stay predictable even if
@@ -219,15 +245,18 @@ void ResourceManager::SetAssetRoot(const std::filesystem::path& assetRootPath)
 	TERRAENGINE_LOG(LogLevel::Debug, "Asset root set to " << assetRoot);
 }
 
+// ResourceManager::GetAssetRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ResourceManager::GetAssetRoot() const
 {
 	return assetRoot;
 }
 
+// ResourceManager::GetProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ResourceManager::GetProjectRoot() const
 {
 	// Export runtimes do not have the editor's authored project layout, so the
 	// runtime root doubles as the project root for writable top-level settings.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (IsExportRuntime())
 	{
 		return assetRoot;
@@ -247,6 +276,7 @@ std::filesystem::path ResourceManager::GetProjectRoot() const
 	std::transform(assetFolderName.begin(), assetFolderName.end(), assetFolderName.begin(), [](unsigned char value) {
 		return static_cast<char>(std::tolower(value));
 	});
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (assetFolderName == "assets" && assetRoot.has_parent_path())
 	{
 		return assetRoot.parent_path();
@@ -257,6 +287,7 @@ std::filesystem::path ResourceManager::GetProjectRoot() const
 	return assetRoot;
 }
 
+// ResourceManager::ConfigureExportArchive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ConfigureExportArchive(const std::filesystem::path& archivePath)
 {
 	if (archivePath.empty()) {
@@ -273,21 +304,25 @@ void ResourceManager::ConfigureExportArchive(const std::filesystem::path& archiv
 	SetAssetRoot(runtimeRoot);
 }
 
+// ResourceManager::GetConfiguredStartupScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<std::filesystem::path> ResourceManager::GetConfiguredStartupScene() const
 {
 	return m_ConfiguredStartupScene;
 }
 
+// ResourceManager::GetProductName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ResourceManager::GetProductName() const
 {
 	return m_ProductName;
 }
 
+// ResourceManager::GetVersion is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ResourceManager::GetVersion() const
 {
 	return m_Version;
 }
 
+// ResourceManager::IsExportRuntime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ResourceManager::IsExportRuntime() const
 {
 	// Export sessions always configure a TEPAK archive before engine startup.
@@ -296,6 +331,7 @@ bool ResourceManager::IsExportRuntime() const
 	return m_ConfiguredExportArchivePath.has_value();
 }
 
+// ResourceManager::ResetManifestMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ResetManifestMetadata(std::string_view fallbackProductName)
 {
 	m_ProductName = fallbackProductName.empty()
@@ -304,22 +340,27 @@ void ResourceManager::ResetManifestMetadata(std::string_view fallbackProductName
 	m_Version = std::string(kDefaultManifestVersion);
 }
 
+// ResourceManager::ApplyManifestMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ApplyManifestMetadata(const nlohmann::json& manifest, std::string_view fallbackProductName)
 {
 	ResetManifestMetadata(fallbackProductName);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto nameIt = manifest.find("name"); nameIt != manifest.end() && nameIt->is_string())
 	{
 		const std::string manifestName = nameIt->get<std::string>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!manifestName.empty())
 		{
 			m_ProductName = manifestName;
 		}
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (auto versionIt = manifest.find("version"); versionIt != manifest.end() && versionIt->is_string())
 	{
 		const std::string manifestVersion = versionIt->get<std::string>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!manifestVersion.empty())
 		{
 			m_Version = manifestVersion;
@@ -327,9 +368,11 @@ void ResourceManager::ApplyManifestMetadata(const nlohmann::json& manifest, std:
 	}
 }
 
+// ResourceManager::RefreshEditorProjectManifest is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::RefreshEditorProjectManifest()
 {
 	const std::optional<std::filesystem::path> projectRoot = FindEditorProjectRoot(assetRoot);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!projectRoot.has_value())
 	{
 		ResetManifestMetadata();
@@ -340,6 +383,7 @@ void ResourceManager::RefreshEditorProjectManifest()
 	ResetManifestMetadata(fallbackProductName);
 
 	const std::filesystem::path manifestPath = *projectRoot / "game.json";
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(manifestPath))
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Project manifest is missing at " << manifestPath << "; using fallback product metadata.");
@@ -349,6 +393,7 @@ void ResourceManager::RefreshEditorProjectManifest()
 	try
 	{
 		std::ifstream manifestStream(manifestPath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!manifestStream)
 		{
 			TERRAENGINE_LOG(LogLevel::Warning, "Project manifest could not be opened at " << manifestPath << "; using fallback product metadata.");
@@ -364,6 +409,7 @@ void ResourceManager::RefreshEditorProjectManifest()
 	}
 }
 
+// ResourceManager::LoadDefaultResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::LoadDefaultResources()
 {
 	TerraEngine::UUID defaultMeshId{};
@@ -387,6 +433,7 @@ void ResourceManager::LoadDefaultResources()
 	defaultTaskCollectionId[15] = 2;
 
 	auto ResolveEnginePath = [this](const std::filesystem::path& p) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (p.is_absolute()) return p.lexically_normal();
 		return (engineRoot / p).lexically_normal();
 	};
@@ -444,6 +491,7 @@ void ResourceManager::LoadDefaultResources()
 	};
 	LoadShaderCollection(fallbackStages);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (taskShaderReady)
 	{
 		std::vector<ShaderStagePath> taskStages = {
@@ -459,6 +507,7 @@ void ResourceManager::LoadDefaultResources()
 	}
 }
 
+// ResourceManager::GetDefaultShaderCollectionID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID ResourceManager::GetDefaultShaderCollectionID() const
 {
 	TerraEngine::UUID id{};
@@ -467,6 +516,7 @@ TerraEngine::UUID ResourceManager::GetDefaultShaderCollectionID() const
 	return id;
 }
 
+// ResourceManager::GetDefaultTaskShaderCollectionID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID ResourceManager::GetDefaultTaskShaderCollectionID() const
 {
 	TerraEngine::UUID id{};
@@ -475,6 +525,7 @@ TerraEngine::UUID ResourceManager::GetDefaultTaskShaderCollectionID() const
 	return id;
 }
 
+// ResourceManager::ClearCaches is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::ClearCaches()
 {
 	// Acquire exclusive locks in a consistent order to avoid deadlocks if
@@ -517,11 +568,14 @@ void ResourceManager::ClearCaches()
 	}
 }
 
+// ResourceManager::DeleteResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type)
 {
 	auto removeFromCache = [&](auto& cache) {
 		std::unique_lock lock(cache.mutex);
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto it = cache.pathToId.begin(); it != cache.pathToId.end(); ) {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (it->second == id) {
 				it = cache.pathToId.erase(it);
 			}
@@ -533,6 +587,7 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 		cache.resources.erase(id);
 	};
 
+	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (type) {
 	case AssetType::Mesh: removeFromCache(meshCache); break;
 	case AssetType::Texture: removeFromCache(textureCache); break;
@@ -544,6 +599,7 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 	RenderSystem::Instance().DeleteResource(id);
 }
 
+// ResourceManager::HasResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 {
 	auto isAvailable = [&](const auto& cache) {
@@ -555,6 +611,7 @@ bool ResourceManager::HasResource(const TerraEngine::UUID& id) const
 		isAvailable(shaderCollectionCache) || isAvailable(shaderCache);
 }
 
+// ResourceManager::RegisterAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::filesystem::path& path, AssetType type)
 {
 	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
@@ -576,6 +633,7 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 	});
 }
 
+// ResourceManager::ResolveAssetReference is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetReference, AssetType type)
 {
 	if (assetReference.empty())
@@ -586,6 +644,7 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 	const auto buildCandidatePaths = [&]() -> std::vector<std::filesystem::path> {
 		std::vector<std::filesystem::path> candidatePaths;
 		const std::filesystem::path queryPath(assetReference);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (AssetReferenceLooksLikePath(assetReference))
 		{
 			// Explicit paths are resolved literally relative to the asset root,
@@ -595,6 +654,7 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 			candidatePaths.push_back(queryPath);
 			if (queryPath.has_extension())
 			{
+				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (std::string_view extension : SupportedExtensionsForAssetType(type))
 				{
 					if (queryPath.extension() != extension)
@@ -609,6 +669,7 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 		}
 
 		const std::filesystem::path topLevelName = queryPath.filename();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (queryPath.has_extension())
 		{
 			// A bare filename like "Player.temf" is assumed to live directly
@@ -632,6 +693,7 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 			return candidatePaths;
 		}
 
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (std::string_view extension : SupportedExtensionsForAssetType(type))
 		{
 			std::filesystem::path candidate = topLevelName;
@@ -646,9 +708,11 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 
 	const auto tryFindRegisteredMatch = [&](auto& cache) -> TerraEngine::UUID {
 		std::shared_lock lock(cache.mutex);
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const std::filesystem::path& candidatePath : candidatePaths)
 		{
 			const std::string exactKey = NormalizeKey(ResolveAssetPath(candidatePath));
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto exactMatch = cache.pathToId.find(exactKey); exactMatch != cache.pathToId.end())
 			{
 				return exactMatch->second;
@@ -659,11 +723,13 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 	};
 
 	const auto tryLoadExplicitPath = [&](const std::filesystem::path& candidatePath) -> TerraEngine::UUID {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!HasNativeExtensionForAssetType(candidatePath, type))
 		{
 			return TerraEngine::EMPTY_UUID;
 		}
 
+		// Dispatch by explicit engine state so each case documents one supported behavior.
 		switch (type)
 		{
 		case AssetType::Mesh:
@@ -683,14 +749,17 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 	VisitAssetCache(type, [&](auto& cache) {
 		resolvedId = tryFindRegisteredMatch(cache);
 	});
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (resolvedId != TerraEngine::EMPTY_UUID)
 	{
 		return resolvedId;
 	}
 
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const std::filesystem::path& candidatePath : candidatePaths)
 	{
 		resolvedId = tryLoadExplicitPath(candidatePath);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (resolvedId != TerraEngine::EMPTY_UUID)
 		{
 			return resolvedId;
@@ -700,6 +769,7 @@ TerraEngine::UUID ResourceManager::ResolveAssetReference(std::string_view assetR
 	return TerraEngine::EMPTY_UUID;
 }
 
+// ResourceManager::DescribeAssetReference is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine::UUID& id, AssetType type) const
 {
 	if (id == TerraEngine::EMPTY_UUID)
@@ -710,12 +780,14 @@ std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine:
 	std::filesystem::path result;
 	const auto capturePath = [&](const auto& cache) {
 		std::shared_lock lock(cache.mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto pathIt = cache.idToPath.find(id); pathIt != cache.idToPath.end())
 		{
 			result = std::filesystem::path(pathIt->second);
 		}
 	};
 
+	// Dispatch by explicit engine state so each case documents one supported behavior.
 	switch (type)
 	{
 	case AssetType::Mesh:
@@ -732,9 +804,11 @@ std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine:
 		break;
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (result.is_absolute())
 	{
 		const std::filesystem::path relativePath = result.lexically_relative(assetRoot);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!relativePath.empty())
 		{
 			return relativePath;
@@ -744,31 +818,37 @@ std::filesystem::path ResourceManager::DescribeAssetReference(const TerraEngine:
 	return result;
 }
 
+// ResourceManager::GetMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 Material* ResourceManager::GetMaterial(const TerraEngine::UUID& id)
 {
 	return GetResourceById<Material>(id, materialCache, [this](const std::filesystem::path& p) { return LoadMaterial(p); });
 }
 
+// ResourceManager::GetMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 Mesh* ResourceManager::GetMesh(const TerraEngine::UUID& id)
 {
 	return GetResourceById<Mesh>(id, meshCache, [this](const std::filesystem::path& p) { return LoadMesh(p); });
 }
 
+// ResourceManager::GetShader is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 Shader* ResourceManager::GetShader(const TerraEngine::UUID& id)
 {
 	return GetResourceById<Shader>(id, shaderCache, [this](const std::filesystem::path& p) { return LoadShader(p); });
 }
 
+// ResourceManager::GetShaderCollection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ShaderCollection* ResourceManager::GetShaderCollection(const TerraEngine::UUID& id)
 {
 	return GetResourceById<ShaderCollection>(id, shaderCollectionCache);
 }
 
+// ResourceManager::GetTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 Texture* ResourceManager::GetTexture(const TerraEngine::UUID& id)
 {
 	return GetResourceById<Texture>(id, textureCache, [this](const std::filesystem::path& p) { return LoadTexture(p); });
 }
 
+// ResourceManager::ResolveAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ResourceManager::ResolveAssetPath(const std::filesystem::path& path) const
 {
 	if (path.is_absolute())
@@ -779,6 +859,7 @@ std::filesystem::path ResourceManager::ResolveAssetPath(const std::filesystem::p
 	return (assetRoot / path).lexically_normal();
 }
 
+// ResourceManager::NormalizeKey is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ResourceManager::NormalizeKey(const std::filesystem::path& path) const
 {
 	// Use generic_string to avoid mismatches between Windows backslashes and
@@ -786,6 +867,7 @@ std::string ResourceManager::NormalizeKey(const std::filesystem::path& path) con
 	return path.lexically_normal().generic_string();
 }
 
+// ResourceManager::ReadFileBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::path& path) const
 {
 	const std::filesystem::path absolutePath = ResolveAssetPath(path);
@@ -808,6 +890,7 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 
 		TERRAENGINE_LOG(LogLevel::Debug, "Reading resource file from mount: " << logicalPathString);
 		const std::vector<std::uint8_t> mountedBytes = ContentMount::Instance().ReadAll(logicalPathString);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!mountedBytes.empty())
 		{
 			return mountedBytes;
@@ -825,6 +908,7 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 		TERRAENGINE_LOG(LogLevel::Warning, "Resource not found in mount: " << logicalPathString);
 	}
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(absolutePath))
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Resource file does not exist on disk: " << absolutePath);
@@ -832,6 +916,7 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 	}
 
 	std::ifstream file(absolutePath, std::ios::binary | std::ios::ate);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!file)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to open resource file: " << absolutePath);
@@ -839,6 +924,7 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 	}
 
 	const std::streamsize length = file.tellg();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (length <= 0)
 	{
 		// Empty authored files are valid for assets such as placeholder UI

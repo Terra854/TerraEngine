@@ -1,3 +1,5 @@
+// ContentMount.cpp — Contains the Content Mount file-specific types, helper functions, and module integration code implementation for mounted content registration, lookup, and byte-loading services.
+
 // ContentMount.cpp — Implementation of the TEPAK runtime content mount.
 //
 // This file integrates TEPAK's PackReader API into the engine runtime. The TEPAK
@@ -54,6 +56,7 @@ ContentMount& ContentMount::operator=(ContentMount&&) noexcept = default;
 bool ContentMount::Mount(const std::filesystem::path& archivePath) {
 	std::scoped_lock lock(m_impl->mountMutex);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_impl->mounted) {
 		TERRAENGINE_LOG(LogLevel::Warning, "ContentMount: Unmounting existing archive before mounting a new one.");
 		Unmount();
@@ -84,25 +87,32 @@ bool ContentMount::Mount(const std::filesystem::path& archivePath) {
 	return true;
 }
 
+// ContentMount::IsMounted is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ContentMount::IsMounted() const {
 	return m_impl->mounted;
 }
 
+// ContentMount::GetArchivePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const std::filesystem::path& ContentMount::GetArchivePath() const {
 	return m_impl->archivePath;
 }
 
+// ContentMount::NormalizeLogicalPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ContentMount::NormalizeLogicalPath(std::string_view logicalPath) {
 	std::string normalized(logicalPath);
 	for (char& c : normalized) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (c == '\\') c = '/';
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (c >= 'A' && c <= 'Z') c += ('a' - 'A');
 	}
 
 	std::string_view lookup = normalized;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (!lookup.empty() && lookup.front() == '/') {
 		lookup.remove_prefix(1);
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (lookup.starts_with("./")) {
 		lookup.remove_prefix(2);
 	}
@@ -110,6 +120,7 @@ std::string ContentMount::NormalizeLogicalPath(std::string_view logicalPath) {
 	return std::string(lookup);
 }
 
+// ContentMount::Exists is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ContentMount::Exists(std::string_view logicalPath) const {
 	if (!m_impl->mounted) {
 		return false;
@@ -118,6 +129,7 @@ bool ContentMount::Exists(std::string_view logicalPath) const {
 	return m_impl->filePaths.count(NormalizeLogicalPath(logicalPath)) > 0;
 }
 
+// ContentMount::ReadAll is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<uint8_t> ContentMount::ReadAll(std::string_view logicalPath) const {
 	if (!m_impl->mounted) {
 		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: Cannot read — no archive is mounted.");
@@ -136,6 +148,7 @@ std::vector<uint8_t> ContentMount::ReadAll(std::string_view logicalPath) const {
 	}
 }
 
+// ContentMount::ReadRange is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::vector<uint8_t> ContentMount::ReadRange(std::string_view logicalPath, uint64_t offset, uint64_t size) const {
 	if (!m_impl->mounted) {
 		TERRAENGINE_LOG(LogLevel::Error, "ContentMount: Cannot read range — no archive is mounted.");
@@ -152,9 +165,11 @@ std::vector<uint8_t> ContentMount::ReadRange(std::string_view logicalPath, uint6
 	}
 }
 
+// ContentMount::Unmount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ContentMount::Unmount() {
 	std::scoped_lock lock(m_impl->mountMutex);
 
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_impl->mounted) {
 		return;
 	}

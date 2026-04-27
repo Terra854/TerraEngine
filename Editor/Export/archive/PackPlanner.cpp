@@ -1,3 +1,7 @@
+// PackPlanner.cpp — TEPAK archive pack planning implementation
+//
+// Implements the logic for converting a discovered file inventory into a deterministic TEPAK archive plan. It handles dictionary training evaluation, memory budget estimation, and the layout of metadata tables for optimized runtime access.
+
 #include "archive/ArchiveWorkflow.h"
 
 #include <algorithm>
@@ -7,20 +11,24 @@
 
 namespace {
 
+// ResolveWorkerCount is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::uint32_t ResolveWorkerCount(std::uint32_t requestedWorkers) {
 	// Clamp to hardware concurrency so the standalone tool does not create more
 	// compression workers than the host can actually run at once.
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (requestedWorkers == 0U) {
 		return 1U;
 	}
 
 	const auto hardwareWorkers = std::thread::hardware_concurrency();
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hardwareWorkers == 0U) {
 		return requestedWorkers;
 	}
 	return std::min(requestedWorkers, hardwareWorkers);
 }
 
+// AppendPathText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AppendPathText(std::string& pathTable, std::string_view text, std::uint32_t& offset, std::uint32_t& length) {
 	// Directory and file records point into one shared string table instead of
 	// each storing their own heap allocation in the on-disk metadata format.
@@ -29,18 +37,21 @@ void AppendPathText(std::string& pathTable, std::string_view text, std::uint32_t
 	pathTable.append(text);
 }
 
+// SumSampleBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::uint64_t SumSampleBytes(const std::vector<tepak::ByteBuffer>& samples) {
 	return std::accumulate(samples.begin(), samples.end(), 0ULL, [](std::uint64_t total, const tepak::ByteBuffer& sample) {
 		return total + static_cast<std::uint64_t>(sample.size());
 	});
 }
 
+// ResolveMaxInFlightTasks is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::uint32_t ResolveMaxInFlightTasks(std::uint32_t workerCount) {
 	// A little extra queue depth keeps workers fed while the main thread waits
 	// for earlier extents to become ready for ordered archive writes.
 	return std::max<std::uint32_t>(2U, workerCount * 2U);
 }
 
+// ResolveDictionaryTrainingBufferBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::uint64_t ResolveDictionaryTrainingBufferBytes(std::uint64_t totalSampleBytes, std::size_t sampleCount, std::uint32_t maxDictionaryBytes) {
 	if (sampleCount < 8U || maxDictionaryBytes == 0U || totalSampleBytes < (16U * 1024U)) {
 		return 0U;
@@ -53,6 +64,7 @@ std::uint64_t ResolveDictionaryTrainingBufferBytes(std::uint64_t totalSampleByte
 
 namespace tepak::archive {
 
+// BuildPackPlan is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 model::PackPlan BuildPackPlan(const PackagingRequest& request, const model::PackagingInventory& inventory, const codec::CodecProvider& codecProvider) {
 	model::PackPlan plan;
 	plan.workerCountUsed = ResolveWorkerCount(request.workerCount);
@@ -70,6 +82,7 @@ model::PackPlan BuildPackPlan(const PackagingRequest& request, const model::Pack
 			const auto candidatePreparedDictionary = codecProvider.PrepareCompressionDictionary(candidateDictionary, request.compressionLevel);
 			std::size_t sizeWithoutDictionary = 0U;
 			std::size_t sizeWithDictionary = 0U;
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const auto& sample : inventory.dictionarySamples) {
 				sizeWithoutDictionary += codecProvider.ChooseCompression(sample, {}, true, request.compressionLevel).storedBytes.size();
 				sizeWithDictionary += codecProvider.ChooseCompression(sample,
@@ -79,6 +92,7 @@ model::PackPlan BuildPackPlan(const PackagingRequest& request, const model::Pack
 					&candidatePreparedDictionary).storedBytes.size();
 			}
 
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (sizeWithDictionary + 32U < sizeWithoutDictionary) {
 				// Reuse the accepted candidate bytes directly so the planner does
 				// not pay for a second full zstd dictionary training pass.
@@ -93,6 +107,7 @@ model::PackPlan BuildPackPlan(const PackagingRequest& request, const model::Pack
 	}
 
 	plan.directories = inventory.directories;
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& directory : plan.directories) {
 		directory.pathHash = codecProvider.HashBytes(directory.normalizedPath);
 		AppendPathText(plan.pathTable, directory.normalizedPath, directory.pathOffset, directory.pathLength);
@@ -100,6 +115,7 @@ model::PackPlan BuildPackPlan(const PackagingRequest& request, const model::Pack
 
 	plan.entries.reserve(inventory.stagedFiles.size());
 	plan.extents.reserve(inventory.stagedFiles.size());
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::uint32_t fileId = 0U; fileId < inventory.stagedFiles.size(); ++fileId) {
 		const auto& stagedFile = inventory.stagedFiles[fileId];
 		PackEntry entry;
@@ -138,6 +154,7 @@ model::PackPlan BuildPackPlan(const PackagingRequest& request, const model::Pack
 	plan.descriptor.fileCount = static_cast<std::uint32_t>(plan.entries.size());
 	plan.descriptor.extentCount = static_cast<std::uint32_t>(plan.extents.size());
 	plan.descriptor.pathTableBytes = static_cast<std::uint64_t>(plan.pathTable.size());
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& extent : plan.extents) {
 		plan.descriptor.codecMask |= (1ULL << static_cast<std::uint32_t>(extent.codec));
 	}
