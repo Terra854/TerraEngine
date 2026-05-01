@@ -3779,7 +3779,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 				VkCommandBufferBeginInfo begin{};
 				begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-				begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+				// Secondary draw buffers are recorded once for the current frame slot and
+				// are reset only after that slot's fence completes in BeginFrame. That
+				// lifetime means they are never submitted for simultaneous execution, so
+				// avoid VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT and the optional
+				// nestedCommandBufferSimultaneousUse device feature it requires.
+				begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
 				begin.pInheritanceInfo = &inherit;
 
 				vkBeginCommandBuffer(secondary, &begin);
@@ -3861,7 +3866,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 			VkCommandBufferBeginInfo begin{};
 			begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+			// The sky secondary buffer follows the same per-frame fence lifetime as
+			// mesh worker buffers, so it can be executed once by the primary command
+			// buffer without requesting Vulkan's optional nested simultaneous-use feature.
+			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
 			begin.pInheritanceInfo = &inherit;
 
 			vkBeginCommandBuffer(skyCmd, &begin);
@@ -3890,7 +3898,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 			VkCommandBufferBeginInfo begin{};
 			begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+			// The scene-grid secondary buffer is reset with the current frame's worker
+			// pool after the GPU fence is signaled, so render-pass continuation is the
+			// only usage flag needed for valid nested execution.
+			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
 			begin.pInheritanceInfo = &inherit;
 
 			vkBeginCommandBuffer(gridCmd, &begin);
@@ -3919,7 +3930,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 			VkCommandBufferBeginInfo begin{};
 			begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT | VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+			// Runtime UI records into a per-frame secondary command buffer that is not
+			// submitted concurrently, so keep the flags limited to render-pass
+			// continuation and avoid requiring nestedCommandBufferSimultaneousUse.
+			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
 			begin.pInheritanceInfo = &inherit;
 
 			vkBeginCommandBuffer(uiCmd, &begin);
