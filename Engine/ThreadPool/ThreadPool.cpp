@@ -11,6 +11,16 @@ ThreadPool& ThreadPool::instance() {
 
 // ThreadPool::initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::initialize() {
+	{
+		std::lock_guard<std::mutex> lock(queue_mutex);
+		// Treat initialization as idempotent so callers can safely guard startup
+		// paths without accidentally spawning duplicate worker groups.
+		if (!workers.empty()) {
+			return;
+		}
+		stop = false;
+	}
+
 	const size_t hardwareThreads = std::thread::hardware_concurrency();
 
 	// specific hardware threads or default to 4 if detection fails.
@@ -25,12 +35,29 @@ void ThreadPool::initialize() {
 // ThreadPool::shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ThreadPool::shutdown()
 {
-	stop = true;
+	{
+		std::lock_guard<std::mutex> lock(queue_mutex);
+		// Workers observe this flag under the same mutex used by the condition
+		// variable so shutdown has a clear happens-before relationship.
+		stop = true;
+	}
 
 	condition.notify_all();
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (std::thread& worker : workers) {
-		worker.join();
+		if (worker.joinable()) {
+			worker.join();
+		}
+	}
+	workers.clear();
+
+	{
+		std::lock_guard<std::mutex> lock(queue_mutex);
+		// A normal shutdown drains queued work before workers exit. This cleanup
+		// keeps repeated shutdown calls safe if a caller queued work before
+		// starting workers or if startup failed partway through.
+		std::queue<std::function<void()>> emptyTasks;
+		tasks.swap(emptyTasks);
 	}
 
 	// Clean up task pool
@@ -59,12 +86,12 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
 				tasks.emplace([task]() {
 					TerraEngine::Profiling::Profiler::Instance().RecordTaskStarted("ThreadPool Task");
 					task->run();
+					ThreadPool::instance().completeTask(task);
 					TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished();
 				});
 			} // Release the lock asap when done to minimize the chances of deadlocks
 
 			TerraEngine::Profiling::Profiler::Instance().RecordTaskQueued();
-			this->completeTask(task);  // Call the completion logic after task execution
 		}
 		condition.notify_one();  // Notify a worker thread that a task is available
 	}
@@ -149,5 +176,9 @@ void ThreadPool::workerThread(int threadNum)
 			this->tasks.pop();
 		}
 		task();
+		// Drop captures held by the completed callable before waiting for the
+		// next job so pooled Task<void> objects can return to the reuse cache
+		// immediately after their futures become ready.
+		task = {};
 	}
 }

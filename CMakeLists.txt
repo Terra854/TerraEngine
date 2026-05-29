@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(CTest)
+
 string(REPLACE "\\" "/" TERRAENGINE_NORMALIZED_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 # Configure-time guard: select platform or option behavior before generating build files.
 if(TERRAENGINE_NORMALIZED_INSTALL_PREFIX MATCHES [[/External/[^/]+/install/?$]])
@@ -732,6 +734,12 @@ target_link_libraries(TerraEngine-Editor
 		xxhash
 )
 
+if(BUILD_TESTING)
+	# Test targets live beside their owning engine/editor code so ownership is
+	# clear, while CTest still exposes one repository-wide verification command.
+	add_subdirectory(Engine/Tests)
+	add_subdirectory(Editor/Tests)
+endif()
 
 # --- Build Configurations & Optimizations ---
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

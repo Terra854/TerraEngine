@@ -23,6 +23,13 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 1. Provide reproducible instructions (README or per-feature docs) describing how to configure, build, install, and run relevant tests/demos from a clean checkout.
 2. When adding features affecting rendering or threading, include stress or regression tests demonstrating correctness under multithreaded loads.
 3. After all implementation tasks are complete, run a test compile of the codebase before finishing so the changed code is proven to compile successfully.
+4. Use `Docs/Testing.md` for the current CTest workflow; keep engine unit tests under `Engine/Tests` and editor unit tests under `Editor/Tests` unless a later feature explicitly expands the scope.
+
+## Commit Message Expectations
+1. Follow the detailed, area-first style used by the earlier project history through commit `3aa8ae41466ea3c6ffed54cfeb1d881a1aad2d8c`: `<Area>: <short imperative summary>.`
+2. Use the subject prefix to name the subsystem or kind of work being changed rather than a generic change category. Prefer existing title-case areas such as `Renderer`, `Editor`, `Resource`, `Asset Pipeline`, `Scene`, and `Build`; add a similarly clear area only when the change does not fit an existing one.
+3. After the one-line subject, include a blank line and a longer commit body. Use concise bullet points to explain the concrete behavioral, architectural, build, asset, or documentation changes made by the commit.
+4. Keep the subject focused on the main effect of the change, and keep body bullets specific enough that a reader can understand what changed without opening the diff.
 
 ## Pull Request Expectations
 1. Reference this guide in PR descriptions to confirm compliance (self-contained deps, shaders separated, comments present, install step executed).
