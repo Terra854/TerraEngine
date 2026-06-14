@@ -8,6 +8,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/ContentMountPathNormalizerTests.cpp
 	Runtime/ContentMountPublicApiTests.cpp
 	Runtime/ExportRuntimeSmokeTests.cpp
+	Runtime/ExportScriptingRuntimeTests.cpp
 	Runtime/ThreadPoolSingletonTests.cpp
 	Runtime/WorkerPoolTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp

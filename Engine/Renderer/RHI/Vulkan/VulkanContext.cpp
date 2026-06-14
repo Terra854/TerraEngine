@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <thread>
 #include <glm/gtc/matrix_transform.hpp>
@@ -1556,37 +1557,26 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRe
 // VulkanContext::Impl::CreateUIPipelines is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 	auto loadShader = [&](const std::string& path) -> VkShaderModule {
-		std::filesystem::path resolvedPath(path);
-		std::ifstream file(resolvedPath, std::ios::ate | std::ios::binary);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!file.is_open() && ResourceManager::Instance().IsExportRuntime()) {
-			// Export builds configure ResourceManager to the packaged runtime
-			// root, so retry there instead of assuming the process working
-			// directory still matches the exported game folder.
-			resolvedPath = ResourceManager::Instance().GetAssetRoot() / path;
-			file.open(resolvedPath, std::ios::ate | std::ios::binary);
-		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!file.is_open()) {
-			TERRAENGINE_LOG(LogLevel::Error, "Failed to open shader file: " << path << " (resolved: " << resolvedPath << ")");
+		const std::filesystem::path shaderPath = ResourceManager::Instance().GetEngineRoot() / path;
+		const std::vector<std::uint8_t> shaderBytes = ResourceManager::Instance().ReadFileBytes(shaderPath);
+		// SPIR-V shader modules must be non-empty and aligned to 32-bit words.
+		if (shaderBytes.empty() || (shaderBytes.size() % sizeof(std::uint32_t)) != 0) {
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to load valid UI shader bytes: " << shaderPath);
 			return VK_NULL_HANDLE;
 		}
 
-		const size_t fileSize = (size_t)file.tellg();
-		std::vector<uint32_t> buffer(fileSize / sizeof(uint32_t));
-		file.seekg(0);
-		file.read((char*)buffer.data(), fileSize);
-		file.close();
+		std::vector<std::uint32_t> buffer(shaderBytes.size() / sizeof(std::uint32_t));
+		std::memcpy(buffer.data(), shaderBytes.data(), shaderBytes.size());
 
 		VkShaderModuleCreateInfo createInfo{};
 		createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-		createInfo.codeSize = buffer.size() * sizeof(uint32_t);
+		createInfo.codeSize = buffer.size() * sizeof(std::uint32_t);
 		createInfo.pCode = buffer.data();
 
 		VkShaderModule shaderModule = VK_NULL_HANDLE;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << resolvedPath);
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << shaderPath);
 			return VK_NULL_HANDLE;
 		}
 
@@ -1988,8 +1978,11 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		return;
 	}
 
-	const std::filesystem::path fontPath = ResourceManager::Instance().GetEngineRoot() / "Fonts" / "Roboto-Medium.ttf";
-	const UIFontAtlas& fontAtlas = uiTextRenderer.EnsureSignedDistanceFontAtlas(fontPath, uiFontAtlasPixelHeight);
+	const std::filesystem::path fontLogicalPath = "Fonts/Roboto-Medium.ttf";
+	const std::filesystem::path fontPath = ResourceManager::Instance().GetEngineRoot() / fontLogicalPath;
+	const std::vector<std::uint8_t> fontBytes = ResourceManager::Instance().ReadFileBytes(fontPath);
+	const std::vector<unsigned char> fontAtlasBytes(fontBytes.begin(), fontBytes.end());
+	const UIFontAtlas& fontAtlas = uiTextRenderer.EnsureSignedDistanceFontAtlasFromBytes(fontLogicalPath.generic_string(), fontAtlasBytes, uiFontAtlasPixelHeight);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!fontAtlas.ready || fontAtlas.width <= 0 || fontAtlas.height <= 0 || fontAtlas.pixels.empty()) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Runtime UI text atlas is unavailable. Missing or invalid font: " << fontPath);
@@ -2702,24 +2695,18 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 
 		auto LoadShaderModule = [&](const char* path) -> VkShaderModule {
-			std::ifstream file(path, std::ios::ate | std::ios::binary);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!file.is_open()) {
+			const std::filesystem::path shaderPath = ResourceManager::Instance().GetEngineRoot() / path;
+			const std::vector<std::uint8_t> shaderBytes = ResourceManager::Instance().ReadFileBytes(shaderPath);
+			// SPIR-V shader modules must be non-empty and aligned to 32-bit words.
+			if (shaderBytes.empty() || (shaderBytes.size() % sizeof(std::uint32_t)) != 0) {
 				return VK_NULL_HANDLE;
 			}
-			const size_t fileSize = static_cast<size_t>(file.tellg());
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (fileSize == 0 || (fileSize % sizeof(uint32_t)) != 0) {
-				return VK_NULL_HANDLE;
-			}
-			std::vector<uint32_t> code(fileSize / sizeof(uint32_t));
-			file.seekg(0);
-			file.read(reinterpret_cast<char*>(code.data()), static_cast<std::streamsize>(fileSize));
-			file.close();
+			std::vector<std::uint32_t> code(shaderBytes.size() / sizeof(std::uint32_t));
+			std::memcpy(code.data(), shaderBytes.data(), shaderBytes.size());
 
 			VkShaderModuleCreateInfo moduleInfo{};
 			moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-			moduleInfo.codeSize = fileSize;
+			moduleInfo.codeSize = shaderBytes.size();
 			moduleInfo.pCode = code.data();
 			VkShaderModule module = VK_NULL_HANDLE;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2763,10 +2750,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		CreateComputePipeline(impl->clusterLightPrefixComputePipeline, "Shaders/Lighting/ClusterLightPrefix.comp.spv");
 		CreateComputePipeline(impl->clusterLightFillComputePipeline, "Shaders/Lighting/ClusterLightFill.comp.spv");
 		CreateComputePipeline(impl->lightAnalysisComputePipeline, "Shaders/Lighting/LightCull.comp.spv");
-		CreateComputePipeline(impl->hiZComputePipeline, "Editor/Shaders/PostProcess/HiZGenerate.comp.spv");
-		CreateComputePipeline(impl->vrsComputePipeline, "Editor/Shaders/PostProcess/VRSGenerate.comp.spv");
-		CreateComputePipeline(impl->gtaoComputePipeline, "Editor/Shaders/PostProcess/GTAO.comp.spv");
-		CreateComputePipeline(impl->gtaoBlurComputePipeline, "Editor/Shaders/PostProcess/GTAOBlur.comp.spv");
+		CreateComputePipeline(impl->hiZComputePipeline, "Shaders/PostProcess/HiZGenerate.comp.spv");
+		CreateComputePipeline(impl->vrsComputePipeline, "Shaders/PostProcess/VRSGenerate.comp.spv");
+		CreateComputePipeline(impl->gtaoComputePipeline, "Shaders/PostProcess/GTAO.comp.spv");
+		CreateComputePipeline(impl->gtaoBlurComputePipeline, "Shaders/PostProcess/GTAOBlur.comp.spv");
 	};
 
 	EnsureLightingComputePipelines();
@@ -3979,7 +3966,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 // VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView) {
-	if (hiZ.image == VK_NULL_HANDLE || hiZComputePipeline == VK_NULL_HANDLE) return;
+	if (hiZ.image == VK_NULL_HANDLE
+		|| hiZComputePipeline == VK_NULL_HANDLE
+		|| depthView == VK_NULL_HANDLE
+		|| hiZ.sampler == VK_NULL_HANDLE
+		|| hiZ.mipViews.size() < hiZ.mipLevels
+		|| hiZ.mipLevels == 0u) {
+		return;
+	}
+	for (uint32_t mipIndex = 0; mipIndex < hiZ.mipLevels; ++mipIndex) {
+		// Each compute descriptor update below requires a concrete image view;
+		// skip Hi-Z for this frame if swapchain recreation left any mip view absent.
+		if (hiZ.mipViews[mipIndex] == VK_NULL_HANDLE) {
+			return;
+		}
+	}
 
 	// 1. Transition main depth buffer to DEPTH_STENCIL_READ_ONLY_OPTIMAL so sampled depth reads are valid.
 	VkImageMemoryBarrier depthBarrier{};
@@ -4009,13 +4010,15 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		hizBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		hizBarrier.subresourceRange.baseMipLevel = 0;
 		hizBarrier.subresourceRange.levelCount = 1;
+		hizBarrier.subresourceRange.baseArrayLayer = 0;
+		hizBarrier.subresourceRange.layerCount = 1;
 		hizBarrier.srcAccessMask = 0;
 		hizBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &hizBarrier);
 
 		VkDescriptorImageInfo depthInfo{};
 		depthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-		depthInfo.imageView = depthImageView;
+		depthInfo.imageView = depthView;
 		depthInfo.sampler = VK_NULL_HANDLE;
 
 		VkDescriptorImageInfo outputInfo{};
@@ -4066,6 +4069,8 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		hizBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		hizBarrier.subresourceRange.baseMipLevel = i;
 		hizBarrier.subresourceRange.levelCount = 1;
+		hizBarrier.subresourceRange.baseArrayLayer = 0;
+		hizBarrier.subresourceRange.layerCount = 1;
 		hizBarrier.srcAccessMask = 0;
 		hizBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &hizBarrier);
@@ -4119,7 +4124,7 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 	VkDescriptorImageInfo restoreDepthInfo{};
 	// Keep the descriptor in read-only layout because binding 12 is sampled by compute passes.
 	restoreDepthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	restoreDepthInfo.imageView = depthImageView;
+	restoreDepthInfo.imageView = depthView;
 	restoreDepthInfo.sampler = hiZ.sampler;
 
 	VkWriteDescriptorSet restoreWrite{};
@@ -4339,7 +4344,12 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 
 // VulkanContext::Impl::GenerateVRSImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView) {
-	if (vrsComputePipeline == VK_NULL_HANDLE || vrs.image == VK_NULL_HANDLE) return;
+	if (vrsComputePipeline == VK_NULL_HANDLE
+		|| vrs.image == VK_NULL_HANDLE
+		|| vrs.view == VK_NULL_HANDLE
+		|| colorView == VK_NULL_HANDLE) {
+		return;
+	}
 
 	// Transition VRS to GENERAL
 	VkImageMemoryBarrier barrier{};

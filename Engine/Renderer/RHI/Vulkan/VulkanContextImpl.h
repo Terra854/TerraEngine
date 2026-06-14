@@ -314,6 +314,7 @@ struct VulkanContext::Impl {
 	VkDescriptorSetLayout globalDescriptorSetLayout = VK_NULL_HANDLE;
 	VkDescriptorPool globalDescriptorPool = VK_NULL_HANDLE;
 	std::vector<VkDescriptorSet> globalDescriptorSets;
+	VkSampler fallbackPointShadowSampler = VK_NULL_HANDLE;
 	
 	std::vector<VulkanBuffer> globalMaterialSSBOs;
 	std::vector<VulkanBuffer> globalFrameCullingSSBOs;

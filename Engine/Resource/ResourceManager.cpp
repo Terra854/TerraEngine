@@ -872,18 +872,10 @@ std::vector<std::uint8_t> ResourceManager::ReadFileBytes(const std::filesystem::
 {
 	const std::filesystem::path absolutePath = ResolveAssetPath(path);
 
-	// Only TerraEngine's built-in default task/mesh/fragment shaders are
-	// intentionally staged beside the runtime instead of inside the TEPAK.
-	// Keep mount probes enabled for every other resource path.
-	const bool isInstalledDefaultShader =
-		absolutePath == (engineRoot / "Shaders" / "Default.task.tspf").lexically_normal()
-		|| absolutePath == (engineRoot / "Shaders" / "Default.mesh.tspf").lexically_normal()
-		|| absolutePath == (engineRoot / "Shaders" / "Default.frag.tspf").lexically_normal();
-
 	// In export builds, the ContentMount provides access to assets packed into 
 	// a .tepak archive. If a mount is active, we attempt to read through it 
 	// using a logical path relative to the asset root.
-	if (ContentMount::Instance().IsMounted() && !isInstalledDefaultShader)
+	if (ContentMount::Instance().IsMounted())
 	{
 		const std::filesystem::path logicalPath = absolutePath.lexically_relative(assetRoot);
 		const std::string logicalPathString = ContentMount::NormalizeLogicalPath(logicalPath.generic_string());

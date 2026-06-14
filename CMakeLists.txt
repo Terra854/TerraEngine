@@ -667,6 +667,7 @@ add_executable(TerraEngine-Editor
 	# --- Export pipeline (BuildProfile, Validator, Packager, Pipeline) ---
 	Editor/Export/BuildProfile.cpp
 	Editor/Export/ExportValidator.cpp
+	Editor/Export/ExportScriptBindingRewriter.cpp
 	Editor/Export/TepakPackager.cpp
 	Editor/Export/ExportPipeline.cpp
 	# --- Copied TEPAK writer sources for asset packaging ---

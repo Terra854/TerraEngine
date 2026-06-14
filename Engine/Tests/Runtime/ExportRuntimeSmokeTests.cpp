@@ -108,17 +108,23 @@ namespace TerraEngine::Tests {
 			const TerraEngine::UUID meshGuid = TerraEngine::GenerateUUID();
 			const std::string meshGuidText = TerraEngine::ToHexString(meshGuid);
 			const std::vector<std::uint8_t> payloadBytes{ 0x54U, 0x45U, 0x52U, 0x52U, 0x41U };
+			const std::string shaderPayload = "fake sky shader bytes";
+			const std::string fontPayload = "fake font bytes";
 
 			workspace.WriteText("game.json", MakeGameManifest(meshGuidText));
 			workspace.WriteText("Scenes/Main.tescene", MakeSceneDocument());
 			workspace.WriteBytes("Data/Smoke.bytes", payloadBytes);
 			workspace.WriteBytes("Meshes/Smoke.temf", {});
+			workspace.WriteText("Shaders/Sky/SkyBackground.mesh.tspf", shaderPayload);
+			workspace.WriteText("Fonts/Roboto-Medium.ttf", fontPayload);
 			workspace.CreatePack();
 
 			BootstrapExportRuntime(workspace);
 			const std::optional<std::filesystem::path> startupScene = ResourceManager::Instance().GetConfiguredStartupScene();
 			const TerraEngine::UUID resolvedMesh = ResourceManager::Instance().ResolveAssetReference("Meshes/Smoke.temf", AssetType::Mesh);
 			const std::vector<std::uint8_t> mountedPayload = ResourceManager::Instance().ReadFileBytes("Data/Smoke.bytes");
+			const std::vector<std::uint8_t> mountedShaderBytes = ResourceManager::Instance().ReadFileBytes("Shaders/Sky/SkyBackground.mesh.tspf");
+			const std::vector<std::uint8_t> mountedFontBytes = ResourceManager::Instance().ReadFileBytes("Fonts/Roboto-Medium.ttf");
 			const TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(*startupScene);
 			const SceneDocument* scene = SceneManager::Instance().GetScene(sceneId);
 
@@ -130,6 +136,8 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(std::string("Scenes/Main.tescene"), startupScene->generic_string(), "Startup scene should preserve the manifest path for engine bootstrap.");
 			context.Expect(resolvedMesh == meshGuid, "Manifest asset entries should register UUID-to-path lookups before scene loading.");
 			context.Expect(mountedPayload == payloadBytes, "ResourceManager should read non-scene runtime bytes through the mounted archive.");
+			context.ExpectEqual(shaderPayload, std::string(mountedShaderBytes.begin(), mountedShaderBytes.end()), "Engine-owned shader files should be read from the mounted archive.");
+			context.ExpectEqual(fontPayload, std::string(mountedFontBytes.begin(), mountedFontBytes.end()), "Engine-owned font files should be read from the mounted archive.");
 			context.Expect(sceneId != TerraEngine::EMPTY_UUID, "SceneManager should assign an ID when the startup scene loads from the mount.");
 			context.Expect(scene != nullptr, "The mounted startup scene should be cached after loading.");
 			context.ExpectEqual(std::string("Mounted Smoke Scene"), scene != nullptr ? scene->name : std::string{}, "SceneManager should parse scene JSON read from the mount.");

@@ -3,6 +3,7 @@
 // Implements the detailed steps of the export pipeline, including project manifest generation, script binding rewrites for NativeAOT, and output directory staging. It manages the execution of external tools like the dotnet CLI and handles progress reporting throughout the build process.
 
 #include "ExportPipeline.h"
+#include "ExportScriptBindingRewriter.h"
 
 #include <array>
 #include <chrono>
@@ -10,7 +11,6 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
-#include <unordered_map>
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
@@ -72,6 +72,56 @@ static void RemoveIfExists(const std::filesystem::path& path) {
 static void RemoveDirectoryIfExists(const std::filesystem::path& path) {
 	std::error_code errorCode;
 	std::filesystem::remove_all(path, errorCode);
+}
+
+// CopyRuntimeShaderTree stages every engine-owned shader into the TEPAK input.
+// Some renderer features still reference shaders from nested editor/history
+// folders, so the export package keeps the complete installed shader layout.
+static bool CopyRuntimeShaderTree(const std::filesystem::path& shadersSrc, const std::filesystem::path& shadersDest, std::string& outError) {
+	if (!std::filesystem::exists(shadersSrc)) {
+		outError = "Runtime shader directory not found: " + shadersSrc.string();
+		return false;
+	}
+
+	RemoveDirectoryIfExists(shadersDest);
+	std::filesystem::create_directories(shadersDest);
+	for (const auto& entry : std::filesystem::recursive_directory_iterator(shadersSrc)) {
+		if (!entry.is_regular_file()) {
+			continue;
+		}
+
+		const auto relative = std::filesystem::relative(entry.path(), shadersSrc);
+		const auto dest = shadersDest / relative;
+		std::filesystem::create_directories(dest.parent_path());
+		std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
+	}
+
+	return true;
+}
+
+// CopyRuntimeAssetTree stages an engine-owned runtime asset folder into the
+// TEPAK input root. Fonts use this path so exported UI text does not depend on
+// loose sidecar files or system-installed fonts.
+static bool CopyRuntimeAssetTree(const std::filesystem::path& sourceRoot, const std::filesystem::path& destinationRoot, const std::string& description, std::string& outError) {
+	if (!std::filesystem::exists(sourceRoot)) {
+		outError = description + " directory not found: " + sourceRoot.string();
+		return false;
+	}
+
+	RemoveDirectoryIfExists(destinationRoot);
+	std::filesystem::create_directories(destinationRoot);
+	for (const auto& entry : std::filesystem::recursive_directory_iterator(sourceRoot)) {
+		if (!entry.is_regular_file()) {
+			continue;
+		}
+
+		const auto relative = std::filesystem::relative(entry.path(), sourceRoot);
+		const auto dest = destinationRoot / relative;
+		std::filesystem::create_directories(dest.parent_path());
+		std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
+	}
+
+	return true;
 }
 
 // RemoveDebugSymbolFiles is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -144,145 +194,6 @@ static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem
 	}
 
 	return metadata;
-}
-
-// ComputeExportScriptId is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-static uint64_t ComputeExportScriptId(const std::string& className) {
-	const uint64_t fnvOffsetBasis = 14695981039346656037ULL;
-	const uint64_t fnvPrime = 1099511628211ULL;
-	uint64_t hash = fnvOffsetBasis;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (unsigned char value : className) {
-		hash ^= static_cast<uint64_t>(value);
-		hash *= fnvPrime;
-	}
-	return hash;
-}
-
-// RewriteBindingPayloads is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-static bool RewriteBindingPayloads(nlohmann::json& node, std::unordered_map<uint64_t, std::string>& observedScriptIds, std::string& outError) {
-	if (node.is_object()) {
-		if (node.contains("components") && node["components"].is_object()) {
-			nlohmann::json& components = node["components"];
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (components.contains("Script") && components["Script"].is_object()) {
-				nlohmann::json& scriptComponent = components["Script"];
-				if (scriptComponent.contains("BindingsJson") && scriptComponent["BindingsJson"].is_string()) {
-					nlohmann::json bindings = nlohmann::json::parse(scriptComponent["BindingsJson"].get<std::string>(), nullptr, false);
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (bindings.is_discarded() || !bindings.is_array()) {
-						outError = "Failed to parse Script.BindingsJson during export staging.";
-						return false;
-					}
-
-					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-					for (nlohmann::json& binding : bindings) {
-						if (!binding.is_object()) {
-							continue;
-						}
-
-						const std::string className = binding.value("className", std::string{});
-						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-						if (className.empty()) {
-							// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-							if (binding.contains("scriptId") && binding["scriptId"].is_number_unsigned()) {
-								continue;
-							}
-
-							outError = "Export staging found a script binding without a className.";
-							return false;
-						}
-
-						const uint64_t scriptId = ComputeExportScriptId(className);
-						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-						if (auto existing = observedScriptIds.find(scriptId); existing != observedScriptIds.end() && existing->second != className) {
-							outError = "NativeAOT export failed because script hash collision " + std::to_string(scriptId) + " maps both '" + existing->second + "' and '" + className + "'.";
-							return false;
-						}
-
-						observedScriptIds[scriptId] = className;
-						binding["scriptId"] = scriptId;
-						binding.erase("className");
-					}
-
-					scriptComponent["BindingsJson"] = bindings.dump();
-				}
-			}
-		}
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (auto& [_, child] : node.items()) {
-			if (!RewriteBindingPayloads(child, observedScriptIds, outError)) {
-				return false;
-			}
-		}
-	}
-	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	else if (node.is_array()) {
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (nlohmann::json& child : node) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!RewriteBindingPayloads(child, observedScriptIds, outError)) {
-				return false;
-			}
-		}
-	}
-
-	return true;
-}
-
-// RewriteStagedScriptBindings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-static bool RewriteStagedScriptBindings(const std::filesystem::path& stagingDir, std::string& outError) {
-	std::unordered_map<uint64_t, std::string> observedScriptIds;
-
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const auto& entry : std::filesystem::recursive_directory_iterator(stagingDir)) {
-		if (!entry.is_regular_file()) {
-			continue;
-		}
-
-		const std::filesystem::path extension = entry.path().extension();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (extension != ".tescene" && extension != ".teprefab") {
-			continue;
-		}
-
-		std::ifstream input(entry.path());
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!input) {
-			outError = "Failed to open staged asset for script rewrite: " + entry.path().string();
-			return false;
-		}
-
-		nlohmann::json assetJson = nlohmann::json::parse(input, nullptr, false);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (assetJson.is_discarded()) {
-			outError = "Failed to parse staged asset JSON: " + entry.path().string();
-			return false;
-		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!RewriteBindingPayloads(assetJson, observedScriptIds, outError)) {
-			outError += " File: " + entry.path().string();
-			return false;
-		}
-
-		std::ofstream output(entry.path(), std::ios::trunc);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!output) {
-			outError = "Failed to write staged asset after script rewrite: " + entry.path().string();
-			return false;
-		}
-
-		output << assetJson.dump(4);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!output.good()) {
-			outError = "Failed to flush staged asset after script rewrite: " + entry.path().string();
-			return false;
-		}
-	}
-
-	return true;
 }
 
 // --- Public API ---
@@ -571,6 +482,19 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 			}
 		}
 
+		// Engine-owned runtime payloads are packed with project content so the
+		// standalone launcher can resolve them entirely through ContentMount.
+		const std::filesystem::path editorDir = std::filesystem::current_path();
+		std::string runtimeAssetError;
+		if (!CopyRuntimeShaderTree(editorDir / "Shaders", stagingDir / "Shaders", runtimeAssetError)) {
+			result.errorMessage = runtimeAssetError;
+			return false;
+		}
+		if (!CopyRuntimeAssetTree(editorDir / "Fonts", stagingDir / "Fonts", "Runtime font", runtimeAssetError)) {
+			result.errorMessage = runtimeAssetError;
+			return false;
+		}
+
 		// Rewrite only the staged scene and prefab copies so export runtime
 		// assets resolve script bindings through deterministic numeric IDs.
 		std::string rewriteError;
@@ -773,51 +697,14 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 		// output staged earlier in RunManagedCompilation(). TerraEngine.CSharp and
 		// the editor's CoreCLR runtime files are no longer part of exported builds.
 
-		// Copy engine shaders.
-		std::filesystem::path shadersSrc = editorDir / "Shaders";
-		if (std::filesystem::exists(shadersSrc)) {
-			std::filesystem::path shadersDest = outputDir / "Shaders";
-			// Replace the staged shader tree wholesale so stale runtime shader
-			// payloads from a previous export cannot linger beside the new build.
-			RemoveDirectoryIfExists(shadersDest);
-			std::filesystem::create_directories(shadersDest);
-			for (const auto& entry : std::filesystem::recursive_directory_iterator(shadersSrc)) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!entry.is_regular_file()) continue;
-				auto relative = std::filesystem::relative(entry.path(), shadersSrc);
-				if (!relative.empty() && relative.begin()->string() == "Editor") {
-					// Editor-only debug/view shaders are not valid runtime content
-					// for exported games, so keep the export package limited to the
-					// gameplay shader set.
-					continue;
-				}
-				auto dest = shadersDest / relative;
-				std::filesystem::create_directories(dest.parent_path());
-				std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
-			}
-		}
-
-		// Copy bundled runtime fonts beside the exported executable so the UI
-		// text renderer can build its fallback atlas without depending on any
-		// system-installed fonts on the target machine.
-		std::filesystem::path fontsSrc = editorDir / "Fonts";
-		if (std::filesystem::exists(fontsSrc)) {
-			std::filesystem::path fontsDest = outputDir / "Fonts";
-			RemoveDirectoryIfExists(fontsDest);
-			std::filesystem::create_directories(fontsDest);
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const auto& entry : std::filesystem::recursive_directory_iterator(fontsSrc)) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!entry.is_regular_file()) continue;
-				auto relative = std::filesystem::relative(entry.path(), fontsSrc);
-				auto dest = fontsDest / relative;
-				std::filesystem::create_directories(dest.parent_path());
-				std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
-			}
-		}
+		// Shaders and fonts are packaged into TEPAK during asset staging. Remove
+		// stale loose copies from older exports so the output folder reflects the
+		// mounted-content runtime contract.
+		RemoveDirectoryIfExists(outputDir / "Shaders");
+		RemoveDirectoryIfExists(outputDir / "Fonts");
 	}
 	catch (const std::exception& e) {
-		result.errorMessage = std::string("Failed to copy engine binaries/shaders: ") + e.what();
+		result.errorMessage = std::string("Failed to copy engine binaries: ") + e.what();
 		return false;
 	}
 

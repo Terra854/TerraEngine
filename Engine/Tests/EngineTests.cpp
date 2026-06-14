@@ -9,6 +9,7 @@ namespace TerraEngine::Tests {
 	void RegisterContentMountPathNormalizerTests(TestRegistry& registry);
 	void RegisterContentMountPublicApiTests(TestRegistry& registry);
 	void RegisterExportRuntimeSmokeTests(TestRegistry& registry);
+	void RegisterExportScriptingRuntimeTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
@@ -37,6 +38,7 @@ int main() {
 	TerraEngine::Tests::RegisterContentMountPathNormalizerTests(registry);
 	TerraEngine::Tests::RegisterContentMountPublicApiTests(registry);
 	TerraEngine::Tests::RegisterExportRuntimeSmokeTests(registry);
+	TerraEngine::Tests::RegisterExportScriptingRuntimeTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);

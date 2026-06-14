@@ -514,6 +514,10 @@ void VulkanContext::Impl::Cleanup() {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device) {
+		if (fallbackPointShadowSampler != VK_NULL_HANDLE) {
+			vkDestroySampler(device, fallbackPointShadowSampler, nullptr);
+			fallbackPointShadowSampler = VK_NULL_HANDLE;
+		}
 		vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 		vkDestroyDescriptorPool(device, globalDescriptorPool, nullptr);
 		vkDestroyDescriptorSetLayout(device, globalDescriptorSetLayout, nullptr);

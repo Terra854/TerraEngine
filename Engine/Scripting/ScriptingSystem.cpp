@@ -1296,6 +1296,12 @@ void ScriptingSystem::InitializeExportMode(const ManagedVTable& vtable) {
 	TERRAENGINE_LOG(LogLevel::Info, "Scripting System (export mode) initialized successfully.");
 }
 
+// ScriptingSystem::InitializeExportModeForTesting is intentionally narrow: it
+// lets headless tests inject a fake NativeAOT VTable without loading a DLL.
+void ScriptingSystem::InitializeExportModeForTesting(const ManagedVTable& vtable) {
+	InitializeExportMode(vtable);
+}
+
 // ScriptingSystem::UpdateExportMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	// Export-mode update dispatches through the VTable function pointers.

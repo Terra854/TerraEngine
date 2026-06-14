@@ -7,6 +7,7 @@ add_executable(TerraEngine-EditorTests
 	Export/BuildProfileEdgeTests.cpp
 	Export/BuildProfileRoundTripTests.cpp
 	Export/ExportPathNormalizerTests.cpp
+	Export/ExportScriptBindingRewriterTests.cpp
 	Export/ExportValidatorManagedSourceTests.cpp
 	Export/ExportValidatorTests.cpp
 	Export/PackRoundTripTests.cpp
@@ -20,6 +21,7 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/BuildProfile.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/codec/CodecProvider.cpp
+	${CMAKE_SOURCE_DIR}/Editor/Export/ExportScriptBindingRewriter.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/ExportValidator.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/io/PathNormalizer.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/util/WorkerPool.cpp

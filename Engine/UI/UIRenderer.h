@@ -49,6 +49,7 @@ public:
 		const std::vector<UIImmediateQuad>& immediateQuads = {}) const;
 
 	const UIFontAtlas& EnsureSignedDistanceFontAtlas(const std::filesystem::path& fontPath, float pixelHeight) const;
+	const UIFontAtlas& EnsureSignedDistanceFontAtlasFromBytes(const std::string& fontName, const std::vector<unsigned char>& fontBytes, float pixelHeight) const;
 
 private:
 	void CollectDraws(const UIElement::Ptr& element, UIRenderBatch& batch) const;

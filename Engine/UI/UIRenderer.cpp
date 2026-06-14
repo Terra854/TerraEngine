@@ -35,56 +35,20 @@ glm::vec2 ResolvePaddingOffset(const UIStyle& style)
 	const UIEdgeValues& padding = *style.padding;
 	return glm::vec2(padding.left.value, padding.top.value);
 }
-}
 
-UIRenderBatch UIRenderer::BuildBatch(
-	const UIElement::Ptr& root,
-	const glm::vec2& viewportSize,
-	const std::vector<UIImmediateQuad>& immediateQuads) const
+// BuildSignedDistanceFontAtlas converts already-loaded TrueType bytes into the
+// SDF texture data consumed by Vulkan. Keeping file IO outside this helper lets
+// export builds source the same font from a TEPAK mount.
+UIFontAtlas BuildSignedDistanceFontAtlas(const std::vector<unsigned char>& fontBytes, float pixelHeight)
 {
-	UIRenderBatch batch;
-	batch.viewportSize = viewportSize;
-	batch.immediateQuads = immediateQuads;
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (root)
-	{
-		CollectDraws(root, batch);
-	}
-
-	return batch;
-}
-
-// UIRenderer::EnsureSignedDistanceFontAtlas is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-const UIFontAtlas& UIRenderer::EnsureSignedDistanceFontAtlas(const std::filesystem::path& fontPath, float pixelHeight) const
-{
-	const std::string cacheKey = fontPath.generic_string() + "#" + std::to_string(pixelHeight);
-
-	std::lock_guard<std::mutex> lock(fontAtlasMutex_);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto existing = fontAtlases_.find(cacheKey); existing != fontAtlases_.end())
-	{
-		return existing->second;
-	}
-
 	UIFontAtlas atlas;
 	atlas.pixelHeight = pixelHeight;
 
-	std::ifstream input(fontPath, std::ios::binary);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!input)
-	{
-		fontAtlases_[cacheKey] = atlas;
-		return fontAtlases_[cacheKey];
-	}
-
-	std::vector<unsigned char> fontBytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
 	stbtt_fontinfo fontInfo{};
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (stbtt_InitFont(&fontInfo, fontBytes.data(), 0) == 0)
+	if (fontBytes.empty() || stbtt_InitFont(&fontInfo, fontBytes.data(), 0) == 0)
 	{
-		fontAtlases_[cacheKey] = atlas;
-		return fontAtlases_[cacheKey];
+		return atlas;
 	}
 
 	// struct PendingGlyph groups related state and operations so callers have one documented contract.
@@ -192,6 +156,56 @@ const UIFontAtlas& UIRenderer::EnsureSignedDistanceFontAtlas(const std::filesyst
 	}
 
 	atlas.ready = !atlas.glyphs.empty();
+	return atlas;
+}
+}
+
+UIRenderBatch UIRenderer::BuildBatch(
+	const UIElement::Ptr& root,
+	const glm::vec2& viewportSize,
+	const std::vector<UIImmediateQuad>& immediateQuads) const
+{
+	UIRenderBatch batch;
+	batch.viewportSize = viewportSize;
+	batch.immediateQuads = immediateQuads;
+
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (root)
+	{
+		CollectDraws(root, batch);
+	}
+
+	return batch;
+}
+
+// UIRenderer::EnsureSignedDistanceFontAtlas is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+const UIFontAtlas& UIRenderer::EnsureSignedDistanceFontAtlas(const std::filesystem::path& fontPath, float pixelHeight) const
+{
+	std::ifstream input(fontPath, std::ios::binary);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (!input)
+	{
+		static const UIFontAtlas emptyAtlas{};
+		return emptyAtlas;
+	}
+
+	std::vector<unsigned char> fontBytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+	return EnsureSignedDistanceFontAtlasFromBytes(fontPath.generic_string(), fontBytes, pixelHeight);
+}
+
+// UIRenderer::EnsureSignedDistanceFontAtlasFromBytes is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+const UIFontAtlas& UIRenderer::EnsureSignedDistanceFontAtlasFromBytes(const std::string& fontName, const std::vector<unsigned char>& fontBytes, float pixelHeight) const
+{
+	const std::string cacheKey = fontName + "#" + std::to_string(pixelHeight);
+
+	std::lock_guard<std::mutex> lock(fontAtlasMutex_);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (auto existing = fontAtlases_.find(cacheKey); existing != fontAtlases_.end())
+	{
+		return existing->second;
+	}
+
+	UIFontAtlas atlas = BuildSignedDistanceFontAtlas(fontBytes, pixelHeight);
 	fontAtlases_[cacheKey] = atlas;
 	return fontAtlases_[cacheKey];
 }

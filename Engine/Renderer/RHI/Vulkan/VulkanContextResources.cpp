@@ -2096,6 +2096,49 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 		}
 	}
 
+	// Binding 8 is a standalone sampler that the material shader statically
+	// declares for point-shadow cubemaps. Initialize it even before any point
+	// light requests shadow storage so descriptor validation always sees a
+	// valid sampler; real point-shadow allocation overwrites this descriptor
+	// with the active cubemap sampler later.
+	VkSamplerCreateInfo fallbackPointSamplerInfo{};
+	fallbackPointSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	fallbackPointSamplerInfo.magFilter = VK_FILTER_LINEAR;
+	fallbackPointSamplerInfo.minFilter = VK_FILTER_LINEAR;
+	fallbackPointSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+	fallbackPointSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+	fallbackPointSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+	fallbackPointSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+	fallbackPointSamplerInfo.anisotropyEnable = VK_FALSE;
+	fallbackPointSamplerInfo.maxAnisotropy = 1.0f;
+	fallbackPointSamplerInfo.compareEnable = VK_FALSE;
+	fallbackPointSamplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+	fallbackPointSamplerInfo.minLod = 0.0f;
+	fallbackPointSamplerInfo.maxLod = 1.0f;
+	fallbackPointSamplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+	fallbackPointSamplerInfo.unnormalizedCoordinates = VK_FALSE;
+	if (vkCreateSampler(device, &fallbackPointSamplerInfo, nullptr, &fallbackPointShadowSampler) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to create fallback point-shadow sampler.");
+		return false;
+	}
+
+	VkDescriptorImageInfo fallbackPointSamplerDescriptor{};
+	fallbackPointSamplerDescriptor.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	fallbackPointSamplerDescriptor.imageView = VK_NULL_HANDLE;
+	fallbackPointSamplerDescriptor.sampler = fallbackPointShadowSampler;
+
+	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+		VkWriteDescriptorSet samplerWrite{};
+		samplerWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		samplerWrite.dstSet = globalDescriptorSets[i];
+		samplerWrite.dstBinding = 8;
+		samplerWrite.dstArrayElement = 0;
+		samplerWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+		samplerWrite.descriptorCount = 1;
+		samplerWrite.pImageInfo = &fallbackPointSamplerDescriptor;
+		vkUpdateDescriptorSets(device, 1, &samplerWrite, 0, nullptr);
+	}
+
 	return true;
 }
 

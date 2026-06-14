@@ -48,6 +48,7 @@ public:
 
 	void UpdateInspectorWatch(std::optional<uint32_t> objectId, std::uint64_t selectionVersion);
 	bool WriteLiveBindingValue(uint32_t objectId, ScriptBinding& binding, std::string_view fieldPath, const nlohmann::json& value, std::string* outError = nullptr);
+	void InitializeExportModeForTesting(const ManagedVTable& vtable);
 
 private:
 	// struct InspectorWatchState groups related state and operations so callers have one documented contract.
