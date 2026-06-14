@@ -3,7 +3,9 @@
 This document is the reproducible CTest workflow for the current unit test
 layout. Engine tests live under `Engine/Tests`; editor tests live under
 `Editor/Tests`. Launcher tests are intentionally out of scope for the current
-test feature.
+test feature. The engine suite includes a headless exported-runtime smoke
+fixture that writes a temporary TEPAK archive and verifies manifest, scene, and
+resource reads through the mounted content path.
 
 ## Configure
 
@@ -19,6 +21,9 @@ cmake --build out/build/Debug --target TerraEngine-EditorTests
 ```
 
 ## Run CTest
+
+Vendored dependency tests are disabled in the TerraEngine CMake configuration,
+so this command runs only the project-owned CTest entries.
 
 ```powershell
 ctest --test-dir out/build/Debug --output-on-failure

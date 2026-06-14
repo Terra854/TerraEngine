@@ -8,6 +8,7 @@ namespace TerraEngine::Tests {
 	void RegisterCodecProviderTests(TestRegistry& registry);
 	void RegisterContentMountPathNormalizerTests(TestRegistry& registry);
 	void RegisterContentMountPublicApiTests(TestRegistry& registry);
+	void RegisterExportRuntimeSmokeTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
@@ -35,6 +36,7 @@ int main() {
 	TerraEngine::Tests::RegisterCodecProviderTests(registry);
 	TerraEngine::Tests::RegisterContentMountPathNormalizerTests(registry);
 	TerraEngine::Tests::RegisterContentMountPublicApiTests(registry);
+	TerraEngine::Tests::RegisterExportRuntimeSmokeTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);

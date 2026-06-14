@@ -188,6 +188,10 @@ set(LAUNCHER_SOURCES
 # project folder.
 set(TEPAK_EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/External")
 add_subdirectory("${TEPAK_EXTERNAL_DIR}/xxhash/build/cmake" "${CMAKE_BINARY_DIR}/xxhash")
+# TerraEngine's CTest surface should stay limited to project-owned engine and
+# editor suites. zstd defaults its upstream tests on when BUILD_TESTING is
+# enabled, so turn those off before adding the vendored dependency.
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "Disable vendored zstd tests" FORCE)
 add_subdirectory("${TEPAK_EXTERNAL_DIR}/zstd/build/cmake" "${CMAKE_BINARY_DIR}/zstd")
 
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
