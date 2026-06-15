@@ -8,6 +8,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterBuildProfileEdgeTests(TestRegistry& registry);
 	void RegisterBuildProfileRoundTripTests(TestRegistry& registry);
 	void RegisterExportPathNormalizerTests(TestRegistry& registry);
+	void RegisterExportPackageValidatorTests(TestRegistry& registry);
 	void RegisterExportScriptBindingRewriterTests(TestRegistry& registry);
 	void RegisterExportValidatorManagedSourceTests(TestRegistry& registry);
 	void RegisterExportValidatorTests(TestRegistry& registry);
@@ -28,6 +29,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterBuildProfileEdgeTests(registry);
 	TerraEngine::EditorTests::RegisterBuildProfileRoundTripTests(registry);
 	TerraEngine::EditorTests::RegisterExportPathNormalizerTests(registry);
+	TerraEngine::EditorTests::RegisterExportPackageValidatorTests(registry);
 	TerraEngine::EditorTests::RegisterExportScriptBindingRewriterTests(registry);
 	TerraEngine::EditorTests::RegisterExportValidatorManagedSourceTests(registry);
 	TerraEngine::EditorTests::RegisterExportValidatorTests(registry);

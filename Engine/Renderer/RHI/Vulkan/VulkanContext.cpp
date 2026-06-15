@@ -1319,7 +1319,7 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 
 	auto loadShader = [&](const std::string& relativePath) -> LoadedSkyShader {
 		LoadedSkyShader loadedShader{};
-		const std::filesystem::path resolvedPath = (ResourceManager::Instance().GetEngineRoot() / relativePath).lexically_normal();
+		const std::filesystem::path resolvedPath = ResourceManager::Instance().ResolveEngineAssetPath(relativePath);
 
 		// Sky shaders now use the same packaged TSPF path as the default mesh
 		// pipeline so task/mesh stages inherit the Vulkan 1.3 target flags and
@@ -1557,7 +1557,7 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRe
 // VulkanContext::Impl::CreateUIPipelines is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateUIPipelines(VkRenderPass renderPass) {
 	auto loadShader = [&](const std::string& path) -> VkShaderModule {
-		const std::filesystem::path shaderPath = ResourceManager::Instance().GetEngineRoot() / path;
+		const std::filesystem::path shaderPath = ResourceManager::Instance().ResolveEngineAssetPath(path);
 		const std::vector<std::uint8_t> shaderBytes = ResourceManager::Instance().ReadFileBytes(shaderPath);
 		// SPIR-V shader modules must be non-empty and aligned to 32-bit words.
 		if (shaderBytes.empty() || (shaderBytes.size() % sizeof(std::uint32_t)) != 0) {
@@ -1979,7 +1979,7 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 	}
 
 	const std::filesystem::path fontLogicalPath = "Fonts/Roboto-Medium.ttf";
-	const std::filesystem::path fontPath = ResourceManager::Instance().GetEngineRoot() / fontLogicalPath;
+	const std::filesystem::path fontPath = ResourceManager::Instance().ResolveEngineAssetPath(fontLogicalPath);
 	const std::vector<std::uint8_t> fontBytes = ResourceManager::Instance().ReadFileBytes(fontPath);
 	const std::vector<unsigned char> fontAtlasBytes(fontBytes.begin(), fontBytes.end());
 	const UIFontAtlas& fontAtlas = uiTextRenderer.EnsureSignedDistanceFontAtlasFromBytes(fontLogicalPath.generic_string(), fontAtlasBytes, uiFontAtlasPixelHeight);
@@ -2695,7 +2695,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 
 		auto LoadShaderModule = [&](const char* path) -> VkShaderModule {
-			const std::filesystem::path shaderPath = ResourceManager::Instance().GetEngineRoot() / path;
+			const std::filesystem::path shaderPath = ResourceManager::Instance().ResolveEngineAssetPath(path);
 			const std::vector<std::uint8_t> shaderBytes = ResourceManager::Instance().ReadFileBytes(shaderPath);
 			// SPIR-V shader modules must be non-empty and aligned to 32-bit words.
 			if (shaderBytes.empty() || (shaderBytes.size() % sizeof(std::uint32_t)) != 0) {
@@ -3966,12 +3966,19 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 // VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView) {
-	if (hiZ.image == VK_NULL_HANDLE
+	if (cmd == VK_NULL_HANDLE
+		|| depthImage == VK_NULL_HANDLE
+		|| lightingComputePipelineLayout == VK_NULL_HANDLE
+		|| currentFrame >= globalDescriptorSets.size()
+		|| globalDescriptorSets[currentFrame] == VK_NULL_HANDLE
+		|| hiZ.image == VK_NULL_HANDLE
 		|| hiZComputePipeline == VK_NULL_HANDLE
 		|| depthView == VK_NULL_HANDLE
 		|| hiZ.sampler == VK_NULL_HANDLE
 		|| hiZ.mipViews.size() < hiZ.mipLevels
-		|| hiZ.mipLevels == 0u) {
+		|| hiZ.mipLevels == 0u
+		|| hiZ.width == 0u
+		|| hiZ.height == 0u) {
 		return;
 	}
 	for (uint32_t mipIndex = 0; mipIndex < hiZ.mipLevels; ++mipIndex) {
@@ -4141,6 +4148,11 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData) {
 	const bool aoEnabled = frameData.renderSettings2.y > 0.001f && frameData.renderSettings2.z > 0.5f;
 	if (!aoEnabled
+		|| cmd == VK_NULL_HANDLE
+		|| depthImageView == VK_NULL_HANDLE
+		|| lightingComputePipelineLayout == VK_NULL_HANDLE
+		|| currentFrame >= globalDescriptorSets.size()
+		|| globalDescriptorSets[currentFrame] == VK_NULL_HANDLE
 		|| gtaoComputePipeline == VK_NULL_HANDLE
 		|| gtaoBlurComputePipeline == VK_NULL_HANDLE
 		|| ambientOcclusionRaw.image == VK_NULL_HANDLE
@@ -4344,10 +4356,18 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 
 // VulkanContext::Impl::GenerateVRSImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView) {
-	if (vrsComputePipeline == VK_NULL_HANDLE
+	if (cmd == VK_NULL_HANDLE
+		|| lightingComputePipelineLayout == VK_NULL_HANDLE
+		|| currentFrame >= globalDescriptorSets.size()
+		|| globalDescriptorSets[currentFrame] == VK_NULL_HANDLE
+		|| vrsComputePipeline == VK_NULL_HANDLE
 		|| vrs.image == VK_NULL_HANDLE
 		|| vrs.view == VK_NULL_HANDLE
-		|| colorView == VK_NULL_HANDLE) {
+		|| colorView == VK_NULL_HANDLE
+		|| vrs.width == 0u
+		|| vrs.height == 0u
+		|| vrs.texelSize.width == 0u
+		|| vrs.texelSize.height == 0u) {
 		return;
 	}
 

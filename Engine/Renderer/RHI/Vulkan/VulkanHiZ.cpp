@@ -10,8 +10,11 @@
 #include <stdexcept>
 
 void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenWidth, uint32_t screenHeight, VkFormat /*ignored*/) {
-	width = screenWidth;
-	height = screenHeight;
+	// Swapchain creation can briefly report a zero-sized drawable during
+	// minimized or export-startup transitions. Vulkan images must still use
+	// non-zero extents, so clamp the backing pyramid to the smallest legal size.
+	width = std::max(screenWidth, 1u);
+	height = std::max(screenHeight, 1u);
 	mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
 
 	VkImageCreateInfo imageInfo{};

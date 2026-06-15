@@ -666,6 +666,7 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/ShaderCompiler.cpp
 	# --- Export pipeline (BuildProfile, Validator, Packager, Pipeline) ---
 	Editor/Export/BuildProfile.cpp
+	Editor/Export/ExportPackageValidator.cpp
 	Editor/Export/ExportValidator.cpp
 	Editor/Export/ExportScriptBindingRewriter.cpp
 	Editor/Export/TepakPackager.cpp

@@ -3,6 +3,7 @@
 // This file serves as the executable entry point for the TerraEngine launcher, responsible for initializing the core engine and bootstrapping export-mode resources. It handles executable path resolution, configures the initial resource mounts, and manages the handoff to the MainEngine runtime loop.
 
 #include <array>
+#include <cstring>
 #include <filesystem>
 #include <exception>
 #include <iostream>
@@ -10,6 +11,13 @@
 #include <string>
 
 #include <entt/entt.hpp>
+
+#ifdef _WIN32
+#	ifndef NOMINMAX
+#		define NOMINMAX
+#	endif
+#	include <Windows.h>
+#endif
 
 #ifdef _MSC_VER
 #	include <crtdbg.h>
@@ -51,6 +59,18 @@ fs::path ResolveManagedLibraryPath(const fs::path& executableDirectory) {
 	// using the fixed Assembly-CSharp name, so the launcher can derive it
 	// without duplicating that path inside game.json.
 	return executableDirectory / "Managed" / "Assembly-CSharp.dll";
+}
+
+bool HasArgument(int argc, char* argv[], const char* expectedArgument) {
+	// Keep launcher switches simple and exact so exported games cannot
+	// accidentally enter validation mode because of a partial argument match.
+	for (int argumentIndex = 1; argumentIndex < argc; ++argumentIndex) {
+		if (argv[argumentIndex] != nullptr && std::strcmp(argv[argumentIndex], expectedArgument) == 0) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 // ConfigureExportBootstrap is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -98,15 +118,22 @@ int main(int argc, char *argv[])
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
-	// --- Export-mode bootstrap ---
-	// Exported builds are discovered by looking for "<ExeStem>.tepak" beside the
-	// executable, but the archive is now mounted later by ResourceManager during
-	// engine startup instead of before Engine::Run() begins.
-	ConfigureExportBootstrap(argc > 0 ? argv[0] : nullptr);
-
-	Engine engine;
-
 	try {
+		// --- Export-mode bootstrap ---
+		// Exported builds are discovered by looking for "<ExeStem>.tepak" beside
+		// the executable. The normal game path lets Engine::Run() initialize the
+		// archive, while validation mode mounts it here and exits before creating
+		// any renderer-owned window or GPU resources.
+		ConfigureExportBootstrap(argc > 0 ? argv[0] : nullptr);
+
+		if (HasArgument(argc, argv, "--validate-export-bootstrap")) {
+			ResourceManager::Instance().Initialize();
+			ResourceManager::Instance().Shutdown();
+			std::cout << "[Launcher] Export bootstrap validation succeeded." << std::endl;
+			return 0;
+		}
+
+		Engine engine;
 		engine.Run();
 	}
 	catch (const std::exception& e) {

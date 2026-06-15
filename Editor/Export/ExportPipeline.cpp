@@ -3,6 +3,7 @@
 // Implements the detailed steps of the export pipeline, including project manifest generation, script binding rewrites for NativeAOT, and output directory staging. It manages the execution of external tools like the dotnet CLI and handles progress reporting throughout the build process.
 
 #include "ExportPipeline.h"
+#include "ExportPackageValidator.h"
 #include "ExportScriptBindingRewriter.h"
 
 #include <array>
@@ -619,6 +620,12 @@ bool ExportPipeline::RunAssetPackaging(const BuildProfile& profile,
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!result.packageResult.success) {
 		result.errorMessage = result.packageResult.errorMessage;
+		return false;
+	}
+
+	std::string packageValidationError;
+	if (!ValidateExportPackage(tepakPath, packageValidationError)) {
+		result.errorMessage = packageValidationError;
 		return false;
 	}
 

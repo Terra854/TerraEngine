@@ -148,6 +148,7 @@ void ResourceManager::Initialize()
 
 	try {
 		const std::filesystem::path archivePath = *m_ConfiguredExportArchivePath;
+		TERRAENGINE_LOG(LogLevel::Info, "Export runtime initializing from TEPAK archive: " << archivePath);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!std::filesystem::exists(archivePath)) {
 			throw std::runtime_error("Configured TEPAK archive does not exist: " + archivePath.string());
@@ -174,6 +175,7 @@ void ResourceManager::Initialize()
 		const std::string manifestText(reinterpret_cast<const char*>(manifestBytes.data()), manifestBytes.size());
 		const nlohmann::json manifest = nlohmann::json::parse(manifestText);
 		ApplyManifestMetadata(manifest, archivePath.stem().string());
+		std::uint32_t registeredAssetCount = 0u;
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (manifest.contains("startupScene")) {
@@ -193,6 +195,7 @@ void ResourceManager::Initialize()
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (auto guid = TerraEngine::ParseUUID(guidStr)) {
 						RegisterAssetPath(*guid, path, static_cast<AssetType>(typeInt));
+						++registeredAssetCount;
 					}
 				}
 				catch (...) {
@@ -201,6 +204,13 @@ void ResourceManager::Initialize()
 				}
 			}
 		}
+
+		TERRAENGINE_LOG(LogLevel::Info,
+			"Export runtime mounted. archive=" << archivePath
+			<< " engineRoot=" << engineRoot
+			<< " assetRoot=" << assetRoot
+			<< " startupScene=" << (m_ConfiguredStartupScene.has_value() ? m_ConfiguredStartupScene->generic_string() : std::string("<none>"))
+			<< " manifestAssets=" << registeredAssetCount);
 	}
 	catch (...) {
 		// Leave the manager in a clean state if export startup fails halfway
@@ -302,6 +312,9 @@ void ResourceManager::ConfigureExportArchive(const std::filesystem::path& archiv
 	const std::filesystem::path runtimeRoot = m_ConfiguredExportArchivePath->parent_path();
 	SetEngineRoot(runtimeRoot);
 	SetAssetRoot(runtimeRoot);
+	TERRAENGINE_LOG(LogLevel::Info,
+		"Configured export runtime paths. archive=" << *m_ConfiguredExportArchivePath
+		<< " runtimeRoot=" << runtimeRoot);
 }
 
 // ResourceManager::GetConfiguredStartupScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -857,6 +870,20 @@ std::filesystem::path ResourceManager::ResolveAssetPath(const std::filesystem::p
 	}
 
 	return (assetRoot / path).lexically_normal();
+}
+
+// ResourceManager::ResolveEngineAssetPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+std::filesystem::path ResourceManager::ResolveEngineAssetPath(const std::filesystem::path& path) const
+{
+	if (path.is_absolute())
+	{
+		return path.lexically_normal();
+	}
+
+	// Editor sessions keep engine-owned payloads such as shaders and fonts in
+	// the installed engine tree. Export sessions set engineRoot to the runtime
+	// folder, so the same absolute path maps back to TEPAK through ReadFileBytes.
+	return (engineRoot / path).lexically_normal();
 }
 
 // ResourceManager::NormalizeKey is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -80,13 +80,15 @@ namespace TerraEngine::Tests {
 			std::filesystem::path root_;
 		};
 
-		std::string MakeGameManifest(std::string_view meshGuid) {
+		std::string MakeGameManifest(std::string_view meshGuid, std::string_view materialGuid, std::string_view textureGuid) {
 			return std::string("{\n")
 				+ "\t\"name\": \"Smoke Export\",\n"
 				+ "\t\"version\": \"2.5.0\",\n"
 				+ "\t\"startupScene\": \"Scenes/Main.tescene\",\n"
 				+ "\t\"assets\": [\n"
-				+ "\t\t{ \"guid\": \"" + std::string(meshGuid) + "\", \"path\": \"Meshes/Smoke.temf\", \"type\": 0 }\n"
+				+ "\t\t{ \"guid\": \"" + std::string(meshGuid) + "\", \"path\": \"Meshes/Smoke.temf\", \"type\": 0 },\n"
+				+ "\t\t{ \"guid\": \"" + std::string(materialGuid) + "\", \"path\": \"Materials/Smoke.tmat\", \"type\": 2 },\n"
+				+ "\t\t{ \"guid\": \"" + std::string(textureGuid) + "\", \"path\": \"Textures/Smoke.tetf\", \"type\": 1 }\n"
 				+ "\t]\n"
 				+ "}\n";
 		}
@@ -106,15 +108,25 @@ namespace TerraEngine::Tests {
 		registry.Add("Engine.ExportRuntime.MountsManifestSceneAndAssetsFromPack", [](TestContext& context) {
 			ExportRuntimeWorkspace workspace;
 			const TerraEngine::UUID meshGuid = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialGuid = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID textureGuid = TerraEngine::GenerateUUID();
 			const std::string meshGuidText = TerraEngine::ToHexString(meshGuid);
+			const std::string materialGuidText = TerraEngine::ToHexString(materialGuid);
+			const std::string textureGuidText = TerraEngine::ToHexString(textureGuid);
 			const std::vector<std::uint8_t> payloadBytes{ 0x54U, 0x45U, 0x52U, 0x52U, 0x41U };
+			const std::string materialPayload = "{\n\t\"name\": \"Smoke Material\"\n}\n";
+			const std::vector<std::uint8_t> texturePayload{ 0x54U, 0x45U, 0x54U, 0x46U };
+			const std::string uiPayload = "<ui />\n";
 			const std::string shaderPayload = "fake sky shader bytes";
 			const std::string fontPayload = "fake font bytes";
 
-			workspace.WriteText("game.json", MakeGameManifest(meshGuidText));
+			workspace.WriteText("game.json", MakeGameManifest(meshGuidText, materialGuidText, textureGuidText));
 			workspace.WriteText("Scenes/Main.tescene", MakeSceneDocument());
 			workspace.WriteBytes("Data/Smoke.bytes", payloadBytes);
 			workspace.WriteBytes("Meshes/Smoke.temf", {});
+			workspace.WriteText("Materials/Smoke.tmat", materialPayload);
+			workspace.WriteBytes("Textures/Smoke.tetf", texturePayload);
+			workspace.WriteText("UI/Hud.tuiml", uiPayload);
 			workspace.WriteText("Shaders/Sky/SkyBackground.mesh.tspf", shaderPayload);
 			workspace.WriteText("Fonts/Roboto-Medium.ttf", fontPayload);
 			workspace.CreatePack();
@@ -122,7 +134,12 @@ namespace TerraEngine::Tests {
 			BootstrapExportRuntime(workspace);
 			const std::optional<std::filesystem::path> startupScene = ResourceManager::Instance().GetConfiguredStartupScene();
 			const TerraEngine::UUID resolvedMesh = ResourceManager::Instance().ResolveAssetReference("Meshes/Smoke.temf", AssetType::Mesh);
+			const TerraEngine::UUID resolvedMaterial = ResourceManager::Instance().ResolveAssetReference("Materials/Smoke.tmat", AssetType::Material);
+			const TerraEngine::UUID resolvedTexture = ResourceManager::Instance().ResolveAssetReference("Textures/Smoke.tetf", AssetType::Texture);
 			const std::vector<std::uint8_t> mountedPayload = ResourceManager::Instance().ReadFileBytes("Data/Smoke.bytes");
+			const std::vector<std::uint8_t> mountedMaterialBytes = ResourceManager::Instance().ReadFileBytes("Materials/Smoke.tmat");
+			const std::vector<std::uint8_t> mountedTextureBytes = ResourceManager::Instance().ReadFileBytes("Textures/Smoke.tetf");
+			const std::vector<std::uint8_t> mountedUiBytes = ResourceManager::Instance().ReadFileBytes("UI/Hud.tuiml");
 			const std::vector<std::uint8_t> mountedShaderBytes = ResourceManager::Instance().ReadFileBytes("Shaders/Sky/SkyBackground.mesh.tspf");
 			const std::vector<std::uint8_t> mountedFontBytes = ResourceManager::Instance().ReadFileBytes("Fonts/Roboto-Medium.ttf");
 			const TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(*startupScene);
@@ -135,7 +152,12 @@ namespace TerraEngine::Tests {
 			context.Expect(startupScene.has_value(), "The packed manifest should provide a startup scene path.");
 			context.ExpectEqual(std::string("Scenes/Main.tescene"), startupScene->generic_string(), "Startup scene should preserve the manifest path for engine bootstrap.");
 			context.Expect(resolvedMesh == meshGuid, "Manifest asset entries should register UUID-to-path lookups before scene loading.");
+			context.Expect(resolvedMaterial == materialGuid, "Packed material assets should be addressable through the export manifest.");
+			context.Expect(resolvedTexture == textureGuid, "Packed texture assets should be addressable through the export manifest.");
 			context.Expect(mountedPayload == payloadBytes, "ResourceManager should read non-scene runtime bytes through the mounted archive.");
+			context.ExpectEqual(materialPayload, std::string(mountedMaterialBytes.begin(), mountedMaterialBytes.end()), "Minimal export packages should keep material source bytes in the mounted archive.");
+			context.Expect(mountedTextureBytes == texturePayload, "Minimal export packages should keep texture payload bytes in the mounted archive.");
+			context.ExpectEqual(uiPayload, std::string(mountedUiBytes.begin(), mountedUiBytes.end()), "Minimal export packages should keep UI documents in the mounted archive.");
 			context.ExpectEqual(shaderPayload, std::string(mountedShaderBytes.begin(), mountedShaderBytes.end()), "Engine-owned shader files should be read from the mounted archive.");
 			context.ExpectEqual(fontPayload, std::string(mountedFontBytes.begin(), mountedFontBytes.end()), "Engine-owned font files should be read from the mounted archive.");
 			context.Expect(sceneId != TerraEngine::EMPTY_UUID, "SceneManager should assign an ID when the startup scene loads from the mount.");

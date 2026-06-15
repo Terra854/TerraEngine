@@ -24,8 +24,11 @@ void VulkanVRS::Create(VkDevice device, VkPhysicalDevice physicalDevice, VmaAllo
 		texelSize = { 8, 8 }; // Fallback
 	}
 
-	width = (screenWidth + texelSize.width - 1) / texelSize.width;
-	height = (screenHeight + texelSize.height - 1) / texelSize.height;
+	// Exported games can enter this path while the window is minimized or still
+	// negotiating its drawable size. Keep the shading-rate image legal and let
+	// later swapchain recreation resize it to the real dimensions.
+	width = std::max((screenWidth + texelSize.width - 1) / texelSize.width, 1u);
+	height = std::max((screenHeight + texelSize.height - 1) / texelSize.height, 1u);
 
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;

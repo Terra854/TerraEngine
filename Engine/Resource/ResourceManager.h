@@ -207,6 +207,16 @@ public:
 	// bytes from disk after the path has been resolved.
 	std::vector<std::uint8_t> ReadFileBytes(const std::filesystem::path& path) const;
 
+	// Collapse relative paths against the configured project asset root. Export
+	// runtimes use the archive folder as asset root so the result can still map
+	// into TEPAK when ReadFileBytes probes the active ContentMount.
+	std::filesystem::path ResolveAssetPath(const std::filesystem::path& path) const;
+
+	// Collapse engine-owned runtime paths against the installed engine root.
+	// Editor builds resolve these to loose files; export builds resolve them to
+	// archive-relative paths because engineRoot is the export runtime folder.
+	std::filesystem::path ResolveEngineAssetPath(const std::filesystem::path& path) const;
+
 private:
 	ResourceManager();
 
@@ -270,10 +280,6 @@ private:
 	// asynchronous code paths to keep cache semantics consistent.
 	template <typename Resource>
 	TerraEngine::UUID FinalizeLoad(const std::string& key, ResourceCache<Resource>& cache, const TerraEngine::UUID& id, std::unique_ptr<Resource> resource);
-
-	// Collapse relative paths against the configured asset root so caching
-	// keys remain stable even when callers run in different directories.
-	std::filesystem::path ResolveAssetPath(const std::filesystem::path& path) const;
 
 	// Produce a normalized string key used by the cache maps. Paths are
 	// stored using generic separators to avoid Windows/Linux mismatches.
