@@ -75,6 +75,73 @@ static void RemoveDirectoryIfExists(const std::filesystem::path& path) {
 	std::filesystem::remove_all(path, errorCode);
 }
 
+static std::string QualityFromRank(std::uint32_t rank)
+{
+	if (rank == 0u) return "disabled";
+	if (rank == 1u) return "low";
+	if (rank == 2u) return "medium";
+	return "high";
+}
+
+static std::string ShadowQualityFromSettings(const nlohmann::json& settings)
+{
+	const std::uint32_t maxShadowLights = settings.value("maxShadowLights", 8u);
+	const std::uint32_t shadowResolution = settings.value("shadowResolution", 2048u);
+	if (maxShadowLights == 0u || shadowResolution == 0u) return "disabled";
+	if (maxShadowLights <= 2u || shadowResolution <= 1024u) return "low";
+	if (maxShadowLights <= 4u || shadowResolution <= 1536u) return "medium";
+	return "high";
+}
+
+static std::string AmbientOcclusionQualityFromSettings(const nlohmann::json& settings)
+{
+	const float strength = settings.value("ambientOcclusionStrength", 1.0f);
+	if (strength <= 0.0f) return "disabled";
+	return QualityFromRank(settings.value("ambientOcclusionQuality", 2u));
+}
+
+static nlohmann::json ResolveRenderProfileManifest(const std::filesystem::path& projectRoot)
+{
+	nlohmann::json renderProfile;
+	renderProfile["profileName"] = "Project Render Settings";
+	renderProfile["shadows"] = "high";
+	renderProfile["ambientOcclusion"] = "medium";
+	renderProfile["variableRateShading"] = "disabled";
+	renderProfile["textureBudgetMb"] = 512u;
+	renderProfile["resolutionScale"] = 1.0f;
+	renderProfile["validationEnabled"] = false;
+	renderProfile["debugEnabled"] = false;
+
+	const std::filesystem::path settingsPath = projectRoot / "ProjectSettings" / "RenderSettings.json";
+	if (!std::filesystem::exists(settingsPath)) {
+		return renderProfile;
+	}
+
+	try {
+		std::ifstream file(settingsPath);
+		nlohmann::json savedSettings;
+		file >> savedSettings;
+		if (auto settingsIt = savedSettings.find("settings"); settingsIt != savedSettings.end() && settingsIt->is_object()) {
+			// Build profiles no longer own renderer quality. The export manifest
+			// records a concise product-facing summary of the authoritative
+			// project render settings so boot logs still show what was exported.
+			renderProfile["shadows"] = ShadowQualityFromSettings(*settingsIt);
+			renderProfile["ambientOcclusion"] = AmbientOcclusionQualityFromSettings(*settingsIt);
+			renderProfile["textureBudgetMb"] = settingsIt->value("textureBudgetMb", 512u);
+			renderProfile["resolutionScale"] = settingsIt->value("resolutionScale", 1.0f);
+			renderProfile["validationEnabled"] = savedSettings.value("validationEnabled", false);
+			renderProfile["debugEnabled"] = savedSettings.value("debugEnabled", false);
+		}
+	}
+	catch (...) {
+		// A malformed optional settings file should not make export crash here;
+		// validation can report richer diagnostics while the manifest remains
+		// deterministic with documented defaults.
+	}
+
+	return renderProfile;
+}
+
 // CopyRuntimeShaderTree stages every engine-owned shader into the TEPAK input.
 // Some renderer features still reference shaders from nested editor/history
 // folders, so the export package keeps the complete installed shader layout.
@@ -741,6 +808,8 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		if (!profile.includedScenes.empty()) {
 			manifest["scenes"] = profile.includedScenes;
 		}
+
+		manifest["renderProfile"] = ResolveRenderProfileManifest(projectRoot);
 
 		// Include the asset GUID map so the engine runtime can resolve 
 		// cross-resource references (UUIDs) back to filenames in the archive.

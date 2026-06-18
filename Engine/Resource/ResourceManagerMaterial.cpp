@@ -12,6 +12,7 @@
 
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineMaterialFile.h"
+#include "Resource/MaterialRuntimeContract.h"
 
 namespace
 {
@@ -120,6 +121,14 @@ namespace
 			}
 
 			material->floats = std::span<const FloatParameter>(reinterpret_cast<const FloatParameter*>(payload + floatOffset), header.floatParameterCount);
+		}
+
+		MaterialRuntimeContract contract = ResolveMaterialRuntimeContract(material->header, material->textures);
+		material->resolvedSlots = std::move(contract.slots);
+		material->fallbackWarnings = std::move(contract.warnings);
+		for (const std::string& warning : material->fallbackWarnings)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "TMAT fallback in " << resolvedPath << ": " << warning);
 		}
 
 		return material;

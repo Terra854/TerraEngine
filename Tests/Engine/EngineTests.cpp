@@ -5,14 +5,19 @@
 namespace TerraEngine::Tests {
 	void RegisterArchiveSerializationTests(TestRegistry& registry);
 	void RegisterBinaryIOTests(TestRegistry& registry);
+	void RegisterBootSummaryValidationTests(TestRegistry& registry);
 	void RegisterCodecProviderTests(TestRegistry& registry);
 	void RegisterContentMountPathNormalizerTests(TestRegistry& registry);
 	void RegisterContentMountPublicApiTests(TestRegistry& registry);
 	void RegisterExportRuntimeSmokeTests(TestRegistry& registry);
+	void RegisterExportRuntimeBaselineLaunchTests(TestRegistry& registry);
+	void RegisterExportStartupFlowTests(TestRegistry& registry);
 	void RegisterExportScriptingRuntimeTests(TestRegistry& registry);
+	void RegisterMaterialRuntimeContractTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
+	void RegisterRenderProfileBootSummaryTests(TestRegistry& registry);
 	void RegisterSpatialBoundsTests(TestRegistry& registry);
 	void RegisterSpatialIndexEdgeTests(TestRegistry& registry);
 	void RegisterSpatialIndexQueryTests(TestRegistry& registry);
@@ -34,16 +39,21 @@ int main() {
 
 	TerraEngine::Tests::RegisterArchiveSerializationTests(registry);
 	TerraEngine::Tests::RegisterBinaryIOTests(registry);
+	TerraEngine::Tests::RegisterBootSummaryValidationTests(registry);
 	TerraEngine::Tests::RegisterCodecProviderTests(registry);
 	TerraEngine::Tests::RegisterContentMountPathNormalizerTests(registry);
 	TerraEngine::Tests::RegisterContentMountPublicApiTests(registry);
 	TerraEngine::Tests::RegisterExportRuntimeSmokeTests(registry);
+	TerraEngine::Tests::RegisterExportRuntimeBaselineLaunchTests(registry);
+	TerraEngine::Tests::RegisterExportStartupFlowTests(registry);
 	TerraEngine::Tests::RegisterExportScriptingRuntimeTests(registry);
+	TerraEngine::Tests::RegisterMaterialRuntimeContractTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
+	TerraEngine::Tests::RegisterRenderProfileBootSummaryTests(registry);
 	TerraEngine::Tests::RegisterSpatialBoundsTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexEdgeTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexQueryTests(registry);

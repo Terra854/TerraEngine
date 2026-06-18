@@ -5,7 +5,7 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 ## Build & Dependency Expectations
 1. **CMake install required** – You must invoke `cmake --build <build-dir> --target install` (or equivalent via `cmake --install`) before finishing a task if any code changes were made (including moving and renaming files). Update docs/scripts accordingly and verify the install tree is produced before marking a task complete.
 2. **Self-contained dependencies** – Do not rely on globally installed system libraries or package managers at runtime/build time. Vendor, subtree, or otherwise bundle all third-party code inside `External/` (or another committed directory) and make the CMake configuration point exclusively to those copies.
-3. **Shader separation** – All GPU shader source must live in dedicated shader files (e.g., `*.vert`, `*.frag`, `*.comp`) under `Engine/Shaders/` (create subfolders there if needed). Never embed shader strings directly in C++ or config files.
+3. **Shader separation** – All GPU shader source must live in dedicated shader files (e.g., `*.vert`, `*.frag`, `*.comp`) under `Engine/Shaders/` or `Editor/Shaders/` (create subfolders there if needed). Never embed shader strings directly in C++ or config files.
 
 ## Code Quality & Documentation
 1. **Explain with comments** – Any code you touch must contain clear, beginner-friendly comments explaining intent, inputs, outputs, and tricky logic. Prioritize maintainability over brevity.
@@ -16,14 +16,14 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 6. **Indent requirements** – Indentation must use a single tab level.
 
 ## Repository Structure
-1. Keep engine sources under `Engine/`, third-party code in `External/`, and **all shaders in `Engine/Shaders/`** (use module-specific subdirectories beneath that folder).
+1. Keep engine sources under `Engine/`, third-party code in `External/`, and **all engine shaders in `Engine/Shaders/` with editor only shaders in `Editor/Shaders/`** (use module-specific subdirectories beneath that folder).
 2. Place build tooling/scripts under `Tools/` with usage comments explaining prerequisites and commands.
 
 ## Testing & Verification
 1. Provide reproducible instructions (README or per-feature docs) describing how to configure, build, install, and run relevant tests/demos from a clean checkout.
 2. When adding features affecting rendering or threading, include stress or regression tests demonstrating correctness under multithreaded loads.
 3. After all implementation tasks are complete, run a test compile of the codebase before finishing so the changed code is proven to compile successfully.
-4. Use `Docs/Testing.md` for the current CTest workflow; keep engine unit tests under `Engine/Tests` and editor unit tests under `Editor/Tests` unless a later feature explicitly expands the scope.
+4. Use `Docs/Testing.md` for the current CTest workflow; keep engine unit tests under `Tests/Engine` and editor unit tests under `Tests/Editor` unless a later feature explicitly expands the scope.
 
 ## Commit Message Expectations
 1. Follow the detailed, area-first style used by the earlier project history through commit `3aa8ae41466ea3c6ffed54cfeb1d881a1aad2d8c`: `<Area>: <short imperative summary>.`

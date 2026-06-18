@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 #include "Utilities/UUID.h"
 
@@ -61,6 +62,19 @@ enum class TextureSemantic : std::uint32_t
 	Occlusion = 3,
 	Emissive = 4,
 	Height = 5
+};
+
+// MaterialRuntimeSlot is the product-facing material contract used by preview,
+// export validation, and runtime binding. TMAT can store packed semantics such
+// as MetallicRoughness, but the runtime still resolves them into these five
+// predictable slots for diagnostics and fallbacks.
+enum class MaterialRuntimeSlot : std::uint32_t
+{
+	Albedo = 0u,
+	Normal = 1u,
+	Roughness = 2u,
+	Metallic = 3u,
+	Emissive = 4u
 };
 
 // SamplerFilter names the supported states explicitly so serialization and switches stay readable.
@@ -137,6 +151,18 @@ struct FloatParameter
 	float value[4];               // Unused components are ignored
 };
 
+// ResolvedMaterialSlot is the runtime-facing result after TMAT texture
+// semantics, scalar factors, and fallback policy have been combined. It keeps
+// renderer/editor preview code from re-deriving the same missing-texture rules.
+struct ResolvedMaterialSlot
+{
+	MaterialRuntimeSlot slot = MaterialRuntimeSlot::Albedo;
+	bool hasTexture = false;
+	TerraEngine::UUID textureUuid = TerraEngine::EMPTY_UUID;
+	float defaultValue[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	std::string fallbackDescription;
+};
+
 // On-disk header placed at the start of every TMAT blob.
 // struct MaterialHeader groups related state and operations so callers have one documented contract.
 struct MaterialHeader
@@ -174,4 +200,6 @@ struct Material
 	std::vector<std::uint8_t> storage;         // Owns the contiguous payload after the header
 	std::span<const TextureBinding> textures;  // Views into storage
 	std::span<const FloatParameter> floats;    // Views into storage
+	std::vector<ResolvedMaterialSlot> resolvedSlots;
+	std::vector<std::string> fallbackWarnings;
 };

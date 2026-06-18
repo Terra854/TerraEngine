@@ -15,26 +15,27 @@ FloatParameter[]     // optional; count = Header.floatParameterCount
 String/data tables   // none required; structs are self-contained
 ```
 
-### Header (84 bytes)
+### Header (100 bytes)
 | Offset | Size | Field | Description |
 | --- | --- | --- | --- |
 | 0 | 4 | magic | ASCII `TMAT` |
 | 4 | 2 | version | Current version = 1 |
-| 6 | 2 | headerSize | Always `sizeof(Header)` (84) |
+| 6 | 2 | headerSize | Always `sizeof(Header)` (100) |
 | 8 | 4 | flags | Bitmask: 1=DoubleSided, 2=UseVertexColor, 4=ReceivesShadows |
 | 12 | 4 | shadingModel | 0=Unlit, 1=MetallicRoughness, 2=SpecularGlossiness |
 | 16 | 4 | alphaMode | 0=Opaque, 1=Mask, 2=Blend |
-| 20 | 16 | baseColorFactor | RGBA multiplier (float[4]) |
-| 36 | 12 | emissiveFactor | RGB emissive (float[3]) |
-| 48 | 4 | metallicFactor | Float |
-| 52 | 4 | roughnessFactor | Float |
-| 56 | 4 | normalScale | Float |
-| 60 | 4 | occlusionStrength | Float |
-| 64 | 4 | alphaCutoff | Float (used when alphaMode = Mask) |
-| 68 | 4 | textureCount | Number of `TextureBinding` entries |
-| 72 | 4 | floatParameterCount | Number of `FloatParameter` entries |
-| 76 | 4 | textureArrayOffset | Byte offset to first `TextureBinding` |
-| 80 | 4 | floatParameterOffset | Byte offset to first `FloatParameter` |
+| 20 | 16 | shaderCollectionId | UUID for the shader collection used by this material |
+| 36 | 16 | baseColorFactor | RGBA multiplier (float[4]) |
+| 52 | 12 | emissiveFactor | RGB emissive (float[3]) |
+| 64 | 4 | metallicFactor | Float |
+| 68 | 4 | roughnessFactor | Float |
+| 72 | 4 | normalScale | Float |
+| 76 | 4 | occlusionStrength | Float |
+| 80 | 4 | alphaCutoff | Float (used when alphaMode = Mask) |
+| 84 | 4 | textureCount | Number of `TextureBinding` entries |
+| 88 | 4 | floatParameterCount | Number of `FloatParameter` entries |
+| 92 | 4 | textureArrayOffset | Byte offset to first `TextureBinding` |
+| 96 | 4 | floatParameterOffset | Byte offset to first `FloatParameter` |
 
 ### TextureBinding (56 bytes each, tightly packed)
 - `semantic` (uint32): 0=BaseColor, 1=Normal, 2=MetallicRoughness, 3=Occlusion, 4=Emissive, 5=Height
@@ -46,6 +47,19 @@ String/data tables   // none required; structs are self-contained
 - `uvOffset` (float[2]): Additive UV offset after scaling
 
 Bindings are stored contiguously starting at `textureArrayOffset`; there is no per-entry padding beyond the packed struct layout.
+
+### Runtime material contract
+At load, preview, and export validation time, TMAT resolves authored bindings into five product-facing runtime slots: albedo, normal, roughness, metallic, and emissive. The resolver keeps the contract stable even when the binary format stores combined data such as `MetallicRoughness`.
+
+| Runtime slot | Preferred texture semantic | Missing-texture fallback |
+| --- | --- | --- |
+| Albedo | `Base` | `baseColorFactor` |
+| Normal | `Normal` | flat normal `(0.5, 0.5, 1.0, normalScale)` |
+| Roughness | `MetallicRoughness` | `roughnessFactor` |
+| Metallic | `MetallicRoughness` | `metallicFactor` |
+| Emissive | `Emissive` | `emissiveFactor` |
+
+Missing preferred textures are valid but emit warnings. Export validation mirrors those warnings so a build can proceed while still exposing the exact fallback values the runtime will use.
 
 ### FloatParameter (24 bytes each)
 - `nameId` (uint32): Stable identifier for the target uniform/constant slot

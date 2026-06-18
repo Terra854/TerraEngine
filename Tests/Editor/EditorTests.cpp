@@ -9,9 +9,12 @@ namespace TerraEngine::EditorTests {
 	void RegisterBuildProfileRoundTripTests(TestRegistry& registry);
 	void RegisterExportPathNormalizerTests(TestRegistry& registry);
 	void RegisterExportPackageValidatorTests(TestRegistry& registry);
+	void RegisterExportRuntimeBaselineSampleTests(TestRegistry& registry);
 	void RegisterExportScriptBindingRewriterTests(TestRegistry& registry);
 	void RegisterExportValidatorManagedSourceTests(TestRegistry& registry);
 	void RegisterExportValidatorTests(TestRegistry& registry);
+	void RegisterMaterialExportValidationTests(TestRegistry& registry);
+	void RegisterMaterialPreviewContractTests(TestRegistry& registry);
 	void RegisterPackRoundTripTests(TestRegistry& registry);
 	void RegisterPackagingRequestValidationTests(TestRegistry& registry);
 	void RegisterProfilerCaptureStoreTests(TestRegistry& registry);
@@ -30,9 +33,12 @@ int main() {
 	TerraEngine::EditorTests::RegisterBuildProfileRoundTripTests(registry);
 	TerraEngine::EditorTests::RegisterExportPathNormalizerTests(registry);
 	TerraEngine::EditorTests::RegisterExportPackageValidatorTests(registry);
+	TerraEngine::EditorTests::RegisterExportRuntimeBaselineSampleTests(registry);
 	TerraEngine::EditorTests::RegisterExportScriptBindingRewriterTests(registry);
 	TerraEngine::EditorTests::RegisterExportValidatorManagedSourceTests(registry);
 	TerraEngine::EditorTests::RegisterExportValidatorTests(registry);
+	TerraEngine::EditorTests::RegisterMaterialExportValidationTests(registry);
+	TerraEngine::EditorTests::RegisterMaterialPreviewContractTests(registry);
 	TerraEngine::EditorTests::RegisterPackRoundTripTests(registry);
 	TerraEngine::EditorTests::RegisterPackagingRequestValidationTests(registry);
 	TerraEngine::EditorTests::RegisterProfilerCaptureStoreTests(registry);

@@ -18,7 +18,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(!result.passed, "A profile missing required fields should fail validation.");
 			context.ExpectEqual(3u, result.errorCount, "Missing name, id, and startup scene should produce three errors.");
 			context.ExpectEqual(1u, result.warningCount, "Missing output directory should produce one warning.");
-			context.ExpectEqual(4u, static_cast<unsigned int>(result.diagnostics.size()), "Every required-field diagnostic should be preserved.");
+			context.Expect(result.diagnostics.size() >= 4u, "Every required-field diagnostic should be preserved alongside informational render diagnostics.");
 		});
 
 		registry.Add("Editor.ExportValidator.MinimalProfilePassesWithoutManagedCompilation", [](TestContext& context) {

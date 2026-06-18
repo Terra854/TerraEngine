@@ -1,0 +1,36 @@
+{
+	"name": "Export Runtime Baseline Startup",
+	"sceneSettings": {
+		"renderSettings": {
+			"ambientLight": [0.08, 0.09, 0.11],
+			"exposure": 1.0
+		}
+	},
+	"objects": [
+		{
+			"name": "Baseline Camera",
+			"components": [
+				{ "type": "Transform", "position": [0.0, 1.4, 4.0], "rotation": [-12.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+				{ "type": "Camera", "primary": true, "fieldOfView": 60.0 }
+			]
+		},
+		{
+			"name": "Baseline Mesh",
+			"components": [
+				{ "type": "Transform", "position": [0.0, 0.0, 0.0], "rotation": [0.0, 25.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+				{
+					"type": "MeshRender",
+					"mesh": "Assets/Meshes/Baseline.temf",
+					"material": "Assets/Materials/Baseline.tmat"
+				},
+				{ "type": "Script", "class": "BaselineScript" }
+			]
+		},
+		{
+			"name": "Baseline UI",
+			"components": [
+				{ "type": "UI", "document": "UI/Baseline.ui" }
+			]
+		}
+	]
+}

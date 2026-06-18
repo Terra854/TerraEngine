@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -28,6 +29,9 @@
 // The launcher is always the export entry point, so it always carries the
 // path-configuration helpers needed by the export runtime.
 #include "Resource/ResourceManager.h"
+#include "Runtime/BootSummary.h"
+#include "Runtime/ContentMount/ContentMount.h"
+#include "Runtime/ExportStartupCoordinator.h"
 #include "Scripting/ScriptingSystem.h"
 
 namespace {
@@ -96,6 +100,39 @@ void ConfigureExportBootstrap(const char* argv0) {
 	ResourceManager::Instance().ConfigureExportArchive(archivePath);
 	ScriptingSystem::Instance().ConfigureExportRuntime(managedLibraryPath);
 }
+
+TerraEngine::Runtime::ExportStartupCoordinatorInput BuildLauncherValidationInput() {
+	ResourceManager& resources = ResourceManager::Instance();
+	TerraEngine::Runtime::ExportStartupCoordinatorInput input;
+	input.exportRuntime = true;
+	input.contentMounted = ContentMount::Instance().IsMounted();
+	input.metadataLoaded = !resources.GetProductName().empty() && !resources.GetVersion().empty();
+	input.projectName = resources.GetProductName();
+	input.version = resources.GetVersion();
+	input.contentSource = "export-archive";
+	input.renderProfile = resources.GetRenderProfileSummary();
+	input.validationEnabled = resources.IsRenderValidationEnabled();
+	input.debugEnabled = resources.IsRenderDebugEnabled();
+
+	const std::optional<std::filesystem::path> startupScene = resources.GetConfiguredStartupScene();
+	input.startupSceneConfigured = startupScene.has_value();
+	input.startupScene = startupScene.has_value() ? startupScene->generic_string() : std::string("<none>");
+	if (startupScene.has_value()) {
+		try {
+			input.startupSceneLoaded = !resources.ReadFileBytes(*startupScene).empty();
+		}
+		catch (const std::exception&) {
+			input.startupSceneLoaded = false;
+		}
+	}
+
+	input.requiredSystems.push_back({ "ResourceManager", true, true, "Initialized" });
+	input.requiredSystems.push_back({ "Scene", true, input.startupSceneLoaded, input.startupSceneLoaded ? "Startup scene readable" : "Startup scene unreadable" });
+	input.requiredSystems.push_back({ "Renderer", true, true, "Deferred until normal runtime startup" });
+	input.requiredSystems.push_back({ "UI", true, true, "Deferred until normal runtime startup" });
+	input.requiredSystems.push_back({ "Scripting", true, true, "NativeAOT path configured" });
+	return input;
+}
 } // namespace
 
 // Entry point responsible for bootstrapping the engine from the launcher executable.
@@ -128,7 +165,14 @@ int main(int argc, char *argv[])
 
 		if (HasArgument(argc, argv, "--validate-export-bootstrap")) {
 			ResourceManager::Instance().Initialize();
+			const TerraEngine::Runtime::ExportStartupCoordinatorResult validationResult =
+				TerraEngine::Runtime::CoordinateExportStartup(BuildLauncherValidationInput());
+			std::cout << TerraEngine::Runtime::FormatBootSummary(validationResult.summary) << std::endl;
 			ResourceManager::Instance().Shutdown();
+			if (!validationResult.CanEnterRuntime()) {
+				std::cerr << "[Launcher] Export bootstrap validation failed: " << validationResult.summary.runtimeEntryReason << std::endl;
+				return 1;
+			}
 			std::cout << "[Launcher] Export bootstrap validation succeeded." << std::endl;
 			return 0;
 		}

@@ -1,0 +1,21 @@
+{
+	"name": "Export Runtime Baseline",
+	"version": "1.0.0",
+	"startupScene": "Scenes/Startup.tescene",
+	"buildProfiles": [
+		{
+			"name": "Baseline Windows",
+			"id": "baseline",
+			"platform": "windows",
+			"outputDirectory": "Builds/Baseline",
+			"startupScene": "Scenes/Startup.tescene",
+			"compressionPreset": "normal",
+			"tepakWorkerCount": 0,
+			"enableManagedCompilation": true,
+			"includeDebugSymbols": true,
+			"stripNativeAotOutput": false,
+			"additionalPublishArgs": "",
+			"includedScenes": []
+		}
+	]
+}

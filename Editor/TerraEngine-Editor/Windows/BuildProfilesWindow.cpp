@@ -55,6 +55,7 @@ namespace
 		ImGui::TextUnformatted(title);
 		ImGui::Spacing();
 	}
+
 }
 
 BuildProfilesWindow::BuildProfilesWindow(MainEditorSubsystem* owner)
@@ -232,8 +233,6 @@ void BuildProfilesWindow::DrawProfileEditor() {
 	if (ImGui::Checkbox("Strip NativeAOT Output", &profile.stripNativeAotOutput)) {
 		profile.isDirty = true;
 	}
-
-	ImGui::Spacing();
 
 	ImGui::Spacing();
 

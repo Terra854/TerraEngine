@@ -21,6 +21,7 @@
 #include "Profiling/ProfilerScope.h"
 #include "Core/Memory/FrameArena.h"
 #include "Core/Memory/FlatMap.h"
+#include "File Formats/TerraEngineMaterialFile.h"
 #include "UI/UISystem.h"
 #include <entt/entt.hpp>
 #include <GLFW/glfw3.h>
@@ -1144,6 +1145,15 @@ std::string RenderSystem::SystemName()
 void RenderSystem::ReloadMaterial(const TerraEngine::UUID& materialId)
 {
 	ResourceManager::Instance().ReloadMaterial(materialId);
+	// Surface runtime-contract fallbacks during hot reload so artists can see
+	// when a material is rendering with authored defaults instead of textures.
+	if (const Material* material = ResourceManager::Instance().GetMaterial(materialId))
+	{
+		for (const std::string& warning : material->fallbackWarnings)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Material " << TerraEngine::ToHexString(materialId) << ": " << warning);
+		}
+	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (rhi)
 	{

@@ -33,6 +33,10 @@ struct ExportValidationResult {
 	uint32_t errorCount = 0;
 	uint32_t warningCount = 0;
 	std::vector<ExportDiagnostic> diagnostics;
+	// Material summaries are duplicated from diagnostics so export UI and tests
+	// can display product-facing fallback decisions without scraping generic
+	// human-readable diagnostic messages.
+	std::vector<std::string> materialFallbackDiagnostics;
 };
 
 /// Validates a build profile and optionally scans managed source code for

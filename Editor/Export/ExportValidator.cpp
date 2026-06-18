@@ -6,12 +6,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <regex>
 #include <sstream>
 #include <unordered_set>
+
+#include "File Formats/TerraEngineMaterialFile.h"
+#include "Resource/MaterialRuntimeContract.h"
 
 // --- Helpers ---
 
@@ -358,6 +362,78 @@ ExportValidationResult ExportValidator::ValidateProfile(const BuildProfile& prof
 	return result;
 }
 
+static void ValidateMaterialFile(const std::filesystem::path& materialPath, ExportValidationResult& result)
+{
+	std::ifstream input(materialPath, std::ios::binary);
+	if (!input)
+	{
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+			"Material", "Could not read material file.", materialPath.string());
+		return;
+	}
+
+	const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+	if (bytes.size() < sizeof(MaterialHeader))
+	{
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+			"Material", "TMAT file is too small.", materialPath.string());
+		return;
+	}
+
+	MaterialHeader header{};
+	std::memcpy(&header, bytes.data(), sizeof(MaterialHeader));
+	std::uint32_t magic = 0u;
+	std::memcpy(&magic, header.magic, sizeof(magic));
+	if (magic != kMaterialMagicValue || header.version != kMaterialCurrentVersion || header.headerSize > bytes.size())
+	{
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+			"Material", "TMAT header is invalid or unsupported.", materialPath.string());
+		return;
+	}
+
+	std::span<const TextureBinding> textures;
+	if (header.textureCount > 0u)
+	{
+		const std::size_t textureBytes = static_cast<std::size_t>(header.textureCount) * sizeof(TextureBinding);
+		if (header.textureArrayOffset < header.headerSize || header.textureArrayOffset + textureBytes > bytes.size())
+		{
+			AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+				"Material", "TMAT texture array is out of bounds.", materialPath.string());
+			return;
+		}
+		textures = std::span<const TextureBinding>(reinterpret_cast<const TextureBinding*>(bytes.data() + header.textureArrayOffset), header.textureCount);
+	}
+
+	const MaterialRuntimeContract contract = ResolveMaterialRuntimeContract(header, textures);
+	for (const std::string& warning : contract.warnings)
+	{
+		const std::string message = "Material fallback: " + warning;
+		result.materialFallbackDiagnostics.push_back(materialPath.generic_string() + ": " + warning);
+		AddDiagnostic(result, ExportDiagnosticSeverity::Warning,
+			"Material", message, materialPath.string());
+	}
+}
+
+static ExportValidationResult ValidateMaterialAssets(const std::filesystem::path& projectRoot)
+{
+	ExportValidationResult result;
+	const std::filesystem::path assetsRoot = projectRoot / "Assets";
+	if (!std::filesystem::exists(assetsRoot))
+	{
+		return result;
+	}
+
+	for (const auto& entry : std::filesystem::recursive_directory_iterator(assetsRoot))
+	{
+		if (entry.is_regular_file() && entry.path().extension() == ".tmat")
+		{
+			ValidateMaterialFile(entry.path(), result);
+		}
+	}
+
+	return result;
+}
+
 // --- Managed source validation ---
 
 ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesystem::path& projectRoot) const {
@@ -473,6 +549,19 @@ ExportValidationResult ExportValidator::ValidateAll(const BuildProfile& profile,
 			sourceResult.diagnostics.begin(),
 			sourceResult.diagnostics.end());
 	}
+
+	auto materialResult = ValidateMaterialAssets(projectRoot);
+	result.errorCount += materialResult.errorCount;
+	result.warningCount += materialResult.warningCount;
+	if (!materialResult.passed) {
+		result.passed = false;
+	}
+	result.materialFallbackDiagnostics.insert(result.materialFallbackDiagnostics.end(),
+		materialResult.materialFallbackDiagnostics.begin(),
+		materialResult.materialFallbackDiagnostics.end());
+	result.diagnostics.insert(result.diagnostics.end(),
+		materialResult.diagnostics.begin(),
+		materialResult.diagnostics.end());
 
 	return result;
 }

@@ -2,6 +2,7 @@
 
 #include "Resource/ResourceManager.h"
 #include "Runtime/ContentMount/ContentMount.h"
+#include "Runtime/ExportStartupCoordinator.h"
 #include "Scene/SceneManager.h"
 #include "TEPAK/PackWriter.h"
 #include "Utilities/UUID.h"
@@ -180,6 +181,24 @@ namespace TerraEngine::Tests {
 
 			context.Expect(threwForMissingManifest, "Export startup should fail when a mounted archive does not contain game.json.");
 			context.Expect(!ContentMount::Instance().IsMounted(), "A failed export startup should unmount the partially opened archive.");
+		});
+
+		registry.Add("Engine.ExportRuntime.ValidationSummaryRejectsMissingStartupScene", [](TestContext& context) {
+			TerraEngine::Runtime::ExportStartupCoordinatorInput input;
+			input.exportRuntime = true;
+			input.contentMounted = true;
+			input.metadataLoaded = true;
+			input.startupSceneConfigured = true;
+			input.startupSceneLoaded = false;
+			input.projectName = "Validation Smoke";
+			input.startupScene = "Scenes/Missing.tescene";
+			input.requiredSystems.push_back({ "ResourceManager", true, true, "Initialized" });
+
+			const TerraEngine::Runtime::ExportStartupCoordinatorResult result =
+				TerraEngine::Runtime::CoordinateExportStartup(input);
+
+			context.Expect(!result.CanEnterRuntime(), "Launcher validation mode should reject missing startup scene content.");
+			context.ExpectEqual(std::string("Scenes/Missing.tescene"), result.summary.startupScene, "Validation summary should preserve the failing startup scene path.");
 		});
 	}
 }

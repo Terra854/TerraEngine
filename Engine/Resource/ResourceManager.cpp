@@ -50,6 +50,81 @@ namespace
 		return {};
 	}
 
+	std::string JsonStringOr(const nlohmann::json& object, std::string_view key, std::string fallback)
+	{
+		if (auto it = object.find(std::string(key)); it != object.end() && it->is_string())
+		{
+			return it->get<std::string>();
+		}
+		return fallback;
+	}
+
+	std::uint32_t JsonUIntOr(const nlohmann::json& object, std::string_view key, std::uint32_t fallback)
+	{
+		if (auto it = object.find(std::string(key)); it != object.end() && it->is_number_unsigned())
+		{
+			return it->get<std::uint32_t>();
+		}
+		return fallback;
+	}
+
+	float JsonFloatOr(const nlohmann::json& object, std::string_view key, float fallback)
+	{
+		if (auto it = object.find(std::string(key)); it != object.end() && it->is_number())
+		{
+			return it->get<float>();
+		}
+		return fallback;
+	}
+
+	bool JsonBoolOr(const nlohmann::json& object, std::string_view key, bool fallback)
+	{
+		if (auto it = object.find(std::string(key)); it != object.end() && it->is_boolean())
+		{
+			return it->get<bool>();
+		}
+		return fallback;
+	}
+
+	std::uint32_t QualityRank(const std::string& quality)
+	{
+		if (quality == "disabled") return 0u;
+		if (quality == "low") return 1u;
+		if (quality == "medium") return 2u;
+		return 3u;
+	}
+
+	RenderSettings SettingsFromRenderProfileJson(const nlohmann::json& renderProfile)
+	{
+		RenderSettings settings;
+		const std::string shadows = JsonStringOr(renderProfile, "shadows", "high");
+		const std::string ao = JsonStringOr(renderProfile, "ambientOcclusion", "high");
+		const std::uint32_t shadowRank = QualityRank(shadows);
+		const std::uint32_t aoRank = QualityRank(ao);
+
+		settings.maxShadowLights = shadowRank == 0u ? 0u : (shadowRank == 1u ? 2u : (shadowRank == 2u ? 4u : 8u));
+		settings.shadowResolution = shadowRank == 0u ? 0u : (shadowRank == 1u ? 1024u : (shadowRank == 2u ? 1536u : 2048u));
+		settings.shadowFilteringSize = shadowRank == 0u ? 0u : (shadowRank == 1u ? 3u : 5u);
+		settings.ambientOcclusionStrength = aoRank == 0u ? 0.0f : 1.0f;
+		settings.ambientOcclusionQuality = aoRank;
+		return settings;
+	}
+
+	std::string RenderProfileSummaryFromJson(const nlohmann::json& renderProfile)
+	{
+		std::ostringstream stream;
+		stream
+			<< "profile=" << JsonStringOr(renderProfile, "profileName", "Default")
+			<< " shadows=" << JsonStringOr(renderProfile, "shadows", "high")
+			<< " ao=" << JsonStringOr(renderProfile, "ambientOcclusion", "high")
+			<< " vrs=" << JsonStringOr(renderProfile, "variableRateShading", "disabled")
+			<< " textureBudgetMb=" << JsonUIntOr(renderProfile, "textureBudgetMb", 512u)
+			<< " resolutionScale=" << JsonFloatOr(renderProfile, "resolutionScale", 1.0f)
+			<< " validation=" << (JsonBoolOr(renderProfile, "validationEnabled", false) ? "on" : "off")
+			<< " debug=" << (JsonBoolOr(renderProfile, "debugEnabled", false) ? "on" : "off");
+		return stream.str();
+	}
+
 	// AssetReferenceLooksLikePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool AssetReferenceLooksLikePath(std::string_view assetReference)
 	{
@@ -139,6 +214,11 @@ void ResourceManager::Initialize()
 	// Each engine session starts with a fresh startup-scene override so stale
 	// export manifest data cannot leak into the next launch.
 	m_ConfiguredStartupScene.reset();
+	m_ConfiguredRenderSettings.reset();
+	m_RenderProfileSummary = "profile=Default";
+	m_RenderValidationEnabled = false;
+	m_RenderDebugEnabled = false;
+	m_LastStartupError.reset();
 	ResetManifestMetadata();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -182,6 +262,13 @@ void ResourceManager::Initialize()
 			m_ConfiguredStartupScene = manifest["startupScene"].get<std::string>();
 		}
 
+		if (auto renderIt = manifest.find("renderProfile"); renderIt != manifest.end() && renderIt->is_object()) {
+			m_ConfiguredRenderSettings = SettingsFromRenderProfileJson(*renderIt);
+			m_RenderProfileSummary = RenderProfileSummaryFromJson(*renderIt);
+			m_RenderValidationEnabled = JsonBoolOr(*renderIt, "validationEnabled", false);
+			m_RenderDebugEnabled = JsonBoolOr(*renderIt, "debugEnabled", false);
+		}
+
 		// Register the exported asset lookup table before SceneManager loads the
 		// startup scene so UUID references inside scenes and prefabs can resolve
 		// back to logical archive paths immediately.
@@ -210,13 +297,21 @@ void ResourceManager::Initialize()
 			<< " engineRoot=" << engineRoot
 			<< " assetRoot=" << assetRoot
 			<< " startupScene=" << (m_ConfiguredStartupScene.has_value() ? m_ConfiguredStartupScene->generic_string() : std::string("<none>"))
+			<< " renderProfile={" << m_RenderProfileSummary << "}"
 			<< " manifestAssets=" << registeredAssetCount);
 	}
-	catch (...) {
+	catch (const std::exception& exception) {
 		// Leave the manager in a clean state if export startup fails halfway
 		// through so the engine's higher-level exception handling can retry or
 		// report the failure without a half-mounted archive lingering around.
+		const std::string errorMessage = exception.what();
 		Shutdown();
+		m_LastStartupError = errorMessage;
+		throw;
+	}
+	catch (...) {
+		Shutdown();
+		m_LastStartupError = "Unknown export startup failure.";
 		throw;
 	}
 }
@@ -225,6 +320,10 @@ void ResourceManager::Initialize()
 void ResourceManager::Shutdown()
 {
 	m_ConfiguredStartupScene.reset();
+	m_ConfiguredRenderSettings.reset();
+	m_RenderProfileSummary = "profile=Default";
+	m_RenderValidationEnabled = false;
+	m_RenderDebugEnabled = false;
 	ResetManifestMetadata();
 	ClearCaches();
 
@@ -323,6 +422,11 @@ std::optional<std::filesystem::path> ResourceManager::GetConfiguredStartupScene(
 	return m_ConfiguredStartupScene;
 }
 
+std::optional<std::string> ResourceManager::GetLastStartupError() const
+{
+	return m_LastStartupError;
+}
+
 // ResourceManager::GetProductName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ResourceManager::GetProductName() const
 {
@@ -333,6 +437,26 @@ std::string ResourceManager::GetProductName() const
 std::string ResourceManager::GetVersion() const
 {
 	return m_Version;
+}
+
+std::string ResourceManager::GetRenderProfileSummary() const
+{
+	return m_RenderProfileSummary;
+}
+
+bool ResourceManager::IsRenderValidationEnabled() const
+{
+	return m_RenderValidationEnabled;
+}
+
+bool ResourceManager::IsRenderDebugEnabled() const
+{
+	return m_RenderDebugEnabled;
+}
+
+std::optional<RenderSettings> ResourceManager::GetConfiguredRenderSettings() const
+{
+	return m_ConfiguredRenderSettings;
 }
 
 // ResourceManager::IsExportRuntime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

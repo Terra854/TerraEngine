@@ -19,6 +19,9 @@
 #include "Profiling/Profiler.h"
 #include "Profiling/ProfilerScope.h"
 #include "Resource/ResourceManager.h"
+#include "Runtime/BootSummary.h"
+#include "Runtime/ContentMount/ContentMount.h"
+#include "Runtime/ExportStartupCoordinator.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Scripting/ScriptGlue.h"
 #include "UI/UISystem.h"
@@ -26,6 +29,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <stdexcept>
 #include <thread>
 
 void Engine::Run()
@@ -106,6 +110,11 @@ void Engine::Initialize()
 	// RenderSystem consumes scene data and produces frames.
 	RenderSystem& renderSystem = RenderSystem::Instance();
 	renderSystem.SetEditorModeEnabled(editorMode);
+	if (const auto configuredRenderSettings = resourceManager.GetConfiguredRenderSettings()) {
+		// Export profiles are resolved before runtime starts, so applying them
+		// here gives the renderer one stable quality contract for the session.
+		renderSystem.SetRenderSettings(*configuredRenderSettings);
+	}
 	systems.push_back(&renderSystem);
 
 	std::size_t initializedSystemCount = 0;
@@ -152,8 +161,35 @@ void Engine::Initialize()
 		throw;
 	}
 	
-	// Confirm engine initialization finished so later logs have a baseline.
-	TERRAENGINE_LOG(LogLevel::Info, "Setup complete!");
+	TerraEngine::Runtime::ExportStartupCoordinatorInput startupInput;
+	startupInput.exportRuntime = resourceManager.IsExportRuntime();
+	startupInput.contentMounted = !startupInput.exportRuntime || ContentMount::Instance().IsMounted();
+	startupInput.metadataLoaded = !resourceManager.GetProductName().empty() && !resourceManager.GetVersion().empty();
+	startupInput.startupSceneConfigured = resourceManager.GetConfiguredStartupScene().has_value();
+	startupInput.startupSceneLoaded = !startupInput.startupSceneConfigured || sceneManager.GetActiveScene() != nullptr;
+	startupInput.projectName = resourceManager.GetProductName();
+	startupInput.version = resourceManager.GetVersion();
+	startupInput.contentSource = startupInput.exportRuntime ? "export-archive" : resourceManager.GetProjectRoot().generic_string();
+	startupInput.startupScene = resourceManager.GetConfiguredStartupScene().has_value()
+		? resourceManager.GetConfiguredStartupScene()->generic_string()
+		: std::string("<none>");
+	startupInput.renderProfile = resourceManager.GetRenderProfileSummary();
+	startupInput.validationEnabled = resourceManager.IsRenderValidationEnabled();
+	startupInput.debugEnabled = resourceManager.IsRenderDebugEnabled();
+	for (auto* system : systems) {
+		startupInput.requiredSystems.push_back({
+			system->SystemName(),
+			true,
+			true,
+			"Initialized"
+		});
+	}
+	const TerraEngine::Runtime::ExportStartupCoordinatorResult startupResult = TerraEngine::Runtime::CoordinateExportStartup(startupInput);
+	const TerraEngine::Runtime::BootSummary& bootSummary = startupResult.summary;
+	TERRAENGINE_LOG(LogLevel::Info, TerraEngine::Runtime::FormatBootSummary(bootSummary));
+	if (!startupResult.CanEnterRuntime()) {
+		throw std::runtime_error(bootSummary.runtimeEntryReason);
+	}
 }
 
 // Engine::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

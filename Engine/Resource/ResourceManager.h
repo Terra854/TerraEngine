@@ -26,6 +26,7 @@
 #include "Core/Export.h"
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineShaderFile.h"
+#include "Renderer/RenderTypes.h"
 #include "Scene/SpatialBounds.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
@@ -119,11 +120,18 @@ public:
 	// Exposes the startup scene discovered from the export manifest so the
 	// engine can hand it to SceneManager before scene initialization begins.
 	std::optional<std::filesystem::path> GetConfiguredStartupScene() const;
+	std::optional<std::string> GetLastStartupError() const;
 
 	// Returns the manifest-backed product metadata that Application.cs exposes to
 	// gameplay scripts. These values come from project-root or export game.json.
 	std::string GetProductName() const;
 	std::string GetVersion() const;
+
+	// Returns the resolved render profile summary read from exported metadata.
+	std::string GetRenderProfileSummary() const;
+	bool IsRenderValidationEnabled() const;
+	bool IsRenderDebugEnabled() const;
+	std::optional<RenderSettings> GetConfiguredRenderSettings() const;
 
 	// Lets runtime systems distinguish packaged export sessions from editor
 	// project sessions so exported builds can keep their writable files in a
@@ -302,6 +310,11 @@ private:
 	std::filesystem::path engineRoot;
 	std::optional<std::filesystem::path> m_ConfiguredStartupScene;
 	std::optional<std::filesystem::path> m_ConfiguredExportArchivePath;
+	std::optional<std::string> m_LastStartupError;
+	std::optional<RenderSettings> m_ConfiguredRenderSettings;
+	std::string m_RenderProfileSummary = "profile=Default";
+	bool m_RenderValidationEnabled = false;
+	bool m_RenderDebugEnabled = false;
 	std::string m_ProductName = "TerraEngine";
 	std::string m_Version = "1.0.0";
 

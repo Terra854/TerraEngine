@@ -4,11 +4,16 @@ add_executable(TerraEngine-EngineTests
 	EngineTests.cpp
 	Runtime/ArchiveSerializationTests.cpp
 	Runtime/BinaryIOTests.cpp
+	Runtime/BootSummaryValidationTests.cpp
 	Runtime/CodecProviderTests.cpp
 	Runtime/ContentMountPathNormalizerTests.cpp
 	Runtime/ContentMountPublicApiTests.cpp
+	Runtime/ExportRuntimeBaselineLaunchTests.cpp
 	Runtime/ExportRuntimeSmokeTests.cpp
 	Runtime/ExportScriptingRuntimeTests.cpp
+	Runtime/ExportStartupFlowTests.cpp
+	Runtime/MaterialRuntimeContractTests.cpp
+	Runtime/RenderProfileBootSummaryTests.cpp
 	Runtime/ThreadPoolSingletonTests.cpp
 	Runtime/WorkerPoolTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
@@ -25,6 +30,7 @@ add_executable(TerraEngine-EngineTests
 	UI/UILayoutEngineTests.cpp
 	UI/UIParserTests.cpp
 	UI/UIStyleTests.cpp
+	${CMAKE_SOURCE_DIR}/Engine/Resource/MaterialRuntimeContract.cpp
 )
 
 target_include_directories(TerraEngine-EngineTests

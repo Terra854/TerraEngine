@@ -137,7 +137,6 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path) {
 				profile.includedScenes.push_back(scene.get<std::string>());
 			}
 		}
-
 		profile.filePath = path;
 		profile.isDirty = false;
 	}

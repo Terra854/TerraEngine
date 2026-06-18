@@ -35,11 +35,14 @@ set(ENGINE_SOURCES
 	Engine/Core/Object/ObjectManager.cpp
 	Engine/Core/Object/ComponentRegistry.cpp
 	Engine/Resource/ResourceManager.cpp
+	Engine/Resource/MaterialRuntimeContract.cpp
 	Engine/Resource/ResourceManagerMaterial.cpp
 	Engine/Resource/ResourceManagerMesh.cpp
 	Engine/Resource/ResourceManagerShader.cpp
 	Engine/Resource/ResourceManagerShaderCollection.cpp
 	Engine/Resource/ResourceManagerTexture.cpp
+	Engine/Runtime/BootSummary.cpp
+	Engine/Runtime/ExportStartupCoordinator.cpp
 	Engine/Scene/SceneManager.cpp
 	Engine/Scene/Serializer.cpp
 	Engine/Scene/SpatialIndex.cpp
@@ -89,6 +92,7 @@ set(ENGINE_HEADERS
 	Engine/Input/InputCodes.h
 	Engine/Input/InputSystem.h
 	Engine/Resource/ResourceManager.h
+	Engine/Resource/MaterialRuntimeContract.h
 	Engine/Resource/ShaderCollection.h
 	Engine/Scene/SceneManager.h
 	Engine/Components/LightComponent.h
@@ -129,6 +133,8 @@ set(ENGINE_HEADERS
 	Engine/UI/UIRenderer.h
 	Engine/UI/UISystem.h
 	Engine/Runtime/ContentMount/ContentMount.h
+	Engine/Runtime/BootSummary.h
+	Engine/Runtime/ExportStartupCoordinator.h
 	Engine/Debug.h
 )
 
@@ -741,10 +747,10 @@ target_link_libraries(TerraEngine-Editor
 )
 
 if(BUILD_TESTING)
-	# Test targets live beside their owning engine/editor code so ownership is
-	# clear, while CTest still exposes one repository-wide verification command.
-	add_subdirectory(Engine/Tests)
-	add_subdirectory(Editor/Tests)
+	# Test targets live under one repository-level Tests tree while preserving
+	# separate engine/editor executables for focused CTest labels.
+	add_subdirectory(Tests/Engine)
+	add_subdirectory(Tests/Editor)
 endif()
 
 # --- Build Configurations & Optimizations ---
