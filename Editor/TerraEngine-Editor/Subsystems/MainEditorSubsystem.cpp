@@ -1066,6 +1066,10 @@ void MainEditorSubsystem::DrawUI() {
 	if (ctx && ctx->engine) {
 		RenderSystem* renderSystem = ctx->engine->GetSystem<RenderSystem>();
 		if (renderSystem) {
+			// Asset-style prefab editing is an isolated authoring mode, not a
+			// gameplay preview. Suppressing the next Game View render avoids a
+			// hidden/blank offscreen pass while Scene View remains responsive.
+			renderSystem->SetGameViewSuppressed(IsAssetPrefabEditingMode());
 			VulkanContext* vulkan = dynamic_cast<VulkanContext*>(renderSystem->GetContext());
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (vulkan) {

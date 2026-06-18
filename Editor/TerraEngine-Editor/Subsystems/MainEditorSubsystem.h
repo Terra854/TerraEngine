@@ -59,6 +59,7 @@ public:
 	bool SaveOpenPrefab();
 	void ClosePrefabMode();
 	bool IsPrefabEditingMode() const { return m_IsPrefabEditingMode; }
+	bool IsAssetPrefabEditingMode() const { return m_IsPrefabEditingMode && !m_PrefabEditOpenedFromSceneObject; }
 	std::filesystem::path GetPrefabEditingPath() const { return m_PrefabEditingPath; }
 	bool IsPrefabEditingDirty() const { return m_PrefabEditingDirty; }
 	bool TryApplyPrefabModeGameViewCameras(float aspect) const;

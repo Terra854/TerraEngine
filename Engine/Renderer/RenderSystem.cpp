@@ -1031,8 +1031,10 @@ void RenderSystem::Update(float deltaTime)
 		rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::SceneView, RenderViewType::Scene, 1u));
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!gameViewCameras.empty())
+	// Asset-style prefab editing has no active runtime scene. When the editor
+	// requests suppression, skip every Game View submission path so opening a
+	// prefab asset cannot burn a full offscreen game render every frame.
+	if (!gameViewSuppressed && !gameViewCameras.empty())
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Game View Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -1049,7 +1051,7 @@ void RenderSystem::Update(float deltaTime)
 		}
 	}
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	else if (cameras.empty())
+	else if (!gameViewSuppressed && cameras.empty())
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Blank Game View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		FrameRenderData blankData{};
@@ -1068,7 +1070,7 @@ void RenderSystem::Update(float deltaTime)
 			blankData.shadowDrawLists.clear();
 			rhi->RenderFrame(blankData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
 	}
-	else
+	else if (!gameViewSuppressed)
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Runtime Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.

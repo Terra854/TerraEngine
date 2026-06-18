@@ -13,6 +13,7 @@
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 
@@ -94,18 +95,49 @@ void GameViewWindow::OnGui() {
 	imageSize.y *= m_Scale;
 	UISystem::Instance().SetGameViewportSize(glm::vec2(imageSize.x, imageSize.y));
 
+	const bool isAssetPrefabEditing = m_Owner != nullptr && m_Owner->IsAssetPrefabEditingMode();
+	if (isAssetPrefabEditing)
+	{
+		const auto activePrefabCameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
+		if (activePrefabCameras.empty())
+		{
+			// Prefab assets opened from the asset browser are edited in isolation.
+			// If they have no active authored camera, keep the Game View idle.
+			// ObjectManager's component query excludes inactive objects and
+			// disabled CameraComponents, so disabled cameras do not count here.
+			UISystem::Instance().SetEditorGameViewPointer(glm::vec2(-1.0f, -1.0f), false, false);
+			const ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+			ImDrawList* drawList = ImGui::GetWindowDrawList();
+			drawList->AddRectFilled(cursorPos, ImVec2(cursorPos.x + availableSize.x, cursorPos.y + availableSize.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
+
+			const char* text = "Game View paused while editing prefab asset";
+			const ImVec2 textSize = ImGui::CalcTextSize(text);
+			ImGui::SetCursorScreenPos(ImVec2(cursorPos.x + (availableSize.x - textSize.x) * 0.5f, cursorPos.y + (availableSize.y - textSize.y) * 0.5f));
+			ImGui::Text("%s", text);
+			return;
+		}
+
+		// An active prefab-local camera is a valid preview source for asset-style
+		// prefab editing, so re-enable Game View submission for this frame and
+		// let the regular camera collection below submit those prefab cameras.
+		RenderSystem::Instance().SetGameViewSuppressed(false);
+	}
+
 	// --- Update Cameras ---
 	float aspect = (imageSize.y > 0.0001f) ? (imageSize.x / imageSize.y) : 1.0f;
 	if (aspect <= 0.0001f) aspect = 1.0f;
 
-	const bool hasPrefabModeSceneCameras = (m_Owner != nullptr) && m_Owner->TryApplyPrefabModeGameViewCameras(aspect);
+	const bool hasPrefabModeSceneCameras = !isAssetPrefabEditing && (m_Owner != nullptr) && m_Owner->TryApplyPrefabModeGameViewCameras(aspect);
 	bool hasCameras = hasPrefabModeSceneCameras;
 	if (!hasPrefabModeSceneCameras)
 	{
 		auto cameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
 		hasCameras = !cameras.empty();
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (auto obj : cameras) {
+		const std::size_t cameraCount = isAssetPrefabEditing ? std::min<std::size_t>(cameras.size(), 1u) : cameras.size();
+		// Iterate over the active camera snapshot; asset-prefab preview uses the
+		// first active prefab camera only so one camera owns the Game View output.
+		for (std::size_t cameraIndex = 0; cameraIndex < cameraCount; ++cameraIndex) {
+			auto obj = cameras[cameraIndex];
 			Transform* transform = obj.getComponent<Transform>();
 			CameraComponent* camera = obj.getComponent<CameraComponent>();
 

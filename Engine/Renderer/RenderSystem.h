@@ -86,10 +86,15 @@ public:
 	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
 		gameViewCameras.push_back({view, proj, pos});
 	}
+	// Isolated prefab asset editing does not have an active game scene, so the
+	// editor can suppress Game View submission for that frame and leave GPU time
+	// available for Scene View and the rest of the desktop.
+	void SetGameViewSuppressed(bool suppressed) { gameViewSuppressed = suppressed; }
 	// ClearOverrideCameras is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ClearOverrideCameras() {
 		hasSceneViewCamera = false;
 		gameViewCameras.clear();
+		gameViewSuppressed = false;
 		sceneViewContextTintEnabled = false;
 		sceneViewContextFocusedObjectIds.clear();
 	}
@@ -105,6 +110,7 @@ private:
 	bool hasSceneViewCamera = false;
 	OverrideCameraData sceneViewCamera;
 	std::vector<OverrideCameraData> gameViewCameras;
+	bool gameViewSuppressed = false;
 	// Scene View prefab-context editing keeps the selected prefab branch normal
 	// and submits a light tint for every other draw command in that view only.
 	std::unordered_set<TerraEngine::UUID> sceneViewContextFocusedObjectIds;

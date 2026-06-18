@@ -147,6 +147,18 @@ void HierarchyWindow::OnGui() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::MenuItem("Create Empty Object")) {
 			Object obj = objManager.createObject("Object");
+			if (m_Owner != nullptr && m_Owner->IsPrefabEditingMode()) {
+				// Prefab assets must remain a single authored object tree. The
+				// hierarchy add button therefore creates a child of the current
+				// prefab root instead of introducing a second root beside it.
+				auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
+				for (const TerraEngine::UUID& rootId : graph.rootObjects) {
+					if (auto rootObject = objManager.getObject(rootId); rootObject && rootObject->EntityId() != obj.EntityId()) {
+						objManager.setParent(obj, *rootObject);
+						break;
+					}
+				}
+			}
 			UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(obj.EntityId()));
 		}
 		ImGui::EndPopup();
@@ -391,7 +403,12 @@ void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<Terra
 	if (isPrefabAuthoredObject) {
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.72f, 1.0f, 1.0f));
 	}
-	bool opened = ImGui::TreeNodeEx((void*)(uint64_t)obj.EntityId(), flags, "%s", name.c_str());
+	// Scene-context prefab editing reloads object-manager snapshots around the
+	// Scene View render path, which can change transient entt handles between
+	// frames. Key the ImGui tree by the authored object UUID so expanded child
+	// branches remain stable while the prefab is being edited in context.
+	const std::string treeNodeId = TerraEngine::ToHexString(obj.getUUID());
+	bool opened = ImGui::TreeNodeEx(treeNodeId.c_str(), flags, "%s", name.c_str());
 	if (isPrefabAuthoredObject) {
 		ImGui::PopStyleColor();
 	}
