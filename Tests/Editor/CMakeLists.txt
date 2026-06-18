@@ -17,6 +17,9 @@ add_executable(TerraEngine-EditorTests
 	Export/PackRoundTripTests.cpp
 	Export/PackagingRequestValidationTests.cpp
 	Profiling/ProfilerCaptureStoreTests.cpp
+	Scene/PrefabAuthoringWorkflowTests.cpp
+	Scene/SceneRuntimeParityTests.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/ArchiveSerialization.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/ExtentReader.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
@@ -41,6 +44,8 @@ target_include_directories(TerraEngine-EditorTests
 		${CMAKE_CURRENT_SOURCE_DIR}
 		${CMAKE_SOURCE_DIR}
 		${CMAKE_SOURCE_DIR}/Engine
+		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core
+		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems
 		${CMAKE_SOURCE_DIR}/Editor/Export
 		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling
 		${CMAKE_SOURCE_DIR}/External/json/single_include
@@ -62,9 +67,19 @@ target_compile_definitions(TerraEngine-EditorTests
 
 target_link_libraries(TerraEngine-EditorTests
 	PRIVATE
+		TerraEngine-Engine
 		Threads::Threads
 		libzstd_static
 		xxhash
+)
+
+add_custom_command(TARGET TerraEngine-EditorTests POST_BUILD
+	# Editor tests now exercise shared engine scene code, so copy dependent
+	# runtime DLLs beside the executable just like the engine test target does.
+	COMMAND ${CMAKE_COMMAND} -E copy_if_different
+		$<TARGET_RUNTIME_DLLS:TerraEngine-EditorTests>
+		$<TARGET_FILE_DIR:TerraEngine-EditorTests>
+	COMMAND_EXPAND_LISTS
 )
 
 add_test(NAME Editor.ExportUnitTests COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

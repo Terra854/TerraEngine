@@ -275,6 +275,12 @@ std::vector<Object> ObjectManager::getChildren(const Object& parent)
 			}
 		}
 	}
+	// Stable hierarchy queries are important for editor trees, saved scenes,
+	// and runtime summaries. Sort by UUID instead of transient EnTT ids so
+	// reloads and undo sessions keep the same parent-before-child ordering.
+	std::sort(children.begin(), children.end(), [this](const Object& lhs, const Object& rhs) {
+		return TerraEngine::ToHexString(getUUID(lhs.EntityId())) < TerraEngine::ToHexString(getUUID(rhs.EntityId()));
+	});
 	return children;
 }
 
@@ -294,6 +300,11 @@ std::vector<Object> ObjectManager::getRootObjects()
 			roots.push_back(makeHandle(entityId));
 		}
 	}
+	// Root order is part of the authored scene surface, so make it independent
+	// from unordered_map bucket order and stable across editor/runtime/export.
+	std::sort(roots.begin(), roots.end(), [this](const Object& lhs, const Object& rhs) {
+		return TerraEngine::ToHexString(getUUID(lhs.EntityId())) < TerraEngine::ToHexString(getUUID(rhs.EntityId()));
+	});
 	return roots;
 }
 

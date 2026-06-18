@@ -22,6 +22,8 @@
 #include "Runtime/BootSummary.h"
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ExportStartupCoordinator.h"
+#include "Scene/SceneMutationQueue.h"
+#include "Scene/SceneGraphRuntime.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Scripting/ScriptGlue.h"
 #include "UI/UISystem.h"
@@ -176,6 +178,11 @@ void Engine::Initialize()
 	startupInput.renderProfile = resourceManager.GetRenderProfileSummary();
 	startupInput.validationEnabled = resourceManager.IsRenderValidationEnabled();
 	startupInput.debugEnabled = resourceManager.IsRenderDebugEnabled();
+	if (sceneManager.GetActiveScene() != nullptr) {
+		auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(ObjectManager::instance());
+		auto summary = TerraEngine::Scene::BuildSceneRuntimeSummary(graph);
+		TERRAENGINE_LOG(LogLevel::Info, "Export startup scene summary: objects=" << summary.objects.size() << ", diagnostics=" << summary.diagnostics.size());
+	}
 	for (auto* system : systems) {
 		startupInput.requiredSystems.push_back({
 			system->SystemName(),
@@ -211,6 +218,12 @@ bool Engine::Update(float deltaTime)
 		// temporary string remains valid for the marker label.
 		for (auto* system : systems) {
 			system->Update(deltaTime);
+		}
+		if (!TerraEngine::Scene::SceneMutationQueue::Instance().Empty()) {
+			// Structural scene mutations are applied after systems finish their
+			// update work so iteration over components and hierarchy data cannot
+			// be invalidated midway through a frame.
+			TerraEngine::Scene::SceneMutationQueue::Instance().Apply(ObjectManager::instance());
 		}
 	}
 	TerraEngine::Profiling::Profiler::Instance().EndFrame();

@@ -227,6 +227,15 @@ RenderSystem::RenderSystem()
 	latestSceneLightingDiagnostics.viewType = RenderViewType::Scene;
 }
 
+void RenderSystem::SetSceneViewContextTint(const std::unordered_set<TerraEngine::UUID>& focusedObjectIds)
+{
+	// The editor calls this once per Scene View frame while prefab context mode
+	// is active. An empty set disables the cue so stale selections do not tint
+	// unrelated views on later frames.
+	sceneViewContextFocusedObjectIds = focusedObjectIds;
+	sceneViewContextTintEnabled = !sceneViewContextFocusedObjectIds.empty();
+}
+
 // RenderSystem::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::Initialize()
 {
@@ -989,6 +998,24 @@ void RenderSystem::Update(float deltaTime)
 		request.outputId = outputId;
 		return request;
 	};
+	auto applySceneViewContextTint = [&]() {
+		if (!sceneViewContextTintEnabled || sceneViewContextFocusedObjectIds.empty())
+		{
+			return;
+		}
+
+		// Prefab context mode keeps the opened prefab branch in normal material
+		// color and gently washes every surrounding scene command toward white.
+		// This runs only on the Scene View command list before submission.
+		const glm::vec4 contextTint(1.0f, 1.0f, 1.0f, 0.25f);
+		frameData.editorContextTint = contextTint;
+		for (DrawCommand& command : frameData.commands)
+		{
+			command.editorTint = sceneViewContextFocusedObjectIds.contains(command.objectId)
+				? glm::vec4(0.0f)
+				: contextTint;
+		}
+	};
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasSceneViewCamera)
@@ -998,6 +1025,7 @@ void RenderSystem::Update(float deltaTime)
 		frameData.projectionMatrix = sceneViewCamera.proj;
 		frameData.cameraWorldPosition = sceneViewCamera.pos;
 		frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+		applySceneViewContextTint();
 		frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 		sceneSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 		rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::SceneView, RenderViewType::Scene, 1u));
@@ -1010,6 +1038,7 @@ void RenderSystem::Update(float deltaTime)
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& cam : gameViewCameras)
 		{
+			frameData.editorContextTint = glm::vec4(0.0f);
 			frameData.viewMatrix = cam.view;
 			frameData.projectionMatrix = cam.proj;
 			frameData.cameraWorldPosition = cam.pos;
@@ -1034,6 +1063,7 @@ void RenderSystem::Update(float deltaTime)
 			blankData.customOverrideActive = (currentPreset == QualityPreset::Custom);
 			blankData.settings = SanitizeRenderSettings(currentSettings);
 			blankData.sky = frameData.sky;
+			blankData.editorContextTint = glm::vec4(0.0f);
 			blankData.commands.clear();
 			blankData.shadowDrawLists.clear();
 			rhi->RenderFrame(blankData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
@@ -1073,6 +1103,7 @@ void RenderSystem::Update(float deltaTime)
 			frameData.projectionMatrix = glm::perspective(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
 			frameData.projectionMatrix[1][1] *= -1;
 			frameData.cameraWorldPosition = cameraTransform.position;
+			frameData.editorContextTint = glm::vec4(0.0f);
 			frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 			gameSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();

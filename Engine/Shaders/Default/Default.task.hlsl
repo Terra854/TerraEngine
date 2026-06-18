@@ -79,6 +79,7 @@ struct PushConstants
 	uint clusterDataOffset;
 	uint lightIndexOffset;
 	uint indirectDrawOffset;
+	float4 editorTint;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;

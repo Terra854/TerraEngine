@@ -1300,6 +1300,7 @@ struct SkyPushConstants
 	glm::vec4 groundTintPadding = glm::vec4(1.0f);
 	glm::vec4 sunDirectionTextureIndex = glm::vec4(0.0f, 0.35f, -1.0f, 0.0f);
 	glm::vec4 skyParams = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+	glm::vec4 editorTint = glm::vec4(0.0f);
 };
 
 // VulkanContext::Impl::CreateSkyBackgroundPipeline is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1537,6 +1538,7 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRe
 		skyFlags |= 2u;
 	}
 	push.skyParams = glm::vec4(tanHalfFovX, tanHalfFovY, glm::radians(frameData.sky.rotationOffsetDegrees), static_cast<float>(skyFlags));
+	push.editorTint = frameData.editorContextTint;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (frameData.sky.hasTexture)
@@ -3127,6 +3129,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.clusterDataOffset = renderSnapshot.clusterDataOffset;
 		push.lightIndexOffset = renderSnapshot.lightIndexOffset;
 		push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
+		push.editorTint = command.editorTint;
 
 		PreparedDraw draw{};
 		draw.mesh = &mesh;
@@ -3180,6 +3183,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					// recursive shadow sampling are skipped while depth writes.
 					shadowDraw.push.vrsActive = 2u;
 					shadowDraw.push.taskCullingEnabled = 0u;
+					shadowDraw.push.editorTint = glm::vec4(0.0f);
 					
 					VkDrawMeshTasksIndirectCommandEXT shadowIndirectCmd{};
 					shadowIndirectCmd.groupCountX = taskGroupCount;
@@ -3298,6 +3302,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			shadowDraw.push.clusterDataOffset = renderSnapshot.clusterDataOffset;
 			shadowDraw.push.lightIndexOffset = renderSnapshot.lightIndexOffset;
 			shadowDraw.push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
+			shadowDraw.push.editorTint = glm::vec4(0.0f);
 			shadowDraw.materialFlags = materialFlags;
 
 			const uint32_t kTaskBatchSize = 32u;
@@ -3940,14 +3945,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	vkCmdEndRenderPass(cmd);
 			
-				// VRS Generation for next frame
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (impl->UsesVrsAttachment()) {
-					impl->GenerateVRSImage(cmd, (view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);
-				}
+	// VRS Generation for next frame
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (impl->UsesVrsAttachment()) {
+		impl->GenerateVRSImage(cmd, (view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);
+	}
 			
-				vkEndCommandBuffer(cmd);
-				// Record the command buffer to be submitted at EndFrame so multiple cameras
+	vkEndCommandBuffer(cmd);
+	// Record the command buffer to be submitted at EndFrame so multiple cameras
 	// render sequentially before a single present.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {

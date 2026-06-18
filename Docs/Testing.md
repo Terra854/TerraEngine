@@ -12,6 +12,10 @@ The export runtime baseline checks also validate
 that the sample project keeps its startup scene, project render settings, UI
 signal, and script signal wired for manual and CI export coverage.
 
+The scene graph runtime checks validate deterministic traversal, hierarchy
+diagnostics, prefab composition, queued mutation safety, and editor/runtime
+parity. Manual validation fixtures live under `Tests/Fixtures/SceneGraphRuntime`.
+
 ## Configure
 
 ```powershell

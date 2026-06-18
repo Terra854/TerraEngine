@@ -275,6 +275,7 @@ void SceneViewWindow::OnGui() {
 	
 	// Set Scene View Camera for next render
 	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPos);
+	ApplyPrefabContextTintForNextRender();
 
 	HandlePicking(view, projNoFlip, cursorPos, contentSize);
 
@@ -503,6 +504,59 @@ void SceneViewWindow::HandleCameraInput(float deltaTime) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::IsKeyPressed(ImGuiKey_R)) m_CurrentGizmoOperation = ImGuizmo::SCALE;
 	}
+}
+
+void SceneViewWindow::CollectFocusedPrefabObjectIds(entt::entity entity, std::unordered_set<TerraEngine::UUID>& objectIds)
+{
+	auto& objectManager = ObjectManager::instance();
+	auto object = objectManager.getObject(entity);
+	if (!object.has_value())
+	{
+		return;
+	}
+
+	objectIds.insert(object->getUUID());
+	if (const auto* mesh = object->getComponent<MeshRenderComponent>(); mesh != nullptr && mesh->spatialObjectId != TerraEngine::EMPTY_UUID)
+	{
+		// RenderSystem keys draw commands by spatial object id when a mesh has
+		// one. Include that id too so prefab-focus tinting matches the renderer
+		// instead of accidentally washing out the selected object.
+		objectIds.insert(mesh->spatialObjectId);
+	}
+	for (Object child : objectManager.getChildren(*object))
+	{
+		CollectFocusedPrefabObjectIds(child.EntityId(), objectIds);
+	}
+}
+
+void SceneViewWindow::ApplyPrefabContextTintForNextRender()
+{
+	std::unordered_set<TerraEngine::UUID> focusedObjectIds;
+	if (m_Owner == nullptr || !m_Owner->ShouldSceneViewUseSceneContextForPrefabEdit())
+	{
+		RenderSystem::Instance().SetSceneViewContextTint(focusedObjectIds);
+		return;
+	}
+
+	const auto selectedEntity = m_Owner->GetSelectedEntity();
+	if (!selectedEntity.has_value())
+	{
+		RenderSystem::Instance().SetSceneViewContextTint(focusedObjectIds);
+		return;
+	}
+
+	auto& registry = ObjectManager::instance().getRegistry();
+	if (!registry.valid(*selectedEntity))
+	{
+		RenderSystem::Instance().SetSceneViewContextTint(focusedObjectIds);
+		return;
+	}
+
+	// Include the selected prefab root and every child in the active prefab
+	// branch so nested prefab objects stay fully colored while scene context
+	// around them is washed out by the renderer.
+	CollectFocusedPrefabObjectIds(*selectedEntity, focusedObjectIds);
+	RenderSystem::Instance().SetSceneViewContextTint(focusedObjectIds);
 }
 
 // SceneViewWindow::DrawGizmos is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

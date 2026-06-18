@@ -1,0 +1,56 @@
+#include "../TestHarness.h"
+
+#include "Core/Object/ObjectManager.h"
+#include "Scene/SceneMutationQueue.h"
+
+namespace TerraEngine::Tests {
+	void RegisterSceneMutationQueueTests(TestRegistry& registry)
+	{
+		registry.Add("SceneMutationQueue.AppliesAcceptedRequestsInOrder", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+
+			TerraEngine::Scene::SceneMutationQueue queue;
+			queue.Enqueue({"create-parent", TerraEngine::Scene::SceneMutationOperation::CreateObject, {}, {}, "Parent"});
+			auto result = queue.Apply(objects);
+
+			context.Expect(result.applied, "A valid create batch should apply.");
+			context.ExpectEqual(static_cast<std::size_t>(1), objects.getRootObjects().size(), "Create should add one root object.");
+			context.Expect(queue.Empty(), "Applied queues should clear their requests.");
+			objects.clear();
+		});
+
+		registry.Add("SceneMutationQueue.RejectsConflictingSelfParent", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object target = objects.createObject("Target");
+			const TerraEngine::UUID targetId = objects.getUUID(target.EntityId());
+			auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects);
+
+			TerraEngine::Scene::SceneMutationQueue queue;
+			queue.Enqueue({"self-parent", TerraEngine::Scene::SceneMutationOperation::ReparentObject, targetId, targetId});
+			const auto result = queue.Validate(graph);
+
+			context.Expect(!result.results.front().accepted, "Self-parent requests should be rejected during validation.");
+			context.Expect(!result.diagnostics.empty(), "Rejected requests should return diagnostics.");
+			objects.clear();
+		});
+
+		registry.Add("SceneMutationQueue.RollbackLeavesSceneUnchangedOnRejectedBatch", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object target = objects.createObject("Target");
+			const TerraEngine::UUID missingId = TerraEngine::GenerateUUID();
+			const std::size_t beforeCount = objects.getRootObjects().size();
+
+			TerraEngine::Scene::SceneMutationQueue queue;
+			queue.Enqueue({"delete-missing", TerraEngine::Scene::SceneMutationOperation::DeleteObject, missingId});
+			queue.Enqueue({"delete-existing", TerraEngine::Scene::SceneMutationOperation::DeleteObject, objects.getUUID(target.EntityId())});
+			const auto result = queue.Apply(objects);
+
+			context.Expect(!result.applied, "Rejected batches should not apply partial changes.");
+			context.ExpectEqual(beforeCount, objects.getRootObjects().size(), "The existing object should remain after rollback.");
+			objects.clear();
+		});
+	}
+}

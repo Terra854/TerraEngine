@@ -21,6 +21,8 @@
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
 #include "Input/InputSystem.h"
+#include "PrefabComposition.h"
+#include "SceneGraphRuntime.h"
 #include "Serializer.h"
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "Renderer/RenderSystem.h"
@@ -185,9 +187,22 @@ TerraEngine::UUID SceneManager::LoadPrefab(const std::filesystem::path& path)
 {
 	// Trace synchronous prefab requests so missing assets are obvious at debug verbosity.
 	TERRAENGINE_LOG(LogLevel::Debug, "Request to load prefab " << path);
-	return LoadOrGetCached<SceneDocument>(path, prefabCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
+	const TerraEngine::UUID prefabId = LoadOrGetCached<SceneDocument>(path, prefabCache, [this](const std::filesystem::path& resolvedPath, SceneFileType type) {
 		return LoadSceneDocument(resolvedPath, type);
 	}, SceneFileType::Prefab);
+	if (const SceneDocument* prefab = GetPrefab(prefabId))
+	{
+		TerraEngine::Scene::PrefabSource source;
+		source.sourceId = prefabId;
+		source.sourcePath = prefab->sourcePath;
+		source.sourceGraph = TerraEngine::Scene::BuildSceneGraphFromJson(prefab->parsedJson);
+		TerraEngine::Scene::ValidatePrefabSource(source);
+		for (const TerraEngine::Scene::SceneDiagnostic& diagnostic : source.sourceGraph.diagnostics)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Prefab composition diagnostic: " << TerraEngine::Scene::FormatSceneDiagnostic(diagnostic));
+		}
+	}
+	return prefabId;
 }
 
 // SceneManager::LoadSceneAsync is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -249,6 +264,12 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 		for (const auto& objJson : doc->parsedJson["entities"]) {
 			Serializer::DeserializeObject(objJson);
 		}
+	}
+
+	auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
+	for (const TerraEngine::Scene::SceneDiagnostic& diagnostic : graph.diagnostics)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Scene graph load diagnostic: " << TerraEngine::Scene::FormatSceneDiagnostic(diagnostic));
 	}
 
 	activeSceneId = id;
@@ -353,12 +374,19 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 	sceneJson["objects"] = nlohmann::json::array();
 
 	ObjectManager& objManager = ObjectManager::instance();
-	auto roots = objManager.getRootObjects();
+	auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
+	for (const TerraEngine::Scene::SceneDiagnostic& diagnostic : graph.diagnostics)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Scene graph save diagnostic: " << TerraEngine::Scene::FormatSceneDiagnostic(diagnostic));
+	}
 
 	// Leverage the centralized Serializer to convert the live object graph 
 	// into a JSON structure suitable for disk storage.
-	for (auto& root : roots) {
-		sceneJson["objects"].push_back(Serializer::SerializeObject(root));
+	for (const TerraEngine::UUID& rootId : graph.rootObjects) {
+		if (auto root = objManager.getObject(rootId))
+		{
+			sceneJson["objects"].push_back(Serializer::SerializeObject(*root));
+		}
 	}
 
 	std::ofstream file(targetPath);

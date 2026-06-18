@@ -11,9 +11,13 @@
 #include "../Profiling/EditorProfilerService.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/MainEngine.h"
+#include "Engine/Components/CameraComponent.h"
+#include "Engine/Components/PrefabLinkComponent.h"
+#include "Engine/Components/Transform.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Renderer/RHI/Vulkan/VulkanContext.h"
 #include "Engine/Scene/SceneManager.h"
+#include "Engine/Scene/SceneGraphRuntime.h"
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/UI/UISystem.h"
@@ -22,6 +26,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <backends/imgui_impl_vulkan.h>
+#include <glm/gtc/matrix_transform.hpp>
 #include <fstream>
 
 // Include Window Headers
@@ -73,7 +78,16 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	UndoRedoSystem::Instance().Initialize(context);
 	ScriptCompilationSubsystem::Instance().Initialize(context);
 
-	ObjectManager::instance().SetOnModifiedCallback([]() {
+	ObjectManager::instance().SetOnModifiedCallback([this]() {
+		if (m_SuppressObjectModifiedCallback)
+		{
+			return;
+		}
+		if (m_IsPrefabEditingMode)
+		{
+			m_PrefabEditingDirty = true;
+			return;
+		}
 		SceneManager::Instance().ForceMarkActiveSceneDirty();
 	});
 
@@ -191,6 +205,10 @@ void MainEditorSubsystem::CapturePlayModeSceneState()
 		snapshotJson["objects"].push_back(Serializer::SerializeObject(rootObject));
 	}
 
+	auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(ObjectManager::instance());
+	auto summary = TerraEngine::Scene::BuildSceneRuntimeSummary(graph);
+	TERRAENGINE_LOG(LogLevel::Info, "Captured editor play-mode scene summary with " << summary.objects.size() << " objects.");
+
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectedEntity.has_value())
 	{
@@ -238,6 +256,9 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	}
 
 	ScriptingSystem::Instance().RebuildRestoredSceneBindings();
+	auto restoredGraph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(ObjectManager::instance());
+	auto restoredSummary = TerraEngine::Scene::BuildSceneRuntimeSummary(restoredGraph);
+	TERRAENGINE_LOG(LogLevel::Info, "Restored editor play-mode scene summary with " << restoredSummary.objects.size() << " objects.");
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_PlayModeSceneWasDirty)
 	{
@@ -277,8 +298,316 @@ void MainEditorSubsystem::ClearPlayModeSceneState()
 	m_PlayModeSelectedEntityUuid.reset();
 }
 
+void MainEditorSubsystem::CapturePrefabReturnSceneState()
+{
+	m_HasPrefabReturnSceneSnapshot = false;
+	m_PrefabReturnSceneSnapshotJson.clear();
+	m_PrefabReturnSelectedEntityUuid.reset();
+	m_PrefabReturnSceneWasDirty = SceneManager::Instance().IsActiveSceneDirty();
+	m_PrefabReturnGameViewCameras.clear();
+
+	const auto sceneCameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
+	for (Object cameraObject : sceneCameras)
+	{
+		const Transform* transform = cameraObject.getComponent<Transform>();
+		const CameraComponent* camera = cameraObject.getComponent<CameraComponent>();
+		if (transform == nullptr || camera == nullptr)
+		{
+			continue;
+		}
+
+		// Copy only the render-facing camera fields needed to rebuild the same
+		// Game View camera after prefab mode swaps in an isolated ObjectManager.
+		PrefabReturnGameViewCamera cachedCamera;
+		cachedCamera.position = transform->position;
+		cachedCamera.rotation = transform->rotation;
+		cachedCamera.up = camera->up;
+		cachedCamera.verticalFovDegrees = camera->verticalFovDegrees;
+		cachedCamera.nearPlane = camera->nearPlane;
+		cachedCamera.farPlane = camera->farPlane;
+		m_PrefabReturnGameViewCameras.push_back(cachedCamera);
+	}
+
+	nlohmann::json snapshotJson;
+	const SceneDocument* activeScene = SceneManager::Instance().GetActiveScene();
+	snapshotJson["name"] = activeScene != nullptr ? activeScene->name : "ActiveScene";
+	snapshotJson["sceneSettings"] = Serializer::SerializeSceneRenderSettings(SceneManager::Instance().GetActiveSceneRenderSettings());
+	snapshotJson["objects"] = nlohmann::json::array();
+
+	for (Object rootObject : ObjectManager::instance().getRootObjects())
+	{
+		snapshotJson["objects"].push_back(Serializer::SerializeObject(rootObject));
+	}
+
+	if (selectedEntity.has_value())
+	{
+		m_PrefabReturnSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedEntity);
+	}
+
+	m_PrefabReturnSceneSnapshotJson = snapshotJson.dump();
+	m_HasPrefabReturnSceneSnapshot = true;
+}
+
+void MainEditorSubsystem::RestorePrefabReturnSceneState()
+{
+	if (!m_HasPrefabReturnSceneSnapshot)
+	{
+		return;
+	}
+
+	if (!LoadPrefabReturnSceneSnapshotIntoObjectManager(true))
+	{
+		return;
+	}
+
+	m_HasPrefabReturnSceneSnapshot = false;
+	m_PrefabReturnSceneSnapshotJson.clear();
+	m_PrefabReturnSelectedEntityUuid.reset();
+	m_PrefabReturnGameViewCameras.clear();
+}
+
+void MainEditorSubsystem::CaptureCurrentPrefabEditingState()
+{
+	if (!m_IsPrefabEditingMode || !m_PrefabObjectsLoadedForEditor)
+	{
+		return;
+	}
+
+	nlohmann::json prefabJson;
+	prefabJson["name"] = m_PrefabEditingPath.empty() ? "Prefab" : m_PrefabEditingPath.stem().string();
+	prefabJson["objects"] = nlohmann::json::array();
+	for (Object rootObject : ObjectManager::instance().getRootObjects())
+	{
+		prefabJson["objects"].push_back(Serializer::SerializeObject(rootObject));
+	}
+
+	if (selectedEntity.has_value())
+	{
+		m_PrefabEditingSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedEntity);
+	}
+	else
+	{
+		m_PrefabEditingSelectedEntityUuid.reset();
+	}
+
+	m_PrefabEditingObjectSnapshotJson = prefabJson.dump();
+}
+
+bool MainEditorSubsystem::EnsurePrefabObjectsLoadedForEditor()
+{
+	if (!m_IsPrefabEditingMode || m_PrefabObjectsLoadedForEditor)
+	{
+		return false;
+	}
+
+	return LoadPrefabEditingSnapshotIntoObjectManager();
+}
+
+void MainEditorSubsystem::RestoreSceneObjectsForRuntimeDuringPrefabEdit()
+{
+	if (!m_IsPrefabEditingMode || !m_PrefabObjectsLoadedForEditor)
+	{
+		return;
+	}
+
+	if (!m_PrefabEditOpenedFromSceneObject)
+	{
+		return;
+	}
+
+	CaptureCurrentPrefabEditingState();
+	if (LoadPrefabReturnSceneSnapshotIntoObjectManager(false))
+	{
+		m_PrefabObjectsLoadedForEditor = false;
+		SetSelectedEntity(std::nullopt);
+	}
+}
+
+bool MainEditorSubsystem::LoadPrefabEditingSnapshotIntoObjectManager()
+{
+	if (m_PrefabEditingObjectSnapshotJson.empty())
+	{
+		return false;
+	}
+
+	nlohmann::json snapshotJson;
+	try
+	{
+		snapshotJson = nlohmann::json::parse(m_PrefabEditingObjectSnapshotJson);
+	}
+	catch (const nlohmann::json::parse_error& parseError)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to parse prefab editing snapshot at byte " << parseError.byte << ": " << parseError.what());
+		SetSelectedEntity(std::nullopt);
+		return false;
+	}
+
+	m_SuppressObjectModifiedCallback = true;
+	ObjectManager::instance().clear();
+	if (snapshotJson.contains("objects") && snapshotJson["objects"].is_array())
+	{
+		for (const nlohmann::json& objectJson : snapshotJson["objects"])
+		{
+			Serializer::DeserializeObject(objectJson);
+		}
+	}
+	m_SuppressObjectModifiedCallback = false;
+
+	m_PrefabObjectsLoadedForEditor = true;
+	if (m_PrefabEditingSelectedEntityUuid.has_value())
+	{
+		if (auto restoredObject = ObjectManager::instance().getObject(*m_PrefabEditingSelectedEntityUuid))
+		{
+			SetSelectedEntity(restoredObject->EntityId());
+		}
+		else
+		{
+			SetSelectedEntity(std::nullopt);
+		}
+	}
+	else
+	{
+		SetSelectedEntity(std::nullopt);
+	}
+
+	return true;
+}
+
+bool MainEditorSubsystem::LoadPrefabReturnSceneSnapshotIntoObjectManager(bool restoreSelection)
+{
+	if (!m_HasPrefabReturnSceneSnapshot)
+	{
+		return false;
+	}
+
+	nlohmann::json snapshotJson;
+	try
+	{
+		snapshotJson = nlohmann::json::parse(m_PrefabReturnSceneSnapshotJson);
+	}
+	catch (const nlohmann::json::parse_error& parseError)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to parse prefab return scene snapshot at byte " << parseError.byte << ": " << parseError.what());
+		SetSelectedEntity(std::nullopt);
+		return false;
+	}
+
+	m_SuppressObjectModifiedCallback = true;
+	ObjectManager::instance().clear();
+	if (snapshotJson.contains("sceneSettings"))
+	{
+		SceneManager::Instance().SetActiveSceneRenderSettings(Serializer::DeserializeSceneRenderSettings(snapshotJson["sceneSettings"]));
+	}
+	if (snapshotJson.contains("objects") && snapshotJson["objects"].is_array())
+	{
+		for (const nlohmann::json& objectJson : snapshotJson["objects"])
+		{
+			Serializer::DeserializeObject(objectJson);
+		}
+	}
+	m_SuppressObjectModifiedCallback = false;
+
+	if (m_PrefabReturnSceneWasDirty)
+	{
+		SceneManager::Instance().ForceMarkActiveSceneDirty();
+	}
+	else
+	{
+		SceneManager::Instance().ClearActiveSceneDirty();
+	}
+
+	if (restoreSelection && m_PrefabReturnSelectedEntityUuid.has_value())
+	{
+		if (auto restoredObject = ObjectManager::instance().getObject(*m_PrefabReturnSelectedEntityUuid))
+		{
+			SetSelectedEntity(restoredObject->EntityId());
+		}
+		else
+		{
+			SetSelectedEntity(std::nullopt);
+		}
+	}
+	else if (restoreSelection)
+	{
+		SetSelectedEntity(std::nullopt);
+	}
+
+	return true;
+}
+
+bool MainEditorSubsystem::TryApplyPrefabModeGameViewCameras(float aspect) const
+{
+	if (!m_IsPrefabEditingMode || m_PrefabReturnGameViewCameras.empty())
+	{
+		return false;
+	}
+
+	if (aspect <= 0.0001f)
+	{
+		aspect = 1.0f;
+	}
+
+	for (const PrefabReturnGameViewCamera& camera : m_PrefabReturnGameViewCameras)
+	{
+		const glm::vec3 forward = camera.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+		glm::vec3 up = camera.rotation * camera.up;
+		if (glm::length(up) < 0.0001f)
+		{
+			up = glm::vec3(0.0f, 1.0f, 0.0f);
+		}
+
+		// Feed the renderer through its normal Game View camera entry point, so
+		// prefab editing only changes camera ownership, not render behavior.
+		const glm::mat4 view = glm::lookAt(camera.position, camera.position + forward, glm::normalize(up));
+		glm::mat4 proj = glm::perspective(glm::radians(camera.verticalFovDegrees), aspect, camera.nearPlane, camera.farPlane);
+		proj[1][1] *= -1.0f;
+		RenderSystem::Instance().SetGameViewCamera(view, proj, camera.position);
+	}
+
+	return true;
+}
+
+bool MainEditorSubsystem::LoadPrefabIntoIsolatedObjectManager(const std::filesystem::path& path)
+{
+	std::ifstream input(path, std::ios::binary);
+	if (!input)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to open prefab for editing: " << path);
+		return false;
+	}
+
+	nlohmann::json prefabJson;
+	try
+	{
+		input >> prefabJson;
+	}
+	catch (const nlohmann::json::parse_error& parseError)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Prefab edit file failed JSON parse at byte " << parseError.byte << ": " << parseError.what() << " Path: " << path);
+		return false;
+	}
+
+	m_SuppressObjectModifiedCallback = true;
+	ObjectManager::instance().clear();
+	if (prefabJson.contains("objects") && prefabJson["objects"].is_array())
+	{
+		for (const nlohmann::json& objectJson : prefabJson["objects"])
+		{
+			Serializer::DeserializeObject(objectJson);
+		}
+	}
+	m_SuppressObjectModifiedCallback = false;
+
+	SetSelectedEntity(std::nullopt);
+	return true;
+}
+
 // MainEditorSubsystem::OpenScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
+	if (m_IsPrefabEditingMode)
+	{
+		ClosePrefabMode();
+	}
 	TerraEngine::UUID sceneId = SceneManager::Instance().LoadScene(path);
 		if (sceneId != TerraEngine::EMPTY_UUID) {
 			SceneManager::Instance().SetActiveScene(sceneId);
@@ -286,6 +615,14 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 			m_CurrentScenePath = path;
 			ClearPlayModeSceneState();
 			UndoRedoSystem::Instance().Clear();
+
+			auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(ObjectManager::instance());
+			auto summary = TerraEngine::Scene::BuildSceneRuntimeSummary(graph);
+			TERRAENGINE_LOG(LogLevel::Info, "Editor scene graph loaded with " << summary.objects.size() << " objects and " << summary.diagnostics.size() << " diagnostics.");
+			for (const auto& diagnostic : summary.diagnostics)
+			{
+				TERRAENGINE_LOG(LogLevel::Warning, "Editor scene graph diagnostic: " << TerraEngine::Scene::FormatSceneDiagnostic(diagnostic));
+			}
 	
 			// Save to LastScene.txt
 	
@@ -307,9 +644,213 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 	}
 }
 
+bool MainEditorSubsystem::OpenPrefabAsset(const std::filesystem::path& path)
+{
+	return OpenPrefabAssetInternal(path, false);
+}
+
+bool MainEditorSubsystem::OpenPrefabAssetInternal(const std::filesystem::path& path, bool openedFromSceneObject)
+{
+	const std::filesystem::path absolutePath = std::filesystem::absolute(path).lexically_normal();
+	if (absolutePath.extension() != ".teprefab")
+	{
+		return false;
+	}
+
+	if (m_IsPrefabEditingMode && m_PrefabEditingDirty)
+	{
+		SaveOpenPrefab();
+	}
+
+	if (!m_IsPrefabEditingMode)
+	{
+		CapturePrefabReturnSceneState();
+	}
+
+	if (!LoadPrefabIntoIsolatedObjectManager(absolutePath))
+	{
+		if (!m_IsPrefabEditingMode)
+		{
+			RestorePrefabReturnSceneState();
+		}
+		return false;
+	}
+
+	m_IsPrefabEditingMode = true;
+	m_PrefabEditingDirty = false;
+	m_PrefabEditingPath = absolutePath;
+	m_PrefabObjectsLoadedForEditor = true;
+	m_PrefabEditOpenedFromSceneObject = openedFromSceneObject;
+	CaptureCurrentPrefabEditingState();
+
+	TERRAENGINE_LOG(LogLevel::Info, "Opened prefab in isolated edit mode: " << absolutePath);
+	return true;
+}
+
+bool MainEditorSubsystem::OpenPrefabFromObject(Object& object)
+{
+	PrefabLinkComponent* link = object.getComponent<PrefabLinkComponent>();
+	if (link == nullptr || link->prefabPath.empty())
+	{
+		return false;
+	}
+
+	std::filesystem::path prefabPath = link->prefabPath;
+	if (!prefabPath.is_absolute())
+	{
+		prefabPath = SceneManager::Instance().GetSceneRoot() / prefabPath;
+	}
+	return OpenPrefabAssetInternal(prefabPath, true);
+}
+
+bool MainEditorSubsystem::ResetPrefabInstanceToDefaults(Object& object)
+{
+	PrefabLinkComponent* link = object.getComponent<PrefabLinkComponent>();
+	if (link == nullptr || link->prefabPath.empty())
+	{
+		return false;
+	}
+
+	std::filesystem::path prefabPath = link->prefabPath;
+	if (!prefabPath.is_absolute())
+	{
+		prefabPath = SceneManager::Instance().GetSceneRoot() / prefabPath;
+	}
+
+	std::ifstream prefabInput(prefabPath, std::ios::binary);
+	if (!prefabInput)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Cannot reset prefab instance because the source file could not be opened: " << prefabPath);
+		return false;
+	}
+
+	nlohmann::json prefabJson;
+	try
+	{
+		prefabInput >> prefabJson;
+	}
+	catch (const nlohmann::json::parse_error& parseError)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Cannot reset prefab instance because the source file failed JSON parse at byte " << parseError.byte << ": " << parseError.what());
+		return false;
+	}
+
+	if (!prefabJson.contains("objects") || !prefabJson["objects"].is_array() || prefabJson["objects"].empty())
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Cannot reset prefab instance because the prefab has no root object: " << prefabPath);
+		return false;
+	}
+
+	const TerraEngine::UUID prefabSourceId = link->prefabSourceId;
+	const std::string prefabName = link->prefabName;
+	ObjectManager& objManager = ObjectManager::instance();
+	const entt::entity parentEntity = objManager.getParentEntity(object.EntityId());
+	std::optional<Object> parentObject;
+	if (parentEntity != entt::null)
+	{
+		parentObject = objManager.getObject(parentEntity);
+	}
+
+	objManager.removeObject(object);
+	Object restoredObject = Serializer::DeserializeObject(prefabJson["objects"].front(), parentObject);
+	PrefabLinkComponent* existingRestoredLink = restoredObject.getComponent<PrefabLinkComponent>();
+	PrefabLinkComponent& restoredLink = existingRestoredLink != nullptr ? *existingRestoredLink : restoredObject.addComponent<PrefabLinkComponent>();
+	restoredLink.prefabSourceId = prefabSourceId;
+	restoredLink.sourceObjectId = restoredObject.getUUID();
+	restoredLink.prefabName = prefabName.empty() ? prefabPath.stem().string() : prefabName;
+
+	std::error_code relativeError;
+	const std::filesystem::path relativePrefabPath = std::filesystem::relative(prefabPath, SceneManager::Instance().GetSceneRoot(), relativeError);
+	restoredLink.prefabPath = relativeError ? prefabPath.generic_string() : relativePrefabPath.generic_string();
+	restoredLink.overriddenProperties.clear();
+
+	SetSelectedEntity(restoredObject.EntityId());
+	SceneManager::Instance().ForceMarkActiveSceneDirty();
+	TERRAENGINE_LOG(LogLevel::Info, "Reset prefab instance to defaults from " << prefabPath);
+	return true;
+}
+
+bool MainEditorSubsystem::SaveOpenPrefab()
+{
+	if (!m_IsPrefabEditingMode || m_PrefabEditingPath.empty())
+	{
+		return false;
+	}
+
+	if (!m_PrefabObjectsLoadedForEditor && !m_PrefabEditingObjectSnapshotJson.empty())
+	{
+		nlohmann::json snapshotJson;
+		try
+		{
+			snapshotJson = nlohmann::json::parse(m_PrefabEditingObjectSnapshotJson);
+		}
+		catch (const nlohmann::json::parse_error& parseError)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to save prefab because the cached edit snapshot failed JSON parse at byte " << parseError.byte << ": " << parseError.what());
+			return false;
+		}
+
+		std::ofstream snapshotOutput(m_PrefabEditingPath, std::ios::binary);
+		if (!snapshotOutput)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to save prefab: " << m_PrefabEditingPath);
+			return false;
+		}
+		snapshotOutput << snapshotJson.dump(4);
+		m_PrefabEditingDirty = false;
+		TERRAENGINE_LOG(LogLevel::Info, "Saved prefab: " << m_PrefabEditingPath);
+		return true;
+	}
+
+	nlohmann::json prefabJson;
+	prefabJson["name"] = m_PrefabEditingPath.stem().string();
+	prefabJson["objects"] = nlohmann::json::array();
+	for (Object rootObject : ObjectManager::instance().getRootObjects())
+	{
+		prefabJson["objects"].push_back(Serializer::SerializeObject(rootObject));
+	}
+
+	std::ofstream output(m_PrefabEditingPath, std::ios::binary);
+	if (!output)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to save prefab: " << m_PrefabEditingPath);
+		return false;
+	}
+
+	output << prefabJson.dump(4);
+	m_PrefabEditingDirty = false;
+	TERRAENGINE_LOG(LogLevel::Info, "Saved prefab: " << m_PrefabEditingPath);
+	return true;
+}
+
+void MainEditorSubsystem::ClosePrefabMode()
+{
+	if (!m_IsPrefabEditingMode)
+	{
+		return;
+	}
+
+	if (m_PrefabEditingDirty)
+	{
+		SaveOpenPrefab();
+	}
+
+	m_IsPrefabEditingMode = false;
+	m_PrefabEditingDirty = false;
+	m_PrefabEditingPath.clear();
+	m_PrefabObjectsLoadedForEditor = false;
+	m_PrefabEditOpenedFromSceneObject = false;
+	m_PrefabEditingObjectSnapshotJson.clear();
+	m_PrefabEditingSelectedEntityUuid.reset();
+	RestorePrefabReturnSceneState();
+
+	TERRAENGINE_LOG(LogLevel::Info, "Closed prefab edit mode and restored the active scene.");
+}
+
 // MainEditorSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::Shutdown() {
 	ClearPlayModeSceneState();
+	m_PrefabReturnGameViewCameras.clear();
 	if (g_ActiveMainEditorSubsystem == this)
 	{
 		g_ActiveMainEditorSubsystem = nullptr;
@@ -418,7 +959,11 @@ void MainEditorSubsystem::Update(float deltaTime) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) {
 		if (ImGui::IsKeyPressed(ImGuiKey_S)) {
-			SceneManager::Instance().SaveScene();
+			if (m_IsPrefabEditingMode) {
+				SaveOpenPrefab();
+			} else {
+				SceneManager::Instance().SaveScene();
+			}
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
@@ -515,6 +1060,8 @@ bool MainEditorSubsystem::TryGetGameViewRenderStats(RenderStatsSnapshot& outStat
 
 // MainEditorSubsystem::DrawUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::DrawUI() {
+	EnsurePrefabObjectsLoadedForEditor();
+
 	// Check for resize/recreation of offscreen resources
 	if (ctx && ctx->engine) {
 		RenderSystem* renderSystem = ctx->engine->GetSystem<RenderSystem>();
@@ -647,9 +1194,39 @@ void MainEditorSubsystem::DrawUI() {
 	ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
 	ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), dockspace_flags);
 
+	if (m_IsPrefabEditingMode && !m_PrefabObjectsLoadedForEditor)
+	{
+		// Runtime rendering keeps the scene snapshot loaded after each frame in
+		// scene-context prefab mode. Reload the isolated prefab snapshot before
+		// editor UI windows read hierarchy/inspector state so those windows do
+		// not flicker between scene objects and prefab objects.
+		EnsurePrefabObjectsLoadedForEditor();
+	}
+
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& win : m_Windows) {
-		win->Draw();
+		const bool drawSceneViewInSceneContext = ShouldSceneViewUseSceneContextForPrefabEdit()
+			&& std::dynamic_pointer_cast<SceneViewWindow>(win) != nullptr
+			&& m_PrefabObjectsLoadedForEditor;
+		if (drawSceneViewInSceneContext)
+		{
+			// Scene-context prefab editing should look like Unity's in-context
+			// mode: Scene View uses the real scene snapshot, while the hierarchy
+			// and inspector keep editing the isolated prefab data.
+			CaptureCurrentPrefabEditingState();
+			LoadPrefabReturnSceneSnapshotIntoObjectManager(true);
+			m_PrefabObjectsLoadedForEditor = false;
+			win->Draw();
+			EnsurePrefabObjectsLoadedForEditor();
+		}
+		else
+		{
+			if (m_IsPrefabEditingMode && !m_PrefabObjectsLoadedForEditor)
+			{
+				EnsurePrefabObjectsLoadedForEditor();
+			}
+			win->Draw();
+		}
 	}
 
 	DrawSaveConfirmationModal();
@@ -659,6 +1236,7 @@ void MainEditorSubsystem::DrawUI() {
 	if (showDemoWindow) ImGui::ShowDemoWindow(&showDemoWindow);
 
 	ImGui::End();
+	RestoreSceneObjectsForRuntimeDuringPrefabEdit();
 }
 
 // MainEditorSubsystem::DrawMainMenuBar is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -667,8 +1245,8 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 		if (ImGui::BeginMenu("File")) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (SceneManager::Instance().SaveScene(m_CurrentScenePath)) {
+				const bool saved = m_IsPrefabEditingMode ? SaveOpenPrefab() : SceneManager::Instance().SaveScene(m_CurrentScenePath);
+				if (saved && !m_IsPrefabEditingMode) {
 					UndoRedoSystem::Instance().SetSavePoint();
 				}
 			}
@@ -767,7 +1345,7 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 
 // MainEditorSubsystem::RequestOpenScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::RequestOpenScene(const std::filesystem::path& path) {
-	if (SceneManager::Instance().IsActiveSceneDirty()) {
+	if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
 		m_PendingAction = PendingAction::OpenScene;
 		m_PendingScenePath = path;
 		m_ShowSaveConfirmation = true;
@@ -778,7 +1356,7 @@ void MainEditorSubsystem::RequestOpenScene(const std::filesystem::path& path) {
 
 // MainEditorSubsystem::RequestCloseProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::RequestCloseProject() {
-	if (SceneManager::Instance().IsActiveSceneDirty()) {
+	if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
 		m_PendingAction = PendingAction::CloseProject;
 		m_ShowSaveConfirmation = true;
 	} else {
@@ -788,7 +1366,7 @@ void MainEditorSubsystem::RequestCloseProject() {
 
 // MainEditorSubsystem::RequestExit is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::RequestExit() {
-	if (SceneManager::Instance().IsActiveSceneDirty()) {
+	if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
 		m_PendingAction = PendingAction::Exit;
 		m_ShowSaveConfirmation = true;
 	} else {
@@ -828,13 +1406,23 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginPopupModal("Save Changes?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-		ImGui::Text("There are unsaved changes to the current scene.\nDo you want to save them?");
+		ImGui::Text("There are unsaved changes to the current scene or prefab.\nDo you want to save them?");
 		ImGui::Separator();
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("Yes", ImVec2(120, 0))) {
-			SceneManager::Instance().SaveScene();
-			UndoRedoSystem::Instance().SetSavePoint();
+			if (m_IsPrefabEditingMode) {
+				const bool restoreSceneNeedsSave = SceneManager::Instance().IsActiveSceneDirty();
+				SaveOpenPrefab();
+				ClosePrefabMode();
+				if (restoreSceneNeedsSave) {
+					SceneManager::Instance().SaveScene(m_CurrentScenePath);
+					UndoRedoSystem::Instance().SetSavePoint();
+				}
+			} else {
+				SceneManager::Instance().SaveScene();
+				UndoRedoSystem::Instance().SetSavePoint();
+			}
 			ExecutePendingAction();
 			ImGui::CloseCurrentPopup();
 		}
@@ -842,6 +1430,9 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 		ImGui::SameLine();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::Button("No", ImVec2(120, 0))) {
+			if (m_IsPrefabEditingMode) {
+				m_PrefabEditingDirty = false;
+			}
 			ExecutePendingAction();
 			ImGui::CloseCurrentPopup();
 		}
@@ -896,6 +1487,17 @@ void MainEditorSubsystem::CloseCurrentProject() {
 	ScriptingSystem::Instance().SetRunning(false);
 	ClearPlayModeSceneState();
 	ScriptCompilationSubsystem::Instance().OnProjectClosed();
+	m_IsPrefabEditingMode = false;
+	m_PrefabEditingDirty = false;
+	m_HasPrefabReturnSceneSnapshot = false;
+	m_PrefabReturnSceneSnapshotJson.clear();
+	m_PrefabReturnSelectedEntityUuid.reset();
+	m_PrefabReturnGameViewCameras.clear();
+	m_PrefabEditingPath.clear();
+	m_PrefabObjectsLoadedForEditor = false;
+	m_PrefabEditOpenedFromSceneObject = false;
+	m_PrefabEditingObjectSnapshotJson.clear();
+	m_PrefabEditingSelectedEntityUuid.reset();
 
 	// Clear Scene
 	SceneManager::Instance().UnloadAll();

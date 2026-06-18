@@ -326,6 +326,9 @@ struct DrawCommand
 	std::uint32_t meshDataIndex = 0u;
 	std::uint32_t textureIndex = 0u;
 	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	// Editor-only tint is submitted per draw so Scene View context modes can
+	// de-emphasize surrounding objects without changing runtime materials.
+	glm::vec4 editorTint = glm::vec4(0.0f);
 	bool taskShaderCullingEnabled = true;
 };
 
@@ -353,6 +356,9 @@ struct PushConstants
 	std::uint32_t clusterDataOffset = 0u;
 	std::uint32_t lightIndexOffset = 0u;
 	std::uint32_t indirectDrawOffset = 0u;
+	// rgb is the tint target color and a is blend strength. Runtime draws leave
+	// this at zero so authoring cues never leak into exported/game rendering.
+	alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);
 };
 
 inline constexpr std::uint32_t kLightingClusterDimX = 16u;
@@ -645,6 +651,10 @@ struct FrameRenderData
 	FrameSkyData sky;
 	std::vector<FrameLightCandidate> lightCandidates;
 	std::vector<DrawCommand> commands;
+	// Scene View can request a whole-view authoring tint for non-mesh passes
+	// such as sky and grid while individual DrawCommand tint preserves the
+	// focused prefab branch at normal color.
+	glm::vec4 editorContextTint = glm::vec4(0.0f);
 	// Per-light shadow lists are separate from the main camera-visible list so
 	// shadow passes can cull against each light instead of the active camera.
 	std::vector<ShadowDrawList> shadowDrawLists;

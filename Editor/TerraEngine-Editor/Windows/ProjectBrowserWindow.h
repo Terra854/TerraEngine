@@ -23,6 +23,9 @@ protected:
 private:
 	void DrawDirectoryTree(const std::filesystem::path& path);
 	void DrawDirectoryContent(const std::filesystem::path& path);
+	void OpenCreateAssetModal(const std::string& title, const std::string& defaultName, const std::string& extension);
+	void DrawCreateAssetModal();
+	void CreateNamedAsset();
 
 	MainEditorSubsystem* m_Owner;
 	std::filesystem::path m_CurrentDirectory;
@@ -32,7 +35,12 @@ private:
 
 	std::filesystem::path m_AssetToDelete;
 	bool m_ShowDeleteModal = false;
+	bool m_ShowCreateAssetModal = false;
 	bool m_ShowCreateScriptModal = false;
+	std::string m_CreateAssetTitle;
+	std::string m_CreateAssetExtension;
+	std::array<char, 128> m_NewAssetName{};
 	std::array<char, 128> m_NewScriptName{};
+	std::string m_CreateAssetError;
 	std::string m_CreateScriptError;
 };

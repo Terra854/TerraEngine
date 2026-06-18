@@ -14,6 +14,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/ExportStartupFlowTests.cpp
 	Runtime/MaterialRuntimeContractTests.cpp
 	Runtime/RenderProfileBootSummaryTests.cpp
+	Runtime/SceneRuntimeParityTests.cpp
 	Runtime/ThreadPoolSingletonTests.cpp
 	Runtime/WorkerPoolTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
@@ -22,6 +23,9 @@ add_executable(TerraEngine-EngineTests
 	Core/ObjectManagerTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
 	Renderer/RenderTypesTests.cpp
+	Scene/PrefabCompositionTests.cpp
+	Scene/SceneGraphRuntimeTests.cpp
+	Scene/SceneMutationQueueTests.cpp
 	Scene/SpatialBoundsTests.cpp
 	Scene/SpatialIndexEdgeTests.cpp
 	Scene/SpatialIndexQueryTests.cpp

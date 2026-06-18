@@ -5,8 +5,11 @@
 
 #pragma once
 #include "../Framework/EditorWindow.h"
+#include "Engine/Utilities/UUID.h"
+#include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <unordered_set>
 
 class MainEditorSubsystem;
 
@@ -21,6 +24,8 @@ protected:
 private:
 	void HandleCameraInput(float deltaTime);
 	void DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
+	void ApplyPrefabContextTintForNextRender();
+	void CollectFocusedPrefabObjectIds(entt::entity entity, std::unordered_set<TerraEngine::UUID>& objectIds);
 
 	MainEditorSubsystem* m_Owner;
 

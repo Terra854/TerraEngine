@@ -29,6 +29,9 @@ protected:
 	virtual void OnGui() override;
 
 private:
+	bool IsPrefabOverride(Object& obj, const std::string& compName, const std::string& propertyName) const;
+	void ResetPrefabOverride(Object& obj, const std::string& compName, const std::string& propertyName);
+	void DrawPrefabLinkInspector(Object& obj);
 	void DrawProperty(const std::string& compName, TerraEngine::Reflection::Property prop, Object& obj, ComponentAccessFunctions& access);
 	void DrawScriptComponentInspector(Object& obj);
 	void DrawScriptDropTarget(Object& obj);

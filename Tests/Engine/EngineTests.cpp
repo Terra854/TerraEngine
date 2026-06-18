@@ -15,9 +15,13 @@ namespace TerraEngine::Tests {
 	void RegisterExportScriptingRuntimeTests(TestRegistry& registry);
 	void RegisterMaterialRuntimeContractTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
+	void RegisterPrefabCompositionTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
 	void RegisterRenderProfileBootSummaryTests(TestRegistry& registry);
+	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
+	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
+	void RegisterSceneMutationQueueTests(TestRegistry& registry);
 	void RegisterSpatialBoundsTests(TestRegistry& registry);
 	void RegisterSpatialIndexEdgeTests(TestRegistry& registry);
 	void RegisterSpatialIndexQueryTests(TestRegistry& registry);
@@ -51,9 +55,13 @@ int main() {
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);
+	TerraEngine::Tests::RegisterPrefabCompositionTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
 	TerraEngine::Tests::RegisterRenderProfileBootSummaryTests(registry);
+	TerraEngine::Tests::RegisterSceneRuntimeParityTests(registry);
+	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
+	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
 	TerraEngine::Tests::RegisterSpatialBoundsTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexEdgeTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexQueryTests(registry);

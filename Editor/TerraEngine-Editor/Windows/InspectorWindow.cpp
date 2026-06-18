@@ -7,10 +7,13 @@
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/ScriptCompilationSubsystem.h"
 #include "../Subsystems/UndoRedoSystem.h"
+#include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Core/Object/Component.h"
+#include "Engine/Components/PrefabLinkComponent.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Scene/SceneManager.h"
 #include "Engine/Components/LightComponent.h"
 #include "Engine/Components/UIComponent.h"
 #include "Engine/Components/ScriptComponent.h"
@@ -34,6 +37,7 @@
 #include <fstream>
 #include <filesystem>
 #include <limits>
+#include <sstream>
 
 using ReflectionProperty = TerraEngine::Reflection::Property;
 using ReflectionType = TerraEngine::Reflection::Type;
@@ -846,6 +850,96 @@ InspectorWindow::InspectorWindow(MainEditorSubsystem* owner)
 	: EditorWindow("Inspector"), m_Owner(owner) {
 }
 
+bool InspectorWindow::IsPrefabOverride(Object& obj, const std::string& compName, const std::string& propertyName) const
+{
+	PrefabLinkComponent* link = obj.getComponent<PrefabLinkComponent>();
+	if (link == nullptr)
+	{
+		return false;
+	}
+
+	const std::string token = compName + "." + propertyName;
+	std::istringstream stream(link->overriddenProperties);
+	std::string item;
+	while (std::getline(stream, item, ';'))
+	{
+		if (item == token || item == compName)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void InspectorWindow::ResetPrefabOverride(Object& obj, const std::string& compName, const std::string& propertyName)
+{
+	PrefabLinkComponent* link = obj.getComponent<PrefabLinkComponent>();
+	if (link == nullptr)
+	{
+		return;
+	}
+
+	const std::string propertyToken = compName + "." + propertyName;
+	const std::string componentToken = compName;
+	std::vector<std::string> keptTokens;
+	std::istringstream stream(link->overriddenProperties);
+	std::string item;
+	while (std::getline(stream, item, ';'))
+	{
+		const bool resetsWholeComponent = propertyName.empty() && (item == componentToken || item.rfind(componentToken + ".", 0) == 0);
+		if (!item.empty() && item != propertyToken && item != componentToken && !resetsWholeComponent)
+		{
+			keptTokens.push_back(item);
+		}
+	}
+
+	link->overriddenProperties.clear();
+	for (std::size_t index = 0; index < keptTokens.size(); ++index)
+	{
+		if (index > 0)
+		{
+			link->overriddenProperties += ';';
+		}
+		link->overriddenProperties += keptTokens[index];
+	}
+	SceneManager::Instance().ForceMarkActiveSceneDirty();
+	TERRAENGINE_LOG(LogLevel::Info, "Prefab override reset requested for " << compName << "." << propertyName);
+}
+
+void InspectorWindow::DrawPrefabLinkInspector(Object& obj)
+{
+	PrefabLinkComponent* link = obj.getComponent<PrefabLinkComponent>();
+	if (link == nullptr)
+	{
+		return;
+	}
+
+	const std::string prefabName = link->prefabName.empty() ? obj.getName() : link->prefabName;
+	if (ImGui::CollapsingHeader("Prefab", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::Text("Prefab: %s", prefabName.c_str());
+		if (!link->prefabPath.empty()) {
+			ImGui::TextDisabled("%s", link->prefabPath.c_str());
+		}
+		if (ImGui::Button("Open Source")) {
+			m_Owner->OpenPrefabFromObject(obj);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Unlink")) {
+			obj.removeComponent<PrefabLinkComponent>();
+			SceneManager::Instance().ForceMarkActiveSceneDirty();
+			return;
+		}
+		if (ImGui::Button("Apply To Defaults")) {
+			TERRAENGINE_LOG(LogLevel::Info, "Prefab authoring request: apply selected inspector values to defaults for " << prefabName);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Reset Object")) {
+			m_Owner->ResetPrefabInstanceToDefaults(obj);
+			return;
+		}
+	}
+}
+
 // InspectorWindow::UpdateInspectorDragState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InspectorWindow::UpdateInspectorDragState() {
 	if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
@@ -881,7 +975,20 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	ImGui::TableNextRow();
 	ImGui::TableSetColumnIndex(0);
 	ImGui::AlignTextToFramePadding();
+	const bool prefabOverride = IsPrefabOverride(obj, compName, name);
+	if (prefabOverride) {
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.28f, 1.0f));
+	}
 	ImGui::TextUnformatted(name.c_str());
+	if (prefabOverride) {
+		ImGui::PopStyleColor();
+	}
+	if (ImGui::BeginPopupContextItem(("PrefabPropertyReset_" + compName + "_" + name).c_str())) {
+		if (ImGui::MenuItem("Reset To Prefab Default")) {
+			ResetPrefabOverride(obj, compName, name);
+		}
+		ImGui::EndPopup();
+	}
 	ImGui::TableSetColumnIndex(1);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2664,6 +2771,8 @@ void InspectorWindow::OnGui() {
 				ImGui::EndTable();
 			}
 			
+			DrawPrefabLinkInspector(obj);
+
 			ImGui::Separator();
 			
 			std::vector<std::string>& inspectorComponentOrder = m_PerObjectComponentOrders[obj.EntityId()];
@@ -2672,6 +2781,9 @@ void InspectorWindow::OnGui() {
 			bool hasTransform = false;
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (auto& [compName, access] : accessReg) {
+				if (compName == "PrefabLinkComponent") {
+					continue;
+				}
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (access.hasComponent(obj)) {
 					activeComponents.insert(compName);
@@ -2828,6 +2940,12 @@ void InspectorWindow::OnGui() {
 				ImGui::SameLine();
 				ImGui::AlignTextToFramePadding();
 				ImGui::TextUnformatted(displayName.c_str());
+				if (ImGui::BeginPopupContextItem(("PrefabComponentReset_" + compName).c_str())) {
+					if (ImGui::MenuItem("Reset Component To Prefab Defaults")) {
+						ResetPrefabOverride(obj, compName, "");
+					}
+					ImGui::EndPopup();
+				}
 
 				ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + lineHeight));
 				ImGui::Dummy(ImVec2(0,0));
@@ -2900,6 +3018,9 @@ void InspectorWindow::OnGui() {
 
 				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (const auto& compName : availableComponents) {
+					if (compName == "PrefabLinkComponent") {
+						continue;
+					}
 					const std::string displayName = BuildDisplayComponentName(compName);
 					if (searchBuf[0] != '\0') {
 						std::string lowerName = compName;

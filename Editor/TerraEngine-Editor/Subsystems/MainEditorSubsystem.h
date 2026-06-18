@@ -12,6 +12,8 @@
 #include <string>
 #include <filesystem>
 #include <memory>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/vec3.hpp>
 #include "IEditorSubsystem.h"
 #include "../Framework/EditorWindow.h"
 #include "Engine/Renderer/RenderTypes.h"
@@ -49,6 +51,18 @@ public:
 	
 	// Opens a scene and updates the last opened scene tracking.
 	void OpenScene(const std::filesystem::path& path);
+	// Opens a prefab asset in an isolated hierarchy so the existing scene is
+	// protected while authoring prefab defaults.
+	bool OpenPrefabAsset(const std::filesystem::path& path);
+	bool OpenPrefabFromObject(Object& object);
+	bool ResetPrefabInstanceToDefaults(Object& object);
+	bool SaveOpenPrefab();
+	void ClosePrefabMode();
+	bool IsPrefabEditingMode() const { return m_IsPrefabEditingMode; }
+	std::filesystem::path GetPrefabEditingPath() const { return m_PrefabEditingPath; }
+	bool IsPrefabEditingDirty() const { return m_PrefabEditingDirty; }
+	bool TryApplyPrefabModeGameViewCameras(float aspect) const;
+	bool ShouldSceneViewUseSceneContextForPrefabEdit() const { return m_IsPrefabEditingMode && m_PrefabEditOpenedFromSceneObject; }
 	
 	// Request actions with dirty check
 	void RequestOpenScene(const std::filesystem::path& path);
@@ -80,6 +94,15 @@ private:
 	void CapturePlayModeSceneState();
 	void RestorePlayModeSceneState();
 	void ClearPlayModeSceneState();
+	void CapturePrefabReturnSceneState();
+	void RestorePrefabReturnSceneState();
+	void CaptureCurrentPrefabEditingState();
+	bool EnsurePrefabObjectsLoadedForEditor();
+	void RestoreSceneObjectsForRuntimeDuringPrefabEdit();
+	bool LoadPrefabEditingSnapshotIntoObjectManager();
+	bool LoadPrefabReturnSceneSnapshotIntoObjectManager(bool restoreSelection);
+	bool LoadPrefabIntoIsolatedObjectManager(const std::filesystem::path& path);
+	bool OpenPrefabAssetInternal(const std::filesystem::path& path, bool openedFromSceneObject);
 	void DrawMainMenuBar();
 	void CloseCurrentProject();
 	
@@ -95,6 +118,31 @@ private:
 	bool m_PlayModeSceneWasDirty = false;
 	std::string m_PlayModeSceneSnapshotJson;
 	std::optional<TerraEngine::UUID> m_PlayModeSelectedEntityUuid;
+	bool m_IsPrefabEditingMode = false;
+	bool m_PrefabEditingDirty = false;
+	bool m_HasPrefabReturnSceneSnapshot = false;
+	bool m_PrefabReturnSceneWasDirty = false;
+	std::string m_PrefabReturnSceneSnapshotJson;
+	std::optional<TerraEngine::UUID> m_PrefabReturnSelectedEntityUuid;
+	std::filesystem::path m_PrefabEditingPath;
+	bool m_SuppressObjectModifiedCallback = false;
+	bool m_PrefabObjectsLoadedForEditor = false;
+	bool m_PrefabEditOpenedFromSceneObject = false;
+	std::string m_PrefabEditingObjectSnapshotJson;
+	std::optional<TerraEngine::UUID> m_PrefabEditingSelectedEntityUuid;
+
+	// Cached camera data lets prefab isolation replace the hierarchy ObjectManager
+	// without changing which authored scene camera drives the Game View.
+	struct PrefabReturnGameViewCamera
+	{
+		glm::vec3 position = glm::vec3(0.0f);
+		glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+		glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+		float verticalFovDegrees = 45.0f;
+		float nearPlane = 0.1f;
+		float farPlane = 100.0f;
+	};
+	std::vector<PrefabReturnGameViewCamera> m_PrefabReturnGameViewCameras;
 
 	void* sceneTextureID = nullptr;
 	void* cachedSceneImageView = nullptr;

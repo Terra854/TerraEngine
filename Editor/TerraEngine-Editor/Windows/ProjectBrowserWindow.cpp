@@ -61,6 +61,7 @@ void OpenMarkupAssetInBuilder(MainEditorSubsystem* owner, const std::filesystem:
 ProjectBrowserWindow::ProjectBrowserWindow(MainEditorSubsystem* owner)
 	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: EditorWindow("Project Browser"), m_Owner(owner) {
+	std::fill(m_NewAssetName.begin(), m_NewAssetName.end(), '\0');
 	std::fill(m_NewScriptName.begin(), m_NewScriptName.end(), '\0');
 }
 
@@ -97,61 +98,18 @@ void ProjectBrowserWindow::OnGui() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginPopup("AddAssetPopup")) {
 			if (ImGui::MenuItem("Folder")) {
-				std::filesystem::path newFolderPath = m_CurrentDirectory / "New Folder";
-				int i = 1;
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-				while (std::filesystem::exists(newFolderPath)) {
-					newFolderPath = m_CurrentDirectory / ("New Folder (" + std::to_string(i++) + ")");
-				}
-				std::filesystem::create_directory(newFolderPath);
+				OpenCreateAssetModal("Create Folder", "New Folder", "");
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("Material (.tmat)")) {
-				std::filesystem::path newMatPath = m_CurrentDirectory / "New Material.tmat";
-				int i = 1;
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-				while (std::filesystem::exists(newMatPath)) {
-					newMatPath = m_CurrentDirectory / ("New Material (" + std::to_string(i++) + ").tmat");
-				}
-
-				MaterialHeader header{};
-				std::memcpy(header.magic, "TMAT", 4);
-				header.version = kMaterialCurrentVersion;
-				header.headerSize = sizeof(MaterialHeader);
-				header.flags = 0;
-				header.shadingModel = (uint32_t)ShadingModel::Unlit;
-				header.alphaMode = (uint32_t)AlphaMode::Opaque;
-				header.shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
-				header.baseColorFactor[0] = 1.0f;
-				header.baseColorFactor[1] = 1.0f;
-				header.baseColorFactor[2] = 1.0f;
-				header.baseColorFactor[3] = 1.0f;
-				header.metallicFactor = 0.0f;
-				header.roughnessFactor = 0.5f;
-				header.normalScale = 1.0f;
-				header.occlusionStrength = 1.0f;
-				header.textureCount = 0;
-				header.floatParameterCount = 0;
-				header.textureArrayOffset = sizeof(MaterialHeader);
-				header.floatParameterOffset = sizeof(MaterialHeader);
-
-				std::ofstream out(newMatPath, std::ios::binary);
-				out.write((char*)&header, sizeof(MaterialHeader));
-
-				m_Owner->SetSelectedAsset(std::filesystem::absolute(newMatPath));
+				OpenCreateAssetModal("Create Material", "New Material", ".tmat");
+			}
+			if (ImGui::MenuItem("Prefab (.teprefab)")) {
+				OpenCreateAssetModal("Create Prefab", "New Prefab", ".teprefab");
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("UI Markup (.tuiml)")) {
-				const std::filesystem::path markupPath = MakeUniqueAssetPath(m_CurrentDirectory, "New UI", ".tuiml");
-
-				std::ofstream markupOutput(markupPath);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (markupOutput) {
-					// UI markup is the only file created from the asset browser.
-					// Stylesheets are attached later from the UI Builder itself.
-					markupOutput << kDefaultUIMarkup;
-					m_Owner->SetSelectedAsset(std::filesystem::absolute(markupPath));
-				}
+				OpenCreateAssetModal("Create UI Markup", "New UI", ".tuiml");
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::MenuItem("C# Script (.cs)")) {
@@ -239,6 +197,8 @@ void ProjectBrowserWindow::OnGui() {
 			ImGui::EndPopup();
 		}
 
+		DrawCreateAssetModal();
+
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_ShowCreateScriptModal) {
 			ImGui::OpenPopup("Create C# Script");
@@ -274,6 +234,98 @@ void ProjectBrowserWindow::OnGui() {
 			ImGui::EndPopup();
 		}
 	}
+}
+
+void ProjectBrowserWindow::OpenCreateAssetModal(const std::string& title, const std::string& defaultName, const std::string& extension)
+{
+	m_CreateAssetTitle = title;
+	m_CreateAssetExtension = extension;
+	m_CreateAssetError.clear();
+	std::fill(m_NewAssetName.begin(), m_NewAssetName.end(), '\0');
+	std::copy(defaultName.begin(), defaultName.end(), m_NewAssetName.begin());
+	m_ShowCreateAssetModal = true;
+}
+
+void ProjectBrowserWindow::DrawCreateAssetModal()
+{
+	if (m_ShowCreateAssetModal) {
+		ImGui::OpenPopup(m_CreateAssetTitle.c_str());
+		m_ShowCreateAssetModal = false;
+	}
+
+	if (ImGui::BeginPopupModal(m_CreateAssetTitle.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		ImGui::InputText("Name", m_NewAssetName.data(), m_NewAssetName.size());
+		if (!m_CreateAssetError.empty()) {
+			ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", m_CreateAssetError.c_str());
+		}
+
+		if (ImGui::Button("Create", ImVec2(120, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+			CreateNamedAsset();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+}
+
+void ProjectBrowserWindow::CreateNamedAsset()
+{
+	std::string assetName = m_NewAssetName.data();
+	if (assetName.empty()) {
+		m_CreateAssetError = "Name cannot be empty.";
+		return;
+	}
+
+	const std::filesystem::path targetPath = m_CreateAssetExtension.empty()
+		? MakeUniqueAssetPath(m_CurrentDirectory, assetName, "")
+		: MakeUniqueAssetPath(m_CurrentDirectory, assetName, m_CreateAssetExtension);
+
+	if (m_CreateAssetExtension.empty()) {
+		std::filesystem::create_directory(targetPath);
+		m_CurrentDirectory = targetPath;
+		ImGui::CloseCurrentPopup();
+		return;
+	}
+
+	if (m_CreateAssetExtension == ".tmat") {
+		MaterialHeader header{};
+		std::memcpy(header.magic, "TMAT", 4);
+		header.version = kMaterialCurrentVersion;
+		header.headerSize = sizeof(MaterialHeader);
+		header.flags = 0;
+		header.shadingModel = (uint32_t)ShadingModel::Unlit;
+		header.alphaMode = (uint32_t)AlphaMode::Opaque;
+		header.shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
+		header.baseColorFactor[0] = 1.0f;
+		header.baseColorFactor[1] = 1.0f;
+		header.baseColorFactor[2] = 1.0f;
+		header.baseColorFactor[3] = 1.0f;
+		header.metallicFactor = 0.0f;
+		header.roughnessFactor = 0.5f;
+		header.normalScale = 1.0f;
+		header.occlusionStrength = 1.0f;
+		header.textureCount = 0;
+		header.floatParameterCount = 0;
+		header.textureArrayOffset = sizeof(MaterialHeader);
+		header.floatParameterOffset = sizeof(MaterialHeader);
+
+		std::ofstream out(targetPath, std::ios::binary);
+		out.write(reinterpret_cast<const char*>(&header), sizeof(MaterialHeader));
+	} else if (m_CreateAssetExtension == ".tuiml") {
+		std::ofstream markupOutput(targetPath);
+		markupOutput << kDefaultUIMarkup;
+	} else if (m_CreateAssetExtension == ".teprefab") {
+		nlohmann::json prefabJson;
+		prefabJson["name"] = targetPath.stem().string();
+		prefabJson["objects"] = nlohmann::json::array();
+		std::ofstream prefabOutput(targetPath);
+		prefabOutput << prefabJson.dump(4);
+	}
+
+	m_Owner->SetSelectedAsset(std::filesystem::absolute(targetPath));
+	ImGui::CloseCurrentPopup();
 }
 
 // ProjectBrowserWindow::DrawDirectoryTree is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -348,6 +400,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 			ImGui::TableNextColumn();
 			
 			ImGui::PushID(filename.c_str());
+			const std::filesystem::path absoluteEntryPath = std::filesystem::absolute(entry.path());
 			
 			std::string icon = entry.is_directory() ? "[DIR]" : "[FILE]";
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -355,12 +408,14 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				icon = "[C#]";
 			} else if (!entry.is_directory() && entry.path().extension() == ".tuiml") {
 				icon = "[UI]";
+			} else if (!entry.is_directory() && entry.path().extension() == ".teprefab") {
+				icon = "[PFB]";
 			}
 			
 			bool isSelected = false;
 			auto currentSelected = m_Owner->GetSelectedAsset();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (currentSelected && *currentSelected == std::filesystem::absolute(entry.path())) {
+			if (currentSelected && *currentSelected == absoluteEntryPath) {
 				isSelected = true;
 			}
 
@@ -372,7 +427,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::Button(icon.c_str(), ImVec2(m_ThumbnailSize, m_ThumbnailSize))) {
 					if (!entry.is_directory()) {
-						m_Owner->SetSelectedAsset(std::filesystem::absolute(entry.path()));
+						m_Owner->SetSelectedAsset(absoluteEntryPath);
 					}
 				}
 
@@ -381,10 +436,12 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				ImGui::PopStyleColor();
 			}
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ImGui::BeginPopupContextWindow()) {
+			// Bind the context menu to the asset icon. A window-level popup
+			// inside this loop can reuse the wrong loop entry and delete an
+			// unrelated asset when the browser background is right-clicked.
+			if (ImGui::BeginPopupContextItem("AssetIconContextMenu")) {
 				if (ImGui::MenuItem("Delete")) {
-					m_AssetToDelete = std::filesystem::absolute(entry.path());
+					m_AssetToDelete = absoluteEntryPath;
 					m_ShowDeleteModal = true;
 				}
 				ImGui::EndPopup();
@@ -412,6 +469,8 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 						ScriptCompilationSubsystem::Instance().OpenScript(std::filesystem::absolute(entry.path()));
 					} else if (entry.path().extension() == ".tuiml") {
 						OpenMarkupAssetInBuilder(m_Owner, entry.path());
+					} else if (entry.path().extension() == ".teprefab") {
+						m_Owner->OpenPrefabAsset(std::filesystem::absolute(entry.path()));
 					}
 				}
 			}
@@ -442,6 +501,13 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 			}
 
 			ImGui::TextWrapped("%s", filename.c_str());
+			if (ImGui::BeginPopupContextItem("AssetNameContextMenu")) {
+				if (ImGui::MenuItem("Delete")) {
+					m_AssetToDelete = absoluteEntryPath;
+					m_ShowDeleteModal = true;
+				}
+				ImGui::EndPopup();
+			}
 			ImGui::PopID();
 		}
 		ImGui::EndTable();

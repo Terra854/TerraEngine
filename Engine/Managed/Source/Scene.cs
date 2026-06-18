@@ -10,6 +10,10 @@ using System.Runtime.InteropServices;
 
 namespace TerraEngine
 {
+	// Structural scene edits are synchronized by the native mutation queue at
+	// the end of the engine update pass. Scripts can request scene changes
+	// during gameplay, and systems observe them on the next stable frame
+	// boundary instead of midway through component iteration.
 	// Scene is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public static class Scene
 	{

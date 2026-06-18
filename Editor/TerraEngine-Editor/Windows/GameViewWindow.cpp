@@ -98,26 +98,31 @@ void GameViewWindow::OnGui() {
 	float aspect = (imageSize.y > 0.0001f) ? (imageSize.x / imageSize.y) : 1.0f;
 	if (aspect <= 0.0001f) aspect = 1.0f;
 
-	auto cameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
-	bool hasCameras = !cameras.empty();
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (auto obj : cameras) {
-		Transform* transform = obj.getComponent<Transform>();
-		CameraComponent* camera = obj.getComponent<CameraComponent>();
+	const bool hasPrefabModeSceneCameras = (m_Owner != nullptr) && m_Owner->TryApplyPrefabModeGameViewCameras(aspect);
+	bool hasCameras = hasPrefabModeSceneCameras;
+	if (!hasPrefabModeSceneCameras)
+	{
+		auto cameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
+		hasCameras = !cameras.empty();
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		for (auto obj : cameras) {
+			Transform* transform = obj.getComponent<Transform>();
+			CameraComponent* camera = obj.getComponent<CameraComponent>();
 
-		glm::vec3 pos = transform->position;
-		glm::quat rot = transform->rotation;
+			glm::vec3 pos = transform->position;
+			glm::quat rot = transform->rotation;
 
-		const glm::vec3 defaultForward(0.0f, 0.0f, -1.0f);
-		const glm::vec3 forward = rot * defaultForward;
-		glm::vec3 up = rot * camera->up;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (glm::length(up) < 0.0001f) up = glm::vec3(0.0f, 1.0f, 0.0f);
+			const glm::vec3 defaultForward(0.0f, 0.0f, -1.0f);
+			const glm::vec3 forward = rot * defaultForward;
+			glm::vec3 up = rot * camera->up;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (glm::length(up) < 0.0001f) up = glm::vec3(0.0f, 1.0f, 0.0f);
 
-		glm::mat4 view = glm::lookAt(pos, pos + forward, glm::normalize(up));
-		glm::mat4 proj = glm::perspective(glm::radians(camera->verticalFovDegrees), aspect, camera->nearPlane, camera->farPlane);
-		proj[1][1] *= -1;
-		RenderSystem::Instance().SetGameViewCamera(view, proj, pos);
+			glm::mat4 view = glm::lookAt(pos, pos + forward, glm::normalize(up));
+			glm::mat4 proj = glm::perspective(glm::radians(camera->verticalFovDegrees), aspect, camera->nearPlane, camera->farPlane);
+			proj[1][1] *= -1;
+			RenderSystem::Instance().SetGameViewCamera(view, proj, pos);
+		}
 	}
 
 	// --- Draw Render ---

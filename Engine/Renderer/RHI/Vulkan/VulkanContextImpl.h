@@ -525,17 +525,22 @@ struct VulkanContext::Impl {
 	// Editor / Offscreen Resources
 	// struct PushConstants groups related state and operations so callers have one documented contract.
 	struct PushConstants {
-	alignas(16) glm::mat4 viewProj;
+		alignas(16) glm::mat4 viewProj;
 		alignas(16) glm::mat4 model;
-	uint32_t textureIndex;
-	uint32_t materialIndex;
-	uint32_t taskCullingEnabled;
-	uint32_t statsSlotIndex;
-	float cullingEpsilon;
-	uint32_t lightDataOffset;
-	uint32_t clusterDataOffset;
-	uint32_t lightIndexOffset;
-	uint32_t indirectDrawOffset;
+		uint32_t materialIndex;
+		uint32_t meshDataIndex;
+		uint32_t textureIndex;
+		uint32_t vrsActive;
+		uint32_t taskCullingEnabled;
+		uint32_t statsSlotIndex;
+		float cullingEpsilon;
+		uint32_t lightDataOffset;
+		uint32_t clusterDataOffset;
+		uint32_t lightIndexOffset;
+		uint32_t indirectDrawOffset;
+		// Editor-only tint is part of the default mesh push-constant contract so
+		// every default shader stage observes the same byte layout.
+		alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);
 	};
 
 	// struct OffscreenResources groups related state and operations so callers have one documented contract.

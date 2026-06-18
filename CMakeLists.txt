@@ -43,6 +43,9 @@ set(ENGINE_SOURCES
 	Engine/Resource/ResourceManagerTexture.cpp
 	Engine/Runtime/BootSummary.cpp
 	Engine/Runtime/ExportStartupCoordinator.cpp
+	Engine/Scene/SceneGraphRuntime.cpp
+	Engine/Scene/PrefabComposition.cpp
+	Engine/Scene/SceneMutationQueue.cpp
 	Engine/Scene/SceneManager.cpp
 	Engine/Scene/Serializer.cpp
 	Engine/Scene/SpatialIndex.cpp
@@ -88,12 +91,16 @@ set(ENGINE_HEADERS
 	Engine/Core/Object/Object.h
 	Engine/Core/Object/ObjectManager.h
 	Engine/Components/Transform.h
+	Engine/Components/PrefabLinkComponent.h
 	Engine/Input/InputBackend.h
 	Engine/Input/InputCodes.h
 	Engine/Input/InputSystem.h
 	Engine/Resource/ResourceManager.h
 	Engine/Resource/MaterialRuntimeContract.h
 	Engine/Resource/ShaderCollection.h
+	Engine/Scene/SceneGraphRuntime.h
+	Engine/Scene/PrefabComposition.h
+	Engine/Scene/SceneMutationQueue.h
 	Engine/Scene/SceneManager.h
 	Engine/Components/LightComponent.h
 	Engine/Components/UIComponent.h
@@ -211,6 +218,7 @@ add_library(TerraEngine-Engine SHARED
 target_include_directories(TerraEngine-Engine
 	PUBLIC
 		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine/Core/Object
 		${CMAKE_CURRENT_SOURCE_DIR}/External/entt/src
 		${CMAKE_CURRENT_SOURCE_DIR}/External/glm
 		${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
@@ -649,6 +657,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
+	Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
 	Editor/TerraEngine-Editor/Project/ProjectManager.cpp

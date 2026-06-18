@@ -6,7 +6,9 @@
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include <string>
+#include <unordered_set>
 #include <entt/entity/entity.hpp>
+#include "Engine/Utilities/UUID.h"
 
 class MainEditorSubsystem;
 class Object;
@@ -20,7 +22,8 @@ protected:
 	virtual void OnGui() override;
 
 private:
-	void DrawEntityNode(Object& obj);
+	void DrawEntityNode(Object& obj, const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds = nullptr);
+	void CreatePrefabFromSelection(Object& obj);
 	
 	MainEditorSubsystem* m_Owner;
 	std::string m_SearchFilter;

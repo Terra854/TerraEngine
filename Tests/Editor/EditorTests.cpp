@@ -17,7 +17,9 @@ namespace TerraEngine::EditorTests {
 	void RegisterMaterialPreviewContractTests(TestRegistry& registry);
 	void RegisterPackRoundTripTests(TestRegistry& registry);
 	void RegisterPackagingRequestValidationTests(TestRegistry& registry);
+	void RegisterPrefabAuthoringWorkflowTests(TestRegistry& registry);
 	void RegisterProfilerCaptureStoreTests(TestRegistry& registry);
+	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 }
 
 int main() {
@@ -41,7 +43,9 @@ int main() {
 	TerraEngine::EditorTests::RegisterMaterialPreviewContractTests(registry);
 	TerraEngine::EditorTests::RegisterPackRoundTripTests(registry);
 	TerraEngine::EditorTests::RegisterPackagingRequestValidationTests(registry);
+	TerraEngine::EditorTests::RegisterPrefabAuthoringWorkflowTests(registry);
 	TerraEngine::EditorTests::RegisterProfilerCaptureStoreTests(registry);
+	TerraEngine::EditorTests::RegisterSceneRuntimeParityTests(registry);
 
 	return registry.RunAll(std::cout);
 }

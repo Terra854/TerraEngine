@@ -101,6 +101,7 @@ struct PushConstants
 	uint clusterDataOffset;
 	uint lightIndexOffset;
 	uint indirectDrawOffset;
+	float4 editorTint;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
@@ -608,6 +609,11 @@ float3 BuildHeatmapColor(float normalizedLightCount)
 	return lerp(float3(0.0, 0.2, 1.0), float3(1.0, 0.2, 0.0), t);
 }
 
+float3 ApplyEditorTint(float3 color)
+{
+	return lerp(color, SceneUniforms.editorTint.rgb, saturate(SceneUniforms.editorTint.a));
+}
+
 float4 main(PSIn input) : SV_Target0
 {
 	const MaterialData mat = allMaterials[SceneUniforms.materialIndex];
@@ -636,7 +642,7 @@ float4 main(PSIn input) : SV_Target0
 
 	if (mat.ShadingModel == kShadingModel_Unlit)
 	{
-		return float4(finalColor.rgb + emissive, finalColor.a);
+		return float4(ApplyEditorTint(finalColor.rgb + emissive), finalColor.a);
 	}
 
 	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
@@ -707,5 +713,5 @@ float4 main(PSIn input) : SV_Target0
 		finalLighting += EvaluateIBL(frame, normal, viewDir, finalColor.rgb, metallic, roughness, indirectOcclusion);
 	}
 
-	return float4(finalLighting + emissive, finalColor.a);
+	return float4(ApplyEditorTint(finalLighting + emissive), finalColor.a);
 }

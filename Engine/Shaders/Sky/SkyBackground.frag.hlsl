@@ -25,6 +25,7 @@ struct SkyPushConstants
 	float4 groundTintPadding;
 	float4 sunDirectionTextureIndex;
 	float4 skyParams;
+	float4 editorTint;
 };
 
 [[vk::push_constant]]
@@ -174,6 +175,11 @@ float3 BuildSunContribution(float3 direction)
 		glowColor * (innerGlow * innerGlowIntensity + outerGlow * outerGlowIntensity));
 }
 
+float3 ApplyEditorTint(float3 color)
+{
+	return lerp(color, SkyData.editorTint.rgb, saturate(SkyData.editorTint.a));
+}
+
 float4 PSMain(PSInput input) : SV_Target0
 {
 	// The renderer provides the horizontal and vertical tangent of the half-FOV
@@ -188,7 +194,7 @@ float4 PSMain(PSInput input) : SV_Target0
 	uint flags = (uint)(SkyData.skyParams.w + 0.5f);
 	if ((flags & 2u) != 0u)
 	{
-		return float4(0.0f, 0.0f, 0.0f, 1.0f);
+		return float4(ApplyEditorTint(float3(0.0f, 0.0f, 0.0f)), 1.0f);
 	}
 
 	float3 sunDirection = normalize(SkyData.sunDirectionTextureIndex.xyz);
@@ -213,5 +219,5 @@ float4 PSMain(PSInput input) : SV_Target0
 	color += BuildSunContribution(worldDirection);
 	color *= SkyData.horizonTintIntensity.w;
 	color = 1.0f - exp(-color * SkyData.zenithTintExposure.w);
-	return float4(color, 1.0f);
+	return float4(ApplyEditorTint(color), 1.0f);
 }

@@ -79,6 +79,7 @@ public:
 		sceneViewCamera = OverrideCameraData{view, proj, pos};
 		hasSceneViewCamera = true;
 	}
+	void SetSceneViewContextTint(const std::unordered_set<TerraEngine::UUID>& focusedObjectIds);
 	// SetEditorModeEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
 	// SetGameViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -89,6 +90,8 @@ public:
 	void ClearOverrideCameras() {
 		hasSceneViewCamera = false;
 		gameViewCameras.clear();
+		sceneViewContextTintEnabled = false;
+		sceneViewContextFocusedObjectIds.clear();
 	}
 
 private:
@@ -102,6 +105,10 @@ private:
 	bool hasSceneViewCamera = false;
 	OverrideCameraData sceneViewCamera;
 	std::vector<OverrideCameraData> gameViewCameras;
+	// Scene View prefab-context editing keeps the selected prefab branch normal
+	// and submits a light tint for every other draw command in that view only.
+	std::unordered_set<TerraEngine::UUID> sceneViewContextFocusedObjectIds;
+	bool sceneViewContextTintEnabled = false;
 
 	// Internal structs for data gathering
 	// struct CameraEntry groups related state and operations so callers have one documented contract.

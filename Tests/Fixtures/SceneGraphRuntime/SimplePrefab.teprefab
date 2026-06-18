@@ -1,0 +1,15 @@
+{
+	"name": "SimplePrefab",
+	"objects": [
+		{
+			"uuid": "00000000000000000000000000000010",
+			"name": "PrefabRoot",
+			"children": [
+				{
+					"uuid": "00000000000000000000000000000011",
+					"name": "PrefabChild"
+				}
+			]
+		}
+	]
+}
