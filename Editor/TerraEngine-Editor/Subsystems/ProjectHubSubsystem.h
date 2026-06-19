@@ -6,7 +6,10 @@
 
 #include "IEditorSubsystem.h"
 #include <ImGuiFileDialog.h>
+#include <filesystem>
 #include <functional>
+#include <optional>
+#include <string>
 
 class ProjectHubSubsystem : public IEditorSubsystem {
 public:
@@ -21,12 +24,28 @@ public:
 	void SetOnProjectLoadedCallback(std::function<void()> callback);
 
 private:
+	enum class PendingProjectActionType {
+		Open,
+		Create
+	};
+
+	struct PendingProjectAction {
+		PendingProjectActionType type = PendingProjectActionType::Open;
+		std::filesystem::path path;
+		std::string name;
+		int templateIndex = 0;
+	};
+
 	void DrawSidebar();
 	void DrawRecentProjects();
 	void DrawNewProjectWizard();
+	void QueueProjectOpen(const std::filesystem::path& path);
+	void QueueProjectCreate(const std::filesystem::path& path, std::string name, int templateIndex);
+	void ProcessPendingProjectAction();
 
 	EditorContext* ctx = nullptr;
 	std::function<void()> onProjectLoaded;
+	std::optional<PendingProjectAction> pendingProjectAction;
 	
 	// Page names the supported states explicitly so serialization and switches stay readable.
 	enum class Page {

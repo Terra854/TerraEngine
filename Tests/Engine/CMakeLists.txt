@@ -12,6 +12,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/ExportRuntimeSmokeTests.cpp
 	Runtime/ExportScriptingRuntimeTests.cpp
 	Runtime/ExportStartupFlowTests.cpp
+	Runtime/LinuxStartupSmokeTests.cpp
 	Runtime/MaterialRuntimeContractTests.cpp
 	Runtime/RenderProfileBootSummaryTests.cpp
 	Runtime/SceneRuntimeParityTests.cpp
@@ -21,6 +22,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackPlanner.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
 	Core/ObjectManagerTests.cpp
+	Platform/PlatformUtilsTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
 	Renderer/RenderTypesTests.cpp
 	Scene/PrefabCompositionTests.cpp
@@ -68,14 +70,16 @@ target_compile_definitions(TerraEngine-EngineTests
 		ZSTD_STATIC_LINKING_ONLY
 )
 
-add_custom_command(TARGET TerraEngine-EngineTests POST_BUILD
-	# Windows loads dependent DLLs from the executable directory first, so copy
-	# the engine and vendor runtime DLLs beside the test executable for CTest.
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different
-		$<TARGET_RUNTIME_DLLS:TerraEngine-EngineTests>
-		$<TARGET_FILE_DIR:TerraEngine-EngineTests>
-	COMMAND_EXPAND_LISTS
-)
+if(WIN32)
+	add_custom_command(TARGET TerraEngine-EngineTests POST_BUILD
+		# Windows loads dependent DLLs from the executable directory first, so copy
+		# the engine and vendor runtime DLLs beside the test executable for CTest.
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			$<TARGET_RUNTIME_DLLS:TerraEngine-EngineTests>
+			$<TARGET_FILE_DIR:TerraEngine-EngineTests>
+		COMMAND_EXPAND_LISTS
+	)
+endif()
 
 add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.SpatialUnitTests PROPERTIES LABELS "Engine")

@@ -533,7 +533,7 @@ void VulkanContext::Impl::Cleanup() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device) vkDestroyDevice(device, nullptr);
 
-	if (enableValidationLayers && instance) {
+	if (validationLayersEnabled && instance) {
 		DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
 	}
 
@@ -548,9 +548,11 @@ void VulkanContext::Impl::Cleanup() {
 // VulkanContext::Impl::CreateInstance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateInstance() {
 	// Build the instance and verify that requested validation layers are present.
-	if (enableValidationLayers && !CheckValidationLayerSupport()) {
-		TERRAENGINE_LOG(LogLevel::Error, "validation layers requested, but not available!");
-		return false;
+	validationLayersEnabled = enableValidationLayers;
+	if (validationLayersEnabled && !CheckValidationLayerSupport()) {
+		// Linux developer machines may not expose the SDK layer manifest unless VK_LAYER_PATH is set.
+		TERRAENGINE_LOG(LogLevel::Warning, "validation layers requested, but not available; continuing without validation layers.");
+		validationLayersEnabled = false;
 	}
 
 	VkApplicationInfo appInfo{};
@@ -571,7 +573,7 @@ bool VulkanContext::Impl::CreateInstance() {
 
 	VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (enableValidationLayers) {
+	if (validationLayersEnabled) {
 		createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
 		createInfo.ppEnabledLayerNames = validationLayers.data();
 
@@ -605,7 +607,7 @@ void VulkanContext::Impl::PopulateDebugMessengerCreateInfo(VkDebugUtilsMessenger
 // VulkanContext::Impl::SetupDebugMessenger is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::SetupDebugMessenger() {
 	// Install the debug messenger when validation layers are enabled.
-	if (!enableValidationLayers) return true;
+	if (!validationLayersEnabled) return true;
 
 	VkDebugUtilsMessengerCreateInfoEXT createInfo;
 	PopulateDebugMessengerCreateInfo(createInfo);
@@ -793,12 +795,9 @@ bool VulkanContext::Impl::CreateLogicalDevice() {
 	createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (enableValidationLayers) {
-		createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
-		createInfo.ppEnabledLayerNames = validationLayers.data();
-	} else {
-		createInfo.enabledLayerCount = 0;
-	}
+	// Device layers are deprecated; instance-level validation layers cover device calls.
+	createInfo.enabledLayerCount = 0;
+	createInfo.ppEnabledLayerNames = nullptr;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
@@ -1273,7 +1272,7 @@ std::vector<const char*> VulkanContext::Impl::GetRequiredExtensions() {
 	std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (enableValidationLayers) {
+	if (validationLayersEnabled) {
 		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	}
 

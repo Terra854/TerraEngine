@@ -79,12 +79,21 @@ public:
 		sceneViewCamera = OverrideCameraData{view, proj, pos};
 		hasSceneViewCamera = true;
 	}
+	// Record the editor panel dimensions before rendering so Vulkan allocates
+	// offscreen targets that match the ImGui image rectangle rather than the
+	// whole operating-system window.
+	void SetSceneViewTargetSize(const glm::uvec2& size) {
+		sceneViewTargetSize = size;
+	}
 	void SetSceneViewContextTint(const std::unordered_set<TerraEngine::UUID>& focusedObjectIds);
 	// SetEditorModeEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
 	// SetGameViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
 		gameViewCameras.push_back({view, proj, pos});
+	}
+	void SetGameViewTargetSize(const glm::uvec2& size) {
+		gameViewTargetSize = size;
 	}
 	// Isolated prefab asset editing does not have an active game scene, so the
 	// editor can suppress Game View submission for that frame and leave GPU time
@@ -95,6 +104,8 @@ public:
 		hasSceneViewCamera = false;
 		gameViewCameras.clear();
 		gameViewSuppressed = false;
+		sceneViewTargetSize = glm::uvec2(0u);
+		gameViewTargetSize = glm::uvec2(0u);
 		sceneViewContextTintEnabled = false;
 		sceneViewContextFocusedObjectIds.clear();
 	}
@@ -110,6 +121,8 @@ private:
 	bool hasSceneViewCamera = false;
 	OverrideCameraData sceneViewCamera;
 	std::vector<OverrideCameraData> gameViewCameras;
+	glm::uvec2 sceneViewTargetSize = glm::uvec2(0u);
+	glm::uvec2 gameViewTargetSize = glm::uvec2(0u);
 	bool gameViewSuppressed = false;
 	// Scene View prefab-context editing keeps the selected prefab branch normal
 	// and submits a light tint for every other draw command in that view only.

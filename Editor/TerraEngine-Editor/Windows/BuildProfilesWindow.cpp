@@ -374,11 +374,20 @@ void BuildProfilesWindow::DrawExportPanel() {
 				"Export succeeded in %.1fs", m_LastExportResult.totalElapsedSeconds);
 			ImGui::TextDisabled("Output: %s", m_LastExportResult.outputDirectory.string().c_str());
 			
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (m_RunAfterExport) {
 				m_RunAfterExport = false;
-				std::string launcherPath = (m_LastExportResult.outputDirectory / "TerraEngine-Launcher.exe").string();
-				// Use std::system or platform-specific equivalent to launch the process asynchronously
+				const std::filesystem::path projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
+				const bool hasSelectedProfile = m_SelectedProfileIndex >= 0 && m_SelectedProfileIndex < static_cast<int>(m_Profiles.size());
+				const BuildProfile* selectedProfile = hasSelectedProfile ? &m_Profiles[m_SelectedProfileIndex] : nullptr;
+				const std::string fallbackName = selectedProfile ? selectedProfile->name : "TerraEngine";
+				const ExportPlatform platform = selectedProfile ? selectedProfile->platform : GetHostExportPlatform();
+				std::string projectName = projectRoot.filename().string();
+				if (projectName.empty()) {
+					projectName = fallbackName;
+				}
+				const std::string launcherPath = (m_LastExportResult.outputDirectory / GetExportLauncherFileName(projectName, platform)).string();
+				// Hand the built launcher to the OS after export completes; this mirrors
+				// the editor's lightweight external-tool launch behavior.
 #ifdef _WIN32
 				std::string cmd = "start \"\" \"" + launcherPath + "\"";
 				std::system(cmd.c_str());
@@ -401,6 +410,7 @@ void BuildProfilesWindow::CreateNewProfile() {
 	BuildProfile profile;
 	profile.id = GenerateBuildProfileId();
 	profile.name = "New Profile";
+	profile.platform = GetHostExportPlatform();
 	profile.isDirty = true;
 	m_Profiles.push_back(std::move(profile));
 	m_SelectedProfileIndex = static_cast<int>(m_Profiles.size()) - 1;

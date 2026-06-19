@@ -166,6 +166,7 @@ struct PipelineKeyHash {
 struct VulkanContext::Impl {
 	VkInstance instance = VK_NULL_HANDLE;
 	VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
+	bool validationLayersEnabled = enableValidationLayers;
 	VkSurfaceKHR surface = VK_NULL_HANDLE;
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 	VkDevice device = VK_NULL_HANDLE;
@@ -579,6 +580,7 @@ struct VulkanContext::Impl {
 	std::vector<std::vector<size_t>> workerBufferUsage; // Tracks next available secondary buffer index per worker per frame
 	bool swapchainImageAcquired = false;
 	bool skipFrame = false;
+	bool editorRenderSubmitted = false;
 	uint32_t acquiredImageIndex = 0;
 
 	bool InitVulkan(WindowSystem& windowSystem);

@@ -120,6 +120,19 @@ namespace TerraEngine::EditorTests {
 			context.Expect(error.empty(), "Successful package validation should not leave an error string.");
 		});
 
+		registry.Add("Editor.ExportPackageValidator.AcceptsWindowsRuntimePackageWithPlatformOverload", [](TestContext& context) {
+			TempExportPackageWorkspace workspace;
+			WriteRequiredExportRuntimeEntries(workspace);
+			WriteManifestAndStartupScene(workspace);
+			workspace.CreatePack();
+
+			std::string error;
+			const bool valid = ValidateExportPackage(workspace.PackPath(), ExportPlatform::Windows, error);
+
+			context.Expect(valid, error.empty() ? "Windows package validation should keep the original package contract." : error);
+			context.Expect(error.empty(), "Successful Windows package validation should not leave an error string.");
+		});
+
 		registry.Add("Editor.ExportPackageValidator.RejectsMissingRuntimeFont", [](TestContext& context) {
 			TempExportPackageWorkspace workspace;
 			WriteRequiredExportRuntimeEntries(workspace);

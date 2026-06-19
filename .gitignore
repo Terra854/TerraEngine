@@ -258,6 +258,20 @@ _pkginfo.txt
 # Others
 ClientBin/
 ~$*
+
+# Cross-platform C/C++ outputs
+*.o
+*.a
+*.so
+*.dll
+*.exe
+
+# Local environment and editor noise
+.env*
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
 *~
 *.dbmdl
 *.dbproj.schemaview

@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -26,6 +27,29 @@
 namespace
 {
 constexpr char kCreateStyleSheetDialogKey[] = "CreateUIStyleSheetDlg";
+
+bool EqualsIgnoreAsciiCase(std::string_view lhs, std::string_view rhs)
+{
+	if (lhs.size() != rhs.size())
+	{
+		return false;
+	}
+
+	for (std::size_t index = 0; index < lhs.size(); ++index)
+	{
+		// UI selector type names are authored as ASCII identifiers, so avoid
+		// platform-specific functions such as _stricmp while keeping the
+		// comparison predictable across Windows and Linux.
+		const unsigned char left = static_cast<unsigned char>(lhs[index]);
+		const unsigned char right = static_cast<unsigned char>(rhs[index]);
+		if (std::tolower(left) != std::tolower(right))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
 
 // ToImColor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 ImU32 ToImColor(const glm::vec4& color)
@@ -296,7 +320,7 @@ bool SelectorTargetsElement(const UIStyleRule& rule, const UIElement& element)
 		return element.HasClass(rule.selectorValue);
 	case UISelectorKind::Type:
 	default:
-		return _stricmp(element.typeName.c_str(), rule.selectorValue.c_str()) == 0;
+		return EqualsIgnoreAsciiCase(element.typeName, rule.selectorValue);
 	}
 }
 

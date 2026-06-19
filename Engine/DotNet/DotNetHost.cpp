@@ -32,6 +32,26 @@ namespace
 	constexpr const char* kHostFxrLibraryName = "libhostfxr.so";
 #endif
 
+	std::basic_string<char_t> ToHostFxrString(const std::wstring& value) {
+#ifdef _WIN32
+		return value;
+#else
+		std::basic_string<char_t> converted;
+		converted.reserve(value.size());
+		for (wchar_t character : value) {
+			// Managed metadata names in this engine path are generated from C#
+			// identifiers and assembly names, so the current contract is ASCII.
+			// Keep the conversion explicit so Linux never passes wchar_t buffers
+			// to hostfxr, whose char_t is char on Unix.
+			if (character < 0 || character > 0x7f) {
+				return {};
+			}
+			converted.push_back(static_cast<char_t>(character));
+		}
+		return converted;
+#endif
+	}
+
 #ifdef _WIN32
 	std::string BuildPlatformLoadErrorMessage() {
 		const DWORD errorCode = GetLastError();
@@ -142,7 +162,7 @@ bool DotNetHost::InitializeExportRuntime(const std::filesystem::path& nativeAotL
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(nativeAotLibaryPath)) {
-		SetNativeError("NativeAOT runtime library was not found at " + nativeAotLibaryPath.string() + ". Make sure the export output includes Managed/Assembly-CSharp.dll and its native dependencies.");
+		SetNativeError("NativeAOT runtime library was not found at " + nativeAotLibaryPath.string() + ". Make sure the export output includes the platform runtime library under Managed/ and its native dependencies.");
 		TERRAENGINE_LOG(LogLevel::Error, m_LastNativeError);
 		return false;
 	}
@@ -222,13 +242,23 @@ void* DotNetHost::GetManagedFunction(
 
 	void* fptr = nullptr;
 	
-	// In .NET 5+, we can use UNMANAGEDCALLERSONLY_METHOD if delegateTypeName is empty
-	const wchar_t* delegate_type = delegateTypeName.empty() ? UNMANAGEDCALLERSONLY_METHOD : delegateTypeName.c_str();
+	const std::basic_string<char_t> hostTypeName = ToHostFxrString(typeName);
+	const std::basic_string<char_t> hostMethodName = ToHostFxrString(methodName);
+	const std::basic_string<char_t> hostDelegateTypeName = ToHostFxrString(delegateTypeName);
+	if (hostTypeName.empty() || hostMethodName.empty() || (!delegateTypeName.empty() && hostDelegateTypeName.empty())) {
+		TERRAENGINE_LOG(LogLevel::Error, "Managed function names must be ASCII-compatible for hostfxr lookup on this platform.");
+		return nullptr;
+	}
+
+	// In .NET 5+, UNMANAGEDCALLERSONLY_METHOD tells hostfxr that the managed
+	// method is decorated for direct unmanaged calls. When a delegate name is
+	// supplied, pass the converted platform string instead.
+	const char_t* delegate_type = delegateTypeName.empty() ? UNMANAGEDCALLERSONLY_METHOD : hostDelegateTypeName.c_str();
 
 	int rc = load_assembly_and_get_function_pointer(
 		assemblyPath.c_str(),
-		typeName.c_str(),
-		methodName.c_str(),
+		hostTypeName.c_str(),
+		hostMethodName.c_str(),
 		delegate_type,
 		nullptr,
 		&fptr);

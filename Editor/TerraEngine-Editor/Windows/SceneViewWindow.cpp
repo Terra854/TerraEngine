@@ -233,8 +233,14 @@ void SceneViewWindow::OnGui() {
 	
 	// We draw the image filling the content region
 	ImVec2 contentSize = ImGui::GetContentRegionAvail();
+	contentSize.x = std::max(contentSize.x, 1.0f);
+	contentSize.y = std::max(contentSize.y, 1.0f);
 	ImVec2 windowPos = ImGui::GetWindowPos();
 	ImVec2 cursorPos = ImGui::GetCursorScreenPos(); // Absolute position for ImGuizmo
+	const glm::uvec2 sceneTargetSize(
+		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(contentSize.x))),
+		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(contentSize.y))));
+	RenderSystem::Instance().SetSceneViewTargetSize(sceneTargetSize);
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (texID) {
@@ -247,6 +253,14 @@ void SceneViewWindow::OnGui() {
 	ImGuizmo::SetOrthographic(false);
 	ImGuizmo::SetDrawlist();
 	ImGuizmo::SetRect(cursorPos.x, cursorPos.y, contentSize.x, contentSize.y);
+
+	const bool isFocused = ImGui::IsWindowFocused();
+	const bool isHovered = ImGui::IsWindowHovered();
+	// Apply editor camera input before deriving matrices so the submitted view
+	// matrix and camera world position describe the same camera state.
+	if (isFocused || isHovered) {
+		HandleCameraInput(ImGui::GetIO().DeltaTime);
+	}
 
 	// Calculate Camera Matrices
 	glm::mat4 view = glm::mat4(1.0f);
@@ -265,14 +279,6 @@ void SceneViewWindow::OnGui() {
 	proj = projNoFlip;
 	proj[1][1] *= -1; // Vulkan flip
 
-	bool isFocused = ImGui::IsWindowFocused();
-	bool isHovered = ImGui::IsWindowHovered();
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (isFocused || isHovered) {
-		HandleCameraInput(ImGui::GetIO().DeltaTime);
-	}
-	
 	// Set Scene View Camera for next render
 	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPos);
 	ApplyPrefabContextTintForNextRender();

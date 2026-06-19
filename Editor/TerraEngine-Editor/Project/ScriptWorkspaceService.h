@@ -34,6 +34,15 @@ struct ScriptWorkspaceStatus
 class ScriptWorkspaceService
 {
 public:
+	struct EditorCommandContext
+	{
+		// Paths used by command templates. Tests and runtime code share this
+		// shape so placeholder expansion stays consistent across platforms.
+		std::filesystem::path solutionPath;
+		std::filesystem::path projectPath;
+		std::filesystem::path scriptPath;
+	};
+
 	void SetProjectRoot(const std::filesystem::path& projectRoot);
 
 	[[nodiscard]] bool HasProjectRoot() const;
@@ -51,6 +60,10 @@ public:
 	bool CreateScriptFromTemplate(const std::filesystem::path& destinationDirectory, const std::string& className, std::filesystem::path& outCreatedPath, std::string* outError = nullptr);
 	bool OpenScriptInExternalEditor(const std::filesystem::path& scriptPath, const std::string& commandTemplate, std::string* outError = nullptr);
 	bool SyncManagedReferences(std::string* outError = nullptr);
+
+	[[nodiscard]] static std::string QuoteCommandArgument(const std::filesystem::path& path);
+	[[nodiscard]] static std::string ExpandEditorCommandTemplate(std::string commandTemplate, const EditorCommandContext& context);
+	[[nodiscard]] static std::string BuildDefaultEditorCommand(const std::filesystem::path& targetPath);
 
 private:
 	// These helpers are kept private so every caller goes through

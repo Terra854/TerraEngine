@@ -47,9 +47,13 @@ bool RequireEntry(const std::unordered_set<std::string>& entries, std::string_vi
 }
 }
 
-bool ValidateExportPackage(const std::filesystem::path& packagePath, std::string& outError)
+bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatform platform, std::string& outError)
 {
 	try {
+		// The TEPAK content contract is intentionally platform-neutral. The
+		// platform argument documents the caller's target and leaves room for
+		// platform-specific packaged payloads without changing existing callers.
+		(void)platform;
 		const tepak::PackReader reader = tepak::PackReader::Open(packagePath);
 		std::unordered_set<std::string> entries;
 		for (const tepak::PackEntry& entry : reader.GetEntries()) {
@@ -129,4 +133,9 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, std::string
 
 	outError.clear();
 	return true;
+}
+
+bool ValidateExportPackage(const std::filesystem::path& packagePath, std::string& outError)
+{
+	return ValidateExportPackage(packagePath, ExportPlatform::Windows, outError);
 }

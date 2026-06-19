@@ -359,6 +359,32 @@ ExportValidationResult ExportValidator::ValidateProfile(const BuildProfile& prof
 			"Profile", "Startup scene must be selected.");
 	}
 
+	const std::string platformName = ExportPlatformToString(profile.platform);
+	const std::string managedRuntimeName = GetExportManagedRuntimeLibraryName(profile.platform);
+	const std::string engineRuntimeName = GetExportEngineLibraryName(profile.platform);
+	const std::string glfwRuntimeName = GetExportGlfwLibraryName(profile.platform);
+	AddDiagnostic(result, ExportDiagnosticSeverity::Info,
+		"Profile",
+		"Export platform '" + platformName + "' expects Managed/" + managedRuntimeName +
+			", " + engineRuntimeName + ", " + glfwRuntimeName +
+			", and Game.tepak to be staged with the launcher.");
+
+	if (profile.platform == ExportPlatform::Linux) {
+		// Linux failures are often environmental, so surface the display/GPU
+		// contract before the build pipeline starts copying artifacts.
+		AddDiagnostic(result, ExportDiagnosticSeverity::Info,
+			"Profile",
+			"Linux startup smoke requires a working display server and Vulkan-capable GPU/driver; headless or unsupported hosts should fail within 30 seconds with display or GPU diagnostics.");
+	}
+
+	if (profile.enableManagedCompilation && !IsExportPlatformNativeToHost(profile.platform)) {
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+			"Profile",
+			"Cross-OS NativeAOT export is not supported by dotnet. This host can publish " +
+				GetExportRuntimeIdentifier(GetHostExportPlatform()) + "; the selected platform requires " +
+				GetExportRuntimeIdentifier(profile.platform) + ". Switch the profile platform or export from the target OS.");
+	}
+
 	return result;
 }
 

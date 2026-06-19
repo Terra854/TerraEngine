@@ -28,21 +28,66 @@ std::string GenerateBuildProfileId() {
 	return oss.str();
 }
 
-// --- JSON helpers ---
+// --- Platform helpers ---
 
-static std::string PlatformToString(ExportPlatform p) {
-	switch (p) {
+std::string ExportPlatformToString(ExportPlatform platform) {
+	switch (platform) {
 	case ExportPlatform::Windows: return "windows";
 	case ExportPlatform::Linux:   return "linux";
 	default:                       return "windows";
 	}
 }
 
-// StringToPlatform is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-static ExportPlatform StringToPlatform(const std::string& s) {
-	if (s == "linux") return ExportPlatform::Linux;
+ExportPlatform ExportPlatformFromString(const std::string& value) {
+	if (value == "linux") return ExportPlatform::Linux;
 	return ExportPlatform::Windows;
 }
+
+std::string GetExportRuntimeIdentifier(ExportPlatform platform) {
+	return platform == ExportPlatform::Linux ? "linux-x64" : "win-x64";
+}
+
+ExportPlatform GetHostExportPlatform() {
+#ifdef _WIN32
+	return ExportPlatform::Windows;
+#elif defined(__linux__)
+	return ExportPlatform::Linux;
+#else
+	return ExportPlatform::Windows;
+#endif
+}
+
+bool IsExportPlatformNativeToHost(ExportPlatform platform) {
+	// .NET NativeAOT does not support cross-OS publishing, so managed export
+	// compilation can target only the current host OS.
+	return platform == GetHostExportPlatform();
+}
+
+std::string GetExportExecutableSuffix(ExportPlatform platform) {
+	return platform == ExportPlatform::Windows ? ".exe" : "";
+}
+
+std::string GetExportSharedLibrarySuffix(ExportPlatform platform) {
+	return platform == ExportPlatform::Windows ? ".dll" : ".so";
+}
+
+std::string GetExportLauncherFileName(const std::string& projectName, ExportPlatform platform) {
+	return projectName + GetExportExecutableSuffix(platform);
+}
+
+std::string GetExportManagedRuntimeLibraryName(ExportPlatform platform) {
+	return "Assembly-CSharp" + GetExportSharedLibrarySuffix(platform);
+}
+
+std::string GetExportEngineLibraryName(ExportPlatform platform) {
+	return platform == ExportPlatform::Windows ? "TerraEngine.dll" : "libTerraEngine.so";
+}
+
+std::string GetExportGlfwLibraryName(ExportPlatform platform) {
+	return platform == ExportPlatform::Windows ? "glfw3.dll" : "libglfw.so";
+}
+
+// --- JSON helpers ---
 
 // CompressionPresetToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::string CompressionPresetToString(CompressionPreset p) {
@@ -71,7 +116,7 @@ bool SaveBuildProfile(const BuildProfile& profile, const std::filesystem::path& 
 		nlohmann::json j;
 		j["name"] = profile.name;
 		j["id"] = profile.id;
-		j["platform"] = PlatformToString(profile.platform);
+		j["platform"] = ExportPlatformToString(profile.platform);
 		j["outputDirectory"] = profile.outputDirectory.string();
 		j["startupScene"] = profile.startupScene;
 		j["compressionPreset"] = CompressionPresetToString(profile.compressionPreset);
@@ -113,7 +158,7 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("name"))                    profile.name = j["name"].get<std::string>();
 		if (j.contains("id"))                      profile.id = j["id"].get<std::string>();
-		if (j.contains("platform"))                profile.platform = StringToPlatform(j["platform"].get<std::string>());
+		if (j.contains("platform"))                profile.platform = ExportPlatformFromString(j["platform"].get<std::string>());
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("outputDirectory"))         profile.outputDirectory = j["outputDirectory"].get<std::string>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

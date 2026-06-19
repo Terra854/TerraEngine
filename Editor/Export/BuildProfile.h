@@ -84,3 +84,36 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path);
 
 /// Load all profiles from a directory (e.g. <ProjectRoot>/BuildProfiles/).
 std::vector<BuildProfile> LoadAllBuildProfiles(const std::filesystem::path& directory);
+
+/// Converts an export platform to the stable lowercase string stored in JSON.
+std::string ExportPlatformToString(ExportPlatform platform);
+
+/// Parses a lowercase export platform string, defaulting to Windows for legacy profiles.
+ExportPlatform ExportPlatformFromString(const std::string& value);
+
+/// Returns the .NET runtime identifier used when publishing managed export payloads.
+std::string GetExportRuntimeIdentifier(ExportPlatform platform);
+
+/// Returns the export platform that can be NativeAOT-published on the current host.
+ExportPlatform GetHostExportPlatform();
+
+/// Returns true when the selected export platform can be NativeAOT-published on this host OS.
+bool IsExportPlatformNativeToHost(ExportPlatform platform);
+
+/// Returns the executable suffix used by the exported launcher on the target platform.
+std::string GetExportExecutableSuffix(ExportPlatform platform);
+
+/// Returns the native shared-library suffix used by the target platform.
+std::string GetExportSharedLibrarySuffix(ExportPlatform platform);
+
+/// Returns the launcher filename for the named project and target platform.
+std::string GetExportLauncherFileName(const std::string& projectName, ExportPlatform platform);
+
+/// Returns the NativeAOT gameplay library filename expected under Managed/.
+std::string GetExportManagedRuntimeLibraryName(ExportPlatform platform);
+
+/// Returns the engine shared library filename installed beside exported launchers.
+std::string GetExportEngineLibraryName(ExportPlatform platform);
+
+/// Returns the GLFW runtime library filename installed beside native consumers.
+std::string GetExportGlfwLibraryName(ExportPlatform platform);

@@ -6,6 +6,7 @@
 #include "ProjectManager.h"
 #include <imgui.h>
 #include "Engine/Core/Logger/Logger.h"
+#include <utility>
 
 void ProjectHubSubsystem::Initialize(EditorContext& context) {
 	ctx = &context;
@@ -15,12 +16,13 @@ void ProjectHubSubsystem::Initialize(EditorContext& context) {
 
 // ProjectHubSubsystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectHubSubsystem::Shutdown() {
+	pendingProjectAction.reset();
 	ctx = nullptr;
 }
 
 // ProjectHubSubsystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectHubSubsystem::Update(float deltaTime) {
-	// Logic updates if needed
+	ProcessPendingProjectAction();
 }
 
 void ProjectHubSubsystem::SetOnProjectLoadedCallback(std::function<void()> callback) {
@@ -74,12 +76,7 @@ void ProjectHubSubsystem::DrawUI() {
 				filePathName = ImGuiFileDialog::Instance()->GetCurrentPath();
 			}
 			TERRAENGINE_LOG(LogLevel::Info, "[ProjectHub] Open Project Selected Path: " << filePathName);
-
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ctx->projectManager->LoadProject(filePathName, &errorMessage)) {
-				errorMessage.clear();
-				if (onProjectLoaded) onProjectLoaded();
-			}
+			QueueProjectOpen(filePathName);
 		}
 		ImGuiFileDialog::Instance()->Close();
 	}
@@ -166,11 +163,7 @@ void ProjectHubSubsystem::DrawRecentProjects() {
 		for (const auto& proj : recents) {
 			std::string label = proj.name + " (" + proj.path + ")";
 			if (ImGui::Button(label.c_str(), ImVec2(-1, 50))) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ctx->projectManager->LoadProject(proj.path, &errorMessage)) {
-					errorMessage.clear();
-					if (onProjectLoaded) onProjectLoaded();
-				}
+				QueueProjectOpen(proj.path);
 			}
 		}
 		ImGui::EndChild();
@@ -191,7 +184,7 @@ void ProjectHubSubsystem::DrawNewProjectWizard() {
 
 	ImGui::InputText("Project Name", newProjectName, 64);
 	
-	ImGui::LabelText("Location", newProjectPath.c_str());
+	ImGui::LabelText("Location", "%s", newProjectPath.c_str());
 	ImGui::SameLine();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("...")) {
@@ -215,18 +208,63 @@ void ProjectHubSubsystem::DrawNewProjectWizard() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Create", ImVec2(120, 40))) {
 		std::filesystem::path finalPath = std::filesystem::path(newProjectPath) / newProjectName;
-		ProjectTemplate tmpl = (ProjectTemplate)selectedTemplate;
-		
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (ctx->projectManager->CreateProject(finalPath, newProjectName, tmpl, &errorMessage)) {
-			errorMessage.clear();
-			if (onProjectLoaded) onProjectLoaded();
-		}
+		QueueProjectCreate(finalPath, newProjectName, selectedTemplate);
 	}
 	ImGui::SameLine();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Cancel", ImVec2(100, 40))) {
 		errorMessage.clear();
 		currentPage = Page::Recent;
+	}
+}
+
+void ProjectHubSubsystem::QueueProjectOpen(const std::filesystem::path& path) {
+	errorMessage.clear();
+	// Project loading changes asset, script, and renderer-facing state, so run it from Update instead of the ImGui draw callback.
+	pendingProjectAction = PendingProjectAction {
+		.type = PendingProjectActionType::Open,
+		.path = path
+	};
+}
+
+void ProjectHubSubsystem::QueueProjectCreate(const std::filesystem::path& path, std::string name, int templateIndex) {
+	errorMessage.clear();
+	// Project creation ends by loading the new project, so it follows the same deferred path as opening an existing project.
+	pendingProjectAction = PendingProjectAction {
+		.type = PendingProjectActionType::Create,
+		.path = path,
+		.name = std::move(name),
+		.templateIndex = templateIndex
+	};
+}
+
+void ProjectHubSubsystem::ProcessPendingProjectAction() {
+	// The editor can shut the hub down while dialogs are closing; keep this guard before touching shared context pointers.
+	if (ctx == nullptr || ctx->projectManager == nullptr || !pendingProjectAction.has_value()) {
+		return;
+	}
+
+	PendingProjectAction action = std::move(*pendingProjectAction);
+	pendingProjectAction.reset();
+
+	bool projectLoaded = false;
+	if (action.type == PendingProjectActionType::Open) {
+		TERRAENGINE_LOG(LogLevel::Info, "[ProjectHub] Opening queued project: " << action.path.string());
+		projectLoaded = ctx->projectManager->LoadProject(action.path, &errorMessage);
+	} else {
+		TERRAENGINE_LOG(LogLevel::Info, "[ProjectHub] Creating queued project: " << action.path.string());
+		projectLoaded = ctx->projectManager->CreateProject(
+			action.path,
+			action.name,
+			static_cast<ProjectTemplate>(action.templateIndex),
+			&errorMessage
+		);
+	}
+
+	if (projectLoaded) {
+		errorMessage.clear();
+		if (onProjectLoaded) {
+			onProjectLoaded();
+		}
 	}
 }

@@ -1074,6 +1074,7 @@ void VulkanContext::BeginFrame() {
 
 	impl->swapchainImageAcquired = false;
 	impl->skipFrame = false;
+	impl->editorRenderSubmitted = false;
 
 	// Acquire the swapchain image once per frame so multiple camera passes can
 	// render to the same back buffer and present only on the final camera.
@@ -4479,7 +4480,8 @@ void VulkanContext::EndFrame() {
 		: impl->renderFinishedSemaphores[impl->acquiredImageIndex];
 
 	VkSemaphore signalSemaphores[] = {signalSemaphore};
-	// Always signal render finished, so Editor pass can wait on it
+	// Signal render finished only when command buffers are submitted; PresentEditor
+	// checks editorRenderSubmitted before waiting on this binary semaphore.
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = signalSemaphores;
 
@@ -4487,12 +4489,13 @@ void VulkanContext::EndFrame() {
 	if (impl->editorMode) {
 		// In Editor Mode, we defer the frame fence signal to the UI pass (PresentEditor)
 		// so the frame is considered "in flight" until the UI is also done.
-	VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+		VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
 		if (submitResult != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
 			impl->RecreateSwapChain();
 			return;
 		}
+		impl->editorRenderSubmitted = true;
 	} else {
 		vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
 		VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
@@ -4717,17 +4720,16 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	VkSubmitInfo submitInfo{};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	
-	// Wait for BOTH Swapchain Image (Available) AND Scene Render (RenderFinished)
-	std::array<VkSemaphore, 2> waitSemaphores = {
-		impl->imageAvailableSemaphores[impl->currentFrame],
-		impl->renderFinishedSemaphores[impl->currentFrame]
-	};
-	std::array<VkPipelineStageFlags, 2> waitStages = {
-		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, // Swapchain available
-		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT // Scene done (safe to sample in UI fragment shader)
-	};
-	
-	submitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
+	std::array<VkSemaphore, 2> waitSemaphores = {impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE};
+	std::array<VkPipelineStageFlags, 2> waitStages = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT};
+	uint32_t waitSemaphoreCount = 1;
+	if (impl->editorRenderSubmitted) {
+		// Scene/Game View textures are sampled by ImGui, so wait for their offscreen pass only when one ran this frame.
+		waitSemaphores[waitSemaphoreCount] = impl->renderFinishedSemaphores[impl->currentFrame];
+		++waitSemaphoreCount;
+	}
+
+	submitInfo.waitSemaphoreCount = waitSemaphoreCount;
 	submitInfo.pWaitSemaphores = waitSemaphores.data();
 	submitInfo.pWaitDstStageMask = waitStages.data();
 

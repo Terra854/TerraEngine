@@ -10,6 +10,7 @@
 #include <array>
 #include <cctype>
 #include <cwctype>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <vector>
@@ -20,6 +21,9 @@
 #include <Objbase.h>
 #include <shellapi.h>
 #include <wrl/client.h>
+#else
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace
@@ -106,6 +110,70 @@ namespace
 
 		return std::string(firstNonWhitespace, lastNonWhitespace);
 	}
+
+#if !defined(_WIN32)
+	bool RunDetachedShellCommand(const std::filesystem::path& workingDirectory, const std::string& commandLine, std::string* outError)
+	{
+		// Double-fork so xdg-open, code, Rider, or another configured editor can
+		// outlive TerraEngine without leaving a zombie child attached to the editor.
+		const pid_t firstChild = fork();
+		if (firstChild < 0)
+		{
+			if (outError)
+			{
+				*outError = "Failed to start the configured Linux editor command.";
+			}
+			return false;
+		}
+
+		if (firstChild == 0)
+		{
+			const pid_t secondChild = fork();
+			if (secondChild < 0)
+			{
+				_exit(127);
+			}
+
+			if (secondChild > 0)
+			{
+				_exit(0);
+			}
+
+			setsid();
+			if (!workingDirectory.empty())
+			{
+				std::error_code pathError;
+				const std::filesystem::path absoluteWorkingDirectory = std::filesystem::absolute(workingDirectory, pathError);
+				const std::string workingDirectoryText = pathError ? workingDirectory.string() : absoluteWorkingDirectory.string();
+				(void)chdir(workingDirectoryText.c_str());
+			}
+
+			execl("/bin/sh", "sh", "-c", commandLine.c_str(), static_cast<char*>(nullptr));
+			_exit(127);
+		}
+
+		int status = 0;
+		if (waitpid(firstChild, &status, 0) < 0)
+		{
+			if (outError)
+			{
+				*outError = "Failed to wait for the Linux editor launcher process.";
+			}
+			return false;
+		}
+
+		if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+		{
+			if (outError)
+			{
+				*outError = "Failed to start the configured Linux editor command: " + commandLine + ".";
+			}
+			return false;
+		}
+
+		return true;
+	}
+#endif
 
 	// ResolveEditorExecutableDirectory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::filesystem::path ResolveEditorExecutableDirectory()
@@ -806,21 +874,21 @@ bool ScriptWorkspaceService::OpenScriptInExternalEditor(const std::filesystem::p
 		return false;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!commandTemplate.empty())
 	{
 		return LaunchCommand(commandTemplate, scriptPath, outError);
 	}
 
 #if defined(_WIN32)
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (LaunchVisualStudioWorkspace(scriptPath, outError))
 	{
 		return true;
 	}
 #endif
 
-	const std::filesystem::path targetPath = GetSolutionPath();
+	// When no IDE-specific integration is available, use the OS default opener
+	// on the clicked script. Workspace-level opens still fall back to the .sln.
+	const std::filesystem::path targetPath = scriptPath.empty() ? GetSolutionPath() : scriptPath;
 	return LaunchDefaultEditor(targetPath, outError);
 }
 
@@ -1228,31 +1296,92 @@ std::string ScriptWorkspaceService::GetProjectName() const
 	return m_ProjectRoot.filename().string();
 }
 
+// QuoteCommandArgument keeps custom editor commands safe for paths with spaces
+// and shell metacharacters before template expansion.
+std::string ScriptWorkspaceService::QuoteCommandArgument(const std::filesystem::path& path)
+{
+#if defined(_WIN32)
+	std::string text = path.string();
+	std::string quoted = "\"";
+	for (char value : text)
+	{
+		if (value == '"')
+		{
+			quoted += "\\\"";
+		}
+		else
+		{
+			quoted += value;
+		}
+	}
+	quoted += "\"";
+	return quoted;
+#else
+	std::string text = path.string();
+	std::string quoted = "'";
+	for (char value : text)
+	{
+		if (value == '\'')
+		{
+			quoted += "'\\''";
+		}
+		else
+		{
+			quoted += value;
+		}
+	}
+	quoted += "'";
+	return quoted;
+#endif
+}
+
+// ExpandEditorCommandTemplate supports user commands such as `code {script}`
+// while still allowing workspace-level commands like `rider {solution}`.
+std::string ScriptWorkspaceService::ExpandEditorCommandTemplate(std::string commandTemplate, const EditorCommandContext& context)
+{
+	ReplaceAll(commandTemplate, "{solution}", QuoteCommandArgument(context.solutionPath));
+	ReplaceAll(commandTemplate, "{project}", QuoteCommandArgument(context.projectPath));
+	ReplaceAll(commandTemplate, "{script}", QuoteCommandArgument(context.scriptPath));
+	return commandTemplate;
+}
+
+// BuildDefaultEditorCommand is the Linux fallback when no IDE command is configured.
+std::string ScriptWorkspaceService::BuildDefaultEditorCommand(const std::filesystem::path& targetPath)
+{
+#if defined(_WIN32)
+	(void)targetPath;
+	return {};
+#else
+	return "xdg-open " + QuoteCommandArgument(targetPath);
+#endif
+}
+
 // ScriptWorkspaceService::LoadTemplate is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ScriptWorkspaceService::LoadTemplate(const std::filesystem::path& path) const
 {
 	return LoadTextFile(path);
 }
 
-// ScriptWorkspaceService::LaunchCommand is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+// LaunchCommand runs the configured external editor command after expanding
+// TerraEngine's workspace placeholders.
 bool ScriptWorkspaceService::LaunchCommand(const std::string& commandTemplate, const std::filesystem::path& scriptPath, std::string* outError) const
 {
-#if defined(_WIN32)
-	std::string expandedCommand = commandTemplate;
-	ReplaceAll(expandedCommand, "{solution}", "\"" + GetSolutionPath().string() + "\"");
-	ReplaceAll(expandedCommand, "{project}", "\"" + GetProjectPath().string() + "\"");
-	ReplaceAll(expandedCommand, "{script}", "\"" + scriptPath.string() + "\"");
+	const EditorCommandContext commandContext{
+		GetSolutionPath(),
+		GetProjectPath(),
+		scriptPath
+	};
+	const std::string expandedCommand = ExpandEditorCommandTemplate(commandTemplate, commandContext);
 
+#if defined(_WIN32)
 	STARTUPINFOW startupInfo{};
 	startupInfo.cb = sizeof(startupInfo);
 	PROCESS_INFORMATION processInfo{};
 	std::wstring wideCommand(expandedCommand.begin(), expandedCommand.end());
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!CreateProcessW(nullptr, wideCommand.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, m_ProjectRoot.wstring().c_str(), &startupInfo, &processInfo))
 	{
 		const DWORD errorCode = GetLastError();
 		const std::string message = "Failed to launch the configured external editor command. Windows error code: " + std::to_string(errorCode) + ".";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outError)
 		{
 			*outError = message;
@@ -1264,13 +1393,16 @@ bool ScriptWorkspaceService::LaunchCommand(const std::string& commandTemplate, c
 	CloseHandle(processInfo.hProcess);
 	return true;
 #else
-	(void)commandTemplate;
-	(void)scriptPath;
-	if (outError)
+	if (expandedCommand.empty())
 	{
-		*outError = "Custom external editor commands are currently implemented for Windows only.";
+		if (outError)
+		{
+			*outError = "No Linux external editor command is configured. Set a command such as `code {script}` or use the default opener.";
+		}
+		return false;
 	}
-	return false;
+
+	return RunDetachedShellCommand(m_ProjectRoot, expandedCommand, outError);
 #endif
 }
 
@@ -1278,11 +1410,9 @@ bool ScriptWorkspaceService::LaunchDefaultEditor(const std::filesystem::path& ta
 {
 #if defined(_WIN32)
 	const HINSTANCE result = ShellExecuteW(nullptr, L"open", targetPath.wstring().c_str(), nullptr, m_ProjectRoot.wstring().c_str(), SW_SHOWNORMAL);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (reinterpret_cast<std::intptr_t>(result) <= 32)
 	{
 		const std::string message = "Windows could not open " + targetPath.string() + " with the default associated editor.";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (outError)
 		{
 			*outError = message;
@@ -1292,12 +1422,25 @@ bool ScriptWorkspaceService::LaunchDefaultEditor(const std::filesystem::path& ta
 
 	return true;
 #else
-	(void)targetPath;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (outError)
+	const std::string command = BuildDefaultEditorCommand(targetPath);
+	if (command.empty())
 	{
-		*outError = "Launching the default external editor is currently implemented for Windows only.";
+		if (outError)
+		{
+			*outError = "No Linux default editor opener is available. Configure an editor command such as `code {script}` or `rider {solution}`.";
+		}
+		return false;
 	}
-	return false;
+
+	if (!RunDetachedShellCommand(m_ProjectRoot, command, outError))
+	{
+		if (outError && outError->empty())
+		{
+			*outError = "Failed to launch the Linux default opener for " + targetPath.string() + ". Configure an editor command such as `code {script}` or `rider {solution}`.";
+		}
+		return false;
+	}
+
+	return true;
 #endif
 }

@@ -53,11 +53,6 @@ static std::string ResolveProjectExportName(const std::filesystem::path& project
 	return projectName;
 }
 
-// ResolveLauncherFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-static std::string ResolveLauncherFileName(const std::string& projectName, ExportPlatform platform) {
-	return platform == ExportPlatform::Windows ? projectName + ".exe" : projectName;
-}
-
 // ResolveArchiveFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::string ResolveArchiveFileName(const std::string& projectName) {
 	return projectName + ".tepak";
@@ -392,6 +387,13 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 		return false;
 	}
 
+	if (!IsExportPlatformNativeToHost(profile.platform)) {
+		result.errorMessage = "Cross-OS NativeAOT export is not supported by dotnet. This host can publish " +
+			GetExportRuntimeIdentifier(GetHostExportPlatform()) + "; the selected profile targets " +
+			GetExportRuntimeIdentifier(profile.platform) + ".";
+		return false;
+	}
+
 	// Resolve the output directory for the NativeAOT publish output.
 	std::filesystem::path outputDir = ResolveOutputDirectory(profile, projectRoot);
 	std::filesystem::create_directories(outputDir);
@@ -440,13 +442,10 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 		return false;
 	}
 
-	// Build the dotnet publish command for NativeAOT.
-	// The runtime identifier is set based on the target platform.
-	std::string rid = "win-x64";
-	if (profile.platform == ExportPlatform::Linux) {
-		rid = "linux-x64";
-	}
-
+	// Build the dotnet publish command for NativeAOT. The runtime identifier is
+	// resolved through the shared build-profile helper so editor export and
+	// CMake-managed payloads cannot drift between Windows and Linux.
+	const std::string rid = GetExportRuntimeIdentifier(profile.platform);
 	std::ostringstream cmd;
 	cmd << "dotnet publish"
 		<< " \"" << managedProject.string() << "\""
@@ -691,7 +690,7 @@ bool ExportPipeline::RunAssetPackaging(const BuildProfile& profile,
 	}
 
 	std::string packageValidationError;
-	if (!ValidateExportPackage(tepakPath, packageValidationError)) {
+	if (!ValidateExportPackage(tepakPath, profile.platform, packageValidationError)) {
 		result.errorMessage = packageValidationError;
 		return false;
 	}
@@ -712,8 +711,8 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 
 	std::filesystem::path outputDir = ResolveOutputDirectory(profile, projectRoot);
 	const std::string projectName = ResolveProjectExportName(projectRoot, profile);
-	const std::string launcherFileName = ResolveLauncherFileName(projectName, profile.platform);
-	const std::string legacyLauncherFileName = ResolveLauncherFileName(profile.name, profile.platform);
+	const std::string launcherFileName = GetExportLauncherFileName(projectName, profile.platform);
+	const std::string legacyLauncherFileName = GetExportLauncherFileName(profile.name, profile.platform);
 	const std::string archiveFileName = ResolveArchiveFileName(projectName);
 	std::filesystem::create_directories(outputDir);
 
@@ -737,32 +736,41 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 		std::filesystem::path editorDir = std::filesystem::current_path();
 		std::filesystem::path engineBuildDir = editorDir.parent_path();
 		
-		std::filesystem::path launcherSrc = engineBuildDir / "Launcher" / "TerraEngine-Launcher.exe";
+		const std::filesystem::path launcherSourceName = GetExportLauncherFileName("TerraEngine-Launcher", profile.platform);
+		std::filesystem::path launcherSrc = engineBuildDir / "Launcher" / launcherSourceName;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(launcherSrc)) {
 			std::filesystem::copy_file(launcherSrc, outputDir / launcherFileName, std::filesystem::copy_options::overwrite_existing);
+		} else {
+			result.errorMessage = "Required launcher binary not found: " + launcherSrc.string();
+			return false;
 		}
 
-		// Copy required native engine DLLs beside the launcher.
-		std::vector<std::string> engineDlls = { "TerraEngine.dll", "glfw3.dll" };
-		for (const auto& dll : engineDlls) {
-			std::filesystem::path dllSrc = engineBuildDir / "Launcher" / dll;
+		// Copy required native engine libraries beside the launcher. The names
+		// follow each platform's native convention while preserving the Windows
+		// DLL contract already used by exported builds.
+		std::vector<std::string> engineLibraries = {
+			GetExportEngineLibraryName(profile.platform),
+			GetExportGlfwLibraryName(profile.platform)
+		};
+		for (const auto& libraryName : engineLibraries) {
+			std::filesystem::path librarySrc = engineBuildDir / "Launcher" / libraryName;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!std::filesystem::exists(dllSrc)) {
-				dllSrc = engineBuildDir / "Engine" / dll;
+			if (!std::filesystem::exists(librarySrc)) {
+				librarySrc = engineBuildDir / "Engine" / libraryName;
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (std::filesystem::exists(dllSrc)) {
+			if (std::filesystem::exists(librarySrc)) {
 				try {
-					std::filesystem::copy_file(dllSrc, outputDir / dll, std::filesystem::copy_options::overwrite_existing);
+					std::filesystem::copy_file(librarySrc, outputDir / libraryName, std::filesystem::copy_options::overwrite_existing);
 				}
 				catch (const std::exception& e) {
-					std::cerr << "[Export] Failed to copy " << dll << ": " << e.what() << std::endl;
-					result.errorMessage = "Failed to copy engine DLL: " + dll;
+					std::cerr << "[Export] Failed to copy " << libraryName << ": " << e.what() << std::endl;
+					result.errorMessage = "Failed to copy engine runtime library: " + libraryName;
 					return false;
 				}
 			} else {
-				result.errorMessage = "Required engine binary not found: " + dllSrc.string();
+				result.errorMessage = "Required engine runtime library not found: " + librarySrc.string();
 				return false;
 			}
 		}

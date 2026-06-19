@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <thread>
 #include <atomic>

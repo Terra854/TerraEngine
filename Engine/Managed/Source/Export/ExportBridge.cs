@@ -17,7 +17,9 @@ namespace TerraEngine.Export
 {
 	public static partial class ExportBridge
 	{
-		private const string EngineDll = "TerraEngine.dll";
+		// Use the logical library name so .NET resolves TerraEngine.dll on
+		// Windows and libTerraEngine.so on Linux from the local launcher folder.
+		private const string EngineDll = "TerraEngine";
 		public const int MaxExportStringBytes = 256;
 
 		/// <summary>

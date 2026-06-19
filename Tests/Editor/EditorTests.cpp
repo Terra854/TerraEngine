@@ -13,12 +13,16 @@ namespace TerraEngine::EditorTests {
 	void RegisterExportScriptBindingRewriterTests(TestRegistry& registry);
 	void RegisterExportValidatorManagedSourceTests(TestRegistry& registry);
 	void RegisterExportValidatorTests(TestRegistry& registry);
+	void RegisterLinuxPlatformExportTests(TestRegistry& registry);
 	void RegisterMaterialExportValidationTests(TestRegistry& registry);
 	void RegisterMaterialPreviewContractTests(TestRegistry& registry);
 	void RegisterPackRoundTripTests(TestRegistry& registry);
 	void RegisterPackagingRequestValidationTests(TestRegistry& registry);
 	void RegisterPrefabAuthoringWorkflowTests(TestRegistry& registry);
 	void RegisterProfilerCaptureStoreTests(TestRegistry& registry);
+	void RegisterLinuxScriptCompilationTests(TestRegistry& registry);
+	void RegisterLinuxScriptEditorLaunchTests(TestRegistry& registry);
+	void RegisterLinuxScriptWorkspaceTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 }
 
@@ -39,12 +43,16 @@ int main() {
 	TerraEngine::EditorTests::RegisterExportScriptBindingRewriterTests(registry);
 	TerraEngine::EditorTests::RegisterExportValidatorManagedSourceTests(registry);
 	TerraEngine::EditorTests::RegisterExportValidatorTests(registry);
+	TerraEngine::EditorTests::RegisterLinuxPlatformExportTests(registry);
 	TerraEngine::EditorTests::RegisterMaterialExportValidationTests(registry);
 	TerraEngine::EditorTests::RegisterMaterialPreviewContractTests(registry);
 	TerraEngine::EditorTests::RegisterPackRoundTripTests(registry);
 	TerraEngine::EditorTests::RegisterPackagingRequestValidationTests(registry);
 	TerraEngine::EditorTests::RegisterPrefabAuthoringWorkflowTests(registry);
 	TerraEngine::EditorTests::RegisterProfilerCaptureStoreTests(registry);
+	TerraEngine::EditorTests::RegisterLinuxScriptCompilationTests(registry);
+	TerraEngine::EditorTests::RegisterLinuxScriptEditorLaunchTests(registry);
+	TerraEngine::EditorTests::RegisterLinuxScriptWorkspaceTests(registry);
 	TerraEngine::EditorTests::RegisterSceneRuntimeParityTests(registry);
 
 	return registry.RunAll(std::cout);

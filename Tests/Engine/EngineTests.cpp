@@ -13,8 +13,10 @@ namespace TerraEngine::Tests {
 	void RegisterExportRuntimeBaselineLaunchTests(TestRegistry& registry);
 	void RegisterExportStartupFlowTests(TestRegistry& registry);
 	void RegisterExportScriptingRuntimeTests(TestRegistry& registry);
+	void RegisterLinuxStartupSmokeTests(TestRegistry& registry);
 	void RegisterMaterialRuntimeContractTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
+	void RegisterPlatformUtilsTests(TestRegistry& registry);
 	void RegisterPrefabCompositionTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
@@ -51,10 +53,12 @@ int main() {
 	TerraEngine::Tests::RegisterExportRuntimeBaselineLaunchTests(registry);
 	TerraEngine::Tests::RegisterExportStartupFlowTests(registry);
 	TerraEngine::Tests::RegisterExportScriptingRuntimeTests(registry);
+	TerraEngine::Tests::RegisterLinuxStartupSmokeTests(registry);
 	TerraEngine::Tests::RegisterMaterialRuntimeContractTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);
+	TerraEngine::Tests::RegisterPlatformUtilsTests(registry);
 	TerraEngine::Tests::RegisterPrefabCompositionTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);

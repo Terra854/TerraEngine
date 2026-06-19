@@ -6,7 +6,38 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Linux links several vendored static libraries into the TerraEngine shared
+# object. Position-independent code is required for that link step, so enable it
+# before any third-party targets are declared.
+if(UNIX AND NOT APPLE)
+	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 include(CTest)
+
+# Configure-time guard: centralize platform names so native, managed, and
+# install rules all agree about the host layout they are producing.
+if(WIN32)
+	set(TERRAENGINE_HOST_OS "Windows")
+	set(TERRAENGINE_DOTNET_RID "win-x64")
+	set(TERRAENGINE_DOTNET_FALLBACK_OS "win")
+	set(TERRAENGINE_DOTNET_TARGET_OS "win")
+	set(TERRAENGINE_EXECUTABLE_SUFFIX ".exe")
+	set(TERRAENGINE_SHARED_LIBRARY_SUFFIX ".dll")
+elseif(UNIX AND NOT APPLE)
+	set(TERRAENGINE_HOST_OS "Linux")
+	set(TERRAENGINE_DOTNET_RID "linux-x64")
+	set(TERRAENGINE_DOTNET_FALLBACK_OS "linux")
+	set(TERRAENGINE_DOTNET_TARGET_OS "linux")
+	set(TERRAENGINE_EXECUTABLE_SUFFIX "")
+	set(TERRAENGINE_SHARED_LIBRARY_SUFFIX ".so")
+else()
+	message(FATAL_ERROR "TerraEngine currently supports Windows and Linux hosts only.")
+endif()
+
+set(TERRAENGINE_MANAGED_RUNTIME_LIBRARY "Assembly-CSharp${TERRAENGINE_SHARED_LIBRARY_SUFFIX}")
+set(TERRAENGINE_ENGINE_RUNTIME_LIBRARY "$<TARGET_FILE_NAME:TerraEngine-Engine>")
+set(TERRAENGINE_LOCAL_RPATH "\$ORIGIN")
 
 string(REPLACE "\\" "/" TERRAENGINE_NORMALIZED_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 # Configure-time guard: select platform or option behavior before generating build files.
@@ -273,8 +304,17 @@ set(GLFW_BUILD_DOCS OFF CACHE BOOL "Disable GLFW docs" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "Disable GLFW examples" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "Disable GLFW tests" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "Disable GLFW install target" FORCE)
-set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "Disable GLFW Wayland backend" FORCE)
-set(GLFW_BUILD_X11 OFF CACHE BOOL "Disable GLFW X11 backend" FORCE)
+if(UNIX AND NOT APPLE)
+	# Linux needs one native window backend for editor and launcher smoke runs.
+	# X11 is the broad default; Wayland can be enabled explicitly by users with
+	# the required compositor and development headers.
+	option(TERRAENGINE_LINUX_ENABLE_WAYLAND "Enable GLFW Wayland backend on Linux" OFF)
+	set(GLFW_BUILD_X11 ON CACHE BOOL "Enable GLFW X11 backend on Linux" FORCE)
+	set(GLFW_BUILD_WAYLAND ${TERRAENGINE_LINUX_ENABLE_WAYLAND} CACHE BOOL "Enable GLFW Wayland backend on Linux" FORCE)
+else()
+	set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "Disable GLFW Wayland backend" FORCE)
+	set(GLFW_BUILD_X11 OFF CACHE BOOL "Disable GLFW X11 backend" FORCE)
+endif()
 set(GLFW_BUILD_SHARED_LIBS ON CACHE BOOL "Build GLFW as a shared library" FORCE)
 set(GLFW_BUILD_DLL ON CACHE BOOL "Enable GLFW DLL export" FORCE)
 
@@ -372,8 +412,12 @@ target_compile_definitions(TerraEngine-Engine
 		ZSTD_STATIC_LINKING_ONLY
 )
 
-set_target_properties(TerraEngine-Engine PROPERTIES OUTPUT_NAME "TerraEngine")
-set_target_properties(TerraEngine-Engine PROPERTIES DEBUG_POSTFIX "")
+set_target_properties(TerraEngine-Engine PROPERTIES
+	OUTPUT_NAME "TerraEngine"
+	DEBUG_POSTFIX ""
+	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+)
 
 # Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)
@@ -395,12 +439,24 @@ set(DOTNET_RUNTIME_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/External/dotnet/runtime/src/
 
 # Configure configure.h required by nethost/pal.h
 set(CLI_CMAKE_COMMIT_HASH "unknown")
-set(CLI_CMAKE_FALLBACK_OS "Windows")
-set(CLR_CMAKE_TARGET_OS "win")
+set(CLI_CMAKE_FALLBACK_OS "${TERRAENGINE_DOTNET_FALLBACK_OS}")
+set(CLI_CMAKE_PKG_RID "${TERRAENGINE_DOTNET_RID}")
+set(CLR_CMAKE_TARGET_OS "${TERRAENGINE_DOTNET_TARGET_OS}")
 set(CLR_CMAKE_TARGET_ARCH "x64")
 configure_file(
     ${DOTNET_RUNTIME_ROOT}/configure.h.in
     ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/configure.h
+)
+
+# The Unix PAL source includes hostmisc/config.h for small libc feature
+# switches. Linux dirent entries expose d_type on supported filesystems, and
+# getauxval is available from glibc, so nethost can use the same fast paths as
+# the upstream runtime build.
+set(HAVE_DIRENT_D_TYPE 1)
+set(HAVE_GETAUXVAL 1)
+configure_file(
+	${DOTNET_RUNTIME_ROOT}/hostmisc/config.h.in
+	${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/config.h
 )
 
 # Generate runtime_version.h required by nethost/utils.h
@@ -415,6 +471,13 @@ file(WRITE ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/_vers
 #define VER_FILEVERSION_STR \"10.0.1.0\"
 #define VER_PRODUCTVERSION 10,0,1,0
 #define VER_FILEVERSION 10,0,1,0
+")
+
+# Generate _version.c required by nethost/utils.cpp on Unix. The upstream
+# source embeds this static version string directly, so keep the local file in
+# the generated nethost include directory instead of editing vendored sources.
+file(WRITE ${CMAKE_BINARY_DIR}/External/dotnet/runtime/src/native/corehost/_version.c
+"static char sccsid[] __attribute__((used)) = \"@(#)Version 10.0.1\";
 ")
 
 set(NETHOST_SOURCES
@@ -435,6 +498,7 @@ endif()
 
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_library(nethost STATIC ${NETHOST_SOURCES})
+set_target_properties(nethost PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(nethost PUBLIC
     ${DOTNET_RUNTIME_ROOT}
     ${DOTNET_RUNTIME_ROOT}/hostmisc
@@ -455,6 +519,9 @@ target_compile_definitions(nethost PRIVATE
 # Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)
     target_compile_definitions(nethost PRIVATE TARGET_WINDOWS TARGET_AMD64)
+elseif(UNIX AND NOT APPLE)
+    target_compile_definitions(nethost PRIVATE TARGET_LINUX TARGET_AMD64)
+    target_link_libraries(nethost PUBLIC ${CMAKE_DL_LIBS})
 endif()
 
 set(MANAGED_CORE_SOURCES
@@ -488,7 +555,7 @@ add_custom_target(TerraEngine.Managed.Output
 	COMMENT "Preparing managed publish output directory"
 )
 add_custom_target(TerraEngine ALL
-    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
+    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed/TerraEngine.csproj" -c $<CONFIG> -r ${TERRAENGINE_DOTNET_RID} --self-contained true -o "${MANAGED_OUTPUT_DIR}"
     COMMENT "Publishing Managed Assembly: TerraEngine (Self-Contained)"
     SOURCES ${MANAGED_CORE_SOURCES}
 )
@@ -515,9 +582,12 @@ set(MANAGED_EDITOR_SOURCES
 )
 
 add_custom_target(TerraEngine.Editor.Managed ALL
-    COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -r win-x64 --self-contained true -o "${MANAGED_OUTPUT_DIR}"
-    COMMENT "Publishing Managed Assembly: TerraEngine.Editor (Self-Contained)"
-    SOURCES ${MANAGED_EDITOR_SOURCES}
+	# The vendored Hexa.NET.ImGui project is multi-targeted. Serializing MSBuild
+	# keeps .NET 10 Linux publishes deterministic instead of failing during the
+	# parallel restore graph walk with no emitted compiler error.
+	COMMAND dotnet publish "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Editor/TerraEngine.Editor.csproj" -c $<CONFIG> -r ${TERRAENGINE_DOTNET_RID} --self-contained true -o "${MANAGED_OUTPUT_DIR}" -m:1
+	COMMENT "Publishing Managed Assembly: TerraEngine.Editor (Self-Contained)"
+	SOURCES ${MANAGED_EDITOR_SOURCES}
 )
 add_dependencies(TerraEngine.Editor.Managed TerraEngine.Managed.Output)
 add_dependencies(TerraEngine.Editor.Managed TerraEngine)
@@ -526,6 +596,10 @@ add_dependencies(TerraEngine.Editor.Managed TerraEngine.Export.Generator)
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_executable(TerraEngine-Launcher
     ${LAUNCHER_SOURCES}
+)
+set_target_properties(TerraEngine-Launcher PROPERTIES
+	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}"
 )
 
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
@@ -607,10 +681,12 @@ set(CIMGUI_VARGS0 1 CACHE STRING "CIMGUI VARGS0" FORCE)
 add_subdirectory(External/cimgui)
 
 # Ensure cimgui exports C++ ImGui symbols so TerraEngine-Editor can use them.
-# Also clear postfixes so managed wrappers can find the DLL by its expected name.
+# Also clear postfixes so managed wrappers can find the runtime library by its expected name.
 set_target_properties(cimgui PROPERTIES
 	DEBUG_POSTFIX ""
 	PREFIX ""
+	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}"
 )
 
 # Resolve 'inconsistent dll linkage' properly by compiling backends and ImGuizmo
@@ -630,22 +706,42 @@ target_include_directories(cimgui PRIVATE
 	${IMGUI_DIR}/backends
 )
 
-# Ensure consistent DLL linkage macros for all symbols exported by cimgui.dll
-# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
-target_compile_definitions(cimgui
-	PRIVATE
-		"IMGUI_API=__declspec(dllexport)"
-		"IMGUI_IMPL_API=extern \"C\" __declspec(dllexport)"
-		IMGUI_IMPL_VULKAN_NO_PROTOTYPES
-)
-# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
-target_compile_definitions(cimgui INTERFACE
-		"IMGUI_API=__declspec(dllimport)"
-		"IMGUI_IMPL_API=extern \"C\" __declspec(dllimport)"
-)
+if(WIN32)
+	# Windows keeps explicit import/export declarations so the editor and
+	# managed wrapper consume the same DLL ABI as before.
+	target_compile_definitions(cimgui
+		PRIVATE
+			"IMGUI_API=__declspec(dllexport)"
+			"IMGUI_IMPL_API=extern \"C\" __declspec(dllexport)"
+			IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+	)
+	target_compile_definitions(cimgui INTERFACE
+			"IMGUI_API=__declspec(dllimport)"
+			"IMGUI_IMPL_API=extern \"C\" __declspec(dllimport)"
+	)
+else()
+	# GCC/Clang do not understand __declspec; default visibility is enough for
+	# the Linux shared object built from the vendored cimgui sources.
+	target_compile_definitions(cimgui
+		PRIVATE
+			"IMGUI_API="
+			"IMGUI_IMPL_API=extern \"C\""
+			IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+	)
+	target_compile_definitions(cimgui INTERFACE
+			"IMGUI_API="
+			"IMGUI_IMPL_API=extern \"C\""
+	)
+endif()
 
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_link_libraries(cimgui glfw Vulkan::Headers)
+if(UNIX AND NOT APPLE)
+	# The vendored ImGui GLFW backend calls X11 functions through GLFW native
+	# access on Linux, so cimgui must link libX11 explicitly for editor links.
+	find_package(X11 REQUIRED)
+	target_link_libraries(cimgui X11::X11)
+endif()
 
 set_target_properties(glfw PROPERTIES DEBUG_POSTFIX "")
 
@@ -698,6 +794,10 @@ add_executable(TerraEngine-Editor
 	Editor/Export/util/WorkerPool.cpp
 	Editor/Export/validation/PackValidator.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
+)
+set_target_properties(TerraEngine-Editor PROPERTIES
+	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}"
 )
 
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
@@ -1106,11 +1206,13 @@ endif()
 		)
 	endif()
 
-	# Install rule: every code change must keep the install tree reproducible for downstream users.
-	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
-		OPTIONAL
-	)
+	if(WIN32)
+		# Install rule: every code change must keep the install tree reproducible for downstream users.
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Engine
+			OPTIONAL
+		)
+	endif()
 
 	# --- Launcher Install ---
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
@@ -1119,22 +1221,26 @@ endif()
 		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
 	)
 
-	# Install rule: every code change must keep the install tree reproducible for downstream users.
-	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
-		OPTIONAL
-	)
+	if(WIN32)
+		# Install rule: every code change must keep the install tree reproducible for downstream users.
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Launcher>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
+			OPTIONAL
+		)
+	endif()
 
 	# Install Engine DLLs to Launcher folder so it can run
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_FILE:TerraEngine-Engine>
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
 	)
-	# Install rule: every code change must keep the install tree reproducible for downstream users.
-	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
-		OPTIONAL
-	)
+	if(WIN32)
+		# Install rule: every code change must keep the install tree reproducible for downstream users.
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher
+			OPTIONAL
+		)
+	endif()
 
 	# --- Editor Install ---
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
@@ -1148,11 +1254,13 @@ endif()
 	install(FILES $<TARGET_FILE:TerraEngine-Engine>
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
-	# Install rule: every code change must keep the install tree reproducible for downstream users.
-	install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
-		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
-		OPTIONAL
-	)
+	if(WIN32)
+		# Install rule: every code change must keep the install tree reproducible for downstream users.
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+			OPTIONAL
+		)
+	endif()
 
 	# Install Managed Assemblies to Editor (Self-Contained)
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
@@ -1177,6 +1285,7 @@ endif()
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
 	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
+	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
 
 	# Ship a bundled fallback UI font so runtime UI text rendering works in both
 	# the editor and exported builds without depending on any OS-installed font.
@@ -1201,6 +1310,25 @@ endif()
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher)
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)
 	install(FILES $<TARGET_FILE:glfw> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor/Managed)
+	if(UNIX AND NOT APPLE)
+		foreach(TERRAENGINE_GLFW_RUNTIME_DIR Launcher Editor Editor/Managed)
+			# Linux binaries need the GLFW SONAME link beside the copied real
+			# shared object, otherwise the loader looks for libglfw.so.3 and
+			# ignores the libglfw.so.3.4 file.
+			install(CODE "file(REMOVE \"${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_GLFW_RUNTIME_DIR}/libglfw.so.3\")")
+			install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink libglfw.so.3.4 \"${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_GLFW_RUNTIME_DIR}/libglfw.so.3\")")
+			install(CODE "file(REMOVE \"${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_GLFW_RUNTIME_DIR}/libglfw.so\")")
+			install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink libglfw.so.3 \"${ENGINE_INSTALL_DESTINATION}/${TERRAENGINE_GLFW_RUNTIME_DIR}/libglfw.so\")")
+		endforeach()
+	endif()
+
+	if(UNIX AND NOT APPLE)
+		# Linux executables resolve local shared objects from their run
+		# directory during smoke validation, so copy vendored runtime libraries
+		# beside every native consumer that needs them.
+		install(FILES $<TARGET_FILE:volk> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Launcher OPTIONAL)
+		install(FILES $<TARGET_FILE:volk> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor OPTIONAL)
+	endif()
 
 # Install rule: every code change must keep the install tree reproducible for downstream users.
 install(TARGETS TerraEngineMeshCompiler

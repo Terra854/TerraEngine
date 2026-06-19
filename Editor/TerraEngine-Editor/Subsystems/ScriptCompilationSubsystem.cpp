@@ -6,16 +6,25 @@
 
 #include "../Assets/AssetDatabase.h"
 #include "../Project/ProjectManager.h"
+#include "ScriptBuildUtilities.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Components/ScriptComponent.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 
 #include <array>
+#include <cerrno>
 #include <chrono>
+#include <cstring>
 
 #if defined(_WIN32)
 #include <Windows.h>
+#else
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace
@@ -26,12 +35,6 @@ namespace
 	std::string BuildProfileToString(ScriptBuildProfile profile)
 	{
 		return profile == ScriptBuildProfile::Debug ? "Debug" : "Release";
-	}
-
-	// BuildProfileToWideString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	std::wstring BuildProfileToWideString(ScriptBuildProfile profile)
-	{
-		return profile == ScriptBuildProfile::Debug ? L"Debug" : L"Release";
 	}
 
 	// CoordinatorStateToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -56,10 +59,10 @@ namespace
 		return "Unknown";
 	}
 
-#if defined(_WIN32)
 	// RunProcessCapture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	bool RunProcessCapture(const std::filesystem::path& workingDirectory, const std::wstring& commandLine, std::string& output, DWORD& exitCode)
+	bool RunProcessCapture(const std::filesystem::path& workingDirectory, const std::string& commandLine, std::string& output, int& exitCode)
 	{
+#if defined(_WIN32)
 		SECURITY_ATTRIBUTES securityAttributes{};
 		securityAttributes.nLength = sizeof(securityAttributes);
 		securityAttributes.bInheritHandle = TRUE;
@@ -83,7 +86,7 @@ namespace
 		startupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
 		PROCESS_INFORMATION processInfo{};
-		std::wstring mutableCommandLine = commandLine;
+		std::wstring mutableCommandLine(commandLine.begin(), commandLine.end());
 		const BOOL started = CreateProcessW(
 			nullptr,
 			mutableCommandLine.data(),
@@ -113,14 +116,175 @@ namespace
 		}
 
 		WaitForSingleObject(processInfo.hProcess, INFINITE);
-		GetExitCodeProcess(processInfo.hProcess, &exitCode);
+		DWORD processExitCode = 0;
+		GetExitCodeProcess(processInfo.hProcess, &processExitCode);
+		exitCode = static_cast<int>(processExitCode);
 
 		CloseHandle(processInfo.hThread);
 		CloseHandle(processInfo.hProcess);
 		CloseHandle(readHandle);
 		return true;
-	}
+#else
+		constexpr auto kBuildTimeout = std::chrono::minutes(5);
+		constexpr auto kPostExitPipeDrainTimeout = std::chrono::seconds(2);
+
+		int pipeHandles[2] = {-1, -1};
+		// Capture stdout and stderr together so Linux compiler diagnostics are
+		// shown in the editor exactly like they would be in a terminal.
+		if (pipe2(pipeHandles, O_CLOEXEC) != 0)
+		{
+			output = std::string("Failed to create process output pipe: ") + std::strerror(errno);
+			return false;
+		}
+
+		const pid_t childProcess = fork();
+		if (childProcess < 0)
+		{
+			output = std::string("Failed to fork dotnet build process: ") + std::strerror(errno);
+			close(pipeHandles[0]);
+			close(pipeHandles[1]);
+			return false;
+		}
+
+		if (childProcess == 0)
+		{
+			// Put the shell and any dotnet children in their own process group so
+			// timeout cleanup cannot accidentally signal the editor process.
+			setpgid(0, 0);
+			close(pipeHandles[0]);
+			dup2(pipeHandles[1], STDOUT_FILENO);
+			dup2(pipeHandles[1], STDERR_FILENO);
+			close(pipeHandles[1]);
+
+			if (!workingDirectory.empty())
+			{
+				std::error_code pathError;
+				const std::filesystem::path absoluteWorkingDirectory = std::filesystem::absolute(workingDirectory, pathError);
+				const std::string workingDirectoryText = pathError ? workingDirectory.string() : absoluteWorkingDirectory.string();
+				if (chdir(workingDirectoryText.c_str()) != 0)
+				{
+					_exit(127);
+				}
+			}
+
+			execl("/bin/sh", "sh", "-c", commandLine.c_str(), static_cast<char*>(nullptr));
+			_exit(127);
+		}
+
+		setpgid(childProcess, childProcess);
+		close(pipeHandles[1]);
+		const int currentFlags = fcntl(pipeHandles[0], F_GETFL, 0);
+		if (currentFlags >= 0)
+		{
+			fcntl(pipeHandles[0], F_SETFL, currentFlags | O_NONBLOCK);
+		}
+
+		std::array<char, 4096> buffer{};
+		const auto startedAt = std::chrono::steady_clock::now();
+		std::optional<std::chrono::steady_clock::time_point> childExitedAt;
+		int status = 0;
+		bool childExited = false;
+		bool pipeClosed = false;
+		bool timedOut = false;
+
+		while (!pipeClosed)
+		{
+			pollfd readPoll{};
+			readPoll.fd = pipeHandles[0];
+			readPoll.events = POLLIN | POLLHUP | POLLERR;
+			const int pollResult = poll(&readPoll, 1, 100);
+			if (pollResult > 0 && (readPoll.revents & (POLLIN | POLLHUP | POLLERR)) != 0)
+			{
+				while (true)
+				{
+					const ssize_t bytesRead = read(pipeHandles[0], buffer.data(), buffer.size());
+					if (bytesRead > 0)
+					{
+						output.append(buffer.data(), static_cast<std::size_t>(bytesRead));
+						continue;
+					}
+					if (bytesRead == 0)
+					{
+						pipeClosed = true;
+					}
+					break;
+				}
+			}
+
+			if (!childExited)
+			{
+				const pid_t waitResult = waitpid(childProcess, &status, WNOHANG);
+				if (waitResult == childProcess)
+				{
+					childExited = true;
+					childExitedAt = std::chrono::steady_clock::now();
+				}
+				else if (waitResult < 0 && errno != EINTR)
+				{
+					close(pipeHandles[0]);
+					output += std::string("Failed to wait for dotnet build process: ") + std::strerror(errno);
+					return false;
+				}
+			}
+
+			const auto now = std::chrono::steady_clock::now();
+			if (!childExited && now - startedAt > kBuildTimeout)
+			{
+				timedOut = true;
+				kill(-childProcess, SIGTERM);
+				std::this_thread::sleep_for(std::chrono::milliseconds(200));
+				kill(-childProcess, SIGKILL);
+				waitpid(childProcess, &status, 0);
+				childExited = true;
+				break;
+			}
+
+			// Some tools can leave grandchildren with inherited stdout/stderr
+			// handles. Once the shell has exited, drain briefly for final output
+			// and then let the editor continue instead of waiting forever for EOF.
+			if (childExitedAt.has_value() && now - *childExitedAt > kPostExitPipeDrainTimeout)
+			{
+				break;
+			}
+		}
+		close(pipeHandles[0]);
+
+		if (!childExited)
+		{
+			while (waitpid(childProcess, &status, 0) < 0)
+			{
+				if (errno == EINTR)
+				{
+					continue;
+				}
+				output += std::string("Failed to wait for dotnet build process: ") + std::strerror(errno);
+				return false;
+			}
+		}
+
+		if (timedOut)
+		{
+			exitCode = 124;
+			output += "\ndotnet build exceeded the editor script compilation timeout and was terminated.";
+			return true;
+		}
+
+		if (WIFEXITED(status))
+		{
+			exitCode = WEXITSTATUS(status);
+		}
+		else if (WIFSIGNALED(status))
+		{
+			exitCode = 128 + WTERMSIG(status);
+		}
+		else
+		{
+			exitCode = status;
+		}
+
+		return true;
 #endif
+	}
 }
 
 ScriptCompilationSubsystem& ScriptCompilationSubsystem::Instance()
@@ -396,7 +560,7 @@ bool ScriptCompilationSubsystem::TryReloadWorkspaceAssembly(std::string* outErro
 	{
 		if (outError)
 		{
-			*outError = "The project Assembly-CSharp.dll is unavailable at " + assemblyPath.string() + ", so TerraEngine cannot restore script execution after the failed compile.";
+			*outError = "The managed Assembly-CSharp output is unavailable at " + assemblyPath.string() + ", so TerraEngine cannot restore script execution after the failed compile.";
 		}
 		return false;
 	}
@@ -549,7 +713,7 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 		{
 			m_Status.gameplayAssemblyLoaded = ScriptingSystem::Instance().HasLoadedGameplayAssembly();
 			m_Status.activeAssemblyPath = ScriptingSystem::Instance().GetLoadedGameplayAssemblyPath();
-			m_Status.lastSummary += " Reloaded the existing project Assembly-CSharp.dll.";
+			m_Status.lastSummary += " Reloaded the existing managed Assembly-CSharp output.";
 		}
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (!reloadError.empty())
@@ -576,7 +740,7 @@ void ScriptCompilationSubsystem::HandleCompletedBuild(ScriptBuildResult result)
 		m_Status.state = ScriptCoordinatorState::Failed;
 		m_Status.lastSummary = reloadError;
 		TERRAENGINE_LOG(LogLevel::Error, "Assembly-CSharp build completed but the gameplay assembly reload failed: " << reloadError);
-		m_Status.lastSummary += " TerraEngine keeps only the project Assembly-CSharp.dll, so no separate rollback copy is available.";
+		m_Status.lastSummary += " TerraEngine keeps only the project managed Assembly-CSharp output, so no separate rollback copy is available.";
 
 		RestorePausedGameplayState();
 		AssetDatabase::Instance().SetScriptCompileState("CompileError", m_Status.lastSummary);
@@ -640,30 +804,33 @@ ScriptCompilationSubsystem::ScriptBuildResult ScriptCompilationSubsystem::RunBui
 		return result;
 	}
 
-#if defined(_WIN32)
-	std::wstring commandLine = L"dotnet build \"" + m_WorkspaceService.GetProjectPath().wstring() + L"\" -c " + BuildProfileToWideString(profile) + L" -nologo -p:GenerateFullPaths=true";
-	DWORD exitCode = 0;
-	if (!RunProcessCapture(m_WorkspaceService.GetProjectRoot(), commandLine, result.buildOutput, exitCode))
+	const TerraEngine::Editor::Scripting::ScriptBuildInvocation invocation = TerraEngine::Editor::Scripting::CreateScriptBuildInvocation(
+		m_WorkspaceService.GetProjectRoot(),
+		m_WorkspaceService.GetProjectPath(),
+		BuildProfileToString(profile));
+
+	int exitCode = 0;
+	if (!RunProcessCapture(invocation.workingDirectory, invocation.commandLine, result.buildOutput, exitCode))
 	{
-		result.failureMessage = "Failed to start dotnet build for Assembly-CSharp.";
+		result.failureMessage = TerraEngine::Editor::Scripting::DescribeScriptBuildLaunchFailure(invocation);
+		if (!result.buildOutput.empty())
+		{
+			result.failureMessage += " " + result.buildOutput;
+		}
 		return result;
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (exitCode != 0)
 	{
-		result.failureMessage = "dotnet build failed for Assembly-CSharp.";
+		result.failureMessage = TerraEngine::Editor::Scripting::DescribeScriptBuildExitFailure(invocation, exitCode, result.buildOutput);
 		return result;
 	}
-#else
-	result.failureMessage = "The current scripting build runner is implemented for Windows only.";
-	return result;
-#endif
 
 	result.assemblyPath = m_WorkspaceService.GetAssemblyPath();
 	if (!std::filesystem::exists(result.assemblyPath))
 	{
-		result.failureMessage = "dotnet build completed without producing Assembly-CSharp.dll at " + result.assemblyPath.string() + ".";
+		result.failureMessage = TerraEngine::Editor::Scripting::DescribeMissingScriptAssembly(result.assemblyPath);
 		return result;
 	}
 

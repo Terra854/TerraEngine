@@ -59,10 +59,15 @@ fs::path ResolveExecutablePath(const char* argv0) {
 
 // ResolveManagedLibraryPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 fs::path ResolveManagedLibraryPath(const fs::path& executableDirectory) {
-	// Exported builds always place the NativeAOT gameplay library in Managed/
-	// using the fixed Assembly-CSharp name, so the launcher can derive it
-	// without duplicating that path inside game.json.
-	return executableDirectory / "Managed" / "Assembly-CSharp.dll";
+	// Exported builds always place the NativeAOT gameplay library in Managed/.
+	// The filename follows native platform conventions so Linux exports can
+	// load a shared object while Windows keeps the existing DLL contract.
+#ifdef _WIN32
+	const fs::path managedLibraryName = "Assembly-CSharp.dll";
+#else
+	const fs::path managedLibraryName = "Assembly-CSharp.so";
+#endif
+	return executableDirectory / "Managed" / managedLibraryName;
 }
 
 bool HasArgument(int argc, char* argv[], const char* expectedArgument) {

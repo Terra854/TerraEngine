@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cmath>
 
 GameViewWindow::GameViewWindow(MainEditorSubsystem* owner)
 	: EditorWindow("Game View"), m_Owner(owner) {
@@ -93,6 +94,10 @@ void GameViewWindow::OnGui() {
 
 	imageSize.x *= m_Scale;
 	imageSize.y *= m_Scale;
+	const glm::uvec2 gameTargetSize(
+		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(imageSize.x))),
+		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(imageSize.y))));
+	RenderSystem::Instance().SetGameViewTargetSize(gameTargetSize);
 	UISystem::Instance().SetGameViewportSize(glm::vec2(imageSize.x, imageSize.y));
 
 	const bool isAssetPrefabEditing = m_Owner != nullptr && m_Owner->IsAssetPrefabEditingMode();

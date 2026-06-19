@@ -61,5 +61,17 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(profile.includedScenes.size(), loaded.includedScenes.size(), "All included scenes should round-trip through JSON.");
 			context.ExpectEqual(profilePath.string(), loaded.filePath.string(), "The loaded profile should remember its source file path.");
 		});
+
+		registry.Add("Editor.BuildProfile.WindowsArtifactNamesRemainCompatible", [](TestContext& context) {
+			// These names protect the original Windows export contract while the
+			// platform helpers add Linux-specific runtime naming.
+			context.ExpectEqual(std::string("win-x64"), GetExportRuntimeIdentifier(ExportPlatform::Windows), "Windows exports should keep publishing win-x64 managed payloads.");
+			context.ExpectEqual(std::string(".exe"), GetExportExecutableSuffix(ExportPlatform::Windows), "Windows launcher filenames should keep the .exe suffix.");
+			context.ExpectEqual(std::string(".dll"), GetExportSharedLibrarySuffix(ExportPlatform::Windows), "Windows native payloads should keep the .dll suffix.");
+			context.ExpectEqual(std::string("Game.exe"), GetExportLauncherFileName("Game", ExportPlatform::Windows), "Windows launcher staging should keep the executable extension.");
+			context.ExpectEqual(std::string("Assembly-CSharp.dll"), GetExportManagedRuntimeLibraryName(ExportPlatform::Windows), "Windows NativeAOT payload should keep the DLL name.");
+			context.ExpectEqual(std::string("TerraEngine.dll"), GetExportEngineLibraryName(ExportPlatform::Windows), "Windows engine runtime should keep the original DLL name.");
+			context.ExpectEqual(std::string("glfw3.dll"), GetExportGlfwLibraryName(ExportPlatform::Windows), "Windows GLFW runtime should keep the original DLL name.");
+		});
 	}
 }

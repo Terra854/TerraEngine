@@ -15,7 +15,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\Engine\Managed\TerraEngine.csproj" />
-    <ProjectReference Include="..\..\..\External\Hexa.NET.ImGui\Hexa.NET.ImGui\Hexa.NET.ImGui.csproj" />
+    <!-- The vendored Hexa project targets several older TFMs. Pin the editor
+         reference to netstandard2.0 so Linux builds with only the .NET 10 SDK
+         do not try to restore/build every Hexa target framework. -->
+    <ProjectReference Include="..\..\..\External\Hexa.NET.ImGui\Hexa.NET.ImGui\Hexa.NET.ImGui.csproj" TargetFramework="netstandard2.0" SetTargetFramework="TargetFramework=netstandard2.0" AdditionalProperties="TargetFramework=netstandard2.0" />
   </ItemGroup>
 
 </Project>

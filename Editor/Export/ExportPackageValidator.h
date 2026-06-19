@@ -6,7 +6,10 @@
 
 #pragma once
 
+#include "BuildProfile.h"
+
 #include <filesystem>
 #include <string>
 
 bool ValidateExportPackage(const std::filesystem::path& packagePath, std::string& outError);
+bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatform platform, std::string& outError);

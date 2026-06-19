@@ -185,10 +185,16 @@ model::PackPlan BuildPackPlan(const PackagingRequest& request, const model::Pack
 			request.compressionLevel,
 			plan.dictionaryBytes.size())
 		: 0U;
-	const auto dictionaryTrainingResidentBytes = dictionaryTrainingBufferBytes == 0U
+	const std::uint64_t dictionaryTrainingResidentBytes = dictionaryTrainingBufferBytes == 0U
 		? sampleResidentBytes
 		: (sampleResidentBytes + sampleResidentBytes + dictionaryTrainingBufferBytes);
-	const auto compressionResidentBytes = sampleResidentBytes + metadataResidentBytes + plan.dictionaryBytes.size() + residentExtentBytes + compressionContextResidentBytes + preparedCompressionDictionaryResidentBytes;
+	const std::uint64_t compressionResidentBytes =
+		sampleResidentBytes +
+		metadataResidentBytes +
+		static_cast<std::uint64_t>(plan.dictionaryBytes.size()) +
+		residentExtentBytes +
+		compressionContextResidentBytes +
+		preparedCompressionDictionaryResidentBytes;
 	// Peak memory can happen either while dictionary training builds its
 	// contiguous sample buffer, or later while the worker pool holds in-flight
 	// extent buffers alongside one reusable zstd context per worker thread.

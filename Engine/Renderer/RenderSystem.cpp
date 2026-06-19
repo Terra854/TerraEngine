@@ -990,11 +990,21 @@ void RenderSystem::Update(float deltaTime)
 	// Convert each camera submission into an explicit output owner so the RHI
 	// can give Scene, Game, and future offscreen cameras independent snapshot
 	// ranges instead of inferring ownership from call order alone.
-	auto makeOutputRequest = [](RenderOutputKind kind, RenderViewType diagnosticsView, std::uint32_t outputId) {
+	auto makeOutputRequest = [&](RenderOutputKind kind, RenderViewType diagnosticsView, std::uint32_t outputId) {
 		RenderOutputRequest request{};
 		request.kind = kind;
 		request.priority = RenderOutputPriority::Required;
 		request.diagnosticsView = diagnosticsView;
+		// Editor windows supply panel-sized targets so Vulkan records offscreen
+		// passes against the exact texture rectangle ImGui will present.
+		if (kind == RenderOutputKind::SceneView)
+		{
+			request.targetSize = sceneViewTargetSize;
+		}
+		else if (kind == RenderOutputKind::GameView)
+		{
+			request.targetSize = gameViewTargetSize;
+		}
 		request.outputId = outputId;
 		return request;
 	};
@@ -1016,9 +1026,11 @@ void RenderSystem::Update(float deltaTime)
 				: contextTint;
 		}
 	};
+	const bool sceneViewTargetReady = !editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u);
+	const bool gameViewTargetReady = !editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (hasSceneViewCamera)
+	if (hasSceneViewCamera && sceneViewTargetReady)
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Scene View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		frameData.viewMatrix = sceneViewCamera.view;
@@ -1034,7 +1046,7 @@ void RenderSystem::Update(float deltaTime)
 	// Asset-style prefab editing has no active runtime scene. When the editor
 	// requests suppression, skip every Game View submission path so opening a
 	// prefab asset cannot burn a full offscreen game render every frame.
-	if (!gameViewSuppressed && !gameViewCameras.empty())
+	if (!gameViewSuppressed && gameViewTargetReady && !gameViewCameras.empty())
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Game View Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -1051,7 +1063,7 @@ void RenderSystem::Update(float deltaTime)
 		}
 	}
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	else if (!gameViewSuppressed && cameras.empty())
+	else if (!gameViewSuppressed && gameViewTargetReady && cameras.empty())
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Blank Game View", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		FrameRenderData blankData{};
@@ -1070,7 +1082,7 @@ void RenderSystem::Update(float deltaTime)
 			blankData.shadowDrawLists.clear();
 			rhi->RenderFrame(blankData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
 	}
-	else if (!gameViewSuppressed)
+	else if (!gameViewSuppressed && gameViewTargetReady)
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Submit Runtime Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
