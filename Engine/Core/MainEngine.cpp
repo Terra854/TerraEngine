@@ -33,6 +33,31 @@
 #include <memory>
 #include <stdexcept>
 #include <thread>
+#include <utility>
+
+namespace {
+	TerraEngine::Scheduling::SystemDeclaration MakeEngineSystemDeclaration(std::string name, std::string phase, std::vector<std::string> reads, std::vector<std::string> writes, bool requiresFlushedSceneMutations = false)
+	{
+		TerraEngine::Scheduling::SystemDeclaration declaration;
+		declaration.name = std::move(name);
+		declaration.phase = std::move(phase);
+		declaration.reads = std::move(reads);
+		declaration.writes = std::move(writes);
+		declaration.mainThread = true;
+		declaration.requiresFlushedSceneMutations = requiresFlushedSceneMutations;
+		declaration.profilingLabel = declaration.name;
+		declaration.usesDefaultMetadata = false;
+		return declaration;
+	}
+
+	void RegisterEngineSystem(std::vector<SystemsBase*>& systems, TerraEngine::Scheduling::SystemScheduler& scheduler, SystemsBase& system, TerraEngine::Scheduling::SystemDeclaration declaration)
+	{
+		// Keep the legacy vector for initialization, shutdown, and GetSystem()
+		// while the scheduler owns only ordering metadata for frame updates.
+		systems.push_back(&system);
+		scheduler.RegisterSystem(system, std::move(declaration));
+	}
+}
 
 void Engine::Run()
 {
@@ -70,6 +95,9 @@ void Engine::Initialize()
 	
 	// Reset the frame timer so the first tick is measured from initialization time.
 	frameTimer = FrameTimer();
+	systems.clear();
+	systemScheduler.Clear();
+	systemScheduler.SetMutationFlushPoints(TerraEngine::Scheduling::DefaultMutationFlushPoints());
 
 	// Register all components so they are available for reflection/editor
 	ComponentRegistry::RegisterAllComponents();
@@ -87,27 +115,27 @@ void Engine::Initialize()
 	windowSystem.Configure(std::make_unique<GlfwWindowBackend>(), windowConfig, [this]() {
 		SignalShutdown();
 		});
-	systems.push_back(&windowSystem);
+	RegisterEngineSystem(systems, systemScheduler, windowSystem, MakeEngineSystemDeclaration("WindowSystem", "PreFrame", {}, { "Window" }));
 
 	// Set up the input system after the window so the backend can attach to the
 	// native window handle without duplicating platform specific code here.
 	InputSystem& inputSystem = InputSystem::Instance();
 	inputSystem.Configure(std::make_unique<GlfwInputBackend>());
-	systems.push_back(&inputSystem);
+	RegisterEngineSystem(systems, systemScheduler, inputSystem, MakeEngineSystemDeclaration("InputSystem", "Input", { "Window" }, { "Input" }));
 
 	// The scene manager owns authored .tescene and .teprefab JSON documents so
 	// gameplay code can request them without re-reading disk on every access.
 	SceneManager& sceneManager = SceneManager::Instance();
-	systems.push_back(&sceneManager);
+	RegisterEngineSystem(systems, systemScheduler, sceneManager, MakeEngineSystemDeclaration("SceneManager", "Scene", { "Resources" }, { "SceneGraph", "ObjectManager" }));
 
 	// ScriptingSystem manages the .NET runtime and gameplay scripts.
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
-	systems.push_back(&scriptingSystem);
+	RegisterEngineSystem(systems, systemScheduler, scriptingSystem, MakeEngineSystemDeclaration("ScriptingSystem", "Scripting", { "SceneGraph", "Resources" }, { "Scripting", "ObjectManager", "SceneMutationQueue" }));
 
 	// UISystem parses `.tuiml`/`.tuss` assets and builds CPU-side UI batches
 	// after gameplay and scene state have been updated for the current frame.
 	UISystem& uiSystem = UISystem::Instance();
-	systems.push_back(&uiSystem);
+	RegisterEngineSystem(systems, systemScheduler, uiSystem, MakeEngineSystemDeclaration("UISystem", "UI", { "SceneGraph", "ObjectManager", "Scripting" }, { "UI" }, true));
 
 	// RenderSystem consumes scene data and produces frames.
 	RenderSystem& renderSystem = RenderSystem::Instance();
@@ -117,7 +145,13 @@ void Engine::Initialize()
 		// here gives the renderer one stable quality contract for the session.
 		renderSystem.SetRenderSettings(*configuredRenderSettings);
 	}
-	systems.push_back(&renderSystem);
+	RegisterEngineSystem(systems, systemScheduler, renderSystem, MakeEngineSystemDeclaration("RenderSystem", "Render", { "Window", "SceneGraph", "ObjectManager", "UI", "Resources" }, { "Renderer" }, true));
+
+	const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.BuildSchedule();
+	TERRAENGINE_LOG(LogLevel::Info, schedulerSummary.formatted);
+	if (!schedulerSummary.valid) {
+		throw std::runtime_error("System scheduler validation failed. See scheduler summary diagnostics in the log.");
+	}
 
 	std::size_t initializedSystemCount = 0;
 	bool editorSystemInitialized = false;
@@ -213,17 +247,21 @@ bool Engine::Update(float deltaTime)
 	{
 		TERRAENGINE_PROFILE_SCOPE("Engine::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 
-		// Run each registered system with an individual named scope. The system
-		// name is copied by the profiler at scope construction time, so the
-		// temporary string remains valid for the marker label.
-		for (auto* system : systems) {
-			system->Update(deltaTime);
-		}
-		if (!TerraEngine::Scene::SceneMutationQueue::Instance().Empty()) {
-			// Structural scene mutations are applied after systems finish their
-			// update work so iteration over components and hierarchy data cannot
-			// be invalidated midway through a frame.
-			TerraEngine::Scene::SceneMutationQueue::Instance().Apply(ObjectManager::instance());
+		const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.ExecuteFrame(deltaTime, [](const TerraEngine::Scheduling::MutationFlushPoint&) {
+			TerraEngine::Scheduling::MutationFlushRuntimeState state;
+			TerraEngine::Scene::SceneMutationQueue& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
+			if (!queue.Empty()) {
+				// Structural scene mutations are applied only at declared flush
+				// points so systems that iterate hierarchy/component data never
+				// observe the ObjectManager changing midway through their update.
+				const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(ObjectManager::instance());
+				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
+			}
+			state.pendingAfterFlush = queue.Size();
+			return state;
+		});
+		if (!schedulerSummary.valid) {
+			TERRAENGINE_LOG(LogLevel::Error, schedulerSummary.formatted);
 		}
 	}
 	TerraEngine::Profiling::Profiler::Instance().EndFrame();

@@ -27,7 +27,10 @@ namespace TerraEngine::Editor::Scripting
 
 	inline std::string QuoteDotNetCommandArgument(const std::filesystem::path& path)
 	{
-		std::string text = path.string();
+		// Use generic separators so command text remains stable when tests model
+		// Linux project paths on a Windows host. dotnet accepts forward slashes on
+		// Windows, and Linux/macOS already use this representation naturally.
+		std::string text = path.generic_string();
 		std::string quoted = "\"";
 		for (char value : text)
 		{

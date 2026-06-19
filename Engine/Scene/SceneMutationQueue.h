@@ -63,6 +63,7 @@ namespace TerraEngine::Scene {
 		void Enqueue(SceneMutationRequest request);
 		bool Empty() const;
 		std::size_t Size() const;
+		std::vector<SceneMutationRequest> PendingRequests() const;
 		void Clear();
 		SceneMutationBatchResult Validate(const SceneGraph& graph) const;
 		SceneMutationBatchResult Apply(ObjectManager& objects);

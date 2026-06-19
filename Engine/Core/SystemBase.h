@@ -8,6 +8,7 @@
 #pragma once
 
 #include "Export.h"
+#include "Scheduling/SystemScheduler.h"
 #include <string>
 
 class TERRAENGINE_API SystemsBase {
@@ -29,4 +30,18 @@ public:
 	virtual std::string SystemName() {
 		return "Unnamed system (If you are seeing this, you need to implement SystemName() inside the system)";
 	};
+
+	// SchedulerDeclaration returns conservative metadata when a system has not
+	// been given an explicit phase/resource contract yet. Keeping the fallback
+	// main-thread and PostFrame-bound preserves current single-threaded behavior
+	// while diagnostics tell contributors which systems still need real metadata.
+	virtual TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() {
+		TerraEngine::Scheduling::SystemDeclaration declaration;
+		declaration.name = SystemName();
+		declaration.phase = "PostFrame";
+		declaration.mainThread = true;
+		declaration.profilingLabel = declaration.name;
+		declaration.usesDefaultMetadata = true;
+		return declaration;
+	}
 };

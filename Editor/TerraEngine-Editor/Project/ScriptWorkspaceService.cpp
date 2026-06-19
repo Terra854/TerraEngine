@@ -689,7 +689,21 @@ namespace
 
 void ScriptWorkspaceService::SetProjectRoot(const std::filesystem::path& projectRoot)
 {
-	m_ProjectRoot = projectRoot.empty() ? std::filesystem::path{} : std::filesystem::absolute(projectRoot).lexically_normal();
+	if (projectRoot.empty())
+	{
+		m_ProjectRoot = std::filesystem::path{};
+	}
+	else if (projectRoot.is_relative() && !projectRoot.has_root_directory())
+	{
+		// User-created relative paths should still resolve against the current
+		// process directory, but rooted POSIX-style paths used by Linux validation
+		// tests must not be rewritten to the current Windows drive.
+		m_ProjectRoot = std::filesystem::absolute(projectRoot).lexically_normal();
+	}
+	else
+	{
+		m_ProjectRoot = projectRoot.lexically_normal();
+	}
 	m_Status.solutionPath = GetSolutionPath();
 	m_Status.projectPath = GetProjectPath();
 	m_Status.outputRoot = GetOutputRoot();

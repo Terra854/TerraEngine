@@ -65,6 +65,14 @@ namespace TerraEngine::Scene {
 		return requests.size();
 	}
 
+	std::vector<SceneMutationRequest> SceneMutationQueue::PendingRequests() const
+	{
+		// Return a snapshot instead of exposing the internal vector so scheduler
+		// diagnostics and tests can inspect pending requests without mutating the
+		// queue that frame systems are still relying on.
+		return requests;
+	}
+
 	void SceneMutationQueue::Clear()
 	{
 		requests.clear();

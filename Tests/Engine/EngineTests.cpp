@@ -25,6 +25,7 @@ namespace TerraEngine::Tests {
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
 	void RegisterSpatialBoundsTests(TestRegistry& registry);
+	void RegisterSystemSchedulerTests(TestRegistry& registry);
 	void RegisterSpatialIndexEdgeTests(TestRegistry& registry);
 	void RegisterSpatialIndexQueryTests(TestRegistry& registry);
 	void RegisterSpatialIndexRefreshTests(TestRegistry& registry);
@@ -67,6 +68,7 @@ int main() {
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
 	TerraEngine::Tests::RegisterSpatialBoundsTests(registry);
+	TerraEngine::Tests::RegisterSystemSchedulerTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexEdgeTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexQueryTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexRefreshTests(registry);

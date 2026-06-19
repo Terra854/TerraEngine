@@ -20,6 +20,7 @@
 
 #include "Export.h"
 #include "SystemBase.h"
+#include "Scheduling/SystemScheduler.h"
 #include "Object/ObjectManager.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Timer.h"
@@ -63,11 +64,14 @@ class TERRAENGINE_API Engine {
 		// GetEditorSystem is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		SystemsBase* GetEditorSystem() { return editorSystem; }
 
+		const TerraEngine::Scheduling::ScheduleSummary& GetSchedulerSummary() const { return systemScheduler.LatestSummary(); }
+
 	private:
 		bool running = true;
 		// Non-owning references to systems stored as singletons elsewhere in the
 		// engine so the main loop can iterate them without heap allocations.
 		std::vector<SystemsBase*> systems;
+		TerraEngine::Scheduling::SystemScheduler systemScheduler;
 		FrameTimer frameTimer;
 
 		SystemsBase* editorSystem = nullptr;

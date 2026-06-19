@@ -60,6 +60,7 @@ endif()
 set(ENGINE_SOURCES
 	Engine/Core/MainEngine.cpp
 	Engine/Core/Timer.cpp
+	Engine/Core/Scheduling/SystemScheduler.cpp
 	Engine/Core/Logger/Logger.cpp
 	Engine/Core/Object/Component.cpp
 	Engine/Core/Object/Object.cpp
@@ -118,6 +119,7 @@ set(ENGINE_HEADERS
 	Engine/Core/Logger/Logger.h
 	Engine/Core/SystemBase.h
 	Engine/Core/Timer.h
+	Engine/Core/Scheduling/SystemScheduler.h
 	Engine/Core/Object/Component.h
 	Engine/Core/Object/Object.h
 	Engine/Core/Object/ObjectManager.h
