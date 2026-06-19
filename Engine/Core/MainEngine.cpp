@@ -78,6 +78,14 @@ void Engine::SignalShutdown()
 	running = false;
 }
 
+void Engine::ResetFrameTimer()
+{
+	// Editor actions such as entering Play Mode can perform blocking work after
+	// the engine frame has already updated. Resetting here lets the next runtime
+	// tick measure only gameplay frame time instead of editor transition cost.
+	frameTimer = FrameTimer();
+}
+
 // Engine::SetEditorMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Engine::SetEditorMode(SystemsBase* system)
 {
@@ -93,8 +101,6 @@ void Engine::Initialize()
 	SetApplicationHostEngine(this);
 	pool.initialize();
 	
-	// Reset the frame timer so the first tick is measured from initialization time.
-	frameTimer = FrameTimer();
 	systems.clear();
 	systemScheduler.Clear();
 	systemScheduler.SetMutationFlushPoints(TerraEngine::Scheduling::DefaultMutationFlushPoints());
@@ -151,6 +157,18 @@ void Engine::Initialize()
 	TERRAENGINE_LOG(LogLevel::Info, schedulerSummary.formatted);
 	if (!schedulerSummary.valid) {
 		throw std::runtime_error("System scheduler validation failed. See scheduler summary diagnostics in the log.");
+	}
+	TerraEngine::Scheduling::JobGraphSchedulerLoweringInput loweringInput;
+	loweringInput.graphId = "engine-system-scheduler";
+	loweringInput.label = "Engine System Scheduler";
+	loweringInput.phases = systemScheduler.PhaseDefinitions();
+	loweringInput.orderedSystems = systemScheduler.OrderedDeclarations();
+	loweringInput.mutationFlushPoints = systemScheduler.MutationFlushPoints();
+	TerraEngine::Scheduling::JobGraph loweredGraph = TerraEngine::Scheduling::JobGraph::FromSchedulerLowering(loweringInput);
+	latestJobGraphSummary = loweredGraph.Validate();
+	TERRAENGINE_LOG(LogLevel::Info, latestJobGraphSummary.formatted);
+	if (!latestJobGraphSummary.valid) {
+		throw std::runtime_error("System scheduler job graph validation failed. See job graph summary diagnostics in the log.");
 	}
 
 	std::size_t initializedSystemCount = 0;
@@ -231,6 +249,11 @@ void Engine::Initialize()
 	if (!startupResult.CanEnterRuntime()) {
 		throw std::runtime_error(bootSummary.runtimeEntryReason);
 	}
+
+	// Reset after all startup/editor setup has finished so the first frame delta
+	// represents frame time, not project loading, script compilation, or shader
+	// preparation that happened before the runtime loop could begin.
+	ResetFrameTimer();
 }
 
 // Engine::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

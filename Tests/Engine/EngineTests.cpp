@@ -16,6 +16,7 @@ namespace TerraEngine::Tests {
 	void RegisterLinuxStartupSmokeTests(TestRegistry& registry);
 	void RegisterMaterialRuntimeContractTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
+	void RegisterJobGraphTests(TestRegistry& registry);
 	void RegisterPlatformUtilsTests(TestRegistry& registry);
 	void RegisterPrefabCompositionTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
@@ -59,6 +60,7 @@ int main() {
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);
+	TerraEngine::Tests::RegisterJobGraphTests(registry);
 	TerraEngine::Tests::RegisterPlatformUtilsTests(registry);
 	TerraEngine::Tests::RegisterPrefabCompositionTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureTests(registry);

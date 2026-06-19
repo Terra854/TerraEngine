@@ -20,6 +20,7 @@
 
 #include "Export.h"
 #include "SystemBase.h"
+#include "Scheduling/JobGraph.h"
 #include "Scheduling/SystemScheduler.h"
 #include "Object/ObjectManager.h"
 #include "ThreadPool/ThreadPool.h"
@@ -47,6 +48,7 @@ class TERRAENGINE_API Engine {
 		void Initialize();
 		bool Update(float deltaTime);
 		void Shutdown();
+		void ResetFrameTimer();
 
 		template <typename T>
 		// GetSystem is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -65,6 +67,7 @@ class TERRAENGINE_API Engine {
 		SystemsBase* GetEditorSystem() { return editorSystem; }
 
 		const TerraEngine::Scheduling::ScheduleSummary& GetSchedulerSummary() const { return systemScheduler.LatestSummary(); }
+		const TerraEngine::Scheduling::JobGraphSummary& GetJobGraphSummary() const { return latestJobGraphSummary; }
 
 	private:
 		bool running = true;
@@ -72,6 +75,7 @@ class TERRAENGINE_API Engine {
 		// engine so the main loop can iterate them without heap allocations.
 		std::vector<SystemsBase*> systems;
 		TerraEngine::Scheduling::SystemScheduler systemScheduler;
+		TerraEngine::Scheduling::JobGraphSummary latestJobGraphSummary;
 		FrameTimer frameTimer;
 
 		SystemsBase* editorSystem = nullptr;

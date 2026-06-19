@@ -715,4 +715,14 @@ namespace TerraEngine::Scheduling {
 	{
 		return orderedDeclarations;
 	}
+
+	const std::vector<SchedulerPhaseDefinition>& SystemScheduler::PhaseDefinitions() const
+	{
+		return phases;
+	}
+
+	const std::vector<MutationFlushPoint>& SystemScheduler::MutationFlushPoints() const
+	{
+		return flushPoints;
+	}
 }

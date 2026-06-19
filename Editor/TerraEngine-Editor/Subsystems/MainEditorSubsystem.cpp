@@ -1164,6 +1164,9 @@ void MainEditorSubsystem::DrawUI() {
 			bool running = ScriptingSystem::Instance().IsRunning();
 			if (!running) {
 				CapturePlayModeSceneState();
+				if (ctx != nullptr && ctx->engine != nullptr) {
+					ctx->engine->ResetFrameTimer();
+				}
 				ScriptingSystem::Instance().SetRunning(true);
 				ScriptingSystem::Instance().SetPaused(false);
 			} else {

@@ -142,6 +142,8 @@ namespace TerraEngine::Scheduling {
 		const ScheduleSummary& ExecuteFrame(float deltaTime, const MutationFlushCallback& flushCallback);
 		const ScheduleSummary& LatestSummary() const;
 		const std::vector<SystemDeclaration>& OrderedDeclarations() const;
+		const std::vector<SchedulerPhaseDefinition>& PhaseDefinitions() const;
+		const std::vector<MutationFlushPoint>& MutationFlushPoints() const;
 
 	private:
 		struct RegisteredSystem {
