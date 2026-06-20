@@ -37,7 +37,18 @@ public:
 	virtual TerraEngine::Renderer::BackendCapabilityProfile GetBackendCapabilityProfile() const
 	{
 		TerraEngine::Renderer::BackendCapabilityProfile profile;
-		profile.requiredSerialBoundaries = { "final-submit", "present", "resource-retire" };
+		// Unknown backends start conservative: workers may prepare immutable
+		// data, but final ownership transitions stay coordinator-owned until the
+		// backend explicitly proves a stronger contract. New APIs such as DX12
+		// should fill this profile from their real queue and lifetime rules
+		// instead of changing high-level render graph code.
+		profile.requiredSerialBoundaries = { "final-submit", "present", "swapchain", "recovery", "resource-retire" };
+		profile.queueCapabilities = {
+			{ "transfer", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, "Default backend profile uses a single safe queue." },
+			{ "compute", TerraEngine::Renderer::RenderBackendQueueMode::Unavailable, false, "Default backend profile exposes no compute overlap." },
+			{ "graphics", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, {} },
+			{ "presentation", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, "Presentation remains coordinator-owned." }
+		};
 		return profile;
 	}
 	// Backends consume a validated plan only at the coordinator boundary. The

@@ -50,6 +50,19 @@ namespace TerraEngine::Tests {
 			context.Expect(!summary.renderWorkerGroups.empty(), "Requested diagnostics should include render worker group summaries.");
 			TerraEngine::Renderer::SetRenderDiagnosticsRequested(false);
 		});
+
+		registry.Add("Renderer.Diagnostics.ClosedBuildKeepsDetailedWorkDisabled", [](TestContext& context) {
+			TerraEngine::Renderer::SetRenderDiagnosticsRequested(false);
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 31u;
+			TerraEngine::Renderer::RenderWorkPacketPlan packetPlan;
+			TerraEngine::Renderer::RenderSubmissionPlan submission;
+			submission.frameId = 31u;
+			TerraEngine::Renderer::BackendCapabilityProfile profile;
+			const auto summary = TerraEngine::Renderer::BuildRenderDiagnosticsSummary(snapshot, packetPlan, submission, profile);
+			context.Expect(!summary.detailed, "Closed diagnostics should avoid detailed collection.");
+			context.Expect(summary.topPassCosts.empty(), "Closed diagnostics should not collect expensive pass detail.");
+		});
 	}
 
 }

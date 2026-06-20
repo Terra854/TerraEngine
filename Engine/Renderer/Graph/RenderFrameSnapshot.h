@@ -17,6 +17,18 @@
 
 namespace TerraEngine::Renderer {
 
+	enum class RenderResourceReadinessState
+	{
+		// Ready resources can be consumed by workers immediately. Other states
+		// force the graph to pick a fallback, delay work, or reject the frame
+		// before backend submission tries to use an unsafe resource.
+		Ready,
+		Pending,
+		Fallback,
+		Failed,
+		Retired
+	};
+
 	struct RenderFrameViewRequest
 	{
 		RenderOutputKind outputKind = RenderOutputKind::GameView;
@@ -49,10 +61,16 @@ namespace TerraEngine::Renderer {
 		std::string debugName;
 		bool resident = true;
 		bool usingFallback = false;
+		bool requiredForFrame = false;
+		RenderResourceReadinessState readiness = RenderResourceReadinessState::Ready;
+		std::string fallbackReason;
 	};
 
 	struct RenderFrameSnapshot
 	{
+		// RenderSystem builds this value object on the main thread. Worker jobs
+		// must read only these copied records, never live scene containers or
+		// editor-owned objects that can mutate during the frame.
 		std::uint64_t frameId = 0u;
 		std::vector<RenderFrameViewRequest> viewRequests;
 		std::vector<RenderFrameRenderableRecord> renderables;
@@ -64,12 +82,20 @@ namespace TerraEngine::Renderer {
 		std::uint64_t resourceRevision = 0u;
 		std::uint64_t sceneRevision = 0u;
 		bool valid = true;
+		// This flag is a defensive tripwire for tests and diagnostics. If a
+		// future collector accidentally hands workers live mutable state, graph
+		// validation can reject the packet instead of racing the scene.
+		bool containsLiveMutableState = false;
 	};
 
 	// Builder functions keep construction deterministic. Tests and future
 	// backends can create snapshots without needing access to RenderSystem.
+	// Deterministic sorting and hashing make worker completion order irrelevant
+	// to the final renderer output.
 	TERRAENGINE_API void SortSnapshotDeterministically(RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API bool SnapshotUsesOnlyResolvedResources(const RenderFrameSnapshot& snapshot);
+	TERRAENGINE_API bool SnapshotContainsLiveMutableState(const RenderFrameSnapshot& snapshot);
+	TERRAENGINE_API std::uint64_t BuildSnapshotDeterministicHash(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API std::uint64_t EstimateSnapshotWorkload(const RenderFrameSnapshot& snapshot);
 
 }

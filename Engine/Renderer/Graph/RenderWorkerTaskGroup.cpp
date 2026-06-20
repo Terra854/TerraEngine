@@ -25,6 +25,8 @@ namespace TerraEngine::Renderer {
 		else
 		{
 			group.serialCount = requestedWorkItems > 0u ? 1u : 0u;
+			group.inlinedForSmallWork = requestedWorkItems > 0u && requestedWorkItems < capabilities.workerSchedulingThreshold;
+			group.serialFallbackReason = group.inlinedForSmallWork ? "Workload is below worker scheduling threshold." : "Backend capability profile requires serial renderer work.";
 		}
 		return group;
 	}
@@ -35,6 +37,7 @@ namespace TerraEngine::Renderer {
 		group.cancellationReason = std::move(reason);
 		group.workerCount = 0u;
 		group.serialCount = group.requestedWorkItems > 0u ? 1u : 0u;
+		group.serialFallbackReason = group.cancellationReason;
 	}
 
 	bool ShouldRunRenderGroupOnWorkers(const RenderWorkerTaskGroup& group)

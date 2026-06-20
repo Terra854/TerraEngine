@@ -10,6 +10,7 @@
 #include "../Profiling/EditorProfilerService.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Profiling/Profiler.h"
+#include "Engine/Renderer/RenderSystem.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -369,6 +370,32 @@ void ProfilerWindow::DrawFrameDetails()
 
 	ImGui::Text("Frame %llu", static_cast<unsigned long long>(selectedFrame->frameIndex));
 	ImGui::Text("Duration: %.3f ms", selectedFrame->durationMs);
+	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+	if (!renderDiagnostics.backendFrameBreakdown.stageTimings.empty() && ImGui::TreeNode("Backend Submit Path"))
+	{
+		if (ImGui::BeginTable("ProfilerBackendSubmitStages", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Stage");
+			ImGui::TableSetupColumn("View");
+			ImGui::TableSetupColumn("Time");
+			ImGui::TableSetupColumn("Backend");
+			ImGui::TableHeadersRow();
+			for (const TerraEngine::Renderer::BackendStageTiming& timing : renderDiagnostics.backendFrameBreakdown.stageTimings)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(timing.label.empty() ? TerraEngine::Renderer::ToString(timing.stage) : timing.label.c_str());
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextUnformatted(timing.viewType == RenderViewType::Scene ? "Scene" : "Game");
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%.3f ms", timing.milliseconds);
+				ImGui::TableSetColumnIndex(3);
+				ImGui::TextUnformatted(timing.backendId.c_str());
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!selectedFrame->complete)
 	{

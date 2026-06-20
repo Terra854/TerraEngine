@@ -88,6 +88,42 @@ namespace
 		std::size_t missCount = 0u;
 	};
 
+	struct VisibleCommandCacheRecord
+	{
+		std::uint64_t signature = 0u;
+		std::uint64_t lastTouchedFrameId = 0u;
+		std::vector<DrawCommand> commands;
+		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
+	};
+
+	struct VisibleCommandCacheState
+	{
+		std::unordered_map<std::uint64_t, VisibleCommandCacheRecord> recordsBySignature;
+		std::size_t hitCount = 0u;
+		std::size_t missCount = 0u;
+	};
+
+	struct ShadowDrawListCacheRecord
+	{
+		std::uint64_t signature = 0u;
+		std::uint64_t lastTouchedFrameId = 0u;
+		std::vector<ShadowDrawList> shadowDrawLists;
+	};
+
+	struct ShadowDrawListCacheState
+	{
+		std::unordered_map<std::uint64_t, ShadowDrawListCacheRecord> recordsBySignature;
+		std::size_t hitCount = 0u;
+		std::size_t missCount = 0u;
+	};
+
+	struct VisibleCommandBuildResult
+	{
+		std::vector<DrawCommand> commands;
+		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
+		bool cacheHit = false;
+	};
+
 	std::uint64_t HashFloat(float value)
 	{
 		std::uint32_t bits = 0u;
@@ -106,6 +142,28 @@ namespace
 		HashCombine(seed, HashFloat(value.x));
 		HashCombine(seed, HashFloat(value.y));
 		HashCombine(seed, HashFloat(value.z));
+	}
+
+	void HashVec4(std::uint64_t& seed, const glm::vec4& value)
+	{
+		HashCombine(seed, HashFloat(value.x));
+		HashCombine(seed, HashFloat(value.y));
+		HashCombine(seed, HashFloat(value.z));
+		HashCombine(seed, HashFloat(value.w));
+	}
+
+	void HashMat4(std::uint64_t& seed, const glm::mat4& value)
+	{
+		for (int column = 0; column < 4; ++column)
+		{
+			HashVec4(seed, value[column]);
+		}
+	}
+
+	void HashUVec2(std::uint64_t& seed, const glm::uvec2& value)
+	{
+		HashCombine(seed, static_cast<std::uint64_t>(value.x));
+		HashCombine(seed, static_cast<std::uint64_t>(value.y));
 	}
 
 	void HashQuat(std::uint64_t& seed, const glm::quat& value)
@@ -163,6 +221,79 @@ namespace
 		return seed;
 	}
 
+	std::uint64_t BuildRenderSettingsSignature(const RenderSettings& settings, QualityPreset preset, bool taskShaderCullingEnabled)
+	{
+		std::uint64_t seed = kRenderHashOffset;
+		HashCombine(seed, static_cast<std::uint64_t>(preset));
+		HashCombine(seed, taskShaderCullingEnabled ? 1u : 0u);
+		HashCombine(seed, settings.shadowResolution);
+		HashCombine(seed, settings.shadowFilteringSize);
+		HashCombine(seed, settings.maxUploadedLights);
+		HashCombine(seed, settings.maxDynamicLights);
+		HashCombine(seed, settings.maxShadowLights);
+		HashCombine(seed, settings.maxAreaLights);
+		HashCombine(seed, settings.enableLTC);
+		HashCombine(seed, settings.enableIBL);
+		HashCombine(seed, HashFloat(settings.indirectStrength));
+		HashCombine(seed, HashFloat(settings.ambientOcclusionStrength));
+		HashCombine(seed, settings.ambientOcclusionQuality);
+		HashCombine(seed, settings.anisotropicFiltering);
+		return seed;
+	}
+
+	std::uint64_t BuildVisibleCommandCacheKey(
+		std::uint64_t sceneRevision,
+		std::uint64_t settingsSignature,
+		std::uint64_t renderableWorldSignature,
+		const glm::mat4& viewProjection,
+		const glm::uvec2& targetSize,
+		RenderViewType viewType,
+		std::uint32_t outputId)
+	{
+		std::uint64_t seed = kRenderHashOffset;
+		HashCombine(seed, sceneRevision);
+		HashCombine(seed, settingsSignature);
+		HashCombine(seed, renderableWorldSignature);
+		HashMat4(seed, viewProjection);
+		HashUVec2(seed, targetSize);
+		HashCombine(seed, static_cast<std::uint64_t>(viewType));
+		HashCombine(seed, outputId);
+		return seed;
+	}
+
+	std::uint64_t BuildLightSetSignature(const std::vector<FrameLightCandidate>& lights)
+	{
+		std::uint64_t seed = kRenderHashOffset;
+		HashCombine(seed, static_cast<std::uint64_t>(lights.size()));
+		for (const FrameLightCandidate& light : lights)
+		{
+			HashCombine(seed, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(light.lightId)));
+			HashVec4(seed, light.gpuLight.positionAndType);
+			HashVec4(seed, light.gpuLight.directionAndRange);
+			HashVec4(seed, light.gpuLight.colorAndIntensity);
+			HashVec4(seed, light.gpuLight.coneAnglesAndArea);
+			HashVec4(seed, light.gpuLight.extraParams);
+			HashCombine(seed, light.candidateFlags);
+		}
+		return seed;
+	}
+
+	std::uint64_t BuildShadowDrawListCacheKey(
+		std::uint64_t sceneRevision,
+		std::uint64_t settingsSignature,
+		std::uint64_t renderableWorldSignature,
+		std::uint64_t lightSetSignature,
+		const glm::vec3& cameraWorldPosition)
+	{
+		std::uint64_t seed = kRenderHashOffset;
+		HashCombine(seed, sceneRevision);
+		HashCombine(seed, settingsSignature);
+		HashCombine(seed, renderableWorldSignature);
+		HashCombine(seed, lightSetSignature);
+		HashVec3(seed, cameraWorldPosition);
+		return seed;
+	}
+
 	void PruneStaleDrawCommandCache(DrawCommandCacheState& cache, const std::unordered_set<TerraEngine::UUID>& aliveObjectIds)
 	{
 		for (auto iterator = cache.recordsByObjectId.begin(); iterator != cache.recordsByObjectId.end();)
@@ -180,6 +311,15 @@ namespace
 			iterator = aliveLightIds.contains(iterator->first)
 				? std::next(iterator)
 				: cache.recordsByLightId.erase(iterator);
+		}
+	}
+
+	template<typename Cache>
+	void TrimSignatureCache(Cache& cache, std::size_t limit)
+	{
+		while (cache.recordsBySignature.size() > limit)
+		{
+			cache.recordsBySignature.erase(cache.recordsBySignature.begin());
 		}
 	}
 
@@ -844,7 +984,7 @@ void RenderSystem::Update(float deltaTime)
 		{
 			backendBreakdown = TerraEngine::Renderer::BuildUnavailableBackendFrameBreakdown(renderFrameSnapshot);
 		}
-		renderGraphDiagnostics.backendFrameBreakdown = std::move(backendBreakdown);
+		TerraEngine::Renderer::ApplyBackendBreakdownToRenderDiagnostics(renderGraphDiagnostics, backendBreakdown);
 		renderGraphDiagnostics.backendFallbacks.push_back(
 			"Vulkan preparation cache hits: "
 			+ std::to_string(rendererPreparationSummary.cacheHitCount)
@@ -856,6 +996,13 @@ void RenderSystem::Update(float deltaTime)
 		}
 	}
 	const size_t renderGraphWorkerCount = std::max<size_t>(1u, backendCapabilities.maxRecordingWorkers);
+	static VisibleCommandCacheState visibleCommandCache;
+	static ShadowDrawListCacheState shadowDrawListCache;
+	visibleCommandCache.hitCount = 0u;
+	visibleCommandCache.missCount = 0u;
+	shadowDrawListCache.hitCount = 0u;
+	shadowDrawListCache.missCount = 0u;
+	const std::uint64_t renderPreparationSettingsSignature = BuildRenderSettingsSignature(renderFrameSnapshot.renderSettings, currentPreset, taskShaderCullingEnabled);
 
 	std::vector<TerraEngine::Scene::SpatialObjectRecord> spatialRecords;
 	std::unordered_map<entt::entity, std::size_t> renderableLookup;
@@ -894,6 +1041,7 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	std::vector<DrawCommand> renderableDrawCommands(renderables.size());
+	std::vector<std::uint64_t> drawCommandSignatures(renderables.size(), 0u);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!renderables.empty())
 	{
@@ -901,7 +1049,6 @@ void RenderSystem::Update(float deltaTime)
 		static DrawCommandCacheState drawCommandCache;
 		drawCommandCache.hitCount = 0u;
 		drawCommandCache.missCount = 0u;
-		std::vector<std::uint64_t> drawCommandSignatures(renderables.size(), 0u);
 		std::unordered_set<TerraEngine::UUID> aliveDrawCommandObjects;
 		aliveDrawCommandObjects.reserve(renderables.size());
 
@@ -966,6 +1113,16 @@ void RenderSystem::Update(float deltaTime)
 				+ std::to_string(drawCommandCache.hitCount + drawCommandCache.missCount));
 		}
 	}
+	// The visible and shadow caches store draw commands with model matrices.
+	// Include every renderable's current draw signature so Play-mode transform
+	// changes invalidate cached view work even when the editor camera is still.
+	std::uint64_t renderableWorldSignature = kRenderHashOffset;
+	HashCombine(renderableWorldSignature, static_cast<std::uint64_t>(drawCommandSignatures.size()));
+	for (std::size_t index = 0u; index < drawCommandSignatures.size(); ++index)
+	{
+		HashCombine(renderableWorldSignature, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(renderables[index].objectId)));
+		HashCombine(renderableWorldSignature, drawCommandSignatures[index]);
+	}
 
 	auto collectCandidateIndices = [&](const TerraEngine::Scene::SpatialQueryResult& query) {
 		std::vector<std::size_t> candidateIndices;
@@ -992,14 +1149,42 @@ void RenderSystem::Update(float deltaTime)
 		return commands;
 	};
 
-	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection) {
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Frustum Cull Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection, const glm::uvec2& targetSize, RenderViewType viewType, std::uint32_t outputId) {
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Visible Draw Commands Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		const std::uint64_t signature = BuildVisibleCommandCacheKey(
+			renderFrameSnapshot.sceneRevision,
+			renderPreparationSettingsSignature,
+			renderableWorldSignature,
+			viewProjection,
+			targetSize,
+			viewType,
+			outputId);
+		if (const auto existing = visibleCommandCache.recordsBySignature.find(signature); existing != visibleCommandCache.recordsBySignature.end())
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			++visibleCommandCache.hitCount;
+			existing->second.lastTouchedFrameId = activeRenderFrameId;
+			return VisibleCommandBuildResult{ existing->second.commands, existing->second.diagnostics, true };
+		}
+
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Rebuild Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const TerraEngine::Scene::SpatialFrustum frustum = TerraEngine::Scene::ExtractFrustum(viewProjection);
 		TerraEngine::Scene::SpatialQueryFilter filter{};
 		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
 		filter.collectDiagnostics = true;
 		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
-		return buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
+		VisibleCommandBuildResult result;
+		result.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
+		result.diagnostics = spatialIndex.GetDiagnosticsSnapshot();
+		VisibleCommandCacheRecord record;
+		record.signature = signature;
+		record.lastTouchedFrameId = activeRenderFrameId;
+		record.commands = result.commands;
+		record.diagnostics = result.diagnostics;
+		visibleCommandCache.recordsBySignature[signature] = std::move(record);
+		TrimSignatureCache(visibleCommandCache, 32u);
+		++visibleCommandCache.missCount;
+		return result;
 	};
 
 	// Pack reflected lights in parallel so large scenes keep the CPU upload path
@@ -1139,7 +1324,22 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	auto buildShadowDrawLists = [&](const glm::vec3& cameraWorldPosition) {
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Shadow Draw Lists Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		const std::uint64_t signature = BuildShadowDrawListCacheKey(
+			renderFrameSnapshot.sceneRevision,
+			renderPreparationSettingsSignature,
+			renderableWorldSignature,
+			BuildLightSetSignature(packedLights),
+			cameraWorldPosition);
+		if (const auto existing = shadowDrawListCache.recordsBySignature.find(signature); existing != shadowDrawListCache.recordsBySignature.end())
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			++shadowDrawListCache.hitCount;
+			existing->second.lastTouchedFrameId = activeRenderFrameId;
+			return existing->second.shadowDrawLists;
+		}
+
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Rebuild Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		std::vector<std::optional<ShadowDrawList>> shadowDrawListsByLight(packedLights.size());
 		TerraEngine::Scene::SpatialQueryFilter filter{};
 		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
@@ -1206,6 +1406,13 @@ void RenderSystem::Update(float deltaTime)
 			}
 		}
 
+		ShadowDrawListCacheRecord record;
+		record.signature = signature;
+		record.lastTouchedFrameId = activeRenderFrameId;
+		record.shadowDrawLists = shadowDrawLists;
+		shadowDrawListCache.recordsBySignature[signature] = std::move(record);
+		TrimSignatureCache(shadowDrawListCache, 32u);
+		++shadowDrawListCache.missCount;
 		return shadowDrawLists;
 	};
 
@@ -1402,11 +1609,19 @@ void RenderSystem::Update(float deltaTime)
 		frameData.viewMatrix = sceneViewCamera.view;
 		frameData.projectionMatrix = sceneViewCamera.proj;
 		frameData.cameraWorldPosition = sceneViewCamera.pos;
-		frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+		const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, sceneViewTargetSize, RenderViewType::Scene, 1u);
+		frameData.commands = visibleCommands.commands;
+		sceneSpatialDiagnostics = visibleCommands.diagnostics;
 		applySceneViewContextTint();
 		frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
-		sceneSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 		rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::SceneView, RenderViewType::Scene, 1u));
+	}
+	else if (TerraEngine::Renderer::RenderDiagnosticsRequested())
+	{
+		renderGraphDiagnostics.delayedWork.push_back(
+			hasSceneViewCamera
+				? "Scene View skipped because its render target is not ready."
+				: "Scene View skipped because the editor did not provide a scene camera this frame.");
 	}
 
 	// Asset-style prefab editing has no active runtime scene. When the editor
@@ -1422,9 +1637,10 @@ void RenderSystem::Update(float deltaTime)
 			frameData.viewMatrix = cam.view;
 			frameData.projectionMatrix = cam.proj;
 			frameData.cameraWorldPosition = cam.pos;
-			frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderViewType::Game, 2u);
+			frameData.commands = visibleCommands.commands;
+			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
-			gameSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
 		}
 	}
@@ -1484,12 +1700,39 @@ void RenderSystem::Update(float deltaTime)
 			frameData.projectionMatrix[1][1] *= -1;
 			frameData.cameraWorldPosition = cameraTransform.position;
 			frameData.editorContextTint = glm::vec4(0.0f);
-			frameData.commands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix);
+			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderViewType::Game, 2u);
+			frameData.commands = visibleCommands.commands;
+			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
-			gameSpatialDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 
 			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u));
 		}
+	}
+	else if (TerraEngine::Renderer::RenderDiagnosticsRequested() && gameViewSuppressed)
+	{
+		renderGraphDiagnostics.delayedWork.push_back("Game View skipped because the editor suppressed it for prefab asset editing.");
+	}
+	else if (TerraEngine::Renderer::RenderDiagnosticsRequested() && !gameViewTargetReady)
+	{
+		renderGraphDiagnostics.delayedWork.push_back("Game View skipped because its render target is not ready.");
+	}
+	if (TerraEngine::Renderer::RenderDiagnosticsRequested())
+	{
+		renderGraphDiagnostics.backendFallbacks.push_back(
+			"Visible draw command cache hits: "
+			+ std::to_string(visibleCommandCache.hitCount)
+			+ "/"
+			+ std::to_string(visibleCommandCache.hitCount + visibleCommandCache.missCount));
+		renderGraphDiagnostics.backendFallbacks.push_back(
+			"Shadow draw list cache hits: "
+			+ std::to_string(shadowDrawListCache.hitCount)
+			+ "/"
+			+ std::to_string(shadowDrawListCache.hitCount + shadowDrawListCache.missCount));
+		renderGraphDiagnostics.backendFallbacks.push_back(
+			"Persistent render packet cache hits: "
+			+ std::to_string(rendererPreparationSummary.renderPacketCache.cacheHits)
+			+ "/"
+			+ std::to_string(rendererPreparationSummary.renderPacketCache.packetCount));
 	}
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: RHI End Frame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);

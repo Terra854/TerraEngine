@@ -3,9 +3,37 @@
 #include "Renderer/Graph/RenderGraph.h"
 #include "Renderer/Graph/RenderSubmissionPlan.h"
 
+#include <filesystem>
 #include <fstream>
 
 namespace TerraEngine::Tests {
+
+	namespace {
+
+		std::string ReadRepositoryHeader(const std::filesystem::path& relativePath)
+		{
+			// CTest runs from the build tree while local executable runs usually
+			// start in the repository root. Walking upward keeps the header leak
+			// tests stable in both entry points.
+			std::filesystem::path probe = std::filesystem::current_path();
+			for (int depth = 0; depth < 8; ++depth)
+			{
+				const std::filesystem::path candidate = probe / relativePath;
+				std::ifstream stream(candidate);
+				if (stream)
+				{
+					return std::string((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+				}
+				if (!probe.has_parent_path())
+				{
+					break;
+				}
+				probe = probe.parent_path();
+			}
+			return {};
+		}
+
+	}
 
 	void RegisterRenderGraphContractTests(TestRegistry& registry)
 	{
@@ -32,10 +60,16 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Renderer.Graph.HeadersAvoidBackendNames", [](TestContext& context) {
-			std::ifstream graphHeader("Engine/Renderer/Graph/RenderGraph.h");
-			std::string contents((std::istreambuf_iterator<char>(graphHeader)), std::istreambuf_iterator<char>());
+			const std::string contents = ReadRepositoryHeader("Engine/Renderer/Graph/RenderGraph.h");
+			context.Expect(!contents.empty(), "Renderer graph header should be readable from the test working directory.");
 			context.Expect(contents.find("Vk") == std::string::npos, "Renderer graph public headers should not expose Vulkan symbols.");
 			context.Expect(contents.find("D3D") == std::string::npos, "Renderer graph public headers should not expose future backend symbols either.");
+		});
+
+		registry.Add("Renderer.Graph.RhiHeadersExposePortableQueueNames", [](TestContext& context) {
+			const std::string contents = ReadRepositoryHeader("Engine/Renderer/RHI/RHIDefinitions.h");
+			context.Expect(!contents.empty(), "RHI definitions header should be readable from the test working directory.");
+			context.Expect(contents.find("RenderBackendQueueMode") != std::string::npos, "RHI queue readiness should use backend-neutral names.");
 		});
 	}
 

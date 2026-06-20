@@ -35,6 +35,14 @@ namespace TerraEngine::Tests {
 			context.Expect(profile.supportsParallelRecording, "Mock backend should expose backend-neutral parallel recording support.");
 			context.Expect(profile.supportsRenderTaskGroups, "Mock backend should expose render task group support without Vulkan symbols.");
 		});
+
+		registry.Add("Renderer.MockBackend.ExposesQueueReadinessWithoutBackendHandles", [](TestContext& context) {
+			MockRenderBackend backend;
+			backend.profile.supportsMultiQueueReadiness = true;
+			backend.profile.queueCapabilities.push_back({ "graphics", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, {} });
+			context.Expect(backend.profile.supportsMultiQueueReadiness, "Mock backend should opt into backend-neutral queue readiness.");
+			context.ExpectEqual(std::string("graphics"), backend.profile.queueCapabilities.front().category, "Queue readiness should use portable category names.");
+		});
 	}
 
 }

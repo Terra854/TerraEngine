@@ -449,6 +449,9 @@ struct VulkanContext::Impl {
 	RenderSnapshotHandle activeRenderSnapshot{};
 	RenderSnapshotDiagnosticsSnapshot pendingRenderSnapshotDiagnostics{};
 	RenderSnapshotDiagnosticsSnapshot latestRenderSnapshotDiagnostics{};
+	TerraEngine::Renderer::BackendFrameBreakdown pendingBackendFrameBreakdown{};
+	TerraEngine::Renderer::BackendFrameBreakdown latestBackendFrameBreakdown{};
+	std::uint64_t backendFrameSerial = 0u;
 	ClusterValidationSnapshot previousClusterValidationSnapshot{};
 	bool previousClusterValidationSnapshotValid = false;
 	std::filesystem::path clusterValidationCapturePath = std::filesystem::path("Tools") / "LightingValidation" / "results" / "latest-cluster-validation.json";

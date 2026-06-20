@@ -1,0 +1,30 @@
+{
+	"version": 1,
+	"thresholds": {
+		"smallSceneMaxRegressionPercent": 5,
+		"largeSceneMinImprovementPercent": 30,
+		"diagnosticsClosedMaxOverheadPercent": 1,
+		"backendStageAttributionMinPercent": 95,
+		"backendStallWarningMilliseconds": 0.25,
+		"consecutiveRunTolerancePercent": 10
+	},
+	"gateNotes": [
+		"Run each workload three times on the same backend and compare the median visible-frame cost.",
+		"Small scenes should stay on the inline path; a regression above smallSceneMaxRegressionPercent should fail the gate.",
+		"Large stable scenes should show prepared-packet reuse; improvement below largeSceneMinImprovementPercent should be investigated before accepting the change.",
+		"Diagnostics-closed captures must not include detailed graph collection overhead above diagnosticsClosedMaxOverheadPercent.",
+		"Streaming and stress workloads may delay queued background work, but visible-frame work should stay bounded and report the delay reason.",
+		"Backend submit-path captures should attribute at least backendStageAttributionMinPercent of broad RHI begin, view submit, and RHI end time to named backend stages.",
+		"Backend waits at or above backendStallWarningMilliseconds should publish a stall classification and recommended action while diagnostics are open."
+	],
+	"workloads": [
+		{ "name": "small", "renderables": 10, "materials": 3, "lights": 1, "ui": true, "streamingResources": 0 },
+		{ "name": "medium", "renderables": 250, "materials": 12, "lights": 4, "ui": true, "streamingResources": 16 },
+		{ "name": "large", "renderables": 1000, "materials": 20, "lights": 10, "ui": true, "streamingResources": 0 },
+		{ "name": "streaming", "renderables": 500, "materials": 16, "lights": 4, "ui": false, "streamingResources": 100 },
+		{ "name": "ui-heavy", "renderables": 200, "materials": 8, "lights": 2, "ui": true, "streamingResources": 0 },
+		{ "name": "shadow-heavy", "renderables": 750, "materials": 20, "lights": 10, "ui": false, "streamingResources": 0 },
+		{ "name": "scene-game-submit", "renderables": 1000, "materials": 20, "lights": 10, "ui": true, "streamingResources": 0, "views": ["scene", "game"], "backendStages": true, "backendStageGate": "backendStageAttributionMinPercent", "stallThreshold": "backendStallWarningMilliseconds" },
+		{ "name": "randomized-stress", "renderables": 1000, "materials": 20, "lights": 10, "ui": true, "streamingResources": 100 }
+	]
+}

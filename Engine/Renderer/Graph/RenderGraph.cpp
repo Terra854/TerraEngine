@@ -1,6 +1,8 @@
 #include "RenderGraph.h"
 
 #include <algorithm>
+#include <cstring>
+#include <functional>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -39,6 +41,73 @@ namespace TerraEngine::Renderer {
 		}
 	}
 
+	std::string ToString(RenderFailurePolicy policy)
+	{
+		switch (policy)
+		{
+		case RenderFailurePolicy::Fatal: return "fatal";
+		case RenderFailurePolicy::Degrade: return "degrade";
+		case RenderFailurePolicy::Skip: return "skip";
+		case RenderFailurePolicy::Retry: return "retry";
+		case RenderFailurePolicy::DiagnosticsOnly: return "diagnostics-only";
+		default: return "unknown";
+		}
+	}
+
+	std::string ToString(RenderWorkBudgetCategory category)
+	{
+		switch (category)
+		{
+		case RenderWorkBudgetCategory::Upload: return "upload";
+		case RenderWorkBudgetCategory::DrawPreparation: return "draw-preparation";
+		case RenderWorkBudgetCategory::ShadowPreparation: return "shadow-preparation";
+		case RenderWorkBudgetCategory::UiPreparation: return "ui-preparation";
+		case RenderWorkBudgetCategory::PipelinePreparation: return "pipeline-preparation";
+		case RenderWorkBudgetCategory::Readback: return "readback";
+		case RenderWorkBudgetCategory::TransientMemory: return "transient-memory";
+		case RenderWorkBudgetCategory::WorkerScratchMemory: return "worker-scratch-memory";
+		case RenderWorkBudgetCategory::DeferredRetirement: return "deferred-retirement";
+		default: return "unknown";
+		}
+	}
+
+	std::string ToString(RenderBudgetOverflowPolicy policy)
+	{
+		switch (policy)
+		{
+		case RenderBudgetOverflowPolicy::Delay: return "delay";
+		case RenderBudgetOverflowPolicy::Cancel: return "cancel";
+		case RenderBudgetOverflowPolicy::Degrade: return "degrade";
+		case RenderBudgetOverflowPolicy::Serialize: return "serialize";
+		case RenderBudgetOverflowPolicy::Reject: return "reject";
+		default: return "unknown";
+		}
+	}
+
+	std::string ToString(RenderQueueCategory category)
+	{
+		switch (category)
+		{
+		case RenderQueueCategory::Transfer: return "transfer";
+		case RenderQueueCategory::Compute: return "compute";
+		case RenderQueueCategory::Graphics: return "graphics";
+		case RenderQueueCategory::Presentation: return "presentation";
+		default: return "unknown";
+		}
+	}
+
+	std::string ToString(RenderQueueMode mode)
+	{
+		switch (mode)
+		{
+		case RenderQueueMode::Parallel: return "parallel";
+		case RenderQueueMode::Serial: return "serial";
+		case RenderQueueMode::Unavailable: return "unavailable";
+		case RenderQueueMode::Fallback: return "fallback";
+		default: return "unknown";
+		}
+	}
+
 	bool IsWriteAccess(RenderAccessMode mode)
 	{
 		return mode == RenderAccessMode::Write
@@ -46,6 +115,81 @@ namespace TerraEngine::Renderer {
 			|| mode == RenderAccessMode::Present
 			|| mode == RenderAccessMode::Upload
 			|| mode == RenderAccessMode::Resolve;
+	}
+
+	bool IsCoordinatorOwnedAccess(RenderAccessMode mode)
+	{
+		return mode == RenderAccessMode::Present;
+	}
+
+	bool IsRenderWorkOverBudget(const RenderWorkBudget& budget)
+	{
+		return budget.limit > 0u && budget.currentUsage > budget.limit;
+	}
+
+	bool IsCancellationTokenCurrent(const RenderCancellationToken& token, std::uint64_t ownerRevision, std::uint64_t frameId)
+	{
+		return token.ownerRevision == ownerRevision && token.frameId == frameId;
+	}
+
+	bool IsRenderWorkPacketStale(const RenderWorkPacket& packet, std::uint64_t ownerRevision, std::uint64_t frameId)
+	{
+		if (packet.state == RenderPacketState::Stale || packet.state == RenderPacketState::Cancelled)
+		{
+			return true;
+		}
+		return !IsCancellationTokenCurrent(packet.cancellationToken, ownerRevision, frameId);
+	}
+
+	namespace {
+		void HashCombine(std::uint64_t& seed, std::uint64_t value)
+		{
+			seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+		}
+
+		std::uint64_t HashUuid(const TerraEngine::UUID& id)
+		{
+			return static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(id));
+		}
+
+		std::uint64_t HashMatrix(const glm::mat4& matrix)
+		{
+			std::uint64_t hash = 1469598103934665603ull;
+			for (int column = 0; column < 4; ++column)
+			{
+				for (int row = 0; row < 4; ++row)
+				{
+					std::uint32_t bits = 0u;
+					const float value = matrix[column][row];
+					std::memcpy(&bits, &value, sizeof(float));
+					HashCombine(hash, bits);
+				}
+			}
+			return hash;
+		}
+	}
+
+	PreparedDrawPacketSignature BuildPreparedDrawPacketSignature(const RenderFrameRenderableRecord& record)
+	{
+		PreparedDrawPacketSignature signature;
+		signature.objectId = record.objectId;
+		signature.meshId = record.meshId;
+		signature.materialId = record.materialId;
+		signature.transformHash = HashMatrix(record.modelMatrix);
+		signature.visibilityHash = record.taskShaderCullingEnabled ? 1u : 0u;
+		signature.overrideHash = record.usingFallback ? 1u : 0u;
+		return signature;
+	}
+
+	std::uint64_t HashPreparedDrawPacketSignature(const PreparedDrawPacketSignature& signature)
+	{
+		std::uint64_t hash = HashUuid(signature.objectId);
+		HashCombine(hash, HashUuid(signature.meshId));
+		HashCombine(hash, HashUuid(signature.materialId));
+		HashCombine(hash, signature.transformHash);
+		HashCombine(hash, signature.visibilityHash);
+		HashCombine(hash, signature.overrideHash);
+		return hash;
 	}
 
 	namespace {
@@ -85,6 +229,21 @@ namespace TerraEngine::Renderer {
 			if (pass.workPolicy != RenderWorkPolicy::WorkerEligible && pass.fallbackReason.empty())
 			{
 				AddDiagnostic(result, "missing-serial-reason", pass.passId, "Serial or fallback pass has no reason.", "Explain the ownership or capability boundary.");
+			}
+			if (pass.ownership == RenderWorkerOwnership::CoordinatorOnly && pass.workPolicy == RenderWorkPolicy::WorkerEligible)
+			{
+				AddDiagnostic(result, "worker-owns-coordinator-pass", pass.passId, "Coordinator-owned pass is marked worker eligible.", "Serialize coordinator-only work.");
+			}
+			if (!pass.canOverlap && pass.workPolicy == RenderWorkPolicy::WorkerEligible && pass.dependencies.empty())
+			{
+				AddDiagnostic(result, "missing-non-overlap-dependency", pass.passId, "Non-overlapping worker pass has no ordering dependency.", "Add a dependency or mark the pass serial.");
+			}
+			for (const RenderResourceState& output : pass.outputs)
+			{
+				if (IsCoordinatorOwnedAccess(output.accessMode) && pass.ownership != RenderWorkerOwnership::CoordinatorOnly)
+				{
+					AddDiagnostic(result, "present-not-coordinator-owned", pass.passId, "Presentation output is not coordinator-owned.", "Keep presentation and final submit on the coordinator path.");
+				}
 			}
 		}
 
@@ -190,6 +349,8 @@ namespace TerraEngine::Renderer {
 				packet.executionPolicy = passCanUseWorkers ? RenderPacketExecutionPolicy::Worker : RenderPacketExecutionPolicy::Serial;
 				packet.inputs = pass.inputs;
 				packet.outputs = pass.outputs;
+				packet.failurePolicy = pass.failurePolicy;
+				packet.cancellationToken = { snapshot.frameId, snapshot.sceneRevision, snapshot.frameId, "frame-snapshot" };
 				packet.profilingLabel = pass.profilingLabel;
 				plan.workerPacketCount += packet.executionPolicy == RenderPacketExecutionPolicy::Worker ? 1u : 0u;
 				plan.serialPacketCount += packet.executionPolicy == RenderPacketExecutionPolicy::Serial ? 1u : 0u;

@@ -29,6 +29,22 @@ struct RHIConfig
 
 namespace TerraEngine::Renderer {
 
+	enum class RenderBackendQueueMode
+	{
+		Parallel,
+		Serial,
+		Unavailable,
+		Fallback
+	};
+
+	struct BackendQueueCapability
+	{
+		std::string category;
+		RenderBackendQueueMode mode = RenderBackendQueueMode::Serial;
+		bool handoffRequired = false;
+		std::string fallbackReason;
+	};
+
 	// BackendCapabilityProfile is the renderer-facing promise a graphics API
 	// makes before it receives frame work. RenderSystem uses these values to
 	// decide what can run on workers and which operations must stay serialized.
@@ -52,10 +68,15 @@ namespace TerraEngine::Renderer {
 		bool supportsPacketLocalDiagnostics = false;
 		bool supportsRenderTaskGroups = false;
 		bool supportsFrameOverlap = false;
+		bool supportsRenderWorkBudgets = false;
+		bool supportsMultiQueueReadiness = false;
+		bool supportsWorkerOwnedPreparation = false;
 		std::uint32_t maxRecordingWorkers = 1u;
 		std::uint32_t workerSchedulingThreshold = 128u;
+		std::uint32_t maxPreparedFrames = 1u;
 		std::vector<std::string> requiredSerialBoundaries;
 		std::vector<std::string> diagnosticCapabilities;
+		std::vector<BackendQueueCapability> queueCapabilities;
 	};
 
 }

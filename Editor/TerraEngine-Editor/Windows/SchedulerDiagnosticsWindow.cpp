@@ -95,6 +95,11 @@ namespace
 		}
 		return "inline";
 	}
+
+	const char* RenderViewText(RenderViewType viewType)
+	{
+		return viewType == RenderViewType::Scene ? "Scene" : "Game";
+	}
 }
 
 SchedulerDiagnosticsWindow::SchedulerDiagnosticsWindow(MainEditorSubsystem* windowOwner)
@@ -310,7 +315,11 @@ void SchedulerDiagnosticsWindow::DrawRenderGraphSummary()
 		ImGui::TreePop();
 	}
 
-	if (!summary.backendFrameBreakdown.samples.empty() && ImGui::TreeNode("Backend Frame Breakdown"))
+	if ((!summary.backendFrameBreakdown.samples.empty()
+		|| !summary.backendFrameBreakdown.stageTimings.empty()
+		|| !summary.backendStalls.empty()
+		|| !summary.viewSubmitWork.empty())
+		&& ImGui::TreeNode("Backend Frame Breakdown"))
 	{
 		if (ImGui::BeginTable("SchedulerDiagnosticsRenderBackendBreakdown", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 		{
@@ -326,7 +335,7 @@ void SchedulerDiagnosticsWindow::DrawRenderGraphSummary()
 				ImGui::TableSetColumnIndex(0);
 				ImGui::TextUnformatted(sample.label.c_str());
 				ImGui::TableSetColumnIndex(1);
-				ImGui::TextUnformatted(sample.viewType == RenderViewType::Scene ? "Scene" : "Game");
+				ImGui::TextUnformatted(RenderViewText(sample.viewType));
 				ImGui::TableSetColumnIndex(2);
 				if (sample.unavailable)
 				{
@@ -342,6 +351,105 @@ void SchedulerDiagnosticsWindow::DrawRenderGraphSummary()
 				ImGui::TextUnformatted(sample.shared ? "shared" : "view");
 			}
 			ImGui::EndTable();
+		}
+
+		if (!summary.backendFrameBreakdown.stageTimings.empty() && ImGui::TreeNode("Backend Submit Stages"))
+		{
+			if (ImGui::BeginTable("SchedulerDiagnosticsBackendSubmitStages", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("Stage");
+				ImGui::TableSetupColumn("View");
+				ImGui::TableSetupColumn("View Id");
+				ImGui::TableSetupColumn("Time");
+				ImGui::TableSetupColumn("Thread");
+				ImGui::TableSetupColumn("Backend");
+				ImGui::TableHeadersRow();
+				for (const TerraEngine::Renderer::BackendStageTiming& timing : summary.backendFrameBreakdown.stageTimings)
+				{
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted(timing.label.empty() ? TerraEngine::Renderer::ToString(timing.stage) : timing.label.c_str());
+					ImGui::TableSetColumnIndex(1);
+					ImGui::TextUnformatted(RenderViewText(timing.viewType));
+					ImGui::TableSetColumnIndex(2);
+					ImGui::Text("%u", timing.viewId);
+					ImGui::TableSetColumnIndex(3);
+					ImGui::Text("%.3f ms", timing.milliseconds);
+					ImGui::TableSetColumnIndex(4);
+					ImGui::Text("%u", timing.threadId);
+					ImGui::TableSetColumnIndex(5);
+					ImGui::TextUnformatted(timing.backendId.c_str());
+				}
+				ImGui::EndTable();
+			}
+			ImGui::TreePop();
+		}
+
+		if (!summary.backendStalls.empty() && ImGui::TreeNode("Backend Stalls"))
+		{
+			if (ImGui::BeginTable("SchedulerDiagnosticsBackendStalls", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("Severity");
+				ImGui::TableSetupColumn("Type");
+				ImGui::TableSetupColumn("Stage");
+				ImGui::TableSetupColumn("View Id");
+				ImGui::TableSetupColumn("Time");
+				ImGui::TableSetupColumn("Action");
+				ImGui::TableHeadersRow();
+				for (const TerraEngine::Renderer::BackendStallDiagnostic& stall : summary.backendStalls)
+				{
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted(TerraEngine::Renderer::ToString(stall.severity));
+					ImGui::TableSetColumnIndex(1);
+					ImGui::TextUnformatted(TerraEngine::Renderer::ToString(stall.waitType));
+					ImGui::TableSetColumnIndex(2);
+					ImGui::TextUnformatted(TerraEngine::Renderer::ToString(stall.owningStage));
+					ImGui::TableSetColumnIndex(3);
+					ImGui::Text("%u", stall.viewId);
+					ImGui::TableSetColumnIndex(4);
+					ImGui::Text("%.3f / %.3f ms", stall.milliseconds, stall.thresholdMilliseconds);
+					ImGui::TableSetColumnIndex(5);
+					ImGui::TextWrapped("%s", stall.recommendedAction.c_str());
+				}
+				ImGui::EndTable();
+			}
+			ImGui::TreePop();
+		}
+
+		if (!summary.viewSubmitWork.empty() && ImGui::TreeNode("Scene/Game Submit Reuse"))
+		{
+			if (ImGui::BeginTable("SchedulerDiagnosticsViewSubmitReuse", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("View");
+				ImGui::TableSetupColumn("View Id");
+				ImGui::TableSetupColumn("Recording");
+				ImGui::TableSetupColumn("Submit");
+				ImGui::TableSetupColumn("Decision");
+				ImGui::TableSetupColumn("Key");
+				ImGui::TableSetupColumn("Reason");
+				ImGui::TableHeadersRow();
+				for (const TerraEngine::Renderer::ViewSubmitWorkItem& item : summary.viewSubmitWork)
+				{
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted(RenderViewText(item.viewType));
+					ImGui::TableSetColumnIndex(1);
+					ImGui::Text("%u", item.viewId);
+					ImGui::TableSetColumnIndex(2);
+					ImGui::Text("%.3f ms", item.recordingMilliseconds);
+					ImGui::TableSetColumnIndex(3);
+					ImGui::Text("%.3f ms", item.submitMilliseconds);
+					ImGui::TableSetColumnIndex(4);
+					ImGui::TextUnformatted(TerraEngine::Renderer::ToString(item.reuseDecision));
+					ImGui::TableSetColumnIndex(5);
+					ImGui::TextUnformatted(item.sharedWorkKey.c_str());
+					ImGui::TableSetColumnIndex(6);
+					ImGui::TextWrapped("%s", item.reuseReason.c_str());
+				}
+				ImGui::EndTable();
+			}
+			ImGui::TreePop();
 		}
 		ImGui::TreePop();
 	}
@@ -371,6 +479,62 @@ void SchedulerDiagnosticsWindow::DrawRenderGraphSummary()
 				ImGui::TextWrapped("%s", group.cancelled ? group.cancellationReason.c_str() : "active");
 			}
 			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
+
+	if (!summary.budgetDiagnostics.empty() && ImGui::TreeNode("Render Budgets"))
+	{
+		if (ImGui::BeginTable("SchedulerDiagnosticsRenderBudgets", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Category");
+			ImGui::TableSetupColumn("Usage");
+			ImGui::TableSetupColumn("Limit");
+			ImGui::TableSetupColumn("Policy");
+			ImGui::TableSetupColumn("State");
+			ImGui::TableHeadersRow();
+			for (const TerraEngine::Renderer::RenderBudgetDiagnostic& budget : summary.budgetDiagnostics)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(budget.label.c_str());
+				ImGui::TableSetColumnIndex(1);
+				ImGui::Text("%zu", budget.currentUsage);
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%zu", budget.limit);
+				ImGui::TableSetColumnIndex(3);
+				ImGui::TextUnformatted(TerraEngine::Renderer::ToString(budget.overflowPolicy).c_str());
+				ImGui::TableSetColumnIndex(4);
+				ImGui::TextUnformatted(budget.overBudget ? "over" : "ok");
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
+
+	if (!summary.queueReadiness.empty() && ImGui::TreeNode("Render Queues"))
+	{
+		for (const TerraEngine::Renderer::RenderQueueReadiness& readiness : summary.queueReadiness)
+		{
+			ImGui::TextWrapped("%s: %s%s %s",
+				TerraEngine::Renderer::ToString(readiness.category).c_str(),
+				TerraEngine::Renderer::ToString(readiness.mode).c_str(),
+				readiness.handoffRequired ? " handoff" : "",
+				readiness.fallbackReason.c_str());
+		}
+		ImGui::TreePop();
+	}
+
+	if (!summary.performanceGates.empty() && ImGui::TreeNode("Performance Gates"))
+	{
+		for (const TerraEngine::Renderer::RenderPerformanceGateResult& gate : summary.performanceGates)
+		{
+			ImGui::TextWrapped("%s: %s (baseline %.3f, latest %.3f, threshold %.1f%%)",
+				gate.workloadName.c_str(),
+				gate.passed ? "pass" : "fail",
+				gate.baselineValue,
+				gate.latestValue,
+				gate.thresholdPercent);
 		}
 		ImGui::TreePop();
 	}

@@ -93,6 +93,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::uint64_t resourceId = 0u;
 		std::uint64_t retireAfterFrameId = 0u;
 		std::string debugName;
+		bool cancelled = false;
 	};
 
 	struct ThreadDiagnosticRecord
@@ -117,6 +118,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		ShaderMaterialPreparationPlan shaderMaterialPlan;
 		UiGeometryPreparationPlan uiPlan;
 		std::vector<FrameResourceRetirement> retiredResources;
+		std::vector<FrameResourceRetirement> waitingRetirements;
 		std::vector<ThreadDiagnosticRecord> diagnostics;
 	};
 
@@ -129,6 +131,7 @@ namespace TerraEngine::Renderer::Vulkan {
 		PersistentRenderPacketCacheStats RefreshPersistentRenderPackets(const RenderFrameSnapshot& snapshot);
 		void EnqueueResourceForRetirement(FrameResourceRetirement retirement);
 		std::vector<FrameResourceRetirement> RetireCompletedResources(std::uint64_t completedFrameId);
+		std::size_t PendingRetirementCount() const;
 		void PushThreadDiagnostic(std::uint32_t workerId, std::string message);
 		std::vector<ThreadDiagnosticRecord> DrainThreadDiagnostics();
 		VulkanRendererPreparationSummary BuildFramePreparation(

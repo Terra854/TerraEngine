@@ -35,8 +35,16 @@ scheduling thresholds, submission-plan rejection for stale or unsafe work,
 mock-backend portability, opt-in render diagnostics, backend frame breakdown
 categories, render worker task group planning, Vulkan recording-batch planning,
 thread-local recording context ownership, and stale backend batch rejection. The
-editor suite also checks that closing Scheduler Diagnostics disables render
-graph diagnostic collection with the ECS and scripting diagnostic toggles.
+complete renderer-threading checks also cover worker-owned render preparation,
+small-scene inline fallbacks, resource readiness fallbacks, upload budgets,
+deferred retirement safety, multi-queue readiness reports, non-fatal failure
+containment, randomized pass validation, and visible-frame versus queued
+background cost accounting. The backend submit-path checks split RHI begin,
+per-view submit, and RHI end work into named backend stages so acquire, fence,
+recording, descriptor, transition, submit, present, and forced-idle stalls can
+be diagnosed directly. The editor suite also checks that closing Scheduler
+Diagnostics disables render graph diagnostic collection with the ECS and
+scripting diagnostic toggles.
 
 For Linux-specific prerequisites and troubleshooting, see
 `Docs/LinuxSupport.md`.
@@ -79,6 +87,24 @@ TEMF/TETF/TMAT files are placeholders for compiled binary assets; regenerate
 them through the asset compilers before using the project as a runnable manual
 export. The automated tests still guard the manifest, scene references, UI
 signal, script signal, and startup coordinator decision.
+
+## Renderer Performance Baseline
+
+Renderer threading fixtures live at `Tests/Fixtures/RendererPerformanceBaseline`.
+The `workloads.json` manifest describes the small, medium, large, streaming,
+UI-heavy, shadow-heavy, scene-game-submit, and randomized-stress scenes used by
+the renderer graph tests and by manual profiling runs. Keep this fixture
+lightweight and committed:
+it is the shared reference for validating that small scenes stay inline, large
+stable scenes reuse prepared packets, streaming resources fall back instead of
+blocking the frame, and diagnostics stay opt-in.
+
+Use the Windows or Linux workflow below, then run three local editor captures
+with diagnostics closed and one capture with Scheduler Diagnostics open. Compare
+the visible-frame timings against queued background work before accepting a
+renderer-threading change. A regression should be fixed or recorded in the
+feature quickstart with the machine, scene, and backend context that reproduced
+it.
 
 ### Install After Code Changes
 

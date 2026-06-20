@@ -1,8 +1,20 @@
 #include "RenderFrameSnapshot.h"
 
+#include <functional>
+
 namespace TerraEngine::Renderer {
 
 	namespace {
+		void HashCombine(std::uint64_t& seed, std::uint64_t value)
+		{
+			seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+		}
+
+		std::uint64_t HashUuid(const TerraEngine::UUID& id)
+		{
+			return static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(id));
+		}
+
 		template<typename Record>
 		void SortByUuid(std::vector<Record>& records, TerraEngine::UUID Record::* member)
 		{
@@ -39,9 +51,45 @@ namespace TerraEngine::Renderer {
 		};
 
 		return snapshot.valid
+			&& !SnapshotContainsLiveMutableState(snapshot)
 			&& allResourcesResolved(snapshot.materials)
 			&& allResourcesResolved(snapshot.meshes)
 			&& allResourcesResolved(snapshot.textures);
+	}
+
+	bool SnapshotContainsLiveMutableState(const RenderFrameSnapshot& snapshot)
+	{
+		return snapshot.containsLiveMutableState;
+	}
+
+	std::uint64_t BuildSnapshotDeterministicHash(const RenderFrameSnapshot& snapshot)
+	{
+		std::uint64_t hash = snapshot.frameId;
+		HashCombine(hash, snapshot.sceneRevision);
+		HashCombine(hash, snapshot.resourceRevision);
+		HashCombine(hash, snapshot.valid ? 1u : 0u);
+		for (const RenderFrameViewRequest& view : snapshot.viewRequests)
+		{
+			HashCombine(hash, view.outputId);
+			HashCombine(hash, static_cast<std::uint64_t>(view.viewType));
+			HashCombine(hash, view.targetSize.x);
+			HashCombine(hash, view.targetSize.y);
+		}
+		for (const RenderFrameRenderableRecord& renderable : snapshot.renderables)
+		{
+			HashCombine(hash, HashUuid(renderable.objectId));
+			HashCombine(hash, HashUuid(renderable.meshId));
+			HashCombine(hash, HashUuid(renderable.materialId));
+			HashCombine(hash, renderable.taskShaderCullingEnabled ? 1u : 0u);
+			HashCombine(hash, renderable.usingFallback ? 1u : 0u);
+		}
+		for (const RenderFrameLightRecord& light : snapshot.lights)
+		{
+			HashCombine(hash, HashUuid(light.lightId));
+			HashCombine(hash, light.lightType);
+			HashCombine(hash, light.castsShadows ? 1u : 0u);
+		}
+		return hash;
 	}
 
 	std::uint64_t EstimateSnapshotWorkload(const RenderFrameSnapshot& snapshot)

@@ -26,6 +26,14 @@ namespace TerraEngine::Tests {
 			context.Expect(!breakdown.samples.empty(), "Fallback breakdown should name unavailable sections.");
 			context.Expect(breakdown.samples.front().unavailable, "Fallback sections should be explicitly unavailable.");
 		});
+
+		registry.Add("Renderer.FrameBreakdown.SeparatesVisibleAndBackgroundWork", [](TestContext& context) {
+			TerraEngine::Renderer::BackendFrameBreakdown breakdown;
+			TerraEngine::Renderer::AddBackendFrameCost(breakdown, TerraEngine::Renderer::BackendFrameCostCategory::VisibleFrameWork, RenderViewType::Game, 3.0f);
+			TerraEngine::Renderer::AddBackendFrameCost(breakdown, TerraEngine::Renderer::BackendFrameCostCategory::QueuedBackgroundWork, RenderViewType::Game, 2.0f);
+			context.ExpectEqual(3.0f, TerraEngine::Renderer::SumVisibleBackendFrameCost(breakdown), "Visible work should exclude queued background work.");
+			context.ExpectEqual(2.0f, TerraEngine::Renderer::SumQueuedBackendFrameCost(breakdown), "Queued background work should be measured separately.");
+		});
 	}
 
 }

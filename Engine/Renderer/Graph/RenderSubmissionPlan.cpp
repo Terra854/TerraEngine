@@ -35,6 +35,12 @@ namespace TerraEngine::Renderer {
 				plan.resourceTransitions.push_back(output);
 			}
 		}
+		plan.queueReadiness = {
+			{ RenderQueueCategory::Transfer, RenderQueueMode::Serial, false, "Single-queue fallback remains valid until backend reports queue overlap." },
+			{ RenderQueueCategory::Compute, RenderQueueMode::Unavailable, false, "No compute overlap requested by this frame." },
+			{ RenderQueueCategory::Graphics, RenderQueueMode::Serial, false, {} },
+			{ RenderQueueCategory::Presentation, RenderQueueMode::Serial, false, "Presentation remains coordinator-owned." }
+		};
 
 		ValidateRenderSubmissionPlan(plan, currentFrameId);
 		return plan;
@@ -60,11 +66,30 @@ namespace TerraEngine::Renderer {
 		{
 			if (packet.state == RenderPacketState::Failed)
 			{
-				AddSubmissionDiagnostic(plan, "failed-packet", "Required render work packet failed.", "Use a validated fallback or block submission.");
+				if (packet.failurePolicy == RenderFailurePolicy::Fatal)
+				{
+					plan.fatalFailures.push_back(packet.packetId);
+					AddSubmissionDiagnostic(plan, "failed-packet", "Required render work packet failed.", "Use a validated fallback or block submission.");
+				}
+				else
+				{
+					plan.degradedWork.push_back(packet.packetId);
+				}
 			}
 			if (packet.state == RenderPacketState::Cancelled)
 			{
-				AddSubmissionDiagnostic(plan, "cancelled-packet", "Required render work packet was cancelled.", "Rebuild the frame or serialize the pass.");
+				if (packet.failurePolicy == RenderFailurePolicy::Fatal)
+				{
+					AddSubmissionDiagnostic(plan, "cancelled-packet", "Required render work packet was cancelled.", "Rebuild the frame or serialize the pass.");
+				}
+				else
+				{
+					plan.degradedWork.push_back(packet.packetId);
+				}
+			}
+			if (packet.state == RenderPacketState::Stale)
+			{
+				AddSubmissionDiagnostic(plan, "stale-packet", "Render work packet completed after its owner changed.", "Discard stale results before publishing.");
 			}
 			for (const RenderResourceState& output : packet.outputs)
 			{
@@ -72,6 +97,13 @@ namespace TerraEngine::Renderer {
 				{
 					AddSubmissionDiagnostic(plan, "worker-present", "Worker packet attempted to own presentation state.", "Keep presentation resources coordinator-owned.");
 				}
+			}
+		}
+		for (const RenderQueueReadiness& readiness : plan.queueReadiness)
+		{
+			if (readiness.mode == RenderQueueMode::Parallel && readiness.handoffRequired && readiness.fallbackReason.empty())
+			{
+				AddSubmissionDiagnostic(plan, "missing-queue-handoff-reason", "Parallel queue readiness requires a documented ownership handoff.", "Record the queue handoff or use serial fallback.");
 			}
 		}
 		return plan.valid;

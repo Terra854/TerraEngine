@@ -25,6 +25,8 @@ namespace TerraEngine::Renderer {
 		std::size_t requestedWorkItems = 0u;
 		std::size_t workerCount = 0u;
 		std::size_t serialCount = 0u;
+		bool inlinedForSmallWork = false;
+		std::string serialFallbackReason;
 		bool cancelled = false;
 		std::string cancellationReason;
 	};

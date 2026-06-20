@@ -180,10 +180,18 @@ namespace {
 		std::vector<FrameResourceRetirement> retired;
 		while (!pendingRetirements.empty() && pendingRetirements.front().retireAfterFrameId <= completedFrameId)
 		{
-			retired.push_back(std::move(pendingRetirements.front()));
+			if (!pendingRetirements.front().cancelled)
+			{
+				retired.push_back(std::move(pendingRetirements.front()));
+			}
 			pendingRetirements.pop_front();
 		}
 		return retired;
+	}
+
+	std::size_t VulkanRendererPreparationCache::PendingRetirementCount() const
+	{
+		return pendingRetirements.size();
 	}
 
 	void VulkanRendererPreparationCache::PushThreadDiagnostic(std::uint32_t workerId, std::string message)
@@ -234,6 +242,7 @@ namespace {
 		summary.shaderMaterialPlan = BuildShaderMaterialPreparationPlan(snapshot, capabilities);
 		summary.uiPlan = BuildUiGeometryPreparationPlan(snapshot, capabilities);
 		summary.retiredResources = RetireCompletedResources(snapshot.frameId > 2u ? snapshot.frameId - 2u : 0u);
+		summary.waitingRetirements.assign(pendingRetirements.begin(), pendingRetirements.end());
 		summary.diagnostics = DrainThreadDiagnostics();
 		return summary;
 	}

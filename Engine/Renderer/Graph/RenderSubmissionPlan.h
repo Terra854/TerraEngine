@@ -18,7 +18,10 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderPassNode> orderedPasses;
 		std::vector<RenderWorkPacket> recordedWork;
 		std::vector<RenderResourceState> resourceTransitions;
+		std::vector<RenderQueueReadiness> queueReadiness;
 		std::vector<std::string> fallbacksUsed;
+		std::vector<std::string> degradedWork;
+		std::vector<std::string> fatalFailures;
 		std::vector<RenderGraphValidationDiagnostic> validationDiagnostics;
 		bool frameOverlapAllowed = false;
 		std::vector<std::string> frameOverlapBlockedReasons;
