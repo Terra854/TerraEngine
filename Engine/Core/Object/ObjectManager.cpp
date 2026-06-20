@@ -495,6 +495,13 @@ std::optional<Object> ObjectManager::getObject(const TerraEngine::UUID& id)
 	return std::nullopt;
 }
 
+void ObjectManager::SortObjectsByStableId(std::vector<Object>& objects)
+{
+	std::sort(objects.begin(), objects.end(), [this](const Object& lhs, const Object& rhs) {
+		return TerraEngine::ToHexString(getUUID(lhs.EntityId())) < TerraEngine::ToHexString(getUUID(rhs.EntityId()));
+	});
+}
+
 // ObjectManager::UpdateEntityUUID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::UpdateEntityUUID(entt::entity entity, const TerraEngine::UUID& newId)
 {

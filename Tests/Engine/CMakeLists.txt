@@ -21,9 +21,12 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackPlanner.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
+	Core/ComponentAccessTests.cpp
+	Core/EcsQueryTaskGraphTests.cpp
 	Core/ObjectManagerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Core/JobGraphTests.cpp
 	Core/SystemSchedulerTests.cpp
+	Core/TransformTaskGraphTests.cpp
 	Platform/PlatformUtilsTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
 	Renderer/RenderTypesTests.cpp

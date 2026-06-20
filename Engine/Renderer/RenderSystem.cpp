@@ -8,6 +8,7 @@
 #include "UI/UISystem.h"
 #include "RHI/Vulkan/VulkanContext.h"
 #include "Core/Logger/Logger.h"
+#include "Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Window/WindowSystem.h"
 #include "Components/CameraComponent.h"
 #include "Components/MeshRenderComponent.h"
@@ -30,6 +31,7 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
@@ -95,6 +97,47 @@ namespace
 		sanitized.ambientOcclusionQuality = std::min(sanitized.ambientOcclusionQuality, 3u);
 		sanitized.enableIBL = sanitized.enableIBL > 0u ? 1u : 0u;
 		return sanitized;
+	}
+
+	TerraEngine::Scheduling::EcsComponentQueryDeclaration MakeProtectedRenderQuery(
+		std::string queryName,
+		bool includeDiagnosticsMetadata,
+		std::initializer_list<const char*> reads,
+		std::initializer_list<const char*> readResources,
+		std::initializer_list<const char*> writeResources,
+		TerraEngine::Scheduling::EcsQueryChunkWork work)
+	{
+		TerraEngine::Scheduling::EcsComponentQueryDeclaration query;
+		query.queryName = std::move(queryName);
+		if (includeDiagnosticsMetadata)
+		{
+			query.access.ownerSystem = "RenderSystem";
+			query.access.queryName = query.queryName;
+			query.access.readComponents.assign(reads.begin(), reads.end());
+			query.access.readResources.assign(readResources.begin(), readResources.end());
+			query.access.writeResources.assign(writeResources.begin(), writeResources.end());
+			query.access.workerEligible = false;
+			query.access.mainThreadReason = "Renderer collection currently reads live EnTT component storage and frame allocator containers.";
+		}
+		query.preserveMatchingObjectOrder = true;
+		query.copyObjectIdsIntoChunks = false;
+		query.runOnceWithoutObjectSnapshot = true;
+		query.work = std::move(work);
+		return query;
+	}
+
+	Transform ReflectTransformComponent(const Transform& transform)
+	{
+		Transform reflectedTransform{};
+		// Render collection runs as protected main-thread work after scripting,
+		// so it can read the concrete component fields directly. Avoiding the
+		// reflection getter here removes repeated property lookup, variant
+		// wrapping, and shared-lock overhead from every visible object each
+		// frame.
+		reflectedTransform.position = transform.position;
+		reflectedTransform.rotation = transform.rotation;
+		reflectedTransform.scale = transform.scale;
+		return reflectedTransform;
 	}
 
 	// SafeNormalizeDirection is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -307,51 +350,164 @@ void RenderSystem::Update(float deltaTime)
 	// Capture all transforms first so hierarchical world transforms can be derived for cameras and renderables.
 	FrameMap<entt::entity, Transform> localTransforms;
 	localTransforms.reserve(1000); // Guess initial size
-
-	{
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Transforms", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		objManager.forEachObjectWithComponents<Transform>(
-			[&](Object object, Transform& transform)
-			{
-				Transform reflectedTransform{};
-				reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-				reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-				reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-				localTransforms.emplace(object.EntityId(), reflectedTransform);
-			}
-		);
-	}
-
 	// Snapshot camera components so view/projection data is sourced from
 	// authored entities instead of the legacy hardcoded values.
 	FrameVector<CameraEntry> cameras;
 	cameras.reserve(10);
-
+	// Snapshot renderable components to avoid locking the registry during parallel work.
+	FrameVector<RenderableEntry> renderables;
+	renderables.reserve(1000);
+	// Snapshot scene light components so packing can run in worker tasks without
+	// touching the entity registry after this point.
+	FrameVector<LightEntry> lights;
+	lights.reserve(256);
 	{
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		objManager.forEachObjectWithComponents<Transform, CameraComponent>(
-			[&](Object object, Transform& transform, CameraComponent& cameraComp)
-			{
-				CameraComponent reflectedCamera{};
-				reflectedCamera.verticalFovDegrees = GetComponentProperty<CameraComponent, float>(cameraComp, "verticalFovDegrees");
-				reflectedCamera.aspectRatio = GetComponentProperty<CameraComponent, float>(cameraComp, "aspectRatio");
-				reflectedCamera.nearPlane = GetComponentProperty<CameraComponent, float>(cameraComp, "nearPlane");
-				reflectedCamera.farPlane = GetComponentProperty<CameraComponent, float>(cameraComp, "farPlane");
-				reflectedCamera.up = GetComponentProperty<CameraComponent, glm::vec3>(cameraComp, "up");
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: ECS Collection Graph", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		const bool diagnosticsEnabled = TerraEngine::Scheduling::EcsGraphFrameDiagnosticsEnabled();
+		TerraEngine::Scheduling::EcsQueryTaskGraph renderCollectionGraph({ "render-system-collection", "Render System Collection", false, diagnosticsEnabled });
 
-				cameras.push_back({ object.EntityId(), reflectedCamera });
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!localTransforms.contains(object.EntityId()))
+		renderCollectionGraph.AddQuery(MakeProtectedRenderQuery(
+			"Render.CollectTransforms",
+			diagnosticsEnabled,
+			{ "Transform" },
+			{},
+			{ "Render.LocalTransforms" },
+			[this, &localTransforms](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Transforms", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				objManager.forEachObjectWithComponents<Transform>(
+					[&](Object object, Transform& transform)
+					{
+						localTransforms.emplace(object.EntityId(), ReflectTransformComponent(transform));
+					}
+				);
+			}));
+
+		renderCollectionGraph.AddQuery(MakeProtectedRenderQuery(
+			"Render.CollectCameras",
+			diagnosticsEnabled,
+			{ "Transform", "CameraComponent" },
+			{ "Render.LocalTransforms" },
+			{ "Render.CameraCollection" },
+			[this, &cameras, &localTransforms](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				objManager.forEachObjectWithComponents<Transform, CameraComponent>(
+					[&](Object object, Transform&, CameraComponent& cameraComp)
+					{
+						CameraComponent reflectedCamera{};
+						reflectedCamera.verticalFovDegrees = cameraComp.verticalFovDegrees;
+						reflectedCamera.aspectRatio = cameraComp.aspectRatio;
+						reflectedCamera.nearPlane = cameraComp.nearPlane;
+						reflectedCamera.farPlane = cameraComp.farPlane;
+						reflectedCamera.up = cameraComp.up;
+						cameras.push_back({ object.EntityId(), reflectedCamera });
+					}
+				);
+			}));
+
+		renderCollectionGraph.AddQuery(MakeProtectedRenderQuery(
+			"Render.CollectRenderables",
+			diagnosticsEnabled,
+			{ "Transform", "MeshRenderComponent" },
+			{ "Render.LocalTransforms", "Render.CameraCollection" },
+			{ "Render.RenderableCollection" },
+			[&cameras, &renderables, &localTransforms, this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Renderables", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				if (cameras.empty() && !hasSceneViewCamera)
 				{
-					Transform reflectedTransform{};
-					reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-					reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-					reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-					localTransforms.emplace(object.EntityId(), reflectedTransform);
+					return;
 				}
-			}
-		);
+				objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
+					[&](Object object, Transform&, MeshRenderComponent& meshComp)
+					{
+						const TerraEngine::UUID meshId = meshComp.meshId;
+						const TerraEngine::UUID materialId = meshComp.materialId;
+						const TerraEngine::UUID spatialObjectId = meshComp.spatialObjectId;
+						const bool objectTaskCullingEnabled = meshComp.taskShaderCullingEnabled;
+						if (meshId == TerraEngine::EMPTY_UUID || materialId == TerraEngine::EMPTY_UUID)
+						{
+							return;
+						}
+
+						auto& rm = ResourceManager::Instance();
+						if (!rm.HasResource(meshId) || !rm.HasResource(materialId))
+						{
+							return;
+						}
+
+						MeshRenderComponent reflectedMesh{};
+						reflectedMesh.meshId = meshId;
+						reflectedMesh.materialId = materialId;
+						reflectedMesh.spatialObjectId = spatialObjectId;
+						reflectedMesh.taskShaderCullingEnabled = objectTaskCullingEnabled;
+						const TerraEngine::UUID objectId = spatialObjectId != TerraEngine::EMPTY_UUID ? spatialObjectId : object.getUUID();
+						renderables.push_back({ object.EntityId(), objectId, objManager.isObjectStatic(object), reflectedMesh });
+					}
+				);
+			}));
+
+		renderCollectionGraph.AddQuery(MakeProtectedRenderQuery(
+			"Render.CollectLights",
+			diagnosticsEnabled,
+			{ "Transform", "LightComponent" },
+			{ "Render.LocalTransforms" },
+			{ "Render.LightCollection" },
+			[this, &lights, &localTransforms](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Lights", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				objManager.forEachObjectWithComponents<Transform, LightComponent>(
+					[&](Object object, Transform&, LightComponent& lightComp)
+					{
+					LightComponent reflectedLight{};
+					const std::uint32_t encodedType = static_cast<std::uint32_t>(lightComp.type);
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+					if (encodedType > static_cast<std::uint32_t>(LightType::Area))
+					{
+						// Unsupported legacy light types are intentionally skipped so they
+						// are not silently remapped to another runtime behavior.
+						return;
+					}
+					reflectedLight.type = static_cast<LightType>(encodedType);
+
+					const std::uint32_t encodedUnit = static_cast<std::uint32_t>(lightComp.unit);
+					reflectedLight.unit = static_cast<LightUnit>(encodedUnit);
+
+					const std::uint32_t encodedAppearance = static_cast<std::uint32_t>(lightComp.appearance);
+					reflectedLight.appearance = static_cast<LightAppearance>(encodedAppearance);
+
+					reflectedLight.color = lightComp.color;
+					reflectedLight.temperature = lightComp.temperature;
+					reflectedLight.intensity = lightComp.intensity;
+					reflectedLight.range = lightComp.range;
+					reflectedLight.innerConeAngle = lightComp.innerConeAngle;
+					reflectedLight.outerConeAngle = lightComp.outerConeAngle;
+					reflectedLight.width = lightComp.width;
+					reflectedLight.height = lightComp.height;
+					reflectedLight.castsShadows = lightComp.castsShadows;
+					reflectedLight.shadowStrength = lightComp.shadowStrength;
+					reflectedLight.shadowBias = lightComp.shadowBias;
+					reflectedLight.indirectMultiplier = lightComp.indirectMultiplier;
+					reflectedLight.authoredPriority = lightComp.authoredPriority;
+					reflectedLight.stabilityPreference = lightComp.stabilityPreference;
+
+					lights.push_back({ object.EntityId(), object.getUUID(), reflectedLight });
+					}
+				);
+			}));
+
+		const TerraEngine::Scheduling::EcsSystemGraphFrameSummary& graphSummary = renderCollectionGraph.Execute();
+		if (diagnosticsEnabled)
+		{
+			TerraEngine::Scheduling::PublishEcsGraphFrameSummary(graphSummary);
+		}
+		if (!graphSummary.valid)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, TerraEngine::Scheduling::FormatEcsSystemGraphFrameSummary(graphSummary));
+		}
 	}
+
 	// Throttle warning spam so missing cameras do not flood the console every frame.
 	static bool loggedMissingCamera = false;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -366,108 +522,6 @@ void RenderSystem::Update(float deltaTime)
 	else
 	{
 		loggedMissingCamera = false;
-	}
-
-	// Snapshot renderable components to avoid locking the registry during parallel work.
-	FrameVector<RenderableEntry> renderables;
-	renderables.reserve(1000);
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!cameras.empty() || hasSceneViewCamera)
-	{
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Renderables", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
-			[&](Object object, Transform& transform, MeshRenderComponent& meshComp)
-			{
-				const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
-				const TerraEngine::UUID materialId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "materialId");
-				const TerraEngine::UUID spatialObjectId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "spatialObjectId");
-				const bool objectTaskCullingEnabled = GetComponentProperty<MeshRenderComponent, bool>(meshComp, "taskShaderCullingEnabled");
-				
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (meshId != TerraEngine::EMPTY_UUID && materialId != TerraEngine::EMPTY_UUID)
-				{
-					// Ensure resources still exist in the cache to prevent renderer crashes
-					auto& rm = ResourceManager::Instance();
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (rm.HasResource(meshId) && rm.HasResource(materialId))
-					{
-						MeshRenderComponent reflectedMesh{};
-						reflectedMesh.meshId = meshId;
-						reflectedMesh.materialId = materialId;
-						reflectedMesh.spatialObjectId = spatialObjectId;
-						reflectedMesh.taskShaderCullingEnabled = objectTaskCullingEnabled;
-
-						const TerraEngine::UUID objectId = spatialObjectId != TerraEngine::EMPTY_UUID ? spatialObjectId : object.getUUID();
-						renderables.push_back({ object.EntityId(), objectId, objManager.isObjectStatic(object), reflectedMesh });
-						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-						if (!localTransforms.contains(object.EntityId()))
-						{
-							Transform reflectedTransform{};
-							reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-							reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-							reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-							localTransforms.emplace(object.EntityId(), reflectedTransform);
-						}
-					}
-				}
-			}
-		);
-	}
-
-	// Snapshot scene light components so packing can run in worker tasks without
-	// touching the entity registry after this point.
-	FrameVector<LightEntry> lights;
-	lights.reserve(256);
-	{
-		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Lights", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		objManager.forEachObjectWithComponents<Transform, LightComponent>(
-			[&](Object object, Transform& transform, LightComponent& lightComp)
-			{
-				LightComponent reflectedLight{};
-				const std::uint32_t encodedType = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "type");
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (encodedType > static_cast<std::uint32_t>(LightType::Area))
-				{
-					// Unsupported legacy light types are intentionally skipped so they
-					// are not silently remapped to another runtime behavior.
-					return;
-				}
-				reflectedLight.type = static_cast<LightType>(encodedType);
-				
-				const std::uint32_t encodedUnit = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "unit");
-				reflectedLight.unit = static_cast<LightUnit>(encodedUnit);
-
-				const std::uint32_t encodedAppearance = GetComponentProperty<LightComponent, std::uint32_t>(lightComp, "appearance");
-				reflectedLight.appearance = static_cast<LightAppearance>(encodedAppearance);
-
-				reflectedLight.color = GetComponentProperty<LightComponent, glm::vec3>(lightComp, "color");
-				reflectedLight.temperature = GetComponentProperty<LightComponent, float>(lightComp, "temperature");
-				reflectedLight.intensity = GetComponentProperty<LightComponent, float>(lightComp, "intensity");
-				reflectedLight.range = GetComponentProperty<LightComponent, float>(lightComp, "range");
-				reflectedLight.innerConeAngle = GetComponentProperty<LightComponent, float>(lightComp, "innerConeAngle");
-				reflectedLight.outerConeAngle = GetComponentProperty<LightComponent, float>(lightComp, "outerConeAngle");
-				reflectedLight.width = GetComponentProperty<LightComponent, float>(lightComp, "width");
-				reflectedLight.height = GetComponentProperty<LightComponent, float>(lightComp, "height");
-				reflectedLight.castsShadows = GetComponentProperty<LightComponent, bool>(lightComp, "castsShadows");
-				reflectedLight.shadowStrength = GetComponentProperty<LightComponent, float>(lightComp, "shadowStrength");
-				reflectedLight.shadowBias = GetComponentProperty<LightComponent, float>(lightComp, "shadowBias");
-				reflectedLight.indirectMultiplier = GetComponentProperty<LightComponent, float>(lightComp, "indirectMultiplier");
-				reflectedLight.authoredPriority = GetComponentProperty<LightComponent, float>(lightComp, "authoredPriority");
-				reflectedLight.stabilityPreference = GetComponentProperty<LightComponent, float>(lightComp, "stabilityPreference");
-
-				lights.push_back({ object.EntityId(), object.getUUID(), reflectedLight });
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!localTransforms.contains(object.EntityId()))
-				{
-					Transform reflectedTransform{};
-					reflectedTransform.position = GetComponentProperty<Transform, glm::vec3>(transform, "Position");
-					reflectedTransform.rotation = GetComponentProperty<Transform, glm::quat>(transform, "Rotation");
-					reflectedTransform.scale = GetComponentProperty<Transform, glm::vec3>(transform, "Scale");
-					localTransforms.emplace(object.EntityId(), reflectedTransform);
-				}
-			}
-		);
 	}
 
 	// Cache of computed world transforms to avoid recomputing during traversal.

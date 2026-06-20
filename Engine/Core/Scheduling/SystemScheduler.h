@@ -106,6 +106,8 @@ namespace TerraEngine::Scheduling {
 		std::vector<std::string> flushPoints;
 		std::vector<std::string> mainThreadSystems;
 		std::vector<std::string> defaultedSystems;
+		std::vector<std::string> componentQueryGroups;
+		std::string ecsGraphSummary;
 		std::vector<ScheduleDiagnostic> diagnostics;
 		std::string formatted;
 	};
@@ -137,6 +139,8 @@ namespace TerraEngine::Scheduling {
 		void SetMutationFlushPoints(std::vector<MutationFlushPoint> flushPoints);
 		void RegisterSystem(SystemsBase& system);
 		void RegisterSystem(SystemsBase& system, SystemDeclaration declaration);
+		void SetLatestEcsGraphSummary(std::string summary);
+		void SetLatestComponentQueryGroups(std::vector<std::string> queryGroups);
 
 		const ScheduleSummary& BuildSchedule();
 		const ScheduleSummary& ExecuteFrame(float deltaTime, const MutationFlushCallback& flushCallback);
@@ -158,6 +162,8 @@ namespace TerraEngine::Scheduling {
 		std::vector<RegisteredSystem> systems;
 		std::vector<std::size_t> orderedIndices;
 		std::vector<SystemDeclaration> orderedDeclarations;
+		std::vector<std::string> latestComponentQueryGroups;
+		std::string latestEcsGraphSummary;
 		ScheduleSummary latestSummary;
 		bool dirty = true;
 	};

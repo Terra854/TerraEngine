@@ -60,6 +60,8 @@ endif()
 set(ENGINE_SOURCES
 	Engine/Core/MainEngine.cpp
 	Engine/Core/Timer.cpp
+	Engine/Core/Scheduling/ComponentAccess.cpp
+	Engine/Core/Scheduling/EcsQueryTaskGraph.cpp
 	Engine/Core/Scheduling/JobGraph.cpp
 	Engine/Core/Scheduling/SystemScheduler.cpp
 	Engine/Core/Logger/Logger.cpp
@@ -120,6 +122,8 @@ set(ENGINE_HEADERS
 	Engine/Core/Logger/Logger.h
 	Engine/Core/SystemBase.h
 	Engine/Core/Timer.h
+	Engine/Core/Scheduling/ComponentAccess.h
+	Engine/Core/Scheduling/EcsQueryTaskGraph.h
 	Engine/Core/Scheduling/JobGraph.h
 	Engine/Core/Scheduling/SystemScheduler.h
 	Engine/Core/Object/Component.h
@@ -774,6 +778,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp
+	Editor/TerraEngine-Editor/Windows/SchedulerDiagnosticsWindow.cpp
 	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SkySettingsWindow.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp

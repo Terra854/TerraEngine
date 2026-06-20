@@ -39,6 +39,9 @@ public:
 	[[nodiscard]] const std::filesystem::path& GetLoadedGameplayAssemblyPath() const { return m_LoadedGameplayAssemblyPath; }
 	[[nodiscard]] const std::string& GetLastGameplayDiagnostic() const { return m_LastGameplayDiagnostic; }
 	[[nodiscard]] float GetLastDeltaTime() const { return m_LastDeltaTime; }
+	[[nodiscard]] bool ManagedCallbacksRunProtected() const { return true; }
+	[[nodiscard]] bool ManagedCallbacksRequireSchedulerAnnotations() const { return false; }
+	[[nodiscard]] std::string GetSchedulerBoundarySummary() const;
 
 	bool LoadGameplayAssembly(const std::filesystem::path& assemblyPath, std::string* outError = nullptr);
 	void ClearGameplayAssembly();

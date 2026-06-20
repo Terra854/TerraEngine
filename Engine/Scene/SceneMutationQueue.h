@@ -32,6 +32,13 @@ namespace TerraEngine::Scene {
 		ResetPrefabDefaults
 	};
 
+	enum class SceneComponentMutationPayloadKind {
+		None,
+		Add,
+		Remove,
+		Replace
+	};
+
 	struct SceneMutationRequest {
 		std::string requestId;
 		SceneMutationOperation operation = SceneMutationOperation::CreateObject;
@@ -40,6 +47,7 @@ namespace TerraEngine::Scene {
 		std::string displayName;
 		std::string componentName;
 		std::string payloadJson;
+		SceneComponentMutationPayloadKind componentPayloadKind = SceneComponentMutationPayloadKind::None;
 		std::uint64_t expectedGraphRevision = 0;
 	};
 

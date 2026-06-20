@@ -15,6 +15,8 @@ namespace TerraEngine::Tests {
 	void RegisterExportScriptingRuntimeTests(TestRegistry& registry);
 	void RegisterLinuxStartupSmokeTests(TestRegistry& registry);
 	void RegisterMaterialRuntimeContractTests(TestRegistry& registry);
+	void RegisterComponentAccessTests(TestRegistry& registry);
+	void RegisterEcsQueryTaskGraphTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
 	void RegisterJobGraphTests(TestRegistry& registry);
 	void RegisterPlatformUtilsTests(TestRegistry& registry);
@@ -27,6 +29,7 @@ namespace TerraEngine::Tests {
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
 	void RegisterSpatialBoundsTests(TestRegistry& registry);
 	void RegisterSystemSchedulerTests(TestRegistry& registry);
+	void RegisterTransformTaskGraphTests(TestRegistry& registry);
 	void RegisterSpatialIndexEdgeTests(TestRegistry& registry);
 	void RegisterSpatialIndexQueryTests(TestRegistry& registry);
 	void RegisterSpatialIndexRefreshTests(TestRegistry& registry);
@@ -57,6 +60,8 @@ int main() {
 	TerraEngine::Tests::RegisterExportScriptingRuntimeTests(registry);
 	TerraEngine::Tests::RegisterLinuxStartupSmokeTests(registry);
 	TerraEngine::Tests::RegisterMaterialRuntimeContractTests(registry);
+	TerraEngine::Tests::RegisterComponentAccessTests(registry);
+	TerraEngine::Tests::RegisterEcsQueryTaskGraphTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);
@@ -71,6 +76,7 @@ int main() {
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
 	TerraEngine::Tests::RegisterSpatialBoundsTests(registry);
 	TerraEngine::Tests::RegisterSystemSchedulerTests(registry);
+	TerraEngine::Tests::RegisterTransformTaskGraphTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexEdgeTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexQueryTests(registry);
 	TerraEngine::Tests::RegisterSpatialIndexRefreshTests(registry);

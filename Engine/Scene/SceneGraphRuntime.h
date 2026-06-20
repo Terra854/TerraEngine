@@ -89,6 +89,19 @@ namespace TerraEngine::Scene {
 		std::vector<SceneDiagnostic> diagnostics;
 	};
 
+	struct SceneTransformWorkUnit {
+		std::string workUnitId;
+		std::uint32_t hierarchyLevel = 0;
+		std::vector<SceneObjectId> objects;
+		std::vector<std::string> parentDependencies;
+	};
+
+	struct SceneTransformWorkPlan {
+		bool valid = true;
+		std::vector<SceneTransformWorkUnit> units;
+		std::vector<SceneDiagnostic> diagnostics;
+	};
+
 	TERRAENGINE_API std::string_view ToString(SceneDiagnosticSeverity severity);
 	TERRAENGINE_API std::string_view ToString(SceneDiagnosticCategory category);
 	TERRAENGINE_API std::string FormatSceneDiagnostic(const SceneDiagnostic& diagnostic);
@@ -98,6 +111,7 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API bool ValidateSceneGraph(SceneGraph& graph);
 	TERRAENGINE_API std::vector<SceneObjectId> BuildTraversalOrder(const SceneGraph& graph);
 	TERRAENGINE_API void ComputeWorldTransforms(SceneGraph& graph);
+	TERRAENGINE_API SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph);
 	TERRAENGINE_API SceneRuntimeSummary BuildSceneRuntimeSummary(const SceneGraph& graph);
 	TERRAENGINE_API bool ReparentPreserveWorld(ObjectManager& objects, Object child, std::optional<Object> parent);
 

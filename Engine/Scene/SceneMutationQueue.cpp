@@ -114,6 +114,15 @@ namespace TerraEngine::Scene {
 				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Object cannot be parented to itself.", "Choose a different parent or detach to root."));
 			}
 
+			if ((request.operation == SceneMutationOperation::AddComponent
+				|| request.operation == SceneMutationOperation::RemoveComponent
+				|| request.operation == SceneMutationOperation::UpdateComponent)
+				&& request.componentName.empty())
+			{
+				result.accepted = false;
+				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Component mutation is missing a component name.", "Set componentName so the owning system can apply the payload deterministically."));
+			}
+
 			if (request.operation == SceneMutationOperation::DeleteObject && result.accepted)
 			{
 				deletedTargets.insert(request.targetObjectId);
@@ -179,7 +188,7 @@ namespace TerraEngine::Scene {
 				}
 				break;
 			default:
-				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Info, request, "Mutation operation recorded but has no direct ObjectManager side effect yet.", "Prefab and component payloads are handled by their owning systems."));
+				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Info, request, "Mutation operation recorded but has no direct ObjectManager side effect yet.", "Prefab and component payloads are handled by their owning systems at the approved flush point."));
 				break;
 			}
 		}

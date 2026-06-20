@@ -473,6 +473,8 @@ void SceneManager::UnloadAll()
 // SceneManager::NullifyAssetReferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::NullifyAssetReferences(const TerraEngine::UUID& assetId)
 {
+	// MainEngine mirrors this mesh/material asset scan into EcsQueryTaskGraph metadata so scheduler diagnostics can
+	// reason about the component access before this protected scene-maintenance path mutates existing components.
 	ObjectManager::instance().forEachObjectWithComponents<MeshRenderComponent>(
 		[&](Object object, MeshRenderComponent& meshComp)
 		{

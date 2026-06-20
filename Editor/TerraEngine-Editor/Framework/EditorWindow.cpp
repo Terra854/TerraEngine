@@ -73,8 +73,11 @@ void EditorWindow::Draw() {
 		ImGui::EndPopup();
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (expanded) {
+	// A close request can run custom side effects such as disabling live
+	// diagnostics. Do not call OnGui again on that same frame after visibility
+	// changed, otherwise a window can immediately re-enable the state it just
+	// disabled.
+	if (expanded && m_IsVisible) {
 		OnGui();
 	}
 	ImGui::End();

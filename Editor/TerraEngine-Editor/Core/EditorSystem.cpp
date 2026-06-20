@@ -16,6 +16,7 @@
 #include "Engine/DotNet/DotNetHost.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Core/Logger/Logger.h"
+#include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
 
 // ImGui
 #include <imgui.h>
@@ -125,6 +126,7 @@ void EditorSystem::Setup(Engine* enginePtr) {
 
 	mainEditor->SetOnProjectClosedCallback([this]() {
 		SaveWorkspaceLayout();
+		TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
 
 		// Hide all C++ windows
 		auto windows = mainEditor->GetWindows();

@@ -22,6 +22,7 @@ add_executable(TerraEngine-EditorTests
 	Project/LinuxScriptEditorLaunchTests.cpp
 	Project/LinuxScriptWorkspaceTests.cpp
 	Scene/PrefabAuthoringWorkflowTests.cpp
+	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp

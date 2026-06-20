@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.h"
+#include "Scripting/ScriptingSystem.h"
 
 #include <filesystem>
 #include <string>
@@ -57,6 +58,14 @@ namespace TerraEngine::EditorTests {
 			context.Expect(command.find("Player Controller.cs") != std::string::npos, "Linux default script launch should include the clicked script path.");
 			context.Expect(command.find("Assembly-CSharp.sln") == std::string::npos, "Linux default script launch should not redirect script clicks to the solution file.");
 #endif
+		});
+
+		registry.Add("Editor.LinuxScriptEditorLaunch.CSharpAuthoringNeedsNoSchedulerAnnotations", [](TestContext& context) {
+			const ScriptingSystem& scripting = ScriptingSystem::Instance();
+
+			context.Expect(scripting.ManagedCallbacksRunProtected(), "Managed callbacks should remain on the protected scheduler boundary.");
+			context.Expect(!scripting.ManagedCallbacksRequireSchedulerAnnotations(), "C# gameplay authors should not need scheduler annotations.");
+			context.Expect(scripting.GetSchedulerBoundarySummary().find("no C# job") != std::string::npos, "Compatibility summary should clearly state the unchanged C# workflow.");
 		});
 	}
 }

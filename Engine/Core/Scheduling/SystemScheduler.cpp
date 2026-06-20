@@ -271,6 +271,16 @@ namespace TerraEngine::Scheduling {
 			stream << ' ' << system;
 		}
 		stream << '\n';
+		stream << "Component query groups:";
+		for (const std::string& group : summary.componentQueryGroups)
+		{
+			stream << " [" << group << "]";
+		}
+		stream << '\n';
+		if (!summary.ecsGraphSummary.empty())
+		{
+			stream << "ECS graph: " << summary.ecsGraphSummary << '\n';
+		}
 		if (summary.diagnostics.empty())
 		{
 			stream << "Diagnostics: none";
@@ -303,6 +313,8 @@ namespace TerraEngine::Scheduling {
 		systems.clear();
 		orderedIndices.clear();
 		orderedDeclarations.clear();
+		latestComponentQueryGroups.clear();
+		latestEcsGraphSummary.clear();
 		latestSummary = {};
 		dirty = true;
 	}
@@ -340,9 +352,33 @@ namespace TerraEngine::Scheduling {
 		dirty = true;
 	}
 
+	void SystemScheduler::SetLatestEcsGraphSummary(std::string summary)
+	{
+		if (latestEcsGraphSummary == summary)
+		{
+			return;
+		}
+		latestEcsGraphSummary = std::move(summary);
+		latestSummary.ecsGraphSummary = latestEcsGraphSummary;
+		latestSummary.formatted = FormatScheduleSummary(latestSummary);
+	}
+
+	void SystemScheduler::SetLatestComponentQueryGroups(std::vector<std::string> queryGroups)
+	{
+		if (latestComponentQueryGroups == queryGroups)
+		{
+			return;
+		}
+		latestComponentQueryGroups = std::move(queryGroups);
+		latestSummary.componentQueryGroups = latestComponentQueryGroups;
+		latestSummary.formatted = FormatScheduleSummary(latestSummary);
+	}
+
 	const ScheduleSummary& SystemScheduler::BuildSchedule()
 	{
 		latestSummary = {};
+		latestSummary.componentQueryGroups = latestComponentQueryGroups;
+		latestSummary.ecsGraphSummary = latestEcsGraphSummary;
 		orderedIndices.clear();
 		orderedDeclarations.clear();
 

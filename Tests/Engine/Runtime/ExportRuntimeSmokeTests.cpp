@@ -3,6 +3,7 @@
 #include "Resource/ResourceManager.h"
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ExportStartupCoordinator.h"
+#include "Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Scene/SceneManager.h"
 #include "TEPAK/PackWriter.h"
 #include "Utilities/UUID.h"
@@ -199,6 +200,24 @@ namespace TerraEngine::Tests {
 
 			context.Expect(!result.CanEnterRuntime(), "Launcher validation mode should reject missing startup scene content.");
 			context.ExpectEqual(std::string("Scenes/Missing.tescene"), result.summary.startupScene, "Validation summary should preserve the failing startup scene path.");
+		});
+
+		registry.Add("Engine.ExportRuntime.SchedulerGraphSmokeAcceptsProtectedExportSystems", [](TestContext& context) {
+			TerraEngine::Scheduling::EcsQueryTaskGraph graph({ "export-smoke", "Export Scheduler Smoke" });
+			TerraEngine::Scheduling::EcsComponentQueryDeclaration scripting;
+			scripting.queryName = "Scripting.ManagedCallbacks";
+			scripting.access.ownerSystem = "ScriptingSystem";
+			scripting.access.queryName = scripting.queryName;
+			scripting.access.readComponents = { "ScriptComponent" };
+			scripting.access.writeResources = { "Scripting" };
+			scripting.access.workerEligible = false;
+			scripting.access.mainThreadReason = "Managed C# callbacks remain protected in exported runtime.";
+			graph.AddQuery(std::move(scripting));
+
+			const auto& summary = graph.Execute();
+
+			context.Expect(summary.valid && summary.completed, "Export runtime scheduler smoke should accept protected managed callback work.");
+			context.Expect(summary.formatted.find("Scripting.ManagedCallbacks") != std::string::npos, "Export scheduler summary should name protected scripting work.");
 		});
 	}
 }

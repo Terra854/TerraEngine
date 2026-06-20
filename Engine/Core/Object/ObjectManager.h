@@ -148,6 +148,20 @@ public:
 		return objects;
 	}
 
+	// Snapshot matching objects before worker dispatch so query chunks iterate a
+	// stable list even if later systems request deferred structural mutations.
+	template<typename... Components>
+	std::vector<Object> SnapshotObjectsWithComponents()
+	{
+		std::vector<Object> objects = getObjectsWithComponents<Components...>();
+		SortObjectsByStableId(objects);
+		return objects;
+	}
+
+	// Shared stable sorter used by ECS query planning and tests. UUID order is
+	// chosen over EnTT entity order because entity ids are allocation details.
+	void SortObjectsByStableId(std::vector<Object>& objects);
+
 	// Method to remove an Object.
 	void removeObject(Object obj);
 	// Fetch the parent entity for a given child, or entt::null if unparented.

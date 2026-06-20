@@ -52,5 +52,32 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(beforeCount, objects.getRootObjects().size(), "The existing object should remain after rollback.");
 			objects.clear();
 		});
+
+		registry.Add("SceneMutationQueue.ComponentMutationsNeedValidPayloadTargets", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object target = objects.createObject("Component Target");
+			const TerraEngine::UUID targetId = objects.getUUID(target.EntityId());
+
+			TerraEngine::Scene::SceneMutationQueue missingName;
+			missingName.Enqueue({ "missing-component", TerraEngine::Scene::SceneMutationOperation::AddComponent, targetId });
+			auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects);
+			const auto rejected = missingName.Validate(graph);
+			context.Expect(!rejected.results.front().accepted, "Component mutations without component names should be rejected.");
+			context.Expect(!rejected.diagnostics.empty(), "Rejected component mutations should include diagnostics.");
+
+			TerraEngine::Scene::SceneMutationQueue valid;
+			TerraEngine::Scene::SceneMutationRequest request;
+			request.requestId = "replace-transform";
+			request.operation = TerraEngine::Scene::SceneMutationOperation::UpdateComponent;
+			request.targetObjectId = targetId;
+			request.componentName = "Transform";
+			request.componentPayloadKind = TerraEngine::Scene::SceneComponentMutationPayloadKind::Replace;
+			valid.Enqueue(request);
+			const auto accepted = valid.Apply(objects);
+			context.Expect(accepted.applied, "Valid component payload mutations should flush at the approved boundary.");
+			context.Expect(valid.Empty(), "Applied component payload mutations should clear the queue.");
+			objects.clear();
+		});
 	}
 }

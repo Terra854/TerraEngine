@@ -22,13 +22,13 @@
 #include "Runtime/BootSummary.h"
 #include "Runtime/ContentMount/ContentMount.h"
 #include "Runtime/ExportStartupCoordinator.h"
+#include "Scheduling/EcsQueryTaskGraph.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/SceneGraphRuntime.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Scripting/ScriptGlue.h"
 #include "UI/UISystem.h"
 
-#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <stdexcept>
@@ -57,6 +57,7 @@ namespace {
 		systems.push_back(&system);
 		scheduler.RegisterSystem(system, std::move(declaration));
 	}
+
 }
 
 void Engine::Run()
@@ -270,6 +271,15 @@ bool Engine::Update(float deltaTime)
 	{
 		TERRAENGINE_PROFILE_SCOPE("Engine::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 
+		// Real systems publish ECS query graph summaries as they execute. Clear
+		// the frame collector here so scheduler diagnostics piggyback on actual
+		// system scans instead of running a duplicate global diagnostic pass.
+		const bool ecsGraphDiagnosticsEnabled = TerraEngine::Scheduling::EcsGraphFrameDiagnosticsEnabled();
+		if (ecsGraphDiagnosticsEnabled)
+		{
+			TerraEngine::Scheduling::ClearPublishedEcsGraphFrameSummaries();
+		}
+
 		const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.ExecuteFrame(deltaTime, [](const TerraEngine::Scheduling::MutationFlushPoint&) {
 			TerraEngine::Scheduling::MutationFlushRuntimeState state;
 			TerraEngine::Scene::SceneMutationQueue& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
@@ -285,6 +295,11 @@ bool Engine::Update(float deltaTime)
 		});
 		if (!schedulerSummary.valid) {
 			TERRAENGINE_LOG(LogLevel::Error, schedulerSummary.formatted);
+		}
+		if (ecsGraphDiagnosticsEnabled)
+		{
+			systemScheduler.SetLatestComponentQueryGroups(TerraEngine::Scheduling::PublishedEcsComponentQueryGroups());
+			systemScheduler.SetLatestEcsGraphSummary(TerraEngine::Scheduling::FormatPublishedEcsGraphFrameSummaries());
 		}
 	}
 	TerraEngine::Profiling::Profiler::Instance().EndFrame();

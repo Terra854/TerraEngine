@@ -10,6 +10,7 @@
 #include "Components/UIComponent.h"
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
+#include "Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Input/InputCodes.h"
 #include "Input/InputSystem.h"
 #include "Profiling/ProfilerScope.h"
@@ -80,6 +81,28 @@ bool BuildHoveredElementPath(
 
 	outHitElement = element;
 	return true;
+}
+
+TerraEngine::Scheduling::EcsComponentQueryDeclaration MakeProtectedUiQuery(
+	bool includeDiagnosticsMetadata,
+	TerraEngine::Scheduling::EcsQueryChunkWork work)
+{
+	TerraEngine::Scheduling::EcsComponentQueryDeclaration query;
+	query.queryName = "UI.CollectVisibleComponents";
+	if (includeDiagnosticsMetadata)
+	{
+		query.access.ownerSystem = "UISystem";
+		query.access.queryName = query.queryName;
+		query.access.readComponents = { "UIComponent" };
+		query.access.writeResources = { "UI.LiveComponents" };
+		query.access.workerEligible = false;
+		query.access.mainThreadReason = "UI collection stores live component pointers that are consumed by protected document/input state.";
+	}
+	query.preserveMatchingObjectOrder = true;
+	query.copyObjectIdsIntoChunks = false;
+	query.runOnceWithoutObjectSnapshot = true;
+	query.work = std::move(work);
+	return query;
 }
 
 // ApplyHoverStateRecursive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -195,14 +218,31 @@ void UISystem::Update(float deltaTime)
 
 	std::vector<std::pair<entt::entity, UIComponent*>> liveComponents;
 	{
-		TERRAENGINE_PROFILE_SCOPE("UISystem: Collect UI Components", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		ObjectManager::instance().forEachObjectWithComponents<UIComponent>([&](Object object, UIComponent& component) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (component.IsVisible())
+		TERRAENGINE_PROFILE_SCOPE("UISystem: ECS UI Collection Graph", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		const bool diagnosticsEnabled = TerraEngine::Scheduling::EcsGraphFrameDiagnosticsEnabled();
+		TerraEngine::Scheduling::EcsQueryTaskGraph uiCollectionGraph({ "ui-system-collection", "UI System Collection", false, diagnosticsEnabled });
+		uiCollectionGraph.AddQuery(MakeProtectedUiQuery(
+			diagnosticsEnabled,
+			[&liveComponents](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
 			{
-				liveComponents.emplace_back(object.EntityId(), &component);
-			}
-		});
+				TERRAENGINE_PROFILE_SCOPE("UISystem: Collect UI Components", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				ObjectManager::instance().forEachObjectWithComponents<UIComponent>([&](Object object, UIComponent& component) {
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+					if (component.IsVisible())
+					{
+						liveComponents.emplace_back(object.EntityId(), &component);
+					}
+				});
+			}));
+		const TerraEngine::Scheduling::EcsSystemGraphFrameSummary& graphSummary = uiCollectionGraph.Execute();
+		if (diagnosticsEnabled)
+		{
+			TerraEngine::Scheduling::PublishEcsGraphFrameSummary(graphSummary);
+		}
+		if (!graphSummary.valid)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, TerraEngine::Scheduling::FormatEcsSystemGraphFrameSummary(graphSummary));
+		}
 	}
 
 	{

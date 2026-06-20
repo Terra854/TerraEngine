@@ -687,6 +687,11 @@ std::string ScriptingSystem::SystemName() {
 	return "ScriptingSystem";
 }
 
+std::string ScriptingSystem::GetSchedulerBoundarySummary() const
+{
+	return "C# gameplay callbacks run on the protected scheduler boundary; no C# job, query, or scheduler annotations are required.";
+}
+
 // ScriptingSystem::LoadGameplayAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ScriptingSystem::LoadGameplayAssembly(const std::filesystem::path& assemblyPath, std::string* outError) {
 	if (managedLoadGameplayAssembly == nullptr) {

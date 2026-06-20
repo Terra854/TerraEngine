@@ -16,6 +16,13 @@ The scene graph runtime checks validate deterministic traversal, hierarchy
 diagnostics, prefab composition, queued mutation safety, and editor/runtime
 parity. Manual validation fixtures live under `Tests/Fixtures/SceneGraphRuntime`.
 
+The scheduler checks cover the phase scheduler, general job graph, and ECS query
+task graph layers. The engine suite validates component read/write declarations,
+deterministic chunking, deferred scene mutation flushes, transform dependency
+levels, and exported runtime scheduler smoke coverage. The editor suite validates
+that Play Mode can consume the scheduler summaries while C# authors keep normal
+script workflows without adding job or query annotations.
+
 For Linux-specific prerequisites and troubleshooting, see
 `Docs/LinuxSupport.md`.
 

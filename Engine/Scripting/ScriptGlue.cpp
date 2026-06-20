@@ -15,6 +15,7 @@
 #include "UI/UISystem.h"
 #include "Input/InputSystem.h"
 #include "Scene/SceneManager.h"
+#include "Scene/SceneMutationQueue.h"
 #include "Utilities/PlatformUtils.h"
 
 #include <array>
@@ -530,6 +531,10 @@ extern "C" {
 	// Native_Object_Create is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t Native_Object_Create(const char* name) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		// Managed object creation keeps its immediate gameplay behavior today,
+		// but the operation is also expressible as a SceneMutationQueue request
+		// for future worker-originated script bridges. Keeping that contract in
+		// this boundary prevents C# authors from needing scheduler annotations.
 		Object obj = ObjectManager::instance().createObject(name ? name : "New Object");
 		return static_cast<uint32_t>(obj.EntityId());
 	}
@@ -537,6 +542,9 @@ extern "C" {
 	// Native_Object_Destroy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Object_Destroy(uint32_t objectId) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		// Destruction remains immediate for existing C# gameplay compatibility.
+		// Worker jobs must use SceneMutationQueue instead, so no managed callback
+		// observes object storage changing from a background thread.
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			ObjectManager::instance().removeObject(*objOpt);
 		}

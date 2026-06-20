@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <functional>
 #include <sstream>
+#include <tuple>
 #include <unordered_set>
 
 namespace TerraEngine::Scene {
@@ -410,6 +411,47 @@ namespace TerraEngine::Scene {
 		{
 			resolve(rootId);
 		}
+	}
+
+	SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph)
+	{
+		SceneTransformWorkPlan plan;
+		plan.diagnostics = graph.diagnostics;
+		plan.valid = !std::any_of(plan.diagnostics.begin(), plan.diagnostics.end(), [](const SceneDiagnostic& diagnostic) {
+			return diagnostic.severity == SceneDiagnosticSeverity::Error || diagnostic.severity == SceneDiagnosticSeverity::Fatal;
+		});
+		if (!plan.valid)
+		{
+			return plan;
+		}
+
+		std::unordered_map<std::uint32_t, SceneTransformWorkUnit> unitsByDepth;
+		for (const SceneObjectId& objectId : BuildTraversalOrder(graph))
+		{
+			const std::uint32_t depth = DepthForObject(graph, objectId);
+			SceneTransformWorkUnit& unit = unitsByDepth[depth];
+			unit.hierarchyLevel = depth;
+			unit.workUnitId = "level-" + std::to_string(depth);
+			unit.objects.push_back(objectId);
+			if (depth > 0)
+			{
+				unit.parentDependencies.push_back("level-" + std::to_string(depth - 1));
+			}
+		}
+		for (auto& [depth, unit] : unitsByDepth)
+		{
+			(void)depth;
+			std::sort(unit.objects.begin(), unit.objects.end(), [](const SceneObjectId& left, const SceneObjectId& right) {
+				return TerraEngine::ToHexString(left) < TerraEngine::ToHexString(right);
+			});
+			std::sort(unit.parentDependencies.begin(), unit.parentDependencies.end());
+			unit.parentDependencies.erase(std::unique(unit.parentDependencies.begin(), unit.parentDependencies.end()), unit.parentDependencies.end());
+			plan.units.push_back(std::move(unit));
+		}
+		std::sort(plan.units.begin(), plan.units.end(), [](const SceneTransformWorkUnit& left, const SceneTransformWorkUnit& right) {
+			return std::tie(left.hierarchyLevel, left.workUnitId) < std::tie(right.hierarchyLevel, right.workUnitId);
+		});
+		return plan;
 	}
 
 	SceneRuntimeSummary BuildSceneRuntimeSummary(const SceneGraph& graph)

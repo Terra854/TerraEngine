@@ -37,6 +37,7 @@
 #include "../Windows/SceneViewWindow.h"
 #include "../Windows/BuildProfilesWindow.h"
 #include "../Windows/ProfilerWindow.h"
+#include "../Windows/SchedulerDiagnosticsWindow.h"
 #include "../Windows/UIBuilderWindow.h"
 #include "../Windows/SkySettingsWindow.h"
 
@@ -72,6 +73,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
 	m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
 	m_Windows.push_back(std::make_shared<ProfilerWindow>(this));
+	m_Windows.push_back(std::make_shared<SchedulerDiagnosticsWindow>(this));
 	m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));
 	m_Windows.push_back(std::make_shared<SkySettingsWindow>(this));
 
