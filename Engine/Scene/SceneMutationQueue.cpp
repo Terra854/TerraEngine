@@ -4,8 +4,11 @@
 
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
+#include "Core/Object/Component.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <mutex>
 #include <unordered_set>
 
 namespace TerraEngine::Scene {
@@ -48,6 +51,7 @@ namespace TerraEngine::Scene {
 
 	void SceneMutationQueue::Enqueue(SceneMutationRequest request)
 	{
+		std::scoped_lock lock(requestsMutex);
 		if (request.requestId.empty())
 		{
 			request.requestId = "mutation-" + std::to_string(requests.size());
@@ -57,11 +61,13 @@ namespace TerraEngine::Scene {
 
 	bool SceneMutationQueue::Empty() const
 	{
+		std::scoped_lock lock(requestsMutex);
 		return requests.empty();
 	}
 
 	std::size_t SceneMutationQueue::Size() const
 	{
+		std::scoped_lock lock(requestsMutex);
 		return requests.size();
 	}
 
@@ -70,11 +76,13 @@ namespace TerraEngine::Scene {
 		// Return a snapshot instead of exposing the internal vector so scheduler
 		// diagnostics and tests can inspect pending requests without mutating the
 		// queue that frame systems are still relying on.
+		std::scoped_lock lock(requestsMutex);
 		return requests;
 	}
 
 	void SceneMutationQueue::Clear()
 	{
+		std::scoped_lock lock(requestsMutex);
 		requests.clear();
 	}
 
@@ -83,12 +91,17 @@ namespace TerraEngine::Scene {
 		SceneMutationBatchResult batch;
 		batch.applied = false;
 		std::unordered_set<TerraEngine::UUID> deletedTargets;
+		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
 
-		for (const SceneMutationRequest& request : requests)
+		for (const SceneMutationRequest& request : requestSnapshot)
 		{
 			SceneMutationResult result;
 			result.requestId = request.requestId;
 			result.accepted = true;
+			result.sourceObjectId = request.sourceObjectId;
+			result.sourceObjectUuid = request.sourceObjectUuid;
+			result.sourceBindingId = request.sourceBindingId;
+			result.sourceFrameOrder = request.sourceFrameOrder;
 
 			if (request.expectedGraphRevision != 0 && request.expectedGraphRevision != graph.revision)
 			{
@@ -140,6 +153,7 @@ namespace TerraEngine::Scene {
 
 	SceneMutationBatchResult SceneMutationQueue::Apply(ObjectManager& objects)
 	{
+		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
 		SceneGraph graph = BuildSceneGraphFromObjectManager(objects);
 		SceneMutationBatchResult batch = Validate(graph);
 		const bool hasRejectedRequest = std::any_of(batch.results.begin(), batch.results.end(), [](const SceneMutationResult& result) {
@@ -150,9 +164,9 @@ namespace TerraEngine::Scene {
 			return batch;
 		}
 
-		for (std::size_t index = 0; index < requests.size(); ++index)
+		for (std::size_t index = 0; index < requestSnapshot.size(); ++index)
 		{
-			const SceneMutationRequest& request = requests[index];
+			const SceneMutationRequest& request = requestSnapshot[index];
 			SceneMutationResult& result = batch.results[index];
 
 			switch (request.operation)
@@ -187,6 +201,24 @@ namespace TerraEngine::Scene {
 					objects.setParent(*target, parent);
 				}
 				break;
+			case SceneMutationOperation::AddComponent:
+				if (auto target = objects.getObject(request.targetObjectId))
+				{
+					std::lock_guard registryLock(ComponentAccessRegistryMutex());
+					auto& registry = ComponentAccessRegistry();
+					if (auto component = registry.find(request.componentName); component != registry.end())
+					{
+						if (!component->second.hasComponent(*target))
+						{
+							component->second.addComponent(*target);
+						}
+					}
+					else
+					{
+						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component mutation references an unknown component type.", "Register the component in ComponentAccessRegistry before scripts can add it."));
+					}
+				}
+				break;
 			default:
 				result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Info, request, "Mutation operation recorded but has no direct ObjectManager side effect yet.", "Prefab and component payloads are handled by their owning systems at the approved flush point."));
 				break;
@@ -194,7 +226,11 @@ namespace TerraEngine::Scene {
 		}
 
 		batch.applied = true;
-		Clear();
+		{
+			std::scoped_lock lock(requestsMutex);
+			const std::size_t removeCount = std::min(requestSnapshot.size(), requests.size());
+			requests.erase(requests.begin(), requests.begin() + static_cast<std::ptrdiff_t>(removeCount));
+		}
 		return batch;
 	}
 }

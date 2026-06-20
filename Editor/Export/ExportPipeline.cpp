@@ -11,7 +11,6 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
-#include <sstream>
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
@@ -442,33 +441,9 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 		return false;
 	}
 
-	// Build the dotnet publish command for NativeAOT. The runtime identifier is
-	// resolved through the shared build-profile helper so editor export and
-	// CMake-managed payloads cannot drift between Windows and Linux.
-	const std::string rid = GetExportRuntimeIdentifier(profile.platform);
-	std::ostringstream cmd;
-	cmd << "dotnet publish"
-		<< " \"" << managedProject.string() << "\""
-		<< " -c Release"
-		<< " -r " << rid
-		<< " -p:PublishAot=true"
-		<< " -p:DefineConstants=TERRAENGINE_EXPORT"
-		<< " -o \"" << managedOutputDir.string() << "\"";
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (profile.stripNativeAotOutput) {
-		cmd << " -p:StripSymbols=true";
-	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!profile.includeDebugSymbols) {
-		cmd << " -p:DebugType=none";
-	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!profile.additionalPublishArgs.empty()) {
-		cmd << " " << profile.additionalPublishArgs;
-	}
-
-	const std::string commandLine = cmd.str();
+	// Build the dotnet publish command in the shared build-profile helper so
+	// profile toggles are tested without launching a real NativeAOT publish.
+	const std::string commandLine = BuildNativeAotPublishCommand(profile, managedProject, managedOutputDir);
 
 	// Execute the dotnet publish command.
 	const int exitCode = std::system(commandLine.c_str());

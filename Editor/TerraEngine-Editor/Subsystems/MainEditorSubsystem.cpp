@@ -11,6 +11,7 @@
 #include "../Profiling/EditorProfilerService.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/MainEngine.h"
+#include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Engine/Components/CameraComponent.h"
 #include "Engine/Components/PrefabLinkComponent.h"
 #include "Engine/Components/Transform.h"
@@ -1494,6 +1495,8 @@ void MainEditorSubsystem::DrawScriptCompilationModal() {
 // MainEditorSubsystem::CloseCurrentProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::CloseCurrentProject() {
 	ScriptingSystem::Instance().SetRunning(false);
+	ScriptingSystem::SetScriptingDiagnosticsRequested(false);
+	TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
 	ClearPlayModeSceneState();
 	ScriptCompilationSubsystem::Instance().OnProjectClosed();
 	m_IsPrefabEditingMode = false;

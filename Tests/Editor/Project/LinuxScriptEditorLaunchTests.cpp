@@ -63,9 +63,9 @@ namespace TerraEngine::EditorTests {
 		registry.Add("Editor.LinuxScriptEditorLaunch.CSharpAuthoringNeedsNoSchedulerAnnotations", [](TestContext& context) {
 			const ScriptingSystem& scripting = ScriptingSystem::Instance();
 
-			context.Expect(scripting.ManagedCallbacksRunProtected(), "Managed callbacks should remain on the protected scheduler boundary.");
+			context.Expect(!scripting.ManagedCallbacksRunProtected(), "Managed callbacks should be native-scheduled instead of forced through the protected boundary.");
 			context.Expect(!scripting.ManagedCallbacksRequireSchedulerAnnotations(), "C# gameplay authors should not need scheduler annotations.");
-			context.Expect(scripting.GetSchedulerBoundarySummary().find("no C# job") != std::string::npos, "Compatibility summary should clearly state the unchanged C# workflow.");
+			context.Expect(scripting.GetSchedulerBoundarySummary().find("normal API") != std::string::npos, "Compatibility summary should clearly state the unchanged C# workflow.");
 		});
 	}
 }

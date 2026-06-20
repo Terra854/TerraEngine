@@ -57,9 +57,51 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(profile.startupScene, loaded.startupScene, "The startup scene should round-trip through JSON.");
 			context.Expect(loaded.compressionPreset == CompressionPreset::Best, "The compression preset should round-trip through JSON.");
 			context.ExpectEqual(profile.tepakWorkerCount, loaded.tepakWorkerCount, "The worker count should round-trip through JSON.");
+			context.ExpectEqual(profile.enableManagedCompilation, loaded.enableManagedCompilation, "The managed compilation toggle should round-trip through JSON.");
+			context.ExpectEqual(profile.includeDebugSymbols, loaded.includeDebugSymbols, "The debug symbol toggle should round-trip through JSON.");
+			context.ExpectEqual(profile.stripNativeAotOutput, loaded.stripNativeAotOutput, "The NativeAOT strip toggle should round-trip through JSON.");
 			context.ExpectEqual(profile.additionalPublishArgs, loaded.additionalPublishArgs, "Additional publish arguments should round-trip through JSON.");
 			context.ExpectEqual(profile.includedScenes.size(), loaded.includedScenes.size(), "All included scenes should round-trip through JSON.");
 			context.ExpectEqual(profilePath.string(), loaded.filePath.string(), "The loaded profile should remember its source file path.");
+		});
+
+		registry.Add("Editor.BuildProfile.NativeAotPublishCommandHonorsStripToggle", [](TestContext& context) {
+			BuildProfile profile{};
+			profile.platform = ExportPlatform::Windows;
+			profile.includeDebugSymbols = true;
+			profile.stripNativeAotOutput = false;
+
+			const std::filesystem::path projectPath = "C:/Projects/Terra Game/Assembly-CSharp.csproj";
+			const std::filesystem::path outputPath = "C:/Projects/Terra Game/Builds/Profile/Managed";
+
+			const std::string unstrippedCommand = BuildNativeAotPublishCommand(profile, projectPath, outputPath);
+			context.Expect(unstrippedCommand.find("-p:PublishAot=true") != std::string::npos, "NativeAOT publish should always enable PublishAot.");
+			context.Expect(unstrippedCommand.find("-p:StripSymbols=true") == std::string::npos, "Disabled strip output should not pass StripSymbols to dotnet.");
+			context.Expect(unstrippedCommand.find("-p:DebugType=none") == std::string::npos, "Included debug symbols should not suppress debug output.");
+
+			profile.stripNativeAotOutput = true;
+			const std::string strippedCommand = BuildNativeAotPublishCommand(profile, projectPath, outputPath);
+			context.Expect(strippedCommand.find("-p:StripSymbols=true") != std::string::npos, "Enabled strip output should pass StripSymbols to dotnet.");
+		});
+
+		registry.Add("Editor.BuildProfile.NativeAotPublishCommandKeepsOtherPublishSettings", [](TestContext& context) {
+			BuildProfile profile{};
+			profile.platform = ExportPlatform::Linux;
+			profile.includeDebugSymbols = false;
+			profile.stripNativeAotOutput = true;
+			profile.additionalPublishArgs = "-p:InvariantGlobalization=true";
+
+			const std::string command = BuildNativeAotPublishCommand(
+				profile,
+				"/tmp/Terra Game/Assembly-CSharp.csproj",
+				"/tmp/Terra Game/Builds/Profile/Managed");
+
+			// These checks make sure the strip option does not displace the
+			// platform, debug-symbol, or user-supplied publish arguments.
+			context.Expect(command.find("-r linux-x64") != std::string::npos, "Linux profiles should publish the linux-x64 NativeAOT runtime identifier.");
+			context.Expect(command.find("-p:StripSymbols=true") != std::string::npos, "Strip output should remain present with other publish options.");
+			context.Expect(command.find("-p:DebugType=none") != std::string::npos, "Disabled debug symbols should suppress debug output.");
+			context.Expect(command.find("-p:InvariantGlobalization=true") != std::string::npos, "Additional publish arguments should be appended after built-in options.");
 		});
 
 		registry.Add("Editor.BuildProfile.WindowsArtifactNamesRemainCompatible", [](TestContext& context) {

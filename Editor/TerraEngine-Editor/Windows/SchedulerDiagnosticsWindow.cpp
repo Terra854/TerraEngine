@@ -12,6 +12,7 @@
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Engine/Core/Scheduling/SystemScheduler.h"
+#include "Engine/Scripting/ScriptingSystem.h"
 
 #include <cstddef>
 #include <imgui.h>
@@ -104,11 +105,15 @@ void SchedulerDiagnosticsWindow::OnGui()
 	if (!m_IsVisible)
 	{
 		TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
+		ScriptingSystem::SetScriptingDiagnosticsRequested(false);
 		return;
 	}
 	TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(true);
+	ScriptingSystem::SetScriptingDiagnosticsRequested(true);
 
 	DrawSchedulerSummary();
+	ImGui::Spacing();
+	DrawScriptingSummary();
 	ImGui::Spacing();
 	DrawEcsGraphSummaries();
 }
@@ -116,6 +121,7 @@ void SchedulerDiagnosticsWindow::OnGui()
 bool SchedulerDiagnosticsWindow::OnCloseRequested()
 {
 	TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
+	ScriptingSystem::SetScriptingDiagnosticsRequested(false);
 	return true;
 }
 
@@ -201,6 +207,51 @@ void SchedulerDiagnosticsWindow::DrawSchedulerSummary()
 		if (!summary.ecsGraphSummary.empty())
 		{
 			ImGui::TextWrapped("ECS graph: %s", summary.ecsGraphSummary.c_str());
+		}
+		ImGui::TreePop();
+	}
+}
+
+void SchedulerDiagnosticsWindow::DrawScriptingSummary()
+{
+	ImGui::SeparatorText("Scripting");
+	const ScriptingSystem::ScriptingFrameResult& result = ScriptingSystem::Instance().GetLatestScriptingFrameResult();
+	if (result.frameId == 0)
+	{
+		ImGui::TextDisabled("Waiting for scripting frame data.");
+		return;
+	}
+
+	if (ImGui::BeginTable("SchedulerDiagnosticsScripting", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Frame");
+		ImGui::TableSetupColumn("Updated");
+		ImGui::TableSetupColumn("Worker");
+		ImGui::TableSetupColumn("Protected");
+		ImGui::TableSetupColumn("Mutations");
+		ImGui::TableSetupColumn("Failures");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::Text("%llu", static_cast<unsigned long long>(result.frameId));
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Text("%zu", result.updatedScripts);
+		ImGui::TableSetColumnIndex(2);
+		ImGui::Text("%zu", result.workerScripts);
+		ImGui::TableSetColumnIndex(3);
+		ImGui::Text("%zu", result.protectedScripts);
+		ImGui::TableSetColumnIndex(4);
+		ImGui::Text("%zu accepted / %zu rejected", result.acceptedMutations, result.rejectedMutations);
+		ImGui::TableSetColumnIndex(5);
+		ImGui::Text("%zu", result.failedScripts);
+		ImGui::EndTable();
+	}
+
+	if (!result.accessReport.messages.empty() && ImGui::TreeNode("Scripting Messages"))
+	{
+		for (const std::string& message : result.accessReport.messages)
+		{
+			ImGui::TextWrapped("%s", message.c_str());
 		}
 		ImGui::TreePop();
 	}

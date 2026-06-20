@@ -530,6 +530,16 @@ extern "C" {
 
 	// Native_Object_Create is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint32_t Native_Object_Create(const char* name) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value() && context->workerDispatch) {
+			ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+			scriptingSystem.RecordScriptMutationRequest(scriptingSystem.BuildScriptMutationRequest(
+				TerraEngine::Scene::SceneMutationOperation::CreateObject,
+				*context,
+				TerraEngine::EMPTY_UUID,
+				name ? name : "New Object"));
+			return InvalidObjectId();
+		}
+
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		// Managed object creation keeps its immediate gameplay behavior today,
 		// but the operation is also expressible as a SceneMutationQueue request
@@ -541,6 +551,18 @@ extern "C" {
 
 	// Native_Object_Destroy is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Object_Destroy(uint32_t objectId) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value() && context->workerDispatch) {
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				scriptingSystem.RecordScriptMutationRequest(scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::DeleteObject,
+					*context,
+					objOpt->getUUID()));
+			}
+			return;
+		}
+
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		// Destruction remains immediate for existing C# gameplay compatibility.
 		// Worker jobs must use SceneMutationQueue instead, so no managed callback
@@ -639,6 +661,24 @@ extern "C" {
 
 	// Native_AddComponent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_AddComponent(uint32_t objectId, const char* componentType) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value() && context->workerDispatch) {
+			if (componentType == nullptr || componentType[0] == '\0') {
+				return false;
+			}
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				scriptingSystem.RecordScriptMutationRequest(scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::AddComponent,
+					*context,
+					objOpt->getUUID(),
+					{},
+					componentType));
+				return true;
+			}
+			return false;
+		}
+
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			auto& reg = ComponentAccessRegistry();

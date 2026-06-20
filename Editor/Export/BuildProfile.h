@@ -112,6 +112,15 @@ std::string GetExportLauncherFileName(const std::string& projectName, ExportPlat
 /// Returns the NativeAOT gameplay library filename expected under Managed/.
 std::string GetExportManagedRuntimeLibraryName(ExportPlatform platform);
 
+/// Builds the dotnet publish command used for NativeAOT gameplay compilation.
+/// @param profile Build profile whose toggles become publish properties.
+/// @param managedProject Full path to Assembly-CSharp.csproj.
+/// @param managedOutputDir Full path where dotnet should place NativeAOT output.
+std::string BuildNativeAotPublishCommand(
+	const BuildProfile& profile,
+	const std::filesystem::path& managedProject,
+	const std::filesystem::path& managedOutputDir);
+
 /// Returns the engine shared library filename installed beside exported launchers.
 std::string GetExportEngineLibraryName(ExportPlatform platform);
 

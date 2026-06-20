@@ -30,6 +30,11 @@ add_executable(TerraEngine-EngineTests
 	Platform/PlatformUtilsTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
 	Renderer/RenderTypesTests.cpp
+	Scripting/ScriptingComponentAccessTests.cpp
+	Scripting/ScriptingDiagnosticsTests.cpp
+	Scripting/ScriptingDispatchTests.cpp
+	Scripting/ScriptingMutationTests.cpp
+	Scripting/ScriptingWorkloadTests.cpp
 	Scene/PrefabCompositionTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
 	Scene/SceneMutationQueueTests.cpp

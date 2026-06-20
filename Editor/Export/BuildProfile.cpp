@@ -79,6 +79,38 @@ std::string GetExportManagedRuntimeLibraryName(ExportPlatform platform) {
 	return "Assembly-CSharp" + GetExportSharedLibrarySuffix(platform);
 }
 
+std::string BuildNativeAotPublishCommand(
+	const BuildProfile& profile,
+	const std::filesystem::path& managedProject,
+	const std::filesystem::path& managedOutputDir)
+{
+	// The export pipeline runs this exact command through the shell. Keeping the
+	// string construction in one helper lets tests verify that each profile
+	// toggle maps to the intended dotnet NativeAOT property.
+	std::ostringstream command;
+	command << "dotnet publish"
+		<< " \"" << managedProject.string() << "\""
+		<< " -c Release"
+		<< " -r " << GetExportRuntimeIdentifier(profile.platform)
+		<< " -p:PublishAot=true"
+		<< " -p:DefineConstants=TERRAENGINE_EXPORT"
+		<< " -o \"" << managedOutputDir.string() << "\"";
+
+	if (profile.stripNativeAotOutput) {
+		command << " -p:StripSymbols=true";
+	}
+
+	if (!profile.includeDebugSymbols) {
+		command << " -p:DebugType=none";
+	}
+
+	if (!profile.additionalPublishArgs.empty()) {
+		command << " " << profile.additionalPublishArgs;
+	}
+
+	return command.str();
+}
+
 std::string GetExportEngineLibraryName(ExportPlatform platform) {
 	return platform == ExportPlatform::Windows ? "TerraEngine.dll" : "libTerraEngine.so";
 }

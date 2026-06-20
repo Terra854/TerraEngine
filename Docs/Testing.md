@@ -23,6 +23,12 @@ levels, and exported runtime scheduler smoke coverage. The editor suite validate
 that Play Mode can consume the scheduler summaries while C# authors keep normal
 script workflows without adding job or query annotations.
 
+The scripting scheduler checks live under `Tests/Engine/Scripting`. They verify
+workload snapshots, worker batch planning, thread-local dispatch context,
+diagnostics gating, and deferred script-origin scene mutations. Export scripting
+tests also cover the NativeAOT path so editor and exported runtimes keep the same
+batching and lifecycle contract.
+
 For Linux-specific prerequisites and troubleshooting, see
 `Docs/LinuxSupport.md`.
 
@@ -99,7 +105,9 @@ NativeAOT payloads such as `Assembly-CSharp.so`.
 ## Windows Workflow
 
 The Windows workflow uses the same project-owned CTest surface and install
-requirement. Run these commands from the repository root:
+requirement. Run these commands from a Visual Studio Developer PowerShell or
+after calling `VsDevCmd.bat`; a plain shell may fail before compiling project
+code because MSVC standard library include paths are not initialized.
 
 ```powershell
 cmake --preset Debug

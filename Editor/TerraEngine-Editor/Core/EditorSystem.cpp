@@ -127,6 +127,7 @@ void EditorSystem::Setup(Engine* enginePtr) {
 	mainEditor->SetOnProjectClosedCallback([this]() {
 		SaveWorkspaceLayout();
 		TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
+		ScriptingSystem::SetScriptingDiagnosticsRequested(false);
 
 		// Hide all C++ windows
 		auto windows = mainEditor->GetWindows();

@@ -4,17 +4,21 @@
 
 #include "Core/Logger/Logger.h"
 #include "Core/Object/ObjectManager.h"
+#include "Core/Scheduling/JobGraph.h"
 #include "DotNet/DotNetHost.h"
 #include "Profiling/ProfilerScope.h"
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <future>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -25,6 +29,36 @@ namespace
 {
 	constexpr float kLiveInspectorRefreshSeconds = 0.25f;
 	constexpr std::size_t kMaxExportFieldValueBytes = 256;
+	std::atomic_bool g_ScriptingDiagnosticsRequested{ false };
+	thread_local std::optional<ScriptingSystem::ScriptDispatchContext> g_CurrentScriptDispatchContext;
+
+	std::string ToString(ScriptingSystem::ScriptExecutionClass executionClass)
+	{
+		switch (executionClass)
+		{
+		case ScriptingSystem::ScriptExecutionClass::WorkerSafe:
+			return "worker-safe";
+		case ScriptingSystem::ScriptExecutionClass::Protected:
+			return "protected";
+		case ScriptingSystem::ScriptExecutionClass::Skipped:
+			return "skipped";
+		case ScriptingSystem::ScriptExecutionClass::Failed:
+			return "failed";
+		}
+		return "unknown";
+	}
+
+	std::string BuildScriptDiagnosticLabel(std::uint32_t objectId, std::string_view bindingId, std::string_view scriptType)
+	{
+		std::ostringstream stream;
+		stream << "Object " << objectId << " :: ";
+		stream << (scriptType.empty() ? "<unresolved script>" : scriptType);
+		if (!bindingId.empty())
+		{
+			stream << " [" << bindingId << "]";
+		}
+		return stream.str();
+	}
 
 	// FnvHash64 is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint64_t FnvHash64(const std::string& text) {
@@ -406,6 +440,422 @@ ScriptingSystem& ScriptingSystem::Instance() {
 	return instance;
 }
 
+bool ScriptingSystem::IsScriptingDiagnosticsRequested() const
+{
+	return ScriptingDiagnosticsRequested();
+}
+
+void ScriptingSystem::SetScriptingDiagnosticsRequested(bool requested)
+{
+	g_ScriptingDiagnosticsRequested.store(requested, std::memory_order_relaxed);
+}
+
+bool ScriptingSystem::ScriptingDiagnosticsRequested()
+{
+	return g_ScriptingDiagnosticsRequested.load(std::memory_order_relaxed);
+}
+
+std::optional<ScriptingSystem::ScriptDispatchContext> ScriptingSystem::CurrentScriptDispatchContext()
+{
+	return g_CurrentScriptDispatchContext;
+}
+
+void ScriptingSystem::SetCurrentScriptDispatchContext(ScriptDispatchContext context)
+{
+	g_CurrentScriptDispatchContext = std::move(context);
+}
+
+void ScriptingSystem::ClearCurrentScriptDispatchContext()
+{
+	g_CurrentScriptDispatchContext.reset();
+}
+
+std::vector<ScriptingSystem::ScriptBatch> ScriptingSystem::PlanScriptBatches(const ScriptUpdateWorkload& workload, std::size_t workerCount)
+{
+	std::vector<ScriptBatch> batches;
+	if (workload.items.empty())
+	{
+		return batches;
+	}
+
+	std::vector<ScriptWorkItem> workerItems;
+	std::vector<ScriptWorkItem> protectedItems;
+	std::vector<ScriptWorkItem> skippedItems;
+	workerItems.reserve(workload.items.size());
+	protectedItems.reserve(workload.items.size());
+	skippedItems.reserve(workload.items.size());
+
+	for (const ScriptWorkItem& item : workload.items)
+	{
+		switch (item.executionClass)
+		{
+		case ScriptExecutionClass::WorkerSafe:
+			workerItems.push_back(item);
+			break;
+		case ScriptExecutionClass::Protected:
+			protectedItems.push_back(item);
+			break;
+		default:
+			skippedItems.push_back(item);
+			break;
+		}
+	}
+
+	auto appendBatches = [&batches](std::vector<ScriptWorkItem>& items, ScriptExecutionClass executionClass, std::size_t chunkSize, std::string_view prefix, std::string protectedReason) {
+		if (items.empty())
+		{
+			return;
+		}
+		const std::size_t safeChunkSize = std::max<std::size_t>(1, chunkSize);
+		for (std::size_t begin = 0, batchIndex = 0; begin < items.size(); begin += safeChunkSize, ++batchIndex)
+		{
+			const std::size_t end = std::min(items.size(), begin + safeChunkSize);
+			ScriptBatch batch;
+			batch.batchId = std::string(prefix) + "-" + std::to_string(batchIndex);
+			batch.executionClass = executionClass;
+			batch.profilingLabel = "ScriptingSystem: " + batch.batchId;
+			batch.mutationOrderBase = begin;
+			batch.protectedReason = protectedReason;
+			batch.items.assign(items.begin() + static_cast<std::ptrdiff_t>(begin), items.begin() + static_cast<std::ptrdiff_t>(end));
+			batches.push_back(std::move(batch));
+		}
+	};
+
+	const std::size_t threadCount = std::max<std::size_t>(1, workerCount);
+	const std::size_t targetWorkerBatchCount = std::max<std::size_t>(1, threadCount * 4);
+	const std::size_t workerBatchSize = std::max<std::size_t>(8, (workerItems.size() + targetWorkerBatchCount - 1) / targetWorkerBatchCount);
+	appendBatches(workerItems, ScriptExecutionClass::WorkerSafe, workerBatchSize, "worker", {});
+	appendBatches(protectedItems, ScriptExecutionClass::Protected, std::max<std::size_t>(1, protectedItems.size()), "protected", "Lifecycle or API access requires deterministic protected execution.");
+	appendBatches(skippedItems, ScriptExecutionClass::Skipped, std::max<std::size_t>(1, skippedItems.size()), "skipped", "Script work item was not eligible for update this frame.");
+	return batches;
+}
+
+std::string ScriptingSystem::FormatScriptingFrameResult(const ScriptingFrameResult& result)
+{
+	std::ostringstream stream;
+	stream << "Scripting frame " << result.frameId
+		<< ": updated=" << result.updatedScripts
+		<< " failed=" << result.failedScripts
+		<< " skipped=" << result.skippedScripts
+		<< " worker=" << result.workerScripts
+		<< " protected=" << result.protectedScripts
+		<< " acceptedMutations=" << result.acceptedMutations
+		<< " rejectedMutations=" << result.rejectedMutations;
+	if (result.diagnosticsCollected)
+	{
+		stream << " diagnostics=on";
+		for (const std::string& message : result.accessReport.messages)
+		{
+			stream << "\n  " << message;
+		}
+		for (const std::string& reason : result.accessReport.protectedReasons)
+		{
+			stream << "\n  protected: " << reason;
+		}
+	}
+	else
+	{
+		stream << " diagnostics=off";
+	}
+	return stream.str();
+}
+
+ScriptingSystem::ScriptUpdateWorkload ScriptingSystem::BuildScriptUpdateWorkload(float deltaTime, bool exportMode)
+{
+	ScriptUpdateWorkload workload;
+	workload.frameId = m_NextScriptingFrameId++;
+	workload.deltaTime = deltaTime;
+	workload.running = m_Running;
+	workload.paused = m_Paused;
+	workload.stepping = m_StepFrames > 0;
+	workload.exportMode = exportMode;
+	workload.diagnosticsRequested = ScriptingDiagnosticsRequested();
+
+	auto& objectManager = ObjectManager::instance();
+	const std::vector<Object> objects = objectManager.SnapshotObjectsWithComponents<ScriptComponent>();
+	workload.items.reserve(objects.size());
+
+	// Snapshot script bindings before worker dispatch. Workers only read the
+	// copied binding identifiers and script ids, so C# authors do not need to
+	// opt into scheduler annotations to benefit from parallel updates.
+	for (Object object : objects)
+	{
+		ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+		if (scriptComponent == nullptr || !scriptComponent->active)
+		{
+			continue;
+		}
+
+		auto guard = scriptComponent->acquireReadLock();
+		for (const ScriptBinding& binding : scriptComponent->GetBindings())
+		{
+			if (!binding.enabled)
+			{
+				continue;
+			}
+			if (exportMode && binding.scriptId == 0)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "[Scripting] Export binding " << binding.bindingId << " on object " << static_cast<std::uint32_t>(object.EntityId()) << " is missing staged scriptId data.");
+				continue;
+			}
+			if (!exportMode && binding.className.empty())
+			{
+				continue;
+			}
+
+			ScriptWorkItem item;
+			item.objectId = static_cast<std::uint32_t>(object.EntityId());
+			item.objectUuid = object.getUUID();
+			item.bindingId = binding.bindingId;
+			item.scriptType = binding.className.empty() ? ("scriptId:" + std::to_string(binding.scriptId)) : binding.className;
+			item.scriptRuntimeId = binding.scriptId;
+			item.lifecycleState = ScriptLifecycleState::Updating;
+			item.executionClass = ScriptExecutionClass::WorkerSafe;
+			item.diagnosticLabel = BuildScriptDiagnosticLabel(item.objectId, item.bindingId, item.scriptType);
+			item.serializedValues = binding.serializedValues;
+			workload.items.push_back(std::move(item));
+		}
+	}
+
+	return workload;
+}
+
+ScriptingSystem::ScriptingFrameResult ScriptingSystem::DispatchScriptWorkload(const ScriptUpdateWorkload& workload)
+{
+	ScriptingFrameResult result;
+	result.frameId = workload.frameId;
+	result.diagnosticsCollected = workload.diagnosticsRequested;
+	result.accessReport.frameId = workload.frameId;
+	result.accessReport.totalScripts = workload.items.size();
+
+	if (!workload.running || workload.items.empty())
+	{
+		result.skippedScripts = workload.items.size();
+		result.formattedSummary = FormatScriptingFrameResult(result);
+		m_LatestFrameResult = result;
+		return result;
+	}
+
+	const std::size_t threadCount = std::max<std::size_t>(1, ThreadPool::instance().getThreadCount());
+	const std::vector<ScriptBatch> batches = PlanScriptBatches(workload, threadCount);
+	std::atomic<std::size_t> updatedScripts{ 0 };
+	std::atomic<std::size_t> failedScripts{ 0 };
+	std::atomic<std::size_t> skippedScripts{ 0 };
+	std::atomic<std::size_t> workerScripts{ 0 };
+	std::atomic<std::size_t> protectedScripts{ 0 };
+	std::mutex startedInstancesMutex;
+	std::vector<ScriptWorkItem> startedInstances;
+
+	TerraEngine::Scheduling::JobGraph graph("scripting-frame-" + std::to_string(workload.frameId), "Scripting Frame");
+	std::vector<TerraEngine::Scheduling::DependencyHandle> batchJobs;
+	batchJobs.reserve(batches.size());
+
+	for (const ScriptBatch& batch : batches)
+	{
+		const std::uint64_t frameId = workload.frameId;
+		const float frameDeltaTime = workload.deltaTime;
+		const bool exportMode = workload.exportMode;
+		TerraEngine::Scheduling::JobGraphJobDeclaration job;
+		job.name = batch.batchId;
+		job.executionPolicy = batch.executionClass == ScriptExecutionClass::WorkerSafe
+			? TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible
+			: TerraEngine::Scheduling::JobGraphExecutionPolicy::Protected;
+		job.cancellable = false;
+		job.requiresSuccessfulDependencies = true;
+		job.profilingLabel = batch.profilingLabel;
+		job.work = [this, frameId, frameDeltaTime, exportMode, batch, &updatedScripts, &failedScripts, &skippedScripts, &workerScripts, &protectedScripts, &startedInstancesMutex, &startedInstances](TerraEngine::Scheduling::JobGraphContext&) {
+			const bool workerDispatch = batch.executionClass == ScriptExecutionClass::WorkerSafe;
+			for (std::size_t itemIndex = 0; itemIndex < batch.items.size(); ++itemIndex)
+			{
+				const ScriptWorkItem& item = batch.items[itemIndex];
+				if (item.executionClass == ScriptExecutionClass::Skipped)
+				{
+					skippedScripts.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
+				if (item.executionClass == ScriptExecutionClass::Failed)
+				{
+					failedScripts.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
+
+				ScriptDispatchContext context;
+				context.workerDispatch = workerDispatch;
+				context.exportMode = exportMode;
+				context.sourceObjectId = item.objectId;
+				context.sourceObjectUuid = item.objectUuid;
+				context.sourceBindingId = item.bindingId;
+				context.frameOrder = (frameId * 1000000ULL) + batch.mutationOrderBase + itemIndex;
+				SetCurrentScriptDispatchContext(std::move(context));
+
+				try
+				{
+					if (exportMode)
+					{
+						if (item.runtimeHandle == nullptr)
+						{
+							failedScripts.fetch_add(1, std::memory_order_relaxed);
+							ClearCurrentScriptDispatchContext();
+							continue;
+						}
+						if (!item.runtimeStarted && m_ExportVTable.invokeStart != nullptr)
+						{
+							m_ExportVTable.invokeStart(item.runtimeHandle);
+							std::scoped_lock lock(startedInstancesMutex);
+							startedInstances.push_back(item);
+						}
+						if (m_ExportVTable.invokeUpdate != nullptr)
+						{
+							m_ExportVTable.invokeUpdate(item.runtimeHandle, frameDeltaTime);
+						}
+					}
+					else if (managedUpdateScript != nullptr)
+					{
+						managedUpdateScript(item.objectId, item.bindingId.c_str(), item.scriptType.c_str(), frameDeltaTime);
+					}
+					updatedScripts.fetch_add(1, std::memory_order_relaxed);
+					if (workerDispatch)
+					{
+						workerScripts.fetch_add(1, std::memory_order_relaxed);
+					}
+					else
+					{
+						protectedScripts.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+				catch (...)
+				{
+					failedScripts.fetch_add(1, std::memory_order_relaxed);
+				}
+				ClearCurrentScriptDispatchContext();
+			}
+		};
+		batchJobs.push_back(graph.AddJob(std::move(job)));
+	}
+
+	TerraEngine::Scheduling::JobGraphTaskGroupDeclaration group;
+	group.name = "Scripting batches";
+	group.jobs = batchJobs;
+	group.executionPolicy = TerraEngine::Scheduling::JobGraphExecutionPolicy::MixedProtected;
+	group.profilingLabel = "ScriptingSystem: Batches";
+	graph.AddTaskGroup(std::move(group));
+	const TerraEngine::Scheduling::JobGraphSummary& graphSummary = graph.Execute();
+
+	if (!graphSummary.valid || !graphSummary.completed)
+	{
+		result.accessReport.conflicts.push_back("Scripting job graph did not complete cleanly.");
+		for (const TerraEngine::Scheduling::JobGraphDiagnostic& diagnostic : graphSummary.diagnostics)
+		{
+			result.accessReport.messages.push_back(diagnostic.nodeLabel + ": " + diagnostic.message);
+		}
+	}
+
+	if (workload.exportMode && !startedInstances.empty())
+	{
+		std::scoped_lock lock(m_ExportInstancesMutex);
+		for (const ScriptWorkItem& item : startedInstances)
+		{
+			auto instanceIt = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& instance) {
+				return instance.objectId == item.objectId
+					&& instance.bindingId == item.bindingId
+					&& instance.scriptId == item.scriptRuntimeId;
+			});
+			if (instanceIt != m_ExportInstances.end())
+			{
+				instanceIt->started = true;
+			}
+		}
+	}
+
+	result.updatedScripts = updatedScripts.load(std::memory_order_relaxed);
+	result.failedScripts = failedScripts.load(std::memory_order_relaxed);
+	result.skippedScripts = skippedScripts.load(std::memory_order_relaxed);
+	result.workerScripts = workerScripts.load(std::memory_order_relaxed);
+	result.protectedScripts = protectedScripts.load(std::memory_order_relaxed);
+	result.accessReport.workerScripts = result.workerScripts;
+	result.accessReport.protectedScripts = result.protectedScripts;
+	if (workload.diagnosticsRequested)
+	{
+		result.accessReport.messages.push_back("Scripting batches=" + std::to_string(batches.size()) + " graphCompleted=" + (graphSummary.completed ? "true" : "false"));
+	}
+
+	FlushScriptMutationsIntoResult(result);
+	result.formattedSummary = FormatScriptingFrameResult(result);
+	m_LatestFrameResult = result;
+	PublishLatestScriptingDiagnostics();
+	return result;
+}
+
+void ScriptingSystem::PublishLatestScriptingDiagnostics()
+{
+	if (m_LatestFrameResult.diagnosticsCollected)
+	{
+		TERRAENGINE_LOG(LogLevel::Debug, m_LatestFrameResult.formattedSummary);
+	}
+}
+
+TerraEngine::Scene::SceneMutationRequest ScriptingSystem::BuildScriptMutationRequest(TerraEngine::Scene::SceneMutationOperation operation, const ScriptDispatchContext& context, TerraEngine::UUID targetObjectId, std::string displayName, std::string componentName, std::string payloadJson) const
+{
+	TerraEngine::Scene::SceneMutationRequest request;
+	request.requestId = "script-" + std::to_string(context.frameOrder);
+	request.operation = operation;
+	request.targetObjectId = targetObjectId;
+	request.displayName = std::move(displayName);
+	request.componentName = std::move(componentName);
+	request.payloadJson = std::move(payloadJson);
+	request.sourceObjectId = context.sourceObjectId;
+	request.sourceObjectUuid = context.sourceObjectUuid;
+	request.sourceBindingId = context.sourceBindingId;
+	request.sourceFrameOrder = context.frameOrder;
+	if (operation == TerraEngine::Scene::SceneMutationOperation::AddComponent)
+	{
+		request.componentPayloadKind = TerraEngine::Scene::SceneComponentMutationPayloadKind::Add;
+	}
+	return request;
+}
+
+void ScriptingSystem::RecordScriptMutationRequest(TerraEngine::Scene::SceneMutationRequest request)
+{
+	const std::uint64_t mutationOrder = m_NextScriptMutationOrder.fetch_add(1, std::memory_order_relaxed);
+	request.requestId = request.requestId.empty()
+		? ("script-mutation-" + std::to_string(mutationOrder))
+		: (request.requestId + "-" + std::to_string(mutationOrder));
+	TerraEngine::Scene::SceneMutationQueue::Instance().Enqueue(std::move(request));
+}
+
+void ScriptingSystem::FlushScriptMutationsIntoResult(ScriptingFrameResult& result)
+{
+	TerraEngine::Scene::SceneMutationQueue& queue = TerraEngine::Scene::SceneMutationQueue::Instance();
+	const std::size_t pendingBeforeFlush = queue.Size();
+	if (pendingBeforeFlush == 0)
+	{
+		return;
+	}
+
+	TerraEngine::Scene::SceneMutationBatchResult mutationResult = queue.Apply(ObjectManager::instance());
+	for (const TerraEngine::Scene::SceneMutationResult& entry : mutationResult.results)
+	{
+		if (entry.accepted)
+		{
+			++result.acceptedMutations;
+		}
+		else
+		{
+			++result.rejectedMutations;
+		}
+		for (const TerraEngine::Scene::SceneDiagnostic& diagnostic : entry.diagnostics)
+		{
+			result.accessReport.messages.push_back(entry.requestId + ": " + diagnostic.message);
+		}
+	}
+	for (const TerraEngine::Scene::SceneDiagnostic& diagnostic : mutationResult.diagnostics)
+	{
+		result.accessReport.messages.push_back(diagnostic.message);
+	}
+	result.accessReport.deferredMutations = result.acceptedMutations;
+	result.accessReport.rejectedMutations = result.rejectedMutations;
+}
+
 // ScriptingSystem::ConfigureExportRuntime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::ConfigureExportRuntime(const std::filesystem::path& nativeAotLibraryPath) {
 	// Store the absolute path up front so later system initialization does not
@@ -563,87 +1013,11 @@ void ScriptingSystem::Update(float deltaTime) {
 		}
 	}
 
-	// struct ScriptBatchItem groups related state and operations so callers have one documented contract.
-	struct ScriptBatchItem {
-		uint32_t objectId = 0;
-		std::string bindingId;
-		std::string className;
-	};
-
-	std::vector<ScriptBatchItem> allBindings;
 	{
-		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Collect Script Bindings", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		auto& objectManager = ObjectManager::instance();
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>()) {
-			ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
-			if (scriptComponent == nullptr || !scriptComponent->active) {
-				continue;
-			}
-
-			auto guard = scriptComponent->acquireReadLock();
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const ScriptBinding& binding : scriptComponent->GetBindings()) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!binding.enabled || binding.className.empty()) {
-					continue;
-				}
-
-				allBindings.push_back({ static_cast<uint32_t>(object.EntityId()), binding.bindingId, binding.className });
-			}
-		}
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!allBindings.empty()) {
-		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Dispatch Script Batches", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		const std::size_t threadCount = std::max<std::size_t>(1, ThreadPool::instance().getThreadCount());
-		const std::size_t targetTaskCount = threadCount * 4;
-		std::size_t batchSize = allBindings.size() / std::max<std::size_t>(1, targetTaskCount);
-		batchSize = std::max<std::size_t>(8, batchSize);
-
-		// Wait for the current frame's script batches before returning so play
-		// mode cannot enqueue an unbounded backlog of managed updates.
-		std::vector<std::future<void>> futures;
-		std::vector<ScriptBatchItem> currentBatch;
-		currentBatch.reserve(batchSize);
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const ScriptBatchItem& item : allBindings) {
-			currentBatch.push_back(item);
-			if (currentBatch.size() >= batchSize) {
-				auto task = ThreadPool::instance().createTask([items = std::move(currentBatch), this, deltaTime]() {
-					TERRAENGINE_PROFILE_SCOPE("ScriptingSystem Task: Managed Update Batch", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
-					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-					for (const ScriptBatchItem& entry : items) {
-						managedUpdateScript(entry.objectId, entry.bindingId.c_str(), entry.className.c_str(), deltaTime);
-					}
-				});
-				futures.push_back(task->getFuture());
-				ThreadPool::instance().enqueue(task);
-				currentBatch = std::vector<ScriptBatchItem>();
-				currentBatch.reserve(batchSize);
-			}
-		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!currentBatch.empty()) {
-			auto task = ThreadPool::instance().createTask([items = std::move(currentBatch), this, deltaTime]() {
-				TERRAENGINE_PROFILE_SCOPE("ScriptingSystem Task: Managed Update Batch", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-				for (const ScriptBatchItem& entry : items) {
-					managedUpdateScript(entry.objectId, entry.bindingId.c_str(), entry.className.c_str(), deltaTime);
-				}
-			});
-			futures.push_back(task->getFuture());
-			ThreadPool::instance().enqueue(task);
-		}
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (std::future<void>& future : futures) {
-			TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Wait Script Batch", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-			future.get();
-		}
+		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Build Script Workload", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		ScriptUpdateWorkload workload = BuildScriptUpdateWorkload(deltaTime, false);
+		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Dispatch Script Workload", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		DispatchScriptWorkload(workload);
 	}
 
 	{
@@ -689,7 +1063,7 @@ std::string ScriptingSystem::SystemName() {
 
 std::string ScriptingSystem::GetSchedulerBoundarySummary() const
 {
-	return "C# gameplay callbacks run on the protected scheduler boundary; no C# job, query, or scheduler annotations are required.";
+	return "C# gameplay callbacks are scheduled as native script batches; C# authors keep the normal API while structural scene changes are deferred to SceneMutationQueue flush points.";
 }
 
 // ScriptingSystem::LoadGameplayAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1309,9 +1683,6 @@ void ScriptingSystem::InitializeExportModeForTesting(const ManagedVTable& vtable
 
 // ScriptingSystem::UpdateExportMode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::UpdateExportMode(float deltaTime) {
-	// Export-mode update dispatches through the VTable function pointers.
-	// The threading model mirrors the editor runtime: bindings are gathered,
-	// batched across the thread pool, and waited on before returning.
 	if (!m_ExportMode || !m_Running) {
 		return;
 	}
@@ -1325,60 +1696,16 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 		}
 	}
 
-	// Collect active script bindings from the ECS, same as editor mode.
-	// struct ExportBatchItem groups related state and operations so callers have one documented contract.
-	struct ExportBatchItem {
-		uint32_t objectId = 0;
-		uint64_t scriptId = 0;
-		std::string bindingId;
-		std::string className;
-		std::vector<ScriptFieldValue> serializedValues;
-	};
-
-	std::vector<ExportBatchItem> allBindings;
-	auto& objectManager = ObjectManager::instance();
-	size_t objectsWithScripts = 0;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>()) {
-		objectsWithScripts++;
-		ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (scriptComponent == nullptr || !scriptComponent->active) {
-			continue;
-		}
-
-		auto guard = scriptComponent->acquireReadLock();
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const ScriptBinding& binding : scriptComponent->GetBindings()) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!binding.enabled) {
-				continue;
-			}
-
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (binding.scriptId == 0) {
-				TERRAENGINE_LOG(LogLevel::Error, "[Scripting] Export binding " << binding.bindingId << " on object " << static_cast<uint32_t>(object.EntityId()) << " is missing staged scriptId data.");
-				continue;
-			}
-
-			ExportBatchItem item;
-			item.objectId = static_cast<uint32_t>(object.EntityId());
-			item.scriptId = binding.scriptId;
-			item.bindingId = binding.bindingId;
-			item.className = binding.className.empty() ? ("scriptId:" + std::to_string(binding.scriptId)) : binding.className;
-			item.serializedValues = binding.serializedValues;
-			allBindings.push_back(std::move(item));
-		}
-	}
+	ScriptUpdateWorkload workload = BuildScriptUpdateWorkload(deltaTime, true);
 
 	std::vector<ExportScriptInstance> staleInstances;
 	{
 		std::scoped_lock lock(m_ExportInstancesMutex);
 		auto staleBegin = std::remove_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& instance) {
-			const bool stillActive = std::any_of(allBindings.begin(), allBindings.end(), [&](const ExportBatchItem& item) {
+			const bool stillActive = std::any_of(workload.items.begin(), workload.items.end(), [&](const ScriptWorkItem& item) {
 				return item.objectId == instance.objectId
 					&& item.bindingId == instance.bindingId
-					&& item.scriptId == instance.scriptId;
+					&& item.scriptRuntimeId == instance.scriptId;
 			});
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!stillActive) {
@@ -1404,30 +1731,22 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (allBindings.empty()) {
-		if (objectsWithScripts > 0) {
-			static bool loggedOnce = false;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!loggedOnce) {
-				TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Found " << objectsWithScripts << " objects with ScriptComponents, but 0 enabled bindings.");
-				loggedOnce = true;
-			}
-		}
+	if (workload.items.empty()) {
+		DispatchScriptWorkload(workload);
 		return;
 	}
 
 	// Create missing instances first so gameplay callbacks always see hydrated
 	// scene values before Awake and Start begin executing.
-	std::vector<ExportBatchItem> pendingCreations;
+	std::vector<ScriptWorkItem> pendingCreations;
 	{
 		std::scoped_lock lock(m_ExportInstancesMutex);
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const ExportBatchItem& item : allBindings) {
+		for (const ScriptWorkItem& item : workload.items) {
 			auto instanceIt = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& instance) {
 				return instance.objectId == item.objectId
 					&& instance.bindingId == item.bindingId
-					&& instance.scriptId == item.scriptId;
+					&& instance.scriptId == item.scriptRuntimeId;
 			});
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (instanceIt == m_ExportInstances.end()) {
@@ -1437,25 +1756,25 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 	}
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ExportBatchItem& item : pendingCreations) {
+	for (const ScriptWorkItem& item : pendingCreations) {
 		if (m_ExportVTable.createScript == nullptr) {
 			break;
 		}
 
-		TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Creating instance for " << item.className << " (ID: " << item.scriptId << ") on object " << item.objectId);
-		void* handle = m_ExportVTable.createScript(item.scriptId, item.objectId);
+		TERRAENGINE_LOG(LogLevel::Debug, "[Scripting] Creating instance for " << item.scriptType << " (ID: " << item.scriptRuntimeId << ") on object " << item.objectId);
+		void* handle = m_ExportVTable.createScript(item.scriptRuntimeId, item.objectId);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (handle == nullptr) {
-			TERRAENGINE_LOG(LogLevel::Error, "[Scripting] createScript returned NULL for " << item.className << " (ID: " << item.scriptId << ")");
+			TERRAENGINE_LOG(LogLevel::Error, "[Scripting] createScript returned NULL for " << item.scriptType << " (ID: " << item.scriptRuntimeId << ")");
 			continue;
 		}
 
 		ScriptBinding stagedBinding;
 		stagedBinding.bindingId = item.bindingId;
-		stagedBinding.className = item.className;
-		stagedBinding.scriptId = item.scriptId;
+		stagedBinding.className = item.scriptType;
+		stagedBinding.scriptId = item.scriptRuntimeId;
 		stagedBinding.serializedValues = item.serializedValues;
-		ApplyExportBindingValues(m_ExportVTable, stagedBinding, handle, item.scriptId);
+		ApplyExportBindingValues(m_ExportVTable, stagedBinding, handle, item.scriptRuntimeId);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (m_ExportVTable.invokeAwake != nullptr) {
 			m_ExportVTable.invokeAwake(handle);
@@ -1463,7 +1782,7 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 
 		ExportScriptInstance instance;
 		instance.handle = handle;
-		instance.scriptId = item.scriptId;
+		instance.scriptId = item.scriptRuntimeId;
 		instance.objectId = item.objectId;
 		instance.bindingId = item.bindingId;
 		instance.started = false;
@@ -1472,59 +1791,27 @@ void ScriptingSystem::UpdateExportMode(float deltaTime) {
 		m_ExportInstances.push_back(std::move(instance));
 	}
 
-	// Batch and dispatch through the thread pool.
-	const std::size_t threadCount = std::max<std::size_t>(1, ThreadPool::instance().getThreadCount());
-	const std::size_t targetTaskCount = threadCount * 4;
-	std::size_t batchSize = allBindings.size() / std::max<std::size_t>(1, targetTaskCount);
-	batchSize = std::max<std::size_t>(8, batchSize);
-
-	std::vector<std::future<void>> futures;
-	std::vector<ExportBatchItem> currentBatch;
-	currentBatch.reserve(batchSize);
-
-	auto dispatchBatch = [&](std::vector<ExportBatchItem> items) {
-		auto task = ThreadPool::instance().createTask([items = std::move(items), this, deltaTime]() {
-			std::scoped_lock lock(m_ExportInstancesMutex);
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const ExportBatchItem& entry : items) {
-				auto it = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& inst) {
-					return inst.objectId == entry.objectId
-						&& inst.bindingId == entry.bindingId
-						&& inst.scriptId == entry.scriptId;
-				});
-
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (it != m_ExportInstances.end()) {
-					if (!it->started) {
-						if (m_ExportVTable.invokeStart) m_ExportVTable.invokeStart(it->handle);
-						it->started = true;
-					}
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (m_ExportVTable.invokeUpdate) m_ExportVTable.invokeUpdate(it->handle, deltaTime);
-				}
+	{
+		std::scoped_lock lock(m_ExportInstancesMutex);
+		for (ScriptWorkItem& item : workload.items)
+		{
+			auto instanceIt = std::find_if(m_ExportInstances.begin(), m_ExportInstances.end(), [&](const ExportScriptInstance& instance) {
+				return instance.objectId == item.objectId
+					&& instance.bindingId == item.bindingId
+					&& instance.scriptId == item.scriptRuntimeId;
+			});
+			if (instanceIt != m_ExportInstances.end())
+			{
+				item.runtimeHandle = instanceIt->handle;
+				item.runtimeStarted = instanceIt->started;
 			}
-		});
-		futures.push_back(task->getFuture());
-		ThreadPool::instance().enqueue(task);
-	};
-
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ExportBatchItem& item : allBindings) {
-		currentBatch.push_back(item);
-		if (currentBatch.size() >= batchSize) {
-			dispatchBatch(std::move(currentBatch));
-			currentBatch = std::vector<ExportBatchItem>();
-			currentBatch.reserve(batchSize);
+			else
+			{
+				item.executionClass = ScriptExecutionClass::Failed;
+				item.protectedReason = "Export script instance could not be created.";
+			}
 		}
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!currentBatch.empty()) {
-		dispatchBatch(std::move(currentBatch));
-	}
-
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (std::future<void>& future : futures) {
-		future.get();
-	}
+	DispatchScriptWorkload(workload);
 }

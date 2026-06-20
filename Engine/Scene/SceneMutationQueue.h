@@ -11,6 +11,7 @@
 #include "Utilities/UUID.h"
 
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -49,12 +50,20 @@ namespace TerraEngine::Scene {
 		std::string payloadJson;
 		SceneComponentMutationPayloadKind componentPayloadKind = SceneComponentMutationPayloadKind::None;
 		std::uint64_t expectedGraphRevision = 0;
+		std::uint32_t sourceObjectId = 0;
+		TerraEngine::UUID sourceObjectUuid = TerraEngine::EMPTY_UUID;
+		std::string sourceBindingId;
+		std::uint64_t sourceFrameOrder = 0;
 	};
 
 	struct SceneMutationResult {
 		std::string requestId;
 		bool accepted = false;
 		TerraEngine::UUID createdObjectId = TerraEngine::EMPTY_UUID;
+		std::uint32_t sourceObjectId = 0;
+		TerraEngine::UUID sourceObjectUuid = TerraEngine::EMPTY_UUID;
+		std::string sourceBindingId;
+		std::uint64_t sourceFrameOrder = 0;
 		std::vector<SceneDiagnostic> diagnostics;
 	};
 
@@ -78,6 +87,7 @@ namespace TerraEngine::Scene {
 
 	private:
 		std::vector<SceneMutationRequest> requests;
+		mutable std::mutex requestsMutex;
 	};
 
 }

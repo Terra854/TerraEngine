@@ -27,6 +27,11 @@ namespace TerraEngine::Tests {
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
+	void RegisterScriptingComponentAccessTests(TestRegistry& registry);
+	void RegisterScriptingDiagnosticsTests(TestRegistry& registry);
+	void RegisterScriptingDispatchTests(TestRegistry& registry);
+	void RegisterScriptingMutationTests(TestRegistry& registry);
+	void RegisterScriptingWorkloadTests(TestRegistry& registry);
 	void RegisterSpatialBoundsTests(TestRegistry& registry);
 	void RegisterSystemSchedulerTests(TestRegistry& registry);
 	void RegisterTransformTaskGraphTests(TestRegistry& registry);
@@ -74,6 +79,11 @@ int main() {
 	TerraEngine::Tests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
+	TerraEngine::Tests::RegisterScriptingComponentAccessTests(registry);
+	TerraEngine::Tests::RegisterScriptingDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterScriptingDispatchTests(registry);
+	TerraEngine::Tests::RegisterScriptingMutationTests(registry);
+	TerraEngine::Tests::RegisterScriptingWorkloadTests(registry);
 	TerraEngine::Tests::RegisterSpatialBoundsTests(registry);
 	TerraEngine::Tests::RegisterSystemSchedulerTests(registry);
 	TerraEngine::Tests::RegisterTransformTaskGraphTests(registry);

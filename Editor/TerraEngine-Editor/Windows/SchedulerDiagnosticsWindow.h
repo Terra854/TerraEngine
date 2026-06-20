@@ -21,6 +21,7 @@ protected:
 
 private:
 	void DrawSchedulerSummary();
+	void DrawScriptingSummary();
 	void DrawEcsGraphSummaries();
 
 	MainEditorSubsystem* owner = nullptr;
