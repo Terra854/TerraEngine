@@ -8,6 +8,7 @@
 
 #include <array>
 #include <chrono>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -74,6 +75,7 @@ namespace TerraEngine::Scene
 		std::unordered_map<TerraEngine::UUID, int> nodeByObjectId;
 		std::vector<TerraEngine::UUID> fallbackObjectIds;
 		std::unordered_set<TerraEngine::UUID> dirtyObjectIds;
+		mutable std::mutex diagnosticsMutex;
 		mutable SpatialDiagnosticsSnapshot diagnostics{};
 		bool hasBuiltIndex = false;
 

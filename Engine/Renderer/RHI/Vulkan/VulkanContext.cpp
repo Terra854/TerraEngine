@@ -40,6 +40,7 @@ namespace
 	constexpr float kTemporalResetMatrixEpsilon = 0.75f;
 	constexpr float kDepthHistoryMatrixEpsilon = 0.0005f;
 	constexpr std::uint64_t kTemporalStateHistoryFrames = 240u;
+	constexpr std::size_t kVulkanParallelRecordingThreshold = 64u;
 
 	// struct ScoredCandidate groups related state and operations so callers have one documented contract.
 	struct ScoredCandidate
@@ -3030,10 +3031,24 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 		return &pipelineIt->second;
 	};
+	std::unordered_map<TerraEngine::UUID, Material*> materialLookupCache;
+	materialLookupCache.reserve(frameData.commands.size());
+	const auto ResolveMaterial = [&](const TerraEngine::UUID& materialId) -> Material* {
+		// Material reloads invalidate backend state between frames. Within one
+		// RenderFrame call the reflected command list is immutable, so repeated
+		// camera and shadow draws can share the same ResourceManager lookup.
+		auto existing = materialLookupCache.find(materialId);
+		if (existing != materialLookupCache.end()) {
+			return existing->second;
+		}
+		Material* material = ResourceManager::Instance().GetMaterial(materialId);
+		materialLookupCache.emplace(materialId, material);
+		return material;
+	};
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& command : frameData.commands) {
-		Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
+		Material* material = ResolveMaterial(command.materialId);
 		if (!material) continue;
 
 		impl->EnsureMesh(command.meshId);
@@ -3100,14 +3115,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		PushConstants push{};
 		push.viewProj = frameData.projectionMatrix * frameData.viewMatrix;
 		push.model = command.modelMatrix;
-		push.textureIndex = 0;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (material->header.textureCount > 0 && !material->textures.empty()) {
-			TerraEngine::UUID texID = material->textures[0].textureUuid;
-			if (impl->textureIndexMap.contains(texID)) {
-				push.textureIndex = impl->textureIndexMap[texID];
-			}
-		}
 		push.materialIndex = 0;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (impl->materialIndexMap.contains(command.materialId)) {
@@ -3222,7 +3229,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// Rebuilding the shadow draws from that list preserves the culling win
 		// all the way through pipeline selection and indirect submission.
 		for (const DrawCommand& command : shadowDrawList.commands) {
-			Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
+			Material* material = ResolveMaterial(command.materialId);
 			if (material == nullptr || !shadowResourcesReady || !ShouldMaterialCastShadow(material->shadowBehavior)) {
 				continue;
 			}
@@ -3741,12 +3748,80 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!prepared.empty()) {
 		const size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
-		const size_t workerCount = std::min(prepared.size(), hw);
+		const size_t workerCount = prepared.size() < kVulkanParallelRecordingThreshold ? 1u : std::min(prepared.size(), hw);
 		const size_t chunkSize = (prepared.size() + workerCount - 1) / workerCount;
 
 		impl->EnsureWorkerPools(impl->currentFrame, workerCount);
 		std::vector<std::future<VkCommandBuffer>> futures;
 		futures.reserve(workerCount);
+		auto recordSecondaryRange = [this, &prepared](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+			vkResetCommandBuffer(secondary, 0);
+
+			VkCommandBufferInheritanceInfo inherit{};
+			inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+			inherit.renderPass = renderPass;
+			inherit.subpass = 0;
+			inherit.framebuffer = framebuffer;
+
+			VkCommandBufferBeginInfo begin{};
+			begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+			// Secondary draw buffers are recorded once for the current frame slot and
+			// are reset only after that slot's fence completes in BeginFrame. That
+			// lifetime means they are never submitted for simultaneous execution, so
+			// avoid VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT and the optional
+			// nestedCommandBufferSimultaneousUse device feature it requires.
+			begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+			begin.pInheritanceInfo = &inherit;
+
+			vkBeginCommandBuffer(secondary, &begin);
+			VkViewport viewport{};
+			viewport.x = 0.0f;
+			viewport.y = 0.0f;
+			viewport.width = static_cast<float>(renderExtent.width);
+			viewport.height = static_cast<float>(renderExtent.height);
+			viewport.minDepth = 0.0f;
+			viewport.maxDepth = 1.0f;
+			vkCmdSetViewport(secondary, 0u, 1u, &viewport);
+
+			VkRect2D scissor{};
+			scissor.offset = { 0, 0 };
+			scissor.extent = renderExtent;
+			vkCmdSetScissor(secondary, 0u, 1u, &scissor);
+
+			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+			for (size_t i = start; i < end; ++i) {
+				const PreparedDraw& draw = prepared[i];
+				if (draw.pipeline == nullptr
+					|| draw.pipeline->pipeline == VK_NULL_HANDLE
+					|| draw.pipeline->layout == VK_NULL_HANDLE
+					|| draw.mesh == nullptr) {
+					continue;
+				}
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (draw.mesh->meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
+					|| draw.mesh->meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
+					|| draw.mesh->meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
+					|| draw.mesh->indexBuffer.buffer == VK_NULL_HANDLE
+					|| draw.mesh->meshletBuffer.buffer == VK_NULL_HANDLE
+					|| draw.mesh->meshletCount == 0) {
+					continue;
+				}
+
+				vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->pipeline);
+				vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->layout, 0, static_cast<uint32_t>(draw.descriptorSets.size()), draw.descriptorSets.data(), 0, nullptr);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (draw.pipeline->supportsDefaultPushConstants) {
+					vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &draw.push);
+				}
+
+				VkDeviceSize offset = static_cast<VkDeviceSize>(draw.push.indirectDrawOffset + draw.indirectBufferIndex) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
+				vkCmdDrawMeshTasksIndirectEXT(secondary, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
+			}
+			vkEndCommandBuffer(secondary);
+			return secondary;
+		};
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (size_t taskIndex = 0; taskIndex < workerCount; ++taskIndex) {
@@ -3758,77 +3833,18 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			const VkExtent2D renderExtent = renderPassInfo.renderArea.extent;
 			const uint32_t frameIndex = currentFrame;
 			VkCommandBuffer secondary = impl->AcquireWorkerCommandBuffer(frameIndex, taskIndex);
-
-			auto task = ThreadPool::instance().createTask([secondary, renderPass, framebuffer, renderExtent, start, end, &prepared, this]() -> VkCommandBuffer {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
-				vkResetCommandBuffer(secondary, 0);
-
-				VkCommandBufferInheritanceInfo inherit{};
-				inherit.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
-				inherit.renderPass = renderPass;
-				inherit.subpass = 0;
-				inherit.framebuffer = framebuffer;
-
-				VkCommandBufferBeginInfo begin{};
-				begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-				// Secondary draw buffers are recorded once for the current frame slot and
-				// are reset only after that slot's fence completes in BeginFrame. That
-				// lifetime means they are never submitted for simultaneous execution, so
-				// avoid VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT and the optional
-				// nestedCommandBufferSimultaneousUse device feature it requires.
-				begin.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
-				begin.pInheritanceInfo = &inherit;
-
-				vkBeginCommandBuffer(secondary, &begin);
-				VkViewport viewport{};
-				viewport.x = 0.0f;
-				viewport.y = 0.0f;
-				viewport.width = static_cast<float>(renderExtent.width);
-				viewport.height = static_cast<float>(renderExtent.height);
-				viewport.minDepth = 0.0f;
-				viewport.maxDepth = 1.0f;
-				vkCmdSetViewport(secondary, 0u, 1u, &viewport);
-
-				VkRect2D scissor{};
-				scissor.offset = { 0, 0 };
-				scissor.extent = renderExtent;
-				vkCmdSetScissor(secondary, 0u, 1u, &scissor);
-
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-				for (size_t i = start; i < end; ++i) {
-					const PreparedDraw& draw = prepared[i];
-					if (draw.pipeline == nullptr
-						|| draw.pipeline->pipeline == VK_NULL_HANDLE
-						|| draw.pipeline->layout == VK_NULL_HANDLE
-						|| draw.mesh == nullptr) {
-						continue;
-					}
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (draw.mesh->meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
-						|| draw.mesh->meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
-						|| draw.mesh->meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
-						|| draw.mesh->indexBuffer.buffer == VK_NULL_HANDLE
-						|| draw.mesh->meshletBuffer.buffer == VK_NULL_HANDLE
-						|| draw.mesh->meshletCount == 0) {
-						continue;
-					}
-
-					vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->pipeline);
-					vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->layout, 0, static_cast<uint32_t>(draw.descriptorSets.size()), draw.descriptorSets.data(), 0, nullptr);
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (draw.pipeline->supportsDefaultPushConstants) {
-						vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &draw.push);
-					}
-
-					VkDeviceSize offset = static_cast<VkDeviceSize>(draw.push.indirectDrawOffset + draw.indirectBufferIndex) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
-					vkCmdDrawMeshTasksIndirectEXT(secondary, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
+			if (workerCount == 1u) {
+				if (VkCommandBuffer recorded = recordSecondaryRange(secondary, renderPass, framebuffer, renderExtent, start, end); recorded != VK_NULL_HANDLE) {
+					secondaryBuffers.push_back(recorded);
 				}
-				vkEndCommandBuffer(secondary);
-				return secondary;
-			});
-			futures.push_back(task->getFuture());
-			ThreadPool::instance().enqueue(task);
+			}
+			else {
+				auto task = ThreadPool::instance().createTask([secondary, renderPass, framebuffer, renderExtent, start, end, &recordSecondaryRange]() -> VkCommandBuffer {
+					return recordSecondaryRange(secondary, renderPass, framebuffer, renderExtent, start, end);
+				});
+				futures.push_back(task->getFuture());
+				ThreadPool::instance().enqueue(task);
+			}
 		}
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -4579,6 +4595,52 @@ LightingDiagnosticsSnapshot VulkanContext::GetLatestLightingDiagnostics(RenderVi
 		return snapshot;
 	}
 	return impl->GetLatestLightingDiagnostics(viewType);
+}
+
+TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabilityProfile() const
+{
+	TerraEngine::Renderer::BackendCapabilityProfile profile;
+	profile.backendId = "vulkan";
+	// Vulkan supports recording independent command preparation on workers, but
+	// TerraEngine still keeps swapchain acquire, final queue submission, present,
+	// and resource retirement under the single coordinator to avoid lifetime
+	// races with editor view resize and frame cleanup.
+	profile.supportsParallelRecording = true;
+	profile.supportsAsyncUploadPreparation = true;
+	profile.supportsTransientResources = true;
+	profile.supportsSecondaryRecording = true;
+	profile.supportsParallelShadowRecording = true;
+	profile.supportsParallelPerViewRecording = true;
+	profile.supportsParallelPipelineStatePreparation = true;
+	profile.supportsParallelDescriptorPreparation = true;
+	profile.supportsParallelUploadPlanning = true;
+	profile.supportsParallelTransitionPlanning = true;
+	profile.supportsParallelCulling = true;
+	profile.supportsParallelLightPreparation = true;
+	profile.supportsParallelUiPreparation = true;
+	profile.supportsParallelPacketValidation = true;
+	profile.supportsPacketLocalDiagnostics = true;
+	profile.supportsRenderTaskGroups = true;
+	profile.supportsFrameOverlap = false;
+	profile.maxRecordingWorkers = static_cast<std::uint32_t>(std::max<std::size_t>(1u, std::thread::hardware_concurrency()));
+	profile.workerSchedulingThreshold = 128u;
+	profile.requiredSerialBoundaries = { "acquire", "final-submit", "present", "resource-retire", "swapchain-resize" };
+	profile.diagnosticCapabilities = { "packet-counts", "serialized-reasons", "pass-labels", "resource-warnings", "backend-fallbacks", "backend-frame-breakdown", "worker-recording-batches" };
+	return profile;
+}
+
+bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan)
+{
+	// The current renderer still records concrete Vulkan work from FrameRenderData
+	// in RenderFrame. Consuming the validated graph here gives diagnostics and
+	// future backends a stable contract without moving presentation ownership
+	// out of EndFrame.
+	return plan.valid;
+}
+
+TerraEngine::Renderer::BackendFrameBreakdown VulkanContext::GetLatestBackendFrameBreakdown() const
+{
+	return {};
 }
 
 // VulkanContext::GetLatestRenderSnapshotDiagnostics is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

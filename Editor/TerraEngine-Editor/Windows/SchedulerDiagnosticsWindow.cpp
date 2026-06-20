@@ -12,9 +12,11 @@
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Engine/Core/Scheduling/SystemScheduler.h"
+#include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 
 #include <cstddef>
+#include <algorithm>
 #include <imgui.h>
 #include <string>
 #include <vector>
@@ -106,14 +108,18 @@ void SchedulerDiagnosticsWindow::OnGui()
 	{
 		TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
 		ScriptingSystem::SetScriptingDiagnosticsRequested(false);
+		RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false);
 		return;
 	}
 	TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(true);
 	ScriptingSystem::SetScriptingDiagnosticsRequested(true);
+	RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(true);
 
 	DrawSchedulerSummary();
 	ImGui::Spacing();
 	DrawScriptingSummary();
+	ImGui::Spacing();
+	DrawRenderGraphSummary();
 	ImGui::Spacing();
 	DrawEcsGraphSummaries();
 }
@@ -122,6 +128,7 @@ bool SchedulerDiagnosticsWindow::OnCloseRequested()
 {
 	TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
 	ScriptingSystem::SetScriptingDiagnosticsRequested(false);
+	RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false);
 	return true;
 }
 
@@ -252,6 +259,145 @@ void SchedulerDiagnosticsWindow::DrawScriptingSummary()
 		for (const std::string& message : result.accessReport.messages)
 		{
 			ImGui::TextWrapped("%s", message.c_str());
+		}
+		ImGui::TreePop();
+	}
+}
+
+void SchedulerDiagnosticsWindow::DrawRenderGraphSummary()
+{
+	ImGui::SeparatorText("Render Graph");
+	const TerraEngine::Renderer::RenderDiagnosticsSummary summary = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+	if (summary.frameId == 0u)
+	{
+		ImGui::TextDisabled("Waiting for render graph frame data.");
+		return;
+	}
+
+	if (ImGui::BeginTable("SchedulerDiagnosticsRenderGraph", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Frame");
+		ImGui::TableSetupColumn("State");
+		ImGui::TableSetupColumn("Worker");
+		ImGui::TableSetupColumn("Serial");
+		ImGui::TableSetupColumn("Skipped");
+		ImGui::TableSetupColumn("Failed");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::Text("%llu", static_cast<unsigned long long>(summary.frameId));
+		ImGui::TableSetColumnIndex(1);
+		ImGui::TextUnformatted(summary.valid ? "valid" : "invalid");
+		ImGui::TableSetColumnIndex(2);
+		ImGui::Text("%zu", summary.workerPacketCount);
+		ImGui::TableSetColumnIndex(3);
+		ImGui::Text("%zu", summary.serialPacketCount);
+		ImGui::TableSetColumnIndex(4);
+		ImGui::Text("%zu", summary.skippedPacketCount);
+		ImGui::TableSetColumnIndex(5);
+		ImGui::Text("%zu", summary.failedPacketCount);
+		ImGui::EndTable();
+	}
+
+	if (!summary.topPassCosts.empty() && ImGui::TreeNode("Top Pass Costs"))
+	{
+		const std::size_t visibleCount = std::min<std::size_t>(3u, summary.topPassCosts.size());
+		for (std::size_t index = 0u; index < visibleCount; ++index)
+		{
+			const TerraEngine::Renderer::RenderPassTiming& timing = summary.topPassCosts[index];
+			ImGui::Text("%s: %.3f ms", timing.passId.c_str(), timing.milliseconds);
+		}
+		ImGui::TreePop();
+	}
+
+	if (!summary.backendFrameBreakdown.samples.empty() && ImGui::TreeNode("Backend Frame Breakdown"))
+	{
+		if (ImGui::BeginTable("SchedulerDiagnosticsRenderBackendBreakdown", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Category");
+			ImGui::TableSetupColumn("View");
+			ImGui::TableSetupColumn("Time");
+			ImGui::TableSetupColumn("Wait");
+			ImGui::TableSetupColumn("Scope");
+			ImGui::TableHeadersRow();
+			for (const TerraEngine::Renderer::BackendFrameCostSample& sample : summary.backendFrameBreakdown.samples)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(sample.label.c_str());
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextUnformatted(sample.viewType == RenderViewType::Scene ? "Scene" : "Game");
+				ImGui::TableSetColumnIndex(2);
+				if (sample.unavailable)
+				{
+					ImGui::TextDisabled("unavailable");
+				}
+				else
+				{
+					ImGui::Text("%.3f ms", sample.milliseconds);
+				}
+				ImGui::TableSetColumnIndex(3);
+				ImGui::TextUnformatted(sample.wait ? "yes" : "no");
+				ImGui::TableSetColumnIndex(4);
+				ImGui::TextUnformatted(sample.shared ? "shared" : "view");
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
+
+	if (!summary.renderWorkerGroups.empty() && ImGui::TreeNode("Render Worker Groups"))
+	{
+		if (ImGui::BeginTable("SchedulerDiagnosticsRenderWorkerGroups", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Group");
+			ImGui::TableSetupColumn("Work");
+			ImGui::TableSetupColumn("Workers");
+			ImGui::TableSetupColumn("Serial");
+			ImGui::TableSetupColumn("State");
+			ImGui::TableHeadersRow();
+			for (const TerraEngine::Renderer::RenderWorkerTaskGroup& group : summary.renderWorkerGroups)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(group.label.c_str());
+				ImGui::TableSetColumnIndex(1);
+				ImGui::Text("%zu", group.requestedWorkItems);
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%zu", group.workerCount);
+				ImGui::TableSetColumnIndex(3);
+				ImGui::Text("%zu", group.serialCount);
+				ImGui::TableSetColumnIndex(4);
+				ImGui::TextWrapped("%s", group.cancelled ? group.cancellationReason.c_str() : "active");
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
+
+	if (!summary.serializedReasons.empty() && ImGui::TreeNode("Serialized Work"))
+	{
+		for (const std::string& reason : summary.serializedReasons)
+		{
+			ImGui::TextWrapped("%s", reason.c_str());
+		}
+		ImGui::TreePop();
+	}
+
+	if (!summary.resourceWarnings.empty() && ImGui::TreeNode("Resource Warnings"))
+	{
+		for (const std::string& warning : summary.resourceWarnings)
+		{
+			ImGui::TextWrapped("%s", warning.c_str());
+		}
+		ImGui::TreePop();
+	}
+
+	if (!summary.backendFallbacks.empty() && ImGui::TreeNode("Backend Details"))
+	{
+		for (const std::string& fallback : summary.backendFallbacks)
+		{
+			ImGui::TextWrapped("%s", fallback.c_str());
 		}
 		ImGui::TreePop();
 	}

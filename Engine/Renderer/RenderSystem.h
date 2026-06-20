@@ -20,6 +20,8 @@
 #include "Components/CameraComponent.h"
 #include "Components/MeshRenderComponent.h"
 #include "Components/LightComponent.h"
+#include "Renderer/Graph/RenderDiagnostics.h"
+#include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Scene/SpatialDiagnostics.h"
 #include "Scene/SpatialIndex.h"
 
@@ -54,6 +56,8 @@ public:
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const;
+	TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const;
+	void SetRenderGraphDiagnosticsRequested(bool requested);
 
 	void SetQualityPreset(QualityPreset preset);
 	// GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -163,9 +167,13 @@ private:
 	LightingDiagnosticsSnapshot latestGameLightingDiagnostics{};
 	LightingDiagnosticsSnapshot latestSceneLightingDiagnostics{};
 	RenderSnapshotDiagnosticsSnapshot latestRenderSnapshotDiagnostics{};
+	TerraEngine::Renderer::RenderDiagnosticsSummary latestRenderGraphDiagnostics{};
+	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
 	SkyRuntimeState latestSkyRuntimeState{};
 	bool skyStateDirty = true;
 	std::string lastLoggedSkyIssueKey;
+	std::uint64_t nextRenderFrameId = 1u;
+	std::uint64_t activeRenderFrameId = 0u;
 
 	QualityPreset currentPreset = QualityPreset::High;
 	RenderSettings currentSettings;

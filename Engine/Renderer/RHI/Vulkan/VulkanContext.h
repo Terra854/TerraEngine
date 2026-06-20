@@ -26,6 +26,9 @@ public:
 	void RenderFrame(const FrameRenderData& frameData, const RenderOutputRequest& outputRequest) override;
 	void EndFrame() override;
 	void SetGlobalTaskShaderCullingEnabled(bool enabled) override;
+	TerraEngine::Renderer::BackendCapabilityProfile GetBackendCapabilityProfile() const override;
+	bool ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan) override;
+	TerraEngine::Renderer::BackendFrameBreakdown GetLatestBackendFrameBreakdown() const override;
 	bool IsTaskShaderSupported() const override;
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const override;
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const override;

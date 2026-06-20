@@ -7,6 +7,9 @@
 #include "RenderSystem.h"
 #include "UI/UISystem.h"
 #include "RHI/Vulkan/VulkanContext.h"
+#include "RHI/Vulkan/VulkanRendererWorkCache.h"
+#include "Renderer/Graph/RenderGraph.h"
+#include "Renderer/Graph/RenderSubmissionPlan.h"
 #include "Core/Logger/Logger.h"
 #include "Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Window/WindowSystem.h"
@@ -31,7 +34,11 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <future>
 #include <initializer_list>
+#include <iterator>
+#include <optional>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
@@ -49,6 +56,170 @@ namespace
 	constexpr float kDirectionalShadowNear = 0.1f;
 	constexpr float kDirectionalShadowFar = 180.0f;
 	constexpr float kDirectionalShadowExtent = 40.0f;
+	constexpr std::size_t kRenderParallelThreshold = 64u;
+	constexpr std::uint64_t kRenderHashOffset = 1469598103934665603ull;
+	constexpr std::uint64_t kRenderHashPrime = 1099511628211ull;
+
+	struct CachedDrawCommandRecord
+	{
+		std::uint64_t signature = 0u;
+		std::uint64_t lastTouchedFrameId = 0u;
+		DrawCommand command;
+	};
+
+	struct DrawCommandCacheState
+	{
+		std::unordered_map<TerraEngine::UUID, CachedDrawCommandRecord> recordsByObjectId;
+		std::size_t hitCount = 0u;
+		std::size_t missCount = 0u;
+	};
+
+	struct CachedLightCandidateRecord
+	{
+		std::uint64_t signature = 0u;
+		std::uint64_t lastTouchedFrameId = 0u;
+		FrameLightCandidate candidate;
+	};
+
+	struct LightCandidateCacheState
+	{
+		std::unordered_map<TerraEngine::UUID, CachedLightCandidateRecord> recordsByLightId;
+		std::size_t hitCount = 0u;
+		std::size_t missCount = 0u;
+	};
+
+	std::uint64_t HashFloat(float value)
+	{
+		std::uint32_t bits = 0u;
+		std::memcpy(&bits, &value, sizeof(bits));
+		return static_cast<std::uint64_t>(bits);
+	}
+
+	void HashCombine(std::uint64_t& seed, std::uint64_t value)
+	{
+		seed ^= value;
+		seed *= kRenderHashPrime;
+	}
+
+	void HashVec3(std::uint64_t& seed, const glm::vec3& value)
+	{
+		HashCombine(seed, HashFloat(value.x));
+		HashCombine(seed, HashFloat(value.y));
+		HashCombine(seed, HashFloat(value.z));
+	}
+
+	void HashQuat(std::uint64_t& seed, const glm::quat& value)
+	{
+		HashCombine(seed, HashFloat(value.x));
+		HashCombine(seed, HashFloat(value.y));
+		HashCombine(seed, HashFloat(value.z));
+		HashCombine(seed, HashFloat(value.w));
+	}
+
+	std::uint64_t BuildDrawCommandSignature(
+		const TerraEngine::UUID& meshId,
+		const TerraEngine::UUID& materialId,
+		const Transform& transform,
+		bool taskShaderCullingEnabled)
+	{
+		// The cache key covers every DrawCommand input that affects model-space
+		// or resource binding. Scene View tint is applied later to the visible
+		// command list, so it intentionally does not invalidate the base cache.
+		std::uint64_t seed = kRenderHashOffset;
+		HashCombine(seed, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(meshId)));
+		HashCombine(seed, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(materialId)));
+		HashVec3(seed, transform.position);
+		HashQuat(seed, transform.rotation);
+		HashVec3(seed, transform.scale);
+		HashCombine(seed, taskShaderCullingEnabled ? 1u : 0u);
+		return seed;
+	}
+
+	std::uint64_t BuildLightCandidateSignature(const Transform& transform, const LightComponent& light)
+	{
+		// The packed light cache key covers transform and every authoring field
+		// used to produce the GPULight payload. The renderer can reuse the
+		// previous candidate until one of those inputs changes.
+		std::uint64_t seed = kRenderHashOffset;
+		HashVec3(seed, transform.position);
+		HashQuat(seed, transform.rotation);
+		HashCombine(seed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(light.type)));
+		HashCombine(seed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(light.unit)));
+		HashCombine(seed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(light.appearance)));
+		HashVec3(seed, light.color);
+		HashCombine(seed, HashFloat(light.temperature));
+		HashCombine(seed, HashFloat(light.intensity));
+		HashCombine(seed, HashFloat(light.range));
+		HashCombine(seed, HashFloat(light.innerConeAngle));
+		HashCombine(seed, HashFloat(light.outerConeAngle));
+		HashCombine(seed, HashFloat(light.width));
+		HashCombine(seed, HashFloat(light.height));
+		HashCombine(seed, light.castsShadows ? 1u : 0u);
+		HashCombine(seed, HashFloat(light.shadowStrength));
+		HashCombine(seed, HashFloat(light.shadowBias));
+		HashCombine(seed, HashFloat(light.indirectMultiplier));
+		HashCombine(seed, HashFloat(light.authoredPriority));
+		HashCombine(seed, HashFloat(light.stabilityPreference));
+		return seed;
+	}
+
+	void PruneStaleDrawCommandCache(DrawCommandCacheState& cache, const std::unordered_set<TerraEngine::UUID>& aliveObjectIds)
+	{
+		for (auto iterator = cache.recordsByObjectId.begin(); iterator != cache.recordsByObjectId.end();)
+		{
+			iterator = aliveObjectIds.contains(iterator->first)
+				? std::next(iterator)
+				: cache.recordsByObjectId.erase(iterator);
+		}
+	}
+
+	void PruneStaleLightCandidateCache(LightCandidateCacheState& cache, const std::unordered_set<TerraEngine::UUID>& aliveLightIds)
+	{
+		for (auto iterator = cache.recordsByLightId.begin(); iterator != cache.recordsByLightId.end();)
+		{
+			iterator = aliveLightIds.contains(iterator->first)
+				? std::next(iterator)
+				: cache.recordsByLightId.erase(iterator);
+		}
+	}
+
+	template<typename Fn>
+	void RunRenderChunkedWork(std::size_t itemCount, std::size_t workerLimit, std::size_t parallelThreshold, const char* taskLabel, Fn&& work)
+	{
+		if (itemCount == 0u)
+		{
+			return;
+		}
+		const std::size_t workerCount = std::min(itemCount, std::max<std::size_t>(1u, workerLimit));
+		if (workerCount <= 1u || itemCount < parallelThreshold)
+		{
+			work(0u, itemCount);
+			return;
+		}
+
+		const std::size_t chunkSize = (itemCount + workerCount - 1u) / workerCount;
+		std::vector<std::future<void>> futures;
+		futures.reserve(workerCount);
+		for (std::size_t taskIndex = 0u; taskIndex < workerCount; ++taskIndex)
+		{
+			const std::size_t begin = taskIndex * chunkSize;
+			if (begin >= itemCount)
+			{
+				break;
+			}
+			const std::size_t end = std::min(itemCount, begin + chunkSize);
+			auto task = ThreadPool::instance().createTask([begin, end, taskLabel, &work]() {
+				TERRAENGINE_PROFILE_SCOPE(taskLabel, TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
+				work(begin, end);
+			});
+			futures.push_back(task->getFuture());
+			ThreadPool::instance().enqueue(task);
+		}
+		for (auto& future : futures)
+		{
+			future.get();
+		}
+	}
 
 	// ResolveRuntimeSettingsDirectory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::filesystem::path ResolveRuntimeSettingsDirectory()
@@ -600,6 +771,92 @@ void RenderSystem::Update(float deltaTime)
 		return model;
 	};
 
+	activeRenderFrameId = nextRenderFrameId++;
+	const TerraEngine::Renderer::BackendCapabilityProfile backendCapabilities = rhi
+		? rhi->GetBackendCapabilityProfile()
+		: TerraEngine::Renderer::BackendCapabilityProfile{};
+	TerraEngine::Renderer::RenderFrameSnapshot renderFrameSnapshot;
+	renderFrameSnapshot.frameId = activeRenderFrameId;
+	renderFrameSnapshot.renderSettings = SanitizeRenderSettings(currentSettings);
+	renderFrameSnapshot.sceneRevision = objManager.GetSpatialRevision();
+	renderFrameSnapshot.viewRequests.reserve(2u + gameViewCameras.size() + cameras.size());
+	if (hasSceneViewCamera && (!editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u)))
+	{
+		renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::SceneView, RenderViewType::Scene, sceneViewTargetSize, 1u });
+	}
+	if (!gameViewSuppressed && (!editorModeEnabled || (gameViewTargetSize.x > 0u && gameViewTargetSize.y > 0u)))
+	{
+		if (!gameViewCameras.empty())
+		{
+			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::GameView, RenderViewType::Game, gameViewTargetSize, 2u });
+		}
+		else if (!cameras.empty())
+		{
+			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::MainRuntimeView, RenderViewType::Game, gameViewTargetSize, 2u });
+		}
+	}
+	renderFrameSnapshot.renderables.reserve(renderables.size());
+	renderFrameSnapshot.meshes.reserve(renderables.size());
+	renderFrameSnapshot.materials.reserve(renderables.size());
+	for (const RenderableEntry& entry : renderables)
+	{
+		const Transform* transform = worldTransforms.find(entry.entity);
+		renderFrameSnapshot.renderables.push_back({
+			entry.objectId,
+			entry.mesh.meshId,
+			entry.mesh.materialId,
+			transform ? makeModelMatrix(*transform) : glm::mat4(1.0f),
+			entry.mesh.taskShaderCullingEnabled,
+			false
+		});
+		renderFrameSnapshot.meshes.push_back({ entry.mesh.meshId, "mesh", true, false });
+		renderFrameSnapshot.materials.push_back({ entry.mesh.materialId, "material", true, false });
+	}
+	renderFrameSnapshot.lights.reserve(lights.size());
+	for (const LightEntry& light : lights)
+	{
+		renderFrameSnapshot.lights.push_back({
+			light.lightId,
+			static_cast<std::uint32_t>(light.light.type),
+			light.light.castsShadows,
+			false
+		});
+	}
+	TerraEngine::Renderer::SortSnapshotDeterministically(renderFrameSnapshot);
+	const std::vector<TerraEngine::Renderer::RenderPassNode> renderGraphPasses = TerraEngine::Renderer::BuildDefaultRenderPasses(renderFrameSnapshot, backendCapabilities);
+	const TerraEngine::Renderer::RenderWorkPacketPlan renderPacketPlan = TerraEngine::Renderer::BuildRenderWorkPacketPlan(renderFrameSnapshot, renderGraphPasses, backendCapabilities);
+	static TerraEngine::Renderer::Vulkan::VulkanRendererPreparationCache rendererPreparationCache;
+	TerraEngine::Renderer::Vulkan::VulkanRendererPreparationSummary rendererPreparationSummary;
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Prepare Backend Work Caches", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		rendererPreparationSummary = rendererPreparationCache.BuildFramePreparation(renderFrameSnapshot, renderGraphPasses, backendCapabilities);
+	}
+	TerraEngine::Renderer::RenderSubmissionPlan renderSubmissionPlan = TerraEngine::Renderer::BuildRenderSubmissionPlan(renderFrameSnapshot, renderGraphPasses, renderPacketPlan, activeRenderFrameId);
+	if (!rhi->ConsumeRenderSubmissionPlan(renderSubmissionPlan))
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Render graph rejected frame " << activeRenderFrameId << " before backend submission.");
+	}
+	TerraEngine::Renderer::RenderDiagnosticsSummary renderGraphDiagnostics = TerraEngine::Renderer::BuildRenderDiagnosticsSummary(renderFrameSnapshot, renderPacketPlan, renderSubmissionPlan, backendCapabilities);
+	if (TerraEngine::Renderer::RenderDiagnosticsRequested() && rhi)
+	{
+		TerraEngine::Renderer::BackendFrameBreakdown backendBreakdown = rhi->GetLatestBackendFrameBreakdown();
+		if (backendBreakdown.frameId == 0u)
+		{
+			backendBreakdown = TerraEngine::Renderer::BuildUnavailableBackendFrameBreakdown(renderFrameSnapshot);
+		}
+		renderGraphDiagnostics.backendFrameBreakdown = std::move(backendBreakdown);
+		renderGraphDiagnostics.backendFallbacks.push_back(
+			"Vulkan preparation cache hits: "
+			+ std::to_string(rendererPreparationSummary.cacheHitCount)
+			+ "/"
+			+ std::to_string(rendererPreparationSummary.cacheLookupCount));
+		if (rendererPreparationSummary.uploadPlan.queuedForUploadWorker)
+		{
+			renderGraphDiagnostics.backendFallbacks.push_back("Immutable upload packets are queued for backend worker preparation.");
+		}
+	}
+	const size_t renderGraphWorkerCount = std::max<size_t>(1u, backendCapabilities.maxRecordingWorkers);
+
 	std::vector<TerraEngine::Scene::SpatialObjectRecord> spatialRecords;
 	std::unordered_map<entt::entity, std::size_t> renderableLookup;
 	{
@@ -641,46 +898,72 @@ void RenderSystem::Update(float deltaTime)
 	if (!renderables.empty())
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		// Build one reusable draw command per renderable so camera views and
-		// shadow queries can cheaply select subsets without rebuilding models.
-		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
-		const size_t taskCount = std::min(renderables.size(), workerCount);
-		const size_t chunkSize = (renderables.size() + taskCount - 1) / taskCount;
-		std::vector<std::future<void>> futures;
-		futures.reserve(taskCount);
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
-		{
-			const size_t start = taskIndex * chunkSize;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (start >= renderables.size())
+		static DrawCommandCacheState drawCommandCache;
+		drawCommandCache.hitCount = 0u;
+		drawCommandCache.missCount = 0u;
+		std::vector<std::uint64_t> drawCommandSignatures(renderables.size(), 0u);
+		std::unordered_set<TerraEngine::UUID> aliveDrawCommandObjects;
+		aliveDrawCommandObjects.reserve(renderables.size());
+
+		// Workers compute cheap signatures from immutable reflected inputs.
+		// The cache map itself is updated later on the coordinator thread so
+		// frame-to-frame reuse does not add a lock to every renderable.
+		RunRenderChunkedWork(
+			renderables.size(),
+			renderGraphWorkerCount,
+			kRenderParallelThreshold,
+			"RenderSystem Task: Hash Draw Command Chunk",
+			[&](std::size_t start, std::size_t end)
 			{
-				break;
-			}
-			const size_t end = std::min(renderables.size(), start + chunkSize);
-			auto task = ThreadPool::instance().createTask([start, end, &renderables, &renderableDrawCommands, &worldTransforms, &makeModelMatrix]() {
-					TERRAENGINE_PROFILE_SCOPE("RenderSystem Task: Build Draw Command Chunk", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-				for (size_t index = start; index < end; ++index)
+				for (std::size_t index = start; index < end; ++index)
 				{
 					const RenderableEntry& entry = renderables[index];
 					const MeshRenderComponent& meshComp = entry.mesh;
-					DrawCommand command{};
-					command.meshId = meshComp.meshId;
-					command.materialId = meshComp.materialId;
-					command.objectId = entry.objectId;
-					command.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
-					command.modelMatrix = makeModelMatrix(worldTransforms.at(entry.entity));
-					renderableDrawCommands[index] = command;
+					drawCommandSignatures[index] = BuildDrawCommandSignature(
+						meshComp.meshId,
+						meshComp.materialId,
+						worldTransforms.at(entry.entity),
+						meshComp.taskShaderCullingEnabled);
 				}
 			});
-			futures.push_back(task->getFuture());
-			ThreadPool::instance().enqueue(task);
-		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (auto& future : futures)
+		for (std::size_t index = 0u; index < renderables.size(); ++index)
 		{
-			future.get();
+			const RenderableEntry& entry = renderables[index];
+			const MeshRenderComponent& meshComp = entry.mesh;
+			aliveDrawCommandObjects.insert(entry.objectId);
+			const std::uint64_t signature = drawCommandSignatures[index];
+			auto cacheEntry = drawCommandCache.recordsByObjectId.find(entry.objectId);
+			if (cacheEntry != drawCommandCache.recordsByObjectId.end() && cacheEntry->second.signature == signature)
+			{
+				cacheEntry->second.lastTouchedFrameId = activeRenderFrameId;
+				renderableDrawCommands[index] = cacheEntry->second.command;
+				++drawCommandCache.hitCount;
+				continue;
+			}
+
+			DrawCommand command{};
+			command.meshId = meshComp.meshId;
+			command.materialId = meshComp.materialId;
+			command.objectId = entry.objectId;
+			command.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
+			command.modelMatrix = makeModelMatrix(worldTransforms.at(entry.entity));
+			renderableDrawCommands[index] = command;
+
+			CachedDrawCommandRecord record{};
+			record.signature = signature;
+			record.lastTouchedFrameId = activeRenderFrameId;
+			record.command = command;
+			drawCommandCache.recordsByObjectId[entry.objectId] = std::move(record);
+			++drawCommandCache.missCount;
+		}
+		PruneStaleDrawCommandCache(drawCommandCache, aliveDrawCommandObjects);
+		if (TerraEngine::Renderer::RenderDiagnosticsRequested())
+		{
+			renderGraphDiagnostics.backendFallbacks.push_back(
+				"Draw command cache hits: "
+				+ std::to_string(drawCommandCache.hitCount)
+				+ "/"
+				+ std::to_string(drawCommandCache.hitCount + drawCommandCache.missCount));
 		}
 	}
 
@@ -725,173 +1008,202 @@ void RenderSystem::Update(float deltaTime)
 	if (!lights.empty())
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Pack Lights", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		const size_t workerCount = std::max<size_t>(1, std::thread::hardware_concurrency());
-		const size_t taskCount = std::min(lights.size(), workerCount);
-		const size_t chunkSize = (lights.size() + taskCount - 1) / taskCount;
+		static LightCandidateCacheState lightCandidateCache;
+		lightCandidateCache.hitCount = 0u;
+		lightCandidateCache.missCount = 0u;
+		std::vector<std::uint64_t> lightCandidateSignatures(lights.size(), 0u);
+		std::unordered_set<TerraEngine::UUID> aliveLightIds;
+		aliveLightIds.reserve(lights.size());
 
-		std::vector<std::future<std::vector<FrameLightCandidate>>> futures;
-		futures.reserve(taskCount);
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
-		{
-			const size_t start = taskIndex * chunkSize;
+		auto makeLightCandidate = [&](const LightEntry& entry, const Transform& transform) {
+			const LightComponent& light = entry.light;
+			const glm::quat normalizedRotation = glm::normalize(transform.rotation);
+			glm::vec3 direction = normalizedRotation * glm::vec3(0.0f, 0.0f, -1.0f);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (start >= lights.size())
+			if (!std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z) || glm::length(direction) < 1e-5f)
 			{
-				break;
+				direction = glm::vec3(0.0f, -1.0f, 0.0f);
 			}
-			const size_t end = std::min(lights.size(), start + chunkSize);
+			else
+			{
+				direction = glm::normalize(direction);
+			}
 
-			auto task = ThreadPool::instance().createTask([start, end, &lights, &worldTransforms]() {
-				TERRAENGINE_PROFILE_SCOPE("RenderSystem Task: Pack Light Chunk", TerraEngine::Profiling::ProfilerModuleId::TaskExecution);
-				std::vector<FrameLightCandidate> chunkLights;
-				chunkLights.reserve(end - start);
+			glm::vec3 finalColor = light.color;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (light.appearance == LightAppearance::FilterAndTemperature)
+			{
+				finalColor *= LightComponent::KelvinToRGB(light.temperature);
+			}
 
+			float clampedIntensity = std::max(light.intensity, 0.0f);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (light.type != LightType::Directional && light.unit == LightUnit::Lumens)
+			{
+				clampedIntensity /= (4.0f * 3.14159265f); // Convert Lumens to Candela
+			}
+
+			const float clampedRange = std::max(light.range, 0.001f);
+			const float clampedInnerAngle = std::clamp(light.innerConeAngle, 0.0f, 1.56f);
+			const float clampedOuterAngle = std::clamp(std::max(light.outerConeAngle, clampedInnerAngle + 0.001f), 0.0f, 1.57f);
+
+			GPULight gpuLight{};
+			gpuLight.positionAndType = glm::vec4(transform.position, static_cast<float>(static_cast<std::uint32_t>(light.type)));
+			gpuLight.directionAndRange = glm::vec4(direction, clampedRange);
+			gpuLight.colorAndIntensity = glm::vec4(
+				std::max(finalColor.x, 0.0f),
+				std::max(finalColor.y, 0.0f),
+				std::max(finalColor.z, 0.0f),
+				clampedIntensity);
+			gpuLight.coneAnglesAndArea = glm::vec4(
+				std::cos(clampedInnerAngle),
+				std::cos(clampedOuterAngle),
+				std::max(light.width, 0.001f),
+				std::max(light.height, 0.001f));
+			gpuLight.shadowAndPadding = glm::vec4(light.castsShadows ? 1.0f : 0.0f, -1.0f, 0.0f, 0.0f);
+			gpuLight.extraParams = glm::vec4(
+				std::clamp(light.shadowStrength, 0.0f, 1.0f),
+				std::max(light.shadowBias, 0.0f),
+				std::max(light.indirectMultiplier, 0.0f),
+				light.authoredPriority);
+
+			FrameLightCandidate candidate{};
+			candidate.lightId = entry.lightId;
+			candidate.gpuLight = gpuLight;
+			candidate.stabilityPreference = std::max(light.stabilityPreference, 0.0f);
+			candidate.candidateFlags = 0u;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (light.castsShadows)
+			{
+				candidate.candidateFlags |= kFrameLightCandidateFlagShadowCapable;
+			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (light.type == LightType::Area)
+			{
+				candidate.candidateFlags |= kFrameLightCandidateFlagSpecialCost;
+			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (light.type == LightType::Directional)
+			{
+				candidate.candidateFlags |= kFrameLightCandidateFlagDirectional;
+			}
+			return candidate;
+		};
+
+		RunRenderChunkedWork(
+			lights.size(),
+			renderGraphWorkerCount,
+			kRenderParallelThreshold,
+			"RenderSystem Task: Hash Light Chunk",
+			[&](std::size_t start, std::size_t end)
+			{
 				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-				for (size_t i = start; i < end; ++i)
+				for (std::size_t i = start; i < end; ++i)
 				{
 					const LightEntry& entry = lights[i];
-					const Transform transform = worldTransforms.at(entry.entity);
-					const LightComponent& light = entry.light;
-
-					const glm::quat normalizedRotation = glm::normalize(transform.rotation);
-					glm::vec3 direction = normalizedRotation * glm::vec3(0.0f, 0.0f, -1.0f);
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (!std::isfinite(direction.x) || !std::isfinite(direction.y) || !std::isfinite(direction.z) || glm::length(direction) < 1e-5f)
-					{
-						direction = glm::vec3(0.0f, -1.0f, 0.0f);
-					}
-					else
-					{
-						direction = glm::normalize(direction);
-					}
-
-					glm::vec3 finalColor = light.color;
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (light.appearance == LightAppearance::FilterAndTemperature)
-					{
-						finalColor *= LightComponent::KelvinToRGB(light.temperature);
-					}
-
-					float clampedIntensity = std::max(light.intensity, 0.0f);
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (light.type != LightType::Directional && light.unit == LightUnit::Lumens)
-					{
-						clampedIntensity /= (4.0f * 3.14159265f); // Convert Lumens to Candela
-					}
-
-					const float clampedRange = std::max(light.range, 0.001f);
-					const float clampedInnerAngle = std::clamp(light.innerConeAngle, 0.0f, 1.56f);
-					const float clampedOuterAngle = std::clamp(std::max(light.outerConeAngle, clampedInnerAngle + 0.001f), 0.0f, 1.57f);
-
-					GPULight gpuLight{};
-					gpuLight.positionAndType = glm::vec4(transform.position, static_cast<float>(static_cast<std::uint32_t>(light.type)));
-					gpuLight.directionAndRange = glm::vec4(direction, clampedRange);
-					gpuLight.colorAndIntensity = glm::vec4(
-						std::max(finalColor.x, 0.0f),
-						std::max(finalColor.y, 0.0f),
-						std::max(finalColor.z, 0.0f),
-						clampedIntensity);
-					gpuLight.coneAnglesAndArea = glm::vec4(
-						std::cos(clampedInnerAngle),
-						std::cos(clampedOuterAngle),
-						std::max(light.width, 0.001f),
-						std::max(light.height, 0.001f));
-					gpuLight.shadowAndPadding = glm::vec4(light.castsShadows ? 1.0f : 0.0f, -1.0f, 0.0f, 0.0f);
-					gpuLight.extraParams = glm::vec4(
-						std::clamp(light.shadowStrength, 0.0f, 1.0f),
-						std::max(light.shadowBias, 0.0f),
-						std::max(light.indirectMultiplier, 0.0f),
-						light.authoredPriority);
-
-					FrameLightCandidate candidate{};
-					candidate.lightId = entry.lightId;
-					candidate.gpuLight = gpuLight;
-					candidate.stabilityPreference = std::max(light.stabilityPreference, 0.0f);
-					candidate.candidateFlags = 0u;
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (light.castsShadows)
-					{
-						candidate.candidateFlags |= kFrameLightCandidateFlagShadowCapable;
-					}
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (light.type == LightType::Area)
-					{
-						candidate.candidateFlags |= kFrameLightCandidateFlagSpecialCost;
-					}
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (light.type == LightType::Directional)
-					{
-						candidate.candidateFlags |= kFrameLightCandidateFlagDirectional;
-					}
-					chunkLights.push_back(candidate);
+					lightCandidateSignatures[i] = BuildLightCandidateSignature(worldTransforms.at(entry.entity), entry.light);
 				}
-
-				return chunkLights;
 			});
-
-			futures.push_back(task->getFuture());
-			ThreadPool::instance().enqueue(task);
-		}
-
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (auto& future : futures)
+		packedLights.reserve(lights.size());
+		for (std::size_t i = 0u; i < lights.size(); ++i)
 		{
-			auto chunk = future.get();
-			packedLights.insert(packedLights.end(), chunk.begin(), chunk.end());
+			const LightEntry& entry = lights[i];
+			aliveLightIds.insert(entry.lightId);
+			const std::uint64_t signature = lightCandidateSignatures[i];
+			auto cacheEntry = lightCandidateCache.recordsByLightId.find(entry.lightId);
+			if (cacheEntry != lightCandidateCache.recordsByLightId.end() && cacheEntry->second.signature == signature)
+			{
+				cacheEntry->second.lastTouchedFrameId = activeRenderFrameId;
+				packedLights.push_back(cacheEntry->second.candidate);
+				++lightCandidateCache.hitCount;
+				continue;
+			}
+
+			CachedLightCandidateRecord record{};
+			record.signature = signature;
+			record.lastTouchedFrameId = activeRenderFrameId;
+			record.candidate = makeLightCandidate(entry, worldTransforms.at(entry.entity));
+			packedLights.push_back(record.candidate);
+			lightCandidateCache.recordsByLightId[entry.lightId] = std::move(record);
+			++lightCandidateCache.missCount;
+		}
+		PruneStaleLightCandidateCache(lightCandidateCache, aliveLightIds);
+		if (TerraEngine::Renderer::RenderDiagnosticsRequested())
+		{
+			renderGraphDiagnostics.backendFallbacks.push_back(
+				"Light candidate cache hits: "
+				+ std::to_string(lightCandidateCache.hitCount)
+				+ "/"
+				+ std::to_string(lightCandidateCache.hitCount + lightCandidateCache.missCount));
 		}
 	}
 
 	auto buildShadowDrawLists = [&](const glm::vec3& cameraWorldPosition) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		std::vector<ShadowDrawList> shadowDrawLists;
-		shadowDrawLists.reserve(packedLights.size());
+		std::vector<std::optional<ShadowDrawList>> shadowDrawListsByLight(packedLights.size());
 		TerraEngine::Scene::SpatialQueryFilter filter{};
 		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
 
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const FrameLightCandidate& candidate : packedLights)
+		RunRenderChunkedWork(
+			packedLights.size(),
+			renderGraphWorkerCount,
+			kRenderParallelThreshold,
+			"RenderSystem Task: Build Shadow Draw Lists",
+			[&](std::size_t start, std::size_t end)
+			{
+				for (std::size_t lightIndex = start; lightIndex < end; ++lightIndex)
+				{
+					const FrameLightCandidate& candidate = packedLights[lightIndex];
+					if ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) == 0u)
+					{
+						continue;
+					}
+
+					ShadowDrawList shadowDrawList{};
+					shadowDrawList.lightId = candidate.lightId;
+
+					const std::uint32_t lightType = static_cast<std::uint32_t>(std::max(candidate.gpuLight.positionAndType.w, 0.0f) + 0.5f);
+					TerraEngine::Scene::SpatialQueryResult query{};
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+					if (lightType == static_cast<std::uint32_t>(LightType::Directional))
+					{
+						const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(candidate.gpuLight, cameraWorldPosition);
+						query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
+					}
+					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+					else if (lightType == static_cast<std::uint32_t>(LightType::Point))
+					{
+						TerraEngine::Scene::SpatialSphere lightBounds{};
+						lightBounds.center = glm::vec3(candidate.gpuLight.positionAndType);
+						lightBounds.radius = std::max(candidate.gpuLight.directionAndRange.w, 0.5f);
+						query = spatialIndex.QuerySphere(lightBounds, filter);
+					}
+					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+					else if (lightType == static_cast<std::uint32_t>(LightType::Spot))
+					{
+						const glm::mat4 lightViewProjection = BuildSpotShadowViewProjection(candidate.gpuLight);
+						query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
+					}
+					// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+					else if (lightType == static_cast<std::uint32_t>(LightType::Area))
+					{
+						const glm::mat4 lightViewProjection = BuildAreaShadowViewProjection(candidate.gpuLight);
+						query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
+					}
+
+					shadowDrawList.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
+					shadowDrawListsByLight[lightIndex] = std::move(shadowDrawList);
+				}
+			});
+
+		std::vector<ShadowDrawList> shadowDrawLists;
+		shadowDrawLists.reserve(shadowDrawListsByLight.size());
+		for (std::optional<ShadowDrawList>& shadowDrawList : shadowDrawListsByLight)
 		{
-			if ((candidate.candidateFlags & kFrameLightCandidateFlagShadowCapable) == 0u)
+			if (shadowDrawList.has_value())
 			{
-				continue;
+				shadowDrawLists.push_back(std::move(*shadowDrawList));
 			}
-
-			ShadowDrawList shadowDrawList{};
-			shadowDrawList.lightId = candidate.lightId;
-
-			const std::uint32_t lightType = static_cast<std::uint32_t>(std::max(candidate.gpuLight.positionAndType.w, 0.0f) + 0.5f);
-			TerraEngine::Scene::SpatialQueryResult query{};
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (lightType == static_cast<std::uint32_t>(LightType::Directional))
-			{
-				const glm::mat4 lightViewProjection = BuildDirectionalShadowViewProjection(candidate.gpuLight, cameraWorldPosition);
-				query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
-			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-			else if (lightType == static_cast<std::uint32_t>(LightType::Point))
-			{
-				TerraEngine::Scene::SpatialSphere lightBounds{};
-				lightBounds.center = glm::vec3(candidate.gpuLight.positionAndType);
-				lightBounds.radius = std::max(candidate.gpuLight.directionAndRange.w, 0.5f);
-				query = spatialIndex.QuerySphere(lightBounds, filter);
-			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-			else if (lightType == static_cast<std::uint32_t>(LightType::Spot))
-			{
-				const glm::mat4 lightViewProjection = BuildSpotShadowViewProjection(candidate.gpuLight);
-				query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
-			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-			else if (lightType == static_cast<std::uint32_t>(LightType::Area))
-			{
-				const glm::mat4 lightViewProjection = BuildAreaShadowViewProjection(candidate.gpuLight);
-				query = spatialIndex.QueryFrustum(TerraEngine::Scene::ExtractFrustum(lightViewProjection), filter);
-			}
-
-			shadowDrawList.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
-			shadowDrawLists.push_back(std::move(shadowDrawList));
 		}
 
 		return shadowDrawLists;
@@ -1186,6 +1498,7 @@ void RenderSystem::Update(float deltaTime)
 
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Publish Render Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		TerraEngine::Renderer::PublishRenderDiagnostics(renderGraphDiagnostics);
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestGameStats = rhi->GetLatestRenderStats(RenderViewType::Game);
 		latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);
@@ -1216,6 +1529,8 @@ void RenderSystem::Update(float deltaTime)
 		latestGameLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Game);
 		latestSceneLightingDiagnostics = rhi->GetLatestLightingDiagnostics(RenderViewType::Scene);
 		latestRenderSnapshotDiagnostics = rhi->GetLatestRenderSnapshotDiagnostics();
+		latestRenderGraphDiagnostics = renderGraphDiagnostics;
+		latestRenderFrameSnapshot = renderFrameSnapshot;
 		latestSkyRuntimeState = skyRuntimeState;
 		TerraEngine::Profiling::Profiler::Instance().RecordRenderStats(latestGameStats, latestSceneStats);
 	}
@@ -1310,6 +1625,8 @@ void RenderSystem::Clear()
 		latestGameLightingDiagnostics = {};
 		latestSceneLightingDiagnostics = {};
 		latestRenderSnapshotDiagnostics = {};
+		latestRenderGraphDiagnostics = {};
+		latestRenderFrameSnapshot = {};
 		latestGameStats.viewType = RenderViewType::Game;
 		latestSceneStats.viewType = RenderViewType::Scene;
 		latestGameBudgetDiagnostics.viewType = RenderViewType::Game;
@@ -1387,6 +1704,22 @@ RenderSnapshotDiagnosticsSnapshot RenderSystem::GetLatestRenderSnapshotDiagnosti
 {
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestRenderSnapshotDiagnostics;
+}
+
+TerraEngine::Renderer::RenderDiagnosticsSummary RenderSystem::GetLatestRenderGraphDiagnostics() const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return latestRenderGraphDiagnostics;
+}
+
+void RenderSystem::SetRenderGraphDiagnosticsRequested(bool requested)
+{
+	TerraEngine::Renderer::SetRenderDiagnosticsRequested(requested);
+	if (!requested)
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestRenderGraphDiagnostics = {};
+	}
 }
 
 // RenderSystem::GetLatestSkyRuntimeState is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

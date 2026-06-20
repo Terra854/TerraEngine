@@ -8,6 +8,8 @@
 
 #include "RHIDefinitions.h"
 #include "Renderer/RenderTypes.h"
+#include "Renderer/Graph/RenderSubmissionPlan.h"
+#include "Renderer/Graph/RenderDiagnostics.h"
 #include "Core/Export.h"
 
 class WindowSystem;
@@ -30,8 +32,31 @@ public:
 	virtual void EndFrame() = 0;
 	// SetGlobalTaskShaderCullingEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void SetGlobalTaskShaderCullingEnabled(bool enabled) {}
+	// Backend capability data keeps high-level scheduling decisions portable.
+	// The default profile is conservative so unknown backends remain correct.
+	virtual TerraEngine::Renderer::BackendCapabilityProfile GetBackendCapabilityProfile() const
+	{
+		TerraEngine::Renderer::BackendCapabilityProfile profile;
+		profile.requiredSerialBoundaries = { "final-submit", "present", "resource-retire" };
+		return profile;
+	}
+	// Backends consume a validated plan only at the coordinator boundary. The
+	// current Vulkan path still records from FrameRenderData, so this hook is a
+	// compatibility bridge for tests and future RHI implementations.
+	virtual bool ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan)
+	{
+		return plan.valid;
+	}
 	// IsTaskShaderSupported is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual bool IsTaskShaderSupported() const { return false; }
+	virtual TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const
+	{
+		return TerraEngine::Renderer::LatestRenderDiagnostics();
+	}
+	virtual TerraEngine::Renderer::BackendFrameBreakdown GetLatestBackendFrameBreakdown() const
+	{
+		return {};
+	}
 	// GetLatestRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const
 	{

@@ -334,6 +334,7 @@ namespace TerraEngine::Scene
 	// SpatialIndex::GetDiagnosticsSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	SpatialDiagnosticsSnapshot SpatialIndex::GetDiagnosticsSnapshot() const
 	{
+		std::scoped_lock lock(diagnosticsMutex);
 		return diagnostics;
 	}
 
@@ -668,9 +669,12 @@ namespace TerraEngine::Scene
 		});
 
 		const auto end = std::chrono::steady_clock::now();
-		diagnostics.visibleCandidateCount = static_cast<std::uint32_t>(result.hits.size());
-		diagnostics.rejectedObjectCount = result.rejectedCount;
-		diagnostics.fallbackObjectCount = result.fallbackCount;
-		diagnostics.lastQueryDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
+		{
+			std::scoped_lock lock(diagnosticsMutex);
+			diagnostics.visibleCandidateCount = static_cast<std::uint32_t>(result.hits.size());
+			diagnostics.rejectedObjectCount = result.rejectedCount;
+			diagnostics.fallbackObjectCount = result.fallbackCount;
+			diagnostics.lastQueryDurationMs = std::chrono::duration<double, std::milli>(end - start).count();
+		}
 	}
 }

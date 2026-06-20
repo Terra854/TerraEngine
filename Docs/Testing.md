@@ -29,6 +29,15 @@ diagnostics gating, and deferred script-origin scene mutations. Export scripting
 tests also cover the NativeAOT path so editor and exported runtimes keep the same
 batching and lifecycle contract.
 
+The renderer graph checks live under `Tests/Engine/Renderer`. They validate
+immutable frame snapshots, backend-neutral pass/resource contracts, packet
+scheduling thresholds, submission-plan rejection for stale or unsafe work,
+mock-backend portability, opt-in render diagnostics, backend frame breakdown
+categories, render worker task group planning, Vulkan recording-batch planning,
+thread-local recording context ownership, and stale backend batch rejection. The
+editor suite also checks that closing Scheduler Diagnostics disables render
+graph diagnostic collection with the ECS and scripting diagnostic toggles.
+
 For Linux-specific prerequisites and troubleshooting, see
 `Docs/LinuxSupport.md`.
 

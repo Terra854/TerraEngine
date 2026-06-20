@@ -7,6 +7,8 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 enum class RHIBackend
 {
@@ -24,3 +26,36 @@ struct RHIConfig
 	bool enableValidationLayers = true;
 #endif
 };
+
+namespace TerraEngine::Renderer {
+
+	// BackendCapabilityProfile is the renderer-facing promise a graphics API
+	// makes before it receives frame work. RenderSystem uses these values to
+	// decide what can run on workers and which operations must stay serialized.
+	struct BackendCapabilityProfile
+	{
+		std::string backendId = "none";
+		bool supportsParallelRecording = false;
+		bool supportsAsyncUploadPreparation = false;
+		bool supportsTransientResources = false;
+		bool supportsSecondaryRecording = false;
+		bool supportsParallelShadowRecording = false;
+		bool supportsParallelPerViewRecording = false;
+		bool supportsParallelPipelineStatePreparation = false;
+		bool supportsParallelDescriptorPreparation = false;
+		bool supportsParallelUploadPlanning = false;
+		bool supportsParallelTransitionPlanning = false;
+		bool supportsParallelCulling = false;
+		bool supportsParallelLightPreparation = false;
+		bool supportsParallelUiPreparation = false;
+		bool supportsParallelPacketValidation = false;
+		bool supportsPacketLocalDiagnostics = false;
+		bool supportsRenderTaskGroups = false;
+		bool supportsFrameOverlap = false;
+		std::uint32_t maxRecordingWorkers = 1u;
+		std::uint32_t workerSchedulingThreshold = 128u;
+		std::vector<std::string> requiredSerialBoundaries;
+		std::vector<std::string> diagnosticCapabilities;
+	};
+
+}

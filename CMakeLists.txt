@@ -93,7 +93,22 @@ set(ENGINE_SOURCES
 	Engine/Profiling/Profiler.cpp
 	Engine/Profiling/ProfilerCapture.cpp
 	Engine/Renderer/RenderSystem.cpp
+	Engine/Renderer/Graph/RenderDiagnostics.cpp
+	Engine/Renderer/Graph/RenderFrameBreakdown.cpp
+	Engine/Renderer/Graph/RenderFrameSnapshot.cpp
+	Engine/Renderer/Graph/RenderGraph.cpp
+	Engine/Renderer/Graph/RenderSubmissionPlan.cpp
+	Engine/Renderer/Graph/RenderWorkerTaskGroup.cpp
+	Engine/Renderer/Graph/RenderWorkPacket.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContext.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanCommandRecording.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanDescriptorPlanning.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanFrameDiagnostics.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanPipelineStateKeys.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanRecordingContext.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanRendererWorkCache.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanTransitionPlanning.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanUploadPlanning.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanHiZ.cpp
@@ -161,9 +176,24 @@ set(ENGINE_HEADERS
 	Engine/Profiling/ProfilerScope.h
 	Engine/Renderer/RenderSystem.h
 	Engine/Renderer/RenderTypes.h
+	Engine/Renderer/Graph/RenderDiagnostics.h
+	Engine/Renderer/Graph/RenderFrameBreakdown.h
+	Engine/Renderer/Graph/RenderFrameSnapshot.h
+	Engine/Renderer/Graph/RenderGraph.h
+	Engine/Renderer/Graph/RenderSubmissionPlan.h
+	Engine/Renderer/Graph/RenderWorkerTaskGroup.h
+	Engine/Renderer/Graph/RenderWorkPacket.h
 	Engine/Renderer/RHI/RHIDefinitions.h
 	Engine/Renderer/RHI/RHIContext.h
 	Engine/Renderer/RHI/Vulkan/VulkanContext.h
+	Engine/Renderer/RHI/Vulkan/VulkanCommandRecording.h
+	Engine/Renderer/RHI/Vulkan/VulkanDescriptorPlanning.h
+	Engine/Renderer/RHI/Vulkan/VulkanFrameDiagnostics.h
+	Engine/Renderer/RHI/Vulkan/VulkanPipelineStateKeys.h
+	Engine/Renderer/RHI/Vulkan/VulkanRecordingContext.h
+	Engine/Renderer/RHI/Vulkan/VulkanRendererWorkCache.h
+	Engine/Renderer/RHI/Vulkan/VulkanTransitionPlanning.h
+	Engine/Renderer/RHI/Vulkan/VulkanUploadPlanning.h
 	Engine/Renderer/RHI/Vulkan/VulkanCommonIncludes.h
 	Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h
 	Engine/Renderer/RHI/Vulkan/VulkanHiZ.h

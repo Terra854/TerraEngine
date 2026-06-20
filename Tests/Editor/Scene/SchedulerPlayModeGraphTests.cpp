@@ -1,6 +1,7 @@
 #include "../TestHarness.h"
 
 #include "Core/Scheduling/EcsQueryTaskGraph.h"
+#include "Renderer/Graph/RenderDiagnostics.h"
 #include "Scripting/ScriptingSystem.h"
 
 namespace TerraEngine::EditorTests {
@@ -35,11 +36,14 @@ namespace TerraEngine::EditorTests {
 		registry.Add("Editor.SchedulerPlayModeGraph.DiagnosticsCloseDisablesScriptingCollection", [](TestContext& context) {
 			ScriptingSystem::SetScriptingDiagnosticsRequested(true);
 			TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(true);
+			TerraEngine::Renderer::SetRenderDiagnosticsRequested(true);
 
 			ScriptingSystem::SetScriptingDiagnosticsRequested(false);
 			TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
+			TerraEngine::Renderer::SetRenderDiagnosticsRequested(false);
 
 			context.Expect(!ScriptingSystem::ScriptingDiagnosticsRequested(), "Closing diagnostics should disable scripting collection.");
+			context.Expect(!TerraEngine::Renderer::RenderDiagnosticsRequested(), "Closing diagnostics should disable render graph collection.");
 		});
 	}
 }
