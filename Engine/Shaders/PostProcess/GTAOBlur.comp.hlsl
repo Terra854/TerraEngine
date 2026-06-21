@@ -3,8 +3,12 @@
 // Bilateral blur for the contact-darkening target. It uses depth agreement to
 // keep occlusion from bleeding across object edges.
 [[vk::binding(12, 0)]] Texture2D<float> inputDepth;
-[[vk::binding(19, 0)]] Texture2D<float> inputOcclusion;
-[[vk::binding(16, 0)]] RWTexture2D<float> outputOcclusion;
+// Raw AO uses its own sampled binding so material shading can keep binding 19
+// pointed at the final blurred AO image for the whole draw pass.
+[[vk::binding(22, 0)]] Texture2D<float> inputOcclusion;
+// Blur output uses a dedicated storage binding instead of the Hi-Z output
+// binding. This keeps all compute passes stable under optimized recording.
+[[vk::binding(24, 0)]] RWTexture2D<float> outputOcclusion;
 [[vk::binding(21, 0)]] Texture2D<float> inputHistory;
 
 struct PushConstants
@@ -64,8 +68,15 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	}
 
 	const float blurred = totalWeight > 0.0f ? weightedOcclusion / totalWeight : LoadOcclusionClamped(int2(pixel));
-	// Blend only after the spatial blur so history smooths residual AO noise
-	// without bleeding raw high-frequency samples across object silhouettes.
-	const float history = LoadHistoryClamped(int2(pixel));
-	outputOcclusion[pixel] = saturate(lerp(blurred, history, saturate(config.historyBlend)));
+	// Blend only after the spatial blur so history smooths residual AO noise.
+	// Avoid sampling history while the CPU says it is invalid; optimized builds
+	// may still propagate undefined texture contents through a zero-weight lerp.
+	const float historyBlend = saturate(config.historyBlend);
+	float resolvedOcclusion = blurred;
+	if (historyBlend > 0.001f)
+	{
+		const float history = LoadHistoryClamped(int2(pixel));
+		resolvedOcclusion = lerp(blurred, history, historyBlend);
+	}
+	outputOcclusion[pixel] = saturate(resolvedOcclusion);
 }

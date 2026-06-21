@@ -708,7 +708,13 @@ float4 main(PSIn input) : SV_Target0
 	{
 		const float aoStrength = saturate(frame.renderSettings2.y / 4.0f) * 4.0f;
 		const float aoQualityEnabled = frame.renderSettings2.z > 0.5f ? 1.0f : 0.0f;
-		const float screenOcclusion = lerp(1.0f, SampleScreenAmbientOcclusion(input, frame), aoQualityEnabled);
+		// Use a branch instead of a zero-weight lerp so disabled/first-frame AO
+		// never samples an image whose contents are intentionally being ignored.
+		float screenOcclusion = 1.0f;
+		if (aoQualityEnabled > 0.5f)
+		{
+			screenOcclusion = SampleScreenAmbientOcclusion(input, frame);
+		}
 		const float indirectOcclusion = lerp(1.0f, authoredOcclusion * screenOcclusion, saturate(aoStrength) * aoQualityEnabled);
 		finalLighting += EvaluateIBL(frame, normal, viewDir, finalColor.rgb, metallic, roughness, indirectOcclusion);
 	}

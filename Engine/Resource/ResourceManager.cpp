@@ -112,6 +112,40 @@ namespace
 		return settings;
 	}
 
+	std::optional<RenderSettings> SettingsFromRenderSettingsJson(const nlohmann::json& renderSettingsDocument)
+	{
+		const nlohmann::json* settingsObject = &renderSettingsDocument;
+		if (auto settingsIt = renderSettingsDocument.find("settings"); settingsIt != renderSettingsDocument.end() && settingsIt->is_object())
+		{
+			settingsObject = &(*settingsIt);
+		}
+
+		if (!settingsObject->is_object())
+		{
+			return std::nullopt;
+		}
+
+		RenderSettings settings;
+		// Keep this field list aligned with RenderSystem::LoadSettings and
+		// SaveSettings. The export manifest carries the full editor-authored
+		// settings object so standalone builds do not have to reverse-engineer
+		// exact values from lossy profile labels.
+		settings.shadowResolution = JsonUIntOr(*settingsObject, "shadowResolution", 2048u);
+		settings.shadowFilteringSize = JsonUIntOr(*settingsObject, "shadowFilteringSize", 5u);
+		settings.maxUploadedLights = JsonUIntOr(*settingsObject, "maxUploadedLights", 256u);
+		settings.maxDynamicLights = JsonUIntOr(*settingsObject, "maxDynamicLights", 128u);
+		settings.maxShadowLights = JsonUIntOr(*settingsObject, "maxShadowLights", 8u);
+		settings.maxAreaLights = JsonUIntOr(*settingsObject, "maxAreaLights", 4u);
+		settings.enableLTC = JsonUIntOr(*settingsObject, "enableLTC", 1u);
+		settings.enableIBL = JsonUIntOr(*settingsObject, "enableIBL", 1u);
+		settings.indirectStrength = JsonFloatOr(*settingsObject, "indirectStrength", 1.0f);
+		settings.ambientOcclusionStrength = JsonFloatOr(*settingsObject, "ambientOcclusionStrength", 1.0f);
+		settings.ambientOcclusionQuality = JsonUIntOr(*settingsObject, "ambientOcclusionQuality", 2u);
+		settings.anisotropicFiltering = JsonUIntOr(*settingsObject, "anisotropicFiltering", 4u);
+		settings.variableRateShading = JsonUIntOr(*settingsObject, "variableRateShading", 0u);
+		return settings;
+	}
+
 	std::string RenderProfileSummaryFromJson(const nlohmann::json& renderProfile)
 	{
 		std::ostringstream stream;
@@ -264,8 +298,14 @@ void ResourceManager::Initialize()
 			m_ConfiguredStartupScene = manifest["startupScene"].get<std::string>();
 		}
 
+		if (auto settingsIt = manifest.find("renderSettings"); settingsIt != manifest.end() && settingsIt->is_object()) {
+			m_ConfiguredRenderSettings = SettingsFromRenderSettingsJson(*settingsIt);
+		}
+
 		if (auto renderIt = manifest.find("renderProfile"); renderIt != manifest.end() && renderIt->is_object()) {
-			m_ConfiguredRenderSettings = SettingsFromRenderProfileJson(*renderIt);
+			if (!m_ConfiguredRenderSettings.has_value()) {
+				m_ConfiguredRenderSettings = SettingsFromRenderProfileJson(*renderIt);
+			}
 			m_RenderProfileSummary = RenderProfileSummaryFromJson(*renderIt);
 			m_RenderValidationEnabled = JsonBoolOr(*renderIt, "validationEnabled", false);
 			m_RenderDebugEnabled = JsonBoolOr(*renderIt, "debugEnabled", false);

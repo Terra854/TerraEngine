@@ -8,6 +8,7 @@
 #include "TEPAK/PackWriter.h"
 #include "Utilities/UUID.h"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -87,6 +88,30 @@ namespace TerraEngine::Tests {
 				+ "\t\"name\": \"Smoke Export\",\n"
 				+ "\t\"version\": \"2.5.0\",\n"
 				+ "\t\"startupScene\": \"Scenes/Main.tescene\",\n"
+				+ "\t\"renderProfile\": {\n"
+				+ "\t\t\"profileName\": \"Smoke Summary\",\n"
+				+ "\t\t\"shadows\": \"low\",\n"
+				+ "\t\t\"ambientOcclusion\": \"low\",\n"
+				+ "\t\t\"variableRateShading\": \"disabled\"\n"
+				+ "\t},\n"
+				+ "\t\"renderSettings\": {\n"
+				+ "\t\t\"preset\": 3,\n"
+				+ "\t\t\"settings\": {\n"
+				+ "\t\t\t\"shadowResolution\": 4096,\n"
+				+ "\t\t\t\"shadowFilteringSize\": 7,\n"
+				+ "\t\t\t\"maxUploadedLights\": 321,\n"
+				+ "\t\t\t\"maxDynamicLights\": 123,\n"
+				+ "\t\t\t\"maxShadowLights\": 6,\n"
+				+ "\t\t\t\"maxAreaLights\": 5,\n"
+				+ "\t\t\t\"enableLTC\": 0,\n"
+				+ "\t\t\t\"enableIBL\": 0,\n"
+				+ "\t\t\t\"indirectStrength\": 2.5,\n"
+				+ "\t\t\t\"ambientOcclusionStrength\": 0.25,\n"
+				+ "\t\t\t\"ambientOcclusionQuality\": 1,\n"
+				+ "\t\t\t\"anisotropicFiltering\": 12,\n"
+				+ "\t\t\t\"variableRateShading\": 1\n"
+				+ "\t\t}\n"
+				+ "\t},\n"
 				+ "\t\"assets\": [\n"
 				+ "\t\t{ \"guid\": \"" + std::string(meshGuid) + "\", \"path\": \"Meshes/Smoke.temf\", \"type\": 0 },\n"
 				+ "\t\t{ \"guid\": \"" + std::string(materialGuid) + "\", \"path\": \"Materials/Smoke.tmat\", \"type\": 2 },\n"
@@ -135,6 +160,7 @@ namespace TerraEngine::Tests {
 
 			BootstrapExportRuntime(workspace);
 			const std::optional<std::filesystem::path> startupScene = ResourceManager::Instance().GetConfiguredStartupScene();
+			const std::optional<RenderSettings> renderSettings = ResourceManager::Instance().GetConfiguredRenderSettings();
 			const TerraEngine::UUID resolvedMesh = ResourceManager::Instance().ResolveAssetReference("Meshes/Smoke.temf", AssetType::Mesh);
 			const TerraEngine::UUID resolvedMaterial = ResourceManager::Instance().ResolveAssetReference("Materials/Smoke.tmat", AssetType::Material);
 			const TerraEngine::UUID resolvedTexture = ResourceManager::Instance().ResolveAssetReference("Textures/Smoke.tetf", AssetType::Texture);
@@ -153,6 +179,20 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(std::string("2.5.0"), ResourceManager::Instance().GetVersion(), "Version metadata should come from packed game.json.");
 			context.Expect(startupScene.has_value(), "The packed manifest should provide a startup scene path.");
 			context.ExpectEqual(std::string("Scenes/Main.tescene"), startupScene->generic_string(), "Startup scene should preserve the manifest path for engine bootstrap.");
+			context.Expect(renderSettings.has_value(), "Packed export manifests should configure renderer settings for standalone runtime.");
+			context.ExpectEqual(4096u, renderSettings.has_value() ? renderSettings->shadowResolution : 0u, "Runtime should prefer exact exported shadow resolution over renderProfile labels.");
+			context.ExpectEqual(7u, renderSettings.has_value() ? renderSettings->shadowFilteringSize : 0u, "Runtime should preserve exact exported shadow filter size.");
+			context.ExpectEqual(321u, renderSettings.has_value() ? renderSettings->maxUploadedLights : 0u, "Runtime should preserve the exact uploaded light budget.");
+			context.ExpectEqual(123u, renderSettings.has_value() ? renderSettings->maxDynamicLights : 0u, "Runtime should preserve the exact dynamic light budget.");
+			context.ExpectEqual(6u, renderSettings.has_value() ? renderSettings->maxShadowLights : 0u, "Runtime should preserve the exact shadow light budget.");
+			context.ExpectEqual(5u, renderSettings.has_value() ? renderSettings->maxAreaLights : 0u, "Runtime should preserve the exact area light budget.");
+			context.ExpectEqual(0u, renderSettings.has_value() ? renderSettings->enableLTC : 1u, "Runtime should preserve exact LTC setting.");
+			context.ExpectEqual(0u, renderSettings.has_value() ? renderSettings->enableIBL : 1u, "Runtime should preserve exact IBL setting.");
+			context.Expect(renderSettings.has_value() && std::fabs(renderSettings->indirectStrength - 2.5f) < 0.0001f, "Runtime should preserve exact indirect strength.");
+			context.Expect(renderSettings.has_value() && std::fabs(renderSettings->ambientOcclusionStrength - 0.25f) < 0.0001f, "Runtime should preserve exact ambient occlusion strength.");
+			context.ExpectEqual(1u, renderSettings.has_value() ? renderSettings->ambientOcclusionQuality : 0u, "Runtime should preserve exact ambient occlusion quality.");
+			context.ExpectEqual(12u, renderSettings.has_value() ? renderSettings->anisotropicFiltering : 0u, "Runtime should preserve exact anisotropic filtering.");
+			context.ExpectEqual(1u, renderSettings.has_value() ? renderSettings->variableRateShading : 0u, "Runtime should preserve exact VRS setting.");
 			context.Expect(resolvedMesh == meshGuid, "Manifest asset entries should register UUID-to-path lookups before scene loading.");
 			context.Expect(resolvedMaterial == materialGuid, "Packed material assets should be addressable through the export manifest.");
 			context.Expect(resolvedTexture == textureGuid, "Packed texture assets should be addressable through the export manifest.");

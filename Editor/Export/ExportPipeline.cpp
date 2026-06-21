@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
@@ -135,6 +136,38 @@ static nlohmann::json ResolveRenderProfileManifest(const std::filesystem::path& 
 	}
 
 	return renderProfile;
+}
+
+static std::optional<nlohmann::json> LoadProjectRenderSettingsManifest(const std::filesystem::path& projectRoot)
+{
+	const std::filesystem::path settingsPath = projectRoot / "ProjectSettings" / "RenderSettings.json";
+	if (!std::filesystem::exists(settingsPath)) {
+		return std::nullopt;
+	}
+
+	try {
+		std::ifstream file(settingsPath);
+		if (!file) {
+			return std::nullopt;
+		}
+
+		nlohmann::json savedSettings;
+		file >> savedSettings;
+		if (!savedSettings.is_object()) {
+			return std::nullopt;
+		}
+
+		// Preserve the editor-authored render settings document exactly instead
+		// of reducing it to profile labels. Export runtime can then apply the
+		// same renderer contract that the project used in the editor.
+		return savedSettings;
+	}
+	catch (...) {
+		// Render settings remain optional for old projects. A malformed file
+		// should be reported by validation, but manifest generation still needs
+		// a deterministic fallback path so export does not crash here.
+		return std::nullopt;
+	}
 }
 
 // CopyRuntimeShaderTree stages every engine-owned shader into the TEPAK input.
@@ -794,6 +827,9 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		}
 
 		manifest["renderProfile"] = ResolveRenderProfileManifest(projectRoot);
+		if (std::optional<nlohmann::json> renderSettings = LoadProjectRenderSettingsManifest(projectRoot)) {
+			manifest["renderSettings"] = *renderSettings;
+		}
 
 		// Include the asset GUID map so the engine runtime can resolve 
 		// cross-resource references (UUIDs) back to filenames in the archive.

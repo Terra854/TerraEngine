@@ -16,6 +16,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -23,6 +24,35 @@ namespace
 {
 	constexpr std::uint64_t kClusterRangeHashOffset = 1469598103934665603ull;
 	constexpr std::uint64_t kClusterRangeHashPrime = 1099511628211ull;
+	constexpr std::uint32_t kFallbackMaterialIndex = 0u;
+	constexpr std::uint32_t kFirstRuntimeMaterialIndex = 1u;
+
+	// CreateFallbackMaterialData defines the renderer-owned material contract
+	// for missing, loading, or invalid materials. Release builds cannot rely on
+	// GPU memory being zeroed, so every unused material slot is initialized with
+	// these safe texture indices and scalar defaults.
+	MaterialData CreateFallbackMaterialData()
+	{
+		MaterialData data{};
+		data.BaseColorFactor = glm::vec4(1.0f);
+		data.EmissiveFactor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+		data.UVTransform = glm::vec4(1.0f, 1.0f, 0.0f, 0.0f);
+		data.MetallicFactor = 0.0f;
+		data.RoughnessFactor = 1.0f;
+		data.NormalScale = 1.0f;
+		data.OcclusionStrength = 1.0f;
+		data.AlphaCutoff = 0.5f;
+		data.AlphaMode = static_cast<std::uint32_t>(AlphaMode::Opaque);
+		data.ShadingModel = static_cast<std::uint32_t>(ShadingModel::MetallicRoughness);
+		data.Flags = 0u;
+		data.BaseColorTextureIndex = 0u;
+		data.NormalTextureIndex = 1u;
+		data.MaskTextureIndex = 2u;
+		data.OcclusionTextureIndex = 2u;
+		data.EmissiveTextureIndex = 0u;
+		data.ShadowBehavior = static_cast<std::uint32_t>(MaterialShadowBehavior::Opaque);
+		return data;
+	}
 
 	// HashClusterRangeValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void HashClusterRangeValue(std::uint64_t& hashValue, std::uint64_t input)
@@ -876,7 +906,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!material) return { globalDescriptorSets[currentFrame] };
 	
-	MaterialData data{};
+	MaterialData data = CreateFallbackMaterialData();
 	data.BaseColorFactor = glm::vec4(
 		material->header.baseColorFactor[0],
 		material->header.baseColorFactor[1],
@@ -905,11 +935,11 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 
 	// Initialize texture slots to renderer-owned fallbacks:
 	// 0 = white base color, 1 = flat normal, 2 = non-metal rough material mask.
-	data.BaseColorTextureIndex = 0;
-	data.NormalTextureIndex = 1;
-	data.MaskTextureIndex = 2;
-	data.OcclusionTextureIndex = 2;
-	data.EmissiveTextureIndex = 0;
+	data.BaseColorTextureIndex = 0u;
+	data.NormalTextureIndex = 1u;
+	data.MaskTextureIndex = 2u;
+	data.OcclusionTextureIndex = 2u;
+	data.EmissiveTextureIndex = 0u;
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (uint32_t i = 0; i < material->header.textureCount; ++i) {
@@ -973,7 +1003,9 @@ void VulkanContext::Impl::InvalidateMaterial(TerraEngine::UUID materialId) {
 	shadowCacheEntries.clear();
 	auto it = materialIndexMap.find(materialId);
 	if (it != materialIndexMap.end()) {
-		freeMaterialIndices.push_back(it->second);
+		if (it->second != kFallbackMaterialIndex) {
+			freeMaterialIndices.push_back(it->second);
+		}
 		materialIndexMap.erase(it);
 	}
 }
@@ -1875,7 +1907,7 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 
 // VulkanContext::Impl::CreateGlobalDescriptorResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
-	std::array<VkDescriptorSetLayoutBinding, 22> bindings{};
+	std::array<VkDescriptorSetLayoutBinding, 25> bindings{};
 	// Textures
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -2012,10 +2044,33 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	bindings[21].descriptorCount = 1;
 	bindings[21].stageFlags = VK_SHADER_STAGE_ALL;
 	bindings[21].pImmutableSamplers = nullptr;
+	// Raw AO input is kept separate from the final material AO binding so
+	// command recording never depends on rebinding one descriptor to two
+	// meanings inside the same command buffer.
+	bindings[22].binding = 22;
+	bindings[22].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	bindings[22].descriptorCount = 1;
+	bindings[22].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[22].pImmutableSamplers = nullptr;
+	// GTAO raw output uses a dedicated storage binding instead of Hi-Z's
+	// storage binding. Sharing binding 16 made optimized frames race against
+	// whichever descriptor update happened last during command recording.
+	bindings[23].binding = 23;
+	bindings[23].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	bindings[23].descriptorCount = 1;
+	bindings[23].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[23].pImmutableSamplers = nullptr;
+	// GTAO blur output is separate from raw output so blur never reads and
+	// writes through the same descriptor binding.
+	bindings[24].binding = 24;
+	bindings[24].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	bindings[24].descriptorCount = 1;
+	bindings[24].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	bindings[24].pImmutableSamplers = nullptr;
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{};
 	bindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	std::array<VkDescriptorBindingFlags, 22> flags = {
+	std::array<VkDescriptorBindingFlags, 25> flags = {
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 0: Textures
 		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 1: Materials (updated mid-frame)
 		0, // 2
@@ -2037,7 +2092,10 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 		0, // 18: Light analysis input
 		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 19: Ambient occlusion texture
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 20: Point shadow cubemap array
-		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT // 21: AO temporal history
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 21: AO temporal history
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 22: AO raw sampled input
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 23: AO raw storage output
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT // 24: AO blur storage output
 	};
 	bindingFlags.bindingCount = static_cast<uint32_t>(flags.size());
 	bindingFlags.pBindingFlags = flags.data();
@@ -2059,13 +2117,13 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	poolSizes[0].descriptorCount = MAX_BINDLESS_TEXTURES * MAX_FRAMES_IN_FLIGHT;
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	poolSizes[1].descriptorCount = (6 + MAX_SHADOW_RESOURCE_SLOTS) * MAX_FRAMES_IN_FLIGHT; // Point shadows + Hi-Z + Depth + VRS Color + AO + AO history
+	poolSizes[1].descriptorCount = (7 + MAX_SHADOW_RESOURCE_SLOTS) * MAX_FRAMES_IN_FLIGHT; // Point shadows + Hi-Z + Depth + VRS Color + AO + AO history + AO raw
 	poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
 	poolSizes[2].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // Point shadow + Hi-Z
 	poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	poolSizes[3].descriptorCount = (9 + MAX_BINDLESS_BUFFERS) * MAX_FRAMES_IN_FLIGHT;
 	poolSizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	poolSizes[4].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // VRS Image + Hi-Z Output
+	poolSizes[4].descriptorCount = 4 * MAX_FRAMES_IN_FLIGHT; // VRS Image + Hi-Z Output + AO raw + AO blur
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -2166,6 +2224,37 @@ void VulkanContext::Impl::CreateMaterialBufferResources() {
 
 		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 	}
+
+	const MaterialData fallbackMaterial = CreateFallbackMaterialData();
+	std::vector<MaterialData> fallbackMaterials(MAX_BINDLESS_MATERIALS, fallbackMaterial);
+	VulkanBuffer stagingBuffer = CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Fallback Material Staging Buffer");
+	void* mappedData = nullptr;
+	if (vmaMapMemory(allocator, stagingBuffer.allocation, &mappedData) == VK_SUCCESS) {
+		std::memcpy(mappedData, fallbackMaterials.data(), static_cast<std::size_t>(bufferSize));
+		vmaFlushAllocation(allocator, stagingBuffer.allocation, 0, bufferSize);
+		vmaUnmapMemory(allocator, stagingBuffer.allocation);
+
+		VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+		VkBufferCopy copyRegion{};
+		copyRegion.srcOffset = 0u;
+		copyRegion.dstOffset = 0u;
+		copyRegion.size = bufferSize;
+		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+			vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
+		}
+		EndSingleTimeCommands(commandBuffer);
+	}
+	else {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to map fallback material staging buffer.");
+	}
+	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+
+	// Slot zero is permanently reserved for missing/unloaded materials. Real
+	// material assets start at one so draw commands that fall back to zero never
+	// accidentally sample an authored material or uninitialized GPU memory.
+	freeMaterialIndices.clear();
+	materialIndexMap.clear();
+	nextMaterialIndex = kFirstRuntimeMaterialIndex;
 }
 
 // VulkanContext::Impl::CreateCullingBufferResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2628,9 +2717,26 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 			return;
 		}
 
-		// Newly created AO targets start readable so material shading has a
-		// valid white fallback until the first compute dispatch fills them.
-		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		// Newly created AO targets must contain explicit visibility data before
+		// any optimized shader is allowed to sample them. A value of 1.0 means
+		// fully open/no contact darkening, which is the safe fallback until the
+		// compute pass writes real occlusion.
+		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		VkCommandBuffer clearCommandBuffer = BeginSingleTimeCommands();
+		VkImageSubresourceRange clearRange{};
+		clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		clearRange.baseMipLevel = 0u;
+		clearRange.levelCount = 1u;
+		clearRange.baseArrayLayer = 0u;
+		clearRange.layerCount = 1u;
+		VkClearColorValue clearValue{};
+		clearValue.float32[0] = 1.0f;
+		clearValue.float32[1] = 1.0f;
+		clearValue.float32[2] = 1.0f;
+		clearValue.float32[3] = 1.0f;
+		vkCmdClearColorImage(clearCommandBuffer, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1u, &clearRange);
+		EndSingleTimeCommands(clearCommandBuffer);
+		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	};
 
 	CreateAoImage("GTAO Raw Occlusion", ambientOcclusionRaw);
@@ -2641,29 +2747,44 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 	ambientOcclusionHistoryValid = false;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ambientOcclusionBlurred.view == VK_NULL_HANDLE || ambientOcclusionHistory.view == VK_NULL_HANDLE) {
+	if (ambientOcclusionRaw.view == VK_NULL_HANDLE || ambientOcclusionBlurred.view == VK_NULL_HANDLE || ambientOcclusionHistory.view == VK_NULL_HANDLE) {
 		return;
 	}
 
-	VkDescriptorImageInfo aoInfo{};
-	aoInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	aoInfo.imageView = ambientOcclusionBlurred.view;
-	aoInfo.sampler = VK_NULL_HANDLE;
+	VkDescriptorImageInfo finalAoInfo{};
+	finalAoInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	finalAoInfo.imageView = ambientOcclusionBlurred.view;
+	finalAoInfo.sampler = VK_NULL_HANDLE;
 
 	VkDescriptorImageInfo historyInfo{};
 	historyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	historyInfo.imageView = ambientOcclusionHistory.view;
 	historyInfo.sampler = VK_NULL_HANDLE;
 
+	VkDescriptorImageInfo rawInputInfo{};
+	rawInputInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	rawInputInfo.imageView = ambientOcclusionRaw.view;
+	rawInputInfo.sampler = VK_NULL_HANDLE;
+
+	VkDescriptorImageInfo rawOutputInfo{};
+	rawOutputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	rawOutputInfo.imageView = ambientOcclusionRaw.view;
+	rawOutputInfo.sampler = VK_NULL_HANDLE;
+
+	VkDescriptorImageInfo blurOutputInfo{};
+	blurOutputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+	blurOutputInfo.imageView = ambientOcclusionHistory.view;
+	blurOutputInfo.sampler = VK_NULL_HANDLE;
+
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-		std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+		std::array<VkWriteDescriptorSet, 5> descriptorWrites{};
 		descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		descriptorWrites[0].dstSet = globalDescriptorSets[i];
 		descriptorWrites[0].dstBinding = 19;
 		descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		descriptorWrites[0].descriptorCount = 1;
-		descriptorWrites[0].pImageInfo = &aoInfo;
+		descriptorWrites[0].pImageInfo = &finalAoInfo;
 
 		descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		descriptorWrites[1].dstSet = globalDescriptorSets[i];
@@ -2671,6 +2792,27 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		descriptorWrites[1].descriptorCount = 1;
 		descriptorWrites[1].pImageInfo = &historyInfo;
+
+		descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrites[2].dstSet = globalDescriptorSets[i];
+		descriptorWrites[2].dstBinding = 22;
+		descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		descriptorWrites[2].descriptorCount = 1;
+		descriptorWrites[2].pImageInfo = &rawInputInfo;
+
+		descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrites[3].dstSet = globalDescriptorSets[i];
+		descriptorWrites[3].dstBinding = 23;
+		descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		descriptorWrites[3].descriptorCount = 1;
+		descriptorWrites[3].pImageInfo = &rawOutputInfo;
+
+		descriptorWrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrites[4].dstSet = globalDescriptorSets[i];
+		descriptorWrites[4].dstBinding = 24;
+		descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		descriptorWrites[4].descriptorCount = 1;
+		descriptorWrites[4].pImageInfo = &blurOutputInfo;
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 	}
 }
@@ -3936,10 +4078,15 @@ uint32_t VulkanContext::Impl::AllocateTextureIndex() {
 
 // VulkanContext::Impl::AllocateMaterialIndex is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
-	if (!freeMaterialIndices.empty()) {
+	while (!freeMaterialIndices.empty()) {
 		uint32_t index = freeMaterialIndices.back();
 		freeMaterialIndices.pop_back();
-		return index;
+		if (index != kFallbackMaterialIndex) {
+			return index;
+		}
+	}
+	if (nextMaterialIndex <= kFallbackMaterialIndex) {
+		nextMaterialIndex = kFirstRuntimeMaterialIndex;
 	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (nextMaterialIndex >= MAX_BINDLESS_MATERIALS) {

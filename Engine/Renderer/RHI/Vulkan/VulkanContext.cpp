@@ -1043,10 +1043,22 @@ void VulkanContext::BeginFrame() {
 	}
 
 	const auto fenceStart = BackendClock::now();
-	vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+	if (!impl->editorMode && !impl->inFlightFences.empty()) {
+		// Runtime rendering still shares several GPU images across frame slots
+		// (depth, shadows, Hi-Z, and AO). Until those resources are per-frame,
+		// the backend must not overlap GPU frames in standalone runtime.
+		vkWaitForFences(
+			impl->device,
+			static_cast<std::uint32_t>(impl->inFlightFences.size()),
+			impl->inFlightFences.data(),
+			VK_TRUE,
+			UINT64_MAX);
+	} else {
+		vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+	}
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 		impl->pendingBackendFrameBreakdown,
-		{ TerraEngine::Renderer::BackendFrameCostCategory::FenceWait, TerraEngine::Renderer::BackendSubmitStage::FenceWait, RenderViewType::Game, 0u, "In-flight fence wait", true, false },
+		{ TerraEngine::Renderer::BackendFrameCostCategory::FenceWait, TerraEngine::Renderer::BackendSubmitStage::FenceWait, RenderViewType::Game, 0u, impl->editorMode ? "In-flight fence wait" : "Shared attachment frame fence wait", true, false },
 		ElapsedMilliseconds(fenceStart),
 		0.25f);
 	// The waited frame slot is now complete, so snapshot its GPU counters for UI stats.
@@ -2874,9 +2886,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		&& firstPrimaryPassForFrame
 		&& depthHistory.valid
 		&& MatricesApproximatelyEqual(currentViewProjection, depthHistory.lastViewProjectionMatrix, kDepthHistoryMatrixEpsilon);
-	const bool hiZOcclusionActive = previousDepthMatchesView
-		&& impl->hiZ.image != VK_NULL_HANDLE
-		&& impl->hiZ.sampler != VK_NULL_HANDLE;
+	// Hi-Z occlusion stays disabled until the pyramid build owns descriptor
+	// sets per mip. The old path rewrote one global sampled/storage descriptor
+	// repeatedly while recording a command buffer, which made optimized builds
+	// observe whichever descriptor write happened last at submit time.
+	const bool hiZOcclusionActive = false;
 
 	FrameCullingDataGPU analysisCullingData{};
 	analysisCullingData.frustumPlanes = BuildFrustumPlanes(currentViewProjection);
@@ -4152,16 +4166,51 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		|| lightingComputePipelineLayout == VK_NULL_HANDLE
 		|| currentFrame >= globalDescriptorSets.size()
 		|| globalDescriptorSets[currentFrame] == VK_NULL_HANDLE
-		|| hiZ.image == VK_NULL_HANDLE
-		|| hiZComputePipeline == VK_NULL_HANDLE
-		|| depthView == VK_NULL_HANDLE
-		|| hiZ.sampler == VK_NULL_HANDLE
-		|| hiZ.mipViews.size() < hiZ.mipLevels
-		|| hiZ.mipLevels == 0u
-		|| hiZ.width == 0u
-		|| hiZ.height == 0u) {
+		|| depthView == VK_NULL_HANDLE) {
 		return;
 	}
+
+	// Keep depth sampling valid for AO and clustered-light depth masking while
+	// the Hi-Z pyramid itself is disabled. The previous implementation rewrote
+	// bindings 12 and 16 for every mip while recording one command buffer; Vulkan
+	// descriptor contents are not snapshotted per dispatch, so optimized builds
+	// could execute every dispatch against the final descriptor values.
+	VkImageMemoryBarrier depthOnlyBarrier{};
+	depthOnlyBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	depthOnlyBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	depthOnlyBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	depthOnlyBarrier.image = depthImage;
+	depthOnlyBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	depthOnlyBarrier.subresourceRange.baseMipLevel = 0u;
+	depthOnlyBarrier.subresourceRange.levelCount = 1u;
+	depthOnlyBarrier.subresourceRange.baseArrayLayer = 0u;
+	depthOnlyBarrier.subresourceRange.layerCount = 1u;
+	depthOnlyBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	depthOnlyBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier(
+		cmd,
+		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &depthOnlyBarrier);
+
+	VkDescriptorImageInfo sampledDepthInfo{};
+	sampledDepthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	sampledDepthInfo.imageView = depthView;
+	sampledDepthInfo.sampler = VK_NULL_HANDLE;
+
+	VkWriteDescriptorSet depthWrite{};
+	depthWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	depthWrite.dstSet = globalDescriptorSets[currentFrame];
+	depthWrite.dstBinding = 12;
+	depthWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	depthWrite.descriptorCount = 1u;
+	depthWrite.pImageInfo = &sampledDepthInfo;
+	vkUpdateDescriptorSets(device, 1u, &depthWrite, 0u, nullptr);
+	return;
+
 	for (uint32_t mipIndex = 0; mipIndex < hiZ.mipLevels; ++mipIndex) {
 		// Each compute descriptor update below requires a concrete image view;
 		// skip Hi-Z for this frame if swapchain recreation left any mip view absent.
@@ -4397,7 +4446,7 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 
 	gtaoWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	gtaoWrites[1].dstSet = globalDescriptorSets[currentFrame];
-	gtaoWrites[1].dstBinding = 16;
+	gtaoWrites[1].dstBinding = 23;
 	gtaoWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	gtaoWrites[1].descriptorCount = 1;
 	gtaoWrites[1].pImageInfo = &rawOutputInfo;
@@ -4457,14 +4506,14 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	std::array<VkWriteDescriptorSet, 3> blurWrites{};
 	blurWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	blurWrites[0].dstSet = globalDescriptorSets[currentFrame];
-	blurWrites[0].dstBinding = 19;
+	blurWrites[0].dstBinding = 22;
 	blurWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	blurWrites[0].descriptorCount = 1;
 	blurWrites[0].pImageInfo = &rawInputInfo;
 
 	blurWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	blurWrites[1].dstSet = globalDescriptorSets[currentFrame];
-	blurWrites[1].dstBinding = 16;
+	blurWrites[1].dstBinding = 24;
 	blurWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	blurWrites[1].descriptorCount = 1;
 	blurWrites[1].pImageInfo = &blurredOutputInfo;
@@ -5627,5 +5676,7 @@ void VulkanContext::Impl::ClearResources() {
 
 	materialIndexMap.clear();
 	freeMaterialIndices.clear();
-	nextMaterialIndex = 0;
+	// Material slot zero is the permanent fallback material, so rebuilt caches
+	// must resume authored material allocation at slot one.
+	nextMaterialIndex = 1u;
 }

@@ -4,7 +4,10 @@
 // full-resolution depth texture and write one R8/R16 occlusion target; until
 // that pass is wired, this file documents and compiles the expected GPU side.
 [[vk::binding(12, 0)]] Texture2D<float> inputDepth;
-[[vk::binding(16, 0)]] RWTexture2D<float> outputOcclusion;
+// Dedicated AO storage binding. Binding 16 is reserved for Hi-Z output, and
+// reusing it for AO made optimized command buffers depend on descriptor update
+// ordering instead of the recorded command order.
+[[vk::binding(23, 0)]] RWTexture2D<float> outputOcclusion;
 
 struct PushConstants
 {
