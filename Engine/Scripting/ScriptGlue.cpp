@@ -995,9 +995,16 @@ extern "C" {
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			auto& reg = ComponentAccessRegistry();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (auto it = reg.find(componentType); it != reg.end()) {
-				TerraEngine::Reflection::Variant val = MarshallFromNative(inValue, static_cast<ScriptType>(type));
-				it->second.setter(*objOpt, propertyName, val);
+			if (componentType != nullptr && propertyName != nullptr && inValue != nullptr && componentType[0] != '\0' && propertyName[0] != '\0') {
+				if (auto it = reg.find(componentType); it != reg.end()) {
+					TerraEngine::Reflection::Variant val = MarshallFromNative(inValue, static_cast<ScriptType>(type));
+					it->second.setter(*objOpt, propertyName, val);
+					if (std::string_view(componentType) == Transform::kComponentName) {
+						ObjectManager::instance().MarkObjectTransformDirty(*objOpt);
+					} else {
+						ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
+					}
+				}
 			}
 		}
 	}

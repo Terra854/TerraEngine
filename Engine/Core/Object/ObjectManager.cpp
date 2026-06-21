@@ -88,10 +88,26 @@ void ObjectManager::notifySpatialObjectDirty(entt::entity entityId)
 	// when their cached world bounds may be stale. The callback carries the
 	// specific entity for systems that want incremental refreshes.
 	++spatialRevision;
+	spatialRevisionByEntity[entityId] = spatialRevision;
 	if (onSpatialObjectDirty)
 	{
 		onSpatialObjectDirty(entityId);
 	}
+}
+
+void ObjectManager::MarkObjectTransformDirty(const Object& obj)
+{
+	if (!registry.valid(obj.EntityId()))
+	{
+		return;
+	}
+
+	// Transform edits dirty both the world-transform cache and the spatial
+	// bounds that depend on it. The two counters stay separate so future systems
+	// can reason about transform-only work without forcing metadata refreshes.
+	++transformRevision;
+	transformRevisionByEntity[obj.EntityId()] = transformRevision;
+	notifySpatialObjectDirty(obj.EntityId());
 }
 
 // Create a new Object
@@ -107,6 +123,7 @@ Object ObjectManager::createObject(const std::string& name) {
 	TerraEngine::UUID uuid = TerraEngine::GenerateUUID();
 	entityToUuid.emplace(object.EntityId(), uuid);
 	uuidToEntity.emplace(uuid, object.EntityId());
+	transformRevisionByEntity[object.EntityId()] = ++transformRevision;
 	
 	ObjectMetadata metadata;
 	metadata.name = name;
@@ -125,7 +142,10 @@ Object ObjectManager::createObject(const std::string& name) {
 // Remove an Object
 // ObjectManager::removeObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::removeObject(Object obj) {
-	notifySpatialObjectDirty(obj.id);
+	if (registry.valid(obj.id))
+	{
+		MarkObjectTransformDirty(obj);
+	}
 	if (auto metadataIter = metadataMap.find(obj); metadataIter != metadataMap.end())
 	{
 		removeLookupIndex(obj.id, metadataIter->second);
@@ -284,7 +304,7 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (onModified) onModified();
-	notifySpatialObjectDirty(childId);
+	MarkObjectTransformDirty(makeHandle(childId));
 
 	return true;
 }
@@ -513,6 +533,24 @@ void ObjectManager::notifyObjectStructureChanged(const Object& obj)
 	if (onModified) onModified();
 }
 
+std::uint64_t ObjectManager::GetObjectTransformRevision(entt::entity entityId) const
+{
+	if (auto it = transformRevisionByEntity.find(entityId); it != transformRevisionByEntity.end())
+	{
+		return it->second;
+	}
+	return 0;
+}
+
+std::uint64_t ObjectManager::GetObjectSpatialRevision(entt::entity entityId) const
+{
+	if (auto it = spatialRevisionByEntity.find(entityId); it != spatialRevisionByEntity.end())
+	{
+		return it->second;
+	}
+	return 0;
+}
+
 std::uint64_t ObjectManager::getObjectMetadataGeneration(const Object& obj) const
 {
 	if (auto it = metadataMap.find(obj); it != metadataMap.end())
@@ -717,6 +755,10 @@ void ObjectManager::clear()
 	childrenMap.clear();
 	uuidToEntity.clear();
 	entityToUuid.clear();
+	transformRevisionByEntity.clear();
+	spatialRevisionByEntity.clear();
+	transformRevision = 0;
+	spatialRevision = 0;
 	nameIndex.clear();
 	tagIndex.clear();
 }

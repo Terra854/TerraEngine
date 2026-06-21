@@ -3,11 +3,15 @@
 #include "SceneGraphRuntime.h"
 
 #include "Components/Transform.h"
+#include "Core/Scheduling/JobGraph.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
 #include <functional>
+#include <glm/gtc/matrix_transform.hpp>
+#include <memory>
 #include <sstream>
 #include <tuple>
 #include <unordered_set>
@@ -132,6 +136,76 @@ namespace TerraEngine::Scene {
 			}
 			return depth;
 		}
+
+		Transform MakeTransform(const glm::vec3& position, const glm::quat& rotation, const glm::vec3& scale)
+		{
+			Transform transform{};
+			transform.position = position;
+			transform.rotation = rotation;
+			transform.scale = scale;
+			return transform;
+		}
+
+		glm::mat4 MakeModelMatrix(const Transform& transform)
+		{
+			glm::mat4 model(1.0f);
+			model = glm::translate(model, transform.position);
+			model = model * glm::mat4_cast(transform.rotation);
+			model = glm::scale(model, transform.scale);
+			return model;
+		}
+
+		SceneWorldTransformRecord ResolveWorldTransformRecord(SceneGraphObject& object, const SceneGraphObject* parent, std::uint32_t hierarchyLevel, std::uint64_t graphRevision)
+		{
+			// Parent records are resolved by an earlier hierarchy level. Workers
+			// therefore only read immutable parent data and write the one child
+			// object assigned to their snapshot item.
+			if (parent != nullptr)
+			{
+				object.worldPosition = parent->worldPosition + parent->worldRotation * (parent->worldScale * object.localPosition);
+				object.worldRotation = parent->worldRotation * object.localRotation;
+				object.worldScale = parent->worldScale * object.localScale;
+			}
+			else
+			{
+				object.worldPosition = object.localPosition;
+				object.worldRotation = object.localRotation;
+				object.worldScale = object.localScale;
+			}
+
+			Transform world = MakeTransform(object.worldPosition, object.worldRotation, object.worldScale);
+			return SceneWorldTransformRecord{
+				object.objectId,
+				object.entity,
+				world,
+				MakeModelMatrix(world),
+				hierarchyLevel,
+				graphRevision
+			};
+		}
+
+		void ExpandDirtyBranch(const SceneGraph& graph, const SceneObjectId& objectId, std::unordered_set<SceneObjectId>& dirtySet)
+		{
+			if (!dirtySet.insert(objectId).second)
+			{
+				return;
+			}
+
+			const auto object = graph.objects.find(objectId);
+			if (object == graph.objects.end())
+			{
+				return;
+			}
+
+			std::vector<SceneObjectId> children = object->second.children;
+			std::sort(children.begin(), children.end(), [](const SceneObjectId& left, const SceneObjectId& right) {
+				return TerraEngine::ToHexString(left) < TerraEngine::ToHexString(right);
+			});
+			for (const SceneObjectId& childId : children)
+			{
+				ExpandDirtyBranch(graph, childId, dirtySet);
+			}
+		}
 	}
 
 	std::string_view ToString(SceneDiagnosticSeverity severity)
@@ -180,7 +254,7 @@ namespace TerraEngine::Scene {
 		return stream.str();
 	}
 
-	SceneGraph BuildSceneGraphFromObjectManager(ObjectManager& objects)
+	SceneGraph BuildSceneGraphFromObjectManager(ObjectManager& objects, bool computeWorldTransforms)
 	{
 		SceneGraph graph;
 		graph.revision = objects.GetSpatialRevision();
@@ -188,9 +262,12 @@ namespace TerraEngine::Scene {
 		std::function<void(Object, SceneObjectId)> visitObject = [&](Object object, SceneObjectId parentId) {
 			SceneGraphObject graphObject;
 			graphObject.objectId = objects.getUUID(object.EntityId());
+			graphObject.entity = object.EntityId();
 			graphObject.parentId = parentId;
 			graphObject.name = objects.getObjectName(object);
 			graphObject.active = objects.isObjectActive(object);
+			graphObject.transformRevision = objects.GetObjectTransformRevision(object.EntityId());
+			graphObject.spatialRevision = objects.GetObjectSpatialRevision(object.EntityId());
 			if (Transform* transform = object.getComponent<Transform>())
 			{
 				graphObject.localPosition = GetComponentProperty<Transform, glm::vec3>(*transform, "Position");
@@ -225,7 +302,10 @@ namespace TerraEngine::Scene {
 		}
 
 		ValidateSceneGraph(graph);
-		ComputeWorldTransforms(graph);
+		if (computeWorldTransforms)
+		{
+			ComputeWorldTransforms(graph);
+		}
 		return graph;
 	}
 
@@ -375,42 +455,47 @@ namespace TerraEngine::Scene {
 
 	void ComputeWorldTransforms(SceneGraph& graph)
 	{
-		std::function<void(SceneObjectId)> resolve = [&](SceneObjectId objectId) {
-			auto objectIt = graph.objects.find(objectId);
-			if (objectIt == graph.objects.end())
-			{
-				return;
-			}
+		(void)PropagateWorldTransforms(graph, BuildDirtyTransformState(graph));
+	}
 
-			SceneGraphObject& object = objectIt->second;
-			if (object.parentId != TerraEngine::EMPTY_UUID)
+	SceneDirtyTransformState BuildDirtyTransformState(const SceneGraph& graph, const std::vector<SceneObjectId>& dirtyRoots, SceneTransformDirtyReason reason)
+	{
+		SceneDirtyTransformState state;
+		state.fullRefreshRequested = dirtyRoots.empty() || reason == SceneTransformDirtyReason::FullRefresh || reason == SceneTransformDirtyReason::SceneLoad;
+		state.reason = reason;
+		state.sourceRevision = graph.revision;
+
+		std::unordered_set<SceneObjectId> rootSet;
+		if (state.fullRefreshRequested)
+		{
+			state.dirtyRoots = graph.rootObjects;
+			rootSet.insert(state.dirtyRoots.begin(), state.dirtyRoots.end());
+		}
+		else
+		{
+			for (const SceneObjectId& rootId : dirtyRoots)
 			{
-				auto parentIt = graph.objects.find(object.parentId);
-				if (parentIt != graph.objects.end())
+				if (rootId != TerraEngine::EMPTY_UUID && graph.objects.find(rootId) != graph.objects.end() && rootSet.insert(rootId).second)
 				{
-					const SceneGraphObject& parent = parentIt->second;
-					object.worldPosition = parent.worldPosition + parent.worldRotation * (parent.worldScale * object.localPosition);
-					object.worldRotation = parent.worldRotation * object.localRotation;
-					object.worldScale = parent.worldScale * object.localScale;
+					state.dirtyRoots.push_back(rootId);
 				}
 			}
-			else
-			{
-				object.worldPosition = object.localPosition;
-				object.worldRotation = object.localRotation;
-				object.worldScale = object.localScale;
-			}
-
-			for (const SceneObjectId& childId : object.children)
-			{
-				resolve(childId);
-			}
-		};
-
-		for (const SceneObjectId& rootId : graph.rootObjects)
-		{
-			resolve(rootId);
 		}
+		std::sort(state.dirtyRoots.begin(), state.dirtyRoots.end(), [](const SceneObjectId& left, const SceneObjectId& right) {
+			return TerraEngine::ToHexString(left) < TerraEngine::ToHexString(right);
+		});
+
+		std::unordered_set<SceneObjectId> expandedSet;
+		for (const SceneObjectId& rootId : state.dirtyRoots)
+		{
+			ExpandDirtyBranch(graph, rootId, expandedSet);
+		}
+
+		state.expandedDirtyObjects.assign(expandedSet.begin(), expandedSet.end());
+		std::sort(state.expandedDirtyObjects.begin(), state.expandedDirtyObjects.end(), [](const SceneObjectId& left, const SceneObjectId& right) {
+			return TerraEngine::ToHexString(left) < TerraEngine::ToHexString(right);
+		});
+		return state;
 	}
 
 	SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph)
@@ -452,6 +537,189 @@ namespace TerraEngine::Scene {
 			return std::tie(left.hierarchyLevel, left.workUnitId) < std::tie(right.hierarchyLevel, right.workUnitId);
 		});
 		return plan;
+	}
+
+	SceneTransformPropagationResult PropagateWorldTransforms(SceneGraph& graph, const SceneDirtyTransformState& dirtyState)
+	{
+		SceneTransformPropagationResult result;
+		result.graphRevision = graph.revision;
+
+		SceneTransformWorkPlan workPlan = BuildTransformWorkPlan(graph);
+		result.valid = workPlan.valid;
+		result.hierarchyLevelCount = static_cast<std::uint32_t>(workPlan.units.size());
+		result.dirtyRootCount = static_cast<std::uint32_t>(dirtyState.dirtyRoots.size());
+		result.expandedDirtyObjectCount = static_cast<std::uint32_t>(dirtyState.expandedDirtyObjects.size());
+		result.diagnostics = workPlan.diagnostics;
+		if (!workPlan.valid)
+		{
+			return result;
+		}
+
+		std::unordered_set<SceneObjectId> dirtyObjects(dirtyState.expandedDirtyObjects.begin(), dirtyState.expandedDirtyObjects.end());
+		const bool processAll = dirtyState.fullRefreshRequested || dirtyObjects.empty();
+
+		struct TransformWorkItem {
+			SceneGraphObject* object = nullptr;
+			const SceneGraphObject* parent = nullptr;
+			std::uint32_t hierarchyLevel = 0;
+			bool process = false;
+		};
+
+		struct TransformChunkOutput {
+			std::vector<SceneWorldTransformRecord> records;
+			std::uint32_t processed = 0;
+			std::uint32_t skipped = 0;
+		};
+
+		std::vector<std::vector<TransformWorkItem>> levelItems;
+		levelItems.reserve(workPlan.units.size());
+		std::size_t totalItems = 0;
+		for (const SceneTransformWorkUnit& unit : workPlan.units)
+		{
+			std::vector<TransformWorkItem> items;
+			items.reserve(unit.objects.size());
+			for (const SceneObjectId& objectId : unit.objects)
+			{
+				auto objectIt = graph.objects.find(objectId);
+				if (objectIt == graph.objects.end())
+				{
+					continue;
+				}
+
+				SceneGraphObject& object = objectIt->second;
+				const SceneGraphObject* parent = nullptr;
+				if (object.parentId != TerraEngine::EMPTY_UUID)
+				{
+					auto parentIt = graph.objects.find(object.parentId);
+					if (parentIt != graph.objects.end())
+					{
+						parent = &parentIt->second;
+					}
+				}
+
+				items.push_back(TransformWorkItem{
+					&object,
+					parent,
+					unit.hierarchyLevel,
+					processAll || dirtyObjects.find(objectId) != dirtyObjects.end()
+				});
+			}
+			totalItems += items.size();
+			levelItems.push_back(std::move(items));
+		}
+
+		auto mergeOutput = [&result](const TransformChunkOutput& output) {
+			result.processedObjectCount += output.processed;
+			result.skippedCleanObjectCount += output.skipped;
+			for (const SceneWorldTransformRecord& record : output.records)
+			{
+				result.worldTransformsByObject[record.objectId] = record.worldTransform;
+				if (record.entity != entt::null)
+				{
+					result.worldTransformsByEntity[record.entity] = record.worldTransform;
+				}
+				result.records.push_back(record);
+			}
+		};
+
+		constexpr std::size_t kWorkerThreshold = 512;
+		constexpr std::size_t kPreferredChunkSize = 256;
+		const bool canUseWorkers = ThreadPool::instance().getThreadCount() > 0;
+		if (!canUseWorkers || totalItems < kWorkerThreshold)
+		{
+			// Small scenes are faster without graph allocation and worker wake-up.
+			// The same per-level work items are still used, so the serial fallback
+			// has identical ordering and diagnostics to the threaded path.
+			for (const std::vector<TransformWorkItem>& items : levelItems)
+			{
+				TransformChunkOutput output;
+				output.records.reserve(items.size());
+				for (const TransformWorkItem& item : items)
+				{
+					if (!item.process)
+					{
+						++output.skipped;
+						continue;
+					}
+					output.records.push_back(ResolveWorldTransformRecord(*item.object, item.parent, item.hierarchyLevel, graph.revision));
+					++output.processed;
+				}
+				mergeOutput(output);
+			}
+		}
+		else
+		{
+			TerraEngine::Scheduling::JobGraph jobGraph("scene-transform-propagation", "Scene Transform Propagation");
+			std::vector<TerraEngine::Scheduling::DependencyHandle> previousLevelJobs;
+			std::vector<std::shared_ptr<TransformChunkOutput>> outputs;
+
+			for (std::size_t levelIndex = 0; levelIndex < levelItems.size(); ++levelIndex)
+			{
+				const std::vector<TransformWorkItem>& items = levelItems[levelIndex];
+				std::vector<TerraEngine::Scheduling::DependencyHandle> currentLevelJobs;
+				for (std::size_t begin = 0; begin < items.size(); begin += kPreferredChunkSize)
+				{
+					const std::size_t end = std::min(begin + kPreferredChunkSize, items.size());
+					auto output = std::make_shared<TransformChunkOutput>();
+					output->records.reserve(end - begin);
+
+					TerraEngine::Scheduling::JobGraphJobDeclaration job;
+					job.name = "Transform.Level" + std::to_string(levelIndex) + ".Chunk" + std::to_string(begin / kPreferredChunkSize);
+					job.executionPolicy = TerraEngine::Scheduling::JobGraphExecutionPolicy::WorkerEligible;
+					job.cancellable = true;
+					job.requiresSuccessfulDependencies = true;
+					job.mayMutateSceneStructure = false;
+					job.profilingLabel = "SceneGraphRuntime: Propagate World Transforms";
+					job.dependencies = previousLevelJobs;
+					job.work = [&items, begin, end, output, revision = graph.revision](TerraEngine::Scheduling::JobGraphContext& context) {
+						for (std::size_t index = begin; index < end; ++index)
+						{
+							if (context.IsCancellationRequested())
+							{
+								return;
+							}
+							const TransformWorkItem& item = items[index];
+							if (!item.process)
+							{
+								++output->skipped;
+								continue;
+							}
+							output->records.push_back(ResolveWorldTransformRecord(*item.object, item.parent, item.hierarchyLevel, revision));
+							++output->processed;
+						}
+					};
+					currentLevelJobs.push_back(jobGraph.AddJob(std::move(job)));
+					outputs.push_back(std::move(output));
+				}
+				previousLevelJobs = std::move(currentLevelJobs);
+			}
+
+			const TerraEngine::Scheduling::JobGraphSummary& summary = jobGraph.Execute();
+			if (!summary.valid || !summary.completed)
+			{
+				result.valid = false;
+				result.diagnostics.push_back(SceneDiagnostic{
+					SceneDiagnosticSeverity::Error,
+					SceneDiagnosticCategory::Hierarchy,
+					TerraEngine::EMPTY_UUID,
+					{},
+					"Scene transform propagation job graph did not complete.",
+					"Inspect JobGraph diagnostics before publishing world transforms."
+				});
+				return result;
+			}
+
+			for (const std::shared_ptr<TransformChunkOutput>& output : outputs)
+			{
+				mergeOutput(*output);
+			}
+		}
+
+		std::sort(result.records.begin(), result.records.end(), [](const SceneWorldTransformRecord& left, const SceneWorldTransformRecord& right) {
+			return std::make_tuple(left.hierarchyLevel, TerraEngine::ToHexString(left.objectId))
+				< std::make_tuple(right.hierarchyLevel, TerraEngine::ToHexString(right.objectId));
+		});
+		return result;
 	}
 
 	SceneRuntimeSummary BuildSceneRuntimeSummary(const SceneGraph& graph)

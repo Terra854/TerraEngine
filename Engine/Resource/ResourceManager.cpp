@@ -99,6 +99,7 @@ namespace
 		RenderSettings settings;
 		const std::string shadows = JsonStringOr(renderProfile, "shadows", "high");
 		const std::string ao = JsonStringOr(renderProfile, "ambientOcclusion", "high");
+		const std::string vrs = JsonStringOr(renderProfile, "variableRateShading", "disabled");
 		const std::uint32_t shadowRank = QualityRank(shadows);
 		const std::uint32_t aoRank = QualityRank(ao);
 
@@ -107,6 +108,7 @@ namespace
 		settings.shadowFilteringSize = shadowRank == 0u ? 0u : (shadowRank == 1u ? 3u : 5u);
 		settings.ambientOcclusionStrength = aoRank == 0u ? 0.0f : 1.0f;
 		settings.ambientOcclusionQuality = aoRank;
+		settings.variableRateShading = vrs == "disabled" ? 0u : 1u;
 		return settings;
 	}
 

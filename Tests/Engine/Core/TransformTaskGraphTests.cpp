@@ -3,8 +3,11 @@
 #include "Core/Object/ObjectManager.h"
 #include "Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Scene/SceneGraphRuntime.h"
+#include "../Scene/SceneGraphTestFixtures.h"
 #include "ThreadPool/ThreadPool.h"
 
+#include <glm/vec3.hpp>
+#include <nlohmann/json.hpp>
 #include <string>
 
 namespace TerraEngine::Tests {
@@ -92,6 +95,49 @@ namespace TerraEngine::Tests {
 			context.Expect(summary.valid && summary.completed, "Transform-only ECS graph should execute.");
 			context.ExpectEqual(static_cast<std::size_t>(2), summary.transformWorkUnits.size(), "Transform work units should appear in ECS summaries.");
 			context.Expect(summary.formatted.find("level-1") != std::string::npos, "Formatted summary should include transform work labels.");
+		});
+
+		registry.Add("Engine.TransformTaskGraph.PropagatesOnlyDirtyBranchesDeterministically", [](TestContext& context) {
+			auto graph = TerraEngine::Scene::BuildSceneGraphFromJson({
+				{"objects", nlohmann::json::array({
+					{
+						{"uuid", TerraEngine::ToHexString(TerraEngine::Tests::SceneFixtures::MakeStableUuid(1))},
+						{"name", "Root"},
+						{"children", nlohmann::json::array({
+							{
+								{"uuid", TerraEngine::ToHexString(TerraEngine::Tests::SceneFixtures::MakeStableUuid(2))},
+								{"name", "DirtyChild"},
+								{"transform", {{"position", {1.0f, 0.0f, 0.0f}}}},
+								{"children", nlohmann::json::array({
+									{
+										{"uuid", TerraEngine::ToHexString(TerraEngine::Tests::SceneFixtures::MakeStableUuid(3))},
+										{"name", "Grandchild"},
+										{"transform", {{"position", {2.0f, 0.0f, 0.0f}}}}
+									}
+								})}
+							},
+							{
+								{"uuid", TerraEngine::ToHexString(TerraEngine::Tests::SceneFixtures::MakeStableUuid(4))},
+								{"name", "CleanSibling"},
+								{"transform", {{"position", {10.0f, 0.0f, 0.0f}}}}
+							}
+						})}
+					}
+				})}
+			});
+			graph.objects[TerraEngine::Tests::SceneFixtures::MakeStableUuid(2)].localPosition = glm::vec3(5.0f, 0.0f, 0.0f);
+
+			const auto dirty = TerraEngine::Scene::BuildDirtyTransformState(
+				graph,
+				{ TerraEngine::Tests::SceneFixtures::MakeStableUuid(2) },
+				TerraEngine::Scene::SceneTransformDirtyReason::LocalTransform);
+			const auto result = TerraEngine::Scene::PropagateWorldTransforms(graph, dirty);
+
+			context.Expect(result.valid, "Dirty branch propagation should remain valid for a valid hierarchy.");
+			context.ExpectEqual(1u, result.dirtyRootCount, "Only the edited child should be a dirty root.");
+			context.ExpectEqual(2u, result.processedObjectCount, "The dirty child and its grandchild should be recomputed.");
+			context.ExpectEqual(2u, result.skippedCleanObjectCount, "The root and clean sibling should be skipped.");
+			context.Expect(graph.objects.at(TerraEngine::Tests::SceneFixtures::MakeStableUuid(3)).worldPosition.x > 6.9f, "Grandchild world transform should consume the updated parent transform.");
 		});
 	}
 }

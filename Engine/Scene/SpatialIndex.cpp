@@ -85,6 +85,7 @@ namespace TerraEngine::Scene
 				fallbackObjectIds.push_back(record.objectId);
 				nodeByObjectId[record.objectId] = -1;
 				diagnostics.fallbackObjectCount++;
+				diagnostics.invalidBoundsObjectCount += record.worldBounds.IsUsable() ? 0u : 1u;
 				continue;
 			}
 			rootBounds = rootBounds.IsUsable() ? Merge(rootBounds, record.worldBounds) : record.worldBounds;
@@ -485,6 +486,10 @@ namespace TerraEngine::Scene
 		diagnostics.removedObjectCount = 0u;
 		diagnostics.unchangedObjectCount = 0u;
 		diagnostics.fullRefreshObjectCount = 0u;
+		diagnostics.incrementalRefreshCount = mode == SpatialRefreshMode::Incremental ? 1u : 0u;
+		diagnostics.fullRefreshCount = mode == SpatialRefreshMode::Full ? 1u : 0u;
+		diagnostics.revisionMismatchFallbackCount = 0u;
+		diagnostics.invalidBoundsObjectCount = 0u;
 	}
 
 	// SpatialIndex::FindContainingChild is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

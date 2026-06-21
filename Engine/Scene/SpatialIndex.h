@@ -8,6 +8,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,6 +19,36 @@
 
 namespace TerraEngine::Scene
 {
+	enum class SpatialRefreshAction : std::uint8_t
+	{
+		Add,
+		Update,
+		Remove,
+		Unchanged,
+		FullRefreshFallback,
+		Reject
+	};
+
+	struct SpatialRefreshRecord
+	{
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		SpatialRefreshAction action = SpatialRefreshAction::Unchanged;
+		SpatialObjectRecord record{};
+		std::uint64_t previousRevision = 0;
+		std::uint64_t nextRevision = 0;
+	};
+
+	struct SpatialRefreshBatch
+	{
+		std::uint64_t batchRevision = 0;
+		bool fullRefresh = false;
+		std::vector<SpatialRefreshRecord> records;
+		std::uint32_t addedCount = 0;
+		std::uint32_t updatedCount = 0;
+		std::uint32_t removedCount = 0;
+		std::uint32_t unchangedCount = 0;
+	};
+
 	// class SpatialIndex groups related state and operations so callers have one documented contract.
 	class SpatialIndex
 	{

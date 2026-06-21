@@ -41,6 +41,7 @@ public:
 	void WaitIdle() override;
 	void Shutdown() override;
 	void ClearResources() override;
+	void SetVariableRateShadingEnabled(bool enabled);
 
 	// ViewType names the supported states explicitly so serialization and switches stay readable.
 	enum class ViewType {

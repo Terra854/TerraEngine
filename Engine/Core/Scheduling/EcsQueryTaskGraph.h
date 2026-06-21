@@ -92,6 +92,8 @@ namespace TerraEngine::Scheduling {
 		std::vector<EcsRaceDiagnostic> diagnostics;
 		std::vector<std::string> mutationFlushes;
 		std::vector<EcsTransformWorkUnit> transformWorkUnits;
+		std::size_t transformWorkObjectCount = 0;
+		std::size_t spatialRefreshBatchCount = 0;
 		JobGraphSummary jobGraphSummary;
 		std::string formatted;
 	};

@@ -5,6 +5,7 @@
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
+#include "Components/Transform.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -343,7 +344,14 @@ namespace TerraEngine::Scene {
 						{
 							result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component update could not write the reflected property.", "Verify the property name and value type match the component reflection metadata."));
 						}
-						objects.notifyObjectStructureChanged(*target);
+						if (request.componentName == Transform::kComponentName)
+						{
+							objects.MarkObjectTransformDirty(*target);
+						}
+						else
+						{
+							objects.notifyObjectStructureChanged(*target);
+						}
 					}
 					catch (const std::exception& exception)
 					{

@@ -114,5 +114,22 @@ namespace TerraEngine::Tests {
 			const auto order = TerraEngine::Scene::BuildTraversalOrder(graph);
 			context.ExpectEqual(static_cast<std::size_t>(1000), order.size(), "Traversal should include all 1,000 objects.");
 		});
+
+		registry.Add("SceneGraphRuntime.ObjectManagerMarksTransformRevisionsForHierarchyChanges", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+
+			Object root = objects.createObject("Root");
+			Object child = objects.createObject("Child");
+			const std::uint64_t beforeTransformRevision = objects.GetObjectTransformRevision(child.EntityId());
+
+			context.Expect(objects.setParent(child, root), "Parenting should succeed before checking dirty transform revisions.");
+			const std::uint64_t afterTransformRevision = objects.GetObjectTransformRevision(child.EntityId());
+			const std::uint64_t afterSpatialRevision = objects.GetObjectSpatialRevision(child.EntityId());
+
+			context.Expect(afterTransformRevision > beforeTransformRevision, "Hierarchy changes should mark the moved branch transform-dirty.");
+			context.Expect(afterSpatialRevision > 0u, "Hierarchy changes should mark dependent spatial bounds dirty.");
+			objects.clear();
+		});
 	}
 }

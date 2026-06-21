@@ -212,6 +212,7 @@ struct VulkanContext::Impl {
 	VkPhysicalDeviceFragmentShadingRateFeaturesKHR vrsFeatures{};
 	bool meshShaderSupported = false;
 	bool taskShaderSupported = false;
+	bool vrsAttachmentRuntimeEnabled = false;
 
 	// UsesVrsAttachment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool UsesVrsAttachment() const
@@ -220,7 +221,8 @@ struct VulkanContext::Impl {
 		// A shared VRS attachment can make the UI sample those textures with
 		// stale coarse shading-rate tiles during dock/viewport resizing, so VRS
 		// attachments are reserved for standalone runtime swapchain rendering.
-		return !editorMode
+		return vrsAttachmentRuntimeEnabled
+			&& !editorMode
 			&& vrsFeatures.attachmentFragmentShadingRate
 			&& vrsFeatures.pipelineFragmentShadingRate
 			&& vrs.view != VK_NULL_HANDLE;

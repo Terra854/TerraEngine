@@ -57,6 +57,8 @@ namespace TerraEngine
         public uint AmbientOcclusionQuality;
         /// <summary> Anisotropic filtering level (1 to 16). </summary>
         public uint AnisotropicFiltering;
+        /// <summary> Startup-only Variable Rate Shading toggle. 1 = Enabled, 0 = Disabled. </summary>
+        public uint VariableRateShading;
     }
 
     // LightingDiagnosticCategory is the managed-facing contract for this subsystem; keep it predictable for scripts.

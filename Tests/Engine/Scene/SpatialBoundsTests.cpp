@@ -70,6 +70,18 @@ namespace TerraEngine::Tests {
 			context.Expect(invalid.state == SpatialBoundsState::Invalid, "Non-finite transforms should invalidate transformed bounds.");
 		});
 
+		registry.Add("Engine.SpatialBounds.DirtyTransformRecomputesWorldBoundsFromLatestMatrix", [](TestContext& context) {
+			const SpatialAABB local = MakeAABB(glm::vec3(-0.5f), glm::vec3(0.5f), SpatialBoundsSource::Mesh);
+			const glm::mat4 first = glm::translate(glm::mat4(1.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+			const glm::mat4 second = glm::translate(glm::mat4(1.0f), glm::vec3(8.0f, 0.0f, 0.0f));
+
+			const SpatialAABB firstWorld = TransformAABB(local, first, 0.0f);
+			const SpatialAABB secondWorld = TransformAABB(local, second, 0.0f);
+
+			context.Expect(NearlyEqualVec3(firstWorld.Center(), glm::vec3(1.0f, 0.0f, 0.0f)), "Initial bounds should use the first world transform.");
+			context.Expect(NearlyEqualVec3(secondWorld.Center(), glm::vec3(8.0f, 0.0f, 0.0f)), "Dirty transform updates should recompute bounds from the latest world transform.");
+		});
+
 		registry.Add("Engine.SpatialBounds.IntersectionHelpersHandleHitsMissesAndFrustumPlanes", [](TestContext& context) {
 			const SpatialAABB box = MakeAABB(glm::vec3(1.0f, -1.0f, -1.0f), glm::vec3(3.0f, 1.0f, 1.0f), SpatialBoundsSource::Authored);
 			const SpatialSphere touchingSphere{glm::vec3(0.0f), 1.0f};

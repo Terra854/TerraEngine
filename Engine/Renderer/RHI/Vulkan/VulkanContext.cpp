@@ -1001,6 +1001,22 @@ VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {
 }
 VulkanContext::~VulkanContext() = default;
 
+void VulkanContext::SetVariableRateShadingEnabled(bool enabled)
+{
+	// The VRS attachment is baked into render passes and framebuffers. Allow
+	// callers to choose it before initialization, but reject late changes until
+	// the backend grows a dedicated render-pass recreation path.
+	if (impl->initialized)
+	{
+		if (impl->vrsAttachmentRuntimeEnabled != enabled)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Ignoring variable-rate shading change after Vulkan initialization. Recreate the backend to change the VRS attachment layout.");
+		}
+		return;
+	}
+	impl->vrsAttachmentRuntimeEnabled = enabled;
+}
+
 // VulkanContext::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Initialize(WindowSystem& windowSystem) {
 	// Build the Vulkan instance/device chain and prime per-frame resources.

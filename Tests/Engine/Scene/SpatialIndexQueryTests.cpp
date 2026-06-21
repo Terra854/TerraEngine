@@ -74,5 +74,26 @@ namespace TerraEngine::Tests {
 			context.Expect(result.hits[0].objectId == MakeUuid(1), "The closest ray hit should be reported first.");
 			context.Expect(result.hits[1].objectId == MakeUuid(2), "The farther ray hit should be reported second.");
 		});
+
+		registry.Add("Engine.SpatialIndex.QueryUsesLatestIncrementalRefreshSnapshot", [](TestContext& context) {
+			TerraEngine::Scene::SpatialIndex index;
+			const std::vector<TerraEngine::Scene::SpatialObjectRecord> initialRecords{
+				MakeRecord(1, {-1.0f, -1.0f, -1.0f}, {1.0f, 1.0f, 1.0f})
+			};
+			const std::vector<TerraEngine::Scene::SpatialObjectRecord> movedRecords{
+				MakeRecord(1, {0.25f, -1.0f, -1.0f}, {1.25f, 1.0f, 1.0f}, 2)
+			};
+
+			index.Rebuild(initialRecords);
+			index.Refresh(movedRecords);
+
+			const TerraEngine::Scene::SpatialQueryResult oldArea = index.QueryAABB(
+				TerraEngine::Scene::MakeAABB({-2.0f, -2.0f, -2.0f}, {-1.25f, 2.0f, 2.0f}, TerraEngine::Scene::SpatialBoundsSource::Authored));
+			const TerraEngine::Scene::SpatialQueryResult newArea = index.QueryAABB(
+				TerraEngine::Scene::MakeAABB({0.2f, -2.0f, -2.0f}, {1.5f, 2.0f, 2.0f}, TerraEngine::Scene::SpatialBoundsSource::Authored));
+
+			context.Expect(!HasHit(oldArea, MakeUuid(1)), "Queries should not return the stale pre-refresh bounds.");
+			context.Expect(HasHit(newArea, MakeUuid(1)), "Queries should return the latest moved bounds after incremental refresh.");
+		});
 	}
 }

@@ -83,6 +83,10 @@ public:
 	// Notify systems and managed wrapper caches that component membership or
 	// other object-local structure changed without changing transform values.
 	void notifyObjectStructureChanged(const Object& obj);
+	// Mark a transform-affecting edit. This is separate from generic component
+	// structure changes so transform propagation can expand only affected
+	// hierarchy branches while spatial refresh still sees the object as dirty.
+	void MarkObjectTransformDirty(const Object& obj);
 	// Object metadata generations let managed wrappers reuse names and lookup
 	// answers during one script dispatch without calling back into native code
 	// on every property access.
@@ -193,6 +197,8 @@ public:
 	// SetOnSpatialObjectDirtyCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetOnSpatialObjectDirtyCallback(std::function<void(entt::entity)> callback) { onSpatialObjectDirty = callback; }
 	std::uint64_t GetSpatialRevision() const { return spatialRevision; }
+	std::uint64_t GetObjectTransformRevision(entt::entity entityId) const;
+	std::uint64_t GetObjectSpatialRevision(entt::entity entityId) const;
 
 private:
 	ObjectManager();
@@ -203,6 +209,7 @@ private:
 	std::function<void()> onModified;
 	std::function<void(entt::entity)> onSpatialObjectDirty;
 	std::uint64_t spatialRevision = 0;
+	std::uint64_t transformRevision = 0;
 	std::unordered_map<Object, ObjectMetadata> metadataMap;
 	entt::registry registry;
 	std::unordered_map<entt::entity, entt::entity> parentMap;
@@ -212,6 +219,8 @@ private:
 	// across undo/redo and serialization boundaries.
 	std::unordered_map<TerraEngine::UUID, entt::entity> uuidToEntity;
 	std::unordered_map<entt::entity, TerraEngine::UUID> entityToUuid;
+	std::unordered_map<entt::entity, std::uint64_t> transformRevisionByEntity;
+	std::unordered_map<entt::entity, std::uint64_t> spatialRevisionByEntity;
 	// Name and tag indexes are maintained beside metadata so C# Object.Find
 	// calls do not scan every scene object during script updates.
 	std::unordered_map<std::string, std::vector<entt::entity>> nameIndex;

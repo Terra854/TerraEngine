@@ -123,6 +123,7 @@ static nlohmann::json ResolveRenderProfileManifest(const std::filesystem::path& 
 			renderProfile["ambientOcclusion"] = AmbientOcclusionQualityFromSettings(*settingsIt);
 			renderProfile["textureBudgetMb"] = settingsIt->value("textureBudgetMb", 512u);
 			renderProfile["resolutionScale"] = settingsIt->value("resolutionScale", 1.0f);
+			renderProfile["variableRateShading"] = settingsIt->value("variableRateShading", 0u) > 0u ? "enabled" : "disabled";
 			renderProfile["validationEnabled"] = savedSettings.value("validationEnabled", false);
 			renderProfile["debugEnabled"] = savedSettings.value("debugEnabled", false);
 		}

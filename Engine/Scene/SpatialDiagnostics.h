@@ -28,6 +28,14 @@ namespace TerraEngine::Scene
 		std::uint32_t staticObjectCount = 0;
 		std::uint32_t dynamicObjectCount = 0;
 		std::uint32_t dirtyObjectCount = 0;
+		std::uint32_t transformDirtyRootCount = 0;
+		std::uint32_t transformExpandedObjectCount = 0;
+		std::uint32_t transformProcessedObjectCount = 0;
+		std::uint32_t transformSkippedCleanObjectCount = 0;
+		std::uint32_t transformHierarchyLevelCount = 0;
+		std::uint32_t boundsRecomputedObjectCount = 0;
+		std::uint32_t invalidTransformObjectCount = 0;
+		std::uint32_t invalidBoundsObjectCount = 0;
 		// These refresh counters describe the index update step, not the query
 		// that runs afterward for a particular camera.
 		std::uint32_t addedObjectCount = 0;
@@ -35,6 +43,9 @@ namespace TerraEngine::Scene
 		std::uint32_t removedObjectCount = 0;
 		std::uint32_t unchangedObjectCount = 0;
 		std::uint32_t fullRefreshObjectCount = 0;
+		std::uint32_t incrementalRefreshCount = 0;
+		std::uint32_t fullRefreshCount = 0;
+		std::uint32_t revisionMismatchFallbackCount = 0;
 		std::uint32_t visibleCandidateCount = 0;
 		std::uint32_t rejectedObjectCount = 0;
 		std::uint32_t fallbackObjectCount = 0;

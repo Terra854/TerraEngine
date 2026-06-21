@@ -16,6 +16,7 @@
 #include "Components/CameraComponent.h"
 #include "Components/MeshRenderComponent.h"
 #include "Components/LightComponent.h"
+#include "Scene/SceneGraphRuntime.h"
 #include "Scene/SceneManager.h"
 #include "Core/Object/ObjectManager.h"
 #include "Components/Transform.h"
@@ -238,6 +239,7 @@ namespace
 		HashCombine(seed, HashFloat(settings.ambientOcclusionStrength));
 		HashCombine(seed, settings.ambientOcclusionQuality);
 		HashCombine(seed, settings.anisotropicFiltering);
+		HashCombine(seed, settings.variableRateShading);
 		return seed;
 	}
 
@@ -407,6 +409,7 @@ namespace
 		sanitized.ambientOcclusionStrength = std::clamp(sanitized.ambientOcclusionStrength, 0.0f, 4.0f);
 		sanitized.ambientOcclusionQuality = std::min(sanitized.ambientOcclusionQuality, 3u);
 		sanitized.enableIBL = sanitized.enableIBL > 0u ? 1u : 0u;
+		sanitized.variableRateShading = sanitized.variableRateShading > 0u ? 1u : 0u;
 		return sanitized;
 	}
 
@@ -594,8 +597,14 @@ void RenderSystem::SetSceneViewContextTint(const std::unordered_set<TerraEngine:
 void RenderSystem::Initialize()
 {
 	TERRAENGINE_LOG(LogLevel::Info, "Initializing RenderSystem...");
+	LoadSettings();
 	
-	rhi = std::make_unique<VulkanContext>();
+	auto vulkanContext = std::make_unique<VulkanContext>();
+	// VRS is a render-pass attachment decision in Vulkan. Apply the startup
+	// render profile before backend initialization so exported builds that
+	// declare VRS disabled never create or load a shading-rate attachment.
+	vulkanContext->SetVariableRateShadingEnabled(SanitizeRenderSettings(currentSettings).variableRateShading > 0u);
+	rhi = std::move(vulkanContext);
 	rhi->Initialize(WindowSystem::Instance());
 
 	WindowSystem::Instance().SetResizeCallback([](int width, int height) {
@@ -611,8 +620,6 @@ void RenderSystem::Initialize()
 			TERRAENGINE_LOG(LogLevel::Error, "Unknown exception in resize callback");
 		}
 	});
-
-	LoadSettings();
 
 	initialized = true;
 }
@@ -658,9 +665,6 @@ void RenderSystem::Update(float deltaTime)
 		FrameArena::Instance().Reset();
 	}
 
-	// Capture all transforms first so hierarchical world transforms can be derived for cameras and renderables.
-	FrameMap<entt::entity, Transform> localTransforms;
-	localTransforms.reserve(1000); // Guess initial size
 	// Snapshot camera components so view/projection data is sourced from
 	// authored entities instead of the legacy hardcoded values.
 	FrameVector<CameraEntry> cameras;
@@ -678,29 +682,12 @@ void RenderSystem::Update(float deltaTime)
 		TerraEngine::Scheduling::EcsQueryTaskGraph renderCollectionGraph({ "render-system-collection", "Render System Collection", false, diagnosticsEnabled });
 
 		renderCollectionGraph.AddQuery(MakeProtectedRenderQuery(
-			"Render.CollectTransforms",
-			diagnosticsEnabled,
-			{ "Transform" },
-			{},
-			{ "Render.LocalTransforms" },
-			[this, &localTransforms](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
-			{
-				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Transforms", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				objManager.forEachObjectWithComponents<Transform>(
-					[&](Object object, Transform& transform)
-					{
-						localTransforms.emplace(object.EntityId(), ReflectTransformComponent(transform));
-					}
-				);
-			}));
-
-		renderCollectionGraph.AddQuery(MakeProtectedRenderQuery(
 			"Render.CollectCameras",
 			diagnosticsEnabled,
 			{ "Transform", "CameraComponent" },
-			{ "Render.LocalTransforms" },
+			{},
 			{ "Render.CameraCollection" },
-			[this, &cameras, &localTransforms](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
+			[this, &cameras](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Cameras", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				objManager.forEachObjectWithComponents<Transform, CameraComponent>(
@@ -721,9 +708,9 @@ void RenderSystem::Update(float deltaTime)
 			"Render.CollectRenderables",
 			diagnosticsEnabled,
 			{ "Transform", "MeshRenderComponent" },
-			{ "Render.LocalTransforms", "Render.CameraCollection" },
+			{ "Render.CameraCollection" },
 			{ "Render.RenderableCollection" },
-			[&cameras, &renderables, &localTransforms, this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
+			[&cameras, &renderables, this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Renderables", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				if (cameras.empty() && !hasSceneViewCamera)
@@ -763,9 +750,9 @@ void RenderSystem::Update(float deltaTime)
 			"Render.CollectLights",
 			diagnosticsEnabled,
 			{ "Transform", "LightComponent" },
-			{ "Render.LocalTransforms" },
+			{},
 			{ "Render.LightCollection" },
-			[this, &lights, &localTransforms](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
+			[this, &lights](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Lights", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				objManager.forEachObjectWithComponents<Transform, LightComponent>(
@@ -835,71 +822,21 @@ void RenderSystem::Update(float deltaTime)
 		loggedMissingCamera = false;
 	}
 
-	// Cache of computed world transforms to avoid recomputing during traversal.
+	TerraEngine::Scene::SceneTransformPropagationResult transformPropagation;
 	FrameMap<entt::entity, Transform> worldTransforms;
-	worldTransforms.reserve(localTransforms.size());
-
-	// Use a set for cycle detection. FlatSet would be better but std::set with FrameAllocator is okayish for small depth,
-	// or just use vector and linear scan for small depth. Recursion depth is usually small in scene graphs.
-	// Let's use FrameVector for "visiting" stack.
-	using VisitingStack = FrameVector<entt::entity>;
-	
-	auto computeWorldTransform = [&](auto&& self, entt::entity entity, VisitingStack& visiting) -> Transform
-	{
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto* cached = worldTransforms.find(entity))
-		{
-			return *cached;
-		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!localTransforms.contains(entity))
-		{
-			return Transform{};
-		}
-		// Prevent cycles from causing infinite recursion.
-		// Linear scan is fast for small hierarchies
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (std::find(visiting.begin(), visiting.end(), entity) != visiting.end()) {
-			return localTransforms.at(entity);
-		}
-
-		visiting.push_back(entity);
-
-		Transform world = localTransforms.at(entity);
-		const entt::entity parent = objManager.getParentEntity(entity);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (parent != entt::null)
-		{
-			Transform parentWorld = self(self, parent, visiting);
-			world.position = parentWorld.position + parentWorld.rotation * (parentWorld.scale * world.position);
-			world.rotation = parentWorld.rotation * world.rotation;
-			world.scale = parentWorld.scale * world.scale;
-		}
-
-		visiting.pop_back();
-		worldTransforms.emplace(entity, world);
-		return world;
-	};
-
-	// Pre-compute world transforms
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Resolve World Transforms", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		VisitingStack visiting;
-		visiting.reserve(16);
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const auto& entry : renderables)
+		TerraEngine::Scene::SceneGraph sceneGraph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager, false);
+		TerraEngine::Scene::SceneDirtyTransformState dirtyTransforms = TerraEngine::Scene::BuildDirtyTransformState(sceneGraph);
+		transformPropagation = TerraEngine::Scene::PropagateWorldTransforms(sceneGraph, dirtyTransforms);
+		worldTransforms.reserve(transformPropagation.worldTransformsByEntity.size());
+		for (const auto& [entity, transform] : transformPropagation.worldTransformsByEntity)
 		{
-			computeWorldTransform(computeWorldTransform, entry.entity, visiting);
+			worldTransforms.emplace(entity, transform);
 		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const auto& entry : lights)
+		if (!transformPropagation.valid)
 		{
-			computeWorldTransform(computeWorldTransform, entry.entity, visiting);
-		}
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const auto& entry : cameras)
-		{
-			computeWorldTransform(computeWorldTransform, entry.entity, visiting);
+			TERRAENGINE_LOG(LogLevel::Error, "RenderSystem received an invalid scene transform propagation result.");
 		}
 	}
 
@@ -909,6 +846,14 @@ void RenderSystem::Update(float deltaTime)
 		model = model * glm::mat4_cast(transform.rotation);
 		model = glm::scale(model, transform.scale);
 		return model;
+	};
+	const Transform fallbackWorldTransform{};
+	auto getWorldTransform = [&](entt::entity entity) -> const Transform& {
+		if (const Transform* transform = worldTransforms.find(entity))
+		{
+			return *transform;
+		}
+		return fallbackWorldTransform;
 	};
 
 	activeRenderFrameId = nextRenderFrameId++;
@@ -1036,7 +981,7 @@ void RenderSystem::Update(float deltaTime)
 		{
 			const RenderableEntry& entry = renderables[index];
 			renderableLookup.emplace(entry.entity, index);
-			const Transform& transform = worldTransforms.at(entry.entity);
+			const Transform& transform = getWorldTransform(entry.entity);
 			const glm::mat4 model = makeModelMatrix(transform);
 			TerraEngine::Scene::SpatialAABB localBounds = ResourceManager::Instance().GetMeshLocalBounds(entry.mesh.meshId);
 			TerraEngine::Scene::SpatialAABB worldBounds = localBounds.IsUsable()
@@ -1060,6 +1005,13 @@ void RenderSystem::Update(float deltaTime)
 		}
 		spatialIndex.Refresh(spatialRecords);
 	}
+	TerraEngine::Scene::SpatialDiagnosticsSnapshot latestSpatialRefreshDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
+	latestSpatialRefreshDiagnostics.transformDirtyRootCount = transformPropagation.dirtyRootCount;
+	latestSpatialRefreshDiagnostics.transformExpandedObjectCount = transformPropagation.expandedDirtyObjectCount;
+	latestSpatialRefreshDiagnostics.transformProcessedObjectCount = transformPropagation.processedObjectCount;
+	latestSpatialRefreshDiagnostics.transformSkippedCleanObjectCount = transformPropagation.skippedCleanObjectCount;
+	latestSpatialRefreshDiagnostics.transformHierarchyLevelCount = transformPropagation.hierarchyLevelCount;
+	latestSpatialRefreshDiagnostics.boundsRecomputedObjectCount = static_cast<std::uint32_t>(spatialRecords.size());
 
 	std::vector<DrawCommand> renderableDrawCommands(renderables.size());
 	std::vector<std::uint64_t> drawCommandSignatures(renderables.size(), 0u);
@@ -1090,7 +1042,7 @@ void RenderSystem::Update(float deltaTime)
 					drawCommandSignatures[index] = BuildDrawCommandSignature(
 						meshComp.meshId,
 						meshComp.materialId,
-						worldTransforms.at(entry.entity),
+						getWorldTransform(entry.entity),
 						meshComp.taskShaderCullingEnabled);
 				}
 			});
@@ -1114,7 +1066,7 @@ void RenderSystem::Update(float deltaTime)
 			command.materialId = meshComp.materialId;
 			command.objectId = entry.objectId;
 			command.taskShaderCullingEnabled = meshComp.taskShaderCullingEnabled;
-			command.modelMatrix = makeModelMatrix(worldTransforms.at(entry.entity));
+			command.modelMatrix = makeModelMatrix(getWorldTransform(entry.entity));
 			renderableDrawCommands[index] = command;
 
 			CachedDrawCommandRecord record{};
@@ -1196,7 +1148,12 @@ void RenderSystem::Update(float deltaTime)
 		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
 		VisibleCommandBuildResult result;
 		result.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
-		result.diagnostics = spatialIndex.GetDiagnosticsSnapshot();
+		result.diagnostics = latestSpatialRefreshDiagnostics;
+		const TerraEngine::Scene::SpatialDiagnosticsSnapshot queryDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
+		result.diagnostics.visibleCandidateCount = queryDiagnostics.visibleCandidateCount;
+		result.diagnostics.rejectedObjectCount = queryDiagnostics.rejectedObjectCount;
+		result.diagnostics.fallbackObjectCount = queryDiagnostics.fallbackObjectCount;
+		result.diagnostics.lastQueryDurationMs = queryDiagnostics.lastQueryDurationMs;
 		VisibleCommandCacheRecord record;
 		record.signature = signature;
 		record.lastTouchedFrameId = activeRenderFrameId;
@@ -1307,7 +1264,7 @@ void RenderSystem::Update(float deltaTime)
 				for (std::size_t i = start; i < end; ++i)
 				{
 					const LightEntry& entry = lights[i];
-					lightCandidateSignatures[i] = BuildLightCandidateSignature(worldTransforms.at(entry.entity), entry.light);
+					lightCandidateSignatures[i] = BuildLightCandidateSignature(getWorldTransform(entry.entity), entry.light);
 				}
 			});
 		packedLights.reserve(lights.size());
@@ -1328,7 +1285,7 @@ void RenderSystem::Update(float deltaTime)
 			CachedLightCandidateRecord record{};
 			record.signature = signature;
 			record.lastTouchedFrameId = activeRenderFrameId;
-			record.candidate = makeLightCandidate(entry, worldTransforms.at(entry.entity));
+			record.candidate = makeLightCandidate(entry, getWorldTransform(entry.entity));
 			packedLights.push_back(record.candidate);
 			lightCandidateCache.recordsByLightId[entry.lightId] = std::move(record);
 			++lightCandidateCache.missCount;
@@ -1693,11 +1650,8 @@ void RenderSystem::Update(float deltaTime)
 		{
 			const entt::entity cameraEntity = cameras[cameraIndex].entity;
 			const auto& camera = cameras[cameraIndex].camera;
-			
-			VisitingStack visiting;
-			visiting.reserve(16);
-			
-			Transform cameraTransform = computeWorldTransform(computeWorldTransform, cameraEntity, visiting);
+			const Transform* propagatedCameraTransform = worldTransforms.find(cameraEntity);
+			Transform cameraTransform = propagatedCameraTransform != nullptr ? *propagatedCameraTransform : Transform{};
 
 			// Normalize the rotation so derived direction vectors remain unit length
 			// even if authoring data drifts slightly off the identity quaternion.
@@ -1776,6 +1730,9 @@ void RenderSystem::Update(float deltaTime)
 		latestGameStats.spatialRemovedObjectCount = gameSpatialDiagnostics.removedObjectCount;
 		latestGameStats.spatialUnchangedObjectCount = gameSpatialDiagnostics.unchangedObjectCount;
 		latestGameStats.spatialFullRefreshObjectCount = gameSpatialDiagnostics.fullRefreshObjectCount;
+		latestGameStats.transformDirtyRootCount = gameSpatialDiagnostics.transformDirtyRootCount;
+		latestGameStats.transformProcessedObjectCount = gameSpatialDiagnostics.transformProcessedObjectCount;
+		latestGameStats.boundsRecomputedObjectCount = gameSpatialDiagnostics.boundsRecomputedObjectCount;
 		latestSceneStats.spatialIndexedObjectCount = sceneSpatialDiagnostics.indexedObjectCount;
 		latestSceneStats.spatialVisibleCandidateCount = sceneSpatialDiagnostics.visibleCandidateCount;
 		latestSceneStats.spatialRejectedObjectCount = sceneSpatialDiagnostics.rejectedObjectCount;
@@ -1786,6 +1743,9 @@ void RenderSystem::Update(float deltaTime)
 		latestSceneStats.spatialRemovedObjectCount = sceneSpatialDiagnostics.removedObjectCount;
 		latestSceneStats.spatialUnchangedObjectCount = sceneSpatialDiagnostics.unchangedObjectCount;
 		latestSceneStats.spatialFullRefreshObjectCount = sceneSpatialDiagnostics.fullRefreshObjectCount;
+		latestSceneStats.transformDirtyRootCount = sceneSpatialDiagnostics.transformDirtyRootCount;
+		latestSceneStats.transformProcessedObjectCount = sceneSpatialDiagnostics.transformProcessedObjectCount;
+		latestSceneStats.boundsRecomputedObjectCount = sceneSpatialDiagnostics.boundsRecomputedObjectCount;
 		latestGameSpatialDiagnostics = gameSpatialDiagnostics;
 		latestSceneSpatialDiagnostics = sceneSpatialDiagnostics;
 		latestGameBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Game);
@@ -2026,6 +1986,7 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 		currentSettings.ambientOcclusionStrength = 0.5f;
 		currentSettings.ambientOcclusionQuality = 0u;
 		currentSettings.anisotropicFiltering = 1u;
+		currentSettings.variableRateShading = 0u;
 		break;
 	case QualityPreset::Medium:
 		currentSettings.shadowResolution = 1024u;
@@ -2040,6 +2001,7 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 		currentSettings.ambientOcclusionStrength = 0.75f;
 		currentSettings.ambientOcclusionQuality = 1u;
 		currentSettings.anisotropicFiltering = 1u;
+		currentSettings.variableRateShading = 0u;
 		break;
 	case QualityPreset::High:
 		currentSettings.shadowResolution = 2048u;
@@ -2054,6 +2016,7 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 		currentSettings.ambientOcclusionStrength = 1.0f;
 		currentSettings.ambientOcclusionQuality = 2u;
 		currentSettings.anisotropicFiltering = 4u;
+		currentSettings.variableRateShading = 0u;
 		break;
 	case QualityPreset::Ultra:
 		currentSettings.shadowResolution = 4096u;
@@ -2068,6 +2031,7 @@ void RenderSystem::SetQualityPreset(QualityPreset preset)
 		currentSettings.ambientOcclusionStrength = 1.25f;
 		currentSettings.ambientOcclusionQuality = 3u;
 		currentSettings.anisotropicFiltering = 16u;
+		currentSettings.variableRateShading = 0u;
 		break;
 	}
 
@@ -2080,6 +2044,10 @@ void RenderSystem::SetRenderSettings(const RenderSettings& settings)
 {
 	currentSettings = SanitizeRenderSettings(settings);
 	currentPreset = QualityPreset::Custom;
+	if (auto* vulkanContext = dynamic_cast<VulkanContext*>(rhi.get()))
+	{
+		vulkanContext->SetVariableRateShadingEnabled(currentSettings.variableRateShading > 0u);
+	}
 	SaveSettings();
 }
 
@@ -2126,6 +2094,7 @@ void RenderSystem::LoadSettings()
 		currentSettings.ambientOcclusionStrength = s.value("ambientOcclusionStrength", 1.0f);
 		currentSettings.ambientOcclusionQuality = s.value("ambientOcclusionQuality", 2u);
 		currentSettings.anisotropicFiltering = s.value("anisotropicFiltering", 4u);
+		currentSettings.variableRateShading = s.value("variableRateShading", 0u);
 		currentSettings = SanitizeRenderSettings(currentSettings);
 	}
 	catch (const std::exception& e)
@@ -2166,6 +2135,7 @@ void RenderSystem::SaveSettings()
 		s["ambientOcclusionStrength"] = currentSettings.ambientOcclusionStrength;
 		s["ambientOcclusionQuality"] = currentSettings.ambientOcclusionQuality;
 		s["anisotropicFiltering"] = currentSettings.anisotropicFiltering;
+		s["variableRateShading"] = currentSettings.variableRateShading;
 		
 		j["settings"] = s;
 

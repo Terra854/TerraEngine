@@ -182,6 +182,7 @@ namespace TerraEngine::Scheduling {
 		{
 			stream << " [" << unit.workUnitId << " level=" << unit.hierarchyLevel << " objects=" << unit.objects.size() << "]";
 		}
+		stream << " totalObjects=" << summary.transformWorkObjectCount << " spatialBatches=" << summary.spatialRefreshBatchCount;
 		stream << '\n';
 		stream << "Mutation flushes:";
 		for (const std::string& flush : summary.mutationFlushes)
@@ -251,6 +252,8 @@ namespace TerraEngine::Scheduling {
 		compact.diagnostics = summary.diagnostics;
 		compact.mutationFlushes = summary.mutationFlushes;
 		compact.transformWorkUnits = summary.transformWorkUnits;
+		compact.transformWorkObjectCount = summary.transformWorkObjectCount;
+		compact.spatialRefreshBatchCount = summary.spatialRefreshBatchCount;
 		compact.jobGraphSummary.graphId = summary.jobGraphSummary.graphId;
 		compact.jobGraphSummary.label = summary.jobGraphSummary.label;
 		compact.jobGraphSummary.valid = summary.jobGraphSummary.valid;
@@ -396,6 +399,10 @@ namespace TerraEngine::Scheduling {
 	{
 		latestSummary = {};
 		latestSummary.transformWorkUnits = transformUnits;
+		for (const EcsTransformWorkUnit& unit : transformUnits)
+		{
+			latestSummary.transformWorkObjectCount += unit.objects.size();
+		}
 		std::vector<ComponentAccessDeclaration> accessDeclarations;
 		std::map<std::string, bool> workerEligibilityByQuery;
 

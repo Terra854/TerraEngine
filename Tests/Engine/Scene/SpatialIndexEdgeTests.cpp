@@ -122,5 +122,21 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(2u, diagnostics.fullRefreshObjectCount, "Full refresh diagnostics should report the number of input records.");
 			context.ExpectEqual(2u, diagnostics.indexedObjectCount, "Full refresh should keep all records indexed.");
 		});
+
+		registry.Add("Engine.SpatialIndex.DiagnosticsExposeSummaryCountersWithoutPerObjectDetails", [](TestContext& context) {
+			TerraEngine::Scene::SpatialIndex index;
+			const std::vector<TerraEngine::Scene::SpatialObjectRecord> records{
+				MakeRecord(1, {-1.0f, -1.0f, -1.0f}, {1.0f, 1.0f, 1.0f}),
+				MakeRecord(2, {2.0f, -1.0f, -1.0f}, {3.0f, 1.0f, 1.0f})
+			};
+			index.Rebuild(records);
+			index.Refresh(records);
+
+			const TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics = index.GetDiagnosticsSnapshot();
+			context.Expect(diagnostics.refreshMode == TerraEngine::Scene::SpatialRefreshMode::Unchanged, "Diagnostics should report unchanged steady-state refreshes.");
+			context.ExpectEqual(2u, diagnostics.unchangedObjectCount, "Summary diagnostics should count unchanged records.");
+			context.ExpectEqual(0u, diagnostics.incrementalRefreshCount, "Unchanged refreshes should not be counted as incremental work.");
+			context.ExpectEqual(0u, diagnostics.fullRefreshCount, "Unchanged refreshes should not be counted as full refresh work.");
+		});
 	}
 }

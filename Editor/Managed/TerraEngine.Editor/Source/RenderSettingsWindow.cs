@@ -199,6 +199,15 @@ namespace TerraEngine.Editor
             }
             ShowOptionTooltip("Improves texture clarity at grazing view angles. Higher values increase texture sampling cost.");
 
+            bool enableVrs = settings.VariableRateShading > 0;
+            // Validate this condition before crossing into native or editor state that may outlive the managed object.
+            if (ImGui.Checkbox("Variable Rate Shading", ref enableVrs))
+            {
+                settings.VariableRateShading = enableVrs ? 1u : 0u;
+                changed = true;
+            }
+            ShowOptionTooltip("Controls whether standalone runtime startup may create a VRS attachment. Changing this affects the next backend initialization or export package, not the already-created Vulkan render pass.");
+
             // Validate this condition before crossing into native or editor state that may outlive the managed object.
             if (changed)
             {

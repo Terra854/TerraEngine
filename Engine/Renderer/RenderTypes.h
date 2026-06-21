@@ -196,6 +196,9 @@ struct RenderSettings
 	float ambientOcclusionStrength = 1.0f;
 	std::uint32_t ambientOcclusionQuality = 2u;
 	std::uint32_t anisotropicFiltering = 4u;
+	// Variable-rate shading changes the render-pass attachment layout, so it
+	// is treated as a startup/render-profile option rather than a hot toggle.
+	std::uint32_t variableRateShading = 0u;
 };
 
 // Scene-owned sky authoring data is serialized with each scene so the editor
@@ -803,6 +806,9 @@ struct RenderStatsSnapshot
 	std::uint32_t spatialRemovedObjectCount = 0u;
 	std::uint32_t spatialUnchangedObjectCount = 0u;
 	std::uint32_t spatialFullRefreshObjectCount = 0u;
+	std::uint32_t transformDirtyRootCount = 0u;
+	std::uint32_t transformProcessedObjectCount = 0u;
+	std::uint32_t boundsRecomputedObjectCount = 0u;
 	bool taskCullingActive = false;
 	bool hiZActive = false;
 	bool vrsActive = false;
