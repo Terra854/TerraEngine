@@ -151,7 +151,7 @@ bool ProfilerCaptureStore::LoadCapture(const std::filesystem::path& capturePath,
 }
 
 // ProfilerCaptureStore::ListCaptures is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStore::ListCaptures(std::string& outError) const
+std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStore::ListCaptures(std::string& outError, const std::function<bool()>& shouldCancel) const
 {
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures;
 	outError.clear();
@@ -180,6 +180,11 @@ std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStor
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(profilerDirectory, ec))
 	{
+		if (shouldCancel && shouldCancel())
+		{
+			outError.clear();
+			return {};
+		}
 		if (ec)
 		{
 			outError = ec.message();

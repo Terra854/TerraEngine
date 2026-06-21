@@ -6,6 +6,7 @@
 
 #include "ProfilerCaptureStore.h"
 
+#include <atomic>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -15,7 +16,7 @@
 struct EditorContext;
 
 // class EditorProfilerService groups related state and operations so callers have one documented contract.
-class EditorProfilerService
+class EditorProfilerService : public std::enable_shared_from_this<EditorProfilerService>
 {
 public:
 	void Initialize(EditorContext& context);
@@ -46,6 +47,11 @@ private:
 
 	EditorContext* ctx = nullptr;
 	ProfilerCaptureStore captureStore;
+	// Each opened project gets a token that background profiler tasks check
+	// before doing filesystem work and before publishing results. Closing the
+	// project flips the token so queued tasks can exit without keeping editor
+	// shutdown alive.
+	std::shared_ptr<std::atomic_bool> cancellationToken = std::make_shared<std::atomic_bool>(false);
 	mutable std::mutex mutex;
 	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures;
 	bool busy = false;

@@ -7,6 +7,7 @@
 #include "Engine/Profiling/ProfilerCapture.h"
 
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -22,7 +23,7 @@ public:
 
 	bool SaveNewCapture(TerraEngine::Profiling::ProfilerCaptureDocument document, std::filesystem::path& outPath, std::string& outError) const;
 	bool LoadCapture(const std::filesystem::path& capturePath, TerraEngine::Profiling::ProfilerCaptureDocument& outDocument, std::string& outError) const;
-	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ListCaptures(std::string& outError) const;
+	std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ListCaptures(std::string& outError, const std::function<bool()>& shouldCancel = {}) const;
 	bool IsPathInsideProject(const std::filesystem::path& path) const;
 
 private:

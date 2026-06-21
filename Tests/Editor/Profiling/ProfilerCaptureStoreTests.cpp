@@ -3,6 +3,7 @@
 #include "ProfilerCaptureStore.h"
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -176,6 +177,24 @@ namespace TerraEngine::EditorTests {
 			context.Expect(HasArtifactNamed(captures, "a-first.teprof") && HasArtifactNamed(captures, "z-second.teprof"), "Listing should include every valid capture artifact.");
 			context.Expect(!HasArtifactNamed(captures, "broken.teprof"), "Listing should ignore unsupported .teprof files.");
 			context.ExpectEqual(1ULL, captures[0].frameCount, "Listed artifacts should expose their capture frame count.");
+		});
+
+		registry.Add("Editor.ProfilerCaptureStore.ListCapturesStopsWhenCancelled", [](TestContext& context) {
+			TempProfilerProject project;
+			ProfilerCaptureStore store(project.Root());
+			std::string error;
+			const std::filesystem::path profilerRoot = project.ProfilerRoot();
+			std::filesystem::create_directories(profilerRoot);
+
+			context.Expect(TerraEngine::Profiling::SaveCaptureDocument(MakeProfilerDocument("Cancel"), profilerRoot / "cancel.teprof", error), "The cancellation fixture capture should be writable.");
+
+			std::atomic_bool cancelRequested = true;
+			const std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> captures = store.ListCaptures(error, [&cancelRequested]() {
+				return cancelRequested.load();
+			});
+
+			context.Expect(captures.empty(), "Cancelled listing should stop before publishing partial capture artifacts.");
+			context.Expect(error.empty(), "Cancelled listing should not look like a filesystem failure.");
 		});
 
 		registry.Add("Editor.ProfilerCaptureStore.ProjectRootCanBeResetAndCleared", [](TestContext& context) {

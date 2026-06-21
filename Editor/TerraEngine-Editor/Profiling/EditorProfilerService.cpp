@@ -41,6 +41,11 @@ void EditorProfilerService::OnProjectOpened()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		++projectGeneration;
+		if (cancellationToken)
+		{
+			cancellationToken->store(true, std::memory_order_release);
+		}
+		cancellationToken = std::make_shared<std::atomic_bool>(false);
 		captureStore.SetProjectRoot(ctx->projectManager->GetProjectRoot());
 		statusText = "Profiler ready";
 		lastError.clear();
@@ -54,6 +59,10 @@ void EditorProfilerService::OnProjectClosed()
 	Profiler::Instance().Clear();
 	std::lock_guard<std::mutex> lock(mutex);
 	++projectGeneration;
+	if (cancellationToken)
+	{
+		cancellationToken->store(true, std::memory_order_release);
+	}
 	captureStore.ClearProjectRoot();
 	captures.clear();
 	busy = false;
@@ -121,57 +130,96 @@ void EditorProfilerService::FinishCapture()
 	}
 
 	std::uint64_t generation = 0u;
+	ProfilerCaptureStore storeSnapshot;
+	std::shared_ptr<std::atomic_bool> cancelToken;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		generation = projectGeneration;
+		storeSnapshot = captureStore;
+		cancelToken = cancellationToken;
 		busy = true;
 		statusText = "Saving profiler capture";
 		lastError.clear();
 	}
 
-	auto task = ThreadPool::instance().createTask([this, document, generation]() mutable {
+	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
+	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, document, generation]() mutable {
+		if (cancelToken && cancelToken->load(std::memory_order_acquire))
+		{
+			return;
+		}
+
 		std::filesystem::path savedPath;
 		std::string error;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!captureStore.SaveNewCapture(document, savedPath, error))
+		if (!storeSnapshot.SaveNewCapture(document, savedPath, error))
 		{
-			std::lock_guard<std::mutex> lock(mutex);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (generation == projectGeneration)
+			std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
+			if (!self)
 			{
-				busy = false;
-				lastError = error;
-				statusText = "Failed to save capture";
+				return;
 			}
+			std::lock_guard<std::mutex> lock(self->mutex);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
+			{
+				self->busy = false;
+				self->lastError = error;
+				self->statusText = "Failed to save capture";
+			}
+			return;
+		}
+		if (cancelToken && cancelToken->load(std::memory_order_acquire))
+		{
 			return;
 		}
 
 		ProfilerCaptureDocument loadedDocument;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!captureStore.LoadCapture(savedPath, loadedDocument, error))
+		if (!storeSnapshot.LoadCapture(savedPath, loadedDocument, error))
 		{
-			std::lock_guard<std::mutex> lock(mutex);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (generation == projectGeneration)
+			std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
+			if (!self)
 			{
-				busy = false;
-				lastError = error;
-				statusText = "Saved capture but failed to open it";
+				return;
+			}
+			std::lock_guard<std::mutex> lock(self->mutex);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
+			{
+				self->busy = false;
+				self->lastError = error;
+				self->statusText = "Saved capture but failed to open it";
 			}
 			return;
 		}
+		if (cancelToken && cancelToken->load(std::memory_order_acquire))
+		{
+			return;
+		}
 
-		std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> refreshedCaptures = captureStore.ListCaptures(error);
+		std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> refreshedCaptures = storeSnapshot.ListCaptures(error, [cancelToken]() {
+			return cancelToken && cancelToken->load(std::memory_order_acquire);
+		});
+		if (cancelToken && cancelToken->load(std::memory_order_acquire))
+		{
+			return;
+		}
 		Profiler::Instance().LoadDocument(loadedDocument);
 
-		std::lock_guard<std::mutex> lock(mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (generation == projectGeneration)
+		std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
+		if (!self)
 		{
-			captures = std::move(refreshedCaptures);
-			busy = false;
-			lastError = error;
-			statusText = "Saved and opened capture";
+			return;
+		}
+		std::lock_guard<std::mutex> lock(self->mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
+		{
+			self->captures = std::move(refreshedCaptures);
+			self->busy = false;
+			self->lastError = error;
+			self->statusText = "Saved and opened capture";
 		}
 	});
 	ThreadPool::instance().enqueue(task);
@@ -196,24 +244,40 @@ void EditorProfilerService::RefreshCaptureList()
 	}
 
 	std::uint64_t generation = 0u;
+	ProfilerCaptureStore storeSnapshot;
+	std::shared_ptr<std::atomic_bool> cancelToken;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		generation = projectGeneration;
+		storeSnapshot = captureStore;
+		cancelToken = cancellationToken;
 		busy = true;
 		statusText = "Refreshing capture list";
 	}
 
-	auto task = ThreadPool::instance().createTask([this, generation]() {
-		std::string error;
-		auto refreshed = captureStore.ListCaptures(error);
-		std::lock_guard<std::mutex> lock(mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (generation == projectGeneration)
+	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
+	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, generation]() {
+		if (cancelToken && cancelToken->load(std::memory_order_acquire))
 		{
-			captures = std::move(refreshed);
-			lastError = error;
-			statusText = error.empty() ? "Capture list refreshed" : error;
-			busy = false;
+			return;
+		}
+		std::string error;
+		auto refreshed = storeSnapshot.ListCaptures(error, [cancelToken]() {
+			return cancelToken && cancelToken->load(std::memory_order_acquire);
+		});
+		std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
+		if (!self)
+		{
+			return;
+		}
+		std::lock_guard<std::mutex> lock(self->mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
+		{
+			self->captures = std::move(refreshed);
+			self->lastError = error;
+			self->statusText = error.empty() ? "Capture list refreshed" : error;
+			self->busy = false;
 		}
 	});
 	ThreadPool::instance().enqueue(task);
@@ -228,39 +292,62 @@ void EditorProfilerService::LoadCapture(const std::filesystem::path& capturePath
 	}
 
 	std::uint64_t generation = 0u;
+	ProfilerCaptureStore storeSnapshot;
+	std::shared_ptr<std::atomic_bool> cancelToken;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		generation = projectGeneration;
+		storeSnapshot = captureStore;
+		cancelToken = cancellationToken;
 		busy = true;
 		statusText = "Opening profiler capture";
 		lastError.clear();
 	}
 
-	auto task = ThreadPool::instance().createTask([this, generation, capturePath]() {
+	std::weak_ptr<EditorProfilerService> weakSelf = weak_from_this();
+	auto task = ThreadPool::instance().createTask([weakSelf, storeSnapshot, cancelToken, generation, capturePath]() {
+		if (cancelToken && cancelToken->load(std::memory_order_acquire))
+		{
+			return;
+		}
 		ProfilerCaptureDocument document;
 		std::string error;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!captureStore.LoadCapture(capturePath, document, error))
+		if (!storeSnapshot.LoadCapture(capturePath, document, error))
 		{
-			std::lock_guard<std::mutex> lock(mutex);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (generation == projectGeneration)
+			std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
+			if (!self)
 			{
-				lastError = error;
-				statusText = "Failed to open capture";
-				busy = false;
+				return;
 			}
+			std::lock_guard<std::mutex> lock(self->mutex);
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
+			{
+				self->lastError = error;
+				self->statusText = "Failed to open capture";
+				self->busy = false;
+			}
+			return;
+		}
+		if (cancelToken && cancelToken->load(std::memory_order_acquire))
+		{
 			return;
 		}
 
 		Profiler::Instance().LoadDocument(document);
-		std::lock_guard<std::mutex> lock(mutex);
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (generation == projectGeneration)
+		std::shared_ptr<EditorProfilerService> self = weakSelf.lock();
+		if (!self)
 		{
-			statusText = "Loaded capture";
-			lastError.clear();
-			busy = false;
+			return;
+		}
+		std::lock_guard<std::mutex> lock(self->mutex);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (generation == self->projectGeneration && (!cancelToken || !cancelToken->load(std::memory_order_acquire)))
+		{
+			self->statusText = "Loaded capture";
+			self->lastError.clear();
+			self->busy = false;
 		}
 	});
 	ThreadPool::instance().enqueue(task);
