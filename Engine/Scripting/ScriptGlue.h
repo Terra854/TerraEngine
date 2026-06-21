@@ -45,6 +45,9 @@ extern "C" {
 	// Reflection-backed component access
 	TERRAENGINE_API bool Native_HasComponent(uint32_t objectId, const char* componentType);
 	TERRAENGINE_API bool Native_AddComponent(uint32_t objectId, const char* componentType);
+	TERRAENGINE_API std::uint64_t Native_Object_GetMetadataGeneration(uint32_t objectId);
+	TERRAENGINE_API std::uint64_t Native_Object_GetComponentGeneration(uint32_t objectId);
+	TERRAENGINE_API std::uint64_t Native_Object_GetBindingGeneration(uint32_t objectId);
 	TERRAENGINE_API void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type);
 	TERRAENGINE_API void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type);
 
@@ -79,6 +82,10 @@ extern "C" {
 	TERRAENGINE_API bool Native_ScriptComponent_AddBinding(uint32_t objectId, const char* className);
 	TERRAENGINE_API bool Native_ScriptComponent_HasBinding(uint32_t objectId, const char* className);
 	TERRAENGINE_API const char* Native_ScriptComponent_GetBindingPayload(uint32_t objectId, const char* bindingId);
+	TERRAENGINE_API std::uint64_t Native_ScriptComponent_GetBindingVersion(uint32_t objectId, const char* bindingId);
 	TERRAENGINE_API bool Native_ScriptComponent_SetBindingValue(uint32_t objectId, const char* bindingId, const char* fieldPath, const char* valueKind, const char* valueJson, const char* compatibility, const char* sourceTypeFingerprint);
 	TERRAENGINE_API bool Native_ScriptComponent_RemoveBindingValue(uint32_t objectId, const char* bindingId, const char* fieldPath);
+	TERRAENGINE_API void Native_Scripting_PushDispatchContext(uint32_t objectId, const char* bindingId, std::uint64_t frameOrder, int workerDispatch, int exportMode, std::uint64_t objectGeneration, std::uint64_t componentGeneration, std::uint64_t bindingGeneration);
+	TERRAENGINE_API void Native_Scripting_PopDispatchContext();
+	TERRAENGINE_API void Native_Scripting_ReportBridgeCacheCounters(std::uint64_t hits, std::uint64_t misses, std::uint64_t avoidedCalls);
 }

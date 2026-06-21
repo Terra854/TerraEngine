@@ -259,6 +259,28 @@ void SchedulerDiagnosticsWindow::DrawScriptingSummary()
 		ImGui::EndTable();
 	}
 
+	if (ImGui::BeginTable("SchedulerDiagnosticsScriptingCaches", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Cache Hits");
+		ImGui::TableSetupColumn("Cache Misses");
+		ImGui::TableSetupColumn("Bridge Avoided");
+		ImGui::TableSetupColumn("Typed Writes");
+		ImGui::TableSetupColumn("JSON Fallbacks");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::Text("%zu", result.cacheHits);
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Text("%zu", result.cacheMisses);
+		ImGui::TableSetColumnIndex(2);
+		ImGui::Text("%zu", result.bridgeCallsAvoided);
+		ImGui::TableSetColumnIndex(3);
+		ImGui::Text("%zu typed / %zu coalesced", result.typedMutations, result.coalescedMutations);
+		ImGui::TableSetColumnIndex(4);
+		ImGui::Text("%zu", result.jsonMutationFallbacks);
+		ImGui::EndTable();
+	}
+
 	if (!result.accessReport.messages.empty() && ImGui::TreeNode("Scripting Messages"))
 	{
 		for (const std::string& message : result.accessReport.messages)

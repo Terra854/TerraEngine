@@ -6,9 +6,15 @@
 #include "Core/Object/ObjectManager.h"
 #include "Core/Object/Component.h"
 
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cstddef>
+#include <exception>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace TerraEngine::Scene {
@@ -40,6 +46,52 @@ namespace TerraEngine::Scene {
 			default:
 				return false;
 			}
+		}
+
+		TerraEngine::Reflection::Variant MakeVariantFromMutationPayload(const nlohmann::json& value, int valueKind)
+		{
+			const auto readFloat = [&value](std::size_t index, float fallback) {
+				return value.is_array() && index < value.size()
+					? value.at(index).get<float>()
+					: fallback;
+			};
+
+			switch (valueKind)
+			{
+			case 0: return value.get<bool>();
+			case 1: return value.get<int>();
+			case 2: return value.get<float>();
+			case 3: return value.get<std::uint32_t>();
+			case 4:
+				return glm::vec2(readFloat(0, 0.0f), readFloat(1, 0.0f));
+			case 5:
+				return glm::vec3(readFloat(0, 0.0f), readFloat(1, 0.0f), readFloat(2, 0.0f));
+			case 6:
+				return glm::vec4(readFloat(0, 0.0f), readFloat(1, 0.0f), readFloat(2, 0.0f), readFloat(3, 0.0f));
+			case 7:
+				return glm::quat(readFloat(0, 1.0f), readFloat(1, 0.0f), readFloat(2, 0.0f), readFloat(3, 0.0f));
+			default:
+				return {};
+			}
+		}
+
+		bool ApplyComponentPropertyPayload(Object& target, const ComponentAccessFunctions& component, const SceneMutationRequest& request)
+		{
+			if (request.typedComponentPayload.valid)
+			{
+				return component.setter(target, request.typedComponentPayload.propertyName, request.typedComponentPayload.value);
+			}
+
+			const nlohmann::json payload = nlohmann::json::parse(request.payloadJson);
+			const std::string propertyName = payload.value("propertyName", std::string{});
+			const int valueKind = payload.value("valueKind", -1);
+			if (propertyName.empty() || !payload.contains("value"))
+			{
+				return false;
+			}
+
+			TerraEngine::Reflection::Variant value = MakeVariantFromMutationPayload(payload["value"], valueKind);
+			return component.setter(target, propertyName, value);
 		}
 	}
 
@@ -77,7 +129,36 @@ namespace TerraEngine::Scene {
 		// diagnostics and tests can inspect pending requests without mutating the
 		// queue that frame systems are still relying on.
 		std::scoped_lock lock(requestsMutex);
-		return requests;
+		std::vector<SceneMutationRequest> snapshot = requests;
+		std::sort(snapshot.begin(), snapshot.end(), [](const SceneMutationRequest& left, const SceneMutationRequest& right) {
+			if (left.sourceFrameOrder != right.sourceFrameOrder)
+			{
+				return left.sourceFrameOrder < right.sourceFrameOrder;
+			}
+			return left.requestId < right.requestId;
+		});
+
+		std::vector<SceneMutationRequest> coalesced;
+		coalesced.reserve(snapshot.size());
+		std::unordered_map<std::string, std::size_t> coalescedIndex;
+		for (SceneMutationRequest& request : snapshot)
+		{
+			if (request.coalescingKey.empty())
+			{
+				coalesced.push_back(std::move(request));
+				continue;
+			}
+
+			if (auto existing = coalescedIndex.find(request.coalescingKey); existing != coalescedIndex.end())
+			{
+				coalesced[existing->second] = std::move(request);
+				continue;
+			}
+
+			coalescedIndex.emplace(request.coalescingKey, coalesced.size());
+			coalesced.push_back(std::move(request));
+		}
+		return coalesced;
 	}
 
 	void SceneMutationQueue::Clear()
@@ -91,7 +172,9 @@ namespace TerraEngine::Scene {
 		SceneMutationBatchResult batch;
 		batch.applied = false;
 		std::unordered_set<TerraEngine::UUID> deletedTargets;
+		const std::size_t rawRequestCount = Size();
 		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
+		batch.coalescedMutationCount = rawRequestCount > requestSnapshot.size() ? rawRequestCount - requestSnapshot.size() : 0;
 
 		for (const SceneMutationRequest& request : requestSnapshot)
 		{
@@ -153,9 +236,24 @@ namespace TerraEngine::Scene {
 
 	SceneMutationBatchResult SceneMutationQueue::Apply(ObjectManager& objects)
 	{
+		const std::size_t rawRequestCount = Size();
 		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
 		SceneGraph graph = BuildSceneGraphFromObjectManager(objects);
 		SceneMutationBatchResult batch = Validate(graph);
+		for (const SceneMutationRequest& request : requestSnapshot)
+		{
+			if (request.operation == SceneMutationOperation::UpdateComponent)
+			{
+				if (request.typedComponentPayload.valid)
+				{
+					++batch.typedMutationCount;
+				}
+				else if (!request.payloadJson.empty() || request.usedJsonFallback)
+				{
+					++batch.jsonMutationFallbackCount;
+				}
+			}
+		}
 		const bool hasRejectedRequest = std::any_of(batch.results.begin(), batch.results.end(), [](const SceneMutationResult& result) {
 			return !result.accepted;
 		});
@@ -211,11 +309,45 @@ namespace TerraEngine::Scene {
 						if (!component->second.hasComponent(*target))
 						{
 							component->second.addComponent(*target);
+							objects.notifyObjectStructureChanged(*target);
 						}
 					}
 					else
 					{
 						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component mutation references an unknown component type.", "Register the component in ComponentAccessRegistry before scripts can add it."));
+					}
+				}
+				break;
+			case SceneMutationOperation::UpdateComponent:
+				if (auto target = objects.getObject(request.targetObjectId))
+				{
+					std::lock_guard registryLock(ComponentAccessRegistryMutex());
+					auto& registry = ComponentAccessRegistry();
+					auto component = registry.find(request.componentName);
+					if (component == registry.end())
+					{
+						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component update references an unknown component type.", "Register the component in ComponentAccessRegistry before scripts can update it."));
+						break;
+					}
+
+					try
+					{
+						const bool hasPayload = request.typedComponentPayload.valid || !request.payloadJson.empty();
+						if (!hasPayload)
+						{
+							result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, "Component update payload is missing property data.", "Include propertyName, valueKind, and value in the deferred payload."));
+							break;
+						}
+
+						if (!ApplyComponentPropertyPayload(*target, component->second, request))
+						{
+							result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component update could not write the reflected property.", "Verify the property name and value type match the component reflection metadata."));
+						}
+						objects.notifyObjectStructureChanged(*target);
+					}
+					catch (const std::exception& exception)
+					{
+						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Error, request, std::string("Component update payload could not be parsed: ") + exception.what(), "Rebuild the script mutation payload from supported property types."));
 					}
 				}
 				break;
@@ -228,7 +360,7 @@ namespace TerraEngine::Scene {
 		batch.applied = true;
 		{
 			std::scoped_lock lock(requestsMutex);
-			const std::size_t removeCount = std::min(requestSnapshot.size(), requests.size());
+			const std::size_t removeCount = std::min(rawRequestCount, requests.size());
 			requests.erase(requests.begin(), requests.begin() + static_cast<std::ptrdiff_t>(removeCount));
 		}
 		return batch;

@@ -122,6 +122,38 @@ static void MarshallToNative(const TerraEngine::Reflection::Variant& var, void* 
 	}
 }
 
+static nlohmann::json MarshallNativeValueToJson(void* data, ScriptType type)
+{
+	switch (type)
+	{
+	case ScriptType::Bool: return *static_cast<bool*>(data);
+	case ScriptType::Int: return *static_cast<int*>(data);
+	case ScriptType::Float: return *static_cast<float*>(data);
+	case ScriptType::EntityID: return *static_cast<uint32_t*>(data);
+	case ScriptType::Vector2:
+	{
+		const glm::vec2 value = *static_cast<glm::vec2*>(data);
+		return nlohmann::json::array({ value.x, value.y });
+	}
+	case ScriptType::Vector3:
+	{
+		const glm::vec3 value = *static_cast<glm::vec3*>(data);
+		return nlohmann::json::array({ value.x, value.y, value.z });
+	}
+	case ScriptType::Vector4:
+	{
+		const glm::vec4 value = *static_cast<glm::vec4*>(data);
+		return nlohmann::json::array({ value.x, value.y, value.z, value.w });
+	}
+	case ScriptType::Quaternion:
+	{
+		const glm::quat value = *static_cast<glm::quat*>(data);
+		return nlohmann::json::array({ value.w, value.x, value.y, value.z });
+	}
+	}
+	return {};
+}
+
 // ResolveBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static ScriptBinding* ResolveBinding(Object& object, const char* bindingId)
 {
@@ -518,6 +550,34 @@ extern "C" {
 		return static_cast<std::uint32_t>(TerraEngine::PlatformUtils::GetRuntimePlatform());
 	}
 
+	void Native_Scripting_PushDispatchContext(uint32_t objectId, const char* bindingId, std::uint64_t frameOrder, int workerDispatch, int exportMode, std::uint64_t objectGeneration, std::uint64_t componentGeneration, std::uint64_t bindingGeneration) {
+		ScriptingSystem::ScriptDispatchContext context;
+		context.workerDispatch = workerDispatch != 0;
+		context.exportMode = exportMode != 0;
+		context.sourceObjectId = objectId;
+		context.sourceBindingId = bindingId != nullptr ? bindingId : "";
+		context.frameOrder = frameOrder;
+		context.objectGeneration = objectGeneration;
+		context.componentGeneration = componentGeneration;
+		context.bindingGeneration = bindingGeneration;
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			context.sourceObjectUuid = objOpt->getUUID();
+		}
+		ScriptingSystem::SetCurrentScriptDispatchContext(std::move(context));
+	}
+
+	void Native_Scripting_PopDispatchContext() {
+		ScriptingSystem::ClearCurrentScriptDispatchContext();
+	}
+
+	void Native_Scripting_ReportBridgeCacheCounters(std::uint64_t hits, std::uint64_t misses, std::uint64_t avoidedCalls) {
+		ScriptingSystem::RecordBridgeCacheCounters(
+			static_cast<std::size_t>(hits),
+			static_cast<std::size_t>(misses),
+			static_cast<std::size_t>(avoidedCalls));
+	}
+
 	// Native_Application_GetProductName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* Native_Application_GetProductName() {
 		return WriteApplicationReturnText(ResourceManager::Instance().GetProductName());
@@ -685,10 +745,35 @@ extern "C" {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto it = reg.find(componentType); it != reg.end()) {
 				it->second.addComponent(*objOpt);
+				ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
 				return true;
 			}
 		}
 		return false;
+	}
+
+	std::uint64_t Native_Object_GetComponentGeneration(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			return ObjectManager::instance().getObjectComponentGeneration(*objOpt);
+		}
+		return 0;
+	}
+
+	std::uint64_t Native_Object_GetMetadataGeneration(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			return ObjectManager::instance().getObjectMetadataGeneration(*objOpt);
+		}
+		return 0;
+	}
+
+	std::uint64_t Native_Object_GetBindingGeneration(uint32_t objectId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			return ObjectManager::instance().getObjectBindingGeneration(*objOpt);
+		}
+		return 0;
 	}
 
 	// Native_ScriptComponent_AddBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -707,6 +792,7 @@ extern "C" {
 
 			auto guard = scriptComponent->acquireWriteLock();
 			scriptComponent->AddBinding(TerraEngine::EMPTY_UUID, className);
+			ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
 			return true;
 		}
 
@@ -756,6 +842,24 @@ extern "C" {
 		return g_ScriptBindingPayloadBuffer.c_str();
 	}
 
+	std::uint64_t Native_ScriptComponent_GetBindingVersion(uint32_t objectId, const char* bindingId) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (bindingId == nullptr || bindingId[0] == '\0') {
+			return 0;
+		}
+
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
+				auto guard = scriptComponent->acquireReadLock();
+				if (const ScriptBinding* binding = scriptComponent->FindBinding(bindingId)) {
+					return binding->authoredStateVersion;
+				}
+			}
+		}
+
+		return 0;
+	}
+
 	// Native_ScriptComponent_SetBindingValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_ScriptComponent_SetBindingValue(uint32_t objectId, const char* bindingId, const char* fieldPath, const char* valueKind, const char* valueJson, const char* compatibility, const char* sourceTypeFingerprint) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
@@ -770,32 +874,35 @@ extern "C" {
 				return false;
 			}
 
-			auto guard = scriptComponent->acquireWriteLock();
-			ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (binding == nullptr) {
-				return false;
-			}
+			{
+				auto guard = scriptComponent->acquireWriteLock();
+				ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (binding == nullptr) {
+					return false;
+				}
 
-			ScriptFieldValue& fieldValue = binding->UpsertSerializedValue(fieldPath, valueKind != nullptr ? valueKind : "");
-			try {
-				// Inspector writes already serialize through JSON, so preserve the
-				// structured payload when possible instead of flattening to strings.
-				fieldValue.value = nlohmann::json::parse(valueJson);
-			} catch (...) {
-				fieldValue.value = valueJson;
-			}
+				ScriptFieldValue& fieldValue = binding->UpsertSerializedValue(fieldPath, valueKind != nullptr ? valueKind : "");
+				try {
+					// Inspector writes already serialize through JSON, so preserve the
+					// structured payload when possible instead of flattening to strings.
+					fieldValue.value = nlohmann::json::parse(valueJson);
+				} catch (...) {
+					fieldValue.value = valueJson;
+				}
 
-			fieldValue.fieldPath = fieldPath;
-			fieldValue.fieldName = fieldPath;
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (valueKind != nullptr) {
-				fieldValue.valueKind = valueKind;
+				fieldValue.fieldPath = fieldPath;
+				fieldValue.fieldName = fieldPath;
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (valueKind != nullptr) {
+					fieldValue.valueKind = valueKind;
+				}
+				fieldValue.compatibility = compatibility != nullptr && compatibility[0] != '\0' ? compatibility : "Current";
+				fieldValue.persistenceState = fieldValue.compatibility;
+				fieldValue.sourceTypeFingerprint = sourceTypeFingerprint != nullptr ? sourceTypeFingerprint : "";
+				scriptComponent->SynchronizeStorageFromBindings();
 			}
-			fieldValue.compatibility = compatibility != nullptr && compatibility[0] != '\0' ? compatibility : "Current";
-			fieldValue.persistenceState = fieldValue.compatibility;
-			fieldValue.sourceTypeFingerprint = sourceTypeFingerprint != nullptr ? sourceTypeFingerprint : "";
-			scriptComponent->SynchronizeStorageFromBindings();
+			ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
 			return true;
 		}
 
@@ -816,14 +923,17 @@ extern "C" {
 				return false;
 			}
 
-			auto guard = scriptComponent->acquireWriteLock();
-			ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (binding == nullptr || !binding->RemoveSerializedValue(fieldPath)) {
-				return false;
-			}
+			{
+				auto guard = scriptComponent->acquireWriteLock();
+				ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (binding == nullptr || !binding->RemoveSerializedValue(fieldPath)) {
+					return false;
+				}
 
-			scriptComponent->SynchronizeStorageFromBindings();
+				scriptComponent->SynchronizeStorageFromBindings();
+			}
+			ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
 			return true;
 		}
 
@@ -845,6 +955,42 @@ extern "C" {
 
 	// Native_SetComponentProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_SetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* inValue, int type) {
+		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value() && context->workerDispatch) {
+			if (componentType == nullptr || componentType[0] == '\0' || propertyName == nullptr || propertyName[0] == '\0' || inValue == nullptr) {
+				return;
+			}
+
+			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+			if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+				TerraEngine::Scene::SceneMutationRequest request = scriptingSystem.BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::UpdateComponent,
+					*context,
+					objOpt->getUUID(),
+					{},
+					componentType);
+				request.typedComponentPayload.propertyName = propertyName;
+				request.typedComponentPayload.valueKind = type;
+				request.typedComponentPayload.value = MarshallFromNative(inValue, static_cast<ScriptType>(type));
+				request.typedComponentPayload.valid = TerraEngine::Reflection::IsValid(request.typedComponentPayload.value);
+				if (!request.typedComponentPayload.valid) {
+					nlohmann::json payload{
+						{ "propertyName", propertyName },
+						{ "valueKind", type },
+						{ "value", MarshallNativeValueToJson(inValue, static_cast<ScriptType>(type)) }
+					};
+					request.payloadJson = payload.dump();
+					request.usedJsonFallback = true;
+				}
+				request.coalescingKey = std::to_string(context->frameOrder)
+					+ "|" + TerraEngine::ToHexString(objOpt->getUUID())
+					+ "|" + componentType
+					+ "|" + propertyName;
+				scriptingSystem.RecordScriptMutationRequest(std::move(request));
+			}
+			return;
+		}
+
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
 			auto& reg = ComponentAccessRegistry();

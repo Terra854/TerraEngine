@@ -935,9 +935,31 @@ void RenderSystem::Update(float deltaTime)
 			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::MainRuntimeView, RenderViewType::Game, gameViewTargetSize, 2u });
 		}
 	}
+	if (renderFrameSnapshot.viewRequests.empty())
+	{
+		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Skip No Render Outputs", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		TerraEngine::Renderer::RenderDiagnosticsSummary noViewDiagnostics{};
+		noViewDiagnostics.frameId = activeRenderFrameId;
+		if (TerraEngine::Renderer::RenderDiagnosticsRequested())
+		{
+			noViewDiagnostics.delayedWork.push_back("Render frame skipped because no Scene, Game, or runtime output target was requested.");
+		}
+		TerraEngine::Renderer::PublishRenderDiagnostics(noViewDiagnostics);
+		{
+			std::lock_guard<std::mutex> lock(statsMutex);
+			latestRenderFrameSnapshot = renderFrameSnapshot;
+			latestRenderGraphDiagnostics = noViewDiagnostics;
+		}
+		ClearOverrideCameras();
+		return;
+	}
 	renderFrameSnapshot.renderables.reserve(renderables.size());
 	renderFrameSnapshot.meshes.reserve(renderables.size());
 	renderFrameSnapshot.materials.reserve(renderables.size());
+	std::unordered_set<TerraEngine::UUID> uniqueMeshIds;
+	std::unordered_set<TerraEngine::UUID> uniqueMaterialIds;
+	uniqueMeshIds.reserve(renderables.size());
+	uniqueMaterialIds.reserve(renderables.size());
 	for (const RenderableEntry& entry : renderables)
 	{
 		const Transform* transform = worldTransforms.find(entry.entity);
@@ -949,8 +971,14 @@ void RenderSystem::Update(float deltaTime)
 			entry.mesh.taskShaderCullingEnabled,
 			false
 		});
-		renderFrameSnapshot.meshes.push_back({ entry.mesh.meshId, "mesh", true, false });
-		renderFrameSnapshot.materials.push_back({ entry.mesh.materialId, "material", true, false });
+		if (uniqueMeshIds.insert(entry.mesh.meshId).second)
+		{
+			renderFrameSnapshot.meshes.push_back({ entry.mesh.meshId, "mesh", true, false });
+		}
+		if (uniqueMaterialIds.insert(entry.mesh.materialId).second)
+		{
+			renderFrameSnapshot.materials.push_back({ entry.mesh.materialId, "material", true, false });
+		}
 	}
 	renderFrameSnapshot.lights.reserve(lights.size());
 	for (const LightEntry& light : lights)
@@ -1171,7 +1199,7 @@ void RenderSystem::Update(float deltaTime)
 		const TerraEngine::Scene::SpatialFrustum frustum = TerraEngine::Scene::ExtractFrustum(viewProjection);
 		TerraEngine::Scene::SpatialQueryFilter filter{};
 		filter.categoryMask = TerraEngine::Scene::SpatialCategoryRenderable;
-		filter.collectDiagnostics = true;
+		filter.collectDiagnostics = TerraEngine::Renderer::RenderDiagnosticsRequested();
 		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
 		VisibleCommandBuildResult result;
 		result.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));

@@ -28,6 +28,9 @@ struct ObjectMetadata {
 	std::string layer = "Default";
 	bool active = true;
 	bool isStatic = false;
+	std::uint64_t metadataGeneration = 1;
+	std::uint64_t componentGeneration = 1;
+	std::uint64_t bindingGeneration = 1;
 };
 
 // class ObjectManager groups related state and operations so callers have one documented contract.
@@ -77,6 +80,15 @@ public:
 	bool isObjectStatic(const Object& obj) const;
 	// Set the object's static state for engine optimizations.
 	void setObjectStatic(const Object& obj, bool isStatic);
+	// Notify systems and managed wrapper caches that component membership or
+	// other object-local structure changed without changing transform values.
+	void notifyObjectStructureChanged(const Object& obj);
+	// Object metadata generations let managed wrappers reuse names and lookup
+	// answers during one script dispatch without calling back into native code
+	// on every property access.
+	std::uint64_t getObjectMetadataGeneration(const Object& obj) const;
+	std::uint64_t getObjectComponentGeneration(const Object& obj) const;
+	std::uint64_t getObjectBindingGeneration(const Object& obj) const;
 
 	// Get the list of all globally available tags defined in the project.
 	// getAvailableTags is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -200,11 +212,18 @@ private:
 	// across undo/redo and serialization boundaries.
 	std::unordered_map<TerraEngine::UUID, entt::entity> uuidToEntity;
 	std::unordered_map<entt::entity, TerraEngine::UUID> entityToUuid;
+	// Name and tag indexes are maintained beside metadata so C# Object.Find
+	// calls do not scan every scene object during script updates.
+	std::unordered_map<std::string, std::vector<entt::entity>> nameIndex;
+	std::unordered_map<std::string, std::vector<entt::entity>> tagIndex;
 
 	std::vector<std::string> availableTags;
 	std::vector<std::string> availableLayers;
 
 	Object makeHandle(entt::entity entityId);
+	void addLookupIndex(entt::entity entityId, const ObjectMetadata& metadata);
+	void removeLookupIndex(entt::entity entityId, const ObjectMetadata& metadata);
+	void removeFromLookupBucket(std::unordered_map<std::string, std::vector<entt::entity>>& index, const std::string& key, entt::entity entityId);
 	void notifySpatialObjectDirty(entt::entity entityId);
 	void detachFromParent(entt::entity childId);
 	bool isDescendant(entt::entity ancestor, entt::entity potentialChild) const;

@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "Core/Object/Reflection.h"
 #include "SceneGraphRuntime.h"
 #include "Utilities/UUID.h"
 
@@ -40,6 +41,13 @@ namespace TerraEngine::Scene {
 		Replace
 	};
 
+	struct SceneComponentPropertyMutation {
+		std::string propertyName;
+		int valueKind = -1;
+		TerraEngine::Reflection::Variant value;
+		bool valid = false;
+	};
+
 	struct SceneMutationRequest {
 		std::string requestId;
 		SceneMutationOperation operation = SceneMutationOperation::CreateObject;
@@ -48,6 +56,9 @@ namespace TerraEngine::Scene {
 		std::string displayName;
 		std::string componentName;
 		std::string payloadJson;
+		SceneComponentPropertyMutation typedComponentPayload;
+		std::string coalescingKey;
+		bool usedJsonFallback = false;
 		SceneComponentMutationPayloadKind componentPayloadKind = SceneComponentMutationPayloadKind::None;
 		std::uint64_t expectedGraphRevision = 0;
 		std::uint32_t sourceObjectId = 0;
@@ -69,6 +80,9 @@ namespace TerraEngine::Scene {
 
 	struct SceneMutationBatchResult {
 		bool applied = false;
+		std::size_t typedMutationCount = 0;
+		std::size_t jsonMutationFallbackCount = 0;
+		std::size_t coalescedMutationCount = 0;
 		std::vector<SceneMutationResult> results;
 		std::vector<SceneDiagnostic> diagnostics;
 	};

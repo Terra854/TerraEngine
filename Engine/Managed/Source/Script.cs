@@ -51,8 +51,16 @@ namespace TerraEngine
 		/// </summary>
 		public void BindEngineInstance(uint objectId, string? bindingId = null)
 		{
+			string nextBindingId = bindingId ?? string.Empty;
+			if (Object != null
+				&& Object.ID == objectId
+				&& string.Equals(BindingId, nextBindingId, System.StringComparison.Ordinal))
+			{
+				return;
+			}
+
 			Object = new Object(objectId);
-			BindingId = bindingId ?? string.Empty;
+			BindingId = nextBindingId;
 			_transform = null;
 		}
 
@@ -88,9 +96,6 @@ namespace TerraEngine
 			}
 
 			InvokeStartIfNeeded();
-			// UI callbacks are pumped once per engine frame from the managed side
-			// so scripts can subscribe with standard C# events instead of polling.
-			UIBridge.PumpPendingEvents();
 			OnUpdate();
 		}
 

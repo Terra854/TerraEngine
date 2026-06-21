@@ -1,6 +1,7 @@
 #pragma once
 
 #include <exception>
+#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <sstream>
@@ -46,22 +47,50 @@ namespace TerraEngine::Tests {
 		int RunAll(std::ostream& output) const {
 			TestContext context;
 			int failedCount = 0;
+			const char* filterValue = std::getenv("TERRAENGINE_TEST_FILTER");
+			const std::string filter = filterValue != nullptr ? filterValue : "";
+
+			auto matchesFilter = [&filter](const std::string& testName) {
+				if(filter.empty()) {
+					return true;
+				}
+				std::size_t begin = 0;
+				while(begin <= filter.size()) {
+					const std::size_t end = filter.find_first_of(",;", begin);
+					const std::string token = filter.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+					if(!token.empty() && testName.find(token) != std::string::npos) {
+						return true;
+					}
+					if(end == std::string::npos) {
+						break;
+					}
+					begin = end + 1;
+				}
+				return false;
+			};
 
 			// Each test gets its own failure boundary so one regression still reports
 			// the rest of the suite, matching the feedback style expected from CTest.
 			for(const TestCase& test : tests_) {
+				if(!matchesFilter(test.name)) {
+					continue;
+				}
 				try {
 					test.body(context);
 					output << "[PASS] " << test.name << '\n';
+					output.flush();
 				} catch(const TestFailure& failure) {
 					++failedCount;
 					output << "[FAIL] " << test.name << ": " << failure.what() << '\n';
+					output.flush();
 				} catch(const std::exception& exception) {
 					++failedCount;
 					output << "[ERROR] " << test.name << ": " << exception.what() << '\n';
+					output.flush();
 				} catch(...) {
 					++failedCount;
 					output << "[ERROR] " << test.name << ": unknown exception\n";
+					output.flush();
 				}
 			}
 

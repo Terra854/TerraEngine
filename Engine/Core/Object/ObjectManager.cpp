@@ -51,6 +51,36 @@ Object ObjectManager::makeHandle(entt::entity entityId)
 	return Object(registry, entityId);
 }
 
+void ObjectManager::addLookupIndex(entt::entity entityId, const ObjectMetadata& metadata)
+{
+	// Keep lookup buckets append-only for creation order and remove stale
+	// entries on rename/delete before inserting the new metadata values.
+	nameIndex[metadata.name].push_back(entityId);
+	tagIndex[metadata.tag].push_back(entityId);
+}
+
+void ObjectManager::removeLookupIndex(entt::entity entityId, const ObjectMetadata& metadata)
+{
+	removeFromLookupBucket(nameIndex, metadata.name, entityId);
+	removeFromLookupBucket(tagIndex, metadata.tag, entityId);
+}
+
+void ObjectManager::removeFromLookupBucket(std::unordered_map<std::string, std::vector<entt::entity>>& index, const std::string& key, entt::entity entityId)
+{
+	auto bucket = index.find(key);
+	if (bucket == index.end())
+	{
+		return;
+	}
+
+	std::vector<entt::entity>& entities = bucket->second;
+	entities.erase(std::remove(entities.begin(), entities.end(), entityId), entities.end());
+	if (entities.empty())
+	{
+		index.erase(bucket);
+	}
+}
+
 // ObjectManager::notifySpatialObjectDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::notifySpatialObjectDirty(entt::entity entityId)
 {
@@ -81,6 +111,7 @@ Object ObjectManager::createObject(const std::string& name) {
 	ObjectMetadata metadata;
 	metadata.name = name;
 	metadataMap.insert({ object, metadata });
+	addLookupIndex(object.EntityId(), metadata);
 	parentMap.emplace(object.EntityId(), entt::null);
 	childrenMap.emplace(object.EntityId(), std::vector<entt::entity>{});
 	
@@ -95,6 +126,11 @@ Object ObjectManager::createObject(const std::string& name) {
 // ObjectManager::removeObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::removeObject(Object obj) {
 	notifySpatialObjectDirty(obj.id);
+	if (auto metadataIter = metadataMap.find(obj); metadataIter != metadataMap.end())
+	{
+		removeLookupIndex(obj.id, metadataIter->second);
+	}
+
 	// Destroying the entity purges every component attached to it (Transform and any others),
 	// ensuring no dangling component data survives past object lifetime.
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -326,7 +362,14 @@ void ObjectManager::setObjectName(const Object& obj, const std::string& name)
 {
 	if (auto it = metadataMap.find(obj); it != metadataMap.end())
 	{
+		if (it->second.name == name)
+		{
+			return;
+		}
+		removeFromLookupBucket(nameIndex, it->second.name, obj.EntityId());
 		it->second.name = name;
+		++it->second.metadataGeneration;
+		nameIndex[name].push_back(obj.EntityId());
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (onModified) onModified();
 	}
@@ -350,7 +393,14 @@ void ObjectManager::setObjectTag(const Object& obj, const std::string& tag)
 {
 	if (auto it = metadataMap.find(obj); it != metadataMap.end())
 	{
+		if (it->second.tag == tag)
+		{
+			return;
+		}
+		removeFromLookupBucket(tagIndex, it->second.tag, obj.EntityId());
 		it->second.tag = tag;
+		++it->second.metadataGeneration;
+		tagIndex[tag].push_back(obj.EntityId());
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (onModified) onModified();
 	}
@@ -374,7 +424,12 @@ void ObjectManager::setObjectLayer(const Object& obj, const std::string& layer)
 {
 	if (auto it = metadataMap.find(obj); it != metadataMap.end())
 	{
+		if (it->second.layer == layer)
+		{
+			return;
+		}
 		it->second.layer = layer;
+		++it->second.metadataGeneration;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (onModified) onModified();
 	}
@@ -397,7 +452,14 @@ void ObjectManager::setObjectActive(const Object& obj, bool active)
 {
 	if (auto it = metadataMap.find(obj); it != metadataMap.end())
 	{
+		if (it->second.active == active)
+		{
+			return;
+		}
 		it->second.active = active;
+		++it->second.metadataGeneration;
+		++it->second.componentGeneration;
+		++it->second.bindingGeneration;
 		notifySpatialObjectDirty(obj.EntityId());
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (onModified) onModified();
@@ -421,30 +483,84 @@ void ObjectManager::setObjectStatic(const Object& obj, bool isStatic)
 {
 	if (auto it = metadataMap.find(obj); it != metadataMap.end())
 	{
+		if (it->second.isStatic == isStatic)
+		{
+			return;
+		}
 		it->second.isStatic = isStatic;
+		++it->second.metadataGeneration;
 		notifySpatialObjectDirty(obj.EntityId());
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (onModified) onModified();
 	}
 }
 
+void ObjectManager::notifyObjectStructureChanged(const Object& obj)
+{
+	if (!registry.valid(obj.EntityId()))
+	{
+		return;
+	}
+
+	// Component membership changes affect script wrapper validity even when the
+	// object's transform did not move, so reuse the existing monotonic revision.
+	if (auto it = metadataMap.find(obj); it != metadataMap.end())
+	{
+		++it->second.componentGeneration;
+		++it->second.bindingGeneration;
+	}
+	notifySpatialObjectDirty(obj.EntityId());
+	if (onModified) onModified();
+}
+
+std::uint64_t ObjectManager::getObjectMetadataGeneration(const Object& obj) const
+{
+	if (auto it = metadataMap.find(obj); it != metadataMap.end())
+	{
+		return it->second.metadataGeneration;
+	}
+	return 0;
+}
+
+std::uint64_t ObjectManager::getObjectComponentGeneration(const Object& obj) const
+{
+	if (auto it = metadataMap.find(obj); it != metadataMap.end())
+	{
+		return it->second.componentGeneration;
+	}
+	return 0;
+}
+
+std::uint64_t ObjectManager::getObjectBindingGeneration(const Object& obj) const
+{
+	if (auto it = metadataMap.find(obj); it != metadataMap.end())
+	{
+		return it->second.bindingGeneration;
+	}
+	return 0;
+}
+
 // ObjectManager::FindObjectByName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<Object> ObjectManager::FindObjectByName(std::string_view name) const
 {
-	// Names live in the side-table because they are editor-facing metadata
-	// rather than ECS component state. Iterate that table so lookups stay in
-	// sync with the hierarchy names authors actually see.
-	for (const auto& [objectHandle, metadata] : metadataMap)
+	auto bucket = nameIndex.find(std::string(name));
+	if (bucket == nameIndex.end())
 	{
-		if (!registry.valid(objectHandle.EntityId()))
+		return std::nullopt;
+	}
+
+	for (entt::entity entityId : bucket->second)
+	{
+		if (!registry.valid(entityId))
 		{
 			continue;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (metadata.name == name)
+		Object handle = const_cast<ObjectManager*>(this)->makeHandle(entityId);
+		auto metadata = metadataMap.find(handle);
+		if (metadata != metadataMap.end() && metadata->second.name == name)
 		{
-			return const_cast<ObjectManager*>(this)->makeHandle(objectHandle.EntityId());
+			return handle;
 		}
 	}
 
@@ -454,19 +570,24 @@ std::optional<Object> ObjectManager::FindObjectByName(std::string_view name) con
 // ObjectManager::FindObjectByTag is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<Object> ObjectManager::FindObjectByTag(std::string_view tag) const
 {
-	// Tags now live in the metadata side-table.
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const auto& [objectHandle, metadata] : metadataMap)
+	auto bucket = tagIndex.find(std::string(tag));
+	if (bucket == tagIndex.end())
 	{
-		if (!registry.valid(objectHandle.EntityId()))
+		return std::nullopt;
+	}
+
+	for (entt::entity entityId : bucket->second)
+	{
+		if (!registry.valid(entityId))
 		{
 			continue;
 		}
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (metadata.active && metadata.tag == tag)
+		Object handle = const_cast<ObjectManager*>(this)->makeHandle(entityId);
+		auto metadata = metadataMap.find(handle);
+		if (metadata != metadataMap.end() && metadata->second.active && metadata->second.tag == tag)
 		{
-			return const_cast<ObjectManager*>(this)->makeHandle(objectHandle.EntityId());
+			return handle;
 		}
 	}
 
@@ -596,4 +717,6 @@ void ObjectManager::clear()
 	childrenMap.clear();
 	uuidToEntity.clear();
 	entityToUuid.clear();
+	nameIndex.clear();
+	tagIndex.clear();
 }

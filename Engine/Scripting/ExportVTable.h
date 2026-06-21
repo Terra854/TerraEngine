@@ -43,6 +43,17 @@ struct ExportFieldDescriptor {
 	char      nameUtf8[64];     // Null-terminated UTF-8 field name (truncated if >63 chars)
 };
 
+struct ExportScriptBatchItem {
+	void* handle;
+	float deltaTime;
+	uint64_t frameOrder;
+	uint64_t objectGeneration;
+	uint64_t componentGeneration;
+	uint64_t bindingGeneration;
+	uint32_t objectId;
+	int32_t workerDispatch;
+};
+
 // Function-pointer table populated by the NativeAOT managed library during
 // InitManagedRuntime(). The C++ engine consumes this struct exclusively in
 // exported builds — no other interop channel is used (AC-003).
@@ -83,6 +94,7 @@ struct ManagedVTable {
 	void     (__cdecl* getFieldValue)(void* handle, int32_t fieldIndex, void* outValue, int32_t valueSize);
 	// Write one field's blittable value into a live script instance.
 	void     (__cdecl* setFieldValue)(void* handle, int32_t fieldIndex, const void* inValue, int32_t valueSize);
+	void     (__cdecl* invokeUpdateBatch)(const ExportScriptBatchItem* items, int32_t itemCount);
 #else
 	int32_t  (*getScriptCount)();
 	void     (*getScriptIds)(uint64_t* outBuffer, int32_t capacity);
@@ -96,6 +108,7 @@ struct ManagedVTable {
 	void     (*getFieldDescriptors)(uint64_t scriptId, ExportFieldDescriptor* outBuffer, int32_t capacity);
 	void     (*getFieldValue)(void* handle, int32_t fieldIndex, void* outValue, int32_t valueSize);
 	void     (*setFieldValue)(void* handle, int32_t fieldIndex, const void* inValue, int32_t valueSize);
+	void     (*invokeUpdateBatch)(const ExportScriptBatchItem* items, int32_t itemCount);
 #endif
 };
 

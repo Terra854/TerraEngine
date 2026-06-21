@@ -1,5 +1,6 @@
 #include "TestHarness.h"
 
+#include "Components/ScriptComponent.h"
 #include "Components/Transform.h"
 #include "Core/Object/Component.h"
 #include "Core/Object/ComponentRegistry.h"
@@ -149,6 +150,58 @@ namespace TerraEngine::Tests {
 			context.Expect(!manager.getObject(childUuid).has_value(), "Removing a parent should recursively clear child UUID lookups.");
 			context.Expect(!manager.getObject(grandchildUuid).has_value(), "Removing a parent should recursively clear grandchild UUID lookups.");
 			context.Expect(manager.getRootObjects().empty(), "Removing the only hierarchy branch should leave no root objects.");
+
+			ResetObjectManager();
+		});
+
+		registry.Add("Engine.ObjectManager.NameAndTagIndexesInvalidateOnMetadataChanges", [](TestContext& context) {
+			ResetObjectManager();
+			ObjectManager& manager = ObjectManager::instance();
+			Object first = manager.createObject("Player");
+			Object second = manager.createObject("Player");
+
+			first.setTag("Enemy");
+			second.setTag("Enemy");
+			context.Expect(manager.FindObjectByName("Player").has_value(), "The name index should find newly created objects.");
+			context.Expect(manager.FindObjectByTag("Enemy").has_value(), "The tag index should find active tagged objects.");
+
+			first.setName("Hero");
+			context.Expect(manager.FindObjectByName("Hero").has_value(), "Renaming should insert the object into the new name bucket.");
+			context.Expect(manager.FindObjectByName("Player").has_value(), "Renaming one duplicate should preserve other objects in the old name bucket.");
+
+			second.setName("Villain");
+			context.Expect(!manager.FindObjectByName("Player").has_value(), "Renaming the final duplicate should remove the old name bucket.");
+
+			first.setTag("Player");
+			context.Expect(manager.FindObjectByTag("Player").has_value(), "Changing tags should insert the object into the new tag bucket.");
+			first.setActive(false);
+			context.Expect(!manager.FindObjectByTag("Player").has_value(), "Inactive objects should not be returned from the tag index.");
+
+			manager.removeObject(second);
+			context.Expect(!manager.FindObjectByName("Villain").has_value(), "Removing an object should erase its name index entry.");
+			context.Expect(manager.FindObjectByTag("Enemy").has_value() == false, "Removing the last active tagged object should erase the tag result.");
+
+			manager.clear();
+			context.Expect(!manager.FindObjectByName("Hero").has_value(), "Clearing the manager should clear name indexes.");
+			context.Expect(!manager.FindObjectByTag("Player").has_value(), "Clearing the manager should clear tag indexes.");
+		});
+
+		registry.Add("Engine.ObjectManager.CacheGenerationsTrackMetadataAndStructure", [](TestContext& context) {
+			ResetObjectManager();
+			ObjectManager& manager = ObjectManager::instance();
+			Object object = manager.createObject("Generation Target");
+			const std::uint64_t initialMetadataGeneration = manager.getObjectMetadataGeneration(object);
+			const std::uint64_t initialComponentGeneration = manager.getObjectComponentGeneration(object);
+			const std::uint64_t initialBindingGeneration = manager.getObjectBindingGeneration(object);
+
+			manager.setObjectName(object, "Generation Target Renamed");
+			context.Expect(manager.getObjectMetadataGeneration(object) > initialMetadataGeneration, "Object name edits should advance the metadata generation used by managed Object.Name caches.");
+			context.ExpectEqual(initialComponentGeneration, manager.getObjectComponentGeneration(object), "Name edits should not invalidate component wrapper caches.");
+
+			object.addComponent<ScriptComponent>();
+			manager.notifyObjectStructureChanged(object);
+			context.Expect(manager.getObjectComponentGeneration(object) > initialComponentGeneration, "Component changes should advance the component generation used by managed GetComponent caches.");
+			context.Expect(manager.getObjectBindingGeneration(object) > initialBindingGeneration, "Script binding capable structure changes should advance binding cache generations.");
 
 			ResetObjectManager();
 		});

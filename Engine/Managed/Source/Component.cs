@@ -6,12 +6,15 @@
 // properties on native engine components.
 
 using System;
+using System.Collections.Concurrent;
 
 namespace TerraEngine
 {
 	// Component is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public class Component
 	{
+		private static readonly ConcurrentDictionary<Type, string> s_nativeTypeNames = new();
+
 		public Object Object { get; internal set; } = null!;
 		public Transform Transform => Object.Transform;
 
@@ -55,6 +58,11 @@ namespace TerraEngine
 
 		// ResolveNativeComponentTypeName bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static string ResolveNativeComponentTypeName(Type managedType)
+		{
+			return s_nativeTypeNames.GetOrAdd(managedType, ResolveNativeComponentTypeNameUncached);
+		}
+
+		private static string ResolveNativeComponentTypeNameUncached(Type managedType)
 		{
 			// Managed API names stay short and idiomatic while native reflection
 			// keeps the original engine component names for serialization/tools.

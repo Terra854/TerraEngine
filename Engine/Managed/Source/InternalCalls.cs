@@ -7,12 +7,14 @@
 
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 
 namespace TerraEngine
 {
@@ -50,7 +52,24 @@ namespace TerraEngine
 		public string BindingId { get; set; } = string.Empty;
 		public string ClassName { get; set; } = string.Empty;
 		public ulong ScriptId { get; set; }
+		public ulong AuthoredStateVersion { get; set; } = 1;
 		public List<ScriptFieldValuePayload> SerializedValues { get; set; } = new();
+	}
+
+	[StructLayout(LayoutKind.Sequential)]
+	internal readonly struct ScriptBatchItemNative
+	{
+		public readonly uint ObjectId;
+		public readonly IntPtr BindingIdPtr;
+		public readonly IntPtr ClassNamePtr;
+		public readonly ulong FrameOrder;
+		public readonly ulong ObjectGeneration;
+		public readonly ulong ComponentGeneration;
+		public readonly ulong BindingGeneration;
+		public readonly int DiagnosticsRequested;
+		public readonly int WorkerDispatch;
+		public readonly int ExportMode;
+		public readonly ulong AuthoredStateVersion;
 	}
 
 	// LiveFieldSnapshotPayload is the managed-facing contract for this subsystem; keep it predictable for scripts.
@@ -115,6 +134,50 @@ namespace TerraEngine
 	// InternalCalls is the managed-facing contract for this subsystem; keep it predictable for scripts.
 	public static class InternalCalls
 	{
+		private static volatile bool s_scriptingDiagnosticsActive;
+		private static long s_bridgeCacheHits;
+		private static long s_bridgeCacheMisses;
+		private static long s_bridgeCallsAvoided;
+
+		internal static bool ScriptingDiagnosticsActive => s_scriptingDiagnosticsActive;
+
+		internal static void RecordManagedCacheHit()
+		{
+			if (!s_scriptingDiagnosticsActive)
+			{
+				return;
+			}
+			Interlocked.Increment(ref s_bridgeCacheHits);
+			Interlocked.Increment(ref s_bridgeCallsAvoided);
+		}
+
+		internal static void RecordManagedCacheMiss()
+		{
+			if (!s_scriptingDiagnosticsActive)
+			{
+				return;
+			}
+			Interlocked.Increment(ref s_bridgeCacheMisses);
+		}
+
+		private static void ResetManagedBridgeCacheCounters()
+		{
+			Interlocked.Exchange(ref s_bridgeCacheHits, 0);
+			Interlocked.Exchange(ref s_bridgeCacheMisses, 0);
+			Interlocked.Exchange(ref s_bridgeCallsAvoided, 0);
+		}
+
+		private static void FlushManagedBridgeCacheCounters()
+		{
+			long hits = Interlocked.Exchange(ref s_bridgeCacheHits, 0);
+			long misses = Interlocked.Exchange(ref s_bridgeCacheMisses, 0);
+			long avoided = Interlocked.Exchange(ref s_bridgeCallsAvoided, 0);
+			if (hits != 0 || misses != 0 || avoided != 0)
+			{
+				Native_Scripting_ReportBridgeCacheCounters((ulong)hits, (ulong)misses, (ulong)avoided);
+			}
+		}
+
 		private sealed class NativeUtf8ReturnBuffer
 		{
 			private readonly object _syncRoot = new();
@@ -155,7 +218,9 @@ namespace TerraEngine
 			public Type ScriptType { get; init; } = null!;
 			public string ClassName { get; set; } = string.Empty;
 			public uint ObjectId { get; set; }
+			public string BindingId { get; set; } = string.Empty;
 			public string LastHydratedSignature { get; set; } = string.Empty;
+			public ulong LastAuthoredStateVersion { get; set; }
 			public long ObservedVersion { get; set; }
 			public object SyncRoot { get; } = new();
 		}
@@ -189,17 +254,15 @@ namespace TerraEngine
 		private static Assembly? _gameplayAssembly;
 		private static Dictionary<string, Type> _attachableTypes = new(StringComparer.Ordinal);
 		private static Dictionary<string, ScriptTypeDescriptorPayload> _descriptorCache = new(StringComparer.Ordinal);
-		private static Dictionary<string, ScriptInstanceState> _scriptInstances = new(StringComparer.Ordinal);
+		private static ConcurrentDictionary<string, ScriptInstanceState> _scriptInstances = new(StringComparer.Ordinal);
+		private static ulong s_lastPumpedUiFrame;
 
 		// DrainScriptInstances bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static List<ScriptInstanceState> DrainScriptInstances()
 		{
-			lock (s_bridgeSync)
-			{
-				var drainedInstances = new List<ScriptInstanceState>(_scriptInstances.Values);
-				_scriptInstances.Clear();
-				return drainedInstances;
-			}
+			var drainedInstances = new List<ScriptInstanceState>(_scriptInstances.Values);
+			_scriptInstances.Clear();
+			return drainedInstances;
 		}
 
 		// DisposeScriptInstances bridges managed callers to engine state; validate arguments before forwarding to native code.
@@ -256,7 +319,8 @@ namespace TerraEngine
 					_gameplayAssembly = nextAssembly;
 					_attachableTypes = nextCatalog;
 					_descriptorCache = new Dictionary<string, ScriptTypeDescriptorPayload>(StringComparer.Ordinal);
-					_scriptInstances = new Dictionary<string, ScriptInstanceState>(StringComparer.Ordinal);
+					_scriptInstances = new ConcurrentDictionary<string, ScriptInstanceState>(StringComparer.Ordinal);
+					s_lastPumpedUiFrame = 0;
 
 					// Validate this condition before crossing into native or editor state that may outlive the managed object.
 					if (previousContext != null)
@@ -287,8 +351,10 @@ namespace TerraEngine
 
 			lock (s_bridgeSync)
 			{
-				_descriptorCache.Clear();
-				_attachableTypes.Clear();
+				_descriptorCache = new Dictionary<string, ScriptTypeDescriptorPayload>(StringComparer.Ordinal);
+				_attachableTypes = new Dictionary<string, Type>(StringComparer.Ordinal);
+				_scriptInstances = new ConcurrentDictionary<string, ScriptInstanceState>(StringComparer.Ordinal);
+				s_lastPumpedUiFrame = 0;
 			}
 
 			// Validate this condition before crossing into native or editor state that may outlive the managed object.
@@ -319,10 +385,8 @@ namespace TerraEngine
 		public static int IsScriptTypeAttachable(IntPtr classNamePtr)
 		{
 			string className = Marshal.PtrToStringAnsi(classNamePtr) ?? string.Empty;
-			lock (s_bridgeSync)
-			{
-				return !string.IsNullOrWhiteSpace(className) && _attachableTypes.ContainsKey(className) ? 1 : 0;
-			}
+			Dictionary<string, Type> attachableTypes = _attachableTypes;
+			return !string.IsNullOrWhiteSpace(className) && attachableTypes.ContainsKey(className) ? 1 : 0;
 		}
 
 		[UnmanagedCallersOnly]
@@ -764,8 +828,44 @@ namespace TerraEngine
 		}
 
 		[UnmanagedCallersOnly]
+		// PumpFrameEvents runs managed event queues once per engine scripting frame.
+		// Native code supplies the frame id so worker-dispatched scripts can share
+		// one event pump without each script repeating the same queue work.
+		public static void PumpFrameEvents(ulong frameId)
+		{
+			PumpFrameEventsCore(frameId);
+		}
+
+		private static void PumpFrameEventsCore(ulong frameId)
+		{
+			try
+			{
+				lock (s_bridgeSync)
+				{
+					if (s_lastPumpedUiFrame == frameId)
+					{
+						return;
+					}
+
+					s_lastPumpedUiFrame = frameId;
+				}
+
+				UIBridge.PumpPendingEvents();
+			}
+			catch (Exception ex)
+			{
+				Log.Error($"Exception while pumping managed UI events:\n{ex}");
+			}
+		}
+
+		[UnmanagedCallersOnly]
 		// UpdateScript bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static void UpdateScript(uint objectId, IntPtr bindingIdPtr, IntPtr classNamePtr, float deltaTime)
+		{
+			UpdateScriptCore(objectId, bindingIdPtr, classNamePtr, deltaTime);
+		}
+
+		private static void UpdateScriptCore(uint objectId, IntPtr bindingIdPtr, IntPtr classNamePtr, float deltaTime, ulong dispatchedAuthoredStateVersion = 0)
 		{
 			try
 			{
@@ -792,44 +892,58 @@ namespace TerraEngine
 
 				ScriptInstanceState scriptState;
 				bool createdState = false;
-				lock (s_bridgeSync)
+				if (!_scriptInstances.TryGetValue(bindingId, out scriptState!))
 				{
-					// Validate this condition before crossing into native or editor state that may outlive the managed object.
-					if (!_scriptInstances.TryGetValue(bindingId, out scriptState!))
+					lock (s_bridgeSync)
 					{
-						if (Activator.CreateInstance(scriptType!) is not Script script)
+						if (!_scriptInstances.TryGetValue(bindingId, out scriptState!))
 						{
-							Log.Error($"Class {className} does not inherit from TerraEngine.Script.");
-							return;
-						}
+							if (Activator.CreateInstance(scriptType!) is not Script script)
+							{
+								Log.Error($"Class {className} does not inherit from TerraEngine.Script.");
+								return;
+							}
 
-						script.BindEngineInstance(objectId, bindingId);
-						scriptState = new ScriptInstanceState
-						{
-							Instance = script,
-							ScriptType = scriptType!,
-							ClassName = className,
-							ObjectId = objectId
-						};
-						_scriptInstances[bindingId] = scriptState;
-						createdState = true;
+							script.BindEngineInstance(objectId, bindingId);
+							scriptState = new ScriptInstanceState
+							{
+								Instance = script,
+								ScriptType = scriptType!,
+								ClassName = className,
+								ObjectId = objectId,
+								BindingId = bindingId
+							};
+							_scriptInstances[bindingId] = scriptState;
+							createdState = true;
+						}
 					}
 				}
 
-				ScriptBindingPayload bindingPayload = GetBindingPayload(objectId, bindingId);
-				string authoredSignature = JsonSerializer.Serialize(bindingPayload.SerializedValues, s_jsonOptions);
+				ulong authoredStateVersion = dispatchedAuthoredStateVersion != 0
+					? dispatchedAuthoredStateVersion
+					: Native_ScriptComponent_GetBindingVersion(objectId, bindingId);
 
 				lock (scriptState.SyncRoot)
 				{
+					bool identityChanged = scriptState.ObjectId != objectId
+						|| !string.Equals(scriptState.BindingId, bindingId, StringComparison.Ordinal);
+					if (identityChanged)
+					{
+						scriptState.Instance.BindEngineInstance(objectId, bindingId);
+						scriptState.BindingId = bindingId;
+					}
+
 					scriptState.ObjectId = objectId;
 					scriptState.ClassName = className;
-					scriptState.Instance.BindEngineInstance(objectId, bindingId);
 
 					// Validate this condition before crossing into native or editor state that may outlive the managed object.
-					if (createdState || !string.Equals(scriptState.LastHydratedSignature, authoredSignature, StringComparison.Ordinal))
+					if (createdState || authoredStateVersion == 0 || authoredStateVersion != scriptState.LastAuthoredStateVersion)
 					{
+						ScriptBindingPayload bindingPayload = GetBindingPayload(objectId, bindingId);
+						string authoredSignature = JsonSerializer.Serialize(bindingPayload.SerializedValues, s_jsonOptions);
 						HydrateScriptInstance(scriptState.Instance, scriptState.ScriptType, bindingPayload);
 						scriptState.LastHydratedSignature = authoredSignature;
+						scriptState.LastAuthoredStateVersion = bindingPayload.AuthoredStateVersion != 0 ? bindingPayload.AuthoredStateVersion : authoredStateVersion;
 					}
 
 					// Validate this condition before crossing into native or editor state that may outlive the managed object.
@@ -845,6 +959,57 @@ namespace TerraEngine
 			catch (Exception ex)
 			{
 				Log.Error($"Exception in UpdateScript for object {objectId}:\n{ex}");
+			}
+		}
+
+		[UnmanagedCallersOnly]
+		public static unsafe void UpdateScriptBatch(IntPtr itemsPtr, int itemCount, float deltaTime, ulong frameId)
+		{
+			if (itemsPtr == IntPtr.Zero || itemCount <= 0)
+			{
+				return;
+			}
+
+			PumpFrameEventsCore(frameId);
+			ScriptBatchItemNative* items = (ScriptBatchItemNative*)itemsPtr;
+			bool previousDiagnosticsState = s_scriptingDiagnosticsActive;
+			bool diagnosticsActive = false;
+			for (int index = 0; index < itemCount; ++index)
+			{
+				ScriptBatchItemNative item = items[index];
+				diagnosticsActive = diagnosticsActive || item.DiagnosticsRequested != 0;
+			}
+
+			s_scriptingDiagnosticsActive = diagnosticsActive;
+			if (diagnosticsActive)
+			{
+				ResetManagedBridgeCacheCounters();
+			}
+
+			try
+			{
+				for (int index = 0; index < itemCount; ++index)
+				{
+					ScriptBatchItemNative item = items[index];
+					Object.SeedDispatchCacheGenerations(item.ObjectId, item.ObjectGeneration, item.ComponentGeneration, item.BindingGeneration);
+					Native_Scripting_PushDispatchContext(item.ObjectId, item.BindingIdPtr, item.FrameOrder, item.WorkerDispatch, item.ExportMode, item.ObjectGeneration, item.ComponentGeneration, item.BindingGeneration);
+					try
+					{
+						UpdateScriptCore(item.ObjectId, item.BindingIdPtr, item.ClassNamePtr, deltaTime, item.AuthoredStateVersion);
+					}
+					finally
+					{
+						Native_Scripting_PopDispatchContext();
+					}
+				}
+			}
+			finally
+			{
+				if (diagnosticsActive)
+				{
+					FlushManagedBridgeCacheCounters();
+				}
+				s_scriptingDiagnosticsActive = previousDiagnosticsState;
 			}
 		}
 
@@ -865,10 +1030,8 @@ namespace TerraEngine
 		// TryResolveScriptType bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static bool TryResolveScriptType(string className, out Type? scriptType)
 		{
-			lock (s_bridgeSync)
-			{
-				return _attachableTypes.TryGetValue(className, out scriptType);
-			}
+			Dictionary<string, Type> attachableTypes = _attachableTypes;
+			return attachableTypes.TryGetValue(className, out scriptType);
 		}
 
 		// GetOrCreateDescriptor bridges managed callers to engine state; validate arguments before forwarding to native code.
@@ -1578,6 +1741,24 @@ namespace TerraEngine
 		internal static extern bool Native_AddComponent(uint objectId, string componentType);
 
 		[DllImport("TerraEngine")]
+		internal static extern ulong Native_Object_GetComponentGeneration(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern ulong Native_Object_GetMetadataGeneration(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern ulong Native_Object_GetBindingGeneration(uint objectId);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Scripting_PushDispatchContext(uint objectId, IntPtr bindingIdPtr, ulong frameOrder, int workerDispatch, int exportMode, ulong objectGeneration, ulong componentGeneration, ulong bindingGeneration);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Scripting_PopDispatchContext();
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_Scripting_ReportBridgeCacheCounters(ulong hits, ulong misses, ulong avoidedCalls);
+
+		[DllImport("TerraEngine")]
 		// Native_GetComponentProperty bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern unsafe void Native_GetComponentProperty(uint objectId, string componentType, string propertyName, void* outValue, int type);
 
@@ -1596,6 +1777,9 @@ namespace TerraEngine
 		[DllImport("TerraEngine")]
 		// Native_ScriptComponent_GetBindingPayload bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern IntPtr Native_ScriptComponent_GetBindingPayload(uint objectId, string bindingId);
+
+		[DllImport("TerraEngine")]
+		internal static extern ulong Native_ScriptComponent_GetBindingVersion(uint objectId, string bindingId);
 
 		[DllImport("TerraEngine")]
 		// Native_ScriptComponent_SetBindingValue bridges managed callers to engine state; validate arguments before forwarding to native code.

@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -71,6 +72,11 @@ public:
 		std::string bindingId;
 		std::string scriptType;
 		std::uint64_t scriptRuntimeId = 0;
+		std::uint64_t authoredStateVersion = 0;
+		std::uint64_t readViewVersion = 0;
+		std::uint64_t objectGeneration = 0;
+		std::uint64_t componentGeneration = 0;
+		std::uint64_t bindingGeneration = 0;
 		ScriptLifecycleState lifecycleState = ScriptLifecycleState::Updating;
 		ScriptExecutionClass executionClass = ScriptExecutionClass::WorkerSafe;
 		std::string diagnosticLabel;
@@ -78,6 +84,20 @@ public:
 		void* runtimeHandle = nullptr;
 		bool runtimeStarted = false;
 		std::string protectedReason;
+	};
+
+	struct ScriptInstanceRecord
+	{
+		std::uint32_t objectId = 0;
+		TerraEngine::UUID objectUuid = TerraEngine::EMPTY_UUID;
+		std::string bindingId;
+		std::string scriptType;
+		ScriptLifecycleState lifecycleState = ScriptLifecycleState::Updating;
+		std::uint64_t authoredStateVersion = 0;
+		std::uint64_t runtimeObservedVersion = 0;
+		std::uint64_t objectGeneration = 0;
+		std::uint64_t componentGeneration = 0;
+		std::uint64_t bindingGeneration = 0;
 	};
 
 	struct ScriptBatch
@@ -100,6 +120,15 @@ public:
 		bool stepping = false;
 		bool exportMode = false;
 		bool diagnosticsRequested = false;
+		std::uint64_t readViewVersion = 0;
+	};
+
+	struct ScriptFrameReadView
+	{
+		std::uint64_t frameId = 0;
+		std::uint64_t readViewVersion = 0;
+		std::uint64_t lookupIndexGeneration = 0;
+		std::vector<ScriptInstanceRecord> scriptRecords;
 	};
 
 	struct ScriptAccessReport
@@ -125,6 +154,13 @@ public:
 		std::size_t protectedScripts = 0;
 		std::size_t acceptedMutations = 0;
 		std::size_t rejectedMutations = 0;
+		std::size_t cacheHits = 0;
+		std::size_t cacheMisses = 0;
+		std::size_t bridgeCallsAvoided = 0;
+		std::size_t typedMutations = 0;
+		std::size_t jsonMutationFallbacks = 0;
+		std::size_t coalescedMutations = 0;
+		std::uint64_t readViewVersion = 0;
 		bool diagnosticsCollected = false;
 		ScriptAccessReport accessReport;
 		std::string formattedSummary;
@@ -138,9 +174,13 @@ public:
 		TerraEngine::UUID sourceObjectUuid = TerraEngine::EMPTY_UUID;
 		std::string sourceBindingId;
 		std::uint64_t frameOrder = 0;
+		std::uint64_t objectGeneration = 0;
+		std::uint64_t componentGeneration = 0;
+		std::uint64_t bindingGeneration = 0;
 	};
 
 	[[nodiscard]] const ScriptingFrameResult& GetLatestScriptingFrameResult() const { return m_LatestFrameResult; }
+	[[nodiscard]] const ScriptFrameReadView& GetLatestScriptFrameReadView() const { return m_LatestFrameReadView; }
 	[[nodiscard]] bool IsScriptingDiagnosticsRequested() const;
 	static void SetScriptingDiagnosticsRequested(bool requested);
 	static bool ScriptingDiagnosticsRequested();
@@ -149,7 +189,10 @@ public:
 	static std::optional<ScriptDispatchContext> CurrentScriptDispatchContext();
 	static void SetCurrentScriptDispatchContext(ScriptDispatchContext context);
 	static void ClearCurrentScriptDispatchContext();
+	static void ResetBridgeCacheCounters();
+	static void RecordBridgeCacheCounters(std::size_t hits, std::size_t misses, std::size_t avoidedCalls);
 	ScriptUpdateWorkload BuildScriptUpdateWorkload(float deltaTime, bool exportMode);
+	ScriptFrameReadView BuildScriptFrameReadView(const ScriptUpdateWorkload& workload) const;
 	TerraEngine::Scene::SceneMutationRequest BuildScriptMutationRequest(TerraEngine::Scene::SceneMutationOperation operation, const ScriptDispatchContext& context, TerraEngine::UUID targetObjectId = TerraEngine::EMPTY_UUID, std::string displayName = {}, std::string componentName = {}, std::string payloadJson = {}) const;
 	void RecordScriptMutationRequest(TerraEngine::Scene::SceneMutationRequest request);
 
@@ -199,13 +242,38 @@ private:
 	std::mutex m_InspectorWatchMutex;
 	InspectorWatchState m_InspectorWatchState;
 	ScriptingFrameResult m_LatestFrameResult;
+	ScriptFrameReadView m_LatestFrameReadView;
 	std::uint64_t m_NextScriptingFrameId = 1;
+	std::uint64_t m_NextScriptingReadViewVersion = 1;
 	std::atomic_uint64_t m_NextScriptMutationOrder = 1;
+	// The active binding index is a main-thread cache of script work records.
+	// Stable frames can copy it directly instead of walking every ScriptComponent
+	// and every binding before each managed dispatch.
+	std::uint64_t m_ActiveScriptBindingIndexRevision = std::numeric_limits<std::uint64_t>::max();
+	bool m_ActiveScriptBindingIndexExportMode = false;
+	std::vector<ScriptWorkItem> m_ActiveScriptBindingIndex;
 
 	// Managed bridge entry points resolved from TerraEngine.CSharp during
 	// startup. Keeping them cached avoids repeated lookup work every frame.
+	struct ManagedScriptBatchItem
+	{
+		std::uint32_t objectId = 0;
+		const char* bindingId = nullptr;
+		const char* scriptType = nullptr;
+		std::uint64_t frameOrder = 0;
+		std::uint64_t objectGeneration = 0;
+		std::uint64_t componentGeneration = 0;
+		std::uint64_t bindingGeneration = 0;
+		std::int32_t diagnosticsRequested = 0;
+		std::int32_t workerDispatch = 0;
+		std::int32_t exportMode = 0;
+		std::uint64_t authoredStateVersion = 0;
+	};
+
 	using InitFn = void (*)();
 	using UpdateScriptFn = void (*)(uint32_t, const char*, const char*, float);
+	using UpdateScriptBatchFn = void (*)(const ManagedScriptBatchItem*, std::int32_t, float, std::uint64_t);
+	using PumpFrameEventsFn = void (*)(std::uint64_t);
 	using LoadGameplayAssemblyFn = int (*)(const char*);
 	using UnloadGameplayAssemblyFn = void (*)();
 	using ResetGameplaySessionFn = void (*)();
@@ -217,6 +285,8 @@ private:
 
 	InitFn managedInit = nullptr;
 	UpdateScriptFn managedUpdateScript = nullptr;
+	UpdateScriptBatchFn managedUpdateScriptBatch = nullptr;
+	PumpFrameEventsFn managedPumpFrameEvents = nullptr;
 	LoadGameplayAssemblyFn managedLoadGameplayAssembly = nullptr;
 	UnloadGameplayAssemblyFn managedUnloadGameplayAssembly = nullptr;
 	ResetGameplaySessionFn managedResetGameplaySession = nullptr;

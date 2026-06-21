@@ -28,6 +28,13 @@ workload snapshots, worker batch planning, thread-local dispatch context,
 diagnostics gating, and deferred script-origin scene mutations. Export scripting
 tests also cover the NativeAOT path so editor and exported runtimes keep the same
 batching and lifecycle contract.
+The scripting runtime performance checks also validate managed lookup cache
+generations, typed deferred component writes, JSON fallback compatibility,
+same-key mutation coalescing, and diagnostics-only bridge/write counters.
+The engine harness also supports an opt-in `TERRAENGINE_TEST_FILTER` environment
+variable for local diagnosis, for example `TERRAENGINE_TEST_FILTER=Scripting`
+to run only scripting tests. CTest still runs the complete engine and editor
+suites by default.
 
 The renderer graph checks live under `Tests/Engine/Renderer`. They validate
 immutable frame snapshots, backend-neutral pass/resource contracts, packet

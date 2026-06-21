@@ -11,6 +11,7 @@
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Profiling/Profiler.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Scripting/ScriptingSystem.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -370,6 +371,14 @@ void ProfilerWindow::DrawFrameDetails()
 
 	ImGui::Text("Frame %llu", static_cast<unsigned long long>(selectedFrame->frameIndex));
 	ImGui::Text("Duration: %.3f ms", selectedFrame->durationMs);
+	const ScriptingSystem::ScriptingFrameResult& scriptingResult = ScriptingSystem::Instance().GetLatestScriptingFrameResult();
+	if (scriptingResult.frameId != 0 && ImGui::TreeNode("Scripting Dispatch Counters"))
+	{
+		ImGui::Text("Updated: %zu  Worker: %zu  Protected: %zu", scriptingResult.updatedScripts, scriptingResult.workerScripts, scriptingResult.protectedScripts);
+		ImGui::Text("Cache hits: %zu  Misses: %zu  Bridge avoided: %zu", scriptingResult.cacheHits, scriptingResult.cacheMisses, scriptingResult.bridgeCallsAvoided);
+		ImGui::Text("Typed writes: %zu  JSON fallbacks: %zu  Coalesced: %zu", scriptingResult.typedMutations, scriptingResult.jsonMutationFallbacks, scriptingResult.coalescedMutations);
+		ImGui::TreePop();
+	}
 	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
 	if (!renderDiagnostics.backendFrameBreakdown.stageTimings.empty() && ImGui::TreeNode("Backend Submit Path"))
 	{

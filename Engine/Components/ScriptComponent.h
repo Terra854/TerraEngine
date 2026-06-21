@@ -322,6 +322,7 @@ struct ScriptBinding
 	// transient members below so stopping play can discard live overrides cleanly.
 	std::vector<ScriptFieldValue> serializedValues;
 	std::vector<std::string> diagnosticIds;
+	std::uint64_t authoredStateVersion = 1;
 
 	// Runtime-only descriptor, snapshot, and repair metadata stay outside the
 	// persisted BindingsJson payload so TerraEngine can keep authored values
@@ -422,6 +423,7 @@ struct ScriptBinding
 			{
 				existingValue->valueKind = std::string(valueKindText);
 			}
+			++authoredStateVersion;
 			return *existingValue;
 		}
 
@@ -431,6 +433,7 @@ struct ScriptBinding
 		nextValue.displayName = nextValue.fieldPath;
 		nextValue.valueKind = std::string(valueKindText);
 		serializedValues.push_back(std::move(nextValue));
+		++authoredStateVersion;
 		return serializedValues.back();
 	}
 
@@ -449,6 +452,7 @@ struct ScriptBinding
 		}
 
 		serializedValues.erase(it, serializedValues.end());
+		++authoredStateVersion;
 		return true;
 	}
 
@@ -477,7 +481,8 @@ inline void to_json(nlohmann::json& jsonValue, const ScriptBinding& binding)
 		{ "enabled", binding.enabled },
 		{ "orderIndex", binding.orderIndex },
 		{ "serializedValues", binding.serializedValues },
-		{ "diagnosticIds", binding.diagnosticIds }
+		{ "diagnosticIds", binding.diagnosticIds },
+		{ "authoredStateVersion", binding.authoredStateVersion }
 	};
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -506,6 +511,7 @@ inline void from_json(const nlohmann::json& jsonValue, ScriptBinding& binding)
 	binding.orderIndex = jsonValue.value("orderIndex", 0);
 	binding.serializedValues = jsonValue.value("serializedValues", std::vector<ScriptFieldValue>{});
 	binding.diagnosticIds = jsonValue.value("diagnosticIds", std::vector<std::string>{});
+	binding.authoredStateVersion = jsonValue.value("authoredStateVersion", static_cast<std::uint64_t>(1));
 	binding.fullTypeName.clear();
 	binding.displayName.clear();
 	binding.runtimeAvailable = false;

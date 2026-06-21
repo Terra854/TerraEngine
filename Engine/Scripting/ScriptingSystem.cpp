@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -30,6 +31,9 @@ namespace
 	constexpr float kLiveInspectorRefreshSeconds = 0.25f;
 	constexpr std::size_t kMaxExportFieldValueBytes = 256;
 	std::atomic_bool g_ScriptingDiagnosticsRequested{ false };
+	std::atomic_size_t g_ScriptingBridgeCacheHits{ 0 };
+	std::atomic_size_t g_ScriptingBridgeCacheMisses{ 0 };
+	std::atomic_size_t g_ScriptingBridgeCallsAvoided{ 0 };
 	thread_local std::optional<ScriptingSystem::ScriptDispatchContext> g_CurrentScriptDispatchContext;
 
 	std::string ToString(ScriptingSystem::ScriptExecutionClass executionClass)
@@ -470,6 +474,20 @@ void ScriptingSystem::ClearCurrentScriptDispatchContext()
 	g_CurrentScriptDispatchContext.reset();
 }
 
+void ScriptingSystem::ResetBridgeCacheCounters()
+{
+	g_ScriptingBridgeCacheHits.store(0, std::memory_order_relaxed);
+	g_ScriptingBridgeCacheMisses.store(0, std::memory_order_relaxed);
+	g_ScriptingBridgeCallsAvoided.store(0, std::memory_order_relaxed);
+}
+
+void ScriptingSystem::RecordBridgeCacheCounters(std::size_t hits, std::size_t misses, std::size_t avoidedCalls)
+{
+	g_ScriptingBridgeCacheHits.fetch_add(hits, std::memory_order_relaxed);
+	g_ScriptingBridgeCacheMisses.fetch_add(misses, std::memory_order_relaxed);
+	g_ScriptingBridgeCallsAvoided.fetch_add(avoidedCalls, std::memory_order_relaxed);
+}
+
 std::vector<ScriptingSystem::ScriptBatch> ScriptingSystem::PlanScriptBatches(const ScriptUpdateWorkload& workload, std::size_t workerCount)
 {
 	std::vector<ScriptBatch> batches;
@@ -540,7 +558,14 @@ std::string ScriptingSystem::FormatScriptingFrameResult(const ScriptingFrameResu
 		<< " worker=" << result.workerScripts
 		<< " protected=" << result.protectedScripts
 		<< " acceptedMutations=" << result.acceptedMutations
-		<< " rejectedMutations=" << result.rejectedMutations;
+		<< " rejectedMutations=" << result.rejectedMutations
+		<< " readView=" << result.readViewVersion
+		<< " cacheHits=" << result.cacheHits
+		<< " cacheMisses=" << result.cacheMisses
+		<< " bridgeAvoided=" << result.bridgeCallsAvoided
+		<< " typedMutations=" << result.typedMutations
+		<< " jsonFallbacks=" << result.jsonMutationFallbacks
+		<< " coalescedMutations=" << result.coalescedMutations;
 	if (result.diagnosticsCollected)
 	{
 		stream << " diagnostics=on";
@@ -570,66 +595,135 @@ ScriptingSystem::ScriptUpdateWorkload ScriptingSystem::BuildScriptUpdateWorkload
 	workload.stepping = m_StepFrames > 0;
 	workload.exportMode = exportMode;
 	workload.diagnosticsRequested = ScriptingDiagnosticsRequested();
+	workload.readViewVersion = m_NextScriptingReadViewVersion++;
 
 	auto& objectManager = ObjectManager::instance();
-	const std::vector<Object> objects = objectManager.SnapshotObjectsWithComponents<ScriptComponent>();
-	workload.items.reserve(objects.size());
-
-	// Snapshot script bindings before worker dispatch. Workers only read the
-	// copied binding identifiers and script ids, so C# authors do not need to
-	// opt into scheduler annotations to benefit from parallel updates.
-	for (Object object : objects)
+	const std::uint64_t currentSceneRevision = objectManager.GetSpatialRevision();
+	const bool rebuildActiveBindingIndex = m_ActiveScriptBindingIndexRevision != currentSceneRevision
+		|| m_ActiveScriptBindingIndexExportMode != exportMode;
+	if (rebuildActiveBindingIndex)
 	{
-		ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
-		if (scriptComponent == nullptr || !scriptComponent->active)
-		{
-			continue;
-		}
+		m_ActiveScriptBindingIndex.clear();
+		m_ActiveScriptBindingIndexRevision = currentSceneRevision;
+		m_ActiveScriptBindingIndexExportMode = exportMode;
 
-		auto guard = scriptComponent->acquireReadLock();
-		for (const ScriptBinding& binding : scriptComponent->GetBindings())
+		const std::vector<Object> objects = objectManager.SnapshotObjectsWithComponents<ScriptComponent>();
+		m_ActiveScriptBindingIndex.reserve(objects.size());
+
+		// Snapshot active script bindings into a main-thread index. Stable frames
+		// can reuse these records directly, while structural or binding changes
+		// rebuild the index before any worker script sees it.
+		for (Object object : objects)
 		{
-			if (!binding.enabled)
-			{
-				continue;
-			}
-			if (exportMode && binding.scriptId == 0)
-			{
-				TERRAENGINE_LOG(LogLevel::Error, "[Scripting] Export binding " << binding.bindingId << " on object " << static_cast<std::uint32_t>(object.EntityId()) << " is missing staged scriptId data.");
-				continue;
-			}
-			if (!exportMode && binding.className.empty())
+			ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+			if (scriptComponent == nullptr || !scriptComponent->active)
 			{
 				continue;
 			}
 
-			ScriptWorkItem item;
-			item.objectId = static_cast<std::uint32_t>(object.EntityId());
-			item.objectUuid = object.getUUID();
-			item.bindingId = binding.bindingId;
-			item.scriptType = binding.className.empty() ? ("scriptId:" + std::to_string(binding.scriptId)) : binding.className;
-			item.scriptRuntimeId = binding.scriptId;
-			item.lifecycleState = ScriptLifecycleState::Updating;
-			item.executionClass = ScriptExecutionClass::WorkerSafe;
-			item.diagnosticLabel = BuildScriptDiagnosticLabel(item.objectId, item.bindingId, item.scriptType);
-			item.serializedValues = binding.serializedValues;
-			workload.items.push_back(std::move(item));
+			auto guard = scriptComponent->acquireReadLock();
+			for (const ScriptBinding& binding : scriptComponent->GetBindings())
+			{
+				if (!binding.enabled)
+				{
+					continue;
+				}
+				if (exportMode && binding.scriptId == 0)
+				{
+					TERRAENGINE_LOG(LogLevel::Error, "[Scripting] Export binding " << binding.bindingId << " on object " << static_cast<std::uint32_t>(object.EntityId()) << " is missing staged scriptId data.");
+					continue;
+				}
+				if (!exportMode && binding.className.empty())
+				{
+					continue;
+				}
+
+				ScriptWorkItem item;
+				item.objectId = static_cast<std::uint32_t>(object.EntityId());
+				item.objectUuid = object.getUUID();
+				item.bindingId = binding.bindingId;
+				item.scriptType = binding.className.empty() ? ("scriptId:" + std::to_string(binding.scriptId)) : binding.className;
+				item.scriptRuntimeId = binding.scriptId;
+				item.authoredStateVersion = binding.authoredStateVersion;
+				item.objectGeneration = objectManager.getObjectMetadataGeneration(object);
+				item.componentGeneration = objectManager.getObjectComponentGeneration(object);
+				item.bindingGeneration = objectManager.getObjectBindingGeneration(object);
+				item.lifecycleState = ScriptLifecycleState::Updating;
+				item.executionClass = ScriptExecutionClass::WorkerSafe;
+				item.diagnosticLabel = BuildScriptDiagnosticLabel(item.objectId, item.bindingId, item.scriptType);
+				item.serializedValues = binding.serializedValues;
+				m_ActiveScriptBindingIndex.push_back(std::move(item));
+			}
 		}
 	}
 
+	bool activeBindingIndexStillValid = true;
+	for (const ScriptWorkItem& cachedItem : m_ActiveScriptBindingIndex)
+	{
+		const auto object = objectManager.getObject(static_cast<entt::entity>(cachedItem.objectId));
+		if (!object.has_value()
+			|| objectManager.getObjectComponentGeneration(*object) != cachedItem.componentGeneration
+			|| objectManager.getObjectBindingGeneration(*object) != cachedItem.bindingGeneration)
+		{
+			activeBindingIndexStillValid = false;
+			break;
+		}
+	}
+	if (!activeBindingIndexStillValid)
+	{
+		m_ActiveScriptBindingIndexRevision = std::numeric_limits<std::uint64_t>::max();
+		return BuildScriptUpdateWorkload(deltaTime, exportMode);
+	}
+
+	workload.items.reserve(m_ActiveScriptBindingIndex.size());
+	for (const ScriptWorkItem& cachedItem : m_ActiveScriptBindingIndex)
+	{
+		ScriptWorkItem item = cachedItem;
+		item.readViewVersion = workload.readViewVersion;
+		workload.items.push_back(std::move(item));
+	}
+
 	return workload;
+}
+
+ScriptingSystem::ScriptFrameReadView ScriptingSystem::BuildScriptFrameReadView(const ScriptUpdateWorkload& workload) const
+{
+	ScriptFrameReadView readView;
+	readView.frameId = workload.frameId;
+	readView.readViewVersion = workload.readViewVersion;
+	readView.lookupIndexGeneration = ObjectManager::instance().GetSpatialRevision();
+	readView.scriptRecords.reserve(workload.items.size());
+
+	for (const ScriptWorkItem& item : workload.items)
+	{
+		ScriptInstanceRecord record;
+		record.objectId = item.objectId;
+		record.objectUuid = item.objectUuid;
+		record.bindingId = item.bindingId;
+		record.scriptType = item.scriptType;
+		record.lifecycleState = item.lifecycleState;
+		record.authoredStateVersion = item.authoredStateVersion;
+		record.objectGeneration = item.objectGeneration;
+		record.componentGeneration = item.componentGeneration;
+		record.bindingGeneration = item.bindingGeneration;
+		readView.scriptRecords.push_back(std::move(record));
+	}
+
+	return readView;
 }
 
 ScriptingSystem::ScriptingFrameResult ScriptingSystem::DispatchScriptWorkload(const ScriptUpdateWorkload& workload)
 {
 	ScriptingFrameResult result;
 	result.frameId = workload.frameId;
+	result.readViewVersion = workload.readViewVersion;
 	result.diagnosticsCollected = workload.diagnosticsRequested;
 	result.accessReport.frameId = workload.frameId;
 	result.accessReport.totalScripts = workload.items.size();
 
 	if (!workload.running || workload.items.empty())
 	{
+		m_LatestFrameReadView = BuildScriptFrameReadView(workload);
 		result.skippedScripts = workload.items.size();
 		result.formattedSummary = FormatScriptingFrameResult(result);
 		m_LatestFrameResult = result;
@@ -637,7 +731,9 @@ ScriptingSystem::ScriptingFrameResult ScriptingSystem::DispatchScriptWorkload(co
 	}
 
 	const std::size_t threadCount = std::max<std::size_t>(1, ThreadPool::instance().getThreadCount());
+	m_LatestFrameReadView = BuildScriptFrameReadView(workload);
 	const std::vector<ScriptBatch> batches = PlanScriptBatches(workload, threadCount);
+	ResetBridgeCacheCounters();
 	std::atomic<std::size_t> updatedScripts{ 0 };
 	std::atomic<std::size_t> failedScripts{ 0 };
 	std::atomic<std::size_t> skippedScripts{ 0 };
@@ -655,6 +751,7 @@ ScriptingSystem::ScriptingFrameResult ScriptingSystem::DispatchScriptWorkload(co
 		const std::uint64_t frameId = workload.frameId;
 		const float frameDeltaTime = workload.deltaTime;
 		const bool exportMode = workload.exportMode;
+		const bool diagnosticsRequested = workload.diagnosticsRequested;
 		TerraEngine::Scheduling::JobGraphJobDeclaration job;
 		job.name = batch.batchId;
 		job.executionPolicy = batch.executionClass == ScriptExecutionClass::WorkerSafe
@@ -663,8 +760,114 @@ ScriptingSystem::ScriptingFrameResult ScriptingSystem::DispatchScriptWorkload(co
 		job.cancellable = false;
 		job.requiresSuccessfulDependencies = true;
 		job.profilingLabel = batch.profilingLabel;
-		job.work = [this, frameId, frameDeltaTime, exportMode, batch, &updatedScripts, &failedScripts, &skippedScripts, &workerScripts, &protectedScripts, &startedInstancesMutex, &startedInstances](TerraEngine::Scheduling::JobGraphContext&) {
+		job.work = [this, frameId, frameDeltaTime, exportMode, diagnosticsRequested, batch, &updatedScripts, &failedScripts, &skippedScripts, &workerScripts, &protectedScripts, &startedInstancesMutex, &startedInstances](TerraEngine::Scheduling::JobGraphContext&) {
 			const bool workerDispatch = batch.executionClass == ScriptExecutionClass::WorkerSafe;
+			if (!exportMode && managedUpdateScriptBatch != nullptr)
+			{
+				// Each worker owns its scratch vector, so batch dispatch can avoid
+				// allocating a fresh managed-item buffer on every frame.
+				thread_local std::vector<ManagedScriptBatchItem> managedItems;
+				managedItems.clear();
+				managedItems.reserve(batch.items.size());
+				for (std::size_t itemIndex = 0; itemIndex < batch.items.size(); ++itemIndex)
+				{
+					const ScriptWorkItem& item = batch.items[itemIndex];
+					if (item.executionClass == ScriptExecutionClass::Skipped)
+					{
+						skippedScripts.fetch_add(1, std::memory_order_relaxed);
+						continue;
+					}
+					if (item.executionClass == ScriptExecutionClass::Failed)
+					{
+						failedScripts.fetch_add(1, std::memory_order_relaxed);
+						continue;
+					}
+
+					ManagedScriptBatchItem managedItem;
+					managedItem.objectId = item.objectId;
+					managedItem.bindingId = item.bindingId.c_str();
+					managedItem.scriptType = item.scriptType.c_str();
+					managedItem.frameOrder = (frameId * 1000000ULL) + batch.mutationOrderBase + itemIndex;
+					managedItem.objectGeneration = item.objectGeneration;
+					managedItem.componentGeneration = item.componentGeneration;
+					managedItem.bindingGeneration = item.bindingGeneration;
+					managedItem.diagnosticsRequested = diagnosticsRequested ? 1 : 0;
+					managedItem.workerDispatch = workerDispatch ? 1 : 0;
+					managedItem.exportMode = 0;
+					managedItem.authoredStateVersion = item.authoredStateVersion;
+					managedItems.push_back(managedItem);
+				}
+
+				if (!managedItems.empty())
+				{
+					TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Managed Batch Worker Execution", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+					managedUpdateScriptBatch(managedItems.data(), static_cast<std::int32_t>(managedItems.size()), frameDeltaTime, frameId);
+					updatedScripts.fetch_add(managedItems.size(), std::memory_order_relaxed);
+					if (workerDispatch)
+					{
+						workerScripts.fetch_add(managedItems.size(), std::memory_order_relaxed);
+					}
+					else
+					{
+						protectedScripts.fetch_add(managedItems.size(), std::memory_order_relaxed);
+					}
+				}
+				return;
+			}
+
+			if (exportMode && m_ExportVTable.invokeUpdateBatch != nullptr)
+			{
+				std::vector<ExportScriptBatchItem> exportItems;
+				exportItems.reserve(batch.items.size());
+				for (std::size_t itemIndex = 0; itemIndex < batch.items.size(); ++itemIndex)
+				{
+					const ScriptWorkItem& item = batch.items[itemIndex];
+					if (item.executionClass == ScriptExecutionClass::Skipped)
+					{
+						skippedScripts.fetch_add(1, std::memory_order_relaxed);
+						continue;
+					}
+					if (item.executionClass == ScriptExecutionClass::Failed || item.runtimeHandle == nullptr)
+					{
+						failedScripts.fetch_add(1, std::memory_order_relaxed);
+						continue;
+					}
+					if (!item.runtimeStarted && m_ExportVTable.invokeStart != nullptr)
+					{
+						m_ExportVTable.invokeStart(item.runtimeHandle);
+						std::scoped_lock lock(startedInstancesMutex);
+						startedInstances.push_back(item);
+					}
+
+					ExportScriptBatchItem exportItem{};
+					exportItem.handle = item.runtimeHandle;
+					exportItem.deltaTime = frameDeltaTime;
+					exportItem.frameOrder = (frameId * 1000000ULL) + batch.mutationOrderBase + itemIndex;
+					exportItem.objectGeneration = item.objectGeneration;
+					exportItem.componentGeneration = item.componentGeneration;
+					exportItem.bindingGeneration = item.bindingGeneration;
+					exportItem.objectId = item.objectId;
+					exportItem.workerDispatch = workerDispatch ? 1 : 0;
+					exportItems.push_back(exportItem);
+				}
+
+				if (!exportItems.empty())
+				{
+					TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Export Batch Worker Execution", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+					m_ExportVTable.invokeUpdateBatch(exportItems.data(), static_cast<std::int32_t>(exportItems.size()));
+					updatedScripts.fetch_add(exportItems.size(), std::memory_order_relaxed);
+					if (workerDispatch)
+					{
+						workerScripts.fetch_add(exportItems.size(), std::memory_order_relaxed);
+					}
+					else
+					{
+						protectedScripts.fetch_add(exportItems.size(), std::memory_order_relaxed);
+					}
+				}
+				return;
+			}
+
 			for (std::size_t itemIndex = 0; itemIndex < batch.items.size(); ++itemIndex)
 			{
 				const ScriptWorkItem& item = batch.items[itemIndex];
@@ -686,6 +889,9 @@ ScriptingSystem::ScriptingFrameResult ScriptingSystem::DispatchScriptWorkload(co
 				context.sourceObjectUuid = item.objectUuid;
 				context.sourceBindingId = item.bindingId;
 				context.frameOrder = (frameId * 1000000ULL) + batch.mutationOrderBase + itemIndex;
+				context.objectGeneration = item.objectGeneration;
+				context.componentGeneration = item.componentGeneration;
+				context.bindingGeneration = item.bindingGeneration;
 				SetCurrentScriptDispatchContext(std::move(context));
 
 				try
@@ -772,6 +978,9 @@ ScriptingSystem::ScriptingFrameResult ScriptingSystem::DispatchScriptWorkload(co
 	result.skippedScripts = skippedScripts.load(std::memory_order_relaxed);
 	result.workerScripts = workerScripts.load(std::memory_order_relaxed);
 	result.protectedScripts = protectedScripts.load(std::memory_order_relaxed);
+	result.cacheHits = g_ScriptingBridgeCacheHits.load(std::memory_order_relaxed);
+	result.cacheMisses = g_ScriptingBridgeCacheMisses.load(std::memory_order_relaxed);
+	result.bridgeCallsAvoided = g_ScriptingBridgeCallsAvoided.load(std::memory_order_relaxed);
 	result.accessReport.workerScripts = result.workerScripts;
 	result.accessReport.protectedScripts = result.protectedScripts;
 	if (workload.diagnosticsRequested)
@@ -852,6 +1061,9 @@ void ScriptingSystem::FlushScriptMutationsIntoResult(ScriptingFrameResult& resul
 	{
 		result.accessReport.messages.push_back(diagnostic.message);
 	}
+	result.typedMutations += mutationResult.typedMutationCount;
+	result.jsonMutationFallbacks += mutationResult.jsonMutationFallbackCount;
+	result.coalescedMutations += mutationResult.coalescedMutationCount;
 	result.accessReport.deferredMutations = result.acceptedMutations;
 	result.accessReport.rejectedMutations = result.rejectedMutations;
 }
@@ -919,6 +1131,14 @@ void ScriptingSystem::Initialize() {
 		bridgeAssemblyPath,
 		L"TerraEngine.InternalCalls, TerraEngine.CSharp",
 		L"UpdateScript"));
+	managedUpdateScriptBatch = reinterpret_cast<UpdateScriptBatchFn>(DotNetHost::Instance().GetManagedFunction(
+		bridgeAssemblyPath,
+		L"TerraEngine.InternalCalls, TerraEngine.CSharp",
+		L"UpdateScriptBatch"));
+	managedPumpFrameEvents = reinterpret_cast<PumpFrameEventsFn>(DotNetHost::Instance().GetManagedFunction(
+		bridgeAssemblyPath,
+		L"TerraEngine.InternalCalls, TerraEngine.CSharp",
+		L"PumpFrameEvents"));
 	managedLoadGameplayAssembly = reinterpret_cast<LoadGameplayAssemblyFn>(DotNetHost::Instance().GetManagedFunction(
 		bridgeAssemblyPath,
 		L"TerraEngine.InternalCalls, TerraEngine.CSharp",
@@ -1013,9 +1233,19 @@ void ScriptingSystem::Update(float deltaTime) {
 		}
 	}
 
+	ScriptUpdateWorkload workload;
 	{
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Build Script Workload", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		ScriptUpdateWorkload workload = BuildScriptUpdateWorkload(deltaTime, false);
+		workload = BuildScriptUpdateWorkload(deltaTime, false);
+	}
+
+	if (managedPumpFrameEvents != nullptr && workload.items.empty())
+	{
+		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Pump UI Events", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		managedPumpFrameEvents(workload.frameId);
+	}
+
+	{
 		TERRAENGINE_PROFILE_SCOPE("ScriptingSystem: Dispatch Script Workload", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		DispatchScriptWorkload(workload);
 	}

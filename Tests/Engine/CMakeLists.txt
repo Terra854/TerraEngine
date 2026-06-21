@@ -71,6 +71,7 @@ add_executable(TerraEngine-EngineTests
 	Scripting/ScriptingDiagnosticsTests.cpp
 	Scripting/ScriptingDispatchTests.cpp
 	Scripting/ScriptingMutationTests.cpp
+	Scripting/ScriptingRuntimeTestFixtures.cpp
 	Scripting/ScriptingWorkloadTests.cpp
 	Scene/PrefabCompositionTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp

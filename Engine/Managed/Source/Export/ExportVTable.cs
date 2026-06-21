@@ -32,7 +32,20 @@ namespace TerraEngine.Export
 		public fixed byte NameUtf8[64];
 	}
 
-	[StructLayout(LayoutKind.Explicit, Size = 104)]
+	[StructLayout(LayoutKind.Sequential, Pack = 8)]
+	public unsafe struct ExportScriptBatchItem
+	{
+		public IntPtr Handle;
+		public float DeltaTime;
+		public ulong FrameOrder;
+		public ulong ObjectGeneration;
+		public ulong ComponentGeneration;
+		public ulong BindingGeneration;
+		public uint ObjectId;
+		public int WorkerDispatch;
+	}
+
+	[StructLayout(LayoutKind.Explicit, Size = 112)]
 	public unsafe struct ManagedVTable
 	{
 		[FieldOffset(0)]  public ulong Version;
@@ -48,5 +61,6 @@ namespace TerraEngine.Export
 		[FieldOffset(80)] public delegate* unmanaged[Cdecl]<ulong, ExportFieldDescriptor*, int, void>     GetFieldDescriptors;
 		[FieldOffset(88)] public delegate* unmanaged[Cdecl]<IntPtr, int, void*, int, void>                GetFieldValue;
 		[FieldOffset(96)] public delegate* unmanaged[Cdecl]<IntPtr, int, void*, int, void>                SetFieldValue;
+		[FieldOffset(104)] public delegate* unmanaged[Cdecl]<ExportScriptBatchItem*, int, void>          InvokeUpdateBatch;
 	}
 }

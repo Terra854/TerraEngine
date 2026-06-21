@@ -24,8 +24,14 @@ namespace TerraEngine::Tests {
 			int awakeCalls = 0;
 			int startCalls = 0;
 			int updateCalls = 0;
+			int batchUpdateCalls = 0;
+			int batchItemCount = 0;
 			int destroyCalls = 0;
 			float lastDeltaTime = 0.0f;
+			std::uint64_t lastFrameOrder = 0;
+			std::uint64_t lastObjectGeneration = 0;
+			std::uint64_t lastComponentGeneration = 0;
+			std::uint64_t lastBindingGeneration = 0;
 			FakeScriptInstance instance;
 		};
 
@@ -84,6 +90,19 @@ namespace TerraEngine::Tests {
 			g_FakeState.lastDeltaTime = deltaTime;
 		}
 
+		void TERRAENGINE_TEST_CALL FakeInvokeUpdateBatch(const ExportScriptBatchItem* items, int32_t itemCount) {
+			++g_FakeState.batchUpdateCalls;
+			g_FakeState.batchItemCount = itemCount;
+			if (items != nullptr && itemCount > 0) {
+				++g_FakeState.updateCalls;
+				g_FakeState.lastDeltaTime = items[0].deltaTime;
+				g_FakeState.lastFrameOrder = items[0].frameOrder;
+				g_FakeState.lastObjectGeneration = items[0].objectGeneration;
+				g_FakeState.lastComponentGeneration = items[0].componentGeneration;
+				g_FakeState.lastBindingGeneration = items[0].bindingGeneration;
+			}
+		}
+
 		void TERRAENGINE_TEST_CALL FakeInvokeDisable(void*) {
 		}
 
@@ -134,6 +153,7 @@ namespace TerraEngine::Tests {
 			vtable.invokeStart = &FakeInvokeStart;
 			vtable.invokeUpdate = &FakeInvokeUpdate;
 			vtable.invokeDisable = &FakeInvokeDisable;
+			vtable.invokeUpdateBatch = &FakeInvokeUpdateBatch;
 			vtable.getFieldCount = &FakeGetFieldCount;
 			vtable.getFieldDescriptors = &FakeGetFieldDescriptors;
 			vtable.getFieldValue = &FakeGetFieldValue;
@@ -186,6 +206,12 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(1, g_FakeState.awakeCalls, "Awake should be invoked when the export script instance is created.");
 			context.ExpectEqual(1, g_FakeState.startCalls, "Start should be invoked on the first export script update.");
 			context.ExpectEqual(1, g_FakeState.updateCalls, "Update should be invoked on the first export script update.");
+			context.ExpectEqual(1, g_FakeState.batchUpdateCalls, "Export runtimes that expose batch dispatch should receive batched script updates.");
+			context.ExpectEqual(1, g_FakeState.batchItemCount, "The batch dispatch should include the staged script work item.");
+			context.Expect(g_FakeState.lastFrameOrder > 0, "Batch dispatch should carry deterministic frame order metadata.");
+			context.Expect(g_FakeState.lastObjectGeneration > 0, "Export batch dispatch should carry object cache generation metadata.");
+			context.Expect(g_FakeState.lastComponentGeneration > 0, "Export batch dispatch should carry component cache generation metadata.");
+			context.Expect(g_FakeState.lastBindingGeneration > 0, "Export batch dispatch should carry binding cache generation metadata.");
 			context.ExpectEqual(0.125f, g_FakeState.lastDeltaTime, "Export script Update should receive the frame delta time.");
 		});
 	}
