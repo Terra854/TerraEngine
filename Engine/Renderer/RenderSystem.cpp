@@ -956,10 +956,6 @@ void RenderSystem::Update(float deltaTime)
 	renderFrameSnapshot.renderables.reserve(renderables.size());
 	renderFrameSnapshot.meshes.reserve(renderables.size());
 	renderFrameSnapshot.materials.reserve(renderables.size());
-	std::unordered_set<TerraEngine::UUID> uniqueMeshIds;
-	std::unordered_set<TerraEngine::UUID> uniqueMaterialIds;
-	uniqueMeshIds.reserve(renderables.size());
-	uniqueMaterialIds.reserve(renderables.size());
 	for (const RenderableEntry& entry : renderables)
 	{
 		const Transform* transform = worldTransforms.find(entry.entity);
@@ -971,14 +967,11 @@ void RenderSystem::Update(float deltaTime)
 			entry.mesh.taskShaderCullingEnabled,
 			false
 		});
-		if (uniqueMeshIds.insert(entry.mesh.meshId).second)
-		{
-			renderFrameSnapshot.meshes.push_back({ entry.mesh.meshId, "mesh", true, false });
-		}
-		if (uniqueMaterialIds.insert(entry.mesh.materialId).second)
-		{
-			renderFrameSnapshot.materials.push_back({ entry.mesh.materialId, "material", true, false });
-		}
+		// Keep mesh and material records aligned with renderables. Several
+		// backend preparation and export diagnostics paths treat this snapshot
+		// as a per-renderable contract rather than a unique resource table.
+		renderFrameSnapshot.meshes.push_back({ entry.mesh.meshId, "mesh", true, false });
+		renderFrameSnapshot.materials.push_back({ entry.mesh.materialId, "material", true, false });
 	}
 	renderFrameSnapshot.lights.reserve(lights.size());
 	for (const LightEntry& light : lights)

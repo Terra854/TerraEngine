@@ -4615,6 +4615,75 @@ void VulkanContext::EndFrame() {
 	auto& cmds = impl->pendingPrimaryCommandBuffers[impl->currentFrame];
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (cmds.empty()) {
+		if (!impl->editorMode && impl->swapchainImageAcquired) {
+			// Standalone runtime acquires the swapchain image in BeginFrame.
+			// If render graph rejection or startup state leaves no recorded
+			// command buffers, still consume the acquire semaphore and present
+			// once so the binary semaphore and frame fence cannot be reused
+			// while the presentation engine still owns pending work.
+			VkSemaphore waitSemaphores[] = {impl->imageAvailableSemaphores[impl->currentFrame]};
+			VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+			VkSemaphore signalSemaphore = impl->renderFinishedSemaphores[impl->currentFrame];
+
+			VkSubmitInfo emptySubmitInfo{};
+			emptySubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+			emptySubmitInfo.waitSemaphoreCount = 1;
+			emptySubmitInfo.pWaitSemaphores = waitSemaphores;
+			emptySubmitInfo.pWaitDstStageMask = waitStages;
+			emptySubmitInfo.signalSemaphoreCount = 1;
+			emptySubmitInfo.pSignalSemaphores = &signalSemaphore;
+
+			const auto resetFenceStart = BackendClock::now();
+			vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
+			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
+				impl->pendingBackendFrameBreakdown,
+				{ TerraEngine::Renderer::BackendFrameCostCategory::RhiEndFrame, TerraEngine::Renderer::BackendSubmitStage::FrameAllocatorReset, RenderViewType::Game, 0u, "Reset frame fence for empty runtime submit", true, false },
+				ElapsedMilliseconds(resetFenceStart));
+
+			const auto submitStart = BackendClock::now();
+			const VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &emptySubmitInfo, impl->inFlightFences[impl->currentFrame]);
+			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
+				impl->pendingBackendFrameBreakdown,
+				{ TerraEngine::Renderer::BackendFrameCostCategory::QueueSubmission, TerraEngine::Renderer::BackendSubmitStage::QueueSubmit, RenderViewType::Game, 0u, "Empty runtime queue submit", true, false },
+				ElapsedMilliseconds(submitStart),
+				0.25f);
+			if (submitResult != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Error, "[Vulkan] Empty QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.");
+				impl->RecreateSwapChain();
+				return;
+			}
+
+			VkPresentInfoKHR presentInfo{};
+			presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+			presentInfo.waitSemaphoreCount = 1;
+			presentInfo.pWaitSemaphores = &signalSemaphore;
+
+			VkSwapchainKHR swapChains[] = {impl->swapchain};
+			presentInfo.swapchainCount = 1;
+			presentInfo.pSwapchains = swapChains;
+			presentInfo.pImageIndices = &impl->acquiredImageIndex;
+
+			const auto presentStart = BackendClock::now();
+			const VkResult presentResult = vkQueuePresentKHR(impl->presentQueue, &presentInfo);
+			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
+				impl->pendingBackendFrameBreakdown,
+				{ TerraEngine::Renderer::BackendFrameCostCategory::Presentation, TerraEngine::Renderer::BackendSubmitStage::Present, RenderViewType::Game, 0u, "Empty runtime queue present", true, false },
+				ElapsedMilliseconds(presentStart),
+				0.25f);
+			if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || impl->framebufferResized) {
+				impl->framebufferResized = false;
+				impl->RecreateSwapChain();
+			} else if (presentResult != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Error, "failed to present empty swap chain image! Result: " << presentResult);
+			}
+
+			impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
+			TerraEngine::Renderer::Vulkan::RecordVulkanFrameCost(
+				impl->pendingBackendFrameBreakdown,
+				{ TerraEngine::Renderer::BackendFrameCostCategory::RhiEndFrame, TerraEngine::Renderer::BackendSubmitStage::Other, RenderViewType::Game, 0u, "RHI End Frame", true, false },
+				ElapsedMilliseconds(endFrameStart));
+			return;
+		}
 		return;
 	}
 
@@ -4633,11 +4702,9 @@ void VulkanContext::EndFrame() {
 	submitInfo.commandBufferCount = static_cast<uint32_t>(cmds.size());
 	submitInfo.pCommandBuffers = cmds.data();
 
-	// If not in editor mode, we must use the semaphore corresponding to the swapchain image index
-	// to avoid validation errors about reusing semaphores still in use by the presentation engine.
 	VkSemaphore signalSemaphore = impl->editorMode 
 		? impl->renderFinishedSemaphores[impl->currentFrame] 
-		: impl->renderFinishedSemaphores[impl->acquiredImageIndex];
+		: impl->renderFinishedSemaphores[impl->currentFrame];
 
 	VkSemaphore signalSemaphores[] = {signalSemaphore};
 	// Signal render finished only when command buffers are submitted; PresentEditor
@@ -4942,7 +5009,24 @@ void VulkanContext::EnableEditorMode() {
 void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	if (!impl->editorMode || !impl->initialized) return;
 
-	// Removed CPU Fence Wait. We now rely on Semaphores to synchronize Scene -> UI on the GPU.
+	// The editor can present UI on the project hub before RenderSystem has any
+	// scene/game output to drive BeginFrame. In that mode PresentEditor owns the
+	// frame slot lifecycle, so it must wait for the slot fence before reusing
+	// binary semaphores, command buffers, and the fence itself.
+	vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+	if (!impl->editorRenderSubmitted) {
+		if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
+			auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
+			if (!extras.empty()) {
+				vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], static_cast<uint32_t>(extras.size()), extras.data());
+				extras.clear();
+			}
+		}
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+		}
+		vkResetCommandPool(impl->device, impl->commandPools[impl->currentFrame], 0);
+	}
 	
 	uint32_t imageIndex;
 	VkResult result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX, impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &imageIndex);
@@ -5053,6 +5137,7 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 
 	// Removed End-of-Frame Block. We proceed optimistically.
 	
+	impl->editorRenderSubmitted = false;
 	impl->currentFrame = (impl->currentFrame + 1) % impl->MAX_FRAMES_IN_FLIGHT;
 }
 
