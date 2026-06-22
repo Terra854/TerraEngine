@@ -217,19 +217,10 @@ struct VulkanContext::Impl {
 	// UsesVrsAttachment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool UsesVrsAttachment() const
 	{
-		// Runtime VRS must fail closed until the backend owns a valid sampled
-		// color-history source. The current direct-to-swapchain path cannot feed
-		// GenerateVRSImage with a sampled color target, so enabling the attachment
-		// would make the render pass consume stale or undefined shading-rate
-		// texels and show focus-dependent tile artifacts in optimized exports.
-		constexpr bool kEnableVrsAttachment = false;
-		if (!kEnableVrsAttachment) {
-			return false;
-		}
-		// Editor rendering presents scene/game offscreen textures through ImGui.
-		// A shared VRS attachment can make the UI sample those textures with
-		// stale coarse shading-rate tiles during dock/viewport resizing, so VRS
-		// attachments are reserved for standalone runtime swapchain rendering.
+		// VRS attachments are only safe when the runtime profile, device feature
+		// query, and attachment image all agree. Editor scene/game views render
+		// through offscreen ImGui textures, so they intentionally keep VRS off to
+		// avoid mixing shading-rate tiles with docked viewport presentation.
 		return vrsAttachmentRuntimeEnabled
 			&& !editorMode
 			&& vrsFeatures.attachmentFragmentShadingRate

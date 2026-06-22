@@ -3375,12 +3375,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			continue;
 		}
 
-		// Keep mesh/task rendering enabled, but disable GPU meshlet rejection
-		// while the optimized/export artifact is being isolated. The dotted
-		// holes match false-positive meshlet culls, and forcing this off keeps
-		// the renderer fail-open until the culling tests have an image-based
-		// regression path.
-		constexpr bool kEnableGpuMeshletCulling = false;
+		// Let task shaders reject meshlets when all CPU-side prerequisites are
+		// available. Hi-Z visibility remains controlled separately by
+		// kEnableMeshletHiZOcclusion so this path only restores the safe
+		// per-meshlet culling work that was disabled while isolating GTAO noise.
+		constexpr bool kEnableGpuMeshletCulling = true;
 		const bool activeTaskCulling = kEnableGpuMeshletCulling
 			&& pipeline->hasTaskStage
 			&& frameData.globalTaskShaderCullingEnabled
