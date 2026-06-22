@@ -1,8 +1,8 @@
 #pragma pack_matrix(column_major)
 
-// First-pass contact darkening shader. The Vulkan integration can bind a
-// full-resolution depth texture and write one R8/R16 occlusion target; until
-// that pass is wired, this file documents and compiles the expected GPU side.
+// First-pass contact darkening shader. Runtime GTAO samples an owned
+// full-resolution depth-history texture and writes one single-channel
+// occlusion target for the blur and material passes.
 [[vk::binding(12, 0)]] Texture2D<float> inputDepth;
 // Dedicated AO storage binding. Binding 16 is reserved for Hi-Z output, and
 // reusing it for AO made optimized command buffers depend on descriptor update

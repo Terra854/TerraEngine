@@ -2988,6 +2988,19 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	const glm::mat4 currentViewProjection = frameData.projectionMatrix * frameData.viewMatrix;
 	VulkanContext::Impl::ViewDepthHistoryState& depthHistory = impl->depthHistoryByView[viewIndex];
 	const bool firstPrimaryPassForFrame = useMainCommandBuffer;
+	const bool aoDepthHistorySlotReady = impl->currentFrame < depthHistory.ambientOcclusionDepthByFrame.size()
+		&& depthHistory.ambientOcclusionDepthByFrame[impl->currentFrame].view != VK_NULL_HANDLE;
+	const bool aoDepthHistoryMatchesView = !impl->editorMode
+		&& firstPrimaryPassForFrame
+		&& aoDepthHistorySlotReady
+		&& depthHistory.ambientOcclusionDepthValidByFrame[impl->currentFrame]
+		&& MatricesApproximatelyEqual(
+			currentViewProjection,
+			depthHistory.ambientOcclusionDepthViewProjectionByFrame[impl->currentFrame],
+			kDepthHistoryMatrixEpsilon);
+	VkImageView aoDepthHistoryView = aoDepthHistoryMatchesView
+		? depthHistory.ambientOcclusionDepthByFrame[impl->currentFrame].view
+		: VK_NULL_HANDLE;
 	const bool previousDepthMatchesView = !impl->editorMode
 		&& firstPrimaryPassForFrame
 		&& depthHistory.valid
@@ -3036,14 +3049,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// Upload artist-facing indirect and contact-darkening controls separately
 	// from integer feature flags so HLSL receives the same type and alignment
 	// that the CPU writes into the frame payload.
-	// Runtime GTAO samples the previous depth buffer before the current scene
-	// pass and publishes an AO image that the same frame samples in material
-	// shading. The current depth-only GTAO implementation still produces
-	// optimized/export-only speckles after it has accumulated runtime history, so
-	// keep it fail-closed until AO owns a dedicated depth-history image instead
-	// of borrowing the live scene depth image. Material occlusion remains active.
-	constexpr bool kEnableRuntimeScreenSpaceAo = false;
-	const bool screenSpaceAoActive = kEnableRuntimeScreenSpaceAo && previousDepthMatchesView;
+	// Runtime GTAO samples an owned depth-history image from the same frame slot
+	// after that slot's fence has completed. This keeps AO independent from the
+	// live depth attachment that the upcoming render pass will clear and write.
+	constexpr bool kEnableRuntimeScreenSpaceAo = true;
+	const bool screenSpaceAoActive = kEnableRuntimeScreenSpaceAo && aoDepthHistoryMatchesView;
 	const float aoQualityForFrame = screenSpaceAoActive
 		? static_cast<float>(frameData.settings.ambientOcclusionQuality)
 		: 0.0f;
@@ -3167,10 +3177,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// per-light culling does not thrash the indirect-command buffer on CPU.
 	indirectCommands.reserve(frameData.commands.size() + shadowCommandSourceCount);
 
-	// Only pre-scene compute passes need the previous depth image. Small scenes
-	// that fall back to the full light loop should not touch stale depth before
-	// the scene pass, which keeps first-frame and focus-resume behavior simple.
-	const bool needsPreSceneDepthCompute = clusteredLightingAvailable || screenSpaceAoActive;
+	// Only clustered lighting borrows the live depth image before the scene
+	// pass. GTAO reads its own depth-history image, so it does not need to move
+	// the shared depth attachment out of the layout expected by vkCmdBeginRenderPass.
+	const bool needsPreSceneDepthCompute = clusteredLightingAvailable;
 	const bool depthPreparedForPreSceneCompute = needsPreSceneDepthCompute
 		&& impl->PrepareDepthForCompute(cmd, impl->depthImageView);
 	if (needsPreSceneDepthCompute && !depthPreparedForPreSceneCompute) {
@@ -3181,8 +3191,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		cullingData.clusteredLightingValid = 0u;
 		impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
 	}
-	if (screenSpaceAoActive && depthPreparedForPreSceneCompute) {
-		impl->GenerateAmbientOcclusion(cmd, cullingData, snapshotSlotIndex);
+	if (screenSpaceAoActive) {
+		const bool generatedAmbientOcclusion = impl->GenerateAmbientOcclusion(cmd, cullingData, snapshotSlotIndex, aoDepthHistoryView);
+		if (!generatedAmbientOcclusion) {
+			cullingData.renderSettings2.z = 0.0f;
+			impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
+			impl->ambientOcclusionHistoryValidByFrame[impl->currentFrame] = false;
+		}
 	} else {
 		impl->ambientOcclusionHistoryValidByFrame[impl->currentFrame] = false;
 	}
@@ -3375,10 +3390,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			continue;
 		}
 
-		// Let task shaders reject meshlets when all CPU-side prerequisites are
-		// available. Hi-Z visibility remains controlled separately by
-		// kEnableMeshletHiZOcclusion so this path only restores the safe
-		// per-meshlet culling work that was disabled while isolating GTAO noise.
+		// Let task shaders reject meshlets once the mesh payload has CPU-built
+		// bounds. Hi-Z visibility is guarded separately, so this flag only
+		// controls the ordinary per-meshlet culling path.
 		constexpr bool kEnableGpuMeshletCulling = true;
 		const bool activeTaskCulling = kEnableGpuMeshletCulling
 			&& pipeline->hasTaskStage
@@ -4249,6 +4263,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (impl->UsesVrsAttachment()) {
 		impl->GenerateVRSImage(cmd, (view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);
 	}
+	if (kEnableRuntimeScreenSpaceAo
+		&& !impl->editorMode
+		&& firstPrimaryPassForFrame
+		&& frameData.settings.ambientOcclusionStrength > 0.001f
+		&& frameData.settings.ambientOcclusionQuality > 0u) {
+		impl->StoreAmbientOcclusionDepthHistory(cmd, viewIndex, currentViewProjection);
+	}
 	// Hi-Z generation is safe to keep warm even while meshlet occlusion culling
 	// is fail-open: the pyramid is written after the scene depth pass and is not
 	// consumed until a later frame decides the occlusion path is enabled.
@@ -4416,6 +4437,106 @@ void VulkanContext::Impl::RestoreDepthForAttachment(VkCommandBuffer cmd) {
 		0, nullptr,
 		0, nullptr,
 		1, &depthBarrier);
+}
+
+// VulkanContext::Impl::StoreAmbientOcclusionDepthHistory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, uint32_t viewIndex, const glm::mat4& viewProjection) {
+	if (cmd == VK_NULL_HANDLE
+		|| depthImage == VK_NULL_HANDLE
+		|| viewIndex >= depthHistoryByView.size()
+		|| currentFrame >= MAX_FRAMES_IN_FLIGHT
+		|| ambientOcclusionWidth == 0u
+		|| ambientOcclusionHeight == 0u) {
+		return;
+	}
+
+	ViewDepthHistoryState& viewHistory = depthHistoryByView[viewIndex];
+	VulkanImage& historyDepth = viewHistory.ambientOcclusionDepthByFrame[currentFrame];
+	if (historyDepth.image == VK_NULL_HANDLE || historyDepth.view == VK_NULL_HANDLE) {
+		viewHistory.ambientOcclusionDepthValidByFrame[currentFrame] = false;
+		return;
+	}
+
+	auto TransitionDepthImage = [&](VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		barrier.subresourceRange.baseMipLevel = 0u;
+		barrier.subresourceRange.levelCount = 1u;
+		barrier.subresourceRange.baseArrayLayer = 0u;
+		barrier.subresourceRange.layerCount = 1u;
+		barrier.srcAccessMask = srcAccess;
+		barrier.dstAccessMask = dstAccess;
+		vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+	};
+
+	// The scene render pass writes the shared depth attachment. Copy that
+	// completed depth into an AO-owned history image so next frame's GTAO pass
+	// never samples an attachment that is being cleared or rewritten.
+	TransitionDepthImage(
+		depthImage,
+		VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		VK_ACCESS_TRANSFER_READ_BIT,
+		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT);
+	TransitionDepthImage(
+		historyDepth.image,
+		VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_ACCESS_TRANSFER_WRITE_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+	VkImageCopy copyRegion{};
+	copyRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	copyRegion.srcSubresource.mipLevel = 0u;
+	copyRegion.srcSubresource.baseArrayLayer = 0u;
+	copyRegion.srcSubresource.layerCount = 1u;
+	copyRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	copyRegion.dstSubresource.mipLevel = 0u;
+	copyRegion.dstSubresource.baseArrayLayer = 0u;
+	copyRegion.dstSubresource.layerCount = 1u;
+	copyRegion.extent = {
+		std::max(ambientOcclusionWidth, 1u),
+		std::max(ambientOcclusionHeight, 1u),
+		1u
+	};
+	vkCmdCopyImage(
+		cmd,
+		depthImage,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		historyDepth.image,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1u,
+		&copyRegion);
+
+	TransitionDepthImage(
+		historyDepth.image,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		VK_ACCESS_TRANSFER_WRITE_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+	TransitionDepthImage(
+		depthImage,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		VK_ACCESS_TRANSFER_READ_BIT,
+		VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+
+	viewHistory.ambientOcclusionDepthViewProjectionByFrame[currentFrame] = viewProjection;
+	viewHistory.ambientOcclusionDepthValidByFrame[currentFrame] = true;
 }
 
 // VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -4665,11 +4786,11 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 }
 
 // VulkanContext::Impl::GenerateAmbientOcclusion is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex) {
+bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView) {
 	const bool aoEnabled = frameData.renderSettings2.y > 0.001f && frameData.renderSettings2.z > 0.5f;
 	if (!aoEnabled
 		|| cmd == VK_NULL_HANDLE
-		|| depthImageView == VK_NULL_HANDLE
+		|| sampledDepthView == VK_NULL_HANDLE
 		|| aoPipelineLayout == VK_NULL_HANDLE
 		|| aoDescriptorSetLayout == VK_NULL_HANDLE
 		|| currentFrame >= globalDescriptorSets.size()
@@ -4683,7 +4804,7 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 		|| ambientOcclusionRawByFrame[currentFrame].view == VK_NULL_HANDLE
 		|| ambientOcclusionBlurredByFrame[currentFrame].view == VK_NULL_HANDLE
 		|| ambientOcclusionHistoryByFrame[currentFrame].view == VK_NULL_HANDLE) {
-		return;
+		return false;
 	}
 
 	VulkanImage& ambientOcclusionRaw = ambientOcclusionRawByFrame[currentFrame];
@@ -4719,7 +4840,7 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 		if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &aoDescriptorPool) != VK_SUCCESS) {
 			aoDescriptorPool = VK_NULL_HANDLE;
 			aoDescriptorSets.clear();
-			return;
+			return false;
 		}
 
 		std::vector<VkDescriptorSetLayout> layouts(descriptorSetCount, aoDescriptorSetLayout);
@@ -4733,7 +4854,7 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 			vkDestroyDescriptorPool(device, aoDescriptorPool, nullptr);
 			aoDescriptorPool = VK_NULL_HANDLE;
 			aoDescriptorSets.clear();
-			return;
+			return false;
 		}
 	}
 
@@ -4741,7 +4862,7 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 		static_cast<std::size_t>(currentFrame) * static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME)
 		+ static_cast<std::size_t>(clampedSnapshotSlot);
 	if (descriptorIndex >= aoDescriptorSets.size() || aoDescriptorSets[descriptorIndex] == VK_NULL_HANDLE) {
-		return;
+		return false;
 	}
 	VkDescriptorSet aoDescriptorSet = aoDescriptorSets[descriptorIndex];
 
@@ -4763,45 +4884,6 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 		vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 	};
 
-	// Manual debug switch for isolating AO output. It defaults off so runtime
-	// builds exercise the real GTAO path while still leaving a narrow diagnostic
-	// hook for future release-only rendering issues.
-	constexpr bool kForceWhiteAoOutputForArtifactIsolation = false;
-	if (kForceWhiteAoOutputForArtifactIsolation) {
-		TransitionAoImage(
-			ambientOcclusionBlurred.image,
-			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			VK_ACCESS_SHADER_READ_BIT,
-			VK_ACCESS_TRANSFER_WRITE_BIT,
-			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-			VK_PIPELINE_STAGE_TRANSFER_BIT);
-
-		VkImageSubresourceRange clearRange{};
-		clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		clearRange.baseMipLevel = 0u;
-		clearRange.levelCount = 1u;
-		clearRange.baseArrayLayer = 0u;
-		clearRange.layerCount = 1u;
-		VkClearColorValue clearValue{};
-		clearValue.float32[0] = 1.0f;
-		clearValue.float32[1] = 1.0f;
-		clearValue.float32[2] = 1.0f;
-		clearValue.float32[3] = 1.0f;
-		vkCmdClearColorImage(cmd, ambientOcclusionBlurred.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1u, &clearRange);
-
-		TransitionAoImage(
-			ambientOcclusionBlurred.image,
-			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			VK_ACCESS_TRANSFER_WRITE_BIT,
-			VK_ACCESS_SHADER_READ_BIT,
-			VK_PIPELINE_STAGE_TRANSFER_BIT,
-			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-		ambientOcclusionHistoryValid = false;
-		return;
-	}
-
 	// The AO targets persist across frames in shader-read layout. Each dispatch
 	// temporarily moves one target to GENERAL, writes it, then makes it readable
 	// before the next compute pass or material shading samples it.
@@ -4816,7 +4898,7 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 
 	VkDescriptorImageInfo depthInfo{};
 	depthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	depthInfo.imageView = depthImageView;
+	depthInfo.imageView = sampledDepthView;
 	depthInfo.sampler = VK_NULL_HANDLE;
 
 	VkDescriptorImageInfo rawOutputInfo{};
@@ -4925,10 +5007,9 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	GTAOBlurPushConstants blurPush{};
 	blurPush.viewportSize = glm::uvec2(width, height);
 	blurPush.depthSigma = 0.0025f / quality;
-	// Optimized/export builds showed AO artifacts that disappeared only when
-	// the AO feature was disabled. Keep spatial AO active, but do not sample
-	// temporal history until the history ownership can be made per-view and
-	// validated with an image regression test.
+	// Keep temporal AO blending disabled until the resolved AO history is also
+	// split per view/camera. The depth input is now owned, but reusing one AO
+	// history image across multiple views can still smear between cameras.
 	blurPush.historyBlend = 0.0f;
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtaoBlurComputePipeline);
@@ -4992,6 +5073,7 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 		VK_PIPELINE_STAGE_TRANSFER_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	ambientOcclusionHistoryValid = true;
+	return true;
 }
 
 // VulkanContext::Impl::GenerateVRSImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -6054,6 +6136,12 @@ void VulkanContext::Impl::ClearResources() {
 	}
 	for (VulkanImage& image : ambientOcclusionHistoryByFrame) {
 		DestroyVulkanImage(image);
+	}
+	for (ViewDepthHistoryState& viewHistory : depthHistoryByView) {
+		for (VulkanImage& image : viewHistory.ambientOcclusionDepthByFrame) {
+			DestroyVulkanImage(image);
+		}
+		viewHistory.ambientOcclusionDepthValidByFrame.fill(false);
 	}
 	ambientOcclusionWidth = 0u;
 	ambientOcclusionHeight = 0u;

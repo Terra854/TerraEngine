@@ -2662,6 +2662,12 @@ void VulkanContext::Impl::DestroyAmbientOcclusionResources()
 	for (VulkanImage& image : ambientOcclusionHistoryByFrame) {
 		DestroyImage(image);
 	}
+	for (ViewDepthHistoryState& viewHistory : depthHistoryByView) {
+		for (VulkanImage& image : viewHistory.ambientOcclusionDepthByFrame) {
+			DestroyImage(image);
+		}
+		viewHistory.ambientOcclusionDepthValidByFrame.fill(false);
+	}
 	ambientOcclusionWidth = 0u;
 	ambientOcclusionHeight = 0u;
 	ambientOcclusionHistoryValidByFrame.fill(false);
@@ -2677,6 +2683,7 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		&& ambientOcclusionRawByFrame[0].image != VK_NULL_HANDLE
 		&& ambientOcclusionBlurredByFrame[0].image != VK_NULL_HANDLE
 		&& ambientOcclusionHistoryByFrame[0].image != VK_NULL_HANDLE
+		&& depthHistoryByView[0].ambientOcclusionDepthByFrame[0].image != VK_NULL_HANDLE
 		&& ambientOcclusionWidth == width
 		&& ambientOcclusionHeight == height) {
 		return;
@@ -2741,6 +2748,65 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	};
 
+	auto CreateAoDepthImage = [&](const char* allocationName, VulkanImage& image) {
+		const VkFormat historyDepthFormat = (depthFormat != VK_FORMAT_UNDEFINED) ? depthFormat : FindDepthFormat();
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent = { width, height, 1u };
+		imageInfo.mipLevels = 1u;
+		imageInfo.arrayLayers = 1u;
+		imageInfo.format = historyDepthFormat;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+		if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &image.image, &image.allocation, nullptr) != VK_SUCCESS) {
+			image = {};
+			return;
+		}
+		vmaSetAllocationName(allocator, image.allocation, allocationName);
+
+		image.view = CreateImageView(image.image, imageInfo.format, VK_IMAGE_ASPECT_DEPTH_BIT);
+		if (image.view == VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, image.image, image.allocation);
+			image = {};
+			return;
+		}
+
+		// The history image starts readable so descriptor sets can be populated
+		// immediately; the validity bit prevents GTAO from sampling it until a
+		// completed scene pass has copied real depth into the slot.
+		VkCommandBuffer transitionCommandBuffer = BeginSingleTimeCommands();
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = image.image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		barrier.subresourceRange.baseMipLevel = 0u;
+		barrier.subresourceRange.levelCount = 1u;
+		barrier.subresourceRange.baseArrayLayer = 0u;
+		barrier.subresourceRange.layerCount = 1u;
+		barrier.srcAccessMask = 0u;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier(
+			transitionCommandBuffer,
+			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			0,
+			0, nullptr,
+			0, nullptr,
+			1, &barrier);
+		EndSingleTimeCommands(transitionCommandBuffer);
+	};
+
 	bool allImagesReady = true;
 	for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
 		CreateAoImage("GTAO Raw Occlusion", ambientOcclusionRawByFrame[frameIndex]);
@@ -2750,6 +2816,14 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 			&& ambientOcclusionRawByFrame[frameIndex].view != VK_NULL_HANDLE
 			&& ambientOcclusionBlurredByFrame[frameIndex].view != VK_NULL_HANDLE
 			&& ambientOcclusionHistoryByFrame[frameIndex].view != VK_NULL_HANDLE;
+	}
+	for (ViewDepthHistoryState& viewHistory : depthHistoryByView) {
+		for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
+			CreateAoDepthImage("GTAO Depth History", viewHistory.ambientOcclusionDepthByFrame[frameIndex]);
+			allImagesReady = allImagesReady
+				&& viewHistory.ambientOcclusionDepthByFrame[frameIndex].view != VK_NULL_HANDLE;
+		}
+		viewHistory.ambientOcclusionDepthValidByFrame.fill(false);
 	}
 	ambientOcclusionWidth = allImagesReady ? width : 0u;
 	ambientOcclusionHeight = allImagesReady ? height : 0u;

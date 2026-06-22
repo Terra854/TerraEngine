@@ -386,6 +386,7 @@ struct VulkanContext::Impl {
 	VkPipelineLayout hiZPipelineLayout = VK_NULL_HANDLE;
 	VkPipelineLayout aoPipelineLayout = VK_NULL_HANDLE;
 	VkPipelineLayout vrsPipelineLayout = VK_NULL_HANDLE;
+	static constexpr uint32_t kStatsViewCount = 2u;
 	std::array<VulkanImage, MAX_FRAMES_IN_FLIGHT> ambientOcclusionRawByFrame{};
 	std::array<VulkanImage, MAX_FRAMES_IN_FLIGHT> ambientOcclusionBlurredByFrame{};
 	std::array<VulkanImage, MAX_FRAMES_IN_FLIGHT> ambientOcclusionHistoryByFrame{};
@@ -431,6 +432,12 @@ struct VulkanContext::Impl {
 		// view-projection lets resize and camera-change frames fail open instead
 		// of hiding visible meshlets with stale depth.
 		glm::mat4 lastViewProjectionMatrix = glm::mat4(1.0f);
+		// GTAO samples this owned depth copy instead of borrowing the live scene
+		// attachment. Each frame slot has its own image so the GPU never reads
+		// and overwrites the same history resource while frames overlap.
+		std::array<VulkanImage, MAX_FRAMES_IN_FLIGHT> ambientOcclusionDepthByFrame{};
+		std::array<glm::mat4, MAX_FRAMES_IN_FLIGHT> ambientOcclusionDepthViewProjectionByFrame{};
+		std::array<bool, MAX_FRAMES_IN_FLIGHT> ambientOcclusionDepthValidByFrame{};
 		bool valid = false;
 	};
 
@@ -442,7 +449,6 @@ struct VulkanContext::Impl {
 		FrameBudgetDiagnosticsSnapshot diagnostics;
 	};
 
-	static constexpr uint32_t kStatsViewCount = 2u;
 	static constexpr uint32_t kMaxStatsFrameSlots = 8u;
 	static constexpr uint32_t kStatsSlotCount = kStatsViewCount * kMaxStatsFrameSlots;
 	std::array<RenderStatsSnapshot, kStatsViewCount> latestStatsByView{};
@@ -496,8 +502,9 @@ struct VulkanContext::Impl {
 		void UploadLightAnalysisInputData(const std::vector<GPULight>& lights);
 			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImageView depthView);
 			void RestoreDepthForAttachment(VkCommandBuffer cmd);
+			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, uint32_t viewIndex, const glm::mat4& viewProjection);
 			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView);
-			void GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex);
+			bool GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
