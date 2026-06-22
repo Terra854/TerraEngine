@@ -8,6 +8,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -44,6 +45,7 @@ public:
 	KeyState GetKeyState(Key key) const;
 	bool IsKeyPressed(Key key) const;
 	bool IsMouseButtonPressed(MouseButton button) const;
+	bool WasMouseButtonPressedThisFrame(MouseButton button) const;
 	std::pair<double, double> GetCursorPosition() const;
 	void SetCursorPosition(double x, double y);
 	std::pair<double, double> GetScrollDelta() const;
@@ -58,6 +60,9 @@ private:
 
 	std::array<KeyState, KeyCount()> keyStates{};
 	std::array<KeyState, MouseButtonCount()> mouseButtonStates{};
+	std::array<std::uint64_t, MouseButtonCount()> mouseButtonPressGenerations{};
+	std::array<std::uint64_t, MouseButtonCount()> observedMouseButtonPressGenerations{};
+	std::array<bool, MouseButtonCount()> mouseButtonPressedThisFrame{};
 	std::pair<double, double> cursorPosition{0.0, 0.0};
 	std::pair<double, double> scrollDelta{0.0, 0.0};
 

@@ -42,6 +42,11 @@ namespace TerraEngine
 		// IsElementHovered bridges managed callers to engine state; validate arguments before forwarding to native code.
 		public static bool IsElementHovered(string elementId)
 			=> !string.IsNullOrWhiteSpace(elementId) && InternalCalls.Native_UI_IsElementHovered(elementId);
+
+		// PumpPendingEvents lets NativeAOT-generated export dispatch run the same
+		// polling fallback that editor-hosted scripts use for UI Clicked events.
+		public static void PumpPendingEvents()
+			=> UIBridge.PumpPendingEvents();
 	}
 
 	// IStyle is the managed-facing contract for this subsystem; keep it predictable for scripts.

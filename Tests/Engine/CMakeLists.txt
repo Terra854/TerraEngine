@@ -27,6 +27,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Core/JobGraphTests.cpp
 	Core/SystemSchedulerTests.cpp
 	Core/TransformTaskGraphTests.cpp
+	Input/InputSystemTests.cpp
 	Platform/PlatformUtilsTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
 	Resource/ResourceResidencyBudgetTests.cpp

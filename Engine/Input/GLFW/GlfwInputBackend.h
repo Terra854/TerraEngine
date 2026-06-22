@@ -50,6 +50,9 @@ private:
 	std::function<void(double, double)> cursorCallback;
 	std::function<void(double, double)> scrollCallback;
 
+	std::pair<double, double> ScaleCursorToFramebuffer(double x, double y) const;
+	std::pair<double, double> ScaleCursorToWindow(double x, double y) const;
+
 	static int TranslateKeyToGlfw(Key key);
 	static int TranslateMouseButtonToGlfw(MouseButton button);
 	static Key TranslateKeyFromGlfw(int glfwKey);

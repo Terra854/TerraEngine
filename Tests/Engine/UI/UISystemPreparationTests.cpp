@@ -1,12 +1,23 @@
 #include "TestHarness.h"
 #include "Components/UIComponent.h"
+#include "Input/InputBackend.h"
+#include "Input/InputSystem.h"
 #include "Core/Object/ObjectManager.h"
+#include "Resource/ResourceManager.h"
+#include "Scripting/ScriptingSystem.h"
 #include "UI/UISystem.h"
+#include "Window/WindowBackend.h"
+#include "Window/WindowSystem.h"
 
 #include <glm/vec2.hpp>
 #include <glm/vec4.hpp>
 
+#include <array>
+#include <functional>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace TerraEngine::Tests {
 namespace {
@@ -41,6 +52,110 @@ namespace {
 		request.existingRootSnapshot = root ? root->Clone() : nullptr;
 		request.estimatedElementCount = UISystem::CountElementTree(request.existingRootSnapshot);
 		return request;
+	}
+
+	class TestWindowBackend final : public IWindowBackend
+	{
+	public:
+		std::string BackendName() const override { return "UIRuntimeTestWindow"; }
+
+		void Initialize(const WindowConfig&) override
+		{
+			// InputSystem only needs a stable non-null native handle in this
+			// headless test; no real OS window is created.
+			nativeHandle_ = this;
+		}
+
+		void PollEvents() override {}
+		void SwapBuffers() override {}
+		bool ShouldClose() const override { return false; }
+		void* GetNativeHandle() const override { return nativeHandle_; }
+		void SetCloseCallback(std::function<void()> onClose) override { closeCallback_ = std::move(onClose); }
+		void SetResizeCallback(std::function<void(int, int)> onResize) override { resizeCallback_ = std::move(onResize); }
+
+		void Shutdown() override
+		{
+			nativeHandle_ = nullptr;
+			closeCallback_ = nullptr;
+			resizeCallback_ = nullptr;
+		}
+
+	private:
+		void* nativeHandle_ = nullptr;
+		std::function<void()> closeCallback_;
+		std::function<void(int, int)> resizeCallback_;
+	};
+
+	class QueuedInputBackend final : public IInputBackend
+	{
+	public:
+		std::string BackendName() const override { return "UIRuntimeQueuedInput"; }
+		void SetWindowHandle(void* windowHandle) override { windowHandle_ = windowHandle; }
+		void Initialize() override {}
+
+		void Update() override
+		{
+			for (const auto& [button, state] : queuedMouseEvents_)
+			{
+				mouseState_[static_cast<std::size_t>(button)] = state;
+				if (mouseButtonCallback_)
+				{
+					mouseButtonCallback_(button, state);
+				}
+			}
+			queuedMouseEvents_.clear();
+		}
+
+		void Shutdown() override
+		{
+			windowHandle_ = nullptr;
+			queuedMouseEvents_.clear();
+		}
+
+		void SetKeyCallback(std::function<void(Key, KeyState)> onKeyEvent) override { keyCallback_ = std::move(onKeyEvent); }
+		void SetMouseButtonCallback(std::function<void(MouseButton, KeyState)> onMouseButton) override { mouseButtonCallback_ = std::move(onMouseButton); }
+		void SetCursorPositionCallback(std::function<void(double, double)> onCursorMove) override { cursorCallback_ = std::move(onCursorMove); }
+		void SetScrollCallback(std::function<void(double, double)> onScroll) override { scrollCallback_ = std::move(onScroll); }
+		bool IsKeyPressed(Key) const override { return false; }
+
+		bool IsMouseButtonPressed(MouseButton button) const override
+		{
+			const std::size_t index = static_cast<std::size_t>(button);
+			return index < mouseState_.size()
+				&& (mouseState_[index] == KeyState::Pressed || mouseState_[index] == KeyState::Held);
+		}
+
+		std::pair<double, double> GetCursorPosition() const override { return cursorPosition_; }
+		void SetCursorPosition(double x, double y) override { cursorPosition_ = { x, y }; }
+
+		void SetHardwareCursorPosition(double x, double y)
+		{
+			// Export UI should use polled backend coordinates even if the cursor
+			// has not generated a movement callback since startup/focus.
+			cursorPosition_ = { x, y };
+		}
+
+		void QueueMouseEvent(MouseButton button, KeyState state)
+		{
+			queuedMouseEvents_.push_back({ button, state });
+		}
+
+	private:
+		void* windowHandle_ = nullptr;
+		std::function<void(Key, KeyState)> keyCallback_;
+		std::function<void(MouseButton, KeyState)> mouseButtonCallback_;
+		std::function<void(double, double)> cursorCallback_;
+		std::function<void(double, double)> scrollCallback_;
+		std::array<KeyState, MouseButtonCount()> mouseState_{};
+		std::pair<double, double> cursorPosition_{ 0.0, 0.0 };
+		std::vector<std::pair<MouseButton, KeyState>> queuedMouseEvents_;
+	};
+
+	void ResetRuntimeInputState()
+	{
+		InputSystem::Instance().Shutdown();
+		WindowSystem::Instance().Shutdown();
+		ResourceManager::Instance().ConfigureExportArchive({});
 	}
 }
 
@@ -170,6 +285,61 @@ void RegisterUISystemPreparationTests(TestRegistry& registry)
 
 		uiSystem.Shutdown();
 		objects.clear();
+	});
+
+	registry.Add("Engine.UISystemPreparation.ExportRuntimeUsesWindowPointerWithoutScriptExportMode", [](TestContext& context) {
+		ResetRuntimeInputState();
+
+		WindowSystem& windowSystem = WindowSystem::Instance();
+		windowSystem.Configure(std::make_unique<TestWindowBackend>(), WindowConfig{}, []() {});
+		windowSystem.Initialize();
+
+		auto inputBackend = std::make_unique<QueuedInputBackend>();
+		QueuedInputBackend* inputBackendPointer = inputBackend.get();
+		InputSystem& inputSystem = InputSystem::Instance();
+		inputSystem.Configure(std::move(inputBackend));
+		inputSystem.Initialize();
+		inputBackendPointer->SetHardwareCursorPosition(24.0, 24.0);
+
+		ResourceManager::Instance().ConfigureExportArchive("HeadlessExportRuntime/game.tepak");
+		context.Expect(ResourceManager::Instance().IsExportRuntime(), "A configured TEPAK archive should mark the session as a packaged runtime.");
+		context.Expect(!ScriptingSystem::Instance().IsExportMode(), "Packaged UI pointer input should not depend on NativeAOT scripting mode.");
+
+		ObjectManager& objects = ObjectManager::instance();
+		UISystem& uiSystem = UISystem::Instance();
+		objects.clear();
+		uiSystem.Initialize();
+		uiSystem.SetGameViewportSize(glm::vec2(800.0f, 600.0f));
+
+		UIElement::Ptr root = UIElement::Create(UIElementType::Root);
+		root->typeName = "UIRoot";
+		root->inlineStyle.width = UIValue::Points(800.0f);
+		root->inlineStyle.height = UIValue::Points(600.0f);
+
+		UIElement::Ptr button = UIElement::Create(UIElementType::Button);
+		button->id = "export-button";
+		button->inlineStyle.width = UIValue::Points(120.0f);
+		button->inlineStyle.height = UIValue::Points(48.0f);
+		button->inlineStyle.backgroundColor = glm::vec4(0.1f, 0.7f, 0.3f, 1.0f);
+		root->AddChild(button);
+
+		Object object = objects.createObject("Export UI Root");
+		UIComponent& component = object.addComponent<UIComponent>();
+		component.SetRoot(root);
+		component.MarkDirty();
+
+		uiSystem.Update(1.0f / 60.0f);
+
+		inputBackendPointer->QueueMouseEvent(MouseButton::Left, KeyState::Pressed);
+		inputBackendPointer->QueueMouseEvent(MouseButton::Left, KeyState::Released);
+		inputSystem.Update(1.0f / 60.0f);
+		uiSystem.Update(1.0f / 60.0f);
+
+		context.Expect(uiSystem.WasElementClicked("export-button"), "Packaged runtime UI should publish clicks from window-space input even without script export mode.");
+
+		uiSystem.Shutdown();
+		objects.clear();
+		ResetRuntimeInputState();
 	});
 }
 }

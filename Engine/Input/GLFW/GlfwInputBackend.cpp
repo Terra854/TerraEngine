@@ -107,7 +107,8 @@ void GlfwInputBackend::Initialize()
 		GlfwInputBackend* backend = it->second;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (backend && backend->cursorCallback) {
-			backend->cursorCallback(x, y);
+			const auto [scaledX, scaledY] = backend->ScaleCursorToFramebuffer(x, y);
+			backend->cursorCallback(scaledX, scaledY);
 		}
 	});
 	
@@ -214,15 +215,67 @@ std::pair<double, double> GlfwInputBackend::GetCursorPosition() const
 		glfwGetCursorPos(window, &x, &y);
 	}
 	
-	return {x, y};
+	return ScaleCursorToFramebuffer(x, y);
 }
 
 // GlfwInputBackend::SetCursorPosition is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwInputBackend::SetCursorPosition(double x, double y)
 {
 	if (window) {
-		glfwSetCursorPos(window, x, y);
+		const auto [windowX, windowY] = ScaleCursorToWindow(x, y);
+		glfwSetCursorPos(window, windowX, windowY);
 	}
+}
+
+std::pair<double, double> GlfwInputBackend::ScaleCursorToFramebuffer(double x, double y) const
+{
+	// Runtime UI is laid out against the framebuffer size while GLFW reports
+	// cursor positions in window coordinates on high-DPI displays. Scale here
+	// so UI hit testing and rendered quads use the same pixel space.
+	if (!window) {
+		return {x, y};
+	}
+
+	int windowWidth = 0;
+	int windowHeight = 0;
+	int framebufferWidth = 0;
+	int framebufferHeight = 0;
+	glfwGetWindowSize(window, &windowWidth, &windowHeight);
+	glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+
+	if (windowWidth <= 0 || windowHeight <= 0 || framebufferWidth <= 0 || framebufferHeight <= 0) {
+		return {x, y};
+	}
+
+	return {
+		x * static_cast<double>(framebufferWidth) / static_cast<double>(windowWidth),
+		y * static_cast<double>(framebufferHeight) / static_cast<double>(windowHeight)
+	};
+}
+
+std::pair<double, double> GlfwInputBackend::ScaleCursorToWindow(double x, double y) const
+{
+	// SetCursorPosition receives engine/UI-space coordinates, so convert back
+	// to GLFW's window coordinate space before warping the platform cursor.
+	if (!window) {
+		return {x, y};
+	}
+
+	int windowWidth = 0;
+	int windowHeight = 0;
+	int framebufferWidth = 0;
+	int framebufferHeight = 0;
+	glfwGetWindowSize(window, &windowWidth, &windowHeight);
+	glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+
+	if (windowWidth <= 0 || windowHeight <= 0 || framebufferWidth <= 0 || framebufferHeight <= 0) {
+		return {x, y};
+	}
+
+	return {
+		x * static_cast<double>(windowWidth) / static_cast<double>(framebufferWidth),
+		y * static_cast<double>(windowHeight) / static_cast<double>(framebufferHeight)
+	};
 }
 
 // GlfwInputBackend::TranslateKeyToGlfw is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

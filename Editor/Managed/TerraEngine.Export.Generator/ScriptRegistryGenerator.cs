@@ -877,6 +877,7 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine("\t\t[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]");
 			source.AppendLine("\t\tprivate static void InvokeUpdate(IntPtr handle, float deltaTime)");
 			source.AppendLine("\t\t{");
+			source.AppendLine("\t\t\tglobal::TerraEngine.UI.PumpPendingEvents();");
 			source.AppendLine("\t\t\tGeneratedScriptRegistry.ScriptHandleRecord? record = GeneratedScriptRegistry.GetHandleRecord(handle);");
 			source.AppendLine("\t\t\tif (record != null)");
 			source.AppendLine("\t\t\t{");
@@ -891,6 +892,8 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine("\t\t\t{");
 			source.AppendLine("\t\t\t\treturn;");
 			source.AppendLine("\t\t\t}");
+			source.AppendLine();
+			source.AppendLine("\t\t\tglobal::TerraEngine.UI.PumpPendingEvents();");
 			source.AppendLine();
 			source.AppendLine("\t\t\tfor (int index = 0; index < itemCount; ++index)");
 			source.AppendLine("\t\t\t{");

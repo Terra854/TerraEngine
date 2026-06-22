@@ -38,6 +38,15 @@ void InputSystem::Configure(std::unique_ptr<IInputBackend> backendInstance)
 	for (auto& state : mouseButtonStates) {
 		state = KeyState::Idle;
 	}
+	for (auto& generation : mouseButtonPressGenerations) {
+		generation = 0;
+	}
+	for (auto& generation : observedMouseButtonPressGenerations) {
+		generation = 0;
+	}
+	for (auto& pressedThisFrame : mouseButtonPressedThisFrame) {
+		pressedThisFrame = false;
+	}
 	
 	scrollDelta = {0.0, 0.0};
 }
@@ -94,6 +103,17 @@ void InputSystem::Update(float deltaTime)
 	}
 
 	backend->Update();
+	cursorPosition = backend->GetCursorPosition();
+
+	// WindowSystem polls platform events before InputSystem updates, so GLFW
+	// callbacks may already have advanced a press generation for this frame.
+	// Publishing a separate one-frame latch preserves quick press/release clicks
+	// whose final button state is Released by the time UI performs hit testing.
+	for (std::size_t index = 0; index < mouseButtonStates.size(); ++index) {
+		const bool sawNewPress = mouseButtonPressGenerations[index] != observedMouseButtonPressGenerations[index];
+		mouseButtonPressedThisFrame[index] = sawNewPress;
+		observedMouseButtonPressGenerations[index] = mouseButtonPressGenerations[index];
+	}
 }
 
 // InputSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -147,6 +167,18 @@ bool InputSystem::IsMouseButtonPressed(MouseButton button) const
 	return state == KeyState::Pressed || state == KeyState::Held;
 }
 
+// InputSystem::WasMouseButtonPressedThisFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool InputSystem::WasMouseButtonPressedThisFrame(MouseButton button) const
+{
+	const auto index = static_cast<std::size_t>(button);
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (index >= mouseButtonPressedThisFrame.size()) {
+		return false;
+	}
+
+	return mouseButtonPressedThisFrame[index];
+}
+
 // InputSystem::GetCursorPosition is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::pair<double, double> InputSystem::GetCursorPosition() const
 {
@@ -192,6 +224,11 @@ void InputSystem::HandleMouseButtonEvent(MouseButton button, KeyState state)
 	}
 	
 	mouseButtonStates[index] = state;
+	if (state == KeyState::Pressed) {
+		// Count press transitions independently from the final button state so
+		// a complete click inside one event-poll cycle is still observable by UI.
+		++mouseButtonPressGenerations[index];
+	}
 }
 
 // InputSystem::HandleCursorMove is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -15,7 +15,6 @@
 #include "Input/InputSystem.h"
 #include "Profiling/ProfilerScope.h"
 #include "Resource/ResourceManager.h"
-#include "Scripting/ScriptingSystem.h"
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
@@ -215,7 +214,7 @@ void UISystem::Update(float deltaTime)
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!pointerState.insideViewport && ScriptingSystem::Instance().IsExportMode())
+	if (!pointerState.insideViewport && ResourceManager::Instance().IsExportRuntime())
 	{
 		// Standalone exports use the window-space cursor directly because there
 		// is no editor viewport layer to translate the mouse into local space.
@@ -270,9 +269,13 @@ void UISystem::Update(float deltaTime)
 		std::unordered_set<std::string> nextClickedElementIds;
 		std::unordered_set<std::string> nextHoveredElementIds;
 		std::unordered_map<std::string, UIElement::Ptr> nextHoveredElementRefs;
+		// Export windows can receive both press and release during the same
+		// platform poll. Use InputSystem's frame latch there so authored buttons
+		// still receive one click even when the final physical state is released.
+		const bool exportMousePressedThisFrame = ResourceManager::Instance().IsExportRuntime()
+			&& InputSystem::Instance().WasMouseButtonPressedThisFrame(MouseButton::Left);
 		const bool leftButtonClickedThisFrame = pointerState.insideViewport
-			&& pointerState.leftButtonDown
-			&& !previousLeftButtonDown_;
+			&& (exportMousePressedThisFrame || (pointerState.leftButtonDown && !previousLeftButtonDown_));
 		bool pointerConsumedByDocument = false;
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
