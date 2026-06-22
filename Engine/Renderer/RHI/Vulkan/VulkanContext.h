@@ -10,6 +10,7 @@
 #include "Core/Export.h"
 #include <memory>
 #include <functional>
+#include <string_view>
 
 class TERRAENGINE_API VulkanContext : public RHIContext
 {
@@ -38,6 +39,7 @@ public:
 	void InvalidateMesh(const TerraEngine::UUID& meshId) override;
 	void InvalidateTexture(const TerraEngine::UUID& textureId) override;
 	void InvalidateResource(const TerraEngine::UUID& id) override;
+	void RetireLoadedResource(const TerraEngine::UUID& id, std::uint64_t frameId, std::string_view debugName) override;
 	void WaitIdle() override;
 	void Shutdown() override;
 	void ClearResources() override;

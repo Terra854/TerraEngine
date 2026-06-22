@@ -71,6 +71,7 @@ set(ENGINE_SOURCES
 	Engine/Core/Object/ComponentRegistry.cpp
 	Engine/Resource/ResourceManager.cpp
 	Engine/Resource/MaterialRuntimeContract.cpp
+	Engine/Resource/ResourceResidency.cpp
 	Engine/Resource/ResourceManagerMaterial.cpp
 	Engine/Resource/ResourceManagerMesh.cpp
 	Engine/Resource/ResourceManagerShader.cpp
@@ -151,6 +152,7 @@ set(ENGINE_HEADERS
 	Engine/Input/InputSystem.h
 	Engine/Resource/ResourceManager.h
 	Engine/Resource/MaterialRuntimeContract.h
+	Engine/Resource/ResourceResidency.h
 	Engine/Resource/ShaderCollection.h
 	Engine/Scene/SceneGraphRuntime.h
 	Engine/Scene/PrefabComposition.h
@@ -809,6 +811,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SchedulerDiagnosticsWindow.cpp
+	Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp
 	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
 	Editor/TerraEngine-Editor/Windows/SkySettingsWindow.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp

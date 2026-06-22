@@ -22,6 +22,10 @@ namespace TerraEngine::Tests {
 	void RegisterPlatformUtilsTests(TestRegistry& registry);
 	void RegisterPrefabCompositionTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
+	void RegisterResourceResidencyBudgetTests(TestRegistry& registry);
+	void RegisterResourceResidencyDiagnosticsTests(TestRegistry& registry);
+	void RegisterResourceResidencyPolicyTests(TestRegistry& registry);
+	void RegisterResourceResidencyUsageTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
 	void RegisterRendererGraphSmokeTests(TestRegistry& registry);
 	void RegisterRenderDiagnosticsTests(TestRegistry& registry);
@@ -111,6 +115,10 @@ int main() {
 	TerraEngine::Tests::RegisterPlatformUtilsTests(registry);
 	TerraEngine::Tests::RegisterPrefabCompositionTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureTests(registry);
+	TerraEngine::Tests::RegisterResourceResidencyBudgetTests(registry);
+	TerraEngine::Tests::RegisterResourceResidencyDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterResourceResidencyPolicyTests(registry);
+	TerraEngine::Tests::RegisterResourceResidencyUsageTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
 	TerraEngine::Tests::RegisterRendererGraphSmokeTests(registry);
 	TerraEngine::Tests::RegisterRenderDiagnosticsTests(registry);

@@ -13,6 +13,7 @@
 #include <utility>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <nlohmann/json.hpp>
 
 #include "Core/Logger/Logger.h"
@@ -110,6 +111,44 @@ namespace
 		settings.ambientOcclusionQuality = aoRank;
 		settings.variableRateShading = vrs == "disabled" ? 0u : 1u;
 		return settings;
+	}
+
+	std::uint64_t JsonUInt64Or(const nlohmann::json& object, std::string_view key, std::uint64_t fallback)
+	{
+		if (auto it = object.find(std::string(key)); it != object.end() && it->is_number_unsigned())
+		{
+			return it->get<std::uint64_t>();
+		}
+		return fallback;
+	}
+
+	double JsonDoubleOr(const nlohmann::json& object, std::string_view key, double fallback)
+	{
+		if (auto it = object.find(std::string(key)); it != object.end() && it->is_number())
+		{
+			return it->get<double>();
+		}
+		return fallback;
+	}
+
+	TerraEngine::Resource::ResidencyPolicy ResidencyPolicyFromJson(const nlohmann::json& object)
+	{
+		TerraEngine::Resource::ResidencyPolicy policy = TerraEngine::Resource::MakeDefaultResidencyPolicy();
+		policy.enabled = JsonBoolOr(object, "enabled", policy.enabled);
+		policy.idleSecondsThreshold = JsonDoubleOr(object, "idleSecondsThreshold", policy.idleSecondsThreshold);
+		policy.memoryBudgetBytes = JsonUInt64Or(object, "memoryBudgetBytes", policy.memoryBudgetBytes);
+		policy.cleanupIntervalSeconds = JsonDoubleOr(object, "cleanupIntervalSeconds", policy.cleanupIntervalSeconds);
+		policy.reloadGraceSeconds = JsonDoubleOr(object, "reloadGraceSeconds", policy.reloadGraceSeconds);
+		policy.strictBudgetMode = JsonBoolOr(object, "strictBudgetMode", policy.strictBudgetMode);
+		return TerraEngine::Resource::SanitizeResidencyPolicy(policy);
+	}
+
+	double ResidencyClockSeconds()
+	{
+		using Clock = std::chrono::steady_clock;
+		static const Clock::time_point startTime = Clock::now();
+		const std::chrono::duration<double> elapsed = Clock::now() - startTime;
+		return elapsed.count();
 	}
 
 	std::optional<RenderSettings> SettingsFromRenderSettingsJson(const nlohmann::json& renderSettingsDocument)
@@ -239,6 +278,19 @@ ResourceManager::ResourceManager()
 {
 	assetRoot = std::filesystem::current_path();
 	engineRoot = std::filesystem::current_path();
+	m_ResidencyPolicy = TerraEngine::Resource::MakeDefaultResidencyPolicy();
+	materialCache.assetType = AssetType::Material;
+	materialCache.tracksResidency = true;
+	meshCache.assetType = AssetType::Mesh;
+	meshCache.tracksResidency = true;
+	shaderCollectionCache.assetType = AssetType::ShaderCollection;
+	// Shader collections are part of pipeline creation state, not ordinary
+	// scene content. The renderer does not yet report shader-collection usage
+	// in its per-frame residency touches, so releasing them here can leave a
+	// valid pipeline key pointing at a missing CPU-side collection.
+	shaderCollectionCache.tracksResidency = false;
+	textureCache.assetType = AssetType::Texture;
+	textureCache.tracksResidency = true;
 
 	basist::basisu_transcoder_init();
 	basist::uastc_init();
@@ -309,6 +361,10 @@ void ResourceManager::Initialize()
 			m_RenderProfileSummary = RenderProfileSummaryFromJson(*renderIt);
 			m_RenderValidationEnabled = JsonBoolOr(*renderIt, "validationEnabled", false);
 			m_RenderDebugEnabled = JsonBoolOr(*renderIt, "debugEnabled", false);
+		}
+
+		if (auto residencyIt = manifest.find("residencyPolicy"); residencyIt != manifest.end() && residencyIt->is_object()) {
+			SetResidencyPolicy(ResidencyPolicyFromJson(*residencyIt));
 		}
 
 		// Register the exported asset lookup table before SceneManager loads the
@@ -745,6 +801,7 @@ void ResourceManager::ClearCaches()
 		textureCache.resources.clear();
 		textureCache.inFlight.clear();
 	}
+	ClearResidencyState();
 }
 
 // ResourceManager::DeleteResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -776,6 +833,292 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 
 	// Notify renderer to purge any GPU-side references/buffers
 	RenderSystem::Instance().DeleteResource(id);
+	{
+		std::unique_lock lock(m_ResidencyMutex);
+		m_ResidentAssets.erase(id);
+		m_ResidentAssetTypes.erase(id);
+	}
+}
+
+void ResourceManager::SetResidencyPolicy(const TerraEngine::Resource::ResidencyPolicy& policy)
+{
+	std::unique_lock lock(m_ResidencyMutex);
+	m_ResidencyPolicy = TerraEngine::Resource::SanitizeResidencyPolicy(policy);
+}
+
+TerraEngine::Resource::ResidencyPolicy ResourceManager::GetResidencyPolicy() const
+{
+	std::shared_lock lock(m_ResidencyMutex);
+	return m_ResidencyPolicy;
+}
+
+void ResourceManager::SetResidencyDiagnosticsEnabled(bool enabled)
+{
+	std::unique_lock lock(m_ResidencyMutex);
+	m_ResidencyPolicy.diagnosticsEnabled = enabled;
+	m_ResidencyDiagnostics.diagnosticsEnabled = enabled;
+}
+
+TerraEngine::Resource::ResidencyDiagnosticsSummary ResourceManager::GetResidencyDiagnosticsSummary() const
+{
+	std::shared_lock lock(m_ResidencyMutex);
+	return m_ResidencyDiagnostics;
+}
+
+bool ResourceManager::IsResourceResident(const TerraEngine::UUID& id) const
+{
+	std::shared_lock lock(m_ResidencyMutex);
+	const auto it = m_ResidentAssets.find(id);
+	return it != m_ResidentAssets.end()
+		&& it->second.state != TerraEngine::Resource::ResidencyState::Released
+		&& it->second.state != TerraEngine::Resource::ResidencyState::PendingRelease;
+}
+
+void ResourceManager::RegisterResidencyResource(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	const std::string& sourceKey,
+	std::uint64_t cpuBytes,
+	std::uint64_t gpuBytes,
+	bool reloadable,
+	TerraEngine::Resource::ResidencyState state)
+{
+	std::unique_lock lock(m_ResidencyMutex);
+	TerraEngine::Resource::ResidentAsset& asset = m_ResidentAssets[id];
+	asset.assetId = id;
+	asset.assetType = TerraEngine::Resource::ToResidencyAssetType(type);
+	asset.sourceKey = sourceKey;
+	asset.state = state;
+	asset.lastTouchedReason = "load";
+	asset.lastUsedSeconds = ResidencyClockSeconds();
+	asset.estimatedCpuBytes = cpuBytes;
+	asset.estimatedGpuBytes = gpuBytes;
+	asset.reloadable = reloadable;
+	asset.inFlight = false;
+	if (type == AssetType::ShaderCollection)
+	{
+		// Shader collections are intentionally pinned until pipeline lifetime
+		// and shader-collection residency are tracked together. This keeps
+		// release builds from evicting a collection while Vulkan still needs it
+		// to build or rebuild a graphics pipeline.
+		asset.reloadable = false;
+		asset.pinReason = TerraEngine::Resource::ResidencyPinReason::PolicyProtected;
+		asset.state = TerraEngine::Resource::ResidencyState::Pinned;
+	}
+	if (asset.pinReason != TerraEngine::Resource::ResidencyPinReason::None)
+	{
+		asset.state = TerraEngine::Resource::ResidencyState::Pinned;
+	}
+	m_ResidentAssetTypes[id] = type;
+}
+
+void ResourceManager::TouchResource(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	std::uint64_t frameId,
+	TerraEngine::Resource::ResidencyPinReason reason,
+	std::string_view detail)
+{
+	std::unique_lock lock(m_ResidencyMutex);
+	TerraEngine::Resource::ResidentAsset& asset = m_ResidentAssets[id];
+	asset.assetId = id;
+	asset.assetType = TerraEngine::Resource::ToResidencyAssetType(type);
+	asset.lastUsedFrame = frameId;
+	asset.lastUsedSeconds = ResidencyClockSeconds();
+	asset.lastTouchedReason = detail.empty() ? std::string(TerraEngine::Resource::ToString(reason)) : std::string(detail);
+	if (asset.sourceKey.empty())
+	{
+		asset.sourceKey = ToHexString(id);
+	}
+	if (reason != TerraEngine::Resource::ResidencyPinReason::None)
+	{
+		asset.pinReason = reason;
+		asset.state = TerraEngine::Resource::ResidencyState::Pinned;
+	}
+	else if (asset.state != TerraEngine::Resource::ResidencyState::Pinned)
+	{
+		asset.state = TerraEngine::Resource::ResidencyState::Active;
+	}
+	m_ResidentAssetTypes[id] = type;
+}
+
+void ResourceManager::PinResource(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	TerraEngine::Resource::ResidencyPinReason reason,
+	std::string_view detail)
+{
+	TouchResource(id, type, 0u, reason, detail);
+}
+
+void ResourceManager::UnpinResource(const TerraEngine::UUID& id)
+{
+	std::unique_lock lock(m_ResidencyMutex);
+	if (auto it = m_ResidentAssets.find(id); it != m_ResidentAssets.end())
+	{
+		it->second.pinReason = TerraEngine::Resource::ResidencyPinReason::None;
+		if (it->second.state == TerraEngine::Resource::ResidencyState::Pinned)
+		{
+			it->second.state = TerraEngine::Resource::ResidencyState::Idle;
+		}
+	}
+}
+
+TerraEngine::Resource::ResidencySnapshot ResourceManager::BuildResidencySnapshot(std::uint64_t frameId) const
+{
+	std::shared_lock lock(m_ResidencyMutex);
+	TerraEngine::Resource::ResidencySnapshot snapshot;
+	snapshot.frameId = frameId;
+	snapshot.nowSeconds = ResidencyClockSeconds();
+	snapshot.policy = m_ResidencyPolicy;
+	snapshot.residentAssets.reserve(m_ResidentAssets.size());
+	for (const auto& [id, asset] : m_ResidentAssets)
+	{
+		if (asset.state == TerraEngine::Resource::ResidencyState::Released)
+		{
+			continue;
+		}
+		snapshot.residentAssets.push_back(asset);
+		if (asset.pinReason != TerraEngine::Resource::ResidencyPinReason::None)
+		{
+			snapshot.pinnedAssetIds.push_back(id);
+		}
+		if (asset.lastUsedFrame == frameId || asset.state == TerraEngine::Resource::ResidencyState::Active)
+		{
+			snapshot.activeAssetIds.push_back(id);
+		}
+	}
+	return snapshot;
+}
+
+std::vector<TerraEngine::Resource::ReleaseRecord> ResourceManager::RunResidencyCleanup(std::uint64_t frameId)
+{
+	TerraEngine::Resource::ResidencyPolicy policy;
+	std::vector<TerraEngine::Resource::ResidentAsset> assets;
+	const double nowSeconds = ResidencyClockSeconds();
+	{
+		std::shared_lock lock(m_ResidencyMutex);
+		policy = m_ResidencyPolicy;
+		if (!policy.enabled || (nowSeconds - m_LastResidencyCleanupSeconds) < policy.cleanupIntervalSeconds)
+		{
+			return {};
+		}
+		assets.reserve(m_ResidentAssets.size());
+		for (const auto& [id, asset] : m_ResidentAssets)
+		{
+			TerraEngine::Resource::ResidentAsset cleanupAsset = asset;
+			// A resource is active for the frame that touched it. On later
+			// cleanup frames it becomes idle unless an explicit pin protects it.
+			if (cleanupAsset.pinReason == TerraEngine::Resource::ResidencyPinReason::None
+				&& cleanupAsset.state == TerraEngine::Resource::ResidencyState::Active
+				&& cleanupAsset.lastUsedFrame != frameId)
+			{
+				cleanupAsset.state = TerraEngine::Resource::ResidencyState::Idle;
+			}
+			assets.push_back(std::move(cleanupAsset));
+		}
+	}
+
+	TerraEngine::Resource::ResidencySnapshot cleanupSnapshot;
+	cleanupSnapshot.frameId = frameId;
+	cleanupSnapshot.nowSeconds = nowSeconds;
+	cleanupSnapshot.policy = policy;
+	cleanupSnapshot.residentAssets = assets;
+	std::vector<TerraEngine::Resource::ReleaseCandidate> candidates = TerraEngine::Resource::BuildReleaseCandidates(cleanupSnapshot);
+	std::vector<TerraEngine::Resource::ReleaseRecord> records;
+	records.reserve(candidates.size());
+	for (const TerraEngine::Resource::ReleaseCandidate& candidate : candidates)
+	{
+		AssetType type = AssetType::Material;
+		{
+			std::shared_lock lock(m_ResidencyMutex);
+			if (auto typeIt = m_ResidentAssetTypes.find(candidate.assetId); typeIt != m_ResidentAssetTypes.end())
+			{
+				type = typeIt->second;
+			}
+		}
+
+		TerraEngine::Resource::ReleaseRecord record;
+		record.frameId = frameId;
+		record.assetId = candidate.assetId;
+		record.assetType = candidate.assetType;
+		record.releaseReason = candidate.releaseReason;
+		record.result = ReleaseResidentResource(candidate.assetId, type, candidate.releaseReason, frameId, candidate.estimatedReclaimableBytes)
+			? TerraEngine::Resource::ResidencyReleaseResult::Released
+			: TerraEngine::Resource::ResidencyReleaseResult::Deferred;
+		record.bytesReclaimed = record.result == TerraEngine::Resource::ResidencyReleaseResult::Released ? candidate.estimatedReclaimableBytes : 0u;
+		record.explanation = record.result == TerraEngine::Resource::ResidencyReleaseResult::Released
+			? "Released CPU cache entry and retired backend resource."
+			: "Release was deferred because the resource could not be detached this frame.";
+		records.push_back(std::move(record));
+	}
+
+	{
+		std::unique_lock lock(m_ResidencyMutex);
+		m_LastResidencyCleanupFrame = frameId;
+		m_LastResidencyCleanupSeconds = nowSeconds;
+		TerraEngine::Resource::ResidencySnapshot diagnosticsSnapshot;
+		diagnosticsSnapshot.frameId = frameId;
+		diagnosticsSnapshot.nowSeconds = nowSeconds;
+		diagnosticsSnapshot.policy = m_ResidencyPolicy;
+		diagnosticsSnapshot.residentAssets = assets;
+		for (const TerraEngine::Resource::ResidentAsset& asset : diagnosticsSnapshot.residentAssets)
+		{
+			if (asset.state == TerraEngine::Resource::ResidencyState::Active)
+			{
+				diagnosticsSnapshot.activeAssetIds.push_back(asset.assetId);
+			}
+			if (asset.pinReason != TerraEngine::Resource::ResidencyPinReason::None)
+			{
+				diagnosticsSnapshot.pinnedAssetIds.push_back(asset.assetId);
+			}
+		}
+		m_ResidencyDiagnostics = TerraEngine::Resource::BuildResidencyDiagnostics(diagnosticsSnapshot, records, m_ResidencyPolicy.diagnosticsEnabled);
+	}
+	return records;
+}
+
+bool ResourceManager::ReleaseResidentResource(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	TerraEngine::Resource::ResidencyReleaseReason reason,
+	std::uint64_t frameId,
+	std::uint64_t candidateBytes)
+{
+	bool detached = false;
+	VisitAssetCache(type, [&](auto& cache) {
+		std::unique_lock lock(cache.mutex);
+		detached = cache.resources.erase(id) > 0u;
+	});
+
+	if (!detached)
+	{
+		return false;
+	}
+
+	RenderSystem::Instance().RetireLoadedResource(id, frameId, "resource-residency");
+	{
+		std::unique_lock lock(m_ResidencyMutex);
+		if (auto it = m_ResidentAssets.find(id); it != m_ResidentAssets.end())
+		{
+			it->second.state = TerraEngine::Resource::ResidencyState::Released;
+			it->second.releaseGeneration += 1u;
+			it->second.lastTouchedReason = std::string(TerraEngine::Resource::ToString(reason));
+			it->second.estimatedCpuBytes = 0u;
+			it->second.estimatedGpuBytes = candidateBytes > it->second.estimatedCpuBytes ? 0u : it->second.estimatedGpuBytes;
+		}
+	}
+	return true;
+}
+
+void ResourceManager::ClearResidencyState()
+{
+	std::unique_lock lock(m_ResidencyMutex);
+	m_ResidentAssets.clear();
+	m_ResidentAssetTypes.clear();
+	m_ResidencyDiagnostics = {};
+	m_LastResidencyCleanupFrame = 0u;
+	m_LastResidencyCleanupSeconds = 0.0;
 }
 
 // ResourceManager::HasResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

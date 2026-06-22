@@ -51,6 +51,8 @@ enum class AssetType {
 	ShaderCollection
 };
 
+#include "Resource/ResourceResidency.h"
+
 // struct ShaderStagePath groups related state and operations so callers have one documented contract.
 struct ShaderStagePath
 {
@@ -167,6 +169,29 @@ public:
 	// Unregister a resource from the cache and trigger any necessary renderer invalidations.
 	void DeleteResource(const TerraEngine::UUID& id, AssetType type);
 
+	// Configure how loaded RAM/VRAM resources leave residency. This policy is
+	// intentionally about live cache contents only; persistent Vulkan or shader
+	// disk caches are backend-owned and stay outside this resource manager.
+	void SetResidencyPolicy(const TerraEngine::Resource::ResidencyPolicy& policy);
+	TerraEngine::Resource::ResidencyPolicy GetResidencyPolicy() const;
+	void SetResidencyDiagnosticsEnabled(bool enabled);
+	TerraEngine::Resource::ResidencyDiagnosticsSummary GetResidencyDiagnosticsSummary() const;
+	bool IsResourceResident(const TerraEngine::UUID& id) const;
+	void TouchResource(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		std::uint64_t frameId,
+		TerraEngine::Resource::ResidencyPinReason reason = TerraEngine::Resource::ResidencyPinReason::None,
+		std::string_view detail = {});
+	void PinResource(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		TerraEngine::Resource::ResidencyPinReason reason,
+		std::string_view detail = {});
+	void UnpinResource(const TerraEngine::UUID& id);
+	TerraEngine::Resource::ResidencySnapshot BuildResidencySnapshot(std::uint64_t frameId) const;
+	std::vector<TerraEngine::Resource::ReleaseRecord> RunResidencyCleanup(std::uint64_t frameId);
+
 	// Check if a resource with the given UUID exists in any of the manager's caches.
 	bool HasResource(const TerraEngine::UUID& id) const;
 
@@ -241,6 +266,10 @@ private:
 		// Futures for tasks that are actively loading. Shared futures let
 		// multiple threads wait without spawning redundant tasks.
 		std::unordered_map<std::string, std::shared_future<TerraEngine::UUID>> inFlight;
+		// Residency metadata lets the generic loader path report the resource
+		// type without each format-specific loader duplicating registration code.
+		AssetType assetType = AssetType::Material;
+		bool tracksResidency = false;
 		mutable std::shared_mutex mutex;
 	};
 
@@ -305,6 +334,33 @@ private:
 	// than inside a mounted archive, so refresh it whenever the asset root moves.
 	void RefreshEditorProjectManifest();
 
+	// RegisterResidencyResource records a loaded cache entry after parsing
+	// succeeds. The source key is kept even after release so future references
+	// can reload the same asset without changing the stable UUID.
+	void RegisterResidencyResource(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		const std::string& sourceKey,
+		std::uint64_t cpuBytes,
+		std::uint64_t gpuBytes,
+		bool reloadable,
+		TerraEngine::Resource::ResidencyState state);
+
+	// EstimateLoadedResourceBytes uses conservative fallback byte counts because
+	// residency cleanup only needs deterministic ordering before specialized
+	// per-format accounting is available.
+	template <typename Resource>
+	std::uint64_t EstimateLoadedResourceBytes(const std::unique_ptr<Resource>& resource) const;
+
+	bool ReleaseResidentResource(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		TerraEngine::Resource::ResidencyReleaseReason reason,
+		std::uint64_t frameId,
+		std::uint64_t candidateBytes);
+
+	void ClearResidencyState();
+
 	ThreadPool& threadPool;
 	std::filesystem::path assetRoot;
 	std::filesystem::path engineRoot;
@@ -317,6 +373,13 @@ private:
 	bool m_RenderDebugEnabled = false;
 	std::string m_ProductName = "TerraEngine";
 	std::string m_Version = "1.0.0";
+	TerraEngine::Resource::ResidencyPolicy m_ResidencyPolicy;
+	TerraEngine::Resource::ResidencyDiagnosticsSummary m_ResidencyDiagnostics;
+	std::unordered_map<TerraEngine::UUID, TerraEngine::Resource::ResidentAsset> m_ResidentAssets;
+	std::unordered_map<TerraEngine::UUID, AssetType> m_ResidentAssetTypes;
+	mutable std::shared_mutex m_ResidencyMutex;
+	std::uint64_t m_LastResidencyCleanupFrame = 0u;
+	double m_LastResidencyCleanupSeconds = 0.0;
 
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;
@@ -338,6 +401,15 @@ inline std::shared_future<TerraEngine::UUID> ResourceManager::MakeReadyFuture(co
 	std::promise<TerraEngine::UUID> promise;
 	promise.set_value(id);
 	return promise.get_future().share();
+}
+
+template <typename Resource>
+std::uint64_t ResourceManager::EstimateLoadedResourceBytes(const std::unique_ptr<Resource>& resource) const
+{
+	// This generic estimate intentionally avoids dereferencing backend-owned
+	// memory. Format-specific loaders can replace it later with exact payload
+	// accounting while cleanup ordering remains deterministic today.
+	return resource ? static_cast<std::uint64_t>(sizeof(Resource)) : 0u;
 }
 
 template <typename Resource>
@@ -450,6 +522,17 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(const std::string& key, Resource
 	if (loadedSuccessfully)
 	{
 		TERRAENGINE_LOG(LogLevel::Debug, "Finalized load for " << key << " (id " << ToHexString(id) << ")");
+		if (cache.tracksResidency)
+		{
+			RegisterResidencyResource(
+				id,
+				cache.assetType,
+				key,
+				EstimateLoadedResourceBytes(cache.resources[id]),
+				0u,
+				true,
+				TerraEngine::Resource::ResidencyState::Active);
+		}
 	}
 	else
 	{

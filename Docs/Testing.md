@@ -53,6 +53,14 @@ be diagnosed directly. The editor suite also checks that closing Scheduler
 Diagnostics disables render graph diagnostic collection with the ECS and
 scripting diagnostic toggles.
 
+The resource residency checks live under `Tests/Engine/Resource` with an editor
+round-trip check under `Tests/Editor/Export`. They validate loaded RAM/VRAM
+cleanup policy defaults, idle release candidates, pin and recent-use protection,
+memory-budget ordering, diagnostics gating, and exported build-profile policy
+serialization. These tests intentionally do not inspect persistent Vulkan or
+pipeline disk caches because those files are backend cache implementation
+details, not loaded resource residency.
+
 For Linux-specific prerequisites and troubleshooting, see
 `Docs/LinuxSupport.md`.
 
@@ -157,4 +165,17 @@ cmake --build out/build/Debug --target TerraEngine-EngineTests
 cmake --build out/build/Debug --target TerraEngine-EditorTests
 ctest --test-dir out/build/Debug --output-on-failure
 cmake --build out/build/Debug --target install
+```
+
+For the RelWithDebInfo residency workflow used by current performance/debug
+work, run the same commands through `VsDevCmd.bat` when the shell is not already
+a Visual Studio Developer shell:
+
+```powershell
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset RelWithDebInfo --target TerraEngine-EngineTests TerraEngine-EditorTests"
+$env:TERRAENGINE_TEST_FILTER="Resource.Residency"
+.\out\build\RelWithDebInfo\TerraEngine-EngineTests.exe
+.\out\build\RelWithDebInfo\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset RelWithDebInfo --target install"
 ```

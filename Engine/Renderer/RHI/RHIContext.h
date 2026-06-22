@@ -12,6 +12,8 @@
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Core/Export.h"
 
+#include <string_view>
+
 class WindowSystem;
 
 // class TERRAENGINE_API groups related state and operations so callers have one documented contract.
@@ -102,6 +104,15 @@ public:
 	virtual void InvalidateTexture(const TerraEngine::UUID& textureId) {}
 	// InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void InvalidateResource(const TerraEngine::UUID& id) {}
+	// RetireLoadedResource is used by RAM/VRAM residency cleanup. The default
+	// backend implementation is conservative and simply invalidates now; APIs
+	// with explicit frame fences can override this to defer physical release.
+	virtual void RetireLoadedResource(const TerraEngine::UUID& id, std::uint64_t frameId, std::string_view debugName)
+	{
+		(void)frameId;
+		(void)debugName;
+		InvalidateResource(id);
+	}
 	// ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void ClearResources() {}
 	virtual void WaitIdle() = 0;

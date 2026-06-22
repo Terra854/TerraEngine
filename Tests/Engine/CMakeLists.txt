@@ -29,6 +29,10 @@ add_executable(TerraEngine-EngineTests
 	Core/TransformTaskGraphTests.cpp
 	Platform/PlatformUtilsTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
+	Resource/ResourceResidencyBudgetTests.cpp
+	Resource/ResourceResidencyDiagnosticsTests.cpp
+	Resource/ResourceResidencyPolicyTests.cpp
+	Resource/ResourceResidencyUsageTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/MockRenderBackendTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererThreadingTestFixtures.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendCompatibilityTests.cpp

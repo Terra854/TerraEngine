@@ -5541,6 +5541,17 @@ void VulkanContext::InvalidateResource(const TerraEngine::UUID& id) {
 	}
 }
 
+void VulkanContext::RetireLoadedResource(const TerraEngine::UUID& id, std::uint64_t frameId, std::string_view debugName) {
+	(void)frameId;
+	(void)debugName;
+	if (impl) {
+		// Vulkan resource residency currently shares the descriptor-safe
+		// invalidation path. Keeping this behind the RHI hook means the engine
+		// can swap in true fence-delayed destruction without changing callers.
+		impl->InvalidateResource(id);
+	}
+}
+
 // VulkanContext::WaitIdle is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::WaitIdle() {
 	if (impl && impl->device) {

@@ -170,6 +170,18 @@ static std::optional<nlohmann::json> LoadProjectRenderSettingsManifest(const std
 	}
 }
 
+static nlohmann::json BuildResidencyPolicyManifest(const BuildProfile& profile)
+{
+	nlohmann::json policy;
+	policy["enabled"] = profile.residencyCleanupEnabled;
+	policy["idleSecondsThreshold"] = profile.residencyIdleSecondsThreshold;
+	policy["memoryBudgetBytes"] = profile.residencyMemoryBudgetMb * 1024ull * 1024ull;
+	policy["cleanupIntervalSeconds"] = profile.residencyCleanupIntervalSeconds;
+	policy["reloadGraceSeconds"] = profile.residencyReloadGraceSeconds;
+	policy["strictBudgetMode"] = profile.residencyStrictBudgetMode;
+	return policy;
+}
+
 // CopyRuntimeShaderTree stages every engine-owned shader into the TEPAK input.
 // Some renderer features still reference shaders from nested editor/history
 // folders, so the export package keeps the complete installed shader layout.
@@ -830,6 +842,7 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		if (std::optional<nlohmann::json> renderSettings = LoadProjectRenderSettingsManifest(projectRoot)) {
 			manifest["renderSettings"] = *renderSettings;
 		}
+		manifest["residencyPolicy"] = BuildResidencyPolicyManifest(profile);
 
 		// Include the asset GUID map so the engine runtime can resolve 
 		// cross-resource references (UUIDs) back to filenames in the archive.

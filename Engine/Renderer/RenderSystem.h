@@ -9,9 +9,11 @@
 #include "Core/SystemBase.h"
 #include "RHI/RHIContext.h"
 #include "Core/Object/ObjectManager.h"
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -46,6 +48,7 @@ public:
 	void ReloadTexture(const TerraEngine::UUID& textureId);
 
 	void DeleteResource(const TerraEngine::UUID& id);
+	void RetireLoadedResource(const TerraEngine::UUID& id, std::uint64_t frameId, std::string_view debugName);
 	
 	void Clear();
 	void SetTaskShaderCullingEnabled(bool enabled);

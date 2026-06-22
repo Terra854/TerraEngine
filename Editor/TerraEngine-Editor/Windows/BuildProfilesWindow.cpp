@@ -236,6 +236,36 @@ void BuildProfilesWindow::DrawProfileEditor() {
 
 	ImGui::Spacing();
 
+	DrawSectionHeader("Resource Residency");
+	if (ImGui::Checkbox("Enable Loaded Resource Cleanup", &profile.residencyCleanupEnabled)) {
+		profile.isDirty = true;
+	}
+	float idleSeconds = static_cast<float>(profile.residencyIdleSecondsThreshold);
+	if (ImGui::InputFloat("Idle Seconds", &idleSeconds, 0.5f, 1.0f, "%.2f")) {
+		profile.residencyIdleSecondsThreshold = static_cast<double>(std::max(0.0f, idleSeconds));
+		profile.isDirty = true;
+	}
+	int memoryBudgetMb = static_cast<int>(profile.residencyMemoryBudgetMb);
+	if (ImGui::InputInt("Memory Budget MB (0=off)", &memoryBudgetMb)) {
+		profile.residencyMemoryBudgetMb = static_cast<uint64_t>(std::max(0, memoryBudgetMb));
+		profile.isDirty = true;
+	}
+	float cleanupInterval = static_cast<float>(profile.residencyCleanupIntervalSeconds);
+	if (ImGui::InputFloat("Cleanup Interval Seconds", &cleanupInterval, 0.25f, 1.0f, "%.2f")) {
+		profile.residencyCleanupIntervalSeconds = static_cast<double>(std::max(0.01f, cleanupInterval));
+		profile.isDirty = true;
+	}
+	float reloadGrace = static_cast<float>(profile.residencyReloadGraceSeconds);
+	if (ImGui::InputFloat("Reload Grace Seconds", &reloadGrace, 0.1f, 0.5f, "%.2f")) {
+		profile.residencyReloadGraceSeconds = static_cast<double>(std::max(0.0f, reloadGrace));
+		profile.isDirty = true;
+	}
+	if (ImGui::Checkbox("Strict Budget Mode", &profile.residencyStrictBudgetMode)) {
+		profile.isDirty = true;
+	}
+
+	ImGui::Spacing();
+
 	// TEPAK settings
 	DrawSectionHeader("TEPAK Settings");
 	const char* presetItems[] = { "None", "Fast", "Normal", "Best" };

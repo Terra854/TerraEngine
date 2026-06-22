@@ -63,6 +63,15 @@ struct BuildProfile {
 	/// Additional NativeAOT publish arguments passed verbatim to dotnet publish.
 	std::string additionalPublishArgs;
 
+	/// Controls runtime RAM/VRAM cleanup for loaded resources in exported builds.
+	/// These values do not affect persistent Vulkan or shader disk caches.
+	bool residencyCleanupEnabled = true;
+	double residencyIdleSecondsThreshold = 10.0;
+	uint64_t residencyMemoryBudgetMb = 0;
+	double residencyCleanupIntervalSeconds = 1.0;
+	double residencyReloadGraceSeconds = 0.5;
+	bool residencyStrictBudgetMode = false;
+
 	/// Additional scenes to include in the export (beyond the active scene).
 	std::vector<std::string> includedScenes;
 

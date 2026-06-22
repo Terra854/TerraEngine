@@ -917,6 +917,8 @@ void RenderSystem::Update(float deltaTime)
 		// as a per-renderable contract rather than a unique resource table.
 		renderFrameSnapshot.meshes.push_back({ entry.mesh.meshId, "mesh", true, false });
 		renderFrameSnapshot.materials.push_back({ entry.mesh.materialId, "material", true, false });
+		ResourceManager::Instance().TouchResource(entry.mesh.meshId, AssetType::Mesh, activeRenderFrameId, TerraEngine::Resource::ResidencyPinReason::None, "renderable mesh");
+		ResourceManager::Instance().TouchResource(entry.mesh.materialId, AssetType::Material, activeRenderFrameId, TerraEngine::Resource::ResidencyPinReason::None, "renderable material");
 	}
 	renderFrameSnapshot.lights.reserve(lights.size());
 	for (const LightEntry& light : lights)
@@ -1761,6 +1763,8 @@ void RenderSystem::Update(float deltaTime)
 
 	skyStateDirty = false;
 
+	ResourceManager::Instance().RunResidencyCleanup(activeRenderFrameId);
+
 	ClearOverrideCameras();
 }
 
@@ -1830,6 +1834,17 @@ void RenderSystem::DeleteResource(const TerraEngine::UUID& id)
 	{
 		rhi->WaitIdle();
 		rhi->InvalidateResource(id);
+	}
+}
+
+void RenderSystem::RetireLoadedResource(const TerraEngine::UUID& id, std::uint64_t frameId, std::string_view debugName)
+{
+	if (rhi)
+	{
+		// Residency cleanup is a cache-pressure path, not an editor delete.
+		// Backends can defer physical destruction until submitted frames no
+		// longer reference the resource instead of forcing a device-wide idle.
+		rhi->RetireLoadedResource(id, frameId, debugName);
 	}
 }
 

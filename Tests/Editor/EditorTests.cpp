@@ -20,6 +20,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterPackagingRequestValidationTests(TestRegistry& registry);
 	void RegisterPrefabAuthoringWorkflowTests(TestRegistry& registry);
 	void RegisterProfilerCaptureStoreTests(TestRegistry& registry);
+	void RegisterResidencyPolicyExportTests(TestRegistry& registry);
 	void RegisterSchedulerPlayModeGraphTests(TestRegistry& registry);
 	void RegisterLinuxScriptCompilationTests(TestRegistry& registry);
 	void RegisterLinuxScriptEditorLaunchTests(TestRegistry& registry);
@@ -51,6 +52,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterPackagingRequestValidationTests(registry);
 	TerraEngine::EditorTests::RegisterPrefabAuthoringWorkflowTests(registry);
 	TerraEngine::EditorTests::RegisterProfilerCaptureStoreTests(registry);
+	TerraEngine::EditorTests::RegisterResidencyPolicyExportTests(registry);
 	TerraEngine::EditorTests::RegisterSchedulerPlayModeGraphTests(registry);
 	TerraEngine::EditorTests::RegisterLinuxScriptCompilationTests(registry);
 	TerraEngine::EditorTests::RegisterLinuxScriptEditorLaunchTests(registry);

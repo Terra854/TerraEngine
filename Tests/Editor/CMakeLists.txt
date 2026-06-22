@@ -17,6 +17,7 @@ add_executable(TerraEngine-EditorTests
 	Export/MaterialPreviewContractTests.cpp
 	Export/PackRoundTripTests.cpp
 	Export/PackagingRequestValidationTests.cpp
+	Export/ResidencyPolicyExportTests.cpp
 	Profiling/ProfilerCaptureStoreTests.cpp
 	Project/LinuxScriptCompilationTests.cpp
 	Project/LinuxScriptEditorLaunchTests.cpp
