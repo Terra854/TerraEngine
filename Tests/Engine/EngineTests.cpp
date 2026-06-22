@@ -77,6 +77,7 @@ namespace TerraEngine::Tests {
 	void RegisterUIElementTests(TestRegistry& registry);
 	void RegisterUILayoutEngineTests(TestRegistry& registry);
 	void RegisterUIParserTests(TestRegistry& registry);
+	void RegisterUISystemPreparationTests(TestRegistry& registry);
 	void RegisterUIStyleTests(TestRegistry& registry);
 	void RegisterThreadPoolSingletonTests(TestRegistry& registry);
 	void RegisterWorkerPoolTests(TestRegistry& registry);
@@ -165,6 +166,7 @@ int main() {
 	TerraEngine::Tests::RegisterUIElementTests(registry);
 	TerraEngine::Tests::RegisterUILayoutEngineTests(registry);
 	TerraEngine::Tests::RegisterUIParserTests(registry);
+	TerraEngine::Tests::RegisterUISystemPreparationTests(registry);
 	TerraEngine::Tests::RegisterUIStyleTests(registry);
 
 	return registry.RunAll(std::cout);

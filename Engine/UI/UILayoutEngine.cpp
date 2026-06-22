@@ -70,6 +70,9 @@ void UILayoutEngine::ComputeLayout(const UIElement::Ptr& root, const glm::vec2& 
 		return;
 	}
 
+	// Each layout pass owns a fresh Yoga tree. This keeps worker preparation
+	// safe because cloned UI trees never share temporary layout nodes with live
+	// editor/runtime UI state.
 	YGNodeRef yogaRoot = BuildNodeTree(root);
 	
 	// Force the root element to always occupy the full viewport dimensions

@@ -15,7 +15,10 @@
 #include <optional>
 
 // UILayoutEngine is a thin wrapper around Yoga that translates TerraEngine's
-// CSS-like authored styles into concrete box positions and sizes.
+// CSS-like authored styles into concrete box positions and sizes. Layout work
+// can run on cloned preparation trees, so each call owns its temporary Yoga
+// nodes from BuildNodeTree through ComputeLayout and clears them before return.
+// Never share these nodes with the live UI tree or another worker task.
 class UILayoutEngine
 {
 public:

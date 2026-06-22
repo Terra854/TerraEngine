@@ -2078,12 +2078,27 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 
 	const std::filesystem::path fontLogicalPath = "Fonts/Roboto-Medium.ttf";
 	const std::filesystem::path fontPath = ResourceManager::Instance().ResolveEngineAssetPath(fontLogicalPath);
-	const std::vector<std::uint8_t> fontBytes = ResourceManager::Instance().ReadFileBytes(fontPath);
-	const std::vector<unsigned char> fontAtlasBytes(fontBytes.begin(), fontBytes.end());
-	const UIFontAtlas& fontAtlas = uiTextRenderer.EnsureSignedDistanceFontAtlasFromBytes(fontLogicalPath.generic_string(), fontAtlasBytes, uiFontAtlasPixelHeight);
+	if (!uiFontAtlasSourceLoadAttempted || uiFontAtlasSourcePath != fontPath) {
+		const std::vector<std::uint8_t> fontBytes = ResourceManager::Instance().ReadFileBytes(fontPath);
+		uiFontAtlasSourceBytes.assign(fontBytes.begin(), fontBytes.end());
+		uiFontAtlasSourcePath = fontPath;
+		uiFontAtlasSourceLoadAttempted = true;
+		uiFontAtlasMissingWarned = false;
+	}
+	if (uiFontAtlasSourceBytes.empty()) {
+		if (!uiFontAtlasMissingWarned) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Runtime UI text font is unavailable. Missing or empty font: " << fontPath);
+			uiFontAtlasMissingWarned = true;
+		}
+		return;
+	}
+	const UIFontAtlas& fontAtlas = uiTextRenderer.EnsureSignedDistanceFontAtlasFromBytes(fontLogicalPath.generic_string(), uiFontAtlasSourceBytes, uiFontAtlasPixelHeight);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!fontAtlas.ready || fontAtlas.width <= 0 || fontAtlas.height <= 0 || fontAtlas.pixels.empty()) {
-		TERRAENGINE_LOG(LogLevel::Warning, "Runtime UI text atlas is unavailable. Missing or invalid font: " << fontPath);
+		if (!uiFontAtlasMissingWarned) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Runtime UI text atlas is unavailable. Missing or invalid font: " << fontPath);
+			uiFontAtlasMissingWarned = true;
+		}
 		return;
 	}
 
@@ -4277,7 +4292,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (kEnableHiZMipGeneration) {
 		// Build Hi-Z after the depth attachment contains the final scene depth.
 		// The next frame can then use this stable pyramid for conservative occlusion.
-		impl->GenerateHiZPyramid(cmd, impl->depthImageView);
+		impl->GenerateHiZPyramid(cmd, impl->depthImageView, snapshotSlotIndex);
 	}
 			
 	vkEndCommandBuffer(cmd);
@@ -4488,7 +4503,7 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 		VK_PIPELINE_STAGE_TRANSFER_BIT);
 	TransitionDepthImage(
 		historyDepth.image,
-		VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		VK_ACCESS_SHADER_READ_BIT,
 		VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -4521,7 +4536,7 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 	TransitionDepthImage(
 		historyDepth.image,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		VK_ACCESS_TRANSFER_WRITE_BIT,
 		VK_ACCESS_SHADER_READ_BIT,
 		VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -4540,7 +4555,7 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 }
 
 // VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView) {
+void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView, uint32_t snapshotSlotIndex) {
 	if (cmd == VK_NULL_HANDLE
 		|| depthImage == VK_NULL_HANDLE
 		|| depthView == VK_NULL_HANDLE
@@ -4564,7 +4579,11 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		}
 	}
 
-	const std::size_t descriptorSetCount = static_cast<std::size_t>(MAX_FRAMES_IN_FLIGHT) * static_cast<std::size_t>(hiZ.mipLevels);
+	const uint32_t clampedSnapshotSlot = std::min(snapshotSlotIndex, MAX_RENDER_SNAPSHOTS_PER_FRAME - 1u);
+	const std::size_t descriptorSetCount =
+		static_cast<std::size_t>(MAX_FRAMES_IN_FLIGHT)
+		* static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME)
+		* static_cast<std::size_t>(hiZ.mipLevels);
 	if (hiZDescriptorPool == VK_NULL_HANDLE || hiZDescriptorSets.size() != descriptorSetCount) {
 		if (hiZDescriptorPool != VK_NULL_HANDLE) {
 			// This path is normally hit only after a resize. Wait before
@@ -4608,7 +4627,14 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		}
 	}
 
-	const std::size_t frameDescriptorBase = static_cast<std::size_t>(currentFrame) * static_cast<std::size_t>(hiZ.mipLevels);
+	// Hi-Z can be recorded by multiple render snapshots in one frame, such as
+	// scene view and game view. Each snapshot owns a descriptor range so a later
+	// view never rewrites descriptors already bound into an earlier command
+	// buffer that has not reached vkQueueSubmit yet.
+	const std::size_t frameDescriptorBase =
+		(static_cast<std::size_t>(currentFrame) * static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME)
+			+ static_cast<std::size_t>(clampedSnapshotSlot))
+		* static_cast<std::size_t>(hiZ.mipLevels);
 	if (frameDescriptorBase + hiZ.mipLevels > hiZDescriptorSets.size()) {
 		return;
 	}
@@ -4897,7 +4923,7 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
 	VkDescriptorImageInfo depthInfo{};
-	depthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	depthInfo.imageView = sampledDepthView;
 	depthInfo.sampler = VK_NULL_HANDLE;
 

@@ -14,6 +14,7 @@
 #include "Engine/Core/Scheduling/SystemScheduler.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
+#include "Engine/UI/UISystem.h"
 
 #include <cstddef>
 #include <algorithm>
@@ -100,6 +101,26 @@ namespace
 	{
 		return viewType == RenderViewType::Scene ? "Scene" : "Game";
 	}
+
+	const char* UiPublishStatusText(UISystem::UIPublishStatus status)
+	{
+		switch (status)
+		{
+		case UISystem::UIPublishStatus::Published:
+			return "published";
+		case UISystem::UIPublishStatus::DiscardedStale:
+			return "discarded stale";
+		case UISystem::UIPublishStatus::FailedPreservedPrevious:
+			return "failed, preserved previous";
+		case UISystem::UIPublishStatus::Cancelled:
+			return "cancelled";
+		case UISystem::UIPublishStatus::ShutdownSkipped:
+			return "shutdown skipped";
+		case UISystem::UIPublishStatus::None:
+		default:
+			return "none";
+		}
+	}
 }
 
 SchedulerDiagnosticsWindow::SchedulerDiagnosticsWindow(MainEditorSubsystem* windowOwner)
@@ -114,15 +135,54 @@ void SchedulerDiagnosticsWindow::OnGui()
 		TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
 		ScriptingSystem::SetScriptingDiagnosticsRequested(false);
 		RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false);
+		UISystem::Instance().SetPreparationDiagnosticsRequested(false);
 		return;
 	}
 	TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(true);
 	ScriptingSystem::SetScriptingDiagnosticsRequested(true);
 	RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(true);
+	UISystem::Instance().SetPreparationDiagnosticsRequested(true);
 
 	DrawSchedulerSummary();
 	ImGui::Spacing();
 	DrawScriptingSummary();
+	ImGui::Spacing();
+	ImGui::SeparatorText("UI Preparation");
+	const UISystem::UIPreparationDiagnostics uiDiagnostics = UISystem::Instance().GetLastPreparationDiagnostics();
+	if (!uiDiagnostics.enabled)
+	{
+		ImGui::TextDisabled("Waiting for UI preparation diagnostics.");
+	}
+	else if (ImGui::BeginTable("SchedulerDiagnosticsUiPreparation", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Docs");
+		ImGui::TableSetupColumn("Requests");
+		ImGui::TableSetupColumn("Inline");
+		ImGui::TableSetupColumn("Worker");
+		ImGui::TableSetupColumn("Ready");
+		ImGui::TableSetupColumn("Published");
+		ImGui::TableSetupColumn("Discarded");
+		ImGui::TableSetupColumn("Last");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::Text("%zu", uiDiagnostics.documentsVisited);
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Text("%zu", uiDiagnostics.requestsScheduled);
+		ImGui::TableSetColumnIndex(2);
+		ImGui::Text("%zu", uiDiagnostics.inlinePreparations);
+		ImGui::TableSetColumnIndex(3);
+		ImGui::Text("%zu", uiDiagnostics.workerPreparations);
+		ImGui::TableSetColumnIndex(4);
+		ImGui::Text("%zu", uiDiagnostics.readyResultsIntegrated);
+		ImGui::TableSetColumnIndex(5);
+		ImGui::Text("%zu", uiDiagnostics.publishedResults);
+		ImGui::TableSetColumnIndex(6);
+		ImGui::Text("%zu stale / %zu failed", uiDiagnostics.staleResultsDiscarded, uiDiagnostics.failedResultsPreserved);
+		ImGui::TableSetColumnIndex(7);
+		ImGui::TextUnformatted(UiPublishStatusText(uiDiagnostics.lastPublishStatus));
+		ImGui::EndTable();
+	}
 	ImGui::Spacing();
 	DrawRenderGraphSummary();
 	ImGui::Spacing();
@@ -134,6 +194,7 @@ bool SchedulerDiagnosticsWindow::OnCloseRequested()
 	TerraEngine::Scheduling::SetEcsGraphFrameDiagnosticsRequested(false);
 	ScriptingSystem::SetScriptingDiagnosticsRequested(false);
 	RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false);
+	UISystem::Instance().SetPreparationDiagnosticsRequested(false);
 	return true;
 }
 

@@ -503,7 +503,7 @@ struct VulkanContext::Impl {
 			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImageView depthView);
 			void RestoreDepthForAttachment(VkCommandBuffer cmd);
 			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, uint32_t viewIndex, const glm::mat4& viewProjection);
-			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView);
+			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView, uint32_t snapshotSlotIndex);
 			bool GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
@@ -541,6 +541,7 @@ struct VulkanContext::Impl {
 	uint32_t AllocateBufferIndex();
 	void UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
 	void UpdateGlobalHiZ(const VulkanHiZ& hiZ);
+	void WaitForDescriptorMutationIdle();
 
 	uint32_t AllocateMaterialIndex();
 
@@ -644,6 +645,10 @@ struct VulkanContext::Impl {
 	int uiFontAtlasWidth = 0;
 	int uiFontAtlasHeight = 0;
 	float uiFontAtlasPixelHeight = 48.0f;
+	std::vector<unsigned char> uiFontAtlasSourceBytes;
+	std::filesystem::path uiFontAtlasSourcePath;
+	bool uiFontAtlasSourceLoadAttempted = false;
+	bool uiFontAtlasMissingWarned = false;
 	UIRenderer uiTextRenderer;
 
 	// Re-usable UI buffers (resized dynamically)

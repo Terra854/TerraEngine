@@ -1028,6 +1028,11 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 	shadowCacheEntries.clear();
 	auto it = meshCache.find(meshId);
 	if (it != meshCache.end()) {
+		// Pending command buffers can still reference the mesh-local descriptor
+		// sets and bindless buffer slot while a project reload is invalidating
+		// resources. Wait once before mutating or freeing any descriptor-backed
+		// state owned by this mesh.
+		WaitForDescriptorMutationIdle();
 		// Clear bindless buffer slot
 		UpdateGlobalBuffer(it->second.bindlessIndex, VK_NULL_HANDLE, 0, 0);
 		freeBufferIndices.push_back(it->second.bindlessIndex);
@@ -1074,6 +1079,10 @@ void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (it->second.image == defaultTexture.image) return;
 
+		// Texture reloads update bindless descriptors and destroy old image
+		// views. Wait for submitted command buffers before those descriptors can
+		// point at replacement resources.
+		WaitForDescriptorMutationIdle();
 		vkDestroySampler(device, it->second.sampler, nullptr);
 		vkDestroyImageView(device, it->second.view, nullptr);
 		vmaDestroyImage(allocator, it->second.image, it->second.allocation);
@@ -2779,13 +2788,13 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		}
 
 		// The history image starts readable so descriptor sets can be populated
-		// immediately; the validity bit prevents GTAO from sampling it until a
-		// completed scene pass has copied real depth into the slot.
+		// immediately; it is sampled like a texture, not used as a depth
+		// attachment, so keep it in shader-read layout between transfer writes.
 		VkCommandBuffer transitionCommandBuffer = BeginSingleTimeCommands();
 		VkImageMemoryBarrier barrier{};
 		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		barrier.image = image.image;
@@ -4131,6 +4140,8 @@ uint32_t VulkanContext::Impl::AllocateMaterialIndex() {
 
 // VulkanContext::Impl::UpdateGlobalTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalTexture(uint32_t index, const VulkanImage& image) {
+	WaitForDescriptorMutationIdle();
+
 	VkDescriptorImageInfo imageInfo{};
 	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	imageInfo.imageView = image.view;
@@ -4167,6 +4178,8 @@ uint32_t VulkanContext::Impl::AllocateBufferIndex() {
 
 // VulkanContext::Impl::UpdateGlobalBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range) {
+	WaitForDescriptorMutationIdle();
+
 	VkDescriptorBufferInfo bufferInfo{};
 	bufferInfo.buffer = buffer;
 	bufferInfo.offset = offset;
@@ -4190,6 +4203,7 @@ void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 // VulkanContext::Impl::UpdateGlobalHiZ is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalHiZ(const VulkanHiZ& hiZ) {
 	if (hiZ.fullView == VK_NULL_HANDLE) return;
+	WaitForDescriptorMutationIdle();
 
 	VkDescriptorImageInfo imageInfo{};
 	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -4218,4 +4232,17 @@ void VulkanContext::Impl::UpdateGlobalHiZ(const VulkanHiZ& hiZ) {
 
 		vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 	}
+}
+
+void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
+	if (!initialized || device == VK_NULL_HANDLE || graphicsQueue == VK_NULL_HANDLE) {
+		return;
+	}
+
+	// Global bindless sets and mesh-local descriptor sets are persistent across
+	// frame slots. Project open/reload can update or free them outside the
+	// normal BeginFrame fence cadence, so wait for submitted graphics work
+	// before mutating descriptors that already-recorded command buffers may
+	// reference.
+	vkQueueWaitIdle(graphicsQueue);
 }

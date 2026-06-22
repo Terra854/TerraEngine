@@ -83,6 +83,7 @@ add_executable(TerraEngine-EngineTests
 	UI/UIElementTests.cpp
 	UI/UILayoutEngineTests.cpp
 	UI/UIParserTests.cpp
+	UI/UISystemPreparationTests.cpp
 	UI/UIStyleTests.cpp
 	${CMAKE_SOURCE_DIR}/Engine/Resource/MaterialRuntimeContract.cpp
 )

@@ -86,6 +86,13 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 		{
 			return;
 		}
+		if (ScriptingSystem::Instance().IsRunning())
+		{
+			// Play mode runs against a temporary scene snapshot. Runtime script
+			// changes, spawned objects, and deferred mutation queue flushes should
+			// be discarded on Stop instead of marking the authored scene file dirty.
+			return;
+		}
 		if (m_IsPrefabEditingMode)
 		{
 			m_PrefabEditingDirty = true;

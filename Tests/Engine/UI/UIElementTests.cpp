@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "UI/UIElement.h"
+#include "UI/UISystem.h"
 
 #include <cmath>
 #include <string>
@@ -97,6 +98,10 @@ namespace TerraEngine::Tests {
 			context.Expect(clone->children[0]->HasClass("cta"), "Clone should preserve child classes.");
 			context.Expect(clone->children[0]->inlineStyle.opacity.has_value() && NearlyEqual(*clone->children[0]->inlineStyle.opacity, 0.5f), "Clone should preserve inline style values.");
 			context.Expect(clone->children[0]->computedStyle.opacity.has_value() && NearlyEqual(*clone->children[0]->computedStyle.opacity, 0.25f), "Clone should preserve computed style values.");
+			context.ExpectEqual(
+				static_cast<unsigned int>(UISystem::CountElementTree(root)),
+				static_cast<unsigned int>(UISystem::CountElementTree(clone)),
+				"Worker-safe cloned trees should preserve deterministic preparation counts.");
 		});
 
 		registry.Add("Engine.UIElement.VisibilityAndHoverAnimationUpdateDisplayStyle", [](TestContext& context) {
