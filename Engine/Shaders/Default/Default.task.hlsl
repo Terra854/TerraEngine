@@ -167,9 +167,24 @@ bool IsOccluded(const float3 centerWorld, const float radiusWorld, const FrameCu
 		return false;
 	}
 	
-	// Conservative closest point in depth. Clamp to [0, 1] so the comparison matches Vulkan ZO depth.
-	float meshletClosestDepth = saturate(centerNdc.z - (radiusWorld / max(centerClip.w, 1e-6f)));
-	float occlusionBias = max(epsilon, 1e-4f);
+	// Project the point on the bounding sphere closest to the camera instead
+	// of subtracting a linear radius from clip depth. That keeps the test
+	// conservative under perspective and prevents meshlets from hiding
+	// themselves when the previous frame's Hi-Z pyramid contains the same mesh.
+	float3 cameraToCenter = centerWorld - frameData.cameraPositionAndEpsilon.xyz;
+	float cameraDistanceSq = dot(cameraToCenter, cameraToCenter);
+	if (cameraDistanceSq <= radiusWorld * radiusWorld)
+	{
+		return false;
+	}
+	float3 closestWorld = centerWorld - cameraToCenter * (radiusWorld * rsqrt(max(cameraDistanceSq, 1e-12f)));
+	float4 closestClip = mul(SceneUniforms.viewProj, float4(closestWorld, 1.0f));
+	if (closestClip.w <= 0.0f)
+	{
+		return false;
+	}
+	float meshletClosestDepth = saturate(closestClip.z / closestClip.w);
+	float occlusionBias = max(epsilon * 4.0f, 0.002f);
 	
 	// Occluded if the nearest point on the meshlet is still deeper than occluders in the Hi-Z region.
 	return meshletClosestDepth > (furthestDepth + occlusionBias);

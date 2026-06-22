@@ -898,7 +898,15 @@ namespace TerraEngine.Export.Generator
 			source.AppendLine("\t\t\t\tGeneratedScriptRegistry.ScriptHandleRecord? record = GeneratedScriptRegistry.GetHandleRecord(item.Handle);");
 			source.AppendLine("\t\t\t\tif (record != null)");
 			source.AppendLine("\t\t\t\t{");
-			source.AppendLine("\t\t\t\t\trecord.Instance.DispatchFrame(item.DeltaTime);");
+			source.AppendLine("\t\t\t\t\tglobal::TerraEngine.InternalCalls.PushScriptDispatchContext(item.ObjectId, IntPtr.Zero, item.FrameOrder, item.WorkerDispatch, 1, item.ObjectGeneration, item.ComponentGeneration, item.BindingGeneration);");
+			source.AppendLine("\t\t\t\t\ttry");
+			source.AppendLine("\t\t\t\t\t{");
+			source.AppendLine("\t\t\t\t\t\trecord.Instance.DispatchFrame(item.DeltaTime);");
+			source.AppendLine("\t\t\t\t\t}");
+			source.AppendLine("\t\t\t\t\tfinally");
+			source.AppendLine("\t\t\t\t\t{");
+			source.AppendLine("\t\t\t\t\t\tglobal::TerraEngine.InternalCalls.PopScriptDispatchContext();");
+			source.AppendLine("\t\t\t\t\t}");
 			source.AppendLine("\t\t\t\t}");
 			source.AppendLine("\t\t\t}");
 			source.AppendLine("\t\t}");

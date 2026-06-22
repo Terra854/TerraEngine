@@ -130,6 +130,11 @@ static const float kDirectionalShadowBias = 0.0015f;
 static const float kSpotShadowBias = 0.0020f;
 static const float kPointShadowBias = 0.0050f;
 static const float kAreaShadowBias = 0.0020f;
+// Microfacet BRDFs become undefined at exactly-zero roughness because the
+// normal-distribution term can evaluate 0 / 0. Keep a tiny floor so polished
+// materials still look sharp without producing optimized-build NaNs.
+static const float kMinimumPerceptualRoughness = 0.045f;
+static const uint kMaxBindlessTextureCount = 1024u;
 // Match the sky system rule: once the sun is roughly ten degrees below the
 // horizon, direct sunlight should no longer illuminate scene geometry.
 static const float kDirectionalLightNightHeight = -0.17364818f;
@@ -139,18 +144,43 @@ static const float kDirectionalLightNightHeight = -0.17364818f;
 static const float kLocalIndirectWrap = 0.55f;
 static const float kLocalIndirectStrength = 0.24f;
 static const float kLocalIndirectMaxMultiplier = 16.0f;
+float3 SafeNormalize(float3 value, float3 fallback)
+{
+	const float lenSq = dot(value, value);
+	if (lenSq <= 1e-8f || !all(isfinite(value)))
+	{
+		return fallback;
+	}
+	return value * rsqrt(lenSq);
+}
+
 static const float kLocalIndirectBounceFloor = 0.12f;
 
 float3 BuildLightingNormal(float3 vertexNormal, float3 worldPosition, float2 uv, float3 sampledNormal, float normalScale, float4 bakedTangent)
 {
-	const float3 n = normalize(vertexNormal);
-	const float3 t = normalize(bakedTangent.xyz);
-	const float3 b = normalize(cross(n, t) * bakedTangent.w);
+	const float3 n = SafeNormalize(vertexNormal, float3(0.0f, 1.0f, 0.0f));
+	const float3 fallbackTangentSeed = abs(n.y) < 0.999f
+		? float3(0.0f, 1.0f, 0.0f)
+		: float3(1.0f, 0.0f, 0.0f);
+	const float3 fallbackTangent = SafeNormalize(cross(fallbackTangentSeed, n), float3(1.0f, 0.0f, 0.0f));
+	const float3 orthogonalTangent = bakedTangent.xyz - n * dot(bakedTangent.xyz, n);
+	const float3 t = SafeNormalize(orthogonalTangent, fallbackTangent);
+	const float tangentSign = bakedTangent.w < 0.0f ? -1.0f : 1.0f;
+	const float3 b = SafeNormalize(cross(n, t) * tangentSign, SafeNormalize(cross(n, fallbackTangent), float3(0.0f, 0.0f, 1.0f)));
 	const float3x3 tbn = float3x3(t, b, n);
 
-	const float3 unpackedNormal = sampledNormal * 2.0f - 1.0f;
-	const float3 scaledNormal = normalize(lerp(float3(0.0, 0.0, 1.0), unpackedNormal, saturate(normalScale)));
-	return normalize(mul(scaledNormal, tbn));
+	// Some generated or imported meshes do not have a valid tangent basis. A
+	// release shader that normalizes a zero or parallel tangent can produce NaN
+	// lighting, which shows up as optimized/export-only speckled pixels. Fall
+	// back to the geometric normal whenever the sampled normal or TBN output is
+	// not finite.
+	float3 unpackedNormal = sampledNormal * 2.0f - 1.0f;
+	if (!all(isfinite(unpackedNormal)) || dot(unpackedNormal, unpackedNormal) <= 1e-8f)
+	{
+		unpackedNormal = float3(0.0f, 0.0f, 1.0f);
+	}
+	const float3 scaledNormal = SafeNormalize(lerp(float3(0.0f, 0.0f, 1.0f), unpackedNormal, saturate(normalScale)), float3(0.0f, 0.0f, 1.0f));
+	return SafeNormalize(mul(scaledNormal, tbn), n);
 }
 
 uint ComputeClusterIndex(PSIn input, FrameCullingData frame)
@@ -161,16 +191,6 @@ uint ComputeClusterIndex(PSIn input, FrameCullingData frame)
 	const uint y = min((uint)((input.position.y / viewport.y) * gridDim.y), gridDim.y - 1u);
 	const uint z = min((uint)(saturate(input.position.z) * gridDim.z), gridDim.z - 1u);
 	return x + y * gridDim.x + z * (gridDim.x * gridDim.y);
-}
-
-float3 SafeNormalize(float3 value, float3 fallback)
-{
-	const float lenSq = dot(value, value);
-	if (lenSq <= 1e-8f)
-	{
-		return fallback;
-	}
-	return value * rsqrt(lenSq);
 }
 
 float ComputePointAttenuation(GPULight light, float3 worldPosition)
@@ -192,9 +212,18 @@ float ComputePointAttenuation(GPULight light, float3 worldPosition)
 
 float SampleShadowPCF(Texture2D shadowMap, SamplerState shadowSampler, float2 uv, float depthNdc, float bias, uint filterSize, float2 texelSize)
 {
+	if (!all(isfinite(uv)) || !isfinite(depthNdc))
+	{
+		return 1.0f;
+	}
+
 	if (filterSize <= 1u)
 	{
 		const float shadowDepth = shadowMap.Sample(shadowSampler, uv).r;
+		if (!isfinite(shadowDepth))
+		{
+			return 1.0f;
+		}
 		return (depthNdc - bias) <= shadowDepth ? 1.0f : 0.0f;
 	}
 
@@ -208,6 +237,12 @@ float SampleShadowPCF(Texture2D shadowMap, SamplerState shadowSampler, float2 uv
 		{
 			const float2 offset = float2((float)x, (float)y) * texelSize;
 			const float tapDepth = shadowMap.Sample(shadowSampler, uv + offset).r;
+			if (!isfinite(tapDepth))
+			{
+				weight += 1.0f;
+				visibility += 1.0f;
+				continue;
+			}
 			visibility += (depthNdc - bias) <= tapDepth ? 1.0f : 0.0f;
 			weight += 1.0f;
 		}
@@ -272,7 +307,7 @@ float SampleDirectionalShadow(GPULight light, FrameCullingData frame, float3 wor
 	}
 
 	const uint shadowTextureIndex = (uint)(light.shadowAndPadding.y + 0.5f);
-	const uint nonUniformIndex = NonUniformResourceIndex(shadowTextureIndex);
+	const uint nonUniformIndex = NonUniformResourceIndex(min(shadowTextureIndex, kMaxBindlessTextureCount - 1u));
 	const float res = (float)frame.renderSettings0.x;
 	const float2 texelSize = 1.0f / max(res, 512.0f);
 	return SampleProjectedShadowMap(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], light, frame, worldPosition, kDirectionalShadowBias, texelSize);
@@ -286,7 +321,7 @@ float SampleSpotShadow(GPULight light, FrameCullingData frame, float3 worldPosit
 	}
 
 	const uint shadowTextureIndex = (uint)(light.shadowAndPadding.y + 0.5f);
-	const uint nonUniformIndex = NonUniformResourceIndex(shadowTextureIndex);
+	const uint nonUniformIndex = NonUniformResourceIndex(min(shadowTextureIndex, kMaxBindlessTextureCount - 1u));
 	const float res = (float)frame.renderSettings0.x;
 	const float2 texelSize = 1.0f / max(res, 512.0f);
 	return SampleProjectedShadowMap(globalTextures[nonUniformIndex], globalSamplers[nonUniformIndex], light, frame, worldPosition, kSpotShadowBias, texelSize);
@@ -304,6 +339,10 @@ float SamplePointShadow(GPULight light, float3 worldPosition)
 	const uint shadowSlot = min((uint)(light.shadowAndPadding.y + 0.5f), kMaxShadowResourceSlots - 1u);
 	const uint nonUniformSlot = NonUniformResourceIndex(shadowSlot);
 	const float sampledDepth = pointShadowCubes[nonUniformSlot].Sample(pointShadowSampler, sampleDir).r;
+	if (!isfinite(sampledDepth))
+	{
+		return 1.0f;
+	}
 	const float faceForwardDistance = max(max(abs(toPoint.x), abs(toPoint.y)), abs(toPoint.z));
 	const float range = max(light.directionAndRange.w, 0.1f);
 	const float depthNdc = ComputePerspectiveShadowDepth01(faceForwardDistance, range);
@@ -319,7 +358,7 @@ float SampleAreaShadow(GPULight light, FrameCullingData frame, float3 worldPosit
 	}
 
 	const uint shadowTextureIndex = (uint)(light.shadowAndPadding.y + 0.5f);
-	const uint nonUniformIndex = NonUniformResourceIndex(shadowTextureIndex);
+	const uint nonUniformIndex = NonUniformResourceIndex(min(shadowTextureIndex, kMaxBindlessTextureCount - 1u));
 	const float range = max(light.directionAndRange.w, 0.1f);
 	const float width = max(light.coneAnglesAndArea.z, 0.1f);
 	const float height = max(light.coneAnglesAndArea.w, 0.1f);
@@ -331,6 +370,15 @@ float SampleAreaShadow(GPULight light, FrameCullingData frame, float3 worldPosit
 
 float ComputeShadowFactor(GPULight light, FrameCullingData frame, float3 worldPosition)
 {
+	// Manual debug switch for shadow isolation. It defaults off so runtime
+	// builds sample the real shadow maps, while a future release-only issue can
+	// still force fully open visibility without changing CPU shadow submission.
+	static const bool kForceOpenShadowsForArtifactIsolation = false;
+	if (kForceOpenShadowsForArtifactIsolation)
+	{
+		return 1.0f;
+	}
+
 	const uint lightType = (uint)(light.positionAndType.w + 0.5);
 	float rawVisibility = 1.0f;
 	if (lightType == kLightTypeDirectional)
@@ -358,14 +406,16 @@ float ComputeShadowFactor(GPULight light, FrameCullingData frame, float3 worldPo
 
 float D_GGX(float nDotH, float roughness)
 {
+	roughness = max(roughness, kMinimumPerceptualRoughness);
 	float a = roughness * roughness;
 	float a2 = a * a;
 	float d = (nDotH * a2 - nDotH) * nDotH + 1.0;
-	return a2 / (kPi * d * d);
+	return a2 / max(kPi * d * d, 1e-8f);
 }
 
 float V_SmithJointSchlick(float nDotL, float nDotV, float roughness)
 {
+	roughness = max(roughness, kMinimumPerceptualRoughness);
 	float a = roughness * roughness;
 	float ggxV = nDotL * (nDotV * (1.0 - a) + a);
 	float ggxL = nDotV * (nDotL * (1.0 - a) + a);
@@ -600,7 +650,8 @@ float SampleScreenAmbientOcclusion(PSIn input, FrameCullingData frame)
 	const int2 pixel = clamp(int2(input.position.xy), int2(0, 0), maxPixel);
 	// The AO pass stores visibility, not darkness: 1 means fully open and
 	// lower values mean nearby depth created contact occlusion.
-	return saturate(ambientOcclusionTexture.Load(uint3(uint2(pixel), 0)));
+	const float visibility = ambientOcclusionTexture.Load(uint3(uint2(pixel), 0));
+	return isfinite(visibility) ? saturate(visibility) : 1.0f;
 }
 
 float3 BuildHeatmapColor(float normalizedLightCount)
@@ -619,7 +670,11 @@ float4 main(PSIn input) : SV_Target0
 	const MaterialData mat = allMaterials[SceneUniforms.materialIndex];
 	const float2 uv = input.uv * mat.UVTransform.xy + mat.UVTransform.zw;
 
-	const float4 baseColorSample = globalTextures[NonUniformResourceIndex(mat.BaseColorTextureIndex)].Sample(globalSamplers[NonUniformResourceIndex(mat.BaseColorTextureIndex)], uv);
+	float4 baseColorSample = globalTextures[NonUniformResourceIndex(min(mat.BaseColorTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.BaseColorTextureIndex, kMaxBindlessTextureCount - 1u))], uv);
+	if (!all(isfinite(baseColorSample)))
+	{
+		baseColorSample = float4(1.0f, 1.0f, 1.0f, 1.0f);
+	}
 	const float4 finalColor = baseColorSample * mat.BaseColorFactor;
 	if (mat.AlphaMode == 1u)
 	{
@@ -633,12 +688,25 @@ float4 main(PSIn input) : SV_Target0
 		return float4(0.0f, 0.0f, 0.0f, 1.0f);
 	}
 
-	const float3 sampledNormal = globalTextures[NonUniformResourceIndex(mat.NormalTextureIndex)].Sample(globalSamplers[NonUniformResourceIndex(mat.NormalTextureIndex)], uv).rgb;
-	const float4 maskSample = globalTextures[NonUniformResourceIndex(mat.MaskTextureIndex)].Sample(globalSamplers[NonUniformResourceIndex(mat.MaskTextureIndex)], uv);
-	const float roughness = saturate(maskSample.g * mat.RoughnessFactor);
+	float3 sampledNormal = globalTextures[NonUniformResourceIndex(min(mat.NormalTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.NormalTextureIndex, kMaxBindlessTextureCount - 1u))], uv).rgb;
+	if (!all(isfinite(sampledNormal)))
+	{
+		sampledNormal = float3(0.5f, 0.5f, 1.0f);
+	}
+	float4 maskSample = globalTextures[NonUniformResourceIndex(min(mat.MaskTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.MaskTextureIndex, kMaxBindlessTextureCount - 1u))], uv);
+	if (!all(isfinite(maskSample)))
+	{
+		maskSample = float4(1.0f, 1.0f, 0.0f, 1.0f);
+	}
+	const float roughness = max(saturate(maskSample.g * mat.RoughnessFactor), kMinimumPerceptualRoughness);
 	const float metallic = saturate(maskSample.b * mat.MetallicFactor);
 	const float authoredOcclusion = lerp(1.0f, maskSample.r, saturate(mat.OcclusionStrength));
-	const float3 emissive = globalTextures[NonUniformResourceIndex(mat.EmissiveTextureIndex)].Sample(globalSamplers[NonUniformResourceIndex(mat.EmissiveTextureIndex)], uv).rgb * mat.EmissiveFactor.rgb;
+	float3 emissiveSample = globalTextures[NonUniformResourceIndex(min(mat.EmissiveTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.EmissiveTextureIndex, kMaxBindlessTextureCount - 1u))], uv).rgb;
+	if (!all(isfinite(emissiveSample)))
+	{
+		emissiveSample = float3(0.0f, 0.0f, 0.0f);
+	}
+	const float3 emissive = emissiveSample * mat.EmissiveFactor.rgb;
 
 	if (mat.ShadingModel == kShadingModel_Unlit)
 	{
@@ -649,10 +717,35 @@ float4 main(PSIn input) : SV_Target0
 	const FrameCullingData frame = frameCullingData[statsIndex];
 	const uint lightCount = frame.clusterGridAndLightCount.w;
 	const float3 normal = BuildLightingNormal(input.normal, input.worldPosition, uv, sampledNormal, mat.NormalScale, input.tangent);
-	const float3 viewDir = normalize(frame.cameraPositionAndEpsilon.xyz - input.worldPosition);
+	const float3 viewDir = SafeNormalize(frame.cameraPositionAndEpsilon.xyz - input.worldPosition, float3(0.0f, 0.0f, 1.0f));
 	const uint clusterIndex = ComputeClusterIndex(input, frame);
-	const ClusterData cluster = clusterGrid[SceneUniforms.clusterDataOffset + clusterIndex];
-	const bool clusteredLightingAvailable = frame.clusteredLightingValid > 0u && frame.clusteredLightingOverflowed == 0u;
+	ClusterData cluster;
+	cluster.offset = 0u;
+	cluster.count = 0u;
+	cluster.padding = uint2(0u, 0u);
+	cluster.minBounds = float3(0.0f, 0.0f, 0.0f);
+	cluster.minBoundsPadding = 0.0f;
+	cluster.maxBounds = float3(0.0f, 0.0f, 0.0f);
+	cluster.maxBoundsPadding = 0.0f;
+	bool clusteredLightingAvailable = frame.clusteredLightingValid > 0u && frame.clusteredLightingOverflowed == 0u;
+	// Clustered lighting is an optimization. Validate the computed range before
+	// sampling the flat light-index buffer so any stale or partially written
+	// cluster metadata falls back to the full light list instead of corrupting
+	// isolated pixels.
+	if (clusteredLightingAvailable)
+	{
+		cluster = clusterGrid[SceneUniforms.clusterDataOffset + clusterIndex];
+		const uint3 clusterGridDim = max(frame.clusterGridAndLightCount.xyz, uint3(1u, 1u, 1u));
+		const uint clusterCount = clusterGridDim.x * clusterGridDim.y * clusterGridDim.z;
+		const uint clusterLightRangeLimit = clusterCount * lightCount;
+		const uint remainingClusterLights = cluster.offset <= clusterLightRangeLimit
+			? (clusterLightRangeLimit - cluster.offset)
+			: 0u;
+		const bool clusterRangeValid = cluster.count <= lightCount
+			&& cluster.offset <= clusterLightRangeLimit
+			&& cluster.count <= remainingClusterLights;
+		clusteredLightingAvailable = clusterRangeValid;
+	}
 
 	float3 lighting = float3(0.0, 0.0, 0.0);
 	uint evaluatedLightCount = 0u;
@@ -719,5 +812,10 @@ float4 main(PSIn input) : SV_Target0
 		finalLighting += EvaluateIBL(frame, normal, viewDir, finalColor.rgb, metallic, roughness, indirectOcclusion);
 	}
 
-	return float4(ApplyEditorTint(finalLighting + emissive), finalColor.a);
+	float3 outputColor = finalLighting + emissive;
+	if (!all(isfinite(outputColor)))
+	{
+		outputColor = finalColor.rgb;
+	}
+	return float4(ApplyEditorTint(max(outputColor, float3(0.0f, 0.0f, 0.0f))), finalColor.a);
 }

@@ -2026,6 +2026,9 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 			void* data = nullptr;
 			vmaMapMemory(allocator, uiStaticVertexBuffer.allocation, &data);
 			memcpy(data, quadVertices.data(), bufferSize);
+			// CPU_TO_GPU allocations are not guaranteed to be host-coherent on
+			// every driver. Flush the exact UI vertex range before Vulkan reads it.
+			vmaFlushAllocation(allocator, uiStaticVertexBuffer.allocation, 0, bufferSize);
 			vmaUnmapMemory(allocator, uiStaticVertexBuffer.allocation);
 
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, staticUiPipeline);
@@ -2114,6 +2117,9 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 		void* stagingData = nullptr;
 		vmaMapMemory(allocator, stagingBuffer.allocation, &stagingData);
 		memcpy(stagingData, fontAtlas.pixels.data(), static_cast<std::size_t>(imageSize));
+		// Font atlas staging can also use non-coherent host-visible memory in
+		// optimized builds, so flush before copying into the GPU-only image.
+		vmaFlushAllocation(allocator, stagingBuffer.allocation, 0, imageSize);
 		vmaUnmapMemory(allocator, stagingBuffer.allocation);
 
 		VkImageCreateInfo imageInfo{};
@@ -2255,6 +2261,9 @@ void VulkanContext::Impl::RenderUI(VkCommandBuffer cmd, const UIRenderBatch& bat
 	void* textData = nullptr;
 	vmaMapMemory(allocator, uiSdfVertexBuffer.allocation, &textData);
 	memcpy(textData, textVertices.data(), textBufferSize);
+	// SDF text vertices are written by the CPU and consumed by the GPU in the
+	// same submitted command buffer, so make the mapped writes explicitly visible.
+	vmaFlushAllocation(allocator, uiSdfVertexBuffer.allocation, 0, textBufferSize);
 	vmaUnmapMemory(allocator, uiSdfVertexBuffer.allocation);
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sdfTextPipeline);
@@ -2837,9 +2846,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			return module;
 		};
 
-		auto CreateComputePipeline = [&](VkPipeline& pipeline, const char* shaderPath) {
+		auto CreateComputePipelineWithLayout = [&](VkPipeline& pipeline, VkPipelineLayout layout, const char* shaderPath) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (pipeline != VK_NULL_HANDLE || impl->lightingComputePipelineLayout == VK_NULL_HANDLE) {
+			if (pipeline != VK_NULL_HANDLE || layout == VK_NULL_HANDLE) {
 				return;
 			}
 			VkShaderModule module = LoadShaderModule(shaderPath);
@@ -2857,7 +2866,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			VkComputePipelineCreateInfo pipelineInfo{};
 			pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
 			pipelineInfo.stage = stageInfo;
-			pipelineInfo.layout = impl->lightingComputePipelineLayout;
+			pipelineInfo.layout = layout;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (vkCreateComputePipelines(impl->device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
 				pipeline = VK_NULL_HANDLE;
@@ -2865,16 +2874,113 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			vkDestroyShaderModule(impl->device, module, nullptr);
 		};
 
+		auto CreateComputePipeline = [&](VkPipeline& pipeline, const char* shaderPath) {
+			CreateComputePipelineWithLayout(pipeline, impl->lightingComputePipelineLayout, shaderPath);
+		};
+
+		if (impl->hiZDescriptorSetLayout == VK_NULL_HANDLE) {
+			std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+			bindings[0].binding = 0u;
+			bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			bindings[0].descriptorCount = 1u;
+			bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			bindings[1].binding = 1u;
+			bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			bindings[1].descriptorCount = 1u;
+			bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			VkDescriptorSetLayoutCreateInfo hiZLayoutInfo{};
+			hiZLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+			hiZLayoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+			hiZLayoutInfo.pBindings = bindings.data();
+			// Hi-Z has a tiny private descriptor set so mip generation never
+			// rewrites global bindings that later passes still depend on.
+			if (vkCreateDescriptorSetLayout(impl->device, &hiZLayoutInfo, nullptr, &impl->hiZDescriptorSetLayout) != VK_SUCCESS) {
+				impl->hiZDescriptorSetLayout = VK_NULL_HANDLE;
+			}
+		}
+
+		if (impl->hiZPipelineLayout == VK_NULL_HANDLE && impl->hiZDescriptorSetLayout != VK_NULL_HANDLE) {
+			VkPushConstantRange hiZPushRange{};
+			hiZPushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			hiZPushRange.offset = 0u;
+			hiZPushRange.size = 16u;
+
+			VkPipelineLayoutCreateInfo hiZPipelineLayoutInfo{};
+			hiZPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			hiZPipelineLayoutInfo.setLayoutCount = 1u;
+			hiZPipelineLayoutInfo.pSetLayouts = &impl->hiZDescriptorSetLayout;
+			hiZPipelineLayoutInfo.pushConstantRangeCount = 1u;
+			hiZPipelineLayoutInfo.pPushConstantRanges = &hiZPushRange;
+			// The push constants are source width/height and output width/height.
+			if (vkCreatePipelineLayout(impl->device, &hiZPipelineLayoutInfo, nullptr, &impl->hiZPipelineLayout) != VK_SUCCESS) {
+				impl->hiZPipelineLayout = VK_NULL_HANDLE;
+			}
+		}
+
+		if (impl->aoDescriptorSetLayout == VK_NULL_HANDLE) {
+			std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+			bindings[0].binding = 12u;
+			bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			bindings[0].descriptorCount = 1u;
+			bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			bindings[1].binding = 21u;
+			bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			bindings[1].descriptorCount = 1u;
+			bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			bindings[2].binding = 22u;
+			bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			bindings[2].descriptorCount = 1u;
+			bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			bindings[3].binding = 23u;
+			bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			bindings[3].descriptorCount = 1u;
+			bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			bindings[4].binding = 24u;
+			bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			bindings[4].descriptorCount = 1u;
+			bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			VkDescriptorSetLayoutCreateInfo aoLayoutInfo{};
+			aoLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+			aoLayoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+			aoLayoutInfo.pBindings = bindings.data();
+			// AO compute uses per-snapshot descriptor sets because editor scene,
+			// game, and additional camera passes can be recorded before the GPU
+			// executes them. Rewriting the global descriptor set made optimized
+			// builds sample whichever AO image was updated last.
+			if (vkCreateDescriptorSetLayout(impl->device, &aoLayoutInfo, nullptr, &impl->aoDescriptorSetLayout) != VK_SUCCESS) {
+				impl->aoDescriptorSetLayout = VK_NULL_HANDLE;
+			}
+		}
+
+		if (impl->aoPipelineLayout == VK_NULL_HANDLE && impl->aoDescriptorSetLayout != VK_NULL_HANDLE) {
+			VkPushConstantRange aoPushRange{};
+			aoPushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+			aoPushRange.offset = 0u;
+			aoPushRange.size = 16u;
+
+			VkPipelineLayoutCreateInfo aoPipelineLayoutInfo{};
+			aoPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			aoPipelineLayoutInfo.setLayoutCount = 1u;
+			aoPipelineLayoutInfo.pSetLayouts = &impl->aoDescriptorSetLayout;
+			aoPipelineLayoutInfo.pushConstantRangeCount = 1u;
+			aoPipelineLayoutInfo.pPushConstantRanges = &aoPushRange;
+			if (vkCreatePipelineLayout(impl->device, &aoPipelineLayoutInfo, nullptr, &impl->aoPipelineLayout) != VK_SUCCESS) {
+				impl->aoPipelineLayout = VK_NULL_HANDLE;
+			}
+		}
+
 		CreateComputePipeline(impl->clusterGridComputePipeline, "Shaders/Lighting/ClusterGrid.comp.spv");
 		CreateComputePipeline(impl->clusterDepthMaskComputePipeline, "Shaders/Lighting/ClusterDepthMask.comp.spv");
 		CreateComputePipeline(impl->clusterLightCountComputePipeline, "Shaders/Lighting/ClusterLightCount.comp.spv");
 		CreateComputePipeline(impl->clusterLightPrefixComputePipeline, "Shaders/Lighting/ClusterLightPrefix.comp.spv");
 		CreateComputePipeline(impl->clusterLightFillComputePipeline, "Shaders/Lighting/ClusterLightFill.comp.spv");
 		CreateComputePipeline(impl->lightAnalysisComputePipeline, "Shaders/Lighting/LightCull.comp.spv");
-		CreateComputePipeline(impl->hiZComputePipeline, "Shaders/PostProcess/HiZGenerate.comp.spv");
+		CreateComputePipelineWithLayout(impl->hiZComputePipeline, impl->hiZPipelineLayout, "Shaders/PostProcess/HiZGenerate.comp.spv");
 		CreateComputePipeline(impl->vrsComputePipeline, "Shaders/PostProcess/VRSGenerate.comp.spv");
-		CreateComputePipeline(impl->gtaoComputePipeline, "Shaders/PostProcess/GTAO.comp.spv");
-		CreateComputePipeline(impl->gtaoBlurComputePipeline, "Shaders/PostProcess/GTAOBlur.comp.spv");
+		CreateComputePipelineWithLayout(impl->gtaoComputePipeline, impl->aoPipelineLayout, "Shaders/PostProcess/GTAO.comp.spv");
+		CreateComputePipelineWithLayout(impl->gtaoBlurComputePipeline, impl->aoPipelineLayout, "Shaders/PostProcess/GTAOBlur.comp.spv");
 	};
 
 	EnsureLightingComputePipelines();
@@ -2886,11 +2992,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		&& firstPrimaryPassForFrame
 		&& depthHistory.valid
 		&& MatricesApproximatelyEqual(currentViewProjection, depthHistory.lastViewProjectionMatrix, kDepthHistoryMatrixEpsilon);
-	// Hi-Z occlusion stays disabled until the pyramid build owns descriptor
-	// sets per mip. The old path rewrote one global sampled/storage descriptor
-	// repeatedly while recording a command buffer, which made optimized builds
-	// observe whichever descriptor write happened last at submit time.
-	const bool hiZOcclusionActive = false;
+	const bool hiZPyramidReady = previousDepthMatchesView
+		&& impl->hiZ.image != VK_NULL_HANDLE
+		&& impl->hiZ.fullView != VK_NULL_HANDLE
+		&& impl->hiZ.sampler != VK_NULL_HANDLE
+		&& impl->hiZ.mipLevels > 0u
+		&& impl->hiZComputePipeline != VK_NULL_HANDLE
+		&& impl->hiZPipelineLayout != VK_NULL_HANDLE
+		&& impl->hiZDescriptorSetLayout != VK_NULL_HANDLE;
+	// Keep Hi-Z mip generation active, but do not let the mesh task shader use
+	// it for visibility yet. The current per-meshlet test can self-occlude on
+	// optimized/export builds because the previous frame pyramid contains the
+	// same object; a later object-level or occluder-only culler can safely flip
+	// this back on after it proves conservative behavior.
+	constexpr bool kEnableMeshletHiZOcclusion = false;
+	const bool hiZOcclusionActive = hiZPyramidReady && kEnableMeshletHiZOcclusion;
 
 	FrameCullingDataGPU analysisCullingData{};
 	analysisCullingData.frustumPlanes = BuildFrustumPlanes(currentViewProjection);
@@ -2920,10 +3036,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// Upload artist-facing indirect and contact-darkening controls separately
 	// from integer feature flags so HLSL receives the same type and alignment
 	// that the CPU writes into the frame payload.
+	// Runtime GTAO samples the previous depth buffer before the current scene
+	// pass and publishes an AO image that the same frame samples in material
+	// shading. The current depth-only GTAO implementation still produces
+	// optimized/export-only speckles after it has accumulated runtime history, so
+	// keep it fail-closed until AO owns a dedicated depth-history image instead
+	// of borrowing the live scene depth image. Material occlusion remains active.
+	constexpr bool kEnableRuntimeScreenSpaceAo = false;
+	const bool screenSpaceAoActive = kEnableRuntimeScreenSpaceAo && previousDepthMatchesView;
+	const float aoQualityForFrame = screenSpaceAoActive
+		? static_cast<float>(frameData.settings.ambientOcclusionQuality)
+		: 0.0f;
 	analysisCullingData.renderSettings2 = glm::vec4(
 		frameData.settings.indirectStrength,
 		frameData.settings.ambientOcclusionStrength,
-		previousDepthMatchesView ? static_cast<float>(frameData.settings.ambientOcclusionQuality) : 0.0f,
+		aoQualityForFrame,
 		hiZOcclusionActive ? 1.0f : 0.0f);
 	analysisCullingData.globalTaskCullingEnabled = (frameData.globalTaskShaderCullingEnabled && impl->globalTaskShaderCullingEnabled) ? 1u : 0u;
 	analysisCullingData.taskShaderSupported = impl->taskShaderSupported ? 1u : 0u;
@@ -2932,15 +3059,22 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	cullingData.clusterGridAndLightCount.w = static_cast<uint32_t>(std::min<size_t>(lightingPayload.size(), VulkanContext::Impl::MAX_GLOBAL_LIGHTS));
 
 	const uint32_t clusterCount = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
-	const bool clusteredLightingAvailable = impl->lightingComputePipelineLayout != VK_NULL_HANDLE
+	constexpr uint32_t kClusteredLightingMinimumLightCount = 16u;
+	const bool clusteredLightingPipelineReady = impl->lightingComputePipelineLayout != VK_NULL_HANDLE
 		&& impl->clusterGridComputePipeline != VK_NULL_HANDLE
 		&& impl->clusterDepthMaskComputePipeline != VK_NULL_HANDLE
 		&& impl->clusterLightCountComputePipeline != VK_NULL_HANDLE
 		&& impl->clusterLightPrefixComputePipeline != VK_NULL_HANDLE
 		&& impl->clusterLightFillComputePipeline != VK_NULL_HANDLE;
+	// Clustered lighting is an acceleration structure. For tiny scenes the full
+	// light loop is cheaper and avoids touching the GPU-written cluster buffers,
+	// which keeps optimized/export builds deterministic while the scene has only
+	// a few authored lights.
+	const bool clusteredLightingWorthBuilding = cullingData.clusterGridAndLightCount.w > kClusteredLightingMinimumLightCount;
+	const bool clusteredLightingAvailable = clusteredLightingPipelineReady && clusteredLightingWorthBuilding;
 	static bool loggedClusteredLightingUnavailable = false;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!clusteredLightingAvailable && cullingData.clusterGridAndLightCount.w > 0u) {
+	if (!clusteredLightingPipelineReady && cullingData.clusterGridAndLightCount.w > kClusteredLightingMinimumLightCount) {
 		// Warn once per outage so validation runs clearly explain why fragment
 		// shading fell back to the full-light path instead of using cluster bins.
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2950,7 +3084,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 	}
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	else if (clusteredLightingAvailable) {
+	else if (clusteredLightingPipelineReady) {
 		loggedClusteredLightingUnavailable = false;
 	}
 	const bool gpuLightAnalysisAvailable = impl->lightingComputePipelineLayout != VK_NULL_HANDLE
@@ -3033,19 +3167,29 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// per-light culling does not thrash the indirect-command buffer on CPU.
 	indirectCommands.reserve(frameData.commands.size() + shadowCommandSourceCount);
 
-	// Hi-Z is generated from the depth buffer rendered by a previous stable
-	// view. Editor scene/game views share one depth image, so history is disabled
-	// there to prevent one docked viewport from culling against another.
-	impl->GenerateHiZPyramid(cmd, impl->depthImageView);
-	if (previousDepthMatchesView) {
-		impl->GenerateAmbientOcclusion(cmd, cullingData);
+	// Only pre-scene compute passes need the previous depth image. Small scenes
+	// that fall back to the full light loop should not touch stale depth before
+	// the scene pass, which keeps first-frame and focus-resume behavior simple.
+	const bool needsPreSceneDepthCompute = clusteredLightingAvailable || screenSpaceAoActive;
+	const bool depthPreparedForPreSceneCompute = needsPreSceneDepthCompute
+		&& impl->PrepareDepthForCompute(cmd, impl->depthImageView);
+	if (needsPreSceneDepthCompute && !depthPreparedForPreSceneCompute) {
+		// Fail open when the shared depth image cannot be borrowed. The draw
+		// pass must not sample AO or cluster metadata that depends on a depth
+		// transition which did not happen.
+		cullingData.renderSettings2.z = 0.0f;
+		cullingData.clusteredLightingValid = 0u;
+		impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
+	}
+	if (screenSpaceAoActive && depthPreparedForPreSceneCompute) {
+		impl->GenerateAmbientOcclusion(cmd, cullingData, snapshotSlotIndex);
 	} else {
-		impl->ambientOcclusionHistoryValid = false;
+		impl->ambientOcclusionHistoryValidByFrame[impl->currentFrame] = false;
 	}
 
 	// Build the variable-length light list before graphics so clustered shading
 	// reads a fresh contiguous range for every cluster.
-	if (clusteredLightingAvailable) {
+	if (clusteredLightingAvailable && depthPreparedForPreSceneCompute) {
 		struct ClusterBuildPushConstants
 		{
 			std::uint32_t cullingSlotIndex = 0u;
@@ -3099,6 +3243,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			0, nullptr,
 			0, nullptr
 		);
+	}
+	if (depthPreparedForPreSceneCompute) {
+		// Pre-scene AO and cluster building sample the previous frame depth.
+		// The upcoming scene render pass clears and writes depth again, so hand
+		// the shared depth image back to graphics before vkCmdBeginRenderPass.
+		impl->RestoreDepthForAttachment(cmd);
 	}
 
 	// Prepare draw data.
@@ -3225,7 +3375,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			continue;
 		}
 
-		const bool activeTaskCulling = pipeline->hasTaskStage
+		// Keep mesh/task rendering enabled, but disable GPU meshlet rejection
+		// while the optimized/export artifact is being isolated. The dotted
+		// holes match false-positive meshlet culls, and forcing this off keeps
+		// the renderer fail-open until the culling tests have an image-based
+		// regression path.
+		constexpr bool kEnableGpuMeshletCulling = false;
+		const bool activeTaskCulling = kEnableGpuMeshletCulling
+			&& pipeline->hasTaskStage
 			&& frameData.globalTaskShaderCullingEnabled
 			&& impl->globalTaskShaderCullingEnabled
 			&& command.taskShaderCullingEnabled
@@ -3467,6 +3624,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		vmaMapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation, &data);
 		auto* snapshotIndirectCommands = static_cast<VkDrawMeshTasksIndirectCommandEXT*>(data) + renderSnapshot.indirectDrawOffset;
 		std::memcpy(snapshotIndirectCommands, indirectCommands.data(), indirectCommands.size() * sizeof(VkDrawMeshTasksIndirectCommandEXT));
+		// The indirect command buffer is ordinary mapped CPU_TO_GPU memory, not a
+		// staging upload. Release and exported builds can land this allocation in
+		// non-coherent memory, so flush the snapshot range before shadow/main
+		// passes consume it through vkCmdDrawMeshTasksIndirectEXT.
+		const VkDeviceSize indirectByteOffset = static_cast<VkDeviceSize>(renderSnapshot.indirectDrawOffset) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
+		const VkDeviceSize indirectByteSize = static_cast<VkDeviceSize>(indirectCommands.size()) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
+		vmaFlushAllocation(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation, indirectByteOffset, indirectByteSize);
 		vmaUnmapMemory(impl->allocator, impl->indirectDrawBuffers[impl->currentFrame].allocation);
 	}
 
@@ -4086,6 +4250,15 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (impl->UsesVrsAttachment()) {
 		impl->GenerateVRSImage(cmd, (view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);
 	}
+	// Hi-Z generation is safe to keep warm even while meshlet occlusion culling
+	// is fail-open: the pyramid is written after the scene depth pass and is not
+	// consumed until a later frame decides the occlusion path is enabled.
+	constexpr bool kEnableHiZMipGeneration = true;
+	if (kEnableHiZMipGeneration) {
+		// Build Hi-Z after the depth attachment contains the final scene depth.
+		// The next frame can then use this stable pyramid for conservative occlusion.
+		impl->GenerateHiZPyramid(cmd, impl->depthImageView);
+	}
 			
 	vkEndCommandBuffer(cmd);
 	const float commandRecordingMs = ElapsedMilliseconds(commandRecordingStart);
@@ -4159,34 +4332,34 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	depthHistory.valid = true;
 }
 
-// VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView) {
+// VulkanContext::Impl::PrepareDepthForCompute is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImageView depthView) {
 	if (cmd == VK_NULL_HANDLE
 		|| depthImage == VK_NULL_HANDLE
-		|| lightingComputePipelineLayout == VK_NULL_HANDLE
 		|| currentFrame >= globalDescriptorSets.size()
 		|| globalDescriptorSets[currentFrame] == VK_NULL_HANDLE
 		|| depthView == VK_NULL_HANDLE) {
-		return;
+		return false;
 	}
 
-	// Keep depth sampling valid for AO and clustered-light depth masking while
-	// the Hi-Z pyramid itself is disabled. The previous implementation rewrote
-	// bindings 12 and 16 for every mip while recording one command buffer; Vulkan
-	// descriptor contents are not snapshotted per dispatch, so optimized builds
-	// could execute every dispatch against the final descriptor values.
-	VkImageMemoryBarrier depthOnlyBarrier{};
-	depthOnlyBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	depthOnlyBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-	depthOnlyBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	depthOnlyBarrier.image = depthImage;
-	depthOnlyBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	depthOnlyBarrier.subresourceRange.baseMipLevel = 0u;
-	depthOnlyBarrier.subresourceRange.levelCount = 1u;
-	depthOnlyBarrier.subresourceRange.baseArrayLayer = 0u;
-	depthOnlyBarrier.subresourceRange.layerCount = 1u;
-	depthOnlyBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	depthOnlyBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	// Depth-dependent compute passes sample the depth image through the global
+	// descriptor set. The image starts and ends each frame in attachment layout,
+	// so this helper performs the one attachment-to-read transition needed by
+	// clustered lighting, ambient occlusion, and Hi-Z generation.
+	VkImageMemoryBarrier depthBarrier{};
+	depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	depthBarrier.image = depthImage;
+	depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	depthBarrier.subresourceRange.baseMipLevel = 0u;
+	depthBarrier.subresourceRange.levelCount = 1u;
+	depthBarrier.subresourceRange.baseArrayLayer = 0u;
+	depthBarrier.subresourceRange.layerCount = 1u;
+	depthBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 	vkCmdPipelineBarrier(
 		cmd,
 		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
@@ -4194,7 +4367,7 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		0,
 		0, nullptr,
 		0, nullptr,
-		1, &depthOnlyBarrier);
+		1, &depthBarrier);
 
 	VkDescriptorImageInfo sampledDepthInfo{};
 	sampledDepthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
@@ -4204,198 +4377,375 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 	VkWriteDescriptorSet depthWrite{};
 	depthWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	depthWrite.dstSet = globalDescriptorSets[currentFrame];
-	depthWrite.dstBinding = 12;
+	depthWrite.dstBinding = 12u;
 	depthWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	depthWrite.descriptorCount = 1u;
 	depthWrite.pImageInfo = &sampledDepthInfo;
 	vkUpdateDescriptorSets(device, 1u, &depthWrite, 0u, nullptr);
-	return;
+	return true;
+}
 
-	for (uint32_t mipIndex = 0; mipIndex < hiZ.mipLevels; ++mipIndex) {
-		// Each compute descriptor update below requires a concrete image view;
-		// skip Hi-Z for this frame if swapchain recreation left any mip view absent.
+// VulkanContext::Impl::RestoreDepthForAttachment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void VulkanContext::Impl::RestoreDepthForAttachment(VkCommandBuffer cmd) {
+	if (cmd == VK_NULL_HANDLE || depthImage == VK_NULL_HANDLE) {
+		return;
+	}
+
+	// Pre-scene compute passes borrow the previous frame depth as a sampled
+	// image. The main scene render pass immediately after them owns the same
+	// image as a writable depth attachment, so restore the layout explicitly
+	// before Vulkan's render-pass load/clear operation sees the attachment.
+	VkImageMemoryBarrier depthBarrier{};
+	depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	depthBarrier.image = depthImage;
+	depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	depthBarrier.subresourceRange.baseMipLevel = 0u;
+	depthBarrier.subresourceRange.levelCount = 1u;
+	depthBarrier.subresourceRange.baseArrayLayer = 0u;
+	depthBarrier.subresourceRange.layerCount = 1u;
+	depthBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	depthBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	vkCmdPipelineBarrier(
+		cmd,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &depthBarrier);
+}
+
+// VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView) {
+	if (cmd == VK_NULL_HANDLE
+		|| depthImage == VK_NULL_HANDLE
+		|| depthView == VK_NULL_HANDLE
+		|| hiZ.image == VK_NULL_HANDLE
+		|| hiZ.fullView == VK_NULL_HANDLE
+		|| hiZ.mipLevels == 0u
+		|| hiZ.width == 0u
+		|| hiZ.height == 0u
+		|| hiZ.mipViews.size() < hiZ.mipLevels
+		|| hiZComputePipeline == VK_NULL_HANDLE
+		|| hiZPipelineLayout == VK_NULL_HANDLE
+		|| hiZDescriptorSetLayout == VK_NULL_HANDLE) {
+		return;
+	}
+
+	for (uint32_t mipIndex = 0u; mipIndex < hiZ.mipLevels; ++mipIndex) {
+		// Every dispatch binds a descriptor set that points at one concrete mip.
+		// Missing views mean swapchain recreation is incomplete, so skip safely.
 		if (hiZ.mipViews[mipIndex] == VK_NULL_HANDLE) {
 			return;
 		}
 	}
 
-	// 1. Transition main depth buffer to DEPTH_STENCIL_READ_ONLY_OPTIMAL so sampled depth reads are valid.
-	VkImageMemoryBarrier depthBarrier{};
-	depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-	depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	depthBarrier.image = depthImage;
-	depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	depthBarrier.subresourceRange.baseMipLevel = 0;
-	depthBarrier.subresourceRange.levelCount = 1;
-	depthBarrier.subresourceRange.baseArrayLayer = 0;
-	depthBarrier.subresourceRange.layerCount = 1;
-	depthBarrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	const std::size_t descriptorSetCount = static_cast<std::size_t>(MAX_FRAMES_IN_FLIGHT) * static_cast<std::size_t>(hiZ.mipLevels);
+	if (hiZDescriptorPool == VK_NULL_HANDLE || hiZDescriptorSets.size() != descriptorSetCount) {
+		if (hiZDescriptorPool != VK_NULL_HANDLE) {
+			// This path is normally hit only after a resize. Wait before
+			// destroying the old per-frame sets so no pending frame can still
+			// reference them.
+			vkDeviceWaitIdle(device);
+			vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
+			hiZDescriptorPool = VK_NULL_HANDLE;
+			hiZDescriptorSets.clear();
+		}
 
-	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &depthBarrier);
+		std::array<VkDescriptorPoolSize, 2> poolSizes{};
+		poolSizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		poolSizes[0].descriptorCount = static_cast<uint32_t>(descriptorSetCount);
+		poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		poolSizes[1].descriptorCount = static_cast<uint32_t>(descriptorSetCount);
+
+		VkDescriptorPoolCreateInfo poolInfo{};
+		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		poolInfo.maxSets = static_cast<uint32_t>(descriptorSetCount);
+		poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+		poolInfo.pPoolSizes = poolSizes.data();
+		if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &hiZDescriptorPool) != VK_SUCCESS) {
+			hiZDescriptorPool = VK_NULL_HANDLE;
+			hiZDescriptorSets.clear();
+			return;
+		}
+
+		std::vector<VkDescriptorSetLayout> layouts(descriptorSetCount, hiZDescriptorSetLayout);
+		hiZDescriptorSets.resize(descriptorSetCount, VK_NULL_HANDLE);
+		VkDescriptorSetAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocInfo.descriptorPool = hiZDescriptorPool;
+		allocInfo.descriptorSetCount = static_cast<uint32_t>(hiZDescriptorSets.size());
+		allocInfo.pSetLayouts = layouts.data();
+		if (vkAllocateDescriptorSets(device, &allocInfo, hiZDescriptorSets.data()) != VK_SUCCESS) {
+			vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
+			hiZDescriptorPool = VK_NULL_HANDLE;
+			hiZDescriptorSets.clear();
+			return;
+		}
+	}
+
+	const std::size_t frameDescriptorBase = static_cast<std::size_t>(currentFrame) * static_cast<std::size_t>(hiZ.mipLevels);
+	if (frameDescriptorBase + hiZ.mipLevels > hiZDescriptorSets.size()) {
+		return;
+	}
+
+	// Touch the shared depth image only after every Hi-Z resource is known to be
+	// valid. Any early return before this point leaves depth in the render-pass
+	// layout, while a complete Hi-Z record restores it before the next frame.
+	if (!PrepareDepthForCompute(cmd, depthView)) {
+		return;
+	}
+
+	auto TransitionHiZMip = [&](uint32_t mipIndex,
+		VkImageLayout oldLayout,
+		VkImageLayout newLayout,
+		VkAccessFlags srcAccess,
+		VkAccessFlags dstAccess,
+		VkPipelineStageFlags srcStage,
+		VkPipelineStageFlags dstStage) {
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = hiZ.image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = mipIndex;
+		barrier.subresourceRange.levelCount = 1u;
+		barrier.subresourceRange.baseArrayLayer = 0u;
+		barrier.subresourceRange.layerCount = 1u;
+		barrier.srcAccessMask = srcAccess;
+		barrier.dstAccessMask = dstAccess;
+		vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+	};
+
+	auto WriteHiZDescriptorSet = [&](uint32_t mipIndex,
+		VkImageView inputView,
+		VkImageLayout inputLayout,
+		VkImageView outputView) -> VkDescriptorSet {
+		VkDescriptorSet descriptorSet = hiZDescriptorSets[frameDescriptorBase + mipIndex];
+
+		VkDescriptorImageInfo inputInfo{};
+		inputInfo.imageLayout = inputLayout;
+		inputInfo.imageView = inputView;
+		inputInfo.sampler = VK_NULL_HANDLE;
+
+		VkDescriptorImageInfo outputInfo{};
+		outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+		outputInfo.imageView = outputView;
+		outputInfo.sampler = VK_NULL_HANDLE;
+
+		std::array<VkWriteDescriptorSet, 2> writes{};
+		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet = descriptorSet;
+		writes[0].dstBinding = 0u;
+		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		writes[0].descriptorCount = 1u;
+		writes[0].pImageInfo = &inputInfo;
+		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet = descriptorSet;
+		writes[1].dstBinding = 1u;
+		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		writes[1].descriptorCount = 1u;
+		writes[1].pImageInfo = &outputInfo;
+		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0u, nullptr);
+		return descriptorSet;
+	};
+
+	// struct HiZPushConstants mirrors HiZGenerate.comp.hlsl: source dimensions
+	// are used for reads, and output dimensions reject inactive workgroup lanes.
+	struct HiZPushConstants
+	{
+		uint32_t inputWidth = 1u;
+		uint32_t inputHeight = 1u;
+		uint32_t outputWidth = 1u;
+		uint32_t outputHeight = 1u;
+	};
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hiZComputePipeline);
 
-	// 2. Generate Level 0 (Convert D32 to R32F)
-	{
-		VkImageMemoryBarrier hizBarrier{};
-		hizBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-		hizBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		hizBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-		hizBarrier.image = hiZ.image;
-		hizBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		hizBarrier.subresourceRange.baseMipLevel = 0;
-		hizBarrier.subresourceRange.levelCount = 1;
-		hizBarrier.subresourceRange.baseArrayLayer = 0;
-		hizBarrier.subresourceRange.layerCount = 1;
-		hizBarrier.srcAccessMask = 0;
-		hizBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &hizBarrier);
+	TransitionHiZMip(
+		0u,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_ACCESS_SHADER_WRITE_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-		VkDescriptorImageInfo depthInfo{};
-		depthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-		depthInfo.imageView = depthView;
-		depthInfo.sampler = VK_NULL_HANDLE;
+	VkDescriptorSet levelZeroSet = WriteHiZDescriptorSet(0u, depthView, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, hiZ.mipViews[0]);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hiZPipelineLayout, 0u, 1u, &levelZeroSet, 0u, nullptr);
+	HiZPushConstants levelZeroPush{};
+	levelZeroPush.inputWidth = hiZ.width;
+	levelZeroPush.inputHeight = hiZ.height;
+	levelZeroPush.outputWidth = hiZ.width;
+	levelZeroPush.outputHeight = hiZ.height;
+	vkCmdPushConstants(cmd, hiZPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(levelZeroPush), &levelZeroPush);
+	vkCmdDispatch(cmd, (hiZ.width + 7u) / 8u, (hiZ.height + 7u) / 8u, 1u);
 
-		VkDescriptorImageInfo outputInfo{};
-		outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-		outputInfo.imageView = hiZ.mipViews[0];
+	TransitionHiZMip(
+		0u,
+		VK_IMAGE_LAYOUT_GENERAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_ACCESS_SHADER_WRITE_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
-		std::array<VkWriteDescriptorSet, 2> writes{};
-		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[0].dstSet = globalDescriptorSets[currentFrame];
-		writes[0].dstBinding = 12;
-		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		writes[0].descriptorCount = 1;
-		writes[0].pImageInfo = &depthInfo;
+	for (uint32_t mipIndex = 1u; mipIndex < hiZ.mipLevels; ++mipIndex) {
+		const uint32_t sourceWidth = std::max(1u, hiZ.width >> (mipIndex - 1u));
+		const uint32_t sourceHeight = std::max(1u, hiZ.height >> (mipIndex - 1u));
+		const uint32_t outputWidth = std::max(1u, hiZ.width >> mipIndex);
+		const uint32_t outputHeight = std::max(1u, hiZ.height >> mipIndex);
 
-		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[1].dstSet = globalDescriptorSets[currentFrame];
-		writes[1].dstBinding = 16;
-		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		writes[1].descriptorCount = 1;
-		writes[1].pImageInfo = &outputInfo;
+		TransitionHiZMip(
+			mipIndex,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_IMAGE_LAYOUT_GENERAL,
+			VK_ACCESS_SHADER_READ_BIT,
+			VK_ACCESS_SHADER_WRITE_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lightingComputePipelineLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
+		VkDescriptorSet mipSet = WriteHiZDescriptorSet(
+			mipIndex,
+			hiZ.mipViews[mipIndex - 1u],
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			hiZ.mipViews[mipIndex]);
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hiZPipelineLayout, 0u, 1u, &mipSet, 0u, nullptr);
 
-		struct { uint32_t w, h, isL0; } push;
-		push.w = hiZ.width; push.h = hiZ.height; push.isL0 = 1;
-		vkCmdPushConstants(cmd, lightingComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-		vkCmdDispatch(cmd, (hiZ.width + 7) / 8, (hiZ.height + 7) / 8, 1);
+		HiZPushConstants mipPush{};
+		mipPush.inputWidth = sourceWidth;
+		mipPush.inputHeight = sourceHeight;
+		mipPush.outputWidth = outputWidth;
+		mipPush.outputHeight = outputHeight;
+		vkCmdPushConstants(cmd, hiZPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(mipPush), &mipPush);
+		vkCmdDispatch(cmd, (outputWidth + 7u) / 8u, (outputHeight + 7u) / 8u, 1u);
 
-		hizBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-		hizBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		hizBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		hizBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &hizBarrier);
+		TransitionHiZMip(
+			mipIndex,
+			VK_IMAGE_LAYOUT_GENERAL,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_ACCESS_SHADER_WRITE_BIT,
+			VK_ACCESS_SHADER_READ_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	}
 
-	// 3. Generate Level 1..N
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (uint32_t i = 1; i < hiZ.mipLevels; ++i) {
-		uint32_t mipW = std::max(1u, hiZ.width >> i);
-		uint32_t mipH = std::max(1u, hiZ.height >> i);
+	// Restore the main depth image to the layout expected at the start of the
+	// next frame. Keeping this invariant avoids first-frame and export-runtime
+	// layout mismatches while the independent Hi-Z pyramid remains readable.
+	VkImageMemoryBarrier restoreDepthBarrier{};
+	restoreDepthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	restoreDepthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+	restoreDepthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	restoreDepthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	restoreDepthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	restoreDepthBarrier.image = depthImage;
+	restoreDepthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	restoreDepthBarrier.subresourceRange.baseMipLevel = 0u;
+	restoreDepthBarrier.subresourceRange.levelCount = 1u;
+	restoreDepthBarrier.subresourceRange.baseArrayLayer = 0u;
+	restoreDepthBarrier.subresourceRange.layerCount = 1u;
+	restoreDepthBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	restoreDepthBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	vkCmdPipelineBarrier(
+		cmd,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		0,
+		0, nullptr,
+		0, nullptr,
+		1, &restoreDepthBarrier);
 
-		VkImageMemoryBarrier hizBarrier{};
-		hizBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-		hizBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		hizBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-		hizBarrier.image = hiZ.image;
-		hizBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		hizBarrier.subresourceRange.baseMipLevel = i;
-		hizBarrier.subresourceRange.levelCount = 1;
-		hizBarrier.subresourceRange.baseArrayLayer = 0;
-		hizBarrier.subresourceRange.layerCount = 1;
-		hizBarrier.srcAccessMask = 0;
-		hizBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &hizBarrier);
-
-		VkDescriptorImageInfo inputInfo{};
-		inputInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		inputInfo.imageView = hiZ.mipViews[i - 1];
-		inputInfo.sampler = hiZ.sampler;
-
-		VkDescriptorImageInfo outputInfo{};
-		outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-		outputInfo.imageView = hiZ.mipViews[i];
-
-		std::array<VkWriteDescriptorSet, 2> writes{};
-		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[0].dstSet = globalDescriptorSets[currentFrame];
-		writes[0].dstBinding = 12;
-		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		writes[0].descriptorCount = 1;
-		writes[0].pImageInfo = &inputInfo;
-
-		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[1].dstSet = globalDescriptorSets[currentFrame];
-		writes[1].dstBinding = 16;
-		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		writes[1].descriptorCount = 1;
-		writes[1].pImageInfo = &outputInfo;
-
-		vkUpdateDescriptorSets(device, 2, writes.data(), 0, nullptr);
-
-		struct { uint32_t w, h, isL0; } push;
-		push.w = mipW; push.h = mipH; push.isL0 = 0;
-		vkCmdPushConstants(cmd, lightingComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-		vkCmdDispatch(cmd, (mipW + 7) / 8, (mipH + 7) / 8, 1);
-
-		hizBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-		hizBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		hizBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-		hizBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &hizBarrier);
-	}
-
-	// 4. Keep depth in read-only layout so the subsequent light-culling compute pass can sample it.
-	depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	depthBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &depthBarrier);
-
-	VkDescriptorImageInfo restoreDepthInfo{};
-	// Keep the descriptor in read-only layout because binding 12 is sampled by compute passes.
-	restoreDepthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-	restoreDepthInfo.imageView = depthView;
-	restoreDepthInfo.sampler = hiZ.sampler;
-
-	VkWriteDescriptorSet restoreWrite{};
-	restoreWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	restoreWrite.dstSet = globalDescriptorSets[currentFrame];
-	restoreWrite.dstBinding = 12;
-	restoreWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	restoreWrite.descriptorCount = 1;
-	restoreWrite.pImageInfo = &restoreDepthInfo;
-	vkUpdateDescriptorSets(device, 1, &restoreWrite, 0, nullptr);
 }
 
 // VulkanContext::Impl::GenerateAmbientOcclusion is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData) {
+void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex) {
 	const bool aoEnabled = frameData.renderSettings2.y > 0.001f && frameData.renderSettings2.z > 0.5f;
 	if (!aoEnabled
 		|| cmd == VK_NULL_HANDLE
 		|| depthImageView == VK_NULL_HANDLE
-		|| lightingComputePipelineLayout == VK_NULL_HANDLE
+		|| aoPipelineLayout == VK_NULL_HANDLE
+		|| aoDescriptorSetLayout == VK_NULL_HANDLE
 		|| currentFrame >= globalDescriptorSets.size()
 		|| globalDescriptorSets[currentFrame] == VK_NULL_HANDLE
 		|| gtaoComputePipeline == VK_NULL_HANDLE
 		|| gtaoBlurComputePipeline == VK_NULL_HANDLE
-		|| ambientOcclusionRaw.image == VK_NULL_HANDLE
-		|| ambientOcclusionBlurred.image == VK_NULL_HANDLE
-		|| ambientOcclusionHistory.image == VK_NULL_HANDLE
-		|| ambientOcclusionRaw.view == VK_NULL_HANDLE
-		|| ambientOcclusionBlurred.view == VK_NULL_HANDLE
-		|| ambientOcclusionHistory.view == VK_NULL_HANDLE) {
+		|| currentFrame >= ambientOcclusionRawByFrame.size()
+		|| ambientOcclusionRawByFrame[currentFrame].image == VK_NULL_HANDLE
+		|| ambientOcclusionBlurredByFrame[currentFrame].image == VK_NULL_HANDLE
+		|| ambientOcclusionHistoryByFrame[currentFrame].image == VK_NULL_HANDLE
+		|| ambientOcclusionRawByFrame[currentFrame].view == VK_NULL_HANDLE
+		|| ambientOcclusionBlurredByFrame[currentFrame].view == VK_NULL_HANDLE
+		|| ambientOcclusionHistoryByFrame[currentFrame].view == VK_NULL_HANDLE) {
 		return;
 	}
 
+	VulkanImage& ambientOcclusionRaw = ambientOcclusionRawByFrame[currentFrame];
+	VulkanImage& ambientOcclusionBlurred = ambientOcclusionBlurredByFrame[currentFrame];
+	VulkanImage& ambientOcclusionHistory = ambientOcclusionHistoryByFrame[currentFrame];
+	bool& ambientOcclusionHistoryValid = ambientOcclusionHistoryValidByFrame[currentFrame];
 	const uint32_t width = std::max(ambientOcclusionWidth, 1u);
 	const uint32_t height = std::max(ambientOcclusionHeight, 1u);
+	const uint32_t clampedSnapshotSlot = std::min(snapshotSlotIndex, MAX_RENDER_SNAPSHOTS_PER_FRAME - 1u);
+	const std::size_t descriptorSetCount = static_cast<std::size_t>(MAX_FRAMES_IN_FLIGHT) * static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME);
+	if (aoDescriptorPool == VK_NULL_HANDLE || aoDescriptorSets.size() != descriptorSetCount) {
+		if (aoDescriptorPool != VK_NULL_HANDLE) {
+			// AO descriptors are recorded into primary command buffers. Wait
+			// before recreating the pool during resize so no pending frame can
+			// still reference sets from the old pool.
+			vkDeviceWaitIdle(device);
+			vkDestroyDescriptorPool(device, aoDescriptorPool, nullptr);
+			aoDescriptorPool = VK_NULL_HANDLE;
+			aoDescriptorSets.clear();
+		}
+
+		std::array<VkDescriptorPoolSize, 2> poolSizes{};
+		poolSizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		poolSizes[0].descriptorCount = static_cast<uint32_t>(descriptorSetCount * 3u);
+		poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		poolSizes[1].descriptorCount = static_cast<uint32_t>(descriptorSetCount * 2u);
+
+		VkDescriptorPoolCreateInfo poolInfo{};
+		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		poolInfo.maxSets = static_cast<uint32_t>(descriptorSetCount);
+		poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+		poolInfo.pPoolSizes = poolSizes.data();
+		if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &aoDescriptorPool) != VK_SUCCESS) {
+			aoDescriptorPool = VK_NULL_HANDLE;
+			aoDescriptorSets.clear();
+			return;
+		}
+
+		std::vector<VkDescriptorSetLayout> layouts(descriptorSetCount, aoDescriptorSetLayout);
+		aoDescriptorSets.resize(descriptorSetCount, VK_NULL_HANDLE);
+		VkDescriptorSetAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocInfo.descriptorPool = aoDescriptorPool;
+		allocInfo.descriptorSetCount = static_cast<uint32_t>(aoDescriptorSets.size());
+		allocInfo.pSetLayouts = layouts.data();
+		if (vkAllocateDescriptorSets(device, &allocInfo, aoDescriptorSets.data()) != VK_SUCCESS) {
+			vkDestroyDescriptorPool(device, aoDescriptorPool, nullptr);
+			aoDescriptorPool = VK_NULL_HANDLE;
+			aoDescriptorSets.clear();
+			return;
+		}
+	}
+
+	const std::size_t descriptorIndex =
+		static_cast<std::size_t>(currentFrame) * static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME)
+		+ static_cast<std::size_t>(clampedSnapshotSlot);
+	if (descriptorIndex >= aoDescriptorSets.size() || aoDescriptorSets[descriptorIndex] == VK_NULL_HANDLE) {
+		return;
+	}
+	VkDescriptorSet aoDescriptorSet = aoDescriptorSets[descriptorIndex];
+
 	auto TransitionAoImage = [&](VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
 		VkImageMemoryBarrier barrier{};
 		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -4413,6 +4763,45 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 		barrier.dstAccessMask = dstAccess;
 		vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 	};
+
+	// Manual debug switch for isolating AO output. It defaults off so runtime
+	// builds exercise the real GTAO path while still leaving a narrow diagnostic
+	// hook for future release-only rendering issues.
+	constexpr bool kForceWhiteAoOutputForArtifactIsolation = false;
+	if (kForceWhiteAoOutputForArtifactIsolation) {
+		TransitionAoImage(
+			ambientOcclusionBlurred.image,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			VK_ACCESS_SHADER_READ_BIT,
+			VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+		VkImageSubresourceRange clearRange{};
+		clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		clearRange.baseMipLevel = 0u;
+		clearRange.levelCount = 1u;
+		clearRange.baseArrayLayer = 0u;
+		clearRange.layerCount = 1u;
+		VkClearColorValue clearValue{};
+		clearValue.float32[0] = 1.0f;
+		clearValue.float32[1] = 1.0f;
+		clearValue.float32[2] = 1.0f;
+		clearValue.float32[3] = 1.0f;
+		vkCmdClearColorImage(cmd, ambientOcclusionBlurred.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1u, &clearRange);
+
+		TransitionAoImage(
+			ambientOcclusionBlurred.image,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_ACCESS_SHADER_READ_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+		ambientOcclusionHistoryValid = false;
+		return;
+	}
 
 	// The AO targets persist across frames in shader-read layout. Each dispatch
 	// temporarily moves one target to GENERAL, writes it, then makes it readable
@@ -4438,14 +4827,14 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 
 	std::array<VkWriteDescriptorSet, 2> gtaoWrites{};
 	gtaoWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	gtaoWrites[0].dstSet = globalDescriptorSets[currentFrame];
+	gtaoWrites[0].dstSet = aoDescriptorSet;
 	gtaoWrites[0].dstBinding = 12;
 	gtaoWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	gtaoWrites[0].descriptorCount = 1;
 	gtaoWrites[0].pImageInfo = &depthInfo;
 
 	gtaoWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	gtaoWrites[1].dstSet = globalDescriptorSets[currentFrame];
+	gtaoWrites[1].dstSet = aoDescriptorSet;
 	gtaoWrites[1].dstBinding = 23;
 	gtaoWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	gtaoWrites[1].descriptorCount = 1;
@@ -4466,9 +4855,9 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	gtaoPush.radiusPixels = 1.0f + quality * 1.5f;
 	gtaoPush.strength = std::clamp(frameData.renderSettings2.y, 0.0f, 4.0f);
 
-	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, lightingComputePipelineLayout, 0, 1, &globalDescriptorSets[currentFrame], 0, nullptr);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipelineLayout, 0, 1, &aoDescriptorSet, 0, nullptr);
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtaoComputePipeline);
-	vkCmdPushConstants(cmd, lightingComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gtaoPush), &gtaoPush);
+	vkCmdPushConstants(cmd, aoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gtaoPush), &gtaoPush);
 	vkCmdDispatch(cmd, (width + 7u) / 8u, (height + 7u) / 8u, 1u);
 
 	TransitionAoImage(
@@ -4480,7 +4869,7 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	TransitionAoImage(
-		ambientOcclusionHistory.image,
+		ambientOcclusionBlurred.image,
 		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		VK_IMAGE_LAYOUT_GENERAL,
 		VK_ACCESS_SHADER_READ_BIT,
@@ -4495,31 +4884,31 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 
 	VkDescriptorImageInfo blurredOutputInfo{};
 	blurredOutputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-	blurredOutputInfo.imageView = ambientOcclusionHistory.view;
+	blurredOutputInfo.imageView = ambientOcclusionBlurred.view;
 	blurredOutputInfo.sampler = VK_NULL_HANDLE;
 
 	VkDescriptorImageInfo historyInputInfo{};
 	historyInputInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	historyInputInfo.imageView = ambientOcclusionBlurred.view;
+	historyInputInfo.imageView = ambientOcclusionHistory.view;
 	historyInputInfo.sampler = VK_NULL_HANDLE;
 
 	std::array<VkWriteDescriptorSet, 3> blurWrites{};
 	blurWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	blurWrites[0].dstSet = globalDescriptorSets[currentFrame];
+	blurWrites[0].dstSet = aoDescriptorSet;
 	blurWrites[0].dstBinding = 22;
 	blurWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	blurWrites[0].descriptorCount = 1;
 	blurWrites[0].pImageInfo = &rawInputInfo;
 
 	blurWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	blurWrites[1].dstSet = globalDescriptorSets[currentFrame];
+	blurWrites[1].dstSet = aoDescriptorSet;
 	blurWrites[1].dstBinding = 24;
 	blurWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	blurWrites[1].descriptorCount = 1;
 	blurWrites[1].pImageInfo = &blurredOutputInfo;
 
 	blurWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	blurWrites[2].dstSet = globalDescriptorSets[currentFrame];
+	blurWrites[2].dstSet = aoDescriptorSet;
 	blurWrites[2].dstBinding = 21;
 	blurWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	blurWrites[2].descriptorCount = 1;
@@ -4537,51 +4926,73 @@ void VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	GTAOBlurPushConstants blurPush{};
 	blurPush.viewportSize = glm::uvec2(width, height);
 	blurPush.depthSigma = 0.0025f / quality;
-	// First frame after resize must not sample undefined temporal content; later
-	// frames use a modest blend to suppress flicker without smearing edits.
-	blurPush.historyBlend = ambientOcclusionHistoryValid ? std::clamp(0.35f + quality * 0.1f, 0.0f, 0.65f) : 0.0f;
+	// Optimized/export builds showed AO artifacts that disappeared only when
+	// the AO feature was disabled. Keep spatial AO active, but do not sample
+	// temporal history until the history ownership can be made per-view and
+	// validated with an image regression test.
+	blurPush.historyBlend = 0.0f;
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtaoBlurComputePipeline);
-	vkCmdPushConstants(cmd, lightingComputePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(blurPush), &blurPush);
+	vkCmdPushConstants(cmd, aoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(blurPush), &blurPush);
 	vkCmdDispatch(cmd, (width + 7u) / 8u, (height + 7u) / 8u, 1u);
 
 	TransitionAoImage(
-		ambientOcclusionHistory.image,
+		ambientOcclusionBlurred.image,
 		VK_IMAGE_LAYOUT_GENERAL,
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		VK_ACCESS_SHADER_WRITE_BIT,
-		VK_ACCESS_SHADER_READ_BIT,
+		VK_ACCESS_TRANSFER_READ_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT);
+	TransitionAoImage(
+		ambientOcclusionHistory.image,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_ACCESS_TRANSFER_WRITE_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+	VkImageCopy copyRegion{};
+	copyRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	copyRegion.srcSubresource.mipLevel = 0u;
+	copyRegion.srcSubresource.baseArrayLayer = 0u;
+	copyRegion.srcSubresource.layerCount = 1u;
+	copyRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	copyRegion.dstSubresource.mipLevel = 0u;
+	copyRegion.dstSubresource.baseArrayLayer = 0u;
+	copyRegion.dstSubresource.layerCount = 1u;
+	copyRegion.extent = { width, height, 1u };
+	// Keep the AO material descriptor stable for the lifetime of the frame.
+	// The blur pass writes the frame's final AO image, then this copy seeds the
+	// next frame's history image without swapping Vulkan handles behind any
+	// already-recorded descriptor sets.
+	vkCmdCopyImage(
+		cmd,
+		ambientOcclusionBlurred.image,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		ambientOcclusionHistory.image,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		1u,
+		&copyRegion);
+
+	TransitionAoImage(
+		ambientOcclusionBlurred.image,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_ACCESS_TRANSFER_READ_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
 		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-
-	std::swap(ambientOcclusionBlurred, ambientOcclusionHistory);
+	TransitionAoImage(
+		ambientOcclusionHistory.image,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		VK_ACCESS_TRANSFER_WRITE_BIT,
+		VK_ACCESS_SHADER_READ_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	ambientOcclusionHistoryValid = true;
-
-	VkDescriptorImageInfo blurredInputInfo{};
-	blurredInputInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	blurredInputInfo.imageView = ambientOcclusionBlurred.view;
-	blurredInputInfo.sampler = VK_NULL_HANDLE;
-
-	VkDescriptorImageInfo nextHistoryInfo{};
-	nextHistoryInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	nextHistoryInfo.imageView = ambientOcclusionHistory.view;
-	nextHistoryInfo.sampler = VK_NULL_HANDLE;
-
-	std::array<VkWriteDescriptorSet, 2> fragmentAoWrites{};
-	fragmentAoWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	fragmentAoWrites[0].dstSet = globalDescriptorSets[currentFrame];
-	fragmentAoWrites[0].dstBinding = 19;
-	fragmentAoWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	fragmentAoWrites[0].descriptorCount = 1;
-	fragmentAoWrites[0].pImageInfo = &blurredInputInfo;
-
-	fragmentAoWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	fragmentAoWrites[1].dstSet = globalDescriptorSets[currentFrame];
-	fragmentAoWrites[1].dstBinding = 21;
-	fragmentAoWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	fragmentAoWrites[1].descriptorCount = 1;
-	fragmentAoWrites[1].pImageInfo = &nextHistoryInfo;
-	vkUpdateDescriptorSets(device, static_cast<uint32_t>(fragmentAoWrites.size()), fragmentAoWrites.data(), 0, nullptr);
 }
 
 // VulkanContext::Impl::GenerateVRSImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -5636,12 +6047,18 @@ void VulkanContext::Impl::ClearResources() {
 	DestroyVulkanImage(environmentIrradianceTexture);
 	DestroyVulkanImage(prefilteredEnvironmentTexture);
 	DestroyVulkanImage(brdfIntegrationTexture);
-	DestroyVulkanImage(ambientOcclusionRaw);
-	DestroyVulkanImage(ambientOcclusionBlurred);
-	DestroyVulkanImage(ambientOcclusionHistory);
+	for (VulkanImage& image : ambientOcclusionRawByFrame) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : ambientOcclusionBlurredByFrame) {
+		DestroyVulkanImage(image);
+	}
+	for (VulkanImage& image : ambientOcclusionHistoryByFrame) {
+		DestroyVulkanImage(image);
+	}
 	ambientOcclusionWidth = 0u;
 	ambientOcclusionHeight = 0u;
-	ambientOcclusionHistoryValid = false;
+	ambientOcclusionHistoryValidByFrame.fill(false);
 
 	textureIndexMap.clear();
 	freeTextureIndices.clear();

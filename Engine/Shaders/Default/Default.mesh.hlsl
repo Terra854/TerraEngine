@@ -186,8 +186,12 @@ void EmitMeshlet(
 			DecodeSnorm10(packedPosition, 20u));
 		const float3 position = decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
 		
-		// Decode bitangent sign from the 2-bit alpha component
-		const float tangentW = float((int(packedPosition >> 30) << 30) >> 30);
+		// Decode the spare packed-position bits as a bitangent sign. Older mesh
+		// payloads can leave this field as zero, and the previous raw signed
+		// decode could emit 0 or -2. The fragment shader expects only a handedness
+		// sign, so publish a stable +1/-1 contract for all payload variants.
+		const int rawTangentSign = (int(packedPosition >> 30) << 30) >> 30;
+		const float tangentW = rawTangentSign < 0 ? -1.0f : 1.0f;
 		
 		const float3 normal = DecodeOct32Normal(packedNormal);
 		const float3 tangent = DecodeOct32Normal(packedTangent);

@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -52,6 +53,33 @@ namespace
 		data.EmissiveTextureIndex = 0u;
 		data.ShadowBehavior = static_cast<std::uint32_t>(MaterialShadowBehavior::Opaque);
 		return data;
+	}
+
+	// WriteMappedBuffer copies CPU data into a mapped VMA buffer and flushes the
+	// written range before the GPU can copy or read from it. Debug builds often
+	// land these uploads in coherent memory, but Release/export runs are free to
+	// use non-coherent host-visible memory, so every staging upload must make
+	// visibility explicit.
+	bool WriteMappedBuffer(VmaAllocator allocator, const VulkanBuffer& buffer, const void* source, VkDeviceSize size, VkDeviceSize offset = 0u)
+	{
+		if (allocator == VK_NULL_HANDLE
+			|| buffer.allocation == VK_NULL_HANDLE
+			|| source == nullptr
+			|| size == 0u)
+		{
+			return false;
+		}
+
+		void* mapped = nullptr;
+		if (vmaMapMemory(allocator, buffer.allocation, &mapped) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		std::memcpy(static_cast<std::uint8_t*>(mapped) + offset, source, static_cast<std::size_t>(size));
+		vmaFlushAllocation(allocator, buffer.allocation, offset, size);
+		vmaUnmapMemory(allocator, buffer.allocation);
+		return true;
 	}
 
 	// HashClusterRangeValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -228,10 +256,7 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 		uint32_t whitePixel = 0xFFFFFFFF;
 		VkDeviceSize imageSize = 4;
 		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Generic Staging Buffer");
-		void* data;
-		vmaMapMemory(allocator, stagingBuffer.allocation, &data);
-		memcpy(data, &whitePixel, 4);
-		vmaUnmapMemory(allocator, stagingBuffer.allocation);
+		WriteMappedBuffer(allocator, stagingBuffer, &whitePixel, imageSize);
 
 		VkImageCreateInfo imageInfo{};
 		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -275,10 +300,7 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 		uint32_t bluePixel = 0xFFFF7F7F; // (127, 127, 255, 255) -> Flat Normal
 		VkDeviceSize imageSize = 4;
 		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Default Normal Staging Buffer");
-		void* data;
-		vmaMapMemory(allocator, stagingBuffer.allocation, &data);
-		memcpy(data, &bluePixel, 4);
-		vmaUnmapMemory(allocator, stagingBuffer.allocation);
+		WriteMappedBuffer(allocator, stagingBuffer, &bluePixel, imageSize);
 
 		VkImageCreateInfo imageInfo{};
 		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -325,10 +347,7 @@ void VulkanContext::Impl::CreateDefaultTexture() {
 		uint32_t maskPixel = 0xFF00FFFF; // (255, 255, 0, 255)
 		VkDeviceSize imageSize = 4;
 		VulkanBuffer stagingBuffer = CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Default Material Mask Staging Buffer");
-		void* data;
-		vmaMapMemory(allocator, stagingBuffer.allocation, &data);
-		memcpy(data, &maskPixel, 4);
-		vmaUnmapMemory(allocator, stagingBuffer.allocation);
+		WriteMappedBuffer(allocator, stagingBuffer, &maskPixel, imageSize);
 
 		VkImageCreateInfo imageInfo{};
 		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -802,11 +821,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	VkDeviceSize totalPayloadSize = static_cast<VkDeviceSize>(cpuTexture->transcodedData.size());
 	
 	VulkanBuffer stagingBuffer = CreateBuffer(totalPayloadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Texture Staging Buffer");
-	
-	void* data;
-	vmaMapMemory(allocator, stagingBuffer.allocation, &data);
-	memcpy(data, cpuTexture->transcodedData.data(), totalPayloadSize);
-	vmaUnmapMemory(allocator, stagingBuffer.allocation);
+	WriteMappedBuffer(allocator, stagingBuffer, cpuTexture->transcodedData.data(), totalPayloadSize);
 
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -973,11 +988,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	
 	VkDeviceSize bufferSize = sizeof(MaterialData);
 	VulkanBuffer stagingBuffer = CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	
-	void* mappedData;
-	vmaMapMemory(allocator, stagingBuffer.allocation, &mappedData);
-	memcpy(mappedData, &data, bufferSize);
-	vmaUnmapMemory(allocator, stagingBuffer.allocation);
+	WriteMappedBuffer(allocator, stagingBuffer, &data, bufferSize);
 	
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 	VkBufferCopy copyRegion{};
@@ -1151,56 +1162,41 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	decodeInfo.counts[3] = (cpuMesh->header.meshletCount & 0x7FFFFFFFu) | (cpuMesh->header.meshletVertexRemapEncoding << 31u);
 
 	VulkanBuffer stagingPackedVertex = CreateBuffer(packedVertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	void* data;
-	vmaMapMemory(allocator, stagingPackedVertex.allocation, &data);
-	memcpy(data, cpuMesh->meshletVertexData.data(), static_cast<size_t>(packedVertexSize));
-	vmaUnmapMemory(allocator, stagingPackedVertex.allocation);
+	WriteMappedBuffer(allocator, stagingPackedVertex, cpuMesh->meshletVertexData.data(), packedVertexSize);
 
 	VulkanBuffer stagingVertexRemap = CreateBuffer(vertexRemapSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	vmaMapMemory(allocator, stagingVertexRemap.allocation, &data);
 	// Zero-copy: upload raw on-disk bytes (u16 or u32) without CPU expansion.
-	memcpy(data, cpuMesh->meshletVertexRemapData.data(), static_cast<size_t>(vertexRemapSize));
-	vmaUnmapMemory(allocator, stagingVertexRemap.allocation);
+	WriteMappedBuffer(allocator, stagingVertexRemap, cpuMesh->meshletVertexRemapData.data(), vertexRemapSize);
 
 	VulkanBuffer stagingSkinning = { VK_NULL_HANDLE, VK_NULL_HANDLE, 0 };
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (skinningDataSize > 0)
 	{
 		stagingSkinning = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-		vmaMapMemory(allocator, stagingSkinning.allocation, &data);
-		memcpy(data, cpuMesh->meshletSkinningData.data(), static_cast<size_t>(skinningDataSize));
-		vmaUnmapMemory(allocator, stagingSkinning.allocation);
+		WriteMappedBuffer(allocator, stagingSkinning, cpuMesh->meshletSkinningData.data(), skinningDataSize);
 	}
 
 	VulkanBuffer stagingIndex = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	vmaMapMemory(allocator, stagingIndex.allocation, &data);
-	memcpy(data, cpuMesh->meshletPrimitiveIndexData.data(), static_cast<size_t>(primitiveIndexSize));
-	vmaUnmapMemory(allocator, stagingIndex.allocation);
+	WriteMappedBuffer(allocator, stagingIndex, cpuMesh->meshletPrimitiveIndexData.data(), primitiveIndexSize);
 
 	VulkanBuffer stagingMeshletTable = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	vmaMapMemory(allocator, stagingMeshletTable.allocation, &data);
-	memcpy(data, cpuMesh->meshletRecords.data(), static_cast<size_t>(meshletTableSize));
-	vmaUnmapMemory(allocator, stagingMeshletTable.allocation);
+	WriteMappedBuffer(allocator, stagingMeshletTable, cpuMesh->meshletRecords.data(), meshletTableSize);
 
 	VulkanBuffer stagingMeshletBounds = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	vmaMapMemory(allocator, stagingMeshletBounds.allocation, &data);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasBoundsPayload)
 	{
-		memcpy(data, cpuMesh->meshletBounds.data(), static_cast<size_t>(meshletBoundsSize));
+		WriteMappedBuffer(allocator, stagingMeshletBounds, cpuMesh->meshletBounds.data(), meshletBoundsSize);
 	}
 	else
 	{
 		MeshletBounds fallbackBounds{};
 		fallbackBounds.coneCutoff = 2.0f;
-		memcpy(data, &fallbackBounds, sizeof(fallbackBounds));
+		WriteMappedBuffer(allocator, stagingMeshletBounds, &fallbackBounds, sizeof(fallbackBounds));
 	}
-	vmaUnmapMemory(allocator, stagingMeshletBounds.allocation);
 
 	VulkanBuffer stagingDecodeInfo = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	vmaMapMemory(allocator, stagingDecodeInfo.allocation, &data);
-	memcpy(data, &decodeInfo, sizeof(MeshDecodeInfo));
-	vmaUnmapMemory(allocator, stagingDecodeInfo.allocation);
+	WriteMappedBuffer(allocator, stagingDecodeInfo, &decodeInfo, sizeof(MeshDecodeInfo));
 
 	VulkanMesh vMesh{};
 	// No CPU repack path: mesh shader reads the packed payload directly from storage buffers.
@@ -2551,12 +2547,7 @@ void VulkanContext::Impl::CreateEnvironmentLightingResources()
 
 		const VkDeviceSize uploadSize = static_cast<VkDeviceSize>(sizeof(glm::vec4) * texels.size());
 		VulkanBuffer stagingBuffer = CreateBuffer(uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Environment Lighting Staging Buffer");
-		void* mapped = nullptr;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (vmaMapMemory(allocator, stagingBuffer.allocation, &mapped) == VK_SUCCESS) {
-			std::memcpy(mapped, texels.data(), static_cast<size_t>(uploadSize));
-			vmaUnmapMemory(allocator, stagingBuffer.allocation);
-		}
+		WriteMappedBuffer(allocator, stagingBuffer, texels.data(), uploadSize);
 
 		VkImageCreateInfo imageInfo{};
 		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -2662,12 +2653,18 @@ void VulkanContext::Impl::DestroyAmbientOcclusionResources()
 		image = {};
 	};
 
-	DestroyImage(ambientOcclusionRaw);
-	DestroyImage(ambientOcclusionBlurred);
-	DestroyImage(ambientOcclusionHistory);
+	for (VulkanImage& image : ambientOcclusionRawByFrame) {
+		DestroyImage(image);
+	}
+	for (VulkanImage& image : ambientOcclusionBlurredByFrame) {
+		DestroyImage(image);
+	}
+	for (VulkanImage& image : ambientOcclusionHistoryByFrame) {
+		DestroyImage(image);
+	}
 	ambientOcclusionWidth = 0u;
 	ambientOcclusionHeight = 0u;
-	ambientOcclusionHistoryValid = false;
+	ambientOcclusionHistoryValidByFrame.fill(false);
 }
 
 // VulkanContext::Impl::CreateAmbientOcclusionResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2676,9 +2673,10 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 	const uint32_t width = std::max(swapchainExtent.width, 1u);
 	const uint32_t height = std::max(swapchainExtent.height, 1u);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ambientOcclusionRaw.image != VK_NULL_HANDLE
-		&& ambientOcclusionBlurred.image != VK_NULL_HANDLE
-		&& ambientOcclusionHistory.image != VK_NULL_HANDLE
+	if (!ambientOcclusionRawByFrame.empty()
+		&& ambientOcclusionRawByFrame[0].image != VK_NULL_HANDLE
+		&& ambientOcclusionBlurredByFrame[0].image != VK_NULL_HANDLE
+		&& ambientOcclusionHistoryByFrame[0].image != VK_NULL_HANDLE
 		&& ambientOcclusionWidth == width
 		&& ambientOcclusionHeight == height) {
 		return;
@@ -2696,7 +2694,11 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		imageInfo.format = AMBIENT_OCCLUSION_FORMAT;
 		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		// AO images are shader-readable/writable, clearable during creation,
+		// and the resolved frame image is copied into the history image after
+		// blur. Include both transfer directions so the temporal path never has
+		// to swap Vulkan handles or rewrite material descriptors mid-frame.
+		imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -2739,80 +2741,40 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	};
 
-	CreateAoImage("GTAO Raw Occlusion", ambientOcclusionRaw);
-	CreateAoImage("GTAO Blurred Occlusion", ambientOcclusionBlurred);
-	CreateAoImage("GTAO History Occlusion", ambientOcclusionHistory);
-	ambientOcclusionWidth = (ambientOcclusionRaw.image != VK_NULL_HANDLE && ambientOcclusionBlurred.image != VK_NULL_HANDLE && ambientOcclusionHistory.image != VK_NULL_HANDLE) ? width : 0u;
-	ambientOcclusionHeight = (ambientOcclusionWidth > 0u) ? height : 0u;
-	ambientOcclusionHistoryValid = false;
+	bool allImagesReady = true;
+	for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
+		CreateAoImage("GTAO Raw Occlusion", ambientOcclusionRawByFrame[frameIndex]);
+		CreateAoImage("GTAO Blurred Occlusion", ambientOcclusionBlurredByFrame[frameIndex]);
+		CreateAoImage("GTAO History Occlusion", ambientOcclusionHistoryByFrame[frameIndex]);
+		allImagesReady = allImagesReady
+			&& ambientOcclusionRawByFrame[frameIndex].view != VK_NULL_HANDLE
+			&& ambientOcclusionBlurredByFrame[frameIndex].view != VK_NULL_HANDLE
+			&& ambientOcclusionHistoryByFrame[frameIndex].view != VK_NULL_HANDLE;
+	}
+	ambientOcclusionWidth = allImagesReady ? width : 0u;
+	ambientOcclusionHeight = allImagesReady ? height : 0u;
+	ambientOcclusionHistoryValidByFrame.fill(false);
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ambientOcclusionRaw.view == VK_NULL_HANDLE || ambientOcclusionBlurred.view == VK_NULL_HANDLE || ambientOcclusionHistory.view == VK_NULL_HANDLE) {
+	if (!allImagesReady) {
 		return;
 	}
 
-	VkDescriptorImageInfo finalAoInfo{};
-	finalAoInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	finalAoInfo.imageView = ambientOcclusionBlurred.view;
-	finalAoInfo.sampler = VK_NULL_HANDLE;
+	for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
+		VkDescriptorImageInfo finalAoInfo{};
+		finalAoInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		finalAoInfo.imageView = ambientOcclusionBlurredByFrame[frameIndex].view;
+		finalAoInfo.sampler = VK_NULL_HANDLE;
 
-	VkDescriptorImageInfo historyInfo{};
-	historyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	historyInfo.imageView = ambientOcclusionHistory.view;
-	historyInfo.sampler = VK_NULL_HANDLE;
-
-	VkDescriptorImageInfo rawInputInfo{};
-	rawInputInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	rawInputInfo.imageView = ambientOcclusionRaw.view;
-	rawInputInfo.sampler = VK_NULL_HANDLE;
-
-	VkDescriptorImageInfo rawOutputInfo{};
-	rawOutputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-	rawOutputInfo.imageView = ambientOcclusionRaw.view;
-	rawOutputInfo.sampler = VK_NULL_HANDLE;
-
-	VkDescriptorImageInfo blurOutputInfo{};
-	blurOutputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-	blurOutputInfo.imageView = ambientOcclusionHistory.view;
-	blurOutputInfo.sampler = VK_NULL_HANDLE;
-
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-		std::array<VkWriteDescriptorSet, 5> descriptorWrites{};
+		// Global binding 19 is the only AO descriptor consumed by material
+		// shading. Compute-only AO inputs and outputs are bound through the
+		// private per-snapshot AO descriptor set during GenerateAmbientOcclusion.
+		std::array<VkWriteDescriptorSet, 1> descriptorWrites{};
 		descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrites[0].dstSet = globalDescriptorSets[i];
+		descriptorWrites[0].dstSet = globalDescriptorSets[frameIndex];
 		descriptorWrites[0].dstBinding = 19;
 		descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		descriptorWrites[0].descriptorCount = 1;
 		descriptorWrites[0].pImageInfo = &finalAoInfo;
-
-		descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrites[1].dstSet = globalDescriptorSets[i];
-		descriptorWrites[1].dstBinding = 21;
-		descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		descriptorWrites[1].descriptorCount = 1;
-		descriptorWrites[1].pImageInfo = &historyInfo;
-
-		descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrites[2].dstSet = globalDescriptorSets[i];
-		descriptorWrites[2].dstBinding = 22;
-		descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		descriptorWrites[2].descriptorCount = 1;
-		descriptorWrites[2].pImageInfo = &rawInputInfo;
-
-		descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrites[3].dstSet = globalDescriptorSets[i];
-		descriptorWrites[3].dstBinding = 23;
-		descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		descriptorWrites[3].descriptorCount = 1;
-		descriptorWrites[3].pImageInfo = &rawOutputInfo;
-
-		descriptorWrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		descriptorWrites[4].dstSet = globalDescriptorSets[i];
-		descriptorWrites[4].dstBinding = 24;
-		descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		descriptorWrites[4].descriptorCount = 1;
-		descriptorWrites[4].pImageInfo = &blurOutputInfo;
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
 	}
 }
@@ -3277,10 +3239,7 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 
 		const VkDeviceSize uploadSize = static_cast<VkDeviceSize>(sizeof(glm::vec4) * texels.size());
 		VulkanBuffer stagingBuffer = CreateBuffer(uploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-		void* mapped = nullptr;
-		vmaMapMemory(allocator, stagingBuffer.allocation, &mapped);
-		std::memcpy(mapped, texels.data(), static_cast<size_t>(uploadSize));
-		vmaUnmapMemory(allocator, stagingBuffer.allocation);
+		WriteMappedBuffer(allocator, stagingBuffer, texels.data(), uploadSize);
 
 		VkImageCreateInfo imageInfo{};
 		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -3542,8 +3501,8 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 		snapshot.viewType = budgetDiagnostics.viewType;
 		snapshot.valid = budgetDiagnostics.valid;
 		snapshot.indirectLightingActive = true;
-		const bool gtaoAvailable = ambientOcclusionBlurred.image != VK_NULL_HANDLE
-			&& ambientOcclusionBlurred.view != VK_NULL_HANDLE
+		const bool gtaoAvailable = ambientOcclusionBlurredByFrame[0].image != VK_NULL_HANDLE
+			&& ambientOcclusionBlurredByFrame[0].view != VK_NULL_HANDLE
 			&& gtaoComputePipeline != VK_NULL_HANDLE
 			&& gtaoBlurComputePipeline != VK_NULL_HANDLE;
 		snapshot.ambientOcclusionActive = gtaoAvailable;

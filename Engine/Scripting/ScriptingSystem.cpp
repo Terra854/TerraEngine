@@ -20,6 +20,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -63,6 +64,46 @@ namespace
 		}
 		return stream.str();
 	}
+
+	ScriptingSystem::ScriptDispatchContext BuildDispatchContext(
+		const ScriptingSystem::ScriptWorkItem& item,
+		bool workerDispatch,
+		bool exportMode,
+		std::uint64_t frameOrder)
+	{
+		ScriptingSystem::ScriptDispatchContext context;
+		context.workerDispatch = workerDispatch;
+		context.exportMode = exportMode;
+		context.sourceObjectId = item.objectId;
+		context.sourceObjectUuid = item.objectUuid;
+		context.sourceBindingId = item.bindingId;
+		context.frameOrder = frameOrder;
+		context.objectGeneration = item.objectGeneration;
+		context.componentGeneration = item.componentGeneration;
+		context.bindingGeneration = item.bindingGeneration;
+		return context;
+	}
+
+	class ScopedScriptDispatchContext
+	{
+	public:
+		explicit ScopedScriptDispatchContext(ScriptingSystem::ScriptDispatchContext context)
+		{
+			// Export lifecycle callbacks can now run inside worker-eligible
+			// scripting batches. Push the same thread-local context used by
+			// managed Update so component setters defer mutations instead of
+			// writing live scene state from a worker thread.
+			ScriptingSystem::SetCurrentScriptDispatchContext(std::move(context));
+		}
+
+		~ScopedScriptDispatchContext()
+		{
+			ScriptingSystem::ClearCurrentScriptDispatchContext();
+		}
+
+		ScopedScriptDispatchContext(const ScopedScriptDispatchContext&) = delete;
+		ScopedScriptDispatchContext& operator=(const ScopedScriptDispatchContext&) = delete;
+	};
 
 	// FnvHash64 is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	uint64_t FnvHash64(const std::string& text) {
@@ -834,6 +875,11 @@ ScriptingSystem::ScriptingFrameResult ScriptingSystem::DispatchScriptWorkload(co
 					}
 					if (!item.runtimeStarted && m_ExportVTable.invokeStart != nullptr)
 					{
+						ScopedScriptDispatchContext dispatchContext(BuildDispatchContext(
+							item,
+							workerDispatch,
+							exportMode,
+							(frameId * 1000000ULL) + batch.mutationOrderBase + itemIndex));
 						m_ExportVTable.invokeStart(item.runtimeHandle);
 						std::scoped_lock lock(startedInstancesMutex);
 						startedInstances.push_back(item);

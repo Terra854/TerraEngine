@@ -141,6 +141,24 @@ namespace TerraEngine
 
 		internal static bool ScriptingDiagnosticsActive => s_scriptingDiagnosticsActive;
 
+		public static void PushScriptDispatchContext(uint objectId, IntPtr bindingIdPtr, ulong frameOrder, int workerDispatch, int exportMode, ulong objectGeneration, ulong componentGeneration, ulong bindingGeneration)
+		{
+			// Export generated code runs in the gameplay assembly, so it cannot
+			// reach the internal P/Invoke declaration directly. This public
+			// wrapper keeps NativeAOT batch dispatch on the same deferred-mutation
+			// contract as editor script dispatch without exposing extra native
+			// state to ordinary component wrappers.
+			Native_Scripting_PushDispatchContext(objectId, bindingIdPtr, frameOrder, workerDispatch, exportMode, objectGeneration, componentGeneration, bindingGeneration);
+		}
+
+		public static void PopScriptDispatchContext()
+		{
+			// Always pair this with PushScriptDispatchContext in a finally block;
+			// the native side stores the context in thread-local state used by
+			// component setters to decide whether writes must be deferred.
+			Native_Scripting_PopDispatchContext();
+		}
+
 		internal static void RecordManagedCacheHit()
 		{
 			if (!s_scriptingDiagnosticsActive)

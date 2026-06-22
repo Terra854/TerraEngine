@@ -217,6 +217,15 @@ struct VulkanContext::Impl {
 	// UsesVrsAttachment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool UsesVrsAttachment() const
 	{
+		// Runtime VRS must fail closed until the backend owns a valid sampled
+		// color-history source. The current direct-to-swapchain path cannot feed
+		// GenerateVRSImage with a sampled color target, so enabling the attachment
+		// would make the render pass consume stale or undefined shading-rate
+		// texels and show focus-dependent tile artifacts in optimized exports.
+		constexpr bool kEnableVrsAttachment = false;
+		if (!kEnableVrsAttachment) {
+			return false;
+		}
 		// Editor rendering presents scene/game offscreen textures through ImGui.
 		// A shared VRS attachment can make the UI sample those textures with
 		// stale coarse shading-rate tiles during dock/viewport resizing, so VRS
@@ -317,6 +326,12 @@ struct VulkanContext::Impl {
 	VkDescriptorSetLayout globalDescriptorSetLayout = VK_NULL_HANDLE;
 	VkDescriptorPool globalDescriptorPool = VK_NULL_HANDLE;
 	std::vector<VkDescriptorSet> globalDescriptorSets;
+	VkDescriptorSetLayout hiZDescriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool hiZDescriptorPool = VK_NULL_HANDLE;
+	std::vector<VkDescriptorSet> hiZDescriptorSets;
+	VkDescriptorSetLayout aoDescriptorSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool aoDescriptorPool = VK_NULL_HANDLE;
+	std::vector<VkDescriptorSet> aoDescriptorSets;
 	VkSampler fallbackPointShadowSampler = VK_NULL_HANDLE;
 	
 	std::vector<VulkanBuffer> globalMaterialSSBOs;
@@ -378,13 +393,14 @@ struct VulkanContext::Impl {
 	VkPipeline gtaoComputePipeline = VK_NULL_HANDLE;
 	VkPipeline gtaoBlurComputePipeline = VK_NULL_HANDLE;
 	VkPipelineLayout hiZPipelineLayout = VK_NULL_HANDLE;
+	VkPipelineLayout aoPipelineLayout = VK_NULL_HANDLE;
 	VkPipelineLayout vrsPipelineLayout = VK_NULL_HANDLE;
-	VulkanImage ambientOcclusionRaw;
-	VulkanImage ambientOcclusionBlurred;
-	VulkanImage ambientOcclusionHistory;
+	std::array<VulkanImage, MAX_FRAMES_IN_FLIGHT> ambientOcclusionRawByFrame{};
+	std::array<VulkanImage, MAX_FRAMES_IN_FLIGHT> ambientOcclusionBlurredByFrame{};
+	std::array<VulkanImage, MAX_FRAMES_IN_FLIGHT> ambientOcclusionHistoryByFrame{};
 	uint32_t ambientOcclusionWidth = 0u;
 	uint32_t ambientOcclusionHeight = 0u;
-	bool ambientOcclusionHistoryValid = false;
+	std::array<bool, MAX_FRAMES_IN_FLIGHT> ambientOcclusionHistoryValidByFrame{};
 
 	// struct GpuLightAnalysisViewSnapshot groups related state and operations so callers have one documented contract.
 	struct GpuLightAnalysisViewSnapshot
@@ -487,8 +503,10 @@ struct VulkanContext::Impl {
 		bool EnsureShadowRenderResources(const ShadowResourceRequest& request);
 		void UploadLightingData(const std::vector<GPULight>& lights);
 		void UploadLightAnalysisInputData(const std::vector<GPULight>& lights);
+			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImageView depthView);
+			void RestoreDepthForAttachment(VkCommandBuffer cmd);
 			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView);
-			void GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData);
+			void GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
 		void ResetMeshletCounters(uint32_t statsSlotIndex);

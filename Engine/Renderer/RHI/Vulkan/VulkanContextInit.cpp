@@ -100,6 +100,16 @@ void VulkanContext::Impl::Cleanup() {
 
 	DestroyAmbientOcclusionResources();
 	DestroyEnvironmentLightingResources();
+	if (hiZDescriptorPool != VK_NULL_HANDLE) {
+		vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
+		hiZDescriptorPool = VK_NULL_HANDLE;
+		hiZDescriptorSets.clear();
+	}
+	if (aoDescriptorPool != VK_NULL_HANDLE) {
+		vkDestroyDescriptorPool(device, aoDescriptorPool, nullptr);
+		aoDescriptorPool = VK_NULL_HANDLE;
+		aoDescriptorSets.clear();
+	}
 	hiZ.Destroy(device, allocator);
 	vrs.Destroy(device, allocator);
 
@@ -343,6 +353,32 @@ void VulkanContext::Impl::Cleanup() {
 		if (lightingComputePipelineLayout != VK_NULL_HANDLE) {
 			vkDestroyPipelineLayout(device, lightingComputePipelineLayout, nullptr);
 			lightingComputePipelineLayout = VK_NULL_HANDLE;
+		}
+		if (hiZDescriptorPool != VK_NULL_HANDLE) {
+			vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
+			hiZDescriptorPool = VK_NULL_HANDLE;
+			hiZDescriptorSets.clear();
+		}
+		if (hiZPipelineLayout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(device, hiZPipelineLayout, nullptr);
+			hiZPipelineLayout = VK_NULL_HANDLE;
+		}
+		if (hiZDescriptorSetLayout != VK_NULL_HANDLE) {
+			vkDestroyDescriptorSetLayout(device, hiZDescriptorSetLayout, nullptr);
+			hiZDescriptorSetLayout = VK_NULL_HANDLE;
+		}
+		if (aoDescriptorPool != VK_NULL_HANDLE) {
+			vkDestroyDescriptorPool(device, aoDescriptorPool, nullptr);
+			aoDescriptorPool = VK_NULL_HANDLE;
+			aoDescriptorSets.clear();
+		}
+		if (aoPipelineLayout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(device, aoPipelineLayout, nullptr);
+			aoPipelineLayout = VK_NULL_HANDLE;
+		}
+		if (aoDescriptorSetLayout != VK_NULL_HANDLE) {
+			vkDestroyDescriptorSetLayout(device, aoDescriptorSetLayout, nullptr);
+			aoDescriptorSetLayout = VK_NULL_HANDLE;
 		}
 		auto DestroyShadowFramebuffer = [&](VkFramebuffer& framebuffer) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1563,6 +1599,16 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	DestroyBufferVector(lightAnalysisSSBOs);
 	DestroyBufferVector(indirectDrawBuffers);
 
+	if (hiZDescriptorPool != VK_NULL_HANDLE) {
+		vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
+		hiZDescriptorPool = VK_NULL_HANDLE;
+		hiZDescriptorSets.clear();
+	}
+	if (aoDescriptorPool != VK_NULL_HANDLE) {
+		vkDestroyDescriptorPool(device, aoDescriptorPool, nullptr);
+		aoDescriptorPool = VK_NULL_HANDLE;
+		aoDescriptorSets.clear();
+	}
 	hiZ.Destroy(device, allocator);
 	vrs.Destroy(device, allocator);
 

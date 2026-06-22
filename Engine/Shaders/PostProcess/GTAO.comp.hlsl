@@ -24,6 +24,11 @@ float LoadDepthClamped(int2 pixel)
 	return inputDepth.Load(uint3(uint2(clampedPixel), 0));
 }
 
+bool IsUsableDepth(float depth)
+{
+	return isfinite(depth) && depth > 0.0f && depth < 0.999999f;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -34,9 +39,16 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	}
 
 	const float centerDepth = LoadDepthClamped(int2(pixel));
+	if (!IsUsableDepth(centerDepth))
+	{
+		outputOcclusion[pixel] = 1.0f;
+		return;
+	}
+
 	const int sampleRadius = max(1, (int)round(config.radiusPixels));
 	float occlusion = 0.0f;
 	float weight = 0.0f;
+	const float sameSurfaceBias = max(0.00035f, centerDepth * 0.00045f);
 
 	// This depth-only approximation is intentionally conservative. Nearby
 	// samples that are closer to the camera than the center pixel contribute
@@ -54,8 +66,16 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
 			const int2 offset = int2(x, y) * sampleRadius;
 			const float sampleDepth = LoadDepthClamped(int2(pixel) + offset);
-			const float depthDelta = centerDepth - sampleDepth;
-			occlusion += saturate(depthDelta * 128.0f);
+			if (!IsUsableDepth(sampleDepth))
+			{
+				continue;
+			}
+
+			// Ignore tiny depth deltas from the same triangle or neighboring
+			// coplanar triangles. Optimized/export builds run fast enough that
+			// these sub-pixel depth differences were visible as dotted AO noise.
+			const float depthDelta = centerDepth - sampleDepth - sameSurfaceBias;
+			occlusion += saturate(depthDelta * 72.0f);
 			weight += 1.0f;
 		}
 	}

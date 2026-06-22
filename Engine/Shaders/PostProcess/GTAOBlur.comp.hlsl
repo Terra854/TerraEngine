@@ -38,6 +38,11 @@ float LoadHistoryClamped(int2 pixel)
 	return inputHistory.Load(uint3(uint2(clampedPixel), 0));
 }
 
+bool IsUsableDepth(float depth)
+{
+	return isfinite(depth) && depth > 0.0f && depth < 0.999999f;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -48,6 +53,12 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	}
 
 	const float centerDepth = LoadDepthClamped(int2(pixel));
+	if (!IsUsableDepth(centerDepth))
+	{
+		outputOcclusion[pixel] = 1.0f;
+		return;
+	}
+
 	float weightedOcclusion = 0.0f;
 	float totalWeight = 0.0f;
 
@@ -59,15 +70,23 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 		{
 			const int2 samplePixel = int2(pixel) + int2(x, y);
 			const float sampleDepth = LoadDepthClamped(samplePixel);
+			if (!IsUsableDepth(sampleDepth))
+			{
+				continue;
+			}
 			const float depthWeight = exp(-abs(sampleDepth - centerDepth) / max(config.depthSigma, 0.0001f));
 			const float spatialWeight = exp(-dot(float2(x, y), float2(x, y)) * 0.25f);
 			const float weight = depthWeight * spatialWeight;
-			weightedOcclusion += LoadOcclusionClamped(samplePixel) * weight;
+			const float sampleOcclusion = LoadOcclusionClamped(samplePixel);
+			weightedOcclusion += (isfinite(sampleOcclusion) ? saturate(sampleOcclusion) : 1.0f) * weight;
 			totalWeight += weight;
 		}
 	}
 
-	const float blurred = totalWeight > 0.0f ? weightedOcclusion / totalWeight : LoadOcclusionClamped(int2(pixel));
+	const float fallbackOcclusion = LoadOcclusionClamped(int2(pixel));
+	const float blurred = totalWeight > 0.0f
+		? weightedOcclusion / totalWeight
+		: (isfinite(fallbackOcclusion) ? saturate(fallbackOcclusion) : 1.0f);
 	// Blend only after the spatial blur so history smooths residual AO noise.
 	// Avoid sampling history while the CPU says it is invalid; optimized builds
 	// may still propagate undefined texture contents through a zero-weight lerp.
@@ -76,7 +95,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	if (historyBlend > 0.001f)
 	{
 		const float history = LoadHistoryClamped(int2(pixel));
-		resolvedOcclusion = lerp(blurred, history, historyBlend);
+		resolvedOcclusion = lerp(blurred, isfinite(history) ? saturate(history) : 1.0f, historyBlend);
 	}
 	outputOcclusion[pixel] = saturate(resolvedOcclusion);
 }
