@@ -1127,7 +1127,7 @@ void RenderSystem::Update(float deltaTime)
 		return commands;
 	};
 
-	auto publishVisibleStreamingNeeds = [&](const std::vector<DrawCommand>& commands, RenderViewType viewType) {
+	auto publishVisibleStreamingNeeds = [&](const std::vector<DrawCommand>& commands, RenderViewType viewType, const glm::vec3& cameraPosition) {
 		const char* viewReason = viewType == RenderViewType::Scene ? "visible scene view renderable" : "visible game view renderable";
 		for (const DrawCommand& command : commands)
 		{
@@ -1139,10 +1139,24 @@ void RenderSystem::Update(float deltaTime)
 			ResourceManager::Instance().TouchResource(command.materialId, AssetType::Material, activeRenderFrameId, TerraEngine::Resource::ResidencyPinReason::None, viewReason);
 			ResourceManager::Instance().MarkStreamingNeed(command.meshId, AssetType::Mesh, TerraEngine::Resource::StreamingNeedType::Visible, activeRenderFrameId, viewReason, 100);
 			ResourceManager::Instance().MarkStreamingNeed(command.materialId, AssetType::Material, TerraEngine::Resource::StreamingNeedType::Visible, activeRenderFrameId, viewReason, 100);
+			if (Material* material = ResourceManager::Instance().GetMaterial(command.materialId))
+			{
+				const glm::vec3 objectPosition = glm::vec3(command.modelMatrix[3]);
+				const double viewDistance = static_cast<double>(glm::length(objectPosition - cameraPosition));
+				for (const TextureBinding& binding : material->textures)
+				{
+					if (binding.textureUuid == TerraEngine::EMPTY_UUID)
+					{
+						continue;
+					}
+					ResourceManager::Instance().MarkStreamingNeed(binding.textureUuid, AssetType::Texture, TerraEngine::Resource::StreamingNeedType::Visible, activeRenderFrameId, viewReason, 90);
+					ResourceManager::Instance().MarkTextureStreamingDistance(binding.textureUuid, viewDistance, activeRenderFrameId, viewReason);
+				}
+			}
 		}
 	};
 
-	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection, const glm::uvec2& targetSize, RenderViewType viewType, std::uint32_t outputId) {
+	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection, const glm::uvec2& targetSize, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Visible Draw Commands Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const std::uint64_t signature = BuildVisibleCommandCacheKey(
 			renderFrameSnapshot.sceneRevision,
@@ -1157,7 +1171,7 @@ void RenderSystem::Update(float deltaTime)
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			++visibleCommandCache.hitCount;
 			existing->second.lastTouchedFrameId = activeRenderFrameId;
-			publishVisibleStreamingNeeds(existing->second.commands, viewType);
+			publishVisibleStreamingNeeds(existing->second.commands, viewType, cameraPosition);
 			return VisibleCommandBuildResult{ existing->second.commands, existing->second.diagnostics, true };
 		}
 
@@ -1175,7 +1189,7 @@ void RenderSystem::Update(float deltaTime)
 		result.diagnostics.rejectedObjectCount = queryDiagnostics.rejectedObjectCount;
 		result.diagnostics.fallbackObjectCount = queryDiagnostics.fallbackObjectCount;
 		result.diagnostics.lastQueryDurationMs = queryDiagnostics.lastQueryDurationMs;
-		publishVisibleStreamingNeeds(result.commands, viewType);
+		publishVisibleStreamingNeeds(result.commands, viewType, cameraPosition);
 		VisibleCommandCacheRecord record;
 		record.signature = signature;
 		record.lastTouchedFrameId = activeRenderFrameId;
@@ -1609,7 +1623,7 @@ void RenderSystem::Update(float deltaTime)
 		frameData.viewMatrix = sceneViewCamera.view;
 		frameData.projectionMatrix = sceneViewCamera.proj;
 		frameData.cameraWorldPosition = sceneViewCamera.pos;
-		const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, sceneViewTargetSize, RenderViewType::Scene, 1u);
+		const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, sceneViewTargetSize, RenderViewType::Scene, 1u, frameData.cameraWorldPosition);
 		frameData.commands = visibleCommands.commands;
 		sceneSpatialDiagnostics = visibleCommands.diagnostics;
 		applySceneViewContextTint();
@@ -1637,7 +1651,7 @@ void RenderSystem::Update(float deltaTime)
 			frameData.viewMatrix = cam.view;
 			frameData.projectionMatrix = cam.proj;
 			frameData.cameraWorldPosition = cam.pos;
-			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderViewType::Game, 2u);
+			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
 			frameData.commands = visibleCommands.commands;
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
@@ -1697,7 +1711,7 @@ void RenderSystem::Update(float deltaTime)
 			frameData.projectionMatrix[1][1] *= -1;
 			frameData.cameraWorldPosition = cameraTransform.position;
 			frameData.editorContextTint = glm::vec4(0.0f);
-			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderViewType::Game, 2u);
+			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
 			frameData.commands = visibleCommands.commands;
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);

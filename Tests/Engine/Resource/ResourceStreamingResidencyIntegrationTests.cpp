@@ -18,8 +18,10 @@ namespace {
 	{
 		registry.Add("Resource.Streaming.Residency.RetentionDefersCleanup", [](TestContext& context) {
 			Resource::ResidencyPolicy residency = Resource::MakeDefaultResidencyPolicy();
-			residency.idleSecondsThreshold = 10.0;
-			residency.reloadGraceSeconds = 5.0;
+			residency.cpu.idleSecondsThreshold = 10.0;
+			residency.cpu.reloadGraceSeconds = 5.0;
+			residency.gpu.idleSecondsThreshold = 10.0;
+			residency.gpu.reloadGraceSeconds = 5.0;
 
 			Resource::ResidentAsset asset;
 			asset.assetId = MakeId(7u);

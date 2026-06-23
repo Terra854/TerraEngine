@@ -598,7 +598,7 @@ void VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint
 }
 
 // VulkanContext::Impl::CreateImageView is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags) {
+VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels) {
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	viewInfo.image = image;
@@ -606,7 +606,7 @@ VkImageView VulkanContext::Impl::CreateImageView(VkImage image, VkFormat format,
 	viewInfo.format = format;
 	viewInfo.subresourceRange.aspectMask = aspectFlags;
 	viewInfo.subresourceRange.baseMipLevel = 0;
-	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.levelCount = std::max(1u, mipLevels);
 	viewInfo.subresourceRange.baseArrayLayer = 0;
 	viewInfo.subresourceRange.layerCount = 1;
 
@@ -798,18 +798,36 @@ VkFormat VulkanContext::Impl::MapTextureFormat(uint32_t vkFormat) {
 // VulkanContext::Impl::EnsureTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	if (textureCache.contains(textureId)) {
+		const VulkanImage& cachedTexture = textureCache[textureId];
+		const TerraEngine::Resource::TextureMipResidency desiredMipResidency =
+			ResourceManager::Instance().ResolveTextureMipResidencyForTexture(textureId, cachedTexture.sourceMipCount);
+		if (desiredMipResidency.residentMipCount != cachedTexture.residentMipCount
+			|| desiredMipResidency.sourceMipOffset != cachedTexture.residentMipOffset)
+		{
+			// Texture streaming policy and view distance can change while a
+			// texture is cached. Recreate the image when the desired mip tail no
+			// longer matches the cached VkImage dimensions, then fall through to
+			// the normal upload path below.
+			InvalidateTexture(textureId, false);
+		}
+		else
+		{
 		ResourceManager::Instance().MarkResourceUploadedToGpu(
 			textureId,
 			AssetType::Texture,
 			static_cast<std::uint64_t>(currentFrame),
-			static_cast<std::uint64_t>(textureCache[textureId].size),
-			"vulkan texture cache hit");
+			static_cast<std::uint64_t>(cachedTexture.size),
+			"vulkan texture cache hit",
+			cachedTexture.residentMipCount,
+			cachedTexture.sourceMipCount,
+			cachedTexture.residentMipOffset);
 		if (!textureIndexMap.contains(textureId)) {
 			uint32_t index = AllocateTextureIndex();
 			textureIndexMap[textureId] = index;
-			UpdateGlobalTexture(index, textureCache[textureId]);
+			UpdateGlobalTexture(index, cachedTexture);
 		}
 		return;
+		}
 	}
 
 	Texture* cpuTexture = ResourceManager::Instance().GetTexture(textureId);
@@ -824,18 +842,69 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		return;
 	}
 
-	VkDeviceSize totalPayloadSize = static_cast<VkDeviceSize>(cpuTexture->transcodedData.size());
-	
-	VulkanBuffer stagingBuffer = CreateBuffer(totalPayloadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Texture Staging Buffer");
-	WriteMappedBuffer(allocator, stagingBuffer, cpuTexture->transcodedData.data(), totalPayloadSize);
+	const std::uint32_t sourceMipCount = std::max(1u, static_cast<std::uint32_t>(cpuTexture->descriptor.mipCount));
+	const TerraEngine::Resource::TextureMipResidency mipResidency =
+		ResourceManager::Instance().ResolveTextureMipResidencyForTexture(textureId, sourceMipCount);
+	const std::uint32_t residentMipOffset = std::min(mipResidency.sourceMipOffset, sourceMipCount - 1u);
+	const std::uint32_t residentMipCount = std::max(1u, std::min(mipResidency.residentMipCount, sourceMipCount - residentMipOffset));
+	VkDeviceSize residentPayloadSize = 0u;
+	for (std::uint32_t mipIndex = 0u; mipIndex < residentMipCount; ++mipIndex)
+	{
+		const std::uint32_t sourceMip = residentMipOffset + mipIndex;
+		if (sourceMip >= cpuTexture->levelTable.size())
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Texture " << ToHexString(textureId) << " has missing mip metadata.");
+			return;
+		}
+		residentPayloadSize += static_cast<VkDeviceSize>(cpuTexture->levelTable[sourceMip].size);
+	}
+	if (residentPayloadSize == 0u)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Texture " << ToHexString(textureId) << " selected no resident mip payload.");
+		return;
+	}
+
+	std::vector<std::uint8_t> residentUploadData(static_cast<std::size_t>(residentPayloadSize));
+	VkDeviceSize uploadOffset = 0u;
+	std::vector<VkBufferImageCopy> regions;
+	regions.reserve(residentMipCount);
+	for (std::uint32_t mipIndex = 0u; mipIndex < residentMipCount; ++mipIndex)
+	{
+		const std::uint32_t sourceMip = residentMipOffset + mipIndex;
+		const auto& level = cpuTexture->levelTable[sourceMip];
+		if (level.offset + level.size > cpuTexture->transcodedData.size())
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Texture " << ToHexString(textureId) << " mip payload overruns transcoded data.");
+			return;
+		}
+		std::memcpy(
+			residentUploadData.data() + static_cast<std::size_t>(uploadOffset),
+			cpuTexture->transcodedData.data() + static_cast<std::size_t>(level.offset),
+			static_cast<std::size_t>(level.size));
+
+		VkBufferImageCopy region{};
+		region.bufferOffset = uploadOffset;
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.mipLevel = mipIndex;
+		region.imageSubresource.baseArrayLayer = 0;
+		region.imageSubresource.layerCount = 1;
+		region.imageExtent.width = std::max(1u, static_cast<uint32_t>(cpuTexture->descriptor.width) >> sourceMip);
+		region.imageExtent.height = std::max(1u, static_cast<uint32_t>(cpuTexture->descriptor.height) >> sourceMip);
+		region.imageExtent.depth = 1;
+		regions.push_back(region);
+		uploadOffset += static_cast<VkDeviceSize>(level.size);
+	}
+
+	VulkanBuffer stagingBuffer = CreateBuffer(residentPayloadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Texture Mip Staging Buffer");
+	WriteMappedBuffer(allocator, stagingBuffer, residentUploadData.data(), residentPayloadSize);
 
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	imageInfo.imageType = VK_IMAGE_TYPE_2D;
-	imageInfo.extent.width = cpuTexture->descriptor.width;
-	imageInfo.extent.height = cpuTexture->descriptor.height;
+	imageInfo.extent.width = std::max(1u, static_cast<uint32_t>(cpuTexture->descriptor.width) >> residentMipOffset);
+	imageInfo.extent.height = std::max(1u, static_cast<uint32_t>(cpuTexture->descriptor.height) >> residentMipOffset);
 	imageInfo.extent.depth = 1;
-	imageInfo.mipLevels = std::max(1u, (uint32_t)cpuTexture->descriptor.mipCount); 
+	imageInfo.mipLevels = residentMipCount;
 	imageInfo.arrayLayers = 1;
 	imageInfo.format = MapTextureFormat(cpuTexture->descriptor.vkFormat);
 	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -857,23 +926,6 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 
 	TransitionImageLayout(vImage.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 	
-	// Copy all mips
-	std::vector<VkBufferImageCopy> regions;
-	regions.reserve(cpuTexture->descriptor.mipCount);
-	for (uint32_t i = 0; i < cpuTexture->descriptor.mipCount; ++i) {
-		const auto& level = cpuTexture->levelTable[i];
-		VkBufferImageCopy region{};
-		region.bufferOffset = level.offset;
-		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		region.imageSubresource.mipLevel = i;
-		region.imageSubresource.baseArrayLayer = 0;
-		region.imageSubresource.layerCount = 1;
-		region.imageExtent.width = std::max(1u, static_cast<uint32_t>(cpuTexture->descriptor.width) >> i);
-		region.imageExtent.height = std::max(1u, static_cast<uint32_t>(cpuTexture->descriptor.height) >> i);
-		region.imageExtent.depth = 1;
-		regions.push_back(region);
-	}
-
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, vImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()), regions.data());
 	EndSingleTimeCommands(commandBuffer);
@@ -882,8 +934,11 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 
 	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
-	vImage.view = CreateImageView(vImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
-	vImage.size = totalPayloadSize;
+	vImage.view = CreateImageView(vImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT, residentMipCount);
+	vImage.size = residentPayloadSize;
+	vImage.sourceMipCount = sourceMipCount;
+	vImage.residentMipCount = residentMipCount;
+	vImage.residentMipOffset = residentMipOffset;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vImage.view == VK_NULL_HANDLE) {
 		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
@@ -899,6 +954,8 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 	samplerInfo.maxAnisotropy = 1.0f;
+	samplerInfo.minLod = 0.0f;
+	samplerInfo.maxLod = static_cast<float>(residentMipCount - 1u);
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vkCreateSampler(device, &samplerInfo, nullptr, &vImage.sampler) != VK_SUCCESS) {
@@ -912,8 +969,11 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		textureId,
 		AssetType::Texture,
 		static_cast<std::uint64_t>(currentFrame),
-		static_cast<std::uint64_t>(totalPayloadSize),
-		"vulkan texture upload");
+		static_cast<std::uint64_t>(residentPayloadSize),
+		mipResidency.partial ? "vulkan texture partial mip upload" : "vulkan texture upload",
+		residentMipCount,
+		sourceMipCount,
+		residentMipOffset);
 
 	// Assign bindless index
 	uint32_t index = AllocateTextureIndex();

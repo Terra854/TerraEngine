@@ -75,6 +75,9 @@ namespace TerraEngine::Resource
 		policy.visibleRetentionSeconds = kDefaultVisibleRetentionSeconds;
 		policy.neededRetentionSeconds = kDefaultNeededRetentionSeconds;
 		policy.maxLoadsPerUpdate = 0u;
+		policy.textureMipStreamingEnabled = false;
+		policy.textureMinStreamMip = 0u;
+		policy.textureMaxStreamMip = 0u;
 		policy.memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
 		policy.diagnosticsEnabled = false;
 		policy.protectedNeedTypes = {
@@ -110,7 +113,102 @@ namespace TerraEngine::Resource
 		{
 			sanitized.protectedNeedTypes = MakeDefaultStreamingPolicy().protectedNeedTypes;
 		}
+		if (sanitized.textureMaxStreamMip < sanitized.textureMinStreamMip)
+		{
+			sanitized.textureMaxStreamMip = sanitized.textureMinStreamMip;
+		}
 		return sanitized;
+	}
+
+	StreamingAssetPolicy MakeDefaultStreamingAssetPolicy(StreamableAssetType type)
+	{
+		StreamingAssetPolicy policy;
+		switch (type)
+		{
+		case StreamableAssetType::ShaderCollection:
+			policy.priorityClass = StreamingPriorityClass::Critical;
+			policy.residencyTier = StreamingResidencyTier::Persistent;
+			policy.priorityBias = 1000;
+			break;
+		case StreamableAssetType::Material:
+			policy.priorityClass = StreamingPriorityClass::Important;
+			policy.residencyTier = StreamingResidencyTier::Warm;
+			policy.priorityBias = 100;
+			break;
+		case StreamableAssetType::Mesh:
+		case StreamableAssetType::Texture:
+		case StreamableAssetType::Other:
+			policy.priorityClass = StreamingPriorityClass::Normal;
+			policy.residencyTier = StreamingResidencyTier::Streamed;
+			policy.priorityBias = 0;
+			break;
+		}
+		return policy;
+	}
+
+	StreamingAssetPolicy SanitizeStreamingAssetPolicy(const StreamingAssetPolicy& policy)
+	{
+		StreamingAssetPolicy sanitized = policy;
+		if (sanitized.priorityBias < -10000)
+		{
+			sanitized.priorityBias = -10000;
+		}
+		if (sanitized.priorityBias > 10000)
+		{
+			sanitized.priorityBias = 10000;
+		}
+		return sanitized;
+	}
+
+	TextureMipResidency ResolveTextureMipResidency(const StreamingPolicy& policy, std::uint32_t sourceMipCount)
+	{
+		TextureMipResidency residency;
+		residency.sourceMipCount = sourceMipCount;
+		if (sourceMipCount == 0u)
+		{
+			return residency;
+		}
+
+		const StreamingPolicy sanitized = SanitizeStreamingPolicy(policy);
+		if (!sanitized.textureMipStreamingEnabled
+			|| sanitized.textureMaxStreamMip == 0u)
+		{
+			residency.sourceMipOffset = 0u;
+			residency.residentMipCount = sourceMipCount;
+			residency.partial = false;
+			return residency;
+		}
+
+		// Mip streaming policy is expressed in source mip indices: mip 0 is
+		// full resolution, and larger indices are progressively cheaper lower
+		// detail levels. The backend currently uploads a contiguous tail that
+		// starts at the chosen source mip, so sampling never touches missing
+		// higher-detail levels.
+		const std::uint32_t maxSourceMip = sourceMipCount - 1u;
+		const std::uint32_t requestedSourceMip = std::clamp(
+			sanitized.textureMinStreamMip,
+			0u,
+			std::min(sanitized.textureMaxStreamMip, maxSourceMip));
+		residency.sourceMipOffset = requestedSourceMip;
+		residency.residentMipCount = sourceMipCount - requestedSourceMip;
+		residency.partial = residency.sourceMipOffset > 0u;
+		return residency;
+	}
+
+	std::int32_t PriorityClassBias(StreamingPriorityClass priorityClass)
+	{
+		switch (priorityClass)
+		{
+		case StreamingPriorityClass::Background:
+			return -100;
+		case StreamingPriorityClass::Normal:
+			return 0;
+		case StreamingPriorityClass::Important:
+			return 100;
+		case StreamingPriorityClass::Critical:
+			return 1000;
+		}
+		return 0;
 	}
 
 	bool ValidatePreloadRule(const PreloadRule& rule, std::string* reason)
@@ -345,5 +443,28 @@ namespace TerraEngine::Resource
 		case MemoryBudgetInteraction::Conservative: return "conservative";
 		}
 		return "use-residency-policy";
+	}
+
+	std::string_view ToString(StreamingPriorityClass priorityClass)
+	{
+		switch (priorityClass)
+		{
+		case StreamingPriorityClass::Background: return "background";
+		case StreamingPriorityClass::Normal: return "normal";
+		case StreamingPriorityClass::Important: return "important";
+		case StreamingPriorityClass::Critical: return "critical";
+		}
+		return "normal";
+	}
+
+	std::string_view ToString(StreamingResidencyTier residencyTier)
+	{
+		switch (residencyTier)
+		{
+		case StreamingResidencyTier::Streamed: return "streamed";
+		case StreamingResidencyTier::Warm: return "warm";
+		case StreamingResidencyTier::Persistent: return "persistent";
+		}
+		return "streamed";
 	}
 }

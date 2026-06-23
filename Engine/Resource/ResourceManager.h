@@ -198,7 +198,10 @@ public:
 		AssetType type,
 		std::uint64_t frameId,
 		std::uint64_t gpuBytes,
-		std::string_view detail = {});
+		std::string_view detail = {},
+		std::uint32_t textureResidentMipCount = 0u,
+		std::uint32_t textureSourceMipCount = 0u,
+		std::uint32_t textureResidentMipOffset = 0u);
 	TerraEngine::Resource::ResidencySnapshot BuildResidencySnapshot(std::uint64_t frameId) const;
 	std::vector<TerraEngine::Resource::ReleaseRecord> RunResidencyCleanup(std::uint64_t frameId);
 
@@ -215,6 +218,19 @@ public:
 		const std::filesystem::path& path,
 		bool referencedByScene = true);
 	std::optional<TerraEngine::Resource::StreamableAssetRecord> GetStreamableAsset(const TerraEngine::UUID& id) const;
+	void SetStreamableAssetPolicy(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		const TerraEngine::Resource::StreamingAssetPolicy& policy);
+	TerraEngine::Resource::StreamingAssetPolicy GetStreamableAssetPolicy(const TerraEngine::UUID& id, AssetType type) const;
+	void MarkTextureStreamingDistance(
+		const TerraEngine::UUID& id,
+		double viewDistance,
+		std::uint64_t frameId,
+		std::string_view reason = {});
+	TerraEngine::Resource::TextureMipResidency ResolveTextureMipResidencyForTexture(
+		const TerraEngine::UUID& id,
+		std::uint32_t sourceMipCount) const;
 	void MarkStreamingNeed(
 		const TerraEngine::UUID& id,
 		AssetType type,
@@ -384,6 +400,7 @@ private:
 		TerraEngine::Resource::ResidencyState state);
 	void CacheLoadedMeshBounds(const TerraEngine::UUID& id, const Mesh* mesh);
 	void CacheLoadedMeshBounds(const TerraEngine::UUID& id, const void* resource);
+	TerraEngine::Resource::StreamingAssetPolicy ResolveStreamingAssetPolicy(const TerraEngine::UUID& id, AssetType type) const;
 
 	// EstimateLoadedResourceBytes uses conservative fallback byte counts because
 	// residency cleanup only needs deterministic ordering before specialized
@@ -395,6 +412,7 @@ private:
 		const TerraEngine::UUID& id,
 		AssetType type,
 		TerraEngine::Resource::ResidencyReleaseReason reason,
+		TerraEngine::Resource::ResidencyReleaseDomain domain,
 		std::uint64_t frameId,
 		std::uint64_t candidateBytes);
 
@@ -434,6 +452,8 @@ private:
 	TerraEngine::Resource::StreamingDiagnosticsSummary m_StreamingDiagnostics;
 	std::unordered_map<TerraEngine::UUID, TerraEngine::Resource::StreamableAssetRecord> m_StreamableAssets;
 	mutable std::shared_mutex m_StreamingMutex;
+	std::uint64_t m_StreamingLoadBudgetFrame = 0u;
+	std::uint32_t m_StreamingLoadsIssuedThisFrame = 0u;
 	std::unordered_map<TerraEngine::UUID, TerraEngine::Scene::SpatialAABB> m_MeshLocalBoundsCache;
 	mutable std::shared_mutex m_MeshLocalBoundsMutex;
 

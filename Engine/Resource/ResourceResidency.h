@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "Resource/ResourceStreaming.h"
 #include "Core/Export.h"
 #include "Utilities/UUID.h"
 
@@ -86,14 +87,31 @@ namespace TerraEngine::Resource
 		RecentlyUsed
 	};
 
+	enum class ResidencyReleaseDomain : std::uint8_t
+	{
+		Cpu,
+		Gpu,
+		CpuAndGpu
+	};
+
+	struct ResidencyMemoryPolicy
+	{
+		double idleSecondsThreshold = 10.0;
+		std::uint64_t memoryBudgetBytes = 0;
+		double reloadGraceSeconds = 0.5;
+	};
+
+	struct GpuResidencyPolicy : ResidencyMemoryPolicy
+	{
+		bool strictBudgetMode = false;
+	};
+
 	struct ResidencyPolicy
 	{
 		bool enabled = true;
-		double idleSecondsThreshold = 10.0;
-		std::uint64_t memoryBudgetBytes = 0;
 		double cleanupIntervalSeconds = 1.0;
-		double reloadGraceSeconds = 0.5;
-		bool strictBudgetMode = false;
+		ResidencyMemoryPolicy cpu;
+		GpuResidencyPolicy gpu;
 		bool diagnosticsEnabled = false;
 		std::unordered_set<std::string> protectedGroups;
 	};
@@ -112,6 +130,8 @@ namespace TerraEngine::Resource
 		ResidencyPinReason pinReason = ResidencyPinReason::None;
 		bool reloadable = true;
 		bool inFlight = false;
+		StreamingPriorityClass priorityClass = StreamingPriorityClass::Normal;
+		StreamingResidencyTier residencyTier = StreamingResidencyTier::Streamed;
 		std::uint64_t releaseGeneration = 0;
 	};
 
@@ -133,6 +153,9 @@ namespace TerraEngine::Resource
 		double idleSeconds = 0.0;
 		std::uint64_t estimatedReclaimableBytes = 0;
 		ResidencyReleaseReason releaseReason = ResidencyReleaseReason::None;
+		ResidencyReleaseDomain releaseDomain = ResidencyReleaseDomain::CpuAndGpu;
+		StreamingPriorityClass priorityClass = StreamingPriorityClass::Normal;
+		StreamingResidencyTier residencyTier = StreamingResidencyTier::Streamed;
 		ResidencyBlockedReason blockedReason = ResidencyBlockedReason::None;
 	};
 
@@ -142,6 +165,7 @@ namespace TerraEngine::Resource
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
 		ResidencyAssetType assetType = ResidencyAssetType::Other;
 		ResidencyReleaseReason releaseReason = ResidencyReleaseReason::None;
+		ResidencyReleaseDomain releaseDomain = ResidencyReleaseDomain::CpuAndGpu;
 		ResidencyReleaseResult result = ResidencyReleaseResult::Skipped;
 		std::uint64_t bytesReclaimed = 0;
 		std::string explanation;
@@ -173,6 +197,7 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::string_view ToString(ResidencyReleaseReason reason);
 	TERRAENGINE_API std::string_view ToString(ResidencyReleaseResult result);
 	TERRAENGINE_API std::string_view ToString(ResidencyBlockedReason reason);
+	TERRAENGINE_API std::string_view ToString(ResidencyReleaseDomain domain);
 	TERRAENGINE_API std::uint64_t EstimateResidentBytes(const ResidentAsset& asset);
 	TERRAENGINE_API ResidencyBlockedReason EvaluateReleaseBlocker(const ResidentAsset& asset, const ResidencyPolicy& policy, double nowSeconds);
 	TERRAENGINE_API std::vector<ReleaseCandidate> BuildReleaseCandidates(const ResidencySnapshot& snapshot);

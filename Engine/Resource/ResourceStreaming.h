@@ -106,6 +106,28 @@ namespace TerraEngine::Resource
 		Conservative
 	};
 
+	enum class StreamingPriorityClass : std::uint8_t
+	{
+		Background,
+		Normal,
+		Important,
+		Critical
+	};
+
+	enum class StreamingResidencyTier : std::uint8_t
+	{
+		Streamed,
+		Warm,
+		Persistent
+	};
+
+	struct StreamingAssetPolicy
+	{
+		StreamingPriorityClass priorityClass = StreamingPriorityClass::Normal;
+		StreamingResidencyTier residencyTier = StreamingResidencyTier::Streamed;
+		std::int32_t priorityBias = 0;
+	};
+
 	struct StreamingNeed
 	{
 		std::string needId;
@@ -135,9 +157,24 @@ namespace TerraEngine::Resource
 		double visibleRetentionSeconds = 2.0;
 		double neededRetentionSeconds = 5.0;
 		std::uint32_t maxLoadsPerUpdate = 0;
+		bool textureMipStreamingEnabled = false;
+		// Texture streaming uses source mip indices. Mip 0 is the authored
+		// full-resolution image; larger indices are lower-detail tail mips.
+		// Near visible textures start at textureMinStreamMip, while far visible
+		// textures can start at textureMaxStreamMip.
+		std::uint32_t textureMinStreamMip = 0;
+		std::uint32_t textureMaxStreamMip = 0;
 		MemoryBudgetInteraction memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
 		bool diagnosticsEnabled = false;
 		std::unordered_set<StreamingNeedType> protectedNeedTypes;
+	};
+
+	struct TextureMipResidency
+	{
+		std::uint32_t sourceMipOffset = 0;
+		std::uint32_t residentMipCount = 0;
+		std::uint32_t sourceMipCount = 0;
+		bool partial = false;
 	};
 
 	struct PreloadRule
@@ -164,6 +201,13 @@ namespace TerraEngine::Resource
 		double lastReleaseEligibleSeconds = 0.0;
 		std::vector<StreamingNeed> needSources;
 		StreamingProtectionReason protectionReason = StreamingProtectionReason::None;
+		StreamingAssetPolicy assetPolicy;
+		bool assetPolicyExplicit = false;
+		std::uint32_t textureSourceMipCount = 0;
+		std::uint32_t textureResidentMipCount = 0;
+		std::uint32_t textureResidentMipOffset = 0;
+		double textureClosestViewDistance = 0.0;
+		double textureDistanceUpdatedSeconds = 0.0;
 		std::uint64_t estimatedCpuBytes = 0;
 		std::uint64_t estimatedGpuBytes = 0;
 		std::string failureReason;
@@ -179,6 +223,11 @@ namespace TerraEngine::Resource
 		double lastNeededSeconds = 0.0;
 		std::vector<StreamingNeed> needSources;
 		StreamingProtectionReason protectionReason = StreamingProtectionReason::None;
+		StreamingAssetPolicy assetPolicy;
+		std::uint32_t textureSourceMipCount = 0;
+		std::uint32_t textureResidentMipCount = 0;
+		std::uint32_t textureResidentMipOffset = 0;
+		double textureClosestViewDistance = 0.0;
 		std::string releaseEligibility;
 		std::string failureReason;
 		std::uint64_t estimatedCpuBytes = 0;
@@ -203,6 +252,10 @@ namespace TerraEngine::Resource
 
 	TERRAENGINE_API StreamingPolicy MakeDefaultStreamingPolicy();
 	TERRAENGINE_API StreamingPolicy SanitizeStreamingPolicy(const StreamingPolicy& policy);
+	TERRAENGINE_API StreamingAssetPolicy MakeDefaultStreamingAssetPolicy(StreamableAssetType type);
+	TERRAENGINE_API StreamingAssetPolicy SanitizeStreamingAssetPolicy(const StreamingAssetPolicy& policy);
+	TERRAENGINE_API TextureMipResidency ResolveTextureMipResidency(const StreamingPolicy& policy, std::uint32_t sourceMipCount);
+	TERRAENGINE_API std::int32_t PriorityClassBias(StreamingPriorityClass priorityClass);
 	TERRAENGINE_API bool ValidatePreloadRule(const PreloadRule& rule, std::string* reason = nullptr);
 	TERRAENGINE_API std::vector<StreamingNeed> EvaluatePreloadRules(const std::vector<PreloadRule>& rules, double nowSeconds = 0.0);
 	TERRAENGINE_API std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds = 0.0);
@@ -216,4 +269,6 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::string_view ToString(StreamingProtectionReason reason);
 	TERRAENGINE_API std::string_view ToString(PreloadCriteriaType type);
 	TERRAENGINE_API std::string_view ToString(MemoryBudgetInteraction interaction);
+	TERRAENGINE_API std::string_view ToString(StreamingPriorityClass priorityClass);
+	TERRAENGINE_API std::string_view ToString(StreamingResidencyTier residencyTier);
 }

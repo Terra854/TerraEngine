@@ -65,5 +65,36 @@ namespace {
 			context.Expect(!Resource::ValidatePreloadRule(rule, &reason), "Negative distance rules should be rejected.");
 			context.Expect(!reason.empty(), "Invalid rules should explain what failed.");
 		});
+
+		registry.Add("Resource.Streaming.Policy.DefaultAssetPoliciesMatchRuntimeCost", [](TestContext& context) {
+			const Resource::StreamingAssetPolicy shaderPolicy = Resource::MakeDefaultStreamingAssetPolicy(Resource::StreamableAssetType::ShaderCollection);
+			const Resource::StreamingAssetPolicy materialPolicy = Resource::MakeDefaultStreamingAssetPolicy(Resource::StreamableAssetType::Material);
+			const Resource::StreamingAssetPolicy texturePolicy = Resource::MakeDefaultStreamingAssetPolicy(Resource::StreamableAssetType::Texture);
+
+			context.Expect(shaderPolicy.priorityClass == Resource::StreamingPriorityClass::Critical, "Shader collections should default to critical priority because pipeline rebuilds depend on them.");
+			context.Expect(shaderPolicy.residencyTier == Resource::StreamingResidencyTier::Persistent, "Shader collections should default to persistent residency until pipeline lifetime is more granular.");
+			context.Expect(materialPolicy.priorityClass == Resource::StreamingPriorityClass::Important, "Materials should load before ordinary background resources because renderables depend on them.");
+			context.Expect(materialPolicy.residencyTier == Resource::StreamingResidencyTier::Warm, "Materials should remain warm longer than fully streamed payloads.");
+			context.Expect(texturePolicy.residencyTier == Resource::StreamingResidencyTier::Streamed, "Textures should remain streamable by default because they usually dominate memory.");
+		});
+
+		registry.Add("Resource.Streaming.Policy.TextureMipResidencyUsesSourceMipIndexRange", [](TestContext& context) {
+			Resource::StreamingPolicy policy = Resource::MakeDefaultStreamingPolicy();
+			Resource::TextureMipResidency full = Resource::ResolveTextureMipResidency(policy, 8u);
+
+			context.ExpectEqual(std::uint32_t{0u}, full.sourceMipOffset, "Mip streaming disabled should keep the original base mip.");
+			context.ExpectEqual(std::uint32_t{8u}, full.residentMipCount, "Mip streaming disabled should keep the complete source chain.");
+			context.Expect(!full.partial, "Full-res residency should not be marked as partial.");
+
+			policy.textureMipStreamingEnabled = true;
+			policy.textureMinStreamMip = 2u;
+			policy.textureMaxStreamMip = 3u;
+			const Resource::TextureMipResidency partial = Resource::ResolveTextureMipResidency(policy, 8u);
+
+			context.ExpectEqual(std::uint32_t{2u}, partial.sourceMipOffset, "Partial residency should start at the configured minimum stream mip index.");
+			context.ExpectEqual(std::uint32_t{6u}, partial.residentMipCount, "Resident mip count should include the selected source mip and every lower-detail tail mip.");
+			context.ExpectEqual(std::uint32_t{8u}, partial.sourceMipCount, "Diagnostics should retain the authored mip count.");
+			context.Expect(partial.partial, "Capped texture residency should be marked as partial.");
+		});
 	}
 }

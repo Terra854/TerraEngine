@@ -16,25 +16,134 @@ namespace TerraEngine::Resource
 {
 	namespace
 	{
-		constexpr double kDefaultIdleSeconds = 10.0;
+		constexpr double kDefaultCpuIdleSeconds = 30.0;
+		constexpr double kDefaultGpuIdleSeconds = 10.0;
 		constexpr double kDefaultCleanupIntervalSeconds = 1.0;
-		constexpr double kDefaultReloadGraceSeconds = 0.5;
+		constexpr double kDefaultCpuReloadGraceSeconds = 5.0;
+		constexpr double kDefaultGpuReloadGraceSeconds = 0.5;
 
 		bool ContainsUuid(const std::vector<TerraEngine::UUID>& values, const TerraEngine::UUID& value)
 		{
 			return std::find(values.begin(), values.end(), value) != values.end();
 		}
+
+		std::uint64_t AddSaturated(std::uint64_t lhs, std::uint64_t rhs)
+		{
+			constexpr std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
+			return lhs > max - rhs ? max : lhs + rhs;
+		}
+
+		ResidencyBlockedReason EvaluateCommonReleaseBlocker(const ResidentAsset& asset)
+		{
+			if (asset.state == ResidencyState::Active)
+			{
+				return ResidencyBlockedReason::Active;
+			}
+			if (asset.state == ResidencyState::Loading)
+			{
+				return ResidencyBlockedReason::Loading;
+			}
+			if (asset.state == ResidencyState::Failed)
+			{
+				return ResidencyBlockedReason::Failed;
+			}
+			if (asset.pinReason != ResidencyPinReason::None || asset.state == ResidencyState::Pinned)
+			{
+				return ResidencyBlockedReason::Pinned;
+			}
+			if (!asset.reloadable || asset.sourceKey.empty())
+			{
+				return ResidencyBlockedReason::NotReloadable;
+			}
+			if (asset.inFlight)
+			{
+				return ResidencyBlockedReason::InFlight;
+			}
+			return ResidencyBlockedReason::None;
+		}
+
+		ResidencyBlockedReason EvaluateDomainReleaseBlocker(const ResidentAsset& asset, double reloadGraceSeconds, double nowSeconds)
+		{
+			const ResidencyBlockedReason common = EvaluateCommonReleaseBlocker(asset);
+			if (common != ResidencyBlockedReason::None)
+			{
+				return common;
+			}
+			const double idleSeconds = nowSeconds >= asset.lastUsedSeconds ? nowSeconds - asset.lastUsedSeconds : 0.0;
+			if (idleSeconds < reloadGraceSeconds)
+			{
+				return ResidencyBlockedReason::RecentlyUsed;
+			}
+			return ResidencyBlockedReason::None;
+		}
+
+		std::uint8_t PriorityReleaseRank(StreamingPriorityClass priorityClass)
+		{
+			switch (priorityClass)
+			{
+			case StreamingPriorityClass::Background:
+				return 0u;
+			case StreamingPriorityClass::Normal:
+				return 1u;
+			case StreamingPriorityClass::Important:
+				return 2u;
+			case StreamingPriorityClass::Critical:
+				return 3u;
+			}
+			return 1u;
+		}
+
+		std::uint8_t TierReleaseRank(StreamingResidencyTier tier)
+		{
+			switch (tier)
+			{
+			case StreamingResidencyTier::Streamed:
+				return 0u;
+			case StreamingResidencyTier::Warm:
+				return 1u;
+			case StreamingResidencyTier::Persistent:
+				return 2u;
+			}
+			return 0u;
+		}
+
+		double IdleMultiplierForTier(StreamingResidencyTier tier)
+		{
+			switch (tier)
+			{
+			case StreamingResidencyTier::Streamed:
+				return 1.0;
+			case StreamingResidencyTier::Warm:
+				return 3.0;
+			case StreamingResidencyTier::Persistent:
+				return std::numeric_limits<double>::infinity();
+			}
+			return 1.0;
+		}
+
+		bool IdleExpiredForTier(double idleSeconds, double baseThreshold, StreamingResidencyTier tier)
+		{
+			if (tier == StreamingResidencyTier::Persistent)
+			{
+				return false;
+			}
+			return idleSeconds >= baseThreshold * IdleMultiplierForTier(tier);
+		}
+
 	}
 
 	ResidencyPolicy MakeDefaultResidencyPolicy()
 	{
 		ResidencyPolicy policy;
 		policy.enabled = true;
-		policy.idleSecondsThreshold = kDefaultIdleSeconds;
-		policy.memoryBudgetBytes = 0;
 		policy.cleanupIntervalSeconds = kDefaultCleanupIntervalSeconds;
-		policy.reloadGraceSeconds = kDefaultReloadGraceSeconds;
-		policy.strictBudgetMode = false;
+		policy.cpu.idleSecondsThreshold = kDefaultCpuIdleSeconds;
+		policy.cpu.memoryBudgetBytes = 0;
+		policy.cpu.reloadGraceSeconds = kDefaultCpuReloadGraceSeconds;
+		policy.gpu.idleSecondsThreshold = kDefaultGpuIdleSeconds;
+		policy.gpu.memoryBudgetBytes = 0;
+		policy.gpu.reloadGraceSeconds = kDefaultGpuReloadGraceSeconds;
+		policy.gpu.strictBudgetMode = false;
 		policy.diagnosticsEnabled = false;
 		policy.protectedGroups = { "default", "fallback", "editor-selection", "preview", "active-scene", "prefab-editing", "loading" };
 		return policy;
@@ -43,17 +152,25 @@ namespace TerraEngine::Resource
 	ResidencyPolicy SanitizeResidencyPolicy(const ResidencyPolicy& policy)
 	{
 		ResidencyPolicy sanitized = policy;
-		if (sanitized.idleSecondsThreshold < 0.0)
+		if (sanitized.cpu.idleSecondsThreshold < 0.0)
 		{
-			sanitized.idleSecondsThreshold = kDefaultIdleSeconds;
+			sanitized.cpu.idleSecondsThreshold = kDefaultCpuIdleSeconds;
+		}
+		if (sanitized.gpu.idleSecondsThreshold < 0.0)
+		{
+			sanitized.gpu.idleSecondsThreshold = kDefaultGpuIdleSeconds;
 		}
 		if (sanitized.cleanupIntervalSeconds <= 0.0)
 		{
 			sanitized.cleanupIntervalSeconds = kDefaultCleanupIntervalSeconds;
 		}
-		if (sanitized.reloadGraceSeconds < 0.0)
+		if (sanitized.cpu.reloadGraceSeconds < 0.0)
 		{
-			sanitized.reloadGraceSeconds = 0.0;
+			sanitized.cpu.reloadGraceSeconds = 0.0;
+		}
+		if (sanitized.gpu.reloadGraceSeconds < 0.0)
+		{
+			sanitized.gpu.reloadGraceSeconds = 0.0;
 		}
 		return sanitized;
 	}
@@ -161,6 +278,17 @@ namespace TerraEngine::Resource
 		return "none";
 	}
 
+	std::string_view ToString(ResidencyReleaseDomain domain)
+	{
+		switch (domain)
+		{
+		case ResidencyReleaseDomain::Cpu: return "cpu";
+		case ResidencyReleaseDomain::Gpu: return "gpu";
+		case ResidencyReleaseDomain::CpuAndGpu: return "cpu+gpu";
+		}
+		return "cpu+gpu";
+	}
+
 	std::uint64_t EstimateResidentBytes(const ResidentAsset& asset)
 	{
 		constexpr std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
@@ -173,36 +301,9 @@ namespace TerraEngine::Resource
 
 	ResidencyBlockedReason EvaluateReleaseBlocker(const ResidentAsset& asset, const ResidencyPolicy& policy, double nowSeconds)
 	{
-		if (asset.state == ResidencyState::Active)
-		{
-			return ResidencyBlockedReason::Active;
-		}
-		if (asset.state == ResidencyState::Loading)
-		{
-			return ResidencyBlockedReason::Loading;
-		}
-		if (asset.state == ResidencyState::Failed)
-		{
-			return ResidencyBlockedReason::Failed;
-		}
-		if (asset.pinReason != ResidencyPinReason::None || asset.state == ResidencyState::Pinned)
-		{
-			return ResidencyBlockedReason::Pinned;
-		}
-		if (!asset.reloadable || asset.sourceKey.empty())
-		{
-			return ResidencyBlockedReason::NotReloadable;
-		}
-		if (asset.inFlight)
-		{
-			return ResidencyBlockedReason::InFlight;
-		}
-		const double idleSeconds = nowSeconds >= asset.lastUsedSeconds ? nowSeconds - asset.lastUsedSeconds : 0.0;
-		if (idleSeconds < policy.reloadGraceSeconds)
-		{
-			return ResidencyBlockedReason::RecentlyUsed;
-		}
-		return ResidencyBlockedReason::None;
+		const ResidencyPolicy sanitized = SanitizeResidencyPolicy(policy);
+		const double graceSeconds = std::min(sanitized.cpu.reloadGraceSeconds, sanitized.gpu.reloadGraceSeconds);
+		return EvaluateDomainReleaseBlocker(asset, graceSeconds, nowSeconds);
 	}
 
 	std::vector<ReleaseCandidate> BuildReleaseCandidates(const ResidencySnapshot& snapshot)
@@ -213,13 +314,17 @@ namespace TerraEngine::Resource
 			return {};
 		}
 
-		std::uint64_t residentBytes = 0;
+		std::uint64_t residentCpuBytes = 0;
+		std::uint64_t residentGpuBytes = 0;
 		for (const ResidentAsset& asset : snapshot.residentAssets)
 		{
-			residentBytes += EstimateResidentBytes(asset);
+			residentCpuBytes = AddSaturated(residentCpuBytes, asset.estimatedCpuBytes);
+			residentGpuBytes = AddSaturated(residentGpuBytes, asset.estimatedGpuBytes);
 		}
-		const bool overBudget = policy.memoryBudgetBytes > 0 && residentBytes > policy.memoryBudgetBytes;
-		std::uint64_t requiredReclaim = overBudget ? residentBytes - policy.memoryBudgetBytes : 0;
+		const bool cpuOverBudget = policy.cpu.memoryBudgetBytes > 0 && residentCpuBytes > policy.cpu.memoryBudgetBytes;
+		const bool gpuOverBudget = policy.gpu.memoryBudgetBytes > 0 && residentGpuBytes > policy.gpu.memoryBudgetBytes;
+		const std::uint64_t requiredCpuReclaim = cpuOverBudget ? residentCpuBytes - policy.cpu.memoryBudgetBytes : 0;
+		const std::uint64_t requiredGpuReclaim = gpuOverBudget ? residentGpuBytes - policy.gpu.memoryBudgetBytes : 0;
 
 		std::vector<ReleaseCandidate> candidates;
 		for (const ResidentAsset& asset : snapshot.residentAssets)
@@ -242,32 +347,60 @@ namespace TerraEngine::Resource
 			}
 
 			const double idleSeconds = snapshot.nowSeconds >= effectiveAsset.lastUsedSeconds ? snapshot.nowSeconds - effectiveAsset.lastUsedSeconds : 0.0;
-			const bool idleExpired = idleSeconds >= policy.idleSecondsThreshold;
-			const ResidencyBlockedReason blocker = EvaluateReleaseBlocker(effectiveAsset, policy, snapshot.nowSeconds);
-			if (blocker != ResidencyBlockedReason::None)
+			const auto appendCandidate = [&](ResidencyReleaseDomain domain,
+				std::uint64_t reclaimableBytes,
+				bool idleExpired,
+				bool overBudget,
+				double reloadGraceSeconds)
 			{
-				continue;
-			}
-			if (!idleExpired && !overBudget)
-			{
-				continue;
-			}
+				if (reclaimableBytes == 0u || (!idleExpired && !overBudget))
+				{
+					return;
+				}
+				const ResidencyBlockedReason blocker = EvaluateDomainReleaseBlocker(effectiveAsset, reloadGraceSeconds, snapshot.nowSeconds);
+				if (blocker != ResidencyBlockedReason::None)
+				{
+					return;
+				}
 
-			ReleaseCandidate candidate;
-			candidate.assetId = effectiveAsset.assetId;
-			candidate.assetType = effectiveAsset.assetType;
-			candidate.sourceKey = effectiveAsset.sourceKey;
-			candidate.idleSeconds = idleSeconds;
-			candidate.estimatedReclaimableBytes = EstimateResidentBytes(effectiveAsset);
-			candidate.releaseReason = idleExpired ? ResidencyReleaseReason::IdleExpiry : ResidencyReleaseReason::MemoryPressure;
-			candidate.blockedReason = ResidencyBlockedReason::None;
-			candidates.push_back(std::move(candidate));
+				ReleaseCandidate candidate;
+				candidate.assetId = effectiveAsset.assetId;
+				candidate.assetType = effectiveAsset.assetType;
+				candidate.sourceKey = effectiveAsset.sourceKey;
+				candidate.idleSeconds = idleSeconds;
+				candidate.estimatedReclaimableBytes = reclaimableBytes;
+				candidate.releaseReason = idleExpired ? ResidencyReleaseReason::IdleExpiry : ResidencyReleaseReason::MemoryPressure;
+				candidate.releaseDomain = domain;
+				candidate.priorityClass = effectiveAsset.priorityClass;
+				candidate.residencyTier = effectiveAsset.residencyTier;
+				candidate.blockedReason = ResidencyBlockedReason::None;
+				candidates.push_back(std::move(candidate));
+			};
+
+			appendCandidate(ResidencyReleaseDomain::Gpu,
+				effectiveAsset.estimatedGpuBytes,
+				IdleExpiredForTier(idleSeconds, policy.gpu.idleSecondsThreshold, effectiveAsset.residencyTier),
+				gpuOverBudget,
+				policy.gpu.reloadGraceSeconds);
+			appendCandidate(ResidencyReleaseDomain::Cpu,
+				effectiveAsset.estimatedCpuBytes,
+				IdleExpiredForTier(idleSeconds, policy.cpu.idleSecondsThreshold, effectiveAsset.residencyTier),
+				cpuOverBudget,
+				policy.cpu.reloadGraceSeconds);
 		}
 
 		std::sort(candidates.begin(), candidates.end(), [](const ReleaseCandidate& lhs, const ReleaseCandidate& rhs) {
 			if (lhs.releaseReason != rhs.releaseReason)
 			{
 				return lhs.releaseReason == ResidencyReleaseReason::IdleExpiry;
+			}
+			if (lhs.priorityClass != rhs.priorityClass)
+			{
+				return PriorityReleaseRank(lhs.priorityClass) < PriorityReleaseRank(rhs.priorityClass);
+			}
+			if (lhs.residencyTier != rhs.residencyTier)
+			{
+				return TierReleaseRank(lhs.residencyTier) < TierReleaseRank(rhs.residencyTier);
 			}
 			if (lhs.idleSeconds != rhs.idleSeconds)
 			{
@@ -277,23 +410,43 @@ namespace TerraEngine::Resource
 			{
 				return lhs.estimatedReclaimableBytes > rhs.estimatedReclaimableBytes;
 			}
+			if (lhs.releaseDomain != rhs.releaseDomain)
+			{
+				return lhs.releaseDomain == ResidencyReleaseDomain::Gpu;
+			}
 			return TerraEngine::ToHexString(lhs.assetId) < TerraEngine::ToHexString(rhs.assetId);
 		});
 
-		if (overBudget)
+		if (cpuOverBudget || gpuOverBudget)
 		{
-			std::uint64_t reclaimed = 0;
+			std::uint64_t reclaimedCpu = 0;
+			std::uint64_t reclaimedGpu = 0;
 			std::vector<ReleaseCandidate> trimmed;
 			for (ReleaseCandidate candidate : candidates)
 			{
-				if (candidate.releaseReason == ResidencyReleaseReason::IdleExpiry || reclaimed < requiredReclaim)
+				if (candidate.releaseReason == ResidencyReleaseReason::IdleExpiry)
 				{
-					if (candidate.releaseReason != ResidencyReleaseReason::IdleExpiry)
-					{
-						reclaimed += candidate.estimatedReclaimableBytes;
-					}
 					trimmed.push_back(std::move(candidate));
+					continue;
 				}
+
+				const bool helpsCpu = candidate.releaseDomain == ResidencyReleaseDomain::Cpu || candidate.releaseDomain == ResidencyReleaseDomain::CpuAndGpu;
+				const bool helpsGpu = candidate.releaseDomain == ResidencyReleaseDomain::Gpu || candidate.releaseDomain == ResidencyReleaseDomain::CpuAndGpu;
+				const bool needsCpu = helpsCpu && reclaimedCpu < requiredCpuReclaim;
+				const bool needsGpu = helpsGpu && reclaimedGpu < requiredGpuReclaim;
+				if (!needsCpu && !needsGpu)
+				{
+					continue;
+				}
+				if (helpsCpu)
+				{
+					reclaimedCpu = AddSaturated(reclaimedCpu, candidate.estimatedReclaimableBytes);
+				}
+				if (helpsGpu)
+				{
+					reclaimedGpu = AddSaturated(reclaimedGpu, candidate.estimatedReclaimableBytes);
+				}
+				trimmed.push_back(std::move(candidate));
 			}
 			return trimmed;
 		}

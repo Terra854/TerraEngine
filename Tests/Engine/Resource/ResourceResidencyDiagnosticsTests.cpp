@@ -41,8 +41,10 @@ namespace {
 		registry.Add("Resource.Residency.Diagnostics.CollectsDetailsOnlyWhenEnabled", [](TestContext& context) {
 			Resource::ResidencyPolicy policy = Resource::MakeDefaultResidencyPolicy();
 			policy.diagnosticsEnabled = true;
-			policy.idleSecondsThreshold = 1.0;
-			policy.reloadGraceSeconds = 0.0;
+			policy.cpu.idleSecondsThreshold = 1.0;
+			policy.cpu.reloadGraceSeconds = 0.0;
+			policy.gpu.idleSecondsThreshold = 1.0;
+			policy.gpu.reloadGraceSeconds = 0.0;
 			const std::vector<Resource::ResidentAsset> assets = { MakeDiagnosticAsset() };
 
 			Resource::ResidencySnapshot snapshot;

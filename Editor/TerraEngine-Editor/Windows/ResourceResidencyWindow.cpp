@@ -12,6 +12,7 @@
 #include "Engine/Resource/ResourceStreaming.h"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <filesystem>
 #include <imgui.h>
@@ -19,8 +20,10 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace
 {
@@ -84,6 +87,37 @@ namespace
 			return path.string();
 		}
 		return TerraEngine::ToHexString(id);
+	}
+
+	std::string LowercaseCopy(std::string_view text)
+	{
+		std::string lowered;
+		lowered.reserve(text.size());
+		for (char value : text)
+		{
+			lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(value))));
+		}
+		return lowered;
+	}
+
+	bool ContainsInsensitive(std::string_view haystack, std::string_view needle)
+	{
+		if (needle.empty())
+		{
+			return true;
+		}
+		return LowercaseCopy(haystack).find(LowercaseCopy(needle)) != std::string::npos;
+	}
+
+	std::string DiagnosticAssetLabel(const TerraEngine::UUID& id, std::optional<AssetType> assetType, const std::filesystem::path& sourceHint = {})
+	{
+		ResourceManager& resources = ResourceManager::Instance();
+		std::filesystem::path displayPath = sourceHint;
+		if (displayPath.empty() && assetType.has_value())
+		{
+			displayPath = resources.DescribeAssetReference(id, *assetType);
+		}
+		return FriendlyAssetLabel(id, displayPath);
 	}
 
 	void DrawAssetCell(const TerraEngine::UUID& id, std::optional<AssetType> assetType, const std::filesystem::path& sourceHint = {})
@@ -151,15 +185,108 @@ namespace
 		return TerraEngine::Resource::ToString(state);
 	}
 
+	bool MatchesTypeFilter(TerraEngine::Resource::StreamableAssetType type, int filter)
+	{
+		switch (filter)
+		{
+		case 1:
+			return type == TerraEngine::Resource::StreamableAssetType::Mesh;
+		case 2:
+			return type == TerraEngine::Resource::StreamableAssetType::Material;
+		case 3:
+			return type == TerraEngine::Resource::StreamableAssetType::Texture;
+		case 4:
+			return type == TerraEngine::Resource::StreamableAssetType::ShaderCollection;
+		default:
+			return true;
+		}
+	}
+
+	bool MatchesResidencyTypeFilter(TerraEngine::Resource::ResidencyAssetType type, int filter)
+	{
+		switch (filter)
+		{
+		case 1:
+			return type == TerraEngine::Resource::ResidencyAssetType::Mesh;
+		case 2:
+			return type == TerraEngine::Resource::ResidencyAssetType::Material;
+		case 3:
+			return type == TerraEngine::Resource::ResidencyAssetType::Texture;
+		case 4:
+			return type == TerraEngine::Resource::ResidencyAssetType::ShaderCollection;
+		default:
+			return true;
+		}
+	}
+
+	bool MatchesMemoryFilter(std::string_view memory, int filter)
+	{
+		switch (filter)
+		{
+		case 1:
+			return memory == "not loaded";
+		case 2:
+			return memory == "RAM";
+		case 3:
+			return memory == "VRAM" || memory == "RAM + VRAM" || memory == "RAM -> VRAM";
+		case 4:
+			return memory == "pending unload";
+		default:
+			return true;
+		}
+	}
+
+	bool MatchesLoadStateFilter(TerraEngine::Resource::StreamablePayloadState state, int filter)
+	{
+		switch (filter)
+		{
+		case 1:
+			return state == TerraEngine::Resource::StreamablePayloadState::Deferred
+				|| state == TerraEngine::Resource::StreamablePayloadState::Registered
+				|| state == TerraEngine::Resource::StreamablePayloadState::Released;
+		case 2:
+			return state == TerraEngine::Resource::StreamablePayloadState::RamResident;
+		case 3:
+			return state == TerraEngine::Resource::StreamablePayloadState::VramResident;
+		case 4:
+			return state == TerraEngine::Resource::StreamablePayloadState::Failed;
+		default:
+			return true;
+		}
+	}
+
+	std::string MipResidencyLabel(const TerraEngine::Resource::StreamingDiagnosticRecord& record)
+	{
+		if (record.assetType != TerraEngine::Resource::StreamableAssetType::Texture
+			|| record.textureSourceMipCount == 0u
+			|| record.textureResidentMipCount == 0u)
+		{
+			return "-";
+		}
+		std::string label = std::to_string(record.textureResidentMipCount)
+			+ "/"
+			+ std::to_string(record.textureSourceMipCount);
+		label += " from mip ";
+		label += std::to_string(record.textureResidentMipOffset);
+		return label;
+	}
+
 	nlohmann::json BuildResidencyPolicyJson(const TerraEngine::Resource::ResidencyPolicy& policy)
 	{
 		nlohmann::json object;
 		object["enabled"] = policy.enabled;
-		object["idleSecondsThreshold"] = policy.idleSecondsThreshold;
-		object["memoryBudgetBytes"] = policy.memoryBudgetBytes;
 		object["cleanupIntervalSeconds"] = policy.cleanupIntervalSeconds;
-		object["reloadGraceSeconds"] = policy.reloadGraceSeconds;
-		object["strictBudgetMode"] = policy.strictBudgetMode;
+		object["cpu"] = {
+			{ "idleSecondsThreshold", policy.cpu.idleSecondsThreshold },
+			{ "memoryBudgetBytes", policy.cpu.memoryBudgetBytes },
+			{ "reloadGraceSeconds", policy.cpu.reloadGraceSeconds }
+		};
+		object["gpu"] = {
+			{ "idleSecondsThreshold", policy.gpu.idleSecondsThreshold },
+			{ "memoryBudgetBytes", policy.gpu.memoryBudgetBytes },
+			{ "reloadGraceSeconds", policy.gpu.reloadGraceSeconds },
+			{ "strictBudgetMode", policy.gpu.strictBudgetMode }
+		};
 		return object;
 	}
 
@@ -172,6 +299,9 @@ namespace
 		object["visibleRetentionSeconds"] = policy.visibleRetentionSeconds;
 		object["neededRetentionSeconds"] = policy.neededRetentionSeconds;
 		object["maxLoadsPerUpdate"] = policy.maxLoadsPerUpdate;
+		object["textureMipStreamingEnabled"] = policy.textureMipStreamingEnabled;
+		object["textureMinStreamMip"] = policy.textureMinStreamMip;
+		object["textureMaxStreamMip"] = policy.textureMaxStreamMip;
 		object["memoryBudgetInteraction"] = std::string(TerraEngine::Resource::ToString(policy.memoryBudgetInteraction));
 		return object;
 	}
@@ -270,6 +400,8 @@ void ResourceResidencyWindow::OnGui()
 	ResourceManager::Instance().SetStreamingDiagnosticsEnabled(true);
 	DrawPolicyControls();
 	ImGui::Spacing();
+	DrawDiagnosticsFilters();
+	ImGui::Spacing();
 	DrawSummary();
 	ImGui::Spacing();
 	DrawStreamingSummary();
@@ -286,6 +418,19 @@ bool ResourceResidencyWindow::OnCloseRequested()
 	return true;
 }
 
+void ResourceResidencyWindow::DrawDiagnosticsFilters()
+{
+	ImGui::SeparatorText("Diagnostics Filters");
+	ImGui::InputText("Search Asset/Path", m_FilterText, sizeof(m_FilterText));
+	const char* typeItems[] = { "All Types", "Meshes", "Materials", "Textures", "Shader Collections" };
+	ImGui::Combo("Type", &m_TypeFilter, typeItems, IM_ARRAYSIZE(typeItems));
+	const char* memoryItems[] = { "All Memory", "Not Loaded", "RAM", "VRAM", "Pending Unload" };
+	ImGui::Combo("Memory", &m_MemoryFilter, memoryItems, IM_ARRAYSIZE(memoryItems));
+	const char* stateItems[] = { "All States", "Deferred/Released", "RAM Resident", "VRAM Resident", "Failed" };
+	ImGui::Combo("Load State", &m_LoadStateFilter, stateItems, IM_ARRAYSIZE(stateItems));
+	ImGui::Checkbox("Only Release Eligible", &m_ShowOnlyReleaseEligible);
+}
+
 void ResourceResidencyWindow::DrawPolicyControls()
 {
 	ResourceManager& resourceManager = ResourceManager::Instance();
@@ -300,21 +445,6 @@ void ResourceResidencyWindow::DrawPolicyControls()
 		residencyChanged = true;
 	}
 
-	float idleSeconds = static_cast<float>(residencyPolicy.idleSecondsThreshold);
-	if (ImGui::InputFloat("Idle Seconds", &idleSeconds, 0.5f, 1.0f, "%.2f"))
-	{
-		residencyPolicy.idleSecondsThreshold = static_cast<double>(std::max(0.0f, idleSeconds));
-		residencyChanged = true;
-	}
-
-	const std::uint64_t memoryBudgetMb64 = residencyPolicy.memoryBudgetBytes / (1024ull * 1024ull);
-	int memoryBudgetMb = static_cast<int>(std::min<std::uint64_t>(memoryBudgetMb64, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
-	if (ImGui::InputInt("Memory Budget MB (0=off)", &memoryBudgetMb))
-	{
-		residencyPolicy.memoryBudgetBytes = static_cast<std::uint64_t>(std::max(0, memoryBudgetMb)) * 1024ull * 1024ull;
-		residencyChanged = true;
-	}
-
 	float cleanupInterval = static_cast<float>(residencyPolicy.cleanupIntervalSeconds);
 	if (ImGui::InputFloat("Cleanup Interval Seconds", &cleanupInterval, 0.25f, 1.0f, "%.2f"))
 	{
@@ -322,14 +452,53 @@ void ResourceResidencyWindow::DrawPolicyControls()
 		residencyChanged = true;
 	}
 
-	float reloadGrace = static_cast<float>(residencyPolicy.reloadGraceSeconds);
-	if (ImGui::InputFloat("Reload Grace Seconds", &reloadGrace, 0.1f, 0.5f, "%.2f"))
+	ImGui::SeparatorText("RAM Residency");
+	float cpuIdleSeconds = static_cast<float>(residencyPolicy.cpu.idleSecondsThreshold);
+	if (ImGui::InputFloat("RAM Idle Seconds", &cpuIdleSeconds, 0.5f, 1.0f, "%.2f"))
 	{
-		residencyPolicy.reloadGraceSeconds = static_cast<double>(std::max(0.0f, reloadGrace));
+		residencyPolicy.cpu.idleSecondsThreshold = static_cast<double>(std::max(0.0f, cpuIdleSeconds));
 		residencyChanged = true;
 	}
 
-	if (ImGui::Checkbox("Strict Budget Mode", &residencyPolicy.strictBudgetMode))
+	const std::uint64_t cpuBudgetMb64 = residencyPolicy.cpu.memoryBudgetBytes / (1024ull * 1024ull);
+	int cpuBudgetMb = static_cast<int>(std::min<std::uint64_t>(cpuBudgetMb64, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
+	if (ImGui::InputInt("RAM Budget MB (0=off)", &cpuBudgetMb))
+	{
+		residencyPolicy.cpu.memoryBudgetBytes = static_cast<std::uint64_t>(std::max(0, cpuBudgetMb)) * 1024ull * 1024ull;
+		residencyChanged = true;
+	}
+
+	float cpuReloadGrace = static_cast<float>(residencyPolicy.cpu.reloadGraceSeconds);
+	if (ImGui::InputFloat("RAM Reload Grace Seconds", &cpuReloadGrace, 0.1f, 0.5f, "%.2f"))
+	{
+		residencyPolicy.cpu.reloadGraceSeconds = static_cast<double>(std::max(0.0f, cpuReloadGrace));
+		residencyChanged = true;
+	}
+
+	ImGui::SeparatorText("VRAM Residency");
+	float gpuIdleSeconds = static_cast<float>(residencyPolicy.gpu.idleSecondsThreshold);
+	if (ImGui::InputFloat("VRAM Idle Seconds", &gpuIdleSeconds, 0.5f, 1.0f, "%.2f"))
+	{
+		residencyPolicy.gpu.idleSecondsThreshold = static_cast<double>(std::max(0.0f, gpuIdleSeconds));
+		residencyChanged = true;
+	}
+
+	const std::uint64_t gpuBudgetMb64 = residencyPolicy.gpu.memoryBudgetBytes / (1024ull * 1024ull);
+	int gpuBudgetMb = static_cast<int>(std::min<std::uint64_t>(gpuBudgetMb64, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
+	if (ImGui::InputInt("VRAM Budget MB (0=off)", &gpuBudgetMb))
+	{
+		residencyPolicy.gpu.memoryBudgetBytes = static_cast<std::uint64_t>(std::max(0, gpuBudgetMb)) * 1024ull * 1024ull;
+		residencyChanged = true;
+	}
+
+	float gpuReloadGrace = static_cast<float>(residencyPolicy.gpu.reloadGraceSeconds);
+	if (ImGui::InputFloat("VRAM Reload Grace Seconds", &gpuReloadGrace, 0.1f, 0.5f, "%.2f"))
+	{
+		residencyPolicy.gpu.reloadGraceSeconds = static_cast<double>(std::max(0.0f, gpuReloadGrace));
+		residencyChanged = true;
+	}
+
+	if (ImGui::Checkbox("Strict VRAM Budget Mode", &residencyPolicy.gpu.strictBudgetMode))
 	{
 		residencyChanged = true;
 	}
@@ -366,6 +535,26 @@ void ResourceResidencyWindow::DrawPolicyControls()
 		streamingPolicy.neededRetentionSeconds = static_cast<double>(std::max(0.0f, neededRetention));
 		streamingChanged = true;
 	}
+
+	if (ImGui::Checkbox("Enable Texture Mip Streaming", &streamingPolicy.textureMipStreamingEnabled))
+	{
+		streamingChanged = true;
+	}
+
+	int minStreamMip = static_cast<int>(streamingPolicy.textureMinStreamMip);
+	if (ImGui::InputInt("Texture Min Stream Mip (near)", &minStreamMip))
+	{
+		streamingPolicy.textureMinStreamMip = static_cast<std::uint32_t>(std::max(0, minStreamMip));
+		streamingChanged = true;
+	}
+
+	int maxStreamMip = static_cast<int>(streamingPolicy.textureMaxStreamMip);
+	if (ImGui::InputInt("Texture Max Stream Mip (far)", &maxStreamMip))
+	{
+		streamingPolicy.textureMaxStreamMip = static_cast<std::uint32_t>(std::max(0, maxStreamMip));
+		streamingChanged = true;
+	}
+	ImGui::TextDisabled("Mip 0 is full resolution; larger mip indices stream lower-detail texture tails.");
 
 	int maxLoads = static_cast<int>(streamingPolicy.maxLoadsPerUpdate);
 	if (ImGui::InputInt("Max Streaming Loads (0=unlimited)", &maxLoads))
@@ -464,25 +653,101 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 		ImGui::EndTable();
 	}
 
-	if (summary.records.empty())
+	std::vector<TerraEngine::Resource::StreamingDiagnosticRecord> records;
+	records.reserve(summary.records.size());
+	for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : summary.records)
+	{
+		const std::optional<AssetType> assetType = AssetTypeFromStreamingType(record.assetType);
+		std::filesystem::path sourceHint;
+		if (const std::optional<TerraEngine::Resource::StreamableAssetRecord> asset = ResourceManager::Instance().GetStreamableAsset(record.assetId))
+		{
+			sourceHint = asset->sourceKey;
+		}
+		const std::string label = DiagnosticAssetLabel(record.assetId, assetType, sourceHint);
+		const std::string memory = std::string(StreamingMemoryLocation(record));
+		const bool releaseEligible = record.needSources.empty()
+			&& record.protectionReason == TerraEngine::Resource::StreamingProtectionReason::None;
+		if (!ContainsInsensitive(label, m_FilterText) && !ContainsInsensitive(sourceHint.string(), m_FilterText))
+		{
+			continue;
+		}
+		if (!MatchesTypeFilter(record.assetType, m_TypeFilter)
+			|| !MatchesMemoryFilter(memory, m_MemoryFilter)
+			|| !MatchesLoadStateFilter(record.payloadState, m_LoadStateFilter)
+			|| (m_ShowOnlyReleaseEligible && !releaseEligible))
+		{
+			continue;
+		}
+		records.push_back(record);
+	}
+
+	if (records.empty())
 	{
 		ImGui::TextDisabled("No streaming diagnostic records.");
 		return;
 	}
 
-	if (ImGui::BeginTable("ResourceStreamingRecords", 9, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	if (ImGui::BeginTable("ResourceStreamingRecords", 12, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable))
 	{
-		ImGui::TableSetupColumn("Asset");
+		ImGui::TableSetupColumn("Asset", ImGuiTableColumnFlags_DefaultSort);
 		ImGui::TableSetupColumn("Type");
+		ImGui::TableSetupColumn("Priority");
+		ImGui::TableSetupColumn("Tier");
 		ImGui::TableSetupColumn("Memory");
 		ImGui::TableSetupColumn("Load State");
+		ImGui::TableSetupColumn("Mips");
 		ImGui::TableSetupColumn("CPU Bytes");
 		ImGui::TableSetupColumn("GPU Bytes");
 		ImGui::TableSetupColumn("Protection");
 		ImGui::TableSetupColumn("Needs");
 		ImGui::TableSetupColumn("Eligibility");
 		ImGui::TableHeadersRow();
-		for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : summary.records)
+		if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs(); sortSpecs && sortSpecs->SpecsCount > 0)
+		{
+			const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
+			const bool ascending = spec.SortDirection == ImGuiSortDirection_Ascending;
+			std::sort(records.begin(), records.end(), [&](const auto& left, const auto& right) {
+				int result = 0;
+				switch (spec.ColumnIndex)
+				{
+				case 0:
+					result = DiagnosticAssetLabel(left.assetId, AssetTypeFromStreamingType(left.assetType)).compare(DiagnosticAssetLabel(right.assetId, AssetTypeFromStreamingType(right.assetType)));
+					break;
+				case 1:
+					result = std::string(TerraEngine::Resource::ToString(left.assetType)).compare(std::string(TerraEngine::Resource::ToString(right.assetType)));
+					break;
+				case 2:
+					result = static_cast<int>(left.assetPolicy.priorityClass) - static_cast<int>(right.assetPolicy.priorityClass);
+					break;
+				case 3:
+					result = static_cast<int>(left.assetPolicy.residencyTier) - static_cast<int>(right.assetPolicy.residencyTier);
+					break;
+				case 4:
+					result = std::string(StreamingMemoryLocation(left)).compare(std::string(StreamingMemoryLocation(right)));
+					break;
+				case 5:
+					result = static_cast<int>(left.payloadState) - static_cast<int>(right.payloadState);
+					break;
+				case 6:
+					result = static_cast<int>(left.textureResidentMipCount) - static_cast<int>(right.textureResidentMipCount);
+					break;
+				case 7:
+					result = left.estimatedCpuBytes < right.estimatedCpuBytes ? -1 : (left.estimatedCpuBytes > right.estimatedCpuBytes ? 1 : 0);
+					break;
+				case 8:
+					result = left.estimatedGpuBytes < right.estimatedGpuBytes ? -1 : (left.estimatedGpuBytes > right.estimatedGpuBytes ? 1 : 0);
+					break;
+				case 10:
+					result = static_cast<int>(left.needSources.size()) - static_cast<int>(right.needSources.size());
+					break;
+				default:
+					result = std::string(TerraEngine::Resource::ToString(left.protectionReason)).compare(std::string(TerraEngine::Resource::ToString(right.protectionReason)));
+					break;
+				}
+				return ascending ? result < 0 : result > 0;
+			});
+		}
+		for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : records)
 		{
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(0);
@@ -495,18 +760,25 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 			ImGui::TableSetColumnIndex(1);
 			TextStringView(TerraEngine::Resource::ToString(record.assetType));
 			ImGui::TableSetColumnIndex(2);
-			TextStringView(StreamingMemoryLocation(record));
+			TextStringView(TerraEngine::Resource::ToString(record.assetPolicy.priorityClass));
 			ImGui::TableSetColumnIndex(3);
-			TextStringView(StreamingLoadStateLabel(record.payloadState));
+			TextStringView(TerraEngine::Resource::ToString(record.assetPolicy.residencyTier));
 			ImGui::TableSetColumnIndex(4);
-			ImGui::Text("%llu", static_cast<unsigned long long>(record.estimatedCpuBytes));
+			TextStringView(StreamingMemoryLocation(record));
 			ImGui::TableSetColumnIndex(5);
-			ImGui::Text("%llu", static_cast<unsigned long long>(record.estimatedGpuBytes));
+			TextStringView(StreamingLoadStateLabel(record.payloadState));
 			ImGui::TableSetColumnIndex(6);
-			TextStringView(TerraEngine::Resource::ToString(record.protectionReason));
+			const std::string mipLabel = MipResidencyLabel(record);
+			ImGui::TextUnformatted(mipLabel.c_str());
 			ImGui::TableSetColumnIndex(7);
-			ImGui::Text("%zu", record.needSources.size());
+			ImGui::Text("%llu", static_cast<unsigned long long>(record.estimatedCpuBytes));
 			ImGui::TableSetColumnIndex(8);
+			ImGui::Text("%llu", static_cast<unsigned long long>(record.estimatedGpuBytes));
+			ImGui::TableSetColumnIndex(9);
+			TextStringView(TerraEngine::Resource::ToString(record.protectionReason));
+			ImGui::TableSetColumnIndex(10);
+			ImGui::Text("%zu", record.needSources.size());
+			ImGui::TableSetColumnIndex(11);
 			ImGui::TextWrapped("%s", record.releaseEligibility.c_str());
 		}
 		ImGui::EndTable();
@@ -517,22 +789,77 @@ void ResourceResidencyWindow::DrawCandidates()
 {
 	const TerraEngine::Resource::ResidencyDiagnosticsSummary summary = ResourceManager::Instance().GetResidencyDiagnosticsSummary();
 	ImGui::SeparatorText("Release Candidates");
-	if (summary.candidates.empty())
+	std::vector<TerraEngine::Resource::ReleaseCandidate> candidates;
+	candidates.reserve(summary.candidates.size());
+	for (const TerraEngine::Resource::ReleaseCandidate& candidate : summary.candidates)
+	{
+		if (!MatchesResidencyTypeFilter(candidate.assetType, m_TypeFilter))
+		{
+			continue;
+		}
+		const std::string label = DiagnosticAssetLabel(candidate.assetId, AssetTypeFromResidencyType(candidate.assetType), candidate.sourceKey);
+		if (!ContainsInsensitive(label, m_FilterText) && !ContainsInsensitive(candidate.sourceKey, m_FilterText))
+		{
+			continue;
+		}
+		candidates.push_back(candidate);
+	}
+
+	if (candidates.empty())
 	{
 		ImGui::TextDisabled("No candidates.");
 		return;
 	}
 
-	if (ImGui::BeginTable("ResourceResidencyCandidates", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	if (ImGui::BeginTable("ResourceResidencyCandidates", 9, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable))
 	{
 		ImGui::TableSetupColumn("Asset");
 		ImGui::TableSetupColumn("Type");
+		ImGui::TableSetupColumn("Priority");
+		ImGui::TableSetupColumn("Tier");
+		ImGui::TableSetupColumn("Memory");
 		ImGui::TableSetupColumn("Idle Seconds");
 		ImGui::TableSetupColumn("Bytes");
 		ImGui::TableSetupColumn("Reason");
 		ImGui::TableSetupColumn("Source");
 		ImGui::TableHeadersRow();
-		for (const TerraEngine::Resource::ReleaseCandidate& candidate : summary.candidates)
+		if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs(); sortSpecs && sortSpecs->SpecsCount > 0)
+		{
+			const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
+			const bool ascending = spec.SortDirection == ImGuiSortDirection_Ascending;
+			std::sort(candidates.begin(), candidates.end(), [&](const auto& left, const auto& right) {
+				int result = 0;
+				switch (spec.ColumnIndex)
+				{
+				case 0:
+					result = DiagnosticAssetLabel(left.assetId, AssetTypeFromResidencyType(left.assetType), left.sourceKey).compare(DiagnosticAssetLabel(right.assetId, AssetTypeFromResidencyType(right.assetType), right.sourceKey));
+					break;
+				case 1:
+					result = std::string(TerraEngine::Resource::ToString(left.assetType)).compare(std::string(TerraEngine::Resource::ToString(right.assetType)));
+					break;
+				case 2:
+					result = static_cast<int>(left.priorityClass) - static_cast<int>(right.priorityClass);
+					break;
+				case 3:
+					result = static_cast<int>(left.residencyTier) - static_cast<int>(right.residencyTier);
+					break;
+				case 4:
+					result = static_cast<int>(left.releaseDomain) - static_cast<int>(right.releaseDomain);
+					break;
+				case 5:
+					result = left.idleSeconds < right.idleSeconds ? -1 : (left.idleSeconds > right.idleSeconds ? 1 : 0);
+					break;
+				case 6:
+					result = left.estimatedReclaimableBytes < right.estimatedReclaimableBytes ? -1 : (left.estimatedReclaimableBytes > right.estimatedReclaimableBytes ? 1 : 0);
+					break;
+				default:
+					result = std::string(TerraEngine::Resource::ToString(left.releaseReason)).compare(std::string(TerraEngine::Resource::ToString(right.releaseReason)));
+					break;
+				}
+				return ascending ? result < 0 : result > 0;
+			});
+		}
+		for (const TerraEngine::Resource::ReleaseCandidate& candidate : candidates)
 		{
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(0);
@@ -540,12 +867,18 @@ void ResourceResidencyWindow::DrawCandidates()
 			ImGui::TableSetColumnIndex(1);
 			TextStringView(TerraEngine::Resource::ToString(candidate.assetType));
 			ImGui::TableSetColumnIndex(2);
-			ImGui::Text("%.2f", candidate.idleSeconds);
+			TextStringView(TerraEngine::Resource::ToString(candidate.priorityClass));
 			ImGui::TableSetColumnIndex(3);
-			ImGui::Text("%llu", static_cast<unsigned long long>(candidate.estimatedReclaimableBytes));
+			TextStringView(TerraEngine::Resource::ToString(candidate.residencyTier));
 			ImGui::TableSetColumnIndex(4);
-			TextStringView(TerraEngine::Resource::ToString(candidate.releaseReason));
+			TextStringView(TerraEngine::Resource::ToString(candidate.releaseDomain));
 			ImGui::TableSetColumnIndex(5);
+			ImGui::Text("%.2f", candidate.idleSeconds);
+			ImGui::TableSetColumnIndex(6);
+			ImGui::Text("%llu", static_cast<unsigned long long>(candidate.estimatedReclaimableBytes));
+			ImGui::TableSetColumnIndex(7);
+			TextStringView(TerraEngine::Resource::ToString(candidate.releaseReason));
+			ImGui::TableSetColumnIndex(8);
 			ImGui::TextWrapped("%s", candidate.sourceKey.c_str());
 		}
 		ImGui::EndTable();
@@ -556,22 +889,72 @@ void ResourceResidencyWindow::DrawReleaseRecords()
 {
 	const TerraEngine::Resource::ResidencyDiagnosticsSummary summary = ResourceManager::Instance().GetResidencyDiagnosticsSummary();
 	ImGui::SeparatorText("Releases");
-	if (summary.records.empty())
+	std::vector<TerraEngine::Resource::ReleaseRecord> records;
+	records.reserve(summary.records.size());
+	for (const TerraEngine::Resource::ReleaseRecord& record : summary.records)
+	{
+		if (!MatchesResidencyTypeFilter(record.assetType, m_TypeFilter))
+		{
+			continue;
+		}
+		const std::string label = DiagnosticAssetLabel(record.assetId, AssetTypeFromResidencyType(record.assetType));
+		if (!ContainsInsensitive(label, m_FilterText) && !ContainsInsensitive(record.explanation, m_FilterText))
+		{
+			continue;
+		}
+		records.push_back(record);
+	}
+
+	if (records.empty())
 	{
 		ImGui::TextDisabled("No release records.");
 		return;
 	}
 
-	if (ImGui::BeginTable("ResourceResidencyRecords", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	if (ImGui::BeginTable("ResourceResidencyRecords", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable))
 	{
 		ImGui::TableSetupColumn("Frame");
 		ImGui::TableSetupColumn("Asset");
 		ImGui::TableSetupColumn("Type");
+		ImGui::TableSetupColumn("Memory");
 		ImGui::TableSetupColumn("Result");
 		ImGui::TableSetupColumn("Bytes");
 		ImGui::TableSetupColumn("Explanation");
 		ImGui::TableHeadersRow();
-		for (const TerraEngine::Resource::ReleaseRecord& record : summary.records)
+		if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs(); sortSpecs && sortSpecs->SpecsCount > 0)
+		{
+			const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
+			const bool ascending = spec.SortDirection == ImGuiSortDirection_Ascending;
+			std::sort(records.begin(), records.end(), [&](const auto& left, const auto& right) {
+				int result = 0;
+				switch (spec.ColumnIndex)
+				{
+				case 0:
+					result = left.frameId < right.frameId ? -1 : (left.frameId > right.frameId ? 1 : 0);
+					break;
+				case 1:
+					result = DiagnosticAssetLabel(left.assetId, AssetTypeFromResidencyType(left.assetType)).compare(DiagnosticAssetLabel(right.assetId, AssetTypeFromResidencyType(right.assetType)));
+					break;
+				case 2:
+					result = std::string(TerraEngine::Resource::ToString(left.assetType)).compare(std::string(TerraEngine::Resource::ToString(right.assetType)));
+					break;
+				case 3:
+					result = static_cast<int>(left.releaseDomain) - static_cast<int>(right.releaseDomain);
+					break;
+				case 4:
+					result = static_cast<int>(left.result) - static_cast<int>(right.result);
+					break;
+				case 5:
+					result = left.bytesReclaimed < right.bytesReclaimed ? -1 : (left.bytesReclaimed > right.bytesReclaimed ? 1 : 0);
+					break;
+				default:
+					result = left.explanation.compare(right.explanation);
+					break;
+				}
+				return ascending ? result < 0 : result > 0;
+			});
+		}
+		for (const TerraEngine::Resource::ReleaseRecord& record : records)
 		{
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(0);
@@ -581,10 +964,12 @@ void ResourceResidencyWindow::DrawReleaseRecords()
 			ImGui::TableSetColumnIndex(2);
 			TextStringView(TerraEngine::Resource::ToString(record.assetType));
 			ImGui::TableSetColumnIndex(3);
-			TextStringView(TerraEngine::Resource::ToString(record.result));
+			TextStringView(TerraEngine::Resource::ToString(record.releaseDomain));
 			ImGui::TableSetColumnIndex(4);
-			ImGui::Text("%llu", static_cast<unsigned long long>(record.bytesReclaimed));
+			TextStringView(TerraEngine::Resource::ToString(record.result));
 			ImGui::TableSetColumnIndex(5);
+			ImGui::Text("%llu", static_cast<unsigned long long>(record.bytesReclaimed));
+			ImGui::TableSetColumnIndex(6);
 			ImGui::TextWrapped("%s", record.explanation.c_str());
 		}
 		ImGui::EndTable();

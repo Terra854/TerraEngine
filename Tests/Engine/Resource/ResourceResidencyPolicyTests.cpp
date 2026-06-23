@@ -33,8 +33,10 @@ namespace {
 
 		registry.Add("Resource.Residency.Policy.IdleThresholdCreatesCandidates", [](TestContext& context) {
 			Resource::ResidencyPolicy policy = Resource::MakeDefaultResidencyPolicy();
-			policy.idleSecondsThreshold = 10.0;
-			policy.reloadGraceSeconds = 0.0;
+			policy.cpu.idleSecondsThreshold = 1000.0;
+			policy.cpu.reloadGraceSeconds = 0.0;
+			policy.gpu.idleSecondsThreshold = 10.0;
+			policy.gpu.reloadGraceSeconds = 0.0;
 			const std::vector<Resource::ResidentAsset> assets = { MakeAsset(1u, 1.0), MakeAsset(2u, 19.0) };
 
 			Resource::ResidencySnapshot snapshot;
@@ -46,6 +48,7 @@ namespace {
 
 			context.ExpectEqual(std::size_t{1u}, candidates.size(), "Only the asset older than the configured idle threshold should be released.");
 			context.Expect(candidates.front().releaseReason == Resource::ResidencyReleaseReason::IdleExpiry, "Idle cleanup should explain that the candidate expired by age.");
+			context.Expect(candidates.front().releaseDomain == Resource::ResidencyReleaseDomain::Gpu, "GPU can expire before RAM so warm CPU payloads stay available for fast reloads.");
 		});
 	}
 }

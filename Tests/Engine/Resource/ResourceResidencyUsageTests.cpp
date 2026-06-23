@@ -26,8 +26,10 @@ namespace {
 	{
 		registry.Add("Resource.Residency.Usage.PinsBlockRelease", [](TestContext& context) {
 			Resource::ResidencyPolicy policy = Resource::MakeDefaultResidencyPolicy();
-			policy.idleSecondsThreshold = 1.0;
-			policy.reloadGraceSeconds = 0.0;
+			policy.cpu.idleSecondsThreshold = 1000.0;
+			policy.cpu.reloadGraceSeconds = 0.0;
+			policy.gpu.idleSecondsThreshold = 1.0;
+			policy.gpu.reloadGraceSeconds = 0.0;
 			const std::vector<Resource::ResidentAsset> assets = {
 				MakeUsageAsset(1u, Resource::ResidencyPinReason::ActiveScene),
 				MakeUsageAsset(2u, Resource::ResidencyPinReason::EditorSelection),
@@ -43,12 +45,15 @@ namespace {
 
 			context.ExpectEqual(std::size_t{1u}, candidates.size(), "Pinned active/editor assets must be protected while idle unpinned assets remain releasable.");
 			context.Expect(candidates.front().assetId[15] == 3u, "The only releasable candidate should be the unpinned mesh.");
+			context.Expect(candidates.front().releaseDomain == Resource::ResidencyReleaseDomain::Gpu, "The first unpinned release should target GPU memory while RAM remains warm.");
 		});
 
 		registry.Add("Resource.Residency.Usage.ReloadGraceBlocksRecentAssets", [](TestContext& context) {
 			Resource::ResidencyPolicy policy = Resource::MakeDefaultResidencyPolicy();
-			policy.idleSecondsThreshold = 1.0;
-			policy.reloadGraceSeconds = 10.0;
+			policy.cpu.idleSecondsThreshold = 1.0;
+			policy.cpu.reloadGraceSeconds = 10.0;
+			policy.gpu.idleSecondsThreshold = 1.0;
+			policy.gpu.reloadGraceSeconds = 10.0;
 			const Resource::ResidentAsset asset = MakeUsageAsset(4u, Resource::ResidencyPinReason::None);
 
 			const Resource::ResidencyBlockedReason blocker = Resource::EvaluateReleaseBlocker(asset, policy, 5.0);
@@ -58,8 +63,10 @@ namespace {
 
 		registry.Add("Resource.Residency.Usage.ShaderCollectionsStayResident", [](TestContext& context) {
 			Resource::ResidencyPolicy policy = Resource::MakeDefaultResidencyPolicy();
-			policy.idleSecondsThreshold = 1.0;
-			policy.reloadGraceSeconds = 0.0;
+			policy.cpu.idleSecondsThreshold = 1.0;
+			policy.cpu.reloadGraceSeconds = 0.0;
+			policy.gpu.idleSecondsThreshold = 1.0;
+			policy.gpu.reloadGraceSeconds = 0.0;
 			Resource::ResidentAsset shaderCollection = MakeUsageAsset(5u, Resource::ResidencyPinReason::None);
 			shaderCollection.assetType = Resource::ResidencyAssetType::ShaderCollection;
 			shaderCollection.sourceKey = "Engine/Shaders/default.tspf";

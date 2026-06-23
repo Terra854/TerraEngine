@@ -89,6 +89,9 @@ struct VulkanImage {
 	VkImageView view;
 	VkSampler sampler;
 	VkDeviceSize size = 0;
+	std::uint32_t sourceMipCount = 1u;
+	std::uint32_t residentMipCount = 1u;
+	std::uint32_t residentMipOffset = 0u;
 };
 
 // Mesh buffers cached on the GPU.
@@ -687,7 +690,7 @@ struct VulkanContext::Impl {
 	void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
 	void TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout);
 	void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
-	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags);
+	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels = 1u);
 
 	VkFormat MapTextureFormat(uint32_t vkFormat);
 	void EnsureTexture(TerraEngine::UUID textureId);

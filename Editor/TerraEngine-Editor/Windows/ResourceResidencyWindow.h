@@ -25,6 +25,12 @@ private:
 	void DrawStreamingSummary();
 	void DrawCandidates();
 	void DrawReleaseRecords();
+	void DrawDiagnosticsFilters();
 
 	MainEditorSubsystem* owner = nullptr;
+	char m_FilterText[128] = {};
+	int m_TypeFilter = 0;
+	int m_MemoryFilter = 0;
+	int m_LoadStateFilter = 0;
+	bool m_ShowOnlyReleaseEligible = false;
 };

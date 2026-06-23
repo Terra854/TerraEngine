@@ -177,11 +177,18 @@ static nlohmann::json BuildResidencyPolicyManifest()
 	const TerraEngine::Resource::ResidencyPolicy profile = ResourceManager::Instance().GetResidencyPolicy();
 	nlohmann::json policy;
 	policy["enabled"] = profile.enabled;
-	policy["idleSecondsThreshold"] = profile.idleSecondsThreshold;
-	policy["memoryBudgetBytes"] = profile.memoryBudgetBytes;
 	policy["cleanupIntervalSeconds"] = profile.cleanupIntervalSeconds;
-	policy["reloadGraceSeconds"] = profile.reloadGraceSeconds;
-	policy["strictBudgetMode"] = profile.strictBudgetMode;
+	policy["cpu"] = {
+		{ "idleSecondsThreshold", profile.cpu.idleSecondsThreshold },
+		{ "memoryBudgetBytes", profile.cpu.memoryBudgetBytes },
+		{ "reloadGraceSeconds", profile.cpu.reloadGraceSeconds }
+	};
+	policy["gpu"] = {
+		{ "idleSecondsThreshold", profile.gpu.idleSecondsThreshold },
+		{ "memoryBudgetBytes", profile.gpu.memoryBudgetBytes },
+		{ "reloadGraceSeconds", profile.gpu.reloadGraceSeconds },
+		{ "strictBudgetMode", profile.gpu.strictBudgetMode }
+	};
 	return policy;
 }
 
@@ -195,6 +202,9 @@ static nlohmann::json BuildStreamingPolicyManifest()
 	policy["visibleRetentionSeconds"] = profile.visibleRetentionSeconds;
 	policy["neededRetentionSeconds"] = profile.neededRetentionSeconds;
 	policy["maxLoadsPerUpdate"] = profile.maxLoadsPerUpdate;
+	policy["textureMipStreamingEnabled"] = profile.textureMipStreamingEnabled;
+	policy["textureMinStreamMip"] = profile.textureMinStreamMip;
+	policy["textureMaxStreamMip"] = profile.textureMaxStreamMip;
 	policy["memoryBudgetInteraction"] = std::string(TerraEngine::Resource::ToString(profile.memoryBudgetInteraction));
 	return policy;
 }
