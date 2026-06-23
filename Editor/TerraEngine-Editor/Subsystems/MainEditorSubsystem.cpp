@@ -43,7 +43,7 @@
 #include "../Windows/SchedulerDiagnosticsWindow.h"
 #include "../Windows/ResourceResidencyWindow.h"
 #include "../Windows/UIBuilderWindow.h"
-#include "../Windows/SkySettingsWindow.h"
+#include "../Windows/ProjectSettingsWindow.h"
 
 namespace
 {
@@ -194,12 +194,12 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<ProjectBrowserWindow>(this));
 	m_Windows.push_back(std::make_shared<GameViewWindow>(this));
 	m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
+	m_Windows.push_back(std::make_shared<ProjectSettingsWindow>(this));
 	m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
 	m_Windows.push_back(std::make_shared<ProfilerWindow>(this));
 	m_Windows.push_back(std::make_shared<SchedulerDiagnosticsWindow>(this));
 	m_Windows.push_back(std::make_shared<ResourceResidencyWindow>(this));
 	m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));
-	m_Windows.push_back(std::make_shared<SkySettingsWindow>(this));
 
 	UndoRedoSystem::Instance().Initialize(context);
 	ScriptCompilationSubsystem::Instance().Initialize(context);
@@ -1235,6 +1235,32 @@ bool MainEditorSubsystem::TryGetGameViewRenderStats(RenderStatsSnapshot& outStat
 	return outStats.valid;
 }
 
+void MainEditorSubsystem::OpenProjectSettings(TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId categoryId)
+{
+	if (auto projectSettings = GetWindow<ProjectSettingsWindow>())
+	{
+		projectSettings->OpenToCategory(categoryId);
+	}
+}
+
+std::vector<std::string> MainEditorSubsystem::GetWindowMenuTitlesForTests() const
+{
+	std::vector<std::string> titles;
+	for (const auto& window : m_Windows)
+	{
+		if (window && TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(window->GetTitle()))
+		{
+			titles.push_back(window->GetTitle());
+		}
+	}
+	return titles;
+}
+
+bool MainEditorSubsystem::ShouldShowWindowInWindowMenuForTests(std::string_view title)
+{
+	return TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(title);
+}
+
 // MainEditorSubsystem::DrawUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::DrawUI() {
 	EnsurePrefabObjectsLoadedForEditor();
@@ -1473,6 +1499,12 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 			if (ImGui::MenuItem("Redo", "Ctrl+Y", false, UndoRedoSystem::Instance().CanRedo())) {
 				UndoRedoSystem::Instance().Redo();
 			}
+			ImGui::Separator();
+			// Project Settings lives under Edit because it changes persistent
+			// project configuration rather than opening another transient tool.
+			if (ImGui::MenuItem(TerraEngine::Editor::ProjectSettings::kProjectSettingsMenuLabel.data())) {
+				OpenProjectSettings();
+			}
 			ImGui::EndMenu();
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1502,6 +1534,9 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 		if (ImGui::BeginMenu("Windows")) {
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (auto& win : m_Windows) {
+				if (!TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(win->GetTitle())) {
+					continue;
+				}
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::MenuItem(win->GetTitle().c_str())) {
 					win->SetVisible(true);

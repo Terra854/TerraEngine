@@ -5,9 +5,22 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include <string>
 
 struct ProjectSettings {
-	int _placeholder = 0; // Empty structs can be weird in some contexts, keeping dummy.
+	std::string projectDisplayName = "TerraEngine Project";
 
-	NLOHMANN_DEFINE_TYPE_INTRUSIVE(ProjectSettings, _placeholder)
+	friend void to_json(nlohmann::json& json, const ProjectSettings& settings)
+	{
+		json = nlohmann::json{
+			{ "projectDisplayName", settings.projectDisplayName }
+		};
+	}
+
+	friend void from_json(const nlohmann::json& json, ProjectSettings& settings)
+	{
+		// Keep old projects loadable even though early ProjectSettings files only
+		// contained a placeholder field.
+		settings.projectDisplayName = json.value("projectDisplayName", "TerraEngine Project");
+	}
 };

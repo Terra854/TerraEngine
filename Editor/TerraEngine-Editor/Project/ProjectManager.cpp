@@ -6,6 +6,7 @@
 #include <fstream>
 #include <chrono>
 #include <algorithm>
+#include <cctype>
 #include "Engine/Core/Logger/Logger.h"
 
 #ifdef _WIN32
@@ -63,6 +64,13 @@ namespace
 
 		TERRAENGINE_LOG(LogLevel::Info, "[ProjectManager] Created default project manifest at " << manifestPath.string());
 		return true;
+	}
+
+	bool IsBlankDisplayName(const std::string& value)
+	{
+		return std::all_of(value.begin(), value.end(), [](unsigned char character) {
+			return std::isspace(character) != 0;
+		});
 	}
 }
 
@@ -238,6 +246,19 @@ bool ProjectManager::HasActiveProject() const {
 const ProjectSettings& ProjectManager::GetSettings() const {
 	static ProjectSettings empty;
 	return currentSettings.has_value() ? *currentSettings : empty;
+}
+
+// ProjectManager::SetProjectDisplayName validates and persists the editable
+// project label used by Project Settings without exposing mutable settings
+// storage to every editor window.
+bool ProjectManager::SetProjectDisplayName(const std::string& displayName) {
+	if (!currentSettings.has_value() || IsBlankDisplayName(displayName)) {
+		return false;
+	}
+
+	currentSettings->projectDisplayName = displayName;
+	SaveProjectSettings();
+	return true;
 }
 
 // ProjectManager::GetProjectRoot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

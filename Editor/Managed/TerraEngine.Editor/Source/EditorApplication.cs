@@ -15,7 +15,6 @@ namespace TerraEngine.Editor
     {
         private static bool _initialized = false;
         private static StatusWindow _statusWindow = null!;
-        private static RenderSettingsWindow _renderSettingsWindow = null!;
 
         [UnmanagedCallersOnly]
         // Initialize bridges managed callers to engine state; validate arguments before forwarding to native code.
@@ -51,13 +50,6 @@ namespace TerraEngine.Editor
             {
                 _statusWindow = new StatusWindow();
                 WindowManager.RegisterWindow(_statusWindow);
-            }
-
-            // Validate this condition before crossing into native or editor state that may outlive the managed object.
-            if (_renderSettingsWindow == null)
-            {
-                _renderSettingsWindow = new RenderSettingsWindow();
-                WindowManager.RegisterWindow(_renderSettingsWindow);
             }
         }
 

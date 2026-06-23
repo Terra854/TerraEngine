@@ -10,12 +10,14 @@
 #include <map>
 #include <vector>
 #include <string>
+#include <string_view>
 #include <filesystem>
 #include <memory>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
 #include "IEditorSubsystem.h"
 #include "../Framework/EditorWindow.h"
+#include "../Project/ProjectSettingsMetadata.h"
 #include "Engine/Renderer/RenderTypes.h"
 #include "Engine/Utilities/UUID.h"
 
@@ -90,6 +92,10 @@ public:
 
 	// GetWindows is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const std::vector<std::shared_ptr<EditorWindow>>& GetWindows() const { return m_Windows; }
+	void OpenProjectSettings(TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId categoryId =
+		TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Project);
+	std::vector<std::string> GetWindowMenuTitlesForTests() const;
+	static bool ShouldShowWindowInWindowMenuForTests(std::string_view title);
 
 private:
 	void CapturePlayModeSceneState();

@@ -815,7 +815,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/SchedulerDiagnosticsWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp
 	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
-	Editor/TerraEngine-Editor/Windows/SkySettingsWindow.cpp
+	Editor/TerraEngine-Editor/Windows/ProjectSettingsWindow.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp

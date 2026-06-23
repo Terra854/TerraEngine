@@ -23,6 +23,9 @@ add_executable(TerraEngine-EditorTests
 	Project/LinuxScriptCompilationTests.cpp
 	Project/LinuxScriptEditorLaunchTests.cpp
 	Project/LinuxScriptWorkspaceTests.cpp
+	Project/ProjectSettingsWindowTests.cpp
+	Project/ProjectSettingsMenuInventoryTests.cpp
+	Project/ProjectSettingsPersistenceTests.cpp
 	Scene/PrefabAuthoringWorkflowTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp

@@ -30,6 +30,7 @@ public:
 	// Accessors
 	bool HasActiveProject() const;
 	const ProjectSettings& GetSettings() const;
+	bool SetProjectDisplayName(const std::string& displayName);
 	std::filesystem::path GetProjectRoot() const;
 	const std::vector<RecentProjectEntry>& GetRecentProjects() const;
 	const EditorPreferences& GetEditorPreferences() const;

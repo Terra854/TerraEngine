@@ -26,6 +26,9 @@ namespace TerraEngine::EditorTests {
 	void RegisterLinuxScriptCompilationTests(TestRegistry& registry);
 	void RegisterLinuxScriptEditorLaunchTests(TestRegistry& registry);
 	void RegisterLinuxScriptWorkspaceTests(TestRegistry& registry);
+	void RegisterProjectSettingsWindowTests(TestRegistry& registry);
+	void RegisterProjectSettingsMenuInventoryTests(TestRegistry& registry);
+	void RegisterProjectSettingsPersistenceTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterStreamingEditorWorkflowTests(TestRegistry& registry);
 }
@@ -60,6 +63,9 @@ int main() {
 	TerraEngine::EditorTests::RegisterLinuxScriptCompilationTests(registry);
 	TerraEngine::EditorTests::RegisterLinuxScriptEditorLaunchTests(registry);
 	TerraEngine::EditorTests::RegisterLinuxScriptWorkspaceTests(registry);
+	TerraEngine::EditorTests::RegisterProjectSettingsWindowTests(registry);
+	TerraEngine::EditorTests::RegisterProjectSettingsMenuInventoryTests(registry);
+	TerraEngine::EditorTests::RegisterProjectSettingsPersistenceTests(registry);
 	TerraEngine::EditorTests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::EditorTests::RegisterStreamingEditorWorkflowTests(registry);
 
