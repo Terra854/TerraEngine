@@ -34,6 +34,10 @@ add_executable(TerraEngine-EngineTests
 	Resource/ResourceResidencyDiagnosticsTests.cpp
 	Resource/ResourceResidencyPolicyTests.cpp
 	Resource/ResourceResidencyUsageTests.cpp
+	Resource/ResourceStreamingDiagnosticsTests.cpp
+	Resource/ResourceStreamingPolicyTests.cpp
+	Resource/ResourceStreamingPreloadTests.cpp
+	Resource/ResourceStreamingResidencyIntegrationTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/MockRenderBackendTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererThreadingTestFixtures.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendCompatibilityTests.cpp
@@ -55,6 +59,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderRandomizedSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderResourceCancellationTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderResourceReadinessTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderStreamingNeedTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderShadowParallelParityTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSmallSceneOverheadTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSnapshotContractTests.cpp
@@ -81,6 +86,7 @@ add_executable(TerraEngine-EngineTests
 	Scene/PrefabCompositionTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
 	Scene/SceneMutationQueueTests.cpp
+	Scene/SceneStreamingDeferredLoadTests.cpp
 	Scene/SpatialBoundsTests.cpp
 	Scene/SpatialIndexEdgeTests.cpp
 	Scene/SpatialIndexQueryTests.cpp

@@ -157,12 +157,6 @@ bool SaveBuildProfile(const BuildProfile& profile, const std::filesystem::path& 
 		j["includeDebugSymbols"] = profile.includeDebugSymbols;
 		j["stripNativeAotOutput"] = profile.stripNativeAotOutput;
 		j["additionalPublishArgs"] = profile.additionalPublishArgs;
-		j["residencyCleanupEnabled"] = profile.residencyCleanupEnabled;
-		j["residencyIdleSecondsThreshold"] = profile.residencyIdleSecondsThreshold;
-		j["residencyMemoryBudgetMb"] = profile.residencyMemoryBudgetMb;
-		j["residencyCleanupIntervalSeconds"] = profile.residencyCleanupIntervalSeconds;
-		j["residencyReloadGraceSeconds"] = profile.residencyReloadGraceSeconds;
-		j["residencyStrictBudgetMode"] = profile.residencyStrictBudgetMode;
 		j["includedScenes"] = profile.includedScenes;
 
 		// Ensure the parent directory exists before writing.
@@ -213,12 +207,6 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path) {
 		if (j.contains("stripNativeAotOutput"))    profile.stripNativeAotOutput = j["stripNativeAotOutput"].get<bool>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("additionalPublishArgs"))   profile.additionalPublishArgs = j["additionalPublishArgs"].get<std::string>();
-		if (j.contains("residencyCleanupEnabled")) profile.residencyCleanupEnabled = j["residencyCleanupEnabled"].get<bool>();
-		if (j.contains("residencyIdleSecondsThreshold")) profile.residencyIdleSecondsThreshold = j["residencyIdleSecondsThreshold"].get<double>();
-		if (j.contains("residencyMemoryBudgetMb")) profile.residencyMemoryBudgetMb = j["residencyMemoryBudgetMb"].get<uint64_t>();
-		if (j.contains("residencyCleanupIntervalSeconds")) profile.residencyCleanupIntervalSeconds = j["residencyCleanupIntervalSeconds"].get<double>();
-		if (j.contains("residencyReloadGraceSeconds")) profile.residencyReloadGraceSeconds = j["residencyReloadGraceSeconds"].get<double>();
-		if (j.contains("residencyStrictBudgetMode")) profile.residencyStrictBudgetMode = j["residencyStrictBudgetMode"].get<bool>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("includedScenes")) {
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.

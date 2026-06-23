@@ -706,6 +706,34 @@ extern "C" {
 		SetMeshRendererAssetReference(objectId, "materialId", AssetType::Material, assetReference);
 	}
 
+	// Native_ResourceStreaming_Preload bridges C# gameplay hints into the same
+	// streaming state used by renderer/editor needs. It schedules background
+	// loading but does not block the script frame.
+	bool Native_ResourceStreaming_Preload(const char* assetReference, int assetType) {
+		if (assetReference == nullptr || assetReference[0] == '\0') {
+			return false;
+		}
+		AssetType type = AssetType::Mesh;
+		switch (assetType) {
+		case 1: type = AssetType::Texture; break;
+		case 2: type = AssetType::Material; break;
+		case 3: type = AssetType::ShaderCollection; break;
+		default: type = AssetType::Mesh; break;
+		}
+		ResourceManager& resources = ResourceManager::Instance();
+		const TerraEngine::UUID id = resources.ResolveAssetReference(assetReference, type);
+		if (id == TerraEngine::EMPTY_UUID) {
+			return false;
+		}
+		resources.RequestStreamableLoad(
+			id,
+			type,
+			TerraEngine::Resource::StreamingNeedType::RuntimeExplicit,
+			0u,
+			"managed explicit preload");
+		return true;
+	}
+
 	// Native_HasComponent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_HasComponent(uint32_t objectId, const char* componentType) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);

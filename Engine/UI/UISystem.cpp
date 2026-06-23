@@ -977,36 +977,55 @@ void UISystem::IntegrateReadyBuilds()
 // UISystem::RefreshCombinedBatch is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UISystem::RefreshCombinedBatch()
 {
-	std::lock_guard<std::mutex> lock(stateMutex_);
-
-	UIRenderBatch nextBatch;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	std::vector<entt::entity> sortedEntities;
-	sortedEntities.reserve(documents_.size());
-	for (const auto& [entity, state] : documents_)
+	std::vector<std::string> activeImageTextures;
 	{
-		(void)entity;
-		(void)state;
-		sortedEntities.push_back(entity);
-	}
-	std::sort(sortedEntities.begin(), sortedEntities.end(), [](entt::entity left, entt::entity right) {
-		return static_cast<std::uint32_t>(left) < static_cast<std::uint32_t>(right);
-	});
-	for (entt::entity entity : sortedEntities)
-	{
-		const UIDocumentState& state = documents_.at(entity);
-		nextBatch.Append(state.batch);
+		std::lock_guard<std::mutex> lock(stateMutex_);
+
+		UIRenderBatch nextBatch;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		std::vector<entt::entity> sortedEntities;
+		sortedEntities.reserve(documents_.size());
+		for (const auto& [entity, state] : documents_)
+		{
+			(void)entity;
+			(void)state;
+			sortedEntities.push_back(entity);
+		}
+		std::sort(sortedEntities.begin(), sortedEntities.end(), [](entt::entity left, entt::entity right) {
+			return static_cast<std::uint32_t>(left) < static_cast<std::uint32_t>(right);
+		});
+		for (entt::entity entity : sortedEntities)
+		{
+			const UIDocumentState& state = documents_.at(entity);
+			nextBatch.Append(state.batch);
+		}
+
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (nextBatch.viewportSize.x <= 0.0f || nextBatch.viewportSize.y <= 0.0f)
+		{
+			nextBatch.viewportSize = gameViewportSize_;
+		}
+
+		nextBatch.immediateQuads.insert(nextBatch.immediateQuads.end(), pendingImmediateQuads_.begin(), pendingImmediateQuads_.end());
+		pendingImmediateQuads_.clear();
+		for (const UIImageRun& imageRun : nextBatch.imageRuns)
+		{
+			if (!imageRun.texturePath.empty())
+			{
+				activeImageTextures.push_back(imageRun.texturePath);
+			}
+		}
+		combinedBatch_ = std::move(nextBatch);
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (nextBatch.viewportSize.x <= 0.0f || nextBatch.viewportSize.y <= 0.0f)
+	// UI documents can reference project textures by path. Publish those needs
+	// after releasing the UI state lock so asset resolution and streaming
+	// bookkeeping never block layout/render batch mutation.
+	for (const std::string& texturePath : activeImageTextures)
 	{
-		nextBatch.viewportSize = gameViewportSize_;
+		const TerraEngine::UUID textureId = ResourceManager::Instance().ResolveAssetReference(texturePath, AssetType::Texture);
+		ResourceManager::Instance().MarkStreamingNeed(textureId, AssetType::Texture, TerraEngine::Resource::StreamingNeedType::ActiveUi, 0u, "active UI image texture", 60);
 	}
-
-	nextBatch.immediateQuads.insert(nextBatch.immediateQuads.end(), pendingImmediateQuads_.begin(), pendingImmediateQuads_.end());
-	pendingImmediateQuads_.clear();
-	combinedBatch_ = std::move(nextBatch);
 }
 
 // UISystem::GetFallbackViewportSize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

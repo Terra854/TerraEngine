@@ -895,6 +895,11 @@ void RenderSystem::Update(float deltaTime)
 			latestRenderFrameSnapshot = renderFrameSnapshot;
 			latestRenderGraphDiagnostics = noViewDiagnostics;
 		}
+		// Even when no view submits GPU work, streaming visibility needs still
+		// have to age out. Without this cleanup pass, assets that were visible
+		// on a previous Scene/Game View frame stay marked as active-view after
+		// the user hides those views or disables every camera.
+		ResourceManager::Instance().RunResidencyCleanup(activeRenderFrameId);
 		ClearOverrideCameras();
 		return;
 	}
@@ -917,8 +922,6 @@ void RenderSystem::Update(float deltaTime)
 		// as a per-renderable contract rather than a unique resource table.
 		renderFrameSnapshot.meshes.push_back({ entry.mesh.meshId, "mesh", true, false });
 		renderFrameSnapshot.materials.push_back({ entry.mesh.materialId, "material", true, false });
-		ResourceManager::Instance().TouchResource(entry.mesh.meshId, AssetType::Mesh, activeRenderFrameId, TerraEngine::Resource::ResidencyPinReason::None, "renderable mesh");
-		ResourceManager::Instance().TouchResource(entry.mesh.materialId, AssetType::Material, activeRenderFrameId, TerraEngine::Resource::ResidencyPinReason::None, "renderable material");
 	}
 	renderFrameSnapshot.lights.reserve(lights.size());
 	for (const LightEntry& light : lights)
@@ -1124,6 +1127,21 @@ void RenderSystem::Update(float deltaTime)
 		return commands;
 	};
 
+	auto publishVisibleStreamingNeeds = [&](const std::vector<DrawCommand>& commands, RenderViewType viewType) {
+		const char* viewReason = viewType == RenderViewType::Scene ? "visible scene view renderable" : "visible game view renderable";
+		for (const DrawCommand& command : commands)
+		{
+			// Only draw commands that survived the active view frustum query
+			// should refresh streaming visibility. Snapshot-wide renderable
+			// metadata is not enough, because disabled cameras or offscreen
+			// editor views must not keep every scene asset resident.
+			ResourceManager::Instance().TouchResource(command.meshId, AssetType::Mesh, activeRenderFrameId, TerraEngine::Resource::ResidencyPinReason::None, viewReason);
+			ResourceManager::Instance().TouchResource(command.materialId, AssetType::Material, activeRenderFrameId, TerraEngine::Resource::ResidencyPinReason::None, viewReason);
+			ResourceManager::Instance().MarkStreamingNeed(command.meshId, AssetType::Mesh, TerraEngine::Resource::StreamingNeedType::Visible, activeRenderFrameId, viewReason, 100);
+			ResourceManager::Instance().MarkStreamingNeed(command.materialId, AssetType::Material, TerraEngine::Resource::StreamingNeedType::Visible, activeRenderFrameId, viewReason, 100);
+		}
+	};
+
 	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection, const glm::uvec2& targetSize, RenderViewType viewType, std::uint32_t outputId) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Visible Draw Commands Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const std::uint64_t signature = BuildVisibleCommandCacheKey(
@@ -1139,6 +1157,7 @@ void RenderSystem::Update(float deltaTime)
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			++visibleCommandCache.hitCount;
 			existing->second.lastTouchedFrameId = activeRenderFrameId;
+			publishVisibleStreamingNeeds(existing->second.commands, viewType);
 			return VisibleCommandBuildResult{ existing->second.commands, existing->second.diagnostics, true };
 		}
 
@@ -1156,6 +1175,7 @@ void RenderSystem::Update(float deltaTime)
 		result.diagnostics.rejectedObjectCount = queryDiagnostics.rejectedObjectCount;
 		result.diagnostics.fallbackObjectCount = queryDiagnostics.fallbackObjectCount;
 		result.diagnostics.lastQueryDurationMs = queryDiagnostics.lastQueryDurationMs;
+		publishVisibleStreamingNeeds(result.commands, viewType);
 		VisibleCommandCacheRecord record;
 		record.signature = signature;
 		record.lastTouchedFrameId = activeRenderFrameId;

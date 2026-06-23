@@ -21,11 +21,13 @@ namespace TerraEngine::EditorTests {
 	void RegisterPrefabAuthoringWorkflowTests(TestRegistry& registry);
 	void RegisterProfilerCaptureStoreTests(TestRegistry& registry);
 	void RegisterResidencyPolicyExportTests(TestRegistry& registry);
+	void RegisterStreamingPolicyExportTests(TestRegistry& registry);
 	void RegisterSchedulerPlayModeGraphTests(TestRegistry& registry);
 	void RegisterLinuxScriptCompilationTests(TestRegistry& registry);
 	void RegisterLinuxScriptEditorLaunchTests(TestRegistry& registry);
 	void RegisterLinuxScriptWorkspaceTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
+	void RegisterStreamingEditorWorkflowTests(TestRegistry& registry);
 }
 
 int main() {
@@ -53,11 +55,13 @@ int main() {
 	TerraEngine::EditorTests::RegisterPrefabAuthoringWorkflowTests(registry);
 	TerraEngine::EditorTests::RegisterProfilerCaptureStoreTests(registry);
 	TerraEngine::EditorTests::RegisterResidencyPolicyExportTests(registry);
+	TerraEngine::EditorTests::RegisterStreamingPolicyExportTests(registry);
 	TerraEngine::EditorTests::RegisterSchedulerPlayModeGraphTests(registry);
 	TerraEngine::EditorTests::RegisterLinuxScriptCompilationTests(registry);
 	TerraEngine::EditorTests::RegisterLinuxScriptEditorLaunchTests(registry);
 	TerraEngine::EditorTests::RegisterLinuxScriptWorkspaceTests(registry);
 	TerraEngine::EditorTests::RegisterSceneRuntimeParityTests(registry);
+	TerraEngine::EditorTests::RegisterStreamingEditorWorkflowTests(registry);
 
 	return registry.RunAll(std::cout);
 }

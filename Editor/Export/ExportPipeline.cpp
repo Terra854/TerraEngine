@@ -5,6 +5,8 @@
 #include "ExportPipeline.h"
 #include "ExportPackageValidator.h"
 #include "ExportScriptBindingRewriter.h"
+#include "Resource/ResourceResidency.h"
+#include "Resource/ResourceStreaming.h"
 
 #include <array>
 #include <chrono>
@@ -170,15 +172,30 @@ static std::optional<nlohmann::json> LoadProjectRenderSettingsManifest(const std
 	}
 }
 
-static nlohmann::json BuildResidencyPolicyManifest(const BuildProfile& profile)
+static nlohmann::json BuildResidencyPolicyManifest()
 {
+	const TerraEngine::Resource::ResidencyPolicy profile = ResourceManager::Instance().GetResidencyPolicy();
 	nlohmann::json policy;
-	policy["enabled"] = profile.residencyCleanupEnabled;
-	policy["idleSecondsThreshold"] = profile.residencyIdleSecondsThreshold;
-	policy["memoryBudgetBytes"] = profile.residencyMemoryBudgetMb * 1024ull * 1024ull;
-	policy["cleanupIntervalSeconds"] = profile.residencyCleanupIntervalSeconds;
-	policy["reloadGraceSeconds"] = profile.residencyReloadGraceSeconds;
-	policy["strictBudgetMode"] = profile.residencyStrictBudgetMode;
+	policy["enabled"] = profile.enabled;
+	policy["idleSecondsThreshold"] = profile.idleSecondsThreshold;
+	policy["memoryBudgetBytes"] = profile.memoryBudgetBytes;
+	policy["cleanupIntervalSeconds"] = profile.cleanupIntervalSeconds;
+	policy["reloadGraceSeconds"] = profile.reloadGraceSeconds;
+	policy["strictBudgetMode"] = profile.strictBudgetMode;
+	return policy;
+}
+
+static nlohmann::json BuildStreamingPolicyManifest()
+{
+	const TerraEngine::Resource::StreamingPolicy profile = ResourceManager::Instance().GetStreamingPolicy();
+	nlohmann::json policy;
+	policy["enabled"] = profile.enabled;
+	policy["deferScenePayloadsOnLoad"] = profile.deferScenePayloadsOnLoad;
+	policy["preloadDistance"] = profile.preloadDistance;
+	policy["visibleRetentionSeconds"] = profile.visibleRetentionSeconds;
+	policy["neededRetentionSeconds"] = profile.neededRetentionSeconds;
+	policy["maxLoadsPerUpdate"] = profile.maxLoadsPerUpdate;
+	policy["memoryBudgetInteraction"] = std::string(TerraEngine::Resource::ToString(profile.memoryBudgetInteraction));
 	return policy;
 }
 
@@ -842,7 +859,8 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		if (std::optional<nlohmann::json> renderSettings = LoadProjectRenderSettingsManifest(projectRoot)) {
 			manifest["renderSettings"] = *renderSettings;
 		}
-		manifest["residencyPolicy"] = BuildResidencyPolicyManifest(profile);
+		manifest["residencyPolicy"] = BuildResidencyPolicyManifest();
+		manifest["streamingPolicy"] = BuildStreamingPolicyManifest();
 
 		// Include the asset GUID map so the engine runtime can resolve 
 		// cross-resource references (UUIDs) back to filenames in the archive.

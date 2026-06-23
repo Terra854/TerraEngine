@@ -3,32 +3,32 @@
 #include "BuildProfile.h"
 
 #include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 namespace TerraEngine::EditorTests {
 	void RegisterResidencyPolicyExportTests(TestRegistry& registry)
 	{
-		registry.Add("Editor.Export.Residency.ProfileFieldsRoundTrip", [](TestContext& context) {
+		registry.Add("Editor.Export.Residency.PolicyNotStoredInBuildProfile", [](TestContext& context) {
 			BuildProfile profile;
 			profile.name = "Residency";
 			profile.id = "residency-test";
-			profile.residencyCleanupEnabled = false;
-			profile.residencyIdleSecondsThreshold = 12.25;
-			profile.residencyMemoryBudgetMb = 456u;
-			profile.residencyCleanupIntervalSeconds = 1.5;
-			profile.residencyReloadGraceSeconds = 0.75;
-			profile.residencyStrictBudgetMode = true;
 			const std::filesystem::path path = std::filesystem::temp_directory_path() / "TerraEngineResidencyProfileTest.json";
 
-			context.Expect(SaveBuildProfile(profile, path), "Build profiles should save residency policy fields.");
-			const BuildProfile loaded = LoadBuildProfile(path);
+			context.Expect(SaveBuildProfile(profile, path), "Build profiles should still save export-only settings.");
+			nlohmann::json savedProfile;
+			{
+				std::ifstream input(path);
+				input >> savedProfile;
+			}
 			std::filesystem::remove(path);
 
-			context.ExpectEqual(false, loaded.residencyCleanupEnabled, "Cleanup enable should round trip.");
-			context.ExpectEqual(12.25, loaded.residencyIdleSecondsThreshold, "Idle threshold should round trip in seconds.");
-			context.ExpectEqual(std::uint64_t{456u}, loaded.residencyMemoryBudgetMb, "Memory budget should round trip in MB.");
-			context.ExpectEqual(1.5, loaded.residencyCleanupIntervalSeconds, "Cleanup interval should round trip in seconds.");
-			context.ExpectEqual(0.75, loaded.residencyReloadGraceSeconds, "Reload grace should round trip in seconds.");
-			context.Expect(loaded.residencyStrictBudgetMode, "Strict budget mode should round trip.");
+			context.Expect(!savedProfile.contains("residencyCleanupEnabled"), "Build profiles should not own loaded-resource cleanup.");
+			context.Expect(!savedProfile.contains("residencyIdleSecondsThreshold"), "Build profiles should not own residency idle thresholds.");
+			context.Expect(!savedProfile.contains("residencyMemoryBudgetMb"), "Build profiles should not own residency memory budgets.");
+			context.Expect(!savedProfile.contains("residencyCleanupIntervalSeconds"), "Build profiles should not own cleanup cadence.");
+			context.Expect(!savedProfile.contains("residencyReloadGraceSeconds"), "Build profiles should not own reload grace.");
+			context.Expect(!savedProfile.contains("residencyStrictBudgetMode"), "Build profiles should not own strict residency budgeting.");
 		});
 	}
 }

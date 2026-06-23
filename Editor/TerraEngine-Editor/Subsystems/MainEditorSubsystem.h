@@ -104,6 +104,7 @@ private:
 	bool LoadPrefabReturnSceneSnapshotIntoObjectManager(bool restoreSelection);
 	bool LoadPrefabIntoIsolatedObjectManager(const std::filesystem::path& path);
 	bool OpenPrefabAssetInternal(const std::filesystem::path& path, bool openedFromSceneObject);
+	void PublishEditorStreamingNeeds();
 	void DrawMainMenuBar();
 	void CloseCurrentProject();
 	

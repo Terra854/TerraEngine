@@ -20,7 +20,9 @@ protected:
 	bool OnCloseRequested() override;
 
 private:
+	void DrawPolicyControls();
 	void DrawSummary();
+	void DrawStreamingSummary();
 	void DrawCandidates();
 	void DrawReleaseRecords();
 

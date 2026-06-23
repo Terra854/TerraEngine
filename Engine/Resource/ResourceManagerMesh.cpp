@@ -660,6 +660,33 @@ namespace
 	}
 }
 
+void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID& id, const Mesh* mesh)
+{
+	if (id == TerraEngine::EMPTY_UUID || mesh == nullptr)
+	{
+		return;
+	}
+
+	TerraEngine::Scene::SpatialAABB bounds = TerraEngine::Scene::MakeFallbackBounds(glm::vec3(0.0f), 1.0f);
+	if (mesh->hasLocalBounds)
+	{
+		bounds = TerraEngine::Scene::MakeAABB(
+			glm::vec3(mesh->localBoundsMin[0], mesh->localBoundsMin[1], mesh->localBoundsMin[2]),
+			glm::vec3(mesh->localBoundsMax[0], mesh->localBoundsMax[1], mesh->localBoundsMax[2]),
+			TerraEngine::Scene::SpatialBoundsSource::Mesh);
+	}
+
+	std::unique_lock lock(m_MeshLocalBoundsMutex);
+	m_MeshLocalBoundsCache[id] = bounds;
+}
+
+void ResourceManager::CacheLoadedMeshBounds(const TerraEngine::UUID&, const void*)
+{
+	// Non-mesh resources have no spatial bounds metadata. This overload keeps
+	// generic load finalization simple without forcing materials, textures, or
+	// shaders to know about mesh-specific residency behavior.
+}
+
 // ResourceManager::LoadMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::UUID ResourceManager::LoadMesh(const std::filesystem::path& path)
 {
@@ -721,6 +748,7 @@ void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (mesh)
 	{
+		CacheLoadedMeshBounds(id, mesh.get());
 		std::unique_lock lock(meshCache.mutex);
 		meshCache.resources[id] = std::move(mesh);
 	}
@@ -729,18 +757,17 @@ void ResourceManager::ReloadMesh(const TerraEngine::UUID& id)
 // ResourceManager::GetMeshLocalBounds is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 TerraEngine::Scene::SpatialAABB ResourceManager::GetMeshLocalBounds(const TerraEngine::UUID& id)
 {
-	if (Mesh* mesh = GetMesh(id))
 	{
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (mesh->hasLocalBounds)
+		std::shared_lock lock(m_MeshLocalBoundsMutex);
+		if (const auto boundsIt = m_MeshLocalBoundsCache.find(id); boundsIt != m_MeshLocalBoundsCache.end())
 		{
-			return TerraEngine::Scene::MakeAABB(
-				glm::vec3(mesh->localBoundsMin[0], mesh->localBoundsMin[1], mesh->localBoundsMin[2]),
-				glm::vec3(mesh->localBoundsMax[0], mesh->localBoundsMax[1], mesh->localBoundsMax[2]),
-				TerraEngine::Scene::SpatialBoundsSource::Mesh);
+			return boundsIt->second;
 		}
-		return TerraEngine::Scene::MakeFallbackBounds(glm::vec3(0.0f), 1.0f);
 	}
 
-	return TerraEngine::Scene::MakeInvalidBounds(TerraEngine::Scene::SpatialBoundsSource::Mesh);
+	// Spatial-index refresh must not load the full mesh payload just to find a
+	// broadphase box. Until a mesh has been demanded by rendering/import, use a
+	// deterministic fallback bound and let visibility streaming decide whether
+	// the heavy RAM/VRAM payload is needed.
+	return TerraEngine::Scene::MakeFallbackBounds(glm::vec3(0.0f), 1.0f);
 }

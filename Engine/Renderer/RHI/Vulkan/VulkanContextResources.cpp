@@ -798,6 +798,12 @@ VkFormat VulkanContext::Impl::MapTextureFormat(uint32_t vkFormat) {
 // VulkanContext::Impl::EnsureTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	if (textureCache.contains(textureId)) {
+		ResourceManager::Instance().MarkResourceUploadedToGpu(
+			textureId,
+			AssetType::Texture,
+			static_cast<std::uint64_t>(currentFrame),
+			static_cast<std::uint64_t>(textureCache[textureId].size),
+			"vulkan texture cache hit");
 		if (!textureIndexMap.contains(textureId)) {
 			uint32_t index = AllocateTextureIndex();
 			textureIndexMap[textureId] = index;
@@ -877,6 +883,7 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
 	vImage.view = CreateImageView(vImage.image, imageInfo.format, VK_IMAGE_ASPECT_COLOR_BIT);
+	vImage.size = totalPayloadSize;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vImage.view == VK_NULL_HANDLE) {
 		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
@@ -901,6 +908,12 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 	}
 
 	textureCache[textureId] = vImage;
+	ResourceManager::Instance().MarkResourceUploadedToGpu(
+		textureId,
+		AssetType::Texture,
+		static_cast<std::uint64_t>(currentFrame),
+		static_cast<std::uint64_t>(totalPayloadSize),
+		"vulkan texture upload");
 
 	// Assign bindless index
 	uint32_t index = AllocateTextureIndex();
@@ -1069,10 +1082,11 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 }
 
 // VulkanContext::Impl::InvalidateTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
+void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId, bool reloadAfterInvalidate) {
 	// Texture edits may affect alpha-tested caster silhouettes, so shadow cache
 	// reuse falls back to refresh after the texture changes.
 	shadowCacheEntries.clear();
+	bool textureWasKnown = false;
 	auto it = textureCache.find(textureId);
 	if (it != textureCache.end()) {
 		// Don't invalidate default texture
@@ -1087,23 +1101,76 @@ void VulkanContext::Impl::InvalidateTexture(TerraEngine::UUID textureId) {
 		vkDestroyImageView(device, it->second.view, nullptr);
 		vmaDestroyImage(allocator, it->second.image, it->second.allocation);
 		textureCache.erase(it);
+		textureWasKnown = true;
 	}
 
-	// Immediately re-ensure the texture exists in the RHI cache and global descriptor set.
-	// Since RenderSystem::ReloadTexture waits for the transcode to finish, the new data is ready.
-	EnsureTexture(textureId);
+	if (auto indexIt = textureIndexMap.find(textureId); indexIt != textureIndexMap.end())
+	{
+		const uint32_t releasedIndex = indexIt->second;
+		UpdateGlobalTexture(releasedIndex, defaultTexture);
+		textureIndexMap.erase(indexIt);
+		if (releasedIndex > 2u)
+		{
+			freeTextureIndices.push_back(releasedIndex);
+		}
+		textureWasKnown = true;
+	}
+
+	if (!reloadAfterInvalidate && textureWasKnown && !materialIndexMap.empty())
+	{
+		// Materials store bindless texture indices in the material SSBO. When
+		// residency evicts a texture, any cached material that referenced that
+		// index must be rebuilt the next time it is drawn so EnsureTexture can
+		// reload visible texture dependencies.
+		for (const auto& [materialId, materialIndex] : materialIndexMap)
+		{
+			(void)materialId;
+			if (materialIndex != kFallbackMaterialIndex)
+			{
+				freeMaterialIndices.push_back(materialIndex);
+			}
+		}
+		materialIndexMap.clear();
+	}
+
+	if (reloadAfterInvalidate)
+	{
+		// Reload paths wait for CPU transcode first, so they can re-upload here.
+		// Residency retirement passes false so an evicted texture stays unloaded
+		// until visibility streaming demands it again.
+		EnsureTexture(textureId);
+	}
 }
 
 // VulkanContext::Impl::InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::InvalidateResource(TerraEngine::UUID id) {
+void VulkanContext::Impl::InvalidateResource(TerraEngine::UUID id, bool reloadTexturesAfterInvalidate) {
 	InvalidateMesh(id);
-	InvalidateTexture(id);
+	InvalidateTexture(id, reloadTexturesAfterInvalidate);
 	InvalidateMaterial(id);
 }
 
 // VulkanContext::Impl::EnsureMesh is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
-	if (meshCache.contains(meshId)) return;
+	auto existingMeshIt = meshCache.find(meshId);
+	if (existingMeshIt != meshCache.end())
+	{
+		const VulkanMesh& mesh = existingMeshIt->second;
+		const VkDeviceSize totalGpuBytes =
+			mesh.meshShaderVertexBuffer.size
+			+ mesh.meshletVertexRemapBuffer.size
+			+ mesh.meshSkinningBuffer.size
+			+ mesh.meshDecodeInfoBuffer.size
+			+ mesh.indexBuffer.size
+			+ mesh.meshletBuffer.size
+			+ mesh.meshletBoundsBuffer.size;
+		ResourceManager::Instance().MarkResourceUploadedToGpu(
+			meshId,
+			AssetType::Mesh,
+			static_cast<std::uint64_t>(currentFrame),
+			static_cast<std::uint64_t>(totalGpuBytes),
+			"vulkan mesh cache hit");
+		return;
+	}
 	
 	Mesh* cpuMesh = ResourceManager::Instance().GetMesh(meshId);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1252,6 +1319,20 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	UpdateGlobalBuffer(vMesh.bindlessIndex, vMesh.meshDecodeInfoBuffer.buffer, 0, vMesh.meshDecodeInfoBuffer.size);
 
 	meshCache[meshId] = vMesh;
+	const VkDeviceSize totalGpuBytes =
+		packedVertexSize
+		+ vertexRemapSize
+		+ skinningDataSize
+		+ static_cast<VkDeviceSize>(sizeof(MeshDecodeInfo))
+		+ primitiveIndexSize
+		+ meshletTableSize
+		+ boundsUploadSize;
+	ResourceManager::Instance().MarkResourceUploadedToGpu(
+		meshId,
+		AssetType::Mesh,
+		static_cast<std::uint64_t>(currentFrame),
+		static_cast<std::uint64_t>(totalGpuBytes),
+		"vulkan mesh buffer upload");
 }
 
 // VulkanContext::Impl::EnsureMeshDescriptorSet is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

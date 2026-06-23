@@ -18,6 +18,7 @@ add_executable(TerraEngine-EditorTests
 	Export/PackRoundTripTests.cpp
 	Export/PackagingRequestValidationTests.cpp
 	Export/ResidencyPolicyExportTests.cpp
+	Export/StreamingPolicyExportTests.cpp
 	Profiling/ProfilerCaptureStoreTests.cpp
 	Project/LinuxScriptCompilationTests.cpp
 	Project/LinuxScriptEditorLaunchTests.cpp
@@ -25,6 +26,7 @@ add_executable(TerraEngine-EditorTests
 	Scene/PrefabAuthoringWorkflowTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
+	Scene/StreamingEditorWorkflowTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/ArchiveSerialization.cpp

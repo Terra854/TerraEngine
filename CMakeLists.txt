@@ -72,6 +72,7 @@ set(ENGINE_SOURCES
 	Engine/Resource/ResourceManager.cpp
 	Engine/Resource/MaterialRuntimeContract.cpp
 	Engine/Resource/ResourceResidency.cpp
+	Engine/Resource/ResourceStreaming.cpp
 	Engine/Resource/ResourceManagerMaterial.cpp
 	Engine/Resource/ResourceManagerMesh.cpp
 	Engine/Resource/ResourceManagerShader.cpp
@@ -153,6 +154,7 @@ set(ENGINE_HEADERS
 	Engine/Resource/ResourceManager.h
 	Engine/Resource/MaterialRuntimeContract.h
 	Engine/Resource/ResourceResidency.h
+	Engine/Resource/ResourceStreaming.h
 	Engine/Resource/ShaderCollection.h
 	Engine/Scene/SceneGraphRuntime.h
 	Engine/Scene/PrefabComposition.h

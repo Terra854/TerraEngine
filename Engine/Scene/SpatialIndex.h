@@ -63,6 +63,10 @@ namespace TerraEngine::Scene
 
 		[[nodiscard]] SpatialQueryResult QueryAABB(const SpatialAABB& area, const SpatialQueryFilter& filter = {}) const;
 		[[nodiscard]] SpatialQueryResult QuerySphere(const SpatialSphere& sphere, const SpatialQueryFilter& filter = {}) const;
+		// Streaming uses the same indexed snapshot as renderer visibility so
+		// large worlds can discover near-view preload candidates without
+		// scanning every object each frame.
+		[[nodiscard]] SpatialQueryResult QueryStreamingCandidates(const glm::vec3& center, float radius, const SpatialQueryFilter& filter = {}) const;
 		[[nodiscard]] SpatialQueryResult QueryFrustum(const SpatialFrustum& frustum, const SpatialQueryFilter& filter = {}) const;
 		[[nodiscard]] SpatialQueryResult QueryRay(const SpatialRay& ray, const SpatialQueryFilter& filter = {}) const;
 		[[nodiscard]] SpatialDiagnosticsSnapshot GetDiagnosticsSnapshot() const;

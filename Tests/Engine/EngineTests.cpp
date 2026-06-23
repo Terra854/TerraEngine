@@ -27,6 +27,10 @@ namespace TerraEngine::Tests {
 	void RegisterResourceResidencyDiagnosticsTests(TestRegistry& registry);
 	void RegisterResourceResidencyPolicyTests(TestRegistry& registry);
 	void RegisterResourceResidencyUsageTests(TestRegistry& registry);
+	void RegisterResourceStreamingDiagnosticsTests(TestRegistry& registry);
+	void RegisterResourceStreamingPolicyTests(TestRegistry& registry);
+	void RegisterResourceStreamingPreloadTests(TestRegistry& registry);
+	void RegisterResourceStreamingResidencyIntegrationTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
 	void RegisterRendererGraphSmokeTests(TestRegistry& registry);
 	void RegisterRenderDiagnosticsTests(TestRegistry& registry);
@@ -55,6 +59,7 @@ namespace TerraEngine::Tests {
 	void RegisterRenderRandomizedSchedulingTests(TestRegistry& registry);
 	void RegisterRenderResourceCancellationTests(TestRegistry& registry);
 	void RegisterRenderResourceReadinessTests(TestRegistry& registry);
+	void RegisterRenderStreamingNeedTests(TestRegistry& registry);
 	void RegisterRenderShadowParallelParityTests(TestRegistry& registry);
 	void RegisterRenderSmallSceneOverheadTests(TestRegistry& registry);
 	void RegisterRenderSnapshotContractTests(TestRegistry& registry);
@@ -68,6 +73,7 @@ namespace TerraEngine::Tests {
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
+	void RegisterSceneStreamingDeferredLoadTests(TestRegistry& registry);
 	void RegisterScriptingComponentAccessTests(TestRegistry& registry);
 	void RegisterScriptingDiagnosticsTests(TestRegistry& registry);
 	void RegisterScriptingDispatchTests(TestRegistry& registry);
@@ -121,6 +127,10 @@ int main() {
 	TerraEngine::Tests::RegisterResourceResidencyDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterResourceResidencyPolicyTests(registry);
 	TerraEngine::Tests::RegisterResourceResidencyUsageTests(registry);
+	TerraEngine::Tests::RegisterResourceStreamingDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterResourceStreamingPolicyTests(registry);
+	TerraEngine::Tests::RegisterResourceStreamingPreloadTests(registry);
+	TerraEngine::Tests::RegisterResourceStreamingResidencyIntegrationTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
 	TerraEngine::Tests::RegisterRendererGraphSmokeTests(registry);
 	TerraEngine::Tests::RegisterRenderDiagnosticsTests(registry);
@@ -135,6 +145,7 @@ int main() {
 	TerraEngine::Tests::RegisterRenderShadowParallelParityTests(registry);
 	TerraEngine::Tests::RegisterRenderUiPreparationTests(registry);
 	TerraEngine::Tests::RegisterRenderResourceReadinessTests(registry);
+	TerraEngine::Tests::RegisterRenderStreamingNeedTests(registry);
 	TerraEngine::Tests::RegisterRenderUploadBudgetTests(registry);
 	TerraEngine::Tests::RegisterRenderDeferredRetirementTests(registry);
 	TerraEngine::Tests::RegisterRenderResourceCancellationTests(registry);
@@ -162,6 +173,7 @@ int main() {
 	TerraEngine::Tests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
+	TerraEngine::Tests::RegisterSceneStreamingDeferredLoadTests(registry);
 	TerraEngine::Tests::RegisterScriptingComponentAccessTests(registry);
 	TerraEngine::Tests::RegisterScriptingDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterScriptingDispatchTests(registry);

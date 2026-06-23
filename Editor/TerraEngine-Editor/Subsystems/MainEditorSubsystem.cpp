@@ -13,6 +13,7 @@
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Engine/Components/CameraComponent.h"
+#include "Engine/Components/MeshRenderComponent.h"
 #include "Engine/Components/PrefabLinkComponent.h"
 #include "Engine/Components/Transform.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -29,6 +30,7 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <fstream>
+#include <nlohmann/json.hpp>
 
 // Include Window Headers
 #include "../Windows/HierarchyWindow.h"
@@ -53,6 +55,125 @@ namespace
 		if (g_ActiveMainEditorSubsystem != nullptr)
 		{
 			g_ActiveMainEditorSubsystem->StopPlayMode();
+		}
+	}
+
+	std::optional<AssetType> AssetTypeFromImporter(std::string_view importerName)
+	{
+		if (importerName == "MeshImporter")
+		{
+			return AssetType::Mesh;
+		}
+		if (importerName == "TextureImporter")
+		{
+			return AssetType::Texture;
+		}
+		if (importerName == "MaterialImporter")
+		{
+			return AssetType::Material;
+		}
+		if (importerName == "ShaderImporter")
+		{
+			return AssetType::ShaderCollection;
+		}
+		return std::nullopt;
+	}
+
+	std::optional<std::pair<TerraEngine::UUID, AssetType>> ResolveEditorAssetPath(const std::filesystem::path& assetPath)
+	{
+		const std::filesystem::path normalizedPath = std::filesystem::absolute(assetPath).lexically_normal();
+		for (const auto& [sourcePath, metadata] : AssetDatabase::Instance().GetAssets())
+		{
+			if (std::filesystem::absolute(sourcePath).lexically_normal() != normalizedPath)
+			{
+				continue;
+			}
+
+			if (auto assetType = AssetTypeFromImporter(metadata.importerName))
+			{
+				return std::make_pair(metadata.guid, *assetType);
+			}
+			return std::nullopt;
+		}
+		return std::nullopt;
+	}
+
+	void PublishMeshRenderAssetNeeds(Object& object, TerraEngine::Resource::StreamingNeedType needType, std::string_view reason)
+	{
+		MeshRenderComponent* meshRenderer = object.getComponent<MeshRenderComponent>();
+		if (meshRenderer == nullptr)
+		{
+			return;
+		}
+
+		ResourceManager& resources = ResourceManager::Instance();
+		resources.MarkStreamingNeed(meshRenderer->meshId, AssetType::Mesh, needType, 0u, reason, 80);
+		resources.MarkStreamingNeed(meshRenderer->materialId, AssetType::Material, needType, 0u, reason, 80);
+	}
+
+	void CollectPrefabAssetNeedsFromObjectJson(const nlohmann::json& objectJson, std::vector<std::pair<TerraEngine::UUID, AssetType>>& assets)
+	{
+		if (const auto componentsIt = objectJson.find("components"); componentsIt != objectJson.end() && componentsIt->is_object())
+		{
+			if (const auto meshRendererIt = componentsIt->find("MeshRenderComponent"); meshRendererIt != componentsIt->end() && meshRendererIt->is_object())
+			{
+				if (const auto meshIdIt = meshRendererIt->find("meshId"); meshIdIt != meshRendererIt->end() && meshIdIt->is_string())
+				{
+					if (const auto parsed = TerraEngine::ParseUUID(meshIdIt->get<std::string>()))
+					{
+						assets.emplace_back(*parsed, AssetType::Mesh);
+					}
+				}
+				if (const auto materialIdIt = meshRendererIt->find("materialId"); materialIdIt != meshRendererIt->end() && materialIdIt->is_string())
+				{
+					if (const auto parsed = TerraEngine::ParseUUID(materialIdIt->get<std::string>()))
+					{
+						assets.emplace_back(*parsed, AssetType::Material);
+					}
+				}
+			}
+		}
+
+		if (const auto childrenIt = objectJson.find("children"); childrenIt != objectJson.end() && childrenIt->is_array())
+		{
+			for (const nlohmann::json& childJson : *childrenIt)
+			{
+				CollectPrefabAssetNeedsFromObjectJson(childJson, assets);
+			}
+		}
+	}
+
+	void PublishPrefabAssetPreviewNeeds(const std::filesystem::path& prefabPath)
+	{
+		std::ifstream prefabInput(prefabPath, std::ios::binary);
+		if (!prefabInput)
+		{
+			return;
+		}
+
+		nlohmann::json prefabJson;
+		try
+		{
+			prefabInput >> prefabJson;
+		}
+		catch (const nlohmann::json::parse_error&)
+		{
+			return;
+		}
+
+		std::vector<std::pair<TerraEngine::UUID, AssetType>> assets;
+		if (const auto objectsIt = prefabJson.find("objects"); objectsIt != prefabJson.end() && objectsIt->is_array())
+		{
+			for (const nlohmann::json& objectJson : *objectsIt)
+			{
+				CollectPrefabAssetNeedsFromObjectJson(objectJson, assets);
+			}
+		}
+
+		ResourceManager& resources = ResourceManager::Instance();
+		for (const auto& [assetId, assetType] : assets)
+		{
+			resources.MarkStreamingNeed(assetId, assetType, TerraEngine::Resource::StreamingNeedType::AssetPreview, 0u, "selected prefab asset preview", 70);
 		}
 	}
 }
@@ -945,6 +1066,8 @@ void MainEditorSubsystem::Update(float deltaTime) {
 		UISystem::Instance().Update(deltaTime);
 	}
 
+	PublishEditorStreamingNeeds();
+
 	// A blocking script compile pauses editor-side interactions until the build
 	// either reloads the new assembly or restores the previous working one.
 	if (ScriptCompilationSubsystem::Instance().ShouldBlockEditorInteraction()) {
@@ -1001,6 +1124,48 @@ void MainEditorSubsystem::Update(float deltaTime) {
 				}
 			}
 		}
+	}
+}
+
+void MainEditorSubsystem::PublishEditorStreamingNeeds()
+{
+	// This publisher runs once per editor frame and only emits compact need
+	// records. ResourceManager owns the synchronized mutation and expiry, so the
+	// inspector, project browser, and prefab workflow do not need to duplicate
+	// residency bookkeeping in their ImGui draw code.
+	if (selectedEntity.has_value())
+	{
+		if (std::optional<Object> selectedObject = ObjectManager::instance().getObject(*selectedEntity))
+		{
+			PublishMeshRenderAssetNeeds(*selectedObject, TerraEngine::Resource::StreamingNeedType::EditorSelection, "editor selected object");
+			PublishMeshRenderAssetNeeds(*selectedObject, TerraEngine::Resource::StreamingNeedType::InspectorPreview, "inspector selected object preview");
+		}
+	}
+
+	if (selectedAsset.has_value())
+	{
+		const std::filesystem::path selectedPath = std::filesystem::absolute(*selectedAsset).lexically_normal();
+		if (auto resolvedAsset = ResolveEditorAssetPath(selectedPath))
+		{
+			ResourceManager::Instance().MarkStreamingNeed(
+				resolvedAsset->first,
+				resolvedAsset->second,
+				TerraEngine::Resource::StreamingNeedType::AssetPreview,
+				0u,
+				"project browser selected asset preview",
+				70);
+		}
+		else if (selectedPath.extension() == ".teprefab")
+		{
+			PublishPrefabAssetPreviewNeeds(selectedPath);
+		}
+	}
+
+	if (m_IsPrefabEditingMode)
+	{
+		ObjectManager::instance().forEachObjectWithComponents<MeshRenderComponent>([](Object object, MeshRenderComponent&) {
+			PublishMeshRenderAssetNeeds(object, TerraEngine::Resource::StreamingNeedType::PrefabEditing, "open prefab editing session");
+		});
 	}
 }
 

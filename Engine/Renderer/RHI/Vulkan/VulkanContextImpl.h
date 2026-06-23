@@ -88,6 +88,7 @@ struct VulkanImage {
 	VmaAllocation allocation;
 	VkImageView view;
 	VkSampler sampler;
+	VkDeviceSize size = 0;
 };
 
 // Mesh buffers cached on the GPU.
@@ -693,8 +694,8 @@ struct VulkanContext::Impl {
 	std::vector<VkDescriptorSet> EnsureMaterialDescriptorSets(TerraEngine::UUID shaderCollectionId, TerraEngine::UUID materialId);
 	void InvalidateMaterial(TerraEngine::UUID materialId);
 	void InvalidateMesh(TerraEngine::UUID meshId);
-	void InvalidateTexture(TerraEngine::UUID textureId);
-	void InvalidateResource(TerraEngine::UUID id);
+	void InvalidateTexture(TerraEngine::UUID textureId, bool reloadAfterInvalidate = true);
+	void InvalidateResource(TerraEngine::UUID id, bool reloadTexturesAfterInvalidate = true);
 	void EnsureMesh(TerraEngine::UUID meshId);
 	void EnsurePipeline(TerraEngine::UUID shaderCollectionId, VkRenderPass renderPass, uint32_t materialFlags);
 	VkDescriptorSet EnsureMeshDescriptorSet(TerraEngine::UUID meshId, const VulkanPipeline& pipeline);

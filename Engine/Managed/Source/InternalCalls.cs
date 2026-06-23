@@ -1751,6 +1751,10 @@ namespace TerraEngine
 		internal static extern void Native_MeshRenderer_SetMaterial(uint objectId, string assetReference);
 
 		[DllImport("TerraEngine")]
+		// Native_ResourceStreaming_Preload sends a non-blocking streaming hint to native ResourceManager.
+		internal static extern bool Native_ResourceStreaming_Preload(string assetReference, int assetType);
+
+		[DllImport("TerraEngine")]
 		// Native_HasComponent bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern bool Native_HasComponent(uint objectId, string componentType);
 

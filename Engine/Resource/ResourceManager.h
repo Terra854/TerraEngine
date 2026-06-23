@@ -52,6 +52,7 @@ enum class AssetType {
 };
 
 #include "Resource/ResourceResidency.h"
+#include "Resource/ResourceStreaming.h"
 
 // struct ShaderStagePath groups related state and operations so callers have one documented contract.
 struct ShaderStagePath
@@ -189,8 +190,44 @@ public:
 		TerraEngine::Resource::ResidencyPinReason reason,
 		std::string_view detail = {});
 	void UnpinResource(const TerraEngine::UUID& id);
+	// MarkResourceUploadedToGpu is called by render backends after they create
+	// real GPU buffers/images for an asset. ResourceManager owns the user-facing
+	// diagnostics, so this keeps RAM-only load state separate from VRAM state.
+	void MarkResourceUploadedToGpu(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		std::uint64_t frameId,
+		std::uint64_t gpuBytes,
+		std::string_view detail = {});
 	TerraEngine::Resource::ResidencySnapshot BuildResidencySnapshot(std::uint64_t frameId) const;
 	std::vector<TerraEngine::Resource::ReleaseRecord> RunResidencyCleanup(std::uint64_t frameId);
+
+	// Configure visibility streaming. Streaming decides which registered scene
+	// payloads are needed; residency cleanup still owns the actual RAM/VRAM
+	// release once streaming marks an asset eligible.
+	void SetStreamingPolicy(const TerraEngine::Resource::StreamingPolicy& policy);
+	TerraEngine::Resource::StreamingPolicy GetStreamingPolicy() const;
+	void SetStreamingDiagnosticsEnabled(bool enabled);
+	TerraEngine::Resource::StreamingDiagnosticsSummary GetStreamingDiagnosticsSummary() const;
+	TerraEngine::Resource::StreamableAssetRecord RegisterStreamableAsset(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		const std::filesystem::path& path,
+		bool referencedByScene = true);
+	std::optional<TerraEngine::Resource::StreamableAssetRecord> GetStreamableAsset(const TerraEngine::UUID& id) const;
+	void MarkStreamingNeed(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		TerraEngine::Resource::StreamingNeedType needType,
+		std::uint64_t frameId,
+		std::string_view reason = {},
+		std::int32_t priority = 0);
+	std::shared_future<TerraEngine::UUID> RequestStreamableLoad(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		TerraEngine::Resource::StreamingNeedType needType,
+		std::uint64_t frameId,
+		std::string_view reason = {});
 
 	// Check if a resource with the given UUID exists in any of the manager's caches.
 	bool HasResource(const TerraEngine::UUID& id) const;
@@ -345,6 +382,8 @@ private:
 		std::uint64_t gpuBytes,
 		bool reloadable,
 		TerraEngine::Resource::ResidencyState state);
+	void CacheLoadedMeshBounds(const TerraEngine::UUID& id, const Mesh* mesh);
+	void CacheLoadedMeshBounds(const TerraEngine::UUID& id, const void* resource);
 
 	// EstimateLoadedResourceBytes uses conservative fallback byte counts because
 	// residency cleanup only needs deterministic ordering before specialized
@@ -360,6 +399,17 @@ private:
 		std::uint64_t candidateBytes);
 
 	void ClearResidencyState();
+	void ClearStreamingState();
+	void UpdateStreamableLoadResult(
+		const TerraEngine::UUID& id,
+		AssetType type,
+		const std::string& sourceKey,
+		bool success,
+		std::uint64_t cpuBytes,
+		std::uint64_t gpuBytes,
+		std::string_view failureReason = {});
+	void MarkStreamableReleased(const TerraEngine::UUID& id, std::uint64_t frameId);
+	TerraEngine::Resource::StreamingDiagnosticsSummary BuildStreamingDiagnosticsLocked(std::uint64_t frameId) const;
 
 	ThreadPool& threadPool;
 	std::filesystem::path assetRoot;
@@ -380,6 +430,12 @@ private:
 	mutable std::shared_mutex m_ResidencyMutex;
 	std::uint64_t m_LastResidencyCleanupFrame = 0u;
 	double m_LastResidencyCleanupSeconds = 0.0;
+	TerraEngine::Resource::StreamingPolicy m_StreamingPolicy;
+	TerraEngine::Resource::StreamingDiagnosticsSummary m_StreamingDiagnostics;
+	std::unordered_map<TerraEngine::UUID, TerraEngine::Resource::StreamableAssetRecord> m_StreamableAssets;
+	mutable std::shared_mutex m_StreamingMutex;
+	std::unordered_map<TerraEngine::UUID, TerraEngine::Scene::SpatialAABB> m_MeshLocalBoundsCache;
+	mutable std::shared_mutex m_MeshLocalBoundsMutex;
 
 	ResourceCache<Material> materialCache;
 	ResourceCache<Mesh> meshCache;
@@ -426,6 +482,13 @@ std::optional<TerraEngine::UUID> ResourceManager::ResolveCached(const std::strin
 		{
 			// Debug log helps trace cache reuse when resources are requested repeatedly.
 			TERRAENGINE_LOG(LogLevel::Debug, "Resource cache hit for " << key << " (id " << ToHexString(id) << ")");
+			UpdateStreamableLoadResult(
+				id,
+				cache.assetType,
+				key,
+				true,
+				cache.tracksResidency ? EstimateLoadedResourceBytes(cache.resources.at(id)) : 0u,
+				0u);
 			return id;
 		}
 	}
@@ -471,6 +534,13 @@ Resource* ResourceManager::GetResourceById(const TerraEngine::UUID& id, Resource
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto existing = cache.resources.find(id); existing != cache.resources.end())
 		{
+			UpdateStreamableLoadResult(
+				id,
+				cache.assetType,
+				cache.idToPath.contains(id) ? cache.idToPath.at(id) : std::string{},
+				true,
+				cache.tracksResidency ? EstimateLoadedResourceBytes(existing->second) : 0u,
+				0u);
 			return existing->second.get();
 		}
 
@@ -522,6 +592,7 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(const std::string& key, Resource
 	if (loadedSuccessfully)
 	{
 		TERRAENGINE_LOG(LogLevel::Debug, "Finalized load for " << key << " (id " << ToHexString(id) << ")");
+		CacheLoadedMeshBounds(id, cache.resources[id].get());
 		if (cache.tracksResidency)
 		{
 			RegisterResidencyResource(
@@ -538,6 +609,14 @@ TerraEngine::UUID ResourceManager::FinalizeLoad(const std::string& key, Resource
 	{
 		TERRAENGINE_LOG(LogLevel::Warning, "Load failed for " << key << "; cache entry cleared for id " << ToHexString(id));
 	}
+	UpdateStreamableLoadResult(
+		id,
+		cache.assetType,
+		key,
+		loadedSuccessfully,
+		loadedSuccessfully && cache.tracksResidency ? EstimateLoadedResourceBytes(cache.resources[id]) : 0u,
+		0u,
+		loadedSuccessfully ? std::string_view{} : std::string_view("loader returned no payload"));
 	return id;
 }
 
@@ -598,6 +677,13 @@ std::shared_future<TerraEngine::UUID> ResourceManager::LoadOrSchedule(const std:
 		{
 			if (cache.resources.find(existing->second) != cache.resources.end())
 			{
+				UpdateStreamableLoadResult(
+					existing->second,
+					cache.assetType,
+					key,
+					true,
+					cache.tracksResidency ? EstimateLoadedResourceBytes(cache.resources.at(existing->second)) : 0u,
+					0u);
 				return MakeReadyFuture(existing->second);
 			}
 		}

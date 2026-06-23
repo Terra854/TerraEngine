@@ -143,12 +143,117 @@ namespace
 		return TerraEngine::Resource::SanitizeResidencyPolicy(policy);
 	}
 
+	TerraEngine::Resource::MemoryBudgetInteraction MemoryBudgetInteractionFromString(const std::string& value)
+	{
+		if (value == "prefer-streaming-release")
+		{
+			return TerraEngine::Resource::MemoryBudgetInteraction::PreferStreamingRelease;
+		}
+		if (value == "conservative")
+		{
+			return TerraEngine::Resource::MemoryBudgetInteraction::Conservative;
+		}
+		return TerraEngine::Resource::MemoryBudgetInteraction::UseResidencyPolicy;
+	}
+
+	TerraEngine::Resource::StreamingPolicy StreamingPolicyFromJson(const nlohmann::json& object)
+	{
+		TerraEngine::Resource::StreamingPolicy policy = TerraEngine::Resource::MakeDefaultStreamingPolicy();
+		policy.enabled = JsonBoolOr(object, "enabled", policy.enabled);
+		policy.deferScenePayloadsOnLoad = JsonBoolOr(object, "deferScenePayloadsOnLoad", policy.deferScenePayloadsOnLoad);
+		policy.preloadDistance = JsonDoubleOr(object, "preloadDistance", policy.preloadDistance);
+		policy.visibleRetentionSeconds = JsonDoubleOr(object, "visibleRetentionSeconds", policy.visibleRetentionSeconds);
+		policy.neededRetentionSeconds = JsonDoubleOr(object, "neededRetentionSeconds", policy.neededRetentionSeconds);
+		policy.maxLoadsPerUpdate = JsonUIntOr(object, "maxLoadsPerUpdate", policy.maxLoadsPerUpdate);
+		policy.memoryBudgetInteraction = MemoryBudgetInteractionFromString(JsonStringOr(object, "memoryBudgetInteraction", std::string(TerraEngine::Resource::ToString(policy.memoryBudgetInteraction))));
+		policy.diagnosticsEnabled = JsonBoolOr(object, "diagnosticsEnabled", policy.diagnosticsEnabled);
+		return TerraEngine::Resource::SanitizeStreamingPolicy(policy);
+	}
+
+	TerraEngine::Resource::StreamableAssetType ToStreamableAssetType(AssetType type)
+	{
+		switch (type)
+		{
+		case AssetType::Mesh: return TerraEngine::Resource::StreamableAssetType::Mesh;
+		case AssetType::Texture: return TerraEngine::Resource::StreamableAssetType::Texture;
+		case AssetType::Material: return TerraEngine::Resource::StreamableAssetType::Material;
+		case AssetType::ShaderCollection: return TerraEngine::Resource::StreamableAssetType::ShaderCollection;
+		}
+		return TerraEngine::Resource::StreamableAssetType::Other;
+	}
+
+	AssetType AssetTypeFromResidencyType(TerraEngine::Resource::ResidencyAssetType type)
+	{
+		// Residency diagnostics store their own asset enum so tests and UI do
+		// not depend on ResourceManager internals. Cleanup converts back to the
+		// concrete cache enum here when the fast lookup map has no entry.
+		switch (type)
+		{
+		case TerraEngine::Resource::ResidencyAssetType::Mesh:
+			return AssetType::Mesh;
+		case TerraEngine::Resource::ResidencyAssetType::Texture:
+			return AssetType::Texture;
+		case TerraEngine::Resource::ResidencyAssetType::ShaderCollection:
+			return AssetType::ShaderCollection;
+		case TerraEngine::Resource::ResidencyAssetType::Material:
+		case TerraEngine::Resource::ResidencyAssetType::Shader:
+		case TerraEngine::Resource::ResidencyAssetType::FontAtlas:
+		case TerraEngine::Resource::ResidencyAssetType::Other:
+			return AssetType::Material;
+		}
+		return AssetType::Material;
+	}
+
 	double ResidencyClockSeconds()
 	{
 		using Clock = std::chrono::steady_clock;
 		static const Clock::time_point startTime = Clock::now();
 		const std::chrono::duration<double> elapsed = Clock::now() - startTime;
 		return elapsed.count();
+	}
+
+	TerraEngine::Resource::StreamingProtectionReason ComputeStreamingProtection(
+		const std::vector<TerraEngine::Resource::StreamingNeed>& needs,
+		const TerraEngine::Resource::StreamingPolicy& policy)
+	{
+		for (const TerraEngine::Resource::StreamingNeed& need : needs)
+		{
+			if (TerraEngine::Resource::IsProtectedNeed(need.needType, policy))
+			{
+				return TerraEngine::Resource::ProtectionForNeed(need.needType);
+			}
+		}
+		return TerraEngine::Resource::StreamingProtectionReason::None;
+	}
+
+	void RefreshStreamableNeedState(
+		TerraEngine::Resource::StreamableAssetRecord& record,
+		const TerraEngine::Resource::StreamingPolicy& policy,
+		double nowSeconds)
+	{
+		// Streaming needs are transient signals that must be re-published while
+		// active. Prune expired entries even when no new need is added; otherwise
+		// looking away from an object would leave a stale active-view protection
+		// in diagnostics until the asset was released.
+		record.needSources = TerraEngine::Resource::MergeStreamingNeeds(std::move(record.needSources), nowSeconds);
+		record.protectionReason = ComputeStreamingProtection(record.needSources, policy);
+	}
+
+	bool HasResidentStreamingMemory(TerraEngine::Resource::StreamablePayloadState state)
+	{
+		// Diagnostics can outlive the exact frame that loaded or released a
+		// payload. Treat only states that actually own RAM or VRAM as resident so
+		// the window never reports stale byte counts for deferred/released assets.
+		switch (state)
+		{
+		case TerraEngine::Resource::StreamablePayloadState::RamResident:
+		case TerraEngine::Resource::StreamablePayloadState::UploadingVram:
+		case TerraEngine::Resource::StreamablePayloadState::VramResident:
+		case TerraEngine::Resource::StreamablePayloadState::PendingRelease:
+			return true;
+		default:
+			return false;
+		}
 	}
 
 	std::optional<RenderSettings> SettingsFromRenderSettingsJson(const nlohmann::json& renderSettingsDocument)
@@ -279,6 +384,7 @@ ResourceManager::ResourceManager()
 	assetRoot = std::filesystem::current_path();
 	engineRoot = std::filesystem::current_path();
 	m_ResidencyPolicy = TerraEngine::Resource::MakeDefaultResidencyPolicy();
+	m_StreamingPolicy = TerraEngine::Resource::MakeDefaultStreamingPolicy();
 	materialCache.assetType = AssetType::Material;
 	materialCache.tracksResidency = true;
 	meshCache.assetType = AssetType::Mesh;
@@ -365,6 +471,10 @@ void ResourceManager::Initialize()
 
 		if (auto residencyIt = manifest.find("residencyPolicy"); residencyIt != manifest.end() && residencyIt->is_object()) {
 			SetResidencyPolicy(ResidencyPolicyFromJson(*residencyIt));
+		}
+
+		if (auto streamingIt = manifest.find("streamingPolicy"); streamingIt != manifest.end() && streamingIt->is_object()) {
+			SetStreamingPolicy(StreamingPolicyFromJson(*streamingIt));
 		}
 
 		// Register the exported asset lookup table before SceneManager loads the
@@ -637,6 +747,20 @@ void ResourceManager::RefreshEditorProjectManifest()
 
 		const nlohmann::json manifest = nlohmann::json::parse(manifestStream);
 		ApplyManifestMetadata(manifest, fallbackProductName);
+
+		// Editor projects use game.json as the project-level runtime contract.
+		// Loading these policies here keeps editor previews, export manifests,
+		// and standalone runtime startup aligned without storing resource
+		// cleanup or streaming knobs in individual build profiles.
+		if (auto residencyIt = manifest.find("residencyPolicy"); residencyIt != manifest.end() && residencyIt->is_object())
+		{
+			SetResidencyPolicy(ResidencyPolicyFromJson(*residencyIt));
+		}
+
+		if (auto streamingIt = manifest.find("streamingPolicy"); streamingIt != manifest.end() && streamingIt->is_object())
+		{
+			SetStreamingPolicy(StreamingPolicyFromJson(*streamingIt));
+		}
 	}
 	catch (const std::exception& exception)
 	{
@@ -780,6 +904,10 @@ void ResourceManager::ClearCaches()
 		meshCache.inFlight.clear();
 	}
 	{
+		std::unique_lock lock(m_MeshLocalBoundsMutex);
+		m_MeshLocalBoundsCache.clear();
+	}
+	{
 		std::unique_lock lock(shaderCache.mutex);
 		shaderCache.pathToId.clear();
 		shaderCache.idToPath.clear();
@@ -802,6 +930,7 @@ void ResourceManager::ClearCaches()
 		textureCache.inFlight.clear();
 	}
 	ClearResidencyState();
+	ClearStreamingState();
 }
 
 // ResourceManager::DeleteResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -831,12 +960,22 @@ void ResourceManager::DeleteResource(const TerraEngine::UUID& id, AssetType type
 	case AssetType::ShaderCollection: removeFromCache(shaderCollectionCache); break;
 	}
 
+	if (type == AssetType::Mesh)
+	{
+		std::unique_lock lock(m_MeshLocalBoundsMutex);
+		m_MeshLocalBoundsCache.erase(id);
+	}
+
 	// Notify renderer to purge any GPU-side references/buffers
 	RenderSystem::Instance().DeleteResource(id);
 	{
 		std::unique_lock lock(m_ResidencyMutex);
 		m_ResidentAssets.erase(id);
 		m_ResidentAssetTypes.erase(id);
+	}
+	{
+		std::unique_lock lock(m_StreamingMutex);
+		m_StreamableAssets.erase(id);
 	}
 }
 
@@ -964,6 +1103,61 @@ void ResourceManager::UnpinResource(const TerraEngine::UUID& id)
 	}
 }
 
+void ResourceManager::MarkResourceUploadedToGpu(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	std::uint64_t frameId,
+	std::uint64_t gpuBytes,
+	std::string_view detail)
+{
+	if (id == TerraEngine::EMPTY_UUID)
+	{
+		return;
+	}
+
+	const double nowSeconds = ResidencyClockSeconds();
+	std::uint64_t cpuBytes = 0u;
+	std::string sourceKey;
+	{
+		std::unique_lock lock(m_ResidencyMutex);
+		TerraEngine::Resource::ResidentAsset& asset = m_ResidentAssets[id];
+		asset.assetId = id;
+		asset.assetType = TerraEngine::Resource::ToResidencyAssetType(type);
+		asset.lastUsedFrame = frameId;
+		asset.lastUsedSeconds = nowSeconds;
+		asset.lastTouchedReason = detail.empty() ? "backend upload" : std::string(detail);
+		asset.estimatedGpuBytes = std::max(asset.estimatedGpuBytes, gpuBytes);
+		if (asset.state != TerraEngine::Resource::ResidencyState::Pinned)
+		{
+			asset.state = TerraEngine::Resource::ResidencyState::Active;
+		}
+		if (asset.sourceKey.empty())
+		{
+			asset.sourceKey = ToHexString(id);
+		}
+		cpuBytes = asset.estimatedCpuBytes;
+		sourceKey = asset.sourceKey;
+		m_ResidentAssetTypes[id] = type;
+	}
+
+	{
+		std::unique_lock lock(m_StreamingMutex);
+		TerraEngine::Resource::StreamableAssetRecord& record = m_StreamableAssets[id];
+		record.assetId = id;
+		record.assetType = ToStreamableAssetType(type);
+		if (!sourceKey.empty())
+		{
+			record.sourceKey = sourceKey;
+		}
+		record.payloadState = TerraEngine::Resource::StreamablePayloadState::VramResident;
+		record.estimatedCpuBytes = std::max(record.estimatedCpuBytes, cpuBytes);
+		record.estimatedGpuBytes = std::max(record.estimatedGpuBytes, gpuBytes);
+		record.lastNeededSeconds = nowSeconds;
+		record.failureReason.clear();
+		record.residencyGeneration += 1u;
+	}
+}
+
 TerraEngine::Resource::ResidencySnapshot ResourceManager::BuildResidencySnapshot(std::uint64_t frameId) const
 {
 	std::shared_lock lock(m_ResidencyMutex);
@@ -995,7 +1189,20 @@ std::vector<TerraEngine::Resource::ReleaseRecord> ResourceManager::RunResidencyC
 {
 	TerraEngine::Resource::ResidencyPolicy policy;
 	std::vector<TerraEngine::Resource::ResidentAsset> assets;
+	std::unordered_map<TerraEngine::UUID, TerraEngine::Resource::StreamingProtectionReason> streamingProtections;
 	const double nowSeconds = ResidencyClockSeconds();
+	{
+		std::unique_lock lock(m_StreamingMutex);
+		for (auto& [id, streamable] : m_StreamableAssets)
+		{
+			RefreshStreamableNeedState(streamable, m_StreamingPolicy, nowSeconds);
+			if (!streamable.needSources.empty() || streamable.protectionReason != TerraEngine::Resource::StreamingProtectionReason::None)
+			{
+				streamingProtections[id] = streamable.protectionReason;
+			}
+		}
+		m_StreamingDiagnostics = BuildStreamingDiagnosticsLocked(frameId);
+	}
 	{
 		std::shared_lock lock(m_ResidencyMutex);
 		policy = m_ResidencyPolicy;
@@ -1015,6 +1222,17 @@ std::vector<TerraEngine::Resource::ReleaseRecord> ResourceManager::RunResidencyC
 			{
 				cleanupAsset.state = TerraEngine::Resource::ResidencyState::Idle;
 			}
+			if (auto streamingIt = streamingProtections.find(id); streamingIt != streamingProtections.end())
+			{
+				// Streaming needs are folded into the existing residency snapshot
+				// instead of running a second release path. This keeps RAM/VRAM
+				// retirement synchronized with the backend frame fences.
+				cleanupAsset.state = TerraEngine::Resource::ResidencyState::Active;
+				if (streamingIt->second != TerraEngine::Resource::StreamingProtectionReason::None)
+				{
+					cleanupAsset.pinReason = TerraEngine::Resource::ResidencyPinReason::PolicyProtected;
+				}
+			}
 			assets.push_back(std::move(cleanupAsset));
 		}
 	}
@@ -1029,7 +1247,7 @@ std::vector<TerraEngine::Resource::ReleaseRecord> ResourceManager::RunResidencyC
 	records.reserve(candidates.size());
 	for (const TerraEngine::Resource::ReleaseCandidate& candidate : candidates)
 	{
-		AssetType type = AssetType::Material;
+		AssetType type = AssetTypeFromResidencyType(candidate.assetType);
 		{
 			std::shared_lock lock(m_ResidencyMutex);
 			if (auto typeIt = m_ResidentAssetTypes.find(candidate.assetId); typeIt != m_ResidentAssetTypes.end())
@@ -1061,7 +1279,15 @@ std::vector<TerraEngine::Resource::ReleaseRecord> ResourceManager::RunResidencyC
 		diagnosticsSnapshot.frameId = frameId;
 		diagnosticsSnapshot.nowSeconds = nowSeconds;
 		diagnosticsSnapshot.policy = m_ResidencyPolicy;
-		diagnosticsSnapshot.residentAssets = assets;
+		diagnosticsSnapshot.residentAssets.reserve(m_ResidentAssets.size());
+		for (const auto& [id, asset] : m_ResidentAssets)
+		{
+			if (asset.state == TerraEngine::Resource::ResidencyState::Released)
+			{
+				continue;
+			}
+			diagnosticsSnapshot.residentAssets.push_back(asset);
+		}
 		for (const TerraEngine::Resource::ResidentAsset& asset : diagnosticsSnapshot.residentAssets)
 		{
 			if (asset.state == TerraEngine::Resource::ResidencyState::Active)
@@ -1083,15 +1309,28 @@ bool ResourceManager::ReleaseResidentResource(
 	AssetType type,
 	TerraEngine::Resource::ResidencyReleaseReason reason,
 	std::uint64_t frameId,
-	std::uint64_t candidateBytes)
+	std::uint64_t /*candidateBytes*/)
 {
-	bool detached = false;
+	bool detachedCpuPayload = false;
 	VisitAssetCache(type, [&](auto& cache) {
 		std::unique_lock lock(cache.mutex);
-		detached = cache.resources.erase(id) > 0u;
+		detachedCpuPayload = cache.resources.erase(id) > 0u;
 	});
 
-	if (!detached)
+	bool hasResidentPayload = false;
+	{
+		std::shared_lock lock(m_ResidencyMutex);
+		if (auto it = m_ResidentAssets.find(id); it != m_ResidentAssets.end())
+		{
+			// Residency tracks RAM and VRAM together. A mesh or texture can have
+			// already dropped its CPU payload while the backend still owns GPU
+			// buffers/images, so a failed CPU-cache erase must not block release.
+			hasResidentPayload = it->second.state != TerraEngine::Resource::ResidencyState::Released
+				&& (it->second.estimatedCpuBytes > 0u || it->second.estimatedGpuBytes > 0u);
+		}
+	}
+
+	if (!detachedCpuPayload && !hasResidentPayload)
 	{
 		return false;
 	}
@@ -1105,9 +1344,10 @@ bool ResourceManager::ReleaseResidentResource(
 			it->second.releaseGeneration += 1u;
 			it->second.lastTouchedReason = std::string(TerraEngine::Resource::ToString(reason));
 			it->second.estimatedCpuBytes = 0u;
-			it->second.estimatedGpuBytes = candidateBytes > it->second.estimatedCpuBytes ? 0u : it->second.estimatedGpuBytes;
+			it->second.estimatedGpuBytes = 0u;
 		}
 	}
+	MarkStreamableReleased(id, frameId);
 	return true;
 }
 
@@ -1119,6 +1359,307 @@ void ResourceManager::ClearResidencyState()
 	m_ResidencyDiagnostics = {};
 	m_LastResidencyCleanupFrame = 0u;
 	m_LastResidencyCleanupSeconds = 0.0;
+}
+
+void ResourceManager::SetStreamingPolicy(const TerraEngine::Resource::StreamingPolicy& policy)
+{
+	std::unique_lock lock(m_StreamingMutex);
+	m_StreamingPolicy = TerraEngine::Resource::SanitizeStreamingPolicy(policy);
+	m_StreamingDiagnostics.diagnosticsEnabled = m_StreamingPolicy.diagnosticsEnabled;
+}
+
+TerraEngine::Resource::StreamingPolicy ResourceManager::GetStreamingPolicy() const
+{
+	std::shared_lock lock(m_StreamingMutex);
+	return m_StreamingPolicy;
+}
+
+void ResourceManager::SetStreamingDiagnosticsEnabled(bool enabled)
+{
+	std::unique_lock lock(m_StreamingMutex);
+	m_StreamingPolicy.diagnosticsEnabled = enabled;
+	m_StreamingDiagnostics.diagnosticsEnabled = enabled;
+}
+
+TerraEngine::Resource::StreamingDiagnosticsSummary ResourceManager::GetStreamingDiagnosticsSummary() const
+{
+	std::shared_lock lock(m_StreamingMutex);
+	return m_StreamingDiagnostics;
+}
+
+TerraEngine::Resource::StreamableAssetRecord ResourceManager::RegisterStreamableAsset(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	const std::filesystem::path& path,
+	bool referencedByScene)
+{
+	const std::filesystem::path resolvedPath = ResolveAssetPath(path);
+	const std::string key = NormalizeKey(resolvedPath);
+	const double nowSeconds = ResidencyClockSeconds();
+	std::unique_lock lock(m_StreamingMutex);
+	TerraEngine::Resource::StreamableAssetRecord& record = m_StreamableAssets[id];
+	record.assetId = id;
+	record.assetType = ToStreamableAssetType(type);
+	record.sourceKey = key;
+	record.lastReferencedSeconds = nowSeconds;
+	if (record.payloadState == TerraEngine::Resource::StreamablePayloadState::Registered
+		|| record.payloadState == TerraEngine::Resource::StreamablePayloadState::Released)
+	{
+		record.payloadState = TerraEngine::Resource::StateAfterRegistration(referencedByScene && m_StreamingPolicy.enabled && m_StreamingPolicy.deferScenePayloadsOnLoad);
+	}
+	return record;
+}
+
+std::optional<TerraEngine::Resource::StreamableAssetRecord> ResourceManager::GetStreamableAsset(const TerraEngine::UUID& id) const
+{
+	std::shared_lock lock(m_StreamingMutex);
+	if (auto it = m_StreamableAssets.find(id); it != m_StreamableAssets.end())
+	{
+		return it->second;
+	}
+	return std::nullopt;
+}
+
+void ResourceManager::MarkStreamingNeed(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	TerraEngine::Resource::StreamingNeedType needType,
+	std::uint64_t frameId,
+	std::string_view reason,
+	std::int32_t priority)
+{
+	if (id == TerraEngine::EMPTY_UUID)
+	{
+		return;
+	}
+
+	const double nowSeconds = ResidencyClockSeconds();
+	TerraEngine::Resource::StreamingProtectionReason protection = TerraEngine::Resource::ProtectionForNeed(needType);
+	std::unique_lock lock(m_StreamingMutex);
+	TerraEngine::Resource::StreamableAssetRecord& record = m_StreamableAssets[id];
+	record.assetId = id;
+	record.assetType = ToStreamableAssetType(type);
+	record.lastNeededSeconds = nowSeconds;
+	if (needType == TerraEngine::Resource::StreamingNeedType::Visible)
+	{
+		record.lastVisibleSeconds = nowSeconds;
+	}
+	if (record.payloadState == TerraEngine::Resource::StreamablePayloadState::Registered)
+	{
+		record.payloadState = TerraEngine::Resource::StreamablePayloadState::Deferred;
+	}
+	TerraEngine::Resource::StreamingNeed need;
+	need.needId = std::string(TerraEngine::Resource::ToString(needType));
+	need.assetId = id;
+	need.needType = needType;
+	need.priority = priority;
+	need.reason = reason.empty() ? std::string(TerraEngine::Resource::ToString(needType)) : std::string(reason);
+	if (needType == TerraEngine::Resource::StreamingNeedType::Visible)
+	{
+		need.expiresAtSeconds = nowSeconds + m_StreamingPolicy.visibleRetentionSeconds;
+	}
+	else if (needType != TerraEngine::Resource::StreamingNeedType::FallbackDefault
+		&& needType != TerraEngine::Resource::StreamingNeedType::BackendInFlight)
+	{
+		// Editor, UI, prefab, preload, and explicit gameplay marks are
+		// republished while active. Giving them a retention window prevents a
+		// one-frame selection or preview from pinning an asset forever.
+		need.expiresAtSeconds = nowSeconds + m_StreamingPolicy.neededRetentionSeconds;
+	}
+	record.needSources.push_back(std::move(need));
+	record.needSources = TerraEngine::Resource::MergeStreamingNeeds(std::move(record.needSources), nowSeconds);
+	record.protectionReason = ComputeStreamingProtection(record.needSources, m_StreamingPolicy);
+	lock.unlock();
+
+	// Streaming protection is mirrored into loaded residency so existing cleanup
+	// and diagnostics remain the single place that actually release RAM/VRAM.
+	TerraEngine::Resource::ResidencyPinReason residencyReason = TerraEngine::Resource::ResidencyPinReason::None;
+	switch (protection)
+	{
+	case TerraEngine::Resource::StreamingProtectionReason::EditorSelection:
+		residencyReason = TerraEngine::Resource::ResidencyPinReason::EditorSelection;
+		break;
+	case TerraEngine::Resource::StreamingProtectionReason::PrefabEditing:
+		residencyReason = TerraEngine::Resource::ResidencyPinReason::PrefabEditing;
+		break;
+	case TerraEngine::Resource::StreamingProtectionReason::Preview:
+		residencyReason = TerraEngine::Resource::ResidencyPinReason::Preview;
+		break;
+	case TerraEngine::Resource::StreamingProtectionReason::FallbackResource:
+	case TerraEngine::Resource::StreamingProtectionReason::DefaultResource:
+		residencyReason = TerraEngine::Resource::ResidencyPinReason::FallbackResource;
+		break;
+	case TerraEngine::Resource::StreamingProtectionReason::InFlightLoad:
+		residencyReason = TerraEngine::Resource::ResidencyPinReason::Loading;
+		break;
+	case TerraEngine::Resource::StreamingProtectionReason::BackendInFlight:
+		residencyReason = TerraEngine::Resource::ResidencyPinReason::BackendInFlight;
+		break;
+	default:
+		residencyReason = TerraEngine::Resource::ResidencyPinReason::None;
+		break;
+	}
+	TouchResource(id, type, frameId, residencyReason, reason);
+}
+
+std::shared_future<TerraEngine::UUID> ResourceManager::RequestStreamableLoad(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	TerraEngine::Resource::StreamingNeedType needType,
+	std::uint64_t frameId,
+	std::string_view reason)
+{
+	MarkStreamingNeed(id, type, needType, frameId, reason, needType == TerraEngine::Resource::StreamingNeedType::Visible ? 100 : 10);
+
+	std::filesystem::path sourcePath;
+	{
+		std::shared_lock lock(m_StreamingMutex);
+		if (auto it = m_StreamableAssets.find(id); it != m_StreamableAssets.end())
+		{
+			sourcePath = it->second.sourceKey;
+		}
+	}
+	if (sourcePath.empty())
+	{
+		return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+	}
+
+	switch (type)
+	{
+	case AssetType::Mesh:
+		return LoadMeshAsync(sourcePath);
+	case AssetType::Texture:
+		return LoadTextureAsync(sourcePath);
+	case AssetType::Material:
+		return LoadMaterialAsync(sourcePath);
+	case AssetType::ShaderCollection:
+		return MakeReadyFuture(id);
+	}
+	return MakeReadyFuture(TerraEngine::EMPTY_UUID);
+}
+
+void ResourceManager::UpdateStreamableLoadResult(
+	const TerraEngine::UUID& id,
+	AssetType type,
+	const std::string& sourceKey,
+	bool success,
+	std::uint64_t cpuBytes,
+	std::uint64_t gpuBytes,
+	std::string_view failureReason)
+{
+	if (id == TerraEngine::EMPTY_UUID)
+	{
+		return;
+	}
+	std::unique_lock lock(m_StreamingMutex);
+	TerraEngine::Resource::StreamableAssetRecord& record = m_StreamableAssets[id];
+	record.assetId = id;
+	record.assetType = ToStreamableAssetType(type);
+	if (!sourceKey.empty())
+	{
+		record.sourceKey = sourceKey;
+	}
+	if (!success)
+	{
+		record.payloadState = TerraEngine::Resource::StreamablePayloadState::Failed;
+	}
+	else if (gpuBytes > 0u)
+	{
+		record.payloadState = TerraEngine::Resource::StreamablePayloadState::VramResident;
+	}
+	else
+	{
+		record.payloadState = TerraEngine::Resource::StreamablePayloadState::RamResident;
+	}
+	record.estimatedCpuBytes = success ? cpuBytes : 0u;
+	record.estimatedGpuBytes = success ? gpuBytes : 0u;
+	record.failureReason = success ? std::string{} : std::string(failureReason);
+	record.lastNeededSeconds = ResidencyClockSeconds();
+	record.residencyGeneration += success ? 1u : 0u;
+}
+
+void ResourceManager::MarkStreamableReleased(const TerraEngine::UUID& id, std::uint64_t frameId)
+{
+	std::unique_lock lock(m_StreamingMutex);
+	if (auto it = m_StreamableAssets.find(id); it != m_StreamableAssets.end())
+	{
+		it->second.payloadState = TerraEngine::Resource::StreamablePayloadState::Released;
+		it->second.lastReleaseEligibleSeconds = ResidencyClockSeconds();
+		it->second.needSources.clear();
+		it->second.protectionReason = TerraEngine::Resource::StreamingProtectionReason::None;
+		it->second.estimatedCpuBytes = 0u;
+		it->second.estimatedGpuBytes = 0u;
+		it->second.failureReason.clear();
+		it->second.residencyGeneration = frameId;
+	}
+}
+
+TerraEngine::Resource::StreamingDiagnosticsSummary ResourceManager::BuildStreamingDiagnosticsLocked(std::uint64_t frameId) const
+{
+	TerraEngine::Resource::StreamingDiagnosticsSummary summary;
+	summary.frameId = frameId;
+	summary.diagnosticsEnabled = m_StreamingPolicy.diagnosticsEnabled;
+	summary.trackedAssetCount = m_StreamableAssets.size();
+	for (const auto& [id, record] : m_StreamableAssets)
+	{
+		switch (record.payloadState)
+		{
+		case TerraEngine::Resource::StreamablePayloadState::Deferred:
+		case TerraEngine::Resource::StreamablePayloadState::Released:
+		case TerraEngine::Resource::StreamablePayloadState::LoadingRam:
+			summary.deferredAssetCount++;
+			break;
+		case TerraEngine::Resource::StreamablePayloadState::UploadingVram:
+			summary.loadingAssetCount++;
+			break;
+		case TerraEngine::Resource::StreamablePayloadState::RamResident:
+		case TerraEngine::Resource::StreamablePayloadState::VramResident:
+			summary.residentAssetCount++;
+			break;
+		case TerraEngine::Resource::StreamablePayloadState::PendingRelease:
+			summary.releaseEligibleCount++;
+			break;
+		case TerraEngine::Resource::StreamablePayloadState::Failed:
+			summary.failedAssetCount++;
+			break;
+		case TerraEngine::Resource::StreamablePayloadState::Registered:
+			break;
+		}
+		if (record.protectionReason != TerraEngine::Resource::StreamingProtectionReason::None)
+		{
+			summary.protectedAssetCount++;
+		}
+		summary.activeNeedCount += record.needSources.size();
+		const bool ownsResidentMemory = HasResidentStreamingMemory(record.payloadState);
+		const std::uint64_t diagnosticCpuBytes = ownsResidentMemory ? record.estimatedCpuBytes : 0u;
+		const std::uint64_t diagnosticGpuBytes = ownsResidentMemory ? record.estimatedGpuBytes : 0u;
+		summary.estimatedResidentBytes += diagnosticCpuBytes + diagnosticGpuBytes;
+		if (m_StreamingPolicy.diagnosticsEnabled)
+		{
+			TerraEngine::Resource::StreamingDiagnosticRecord diagnostic;
+			diagnostic.assetId = id;
+			diagnostic.assetType = record.assetType;
+			diagnostic.payloadState = record.payloadState;
+			diagnostic.lastVisibleSeconds = record.lastVisibleSeconds;
+			diagnostic.lastNeededSeconds = record.lastNeededSeconds;
+			diagnostic.needSources = record.needSources;
+			diagnostic.protectionReason = record.protectionReason;
+			diagnostic.releaseEligibility = record.needSources.empty() && record.protectionReason == TerraEngine::Resource::StreamingProtectionReason::None ? "eligible-or-waiting-policy" : "protected";
+			diagnostic.failureReason = record.failureReason;
+			diagnostic.estimatedCpuBytes = diagnosticCpuBytes;
+			diagnostic.estimatedGpuBytes = diagnosticGpuBytes;
+			summary.records.push_back(std::move(diagnostic));
+		}
+	}
+	return summary;
+}
+
+void ResourceManager::ClearStreamingState()
+{
+	std::unique_lock lock(m_StreamingMutex);
+	m_StreamableAssets.clear();
+	m_StreamingDiagnostics = {};
+	m_StreamingDiagnostics.diagnosticsEnabled = m_StreamingPolicy.diagnosticsEnabled;
 }
 
 // ResourceManager::HasResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1153,6 +1694,7 @@ void ResourceManager::RegisterAssetPath(const TerraEngine::UUID& id, const std::
 			cache.idToPath[id] = key;
 		}
 	});
+	RegisterStreamableAsset(id, type, path, true);
 }
 
 // ResourceManager::ResolveAssetReference is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -304,6 +304,16 @@ namespace TerraEngine::Scene
 		return result;
 	}
 
+	SpatialQueryResult SpatialIndex::QueryStreamingCandidates(const glm::vec3& center, float radius, const SpatialQueryFilter& filter) const
+	{
+		SpatialSphere sphere{};
+		sphere.center = center;
+		sphere.radius = std::max(0.0f, radius);
+		// Streaming reuses the normal spatial sphere query so preload candidate
+		// selection stays deterministic with renderer/editor broadphase data.
+		return QuerySphere(sphere, filter);
+	}
+
 	// SpatialIndex::QueryFrustum is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	SpatialQueryResult SpatialIndex::QueryFrustum(const SpatialFrustum& frustum, const SpatialQueryFilter& filter) const
 	{

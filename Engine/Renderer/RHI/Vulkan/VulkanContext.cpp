@@ -5196,6 +5196,27 @@ void VulkanContext::EndFrame() {
 	}
 
 	auto& cmds = impl->pendingPrimaryCommandBuffers[impl->currentFrame];
+	if (impl->editorMode && impl->framebufferResized) {
+		// A GLFW resize can arrive after scene/game command buffers have been
+		// recorded but before they are submitted. Those command buffers may
+		// reference old offscreen framebuffers, depth resources, or swapchain-
+		// sized attachments, so submitting them can device-lost the queue on
+		// some drivers. Drop this frame and rebuild the resized targets before
+		// the editor UI pass acquires the next swapchain image.
+		impl->framebufferResized = false;
+		cmds.clear();
+		impl->editorRenderSubmitted = false;
+		const auto recoveryStart = BackendClock::now();
+		impl->RecreateSwapChain();
+		impl->RecreateOffscreenResources();
+		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
+			impl->pendingBackendFrameBreakdown,
+			{ TerraEngine::Renderer::BackendFrameCostCategory::ResizeRecreateWait, TerraEngine::Renderer::BackendSubmitStage::SwapchainRecovery, RenderViewType::Game, 0u, "Recreate editor swapchain before submit", true, false },
+			ElapsedMilliseconds(recoveryStart),
+			0.25f,
+			"Editor resize was processed before submitting stale scene/game command buffers.");
+		return;
+	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (cmds.empty()) {
 		if (!impl->editorMode && impl->swapchainImageAcquired) {
@@ -5537,7 +5558,7 @@ void VulkanContext::InvalidateTexture(const TerraEngine::UUID& textureId) {
 // VulkanContext::InvalidateResource is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::InvalidateResource(const TerraEngine::UUID& id) {
 	if (impl) {
-		impl->InvalidateResource(id);
+		impl->InvalidateResource(id, false);
 	}
 }
 
@@ -5548,7 +5569,7 @@ void VulkanContext::RetireLoadedResource(const TerraEngine::UUID& id, std::uint6
 		// Vulkan resource residency currently shares the descriptor-safe
 		// invalidation path. Keeping this behind the RHI hook means the engine
 		// can swap in true fence-delayed destruction without changing callers.
-		impl->InvalidateResource(id);
+		impl->InvalidateResource(id, false);
 	}
 }
 
@@ -5620,6 +5641,15 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 		}
 		vkResetCommandPool(impl->device, impl->commandPools[impl->currentFrame], 0);
+	}
+
+	if (impl->framebufferResized) {
+		// Project hub and menu-only frames can resize without a preceding
+		// RenderSystem EndFrame. Rebuild before acquiring so the acquire
+		// semaphore and framebuffers belong to the current swapchain.
+		impl->framebufferResized = false;
+		impl->RecreateSwapChain();
+		impl->RecreateOffscreenResources();
 	}
 	
 	uint32_t imageIndex;

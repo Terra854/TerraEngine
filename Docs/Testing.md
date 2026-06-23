@@ -61,6 +61,19 @@ serialization. These tests intentionally do not inspect persistent Vulkan or
 pipeline disk caches because those files are backend cache implementation
 details, not loaded resource residency.
 
+The visibility streaming checks extend the resource residency surface with
+deferred scene payload registration, streamable state transitions, preload rule
+evaluation, active render-view needs, editor workflow protection, active UI
+image texture needs, and export manifest policy round trips. For a focused local
+run on Windows:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="Resource.Streaming;Scene.Streaming;Renderer.Streaming"
+.\out\build\Debug\TerraEngine-EngineTests.exe
+.\out\build\Debug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
 For Linux-specific prerequisites and troubleshooting, see
 `Docs/LinuxSupport.md`.
 
