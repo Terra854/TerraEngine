@@ -26,15 +26,15 @@ namespace TerraEngine::EditorTests
 				"Build Profiles should remain a File menu workflow.");
 		});
 
-		registry.Add("Editor.ProjectSettings.MigratedCategoriesExist", [](TestContext& context) {
+		registry.Add("Editor.ProjectSettings.SceneSkyCategoryIsRemoved", [](TestContext& context) {
 			context.Expect(
 				TerraEngine::Editor::ProjectSettings::FindProjectSettingsCategory(
 					TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Graphics) != nullptr,
 				"Graphics settings should be available as a Project Settings category.");
 			context.Expect(
 				TerraEngine::Editor::ProjectSettings::FindProjectSettingsCategory(
-					TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Sky) != nullptr,
-				"Sky settings should be available as a Project Settings category.");
+					TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Sky) == nullptr,
+				"Sky settings should be authored through SkyComponent instead of a scene-level Project Settings category.");
 		});
 	}
 }

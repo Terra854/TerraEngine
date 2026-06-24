@@ -86,6 +86,7 @@ add_executable(TerraEngine-EngineTests
 	Scene/PrefabCompositionTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
 	Scene/SceneMutationQueueTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Scene/SkyComponentSerializationTests.cpp
 	Scene/SceneStreamingDeferredLoadTests.cpp
 	Scene/SpatialBoundsTests.cpp
 	Scene/SpatialIndexEdgeTests.cpp

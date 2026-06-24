@@ -110,19 +110,32 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 			sceneFile << R"({
 	"name": "Scene",
 	"sceneSettings": {
-		"sky": {
-			"enabled": true,
-			"sourceAsset": "",
-			"intensity": 1.0,
-			"exposure": 1.0,
-			"rotationOffsetDegrees": 0.0,
-			"horizonTint": [0.92, 0.96, 1.0],
-			"zenithTint": [0.20, 0.38, 0.80],
-			"groundTint": [0.10, 0.12, 0.18],
-			"directionalLightObjectId": "00000000000000000000000000000000"
-		}
+		"indirectStrength": 1.0,
+		"ambientOcclusionStrength": 1.0,
+		"ambientOcclusionQuality": 2
 	},
 	"objects": [
+		{
+			"name": "Sky",
+			"components": {
+				"SkyComponent": {
+					"sourceAsset": "",
+					"exposure": 1.0,
+					"rotationOffsetDegrees": 0.0,
+					"horizonTint": [0.92, 0.96, 1.0],
+					"zenithTint": [0.20, 0.38, 0.80],
+					"groundTint": [0.10, 0.12, 0.18]
+				},
+				"LightComponent": {
+					"type": 0,
+					"unit": 1,
+					"color": [1.0, 1.0, 1.0],
+					"intensity": 100000.0,
+					"castsShadows": false
+				}
+			},
+			"children": []
+		},
 		{
 			"name": "Main Camera",
 			"components": {

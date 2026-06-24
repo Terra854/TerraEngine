@@ -28,6 +28,7 @@
 #include "Utilities/UUID.h"
 
 class ResourceManager;
+struct SkyComponent;
 class Transform;
 
 // Lightweight holder for a scene or prefab definition. The manager stores the
@@ -101,12 +102,14 @@ public:
 	// triggers a dirty flag reset upon successful write.
 	bool SaveScene(std::optional<std::filesystem::path> path = std::nullopt);
 
-	// Scene-owned sky settings live outside the object hierarchy, so the
-	// editor and renderer query them through dedicated accessors.
+	// Scene render settings now cover only non-sky scene metadata. Sky authoring
+	// lives on SkyComponent and is resolved from the active object graph.
 	const SceneRenderSettings& GetActiveSceneRenderSettings() const;
 	void SetActiveSceneRenderSettings(const SceneRenderSettings& settings);
-	const SceneSkySettings& GetActiveSceneSkySettings() const;
-	void SetActiveSceneSkySettings(const SceneSkySettings& settings);
+	const SkyComponent* GetActiveSkyComponent() const;
+	std::optional<Object> GetActiveSkyObject() const;
+	bool HasActiveSkyComponent() const;
+	void MarkActiveSceneSkyStateDirty();
 
 	// Reports whether the active scene has received modifications since it was 
 	// last saved or loaded.

@@ -15,6 +15,21 @@ signal, and script signal wired for manual and CI export coverage.
 The scene graph runtime checks validate deterministic traversal, hierarchy
 diagnostics, prefab composition, queued mutation safety, and editor/runtime
 parity. Manual validation fixtures live under `Tests/Fixtures/SceneGraphRuntime`.
+Sky component migration checks live under `Tests/Engine/Scene` with the editor
+metadata check under `Tests/Editor/Project`. They validate that sky data saves
+through `SkyComponent`, obsolete `sceneSettings.sky` input is ignored, and the
+scene-level Project Settings sky category stays removed. For a focused local run
+on Windows:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="Scene.SkyComponent"
+.\out\build\Debug\TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+.\out\build\Debug\TerraEngine-EditorTests.exe
+```
+
+The editor harness currently runs the full editor test binary; the sky migration
+coverage is reported by the Project Settings tests inside that run.
 
 The scheduler checks cover the phase scheduler, general job graph, and ECS query
 task graph layers. The engine suite validates component read/write declarations,

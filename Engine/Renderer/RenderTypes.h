@@ -201,29 +201,10 @@ struct RenderSettings
 	std::uint32_t variableRateShading = 0u;
 };
 
-// Scene-owned sky authoring data is serialized with each scene so the editor
-// and runtime always consume the same background configuration.
-struct SceneSkySettings
-{
-	bool enabled = true;
-	std::string sourceAsset;
-	float intensity = 1.0f;
-	float exposure = 1.0f;
-	float rotationOffsetDegrees = 0.0f;
-	glm::vec3 horizonTint = glm::vec3(0.92f, 0.96f, 1.0f);
-	glm::vec3 zenithTint = glm::vec3(0.20f, 0.38f, 0.80f);
-	glm::vec3 groundTint = glm::vec3(0.10f, 0.12f, 0.18f);
-	// When this override is empty the renderer automatically uses the first
-	// directional light found in the active scene. A resolved directional light
-	// is always required for non-black sky rendering.
-	TerraEngine::UUID directionalLightObjectId = TerraEngine::EMPTY_UUID;
-};
-
 // Scene-level render settings can grow over time while keeping one explicit
-// root block in scene JSON for the renderer-facing authoring data.
+// root block in scene JSON for non-object renderer-facing authoring data.
 struct SceneRenderSettings
 {
-	SceneSkySettings sky{};
 	float indirectStrength = 1.0f;
 	float ambientOcclusionStrength = 1.0f;
 	std::uint32_t ambientOcclusionQuality = 2u;
@@ -266,42 +247,26 @@ inline glm::vec3 ClampSkyTint(const glm::vec3& tint)
 	return glm::clamp(tint, glm::vec3(0.0f), glm::vec3(4.0f));
 }
 
-// MakeDefaultSceneSkySettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-inline SceneSkySettings MakeDefaultSceneSkySettings()
+// ClampSkyExposure constrains authored SkyComponent exposure before the value
+// reaches FrameSkyData and shader constants.
+inline float ClampSkyExposure(float exposure)
 {
-	SceneSkySettings settings;
-	settings.enabled = true;
-	settings.sourceAsset.clear();
-	settings.intensity = 1.0f;
-	settings.exposure = 1.0f;
-	settings.rotationOffsetDegrees = 0.0f;
-	settings.horizonTint = glm::vec3(0.92f, 0.96f, 1.0f);
-	settings.zenithTint = glm::vec3(0.20f, 0.38f, 0.80f);
-	settings.groundTint = glm::vec3(0.10f, 0.12f, 0.18f);
-	settings.directionalLightObjectId = TerraEngine::EMPTY_UUID;
-	return settings;
+	return glm::clamp(exposure, 0.0f, 16.0f);
 }
 
-// SanitizeSceneSkySettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-inline SceneSkySettings SanitizeSceneSkySettings(const SceneSkySettings& input)
+// ClampSkyRotationOffset keeps authored yaw offsets finite and bounded to a
+// full turn so procedural sky math cannot receive invalid angles.
+inline float ClampSkyRotationOffset(float rotationOffsetDegrees)
 {
-	SceneSkySettings sanitized = input;
-	sanitized.intensity = glm::clamp(sanitized.intensity, 0.0f, 16.0f);
-	sanitized.exposure = glm::clamp(sanitized.exposure, 0.0f, 16.0f);
-	sanitized.rotationOffsetDegrees = std::isfinite(sanitized.rotationOffsetDegrees)
-		? glm::clamp(sanitized.rotationOffsetDegrees, -360.0f, 360.0f)
+	return std::isfinite(rotationOffsetDegrees)
+		? glm::clamp(rotationOffsetDegrees, -360.0f, 360.0f)
 		: 0.0f;
-	sanitized.horizonTint = ClampSkyTint(sanitized.horizonTint);
-	sanitized.zenithTint = ClampSkyTint(sanitized.zenithTint);
-	sanitized.groundTint = ClampSkyTint(sanitized.groundTint);
-	return sanitized;
 }
 
 // MakeDefaultSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 inline SceneRenderSettings MakeDefaultSceneRenderSettings()
 {
 	SceneRenderSettings settings;
-	settings.sky = MakeDefaultSceneSkySettings();
 	settings.indirectStrength = 1.0f;
 	settings.ambientOcclusionStrength = 1.0f;
 	settings.ambientOcclusionQuality = 2u;
@@ -312,7 +277,6 @@ inline SceneRenderSettings MakeDefaultSceneRenderSettings()
 inline SceneRenderSettings SanitizeSceneRenderSettings(const SceneRenderSettings& input)
 {
 	SceneRenderSettings sanitized = input;
-	sanitized.sky = SanitizeSceneSkySettings(input.sky);
 	sanitized.indirectStrength = glm::clamp(sanitized.indirectStrength, 0.0f, 8.0f);
 	sanitized.ambientOcclusionStrength = glm::clamp(sanitized.ambientOcclusionStrength, 0.0f, 4.0f);
 	sanitized.ambientOcclusionQuality = glm::clamp(sanitized.ambientOcclusionQuality, 0u, 3u);

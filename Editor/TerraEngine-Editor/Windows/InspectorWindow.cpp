@@ -128,6 +128,53 @@ std::string BuildDisplayComponentName(const std::string& componentName)
 	return componentName;
 }
 
+std::string BuildDisplayPropertyName(const std::string& componentName, const std::string& propertyName)
+{
+	if (componentName == "SkyComponent")
+	{
+		if (propertyName == "sourceAsset")
+		{
+			return "Source Asset";
+		}
+		if (propertyName == "exposure")
+		{
+			return "Exposure";
+		}
+		if (propertyName == "rotationOffsetDegrees")
+		{
+			return "Rotation Offset";
+		}
+		if (propertyName == "horizonTint")
+		{
+			return "Horizon Tint";
+		}
+		if (propertyName == "zenithTint")
+		{
+			return "Zenith Tint";
+		}
+		if (propertyName == "groundTint")
+		{
+			return "Ground Tint";
+		}
+	}
+
+	return propertyName;
+}
+
+bool IsSkyComponentName(const std::string& componentName)
+{
+	return componentName == "SkyComponent";
+}
+
+void NotifySceneAfterComponentMutation(const std::string& componentName)
+{
+	SceneManager::Instance().ForceMarkActiveSceneDirty();
+	if (IsSkyComponentName(componentName))
+	{
+		SceneManager::Instance().MarkActiveSceneSkyStateDirty();
+	}
+}
+
 // VkFormatToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const char* VkFormatToString(uint32_t vkFormat)
 {
@@ -783,6 +830,7 @@ private:
 			if (reg.count(m_Component)) {
 				// Setters handle thread-safety internally via component mutexes.
 				reg[m_Component].setter(*obj, m_Property, val);
+				NotifySceneAfterComponentMutation(m_Component);
 			}
 		}
 	}
@@ -950,6 +998,7 @@ void InspectorWindow::UpdateInspectorDragState() {
 // InspectorWindow::DrawProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProperty prop, Object& obj, ComponentAccessFunctions& access) {
 	std::string name = MetaPropertyName(prop);
+	const std::string displayName = BuildDisplayPropertyName(compName, name);
 	ReflectionVariant var = access.getter(obj, name);
 	ReflectionType type = MetaPropertyType(prop);
 
@@ -969,6 +1018,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		if (ImGui::IsItemDeactivatedAfterEdit()) {
 			ReflectionVariant newVal = access.getter(obj, name);
 			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, m_PreEditValue, newVal));
+			NotifySceneAfterComponentMutation(compName);
 		}
 	};
 
@@ -979,7 +1029,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	if (prefabOverride) {
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.28f, 1.0f));
 	}
-	ImGui::TextUnformatted(name.c_str());
+	ImGui::TextUnformatted(displayName.c_str());
 	if (prefabOverride) {
 		ImGui::PopStyleColor();
 	}
@@ -1065,6 +1115,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 			access.setter(obj, name, val);
 			ReflectionVariant newB = access.getter(obj, name);
 			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldB, newB));
+			NotifySceneAfterComponentMutation(compName);
 		}
 	}
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1097,6 +1148,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 						access.setter(obj, name, path);
 						ReflectionVariant newV = access.getter(obj, name);
 						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldV, newV));
+						NotifySceneAfterComponentMutation(compName);
 					}
 				}
 			}
@@ -1165,6 +1217,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 				access.setter(obj, name, TerraEngine::EMPTY_UUID);
 				ReflectionVariant nextId = access.getter(obj, name);
 				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
+				NotifySceneAfterComponentMutation(compName);
 			}
 			ImGui::EndPopup();
 		}
@@ -1188,6 +1241,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 					access.setter(obj, name, newId);
 					ReflectionVariant nextId = access.getter(obj, name);
 					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
+					NotifySceneAfterComponentMutation(compName);
 				}
 			} else {
 				// Generic UUID property, accept any asset payload
@@ -1200,6 +1254,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 						access.setter(obj, name, newId);
 						ReflectionVariant nextId = access.getter(obj, name);
 						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
+						NotifySceneAfterComponentMutation(compName);
 						break;
 					}
 				}
@@ -2866,6 +2921,7 @@ void InspectorWindow::OnGui() {
 						if (ImGui::MenuItem("Remove Component")) {
 							UndoRedoSystem::Instance().PushCommand(std::make_unique<RemoveComponentCommand>(obj.EntityId(), compName));
 							access.removeComponent(obj);
+							NotifySceneAfterComponentMutation(compName);
 						}
 						ImGui::EndPopup();
 					}
@@ -2930,6 +2986,7 @@ void InspectorWindow::OnGui() {
 							access.setter(obj, "active", compActive);
 							ReflectionVariant newA = access.getter(obj, "active");
 							UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "active", oldA, newA));
+							NotifySceneAfterComponentMutation(compName);
 						}
 					}
 					ImGui::PopStyleColor();
@@ -3039,6 +3096,7 @@ void InspectorWindow::OnGui() {
 					if (ImGui::Selectable(displayName.c_str())) {
 						UndoRedoSystem::Instance().PushCommand(std::make_unique<AddComponentCommand>(obj.EntityId(), compName));
 						accessReg[compName].addComponent(obj);
+						NotifySceneAfterComponentMutation(compName);
 						ImGui::CloseCurrentPopup();
 					}
 					ImGui::PopID();

@@ -43,48 +43,12 @@ namespace TerraEngine::Tests {
 			context.Expect(NearlyEqualVec3(glm::vec3(0.0f, 2.5f, 4.0f), clamped), "Sky tint clamping should clamp each color channel into the authored range.");
 		});
 
-		registry.Add("Engine.RenderTypes.DefaultSceneSkySettingsMatchRuntimeBaseline", [](TestContext& context) {
-			const SceneSkySettings settings = MakeDefaultSceneSkySettings();
-
-			context.Expect(settings.enabled, "Default scene sky settings should render the sky background.");
-			context.Expect(settings.sourceAsset.empty(), "Default scene sky settings should use the built-in procedural fallback.");
-			context.Expect(NearlyEqual(1.0f, settings.intensity), "Default scene sky intensity should be neutral.");
-			context.Expect(NearlyEqual(1.0f, settings.exposure), "Default scene sky exposure should be neutral.");
-			context.Expect(NearlyEqual(0.0f, settings.rotationOffsetDegrees), "Default scene sky rotation should start at zero degrees.");
-			context.Expect(NearlyEqualVec3(glm::vec3(0.92f, 0.96f, 1.0f), settings.horizonTint), "Default horizon tint should match the runtime baseline.");
-			context.Expect(NearlyEqualVec3(glm::vec3(0.20f, 0.38f, 0.80f), settings.zenithTint), "Default zenith tint should match the runtime baseline.");
-			context.Expect(NearlyEqualVec3(glm::vec3(0.10f, 0.12f, 0.18f), settings.groundTint), "Default ground tint should match the runtime baseline.");
-			context.Expect(settings.directionalLightObjectId == TerraEngine::EMPTY_UUID, "Default sky settings should let the renderer resolve the scene directional light.");
-		});
-
-		registry.Add("Engine.RenderTypes.SanitizeSceneSkySettingsClampsUnsafeAuthoringValues", [](TestContext& context) {
-			SceneSkySettings unsafeSettings;
-			unsafeSettings.enabled = false;
-			unsafeSettings.sourceAsset = "Assets/Skies/Test.hdr";
-			unsafeSettings.intensity = 25.0f;
-			unsafeSettings.exposure = -3.0f;
-			unsafeSettings.rotationOffsetDegrees = std::numeric_limits<float>::infinity();
-			unsafeSettings.horizonTint = glm::vec3(-2.0f, 1.0f, 8.0f);
-			unsafeSettings.zenithTint = glm::vec3(6.0f, -1.0f, 0.5f);
-			unsafeSettings.groundTint = glm::vec3(0.25f, 9.0f, -0.5f);
-			unsafeSettings.directionalLightObjectId = MakeUuid(9);
-
-			const SceneSkySettings sanitized = SanitizeSceneSkySettings(unsafeSettings);
-
-			context.Expect(!sanitized.enabled, "Sky sanitization should preserve the authored enable flag.");
-			context.ExpectEqual(std::string("Assets/Skies/Test.hdr"), sanitized.sourceAsset, "Sky sanitization should preserve the source asset path.");
-			context.Expect(NearlyEqual(16.0f, sanitized.intensity), "Sky intensity should clamp to the supported maximum.");
-			context.Expect(NearlyEqual(0.0f, sanitized.exposure), "Sky exposure should clamp to the supported minimum.");
-			context.Expect(NearlyEqual(0.0f, sanitized.rotationOffsetDegrees), "Non-finite sky rotation should be reset to a safe default.");
-			context.Expect(NearlyEqualVec3(glm::vec3(0.0f, 1.0f, 4.0f), sanitized.horizonTint), "Horizon tint should clamp each channel.");
-			context.Expect(NearlyEqualVec3(glm::vec3(4.0f, 0.0f, 0.5f), sanitized.zenithTint), "Zenith tint should clamp each channel.");
-			context.Expect(NearlyEqualVec3(glm::vec3(0.25f, 4.0f, 0.0f), sanitized.groundTint), "Ground tint should clamp each channel.");
-			context.Expect(sanitized.directionalLightObjectId == MakeUuid(9), "Sky sanitization should preserve explicit directional light overrides.");
-
-			unsafeSettings.rotationOffsetDegrees = 720.0f;
-			context.Expect(NearlyEqual(360.0f, SanitizeSceneSkySettings(unsafeSettings).rotationOffsetDegrees), "Positive finite sky rotation should clamp to one full turn.");
-			unsafeSettings.rotationOffsetDegrees = -720.0f;
-			context.Expect(NearlyEqual(-360.0f, SanitizeSceneSkySettings(unsafeSettings).rotationOffsetDegrees), "Negative finite sky rotation should clamp to one full turn.");
+		registry.Add("Engine.RenderTypes.SkyFieldClampsConstrainUnsafeAuthoringValues", [](TestContext& context) {
+			context.Expect(NearlyEqual(0.0f, ClampSkyExposure(-3.0f)), "Sky exposure should clamp to the supported minimum.");
+			context.Expect(NearlyEqual(0.0f, ClampSkyRotationOffset(std::numeric_limits<float>::infinity())), "Non-finite sky rotation should be reset to a safe default.");
+			context.Expect(NearlyEqual(360.0f, ClampSkyRotationOffset(720.0f)), "Positive finite sky rotation should clamp to one full turn.");
+			context.Expect(NearlyEqual(-360.0f, ClampSkyRotationOffset(-720.0f)), "Negative finite sky rotation should clamp to one full turn.");
+			context.Expect(NearlyEqualVec3(glm::vec3(0.0f, 1.0f, 4.0f), ClampSkyTint(glm::vec3(-2.0f, 1.0f, 8.0f))), "Horizon tint should clamp each channel.");
 		});
 
 		registry.Add("Engine.RenderTypes.SanitizeSceneRenderSettingsClampsNestedSkyAndLighting", [](TestContext& context) {
@@ -94,16 +58,12 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(2u, defaultSettings.ambientOcclusionQuality, "Default render settings should use the medium ambient-occlusion quality tier.");
 
 			SceneRenderSettings unsafeSettings;
-			unsafeSettings.sky.intensity = -4.0f;
-			unsafeSettings.sky.rotationOffsetDegrees = 720.0f;
 			unsafeSettings.indirectStrength = 11.0f;
 			unsafeSettings.ambientOcclusionStrength = -2.0f;
 			unsafeSettings.ambientOcclusionQuality = 7u;
 
 			const SceneRenderSettings sanitized = SanitizeSceneRenderSettings(unsafeSettings);
 
-			context.Expect(NearlyEqual(0.0f, sanitized.sky.intensity), "Scene render sanitization should clamp nested sky intensity.");
-			context.Expect(NearlyEqual(360.0f, sanitized.sky.rotationOffsetDegrees), "Scene render sanitization should clamp nested sky rotation.");
 			context.Expect(NearlyEqual(8.0f, sanitized.indirectStrength), "Indirect lighting strength should clamp to the supported maximum.");
 			context.Expect(NearlyEqual(0.0f, sanitized.ambientOcclusionStrength), "Ambient occlusion strength should clamp to the supported minimum.");
 			context.ExpectEqual(3u, sanitized.ambientOcclusionQuality, "Ambient occlusion quality should clamp to the supported maximum tier.");

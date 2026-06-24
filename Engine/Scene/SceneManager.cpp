@@ -32,6 +32,7 @@
 #include "Components/CameraComponent.h"
 #include "Components/LightComponent.h"
 #include "Components/MeshRenderComponent.h"
+#include "Components/SkyComponent.h"
 
 namespace
 {
@@ -96,6 +97,10 @@ SceneManager::SceneManager()
 // SceneManager::Initialize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::Initialize()
 {
+	// Register SkyComponent before any scene data is deserialized so reflected
+	// component JSON can create the component through the normal object path.
+	SkyComponent::registerType();
+
 	// Clear any stale tracking in case the manager is restarted during a hot
 	// reload. At this stage nothing is loaded yet so the reset is cheap and
 	// keeps stale cache entries from leaking across sessions.
@@ -251,6 +256,7 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 
 	ObjectManager& objManager = ObjectManager::instance();
 	objManager.clear();
+	SkyComponent::registerType();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (doc->parsedJson.contains("objects")) {
@@ -311,20 +317,64 @@ void SceneManager::SetActiveSceneRenderSettings(const SceneRenderSettings& setti
 {
 	activeSceneRenderSettings = SanitizeSceneRenderSettings(settings);
 	activeSceneDirty = true;
-	RenderSystem::Instance().MarkSkyStateDirty();
 }
 
-// SceneManager::GetActiveSceneSkySettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-const SceneSkySettings& SceneManager::GetActiveSceneSkySettings() const
+// SceneManager::GetActiveSkyComponent resolves the first active SkyComponent in
+// deterministic scene traversal order. Callers must treat the returned pointer
+// as a read-only view into the current ObjectManager state.
+const SkyComponent* SceneManager::GetActiveSkyComponent() const
 {
-	return activeSceneRenderSettings.sky;
+	std::optional<Object> skyObject = GetActiveSkyObject();
+	if (!skyObject.has_value())
+	{
+		return nullptr;
+	}
+
+	return skyObject->getComponent<SkyComponent>();
 }
 
-// SceneManager::SetActiveSceneSkySettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void SceneManager::SetActiveSceneSkySettings(const SceneSkySettings& settings)
+// SceneManager::GetActiveSkyObject resolves the object that owns the first
+// active SkyComponent. The owning object matters because its LightComponent is
+// now the only source allowed to drive sky sun direction.
+std::optional<Object> SceneManager::GetActiveSkyObject() const
 {
-	activeSceneRenderSettings.sky = SanitizeSceneSkySettings(settings);
-	activeSceneDirty = true;
+	ObjectManager& objManager = ObjectManager::instance();
+	const TerraEngine::Scene::SceneGraph graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager, false);
+	const std::vector<TerraEngine::UUID> traversalOrder = TerraEngine::Scene::BuildTraversalOrder(graph);
+	for (const TerraEngine::UUID& objectId : traversalOrder)
+	{
+		std::optional<Object> object = objManager.getObject(objectId);
+		if (!object.has_value())
+		{
+			continue;
+		}
+		if (!object->isActive())
+		{
+			continue;
+		}
+
+		const SkyComponent* skyComponent = object->getComponent<SkyComponent>();
+		if (skyComponent == nullptr || !skyComponent->active)
+		{
+			continue;
+		}
+
+		return object;
+	}
+
+	return std::nullopt;
+}
+
+// SceneManager::HasActiveSkyComponent reports whether sky authoring exists on
+// an active scene object without exposing any redundant scene-level state.
+bool SceneManager::HasActiveSkyComponent() const
+{
+	return GetActiveSkyObject().has_value();
+}
+
+// SceneManager::MarkActiveSceneSkyStateDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void SceneManager::MarkActiveSceneSkyStateDirty()
+{
 	RenderSystem::Instance().MarkSkyStateDirty();
 }
 
@@ -332,6 +382,7 @@ void SceneManager::SetActiveSceneSkySettings(const SceneSkySettings& settings)
 void SceneManager::ForceMarkActiveSceneDirty()
 {
 	activeSceneDirty = true;
+	MarkActiveSceneSkyStateDirty();
 }
 
 // SceneManager::ClearActiveSceneDirty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -504,9 +555,9 @@ void SceneManager::NullifyAssetReferences(const TerraEngine::UUID& assetId)
 		}
 	);
 
-	// Scene-owned sky sources are stored as friendly asset paths rather than raw
-	// UUIDs, so missing textures degrade through renderer fallback instead of
-	// being hard-cleared during asset deletion.
+	// SkyComponent source assets are stored as friendly asset paths rather than
+	// raw UUIDs, so missing textures degrade through renderer fallback instead
+	// of being hard-cleared during asset deletion.
 }
 
 void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32_t gridDepth, float spacing, float intensity)

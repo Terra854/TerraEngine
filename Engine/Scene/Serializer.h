@@ -19,12 +19,12 @@ public:
 	// JSON representation.
 	static nlohmann::json SerializeObject(Object& obj);
 
-	// Scene-owned render metadata lives beside the object hierarchy in the
-	// scene file, so it needs dedicated serialization helpers.
+	// Non-sky scene render metadata lives beside the object hierarchy. Sky data
+	// is component-owned, and obsolete sceneSettings.sky input is ignored.
 	static nlohmann::json SerializeSceneRenderSettings(const SceneRenderSettings& settings);
 
-	// Legacy scenes may omit the sceneSettings block entirely, so deserialization
-	// always falls back to a sanitized default configuration.
+	// Scenes may omit the sceneSettings block entirely, so deserialization falls
+	// back to sanitized defaults for the remaining non-sky settings.
 	static SceneRenderSettings DeserializeSceneRenderSettings(const nlohmann::json& json);
 	
 	// Reconstructs an object graph from JSON data. If a parent is provided,

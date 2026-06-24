@@ -31,7 +31,6 @@ private:
 	void DrawSelectedCategory();
 	void DrawProjectCategory();
 	void DrawGraphicsCategory();
-	void DrawSkyCategory();
 	void DrawUnavailableState(const char* message);
 	void DrawValidationMessage();
 

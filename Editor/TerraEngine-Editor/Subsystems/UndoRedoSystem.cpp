@@ -23,6 +23,20 @@ std::optional<Object> ResolveObject(const TerraEngine::UUID& uuid)
 
 	return ObjectManager::instance().getObject(uuid);
 }
+
+bool IsSkyComponentName(const std::string& componentName)
+{
+	return componentName == "SkyComponent";
+}
+
+void NotifySceneAfterComponentMutation(const std::string& componentName)
+{
+	SceneManager::Instance().ForceMarkActiveSceneDirty();
+	if (IsSkyComponentName(componentName))
+	{
+		SceneManager::Instance().MarkActiveSceneSkyStateDirty();
+	}
+}
 }
 
 CreateObjectCommand::CreateObjectCommand(entt::entity entity) {
@@ -102,6 +116,7 @@ void AddComponentCommand::Undo() {
 		auto& reg = ComponentAccessRegistry();
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].removeComponent(*obj);
+			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
 }
@@ -113,6 +128,7 @@ void AddComponentCommand::Redo() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].addComponent(*obj);
+			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
 }
@@ -140,6 +156,7 @@ void RemoveComponentCommand::Undo() {
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].addComponent(*obj);
 			reg[m_ComponentName].deserialize(*obj, m_ComponentJson);
+			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
 }
@@ -151,6 +168,7 @@ void RemoveComponentCommand::Redo() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (reg.count(m_ComponentName)) {
 			reg[m_ComponentName].removeComponent(*obj);
+			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
 }

@@ -22,7 +22,7 @@ namespace TerraEngine::EditorTests
 
 		registry.Add("Editor.ProjectSettings.CategorySearchContract", [](TestContext& context) {
 			const auto allCategories = TerraEngine::Editor::ProjectSettings::FilterProjectSettingsCategories("");
-			context.ExpectEqual(static_cast<std::size_t>(3), allCategories.size(), "Empty search should show all initial categories.");
+			context.ExpectEqual(static_cast<std::size_t>(2), allCategories.size(), "Empty search should show the current Project Settings categories.");
 
 			const auto shadowMatches = TerraEngine::Editor::ProjectSettings::FilterProjectSettingsCategories("shadow");
 			context.ExpectEqual(static_cast<std::size_t>(1), shadowMatches.size(), "Shadow search should find the graphics category.");
@@ -32,11 +32,7 @@ namespace TerraEngine::EditorTests
 				"Shadow search should route to the graphics category.");
 
 			const auto skyMatches = TerraEngine::Editor::ProjectSettings::FilterProjectSettingsCategories("directional");
-			context.ExpectEqual(static_cast<std::size_t>(1), skyMatches.size(), "Directional search should find the sky category.");
-			context.ExpectEqual(
-				std::string("sky"),
-				std::string(skyMatches.front().stableId),
-				"Directional search should route to the sky category.");
+			context.ExpectEqual(static_cast<std::size_t>(0), skyMatches.size(), "Directional sky search should not expose removed scene-level sky settings.");
 		});
 	}
 }

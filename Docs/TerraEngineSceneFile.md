@@ -34,6 +34,38 @@ TerraEngine uses JSON-authored data for both scenes (`.tescene`) and prefabs (`.
   SceneManager::Instance().SetActiveScene(sceneId);
   ```
 
+## Scene Settings And Sky Components
+- `sceneSettings` is reserved for scene-level render metadata that is not owned by a component, such as indirect lighting and ambient occlusion values.
+- Sky authoring data is saved only on scene objects through `components.SkyComponent`. This keeps sky data on the same object/component path used by the inspector, prefabs, undo/redo, and normal scene saves.
+- Older files may contain `sceneSettings.sky`. TerraEngine treats that field as unsupported old input and ignores it as if it were absent. Loading it does not create a `SkyComponent`, does not migrate data, and does not affect active sky selection.
+- When more than one active object owns `SkyComponent`, the active sky source is selected by the deterministic scene traversal order: root objects and children are visited by UUID string order.
+
+Example sky object:
+```json
+{
+	"name": "Sky",
+	"uuid": "01010101010101010101010101010101",
+	"components": {
+		"SkyComponent": {
+			"active": true,
+			"sourceAsset": "Textures/Sky/Default.tetf",
+			"exposure": 1.0,
+			"rotationOffsetDegrees": 0.0,
+			"horizonTint": [0.92, 0.96, 1.0],
+			"zenithTint": [0.2, 0.38, 0.8],
+			"groundTint": [0.1, 0.12, 0.18]
+		},
+		"LightComponent": {
+			"type": 0,
+			"unit": 1,
+			"color": [1.0, 1.0, 1.0],
+			"intensity": 100000.0,
+			"castsShadows": false
+		}
+	}
+}
+```
+
 ## Build and Install
 Run the standard CMake configure, build, and install steps from a clean checkout:
 ```bash

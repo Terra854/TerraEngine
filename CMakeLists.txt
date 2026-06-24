@@ -148,6 +148,7 @@ set(ENGINE_HEADERS
 	Engine/Core/Object/ObjectManager.h
 	Engine/Components/Transform.h
 	Engine/Components/PrefabLinkComponent.h
+	Engine/Components/SkyComponent.h
 	Engine/Input/InputBackend.h
 	Engine/Input/InputCodes.h
 	Engine/Input/InputSystem.h

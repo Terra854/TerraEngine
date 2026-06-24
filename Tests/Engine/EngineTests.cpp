@@ -73,6 +73,7 @@ namespace TerraEngine::Tests {
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
+	void RegisterSkyComponentSerializationTests(TestRegistry& registry);
 	void RegisterSceneStreamingDeferredLoadTests(TestRegistry& registry);
 	void RegisterScriptingComponentAccessTests(TestRegistry& registry);
 	void RegisterScriptingDiagnosticsTests(TestRegistry& registry);
@@ -173,6 +174,7 @@ int main() {
 	TerraEngine::Tests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
+	TerraEngine::Tests::RegisterSkyComponentSerializationTests(registry);
 	TerraEngine::Tests::RegisterSceneStreamingDeferredLoadTests(registry);
 	TerraEngine::Tests::RegisterScriptingComponentAccessTests(registry);
 	TerraEngine::Tests::RegisterScriptingDiagnosticsTests(registry);

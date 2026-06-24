@@ -10,49 +10,6 @@
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-namespace
-{
-	// ReadVec3OrDefault is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	glm::vec3 ReadVec3OrDefault(const nlohmann::json& jsonValue, const glm::vec3& fallback)
-	{
-		if (!jsonValue.is_array() || jsonValue.size() != 3)
-		{
-			return fallback;
-		}
-
-		glm::vec3 value = fallback;
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (std::size_t index = 0; index < 3; ++index)
-		{
-			if (!jsonValue[index].is_number())
-			{
-				return fallback;
-			}
-
-			value[index] = jsonValue[index].get<float>();
-		}
-
-		return value;
-	}
-
-	// ReadUuidOrDefault is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	TerraEngine::UUID ReadUuidOrDefault(const nlohmann::json& jsonValue, const TerraEngine::UUID& fallback)
-	{
-		if (!jsonValue.is_string())
-		{
-			return fallback;
-		}
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (const auto parsed = TerraEngine::ParseUUID(jsonValue.get<std::string>()))
-		{
-			return *parsed;
-		}
-
-		return fallback;
-	}
-}
-
 // SerializeObjectRecursive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 nlohmann::json SerializeObjectRecursive(Object& obj) {
 	ObjectManager& objManager = ObjectManager::instance();
@@ -80,7 +37,7 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
 		if (functions.hasComponent(obj))
 		{
 			nlohmann::json compJson = nlohmann::json::object();
-			TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType(compName);
+			TerraEngine::Reflection::Type type = functions.reflectionType;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (TerraEngine::Reflection::IsValid(type))
 			{
@@ -143,31 +100,9 @@ nlohmann::json Serializer::SerializeSceneRenderSettings(const SceneRenderSetting
 {
 	const SceneRenderSettings sanitizedSettings = SanitizeSceneRenderSettings(settings);
 	nlohmann::json sceneSettingsJson = nlohmann::json::object();
-	nlohmann::json skyJson = nlohmann::json::object();
 
-	skyJson["enabled"] = sanitizedSettings.sky.enabled;
-	skyJson["sourceAsset"] = sanitizedSettings.sky.sourceAsset;
-	skyJson["intensity"] = sanitizedSettings.sky.intensity;
-	skyJson["exposure"] = sanitizedSettings.sky.exposure;
-	skyJson["rotationOffsetDegrees"] = sanitizedSettings.sky.rotationOffsetDegrees;
-	skyJson["horizonTint"] = {
-		sanitizedSettings.sky.horizonTint.x,
-		sanitizedSettings.sky.horizonTint.y,
-		sanitizedSettings.sky.horizonTint.z
-	};
-	skyJson["zenithTint"] = {
-		sanitizedSettings.sky.zenithTint.x,
-		sanitizedSettings.sky.zenithTint.y,
-		sanitizedSettings.sky.zenithTint.z
-	};
-	skyJson["groundTint"] = {
-		sanitizedSettings.sky.groundTint.x,
-		sanitizedSettings.sky.groundTint.y,
-		sanitizedSettings.sky.groundTint.z
-	};
-	skyJson["directionalLightObjectId"] = TerraEngine::ToHexString(sanitizedSettings.sky.directionalLightObjectId);
-
-	sceneSettingsJson["sky"] = std::move(skyJson);
+	// Sky authoring now belongs to SkyComponent on scene objects. This scene
+	// settings block intentionally writes only non-sky renderer settings.
 	sceneSettingsJson["indirectStrength"] = sanitizedSettings.indirectStrength;
 	sceneSettingsJson["ambientOcclusionStrength"] = sanitizedSettings.ambientOcclusionStrength;
 	sceneSettingsJson["ambientOcclusionQuality"] = sanitizedSettings.ambientOcclusionQuality;
@@ -184,23 +119,8 @@ SceneRenderSettings Serializer::DeserializeSceneRenderSettings(const nlohmann::j
 		return settings;
 	}
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (const auto skyIt = json.find("sky"); skyIt != json.end() && skyIt->is_object())
-	{
-		SceneSkySettings sky = settings.sky;
-		sky.enabled = skyIt->value("enabled", sky.enabled);
-		sky.sourceAsset = skyIt->value("sourceAsset", sky.sourceAsset);
-		sky.intensity = skyIt->value("intensity", sky.intensity);
-		sky.exposure = skyIt->value("exposure", sky.exposure);
-		sky.rotationOffsetDegrees = skyIt->value("rotationOffsetDegrees", sky.rotationOffsetDegrees);
-		sky.horizonTint = ReadVec3OrDefault(skyIt->value("horizonTint", nlohmann::json{}), sky.horizonTint);
-		sky.zenithTint = ReadVec3OrDefault(skyIt->value("zenithTint", nlohmann::json{}), sky.zenithTint);
-		sky.groundTint = ReadVec3OrDefault(skyIt->value("groundTint", nlohmann::json{}), sky.groundTint);
-		sky.directionalLightObjectId = ReadUuidOrDefault(
-			skyIt->value("directionalLightObjectId", nlohmann::json{}),
-			sky.directionalLightObjectId);
-		settings.sky = SanitizeSceneSkySettings(sky);
-	}
+	// Obsolete sceneSettings.sky data is unsupported by design and ignored as
+	// if absent. Do not convert it into component data here.
 
 	settings.indirectStrength = json.value("indirectStrength", settings.indirectStrength);
 	settings.ambientOcclusionStrength = json.value("ambientOcclusionStrength", settings.ambientOcclusionStrength);
@@ -269,7 +189,7 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
 				auto& functions = registry[compName];
 				functions.addComponent(obj);
 
-				TerraEngine::Reflection::Type type = TerraEngine::Reflection::ResolveType(compName);
+					TerraEngine::Reflection::Type type = functions.reflectionType;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (TerraEngine::Reflection::IsValid(type)) {
 					// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.

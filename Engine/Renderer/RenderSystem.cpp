@@ -16,6 +16,7 @@
 #include "Components/CameraComponent.h"
 #include "Components/MeshRenderComponent.h"
 #include "Components/LightComponent.h"
+#include "Components/SkyComponent.h"
 #include "Scene/SceneGraphRuntime.h"
 #include "Scene/SceneManager.h"
 #include "Core/Object/ObjectManager.h"
@@ -1431,65 +1432,47 @@ void RenderSystem::Update(float deltaTime)
 	};
 
 	SkyRuntimeState skyRuntimeState{};
+	const SkyComponent* activeSkyComponent = nullptr;
+	const LightEntry* activeSkyDirectionalLight = nullptr;
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Resolve Sky State", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		const SceneSkySettings activeSkySettings = SceneManager::Instance().GetActiveSceneSkySettings();
+		std::optional<Object> activeSkyObject = SceneManager::Instance().GetActiveSkyObject();
+		activeSkyComponent = activeSkyObject.has_value() ? activeSkyObject->getComponent<SkyComponent>() : nullptr;
+		const bool hasActiveSkyComponent = activeSkyComponent != nullptr;
 		skyRuntimeState.isValid = true;
 		skyRuntimeState.usingFallback = true;
 		skyRuntimeState.hasProblem = false;
 		skyRuntimeState.dirty = skyStateDirty;
-		skyRuntimeState.forceBlackFallback = !activeSkySettings.enabled;
+		skyRuntimeState.forceBlackFallback = !hasActiveSkyComponent;
 		std::string skyIssueMessage;
 
-		const LightEntry* firstDirectionalLight = nullptr;
-		const LightEntry* boundDirectionalLight = nullptr;
+		const TerraEngine::UUID skyObjectId = activeSkyObject.has_value() ? activeSkyObject->getUUID() : TerraEngine::EMPTY_UUID;
+		const LightEntry* skyObjectDirectionalLight = nullptr;
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const LightEntry& lightEntry : lights)
 		{
-			if (lightEntry.light.type != LightType::Directional)
+			if (lightEntry.lightId != skyObjectId)
 			{
 				continue;
 			}
-
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (firstDirectionalLight == nullptr)
+			if (lightEntry.light.type == LightType::Directional)
 			{
-				firstDirectionalLight = &lightEntry;
+				skyObjectDirectionalLight = &lightEntry;
 			}
-
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (lightEntry.lightId == activeSkySettings.directionalLightObjectId)
-			{
-				boundDirectionalLight = &lightEntry;
-			}
+			break;
 		}
 
 		glm::vec3 baseSunDirection = kSkyReferenceSunDirection;
 		const LightEntry* resolvedDirectionalLight = nullptr;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (activeSkySettings.enabled)
+		if (hasActiveSkyComponent)
 		{
-			if (activeSkySettings.directionalLightObjectId != TerraEngine::EMPTY_UUID)
+			resolvedDirectionalLight = skyObjectDirectionalLight;
+			activeSkyDirectionalLight = resolvedDirectionalLight;
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (resolvedDirectionalLight == nullptr)
 			{
-				resolvedDirectionalLight = boundDirectionalLight;
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (resolvedDirectionalLight == nullptr)
-				{
-					skyRuntimeState.hasProblem = true;
-					skyRuntimeState.forceBlackFallback = true;
-					skyIssueMessage = "Configured sky directional light could not be resolved. Rendering a black background.";
-				}
-			}
-			else
-			{
-				resolvedDirectionalLight = firstDirectionalLight;
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (resolvedDirectionalLight == nullptr)
-				{
-					skyRuntimeState.hasProblem = true;
-					skyRuntimeState.forceBlackFallback = true;
-					skyIssueMessage = "Scene sky requires a directional light. Rendering a black background.";
-				}
+				skyRuntimeState.forceBlackFallback = true;
 			}
 		}
 
@@ -1504,12 +1487,13 @@ void RenderSystem::Update(float deltaTime)
 			}
 		}
 
-		skyRuntimeState.resolvedSunDirection = ApplySkyYawOffset(baseSunDirection, activeSkySettings.rotationOffsetDegrees);
+		const float skyRotationOffset = activeSkyComponent != nullptr ? ClampSkyRotationOffset(activeSkyComponent->rotationOffsetDegrees) : 0.0f;
+		skyRuntimeState.resolvedSunDirection = ApplySkyYawOffset(baseSunDirection, skyRotationOffset);
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (activeSkySettings.enabled && !skyRuntimeState.forceBlackFallback && !activeSkySettings.sourceAsset.empty())
+		if (hasActiveSkyComponent && !skyRuntimeState.forceBlackFallback && !activeSkyComponent->sourceAsset.empty())
 		{
-			const TerraEngine::UUID resolvedTextureId = ResourceManager::Instance().ResolveAssetReference(activeSkySettings.sourceAsset, AssetType::Texture);
+			const TerraEngine::UUID resolvedTextureId = ResourceManager::Instance().ResolveAssetReference(activeSkyComponent->sourceAsset, AssetType::Texture);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (resolvedTextureId == TerraEngine::EMPTY_UUID)
 			{
@@ -1526,11 +1510,12 @@ void RenderSystem::Update(float deltaTime)
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (skyRuntimeState.hasProblem)
 		{
-			const std::string issueKey = activeSkySettings.sourceAsset + "|" + skyIssueMessage;
+			const std::string sourceAsset = activeSkyComponent != nullptr ? activeSkyComponent->sourceAsset : std::string();
+			const std::string issueKey = sourceAsset + "|" + skyIssueMessage;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (issueKey != lastLoggedSkyIssueKey)
 			{
-				TERRAENGINE_LOG(LogLevel::Warning, "[Sky] " << skyIssueMessage << " Source: " << activeSkySettings.sourceAsset);
+				TERRAENGINE_LOG(LogLevel::Warning, "[Sky] " << skyIssueMessage << " Source: " << sourceAsset);
 				lastLoggedSkyIssueKey = issueKey;
 			}
 		}
@@ -1541,7 +1526,6 @@ void RenderSystem::Update(float deltaTime)
 	}
 
 	FrameRenderData frameData;
-	const SceneSkySettings activeSkySettings = SceneManager::Instance().GetActiveSceneSkySettings();
 	frameData.deltaTimeSeconds = deltaTime;
 	frameData.globalTaskShaderCullingEnabled = taskShaderCullingEnabled;
 	frameData.cullingEpsilon = 0.001f;
@@ -1552,12 +1536,12 @@ void RenderSystem::Update(float deltaTime)
 	frameData.sky.hasTexture = skyRuntimeState.resolvedSkyHandle != TerraEngine::EMPTY_UUID && !skyRuntimeState.usingFallback;
 	frameData.sky.usingFallback = skyRuntimeState.usingFallback;
 	frameData.sky.forceBlack = skyRuntimeState.forceBlackFallback;
-	frameData.sky.intensity = activeSkySettings.intensity;
-	frameData.sky.exposure = activeSkySettings.exposure;
-	frameData.sky.rotationOffsetDegrees = activeSkySettings.rotationOffsetDegrees;
-	frameData.sky.horizonTint = activeSkySettings.horizonTint;
-	frameData.sky.zenithTint = activeSkySettings.zenithTint;
-	frameData.sky.groundTint = activeSkySettings.groundTint;
+	frameData.sky.intensity = activeSkyDirectionalLight != nullptr ? std::max(activeSkyDirectionalLight->light.intensity, 0.0f) : 1.0f;
+	frameData.sky.exposure = activeSkyComponent != nullptr ? ClampSkyExposure(activeSkyComponent->exposure) : 1.0f;
+	frameData.sky.rotationOffsetDegrees = activeSkyComponent != nullptr ? ClampSkyRotationOffset(activeSkyComponent->rotationOffsetDegrees) : 0.0f;
+	frameData.sky.horizonTint = activeSkyComponent != nullptr ? ClampSkyTint(activeSkyComponent->horizonTint) : frameData.sky.horizonTint;
+	frameData.sky.zenithTint = activeSkyComponent != nullptr ? ClampSkyTint(activeSkyComponent->zenithTint) : frameData.sky.zenithTint;
+	frameData.sky.groundTint = activeSkyComponent != nullptr ? ClampSkyTint(activeSkyComponent->groundTint) : frameData.sky.groundTint;
 	frameData.sky.sunDirection = skyRuntimeState.resolvedSunDirection;
 	frameData.sky.textureId = skyRuntimeState.resolvedSkyHandle;
 	frameData.lightCandidates = std::move(packedLights);

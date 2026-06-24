@@ -23,8 +23,8 @@ namespace TerraEngine::Editor::ProjectSettings
 	inline constexpr std::string_view kSkySettingsWindowTitle = "Sky Settings";
 	inline constexpr std::string_view kRenderSettingsWindowTitle = "Render Settings";
 
-	// ProjectSettingsCategoryId names the supported categories explicitly so UI
-	// routing and tests do not depend on localized labels or menu ordering.
+	// ProjectSettingsCategoryId names known category identifiers explicitly so
+	// tests can verify removed categories are no longer listed by metadata.
 	enum class ProjectSettingsCategoryId
 	{
 		Project,
@@ -41,7 +41,7 @@ namespace TerraEngine::Editor::ProjectSettings
 		std::array<std::string_view, 8> keywords;
 	};
 
-	inline constexpr std::array<ProjectSettingsCategoryDescriptor, 3> kProjectSettingsCategories = {{
+	inline constexpr std::array<ProjectSettingsCategoryDescriptor, 2> kProjectSettingsCategories = {{
 		{
 			ProjectSettingsCategoryId::Project,
 			"project",
@@ -55,13 +55,6 @@ namespace TerraEngine::Editor::ProjectSettings
 			"Graphics",
 			"Renderer quality, lighting, shadow, and texture options.",
 			{ "graphics", "render", "quality", "shadow", "lighting", "texture", "vrs", "ambient" }
-		},
-		{
-			ProjectSettingsCategoryId::Sky,
-			"sky",
-			"Sky",
-			"Scene sky, environment tint, and directional light binding.",
-			{ "sky", "environment", "horizon", "zenith", "ground", "directional", "light", "scene" }
 		}
 	}};
 
