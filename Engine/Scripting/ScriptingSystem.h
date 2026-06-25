@@ -186,6 +186,8 @@ public:
 	static bool ScriptingDiagnosticsRequested();
 	static std::vector<ScriptBatch> PlanScriptBatches(const ScriptUpdateWorkload& workload, std::size_t workerCount);
 	static std::string FormatScriptingFrameResult(const ScriptingFrameResult& result);
+	static std::string FormatScriptLifecycleState(ScriptLifecycleState state);
+	static std::string ClassifyScriptInstanceStatus(const ScriptInstanceRecord& record);
 	static std::optional<ScriptDispatchContext> CurrentScriptDispatchContext();
 	static void SetCurrentScriptDispatchContext(ScriptDispatchContext context);
 	static void ClearCurrentScriptDispatchContext();

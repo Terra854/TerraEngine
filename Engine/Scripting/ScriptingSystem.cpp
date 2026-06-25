@@ -371,6 +371,7 @@ namespace
 		int runtimeOverrideCount = 0;
 		std::vector<ScriptFieldSnapshot> fields;
 		std::vector<ScriptFieldDiagnostic> diagnostics;
+		std::uint64_t snapshotVersion = 0;
 	};
 
 	// struct ManagedWriteResponse groups related state and operations so callers have one documented contract.
@@ -428,6 +429,7 @@ namespace
 		response.runtimeOverrideCount = jsonValue.value("runtimeOverrideCount", 0);
 		response.fields = jsonValue.value("fields", std::vector<ScriptFieldSnapshot>{});
 		response.diagnostics = jsonValue.value("diagnostics", std::vector<ScriptFieldDiagnostic>{});
+		response.snapshotVersion = jsonValue.value("snapshotVersion", static_cast<std::uint64_t>(0));
 	}
 
 	// from_json is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -626,6 +628,56 @@ std::string ScriptingSystem::FormatScriptingFrameResult(const ScriptingFrameResu
 	return stream.str();
 }
 
+// Converts a ScriptLifecycleState enum value into a user-friendly string representation.
+// Input: The ScriptLifecycleState enum to format.
+// Output: A string matching the state name (e.g. "Created", "Started", "Updating", "Disabled", "Destroyed").
+std::string ScriptingSystem::FormatScriptLifecycleState(ScriptLifecycleState state)
+{
+	switch (state)
+	{
+	case ScriptLifecycleState::Created:
+		return "Created";
+	case ScriptLifecycleState::Started:
+		return "Started";
+	case ScriptLifecycleState::Updating:
+		return "Updating";
+	case ScriptLifecycleState::Disabled:
+		return "Disabled";
+	case ScriptLifecycleState::Destroyed:
+		return "Destroyed";
+	}
+	return "Unknown";
+}
+
+// Classifies the status of a script instance based on its lifecycle and version tracking.
+// Input: The ScriptInstanceRecord containing version numbers and lifecycle state.
+// Output: A string describing the active status of the script. Returns "Stale (Update Pending)" if the 
+// authored state version differs from what has been observed in the runtime assembly, or the lifecycle name.
+std::string ScriptingSystem::ClassifyScriptInstanceStatus(const ScriptInstanceRecord& record)
+{
+	// If the user edited properties or recompiled scripts, the authored version increments.
+	// We mark the script as Stale until the gameplay runtime catches up and processes the update.
+	if (record.authoredStateVersion != record.runtimeObservedVersion)
+	{
+		return "Stale (Update Pending)";
+	}
+
+	switch (record.lifecycleState)
+	{
+	case ScriptLifecycleState::Created:
+		return "Created";
+	case ScriptLifecycleState::Started:
+		return "Started";
+	case ScriptLifecycleState::Updating:
+		return "Ready"; // In updating state, the script is active and running correctly
+	case ScriptLifecycleState::Disabled:
+		return "Disabled";
+	case ScriptLifecycleState::Destroyed:
+		return "Destroyed";
+	}
+	return "Unknown";
+}
+
 ScriptingSystem::ScriptUpdateWorkload ScriptingSystem::BuildScriptUpdateWorkload(float deltaTime, bool exportMode)
 {
 	ScriptUpdateWorkload workload;
@@ -747,6 +799,19 @@ ScriptingSystem::ScriptFrameReadView ScriptingSystem::BuildScriptFrameReadView(c
 		record.objectGeneration = item.objectGeneration;
 		record.componentGeneration = item.componentGeneration;
 		record.bindingGeneration = item.bindingGeneration;
+		// Query runtimeObservedVersion from the live script binding's snapshotVersion via ObjectManager
+		if (auto objectOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(item.objectId)))
+		{
+			if (auto* scriptComponent = objectOpt->getComponent<ScriptComponent>())
+			{
+				auto guard = scriptComponent->acquireReadLock();
+				if (const ScriptBinding* binding = scriptComponent->FindBinding(item.bindingId))
+				{
+					record.runtimeObservedVersion = binding->snapshotVersion;
+				}
+			}
+		}
+
 		readView.scriptRecords.push_back(std::move(record));
 	}
 
@@ -1827,6 +1892,7 @@ void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 		binding->runtimeAvailable = response.runtimeAvailable;
 		binding->runtimeOverrideCount = response.runtimeOverrideCount;
 		binding->liveSnapshots = std::move(response.fields);
+		binding->snapshotVersion = response.snapshotVersion;
 
 		// Snapshot refresh should only replace transient runtime diagnostics.
 		// Static descriptor warnings already live on the binding and would grow

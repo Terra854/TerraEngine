@@ -14,6 +14,7 @@
 #include "Engine/Core/Scheduling/SystemScheduler.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
+#include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/UI/UISystem.h"
 
 #include <cstddef>
@@ -347,6 +348,58 @@ void SchedulerDiagnosticsWindow::DrawScriptingSummary()
 		for (const std::string& message : result.accessReport.messages)
 		{
 			ImGui::TextWrapped("%s", message.c_str());
+		}
+		ImGui::TreePop();
+	}
+
+	const ScriptingSystem::ScriptFrameReadView& readView = ScriptingSystem::Instance().GetLatestScriptFrameReadView();
+	if (!readView.scriptRecords.empty() && ImGui::TreeNode("Script Instances"))
+	{
+		if (ImGui::BeginTable("SchedulerDiagnosticsScriptInstances", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+		{
+			ImGui::TableSetupColumn("Object");
+			ImGui::TableSetupColumn("Script Type");
+			ImGui::TableSetupColumn("Binding ID");
+			ImGui::TableSetupColumn("Lifecycle");
+			ImGui::TableSetupColumn("Version");
+			ImGui::TableSetupColumn("Status");
+			ImGui::TableHeadersRow();
+
+			for (const ScriptingSystem::ScriptInstanceRecord& record : readView.scriptRecords)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				std::string objectName = "Object " + std::to_string(record.objectId);
+				if (auto obj = ObjectManager::instance().getObject(static_cast<entt::entity>(record.objectId)))
+				{
+					objectName = ObjectManager::instance().getObjectName(*obj);
+				}
+				ImGui::TextUnformatted(objectName.c_str());
+
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextUnformatted(record.scriptType.c_str());
+
+				ImGui::TableSetColumnIndex(2);
+				ImGui::TextUnformatted(record.bindingId.c_str());
+
+				ImGui::TableSetColumnIndex(3);
+				ImGui::TextUnformatted(ScriptingSystem::FormatScriptLifecycleState(record.lifecycleState).c_str());
+
+				ImGui::TableSetColumnIndex(4);
+				ImGui::Text("%llu / %llu", static_cast<unsigned long long>(record.authoredStateVersion), static_cast<unsigned long long>(record.runtimeObservedVersion));
+
+				ImGui::TableSetColumnIndex(5);
+				std::string status = ScriptingSystem::ClassifyScriptInstanceStatus(record);
+				if (status == "Stale (Update Pending)")
+				{
+					ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1.0f), "%s", status.c_str());
+				}
+				else
+				{
+					ImGui::TextUnformatted(status.c_str());
+				}
+			}
+			ImGui::EndTable();
 		}
 		ImGui::TreePop();
 	}

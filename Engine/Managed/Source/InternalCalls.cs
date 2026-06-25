@@ -91,6 +91,7 @@ namespace TerraEngine
 		public string Status { get; set; } = "Attached";
 		public bool RuntimeAvailable { get; set; }
 		public int RuntimeOverrideCount { get; set; }
+		public ulong SnapshotVersion { get; set; }
 		public List<LiveFieldSnapshotPayload> Fields { get; set; } = new();
 		public List<ScriptFieldDiagnosticPayload> Diagnostics { get; set; } = new();
 	}
@@ -531,7 +532,8 @@ namespace TerraEngine
 					BindingId = bindingId,
 					FullTypeName = descriptor.FullTypeName,
 					Status = "LiveReady",
-					RuntimeAvailable = true
+					RuntimeAvailable = true,
+					SnapshotVersion = scriptState.LastAuthoredStateVersion
 				};
 				snapshot.Diagnostics.AddRange(descriptor.Diagnostics);
 
@@ -962,6 +964,7 @@ namespace TerraEngine
 						HydrateScriptInstance(scriptState.Instance, scriptState.ScriptType, bindingPayload);
 						scriptState.LastHydratedSignature = authoredSignature;
 						scriptState.LastAuthoredStateVersion = bindingPayload.AuthoredStateVersion != 0 ? bindingPayload.AuthoredStateVersion : authoredStateVersion;
+						Native_ScriptComponent_ReportObservedVersion(objectId, bindingId, scriptState.LastAuthoredStateVersion);
 					}
 
 					// Validate this condition before crossing into native or editor state that may outlive the managed object.
@@ -1802,6 +1805,9 @@ namespace TerraEngine
 
 		[DllImport("TerraEngine")]
 		internal static extern ulong Native_ScriptComponent_GetBindingVersion(uint objectId, string bindingId);
+
+		[DllImport("TerraEngine")]
+		internal static extern void Native_ScriptComponent_ReportObservedVersion(uint objectId, string bindingId, ulong observedVersion);
 
 		[DllImport("TerraEngine")]
 		// Native_ScriptComponent_SetBindingValue bridges managed callers to engine state; validate arguments before forwarding to native code.

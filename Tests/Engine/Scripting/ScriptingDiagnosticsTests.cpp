@@ -72,5 +72,27 @@ namespace TerraEngine::Tests {
 			context.Expect(sawProtected, "Protected scripts should keep a separate diagnostics classification.");
 			context.Expect(sawSkipped, "Skipped scripts should keep a separate diagnostics classification.");
 		});
+
+		registry.Add("Scripting.Diagnostics.FormatsLifecycleState", [](TestContext& context) {
+			context.ExpectEqual("Created", ScriptingSystem::FormatScriptLifecycleState(ScriptingSystem::ScriptLifecycleState::Created), "Lifecycle state should format correctly.");
+			context.ExpectEqual("Started", ScriptingSystem::FormatScriptLifecycleState(ScriptingSystem::ScriptLifecycleState::Started), "Lifecycle state should format correctly.");
+			context.ExpectEqual("Updating", ScriptingSystem::FormatScriptLifecycleState(ScriptingSystem::ScriptLifecycleState::Updating), "Lifecycle state should format correctly.");
+			context.ExpectEqual("Disabled", ScriptingSystem::FormatScriptLifecycleState(ScriptingSystem::ScriptLifecycleState::Disabled), "Lifecycle state should format correctly.");
+			context.ExpectEqual("Destroyed", ScriptingSystem::FormatScriptLifecycleState(ScriptingSystem::ScriptLifecycleState::Destroyed), "Lifecycle state should format correctly.");
+		});
+
+		registry.Add("Scripting.Diagnostics.ClassifiesInstanceStatus", [](TestContext& context) {
+			ScriptingSystem::ScriptInstanceRecord record;
+			record.authoredStateVersion = 2;
+			record.runtimeObservedVersion = 2;
+			record.lifecycleState = ScriptingSystem::ScriptLifecycleState::Updating;
+			context.ExpectEqual("Ready", ScriptingSystem::ClassifyScriptInstanceStatus(record), "LifecycleState::Updating and clean should be classified as Ready.");
+
+			record.lifecycleState = ScriptingSystem::ScriptLifecycleState::Disabled;
+			context.ExpectEqual("Disabled", ScriptingSystem::ClassifyScriptInstanceStatus(record), "LifecycleState::Disabled should be classified as Disabled.");
+
+			record.authoredStateVersion = 3;
+			context.ExpectEqual("Stale (Update Pending)", ScriptingSystem::ClassifyScriptInstanceStatus(record), "Version mismatch should result in Stale (Update Pending) status.");
+		});
 	}
 }

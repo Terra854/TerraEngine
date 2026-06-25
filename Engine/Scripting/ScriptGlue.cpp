@@ -888,6 +888,25 @@ extern "C" {
 		return 0;
 	}
 
+	// Reports the runtime observed version of a script binding back to the engine.
+	// Input: The object ID, the binding ID, and the newly observed version number.
+	// Output: None. Updates the binding's snapshotVersion in the ScriptComponent.
+	void Native_ScriptComponent_ReportObservedVersion(uint32_t objectId, const char* bindingId, std::uint64_t observedVersion) {
+		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
+		if (bindingId == nullptr || bindingId[0] == '\0') {
+			return;
+		}
+
+		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
+				auto guard = scriptComponent->acquireWriteLock();
+				if (ScriptBinding* binding = scriptComponent->FindBinding(bindingId)) {
+					binding->snapshotVersion = observedVersion;
+				}
+			}
+		}
+	}
+
 	// Native_ScriptComponent_SetBindingValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_ScriptComponent_SetBindingValue(uint32_t objectId, const char* bindingId, const char* fieldPath, const char* valueKind, const char* valueJson, const char* compatibility, const char* sourceTypeFingerprint) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
