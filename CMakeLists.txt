@@ -793,7 +793,11 @@ set(IMGUI_FILE_DIALOG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiFileDialog)
 
 add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/EditorMain.cpp
+	Editor/TerraEngine-Editor/Core/EditorCommandLine.cpp
 	Editor/TerraEngine-Editor/Core/EditorSystem.cpp
+	Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
+	Editor/TerraEngine-Editor/Automation/EditorMcpBridge.cpp
+	Editor/TerraEngine-Editor/Automation/EditorMcpTransport.cpp
 	Editor/TerraEngine-Editor/Subsystems/ProjectHubSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp
 	Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
@@ -817,6 +821,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp
 	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProjectSettingsWindow.cpp
+	Editor/TerraEngine-Editor/Windows/EditorMcpBridgeWindow.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
@@ -853,6 +858,7 @@ target_include_directories(TerraEngine-Editor
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Project
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling
 		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
 		${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuizmo
@@ -899,6 +905,10 @@ target_link_libraries(TerraEngine-Editor
 		libzstd_static
 		xxhash
 )
+
+if(WIN32)
+	target_link_libraries(TerraEngine-Editor PRIVATE ws2_32)
+endif()
 
 if(BUILD_TESTING)
 	# Test targets live under one repository-level Tests tree while preserving

@@ -7,6 +7,7 @@
 #include "MainEditorSubsystem.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
+#include "../Automation/EditorMcpBridge.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Core/MainEngine.h"
@@ -38,6 +39,10 @@ static GLFWscrollfun g_PrevScrollCallback = nullptr;
 static GLFWkeyfun g_PrevKeyCallback = nullptr;
 static GLFWcharfun g_PrevCharCallback = nullptr;
 static GLFWdropfun g_PrevDropCallback = nullptr;
+
+void EditorSystem::SetStartupProjectPath(const std::filesystem::path& projectPath) {
+	startupProjectPath = projectPath;
+}
 
 // Wraps the OS cursor to the opposite edge while dragging inspector values.
 // Input: window handle for size/position queries. Output: cursor warp plus ImGui state sync.
@@ -98,7 +103,12 @@ void EditorSystem::Setup(Engine* enginePtr) {
 	// Setup Context
 	context.engine = enginePtr;
 	context.projectManager = std::make_shared<ProjectManager>();
-	// context.assetDatabase = std::make_shared<AssetDatabase>(); // Pending
+	context.editorMcpBridge = std::make_shared<TerraEngine::Editor::Automation::EditorMcpBridge>();
+	context.editorMcpBridge->Initialize(&context);
+	// AssetDatabase is a singleton today; expose it through EditorContext with a
+	// non-owning shared_ptr so automation tools and subsystems use the same live
+	// database without changing its lifecycle ownership.
+	context.assetDatabase = std::shared_ptr<AssetDatabase>(&AssetDatabase::Instance(), [](AssetDatabase*) {});
 
 	// Create Subsystems
 	projectHub = std::make_shared<ProjectHubSubsystem>();
@@ -106,22 +116,31 @@ void EditorSystem::Setup(Engine* enginePtr) {
 
 	projectHub->Initialize(context);
 	mainEditor->Initialize(context);
+	context.editorMcpBridge->SetMainEditor(mainEditor.get());
+	context.editorMcpBridge->SetSelectionCallbacks(
+		[this]() -> std::optional<entt::entity> {
+			return mainEditor ? mainEditor->GetSelectedEntity() : std::nullopt;
+		},
+		[this](std::optional<entt::entity> entity) {
+			if (mainEditor) {
+				mainEditor->SetSelectedEntity(entity);
+			}
+		});
+	// MCP startup preferences are applied after editor callbacks are registered
+	// so a default-enabled bridge can safely serve selection-aware requests.
+	const EditorPreferences& preferences = context.projectManager->GetEditorPreferences();
+	const std::string editorMcpWriteModeDefault = preferences.editorMcpWriteModeDefault;
+	const bool editorMcpEnabled = preferences.editorMcpEnabled;
+	if (const auto parsedWriteMode = TerraEngine::Editor::Automation::ParseWriteMode(editorMcpWriteModeDefault)) {
+		context.editorMcpBridge->SetWriteMode(*parsedWriteMode);
+	}
+	if (editorMcpEnabled) {
+		context.editorMcpBridge->SetEnabled(true);
+	}
 
 	// Wire Callbacks
 	projectHub->SetOnProjectLoadedCallback([this]() {
-		// Initialize Asset Database with project root
-		if (context.projectManager->HasActiveProject()) {
-			std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
-			
-			// Set Engine ResourceManager's asset root to the build directory so it can find compiled assets
-			// We do this BEFORE AssetDatabase::Initialize because that triggers ScanProject/RegisterAssetPath
-			ResourceManager::Instance().SetAssetRoot(projectRoot / "Build" / "Assets");
-			
-			AssetDatabase::Instance().Initialize(projectRoot);
-		}
-		// Transition logic
-		mainEditor->OnProjectOpened();
-		pendingLoadLayout = true;
+		HandleProjectLoaded();
 	});
 
 	mainEditor->SetOnProjectClosedCallback([this]() {
@@ -147,6 +166,41 @@ void EditorSystem::Setup(Engine* enginePtr) {
 	});
 
 	initialized = true;
+}
+
+void EditorSystem::ProcessStartupProjectOpen() {
+	if (startupProjectOpenAttempted || !startupProjectPath.has_value() || context.projectManager->HasActiveProject()) {
+		return;
+	}
+
+	startupProjectOpenAttempted = true;
+	std::string error;
+	const std::filesystem::path projectPath = *startupProjectPath;
+	// Process command-line project loading from the editor update path instead
+	// of early setup so it runs after the engine/editor frame has reached the
+	// same initialized state used by normal project-hub opens.
+	TERRAENGINE_LOG(LogLevel::Info, "[EditorSystem] Opening startup project: " << projectPath.string());
+	if (context.projectManager->LoadProject(projectPath, &error)) {
+		HandleProjectLoaded();
+	} else {
+		TERRAENGINE_LOG(LogLevel::Error, "[EditorSystem] Failed to open startup project: " << error);
+	}
+}
+
+void EditorSystem::HandleProjectLoaded() {
+	// Initialize Asset Database with project root
+	if (context.projectManager->HasActiveProject()) {
+		std::filesystem::path projectRoot = context.projectManager->GetProjectRoot();
+		
+		// Set Engine ResourceManager's asset root to the build directory so it can find compiled assets
+		// We do this BEFORE AssetDatabase::Initialize because that triggers ScanProject/RegisterAssetPath
+		ResourceManager::Instance().SetAssetRoot(projectRoot / "Build" / "Assets");
+		
+		AssetDatabase::Instance().Initialize(projectRoot);
+	}
+	// Transition logic
+	mainEditor->OnProjectOpened();
+	pendingLoadLayout = true;
 }
 
 // EditorSystem::SaveWorkspaceLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -453,6 +507,13 @@ void EditorSystem::Initialize() {
 void EditorSystem::Update(float deltaTime) {
 	if (!initialized) return;
 
+	// Command-line project loading must happen before ImGui starts a new frame
+	// and before the editor decides which UI branch to update. Loading here
+	// gives --project the same steady-state behavior as a project that was
+	// already open at the beginning of the frame: scene resources, layout, MCP,
+	// and editor windows all see one consistent active-project state.
+	ProcessStartupProjectOpen();
+
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (pendingLoadLayout) {
 		LoadWorkspaceLayout();
@@ -472,6 +533,9 @@ void EditorSystem::Update(float deltaTime) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (context.projectManager->HasActiveProject()) {
 		AssetDatabase::Instance().Update();
+		if (context.editorMcpBridge) {
+			context.editorMcpBridge->Update(deltaTime);
+		}
 		mainEditor->Update(deltaTime);
 		mainEditor->DrawUI();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -524,8 +588,11 @@ void EditorSystem::Shutdown() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (mainEditor) mainEditor->Shutdown();
 	if (projectHub) projectHub->Shutdown();
+	if (context.editorMcpBridge) context.editorMcpBridge->Shutdown();
 	
 	AssetDatabase::Instance().Shutdown();
+	context.editorMcpBridge.reset();
+	context.assetDatabase.reset();
 	context.projectManager.reset();
 	
 	initialized = false;

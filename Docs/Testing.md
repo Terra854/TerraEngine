@@ -89,6 +89,24 @@ $env:TERRAENGINE_TEST_FILTER="Resource.Streaming;Scene.Streaming;Renderer.Stream
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
+The editor MCP bridge checks live under `Tests/Editor/Automation`. They cover
+automation envelopes, capability metadata, local-only transport checks, bridge
+state transitions, bounded activity history, approval prompts, and resource/tool
+routing. For a focused Windows run, build through the Visual Studio developer
+environment and run the editor harness with the MCP/Automation filter:
+
+```powershell
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine-EditorTests TerraEngine-Editor"
+$env:TERRAENGINE_TEST_FILTER="Editor.MCP;Editor.Automation"
+.\out\build\Debug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+After installation, open the installed editor, load a project, and use
+`Windows > MCP Bridge` to confirm disabled/read-only startup, local-only
+connection behavior, capability/resource listing, write-mode blocking, approval
+prompts, and activity history.
+
 For Linux-specific prerequisites and troubleshooting, see
 `Docs/LinuxSupport.md`.
 

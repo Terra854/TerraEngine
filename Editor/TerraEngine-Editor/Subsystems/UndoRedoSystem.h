@@ -68,6 +68,37 @@ private:
 	std::string m_NewName;
 };
 
+// Records object metadata edits made through automation or inspector paths.
+// All fields are captured because name, tag, layer, active, and static together
+// define the editor-visible metadata surface for one object.
+class SetObjectMetadataCommand : public ICommand {
+public:
+	SetObjectMetadataCommand(entt::entity entity, const nlohmann::json& oldMetadata, const nlohmann::json& newMetadata);
+	void Undo() override;
+	void Redo() override;
+	std::string GetName() const override;
+
+private:
+	TerraEngine::UUID m_Uuid;
+	nlohmann::json m_OldMetadata;
+	nlohmann::json m_NewMetadata;
+};
+
+// Records hierarchy edits so assistant-driven parenting can be undone just like
+// hand-authored hierarchy changes.
+class SetParentCommand : public ICommand {
+public:
+	SetParentCommand(entt::entity child, std::optional<TerraEngine::UUID> oldParent, std::optional<TerraEngine::UUID> newParent);
+	void Undo() override;
+	void Redo() override;
+	std::string GetName() const override;
+
+private:
+	TerraEngine::UUID m_ChildUuid;
+	std::optional<TerraEngine::UUID> m_OldParent;
+	std::optional<TerraEngine::UUID> m_NewParent;
+};
+
 // class AddComponentCommand groups related state and operations so callers have one documented contract.
 class AddComponentCommand : public ICommand {
 public:
@@ -93,6 +124,23 @@ private:
 	TerraEngine::UUID m_Uuid;
 	std::string m_ComponentName;
 	nlohmann::json m_ComponentJson;
+};
+
+// Records a reflected component payload before and after a property edit. The
+// command stores component JSON instead of a single variant so undo remains
+// robust if multiple reflected fields are coupled by component code later.
+class SetComponentPayloadCommand : public ICommand {
+public:
+	SetComponentPayloadCommand(entt::entity entity, const std::string& componentName, nlohmann::json oldPayload, nlohmann::json newPayload);
+	void Undo() override;
+	void Redo() override;
+	std::string GetName() const override;
+
+private:
+	TerraEngine::UUID m_Uuid;
+	std::string m_ComponentName;
+	nlohmann::json m_OldPayload;
+	nlohmann::json m_NewPayload;
 };
 
 // class ChangeTransformCommand groups related state and operations so callers have one documented contract.

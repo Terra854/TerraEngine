@@ -14,6 +14,10 @@ class ProjectManager;
 class AssetDatabase;
 // class EditorProfilerService groups related state and operations so callers have one documented contract.
 class EditorProfilerService;
+namespace TerraEngine::Editor::Automation
+{
+	class EditorMcpBridge;
+}
 
 // Lightweight scripting snapshot shared across editor windows. This avoids
 // having every window query multiple subsystems during each ImGui draw pass.
@@ -40,5 +44,9 @@ struct EditorContext {
 	std::shared_ptr<ProjectManager> projectManager;
 	std::shared_ptr<AssetDatabase> assetDatabase;
 	std::shared_ptr<EditorProfilerService> editorProfiler;
+	// The MCP bridge is editor-owned and opt-in; keeping it in shared context
+	// lets windows display status while subsystems route updates through one
+	// lifecycle-managed object.
+	std::shared_ptr<TerraEngine::Editor::Automation::EditorMcpBridge> editorMcpBridge;
 	ScriptEditorState scripting;
 };

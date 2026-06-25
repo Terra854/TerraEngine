@@ -25,6 +25,7 @@
 #include "Engine/UI/UISystem.h"
 #include "Engine/Scripting/ScriptGlue.h"
 #include "Engine/Scripting/ScriptingSystem.h"
+#include "Engine/Utilities/PlatformUtils.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <backends/imgui_impl_vulkan.h>
@@ -44,10 +45,27 @@
 #include "../Windows/ResourceResidencyWindow.h"
 #include "../Windows/UIBuilderWindow.h"
 #include "../Windows/ProjectSettingsWindow.h"
+#include "../Windows/EditorMcpBridgeWindow.h"
 
 namespace
 {
 	MainEditorSubsystem* g_ActiveMainEditorSubsystem = nullptr;
+
+	// ResolveEditorRuntimeRoot returns the directory that contains the running
+	// editor executable. Renderer-owned shaders and managed binaries are staged
+	// beside that executable, so this must not depend on the process working
+	// directory; --project launches often use the repository root as cwd.
+	std::filesystem::path ResolveEditorRuntimeRoot()
+	{
+		const std::filesystem::path executableDirectory = TerraEngine::PlatformUtils::GetExecutableDirectory();
+		if (!executableDirectory.empty())
+		{
+			return executableDirectory;
+		}
+
+		TERRAENGINE_LOG(LogLevel::Warning, "Could not resolve editor executable directory; falling back to current working directory for engine root.");
+		return std::filesystem::current_path();
+	}
 
 	// StopPlayModeFromApplicationQuit is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void StopPlayModeFromApplicationQuit()
@@ -184,7 +202,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 
 	// Set engine root to the executable's directory so default shaders can be found
 	// even if the project asset root is changed later.
-	ResourceManager::Instance().SetEngineRoot(std::filesystem::current_path());
+	ResourceManager::Instance().SetEngineRoot(ResolveEditorRuntimeRoot());
 	
 	// Initialize Windows
 	context.editorProfiler = std::make_shared<EditorProfilerService>();
@@ -200,6 +218,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<SchedulerDiagnosticsWindow>(this));
 	m_Windows.push_back(std::make_shared<ResourceResidencyWindow>(this));
 	m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));
+	m_Windows.push_back(std::make_shared<EditorMcpBridgeWindow>(this));
 
 	UndoRedoSystem::Instance().Initialize(context);
 	ScriptCompilationSubsystem::Instance().Initialize(context);

@@ -377,8 +377,22 @@ static void RefreshManagedElementStyle(UIElement& element)
 // ResolveManagedBridgeAssemblyPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static std::filesystem::path ResolveManagedBridgeAssemblyPath()
 {
+	const auto resolveExecutableDirectory = []() -> std::filesystem::path {
+		const std::filesystem::path executableDirectory = TerraEngine::PlatformUtils::GetExecutableDirectory();
+		if (!executableDirectory.empty())
+		{
+			return executableDirectory;
+		}
+
+		return std::filesystem::current_path();
+	};
+
+	const std::filesystem::path executableDirectory = resolveExecutableDirectory();
 	const std::filesystem::path current = std::filesystem::current_path();
 	const std::filesystem::path candidates[] = {
+		executableDirectory / "Managed" / "TerraEngine.CSharp.dll",
+		executableDirectory / "Editor" / "Managed" / "TerraEngine.CSharp.dll",
+		executableDirectory.parent_path() / "Editor" / "Managed" / "TerraEngine.CSharp.dll",
 		current / "Managed" / "TerraEngine.CSharp.dll",
 		current / "Editor" / "Managed" / "TerraEngine.CSharp.dll",
 		current.parent_path() / "Editor" / "Managed" / "TerraEngine.CSharp.dll"

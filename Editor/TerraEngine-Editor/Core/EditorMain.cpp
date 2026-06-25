@@ -6,12 +6,17 @@
 #include <vector>
 
 #include "Engine/Core/MainEngine.h"
+#include "EditorCommandLine.h"
 #include "EditorSystem.h"
 
 int main(int argc, char** argv) {
+	const EditorCommandLineOptions commandLine = ParseEditorCommandLine(argc, argv);
 	Engine engine;
 	
 	EditorSystem editorSystem;
+	if (commandLine.startupProjectPath.has_value()) {
+		editorSystem.SetStartupProjectPath(*commandLine.startupProjectPath);
+	}
 	// Pass the engine pointer to the editor system so it can access engine state/systems
 	editorSystem.Setup(&engine);
 	

@@ -38,6 +38,7 @@ public:
 	bool ShouldAutoBuildScripts() const;
 	void SetExternalScriptEditorCommand(const std::string& commandTemplate);
 	void SetAutoBuildScripts(bool enabled);
+	void SetEditorMcpPreferences(bool enabled, const std::string& writeModeDefault, const std::string& recentSession);
 
 	// Persist changes
 	void SaveProjectSettings();

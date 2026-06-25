@@ -6,7 +6,9 @@
 
 #include "Core/SystemBase.h"
 #include "EditorContext.h"
+#include <filesystem>
 #include <memory>
+#include <optional>
 
 class ProjectHubSubsystem;
 class MainEditorSubsystem;
@@ -15,6 +17,7 @@ class Engine;
 
 class EditorSystem : public SystemsBase {
 public:
+	void SetStartupProjectPath(const std::filesystem::path& projectPath);
 	void Setup(Engine* engine);
 	void Initialize() override;
 	void Update(float deltaTime) override;
@@ -30,6 +33,7 @@ private:
 	EditorContext context;
 	std::shared_ptr<ProjectHubSubsystem> projectHub;
 	std::shared_ptr<MainEditorSubsystem> mainEditor;
+	std::optional<std::filesystem::path> startupProjectPath;
 
 	// Managed Editor Hooks
 	typedef void (*ManagedInitFn)(void*);
@@ -51,6 +55,9 @@ private:
 	bool initialized = false;
 	bool pendingLoadLayout = false;
 	bool pendingSaveLayout = false;
+	bool startupProjectOpenAttempted = false;
+	void HandleProjectLoaded();
+	void ProcessStartupProjectOpen();
 public:
 	void DrawWindowMenu();
 	void HideAllWindows();

@@ -20,11 +20,11 @@ struct SkyComponent : public Component<SkyComponent>
 	static constexpr std::string_view kComponentName = "SkyComponent";
 
 	std::string sourceAsset;
-	float exposure = 1.0f;
+	float exposure = 0.7f;
 	float rotationOffsetDegrees = 0.0f;
-	glm::vec3 horizonTint = glm::vec3(0.92f, 0.96f, 1.0f);
-	glm::vec3 zenithTint = glm::vec3(0.20f, 0.38f, 0.80f);
-	glm::vec3 groundTint = glm::vec3(0.10f, 0.12f, 0.18f);
+	glm::vec3 horizonTint = glm::vec3(0.45f, 0.58f, 0.72f);
+	glm::vec3 zenithTint = glm::vec3(0.08f, 0.16f, 0.36f);
+	glm::vec3 groundTint = glm::vec3(0.06f, 0.07f, 0.09f);
 
 	static void reflect(entt::meta_factory<SkyComponent>& factory)
 	{

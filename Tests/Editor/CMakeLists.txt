@@ -26,12 +26,29 @@ add_executable(TerraEngine-EditorTests
 	Project/ProjectSettingsWindowTests.cpp
 	Project/ProjectSettingsMenuInventoryTests.cpp
 	Project/ProjectSettingsPersistenceTests.cpp
+	Core/EditorCommandLineTests.cpp
+	Automation/EditorAutomationServiceTests.cpp
+	Automation/EditorMcpBridgeContractTests.cpp
+	Automation/EditorMcpBridgeSafetyTests.cpp
+	Automation/EditorMcpTransportTests.cpp
 	Scene/PrefabAuthoringWorkflowTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
 	Scene/StreamingEditorWorkflowTests.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/PrefabAuthoringSubsystem.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/ScriptCompilationSubsystem.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems/UndoRedoSystem.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core/EditorCommandLine.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ProjectManager.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project/ScriptWorkspaceService.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/AssetDatabase.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/FileWatcher.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorMcpBridge.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorMcpTransport.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MeshCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/TextureCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ShaderCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/ArchiveSerialization.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/ExtentReader.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
@@ -59,8 +76,15 @@ target_include_directories(TerraEngine-EditorTests
 		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Core
 		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Project
 		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Subsystems
+		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets
+		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation
+		${CMAKE_SOURCE_DIR}/Editor/AssetCompilers
 		${CMAKE_SOURCE_DIR}/Editor/Export
 		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling
+		${CMAKE_SOURCE_DIR}/External/basisu/encoder
+		${CMAKE_SOURCE_DIR}/External/basisu/transcoder
+		${CMAKE_SOURCE_DIR}/External/basisu/zstd
+		${CMAKE_SOURCE_DIR}/External/cimgui/imgui
 		${CMAKE_SOURCE_DIR}/External/json/single_include
 )
 
@@ -82,9 +106,17 @@ target_link_libraries(TerraEngine-EditorTests
 	PRIVATE
 		TerraEngine-Engine
 		Threads::Threads
+		assimp::assimp
+		meshoptimizer
+		mikktspace
+		basisu
 		libzstd_static
 		xxhash
 )
+
+if(WIN32)
+	target_link_libraries(TerraEngine-EditorTests PRIVATE ws2_32)
+endif()
 
 if(WIN32)
 	add_custom_command(TARGET TerraEngine-EditorTests POST_BUILD

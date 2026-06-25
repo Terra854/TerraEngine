@@ -8,6 +8,7 @@
 #include "DotNet/DotNetHost.h"
 #include "Profiling/ProfilerScope.h"
 #include "ThreadPool/ThreadPool.h"
+#include "Utilities/PlatformUtils.h"
 
 #include <algorithm>
 #include <array>
@@ -36,6 +37,17 @@ namespace
 	std::atomic_size_t g_ScriptingBridgeCacheMisses{ 0 };
 	std::atomic_size_t g_ScriptingBridgeCallsAvoided{ 0 };
 	thread_local std::optional<ScriptingSystem::ScriptDispatchContext> g_CurrentScriptDispatchContext;
+
+	fs::path ResolveExecutableDirectory()
+	{
+		const fs::path executableDirectory = TerraEngine::PlatformUtils::GetExecutableDirectory();
+		if (!executableDirectory.empty())
+		{
+			return executableDirectory;
+		}
+
+		return fs::current_path();
+	}
 
 	std::string ToString(ScriptingSystem::ScriptExecutionClass executionClass)
 	{
@@ -1971,8 +1983,12 @@ void ScriptingSystem::SetAllBindingStatuses(const std::string& statusText) {
 
 // ScriptingSystem::ResolveManagedBridgeAssemblyPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::filesystem::path ScriptingSystem::ResolveManagedBridgeAssemblyPath() const {
+	const fs::path executableDirectory = ResolveExecutableDirectory();
 	const fs::path current = fs::current_path();
 	const fs::path candidates[] = {
+		executableDirectory / "Managed" / "TerraEngine.CSharp.dll",
+		executableDirectory / "Editor" / "Managed" / "TerraEngine.CSharp.dll",
+		executableDirectory.parent_path() / "Editor" / "Managed" / "TerraEngine.CSharp.dll",
 		current / "Managed" / "TerraEngine.CSharp.dll",
 		current / "Editor" / "Managed" / "TerraEngine.CSharp.dll",
 		current.parent_path() / "Editor" / "Managed" / "TerraEngine.CSharp.dll"

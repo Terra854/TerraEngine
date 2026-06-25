@@ -1192,9 +1192,18 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 
 	// Load SPIR-V
 	auto loadShader = [&](const std::string& path) -> VkShaderModule {
-		std::ifstream file(path, std::ios::ate | std::ios::binary);
+		std::filesystem::path shaderPath(path);
+		if (shaderPath.is_relative())
+		{
+			// Editor debug shaders are installed beside the executable, not the
+			// current working directory. Resolve through ResourceManager so
+			// --project launches from arbitrary folders still find them.
+			shaderPath = ResourceManager::Instance().GetEngineRoot() / shaderPath;
+		}
+
+		std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
 		if (!file.is_open()) {
-			TERRAENGINE_LOG(LogLevel::Error, "Failed to open shader file: " << path);
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to open shader file: " << shaderPath);
 			return VK_NULL_HANDLE;
 		}
 		size_t fileSize = (size_t)file.tellg();
@@ -1211,7 +1220,7 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 		VkShaderModule shaderModule;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << path);
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to create shader module for: " << shaderPath);
 			return VK_NULL_HANDLE;
 		}
 		return shaderModule;

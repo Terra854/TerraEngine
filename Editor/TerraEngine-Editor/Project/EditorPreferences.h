@@ -22,6 +22,35 @@ struct EditorPreferences {
 	std::string theme = "Dark";
 	std::string externalScriptEditorCommand;
 	bool autoBuildScripts = true;
+	// The MCP bridge is an editor-wide user preference, not project state, so
+	// startup can restore the user's requested local automation endpoint.
+	bool editorMcpEnabled = false;
+	std::string editorMcpWriteModeDefault = "read_only";
+	std::string editorMcpRecentSession;
 
-	NLOHMANN_DEFINE_TYPE_INTRUSIVE(EditorPreferences, recentProjects, theme, externalScriptEditorCommand, autoBuildScripts)
+	friend void to_json(nlohmann::json& json, const EditorPreferences& preferences)
+	{
+		json = nlohmann::json{
+			{"recentProjects", preferences.recentProjects},
+			{"theme", preferences.theme},
+			{"externalScriptEditorCommand", preferences.externalScriptEditorCommand},
+			{"autoBuildScripts", preferences.autoBuildScripts},
+			{"editorMcpEnabled", preferences.editorMcpEnabled},
+			{"editorMcpWriteModeDefault", preferences.editorMcpWriteModeDefault},
+			{"editorMcpRecentSession", preferences.editorMcpRecentSession}
+		};
+	}
+
+	friend void from_json(const nlohmann::json& json, EditorPreferences& preferences)
+	{
+		// Each field falls back to the struct default so older or partially
+		// written preference files remain loadable after editor upgrades.
+		preferences.recentProjects = json.value("recentProjects", preferences.recentProjects);
+		preferences.theme = json.value("theme", preferences.theme);
+		preferences.externalScriptEditorCommand = json.value("externalScriptEditorCommand", preferences.externalScriptEditorCommand);
+		preferences.autoBuildScripts = json.value("autoBuildScripts", preferences.autoBuildScripts);
+		preferences.editorMcpEnabled = json.value("editorMcpEnabled", json.value("editorMcpEnabledByDefault", preferences.editorMcpEnabled));
+		preferences.editorMcpWriteModeDefault = json.value("editorMcpWriteModeDefault", preferences.editorMcpWriteModeDefault);
+		preferences.editorMcpRecentSession = json.value("editorMcpRecentSession", preferences.editorMcpRecentSession);
+	}
 };

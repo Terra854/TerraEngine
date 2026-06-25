@@ -12,10 +12,14 @@
 #include <cstdlib>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include "Core/Logger/Logger.h"
 
 #ifdef _WIN32
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
 #	ifndef NOMINMAX
 #		define NOMINMAX
 #	endif
@@ -23,8 +27,12 @@
 #	include <ShlObj.h>
 #	include <shellapi.h>
 #	include <Windows.h>
+#elif defined(__APPLE__)
+#	include <mach-o/dyld.h>
+#	include <unistd.h>
 #else
 #	include <spawn.h>
+#	include <unistd.h>
 
 extern char** environ;
 #endif
@@ -123,6 +131,69 @@ TerraEngine::RuntimePlatform TerraEngine::PlatformUtils::GetRuntimePlatform()
 #else
 	return RuntimePlatform::Unknown;
 #endif
+}
+
+std::filesystem::path TerraEngine::PlatformUtils::GetExecutablePath()
+{
+#ifdef _WIN32
+	std::wstring buffer(MAX_PATH, L'\0');
+	DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+	while (length == buffer.size() && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+	{
+		buffer.resize(buffer.size() * 2u);
+		length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+	}
+
+	if (length == 0 || length >= buffer.size())
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Executable path discovery failed on Windows.");
+		return {};
+	}
+
+	buffer.resize(length);
+	return std::filesystem::path(buffer).lexically_normal();
+#elif defined(__APPLE__)
+	std::uint32_t bufferSize = 0;
+	_NSGetExecutablePath(nullptr, &bufferSize);
+	std::vector<char> buffer(static_cast<std::size_t>(bufferSize) + 1u, '\0');
+	if (_NSGetExecutablePath(buffer.data(), &bufferSize) != 0)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Executable path discovery failed on macOS.");
+		return {};
+	}
+
+	std::error_code errorCode;
+	const std::filesystem::path resolved = std::filesystem::weakly_canonical(buffer.data(), errorCode);
+	return errorCode ? std::filesystem::path(buffer.data()).lexically_normal() : resolved;
+#elif defined(__linux__)
+	std::vector<char> buffer(4096u, '\0');
+	for (;;)
+	{
+		const ssize_t length = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1u);
+		if (length < 0)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Executable path discovery failed on Linux.");
+			return {};
+		}
+
+		if (static_cast<std::size_t>(length) < buffer.size() - 1u)
+		{
+			buffer[static_cast<std::size_t>(length)] = '\0';
+			return std::filesystem::path(buffer.data()).lexically_normal();
+		}
+
+		buffer.resize(buffer.size() * 2u, '\0');
+	}
+#else
+	TERRAENGINE_LOG(LogLevel::Warning, "Executable path discovery is unavailable on this platform.");
+	return {};
+#endif
+}
+
+std::filesystem::path TerraEngine::PlatformUtils::GetExecutableDirectory()
+{
+	const std::filesystem::path executablePath = GetExecutablePath();
+	return executablePath.empty() ? std::filesystem::path{} : executablePath.parent_path();
 }
 
 std::filesystem::path TerraEngine::PlatformUtils::GetPersistentDataPath(std::string_view productName)

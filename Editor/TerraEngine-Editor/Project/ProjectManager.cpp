@@ -7,6 +7,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include "Engine/Core/Logger/Logger.h"
 
 #ifdef _WIN32
@@ -19,6 +20,60 @@ namespace fs = std::filesystem;
 namespace
 {
 	constexpr std::string_view kDefaultProjectVersion = "1.0.0";
+	constexpr std::string_view kEditorPreferencesFileName = ".terra_editor_prefs.json";
+
+	fs::path ResolveEditorPreferencesPath()
+	{
+		// Tests and developer tools can pin the preferences file explicitly, while
+		// normal editor runs use a user-level path so settings do not follow the
+		// active project or the process launch directory.
+		if (const char* overridePath = std::getenv("TERRAENGINE_EDITOR_PREFS_PATH"))
+		{
+			if (overridePath[0] != '\0')
+			{
+				return fs::path(overridePath);
+			}
+		}
+
+#ifdef _WIN32
+		if (const char* appData = std::getenv("APPDATA"))
+		{
+			if (appData[0] != '\0')
+			{
+				return fs::path(appData) / "TerraEngine" / "Editor" / kEditorPreferencesFileName;
+			}
+		}
+		if (const char* localAppData = std::getenv("LOCALAPPDATA"))
+		{
+			if (localAppData[0] != '\0')
+			{
+				return fs::path(localAppData) / "TerraEngine" / "Editor" / kEditorPreferencesFileName;
+			}
+		}
+#else
+		if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME"))
+		{
+			if (xdgConfigHome[0] != '\0')
+			{
+				return fs::path(xdgConfigHome) / "TerraEngine" / "Editor" / kEditorPreferencesFileName;
+			}
+		}
+		if (const char* home = std::getenv("HOME"))
+		{
+			if (home[0] != '\0')
+			{
+				return fs::path(home) / ".config" / "TerraEngine" / "Editor" / kEditorPreferencesFileName;
+			}
+		}
+#endif
+
+		return fs::current_path() / kEditorPreferencesFileName;
+	}
+
+	fs::path ResolveLegacyEditorPreferencesPath()
+	{
+		return fs::current_path() / kEditorPreferencesFileName;
+	}
 
 	// EnsureProjectManifest is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool EnsureProjectManifest(const fs::path& projectRoot, std::string_view requestedName, std::string* outError = nullptr)
@@ -120,17 +175,17 @@ bool ProjectManager::CreateProject(const fs::path& location, const std::string& 
 			"components": {
 				"SkyComponent": {
 					"sourceAsset": "",
-					"exposure": 1.0,
+					"exposure": 0.7,
 					"rotationOffsetDegrees": 0.0,
-					"horizonTint": [0.92, 0.96, 1.0],
-					"zenithTint": [0.20, 0.38, 0.80],
-					"groundTint": [0.10, 0.12, 0.18]
+					"horizonTint": [0.45, 0.58, 0.72],
+					"zenithTint": [0.08, 0.16, 0.36],
+					"groundTint": [0.06, 0.07, 0.09]
 				},
 				"LightComponent": {
 					"type": 0,
 					"unit": 1,
 					"color": [1.0, 1.0, 1.0],
-					"intensity": 100000.0,
+					"intensity": 2.0,
 					"castsShadows": false
 				}
 			},
@@ -311,6 +366,14 @@ void ProjectManager::SetAutoBuildScripts(bool enabled) {
 	SaveEditorPreferences();
 }
 
+// ProjectManager::SetEditorMcpPreferences stores the bridge defaults that the editor reapplies during startup.
+void ProjectManager::SetEditorMcpPreferences(bool enabled, const std::string& writeModeDefault, const std::string& recentSession) {
+	editorPrefs.editorMcpEnabled = enabled;
+	editorPrefs.editorMcpWriteModeDefault = writeModeDefault;
+	editorPrefs.editorMcpRecentSession = recentSession;
+	SaveEditorPreferences();
+}
+
 // ProjectManager::SaveProjectSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectManager::SaveProjectSettings() {
 	if (!currentSettings.has_value() || projectRoot.empty()) return;
@@ -328,19 +391,35 @@ void ProjectManager::SaveProjectSettings() {
 
 // ProjectManager::SaveEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectManager::SaveEditorPreferences() {
-	std::ofstream file(".terra_editor_prefs.json");
+	const fs::path preferencesPath = ResolveEditorPreferencesPath();
+	if (!preferencesPath.parent_path().empty()) {
+		fs::create_directories(preferencesPath.parent_path());
+	}
+	std::ofstream file(preferencesPath);
 	nlohmann::json j = editorPrefs;
 	file << j.dump(4);
 }
 
 // ProjectManager::LoadEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectManager::LoadEditorPreferences() {
-	if (fs::exists(".terra_editor_prefs.json")) {
+	const fs::path preferencesPath = ResolveEditorPreferencesPath();
+	const fs::path legacyPreferencesPath = ResolveLegacyEditorPreferencesPath();
+	fs::path pathToLoad;
+	if (fs::exists(preferencesPath)) {
+		pathToLoad = preferencesPath;
+	} else if (fs::exists(legacyPreferencesPath)) {
+		pathToLoad = legacyPreferencesPath;
+	}
+
+	if (!pathToLoad.empty()) {
 		try {
-			std::ifstream file(".terra_editor_prefs.json");
+			std::ifstream file(pathToLoad);
 			nlohmann::json j;
 			file >> j;
 			editorPrefs = j.get<EditorPreferences>();
+			if (pathToLoad != preferencesPath) {
+				SaveEditorPreferences();
+			}
 		} catch (...) {
 			// ignore corrupt prefs
 		}

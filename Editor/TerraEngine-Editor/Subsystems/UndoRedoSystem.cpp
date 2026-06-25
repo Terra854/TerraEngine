@@ -106,6 +106,73 @@ void RenameObjectCommand::Redo() {
 // RenameObjectCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string RenameObjectCommand::GetName() const { return "Rename Object"; }
 
+namespace
+{
+void ApplyObjectMetadata(const TerraEngine::UUID& uuid, const nlohmann::json& metadata)
+{
+	if (auto obj = ResolveObject(uuid))
+	{
+		if (metadata.contains("name") && metadata["name"].is_string()) obj->setName(metadata["name"].get<std::string>());
+		if (metadata.contains("tag") && metadata["tag"].is_string()) obj->setTag(metadata["tag"].get<std::string>());
+		if (metadata.contains("layer") && metadata["layer"].is_string()) obj->setLayer(metadata["layer"].get<std::string>());
+		if (metadata.contains("active") && metadata["active"].is_boolean()) obj->setActive(metadata["active"].get<bool>());
+		if (metadata.contains("static") && metadata["static"].is_boolean()) obj->setStatic(metadata["static"].get<bool>());
+		SceneManager::Instance().ForceMarkActiveSceneDirty();
+	}
+}
+
+std::optional<Object> ResolveParent(const std::optional<TerraEngine::UUID>& parentUuid)
+{
+	if (!parentUuid.has_value())
+	{
+		return std::nullopt;
+	}
+	return ResolveObject(*parentUuid);
+}
+}
+
+SetObjectMetadataCommand::SetObjectMetadataCommand(entt::entity entity, const nlohmann::json& oldMetadata, const nlohmann::json& newMetadata)
+	: m_Uuid(ObjectManager::instance().getUUID(entity)), m_OldMetadata(oldMetadata), m_NewMetadata(newMetadata)
+{
+}
+
+void SetObjectMetadataCommand::Undo()
+{
+	ApplyObjectMetadata(m_Uuid, m_OldMetadata);
+}
+
+void SetObjectMetadataCommand::Redo()
+{
+	ApplyObjectMetadata(m_Uuid, m_NewMetadata);
+}
+
+std::string SetObjectMetadataCommand::GetName() const { return "Edit Object Metadata"; }
+
+SetParentCommand::SetParentCommand(entt::entity child, std::optional<TerraEngine::UUID> oldParent, std::optional<TerraEngine::UUID> newParent)
+	: m_ChildUuid(ObjectManager::instance().getUUID(child)), m_OldParent(oldParent), m_NewParent(newParent)
+{
+}
+
+void SetParentCommand::Undo()
+{
+	if (auto child = ResolveObject(m_ChildUuid))
+	{
+		ObjectManager::instance().setParent(*child, ResolveParent(m_OldParent));
+		SceneManager::Instance().ForceMarkActiveSceneDirty();
+	}
+}
+
+void SetParentCommand::Redo()
+{
+	if (auto child = ResolveObject(m_ChildUuid))
+	{
+		ObjectManager::instance().setParent(*child, ResolveParent(m_NewParent));
+		SceneManager::Instance().ForceMarkActiveSceneDirty();
+	}
+}
+
+std::string SetParentCommand::GetName() const { return "Set Object Parent"; }
+
 AddComponentCommand::AddComponentCommand(entt::entity entity, const std::string& componentName)
 	// m_Uuid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: m_Uuid(ObjectManager::instance().getUUID(entity)), m_ComponentName(componentName) {}
@@ -175,6 +242,39 @@ void RemoveComponentCommand::Redo() {
 
 // RemoveComponentCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string RemoveComponentCommand::GetName() const { return "Remove " + m_ComponentName; }
+
+SetComponentPayloadCommand::SetComponentPayloadCommand(entt::entity entity, const std::string& componentName, nlohmann::json oldPayload, nlohmann::json newPayload)
+	: m_Uuid(ObjectManager::instance().getUUID(entity)), m_ComponentName(componentName), m_OldPayload(std::move(oldPayload)), m_NewPayload(std::move(newPayload))
+{
+}
+
+void SetComponentPayloadCommand::Undo()
+{
+	if (auto obj = ResolveObject(m_Uuid))
+	{
+		auto& reg = ComponentAccessRegistry();
+		if (reg.count(m_ComponentName))
+		{
+			reg[m_ComponentName].deserialize(*obj, m_OldPayload);
+			NotifySceneAfterComponentMutation(m_ComponentName);
+		}
+	}
+}
+
+void SetComponentPayloadCommand::Redo()
+{
+	if (auto obj = ResolveObject(m_Uuid))
+	{
+		auto& reg = ComponentAccessRegistry();
+		if (reg.count(m_ComponentName))
+		{
+			reg[m_ComponentName].deserialize(*obj, m_NewPayload);
+			NotifySceneAfterComponentMutation(m_ComponentName);
+		}
+	}
+}
+
+std::string SetComponentPayloadCommand::GetName() const { return "Edit " + m_ComponentName; }
 
 ChangeTransformCommand::ChangeTransformCommand(entt::entity entity, const glm::vec3& oldPos, const glm::quat& oldRot, const glm::vec3& oldScale,
 											const glm::vec3& newPos, const glm::quat& newRot, const glm::vec3& newScale)

@@ -28,6 +28,15 @@ namespace TerraEngine
 		// Returns the host operating system TerraEngine is currently running on.
 		RuntimePlatform GetRuntimePlatform();
 
+		// Returns the absolute path to the running executable when the platform
+		// exposes it. Callers should handle an empty path by falling back to a
+		// context-specific root such as current_path().
+		std::filesystem::path GetExecutablePath();
+
+		// Returns the directory containing the running executable, or an empty
+		// path when executable discovery is unavailable on the current platform.
+		std::filesystem::path GetExecutableDirectory();
+
 		// Resolves the per-product writable save-data directory and creates it if
 		// possible so gameplay code can write files immediately.
 		std::filesystem::path GetPersistentDataPath(std::string_view productName);

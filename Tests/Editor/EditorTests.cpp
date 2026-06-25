@@ -29,6 +29,11 @@ namespace TerraEngine::EditorTests {
 	void RegisterProjectSettingsWindowTests(TestRegistry& registry);
 	void RegisterProjectSettingsMenuInventoryTests(TestRegistry& registry);
 	void RegisterProjectSettingsPersistenceTests(TestRegistry& registry);
+	void RegisterEditorCommandLineTests(TestRegistry& registry);
+	void RegisterEditorAutomationServiceTests(TestRegistry& registry);
+	void RegisterEditorMcpBridgeContractTests(TestRegistry& registry);
+	void RegisterEditorMcpBridgeSafetyTests(TestRegistry& registry);
+	void RegisterEditorMcpTransportTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterStreamingEditorWorkflowTests(TestRegistry& registry);
 }
@@ -66,6 +71,11 @@ int main() {
 	TerraEngine::EditorTests::RegisterProjectSettingsWindowTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsMenuInventoryTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsPersistenceTests(registry);
+	TerraEngine::EditorTests::RegisterEditorCommandLineTests(registry);
+	TerraEngine::EditorTests::RegisterEditorAutomationServiceTests(registry);
+	TerraEngine::EditorTests::RegisterEditorMcpBridgeContractTests(registry);
+	TerraEngine::EditorTests::RegisterEditorMcpBridgeSafetyTests(registry);
+	TerraEngine::EditorTests::RegisterEditorMcpTransportTests(registry);
 	TerraEngine::EditorTests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::EditorTests::RegisterStreamingEditorWorkflowTests(registry);
 
