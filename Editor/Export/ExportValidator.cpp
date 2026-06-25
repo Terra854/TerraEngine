@@ -13,6 +13,8 @@
 #include <regex>
 #include <sstream>
 #include <unordered_set>
+#include <array>
+#include <nlohmann/json.hpp>
 
 #include "File Formats/TerraEngineMaterialFile.h"
 #include "Resource/MaterialRuntimeContract.h"
@@ -556,6 +558,190 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 	return result;
 }
 
+// Searches for the directory containing compiled shaders relative to the project root and current path.
+// Input: The project's root path.
+// Output: The path to the shaders directory, or an empty path if not found.
+static std::filesystem::path FindShadersDirectory(const std::filesystem::path& projectRoot) {
+	if (!projectRoot.empty()) {
+		if (std::filesystem::exists(projectRoot / "Shaders") && std::filesystem::is_directory(projectRoot / "Shaders")) {
+			return projectRoot / "Shaders";
+		}
+		if (std::filesystem::exists(projectRoot / "Build/Editor/Shaders") && std::filesystem::is_directory(projectRoot / "Build/Editor/Shaders")) {
+			return projectRoot / "Build/Editor/Shaders";
+		}
+	}
+
+	// Walk up from current directory to find any valid shaders directory candidate
+	std::filesystem::path dir = std::filesystem::current_path();
+	while (!dir.empty()) {
+		std::array<std::filesystem::path, 6> checks = {
+			dir / "Shaders",
+			dir / "Build/Editor/Shaders",
+			dir / "out/build_gemini/Build/Editor/Shaders",
+			dir / "out/build/Build/Editor/Shaders",
+			dir / "../Build/Editor/Shaders",
+			dir / "../../Build/Editor/Shaders"
+		};
+		for (const auto& check : checks) {
+			std::error_code ec;
+			if (std::filesystem::exists(check, ec) && std::filesystem::is_directory(check, ec)) {
+				return std::filesystem::canonical(check);
+			}
+		}
+		std::filesystem::path parent = dir.parent_path();
+		if (parent == dir) {
+			break;
+		}
+		dir = parent;
+	}
+	return {};
+}
+
+// Validates all compiled shader outputs, missing compiled asset outputs, and stale .meta/compiled path mismatches.
+// Input: The project's root path.
+// Output: An ExportValidationResult containing the diagnosed errors/warnings.
+static ExportValidationResult ValidateAssetsAndShaders(const std::filesystem::path& projectRoot) {
+	ExportValidationResult result;
+
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	const std::filesystem::path assetsRoot = projectRoot / "Assets";
+	if (!std::filesystem::exists(assetsRoot)) {
+		return result;
+	}
+
+	// 1. Missing Compiled Shader Outputs Check
+	const std::filesystem::path shadersDir = FindShadersDirectory(projectRoot);
+	
+	static constexpr std::array<std::string_view, 24> kRequiredShaders = {
+		"default.task.tspf",
+		"default.mesh.tspf",
+		"default.frag.tspf",
+		"editor/sceneviewgrid.vert.spv",
+		"editor/sceneviewgrid.frag.spv",
+		"sky/skybackground.task.tspf",
+		"sky/skybackground.mesh.tspf",
+		"sky/skybackground.frag.tspf",
+		"ui/ui_instanced.vert.spv",
+		"ui/ui_instanced.frag.spv",
+		"ui/ui_static.vert.spv",
+		"ui/ui_static.frag.spv",
+		"ui/ui_sdf_text.vert.spv",
+		"ui/ui_sdf_text.frag.spv",
+		"lighting/clusterdepthmask.comp.spv",
+		"lighting/clustergrid.comp.spv",
+		"lighting/clusterlightcount.comp.spv",
+		"lighting/clusterlightfill.comp.spv",
+		"lighting/clusterlightprefix.comp.spv",
+		"lighting/lightcull.comp.spv",
+		"postprocess/hizgenerate.comp.spv",
+		"postprocess/vrsgenerate.comp.spv",
+		"postprocess/gtao.comp.spv",
+		"postprocess/gtaoblur.comp.spv"
+	};
+
+	if (shadersDir.empty()) {
+		AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+			"Shaders", "Runtime shader directory not found.");
+	} else {
+		for (std::string_view requiredShader : kRequiredShaders) {
+			std::filesystem::path fullShaderPath = shadersDir / requiredShader;
+			if (!std::filesystem::exists(fullShaderPath)) {
+				AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+					"Shaders", "Missing compiled shader output: " + std::string(requiredShader), fullShaderPath.string());
+			}
+		}
+	}
+
+	// 2. Missing Compiled Asset Outputs and Stale .meta/compiled path mismatches Checks
+	const std::filesystem::path buildRoot = projectRoot / "Build" / "Assets";
+
+	if (std::filesystem::exists(assetsRoot)) {
+		for (const auto& entry : std::filesystem::recursive_directory_iterator(assetsRoot)) {
+			if (entry.is_regular_file() && entry.path().extension() == ".meta") {
+				std::filesystem::path metaFilePath = entry.path();
+				std::filesystem::path sourceFilePath = metaFilePath;
+				sourceFilePath.replace_extension(""); // Remove .meta extension to get source file path
+
+				// Verify if the source file actually exists. If not, it is a stale .meta file (orphaned metadata).
+				if (!std::filesystem::exists(sourceFilePath)) {
+					AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+						"Assets", "Orphaned metadata: Source file does not exist for .meta.", metaFilePath.string());
+					continue;
+				}
+
+				// Load and parse the .meta JSON file
+				std::ifstream file(metaFilePath);
+				if (!file.is_open()) {
+					AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+						"Assets", "Could not open .meta file for validation.", metaFilePath.string());
+					continue;
+				}
+
+				nlohmann::json j;
+				try {
+					file >> j;
+				} catch (const std::exception& ex) {
+					AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+						"Assets", "Failed to parse .meta JSON: " + std::string(ex.what()), metaFilePath.string());
+					continue;
+				}
+
+				std::string importerName = j.value("importerName", "");
+				std::string sourcePathStr = j.value("sourcePath", "");
+				std::string compiledPathStr = j.value("compiledPath", "");
+
+				// Normalize slash direction to handle Windows/Unix path format differences
+				auto normalizePath = [](std::string pathStr) {
+					std::replace(pathStr.begin(), pathStr.end(), '\\', '/');
+					return pathStr;
+				};
+
+				// Check stale source path mismatch in .meta
+				std::filesystem::path expectedSourcePath = std::filesystem::relative(sourceFilePath, assetsRoot);
+				if (normalizePath(sourcePathStr) != normalizePath(expectedSourcePath.generic_string())) {
+					AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+						"Assets", "Source path mismatch in metadata. Expected: " + expectedSourcePath.generic_string() + ", Found: " + sourcePathStr, metaFilePath.string());
+				}
+
+				// Only perform compiled path mismatch and existence checks for compiling importers
+				const bool isCompilingImporter = (importerName == "MeshImporter" ||
+												  importerName == "TextureImporter" ||
+												  importerName == "ShaderImporter" ||
+												  importerName == "MaterialImporter");
+
+				if (isCompilingImporter) {
+					std::filesystem::path expectedCompiledPath = expectedSourcePath;
+					if (importerName == "MeshImporter") {
+						expectedCompiledPath.replace_extension(".temf");
+					} else if (importerName == "TextureImporter") {
+						expectedCompiledPath.replace_extension(".tetf");
+					} else if (importerName == "ShaderImporter") {
+						expectedCompiledPath.replace_extension(".tspf");
+					} else if (importerName == "MaterialImporter") {
+						expectedCompiledPath.replace_extension(".tmat");
+					}
+
+					if (normalizePath(compiledPathStr) != normalizePath(expectedCompiledPath.generic_string())) {
+						AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+							"Assets", "Compiled path mismatch in metadata. Expected: " + expectedCompiledPath.generic_string() + ", Found: " + compiledPathStr, metaFilePath.string());
+					}
+
+					// Check missing compiled asset outputs
+					if (!compiledPathStr.empty()) {
+						std::filesystem::path fullCompiledPath = buildRoot / compiledPathStr;
+						if (!std::filesystem::exists(fullCompiledPath)) {
+							AddDiagnostic(result, ExportDiagnosticSeverity::Error,
+								"Assets", "Missing compiled asset output: " + compiledPathStr, metaFilePath.string());
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return result;
+}
+
 // --- Combined validation ---
 
 ExportValidationResult ExportValidator::ValidateAll(const BuildProfile& profile, const std::filesystem::path& projectRoot) const {
@@ -588,6 +774,17 @@ ExportValidationResult ExportValidator::ValidateAll(const BuildProfile& profile,
 	result.diagnostics.insert(result.diagnostics.end(),
 		materialResult.diagnostics.begin(),
 		materialResult.diagnostics.end());
+
+	// Run shader, asset and .meta mismatch validations
+	auto additionalResult = ValidateAssetsAndShaders(projectRoot);
+	result.errorCount += additionalResult.errorCount;
+	result.warningCount += additionalResult.warningCount;
+	if (!additionalResult.passed) {
+		result.passed = false;
+	}
+	result.diagnostics.insert(result.diagnostics.end(),
+		additionalResult.diagnostics.begin(),
+		additionalResult.diagnostics.end());
 
 	return result;
 }
