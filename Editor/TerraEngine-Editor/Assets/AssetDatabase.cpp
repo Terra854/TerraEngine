@@ -16,6 +16,8 @@
 #include "Editor/AssetCompilers/MeshCompiler.h"
 #include "Editor/AssetCompilers/TextureCompiler.h"
 #include "Editor/AssetCompilers/ShaderCompiler.h"
+#include "Editor/AssetCompilers/GltfPackageImporter.h"
+#include "AssetImportResult.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -54,6 +56,86 @@ namespace {
 		}
 
 		return settingIt->get<std::string>();
+	}
+
+	// Import sidecars are editor bookkeeping written next to source assets. They
+	// must remain readable for MCP/package diagnostics, but they are not user
+	// assets and should not receive their own importer, GUID, or browser entry.
+	bool IsImportSidecarPath(const std::filesystem::path& path) {
+		const std::string filename = path.filename().string();
+		return filename.size() >= std::string(".import.json").size()
+			&& filename.compare(filename.size() - std::string(".import.json").size(), std::string(".import.json").size(), ".import.json") == 0;
+	}
+
+	bool IsIgnoredAssetDatabasePath(const std::filesystem::path& path) {
+		if (path.extension() == ".meta") {
+			std::filesystem::path sourcePath = path;
+			sourcePath.replace_extension("");
+			return IsImportSidecarPath(sourcePath);
+		}
+		return IsImportSidecarPath(path);
+	}
+
+	// RegisterGeneratedGltfResources bridges package-owned sub-assets into the
+	// runtime resource table. Some generated package outputs, especially
+	// textures, are not standalone source assets in the browser, but materials
+	// still reference their stable package GUIDs and need ResourceManager paths.
+	void RegisterGeneratedGltfResources(
+		const std::filesystem::path& sourcePath,
+		const std::filesystem::path& buildRoot)
+	{
+		const std::filesystem::path sidecarPath = TerraEngine::AssetPipeline::GetImportResultPath(sourcePath);
+		if (!std::filesystem::exists(sidecarPath))
+		{
+			return;
+		}
+
+		std::ifstream in(sidecarPath);
+		if (!in)
+		{
+			return;
+		}
+
+		json result;
+		try
+		{
+			in >> result;
+		}
+		catch (const json::exception& ex)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping generated glTF resource registration for malformed import sidecar "
+				<< sidecarPath << ": " << ex.what());
+			return;
+		}
+		for (const json& mesh : result.value("generatedMeshes", json::array()))
+		{
+			const auto guid = TerraEngine::ParseUUID(mesh.value("guid", ""));
+			if (!guid || !mesh.contains("compiledPath"))
+			{
+				continue;
+			}
+			ResourceManager::Instance().RegisterAssetPath(*guid, buildRoot / mesh["compiledPath"].get<std::string>(), AssetType::Mesh);
+		}
+
+		for (const json& material : result.value("generatedMaterials", json::array()))
+		{
+			const auto guid = TerraEngine::ParseUUID(material.value("guid", ""));
+			if (!guid || !material.contains("compiledPath"))
+			{
+				continue;
+			}
+			ResourceManager::Instance().RegisterAssetPath(*guid, buildRoot / material["compiledPath"].get<std::string>(), AssetType::Material);
+		}
+
+		for (const json& texture : result.value("generatedTextures", json::array()))
+		{
+			const auto guid = TerraEngine::ParseUUID(texture.value("guid", ""));
+			if (!guid || !texture.contains("compiledPath"))
+			{
+				continue;
+			}
+			ResourceManager::Instance().RegisterAssetPath(*guid, buildRoot / texture["compiledPath"].get<std::string>(), AssetType::Texture);
+		}
 	}
 }
 
@@ -155,6 +237,7 @@ bool AssetDatabase::IsAssetCompiling(const std::filesystem::path& absSourcePath)
 void AssetDatabase::OnFileEvent(const std::filesystem::path& path, FileStatus status) {
 	// Ignore .meta files and directories
 	if (path.extension() == ".meta") return;
+	if (IsIgnoredAssetDatabasePath(path)) return;
 	// Check directory only if it exists (for created/modified)
 	if ((status == FileStatus::Created || status == FileStatus::Modified) && std::filesystem::is_directory(path)) return;
 
@@ -186,6 +269,13 @@ void AssetDatabase::ScanProject() {
 				std::filesystem::path sourcePath = entry.path();
 				sourcePath.replace_extension(""); // Remove .meta extension to get source
 				
+				// Import sidecar metadata may have been produced by older scans;
+				// remove it so bookkeeping files never stay registered as assets.
+				if (IsIgnoredAssetDatabasePath(sourcePath)) {
+					std::filesystem::remove(entry.path());
+					continue;
+				}
+
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!std::filesystem::exists(sourcePath)) {
 					// Orphaned meta found
@@ -212,6 +302,7 @@ void AssetDatabase::ScanProject() {
 			if (entry.is_regular_file()) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (entry.path().extension() == ".meta") continue;
+				if (IsIgnoredAssetDatabasePath(entry.path())) continue;
 				ImportAsset(std::filesystem::absolute(entry.path()));
 			}
 		}
@@ -222,6 +313,7 @@ void AssetDatabase::ScanProject() {
 void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool force) {
 	const auto absSourcePath = std::filesystem::absolute(sourcePath);
 	if (absSourcePath.extension() == ".meta") return;
+	if (IsIgnoredAssetDatabasePath(absSourcePath)) return;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::is_directory(absSourcePath)) return;
 
@@ -275,7 +367,7 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 	std::filesystem::path compiledRelativePath = relativeSourcePath;
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (metadata.importerName == "MeshImporter") compiledRelativePath.replace_extension(".temf");
+	if (metadata.importerName == "MeshImporter" || metadata.importerName == "GltfPackageImporter") compiledRelativePath.replace_extension(".temf");
 	else if (metadata.importerName == "TextureImporter") compiledRelativePath.replace_extension(".tetf");
 	else if (metadata.importerName == "ShaderImporter") compiledRelativePath.replace_extension(".tspf");
 	else if (metadata.importerName == "MaterialImporter") compiledRelativePath.replace_extension(".tmat");
@@ -341,7 +433,7 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 		AssetType type;
 		bool known = false;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (metadata.importerName == "MeshImporter") { type = AssetType::Mesh; known = true; }
+		if (metadata.importerName == "MeshImporter" || metadata.importerName == "GltfPackageImporter") { type = AssetType::Mesh; known = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "TextureImporter") { type = AssetType::Texture; known = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -368,6 +460,11 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 				}
 			}
 		}
+	}
+
+	if (metadata.importerName == "GltfPackageImporter")
+	{
+		RegisterGeneratedGltfResources(absSourcePath, buildRoot);
 	}
 }
 
@@ -432,6 +529,7 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c){ return std::tolower(c); });
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (TerraEngine::AssetPipeline::IsGltfPackageSourceExtension(filePath)) return "GltfPackageImporter";
 	if (IsSupportedMeshSourceExtension(filePath)) return "MeshImporter";
 	if (IsSupportedTextureSourceExtension(filePath)) return "TextureImporter";
 	if (ext == ".hlsl" || ext == ".glsl") return "ShaderImporter";
@@ -592,7 +690,56 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 	TERRAENGINE_LOG(LogLevel::Info, "Compiling Asset via Internal Compiler: " << fullSourcePath);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (metadata.importerName == "MeshImporter") {
+	if (metadata.importerName == "GltfPackageImporter") {
+		TerraEngine::AssetPipeline::GltfPackageImportOptions options{};
+		options.sourcePath = fullSourcePath;
+		options.assetRoot = assetRoot;
+		options.buildRoot = buildRoot;
+		options.sourceRelativePath = metadata.sourcePath;
+		options.packageGuid = metadata.guid;
+		options.shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
+		options.forceReimport = true;
+
+		TerraEngine::AssetPipeline::GltfImportResult importResult = TerraEngine::AssetPipeline::ImportGltfPackage(options);
+		for (TerraEngine::AssetPipeline::GeneratedGltfMeshAsset& mesh : importResult.generatedMeshes)
+		{
+			const TerraEngine::UUID previousGuid = mesh.guid;
+			mesh.guid = metadata.guid;
+			for (TerraEngine::AssetPipeline::GltfMaterialAssignment& assignment : importResult.materialAssignments)
+			{
+				if (assignment.meshGuid == previousGuid)
+				{
+					assignment.meshGuid = metadata.guid;
+				}
+			}
+		}
+		for (const TerraEngine::AssetPipeline::GeneratedGltfMaterialAsset& material : importResult.generatedMaterials)
+		{
+			const std::filesystem::path materialSourcePath = assetRoot / material.sourcePath;
+			if (!std::filesystem::exists(materialSourcePath))
+			{
+				continue;
+			}
+
+			AssetMetadata materialMetadata;
+			materialMetadata.guid = material.guid;
+			materialMetadata.importerName = "MaterialImporter";
+			materialMetadata.sourcePath = material.sourcePath;
+			materialMetadata.compiledPath = material.compiledPath;
+			materialMetadata.lastModified = std::filesystem::last_write_time(materialSourcePath);
+			materialMetadata.settings = json::object();
+			FinishImport(materialMetadata, std::filesystem::absolute(materialSourcePath), true);
+		}
+		if (!TerraEngine::AssetPipeline::SaveImportResult(fullSourcePath, importResult)) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Failed to save glTF import result sidecar for " << fullSourcePath);
+		}
+		if (importResult.status == TerraEngine::AssetPipeline::GltfImportStatus::Failed) {
+			return false;
+		}
+
+		return std::filesystem::exists(fullCompiledPath);
+	}
+	else if (metadata.importerName == "MeshImporter") {
 		return CompileMesh(fullSourcePath, fullCompiledPath);
 	} 
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -692,7 +839,7 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		AssetType type;
 		bool knownResource = false;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (metadata.importerName == "MeshImporter") { type = AssetType::Mesh; knownResource = true; }
+		if (metadata.importerName == "MeshImporter" || metadata.importerName == "GltfPackageImporter") { type = AssetType::Mesh; knownResource = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "TextureImporter") { type = AssetType::Texture; knownResource = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

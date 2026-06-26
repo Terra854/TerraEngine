@@ -43,6 +43,13 @@ reflected component access through `ComponentAccessRegistry`, safe empty-state
 diagnostics, project-relative asset path validation, and export job response
 envelopes.
 
+`asset.import` accepts a project-relative asset path, such as
+`Models/Props/asset.glb`, plus an optional `force` flag. For `.gltf` and `.glb`
+packages, the response includes `data.importResult` with generated mesh,
+material, texture, primitive assignment, bounds, and diagnostic arrays. Missing
+or unsupported package content remains machine-readable through diagnostics so
+MCP clients can decide whether to place partial imports or ask for human review.
+
 ## Validation
 
 Use the Visual Studio developer environment on Windows so MSVC can locate the
@@ -58,8 +65,9 @@ cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -h
 Manual validation should use the installed editor tree. Open a project, show the
 MCP Bridge window, confirm disabled/read-only startup, enable the bridge, inspect
 status/capabilities/resources, switch write mode, exercise object/component
-tools, verify activity records, then disable the bridge and confirm local client
-requests are rejected.
+tools, import a glTF package with `asset.import`, verify the returned generated
+asset identifiers and diagnostics, then disable the bridge and confirm local
+client requests are rejected.
 
 ## Limitations
 

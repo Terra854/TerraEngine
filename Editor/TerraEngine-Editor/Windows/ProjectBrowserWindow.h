@@ -8,6 +8,7 @@
 #include <array>
 #include <string>
 #include <filesystem>
+#include <unordered_set>
 
 class MainEditorSubsystem;
 
@@ -30,6 +31,8 @@ private:
 	MainEditorSubsystem* m_Owner;
 	std::filesystem::path m_CurrentDirectory;
 	std::string m_SearchFilter;
+	std::unordered_set<std::string> m_CollapsedPackageGroups;
+	std::string m_SelectedPackageChildGuid;
 	float m_ThumbnailSize = 64.0f;
 	float m_Padding = 16.0f;
 

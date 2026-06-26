@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -324,6 +325,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	entries[1] = {kChunkUAST, 0, uastOffset, totalUastcSize};
 	header.totalSize = totalSize;
 
+	std::filesystem::create_directories(output.parent_path());
 	std::ofstream out(output, std::ios::binary | std::ios::trunc);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!out) {
@@ -375,4 +377,47 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 
 	out.write(reinterpret_cast<const char*>(&crc), sizeof(crc));
 	return static_cast<bool>(out);
+}
+
+bool CompileTextureFromBytes(
+	const std::vector<std::uint8_t>& bytes,
+	std::string sourceExtension,
+	const std::filesystem::path& output,
+	TextureFileSemantic semantic,
+	std::uint32_t quality,
+	bool generateMipmaps,
+	TextureFilterType filter) {
+	if (bytes.empty()) {
+		std::cerr << "Cannot compile an empty package image payload.\n";
+		return false;
+	}
+
+	if (sourceExtension.empty()) {
+		sourceExtension = ".png";
+	}
+	if (sourceExtension.front() != '.') {
+		sourceExtension.insert(sourceExtension.begin(), '.');
+	}
+
+	const std::filesystem::path tempRoot = std::filesystem::temp_directory_path() / "TerraEnginePackageTextureCompile";
+	std::filesystem::create_directories(tempRoot);
+	const std::filesystem::path stagedImage = tempRoot / output.filename().replace_extension(sourceExtension);
+
+	{
+		std::ofstream out(stagedImage, std::ios::binary | std::ios::trunc);
+		if (!out) {
+			std::cerr << "Failed to stage package texture bytes: " << stagedImage << "\n";
+			return false;
+		}
+		out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+		if (!out) {
+			std::cerr << "Failed to write package texture staging file: " << stagedImage << "\n";
+			return false;
+		}
+	}
+
+	const bool result = CompileTexture(stagedImage, output, semantic, quality, generateMipmaps, filter);
+	std::error_code removeError;
+	std::filesystem::remove(stagedImage, removeError);
+	return result;
 }

@@ -401,6 +401,24 @@ add_subdirectory(External/assimp)
 set(BUILD_SHARED_LIBS ${TERRAENGINE_BUILD_SHARED_LIBS_SAVED} CACHE BOOL "Prefer shared libraries for external dependencies" FORCE)
 set_target_properties(assimp PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 
+# --- fastgltf ---------------------------------------------------------------
+# Terra routes glTF/GLB package imports through fastgltf so the editor can read
+# package-level mesh, material, texture, and embedded-data relationships instead
+# of flattening glTF through the legacy Assimp mesh-only path.
+set(SIMDJSON_INSTALL OFF CACHE BOOL "Disable simdjson install target" FORCE)
+set(SIMDJSON_DEVELOPER_MODE OFF CACHE BOOL "Disable simdjson developer targets" FORCE)
+set(SIMDJSON_SINGLEHEADER ON CACHE BOOL "Use vendored simdjson single header output mode" FORCE)
+add_subdirectory(External/simdjson)
+set_target_properties(simdjson PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+
+set(FASTGLTF_ENABLE_TESTS OFF CACHE BOOL "Disable fastgltf tests" FORCE)
+set(FASTGLTF_ENABLE_EXAMPLES OFF CACHE BOOL "Disable fastgltf examples" FORCE)
+set(FASTGLTF_ENABLE_DOCS OFF CACHE BOOL "Disable fastgltf docs" FORCE)
+set(FASTGLTF_ENABLE_INSTALL OFF CACHE BOOL "Disable fastgltf install target" FORCE)
+set(FASTGLTF_COMPILE_AS_CPP20 ON CACHE BOOL "Compile fastgltf as C++20" FORCE)
+add_subdirectory(External/fastgltf)
+set_target_properties(fastgltf PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+
 # --- mikktspace --------------------------------------------------------------
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
 add_library(mikktspace STATIC External/mikktspace/mikktspace.c External/mikktspace/mikktspace.h)
@@ -825,6 +843,10 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
+	Editor/AssetCompilers/GltfImportTypes.cpp
+	Editor/AssetCompilers/GltfPackageImporter.cpp
+	Editor/AssetCompilers/MaterialAssetWriter.cpp
+	Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
 	# --- Export pipeline (BuildProfile, Validator, Packager, Pipeline) ---
 	Editor/Export/BuildProfile.cpp
 	Editor/Export/ExportPackageValidator.cpp
@@ -898,6 +920,7 @@ target_link_libraries(TerraEngine-Editor
 		glfw
 		Vulkan::Headers
 		assimp::assimp
+		fastgltf::fastgltf
 		meshoptimizer
 		mikktspace
 		basisu
@@ -907,6 +930,16 @@ target_link_libraries(TerraEngine-Editor
 )
 
 if(WIN32)
+	# Deployment rule: editor-only runtime DLLs, such as fastgltf, must sit beside
+	# TerraEngine-Editor.exe in developer builds so launch/test flows do not rely
+	# on PATH or globally installed binaries.
+	add_custom_command(TARGET TerraEngine-Editor POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			$<TARGET_RUNTIME_DLLS:TerraEngine-Editor>
+			$<TARGET_FILE_DIR:TerraEngine-Editor>
+		COMMAND_EXPAND_LISTS
+	)
+
 	target_link_libraries(TerraEngine-Editor PRIVATE ws2_32)
 endif()
 
@@ -1310,6 +1343,12 @@ endif()
 		DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)
 	if(WIN32)
+		# Install rule: every code change must keep the install tree reproducible for downstream users.
+		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Editor>
+			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+			OPTIONAL
+		)
+
 		# Install rule: every code change must keep the install tree reproducible for downstream users.
 		install(FILES $<TARGET_RUNTIME_DLLS:TerraEngine-Engine>
 			DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor

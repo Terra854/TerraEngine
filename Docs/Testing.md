@@ -92,12 +92,17 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 The editor MCP bridge checks live under `Tests/Editor/Automation`. They cover
 automation envelopes, capability metadata, local-only transport checks, bridge
 state transitions, bounded activity history, approval prompts, and resource/tool
-routing. For a focused Windows run, build through the Visual Studio developer
-environment and run the editor harness with the MCP/Automation filter:
+routing. The glTF package import checks live under both
+`Tests/Editor/AssetPipeline` and `Tests/Editor/Automation`; they validate
+fastgltf package parsing, generated material/texture/assignment metadata,
+diagnostics, stable reimport source hashes, MCP import responses, and MCP path
+boundary rejection. For a focused Windows run, build through the Visual Studio
+developer environment and run the editor harness with the MCP/Automation or glTF
+filters:
 
 ```powershell
 cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine-EditorTests TerraEngine-Editor"
-$env:TERRAENGINE_TEST_FILTER="Editor.MCP;Editor.Automation"
+$env:TERRAENGINE_TEST_FILTER="Editor.MCP;Editor.Automation;Editor.AssetPipeline.Gltf"
 .\out\build\Debug\TerraEngine-EditorTests.exe
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```

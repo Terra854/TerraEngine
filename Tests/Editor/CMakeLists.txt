@@ -31,6 +31,15 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorMcpBridgeContractTests.cpp
 	Automation/EditorMcpBridgeSafetyTests.cpp
 	Automation/EditorMcpTransportTests.cpp
+	Automation/EditorMcpAssetImportTests.cpp
+	Automation/EditorMcpAssetImportSafetyTests.cpp
+	AssetPipeline/GltfPackageImporterTests.cpp
+	AssetPipeline/GltfMaterialTextureTests.cpp
+	AssetPipeline/GltfMaterialAssignmentTests.cpp
+	AssetPipeline/GltfImportDiagnosticsTests.cpp
+	AssetPipeline/GltfUnsupportedFeatureTests.cpp
+	AssetPipeline/GltfImportFailureTests.cpp
+	AssetPipeline/GltfReimportTests.cpp
 	Scene/PrefabAuthoringWorkflowTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
@@ -49,6 +58,10 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MeshCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/TextureCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ShaderCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/GltfImportTypes.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/GltfPackageImporter.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MaterialAssetWriter.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/ArchiveSerialization.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/ExtentReader.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
@@ -100,6 +113,7 @@ target_compile_definitions(TerraEngine-EditorTests
 	PRIVATE
 		XXH_STATIC_LINKING_ONLY
 		ZSTD_STATIC_LINKING_ONLY
+		TERRAENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 target_link_libraries(TerraEngine-EditorTests
@@ -107,6 +121,7 @@ target_link_libraries(TerraEngine-EditorTests
 		TerraEngine-Engine
 		Threads::Threads
 		assimp::assimp
+		fastgltf::fastgltf
 		meshoptimizer
 		mikktspace
 		basisu

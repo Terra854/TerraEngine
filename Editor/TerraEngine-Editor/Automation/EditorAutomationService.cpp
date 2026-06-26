@@ -6,12 +6,14 @@
 
 #include "EditorAutomationService.h"
 
+#include "../Assets/AssetImportResult.h"
 #include "../Assets/AssetDatabase.h"
 #include "../Core/EditorContext.h"
 #include "../Project/ProjectManager.h"
 #include "../Subsystems/UndoRedoSystem.h"
 #include "../../Export/BuildProfile.h"
 #include "../../Export/ExportValidator.h"
+#include "../../AssetCompilers/GltfPackageImporter.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
@@ -24,6 +26,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <fstream>
 #include <sstream>
 #include <unordered_set>
 
@@ -276,7 +279,7 @@ namespace TerraEngine::Editor::Automation
 		add("component.get", "component", MutationMode::ReadOnly, false, true, false, "object: target, component: string");
 		add("component.set_property", "component", MutationMode::SceneMutation, false, true, false, "object/component/property/value");
 		add("asset.list", "asset", MutationMode::ReadOnly, true, false, false, "type?: string, search?: string");
-		add("asset.import", "asset", MutationMode::AssetMutation, true, false, false, "path: project-relative asset path, force?: bool");
+		add("asset.import", "asset", MutationMode::AssetMutation, true, false, false, "path: project-relative asset path, force?: bool; glTF returns generated asset ids and diagnostics");
 		add("asset.prepare_delete", "asset", MutationMode::Destructive, true, false, true, "path: project-relative asset path");
 		add("export.validate", "export", MutationMode::ReadOnly, true, false, false, "profile: string");
 		add("export.start", "export", MutationMode::ExportMutation, true, false, true, "profile: string, confirmOutput?: string");
@@ -878,12 +881,44 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Asset file was not found.", relative.generic_string());
 		}
+		const std::filesystem::path canonicalAssetRoot = std::filesystem::weakly_canonical(editorContext->assetDatabase->GetAssetRoot());
+		const std::filesystem::path canonicalAssetPath = std::filesystem::weakly_canonical(absolutePath);
+		const std::string rootText = canonicalAssetRoot.generic_string();
+		const std::string assetText = canonicalAssetPath.generic_string();
+		if (assetText.size() < rootText.size()
+			|| assetText.compare(0, rootText.size(), rootText) != 0
+			|| (assetText.size() > rootText.size() && assetText[rootText.size()] != '/'))
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Asset import path must stay inside the active project's Assets folder.", relative.generic_string());
+		}
 		editorContext->assetDatabase->ImportAsset(absolutePath, arguments.value("force", false));
 		if (activityCallback)
 		{
 			activityCallback(ActivityEventType::Mutation, requestId, "asset.import", "Queued asset import.");
 		}
-		return BuildSuccess(requestId, "Queued asset import.", {{"path", validation["path"]}, {"force", arguments.value("force", false)}, {"status", "queued"}});
+
+		nlohmann::json data = {
+			{"path", validation["path"]},
+			{"force", arguments.value("force", false)},
+			{"status", "queued"}
+		};
+		if (TerraEngine::AssetPipeline::IsGltfPackageSourceExtension(absolutePath))
+		{
+			const std::filesystem::path resultPath = TerraEngine::AssetPipeline::GetImportResultPath(absolutePath);
+			if (std::filesystem::exists(resultPath))
+			{
+				std::ifstream in(resultPath);
+				nlohmann::json importResult = nlohmann::json::object();
+				in >> importResult;
+				data["status"] = importResult.value("status", "Unknown");
+				data["importResult"] = std::move(importResult);
+			}
+			else
+			{
+				data["importResult"] = nullptr;
+			}
+		}
+		return BuildSuccess(requestId, "Queued asset import.", std::move(data));
 	}
 
 	nlohmann::json EditorAutomationService::HandleAssetPrepareDelete(const nlohmann::json& arguments, const std::string& requestId)

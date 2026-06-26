@@ -17,10 +17,10 @@ EditorCommandLineOptions ParseEditorCommandLine(int argc, char** argv)
 		const std::string_view argument(argv[index]);
 		if (argument == "--project")
 		{
-			// The shell passes quoted paths as a single next argument, so the editor
-			// only needs to consume the next argv slot when present.
 			if (index + 1 < argc && argv[index + 1] != nullptr)
 			{
+				// Paths that contain spaces must be quoted by the caller so the
+				// platform command-line parser delivers them as one argv item.
 				options.startupProjectPath = std::filesystem::path(argv[++index]);
 			}
 			continue;

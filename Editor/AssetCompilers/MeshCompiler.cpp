@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -1496,6 +1497,7 @@ bool CompileMesh(
 
 	try
 	{
+		std::filesystem::create_directories(output.parent_path());
 		WriteTemf(
 			output,
 			header,
@@ -1530,4 +1532,97 @@ bool CompileMesh(
 		report.failureReason = "write-failed";
 		return FinalizeReport(false);
 	}
+}
+
+bool CompileMeshFromRaw(
+	const std::filesystem::path& logicalSource,
+	const std::filesystem::path& output,
+	const std::vector<RawMeshVertex>& vertices,
+	const std::vector<std::uint32_t>& indices,
+	bool includeMeshletBounds,
+	MeshCompileReport* outReport,
+	float smoothingAngle,
+	float weldThreshold)
+{
+	if (vertices.empty() || indices.empty() || (indices.size() % 3u) != 0u)
+	{
+		if (outReport != nullptr)
+		{
+			outReport->assetPath = logicalSource;
+			outReport->formatVersion = kMeshCurrentVersion;
+			outReport->status = "compile_fail";
+			outReport->failureReason = "invalid-raw-geometry";
+		}
+		return false;
+	}
+
+	const std::filesystem::path tempRoot = std::filesystem::temp_directory_path() / "TerraEngineRawMeshCompile";
+	std::filesystem::create_directories(tempRoot);
+	const std::string stableName = output.filename().replace_extension(".obj").string();
+	const std::filesystem::path stagedObj = tempRoot / stableName;
+
+	{
+		std::ofstream out(stagedObj, std::ios::trunc);
+		if (!out)
+		{
+			if (outReport != nullptr)
+			{
+				outReport->assetPath = logicalSource;
+				outReport->formatVersion = kMeshCurrentVersion;
+				outReport->status = "compile_fail";
+				outReport->failureReason = "raw-stage-open-failed";
+			}
+			return false;
+		}
+
+		// OBJ is used here only as a short-lived interchange stream into the
+		// existing static mesh cleanup path. The glTF package parser has already
+		// resolved buffers, accessors, materials, and diagnostics before this point.
+		out << "# TerraEngine transient raw mesh stage from " << logicalSource.generic_string() << '\n';
+		for (const RawMeshVertex& vertex : vertices)
+		{
+			out << "v " << vertex.position[0] << ' ' << vertex.position[1] << ' ' << vertex.position[2] << '\n';
+		}
+		for (const RawMeshVertex& vertex : vertices)
+		{
+			// The transient handoff uses OBJ so it can reuse the established
+			// cleanup path. CompileMesh preserves legacy OBJ behavior by flipping
+			// V on import, so pre-flip package UVs here to keep decoded glTF UVs
+			// unchanged in the final TEMF.
+			out << "vt " << vertex.uv[0] << ' ' << (1.0f - vertex.uv[1]) << '\n';
+		}
+		for (const RawMeshVertex& vertex : vertices)
+		{
+			out << "vn " << vertex.normal[0] << ' ' << vertex.normal[1] << ' ' << vertex.normal[2] << '\n';
+		}
+		for (std::size_t index = 0; index < indices.size(); index += 3)
+		{
+			const std::uint32_t a = indices[index + 0] + 1u;
+			const std::uint32_t b = indices[index + 1] + 1u;
+			const std::uint32_t c = indices[index + 2] + 1u;
+			if (a == 0u || b == 0u || c == 0u || a > vertices.size() || b > vertices.size() || c > vertices.size())
+			{
+				if (outReport != nullptr)
+				{
+					outReport->assetPath = logicalSource;
+					outReport->formatVersion = kMeshCurrentVersion;
+					outReport->status = "compile_fail";
+					outReport->failureReason = "raw-index-out-of-range";
+				}
+				return false;
+			}
+			out << "f " << a << '/' << a << '/' << a
+				<< ' ' << b << '/' << b << '/' << b
+				<< ' ' << c << '/' << c << '/' << c << '\n';
+		}
+	}
+
+	const bool compiled = CompileMesh(stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold);
+	std::error_code removeError;
+	std::filesystem::remove(stagedObj, removeError);
+	if (outReport != nullptr)
+	{
+		outReport->assetPath = logicalSource;
+	}
+	return compiled;
 }

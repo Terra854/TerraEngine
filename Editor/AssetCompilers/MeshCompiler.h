@@ -6,7 +6,9 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <array>
 #include <string>
+#include <vector>
 
 // Normalized compile report consumed by CLI output and validation scripts.
 struct MeshCompileReport
@@ -27,6 +29,16 @@ struct MeshCompileReport
 	std::string failureReason;
 };
 
+// RawMeshVertex is the package-import handoff format used when another parser,
+// such as fastgltf, has already decoded source geometry. The mesh compiler still
+// owns cleanup, tangent generation, meshlet building, and TEMF writing.
+struct RawMeshVertex
+{
+	std::array<float, 3> position = { 0.0f, 0.0f, 0.0f };
+	std::array<float, 3> normal = { 0.0f, 0.0f, 1.0f };
+	std::array<float, 2> uv = { 0.0f, 0.0f };
+};
+
 // Returns true when the file extension maps to a mesh source format the offline
 // compiler can parse directly. Editor discovery and CLI validation both use this
 // helper so supported formats stay in sync.
@@ -42,6 +54,19 @@ std::string GetSupportedMeshSourceExtensionsText();
 bool CompileMesh(
 	const std::filesystem::path& input,
 	const std::filesystem::path& output,
+	bool includeMeshletBounds = true,
+	MeshCompileReport* outReport = nullptr,
+	float smoothingAngle = 60.0f,
+	float weldThreshold = 1e-6f);
+
+// Compiles geometry that has already been extracted from a package importer.
+// Input: stable logical source name for reports plus decoded triangle vertices
+// and indices. Output: same optimized TEMF artifact as CompileMesh().
+bool CompileMeshFromRaw(
+	const std::filesystem::path& logicalSource,
+	const std::filesystem::path& output,
+	const std::vector<RawMeshVertex>& vertices,
+	const std::vector<std::uint32_t>& indices,
 	bool includeMeshletBounds = true,
 	MeshCompileReport* outReport = nullptr,
 	float smoothingAngle = 60.0f,

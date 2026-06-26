@@ -65,3 +65,9 @@
 [submodule "External/pugixml"]
 	path = External/pugixml
 	url = https://github.com/zeux/pugixml.git
+[submodule "External/fastgltf"]
+	path = External/fastgltf
+	url = https://github.com/spnda/fastgltf.git
+[submodule "External/simdjson"]
+	path = External/simdjson
+	url = https://github.com/simdjson/simdjson.git

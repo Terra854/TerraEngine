@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <string>
 #include <cstdint>
+#include <vector>
 #include "Engine/File Formats/TerraEngineTextureFile.h"
 
 // Returns true when the file extension maps to a texture source format the
@@ -24,3 +25,14 @@ enum class TextureFilterType {
 };
 
 bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality = 1, bool generateMipmaps = true, TextureFilterType filter = TextureFilterType::Lanczos);
+
+// Compiles image bytes extracted from a package. The source extension tells the
+// existing stb-backed loader how to decode the staged bytes.
+bool CompileTextureFromBytes(
+	const std::vector<std::uint8_t>& bytes,
+	std::string sourceExtension,
+	const std::filesystem::path& output,
+	TextureFileSemantic semantic,
+	std::uint32_t quality = 1,
+	bool generateMipmaps = true,
+	TextureFilterType filter = TextureFilterType::Lanczos);

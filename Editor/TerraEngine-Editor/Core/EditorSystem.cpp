@@ -176,9 +176,8 @@ void EditorSystem::ProcessStartupProjectOpen() {
 	startupProjectOpenAttempted = true;
 	std::string error;
 	const std::filesystem::path projectPath = *startupProjectPath;
-	// Process command-line project loading from the editor update path instead
-	// of early setup so it runs after the engine/editor frame has reached the
-	// same initialized state used by normal project-hub opens.
+	// Process command-line project loading only after editor services are wired
+	// so it reaches the same project lifecycle path used by normal hub opens.
 	TERRAENGINE_LOG(LogLevel::Info, "[EditorSystem] Opening startup project: " << projectPath.string());
 	if (context.projectManager->LoadProject(projectPath, &error)) {
 		HandleProjectLoaded();
@@ -501,17 +500,21 @@ void EditorSystem::Initialize() {
 			managedInitialize(ImGui::GetCurrentContext());
 		}
 	}
+
+	// Command-line project loading should complete during initialization so
+	// automation clients, including MCP, observe the requested project before
+	// their first status/resource query. The open still runs after renderer,
+	// editor, managed, and callback setup, which keeps it aligned with normal
+	// project-hub opens without waiting for the first frame update.
+	ProcessStartupProjectOpen();
 }
 
 // EditorSystem::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void EditorSystem::Update(float deltaTime) {
 	if (!initialized) return;
 
-	// Command-line project loading must happen before ImGui starts a new frame
-	// and before the editor decides which UI branch to update. Loading here
-	// gives --project the same steady-state behavior as a project that was
-	// already open at the beginning of the frame: scene resources, layout, MCP,
-	// and editor windows all see one consistent active-project state.
+	// Keep this idempotent fallback so future delayed-startup paths still open
+	// the requested project before the editor chooses between hub and workspace UI.
 	ProcessStartupProjectOpen();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

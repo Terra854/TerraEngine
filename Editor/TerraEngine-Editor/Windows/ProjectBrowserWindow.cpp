@@ -9,12 +9,16 @@
 #include "UIBuilderWindow.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
+#include "AssetImportResult.h"
+#include "GltfPackageImporter.h"
 #include "Engine/Resource/ResourceManager.h"
 #include <imgui.h>
 #include <ImGuiFileDialog.h>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <vector>
 #include "../../../Engine/File Formats/TerraEngineMaterialFile.h"
 
@@ -55,6 +59,247 @@ void OpenMarkupAssetInBuilder(MainEditorSubsystem* owner, const std::filesystem:
 	{
 		uiBuilder->OpenMarkupDocument(std::filesystem::absolute(markupPath));
 	}
+}
+
+bool IsGltfPackagePath(const std::filesystem::path& path)
+{
+	return TerraEngine::AssetPipeline::IsGltfPackageSourceExtension(path);
+}
+
+bool IsImportResultSidecarPath(const std::filesystem::path& path)
+{
+	const std::string filename = path.filename().string();
+	const std::string suffix = ".import.json";
+	return filename.size() >= suffix.size()
+		&& filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool IsGeneratedFolderForPackage(const std::filesystem::path& directory)
+{
+	if (!std::filesystem::is_directory(directory))
+	{
+		return false;
+	}
+
+	const std::string folderName = directory.filename().string();
+	const std::string generatedSuffix = "_Generated";
+	if (folderName.size() <= generatedSuffix.size()
+		|| folderName.compare(folderName.size() - generatedSuffix.size(), generatedSuffix.size(), generatedSuffix) != 0)
+	{
+		return false;
+	}
+
+	const std::filesystem::path parent = directory.parent_path();
+	const std::string packageStem = folderName.substr(0, folderName.size() - generatedSuffix.size());
+	return std::filesystem::exists(parent / (packageStem + ".gltf"))
+		|| std::filesystem::exists(parent / (packageStem + ".glb"));
+}
+
+nlohmann::json LoadPackageImportResultJson(const std::filesystem::path& packagePath)
+{
+	const std::filesystem::path sidecarPath = TerraEngine::AssetPipeline::GetImportResultPath(packagePath);
+	std::ifstream input(sidecarPath);
+	if (!input)
+	{
+		return nlohmann::json::object();
+	}
+
+	nlohmann::json document = nlohmann::json::object();
+	try
+	{
+		input >> document;
+	}
+	catch (const nlohmann::json::exception&)
+	{
+		return nlohmann::json::object();
+	}
+	return document;
+}
+
+enum class PackageChildKind
+{
+	Mesh,
+	Material,
+	Texture
+};
+
+struct PackageChildTile
+{
+	PackageChildKind kind = PackageChildKind::Mesh;
+	std::string name;
+	std::string sourcePath;
+	std::string guidHex;
+};
+
+std::string ToLowerText(std::string text)
+{
+	std::transform(text.begin(), text.end(), text.begin(), [](unsigned char character) {
+		return static_cast<char>(std::tolower(character));
+	});
+	return text;
+}
+
+bool MatchesSearchText(const std::string& text, const std::string& searchFilter)
+{
+	if (searchFilter.empty())
+	{
+		return true;
+	}
+	return ToLowerText(text).find(ToLowerText(searchFilter)) != std::string::npos;
+}
+
+std::string EllipsizeMiddle(const std::string& text, std::size_t maxCharacters)
+{
+	if (text.size() <= maxCharacters || maxCharacters < 5u)
+	{
+		return text;
+	}
+
+	const std::size_t frontCount = (maxCharacters - 3u) / 2u;
+	const std::size_t backCount = maxCharacters - 3u - frontCount;
+	return text.substr(0u, frontCount) + "..." + text.substr(text.size() - backCount);
+}
+
+void AppendPackageChildren(std::vector<PackageChildTile>& outChildren, const nlohmann::json& items, PackageChildKind kind)
+{
+	if (!items.is_array())
+	{
+		return;
+	}
+
+	for (const nlohmann::json& item : items)
+	{
+		PackageChildTile child{};
+		child.kind = kind;
+		child.name = item.value("name", std::string("Generated"));
+		child.sourcePath = item.value("sourcePath", std::string());
+		child.guidHex = item.value("guid", std::string());
+		outChildren.push_back(std::move(child));
+	}
+}
+
+std::vector<PackageChildTile> BuildPackageChildTiles(const std::filesystem::path& packagePath)
+{
+	const nlohmann::json document = LoadPackageImportResultJson(packagePath);
+	std::vector<PackageChildTile> children;
+	if (!document.is_object() || !document.contains("package"))
+	{
+		return children;
+	}
+
+	AppendPackageChildren(children, document.value("generatedMeshes", nlohmann::json::array()), PackageChildKind::Mesh);
+	AppendPackageChildren(children, document.value("generatedMaterials", nlohmann::json::array()), PackageChildKind::Material);
+	AppendPackageChildren(children, document.value("generatedTextures", nlohmann::json::array()), PackageChildKind::Texture);
+	return children;
+}
+
+bool PackageChildrenMatchSearch(const std::vector<PackageChildTile>& children, const std::string& searchFilter)
+{
+	for (const PackageChildTile& child : children)
+	{
+		if (MatchesSearchText(child.name, searchFilter) || MatchesSearchText(child.sourcePath, searchFilter))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+const char* PackageChildIcon(PackageChildKind kind)
+{
+	switch (kind)
+	{
+	case PackageChildKind::Mesh:
+		return "[MSH]";
+	case PackageChildKind::Material:
+		return "[MAT]";
+	case PackageChildKind::Texture:
+		return "[TEX]";
+	default:
+		return "[SUB]";
+	}
+}
+
+const char* PackageChildPayload(PackageChildKind kind)
+{
+	switch (kind)
+	{
+	case PackageChildKind::Mesh:
+		return "ASSET_MESH";
+	case PackageChildKind::Material:
+		return "ASSET_MATERIAL";
+	case PackageChildKind::Texture:
+		return "ASSET_TEXTURE";
+	default:
+		return "ASSET_GUID";
+	}
+}
+
+bool DrawPackageChildTile(const PackageChildTile& child, float thumbnailSize, bool isSelected)
+{
+	// Generated package children are virtual sub-assets. They can be dragged by
+	// GUID for assignment, but the browser intentionally gives them no delete,
+	// rename, or open action because the source package owns their lifecycle.
+	if (isSelected)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.48f, 0.72f, 1.0f));
+	}
+	else
+	{
+		ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_FrameBgHovered));
+	}
+	const bool clicked = ImGui::Button(PackageChildIcon(child.kind), ImVec2(thumbnailSize, thumbnailSize));
+	ImGui::PopStyleColor(2);
+
+	if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+	{
+		if (const std::optional<TerraEngine::UUID> guid = TerraEngine::ParseUUID(child.guidHex))
+		{
+			ImGui::SetDragDropPayload(PackageChildPayload(child.kind), &(*guid), sizeof(TerraEngine::UUID));
+			ImGui::Text("%s", child.name.c_str());
+		}
+		ImGui::EndDragDropSource();
+	}
+
+	ImGui::TextDisabled("%s", EllipsizeMiddle(child.name, 14u).c_str());
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("%s\n%s", child.name.c_str(), child.sourcePath.c_str());
+	}
+	return clicked;
+}
+
+void DrawPackageFoldoutControl(bool packageExpanded, const std::string& packageGroupKey, std::unordered_set<std::string>& collapsedPackageGroups)
+{
+	// Draw the foldout as an overlay on the package tile's upper-right corner.
+	// The cursor is restored afterward so the label and generated child tiles keep their normal grid layout.
+	const char* foldoutLabel = packageExpanded ? "<" : ">";
+	const ImVec2 tileMin = ImGui::GetItemRectMin();
+	const ImVec2 tileMax = ImGui::GetItemRectMax();
+	const ImVec2 restoreCursor = ImGui::GetCursorScreenPos();
+	const ImVec2 buttonSize(18.0f, 24.0f);
+	ImGui::SetCursorScreenPos(ImVec2(tileMax.x - buttonSize.x, tileMin.y + ((tileMax.y - tileMin.y - buttonSize.y) * 0.5f)));
+	ImGui::PushID("PackageFoldout");
+	if (ImGui::Button(foldoutLabel, buttonSize))
+	{
+		if (packageExpanded)
+		{
+			collapsedPackageGroups.insert(packageGroupKey);
+		}
+		else
+		{
+			collapsedPackageGroups.erase(packageGroupKey);
+		}
+	}
+	ImGui::PopID();
+	ImGui::SetCursorScreenPos(restoreCursor);
+}
+
+void DrawTileLabel(const std::string& label)
+{
+	ImGui::TextWrapped("%s", label.c_str());
 }
 }
 
@@ -372,6 +617,8 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 	for (const auto& entry : std::filesystem::directory_iterator(path)) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (entry.path().extension() == ".meta") continue;
+		if (!entry.is_directory() && IsImportResultSidecarPath(entry.path())) continue;
+		if (entry.is_directory() && IsGeneratedFolderForPackage(entry.path())) continue;
 		entries.push_back(entry);
 	}
 
@@ -387,20 +634,20 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 	if (ImGui::BeginTable("ContentTable", columnCount)) {
 		for (const auto& entry : entries) {
 			std::string filename = entry.path().filename().string();
+			const bool isPackage = !entry.is_directory() && IsGltfPackagePath(entry.path());
+			const std::vector<PackageChildTile> packageChildren = isPackage ? BuildPackageChildTiles(entry.path()) : std::vector<PackageChildTile>{};
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!m_SearchFilter.empty()) {
-				std::string lowerFilename = filename;
-				std::string lowerFilter = m_SearchFilter;
-				std::transform(lowerFilename.begin(), lowerFilename.end(), lowerFilename.begin(), ::tolower);
-				std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (lowerFilename.find(lowerFilter) == std::string::npos) continue;
+				if (!MatchesSearchText(filename, m_SearchFilter) && !PackageChildrenMatchSearch(packageChildren, m_SearchFilter)) continue;
 			}
 
 			ImGui::TableNextColumn();
 			
 			ImGui::PushID(filename.c_str());
 			const std::filesystem::path absoluteEntryPath = std::filesystem::absolute(entry.path());
+			const std::string packageGroupKey = absoluteEntryPath.string();
+			const bool packageExpanded = !isPackage || !m_CollapsedPackageGroups.contains(packageGroupKey);
 			
 			std::string icon = entry.is_directory() ? "[DIR]" : "[FILE]";
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -410,6 +657,8 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				icon = "[UI]";
 			} else if (!entry.is_directory() && entry.path().extension() == ".teprefab") {
 				icon = "[PFB]";
+			} else if (!entry.is_directory() && IsGltfPackagePath(entry.path())) {
+				icon = "[PKG]";
 			}
 			
 			bool isSelected = false;
@@ -424,21 +673,44 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
 			}
 
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ImGui::Button(icon.c_str(), ImVec2(m_ThumbnailSize, m_ThumbnailSize))) {
-					if (!entry.is_directory()) {
-						m_Owner->SetSelectedAsset(absoluteEntryPath);
-					}
+			const float packageChildThumbnailSize = std::max(36.0f, m_ThumbnailSize * 0.72f);
+			bool assetIconHovered = false;
+			if (isPackage && !packageChildren.empty())
+			{
+				ImGui::SetNextItemAllowOverlap();
+			}
+			if (ImGui::Button(icon.c_str(), ImVec2(m_ThumbnailSize, m_ThumbnailSize))) {
+				if (!entry.is_directory()) {
+					m_SelectedPackageChildGuid.clear();
+					m_Owner->SetSelectedAsset(absoluteEntryPath);
 				}
+			}
+			assetIconHovered = ImGui::IsItemHovered();
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (isSelected) {
-				ImGui::PopStyleColor();
+			if (!entry.is_directory() && ImGui::BeginDragDropSource()) {
+				auto& assets = AssetDatabase::Instance().GetAssets();
+				auto it = assets.find(std::filesystem::absolute(entry.path()));
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (it != assets.end()) {
+					TerraEngine::UUID guid = it->second.guid;
+					const std::string& importer = it->second.importerName;
+					const char* payloadType = "ASSET_GUID";
+
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+					if (importer == "MeshImporter" || importer == "GltfPackageImporter") payloadType = "ASSET_MESH";
+					else if (importer == "TextureImporter") payloadType = "ASSET_TEXTURE";
+					else if (importer == "ShaderImporter") payloadType = "ASSET_SHADER";
+					else if (importer == "MaterialImporter") payloadType = "ASSET_MATERIAL";
+					else if (importer == "ScriptImporter") payloadType = "ASSET_SCRIPT";
+					else if (importer == "UIImporter") payloadType = "ASSET_TUIML";
+					else if (importer == "StyleImporter") payloadType = "ASSET_TUSS";
+
+					ImGui::SetDragDropPayload(payloadType, &guid, sizeof(TerraEngine::UUID));
+					ImGui::Text("%s", filename.c_str());
+				}
+				ImGui::EndDragDropSource();
 			}
 
-			// Bind the context menu to the asset icon. A window-level popup
-			// inside this loop can reuse the wrong loop entry and delete an
-			// unrelated asset when the browser background is right-clicked.
 			if (ImGui::BeginPopupContextItem("AssetIconContextMenu")) {
 				if (ImGui::MenuItem("Delete")) {
 					m_AssetToDelete = absoluteEntryPath;
@@ -446,10 +718,18 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				}
 				ImGui::EndPopup();
 			}
-			
+			if (isPackage && !packageChildren.empty())
+			{
+				DrawPackageFoldoutControl(packageExpanded, packageGroupKey, m_CollapsedPackageGroups);
+			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (isSelected) {
+				ImGui::PopStyleColor();
+			}
+
 			// Double-click performs the "open" action while single-click stays a
 			// pure selection gesture, which matches the Unity-style asset flow.
-			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+			if (assetIconHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 				if (entry.is_directory()) {
 					m_CurrentDirectory = entry.path();
 				} else {
@@ -474,39 +754,35 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 					}
 				}
 			}
-			
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!entry.is_directory() && ImGui::BeginDragDropSource()) {
-				auto& assets = AssetDatabase::Instance().GetAssets();
-				auto it = assets.find(std::filesystem::absolute(entry.path()));
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (it != assets.end()) {
-					TerraEngine::UUID guid = it->second.guid;
-					const std::string& importer = it->second.importerName;
-					const char* payloadType = "ASSET_GUID";
-					
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (importer == "MeshImporter") payloadType = "ASSET_MESH";
-					else if (importer == "TextureImporter") payloadType = "ASSET_TEXTURE";
-					else if (importer == "ShaderImporter") payloadType = "ASSET_SHADER";
-					else if (importer == "MaterialImporter") payloadType = "ASSET_MATERIAL";
-					else if (importer == "ScriptImporter") payloadType = "ASSET_SCRIPT";
-					else if (importer == "UIImporter") payloadType = "ASSET_TUIML";
-					else if (importer == "StyleImporter") payloadType = "ASSET_TUSS";
 
-					ImGui::SetDragDropPayload(payloadType, &guid, sizeof(TerraEngine::UUID));
-					ImGui::Text("%s", filename.c_str());
-				}
-				ImGui::EndDragDropSource();
-			}
-
-			ImGui::TextWrapped("%s", filename.c_str());
+			DrawTileLabel(filename);
 			if (ImGui::BeginPopupContextItem("AssetNameContextMenu")) {
 				if (ImGui::MenuItem("Delete")) {
 					m_AssetToDelete = absoluteEntryPath;
 					m_ShowDeleteModal = true;
 				}
 				ImGui::EndPopup();
+			}
+			if (isPackage && packageExpanded) {
+				for (const PackageChildTile& child : packageChildren) {
+					ImGui::TableNextColumn();
+					ImGui::PushID(child.guidHex.c_str());
+					ImGui::Dummy(ImVec2(1.0f, ImGui::GetFrameHeight()));
+					if (DrawPackageChildTile(child, packageChildThumbnailSize, child.guidHex == m_SelectedPackageChildGuid))
+					{
+						m_SelectedPackageChildGuid = child.guidHex;
+						const std::filesystem::path childSourcePath = AssetDatabase::Instance().GetAssetRoot() / child.sourcePath;
+						if (child.kind == PackageChildKind::Material && !child.sourcePath.empty() && std::filesystem::exists(childSourcePath))
+						{
+							m_Owner->SetSelectedAsset(std::filesystem::absolute(childSourcePath));
+						}
+						else
+						{
+							m_Owner->SetSelectedAsset(absoluteEntryPath);
+						}
+					}
+					ImGui::PopID();
+				}
 			}
 			ImGui::PopID();
 		}

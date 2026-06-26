@@ -19,8 +19,10 @@
 #include "Engine/Components/ScriptComponent.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "AssetDatabase.h"
+#include "AssetImportResult.h"
 #include "Editor/AssetCompilers/MeshCompiler.h"
 #include "Editor/AssetCompilers/TextureCompiler.h"
+#include "GltfPackageImporter.h"
 #include "Engine/File Formats/TerraEngineMaterialFile.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
@@ -45,6 +47,22 @@ using ReflectionVariant = TerraEngine::Reflection::Variant;
 
 namespace
 {
+bool IsGeneratedPackageSubAssetPath(const std::filesystem::path& path)
+{
+	const std::filesystem::path normalized = std::filesystem::absolute(path).lexically_normal();
+	for (const auto& part : normalized)
+	{
+		const std::string name = part.string();
+		const std::string suffix = "_Generated";
+		if (name.size() > suffix.size()
+			&& name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 template <typename ValueType>
 // IsMetaValueType is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool IsMetaValueType(const ReflectionVariant& value)
@@ -2629,6 +2647,8 @@ void InspectorWindow::OnGui() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ext == ".tmat") {
 			DrawMaterialInspector(*selectedAsset);
+		} else if (TerraEngine::AssetPipeline::IsGltfPackageSourceExtension(*selectedAsset)) {
+			DrawGltfPackageInspector(*selectedAsset);
 		} else if (IsSupportedMeshSourceExtension(*selectedAsset)) {
 			DrawMeshInspector(*selectedAsset);
 		} else if (IsSupportedTextureSourceExtension(*selectedAsset)) {
@@ -3110,6 +3130,52 @@ void InspectorWindow::OnGui() {
 	}
 }
 
+// InspectorWindow::DrawGltfPackageInspector shows the source package itself, not the read-only generated children.
+// Generated mesh/material/texture sub-assets stay selectable in the Project Browser, while this view remains package-level.
+void InspectorWindow::DrawGltfPackageInspector(const std::filesystem::path& path) {
+	const std::filesystem::path absolutePath = std::filesystem::absolute(path);
+	const auto& assets = AssetDatabase::Instance().GetAssets();
+	const auto metaIt = assets.find(absolutePath);
+
+	ImGui::Text("glTF Package: %s", path.filename().string().c_str());
+	ImGui::Separator();
+
+	if (metaIt == assets.end()) {
+		ImGui::TextDisabled("This package is not registered in the asset database yet.");
+		return;
+	}
+
+	const AssetMetadata& metadata = metaIt->second;
+	TerraEngine::AssetPipeline::GltfImportResult importResult;
+	const bool hasImportResult = TerraEngine::AssetPipeline::LoadImportResult(absolutePath, importResult);
+
+	// Keep the package inspector read-only because edits belong either on the source glTF file
+	// or on explicitly generated sub-assets selected from the Project Browser.
+	if (ImGui::BeginTable("GltfPackageSummary", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+		ImGui::TableSetupColumn("Field", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+		ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+
+		auto drawRow = [](const char* label, const std::string& value) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextWrapped("%s", value.empty() ? "-" : value.c_str());
+		};
+
+		drawRow("GUID", TerraEngine::ToHexString(metadata.guid));
+		drawRow("Source", metadata.sourcePath.generic_string());
+		drawRow("Compiled Mesh", metadata.compiledPath.generic_string());
+		drawRow("Import Status", hasImportResult ? TerraEngine::AssetPipeline::ToString(importResult.status) : "Not imported");
+		drawRow("Package Type", hasImportResult
+			? (importResult.package.packageKind == TerraEngine::AssetPipeline::GltfPackageKind::GltfBinary ? "GLB" : "glTF")
+			: "-");
+		drawRow("Generated Root", hasImportResult ? importResult.package.importRoot.generic_string() : "-");
+
+		ImGui::EndTable();
+	}
+}
+
 // InspectorWindow::DrawMaterialInspector is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
 	if (m_LastInspectedAsset != path) {
@@ -3138,6 +3204,11 @@ void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
 
 	ImGui::Text("Material: %s", path.filename().string().c_str());
 	ImGui::Separator();
+	const bool readOnlyPackageSubAsset = IsGeneratedPackageSubAssetPath(path);
+	if (readOnlyPackageSubAsset) {
+		ImGui::TextDisabled("Read-only generated glTF sub-asset.");
+		ImGui::BeginDisabled();
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginTable("MaterialSettings", 2, ImGuiTableFlags_SizingStretchProp)) {
@@ -3477,6 +3548,10 @@ void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (readOnlyPackageSubAsset) {
+		ImGui::EndDisabled();
+		changed = false;
+	}
 	if (changed) {
 		std::ofstream outFile(path, std::ios::binary);
 		if (outFile.is_open()) {

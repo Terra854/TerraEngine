@@ -34,6 +34,15 @@ namespace TerraEngine::EditorTests {
 	void RegisterEditorMcpBridgeContractTests(TestRegistry& registry);
 	void RegisterEditorMcpBridgeSafetyTests(TestRegistry& registry);
 	void RegisterEditorMcpTransportTests(TestRegistry& registry);
+	void RegisterEditorMcpAssetImportTests(TestRegistry& registry);
+	void RegisterEditorMcpAssetImportSafetyTests(TestRegistry& registry);
+	void RegisterGltfPackageImporterTests(TestRegistry& registry);
+	void RegisterGltfMaterialTextureTests(TestRegistry& registry);
+	void RegisterGltfMaterialAssignmentTests(TestRegistry& registry);
+	void RegisterGltfImportDiagnosticsTests(TestRegistry& registry);
+	void RegisterGltfUnsupportedFeatureTests(TestRegistry& registry);
+	void RegisterGltfImportFailureTests(TestRegistry& registry);
+	void RegisterGltfReimportTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterStreamingEditorWorkflowTests(TestRegistry& registry);
 }
@@ -76,6 +85,15 @@ int main() {
 	TerraEngine::EditorTests::RegisterEditorMcpBridgeContractTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpBridgeSafetyTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpTransportTests(registry);
+	TerraEngine::EditorTests::RegisterEditorMcpAssetImportTests(registry);
+	TerraEngine::EditorTests::RegisterEditorMcpAssetImportSafetyTests(registry);
+	TerraEngine::EditorTests::RegisterGltfPackageImporterTests(registry);
+	TerraEngine::EditorTests::RegisterGltfMaterialTextureTests(registry);
+	TerraEngine::EditorTests::RegisterGltfMaterialAssignmentTests(registry);
+	TerraEngine::EditorTests::RegisterGltfImportDiagnosticsTests(registry);
+	TerraEngine::EditorTests::RegisterGltfUnsupportedFeatureTests(registry);
+	TerraEngine::EditorTests::RegisterGltfImportFailureTests(registry);
+	TerraEngine::EditorTests::RegisterGltfReimportTests(registry);
 	TerraEngine::EditorTests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::EditorTests::RegisterStreamingEditorWorkflowTests(registry);
 

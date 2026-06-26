@@ -78,7 +78,7 @@ namespace
 
 	std::optional<AssetType> AssetTypeFromImporter(std::string_view importerName)
 	{
-		if (importerName == "MeshImporter")
+		if (importerName == "MeshImporter" || importerName == "GltfPackageImporter")
 		{
 			return AssetType::Mesh;
 		}
