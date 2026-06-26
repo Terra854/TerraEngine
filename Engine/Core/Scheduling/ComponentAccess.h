@@ -19,6 +19,12 @@ namespace TerraEngine::Scheduling {
 		Write
 	};
 
+	enum class ComponentAccessGrantMode {
+		WorkerRead,
+		WorkerWriteDeferred,
+		ProtectedCommit
+	};
+
 	enum class ComponentAccessConflictKind {
 		None,
 		ReadRead,
@@ -86,6 +92,7 @@ namespace TerraEngine::Scheduling {
 		std::vector<std::string> readComponents;
 		std::vector<std::string> writeComponents;
 		std::string scope;
+		ComponentAccessGrantMode grantMode = ComponentAccessGrantMode::WorkerWriteDeferred;
 		bool schedulerValidated = false;
 	};
 
@@ -97,6 +104,7 @@ namespace TerraEngine::Scheduling {
 	};
 
 	TERRAENGINE_API std::string ToString(ComponentAccessMode mode);
+	TERRAENGINE_API std::string ToString(ComponentAccessGrantMode mode);
 	TERRAENGINE_API std::string ToString(ComponentAccessConflictKind kind);
 	TERRAENGINE_API std::string ToString(ComponentAccessDiagnosticSeverity severity);
 	TERRAENGINE_API std::string ToString(ComponentAccessDiagnosticCode code);

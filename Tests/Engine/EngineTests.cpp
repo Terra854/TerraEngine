@@ -22,8 +22,13 @@ namespace TerraEngine::Tests {
 	void RegisterComponentAccessTests(TestRegistry& registry);
 	void RegisterEcsQueryTaskGraphTests(TestRegistry& registry);
 	void RegisterFrameWorkloadExecutionTests(TestRegistry& registry);
+	void RegisterWorkerConversionBaselineTests(TestRegistry& registry);
+	void RegisterWorkerConversionScenarioTests(TestRegistry& registry);
+	void RegisterWorkerCoverageReportTests(TestRegistry& registry);
+	void RegisterWorkerHardBoundaryTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
 	void RegisterInputSystemTests(TestRegistry& registry);
+	void RegisterWindowInputWorkerBoundaryTests(TestRegistry& registry);
 	void RegisterJobGraphTests(TestRegistry& registry);
 	void RegisterPlatformUtilsTests(TestRegistry& registry);
 	void RegisterPrefabCompositionTests(TestRegistry& registry);
@@ -43,6 +48,7 @@ namespace TerraEngine::Tests {
 	void RegisterRenderFrameSnapshotTests(TestRegistry& registry);
 	void RegisterRenderGraphContractTests(TestRegistry& registry);
 	void RegisterRenderSubmissionPlanTests(TestRegistry& registry);
+	void RegisterLiveGpuSubmissionBoundaryTests(TestRegistry& registry);
 	void RegisterRenderWorkerTaskGroupTests(TestRegistry& registry);
 	void RegisterRenderWorkSchedulingTests(TestRegistry& registry);
 	void RegisterVulkanRecordingSchedulingTests(TestRegistry& registry);
@@ -86,6 +92,7 @@ namespace TerraEngine::Tests {
 	void RegisterScriptingDispatchTests(TestRegistry& registry);
 	void RegisterScriptingMutationTests(TestRegistry& registry);
 	void RegisterScriptingWorkloadTests(TestRegistry& registry);
+	void RegisterScriptingWorkerBoundaryTests(TestRegistry& registry);
 	void RegisterSpatialBoundsTests(TestRegistry& registry);
 	void RegisterSystemSchedulerTests(TestRegistry& registry);
 	void RegisterTransformTaskGraphTests(TestRegistry& registry);
@@ -127,10 +134,15 @@ int main() {
 	TerraEngine::Tests::RegisterComponentAccessTests(registry);
 	TerraEngine::Tests::RegisterEcsQueryTaskGraphTests(registry);
 	TerraEngine::Tests::RegisterFrameWorkloadExecutionTests(registry);
+	TerraEngine::Tests::RegisterWorkerConversionBaselineTests(registry);
+	TerraEngine::Tests::RegisterWorkerConversionScenarioTests(registry);
+	TerraEngine::Tests::RegisterWorkerCoverageReportTests(registry);
+	TerraEngine::Tests::RegisterWorkerHardBoundaryTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);
 	TerraEngine::Tests::RegisterInputSystemTests(registry);
+	TerraEngine::Tests::RegisterWindowInputWorkerBoundaryTests(registry);
 	TerraEngine::Tests::RegisterJobGraphTests(registry);
 	TerraEngine::Tests::RegisterPlatformUtilsTests(registry);
 	TerraEngine::Tests::RegisterPrefabCompositionTests(registry);
@@ -174,6 +186,7 @@ int main() {
 	TerraEngine::Tests::RegisterRenderWorkerSafetyTests(registry);
 	TerraEngine::Tests::RegisterRenderViewSubmitReuseTests(registry);
 	TerraEngine::Tests::RegisterRenderSubmissionPlanTests(registry);
+	TerraEngine::Tests::RegisterLiveGpuSubmissionBoundaryTests(registry);
 	TerraEngine::Tests::RegisterRenderWorkerTaskGroupTests(registry);
 	TerraEngine::Tests::RegisterRenderWorkSchedulingTests(registry);
 	TerraEngine::Tests::RegisterVulkanRecordingSchedulingTests(registry);
@@ -193,6 +206,7 @@ int main() {
 	TerraEngine::Tests::RegisterScriptingDispatchTests(registry);
 	TerraEngine::Tests::RegisterScriptingMutationTests(registry);
 	TerraEngine::Tests::RegisterScriptingWorkloadTests(registry);
+	TerraEngine::Tests::RegisterScriptingWorkerBoundaryTests(registry);
 	TerraEngine::Tests::RegisterSpatialBoundsTests(registry);
 	TerraEngine::Tests::RegisterSystemSchedulerTests(registry);
 	TerraEngine::Tests::RegisterTransformTaskGraphTests(registry);

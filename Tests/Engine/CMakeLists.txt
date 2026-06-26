@@ -28,11 +28,16 @@ add_executable(TerraEngine-EngineTests
 	Core/ComponentAccessTests.cpp
 	Core/EcsQueryTaskGraphTests.cpp
 	Core/FrameWorkloadExecutionTests.cpp
+	Core/WorkerConversionBaselineTests.cpp
+	Core/WorkerConversionScenarioTests.cpp
+	Core/WorkerCoverageReportTests.cpp
+	Core/WorkerHardBoundaryTests.cpp
 	Core/ObjectManagerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Core/JobGraphTests.cpp
 	Core/SystemSchedulerTests.cpp
 	Core/TransformTaskGraphTests.cpp
 	Input/InputSystemTests.cpp
+	Input/WindowInputWorkerBoundaryTests.cpp
 	Platform/PlatformUtilsTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
 	Resource/ResourceResidencyBudgetTests.cpp
@@ -71,6 +76,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionOwnershipTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkerTaskGroupTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionPlanTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/LiveGpuSubmissionBoundaryTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderTestRegistration.cpp
 	Renderer/RenderTypesTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderUiPreparationTests.cpp
@@ -88,6 +94,7 @@ add_executable(TerraEngine-EngineTests
 	Scripting/ScriptingMutationTests.cpp
 	Scripting/ScriptingRuntimeTestFixtures.cpp
 	Scripting/ScriptingWorkloadTests.cpp
+	Scripting/ScriptingWorkerBoundaryTests.cpp
 	Scene/PrefabCompositionTests.cpp
 	Scene/HierarchySnapshotTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp

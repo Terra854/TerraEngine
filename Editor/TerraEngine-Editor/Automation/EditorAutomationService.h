@@ -52,6 +52,17 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json BuildActivityList(const std::vector<ActivityRecord>& records) const;
 		std::vector<ExportJob> GetExportJobs() const;
 
+		struct ReflectionMutationPreflight
+		{
+			bool valid = false;
+			std::string classification;
+			std::string safeSubwork;
+			std::string protectedCommit;
+			std::string message;
+		};
+
+		[[nodiscard]] ReflectionMutationPreflight PreflightReflectionMutation(const nlohmann::json& arguments) const;
+
 	private:
 		EditorTarget ResolveTarget(const nlohmann::json& value) const;
 		nlohmann::json SerializeObjectSummary(Object object, bool includeComponents) const;

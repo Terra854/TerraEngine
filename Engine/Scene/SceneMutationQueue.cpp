@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <exception>
 #include <mutex>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -93,6 +94,20 @@ namespace TerraEngine::Scene {
 
 			TerraEngine::Reflection::Variant value = MakeVariantFromMutationPayload(payload["value"], valueKind);
 			return component.setter(target, propertyName, value);
+		}
+
+		std::string FormatCommitSummary(const SceneMutationBatchResult& batch)
+		{
+			std::ostringstream stream;
+			stream << "Scene mutation commit '" << batch.commitName << "':"
+				<< " applied=" << (batch.applied ? "true" : "false")
+				<< " input=" << batch.inputMutationCount
+				<< " accepted=" << batch.acceptedMutationCount
+				<< " rejected=" << batch.rejectedMutationCount
+				<< " typed=" << batch.typedMutationCount
+				<< " jsonFallbacks=" << batch.jsonMutationFallbackCount
+				<< " coalesced=" << batch.coalescedMutationCount;
+			return stream.str();
 		}
 	}
 
@@ -175,6 +190,7 @@ namespace TerraEngine::Scene {
 		std::unordered_set<TerraEngine::UUID> deletedTargets;
 		const std::size_t rawRequestCount = Size();
 		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
+		batch.inputMutationCount = requestSnapshot.size();
 		batch.coalescedMutationCount = rawRequestCount > requestSnapshot.size() ? rawRequestCount - requestSnapshot.size() : 0;
 
 		for (const SceneMutationRequest& request : requestSnapshot)
@@ -227,20 +243,32 @@ namespace TerraEngine::Scene {
 
 			if (!result.accepted)
 			{
+				++batch.rejectedMutationCount;
 				batch.diagnostics.insert(batch.diagnostics.end(), result.diagnostics.begin(), result.diagnostics.end());
+			}
+			else
+			{
+				++batch.acceptedMutationCount;
 			}
 			batch.results.push_back(std::move(result));
 		}
 
+		batch.formattedCommitSummary = FormatCommitSummary(batch);
 		return batch;
 	}
 
 	SceneMutationBatchResult SceneMutationQueue::Apply(ObjectManager& objects)
 	{
+		return Apply(objects, "SceneMutationQueue.Apply");
+	}
+
+	SceneMutationBatchResult SceneMutationQueue::Apply(ObjectManager& objects, std::string commitName)
+	{
 		const std::size_t rawRequestCount = Size();
 		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
 		SceneGraph graph = BuildSceneGraphFromObjectManager(objects);
 		SceneMutationBatchResult batch = Validate(graph);
+		batch.commitName = commitName.empty() ? "SceneMutationQueue.Apply" : std::move(commitName);
 		for (const SceneMutationRequest& request : requestSnapshot)
 		{
 			if (request.operation == SceneMutationOperation::UpdateComponent)
@@ -260,6 +288,7 @@ namespace TerraEngine::Scene {
 		});
 		if (hasRejectedRequest)
 		{
+			batch.formattedCommitSummary = FormatCommitSummary(batch);
 			return batch;
 		}
 
@@ -371,6 +400,7 @@ namespace TerraEngine::Scene {
 			const std::size_t removeCount = std::min(rawRequestCount, requests.size());
 			requests.erase(requests.begin(), requests.begin() + static_cast<std::ptrdiff_t>(removeCount));
 		}
+		batch.formattedCommitSummary = FormatCommitSummary(batch);
 		return batch;
 	}
 }

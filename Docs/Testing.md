@@ -46,6 +46,15 @@ Large-scene regression coverage currently includes 10,000-object active queries,
 `TERRAENGINE_TEST_FILTER=ArchitectureMigrationSummary;ActiveMembership;CompactObjectReference;HierarchySnapshot;ComponentAccessGrant;SystemScheduler`
 for a focused local diagnosis pass before running the complete CTest surface.
 
+Broad worker conversion coverage lives beside the existing scheduler tests. Use
+`TERRAENGINE_TEST_FILTER=WorkerConversion;WorkerCoverage;WorkerHardBoundary;ScriptingWorkerBoundary;LiveGpuSubmissionBoundary;WindowInputWorkerBoundary;Editor.ReflectionWorkerBoundary`
+to validate the worker coverage report, hard-boundary classifications, managed
+callback split, live GPU submission split, protected window/input polling, and
+protected editor reflection mutation. The expected classification is:
+managed gameplay callbacks and live GPU submission are partially worker-safe,
+while window/input polling and editor reflection mutation stay protected with
+worker-readable snapshots or preflight validation around them.
+
 The scripting scheduler checks live under `Tests/Engine/Scripting`. They verify
 workload snapshots, worker batch planning, thread-local dispatch context,
 diagnostics gating, and deferred script-origin scene mutations. Export scripting

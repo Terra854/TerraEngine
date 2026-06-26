@@ -12,10 +12,12 @@ namespace TerraEngine::Tests {
 
 			TerraEngine::Scene::SceneMutationQueue queue;
 			queue.Enqueue({"create-parent", TerraEngine::Scene::SceneMutationOperation::CreateObject, {}, {}, "Parent"});
-			auto result = queue.Apply(objects);
+			auto result = queue.Apply(objects, "After Scene");
 
 			context.Expect(result.applied, "A valid create batch should apply.");
 			context.ExpectEqual(static_cast<std::size_t>(1), objects.getRootObjects().size(), "Create should add one root object.");
+			context.ExpectEqual(static_cast<std::size_t>(1), result.acceptedMutationCount, "Protected commit accounting should count accepted mutations.");
+			context.Expect(result.formattedCommitSummary.find("After Scene") != std::string::npos, "Protected commit summary should name the barrier.");
 			context.Expect(queue.Empty(), "Applied queues should clear their requests.");
 			objects.clear();
 		});

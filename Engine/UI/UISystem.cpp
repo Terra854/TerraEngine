@@ -472,6 +472,9 @@ TerraEngine::Scheduling::SystemDeclaration UISystem::SchedulerDeclaration()
 	// worker eligible instead of a purely protected main-thread workload.
 	declaration.mainThread = false;
 	declaration.requiresFlushedSceneMutations = true;
+	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
+	declaration.safeSubwork = "UI document/style/layout preparation snapshots can run on worker tasks.";
+	declaration.protectedCommit = "Publishing prepared UI state back to the live document remains synchronized on UISystem.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
 	return declaration;

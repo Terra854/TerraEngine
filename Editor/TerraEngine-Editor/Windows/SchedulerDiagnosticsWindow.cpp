@@ -146,6 +146,8 @@ void SchedulerDiagnosticsWindow::OnGui()
 
 	DrawSchedulerSummary();
 	ImGui::Spacing();
+	DrawWorkerCoverageSummary();
+	ImGui::Spacing();
 	DrawScriptingSummary();
 	ImGui::Spacing();
 	ImGui::SeparatorText("UI Preparation");
@@ -284,6 +286,44 @@ void SchedulerDiagnosticsWindow::DrawSchedulerSummary()
 		}
 		ImGui::TreePop();
 	}
+}
+
+void SchedulerDiagnosticsWindow::DrawWorkerCoverageSummary()
+{
+	if (owner == nullptr || owner->GetContext() == nullptr || owner->GetContext()->engine == nullptr)
+	{
+		ImGui::TextDisabled("Worker coverage is not available.");
+		return;
+	}
+
+	const TerraEngine::Scheduling::WorkerCoverageReport& report = owner->GetContext()->engine->GetWorkerCoverageReport();
+	ImGui::SeparatorText("Worker Coverage");
+	if (ImGui::BeginTable("SchedulerDiagnosticsWorkerCoverage", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Worker");
+		ImGui::TableSetupColumn("Protected");
+		ImGui::TableSetupColumn("Rejected");
+		ImGui::TableSetupColumn("Fallback");
+		ImGui::TableSetupColumn("Barriers");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::Text("%zu", report.workerCategories.size());
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Text("%zu", report.protectedCategories.size());
+		ImGui::TableSetColumnIndex(2);
+		ImGui::Text("%zu", report.rejectedCategories.size());
+		ImGui::TableSetColumnIndex(3);
+		ImGui::Text("%zu", report.fallbackCategories.size());
+		ImGui::TableSetColumnIndex(4);
+		ImGui::Text("%zu", report.barrierCount);
+		ImGui::EndTable();
+	}
+	DrawStringList("Worker:", report.workerCategories);
+	DrawStringList("Protected:", report.protectedCategories);
+	DrawStringList("Rejected:", report.rejectedCategories);
+	DrawStringList("Fallback:", report.fallbackCategories);
+	DrawStringList("Boundaries:", report.hardBoundaryFindings);
 }
 
 void SchedulerDiagnosticsWindow::DrawScriptingSummary()

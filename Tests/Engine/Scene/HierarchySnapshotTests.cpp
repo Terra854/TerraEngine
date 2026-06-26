@@ -110,6 +110,8 @@ namespace TerraEngine::Tests {
 			context.Expect(plan.valid, "Snapshot-backed transform work plan should validate.");
 			context.ExpectEqual(snapshot.depthRanges.size(), plan.units.size(), "Transform work units should mirror hierarchy depth ranges.");
 			context.ExpectEqual(std::string("level-0"), plan.units.front().workUnitId, "Root depth range should produce level-0 work.");
+			context.Expect(TerraEngine::Scene::IsHierarchySnapshotWorkerReadable(snapshot, snapshot.publishedRevision), "Valid published hierarchy snapshots should be worker-readable.");
+			context.Expect(snapshot.formatted.find("workerReadable=true") != std::string::npos, "Snapshot diagnostics should expose worker-readable publication state.");
 			objects.clear();
 		});
 

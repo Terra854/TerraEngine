@@ -345,6 +345,18 @@ namespace TerraEngine::Scheduling {
 				entry.profilingLabel = node.profilingLabel;
 				if (node.kind == JobGraphNodeKind::Job)
 				{
+					if (node.executionPolicy == JobGraphExecutionPolicy::WorkerEligible)
+					{
+						++summary.workerJobCount;
+					}
+					else if (node.executionPolicy == JobGraphExecutionPolicy::Protected || node.executionPolicy == JobGraphExecutionPolicy::MainThread || node.executionPolicy == JobGraphExecutionPolicy::MixedProtected)
+					{
+						++summary.protectedJobCount;
+					}
+					if (node.state == JobGraphNodeState::Failed || node.state == JobGraphNodeState::Blocked || node.state == JobGraphNodeState::Cancelled)
+					{
+						++summary.rejectedJobCount;
+					}
 					summary.jobs.push_back(std::move(entry));
 				}
 				else if (node.kind == JobGraphNodeKind::TaskGroup)
@@ -519,6 +531,11 @@ namespace TerraEngine::Scheduling {
 			stream << " [" << entry.name << "=" << ToString(entry.state) << ", " << ToString(entry.executionPolicy) << ", profile=" << entry.profilingLabel << "]";
 		}
 		stream << '\n';
+		stream << "Coverage:"
+			<< " worker=" << summary.workerJobCount
+			<< " protected=" << summary.protectedJobCount
+			<< " rejected=" << summary.rejectedJobCount
+			<< " fallback=" << summary.fallbackJobCount << '\n';
 
 		stream << "Task groups:";
 		for (const JobGraphResultEntry& entry : summary.taskGroups)

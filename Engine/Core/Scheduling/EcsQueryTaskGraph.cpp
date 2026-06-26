@@ -88,6 +88,11 @@ namespace TerraEngine::Scheduling {
 			request.readComponents = declaration.access.readComponents;
 			request.writeComponents = declaration.access.writeComponents;
 			request.scope = ToString(policy);
+			request.grantMode = policy == EcsQueryExecutionPolicy::Protected
+				? ComponentAccessGrantMode::ProtectedCommit
+				: declaration.access.writeComponents.empty()
+				? ComponentAccessGrantMode::WorkerRead
+				: ComponentAccessGrantMode::WorkerWriteDeferred;
 			request.schedulerValidated = declaration.access.workerEligible && policy != EcsQueryExecutionPolicy::Protected;
 			return ValidateComponentAccessGrant(std::move(request));
 		}
@@ -207,6 +212,8 @@ namespace TerraEngine::Scheduling {
 				<< " objects=" << plan.matchingObjects.size()
 				<< " compactRefs=" << plan.compactMatchingObjects.size()
 				<< " chunks=" << plan.chunks.size()
+				<< " phase=" << ToString(plan.phaseKind)
+				<< " label=" << plan.phaseLabel
 				<< " processed=" << plan.processedObjectCount
 				<< " grant=" << (plan.accessGrant.granted ? "granted" : "protected")
 				<< " invalidated=" << (plan.invalidatedByMutation ? "true" : "false")
@@ -391,6 +398,10 @@ namespace TerraEngine::Scheduling {
 		{
 			declaration.access.queryName = declaration.queryName;
 		}
+		if (declaration.phaseLabel.empty())
+		{
+			declaration.phaseLabel = declaration.queryName + "." + ToString(declaration.phaseKind);
+		}
 		if (!declaration.preserveMatchingObjectOrder)
 		{
 			SortIds(declaration.matchingObjects);
@@ -461,6 +472,10 @@ namespace TerraEngine::Scheduling {
 			plan.declaration = query;
 			plan.matchingObjects = query.matchingObjects;
 			plan.executionPolicy = SelectPolicy(query, protectedFallback);
+			plan.phaseKind = plan.executionPolicy == EcsQueryExecutionPolicy::Protected
+				? WorkerSystemPhaseKind::ProtectedCommit
+				: query.phaseKind;
+			plan.phaseLabel = query.phaseLabel;
 			plan.compactMatchingObjects = BuildCompactReferences(plan.matchingObjects);
 			plan.accessGrant = BuildAccessGrant(query, plan.executionPolicy);
 			for (const ComponentAccessDiagnostic& diagnostic : plan.accessGrant.diagnostics)

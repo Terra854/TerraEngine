@@ -50,6 +50,21 @@ public:
 	void SetCursorPosition(double x, double y);
 	std::pair<double, double> GetScrollDelta() const;
 
+	struct InputSnapshot
+	{
+		std::uint64_t frameRevision = 0;
+		std::array<KeyState, KeyCount()> keyStates{};
+		std::array<KeyState, MouseButtonCount()> mouseButtonStates{};
+		std::array<bool, MouseButtonCount()> mouseButtonPressedThisFrame{};
+		std::pair<double, double> cursorPosition{ 0.0, 0.0 };
+		std::pair<double, double> scrollDelta{ 0.0, 0.0 };
+		bool workerReadable = false;
+		std::string boundarySummary;
+	};
+
+	[[nodiscard]] InputSnapshot GetLatestWorkerSnapshot() const;
+	[[nodiscard]] std::string GetPollingBoundarySummary() const;
+
 private:
 	InputSystem() = default;
 
@@ -65,6 +80,8 @@ private:
 	std::array<bool, MouseButtonCount()> mouseButtonPressedThisFrame{};
 	std::pair<double, double> cursorPosition{0.0, 0.0};
 	std::pair<double, double> scrollDelta{0.0, 0.0};
+	InputSnapshot latestSnapshot{};
+	std::uint64_t nextSnapshotRevision = 1;
 
 	std::unique_ptr<IInputBackend> backend;
 	bool configured = false;

@@ -124,6 +124,20 @@ namespace TerraEngine::Scheduling {
 		return mode == ComponentAccessMode::Write ? "write" : "read";
 	}
 
+	std::string ToString(ComponentAccessGrantMode mode)
+	{
+		switch (mode)
+		{
+		case ComponentAccessGrantMode::WorkerRead:
+			return "worker-read";
+		case ComponentAccessGrantMode::WorkerWriteDeferred:
+			return "worker-write-deferred";
+		case ComponentAccessGrantMode::ProtectedCommit:
+		default:
+			return "protected-commit";
+		}
+	}
+
 	std::string ToString(ComponentAccessConflictKind kind)
 	{
 		switch (kind)
@@ -344,13 +358,30 @@ namespace TerraEngine::Scheduling {
 		result.normalized.workloadName = declaration.ownerSystem;
 		result.normalized.readComponents = declaration.readComponents;
 		result.normalized.writeComponents = declaration.writeComponents;
-		result.normalized.scope = std::move(request.scope);
+		result.normalized.scope = request.scope.empty()
+			? ToString(request.grantMode)
+			: request.scope + ":" + ToString(request.grantMode);
 		result.normalized.schedulerValidated = request.schedulerValidated;
 
+		if (request.grantMode == ComponentAccessGrantMode::ProtectedCommit)
+		{
+			result.granted = true;
+			result.fallbackReason = "Protected commit grants run on the serialized commit path.";
+			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Info, ComponentAccessDiagnosticCode::ProtectedFallback, declaration, "", result.fallbackReason, "No worker access is granted; apply side effects at the protected commit point.");
+			SortDiagnostics(result.diagnostics);
+			return result;
+		}
 		if (!request.schedulerValidated)
 		{
 			result.fallbackReason = "Scheduler validation is required before hot-loop component access can bypass protected locks.";
 			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Warning, ComponentAccessDiagnosticCode::ProtectedFallback, declaration, "", result.fallbackReason, "Run the workload through scheduler/query validation or use reflected protected access.");
+			return result;
+		}
+		if (request.grantMode == ComponentAccessGrantMode::WorkerRead && !declaration.writeComponents.empty())
+		{
+			result.fallbackReason = "Worker-read grants cannot include component writes.";
+			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Error, ComponentAccessDiagnosticCode::AccessConflict, declaration, "", result.fallbackReason, "Use a deferred worker-write grant or a protected commit grant.");
+			SortDiagnostics(result.diagnostics);
 			return result;
 		}
 		if (declaration.readComponents.empty() && declaration.writeComponents.empty())

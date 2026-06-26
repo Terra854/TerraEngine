@@ -41,9 +41,12 @@ namespace TerraEngine::Scene {
 		std::ostringstream stream;
 		stream << "Hierarchy snapshot: " << (snapshot.valid ? "valid" : "invalid")
 			<< " revision=" << snapshot.revision
+			<< " publishedRevision=" << snapshot.publishedRevision
 			<< " objects=" << snapshot.orderedObjects.size()
 			<< " depthRanges=" << snapshot.depthRanges.size()
-			<< " reused=" << (snapshot.reused ? "true" : "false");
+			<< " reused=" << (snapshot.reused ? "true" : "false")
+			<< " workerReadable=" << (snapshot.workerReadable ? "true" : "false")
+			<< " label=" << snapshot.publicationLabel;
 		if (!snapshot.diagnostics.empty())
 		{
 			stream << "\nDiagnostics:";
@@ -58,10 +61,22 @@ namespace TerraEngine::Scene {
 		return stream.str();
 	}
 
+	bool IsHierarchySnapshotWorkerReadable(const HierarchySnapshot& snapshot, std::uint64_t expectedRevision)
+	{
+		// Worker readers need a valid immutable publication. The optional
+		// revision check lets a prepare phase reject stale snapshots before it
+		// reads compact object references that may no longer point at live data.
+		return snapshot.valid
+			&& snapshot.workerReadable
+			&& (expectedRevision == 0 || snapshot.publishedRevision == expectedRevision);
+	}
+
 	HierarchySnapshot BuildHierarchySnapshot(ObjectManager& objects)
 	{
 		HierarchySnapshot snapshot;
 		snapshot.revision = objects.GetHierarchyRevision();
+		snapshot.publishedRevision = snapshot.revision;
+		snapshot.publicationLabel = "HierarchySnapshot.rev" + std::to_string(snapshot.publishedRevision);
 
 		SceneGraph graph = BuildSceneGraphFromObjectManager(objects, false);
 		std::vector<SceneObjectId> order = BuildTraversalOrder(graph);
@@ -115,6 +130,7 @@ namespace TerraEngine::Scene {
 				});
 			}
 		}
+		snapshot.workerReadable = snapshot.valid;
 		snapshot.formatted = FormatHierarchySnapshot(snapshot);
 		return snapshot;
 	}

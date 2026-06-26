@@ -87,5 +87,30 @@ namespace TerraEngine::Tests {
 			context.Expect(!result.granted, "Reflected editor/script access should not become a worker grant without scheduler validation.");
 			context.Expect(result.fallbackReason.find("Scheduler validation") != std::string::npos, "Protected fallback should explain that scheduler validation is required.");
 		});
+
+		registry.Add("Engine.ComponentAccess.GrantModesSeparateWorkerAndProtectedCommit", [](TestContext& context) {
+			TerraEngine::Scheduling::ComponentAccessGrantRequest readGrant;
+			readGrant.grantId = "read";
+			readGrant.workloadName = "ReadWork";
+			readGrant.readComponents = { "Transform" };
+			readGrant.grantMode = TerraEngine::Scheduling::ComponentAccessGrantMode::WorkerRead;
+			readGrant.schedulerValidated = true;
+			const auto readResult = TerraEngine::Scheduling::ValidateComponentAccessGrant(readGrant);
+
+			TerraEngine::Scheduling::ComponentAccessGrantRequest protectedGrant;
+			protectedGrant.grantId = "commit";
+			protectedGrant.workloadName = "CommitWork";
+			protectedGrant.writeComponents = { "Transform" };
+			protectedGrant.grantMode = TerraEngine::Scheduling::ComponentAccessGrantMode::ProtectedCommit;
+			const auto protectedResult = TerraEngine::Scheduling::ValidateComponentAccessGrant(protectedGrant);
+
+			readGrant.writeComponents = { "Transform" };
+			const auto invalidRead = TerraEngine::Scheduling::ValidateComponentAccessGrant(readGrant);
+
+			context.Expect(readResult.granted, "Scheduler-validated worker-read grants should be allowed.");
+			context.Expect(protectedResult.granted, "Protected commit grants should be allowed on the serialized commit path.");
+			context.Expect(!invalidRead.granted, "Worker-read grants should reject writes.");
+			context.Expect(protectedResult.normalized.scope.find("protected-commit") != std::string::npos, "Grant scope should name the protected commit mode.");
+		});
 	}
 }

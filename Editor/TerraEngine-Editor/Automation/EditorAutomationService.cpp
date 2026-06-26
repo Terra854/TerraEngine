@@ -18,6 +18,7 @@
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/Serializer.h"
+#include "Engine/Core/Scheduling/FrameWorkload.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Utilities/UUID.h"
 
@@ -458,11 +459,22 @@ namespace TerraEngine::Editor::Automation
 			? editorContext->assetDatabase->GetCompileJobsCount()
 			: 0u;
 		nlohmann::json data;
+		nlohmann::json boundaryFindings = nlohmann::json::array();
+		for (const TerraEngine::Scheduling::HardBoundary& boundary : TerraEngine::Scheduling::InitialWorkerHardBoundaries())
+		{
+			boundaryFindings.push_back({
+				{"name", boundary.boundaryName},
+				{"classification", TerraEngine::Scheduling::ToString(boundary.currentClassification)},
+				{"safeSubwork", boundary.safeSubwork},
+				{"protectedCommit", boundary.protectedCommit},
+				{"requiredEvidence", boundary.requiredEvidence}
+			});
+		}
 		data["surfaces"] = nlohmann::json::array({
 			{{"surface", "render"}, {"state", "available"}, {"details", includeDetails ? nlohmann::json{{"note", "Render diagnostics are available through the profiler/resource windows."}} : nlohmann::json::object()}},
 			{{"surface", "resources"}, {"state", assetJobCount > 0 ? "compiling" : "available"}, {"details", nlohmann::json{{"assetCompileJobs", assetJobCount}}}},
 			{{"surface", "streaming"}, {"state", "available"}, {"details", nlohmann::json::object()}},
-			{{"surface", "scheduler"}, {"state", "available"}, {"details", nlohmann::json::object()}},
+			{{"surface", "scheduler"}, {"state", "available"}, {"details", nlohmann::json{{"workerBoundaries", boundaryFindings}}}},
 			{{"surface", "scripting"}, {"state", ScriptingSystem::Instance().IsRunning() ? "running" : "idle"}, {"details", nlohmann::json{{"coordinatorState", editorContext ? editorContext->scripting.coordinatorState : "Idle"}}}},
 			{{"surface", "export"}, {"state", exportJobs.empty() ? "idle" : exportJobs.front().state}, {"details", nlohmann::json{{"jobs", exportJobJson}}}}
 		});
@@ -490,6 +502,48 @@ namespace TerraEngine::Editor::Automation
 	std::vector<ExportJob> EditorAutomationService::GetExportJobs() const
 	{
 		return exportJobs;
+	}
+
+	EditorAutomationService::ReflectionMutationPreflight EditorAutomationService::PreflightReflectionMutation(const nlohmann::json& arguments) const
+	{
+		ReflectionMutationPreflight result;
+		result.classification = "protected";
+		result.safeSubwork = "Target, component, property, and payload validation can run before the protected editor mutation.";
+		result.protectedCommit = "Reflected setters, undo stack updates, object structure notifications, scene dirty markers, and selection/runtime inspector side effects stay protected.";
+		if (!arguments.is_object())
+		{
+			result.message = "Tool arguments must be a JSON object.";
+			return result;
+		}
+
+		EditorTarget target = ResolveTarget(arguments.value("object", nlohmann::json()));
+		const std::string component = arguments.value("component", "");
+		const std::string property = arguments.value("property", "");
+		if (!target.resolved || component.empty() || property.empty() || !arguments.contains("value"))
+		{
+			result.message = "component.set_property requires object, component, property, and value.";
+			return result;
+		}
+
+		Object object = *ObjectManager::instance().getObject(*target.entity);
+		std::lock_guard lock(ComponentAccessRegistryMutex());
+		auto componentIt = ComponentAccessRegistry().find(component);
+		if (componentIt == ComponentAccessRegistry().end() || !componentIt->second.hasComponent(object))
+		{
+			result.message = "Component is not present on the object.";
+			return result;
+		}
+
+		const nlohmann::json existingPayload = componentIt->second.serialize(object);
+		if (!existingPayload.contains(property))
+		{
+			result.message = "Property is not present in component reflection metadata.";
+			return result;
+		}
+
+		result.valid = true;
+		result.message = "Reflection mutation preflight passed; apply the edit through the protected editor mutation handler.";
+		return result;
 	}
 
 	EditorTarget EditorAutomationService::ResolveTarget(const nlohmann::json& value) const
@@ -789,9 +843,10 @@ namespace TerraEngine::Editor::Automation
 		EditorTarget target = ResolveTarget(arguments.value("object", nlohmann::json()));
 		const std::string component = arguments.value("component", "");
 		const std::string property = arguments.value("property", "");
-		if (!target.resolved || component.empty() || property.empty() || !arguments.contains("value"))
+		const ReflectionMutationPreflight preflight = PreflightReflectionMutation(arguments);
+		if (!preflight.valid)
 		{
-			return BuildError(requestId, ErrorCategory::Validation, "component.set_property requires object, component, property, and value.");
+			return BuildError(requestId, ErrorCategory::Validation, preflight.message);
 		}
 		Object object = *ObjectManager::instance().getObject(*target.entity);
 		std::lock_guard lock(ComponentAccessRegistryMutex());

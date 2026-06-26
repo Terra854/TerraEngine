@@ -70,6 +70,7 @@ class TERRAENGINE_API Engine {
 		const TerraEngine::Scheduling::ScheduleSummary& GetSchedulerSummary() const { return systemScheduler.LatestSummary(); }
 		const TerraEngine::Scheduling::JobGraphSummary& GetJobGraphSummary() const { return latestJobGraphSummary; }
 		const TerraEngine::Scheduling::ArchitectureMigrationSummary& GetArchitectureMigrationSummary() const { return latestArchitectureSummary; }
+		const TerraEngine::Scheduling::WorkerCoverageReport& GetWorkerCoverageReport() const { return latestWorkerCoverageReport; }
 
 	private:
 		bool running = true;
@@ -79,6 +80,7 @@ class TERRAENGINE_API Engine {
 		TerraEngine::Scheduling::SystemScheduler systemScheduler;
 		TerraEngine::Scheduling::JobGraphSummary latestJobGraphSummary;
 		TerraEngine::Scheduling::ArchitectureMigrationSummary latestArchitectureSummary;
+		TerraEngine::Scheduling::WorkerCoverageReport latestWorkerCoverageReport;
 		FrameTimer frameTimer;
 
 		SystemsBase* editorSystem = nullptr;

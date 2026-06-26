@@ -35,6 +35,13 @@ public:
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const override;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const override;
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const override;
+	struct LiveGpuSubmissionBoundary
+	{
+		std::string classification;
+		std::string workerSafePreparation;
+		std::string protectedSubmission;
+	};
+	[[nodiscard]] LiveGpuSubmissionBoundary GetLiveGpuSubmissionBoundary() const;
 	void InvalidateMaterial(const TerraEngine::UUID& materialId) override;
 	void InvalidateMesh(const TerraEngine::UUID& meshId) override;
 	void InvalidateTexture(const TerraEngine::UUID& textureId) override;

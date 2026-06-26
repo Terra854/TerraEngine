@@ -59,6 +59,8 @@ namespace TerraEngine::Scheduling {
 		bool runOnceWithoutObjectSnapshot = false;
 		std::size_t workerThreshold = 128;
 		std::size_t preferredChunkSize = 256;
+		WorkerSystemPhaseKind phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
+		std::string phaseLabel;
 		EcsQueryChunkWork work;
 	};
 
@@ -69,6 +71,8 @@ namespace TerraEngine::Scheduling {
 		std::vector<EcsQueryChunk> chunks;
 		ComponentAccessGrantResult accessGrant;
 		EcsQueryExecutionPolicy executionPolicy = EcsQueryExecutionPolicy::Protected;
+		WorkerSystemPhaseKind phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
+		std::string phaseLabel;
 		std::size_t processedObjectCount = 0;
 		bool invalidatedByMutation = false;
 	};

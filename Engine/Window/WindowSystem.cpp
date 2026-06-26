@@ -81,6 +81,11 @@ void WindowSystem::Update(float deltaTime)
 	}
 
 	backend->PollEvents();
+	pollingDiagnostics.pollRevision += 1;
+	pollingDiagnostics.classification = "protected";
+	pollingDiagnostics.protectedReason = "Platform event polling, close/resize callbacks, cursor state, and swap-buffer calls remain owned by the coordinator thread.";
+	pollingDiagnostics.workerSafeSubwork = "Workers may consume immutable input/window snapshots after polling.";
+	pollingDiagnostics.lastPollRan = true;
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (backend->ShouldClose()) {
@@ -93,6 +98,7 @@ void WindowSystem::Update(float deltaTime)
 	}
 	
 	backend->SwapBuffers();
+	pollingDiagnostics.lastSwapRan = true;
 }
 
 // WindowSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -112,4 +118,9 @@ void WindowSystem::Shutdown()
 std::string WindowSystem::SystemName()
 {
 	return "WindowSystem";
+}
+
+WindowSystem::WindowPollingBoundaryDiagnostics WindowSystem::GetPollingBoundaryDiagnostics() const
+{
+	return pollingDiagnostics;
 }

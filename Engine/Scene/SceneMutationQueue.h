@@ -80,11 +80,16 @@ namespace TerraEngine::Scene {
 
 	struct SceneMutationBatchResult {
 		bool applied = false;
+		std::string commitName;
+		std::size_t inputMutationCount = 0;
+		std::size_t acceptedMutationCount = 0;
+		std::size_t rejectedMutationCount = 0;
 		std::size_t typedMutationCount = 0;
 		std::size_t jsonMutationFallbackCount = 0;
 		std::size_t coalescedMutationCount = 0;
 		std::vector<SceneMutationResult> results;
 		std::vector<SceneDiagnostic> diagnostics;
+		std::string formattedCommitSummary;
 	};
 
 	class TERRAENGINE_API SceneMutationQueue {
@@ -98,6 +103,7 @@ namespace TerraEngine::Scene {
 		void Clear();
 		SceneMutationBatchResult Validate(const SceneGraph& graph) const;
 		SceneMutationBatchResult Apply(ObjectManager& objects);
+		SceneMutationBatchResult Apply(ObjectManager& objects, std::string commitName);
 
 	private:
 		std::vector<SceneMutationRequest> requests;

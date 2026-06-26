@@ -114,6 +114,15 @@ void InputSystem::Update(float deltaTime)
 		mouseButtonPressedThisFrame[index] = sawNewPress;
 		observedMouseButtonPressGenerations[index] = mouseButtonPressGenerations[index];
 	}
+
+	latestSnapshot.frameRevision = nextSnapshotRevision++;
+	latestSnapshot.keyStates = keyStates;
+	latestSnapshot.mouseButtonStates = mouseButtonStates;
+	latestSnapshot.mouseButtonPressedThisFrame = mouseButtonPressedThisFrame;
+	latestSnapshot.cursorPosition = cursorPosition;
+	latestSnapshot.scrollDelta = scrollDelta;
+	latestSnapshot.workerReadable = true;
+	latestSnapshot.boundarySummary = GetPollingBoundarySummary();
 }
 
 // InputSystem::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -200,6 +209,16 @@ void InputSystem::SetCursorPosition(double x, double y)
 std::pair<double, double> InputSystem::GetScrollDelta() const
 {
 	return scrollDelta;
+}
+
+InputSystem::InputSnapshot InputSystem::GetLatestWorkerSnapshot() const
+{
+	return latestSnapshot;
+}
+
+std::string InputSystem::GetPollingBoundarySummary() const
+{
+	return "Window/input polling is protected; workers may read immutable input snapshots after backend polling and callback ingestion complete.";
 }
 
 // InputSystem::HandleKeyEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

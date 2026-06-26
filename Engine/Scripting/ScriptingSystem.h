@@ -48,6 +48,7 @@ public:
 	[[nodiscard]] bool ManagedCallbacksRunProtected() const { return true; }
 	[[nodiscard]] bool ManagedCallbacksRequireSchedulerAnnotations() const { return false; }
 	[[nodiscard]] std::string GetSchedulerBoundarySummary() const;
+	[[nodiscard]] TerraEngine::Scheduling::HardBoundary GetManagedCallbackBoundary() const;
 
 	enum class ScriptLifecycleState
 	{

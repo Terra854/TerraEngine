@@ -5543,6 +5543,15 @@ RenderSnapshotDiagnosticsSnapshot VulkanContext::GetLatestRenderSnapshotDiagnost
 	return impl->latestRenderSnapshotDiagnostics;
 }
 
+VulkanContext::LiveGpuSubmissionBoundary VulkanContext::GetLiveGpuSubmissionBoundary() const
+{
+	return {
+		"partially-worker-safe",
+		"Render snapshots, resource readiness, secondary command recording, and submit packet assembly can be prepared away from the protected path.",
+		"Swapchain acquire, queue submit, present, fence/semaphore ownership, editor UI present, and swapchain recovery stay protected."
+	};
+}
+
 // VulkanContext::InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::InvalidateMaterial(const TerraEngine::UUID& materialId) {
 	if (impl) {

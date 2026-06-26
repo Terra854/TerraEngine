@@ -59,6 +59,13 @@ namespace TerraEngine::Scheduling {
 		std::vector<std::string> writes;
 		bool mainThread = true;
 		bool requiresFlushedSceneMutations = false;
+		WorkerSystemPhaseKind phaseKind = WorkerSystemPhaseKind::ProtectedCommit;
+		HardBoundaryClassification boundaryClassification = HardBoundaryClassification::Protected;
+		bool hardBoundary = false;
+		std::string safeSubwork;
+		std::string protectedCommit;
+		std::string protectedReason;
+		std::string fallbackReason;
 		std::string profilingLabel;
 		bool usesDefaultMetadata = true;
 	};
@@ -110,6 +117,7 @@ namespace TerraEngine::Scheduling {
 		std::vector<std::string> componentQueryGroups;
 		std::string ecsGraphSummary;
 		std::vector<ScheduleDiagnostic> diagnostics;
+		WorkerCoverageReport workerCoverageReport;
 		std::string formatted;
 	};
 
@@ -149,6 +157,7 @@ namespace TerraEngine::Scheduling {
 		const ScheduleSummary& ExecuteFrame(float deltaTime, const MutationFlushCallback& flushCallback);
 		std::vector<FrameWorkloadDeclaration> BuildFrameWorkloadDeclarations(float deltaTime);
 		FrameExecutionPlan ExecuteFrameWorkloads(float deltaTime, const MutationFlushCallback& flushCallback = {});
+		WorkerCoverageReport BuildWorkerCoverageReport(float deltaTime);
 		const ScheduleSummary& LatestSummary() const;
 		const std::vector<SystemDeclaration>& OrderedDeclarations() const;
 		const std::vector<SchedulerPhaseDefinition>& PhaseDefinitions() const;

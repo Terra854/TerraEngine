@@ -132,6 +132,10 @@ namespace TerraEngine::Scheduling {
 		std::vector<JobGraphResultEntry> barriers;
 		std::vector<JobGraphDependencyEdge> dependencies;
 		std::vector<JobGraphDiagnostic> diagnostics;
+		std::size_t workerJobCount = 0;
+		std::size_t protectedJobCount = 0;
+		std::size_t rejectedJobCount = 0;
+		std::size_t fallbackJobCount = 0;
 		std::string formatted;
 	};
 

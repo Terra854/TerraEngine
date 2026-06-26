@@ -28,6 +28,7 @@ add_executable(TerraEngine-EditorTests
 	Project/ProjectSettingsPersistenceTests.cpp
 	Core/EditorCommandLineTests.cpp
 	Automation/EditorAutomationServiceTests.cpp
+	Automation/EditorReflectionWorkerBoundaryTests.cpp
 	Automation/EditorMcpBridgeContractTests.cpp
 	Automation/EditorMcpBridgeSafetyTests.cpp
 	Automation/EditorMcpTransportTests.cpp

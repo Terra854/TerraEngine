@@ -122,13 +122,27 @@ void Engine::Initialize()
 	windowSystem.Configure(std::make_unique<GlfwWindowBackend>(), windowConfig, [this]() {
 		SignalShutdown();
 		});
-	RegisterEngineSystem(systems, systemScheduler, windowSystem, MakeEngineSystemDeclaration("WindowSystem", "PreFrame", {}, { "Window" }));
+	auto windowDeclaration = MakeEngineSystemDeclaration("WindowSystem", "PreFrame", {}, { "Window" });
+	windowDeclaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
+	windowDeclaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
+	windowDeclaration.hardBoundary = true;
+	windowDeclaration.safeSubwork = "Immutable window state snapshots for worker readers after protected event polling.";
+	windowDeclaration.protectedCommit = "Platform event polling, close/resize handling, backend callback ingestion, cursor mutation, and swap-buffer calls.";
+	windowDeclaration.protectedReason = windowDeclaration.protectedCommit;
+	RegisterEngineSystem(systems, systemScheduler, windowSystem, std::move(windowDeclaration));
 
 	// Set up the input system after the window so the backend can attach to the
 	// native window handle without duplicating platform specific code here.
 	InputSystem& inputSystem = InputSystem::Instance();
 	inputSystem.Configure(std::make_unique<GlfwInputBackend>());
-	RegisterEngineSystem(systems, systemScheduler, inputSystem, MakeEngineSystemDeclaration("InputSystem", "Input", { "Window" }, { "Input" }));
+	auto inputDeclaration = MakeEngineSystemDeclaration("InputSystem", "Input", { "Window" }, { "Input" });
+	inputDeclaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
+	inputDeclaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::Protected;
+	inputDeclaration.hardBoundary = true;
+	inputDeclaration.safeSubwork = "Immutable post-poll input/window snapshots for worker readers.";
+	inputDeclaration.protectedCommit = "Platform event polling, backend callback ingestion, close/resize handling, cursor mutation, and swap-buffer calls.";
+	inputDeclaration.protectedReason = inputDeclaration.protectedCommit;
+	RegisterEngineSystem(systems, systemScheduler, inputSystem, std::move(inputDeclaration));
 
 	// The scene manager owns authored .tescene and .teprefab JSON documents so
 	// gameplay code can request them without re-reading disk on every access.
@@ -295,6 +309,11 @@ bool Engine::Update(float deltaTime)
 		});
 		if (!schedulerSummary.valid) {
 			TERRAENGINE_LOG(LogLevel::Error, schedulerSummary.formatted);
+		}
+		{
+			TerraEngine::Scheduling::FrameExecutionPlan coveragePlan = TerraEngine::Scheduling::ValidateFrameWorkloads(systemScheduler.BuildFrameWorkloadDeclarations(deltaTime), "engine-frame-coverage");
+			latestWorkerCoverageReport = TerraEngine::Scheduling::BuildWorkerCoverageReport(coveragePlan);
+			latestArchitectureSummary = coveragePlan.migrationSummary;
 		}
 		if (ecsGraphDiagnosticsEnabled)
 		{

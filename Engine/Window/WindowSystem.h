@@ -3,6 +3,7 @@
 #pragma once
 
 #include <functional>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -36,6 +37,18 @@ public:
 	// GetBackend is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	IWindowBackend* GetBackend() const { return backend.get(); }
 
+	struct WindowPollingBoundaryDiagnostics
+	{
+		std::uint64_t pollRevision = 0;
+		std::string classification;
+		std::string protectedReason;
+		std::string workerSafeSubwork;
+		bool lastPollRan = false;
+		bool lastSwapRan = false;
+	};
+
+	[[nodiscard]] WindowPollingBoundaryDiagnostics GetPollingBoundaryDiagnostics() const;
+
 	void Initialize() override;
 	void Update(float deltaTime) override;
 	void Shutdown() override;
@@ -47,6 +60,7 @@ private:
 	WindowConfig windowConfig{};
 	std::unique_ptr<IWindowBackend> backend;
 	std::function<void()> onShutdownRequested;
+	WindowPollingBoundaryDiagnostics pollingDiagnostics{};
 	bool initialized = false;
 	bool configured = false;
 };

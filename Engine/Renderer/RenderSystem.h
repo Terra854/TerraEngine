@@ -62,6 +62,7 @@ public:
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const;
 	TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const;
 	void SetRenderGraphDiagnosticsRequested(bool requested);
+	[[nodiscard]] TerraEngine::Scheduling::HardBoundary GetLiveGpuSubmissionBoundary() const;
 
 	void SetQualityPreset(QualityPreset preset);
 	// GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

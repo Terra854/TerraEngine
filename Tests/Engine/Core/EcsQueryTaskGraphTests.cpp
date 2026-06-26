@@ -232,6 +232,20 @@ namespace TerraEngine::Tests {
 			context.Expect(summary.formatted.find("grant=granted") != std::string::npos, "Formatted ECS summary should expose grant state.");
 		});
 
+		registry.Add("Engine.EcsQueryTaskGraph.WorkerQueriesCarryPreparePhaseMetadata", [](TestContext& context) {
+			TerraEngine::Scheduling::EcsQueryTaskGraph graph({ "phase", "Phase Metadata" });
+			auto query = MakeQuery("PhaseSystem", "PhaseQuery", MakeIds(8));
+			query.workerThreshold = 4;
+			query.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
+			graph.AddQuery(std::move(query));
+
+			const auto& summary = graph.Validate();
+
+			context.Expect(summary.valid, "Phase metadata fixture should validate.");
+			context.Expect(summary.queryPlans.front().phaseKind == TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare, "Worker query should retain worker-prepare metadata.");
+			context.Expect(summary.formatted.find("worker-prepare") != std::string::npos, "Formatted ECS summary should expose phase metadata.");
+		});
+
 		registry.Add("Engine.EcsQueryTaskGraph.DeferredMutationFlushInvalidatesPlans", [](TestContext& context) {
 			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
 			TerraEngine::Scheduling::EcsQueryTaskGraph graph({ "mutation", "Mutation" });

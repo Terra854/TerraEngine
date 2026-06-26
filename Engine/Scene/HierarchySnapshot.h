@@ -43,16 +43,20 @@ namespace TerraEngine::Scene {
 
 	struct HierarchySnapshot {
 		std::uint64_t revision = 0;
+		std::uint64_t publishedRevision = 0;
 		std::vector<HierarchySnapshotEntry> orderedObjects;
 		std::vector<HierarchyDepthRange> depthRanges;
 		std::vector<HierarchySnapshotDiagnostic> diagnostics;
 		bool valid = true;
 		bool reused = false;
+		bool workerReadable = false;
+		std::string publicationLabel;
 		std::string formatted;
 	};
 
 	TERRAENGINE_API std::string ToString(HierarchySnapshotDiagnosticSeverity severity);
 	TERRAENGINE_API std::string FormatHierarchySnapshot(const HierarchySnapshot& snapshot);
+	TERRAENGINE_API bool IsHierarchySnapshotWorkerReadable(const HierarchySnapshot& snapshot, std::uint64_t expectedRevision = 0);
 	TERRAENGINE_API HierarchySnapshot BuildHierarchySnapshot(ObjectManager& objects);
 	TERRAENGINE_API HierarchySnapshot BuildHierarchySnapshot(ObjectManager& objects, const HierarchySnapshot* previousSnapshot);
 

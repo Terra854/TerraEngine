@@ -1427,6 +1427,12 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	// counts through ScriptingFrameResult diagnostics instead.
 	declaration.mainThread = true;
 	declaration.requiresFlushedSceneMutations = false;
+	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
+	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
+	declaration.hardBoundary = true;
+	declaration.safeSubwork = "Native script batch preparation, immutable dispatch inputs, generation validation, and deferred mutation capture.";
+	declaration.protectedCommit = "Arbitrary managed callback invocation, managed lifecycle/reload hooks, and immediate native/reflection API calls.";
+	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
 	return declaration;
@@ -1435,6 +1441,18 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 std::string ScriptingSystem::GetSchedulerBoundarySummary() const
 {
 	return "C# gameplay callbacks are scheduled as native script batches; C# authors keep the normal API while structural scene changes are deferred to SceneMutationQueue flush points.";
+}
+
+TerraEngine::Scheduling::HardBoundary ScriptingSystem::GetManagedCallbackBoundary() const
+{
+	for (const TerraEngine::Scheduling::HardBoundary& boundary : TerraEngine::Scheduling::InitialWorkerHardBoundaries())
+	{
+		if (boundary.boundaryName == "ManagedGameplayCallbacks")
+		{
+			return boundary;
+		}
+	}
+	return {};
 }
 
 // ScriptingSystem::LoadGameplayAssembly is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

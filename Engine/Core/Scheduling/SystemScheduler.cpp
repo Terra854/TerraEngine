@@ -282,6 +282,10 @@ namespace TerraEngine::Scheduling {
 		{
 			stream << "ECS graph: " << summary.ecsGraphSummary << '\n';
 		}
+		if (!summary.workerCoverageReport.formattedSummary.empty())
+		{
+			stream << summary.workerCoverageReport.formattedSummary << '\n';
+		}
 		if (summary.diagnostics.empty())
 		{
 			stream << "Diagnostics: none";
@@ -463,6 +467,15 @@ namespace TerraEngine::Scheduling {
 			if (declaration.mainThread)
 			{
 				latestSummary.mainThreadSystems.push_back(declaration.name);
+			}
+			if ((declaration.phaseKind == WorkerSystemPhaseKind::WorkerPrepare || !declaration.mainThread) && declaration.reads.empty() && declaration.writes.empty())
+			{
+				AddDiagnostic(diagnostics, DiagnosticSeverity::Error, DiagnosticCategory::Resource, declaration.name, declaration.phase, "", "Worker-preparation system has no declared access.", "Declare every resource read/write or keep the system protected.");
+			}
+			if (declaration.hardBoundary)
+			{
+				const std::string classification = ToString(declaration.boundaryClassification);
+				AddDiagnostic(diagnostics, DiagnosticSeverity::Info, DiagnosticCategory::Summary, declaration.name, declaration.phase, "", "Hard boundary classified as " + classification + ".", "Only the documented safe subwork may run on workers.");
 			}
 			if (declaration.usesDefaultMetadata)
 			{
@@ -782,10 +795,18 @@ namespace TerraEngine::Scheduling {
 			workload.mutationPolicy = declaration.requiresFlushedSceneMutations
 				? FrameWorkloadMutationPolicy::DeferredOnly
 				: FrameWorkloadMutationPolicy::None;
+			workload.phaseKind = declaration.phaseKind;
+			workload.boundaryClassification = declaration.boundaryClassification;
+			workload.hardBoundary = declaration.hardBoundary;
+			workload.safeSubwork = declaration.safeSubwork;
+			workload.protectedCommit = declaration.protectedCommit;
 			workload.profilingLabel = declaration.profilingLabel.empty() ? declaration.name : declaration.profilingLabel;
-			workload.protectedReason = declaration.mainThread
+			workload.protectedReason = !declaration.protectedReason.empty()
+				? declaration.protectedReason
+				: declaration.mainThread
 				? "System declaration still requires the main thread."
 				: "Compatibility workload path validates worker-safe metadata before live worker execution is enabled.";
+			workload.fallbackReason = declaration.fallbackReason;
 			workload.work = [system = registeredSystem.system, deltaTime](JobGraphContext&) {
 				// Workload execution deliberately reuses the existing SystemsBase
 				// update call so conversion tests exercise the same code path as
@@ -809,6 +830,7 @@ namespace TerraEngine::Scheduling {
 			workload.workerEligible = false;
 			workload.mainThreadRequired = true;
 			workload.mutationPolicy = FrameWorkloadMutationPolicy::DeferredOnly;
+			workload.phaseKind = WorkerSystemPhaseKind::Barrier;
 			workload.protectedReason = "Mutation flushes remain protected barriers until deferred mutation batches are proven worker-safe.";
 			workload.profilingLabel = workload.workloadName;
 			workloads.push_back(std::move(workload));
@@ -846,6 +868,18 @@ namespace TerraEngine::Scheduling {
 			};
 		}
 		return TerraEngine::Scheduling::ExecuteFrameWorkloads(std::move(workloads), "system-scheduler-frame");
+	}
+
+	WorkerCoverageReport SystemScheduler::BuildWorkerCoverageReport(float deltaTime)
+	{
+		// Coverage reporting intentionally validates the same declarations used
+		// for execution, but it does not call SystemsBase::Update. Editor panels
+		// can therefore show conversion status without changing the frame.
+		FrameExecutionPlan plan = TerraEngine::Scheduling::ValidateFrameWorkloads(BuildFrameWorkloadDeclarations(deltaTime), "system-scheduler-coverage");
+		WorkerCoverageReport report = TerraEngine::Scheduling::BuildWorkerCoverageReport(plan);
+		latestSummary.workerCoverageReport = report;
+		latestSummary.formatted = FormatScheduleSummary(latestSummary);
+		return report;
 	}
 
 	const ScheduleSummary& SystemScheduler::LatestSummary() const

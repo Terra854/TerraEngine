@@ -117,21 +117,52 @@ namespace TerraEngine::Scheduling {
 				{
 					++summary.mutationFlushCount;
 				}
+				if (result.declaration.phaseKind == WorkerSystemPhaseKind::WorkerPrepare)
+				{
+					++summary.workerPhaseCount;
+				}
+				else if (result.declaration.phaseKind == WorkerSystemPhaseKind::ProtectedCommit)
+				{
+					++summary.protectedCommitCount;
+				}
+				else if (result.declaration.phaseKind == WorkerSystemPhaseKind::Barrier)
+				{
+					++summary.barrierCount;
+				}
+				if (result.declaration.hardBoundary)
+				{
+					++summary.hardBoundaryCount;
+					if (result.declaration.boundaryClassification == HardBoundaryClassification::PartiallyWorkerSafe)
+					{
+						++summary.partiallyWorkerSafeBoundaryCount;
+					}
+					std::ostringstream finding;
+					finding << result.declaration.workloadName
+						<< "=" << ToString(result.declaration.boundaryClassification)
+						<< " safe='" << result.declaration.safeSubwork
+						<< "' protected='" << result.declaration.protectedCommit << "'";
+					summary.hardBoundaryFindings.push_back(finding.str());
+				}
 				switch (result.executionPolicy)
 				{
 				case FrameWorkloadExecutionPolicy::WorkerSafe:
 					++summary.workerSafeCount;
+					summary.workerCategories.push_back(result.declaration.ownerSystem + ":" + result.declaration.workloadName);
 					break;
 				case FrameWorkloadExecutionPolicy::Rejected:
 					++summary.rejectedCount;
+					summary.rejectedCategories.push_back(result.declaration.ownerSystem + ":" + result.declaration.workloadName);
 					break;
 				case FrameWorkloadExecutionPolicy::Protected:
 				default:
 					++summary.protectedCount;
+					summary.protectedCategories.push_back(result.declaration.ownerSystem + ":" + result.declaration.workloadName);
 					if (result.fallbackUsed)
 					{
 						++summary.fallbackCount;
-						const std::string reason = result.declaration.protectedReason.empty()
+						const std::string reason = !result.declaration.fallbackReason.empty()
+							? result.declaration.fallbackReason
+							: result.declaration.protectedReason.empty()
 							? "protected fallback"
 							: result.declaration.protectedReason;
 						summary.fallbackReasons.push_back(result.declaration.workloadName + ": " + reason);
@@ -158,6 +189,15 @@ namespace TerraEngine::Scheduling {
 					++summary.componentAccessGrantDeniedCount;
 				}
 			}
+			auto normalize = [](std::vector<std::string>& values) {
+				std::stable_sort(values.begin(), values.end());
+				values.erase(std::unique(values.begin(), values.end()), values.end());
+			};
+			normalize(summary.workerCategories);
+			normalize(summary.protectedCategories);
+			normalize(summary.rejectedCategories);
+			normalize(summary.fallbackReasons);
+			normalize(summary.hardBoundaryFindings);
 			summary.formatted = FormatArchitectureMigrationSummary(summary);
 			plan.migrationSummary = std::move(summary);
 		}
@@ -192,6 +232,76 @@ namespace TerraEngine::Scheduling {
 	std::string ToString(FrameWorkloadMutationPolicy policy)
 	{
 		return policy == FrameWorkloadMutationPolicy::DeferredOnly ? "deferred-only" : "none";
+	}
+
+	std::string ToString(WorkerConversionState state)
+	{
+		switch (state)
+		{
+		case WorkerConversionState::Protected:
+			return "protected";
+		case WorkerConversionState::PartiallyConverted:
+			return "partially-converted";
+		case WorkerConversionState::WorkerConverted:
+			return "worker-converted";
+		case WorkerConversionState::Rejected:
+			return "rejected";
+		case WorkerConversionState::Unreviewed:
+		default:
+			return "unreviewed";
+		}
+	}
+
+	std::string ToString(WorkerSystemPhaseKind kind)
+	{
+		switch (kind)
+		{
+		case WorkerSystemPhaseKind::Snapshot:
+			return "snapshot";
+		case WorkerSystemPhaseKind::WorkerPrepare:
+			return "worker-prepare";
+		case WorkerSystemPhaseKind::ProtectedCommit:
+			return "protected-commit";
+		case WorkerSystemPhaseKind::Barrier:
+			return "barrier";
+		case WorkerSystemPhaseKind::Fallback:
+		default:
+			return "fallback";
+		}
+	}
+
+	std::string ToString(HardBoundaryClassification classification)
+	{
+		switch (classification)
+		{
+		case HardBoundaryClassification::PartiallyWorkerSafe:
+			return "partially-worker-safe";
+		case HardBoundaryClassification::WorkerSafe:
+			return "worker-safe";
+		case HardBoundaryClassification::Rejected:
+			return "rejected";
+		case HardBoundaryClassification::Protected:
+		default:
+			return "protected";
+		}
+	}
+
+	std::string ToString(ConversionFindingStatus status)
+	{
+		switch (status)
+		{
+		case ConversionFindingStatus::WorkerSafe:
+			return "worker-safe";
+		case ConversionFindingStatus::PartiallyWorkerSafe:
+			return "partially-worker-safe";
+		case ConversionFindingStatus::Protected:
+			return "protected";
+		case ConversionFindingStatus::Rejected:
+			return "rejected";
+		case ConversionFindingStatus::NeedsFollowUp:
+		default:
+			return "needs-follow-up";
+		}
 	}
 
 	std::string ToString(ArchitectureDiagnosticSeverity severity)
@@ -260,6 +370,14 @@ namespace TerraEngine::Scheduling {
 			<< " rejected=" << summary.rejectedCount
 			<< " fallbacks=" << summary.fallbackCount
 			<< " mutationFlushes=" << summary.mutationFlushCount
+			<< " workerPhases=" << summary.workerPhaseCount
+			<< " protectedCommits=" << summary.protectedCommitCount
+			<< " barriers=" << summary.barrierCount
+			<< " hardBoundaries=" << summary.hardBoundaryCount
+			<< " partialBoundaries=" << summary.partiallyWorkerSafeBoundaryCount
+			<< " protectedBaselineNs=" << summary.protectedBaselineTimeNs
+			<< " workerPrepNs=" << summary.workerPreparationTimeNs
+			<< " protectedCommitNs=" << summary.protectedCommitTimeNs
 			<< " activeInvalidations=" << summary.activeMembershipInvalidationCount
 			<< " staleReferences=" << summary.staleCompactReferenceCount
 			<< " hierarchyRebuilds=" << summary.hierarchySnapshotRebuildCount
@@ -268,7 +386,192 @@ namespace TerraEngine::Scheduling {
 		{
 			stream << " [" << reason << "]";
 		}
+		for (const std::string& category : summary.workerCategories)
+		{
+			stream << " [worker:" << category << "]";
+		}
+		for (const std::string& category : summary.protectedCategories)
+		{
+			stream << " [protected:" << category << "]";
+		}
+		for (const std::string& category : summary.rejectedCategories)
+		{
+			stream << " [rejected:" << category << "]";
+		}
+		for (const std::string& finding : summary.hardBoundaryFindings)
+		{
+			stream << " [boundary:" << finding << "]";
+		}
 		return stream.str();
+	}
+
+	std::string FormatWorkerCoverageReport(const WorkerCoverageReport& report)
+	{
+		std::ostringstream stream;
+		stream << "Worker coverage report '" << report.frameId << "':"
+			<< " worker=" << report.workerCategories.size()
+			<< " protected=" << report.protectedCategories.size()
+			<< " rejected=" << report.rejectedCategories.size()
+			<< " fallback=" << report.fallbackCategories.size()
+			<< " barriers=" << report.barrierCount
+			<< " protectedTimeNs=" << report.protectedTimeNs
+			<< " workerTimeNs=" << report.workerTimeNs;
+		for (const std::string& category : report.workerCategories)
+		{
+			stream << " [worker:" << category << "]";
+		}
+		for (const std::string& category : report.protectedCategories)
+		{
+			stream << " [protected:" << category << "]";
+		}
+		for (const std::string& category : report.rejectedCategories)
+		{
+			stream << " [rejected:" << category << "]";
+		}
+		for (const std::string& category : report.fallbackCategories)
+		{
+			stream << " [fallback:" << category << "]";
+		}
+		for (const std::string& finding : report.hardBoundaryFindings)
+		{
+			stream << " [boundary:" << finding << "]";
+		}
+		return stream.str();
+	}
+
+	FrameWorkloadDeclaration MakeSnapshotPhase(std::string workloadName, std::string ownerSystem, std::vector<std::string> reads, std::string profilingLabel)
+	{
+		FrameWorkloadDeclaration declaration;
+		declaration.workloadName = std::move(workloadName);
+		declaration.ownerSystem = std::move(ownerSystem);
+		declaration.phase = "Snapshot";
+		declaration.reads = std::move(reads);
+		declaration.workerEligible = true;
+		declaration.mainThreadRequired = false;
+		declaration.phaseKind = WorkerSystemPhaseKind::Snapshot;
+		declaration.profilingLabel = profilingLabel.empty() ? declaration.workloadName : std::move(profilingLabel);
+		return declaration;
+	}
+
+	FrameWorkloadDeclaration MakeWorkerPreparePhase(std::string workloadName, std::string ownerSystem, std::vector<std::string> reads, std::vector<std::string> writes, std::string profilingLabel)
+	{
+		FrameWorkloadDeclaration declaration;
+		declaration.workloadName = std::move(workloadName);
+		declaration.ownerSystem = std::move(ownerSystem);
+		declaration.phase = "WorkerPrepare";
+		declaration.reads = std::move(reads);
+		declaration.writes = std::move(writes);
+		declaration.workerEligible = true;
+		declaration.mainThreadRequired = false;
+		declaration.phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
+		declaration.profilingLabel = profilingLabel.empty() ? declaration.workloadName : std::move(profilingLabel);
+		return declaration;
+	}
+
+	FrameWorkloadDeclaration MakeProtectedCommitPhase(std::string workloadName, std::string ownerSystem, std::vector<std::string> reads, std::vector<std::string> writes, std::string protectedReason, std::string profilingLabel)
+	{
+		FrameWorkloadDeclaration declaration;
+		declaration.workloadName = std::move(workloadName);
+		declaration.ownerSystem = std::move(ownerSystem);
+		declaration.phase = "ProtectedCommit";
+		declaration.reads = std::move(reads);
+		declaration.writes = std::move(writes);
+		declaration.workerEligible = false;
+		declaration.mainThreadRequired = true;
+		declaration.phaseKind = WorkerSystemPhaseKind::ProtectedCommit;
+		declaration.protectedReason = std::move(protectedReason);
+		declaration.profilingLabel = profilingLabel.empty() ? declaration.workloadName : std::move(profilingLabel);
+		return declaration;
+	}
+
+	FrameWorkloadDeclaration MakeBarrierPhase(std::string workloadName, std::string ownerSystem, std::vector<std::string> resources, std::string protectedReason, std::string profilingLabel)
+	{
+		FrameWorkloadDeclaration declaration = MakeProtectedCommitPhase(std::move(workloadName), std::move(ownerSystem), resources, resources, std::move(protectedReason), std::move(profilingLabel));
+		declaration.phase = "Barrier";
+		declaration.phaseKind = WorkerSystemPhaseKind::Barrier;
+		declaration.mutationPolicy = FrameWorkloadMutationPolicy::DeferredOnly;
+		return declaration;
+	}
+
+	FrameWorkloadDeclaration MakeFallbackPhase(std::string workloadName, std::string ownerSystem, std::vector<std::string> reads, std::vector<std::string> writes, std::string fallbackReason, std::string profilingLabel)
+	{
+		FrameWorkloadDeclaration declaration = MakeProtectedCommitPhase(std::move(workloadName), std::move(ownerSystem), std::move(reads), std::move(writes), fallbackReason, std::move(profilingLabel));
+		declaration.phaseKind = WorkerSystemPhaseKind::Fallback;
+		declaration.fallbackReason = declaration.protectedReason;
+		return declaration;
+	}
+
+	std::vector<HardBoundary> InitialWorkerHardBoundaries()
+	{
+		return {
+			{
+				"ManagedGameplayCallbacks",
+				HardBoundaryClassification::PartiallyWorkerSafe,
+				{ "managed-runtime-affinity", "reflection-mutation", "immediate-structural-mutation" },
+				"Native batch preparation, immutable dispatch inputs, generation validation, and deferred mutation capture.",
+				"Arbitrary managed callback invocation, assembly reload/lifecycle callbacks, and immediate native/reflection API calls.",
+				"Repeatable managed runtime validation before moving invocation itself to workers."
+			},
+			{
+				"LiveGpuSubmission",
+				HardBoundaryClassification::PartiallyWorkerSafe,
+				{ "external-device-queue", "swapchain-affinity", "frame-fence-ownership" },
+				"Render snapshots, draw/resource packets, secondary command buffers, and submit description assembly.",
+				"Swapchain acquire, queue submit, present, frame fence/semaphore lifecycle, editor UI present, and recovery.",
+				"Backend-specific proof that queue and presentation ownership can safely move off the coordinator."
+			},
+			{
+				"WindowInputPolling",
+				HardBoundaryClassification::Protected,
+				{ "os-event-source", "backend-callback-ingestion", "cursor-mutation" },
+				"Immutable post-poll input/window snapshots for worker readers.",
+				"Platform event polling, close/resize handling, callback ingestion, cursor mutation, and swap-buffer calls.",
+				"Platform backend contract that permits event polling away from the coordinator."
+			},
+			{
+				"EditorReflectionMutation",
+				HardBoundaryClassification::Protected,
+				{ "editor-lifetime", "reflection-mutation", "undo-stack", "selection-side-effects" },
+				"Target and payload validation against immutable snapshots.",
+				"Reflected setters, component add/remove, object metadata/parent changes, undo stack updates, dirty markers, and selection state.",
+				"Editor transaction model that can publish reflected mutations from a deterministic protected commit."
+			}
+		};
+	}
+
+	std::vector<ConversionFinding> InitialWorkerConversionFindings()
+	{
+		std::vector<ConversionFinding> findings;
+		for (const HardBoundary& boundary : InitialWorkerHardBoundaries())
+		{
+			ConversionFinding finding;
+			finding.targetName = boundary.boundaryName;
+			finding.findingStatus = boundary.currentClassification == HardBoundaryClassification::PartiallyWorkerSafe
+				? ConversionFindingStatus::PartiallyWorkerSafe
+				: ConversionFindingStatus::Protected;
+			finding.evidence = boundary.safeSubwork;
+			finding.blockingReason = boundary.protectedCommit;
+			finding.recommendedAction = boundary.requiredEvidence;
+			finding.lastValidatedScenario = "019-worker-system-conversion initial boundary audit";
+			findings.push_back(std::move(finding));
+		}
+		return findings;
+	}
+
+	WorkerCoverageReport BuildWorkerCoverageReport(const FrameExecutionPlan& plan)
+	{
+		WorkerCoverageReport report;
+		report.frameId = plan.frameId;
+		report.workerCategories = plan.migrationSummary.workerCategories;
+		report.protectedCategories = plan.migrationSummary.protectedCategories;
+		report.rejectedCategories = plan.migrationSummary.rejectedCategories;
+		report.fallbackCategories = plan.migrationSummary.fallbackReasons;
+		report.hardBoundaryFindings = plan.migrationSummary.hardBoundaryFindings;
+		report.barrierCount = plan.migrationSummary.barrierCount;
+		report.protectedTimeNs = plan.migrationSummary.protectedBaselineTimeNs + plan.migrationSummary.protectedCommitTimeNs;
+		report.workerTimeNs = plan.migrationSummary.workerPreparationTimeNs;
+		report.formattedSummary = FormatWorkerCoverageReport(report);
+		return report;
 	}
 
 	std::string FormatFrameExecutionPlan(const FrameExecutionPlan& plan)
@@ -283,6 +586,7 @@ namespace TerraEngine::Scheduling {
 			stream << " [" << result.declaration.workloadName
 				<< " owner=" << result.declaration.ownerSystem
 				<< " phase=" << result.declaration.phase
+				<< " kind=" << ToString(result.declaration.phaseKind)
 				<< " policy=" << ToString(result.executionPolicy)
 				<< " completed=" << (result.completed ? "true" : "false")
 				<< "]";
