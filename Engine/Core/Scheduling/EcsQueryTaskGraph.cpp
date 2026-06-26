@@ -61,7 +61,38 @@ namespace TerraEngine::Scheduling {
 			return EcsQueryExecutionPolicy::WorkerTaskGroup;
 		}
 
-		std::vector<EcsQueryChunk> BuildChunks(const EcsComponentQueryDeclaration& declaration, EcsQueryExecutionPolicy policy)
+		std::vector<TerraEngine::CompactObjectReference> BuildCompactReferences(const std::vector<TerraEngine::UUID>& objects)
+		{
+			ObjectManager& objectManager = ObjectManager::instance();
+			std::vector<TerraEngine::CompactObjectReference> references;
+			references.reserve(objects.size());
+			for (const TerraEngine::UUID& objectId : objects)
+			{
+				if (auto object = objectManager.getObject(objectId))
+				{
+					references.push_back(objectManager.makeCompactReference(object->EntityId()));
+					continue;
+				}
+				TerraEngine::CompactObjectReference unresolved;
+				unresolved.stableId = objectId;
+				references.push_back(unresolved);
+			}
+			return references;
+		}
+
+		ComponentAccessGrantResult BuildAccessGrant(const EcsComponentQueryDeclaration& declaration, EcsQueryExecutionPolicy policy)
+		{
+			ComponentAccessGrantRequest request;
+			request.grantId = declaration.queryName + ".grant";
+			request.workloadName = declaration.queryName;
+			request.readComponents = declaration.access.readComponents;
+			request.writeComponents = declaration.access.writeComponents;
+			request.scope = ToString(policy);
+			request.schedulerValidated = declaration.access.workerEligible && policy != EcsQueryExecutionPolicy::Protected;
+			return ValidateComponentAccessGrant(std::move(request));
+		}
+
+		std::vector<EcsQueryChunk> BuildChunks(const EcsComponentQueryDeclaration& declaration, EcsQueryExecutionPolicy policy, const std::vector<TerraEngine::CompactObjectReference>& compactObjects, const ComponentAccessGrantResult& accessGrant)
 		{
 			const std::vector<TerraEngine::UUID>& objects = declaration.matchingObjects;
 			if (objects.empty())
@@ -70,6 +101,7 @@ namespace TerraEngine::Scheduling {
 				{
 					EcsQueryChunk chunk;
 					chunk.chunkIndex = 0;
+					chunk.accessGrant = accessGrant;
 					chunk.profilingLabel = declaration.queryName + ".direct";
 					return { std::move(chunk) };
 				}
@@ -90,7 +122,9 @@ namespace TerraEngine::Scheduling {
 				if (declaration.copyObjectIdsIntoChunks)
 				{
 					chunk.objects.assign(objects.begin() + static_cast<std::ptrdiff_t>(begin), objects.begin() + static_cast<std::ptrdiff_t>(end));
+					chunk.compactObjects.assign(compactObjects.begin() + static_cast<std::ptrdiff_t>(begin), compactObjects.begin() + static_cast<std::ptrdiff_t>(end));
 				}
+				chunk.accessGrant = accessGrant;
 				chunk.profilingLabel = declaration.queryName + ".chunk" + std::to_string(chunk.chunkIndex);
 				chunks.push_back(std::move(chunk));
 			}
@@ -171,8 +205,10 @@ namespace TerraEngine::Scheduling {
 			stream << " [" << plan.declaration.queryName
 				<< " policy=" << ToString(plan.executionPolicy)
 				<< " objects=" << plan.matchingObjects.size()
+				<< " compactRefs=" << plan.compactMatchingObjects.size()
 				<< " chunks=" << plan.chunks.size()
 				<< " processed=" << plan.processedObjectCount
+				<< " grant=" << (plan.accessGrant.granted ? "granted" : "protected")
 				<< " invalidated=" << (plan.invalidatedByMutation ? "true" : "false")
 				<< "]";
 		}
@@ -271,6 +307,7 @@ namespace TerraEngine::Scheduling {
 			compactPlan.executionPolicy = plan.executionPolicy;
 			compactPlan.processedObjectCount = plan.processedObjectCount;
 			compactPlan.invalidatedByMutation = plan.invalidatedByMutation;
+			compactPlan.accessGrant = plan.accessGrant;
 			compact.queryPlans.push_back(std::move(compactPlan));
 		}
 		std::scoped_lock lock(PublishedSummaryMutex());
@@ -424,7 +461,16 @@ namespace TerraEngine::Scheduling {
 			plan.declaration = query;
 			plan.matchingObjects = query.matchingObjects;
 			plan.executionPolicy = SelectPolicy(query, protectedFallback);
-			plan.chunks = BuildChunks(query, plan.executionPolicy);
+			plan.compactMatchingObjects = BuildCompactReferences(plan.matchingObjects);
+			plan.accessGrant = BuildAccessGrant(query, plan.executionPolicy);
+			for (const ComponentAccessDiagnostic& diagnostic : plan.accessGrant.diagnostics)
+			{
+				if (plan.executionPolicy == EcsQueryExecutionPolicy::WorkerTaskGroup || plan.executionPolicy == EcsQueryExecutionPolicy::Inline)
+				{
+					latestSummary.diagnostics.push_back(FromAccessDiagnostic(diagnostic));
+				}
+			}
+			plan.chunks = BuildChunks(query, plan.executionPolicy, plan.compactMatchingObjects, plan.accessGrant);
 			latestSummary.queryPlans.push_back(std::move(plan));
 			if (options.validateAccessDeclarations)
 			{

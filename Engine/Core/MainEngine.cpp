@@ -137,12 +137,12 @@ void Engine::Initialize()
 
 	// ScriptingSystem manages the .NET runtime and gameplay scripts.
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
-	RegisterEngineSystem(systems, systemScheduler, scriptingSystem, MakeEngineSystemDeclaration("ScriptingSystem", "Scripting", { "SceneGraph", "Resources" }, { "Scripting", "ObjectManager", "SceneMutationQueue" }));
+	RegisterEngineSystem(systems, systemScheduler, scriptingSystem, scriptingSystem.SchedulerDeclaration());
 
 	// UISystem parses `.tuiml`/`.tuss` assets and builds CPU-side UI batches
 	// after gameplay and scene state have been updated for the current frame.
 	UISystem& uiSystem = UISystem::Instance();
-	RegisterEngineSystem(systems, systemScheduler, uiSystem, MakeEngineSystemDeclaration("UISystem", "UI", { "SceneGraph", "ObjectManager", "Scripting" }, { "UI" }, true));
+	RegisterEngineSystem(systems, systemScheduler, uiSystem, uiSystem.SchedulerDeclaration());
 
 	// RenderSystem consumes scene data and produces frames.
 	RenderSystem& renderSystem = RenderSystem::Instance();
@@ -152,7 +152,7 @@ void Engine::Initialize()
 		// here gives the renderer one stable quality contract for the session.
 		renderSystem.SetRenderSettings(*configuredRenderSettings);
 	}
-	RegisterEngineSystem(systems, systemScheduler, renderSystem, MakeEngineSystemDeclaration("RenderSystem", "Render", { "Window", "SceneGraph", "ObjectManager", "UI", "Resources" }, { "Renderer" }, true));
+	RegisterEngineSystem(systems, systemScheduler, renderSystem, renderSystem.SchedulerDeclaration());
 
 	const TerraEngine::Scheduling::ScheduleSummary& schedulerSummary = systemScheduler.BuildSchedule();
 	TERRAENGINE_LOG(LogLevel::Info, schedulerSummary.formatted);
@@ -300,6 +300,26 @@ bool Engine::Update(float deltaTime)
 		{
 			systemScheduler.SetLatestComponentQueryGroups(TerraEngine::Scheduling::PublishedEcsComponentQueryGroups());
 			systemScheduler.SetLatestEcsGraphSummary(TerraEngine::Scheduling::FormatPublishedEcsGraphFrameSummaries());
+			latestArchitectureSummary = {};
+			for (const TerraEngine::Scheduling::EcsSystemGraphFrameSummary& graphSummary : TerraEngine::Scheduling::PublishedEcsGraphFrameSummaries())
+			{
+				for (const TerraEngine::Scheduling::EcsComponentQueryPlan& plan : graphSummary.queryPlans)
+				{
+					if (plan.executionPolicy == TerraEngine::Scheduling::EcsQueryExecutionPolicy::WorkerTaskGroup)
+					{
+						++latestArchitectureSummary.workerSafeCount;
+					}
+					else
+					{
+						++latestArchitectureSummary.protectedCount;
+						++latestArchitectureSummary.fallbackCount;
+						latestArchitectureSummary.fallbackReasons.push_back(plan.declaration.queryName + ": " + TerraEngine::Scheduling::ToString(plan.executionPolicy));
+					}
+				}
+				latestArchitectureSummary.mutationFlushCount += graphSummary.mutationFlushes.size();
+			}
+			latestArchitectureSummary.formatted = TerraEngine::Scheduling::FormatArchitectureMigrationSummary(latestArchitectureSummary);
+			TERRAENGINE_LOG(LogLevel::Info, latestArchitectureSummary.formatted);
 		}
 	}
 	TerraEngine::Profiling::Profiler::Instance().EndFrame();

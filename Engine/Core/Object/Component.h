@@ -368,6 +368,20 @@ public:
 		return WriteLock(access_mutex_);
 	}
 
+	// Scheduler-approved hot loops may access the concrete component directly
+	// after a ComponentAccessGrant proves no unordered writer can race this
+	// workload. The helper is intentionally noisy so callers document that
+	// safety comes from the scheduler contract, not from this component mutex.
+	Derived& schedulerApprovedUnsafeAccess()
+	{
+		return static_cast<Derived&>(*this);
+	}
+
+	const Derived& schedulerApprovedUnsafeAccess() const
+	{
+		return static_cast<const Derived&>(*this);
+	}
+
 protected:
 	// Ensures that the derived component registers itself with the EnTT-backed
 	// reflection registry exactly

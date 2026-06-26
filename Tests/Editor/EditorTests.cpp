@@ -43,6 +43,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterGltfUnsupportedFeatureTests(TestRegistry& registry);
 	void RegisterGltfImportFailureTests(TestRegistry& registry);
 	void RegisterGltfReimportTests(TestRegistry& registry);
+	void RegisterArchitectureHardeningPlayModeTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterStreamingEditorWorkflowTests(TestRegistry& registry);
 }
@@ -94,6 +95,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterGltfUnsupportedFeatureTests(registry);
 	TerraEngine::EditorTests::RegisterGltfImportFailureTests(registry);
 	TerraEngine::EditorTests::RegisterGltfReimportTests(registry);
+	TerraEngine::EditorTests::RegisterArchitectureHardeningPlayModeTests(registry);
 	TerraEngine::EditorTests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::EditorTests::RegisterStreamingEditorWorkflowTests(registry);
 

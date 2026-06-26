@@ -60,6 +60,7 @@ namespace TerraEngine::Scene
 		// falls back to a full rebuild when root bounds must be recalculated.
 		void Refresh(const std::vector<SpatialObjectRecord>& records, bool forceFullRefresh = false);
 		void MarkDirty(const TerraEngine::UUID& objectId);
+		void InvalidateForHierarchySnapshotRebuild(std::uint64_t hierarchyRevision);
 
 		[[nodiscard]] SpatialQueryResult QueryAABB(const SpatialAABB& area, const SpatialQueryFilter& filter = {}) const;
 		[[nodiscard]] SpatialQueryResult QuerySphere(const SpatialSphere& sphere, const SpatialQueryFilter& filter = {}) const;
@@ -112,6 +113,7 @@ namespace TerraEngine::Scene
 		std::unordered_set<TerraEngine::UUID> dirtyObjectIds;
 		mutable std::mutex diagnosticsMutex;
 		mutable SpatialDiagnosticsSnapshot diagnostics{};
+		std::uint64_t lastHierarchySnapshotRevision = 0;
 		bool hasBuiltIndex = false;
 
 		int CreateNode(const SpatialAABB& tightBounds, std::uint32_t depth);

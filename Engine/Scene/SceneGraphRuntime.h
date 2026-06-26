@@ -31,6 +31,7 @@ class ObjectManager;
 namespace TerraEngine::Scene {
 
 	using SceneObjectId = TerraEngine::UUID;
+	struct HierarchySnapshot;
 
 	enum class SceneDiagnosticSeverity {
 		Info,
@@ -158,6 +159,7 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API void ComputeWorldTransforms(SceneGraph& graph);
 	TERRAENGINE_API SceneDirtyTransformState BuildDirtyTransformState(const SceneGraph& graph, const std::vector<SceneObjectId>& dirtyRoots = {}, SceneTransformDirtyReason reason = SceneTransformDirtyReason::FullRefresh);
 	TERRAENGINE_API SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph);
+	TERRAENGINE_API SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph, const HierarchySnapshot& snapshot);
 	TERRAENGINE_API SceneTransformPropagationResult PropagateWorldTransforms(SceneGraph& graph, const SceneDirtyTransformState& dirtyState = {});
 	TERRAENGINE_API SceneRuntimeSummary BuildSceneRuntimeSummary(const SceneGraph& graph);
 	TERRAENGINE_API bool ReparentPreserveWorld(ObjectManager& objects, Object child, std::optional<Object> parent);

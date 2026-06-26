@@ -25,6 +25,7 @@ public:
 	void Update(float deltaTime) override;
 	void Shutdown() override;
 	std::string SystemName() override;
+	TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
 
 	/// Records the exported NativeAOT gameplay library discovered by the
 	/// launcher. The actual library load is deferred until Initialize() so
@@ -44,7 +45,7 @@ public:
 	[[nodiscard]] const std::filesystem::path& GetLoadedGameplayAssemblyPath() const { return m_LoadedGameplayAssemblyPath; }
 	[[nodiscard]] const std::string& GetLastGameplayDiagnostic() const { return m_LastGameplayDiagnostic; }
 	[[nodiscard]] float GetLastDeltaTime() const { return m_LastDeltaTime; }
-	[[nodiscard]] bool ManagedCallbacksRunProtected() const { return false; }
+	[[nodiscard]] bool ManagedCallbacksRunProtected() const { return true; }
 	[[nodiscard]] bool ManagedCallbacksRequireSchedulerAnnotations() const { return false; }
 	[[nodiscard]] std::string GetSchedulerBoundarySummary() const;
 

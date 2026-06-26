@@ -4,6 +4,7 @@
 #include "Core/Object/ObjectManager.h"
 #include "Components/Transform.h"
 #include "Scene/SceneGraphRuntime.h"
+#include "Scene/Serializer.h"
 
 #include <glm/gtc/quaternion.hpp>
 #include <nlohmann/json.hpp>
@@ -129,6 +130,26 @@ namespace TerraEngine::Tests {
 
 			context.Expect(afterTransformRevision > beforeTransformRevision, "Hierarchy changes should mark the moved branch transform-dirty.");
 			context.Expect(afterSpatialRevision > 0u, "Hierarchy changes should mark dependent spatial bounds dirty.");
+			objects.clear();
+		});
+
+		registry.Add("SceneGraphRuntime.SaveLoadPreservesActiveState", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object root = objects.createObject("Root");
+			Object child = objects.createObject("Child");
+			context.Expect(objects.setParent(child, root), "Fixture parent assignment should succeed.");
+			objects.setObjectActive(child, false);
+
+			const nlohmann::json saved = Serializer::SerializeObject(root);
+			objects.clear();
+			Object reloadedRoot = Serializer::DeserializeObject(saved);
+			const std::vector<Object> reloadedChildren = objects.getChildren(reloadedRoot);
+
+			context.ExpectEqual(static_cast<std::size_t>(1), reloadedChildren.size(), "Reloaded root should keep its child.");
+			context.Expect(reloadedRoot.isActive(), "Root should keep the default active state after reload.");
+			context.Expect(!reloadedChildren.front().isActive(), "Inactive child should remain inactive after save/load.");
+			context.ExpectEqual(static_cast<std::size_t>(1), objects.getObjectsWithComponents<Transform>().size(), "Active-only queries should still skip the reloaded inactive child.");
 			objects.clear();
 		});
 	}

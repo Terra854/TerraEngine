@@ -74,5 +74,18 @@ namespace TerraEngine::Tests {
 			context.Expect(result.protectedFallback, "Worker-eligible work without access metadata should fall back to protected execution.");
 			context.Expect(HasCode(result.diagnostics, TerraEngine::Scheduling::ComponentAccessDiagnosticCode::MissingWorkerDeclaration), "Missing worker declaration should produce a diagnostic.");
 		});
+
+		registry.Add("Engine.ComponentAccess.ReflectedEditorScriptBoundaryStaysProtected", [](TestContext& context) {
+			TerraEngine::Scheduling::ComponentAccessGrantRequest reflectedRequest;
+			reflectedRequest.grantId = "editor-script-reflection";
+			reflectedRequest.workloadName = "ManagedScriptReflection";
+			reflectedRequest.readComponents = { "Transform" };
+			reflectedRequest.scope = "reflected-editor-script";
+
+			const auto result = TerraEngine::Scheduling::ValidateComponentAccessGrant(reflectedRequest);
+
+			context.Expect(!result.granted, "Reflected editor/script access should not become a worker grant without scheduler validation.");
+			context.Expect(result.fallbackReason.find("Scheduler validation") != std::string::npos, "Protected fallback should explain that scheduler validation is required.");
+		});
 	}
 }

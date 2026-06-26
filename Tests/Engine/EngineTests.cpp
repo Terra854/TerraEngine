@@ -15,8 +15,13 @@ namespace TerraEngine::Tests {
 	void RegisterExportScriptingRuntimeTests(TestRegistry& registry);
 	void RegisterLinuxStartupSmokeTests(TestRegistry& registry);
 	void RegisterMaterialRuntimeContractTests(TestRegistry& registry);
+	void RegisterActiveMembershipTests(TestRegistry& registry);
+	void RegisterArchitectureMigrationSummaryTests(TestRegistry& registry);
+	void RegisterCompactObjectReferenceTests(TestRegistry& registry);
+	void RegisterComponentAccessGrantTests(TestRegistry& registry);
 	void RegisterComponentAccessTests(TestRegistry& registry);
 	void RegisterEcsQueryTaskGraphTests(TestRegistry& registry);
+	void RegisterFrameWorkloadExecutionTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
 	void RegisterInputSystemTests(TestRegistry& registry);
 	void RegisterJobGraphTests(TestRegistry& registry);
@@ -71,6 +76,7 @@ namespace TerraEngine::Tests {
 	void RegisterVulkanFrameDiagnosticsTests(TestRegistry& registry);
 	void RegisterRenderProfileBootSummaryTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
+	void RegisterHierarchySnapshotTests(TestRegistry& registry);
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
 	void RegisterSkyComponentSerializationTests(TestRegistry& registry);
@@ -114,8 +120,13 @@ int main() {
 	TerraEngine::Tests::RegisterExportScriptingRuntimeTests(registry);
 	TerraEngine::Tests::RegisterLinuxStartupSmokeTests(registry);
 	TerraEngine::Tests::RegisterMaterialRuntimeContractTests(registry);
+	TerraEngine::Tests::RegisterArchitectureMigrationSummaryTests(registry);
+	TerraEngine::Tests::RegisterActiveMembershipTests(registry);
+	TerraEngine::Tests::RegisterCompactObjectReferenceTests(registry);
+	TerraEngine::Tests::RegisterComponentAccessGrantTests(registry);
 	TerraEngine::Tests::RegisterComponentAccessTests(registry);
 	TerraEngine::Tests::RegisterEcsQueryTaskGraphTests(registry);
+	TerraEngine::Tests::RegisterFrameWorkloadExecutionTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);
@@ -172,6 +183,7 @@ int main() {
 	TerraEngine::Tests::RegisterMockRenderBackendTests(registry);
 	TerraEngine::Tests::RegisterRenderProfileBootSummaryTests(registry);
 	TerraEngine::Tests::RegisterSceneRuntimeParityTests(registry);
+	TerraEngine::Tests::RegisterHierarchySnapshotTests(registry);
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
 	TerraEngine::Tests::RegisterSkyComponentSerializationTests(registry);

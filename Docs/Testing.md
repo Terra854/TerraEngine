@@ -38,6 +38,14 @@ levels, and exported runtime scheduler smoke coverage. The editor suite validate
 that Play Mode can consume the scheduler summaries while C# authors keep normal
 script workflows without adding job or query annotations.
 
+Architecture-hardening coverage extends those scheduler checks with
+`FrameWorkload` migration summaries, active membership filtering, compact object
+reference invalidation, hierarchy snapshot reuse, and component access grants.
+Large-scene regression coverage currently includes 10,000-object active queries,
+10,000-object hierarchy snapshot preparation, and 10,000 grant validations. Use
+`TERRAENGINE_TEST_FILTER=ArchitectureMigrationSummary;ActiveMembership;CompactObjectReference;HierarchySnapshot;ComponentAccessGrant;SystemScheduler`
+for a focused local diagnosis pass before running the complete CTest surface.
+
 The scripting scheduler checks live under `Tests/Engine/Scripting`. They verify
 workload snapshots, worker batch planning, thread-local dispatch context,
 diagnostics gating, and deferred script-origin scene mutations. Export scripting
@@ -216,6 +224,16 @@ cmake --build out/build/Debug --target TerraEngine-EngineTests
 cmake --build out/build/Debug --target TerraEngine-EditorTests
 ctest --test-dir out/build/Debug --output-on-failure
 cmake --build out/build/Debug --target install
+```
+
+When using a non-preset build directory created by Codex or local automation,
+replace `out/build/Debug` with that directory. For example, the current Codex
+debug tree uses:
+
+```powershell
+cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" && cmake --build out\build\CodexDebug --target TerraEngine-EngineTests TerraEngine-EditorTests --config Debug"
+ctest --test-dir out\build\CodexDebug --output-on-failure -C Debug
+cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" && cmake --build out\build\CodexDebug --target install --config Debug"
 ```
 
 For the RelWithDebInfo residency workflow used by current performance/debug

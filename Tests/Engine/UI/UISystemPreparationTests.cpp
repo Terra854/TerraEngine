@@ -1,5 +1,6 @@
 #include "TestHarness.h"
 #include "Components/UIComponent.h"
+#include "Core/Scheduling/FrameWorkload.h"
 #include "Input/InputBackend.h"
 #include "Input/InputSystem.h"
 #include "Core/Object/ObjectManager.h"
@@ -177,6 +178,25 @@ void RegisterUISystemPreparationTests(TestRegistry& registry)
 
 		context.Expect(!uiSystem.ShouldPrepareOnWorker(small), "Small UI snapshots should stay inline.");
 		context.Expect(uiSystem.ShouldPrepareOnWorker(large), "Large UI snapshots should be worker eligible.");
+	});
+
+	registry.Add("Engine.UISystemPreparation.SchedulerDeclarationIsWorkerSafeForSnapshotPreparation", [](TestContext& context) {
+		UISystem& uiSystem = UISystem::Instance();
+		const TerraEngine::Scheduling::SystemDeclaration declaration = uiSystem.SchedulerDeclaration();
+		TerraEngine::Scheduling::FrameWorkloadDeclaration workload;
+		workload.workloadName = declaration.name;
+		workload.ownerSystem = declaration.name;
+		workload.phase = declaration.phase;
+		workload.reads = declaration.reads;
+		workload.writes = declaration.writes;
+		workload.workerEligible = !declaration.mainThread;
+		workload.mainThreadRequired = declaration.mainThread;
+		workload.protectedReason = "UI preparation uses cloned request snapshots.";
+
+		const TerraEngine::Scheduling::FrameExecutionPlan plan = TerraEngine::Scheduling::ValidateFrameWorkloads({ workload }, "ui-worker-compat");
+
+		context.Expect(plan.valid, "UI scheduler declaration should validate as a frame workload.");
+		context.ExpectEqual(static_cast<std::size_t>(1), plan.migrationSummary.workerSafeCount, "UI snapshot preparation should be worker-safe in the migration summary.");
 	});
 
 	registry.Add("Engine.UISystemPreparation.PreparedOutputMatchesPreviewPath", [](TestContext& context) {

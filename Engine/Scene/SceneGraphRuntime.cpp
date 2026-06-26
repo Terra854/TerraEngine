@@ -6,6 +6,7 @@
 #include "Core/Scheduling/JobGraph.h"
 #include "Core/Object/Object.h"
 #include "Core/Object/ObjectManager.h"
+#include "Scene/HierarchySnapshot.h"
 #include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
@@ -500,27 +501,80 @@ namespace TerraEngine::Scene {
 
 	SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph)
 	{
+		HierarchySnapshot snapshot;
+		snapshot.revision = graph.revision;
+		for (const SceneObjectId& objectId : BuildTraversalOrder(graph))
+		{
+			const auto object = graph.objects.find(objectId);
+			if (object == graph.objects.end())
+			{
+				continue;
+			}
+			HierarchySnapshotEntry entry;
+			entry.objectId = objectId;
+			entry.parentId = object->second.parentId;
+			entry.depth = DepthForObject(graph, objectId);
+			snapshot.orderedObjects.push_back(entry);
+		}
+		for (std::size_t index = 0; index < snapshot.orderedObjects.size(); ++index)
+		{
+			const std::uint32_t depth = snapshot.orderedObjects[index].depth;
+			if (!snapshot.depthRanges.empty() && snapshot.depthRanges.back().depth == depth)
+			{
+				snapshot.depthRanges.back().end = index + 1;
+			}
+			else
+			{
+				snapshot.depthRanges.push_back({ depth, index, index + 1 });
+			}
+		}
+		snapshot.valid = true;
+		snapshot.formatted = FormatHierarchySnapshot(snapshot);
+		return BuildTransformWorkPlan(graph, snapshot);
+	}
+
+	SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph, const HierarchySnapshot& snapshot)
+	{
 		SceneTransformWorkPlan plan;
 		plan.diagnostics = graph.diagnostics;
 		plan.valid = !std::any_of(plan.diagnostics.begin(), plan.diagnostics.end(), [](const SceneDiagnostic& diagnostic) {
 			return diagnostic.severity == SceneDiagnosticSeverity::Error || diagnostic.severity == SceneDiagnosticSeverity::Fatal;
 		});
+		if (!snapshot.valid)
+		{
+			plan.valid = false;
+			plan.diagnostics.push_back(SceneDiagnostic{
+				SceneDiagnosticSeverity::Error,
+				SceneDiagnosticCategory::Hierarchy,
+				TerraEngine::EMPTY_UUID,
+				{},
+				"Hierarchy snapshot is invalid; transform work planning is blocked.",
+				"Rebuild hierarchy links before preparing transform worker ranges."
+			});
+		}
 		if (!plan.valid)
 		{
 			return plan;
 		}
 
 		std::unordered_map<std::uint32_t, SceneTransformWorkUnit> unitsByDepth;
-		for (const SceneObjectId& objectId : BuildTraversalOrder(graph))
+		for (const HierarchyDepthRange& range : snapshot.depthRanges)
 		{
-			const std::uint32_t depth = DepthForObject(graph, objectId);
-			SceneTransformWorkUnit& unit = unitsByDepth[depth];
-			unit.hierarchyLevel = depth;
-			unit.workUnitId = "level-" + std::to_string(depth);
-			unit.objects.push_back(objectId);
-			if (depth > 0)
+			SceneTransformWorkUnit& unit = unitsByDepth[range.depth];
+			unit.hierarchyLevel = range.depth;
+			unit.workUnitId = "level-" + std::to_string(range.depth);
+			if (range.depth > 0)
 			{
-				unit.parentDependencies.push_back("level-" + std::to_string(depth - 1));
+				unit.parentDependencies.push_back("level-" + std::to_string(range.depth - 1));
+			}
+			const std::size_t end = std::min(range.end, snapshot.orderedObjects.size());
+			for (std::size_t index = range.begin; index < end; ++index)
+			{
+				const SceneObjectId objectId = snapshot.orderedObjects[index].objectId;
+				if (graph.objects.find(objectId) != graph.objects.end())
+				{
+					unit.objects.push_back(objectId);
+				}
 			}
 		}
 		for (auto& [depth, unit] : unitsByDepth)

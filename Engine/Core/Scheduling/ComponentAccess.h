@@ -80,6 +80,22 @@ namespace TerraEngine::Scheduling {
 		std::string formatted;
 	};
 
+	struct ComponentAccessGrantRequest {
+		std::string grantId;
+		std::string workloadName;
+		std::vector<std::string> readComponents;
+		std::vector<std::string> writeComponents;
+		std::string scope;
+		bool schedulerValidated = false;
+	};
+
+	struct ComponentAccessGrantResult {
+		bool granted = false;
+		ComponentAccessGrantRequest normalized;
+		std::vector<ComponentAccessDiagnostic> diagnostics;
+		std::string fallbackReason;
+	};
+
 	TERRAENGINE_API std::string ToString(ComponentAccessMode mode);
 	TERRAENGINE_API std::string ToString(ComponentAccessConflictKind kind);
 	TERRAENGINE_API std::string ToString(ComponentAccessDiagnosticSeverity severity);
@@ -89,5 +105,6 @@ namespace TerraEngine::Scheduling {
 	TERRAENGINE_API ComponentAccessConflict ClassifyComponentAccessConflict(const ComponentAccessDeclaration& left, const ComponentAccessDeclaration& right);
 	TERRAENGINE_API std::vector<ComponentAccessDiagnostic> ValidateComponentAccessSet(const std::vector<ComponentAccessDeclaration>& declarations);
 	TERRAENGINE_API std::string FormatComponentAccessDiagnostics(const std::vector<ComponentAccessDiagnostic>& diagnostics);
+	TERRAENGINE_API ComponentAccessGrantResult ValidateComponentAccessGrant(ComponentAccessGrantRequest request);
 
 }

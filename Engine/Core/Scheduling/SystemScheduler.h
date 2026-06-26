@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Core/Export.h"
+#include "FrameWorkload.h"
 
 #include <cstddef>
 #include <functional>
@@ -141,9 +142,13 @@ namespace TerraEngine::Scheduling {
 		void RegisterSystem(SystemsBase& system, SystemDeclaration declaration);
 		void SetLatestEcsGraphSummary(std::string summary);
 		void SetLatestComponentQueryGroups(std::vector<std::string> queryGroups);
+		void SetFrameWorkloadCompatibilityFallbackEnabled(bool enabled);
+		bool FrameWorkloadCompatibilityFallbackEnabled() const;
 
 		const ScheduleSummary& BuildSchedule();
 		const ScheduleSummary& ExecuteFrame(float deltaTime, const MutationFlushCallback& flushCallback);
+		std::vector<FrameWorkloadDeclaration> BuildFrameWorkloadDeclarations(float deltaTime);
+		FrameExecutionPlan ExecuteFrameWorkloads(float deltaTime, const MutationFlushCallback& flushCallback = {});
 		const ScheduleSummary& LatestSummary() const;
 		const std::vector<SystemDeclaration>& OrderedDeclarations() const;
 		const std::vector<SchedulerPhaseDefinition>& PhaseDefinitions() const;
@@ -165,6 +170,7 @@ namespace TerraEngine::Scheduling {
 		std::vector<std::string> latestComponentQueryGroups;
 		std::string latestEcsGraphSummary;
 		ScheduleSummary latestSummary;
+		bool frameWorkloadCompatibilityFallbackEnabled = true;
 		bool dirty = true;
 	};
 

@@ -21,6 +21,7 @@
 #include "Export.h"
 #include "SystemBase.h"
 #include "Scheduling/JobGraph.h"
+#include "Scheduling/FrameWorkload.h"
 #include "Scheduling/SystemScheduler.h"
 #include "Object/ObjectManager.h"
 #include "ThreadPool/ThreadPool.h"
@@ -68,6 +69,7 @@ class TERRAENGINE_API Engine {
 
 		const TerraEngine::Scheduling::ScheduleSummary& GetSchedulerSummary() const { return systemScheduler.LatestSummary(); }
 		const TerraEngine::Scheduling::JobGraphSummary& GetJobGraphSummary() const { return latestJobGraphSummary; }
+		const TerraEngine::Scheduling::ArchitectureMigrationSummary& GetArchitectureMigrationSummary() const { return latestArchitectureSummary; }
 
 	private:
 		bool running = true;
@@ -76,6 +78,7 @@ class TERRAENGINE_API Engine {
 		std::vector<SystemsBase*> systems;
 		TerraEngine::Scheduling::SystemScheduler systemScheduler;
 		TerraEngine::Scheduling::JobGraphSummary latestJobGraphSummary;
+		TerraEngine::Scheduling::ArchitectureMigrationSummary latestArchitectureSummary;
 		FrameTimer frameTimer;
 
 		SystemsBase* editorSystem = nullptr;

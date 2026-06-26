@@ -1,6 +1,7 @@
 // StatusWindow.cs — Managed engine status diagnostic window
 //
-// Provides a real-time diagnostic window within the managed editor, displaying frame timings, FPS, and lighting diagnostics. It allows developers to monitor engine performance and lighting subsystem state during active development.
+// Provides a real-time diagnostic window within the managed editor, displaying
+// frame timings and FPS during active development.
 
 using Hexa.NET.ImGui;
 using System;
@@ -29,10 +30,6 @@ namespace TerraEngine.Editor
         {
             ImGui.TextUnformatted($"Delta Time: {_deltaTime * 1000.0f:F2} ms");
             ImGui.TextUnformatted($"FPS: {1.0f / _deltaTime:F1}");
-            
-            ImGui.Separator();
-            ImGui.TextDisabled("Lighting");
-            ImGui.TextWrapped(Graphics.LightingDiagnosticsSummary);
 
             ImGui.Separator();
 

@@ -42,6 +42,7 @@ public:
 	void Update(float deltaTime) override;
 	void Shutdown() override;
 	std::string SystemName() override;
+	TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
 
 	void ReloadMaterial(const TerraEngine::UUID& materialId);
 	void ReloadMesh(const TerraEngine::UUID& meshId);

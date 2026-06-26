@@ -294,6 +294,69 @@ namespace TerraEngine::Tests {
 			context.Expect(summary.formatted.find("System scheduler summary: valid") != std::string::npos, "Formatted summary should include validity.");
 		});
 
+		registry.Add("Engine.SystemScheduler.FrameWorkloadsConvertProtectedAndWorkerSystems", [](TestContext& context) {
+			std::vector<std::string> log;
+			FakeSystem scripting("Scripting", &log);
+			FakeSystem ui("UI", &log);
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			auto scriptingDeclaration = MakeDeclaration("Scripting", "Scripting");
+			scriptingDeclaration.reads.push_back("ObjectManager");
+			scriptingDeclaration.writes.push_back("Scripting");
+			auto uiDeclaration = MakeDeclaration("UI", "UI");
+			uiDeclaration.mainThread = false;
+			uiDeclaration.reads.push_back("SceneGraph");
+			uiDeclaration.writes.push_back("UI");
+			scheduler.RegisterSystem(scripting, scriptingDeclaration);
+			scheduler.RegisterSystem(ui, uiDeclaration);
+
+			TerraEngine::Scheduling::FrameExecutionPlan plan = scheduler.ExecuteFrameWorkloads(0.016f);
+
+			context.Expect(plan.valid, "Converted scheduler workloads should validate before execution.");
+			context.Expect(plan.completed, "Converted scheduler workloads should execute through the compatibility path.");
+			context.Expect(plan.migrationSummary.workerSafeCount >= 1, "Worker-safe scheduler declarations should appear in the migration summary.");
+			context.Expect(plan.migrationSummary.protectedCount >= 1, "Main-thread scheduler declarations and flush barriers should remain protected.");
+			context.Expect(Contains(log, "Scripting"), "Protected system workload should call the existing system update.");
+			context.Expect(Contains(log, "UI"), "Worker-safe system workload should call the existing system update in compatibility mode.");
+		});
+
+		registry.Add("Engine.SystemScheduler.FrameWorkloadSummaryIncludesFlushFallbacks", [](TestContext& context) {
+			FakeSystem scene("Scene");
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			scheduler.SetMutationFlushPoints({
+				{ "After Scene", TerraEngine::Scheduling::MutationFlushPosition::AfterPhase, "Scene", {}, true, false },
+				{ "Frame End", TerraEngine::Scheduling::MutationFlushPosition::FrameEnd, "", {}, true, true }
+			});
+			auto declaration = MakeDeclaration("Scene", "Scene");
+			declaration.reads.push_back("SceneGraph");
+			scheduler.RegisterSystem(scene, declaration);
+
+			TerraEngine::Scheduling::FrameExecutionPlan plan = scheduler.ExecuteFrameWorkloads(0.016f);
+
+			context.Expect(plan.valid, "Flush barrier workloads should be valid protected workloads.");
+			context.Expect(plan.migrationSummary.mutationFlushCount >= 2, "Flush barriers should be counted in the migration summary.");
+			context.Expect(plan.formatted.find("Flush:After Scene") != std::string::npos, "Frame workload diagnostics should name protected mutation flush barriers.");
+			context.Expect(plan.formatted.find("System declaration still requires the main thread.") != std::string::npos, "Protected fallback text should explain why legacy systems remain on the caller thread.");
+		});
+
+		registry.Add("Engine.SystemScheduler.FrameWorkloadFallbackCanValidateWithoutUpdating", [](TestContext& context) {
+			std::vector<std::string> log;
+			FakeSystem ui("UI", &log);
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			auto declaration = MakeDeclaration("UI", "UI");
+			declaration.mainThread = false;
+			declaration.reads.push_back("SceneGraph");
+			declaration.writes.push_back("UI");
+			scheduler.RegisterSystem(ui, declaration);
+			scheduler.SetFrameWorkloadCompatibilityFallbackEnabled(false);
+
+			TerraEngine::Scheduling::FrameExecutionPlan plan = scheduler.ExecuteFrameWorkloads(0.016f);
+
+			context.Expect(plan.valid, "Disabling compatibility fallback should still validate workload metadata.");
+			context.Expect(!plan.completed, "Diagnostics-only fallback mode should not report execution completion.");
+			context.Expect(log.empty(), "Diagnostics-only fallback mode should not call SystemsBase::Update.");
+			context.Expect(plan.formatted.find("compatibility execution is disabled") != std::string::npos, "Fallback control diagnostics should explain why updates did not run.");
+		});
+
 		registry.Add("Engine.SystemScheduler.InvalidDiagnosticFieldsAreStructured", [](TestContext& context) {
 			FakeSystem system("BadPhase");
 			TerraEngine::Scheduling::SystemScheduler scheduler;

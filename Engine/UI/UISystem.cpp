@@ -459,6 +459,24 @@ std::string UISystem::SystemName()
 	return "UISystem";
 }
 
+TerraEngine::Scheduling::SystemDeclaration UISystem::SchedulerDeclaration()
+{
+	TerraEngine::Scheduling::SystemDeclaration declaration;
+	declaration.name = "UISystem";
+	declaration.phase = "UI";
+	declaration.reads = { "SceneGraph", "ObjectManager", "Scripting" };
+	declaration.writes = { "UI" };
+	// UI document preparation clones authored trees into UIPreparationRequest
+	// snapshots before worker layout/build. Publishing remains synchronized on
+	// the owning system, but the migration contract can classify preparation as
+	// worker eligible instead of a purely protected main-thread workload.
+	declaration.mainThread = false;
+	declaration.requiresFlushedSceneMutations = true;
+	declaration.profilingLabel = declaration.name;
+	declaration.usesDefaultMetadata = false;
+	return declaration;
+}
+
 // UISystem::SetGameViewportSize is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void UISystem::SetGameViewportSize(const glm::vec2& viewportSize)
 {

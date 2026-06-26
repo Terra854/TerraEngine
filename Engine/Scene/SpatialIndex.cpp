@@ -270,6 +270,22 @@ namespace TerraEngine::Scene
 		}
 	}
 
+	void SpatialIndex::InvalidateForHierarchySnapshotRebuild(std::uint64_t hierarchyRevision)
+	{
+		if (hierarchyRevision == 0 || hierarchyRevision == lastHierarchySnapshotRevision)
+		{
+			return;
+		}
+		lastHierarchySnapshotRevision = hierarchyRevision;
+		hasBuiltIndex = false;
+		std::scoped_lock lock(diagnosticsMutex);
+		// A hierarchy snapshot rebuild can move whole branches even when an
+		// individual bounds record looks unchanged. Force the next refresh to
+		// rebuild from the complete snapshot so spatial consumers never query a
+		// stale tree after transform ordering changes.
+		++diagnostics.revisionMismatchFallbackCount;
+	}
+
 	// SpatialIndex::QueryAABB is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	SpatialQueryResult SpatialIndex::QueryAABB(const SpatialAABB& area, const SpatialQueryFilter& filter) const
 	{

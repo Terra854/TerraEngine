@@ -14,6 +14,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/ExportStartupFlowTests.cpp
 	Runtime/LinuxStartupSmokeTests.cpp
 	Runtime/MaterialRuntimeContractTests.cpp
+	Runtime/ArchitectureMigrationSummaryTests.cpp
 	Runtime/RenderProfileBootSummaryTests.cpp
 	Runtime/SceneRuntimeParityTests.cpp
 	Runtime/ThreadPoolSingletonTests.cpp
@@ -21,8 +22,12 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackPlanner.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
+	Core/ActiveMembershipTests.cpp
+	Core/CompactObjectReferenceTests.cpp
+	Core/ComponentAccessGrantTests.cpp
 	Core/ComponentAccessTests.cpp
 	Core/EcsQueryTaskGraphTests.cpp
+	Core/FrameWorkloadExecutionTests.cpp
 	Core/ObjectManagerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Core/JobGraphTests.cpp
 	Core/SystemSchedulerTests.cpp
@@ -84,6 +89,7 @@ add_executable(TerraEngine-EngineTests
 	Scripting/ScriptingRuntimeTestFixtures.cpp
 	Scripting/ScriptingWorkloadTests.cpp
 	Scene/PrefabCompositionTests.cpp
+	Scene/HierarchySnapshotTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
 	Scene/SceneMutationQueueTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Scene/SkyComponentSerializationTests.cpp

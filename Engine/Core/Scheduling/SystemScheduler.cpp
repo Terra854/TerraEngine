@@ -7,6 +7,7 @@
 #include "SystemScheduler.h"
 
 #include "Core/SystemBase.h"
+#include "JobGraph.h"
 #include "Profiling/ProfilerScope.h"
 
 #include <algorithm>
@@ -372,6 +373,16 @@ namespace TerraEngine::Scheduling {
 		latestComponentQueryGroups = std::move(queryGroups);
 		latestSummary.componentQueryGroups = latestComponentQueryGroups;
 		latestSummary.formatted = FormatScheduleSummary(latestSummary);
+	}
+
+	void SystemScheduler::SetFrameWorkloadCompatibilityFallbackEnabled(bool enabled)
+	{
+		frameWorkloadCompatibilityFallbackEnabled = enabled;
+	}
+
+	bool SystemScheduler::FrameWorkloadCompatibilityFallbackEnabled() const
+	{
+		return frameWorkloadCompatibilityFallbackEnabled;
 	}
 
 	const ScheduleSummary& SystemScheduler::BuildSchedule()
@@ -740,6 +751,101 @@ namespace TerraEngine::Scheduling {
 			dirty = true;
 		}
 		return latestSummary;
+	}
+
+	std::vector<FrameWorkloadDeclaration> SystemScheduler::BuildFrameWorkloadDeclarations(float deltaTime)
+	{
+		if (dirty)
+		{
+			BuildSchedule();
+		}
+
+		std::vector<FrameWorkloadDeclaration> workloads;
+		if (!latestSummary.valid)
+		{
+			return workloads;
+		}
+
+		workloads.reserve(orderedIndices.size() + flushPoints.size());
+		for (std::size_t orderedIndex : orderedIndices)
+		{
+			RegisteredSystem& registeredSystem = systems[orderedIndex];
+			const SystemDeclaration& declaration = registeredSystem.declaration;
+			FrameWorkloadDeclaration workload;
+			workload.workloadName = declaration.name;
+			workload.ownerSystem = declaration.name;
+			workload.phase = declaration.phase;
+			workload.reads = declaration.reads;
+			workload.writes = declaration.writes;
+			workload.workerEligible = !declaration.mainThread;
+			workload.mainThreadRequired = declaration.mainThread;
+			workload.mutationPolicy = declaration.requiresFlushedSceneMutations
+				? FrameWorkloadMutationPolicy::DeferredOnly
+				: FrameWorkloadMutationPolicy::None;
+			workload.profilingLabel = declaration.profilingLabel.empty() ? declaration.name : declaration.profilingLabel;
+			workload.protectedReason = declaration.mainThread
+				? "System declaration still requires the main thread."
+				: "Compatibility workload path validates worker-safe metadata before live worker execution is enabled.";
+			workload.work = [system = registeredSystem.system, deltaTime](JobGraphContext&) {
+				// Workload execution deliberately reuses the existing SystemsBase
+				// update call so conversion tests exercise the same code path as
+				// the serial scheduler while metadata hardening is in progress.
+				if (system != nullptr)
+				{
+					system->Update(deltaTime);
+				}
+			};
+			workloads.push_back(std::move(workload));
+		}
+
+		for (const MutationFlushPoint& point : flushPoints)
+		{
+			FrameWorkloadDeclaration workload;
+			workload.workloadName = "Flush:" + point.name;
+			workload.ownerSystem = "SystemScheduler";
+			workload.phase = point.phaseName.empty() ? "FrameEnd" : point.phaseName;
+			workload.reads = { "SceneMutationQueue" };
+			workload.writes = { "SceneMutationQueue" };
+			workload.workerEligible = false;
+			workload.mainThreadRequired = true;
+			workload.mutationPolicy = FrameWorkloadMutationPolicy::DeferredOnly;
+			workload.protectedReason = "Mutation flushes remain protected barriers until deferred mutation batches are proven worker-safe.";
+			workload.profilingLabel = workload.workloadName;
+			workloads.push_back(std::move(workload));
+		}
+
+		return workloads;
+	}
+
+	FrameExecutionPlan SystemScheduler::ExecuteFrameWorkloads(float deltaTime, const MutationFlushCallback& flushCallback)
+	{
+		std::vector<FrameWorkloadDeclaration> workloads = BuildFrameWorkloadDeclarations(deltaTime);
+		if (!frameWorkloadCompatibilityFallbackEnabled)
+		{
+			FrameExecutionPlan plan = TerraEngine::Scheduling::ValidateFrameWorkloads(std::move(workloads), "system-scheduler-frame");
+			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Warning, ArchitectureDiagnosticCode::CompatibilityFallback, "SystemScheduler", "", "Frame workload compatibility execution is disabled; metadata was validated without calling SystemsBase::Update.", "Enable compatibility fallback before replacing the serial frame path, or lower the validated plan into the worker scheduler.");
+			plan.completed = false;
+			plan.formatted = FormatFrameExecutionPlan(plan);
+			return plan;
+		}
+		for (FrameWorkloadDeclaration& workload : workloads)
+		{
+			if (workload.ownerSystem != "SystemScheduler" || !flushCallback)
+			{
+				continue;
+			}
+			const std::string flushName = workload.workloadName.substr(std::string("Flush:").size());
+			workload.work = [this, flushName, flushCallback](JobGraphContext&) {
+				const auto found = std::find_if(flushPoints.begin(), flushPoints.end(), [&](const MutationFlushPoint& point) {
+					return point.name == flushName;
+				});
+				if (found != flushPoints.end())
+				{
+					(void)flushCallback(*found);
+				}
+			};
+		}
+		return TerraEngine::Scheduling::ExecuteFrameWorkloads(std::move(workloads), "system-scheduler-frame");
 	}
 
 	const ScheduleSummary& SystemScheduler::LatestSummary() const

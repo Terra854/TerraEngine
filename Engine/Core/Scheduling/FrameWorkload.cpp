@@ -1,0 +1,431 @@
+// FrameWorkload.cpp - validation and execution for architecture-hardening work.
+
+#include "FrameWorkload.h"
+
+#include "JobGraph.h"
+#include "Profiling/ProfilerScope.h"
+
+#include <algorithm>
+#include <map>
+#include <set>
+#include <sstream>
+#include <tuple>
+#include <utility>
+
+namespace TerraEngine::Scheduling {
+	namespace {
+		int SeverityRank(ArchitectureDiagnosticSeverity severity)
+		{
+			switch (severity)
+			{
+			case ArchitectureDiagnosticSeverity::Error:
+				return 0;
+			case ArchitectureDiagnosticSeverity::Warning:
+				return 1;
+			case ArchitectureDiagnosticSeverity::Info:
+			default:
+				return 2;
+			}
+		}
+
+		bool IsError(const ArchitectureDiagnostic& diagnostic)
+		{
+			return diagnostic.severity == ArchitectureDiagnosticSeverity::Error;
+		}
+
+		void SortDiagnostics(std::vector<ArchitectureDiagnostic>& diagnostics)
+		{
+			std::stable_sort(diagnostics.begin(), diagnostics.end(), [](const ArchitectureDiagnostic& left, const ArchitectureDiagnostic& right) {
+				return std::make_tuple(SeverityRank(left.severity), static_cast<int>(left.code), left.workloadName, left.resourceName, left.message)
+					< std::make_tuple(SeverityRank(right.severity), static_cast<int>(right.code), right.workloadName, right.resourceName, right.message);
+			});
+		}
+
+		std::vector<std::string> NormalizeList(std::vector<std::string> values)
+		{
+			values.erase(std::remove_if(values.begin(), values.end(), [](const std::string& value) {
+				return value.empty();
+			}), values.end());
+			std::stable_sort(values.begin(), values.end());
+			values.erase(std::unique(values.begin(), values.end()), values.end());
+			return values;
+		}
+
+		std::set<std::string> ReadSet(const FrameWorkloadDeclaration& declaration)
+		{
+			return std::set<std::string>(declaration.reads.begin(), declaration.reads.end());
+		}
+
+		std::set<std::string> WriteSet(const FrameWorkloadDeclaration& declaration)
+		{
+			return std::set<std::string>(declaration.writes.begin(), declaration.writes.end());
+		}
+
+		bool HasWriteConflict(const FrameWorkloadDeclaration& left, const FrameWorkloadDeclaration& right, std::string& resourceName)
+		{
+			const std::set<std::string> leftReads = ReadSet(left);
+			const std::set<std::string> leftWrites = WriteSet(left);
+			const std::set<std::string> rightReads = ReadSet(right);
+			const std::set<std::string> rightWrites = WriteSet(right);
+			for (const std::string& write : leftWrites)
+			{
+				if (rightWrites.contains(write) || rightReads.contains(write))
+				{
+					resourceName = write;
+					return true;
+				}
+			}
+			for (const std::string& write : rightWrites)
+			{
+				if (leftReads.contains(write))
+				{
+					resourceName = write;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		FrameWorkloadExecutionPolicy SelectPolicy(const FrameWorkloadDeclaration& declaration, std::vector<ArchitectureDiagnostic>& diagnostics)
+		{
+			if (declaration.workerEligible && declaration.reads.empty() && declaration.writes.empty())
+			{
+				AddArchitectureDiagnostic(diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::MissingWorkerAccess, declaration.workloadName, "", "Worker-safe workload has no declared reads or writes.", "Declare all accessed resources or keep the workload protected.");
+				return FrameWorkloadExecutionPolicy::Rejected;
+			}
+			if (declaration.workerEligible && !declaration.mainThreadRequired)
+			{
+				return FrameWorkloadExecutionPolicy::WorkerSafe;
+			}
+			if (declaration.mainThreadRequired)
+			{
+				AddArchitectureDiagnostic(diagnostics, ArchitectureDiagnosticSeverity::Info, ArchitectureDiagnosticCode::MainThreadProtected, declaration.workloadName, "", "Workload remains protected because it requires the main thread.", "No action required unless the workload can be converted to immutable inputs.");
+			}
+			else if (!declaration.workerEligible)
+			{
+				AddArchitectureDiagnostic(diagnostics, ArchitectureDiagnosticSeverity::Info, ArchitectureDiagnosticCode::ProtectedFallback, declaration.workloadName, "", "Workload remains protected because worker-safe execution was not declared.", "Add a complete worker-safe access declaration when ready.");
+			}
+			return FrameWorkloadExecutionPolicy::Protected;
+		}
+
+		void RefreshMigrationSummary(FrameExecutionPlan& plan)
+		{
+			ArchitectureMigrationSummary summary;
+			for (const FrameWorkloadResult& result : plan.results)
+			{
+				if (result.declaration.mutationPolicy == FrameWorkloadMutationPolicy::DeferredOnly)
+				{
+					++summary.mutationFlushCount;
+				}
+				switch (result.executionPolicy)
+				{
+				case FrameWorkloadExecutionPolicy::WorkerSafe:
+					++summary.workerSafeCount;
+					break;
+				case FrameWorkloadExecutionPolicy::Rejected:
+					++summary.rejectedCount;
+					break;
+				case FrameWorkloadExecutionPolicy::Protected:
+				default:
+					++summary.protectedCount;
+					if (result.fallbackUsed)
+					{
+						++summary.fallbackCount;
+						const std::string reason = result.declaration.protectedReason.empty()
+							? "protected fallback"
+							: result.declaration.protectedReason;
+						summary.fallbackReasons.push_back(result.declaration.workloadName + ": " + reason);
+					}
+					break;
+				}
+			}
+			for (const ArchitectureDiagnostic& diagnostic : plan.diagnostics)
+			{
+				if (diagnostic.code == ArchitectureDiagnosticCode::ActiveMembershipInvalidated)
+				{
+					++summary.activeMembershipInvalidationCount;
+				}
+				else if (diagnostic.code == ArchitectureDiagnosticCode::CompactReferenceStale)
+				{
+					++summary.staleCompactReferenceCount;
+				}
+				else if (diagnostic.code == ArchitectureDiagnosticCode::HierarchySnapshotBlocked)
+				{
+					++summary.hierarchySnapshotRebuildCount;
+				}
+				else if (diagnostic.code == ArchitectureDiagnosticCode::ComponentAccessGrantDenied)
+				{
+					++summary.componentAccessGrantDeniedCount;
+				}
+			}
+			summary.formatted = FormatArchitectureMigrationSummary(summary);
+			plan.migrationSummary = std::move(summary);
+		}
+	}
+
+	void AddArchitectureDiagnostic(std::vector<ArchitectureDiagnostic>& diagnostics, ArchitectureDiagnosticSeverity severity, ArchitectureDiagnosticCode code, std::string workloadName, std::string resourceName, std::string message, std::string action)
+	{
+		diagnostics.push_back({
+			severity,
+			code,
+			std::move(workloadName),
+			std::move(resourceName),
+			std::move(message),
+			std::move(action)
+		});
+	}
+
+	std::string ToString(FrameWorkloadExecutionPolicy policy)
+	{
+		switch (policy)
+		{
+		case FrameWorkloadExecutionPolicy::WorkerSafe:
+			return "worker-safe";
+		case FrameWorkloadExecutionPolicy::Rejected:
+			return "rejected";
+		case FrameWorkloadExecutionPolicy::Protected:
+		default:
+			return "protected";
+		}
+	}
+
+	std::string ToString(FrameWorkloadMutationPolicy policy)
+	{
+		return policy == FrameWorkloadMutationPolicy::DeferredOnly ? "deferred-only" : "none";
+	}
+
+	std::string ToString(ArchitectureDiagnosticSeverity severity)
+	{
+		switch (severity)
+		{
+		case ArchitectureDiagnosticSeverity::Error:
+			return "error";
+		case ArchitectureDiagnosticSeverity::Warning:
+			return "warning";
+		case ArchitectureDiagnosticSeverity::Info:
+		default:
+			return "info";
+		}
+	}
+
+	std::string ToString(ArchitectureDiagnosticCode code)
+	{
+		switch (code)
+		{
+		case ArchitectureDiagnosticCode::EmptyWorkloadName: return "empty-workload-name";
+		case ArchitectureDiagnosticCode::EmptyOwnerSystem: return "empty-owner-system";
+		case ArchitectureDiagnosticCode::MissingWorkerAccess: return "missing-worker-access";
+		case ArchitectureDiagnosticCode::MainThreadProtected: return "main-thread-protected";
+		case ArchitectureDiagnosticCode::ProtectedFallback: return "protected-fallback";
+		case ArchitectureDiagnosticCode::AccessConflict: return "access-conflict";
+		case ArchitectureDiagnosticCode::MutationRequiresBarrier: return "mutation-requires-barrier";
+		case ArchitectureDiagnosticCode::ExecutionFailed: return "execution-failed";
+		case ArchitectureDiagnosticCode::CompatibilityFallback: return "compatibility-fallback";
+		case ArchitectureDiagnosticCode::ActiveMembershipInvalidated: return "active-membership-invalidated";
+		case ArchitectureDiagnosticCode::CompactReferenceStale: return "compact-reference-stale";
+		case ArchitectureDiagnosticCode::HierarchySnapshotBlocked: return "hierarchy-snapshot-blocked";
+		case ArchitectureDiagnosticCode::ComponentAccessGrantDenied: return "component-access-grant-denied";
+		case ArchitectureDiagnosticCode::None:
+		default:
+			return "none";
+		}
+	}
+
+	std::string FormatArchitectureDiagnostics(const std::vector<ArchitectureDiagnostic>& diagnostics)
+	{
+		if (diagnostics.empty())
+		{
+			return "Architecture diagnostics: none";
+		}
+		std::ostringstream stream;
+		stream << "Architecture diagnostics:";
+		for (const ArchitectureDiagnostic& diagnostic : diagnostics)
+		{
+			stream << "\n- " << ToString(diagnostic.severity)
+				<< "/" << ToString(diagnostic.code)
+				<< " workload='" << diagnostic.workloadName
+				<< "' resource='" << diagnostic.resourceName
+				<< "': " << diagnostic.message
+				<< " Action: " << diagnostic.recommendedAction;
+		}
+		return stream.str();
+	}
+
+	std::string FormatArchitectureMigrationSummary(const ArchitectureMigrationSummary& summary)
+	{
+		std::ostringstream stream;
+		stream << "Architecture migration summary:"
+			<< " workerSafe=" << summary.workerSafeCount
+			<< " protected=" << summary.protectedCount
+			<< " rejected=" << summary.rejectedCount
+			<< " fallbacks=" << summary.fallbackCount
+			<< " mutationFlushes=" << summary.mutationFlushCount
+			<< " activeInvalidations=" << summary.activeMembershipInvalidationCount
+			<< " staleReferences=" << summary.staleCompactReferenceCount
+			<< " hierarchyRebuilds=" << summary.hierarchySnapshotRebuildCount
+			<< " grantDenials=" << summary.componentAccessGrantDeniedCount;
+		for (const std::string& reason : summary.fallbackReasons)
+		{
+			stream << " [" << reason << "]";
+		}
+		return stream.str();
+	}
+
+	std::string FormatFrameExecutionPlan(const FrameExecutionPlan& plan)
+	{
+		std::ostringstream stream;
+		stream << "Frame execution plan '" << plan.frameId << "': "
+			<< (plan.valid ? "valid" : "invalid") << ", "
+			<< (plan.completed ? "completed" : "incomplete") << '\n';
+		stream << "Workloads:";
+		for (const FrameWorkloadResult& result : plan.results)
+		{
+			stream << " [" << result.declaration.workloadName
+				<< " owner=" << result.declaration.ownerSystem
+				<< " phase=" << result.declaration.phase
+				<< " policy=" << ToString(result.executionPolicy)
+				<< " completed=" << (result.completed ? "true" : "false")
+				<< "]";
+		}
+		stream << '\n' << plan.migrationSummary.formatted << '\n';
+		stream << FormatArchitectureDiagnostics(plan.diagnostics);
+		return stream.str();
+	}
+
+	FrameExecutionPlan ValidateFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
+	{
+		FrameExecutionPlan plan;
+		plan.frameId = std::move(frameId);
+		plan.workloads = std::move(workloads);
+		std::stable_sort(plan.workloads.begin(), plan.workloads.end(), [](const FrameWorkloadDeclaration& left, const FrameWorkloadDeclaration& right) {
+			return std::tie(left.phase, left.workloadName, left.ownerSystem) < std::tie(right.phase, right.workloadName, right.ownerSystem);
+		});
+
+		for (FrameWorkloadDeclaration& declaration : plan.workloads)
+		{
+			declaration.reads = NormalizeList(std::move(declaration.reads));
+			declaration.writes = NormalizeList(std::move(declaration.writes));
+			if (declaration.workloadName.empty())
+			{
+				AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::EmptyWorkloadName, "", "", "Frame workload has no stable name.", "Set workloadName before validation.");
+			}
+			if (declaration.ownerSystem.empty())
+			{
+				AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::EmptyOwnerSystem, declaration.workloadName, "", "Frame workload has no owning system.", "Set ownerSystem to the stable SystemsBase name.");
+			}
+			FrameWorkloadResult result;
+			result.declaration = declaration;
+			result.executionPolicy = SelectPolicy(declaration, plan.diagnostics);
+			result.fallbackUsed = result.executionPolicy == FrameWorkloadExecutionPolicy::Protected && !declaration.workerEligible;
+			plan.results.push_back(std::move(result));
+		}
+
+		for (std::size_t leftIndex = 0; leftIndex < plan.results.size(); ++leftIndex)
+		{
+			for (std::size_t rightIndex = leftIndex + 1; rightIndex < plan.results.size(); ++rightIndex)
+			{
+				const FrameWorkloadResult& left = plan.results[leftIndex];
+				const FrameWorkloadResult& right = plan.results[rightIndex];
+				if (left.executionPolicy != FrameWorkloadExecutionPolicy::WorkerSafe || right.executionPolicy != FrameWorkloadExecutionPolicy::WorkerSafe)
+				{
+					continue;
+				}
+				std::string resourceName;
+				if (HasWriteConflict(left.declaration, right.declaration, resourceName))
+				{
+					AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::AccessConflict, left.declaration.workloadName + " <-> " + right.declaration.workloadName, resourceName, "Worker-safe workloads have unordered write conflict.", "Add graph ordering or keep one workload protected.");
+					plan.results[leftIndex].executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
+					plan.results[rightIndex].executionPolicy = FrameWorkloadExecutionPolicy::Rejected;
+				}
+			}
+		}
+
+		SortDiagnostics(plan.diagnostics);
+		plan.valid = std::none_of(plan.diagnostics.begin(), plan.diagnostics.end(), IsError);
+		RefreshMigrationSummary(plan);
+		plan.formatted = FormatFrameExecutionPlan(plan);
+		return plan;
+	}
+
+	FrameExecutionPlan ExecuteFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
+	{
+		FrameExecutionPlan plan = ValidateFrameWorkloads(std::move(workloads), std::move(frameId));
+		if (!plan.valid)
+		{
+			return plan;
+		}
+
+		JobGraph graph(plan.frameId, "Architecture Hardened Frame");
+		std::vector<DependencyHandle> handles;
+		handles.reserve(plan.results.size());
+		for (FrameWorkloadResult& result : plan.results)
+		{
+			JobGraphJobDeclaration job;
+			job.name = result.declaration.workloadName;
+			job.executionPolicy = result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
+				? JobGraphExecutionPolicy::WorkerEligible
+				: JobGraphExecutionPolicy::Protected;
+			job.cancellable = true;
+			job.requiresSuccessfulDependencies = true;
+			job.mayMutateSceneStructure = result.declaration.mutationPolicy == FrameWorkloadMutationPolicy::DeferredOnly;
+			job.profilingLabel = result.declaration.profilingLabel.empty() ? result.declaration.workloadName : result.declaration.profilingLabel;
+			job.work = result.declaration.work;
+			handles.push_back(graph.AddJob(std::move(job)));
+		}
+
+		for (std::size_t leftIndex = 0; leftIndex < plan.results.size(); ++leftIndex)
+		{
+			for (std::size_t rightIndex = leftIndex + 1; rightIndex < plan.results.size(); ++rightIndex)
+			{
+				std::string resourceName;
+				if (HasWriteConflict(plan.results[leftIndex].declaration, plan.results[rightIndex].declaration, resourceName))
+				{
+					graph.AddDependency(handles[leftIndex], handles[rightIndex]);
+				}
+			}
+		}
+
+		// FrameWorkload is the migration-facing layer. It validates the exact
+		// JobGraph shape that worker conversion will use, then runs callbacks on
+		// the caller thread while compatibility mode is still the default. The
+		// lower JobGraph/EcsQueryTaskGraph tests continue to cover true worker
+		// dispatch; this wrapper gives systems deterministic diagnostics without
+		// introducing an extra global ThreadPool dependency during rollout.
+		const JobGraphSummary& summary = graph.Validate();
+		plan.valid = summary.valid;
+		JobGraphContext context;
+		for (FrameWorkloadResult& result : plan.results)
+		{
+			if (!summary.valid || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
+			{
+				result.completed = false;
+				continue;
+			}
+			try
+			{
+				if (result.declaration.work)
+				{
+					TERRAENGINE_PROFILE_TASK_SCOPE("FrameWorkload::CompatibilityJob", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, result.declaration.workloadName.c_str());
+					result.declaration.work(context);
+				}
+				result.completed = true;
+			}
+			catch (...)
+			{
+				result.completed = false;
+				AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, result.declaration.workloadName, "", "Frame workload callback failed during compatibility execution.", "Fix the workload body or keep the owning system protected.");
+			}
+		}
+		plan.completed = summary.valid && std::all_of(plan.results.begin(), plan.results.end(), [](const FrameWorkloadResult& result) {
+			return result.completed;
+		});
+		if (!summary.valid || !plan.completed)
+		{
+			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, plan.frameId, "", "Frame workload graph did not complete successfully.", "Inspect JobGraph diagnostics.");
+		}
+		SortDiagnostics(plan.diagnostics);
+		RefreshMigrationSummary(plan);
+		plan.formatted = FormatFrameExecutionPlan(plan);
+		return plan;
+	}
+}

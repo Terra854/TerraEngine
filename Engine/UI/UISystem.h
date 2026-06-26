@@ -121,6 +121,7 @@ public:
 	void Update(float deltaTime) override;
 	void Shutdown() override;
 	std::string SystemName() override;
+	TerraEngine::Scheduling::SystemDeclaration SchedulerDeclaration() override;
 
 	void SetGameViewportSize(const glm::vec2& viewportSize);
 	void SetEditorGameViewPointer(const glm::vec2& pointerPosition, bool pointerInsideViewport, bool leftButtonDown);

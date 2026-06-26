@@ -1414,6 +1414,24 @@ std::string ScriptingSystem::SystemName() {
 	return "ScriptingSystem";
 }
 
+TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration()
+{
+	TerraEngine::Scheduling::SystemDeclaration declaration;
+	declaration.name = "ScriptingSystem";
+	declaration.phase = "Scripting";
+	declaration.reads = { "SceneGraph", "Resources" };
+	declaration.writes = { "Scripting", "ObjectManager", "SceneMutationQueue" };
+	// Managed callbacks can be batched by native code, but the managed boundary
+	// itself remains protected because scripts may call reflection APIs and
+	// request structural scene mutations. Native pre/post work reports worker
+	// counts through ScriptingFrameResult diagnostics instead.
+	declaration.mainThread = true;
+	declaration.requiresFlushedSceneMutations = false;
+	declaration.profilingLabel = declaration.name;
+	declaration.usesDefaultMetadata = false;
+	return declaration;
+}
+
 std::string ScriptingSystem::GetSchedulerBoundarySummary() const
 {
 	return "C# gameplay callbacks are scheduled as native script batches; C# authors keep the normal API while structural scene changes are deferred to SceneMutationQueue flush points.";

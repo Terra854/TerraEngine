@@ -192,6 +192,46 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(1), summary.queryPlans[1].chunks.size(), "Small query should use one deterministic chunk.");
 		});
 
+		registry.Add("Engine.EcsQueryTaskGraph.ChunksCarryCompactObjectReferences", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			std::vector<TerraEngine::UUID> ids;
+			for (std::size_t index = 0; index < 6; ++index)
+			{
+				Object object = objects.createObject("ChunkObject");
+				ids.push_back(objects.getUUID(object.EntityId()));
+			}
+			TerraEngine::Scheduling::EcsQueryTaskGraph graph({ "compact", "Compact References" });
+			auto query = MakeQuery("CompactSystem", "CompactQuery", ids);
+			query.workerThreshold = 4;
+			query.preferredChunkSize = 3;
+			graph.AddQuery(std::move(query));
+
+			const auto& summary = graph.Validate();
+
+			context.Expect(summary.valid, "Compact reference query fixture should validate.");
+			context.ExpectEqual(ids.size(), summary.queryPlans.front().compactMatchingObjects.size(), "Query plan should snapshot one compact reference per object.");
+			context.ExpectEqual(static_cast<std::size_t>(3), summary.queryPlans.front().chunks.front().compactObjects.size(), "Chunk should carry compact references beside UUIDs.");
+			context.Expect(objects.validateCompactReference(summary.queryPlans.front().chunks.front().compactObjects.front()).validity == TerraEngine::CompactObjectReferenceValidity::Valid, "Chunk compact reference should validate against live ObjectManager state.");
+			objects.clear();
+		});
+
+		registry.Add("Engine.EcsQueryTaskGraph.WorkerChunksCarryComponentAccessGrants", [](TestContext& context) {
+			TerraEngine::Scheduling::EcsQueryTaskGraph graph({ "grants", "Access Grants" });
+			auto query = MakeQuery("GrantSystem", "GrantQuery", MakeIds(8));
+			query.workerThreshold = 4;
+			query.preferredChunkSize = 2;
+			query.access.writeComponents = { "WorldTransform" };
+			graph.AddQuery(std::move(query));
+
+			const auto& summary = graph.Validate();
+
+			context.Expect(summary.valid, "Worker grant query fixture should validate.");
+			context.Expect(summary.queryPlans.front().accessGrant.granted, "Worker-safe query plan should receive a scheduler-validated component access grant.");
+			context.Expect(summary.queryPlans.front().chunks.front().accessGrant.granted, "Each worker chunk should carry the query access grant.");
+			context.Expect(summary.formatted.find("grant=granted") != std::string::npos, "Formatted ECS summary should expose grant state.");
+		});
+
 		registry.Add("Engine.EcsQueryTaskGraph.DeferredMutationFlushInvalidatesPlans", [](TestContext& context) {
 			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
 			TerraEngine::Scheduling::EcsQueryTaskGraph graph({ "mutation", "Mutation" });

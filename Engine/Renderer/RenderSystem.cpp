@@ -1801,6 +1801,24 @@ std::string RenderSystem::SystemName()
 	return "RenderSystem";
 }
 
+TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
+{
+	TerraEngine::Scheduling::SystemDeclaration declaration;
+	declaration.name = "RenderSystem";
+	declaration.phase = "Render";
+	declaration.reads = { "Window", "SceneGraph", "ObjectManager", "UI", "Resources" };
+	declaration.writes = { "Renderer" };
+	// Live ECS collection still runs protected inside RenderSystem, while draw,
+	// light, upload, and backend packet preparation consume immutable snapshots
+	// and are safe for the frame workload migration layer to classify as worker
+	// eligible system work.
+	declaration.mainThread = false;
+	declaration.requiresFlushedSceneMutations = true;
+	declaration.profilingLabel = declaration.name;
+	declaration.usesDefaultMetadata = false;
+	return declaration;
+}
+
 // RenderSystem::ReloadMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenderSystem::ReloadMaterial(const TerraEngine::UUID& materialId)
 {

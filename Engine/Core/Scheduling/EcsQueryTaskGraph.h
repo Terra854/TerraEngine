@@ -8,6 +8,7 @@
 #pragma once
 
 #include "ComponentAccess.h"
+#include "Core/Object/CompactObjectReference.h"
 #include "JobGraph.h"
 #include "Scene/SceneGraphRuntime.h"
 #include "Scene/SceneMutationQueue.h"
@@ -40,6 +41,8 @@ namespace TerraEngine::Scheduling {
 		std::size_t begin = 0;
 		std::size_t end = 0;
 		std::vector<TerraEngine::UUID> objects;
+		std::vector<TerraEngine::CompactObjectReference> compactObjects;
+		ComponentAccessGrantResult accessGrant;
 		std::string profilingLabel;
 		EcsQueryResultState state = EcsQueryResultState::Pending;
 	};
@@ -62,7 +65,9 @@ namespace TerraEngine::Scheduling {
 	struct EcsComponentQueryPlan {
 		EcsComponentQueryDeclaration declaration;
 		std::vector<TerraEngine::UUID> matchingObjects;
+		std::vector<TerraEngine::CompactObjectReference> compactMatchingObjects;
 		std::vector<EcsQueryChunk> chunks;
+		ComponentAccessGrantResult accessGrant;
 		EcsQueryExecutionPolicy executionPolicy = EcsQueryExecutionPolicy::Protected;
 		std::size_t processedObjectCount = 0;
 		bool invalidatedByMutation = false;

@@ -325,4 +325,48 @@ namespace TerraEngine::Scheduling {
 		}
 		return stream.str();
 	}
+
+	ComponentAccessGrantResult ValidateComponentAccessGrant(ComponentAccessGrantRequest request)
+	{
+		ComponentAccessGrantResult result;
+		ComponentAccessDeclaration declaration;
+		declaration.ownerSystem = request.workloadName;
+		declaration.queryName = request.grantId.empty() ? request.workloadName : request.grantId;
+		declaration.readComponents = std::move(request.readComponents);
+		declaration.writeComponents = std::move(request.writeComponents);
+		declaration.workerEligible = request.schedulerValidated;
+		declaration.mainThreadReason = request.schedulerValidated ? std::string{} : "Scheduler did not validate this hot-loop access grant.";
+		std::vector<ComponentAccessDiagnostic> normalizationDiagnostics;
+		declaration = NormalizeComponentAccessDeclaration(std::move(declaration), &normalizationDiagnostics);
+		result.diagnostics = std::move(normalizationDiagnostics);
+
+		result.normalized.grantId = declaration.queryName;
+		result.normalized.workloadName = declaration.ownerSystem;
+		result.normalized.readComponents = declaration.readComponents;
+		result.normalized.writeComponents = declaration.writeComponents;
+		result.normalized.scope = std::move(request.scope);
+		result.normalized.schedulerValidated = request.schedulerValidated;
+
+		if (!request.schedulerValidated)
+		{
+			result.fallbackReason = "Scheduler validation is required before hot-loop component access can bypass protected locks.";
+			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Warning, ComponentAccessDiagnosticCode::ProtectedFallback, declaration, "", result.fallbackReason, "Run the workload through scheduler/query validation or use reflected protected access.");
+			return result;
+		}
+		if (declaration.readComponents.empty() && declaration.writeComponents.empty())
+		{
+			result.fallbackReason = "Component access grant has no component reads or writes.";
+			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Error, ComponentAccessDiagnosticCode::MissingWorkerDeclaration, declaration, "", result.fallbackReason, "Declare the component set before requesting a hot-loop access grant.");
+			return result;
+		}
+		result.granted = std::none_of(result.diagnostics.begin(), result.diagnostics.end(), [](const ComponentAccessDiagnostic& diagnostic) {
+			return diagnostic.severity == ComponentAccessDiagnosticSeverity::Error;
+		});
+		if (!result.granted && result.fallbackReason.empty())
+		{
+			result.fallbackReason = "Component access grant was denied by diagnostics.";
+		}
+		SortDiagnostics(result.diagnostics);
+		return result;
+	}
 }

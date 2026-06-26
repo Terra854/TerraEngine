@@ -4,6 +4,7 @@
 #include "Components/Transform.h"
 #include "Core/Object/Component.h"
 #include "Core/Object/ObjectManager.h"
+#include "Core/Scheduling/FrameWorkload.h"
 #include "Scripting/ScriptingSystem.h"
 #include "ScriptingRuntimeTestFixtures.h"
 
@@ -12,8 +13,28 @@ namespace TerraEngine::Tests {
 	{
 		registry.Add("Scripting.ComponentAccess.ManagedCallbacksAreWorkerScheduled", [](TestContext& context) {
 			const ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
-			context.Expect(!scriptingSystem.ManagedCallbacksRunProtected(), "Managed callbacks should no longer be forced through the protected boundary.");
+			context.Expect(scriptingSystem.ManagedCallbacksRunProtected(), "Managed callbacks should remain behind the protected boundary.");
 			context.Expect(!scriptingSystem.ManagedCallbacksRequireSchedulerAnnotations(), "C# scripts should not require author-side scheduler annotations.");
+		});
+
+		registry.Add("Scripting.ComponentAccess.SchedulerDeclarationReportsProtectedManagedBoundary", [](TestContext& context) {
+			const ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
+			const TerraEngine::Scheduling::SystemDeclaration declaration = const_cast<ScriptingSystem&>(scriptingSystem).SchedulerDeclaration();
+			TerraEngine::Scheduling::FrameWorkloadDeclaration workload;
+			workload.workloadName = declaration.name;
+			workload.ownerSystem = declaration.name;
+			workload.phase = declaration.phase;
+			workload.reads = declaration.reads;
+			workload.writes = declaration.writes;
+			workload.workerEligible = !declaration.mainThread;
+			workload.mainThreadRequired = declaration.mainThread;
+			workload.protectedReason = scriptingSystem.GetSchedulerBoundarySummary();
+
+			const TerraEngine::Scheduling::FrameExecutionPlan plan = TerraEngine::Scheduling::ValidateFrameWorkloads({ workload }, "scripting-protected-boundary");
+
+			context.Expect(plan.valid, "Scripting protected declaration should validate as a frame workload.");
+			context.ExpectEqual(static_cast<std::size_t>(1), plan.migrationSummary.protectedCount, "Scripting managed boundary should remain protected in migration summaries.");
+			context.Expect(plan.formatted.find("C# gameplay callbacks") != std::string::npos, "Scripting protected fallback diagnostics should explain the managed boundary.");
 		});
 
 		registry.Add("Scripting.ComponentAccess.ComponentWrapperGenerationChangesOnStructureEdit", [](TestContext& context) {

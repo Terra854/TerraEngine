@@ -62,10 +62,13 @@ set(ENGINE_SOURCES
 	Engine/Core/Timer.cpp
 	Engine/Core/Scheduling/ComponentAccess.cpp
 	Engine/Core/Scheduling/EcsQueryTaskGraph.cpp
+	Engine/Core/Scheduling/FrameWorkload.cpp
 	Engine/Core/Scheduling/JobGraph.cpp
 	Engine/Core/Scheduling/SystemScheduler.cpp
 	Engine/Core/Logger/Logger.cpp
 	Engine/Core/Object/Component.cpp
+	Engine/Core/Object/ActiveMembership.cpp
+	Engine/Core/Object/CompactObjectReference.cpp
 	Engine/Core/Object/Object.cpp
 	Engine/Core/Object/ObjectManager.cpp
 	Engine/Core/Object/ComponentRegistry.cpp
@@ -81,6 +84,7 @@ set(ENGINE_SOURCES
 	Engine/Runtime/BootSummary.cpp
 	Engine/Runtime/ExportStartupCoordinator.cpp
 	Engine/Scene/SceneGraphRuntime.cpp
+	Engine/Scene/HierarchySnapshot.cpp
 	Engine/Scene/PrefabComposition.cpp
 	Engine/Scene/SceneMutationQueue.cpp
 	Engine/Scene/SceneManager.cpp
@@ -141,9 +145,12 @@ set(ENGINE_HEADERS
 	Engine/Core/Timer.h
 	Engine/Core/Scheduling/ComponentAccess.h
 	Engine/Core/Scheduling/EcsQueryTaskGraph.h
+	Engine/Core/Scheduling/FrameWorkload.h
 	Engine/Core/Scheduling/JobGraph.h
 	Engine/Core/Scheduling/SystemScheduler.h
 	Engine/Core/Object/Component.h
+	Engine/Core/Object/ActiveMembership.h
+	Engine/Core/Object/CompactObjectReference.h
 	Engine/Core/Object/Object.h
 	Engine/Core/Object/ObjectManager.h
 	Engine/Components/Transform.h
@@ -158,6 +165,7 @@ set(ENGINE_HEADERS
 	Engine/Resource/ResourceStreaming.h
 	Engine/Resource/ShaderCollection.h
 	Engine/Scene/SceneGraphRuntime.h
+	Engine/Scene/HierarchySnapshot.h
 	Engine/Scene/PrefabComposition.h
 	Engine/Scene/SceneMutationQueue.h
 	Engine/Scene/SceneManager.h

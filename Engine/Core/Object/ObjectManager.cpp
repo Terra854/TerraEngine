@@ -95,6 +95,14 @@ void ObjectManager::notifySpatialObjectDirty(entt::entity entityId)
 	}
 }
 
+void ObjectManager::notifyHierarchyDirty()
+{
+	// Hierarchy snapshots depend only on parent/child identity and ordering.
+	// Keeping this revision separate from transform edits lets runtime systems
+	// reuse flattened traversal when only local transform values changed.
+	++hierarchyRevision;
+}
+
 void ObjectManager::MarkObjectTransformDirty(const Object& obj)
 {
 	if (!registry.valid(obj.EntityId()))
@@ -117,12 +125,17 @@ Object ObjectManager::createObject(const std::string& name) {
 	// spatial data exists without guarding for missing components.
 	auto object = Object(registry);
 	object.addComponent<Transform>();
+	// ActiveObjectTag is intentionally empty, so EnTT's emplace returns void.
+	// Attaching it through the registry keeps Object::addComponent available
+	// for real component types that return references to the new component.
+	registry.emplace<TerraEngine::ActiveObjectTag>(object.EntityId());
 
 	// Assign a stable identity immediately upon creation so the entity can be
 	// tracked across serialization and undo sessions.
 	TerraEngine::UUID uuid = TerraEngine::GenerateUUID();
 	entityToUuid.emplace(object.EntityId(), uuid);
 	uuidToEntity.emplace(uuid, object.EntityId());
+	generationByEntity[object.EntityId()] = nextObjectGeneration++;
 	transformRevisionByEntity[object.EntityId()] = ++transformRevision;
 	
 	ObjectMetadata metadata;
@@ -134,6 +147,7 @@ Object ObjectManager::createObject(const std::string& name) {
 	
 	// Structured modifications trigger the observer callback to sync dirty state.
 	notifySpatialObjectDirty(object.EntityId());
+	notifyHierarchyDirty();
 	if (onModified) onModified();
 	
 	return object;
@@ -164,6 +178,7 @@ void ObjectManager::removeObject(Object obj) {
 			uuidToEntity.erase(it->second);
 			entityToUuid.erase(it);
 		}
+		generationByEntity.erase(obj.id);
 		registry.destroy(obj.id);
 	}
 
@@ -194,6 +209,7 @@ void ObjectManager::removeObject(Object obj) {
 
 	// Erase the object from the map
 	metadataMap.erase(obj);
+	notifyHierarchyDirty();
 
 	if (onModified) onModified();
 }
@@ -304,6 +320,7 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (onModified) onModified();
+	notifyHierarchyDirty();
 	MarkObjectTransformDirty(makeHandle(childId));
 
 	return true;
@@ -477,6 +494,17 @@ void ObjectManager::setObjectActive(const Object& obj, bool active)
 			return;
 		}
 		it->second.active = active;
+		if (active)
+		{
+			if (!registry.any_of<TerraEngine::ActiveObjectTag>(obj.EntityId()))
+			{
+				registry.emplace<TerraEngine::ActiveObjectTag>(obj.EntityId());
+			}
+		}
+		else if (registry.any_of<TerraEngine::ActiveObjectTag>(obj.EntityId()))
+		{
+			registry.remove<TerraEngine::ActiveObjectTag>(obj.EntityId());
+		}
 		++it->second.metadataGeneration;
 		++it->second.componentGeneration;
 		++it->second.bindingGeneration;
@@ -654,6 +682,60 @@ std::optional<Object> ObjectManager::getObject(const TerraEngine::UUID& id)
 	return std::nullopt;
 }
 
+TerraEngine::CompactObjectReference ObjectManager::makeCompactReference(entt::entity entityId) const
+{
+	TerraEngine::CompactObjectReference reference;
+	reference.entityValue = static_cast<std::uint32_t>(entityId);
+	if (auto generation = generationByEntity.find(entityId); generation != generationByEntity.end())
+	{
+		reference.generation = generation->second;
+	}
+	if (auto uuid = entityToUuid.find(entityId); uuid != entityToUuid.end())
+	{
+		reference.stableId = uuid->second;
+	}
+	return reference;
+}
+
+TerraEngine::CompactObjectReferenceResolution ObjectManager::validateCompactReference(const TerraEngine::CompactObjectReference& reference) const
+{
+	TerraEngine::CompactObjectReferenceResolution resolution;
+	resolution.reference = reference;
+	const entt::entity entityId = static_cast<entt::entity>(reference.entityValue);
+	if (reference.IsEmpty() || !registry.valid(entityId))
+	{
+		resolution.validity = TerraEngine::CompactObjectReferenceValidity::Missing;
+		resolution.message = "Referenced object is missing.";
+		return resolution;
+	}
+	const auto generation = generationByEntity.find(entityId);
+	if (generation == generationByEntity.end() || generation->second != reference.generation)
+	{
+		resolution.validity = TerraEngine::CompactObjectReferenceValidity::Stale;
+		resolution.message = "Referenced object generation is stale.";
+		return resolution;
+	}
+	const auto uuid = entityToUuid.find(entityId);
+	if (reference.stableId != TerraEngine::EMPTY_UUID && (uuid == entityToUuid.end() || uuid->second != reference.stableId))
+	{
+		resolution.validity = TerraEngine::CompactObjectReferenceValidity::Stale;
+		resolution.message = "Referenced object UUID no longer matches.";
+		return resolution;
+	}
+	resolution.validity = TerraEngine::CompactObjectReferenceValidity::Valid;
+	resolution.message = "Referenced object is valid.";
+	return resolution;
+}
+
+std::optional<Object> ObjectManager::resolveCompactReference(const TerraEngine::CompactObjectReference& reference)
+{
+	if (validateCompactReference(reference).validity != TerraEngine::CompactObjectReferenceValidity::Valid)
+	{
+		return std::nullopt;
+	}
+	return getObject(static_cast<entt::entity>(reference.entityValue));
+}
+
 void ObjectManager::SortObjectsByStableId(std::vector<Object>& objects)
 {
 	std::sort(objects.begin(), objects.end(), [this](const Object& lhs, const Object& rhs) {
@@ -680,7 +762,9 @@ void ObjectManager::UpdateEntityUUID(entt::entity entity, const TerraEngine::UUI
 		entityToUuid[entity] = newId;
 		uuidToEntity[newId] = entity;
 	}
+	generationByEntity.try_emplace(entity, nextObjectGeneration++);
 	notifySpatialObjectDirty(entity);
+	notifyHierarchyDirty();
 }
 
 // ObjectManager::detachFromParent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -757,8 +841,11 @@ void ObjectManager::clear()
 	entityToUuid.clear();
 	transformRevisionByEntity.clear();
 	spatialRevisionByEntity.clear();
+	generationByEntity.clear();
 	transformRevision = 0;
 	spatialRevision = 0;
+	hierarchyRevision = 0;
+	nextObjectGeneration = 1;
 	nameIndex.clear();
 	tagIndex.clear();
 }

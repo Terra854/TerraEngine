@@ -14,11 +14,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "Object.h"
+#include "ActiveMembership.h"
+#include "CompactObjectReference.h"
 #include "Components/Transform.h"
 #include "Utilities/UUID.h"
 
@@ -116,6 +119,13 @@ public:
 	std::optional<Object> getObject(entt::entity id);
 	// Build an Object handle for an existing entity by UUID.
 	std::optional<Object> getObject(const TerraEngine::UUID& id);
+
+	// Compact references are cheap identifiers for snapshots and worker
+	// results. They include a generation so stale references are rejected when
+	// an EnTT entity id is destroyed and later reused.
+	TerraEngine::CompactObjectReference makeCompactReference(entt::entity entityId) const;
+	TerraEngine::CompactObjectReferenceResolution validateCompactReference(const TerraEngine::CompactObjectReference& reference) const;
+	std::optional<Object> resolveCompactReference(const TerraEngine::CompactObjectReference& reference);
 	
 	// Get UUID for an entity.
 	TerraEngine::UUID getUUID(entt::entity entity);
@@ -131,12 +141,29 @@ public:
 	template<typename... Components, typename Func>
 	void forEachObjectWithComponents(Func&& func)
 	{
+		// ActiveObjectTag is an empty marker component. Iterating entities from
+		// the combined view keeps active membership as an EnTT filter while the
+		// callback still receives only the real component references callers
+		// already expect.
+		auto view = registry.view<TerraEngine::ActiveObjectTag, Components...>();
+		for (auto entity : view) {
+			auto activeComps = std::forward_as_tuple(view.template get<Components>(entity)...);
+			auto obj = makeHandle(entity);
+			if (std::apply([](auto&... comps) { return (comps.active && ...); }, activeComps)) {
+				std::apply([&](auto&... comps) { func(obj, comps...); }, activeComps);
+			}
+		}
+	};
+
+	// Include inactive objects for editor, serialization, diagnostics, and
+	// migration checks that must inspect authored state instead of gameplay
+	// runtime membership.
+	template<typename... Components, typename Func>
+	void forEachObjectWithComponentsIncludingInactive(Func&& func)
+	{
 		registry.view<Components...>().each([&](entt::entity entity, Components&... comps) {
 			auto obj = makeHandle(entity);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (isObjectActive(obj) && (comps.active && ...)) {
-				func(obj, comps...);
-			}
+			func(obj, comps...);
 		});
 	};
 
@@ -145,21 +172,29 @@ public:
 	std::vector<Object> getObjectsWithComponents()
 	{
 		std::vector<Object> objects;
-
-		auto view = registry.view<Components...>();
-		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		// Entity iteration avoids EnTT's empty-component callback shortcut for
+		// ActiveObjectTag while still excluding inactive objects at the view
+		// level before component state is inspected.
+		auto view = registry.view<TerraEngine::ActiveObjectTag, Components...>();
 		for (auto entity : view)
 		{
-			auto obj = makeHandle(entity);
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!isObjectActive(obj)) continue;
-
-			// Retrieve components to check their active state
-			auto tuple = view.get(entity);
-			if (std::apply([](auto&... comps) { return (comps.active && ...); }, tuple))
+			auto activeComps = std::forward_as_tuple(view.template get<Components>(entity)...);
+			if (std::apply([](auto&... comps) { return (comps.active && ...); }, activeComps))
 			{
-				objects.push_back(obj);
+				objects.push_back(makeHandle(entity));
 			}
+		}
+		return objects;
+	}
+
+	template<typename... Components>
+	std::vector<Object> getObjectsWithComponentsIncludingInactive()
+	{
+		std::vector<Object> objects;
+		auto view = registry.view<Components...>();
+		for (auto entity : view)
+		{
+			objects.push_back(makeHandle(entity));
 		}
 		return objects;
 	}
@@ -197,6 +232,7 @@ public:
 	// SetOnSpatialObjectDirtyCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetOnSpatialObjectDirtyCallback(std::function<void(entt::entity)> callback) { onSpatialObjectDirty = callback; }
 	std::uint64_t GetSpatialRevision() const { return spatialRevision; }
+	std::uint64_t GetHierarchyRevision() const { return hierarchyRevision; }
 	std::uint64_t GetObjectTransformRevision(entt::entity entityId) const;
 	std::uint64_t GetObjectSpatialRevision(entt::entity entityId) const;
 
@@ -210,6 +246,7 @@ private:
 	std::function<void(entt::entity)> onSpatialObjectDirty;
 	std::uint64_t spatialRevision = 0;
 	std::uint64_t transformRevision = 0;
+	std::uint64_t hierarchyRevision = 0;
 	std::unordered_map<Object, ObjectMetadata> metadataMap;
 	entt::registry registry;
 	std::unordered_map<entt::entity, entt::entity> parentMap;
@@ -221,6 +258,8 @@ private:
 	std::unordered_map<entt::entity, TerraEngine::UUID> entityToUuid;
 	std::unordered_map<entt::entity, std::uint64_t> transformRevisionByEntity;
 	std::unordered_map<entt::entity, std::uint64_t> spatialRevisionByEntity;
+	std::unordered_map<entt::entity, std::uint64_t> generationByEntity;
+	std::uint64_t nextObjectGeneration = 1;
 	// Name and tag indexes are maintained beside metadata so C# Object.Find
 	// calls do not scan every scene object during script updates.
 	std::unordered_map<std::string, std::vector<entt::entity>> nameIndex;
@@ -234,6 +273,7 @@ private:
 	void removeLookupIndex(entt::entity entityId, const ObjectMetadata& metadata);
 	void removeFromLookupBucket(std::unordered_map<std::string, std::vector<entt::entity>>& index, const std::string& key, entt::entity entityId);
 	void notifySpatialObjectDirty(entt::entity entityId);
+	void notifyHierarchyDirty();
 	void detachFromParent(entt::entity childId);
 	bool isDescendant(entt::entity ancestor, entt::entity potentialChild) const;
 };
