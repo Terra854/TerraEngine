@@ -35,6 +35,7 @@ namespace TerraEngine::Scheduling {
 		Resource,
 		MainThread,
 		Mutation,
+		Scheduler,
 		DefaultMetadata,
 		Summary
 	};
@@ -159,6 +160,7 @@ namespace TerraEngine::Scheduling {
 		FrameExecutionPlan ExecuteFrameWorkloads(float deltaTime, const MutationFlushCallback& flushCallback = {});
 		WorkerCoverageReport BuildWorkerCoverageReport(float deltaTime);
 		const ScheduleSummary& LatestSummary() const;
+		const FrameExecutionPlan& LatestFrameExecutionPlan() const;
 		const std::vector<SystemDeclaration>& OrderedDeclarations() const;
 		const std::vector<SchedulerPhaseDefinition>& PhaseDefinitions() const;
 		const std::vector<MutationFlushPoint>& MutationFlushPoints() const;
@@ -170,6 +172,8 @@ namespace TerraEngine::Scheduling {
 			std::size_t registrationIndex = 0;
 		};
 
+		std::vector<FrameWorkloadDeclaration> BuildSystemOwnedWorkloadDeclarations(SystemsBase& system, const SystemDeclaration& declaration, float deltaTime, std::size_t executionOrder) const;
+
 		std::vector<SchedulerPhaseDefinition> phases;
 		std::vector<SchedulerResourceDefinition> resources;
 		std::vector<MutationFlushPoint> flushPoints;
@@ -179,6 +183,7 @@ namespace TerraEngine::Scheduling {
 		std::vector<std::string> latestComponentQueryGroups;
 		std::string latestEcsGraphSummary;
 		ScheduleSummary latestSummary;
+		FrameExecutionPlan latestFrameExecutionPlan;
 		bool frameWorkloadCompatibilityFallbackEnabled = true;
 		bool dirty = true;
 	};

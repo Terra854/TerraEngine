@@ -66,6 +66,37 @@ namespace {
 			context.Expect(!reason.empty(), "Invalid rules should explain what failed.");
 		});
 
+		registry.Add("Resource.Streaming.Policy.WorkerPlanningProducesCandidatesBeforeProtectedRegistration", [](TestContext& context) {
+			std::vector<Resource::PreloadRule> rules;
+			Resource::PreloadRule visibleRule;
+			visibleRule.ruleId = "near-visible";
+			visibleRule.criteriaType = Resource::PreloadCriteriaType::Distance;
+			visibleRule.criteriaValue = "16";
+			visibleRule.assetScope = { MakeId(7u), MakeId(8u) };
+			visibleRule.priority = 100;
+			visibleRule.diagnosticName = "worker candidate";
+			rules.push_back(visibleRule);
+
+			Resource::PreloadRule invalidRule = visibleRule;
+			invalidRule.ruleId = "invalid-empty";
+			invalidRule.assetScope = {};
+			rules.push_back(invalidRule);
+
+			const std::vector<Resource::StreamingNeed> candidates = Resource::EvaluatePreloadRules(rules, 12.0);
+			TerraEngine::Scheduling::FrameWorkloadDeclaration declaration = Resource::BuildResourcePreparationWorkloadDeclaration(candidates.size());
+			const TerraEngine::Scheduling::FrameExecutionPlan plan = TerraEngine::Scheduling::ValidateFrameWorkloads({ declaration }, "resource-worker-planning");
+
+			context.ExpectEqual(static_cast<std::size_t>(2), candidates.size(), "Worker planning should return only valid asset candidates.");
+			context.Expect(plan.valid, "Resource candidate planning declaration should validate for worker preparation.");
+			context.ExpectEqual(static_cast<std::size_t>(1), plan.migrationSummary.workerSafeCount, "Resource candidate planning should be visible as worker-safe work.");
+			context.Expect(declaration.protectedCommit.find("ResourceManager registration") != std::string::npos, "Resource registration should remain documented as a protected handoff.");
+			for (const Resource::StreamingNeed& candidate : candidates)
+			{
+				context.Expect(candidate.needType == Resource::StreamingNeedType::DistancePreload, "Distance preload rules should produce deterministic worker candidates.");
+				context.Expect(Resource::ProtectionForNeed(candidate.needType) == Resource::StreamingProtectionReason::PreloadRule, "Registration/loading handoff should retain the protected preload reason.");
+			}
+		});
+
 		registry.Add("Resource.Streaming.Policy.DefaultAssetPoliciesMatchRuntimeCost", [](TestContext& context) {
 			const Resource::StreamingAssetPolicy shaderPolicy = Resource::MakeDefaultStreamingAssetPolicy(Resource::StreamableAssetType::ShaderCollection);
 			const Resource::StreamingAssetPolicy materialPolicy = Resource::MakeDefaultStreamingAssetPolicy(Resource::StreamableAssetType::Material);

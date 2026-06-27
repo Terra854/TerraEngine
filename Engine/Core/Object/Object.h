@@ -10,9 +10,11 @@
 #include <entt/entt.hpp>
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
+#include "Core/Scheduling/WorkerSafety.h"
 #include "Utilities/UUID.h"
 
 // Object now serves as an interface to manage entities in EnTT
@@ -41,9 +43,19 @@ public:
 	bool isStatic() const;
 	void setStatic(bool isStatic);
 
-	// Component management with EnTT
+	// Component management with EnTT. Adding a component changes live storage,
+	// so worker phases must enqueue a deferred SceneMutationQueue request
+	// instead of calling this protected-only API directly.
 	template<typename T, typename... Args>
 	T& addComponent(Args&&... args) {
+		if (TerraEngine::Scheduling::IsWorkerSafetyScopeActive()) {
+			TerraEngine::Scheduling::ReportWorkerSafetyViolation(
+				TerraEngine::Scheduling::WorkerSafetySeverity::Error,
+				"Object.addComponent",
+				"Worker code attempted to add a live component directly.",
+				"Capture a SceneMutationQueue AddComponent request and apply it at a protected scheduler flush.");
+			throw std::runtime_error("Worker code cannot add live components directly.");
+		}
 		return registry->emplace<T>(id, std::forward<Args>(args)...);
 	}
 
@@ -53,9 +65,19 @@ public:
 		return registry->try_get<T>(id);
 	}
 
-	// Function to remove a component
+	// Function to remove a component. Removal is protected-only for the same
+	// reason as addComponent: worker phases record intent and let the scheduler
+	// apply it at a mutation flush point.
 	template<typename T>
 	void removeComponent() {
+		if (TerraEngine::Scheduling::IsWorkerSafetyScopeActive()) {
+			TerraEngine::Scheduling::ReportWorkerSafetyViolation(
+				TerraEngine::Scheduling::WorkerSafetySeverity::Error,
+				"Object.removeComponent",
+				"Worker code attempted to remove a live component directly.",
+				"Capture a SceneMutationQueue RemoveComponent request and apply it at a protected scheduler flush.");
+			return;
+		}
 		registry->remove<T>(id);
 	}
 

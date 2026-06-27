@@ -1,5 +1,7 @@
 #include "../TestHarness.h"
 
+#include "Components/Transform.h"
+#include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
 #include "Scene/SceneMutationQueue.h"
 
@@ -55,6 +57,22 @@ namespace TerraEngine::Tests {
 			objects.clear();
 		});
 
+		registry.Add("SceneMutationQueue.RejectedBatchDoesNotApplyEarlierCreates", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			const std::size_t beforeCount = objects.getRootObjects().size();
+
+			TerraEngine::Scene::SceneMutationQueue queue;
+			queue.Enqueue({ "create-before-reject", TerraEngine::Scene::SceneMutationOperation::CreateObject, {}, {}, "Should Not Exist" });
+			queue.Enqueue({ "delete-missing", TerraEngine::Scene::SceneMutationOperation::DeleteObject, TerraEngine::GenerateUUID() });
+			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
+
+			context.Expect(!result.applied, "A rejected request should block the whole batch.");
+			context.ExpectEqual(beforeCount, objects.getRootObjects().size(), "Earlier accepted creates should not become visible after a later rejection.");
+			context.ExpectEqual(static_cast<std::size_t>(1), result.rejectedMutationCount, "The invalid target should be counted as rejected.");
+			objects.clear();
+		});
+
 		registry.Add("SceneMutationQueue.ComponentMutationsNeedValidPayloadTargets", [](TestContext& context) {
 			ObjectManager& objects = ObjectManager::instance();
 			objects.clear();
@@ -79,6 +97,31 @@ namespace TerraEngine::Tests {
 			const auto accepted = valid.Apply(objects);
 			context.Expect(accepted.applied, "Valid component payload mutations should flush at the approved boundary.");
 			context.Expect(valid.Empty(), "Applied component payload mutations should clear the queue.");
+			objects.clear();
+		});
+
+		registry.Add("SceneMutationQueue.RemoveComponentAppliesThroughRegistry", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			ComponentRegistry::RegisterAllComponents();
+			Object target = objects.createObject("Component Removal Target");
+			const TerraEngine::UUID targetId = objects.getUUID(target.EntityId());
+			context.Expect(target.getComponent<Transform>() != nullptr, "Created objects should start with a Transform component.");
+
+			TerraEngine::Scene::SceneMutationQueue queue;
+			TerraEngine::Scene::SceneMutationRequest request;
+			request.requestId = "remove-transform";
+			request.operation = TerraEngine::Scene::SceneMutationOperation::RemoveComponent;
+			request.targetObjectId = targetId;
+			request.componentName = std::string(Transform::kComponentName);
+			request.componentPayloadKind = TerraEngine::Scene::SceneComponentMutationPayloadKind::Remove;
+			queue.Enqueue(std::move(request));
+
+			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
+
+			context.Expect(result.applied, "Valid remove-component requests should apply through the protected flush.");
+			context.Expect(target.getComponent<Transform>() == nullptr, "The reflected component registry should remove the requested component.");
+			context.Expect(queue.Empty(), "Applied remove-component requests should clear the queue.");
 			objects.clear();
 		});
 	}

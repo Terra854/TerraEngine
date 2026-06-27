@@ -59,6 +59,10 @@ namespace TerraEngine::Scheduling {
 		bool runOnceWithoutObjectSnapshot = false;
 		std::size_t workerThreshold = 128;
 		std::size_t preferredChunkSize = 256;
+		std::size_t minChunkSize = 1;
+		std::size_t maxChunkSize = 1024;
+		std::size_t maxWorkerChunks = 0;
+		bool adaptiveChunking = true;
 		WorkerSystemPhaseKind phaseKind = WorkerSystemPhaseKind::WorkerPrepare;
 		std::string phaseLabel;
 		EcsQueryChunkWork work;

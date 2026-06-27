@@ -1,6 +1,7 @@
 #include "../TestHarness.h"
 #include "EditorMcpBridge.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -100,10 +101,40 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(std::string(TerraEngine::Editor::Automation::ToString(bridge.GetState())), std::string("disabled"), "Bridge should start disabled.");
 			bridge.SetEnabled(true);
 			context.Expect(bridge.IsEnabled(), "Bridge should enable.");
+			context.Expect(bridge.GetListenPort() != 0, "Direct editor enable should start the local listener.");
 			bridge.SetEnabled(false);
 			context.Expect(!bridge.IsEnabled(), "Bridge should disable.");
+			context.ExpectEqual(static_cast<std::uint16_t>(0), bridge.GetListenPort(), "Direct editor disable should stop the listener immediately.");
 			bridge.Shutdown();
 			context.ExpectEqual(std::string(TerraEngine::Editor::Automation::ToString(bridge.GetState())), std::string("stopped"), "Bridge should stop on shutdown.");
+		});
+
+		registry.Add("Editor.MCP.Safety.DisabledBridgeRejectsEnableTool", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetWriteMode(WriteMode::WritesEnabled);
+			const nlohmann::json capabilities = bridge.BuildCapabilityListJson()["capabilities"];
+			const auto advertisedEnablementTool = std::find_if(capabilities.begin(), capabilities.end(), [](const nlohmann::json& capability) {
+				return capability.value("name", std::string()) == "bridge.set_enabled";
+			});
+			context.Expect(advertisedEnablementTool == capabilities.end(), "MCP discovery should not advertise editor-owned bridge enablement.");
+			const nlohmann::json result = bridge.CallTool("bridge.set_enabled", {{"enabled", true}});
+			context.Expect(!result.value("ok", true), "Disabled bridge should reject bridge.set_enabled through the MCP tool path.");
+			context.ExpectEqual(std::string("permission"), result["error"].value("category", std::string()), "Disabled bridge enable attempt should be a permission failure.");
+			context.Expect(!bridge.IsEnabled(), "Rejected enable attempt should leave the bridge disabled.");
+		});
+
+		registry.Add("Editor.MCP.Safety.EnabledBridgeRejectsDisableTool", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			bridge.SetWriteMode(WriteMode::WritesEnabled);
+			context.Expect(bridge.GetListenPort() != 0, "Enabled bridge should own a live local listener.");
+			const nlohmann::json result = bridge.CallTool("bridge.set_enabled", {{"enabled", false}});
+			context.Expect(!result.value("ok", true), "Enabled bridge should reject bridge.set_enabled through the MCP tool path.");
+			context.Expect(bridge.IsEnabled(), "Rejected disable attempt should leave the editor-owned bridge setting enabled.");
+			context.Expect(bridge.GetListenPort() != 0, "Rejected disable attempt should leave the local listener active.");
+			bridge.Shutdown();
 		});
 
 		registry.Add("Editor.MCP.Safety.RequestQueueIsFifo", [](TestContext& context) {

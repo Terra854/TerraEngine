@@ -5,6 +5,7 @@
 #include "Components/SkyComponent.h"
 #include "EditorContext.h"
 #include "AssetDatabase.h"
+#include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scripting/ScriptingSystem.h"
@@ -182,8 +183,31 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json empty = service.HandleTool("diagnostics.get_summary", nlohmann::json::object(), WriteMode::ReadOnly, "diag-1");
 			context.Expect(empty.value("ok", false), "Diagnostics should succeed without an open project.");
 			context.Expect(empty["data"].value("emptyStateSafe", false), "Diagnostics should advertise empty-state safety.");
+			context.Expect(empty["data"].contains("parallelFrame"), "Diagnostics should include the parallel-frame contract even without an engine.");
+			context.Expect(!empty["data"]["parallelFrame"].value("available", true), "Missing engine state should be reported explicitly.");
+			context.Expect(empty["data"].contains("hardBoundaries"), "Diagnostics should include hard-boundary classifications.");
+			context.Expect(empty["data"].contains("mutationDiagnostics"), "Diagnostics should include mutation counters.");
 			const nlohmann::json detailed = service.HandleTool("diagnostics.get_summary", {{"includeDetails", true}}, WriteMode::ReadOnly, "diag-2");
 			context.Expect(!detailed["data"]["surfaces"].empty(), "Detailed diagnostics should include surfaces.");
+			context.Expect(detailed["data"]["mutationDiagnostics"].contains("acceptedMutationCount"), "Mutation diagnostics should expose accepted mutation counts.");
+			context.Expect(detailed["data"]["mutationDiagnostics"].contains("rollbackCount"), "Mutation diagnostics should expose rollback counts.");
+			context.Expect(detailed["data"]["mutationDiagnostics"].value("rejectedBatchesPreventPartialState", false), "Mutation diagnostics should document rollback safety.");
+		});
+
+		registry.Add("Editor.Automation.Service.DiagnosticsExposeParallelFrameState", [](TestContext& context) {
+			Engine engine;
+			EditorContext editorContext;
+			editorContext.engine = &engine;
+			EditorAutomationService service;
+			service.SetEditorContext(&editorContext);
+			const nlohmann::json detailed = service.HandleTool("diagnostics.get_summary", {{"includeDetails", true}}, WriteMode::ReadOnly, "diag-parallel");
+			context.Expect(detailed.value("ok", false), "Engine-backed diagnostics should succeed.");
+			context.Expect(detailed["data"]["parallelFrame"].value("available", false), "Parallel-frame diagnostics should be available when an engine is attached.");
+			context.Expect(detailed["data"]["parallelFrame"].contains("migrationSummary"), "Parallel-frame diagnostics should expose migration counters.");
+			context.Expect(detailed["data"]["parallelFrame"].contains("workerCoverage"), "Parallel-frame diagnostics should expose worker coverage.");
+			context.Expect(!detailed["data"]["hardBoundaries"].empty(), "Hard-boundary classifications should be serialized.");
+			context.Expect(detailed["data"]["surfaces"][4]["details"].contains("parallelFrame"), "Scheduler surface should mirror parallel-frame diagnostics.");
+			context.Expect(detailed["data"]["surfaces"][4]["details"].contains("mutationDiagnostics"), "Scheduler surface should mirror mutation diagnostics.");
 		});
 
 		registry.Add("Editor.Automation.Service.AssetImportListAndExportJobsUseEditorSystems", [](TestContext& context) {

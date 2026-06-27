@@ -192,5 +192,35 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(4.0f, transform->position.z, "The later deterministic write should preserve vector component order.");
 			objects.clear();
 		});
+
+		registry.Add("Scripting.Mutation.WorkerDeferredMutationStressFlushesDeterministically", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
+
+			for (std::uint32_t index = 0; index < 96u; ++index)
+			{
+				ScriptingSystem::ScriptDispatchContext dispatchContext;
+				dispatchContext.workerDispatch = true;
+				dispatchContext.sourceObjectId = index + 1u;
+				dispatchContext.sourceBindingId = "stress-binding-" + std::to_string(index % 8u);
+				dispatchContext.frameOrder = 1000u + index;
+				ScriptingSystem::Instance().RecordScriptMutationRequest(ScriptingSystem::Instance().BuildScriptMutationRequest(
+					TerraEngine::Scene::SceneMutationOperation::CreateObject,
+					dispatchContext,
+					TerraEngine::EMPTY_UUID,
+					"Script Spawn " + std::to_string(index)));
+			}
+
+			const std::vector<TerraEngine::Scene::SceneMutationRequest> pending = TerraEngine::Scene::SceneMutationQueue::Instance().PendingRequests();
+			const TerraEngine::Scene::SceneMutationBatchResult result = TerraEngine::Scene::SceneMutationQueue::Instance().Apply(objects, "script-stress-flush");
+
+			context.ExpectEqual(static_cast<std::size_t>(96), pending.size(), "Script-originated worker stress should enqueue every deferred mutation.");
+			context.Expect(result.applied, "Script-originated worker mutations should apply at the protected flush point.");
+			context.ExpectEqual(static_cast<std::size_t>(96), result.acceptedMutationCount, "Every stress create should be accepted.");
+			context.ExpectEqual(static_cast<std::size_t>(96), objects.getRootObjects().size(), "Every accepted script create should become a root object.");
+			context.Expect(TerraEngine::Scene::SceneMutationQueue::Instance().Empty(), "Successful script stress flush should clear the global mutation queue.");
+			objects.clear();
+		});
 	}
 }

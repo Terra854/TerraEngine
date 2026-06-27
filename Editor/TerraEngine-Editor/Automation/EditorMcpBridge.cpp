@@ -24,22 +24,6 @@ namespace TerraEngine::Editor::Automation
 			const std::string name = request.value("name", "");
 			const nlohmann::json arguments = request.value("arguments", nlohmann::json::object());
 			const std::string requestId = request.value("requestId", "");
-			if (name == "bridge.set_enabled")
-			{
-				if (!arguments.contains("enabled") || !arguments["enabled"].is_boolean())
-				{
-					return service.BuildError(requestId, ErrorCategory::Validation, "bridge.set_enabled requires enabled: bool.");
-				}
-				SetEnabled(arguments["enabled"].get<bool>());
-				if (arguments.contains("writeMode") && arguments["writeMode"].is_string())
-				{
-					if (const auto parsed = ParseWriteMode(arguments["writeMode"].get<std::string>()))
-					{
-						SetWriteMode(*parsed);
-					}
-				}
-				return service.BuildSuccess(requestId, "Updated bridge enablement.", BuildStatusJson());
-			}
 			if (name == "bridge.set_write_mode")
 			{
 				if (!arguments.contains("writeMode") || !arguments["writeMode"].is_string())
@@ -254,7 +238,7 @@ namespace TerraEngine::Editor::Automation
 
 	nlohmann::json EditorMcpBridge::CallTool(std::string_view name, const nlohmann::json& arguments)
 	{
-		if (!IsEnabled() && name != "bridge.set_enabled")
+		if (!IsEnabled())
 		{
 			return service.BuildError(NextRequestId(), ErrorCategory::Permission, "The MCP bridge is disabled.");
 		}

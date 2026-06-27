@@ -63,6 +63,29 @@ namespace TerraEngine::Tests {
 			context.Expect(!summary.detailed, "Closed diagnostics should avoid detailed collection.");
 			context.Expect(summary.topPassCosts.empty(), "Closed diagnostics should not collect expensive pass detail.");
 		});
+
+		registry.Add("Renderer.Diagnostics.StaleSubmissionReportsProtectedSubmitRejection", [](TestContext& context) {
+			TerraEngine::Renderer::SetRenderDiagnosticsRequested(false);
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 41u;
+			TerraEngine::Renderer::RenderWorkPacketPlan packetPlan;
+			TerraEngine::Renderer::RenderSubmissionPlan submission;
+			submission.frameId = 40u;
+			TerraEngine::Renderer::ValidateRenderSubmissionPlan(submission, snapshot.frameId);
+			TerraEngine::Renderer::BackendCapabilityProfile profile;
+			profile.supportsParallelRecording = true;
+
+			const auto summary = TerraEngine::Renderer::BuildRenderDiagnosticsSummary(snapshot, packetPlan, submission, profile);
+			bool foundStaleGuidance = false;
+			for (const std::string& fallback : summary.backendFallbacks)
+			{
+				foundStaleGuidance = foundStaleGuidance || fallback.find("stale") != std::string::npos;
+			}
+
+			context.Expect(!summary.valid, "Stale submissions should keep render diagnostics invalid.");
+			context.Expect(!summary.backendFallbacks.empty(), "Stale submissions should publish protected-submit rejection guidance.");
+			context.Expect(foundStaleGuidance, "Fallback guidance should name stale render work.");
+		});
 	}
 
 }

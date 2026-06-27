@@ -12,6 +12,7 @@
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
 #include "Engine/Core/Scheduling/SystemScheduler.h"
+#include "Engine/Core/Scheduling/WorkerSafety.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Engine/Core/Object/ObjectManager.h"
@@ -120,6 +121,21 @@ namespace
 		case UISystem::UIPublishStatus::None:
 		default:
 			return "none";
+		}
+	}
+
+	const char* WorkerSafetySeverityText(TerraEngine::Scheduling::WorkerSafetySeverity severity)
+	{
+		using TerraEngine::Scheduling::WorkerSafetySeverity;
+		switch (severity)
+		{
+		case WorkerSafetySeverity::Error:
+			return "error";
+		case WorkerSafetySeverity::Warning:
+			return "warning";
+		case WorkerSafetySeverity::Info:
+		default:
+			return "info";
 		}
 	}
 }
@@ -298,34 +314,127 @@ void SchedulerDiagnosticsWindow::DrawWorkerCoverageSummary()
 		return;
 	}
 
+	DrawParallelFrameSummary();
+	DrawHardBoundarySummary();
+	DrawSafetyViolationSummary();
+}
+
+void SchedulerDiagnosticsWindow::DrawParallelFrameSummary()
+{
+	if (owner == nullptr || owner->GetContext() == nullptr || owner->GetContext()->engine == nullptr)
+	{
+		ImGui::TextDisabled("Parallel frame summary is not available.");
+		return;
+	}
+
 	const TerraEngine::Scheduling::WorkerCoverageReport& report = owner->GetContext()->engine->GetWorkerCoverageReport();
+	const TerraEngine::Scheduling::FrameExecutionPlan& framePlan = owner->GetContext()->engine->GetParallelFrameExecutionPlan();
+	const TerraEngine::Scheduling::ArchitectureMigrationSummary& migration = framePlan.migrationSummary;
 	ImGui::SeparatorText("Worker Coverage");
-	if (ImGui::BeginTable("SchedulerDiagnosticsWorkerCoverage", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	ImGui::Text("Frame: %s, mode: %s, parallel: %s",
+		framePlan.frameId.c_str(),
+		TerraEngine::Scheduling::ToString(framePlan.executionMode).c_str(),
+		framePlan.parallelExecutionUsed ? "true" : "false");
+	if (ImGui::BeginTable("SchedulerDiagnosticsWorkerCoverage", 9, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("Worker");
 		ImGui::TableSetupColumn("Protected");
+		ImGui::TableSetupColumn("Inline");
 		ImGui::TableSetupColumn("Rejected");
 		ImGui::TableSetupColumn("Fallback");
 		ImGui::TableSetupColumn("Barriers");
+		ImGui::TableSetupColumn("Worker ms");
+		ImGui::TableSetupColumn("Protected ms");
+		ImGui::TableSetupColumn("Util");
 		ImGui::TableHeadersRow();
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(0);
-		ImGui::Text("%zu", report.workerCategories.size());
+		ImGui::Text("%zu", migration.workerSafeCount);
 		ImGui::TableSetColumnIndex(1);
-		ImGui::Text("%zu", report.protectedCategories.size());
+		ImGui::Text("%zu", migration.protectedCount);
 		ImGui::TableSetColumnIndex(2);
-		ImGui::Text("%zu", report.rejectedCategories.size());
+		ImGui::Text("%zu", migration.inlineCount);
 		ImGui::TableSetColumnIndex(3);
-		ImGui::Text("%zu", report.fallbackCategories.size());
+		ImGui::Text("%zu", migration.rejectedCount);
 		ImGui::TableSetColumnIndex(4);
-		ImGui::Text("%zu", report.barrierCount);
+		ImGui::Text("%zu", migration.fallbackCount);
+		ImGui::TableSetColumnIndex(5);
+		ImGui::Text("%zu", migration.barrierCount);
+		ImGui::TableSetColumnIndex(6);
+		ImGui::Text("%.3f", static_cast<double>(migration.workerPreparationTimeNs) / 1000000.0);
+		ImGui::TableSetColumnIndex(7);
+		ImGui::Text("%.3f", static_cast<double>(migration.protectedCommitTimeNs + migration.protectedBaselineTimeNs) / 1000000.0);
+		ImGui::TableSetColumnIndex(8);
+		ImGui::Text("%.2f", migration.workerUtilization);
 		ImGui::EndTable();
 	}
 	DrawStringList("Worker:", report.workerCategories);
 	DrawStringList("Protected:", report.protectedCategories);
 	DrawStringList("Rejected:", report.rejectedCategories);
 	DrawStringList("Fallback:", report.fallbackCategories);
-	DrawStringList("Boundaries:", report.hardBoundaryFindings);
+}
+
+void SchedulerDiagnosticsWindow::DrawHardBoundarySummary()
+{
+	if (owner == nullptr || owner->GetContext() == nullptr || owner->GetContext()->engine == nullptr)
+	{
+		ImGui::TextDisabled("Hard-boundary summary is not available.");
+		return;
+	}
+
+	const TerraEngine::Scheduling::WorkerCoverageReport& report = owner->GetContext()->engine->GetWorkerCoverageReport();
+	ImGui::SeparatorText("Hard Boundaries");
+	if (report.hardBoundaryFindings.empty())
+	{
+		ImGui::TextDisabled("No hard boundaries reported this frame.");
+		return;
+	}
+
+	if (ImGui::BeginTable("SchedulerDiagnosticsHardBoundaries", 1, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Boundary");
+		ImGui::TableHeadersRow();
+		for (const std::string& finding : report.hardBoundaryFindings)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextWrapped("%s", finding.c_str());
+		}
+		ImGui::EndTable();
+	}
+}
+
+void SchedulerDiagnosticsWindow::DrawSafetyViolationSummary()
+{
+	ImGui::SeparatorText("Worker Safety Violations");
+	const std::vector<TerraEngine::Scheduling::WorkerSafetyViolation> violations = TerraEngine::Scheduling::SnapshotWorkerSafetyViolations();
+	if (violations.empty())
+	{
+		ImGui::TextDisabled("No direct worker mutation violations captured.");
+		return;
+	}
+
+	if (ImGui::BeginTable("SchedulerDiagnosticsWorkerSafetyViolations", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable))
+	{
+		ImGui::TableSetupColumn("Severity");
+		ImGui::TableSetupColumn("Workload");
+		ImGui::TableSetupColumn("Operation");
+		ImGui::TableSetupColumn("Message");
+		ImGui::TableHeadersRow();
+		for (const TerraEngine::Scheduling::WorkerSafetyViolation& violation : violations)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(WorkerSafetySeverityText(violation.severity));
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(violation.workloadName.c_str());
+			ImGui::TableSetColumnIndex(2);
+			ImGui::TextUnformatted(violation.operationName.c_str());
+			ImGui::TableSetColumnIndex(3);
+			ImGui::TextWrapped("%s Action: %s", violation.message.c_str(), violation.recommendedAction.c_str());
+		}
+		ImGui::EndTable();
+	}
 }
 
 void SchedulerDiagnosticsWindow::DrawRuntimeLayoutSummary()

@@ -41,6 +41,52 @@ namespace TerraEngine::Tests {
 			std::vector<std::string>* log = nullptr;
 		};
 
+		class PhaseDeclaringSystem final : public SystemsBase {
+		public:
+			explicit PhaseDeclaringSystem(std::vector<std::string>* executionLog)
+				: log(executionLog)
+			{
+			}
+
+			void Initialize() override {}
+
+			void Update(float) override
+			{
+				if (log != nullptr)
+				{
+					log->push_back("Update");
+				}
+			}
+
+			void Shutdown() override {}
+
+			std::string SystemName() override
+			{
+				return "PhaseSystem";
+			}
+
+			std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float) override
+			{
+				TerraEngine::Scheduling::FrameWorkloadDeclaration workload;
+				workload.workloadName = "PhaseSystem:ProtectedCommit";
+				workload.reads = { "SceneGraph" };
+				workload.mainThreadRequired = true;
+				workload.workerEligible = false;
+				workload.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
+				workload.protectedReason = "Fixture protected commit.";
+				workload.work = [this](TerraEngine::Scheduling::JobGraphContext&) {
+					if (log != nullptr)
+					{
+						log->push_back("DeclaredPhase");
+					}
+				};
+				return { std::move(workload) };
+			}
+
+		private:
+			std::vector<std::string>* log = nullptr;
+		};
+
 		TerraEngine::Scheduling::SystemDeclaration MakeDeclaration(std::string name, std::string phase)
 		{
 			TerraEngine::Scheduling::SystemDeclaration declaration;
@@ -235,7 +281,7 @@ namespace TerraEngine::Tests {
 				return state;
 			});
 
-			context.Expect(!summary.valid, "Pending frame-end mutations should make the frame summary invalid.");
+			context.Expect(summary.valid, "Pending frame-end mutations should stay visible without failing the whole scheduler frame.");
 			context.Expect(HasDiagnostic(summary, TerraEngine::Scheduling::DiagnosticCategory::Mutation), "Pending frame-end mutations should produce a mutation diagnostic.");
 		});
 
@@ -313,10 +359,45 @@ namespace TerraEngine::Tests {
 
 			context.Expect(plan.valid, "Converted scheduler workloads should validate before execution.");
 			context.Expect(plan.completed, "Converted scheduler workloads should execute through the compatibility path.");
-			context.Expect(plan.migrationSummary.workerSafeCount >= 1, "Worker-safe scheduler declarations should appear in the migration summary.");
-			context.Expect(plan.migrationSummary.protectedCount >= 1, "Main-thread scheduler declarations and flush barriers should remain protected.");
+			context.Expect(plan.migrationSummary.workerSafeCount == 0, "Partially converted scheduler declarations should not move the whole Update call to a worker.");
+			context.Expect(plan.migrationSummary.protectedCount >= 2, "Main-thread systems, partial conversions, and flush barriers should remain protected.");
 			context.Expect(Contains(log, "Scripting"), "Protected system workload should call the existing system update.");
-			context.Expect(Contains(log, "UI"), "Worker-safe system workload should call the existing system update in compatibility mode.");
+			context.Expect(Contains(log, "UI"), "Partially converted system workload should still call the existing system update safely.");
+		});
+
+		registry.Add("Engine.SystemScheduler.FullyWorkerSafeUpdateCanRunOnWorker", [](TestContext& context) {
+			std::vector<std::string> log;
+			FakeSystem system("WorkerSystem", &log);
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			auto declaration = MakeDeclaration("WorkerSystem", "Scene");
+			declaration.mainThread = false;
+			declaration.reads.push_back("SceneGraph");
+			declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::WorkerSafe;
+			scheduler.RegisterSystem(system, declaration);
+
+			TerraEngine::Scheduling::FrameExecutionPlan plan = scheduler.ExecuteFrameWorkloads(0.016f);
+
+			context.Expect(plan.valid, "Fully worker-safe scheduler workloads should validate.");
+			context.Expect(plan.completed, "Fully worker-safe scheduler workloads should execute.");
+			context.Expect(plan.migrationSummary.workerSafeCount >= 1, "A fully worker-safe boundary should be counted as worker-safe.");
+			context.Expect(Contains(log, "WorkerSystem"), "Fully worker-safe workload should call the existing system update.");
+		});
+
+		registry.Add("Engine.SystemScheduler.SystemOwnedPhaseWorkloadsReplaceUpdateWrapper", [](TestContext& context) {
+			std::vector<std::string> log;
+			PhaseDeclaringSystem system(&log);
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			auto declaration = MakeDeclaration("PhaseSystem", "Scene");
+			declaration.reads.push_back("SceneGraph");
+			scheduler.RegisterSystem(system, declaration);
+
+			TerraEngine::Scheduling::FrameExecutionPlan plan = scheduler.ExecuteFrameWorkloads(0.016f);
+
+			context.Expect(plan.valid, "System-owned phase workload should validate through the scheduler.");
+			context.Expect(plan.completed, "System-owned phase workload should execute.");
+			context.Expect(Contains(log, "DeclaredPhase"), "Declared phase should execute.");
+			context.Expect(!Contains(log, "Update"), "Legacy Update wrapper should not run when the system declares phase workloads.");
+			context.Expect(plan.formatted.find("PhaseSystem:ProtectedCommit") != std::string::npos, "Diagnostics should name the declared system-owned phase.");
 		});
 
 		registry.Add("Engine.SystemScheduler.FrameWorkloadSummaryIncludesFlushFallbacks", [](TestContext& context) {

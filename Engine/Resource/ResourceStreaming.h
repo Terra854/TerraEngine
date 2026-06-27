@@ -17,6 +17,7 @@
 #include <glm/glm.hpp>
 
 #include "Core/Export.h"
+#include "Core/Scheduling/FrameWorkload.h"
 #include "Utilities/UUID.h"
 
 namespace TerraEngine::Resource
@@ -259,6 +260,10 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API bool ValidatePreloadRule(const PreloadRule& rule, std::string* reason = nullptr);
 	TERRAENGINE_API std::vector<StreamingNeed> EvaluatePreloadRules(const std::vector<PreloadRule>& rules, double nowSeconds = 0.0);
 	TERRAENGINE_API std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds = 0.0);
+	// This declaration describes the worker-safe planning phase. The actual
+	// ResourceManager registration and load/upload mutation still happens later
+	// at a protected handoff point.
+	TERRAENGINE_API TerraEngine::Scheduling::FrameWorkloadDeclaration BuildResourcePreparationWorkloadDeclaration(std::size_t estimatedNeedCount);
 	TERRAENGINE_API StreamingProtectionReason ProtectionForNeed(StreamingNeedType needType);
 	TERRAENGINE_API bool IsProtectedNeed(StreamingNeedType needType, const StreamingPolicy& policy);
 	TERRAENGINE_API StreamablePayloadState StateAfterRegistration(bool deferScenePayloads);

@@ -76,6 +76,56 @@ managed gameplay callbacks and live GPU submission are partially worker-safe,
 while window/input polling and editor reflection mutation stay protected with
 worker-readable snapshots or preflight validation around them.
 
+Full parallel frame coverage validates the default job-graph-backed frame path,
+the explicit compatibility baseline, ordered access handoffs, small-work inline
+thresholds, worker-safety scopes, deterministic mutation buffers, and editor
+diagnostic surfacing. Deferred scene mutations are intentionally captured into
+per-worker buffers and applied only at scheduler flush points. A rejected batch
+must leave earlier requests unapplied; direct ObjectManager/component mutation
+inside a worker safety scope should report a safety violation instead of
+silently changing live state. For a focused Windows run:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="FullParallelFrame;FrameWorkload;SystemScheduler;JobGraph;SceneMutationQueue;ParallelMutationBuffer;WorkerHardBoundary;Scripting.Mutation"
+.\out\build\CodexDebug\TerraEngine-EngineTests.exe
+.\out\build\CodexDebug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+Open `Windows > Scheduler Diagnostics` in the installed editor to inspect the
+executed frame plan. The worker coverage section should show frame id, execution
+mode, parallel flag, worker/protected/inline/rejected/fallback counts, barrier
+count, worker/protected timings, worker utilization, fallback reasons, and
+hard-boundary classifications. Small scenes may intentionally show inline work;
+that is an overhead guard, not a protected fallback. Continue to treat managed
+callback invocation, final GPU submit/present, platform event polling, and
+editor reflected mutation as protected unless a later test proves a narrower
+worker-safe phase.
+
+Heavy subsystem worker conversion coverage is split by boundary. Managed script
+batch preparation, immutable render/resource/UI planning, and post-poll
+window/input snapshots may run as worker-safe preparation. Managed callback
+invocation, swapchain acquire/queue submit/present/fence ownership, platform
+event polling, and reflected editor mutation application remain protected
+commits. Use this focused pass when changing those paths:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="Scripting.Workload;RenderWorkerSafety;Renderer.Diagnostics;Resource.Streaming.Policy;UISystemPreparation;WindowInputWorkerBoundary;WorkerHardBoundary;Editor.FullParallelFrame;Editor.Automation.Service"
+.\out\build\CodexDebug\TerraEngine-EngineTests.exe
+.\out\build\CodexDebug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+After code changes, rebuild the Visual Studio-compatible targets and run the
+install target so native, managed, editor, launcher, and shader-tool outputs are
+verified together:
+
+```powershell
+cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" >nul && cmake --build out\build\CodexDebug --target TerraEngine-EngineTests TerraEngine-EditorTests --config Debug"
+ctest --test-dir out\build\CodexDebug --output-on-failure -C Debug
+cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" >nul && cmake --build out\build\CodexDebug --target install --config Debug"
+```
+
 The scripting scheduler checks live under `Tests/Engine/Scripting`. They verify
 workload snapshots, worker batch planning, thread-local dispatch context,
 diagnostics gating, and deferred script-origin scene mutations. Export scripting

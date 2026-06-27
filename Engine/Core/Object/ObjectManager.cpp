@@ -7,7 +7,28 @@
 
 #include "ObjectManager.h"
 
+#include "Core/Scheduling/WorkerSafety.h"
+
 #include <glm/gtc/quaternion.hpp>
+
+#include <stdexcept>
+
+namespace
+{
+	bool ReportWorkerObjectMutation(const char* operationName, const char* message)
+	{
+		if (!TerraEngine::Scheduling::IsWorkerSafetyScopeActive())
+		{
+			return false;
+		}
+		TerraEngine::Scheduling::ReportWorkerSafetyViolation(
+			TerraEngine::Scheduling::WorkerSafetySeverity::Error,
+			operationName,
+			message,
+			"Capture a SceneMutationQueue request and apply it at a protected scheduler flush.");
+		return true;
+	}
+}
 
 ObjectManager& ObjectManager::instance() {
 	static ObjectManager instance;
@@ -164,6 +185,11 @@ void ObjectManager::MarkObjectTransformDirty(const Object& obj)
 // Create a new Object
 // ObjectManager::createObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 Object ObjectManager::createObject(const std::string& name) {
+	if (ReportWorkerObjectMutation("ObjectManager.createObject", "Worker code attempted to create a live object directly."))
+	{
+		throw std::runtime_error("Worker code cannot create live objects directly.");
+	}
+
 	// Every entity begins life with a Transform so systems can safely assume
 	// spatial data exists without guarding for missing components.
 	auto object = Object(registry);
@@ -200,6 +226,11 @@ Object ObjectManager::createObject(const std::string& name) {
 // Remove an Object
 // ObjectManager::removeObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::removeObject(Object obj) {
+	if (ReportWorkerObjectMutation("ObjectManager.removeObject", "Worker code attempted to remove a live object directly."))
+	{
+		return;
+	}
+
 	if (registry.valid(obj.id))
 	{
 		MarkObjectTransformDirty(obj);
@@ -262,6 +293,11 @@ void ObjectManager::removeObject(Object obj) {
 // ObjectManager::setParent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 {
+	if (ReportWorkerObjectMutation("ObjectManager.setParent", "Worker code attempted to reparent live hierarchy directly."))
+	{
+		return false;
+	}
+
 	if (!registry.valid(child.id))
 	{
 		return false;

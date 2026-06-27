@@ -684,6 +684,7 @@ namespace TerraEngine::Scene {
 			// Small scenes are faster without graph allocation and worker wake-up.
 			// The same per-level work items are still used, so the serial fallback
 			// has identical ordering and diagnostics to the threaded path.
+			result.inlineJobCount = totalItems > 0u ? 1u : 0u;
 			for (const std::vector<TransformWorkItem>& items : levelItems)
 			{
 				TransformChunkOutput output;
@@ -749,6 +750,12 @@ namespace TerraEngine::Scene {
 			}
 
 			const TerraEngine::Scheduling::JobGraphSummary& summary = jobGraph.Execute();
+			result.workerJobCount = summary.workerJobCount;
+			result.protectedJobCount = summary.protectedJobCount;
+			result.inlineJobCount = summary.inlineJobCount;
+			result.coordinatorWaitTimeNs = summary.coordinatorWaitTimeNs;
+			result.workerTimeNs = summary.workerTimeNs;
+			result.workerUtilization = summary.workerUtilization;
 			if (!summary.valid || !summary.completed)
 			{
 				result.valid = false;

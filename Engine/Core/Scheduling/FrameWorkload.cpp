@@ -4,12 +4,14 @@
 
 #include "JobGraph.h"
 #include "Profiling/ProfilerScope.h"
+#include "ThreadPool/ThreadPool.h"
 
 #include <algorithm>
 #include <map>
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 namespace TerraEngine::Scheduling {
@@ -108,6 +110,28 @@ namespace TerraEngine::Scheduling {
 			return FrameWorkloadExecutionPolicy::Protected;
 		}
 
+		bool ShouldRunInline(const FrameWorkloadResult& result)
+		{
+			return result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
+				&& result.declaration.inlineWorkItemThreshold > 0
+				&& result.declaration.estimatedWorkItemCount <= result.declaration.inlineWorkItemThreshold;
+		}
+
+		void ApplyInlinePolicy(FrameExecutionPlan& plan)
+		{
+			std::size_t inlineCount = 0;
+			for (FrameWorkloadResult& result : plan.results)
+			{
+				if (ShouldRunInline(result))
+				{
+					result.executionPolicy = FrameWorkloadExecutionPolicy::Inline;
+					result.inlineSelected = true;
+					++inlineCount;
+				}
+			}
+			plan.migrationSummary.inlineCount = inlineCount;
+		}
+
 		void RefreshMigrationSummary(FrameExecutionPlan& plan)
 		{
 			ArchitectureMigrationSummary summary;
@@ -148,6 +172,9 @@ namespace TerraEngine::Scheduling {
 				case FrameWorkloadExecutionPolicy::WorkerSafe:
 					++summary.workerSafeCount;
 					summary.workerCategories.push_back(result.declaration.ownerSystem + ":" + result.declaration.workloadName);
+					break;
+				case FrameWorkloadExecutionPolicy::Inline:
+					summary.protectedCategories.push_back(result.declaration.ownerSystem + ":" + result.declaration.workloadName + ":inline");
 					break;
 				case FrameWorkloadExecutionPolicy::Rejected:
 					++summary.rejectedCount;
@@ -198,8 +225,36 @@ namespace TerraEngine::Scheduling {
 			normalize(summary.rejectedCategories);
 			normalize(summary.fallbackReasons);
 			normalize(summary.hardBoundaryFindings);
+			summary.inlineCount += plan.migrationSummary.inlineCount;
+			summary.protectedBaselineTimeNs = plan.migrationSummary.protectedBaselineTimeNs;
+			summary.workerPreparationTimeNs = plan.migrationSummary.workerPreparationTimeNs;
+			summary.protectedCommitTimeNs = plan.migrationSummary.protectedCommitTimeNs;
+			summary.coordinatorWaitTimeNs = plan.migrationSummary.coordinatorWaitTimeNs;
+			summary.workerUtilization = plan.migrationSummary.workerUtilization;
 			summary.formatted = FormatArchitectureMigrationSummary(summary);
 			plan.migrationSummary = std::move(summary);
+		}
+
+		void ApplyJobGraphSummary(FrameExecutionPlan& plan, const JobGraphSummary& summary)
+		{
+			std::unordered_map<std::string, JobGraphNodeState> statesByName;
+			for (const JobGraphResultEntry& entry : summary.jobs)
+			{
+				statesByName[entry.name] = entry.state;
+			}
+			for (FrameWorkloadResult& result : plan.results)
+			{
+				const auto found = statesByName.find(result.declaration.workloadName);
+				result.completed = found != statesByName.end() && found->second == JobGraphNodeState::Completed;
+			}
+			plan.completed = summary.completed && std::all_of(plan.results.begin(), plan.results.end(), [](const FrameWorkloadResult& result) {
+				return result.completed || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected;
+			});
+			plan.migrationSummary.inlineCount = summary.inlineJobCount;
+			plan.migrationSummary.workerPreparationTimeNs = summary.workerTimeNs;
+			plan.migrationSummary.protectedCommitTimeNs = summary.protectedTimeNs;
+			plan.migrationSummary.coordinatorWaitTimeNs = summary.coordinatorWaitTimeNs;
+			plan.migrationSummary.workerUtilization = summary.workerUtilization;
 		}
 	}
 
@@ -221,6 +276,8 @@ namespace TerraEngine::Scheduling {
 		{
 		case FrameWorkloadExecutionPolicy::WorkerSafe:
 			return "worker-safe";
+		case FrameWorkloadExecutionPolicy::Inline:
+			return "inline";
 		case FrameWorkloadExecutionPolicy::Rejected:
 			return "rejected";
 		case FrameWorkloadExecutionPolicy::Protected:
@@ -232,6 +289,11 @@ namespace TerraEngine::Scheduling {
 	std::string ToString(FrameWorkloadMutationPolicy policy)
 	{
 		return policy == FrameWorkloadMutationPolicy::DeferredOnly ? "deferred-only" : "none";
+	}
+
+	std::string ToString(FrameWorkloadExecutionMode mode)
+	{
+		return mode == FrameWorkloadExecutionMode::Compatibility ? "compatibility" : "parallel";
 	}
 
 	std::string ToString(WorkerConversionState state)
@@ -367,6 +429,7 @@ namespace TerraEngine::Scheduling {
 		stream << "Architecture migration summary:"
 			<< " workerSafe=" << summary.workerSafeCount
 			<< " protected=" << summary.protectedCount
+			<< " inline=" << summary.inlineCount
 			<< " rejected=" << summary.rejectedCount
 			<< " fallbacks=" << summary.fallbackCount
 			<< " mutationFlushes=" << summary.mutationFlushCount
@@ -378,6 +441,8 @@ namespace TerraEngine::Scheduling {
 			<< " protectedBaselineNs=" << summary.protectedBaselineTimeNs
 			<< " workerPrepNs=" << summary.workerPreparationTimeNs
 			<< " protectedCommitNs=" << summary.protectedCommitTimeNs
+			<< " coordinatorWaitNs=" << summary.coordinatorWaitTimeNs
+			<< " workerUtilization=" << summary.workerUtilization
 			<< " activeInvalidations=" << summary.activeMembershipInvalidationCount
 			<< " staleReferences=" << summary.staleCompactReferenceCount
 			<< " hierarchyRebuilds=" << summary.hierarchySnapshotRebuildCount
@@ -579,7 +644,9 @@ namespace TerraEngine::Scheduling {
 		std::ostringstream stream;
 		stream << "Frame execution plan '" << plan.frameId << "': "
 			<< (plan.valid ? "valid" : "invalid") << ", "
-			<< (plan.completed ? "completed" : "incomplete") << '\n';
+			<< (plan.completed ? "completed" : "incomplete")
+			<< ", mode=" << ToString(plan.executionMode)
+			<< ", parallel=" << (plan.parallelExecutionUsed ? "true" : "false") << '\n';
 		stream << "Workloads:";
 		for (const FrameWorkloadResult& result : plan.results)
 		{
@@ -602,7 +669,7 @@ namespace TerraEngine::Scheduling {
 		plan.frameId = std::move(frameId);
 		plan.workloads = std::move(workloads);
 		std::stable_sort(plan.workloads.begin(), plan.workloads.end(), [](const FrameWorkloadDeclaration& left, const FrameWorkloadDeclaration& right) {
-			return std::tie(left.phase, left.workloadName, left.ownerSystem) < std::tie(right.phase, right.workloadName, right.ownerSystem);
+			return std::tie(left.executionOrder, left.phase, left.workloadName, left.ownerSystem) < std::tie(right.executionOrder, right.phase, right.workloadName, right.ownerSystem);
 		});
 
 		for (FrameWorkloadDeclaration& declaration : plan.workloads)
@@ -634,6 +701,12 @@ namespace TerraEngine::Scheduling {
 				{
 					continue;
 				}
+				if (left.declaration.executionOrder != 0
+					&& right.declaration.executionOrder != 0
+					&& left.declaration.executionOrder != right.declaration.executionOrder)
+				{
+					continue;
+				}
 				std::string resourceName;
 				if (HasWriteConflict(left.declaration, right.declaration, resourceName))
 				{
@@ -654,8 +727,19 @@ namespace TerraEngine::Scheduling {
 	FrameExecutionPlan ExecuteFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
 	{
 		FrameExecutionPlan plan = ValidateFrameWorkloads(std::move(workloads), std::move(frameId));
+		plan.executionMode = FrameWorkloadExecutionMode::Parallel;
 		if (!plan.valid)
 		{
+			return plan;
+		}
+		ApplyInlinePolicy(plan);
+		const bool hasWorkerWork = std::any_of(plan.results.begin(), plan.results.end(), [](const FrameWorkloadResult& result) {
+			return result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe;
+		});
+		if (hasWorkerWork && ThreadPool::instance().getThreadCount() == 0)
+		{
+			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Warning, ArchitectureDiagnosticCode::CompatibilityFallback, plan.frameId, "ThreadPool", "Parallel frame execution requested worker work before the ThreadPool was initialized.", "Initialize ThreadPool before executing worker-safe frame work, or call ExecuteFrameWorkloadsCompatibility for an explicit serial baseline.");
+			plan = ExecuteFrameWorkloadsCompatibility(std::move(plan.workloads), std::move(plan.frameId));
 			return plan;
 		}
 
@@ -668,6 +752,8 @@ namespace TerraEngine::Scheduling {
 			job.name = result.declaration.workloadName;
 			job.executionPolicy = result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe
 				? JobGraphExecutionPolicy::WorkerEligible
+				: result.executionPolicy == FrameWorkloadExecutionPolicy::Inline
+				? JobGraphExecutionPolicy::MainThread
 				: JobGraphExecutionPolicy::Protected;
 			job.cancellable = true;
 			job.requiresSuccessfulDependencies = true;
@@ -681,6 +767,13 @@ namespace TerraEngine::Scheduling {
 		{
 			for (std::size_t rightIndex = leftIndex + 1; rightIndex < plan.results.size(); ++rightIndex)
 			{
+				if (plan.results[leftIndex].declaration.executionOrder != 0
+					&& plan.results[rightIndex].declaration.executionOrder != 0
+					&& plan.results[leftIndex].declaration.executionOrder < plan.results[rightIndex].declaration.executionOrder)
+				{
+					graph.AddDependency(handles[leftIndex], handles[rightIndex]);
+					continue;
+				}
 				std::string resourceName;
 				if (HasWriteConflict(plan.results[leftIndex].declaration, plan.results[rightIndex].declaration, resourceName))
 				{
@@ -689,18 +782,41 @@ namespace TerraEngine::Scheduling {
 			}
 		}
 
-		// FrameWorkload is the migration-facing layer. It validates the exact
-		// JobGraph shape that worker conversion will use, then runs callbacks on
-		// the caller thread while compatibility mode is still the default. The
-		// lower JobGraph/EcsQueryTaskGraph tests continue to cover true worker
-		// dispatch; this wrapper gives systems deterministic diagnostics without
-		// introducing an extra global ThreadPool dependency during rollout.
-		const JobGraphSummary& summary = graph.Validate();
+		const JobGraphSummary& summary = graph.Execute();
 		plan.valid = summary.valid;
+		for (FrameWorkloadResult& result : plan.results)
+		{
+			if (result.executionPolicy == FrameWorkloadExecutionPolicy::WorkerSafe)
+			{
+				plan.parallelExecutionUsed = true;
+			}
+		}
+		ApplyJobGraphSummary(plan, summary);
+		if (!summary.valid || !plan.completed)
+		{
+			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, plan.frameId, "", "Frame workload graph did not complete successfully.", "Inspect JobGraph diagnostics.");
+		}
+		SortDiagnostics(plan.diagnostics);
+		RefreshMigrationSummary(plan);
+		plan.formatted = FormatFrameExecutionPlan(plan);
+		return plan;
+	}
+
+	FrameExecutionPlan ExecuteFrameWorkloadsCompatibility(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId)
+	{
+		FrameExecutionPlan plan = ValidateFrameWorkloads(std::move(workloads), std::move(frameId));
+		plan.executionMode = FrameWorkloadExecutionMode::Compatibility;
+		plan.parallelExecutionUsed = false;
+		if (!plan.valid)
+		{
+			return plan;
+		}
+		ApplyInlinePolicy(plan);
+
 		JobGraphContext context;
 		for (FrameWorkloadResult& result : plan.results)
 		{
-			if (!summary.valid || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
+			if (result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected)
 			{
 				result.completed = false;
 				continue;
@@ -720,12 +836,12 @@ namespace TerraEngine::Scheduling {
 				AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, result.declaration.workloadName, "", "Frame workload callback failed during compatibility execution.", "Fix the workload body or keep the owning system protected.");
 			}
 		}
-		plan.completed = summary.valid && std::all_of(plan.results.begin(), plan.results.end(), [](const FrameWorkloadResult& result) {
-			return result.completed;
+		plan.completed = std::all_of(plan.results.begin(), plan.results.end(), [](const FrameWorkloadResult& result) {
+			return result.completed || result.executionPolicy == FrameWorkloadExecutionPolicy::Rejected;
 		});
-		if (!summary.valid || !plan.completed)
+		if (!plan.completed)
 		{
-			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, plan.frameId, "", "Frame workload graph did not complete successfully.", "Inspect JobGraph diagnostics.");
+			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Error, ArchitectureDiagnosticCode::ExecutionFailed, plan.frameId, "", "Frame workload compatibility pass did not complete successfully.", "Inspect workload diagnostics.");
 		}
 		SortDiagnostics(plan.diagnostics);
 		RefreshMigrationSummary(plan);

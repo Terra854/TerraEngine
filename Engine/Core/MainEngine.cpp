@@ -51,6 +51,25 @@ namespace {
 		return declaration;
 	}
 
+	TerraEngine::Scheduling::SystemDeclaration MakeSceneManagerDeclaration()
+	{
+		TerraEngine::Scheduling::SystemDeclaration declaration = MakeEngineSystemDeclaration(
+			"SceneManager",
+			"Scene",
+			{ "Resources", "HierarchySnapshot", "DirtyTransformState" },
+			{ "SceneGraph", "ObjectManager", "TransformWorkUnits", "RuntimeLayout" });
+		// SceneManager still owns live scene documents and ObjectManager-facing
+		// commits on the coordinator thread. The worker-safe part is now named
+		// separately so diagnostics can distinguish immutable hierarchy/runtime
+		// layout preparation from protected scene mutation.
+		declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
+		declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
+		declaration.safeSubwork = "Hierarchy snapshots, dirty transform work plans, and compact runtime layout records from immutable scene copies.";
+		declaration.protectedCommit = "Active scene document ownership, scene load activation, and live ObjectManager hierarchy/component mutation.";
+		declaration.protectedReason = declaration.protectedCommit;
+		return declaration;
+	}
+
 	void RegisterEngineSystem(std::vector<SystemsBase*>& systems, TerraEngine::Scheduling::SystemScheduler& scheduler, SystemsBase& system, TerraEngine::Scheduling::SystemDeclaration declaration)
 	{
 		// Keep the legacy vector for initialization, shutdown, and GetSystem()
@@ -148,7 +167,7 @@ void Engine::Initialize()
 	// The scene manager owns authored .tescene and .teprefab JSON documents so
 	// gameplay code can request them without re-reading disk on every access.
 	SceneManager& sceneManager = SceneManager::Instance();
-	RegisterEngineSystem(systems, systemScheduler, sceneManager, MakeEngineSystemDeclaration("SceneManager", "Scene", { "Resources" }, { "SceneGraph", "ObjectManager" }));
+	RegisterEngineSystem(systems, systemScheduler, sceneManager, MakeSceneManagerDeclaration());
 
 	// ScriptingSystem manages the .NET runtime and gameplay scripts.
 	ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
@@ -312,9 +331,12 @@ bool Engine::Update(float deltaTime)
 			TERRAENGINE_LOG(LogLevel::Error, schedulerSummary.formatted);
 		}
 		{
-			TerraEngine::Scheduling::FrameExecutionPlan coveragePlan = TerraEngine::Scheduling::ValidateFrameWorkloads(systemScheduler.BuildFrameWorkloadDeclarations(deltaTime), "engine-frame-coverage");
-			latestWorkerCoverageReport = TerraEngine::Scheduling::BuildWorkerCoverageReport(coveragePlan);
-			latestArchitectureSummary = coveragePlan.migrationSummary;
+			// Reuse the frame plan that actually executed. Revalidating the same
+			// declarations here would add per-frame overhead and could report a
+			// different coverage story than the work the scheduler just ran.
+			latestParallelFramePlan = systemScheduler.LatestFrameExecutionPlan();
+			latestWorkerCoverageReport = schedulerSummary.workerCoverageReport;
+			latestArchitectureSummary = latestParallelFramePlan.migrationSummary;
 			const auto& runtimeMembership = ObjectManager::instance().GetRuntimeActiveMembershipSnapshot();
 			latestRuntimeLayoutDiagnostics = {};
 			latestRuntimeLayoutDiagnostics.totalObjectCount = runtimeMembership.size();
@@ -331,26 +353,6 @@ bool Engine::Update(float deltaTime)
 		{
 			systemScheduler.SetLatestComponentQueryGroups(TerraEngine::Scheduling::PublishedEcsComponentQueryGroups());
 			systemScheduler.SetLatestEcsGraphSummary(TerraEngine::Scheduling::FormatPublishedEcsGraphFrameSummaries());
-			latestArchitectureSummary = {};
-			for (const TerraEngine::Scheduling::EcsSystemGraphFrameSummary& graphSummary : TerraEngine::Scheduling::PublishedEcsGraphFrameSummaries())
-			{
-				for (const TerraEngine::Scheduling::EcsComponentQueryPlan& plan : graphSummary.queryPlans)
-				{
-					if (plan.executionPolicy == TerraEngine::Scheduling::EcsQueryExecutionPolicy::WorkerTaskGroup)
-					{
-						++latestArchitectureSummary.workerSafeCount;
-					}
-					else
-					{
-						++latestArchitectureSummary.protectedCount;
-						++latestArchitectureSummary.fallbackCount;
-						latestArchitectureSummary.fallbackReasons.push_back(plan.declaration.queryName + ": " + TerraEngine::Scheduling::ToString(plan.executionPolicy));
-					}
-				}
-				latestArchitectureSummary.mutationFlushCount += graphSummary.mutationFlushes.size();
-			}
-			latestArchitectureSummary.formatted = TerraEngine::Scheduling::FormatArchitectureMigrationSummary(latestArchitectureSummary);
-			TERRAENGINE_LOG(LogLevel::Info, latestArchitectureSummary.formatted);
 		}
 	}
 	TerraEngine::Profiling::Profiler::Instance().EndFrame();

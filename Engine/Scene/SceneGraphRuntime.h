@@ -142,6 +142,12 @@ namespace TerraEngine::Scene {
 		std::uint32_t expandedDirtyObjectCount = 0;
 		std::uint32_t processedObjectCount = 0;
 		std::uint32_t skippedCleanObjectCount = 0;
+		std::size_t workerJobCount = 0;
+		std::size_t protectedJobCount = 0;
+		std::size_t inlineJobCount = 0;
+		std::uint64_t coordinatorWaitTimeNs = 0;
+		std::uint64_t workerTimeNs = 0;
+		double workerUtilization = 0.0;
 		std::vector<SceneWorldTransformRecord> records;
 		std::unordered_map<SceneObjectId, Transform> worldTransformsByObject;
 		std::unordered_map<entt::entity, Transform> worldTransformsByEntity;

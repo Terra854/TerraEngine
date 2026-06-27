@@ -14,9 +14,11 @@
 #include "../../Export/BuildProfile.h"
 #include "../../Export/ExportValidator.h"
 #include "../../AssetCompilers/GltfPackageImporter.h"
+#include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
+#include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Scene/RuntimeLayout.h"
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Core/Scheduling/FrameWorkload.h"
@@ -113,6 +115,133 @@ namespace TerraEngine::Editor::Automation
 				}
 			}
 			return std::nullopt;
+		}
+
+		nlohmann::json SerializeHardBoundary(const TerraEngine::Scheduling::HardBoundary& boundary)
+		{
+			return {
+				{"name", boundary.boundaryName},
+				{"classification", TerraEngine::Scheduling::ToString(boundary.currentClassification)},
+				{"riskFactors", boundary.riskFactors},
+				{"safeSubwork", boundary.safeSubwork},
+				{"protectedCommit", boundary.protectedCommit},
+				{"requiredEvidence", boundary.requiredEvidence}
+			};
+		}
+
+		nlohmann::json SerializeArchitectureMigrationSummary(const TerraEngine::Scheduling::ArchitectureMigrationSummary& summary)
+		{
+			return {
+				{"workerSafeCount", summary.workerSafeCount},
+				{"protectedCount", summary.protectedCount},
+				{"inlineCount", summary.inlineCount},
+				{"rejectedCount", summary.rejectedCount},
+				{"fallbackCount", summary.fallbackCount},
+				{"mutationFlushCount", summary.mutationFlushCount},
+				{"workerPhaseCount", summary.workerPhaseCount},
+				{"protectedCommitCount", summary.protectedCommitCount},
+				{"barrierCount", summary.barrierCount},
+				{"hardBoundaryCount", summary.hardBoundaryCount},
+				{"partiallyWorkerSafeBoundaryCount", summary.partiallyWorkerSafeBoundaryCount},
+				{"protectedBaselineTimeNs", summary.protectedBaselineTimeNs},
+				{"workerPreparationTimeNs", summary.workerPreparationTimeNs},
+				{"protectedCommitTimeNs", summary.protectedCommitTimeNs},
+				{"coordinatorWaitTimeNs", summary.coordinatorWaitTimeNs},
+				{"workerUtilization", summary.workerUtilization},
+				{"activeMembershipInvalidationCount", summary.activeMembershipInvalidationCount},
+				{"staleCompactReferenceCount", summary.staleCompactReferenceCount},
+				{"hierarchySnapshotRebuildCount", summary.hierarchySnapshotRebuildCount},
+				{"componentAccessGrantDeniedCount", summary.componentAccessGrantDeniedCount},
+				{"fallbackReasons", summary.fallbackReasons},
+				{"workerCategories", summary.workerCategories},
+				{"protectedCategories", summary.protectedCategories},
+				{"rejectedCategories", summary.rejectedCategories},
+				{"hardBoundaryFindings", summary.hardBoundaryFindings},
+				{"formatted", summary.formatted}
+			};
+		}
+
+		nlohmann::json SerializeWorkerCoverage(const TerraEngine::Scheduling::WorkerCoverageReport& report)
+		{
+			return {
+				{"frameId", report.frameId},
+				{"workerCategories", report.workerCategories},
+				{"protectedCategories", report.protectedCategories},
+				{"rejectedCategories", report.rejectedCategories},
+				{"fallbackCategories", report.fallbackCategories},
+				{"hardBoundaryFindings", report.hardBoundaryFindings},
+				{"barrierCount", report.barrierCount},
+				{"protectedTimeNs", report.protectedTimeNs},
+				{"workerTimeNs", report.workerTimeNs},
+				{"formattedSummary", report.formattedSummary}
+			};
+		}
+
+		nlohmann::json SerializeParallelFrameDiagnostics(const ::Engine* engine)
+		{
+			if (engine == nullptr)
+			{
+				return {{"available", false}};
+			}
+
+			const TerraEngine::Scheduling::FrameExecutionPlan& plan = engine->GetParallelFrameExecutionPlan();
+			const TerraEngine::Scene::LayoutDiagnosticsSummary& layout = engine->GetRuntimeLayoutDiagnostics();
+			nlohmann::json diagnostics = nlohmann::json::array();
+			for (const TerraEngine::Scheduling::ArchitectureDiagnostic& diagnostic : plan.diagnostics)
+			{
+				diagnostics.push_back({
+					{"severity", TerraEngine::Scheduling::ToString(diagnostic.severity)},
+					{"code", TerraEngine::Scheduling::ToString(diagnostic.code)},
+					{"workloadName", diagnostic.workloadName},
+					{"resourceName", diagnostic.resourceName},
+					{"message", diagnostic.message},
+					{"recommendedAction", diagnostic.recommendedAction}
+				});
+			}
+
+			return {
+				{"available", true},
+				{"frameId", plan.frameId},
+				{"executionMode", TerraEngine::Scheduling::ToString(plan.executionMode)},
+				{"parallelExecutionUsed", plan.parallelExecutionUsed},
+				{"valid", plan.valid},
+				{"completed", plan.completed},
+				{"workloadCount", plan.workloads.size()},
+				{"resultCount", plan.results.size()},
+				{"diagnostics", diagnostics},
+				{"migrationSummary", SerializeArchitectureMigrationSummary(engine->GetArchitectureMigrationSummary())},
+				{"workerCoverage", SerializeWorkerCoverage(engine->GetWorkerCoverageReport())},
+				{"runtimeLayout", nlohmann::json{
+					{"frameId", layout.frameId},
+					{"layoutReused", layout.layoutReused},
+					{"layoutRebuildCount", layout.layoutRebuildCount},
+					{"rebuildReasons", layout.rebuildReasons},
+					{"activeObjectCount", layout.activeObjectCount},
+					{"totalObjectCount", layout.totalObjectCount},
+					{"transformRecordCount", layout.transformRecordCount},
+					{"renderRecordCount", layout.renderRecordCount},
+					{"fallbackCount", layout.fallbackCount},
+					{"validationMismatchCount", layout.validationMismatchCount},
+					{"smallSceneGuardTriggered", layout.smallSceneGuardTriggered}
+				}}
+			};
+		}
+
+		nlohmann::json SerializeMutationDiagnostics()
+		{
+			const ScriptingSystem::ScriptingFrameResult& scripting = ScriptingSystem::Instance().GetLatestScriptingFrameResult();
+			return {
+				{"pendingMutationCount", TerraEngine::Scene::SceneMutationQueue::Instance().Size()},
+				{"acceptedMutationCount", scripting.acceptedMutations},
+				{"rejectedMutationCount", scripting.rejectedMutations},
+				{"rollbackCount", 0},
+				{"rejectedBatchesPreventPartialState", true},
+				{"typedMutationCount", scripting.typedMutations},
+				{"jsonMutationFallbackCount", scripting.jsonMutationFallbacks},
+				{"coalescedMutationCount", scripting.coalescedMutations},
+				{"deferredMutationCount", scripting.accessReport.deferredMutations},
+				{"accessRejectedMutationCount", scripting.accessReport.rejectedMutations}
+			};
 		}
 	}
 
@@ -265,7 +394,8 @@ namespace TerraEngine::Editor::Automation
 			RegisterCapability(capability);
 		};
 
-		add("bridge.set_enabled", "bridge", MutationMode::EditorSelection, false, false, false, "enabled: bool, writeMode?: read_only|writes_enabled");
+		// Bridge enablement is editor-owned: MCP clients may change write scope
+		// while connected, but they must not expose or hide the listener itself.
 		add("bridge.set_write_mode", "bridge", MutationMode::EditorSelection, false, false, false, "writeMode: read_only|writes_enabled");
 		add("activity.list", "activity", MutationMode::ReadOnly, false, false, false, "limit?: integer, filter?: string");
 		add("scene.open", "scene", MutationMode::SceneMutation, true, false, true, "path: project-relative scene path");
@@ -331,8 +461,7 @@ namespace TerraEngine::Editor::Automation
 			return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Unknown editor automation capability.");
 		}
 		const std::string toolName(name);
-		const bool bridgeConfigurationTool = toolName == "bridge.set_enabled" || toolName == "bridge.set_write_mode";
-		if (capability->mutatesState && writeMode != WriteMode::WritesEnabled && !bridgeConfigurationTool)
+		if (capability->mutatesState && writeMode != WriteMode::WritesEnabled)
 		{
 			return BuildError(requestId, ErrorCategory::Permission, "The bridge is in read-only mode.");
 		}
@@ -345,7 +474,7 @@ namespace TerraEngine::Editor::Automation
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Open a project before running this capability.");
 		}
 
-		if ((toolName == "bridge.set_enabled" || toolName == "bridge.set_write_mode" || toolName == "activity.list") && bridgeToolCallback)
+		if ((toolName == "bridge.set_write_mode" || toolName == "activity.list") && bridgeToolCallback)
 		{
 			return bridgeToolCallback(nlohmann::json{{"name", toolName}, {"arguments", arguments}, {"requestId", requestId}});
 		}
@@ -463,14 +592,11 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json boundaryFindings = nlohmann::json::array();
 		for (const TerraEngine::Scheduling::HardBoundary& boundary : TerraEngine::Scheduling::InitialWorkerHardBoundaries())
 		{
-			boundaryFindings.push_back({
-				{"name", boundary.boundaryName},
-				{"classification", TerraEngine::Scheduling::ToString(boundary.currentClassification)},
-				{"safeSubwork", boundary.safeSubwork},
-				{"protectedCommit", boundary.protectedCommit},
-				{"requiredEvidence", boundary.requiredEvidence}
-			});
+			boundaryFindings.push_back(SerializeHardBoundary(boundary));
 		}
+		const ::Engine* engine = editorContext != nullptr ? editorContext->engine : nullptr;
+		const nlohmann::json parallelFrame = SerializeParallelFrameDiagnostics(engine);
+		const nlohmann::json mutationDiagnostics = SerializeMutationDiagnostics();
 		const auto& runtimeMembership = ObjectManager::instance().GetRuntimeActiveMembershipSnapshot();
 		std::size_t activeRuntimeObjects = 0u;
 		for (const TerraEngine::Scene::RuntimeActiveMembership& membership : runtimeMembership)
@@ -485,10 +611,13 @@ namespace TerraEngine::Editor::Automation
 			{{"surface", "runtimeLayout"}, {"state", "available"}, {"details", nlohmann::json{{"authoredObjectCount", runtimeMembership.size()}, {"activeRuntimeObjectCount", activeRuntimeObjects}}}},
 			{{"surface", "resources"}, {"state", assetJobCount > 0 ? "compiling" : "available"}, {"details", nlohmann::json{{"assetCompileJobs", assetJobCount}}}},
 			{{"surface", "streaming"}, {"state", "available"}, {"details", nlohmann::json::object()}},
-			{{"surface", "scheduler"}, {"state", "available"}, {"details", nlohmann::json{{"workerBoundaries", boundaryFindings}}}},
+			{{"surface", "scheduler"}, {"state", "available"}, {"details", nlohmann::json{{"workerBoundaries", boundaryFindings}, {"parallelFrame", parallelFrame}, {"mutationDiagnostics", mutationDiagnostics}}}},
 			{{"surface", "scripting"}, {"state", ScriptingSystem::Instance().IsRunning() ? "running" : "idle"}, {"details", nlohmann::json{{"coordinatorState", editorContext ? editorContext->scripting.coordinatorState : "Idle"}}}},
 			{{"surface", "export"}, {"state", exportJobs.empty() ? "idle" : exportJobs.front().state}, {"details", nlohmann::json{{"jobs", exportJobJson}}}}
 		});
+		data["parallelFrame"] = parallelFrame;
+		data["hardBoundaries"] = boundaryFindings;
+		data["mutationDiagnostics"] = mutationDiagnostics;
 		data["emptyStateSafe"] = true;
 		return data;
 	}

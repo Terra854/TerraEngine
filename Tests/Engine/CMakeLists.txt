@@ -29,6 +29,9 @@ add_executable(TerraEngine-EngineTests
 	Core/ComponentAccessTests.cpp
 	Core/EcsQueryTaskGraphTests.cpp
 	Core/FrameWorkloadExecutionTests.cpp
+	Core/FullParallelFrameTestFixtures.cpp
+	Core/FullParallelFrameExecutionTests.cpp
+	Core/FullParallelFrameStressTests.cpp
 	Core/WorkerConversionBaselineTests.cpp
 	Core/WorkerConversionScenarioTests.cpp
 	Core/WorkerCoverageReportTests.cpp
@@ -103,6 +106,7 @@ add_executable(TerraEngine-EngineTests
 	Scene/RuntimeLayoutCompatibilityTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
 	Scene/SceneMutationQueueTests.cpp
+	Scene/ParallelMutationBufferTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Scene/SkyComponentSerializationTests.cpp
 	Scene/SceneStreamingDeferredLoadTests.cpp
 	Scene/SpatialBoundsTests.cpp

@@ -134,8 +134,14 @@ namespace TerraEngine::Scheduling {
 		std::vector<JobGraphDiagnostic> diagnostics;
 		std::size_t workerJobCount = 0;
 		std::size_t protectedJobCount = 0;
+		std::size_t inlineJobCount = 0;
 		std::size_t rejectedJobCount = 0;
 		std::size_t fallbackJobCount = 0;
+		std::size_t blockedDependencyCount = 0;
+		std::uint64_t coordinatorWaitTimeNs = 0;
+		std::uint64_t workerTimeNs = 0;
+		std::uint64_t protectedTimeNs = 0;
+		double workerUtilization = 0.0;
 		std::string formatted;
 	};
 

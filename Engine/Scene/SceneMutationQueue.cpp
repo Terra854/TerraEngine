@@ -127,16 +127,44 @@ namespace TerraEngine::Scene {
 		requests.push_back(std::move(request));
 	}
 
+	void SceneMutationQueue::EnqueueFromWorker(std::uint32_t workerIndex, SceneMutationRequest request)
+	{
+		std::scoped_lock lock(requestsMutex);
+		if (request.requestId.empty())
+		{
+			request.requestId = "worker-" + std::to_string(workerIndex) + "-mutation-" + std::to_string(workerBuffers.size());
+		}
+		auto buffer = std::find_if(workerBuffers.begin(), workerBuffers.end(), [workerIndex](const SceneMutationWorkerBuffer& candidate) {
+			return candidate.workerIndex == workerIndex;
+		});
+		if (buffer == workerBuffers.end())
+		{
+			SceneMutationWorkerBuffer newBuffer;
+			newBuffer.workerIndex = workerIndex;
+			newBuffer.requests.push_back(std::move(request));
+			workerBuffers.push_back(std::move(newBuffer));
+			return;
+		}
+		buffer->requests.push_back(std::move(request));
+	}
+
 	bool SceneMutationQueue::Empty() const
 	{
 		std::scoped_lock lock(requestsMutex);
-		return requests.empty();
+		return requests.empty() && std::all_of(workerBuffers.begin(), workerBuffers.end(), [](const SceneMutationWorkerBuffer& buffer) {
+			return buffer.requests.empty();
+		});
 	}
 
 	std::size_t SceneMutationQueue::Size() const
 	{
 		std::scoped_lock lock(requestsMutex);
-		return requests.size();
+		std::size_t total = requests.size();
+		for (const SceneMutationWorkerBuffer& buffer : workerBuffers)
+		{
+			total += buffer.requests.size();
+		}
+		return total;
 	}
 
 	std::vector<SceneMutationRequest> SceneMutationQueue::PendingRequests() const
@@ -146,6 +174,21 @@ namespace TerraEngine::Scene {
 		// queue that frame systems are still relying on.
 		std::scoped_lock lock(requestsMutex);
 		std::vector<SceneMutationRequest> snapshot = requests;
+		std::vector<SceneMutationWorkerBuffer> sortedBuffers = workerBuffers;
+		std::stable_sort(sortedBuffers.begin(), sortedBuffers.end(), [](const SceneMutationWorkerBuffer& left, const SceneMutationWorkerBuffer& right) {
+			return left.workerIndex < right.workerIndex;
+		});
+		for (SceneMutationWorkerBuffer& buffer : sortedBuffers)
+		{
+			std::stable_sort(buffer.requests.begin(), buffer.requests.end(), [](const SceneMutationRequest& left, const SceneMutationRequest& right) {
+				if (left.sourceFrameOrder != right.sourceFrameOrder)
+				{
+					return left.sourceFrameOrder < right.sourceFrameOrder;
+				}
+				return left.requestId < right.requestId;
+			});
+			snapshot.insert(snapshot.end(), buffer.requests.begin(), buffer.requests.end());
+		}
 		std::sort(snapshot.begin(), snapshot.end(), [](const SceneMutationRequest& left, const SceneMutationRequest& right) {
 			if (left.sourceFrameOrder != right.sourceFrameOrder)
 			{
@@ -181,6 +224,7 @@ namespace TerraEngine::Scene {
 	{
 		std::scoped_lock lock(requestsMutex);
 		requests.clear();
+		workerBuffers.clear();
 	}
 
 	SceneMutationBatchResult SceneMutationQueue::Validate(const SceneGraph& graph) const
@@ -264,7 +308,6 @@ namespace TerraEngine::Scene {
 
 	SceneMutationBatchResult SceneMutationQueue::Apply(ObjectManager& objects, std::string commitName)
 	{
-		const std::size_t rawRequestCount = Size();
 		const std::vector<SceneMutationRequest> requestSnapshot = PendingRequests();
 		SceneGraph graph = BuildSceneGraphFromObjectManager(objects);
 		SceneMutationBatchResult batch = Validate(graph);
@@ -348,6 +391,25 @@ namespace TerraEngine::Scene {
 					}
 				}
 				break;
+			case SceneMutationOperation::RemoveComponent:
+				if (auto target = objects.getObject(request.targetObjectId))
+				{
+					std::lock_guard registryLock(ComponentAccessRegistryMutex());
+					auto& registry = ComponentAccessRegistry();
+					if (auto component = registry.find(request.componentName); component != registry.end())
+					{
+						if (component->second.hasComponent(*target))
+						{
+							component->second.removeComponent(*target);
+							objects.notifyObjectStructureChanged(*target);
+						}
+					}
+					else
+					{
+						result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component removal references an unknown component type.", "Register the component in ComponentAccessRegistry before scripts can remove it."));
+					}
+				}
+				break;
 			case SceneMutationOperation::UpdateComponent:
 				if (auto target = objects.getObject(request.targetObjectId))
 				{
@@ -397,8 +459,8 @@ namespace TerraEngine::Scene {
 		batch.applied = true;
 		{
 			std::scoped_lock lock(requestsMutex);
-			const std::size_t removeCount = std::min(rawRequestCount, requests.size());
-			requests.erase(requests.begin(), requests.begin() + static_cast<std::ptrdiff_t>(removeCount));
+			requests.clear();
+			workerBuffers.clear();
 		}
 		batch.formattedCommitSummary = FormatCommitSummary(batch);
 		return batch;

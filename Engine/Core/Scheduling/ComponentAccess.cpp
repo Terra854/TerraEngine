@@ -50,6 +50,56 @@ namespace TerraEngine::Scheduling {
 			});
 		}
 
+		void NormalizeScopes(std::vector<ComponentAccessScope>& scopes)
+		{
+			if (scopes.empty())
+			{
+				scopes.push_back(ComponentAccessScope::Component);
+				return;
+			}
+			std::stable_sort(scopes.begin(), scopes.end(), [](ComponentAccessScope left, ComponentAccessScope right) {
+				return static_cast<int>(left) < static_cast<int>(right);
+			});
+			scopes.erase(std::unique(scopes.begin(), scopes.end()), scopes.end());
+		}
+
+		bool HasScope(const ComponentAccessDeclaration& declaration, ComponentAccessScope scope)
+		{
+			return std::find(declaration.scopes.begin(), declaration.scopes.end(), scope) != declaration.scopes.end();
+		}
+
+		bool HasAnyWrite(const ComponentAccessDeclaration& declaration)
+		{
+			return !declaration.writeComponents.empty() || !declaration.writeResources.empty();
+		}
+
+		bool HasProtectedOnlyScope(const ComponentAccessDeclaration& declaration)
+		{
+			return HasScope(declaration, ComponentAccessScope::ProtectedWrite)
+				|| HasScope(declaration, ComponentAccessScope::Editor);
+		}
+
+		bool HasReadOnlySnapshotScope(const ComponentAccessDeclaration& declaration)
+		{
+			return HasScope(declaration, ComponentAccessScope::Snapshot)
+				|| HasScope(declaration, ComponentAccessScope::Input)
+				|| HasScope(declaration, ComponentAccessScope::Window);
+		}
+
+		std::string FormatScopes(const std::vector<ComponentAccessScope>& scopes)
+		{
+			std::ostringstream stream;
+			for (std::size_t index = 0; index < scopes.size(); ++index)
+			{
+				if (index != 0)
+				{
+					stream << ",";
+				}
+				stream << ToString(scopes[index]);
+			}
+			return stream.str();
+		}
+
 		void NormalizeList(std::vector<std::string>& values, const ComponentAccessDeclaration& declaration, ComponentAccessDiagnosticCode duplicateCode, std::vector<ComponentAccessDiagnostic>* diagnostics)
 		{
 			values.erase(std::remove_if(values.begin(), values.end(), [](const std::string& value) {
@@ -138,6 +188,36 @@ namespace TerraEngine::Scheduling {
 		}
 	}
 
+	std::string ToString(ComponentAccessScope scope)
+	{
+		switch (scope)
+		{
+		case ComponentAccessScope::Snapshot:
+			return "snapshot";
+		case ComponentAccessScope::DeferredWrite:
+			return "deferred-write";
+		case ComponentAccessScope::ProtectedWrite:
+			return "protected-write";
+		case ComponentAccessScope::Render:
+			return "render";
+		case ComponentAccessScope::Script:
+			return "script";
+		case ComponentAccessScope::Input:
+			return "input";
+		case ComponentAccessScope::Window:
+			return "window";
+		case ComponentAccessScope::Resource:
+			return "resource";
+		case ComponentAccessScope::UI:
+			return "ui";
+		case ComponentAccessScope::Editor:
+			return "editor";
+		case ComponentAccessScope::Component:
+		default:
+			return "component";
+		}
+	}
+
 	std::string ToString(ComponentAccessConflictKind kind)
 	{
 		switch (kind)
@@ -190,6 +270,10 @@ namespace TerraEngine::Scheduling {
 			return "protected-fallback";
 		case ComponentAccessDiagnosticCode::AccessConflict:
 			return "access-conflict";
+		case ComponentAccessDiagnosticCode::AccessScopeConflict:
+			return "access-scope-conflict";
+		case ComponentAccessDiagnosticCode::StaleGeneration:
+			return "stale-generation";
 		case ComponentAccessDiagnosticCode::None:
 		default:
 			return "none";
@@ -204,6 +288,7 @@ namespace TerraEngine::Scheduling {
 		NormalizeList(declaration.writeResources, declaration, ComponentAccessDiagnosticCode::DuplicateWrite, diagnostics);
 		RemoveWritesFromReads(declaration.readComponents, declaration.writeComponents, declaration, "component", diagnostics);
 		RemoveWritesFromReads(declaration.readResources, declaration.writeResources, declaration, "resource", diagnostics);
+		NormalizeScopes(declaration.scopes);
 		return declaration;
 	}
 
@@ -231,6 +316,21 @@ namespace TerraEngine::Scheduling {
 		{
 			result.protectedFallback = true;
 			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Warning, ComponentAccessDiagnosticCode::MissingWorkerDeclaration, result.normalized, "", "Worker-eligible query has no component or resource access declaration.", "Declare all reads/writes or keep this work protected.");
+		}
+		if (result.normalized.workerEligible && HasProtectedOnlyScope(result.normalized))
+		{
+			result.protectedFallback = true;
+			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Warning, ComponentAccessDiagnosticCode::ProtectedFallback, result.normalized, FormatScopes(result.normalized.scopes), "Worker-eligible declaration includes a protected-only scope.", "Split worker-safe preparation from editor/protected commits, then run the commit on the protected path.");
+		}
+		if (HasReadOnlySnapshotScope(result.normalized) && HasAnyWrite(result.normalized))
+		{
+			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Error, ComponentAccessDiagnosticCode::AccessScopeConflict, result.normalized, FormatScopes(result.normalized.scopes), "Read-only snapshot/input/window scopes cannot declare writes.", "Move writes into deferred-write or protected-write scopes after the immutable snapshot is consumed.");
+		}
+		if (result.normalized.snapshotGeneration != 0
+			&& result.normalized.currentGeneration != 0
+			&& result.normalized.snapshotGeneration != result.normalized.currentGeneration)
+		{
+			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Error, ComponentAccessDiagnosticCode::StaleGeneration, result.normalized, "snapshot-generation", "Component access snapshot generation is stale.", "Discard this workload and rebuild it from the latest scene/component generation.");
 		}
 		if (!result.normalized.workerEligible && result.normalized.mainThreadReason.empty())
 		{
@@ -348,6 +448,9 @@ namespace TerraEngine::Scheduling {
 		declaration.queryName = request.grantId.empty() ? request.workloadName : request.grantId;
 		declaration.readComponents = std::move(request.readComponents);
 		declaration.writeComponents = std::move(request.writeComponents);
+		declaration.scopes = { request.scopeKind };
+		declaration.snapshotGeneration = request.snapshotGeneration;
+		declaration.currentGeneration = request.currentGeneration;
 		declaration.workerEligible = request.schedulerValidated;
 		declaration.mainThreadReason = request.schedulerValidated ? std::string{} : "Scheduler did not validate this hot-loop access grant.";
 		std::vector<ComponentAccessDiagnostic> normalizationDiagnostics;
@@ -360,8 +463,28 @@ namespace TerraEngine::Scheduling {
 		result.normalized.writeComponents = declaration.writeComponents;
 		result.normalized.scope = request.scope.empty()
 			? ToString(request.grantMode)
-			: request.scope + ":" + ToString(request.grantMode);
+			: request.scope + ":" + ToString(request.scopeKind) + ":" + ToString(request.grantMode);
+		result.normalized.scopeKind = request.scopeKind;
+		result.normalized.snapshotGeneration = request.snapshotGeneration;
+		result.normalized.currentGeneration = request.currentGeneration;
 		result.normalized.schedulerValidated = request.schedulerValidated;
+
+		if (HasReadOnlySnapshotScope(declaration) && HasAnyWrite(declaration))
+		{
+			result.fallbackReason = "Read-only snapshot/input/window scopes cannot grant component writes.";
+			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Error, ComponentAccessDiagnosticCode::AccessScopeConflict, declaration, FormatScopes(declaration.scopes), result.fallbackReason, "Use a deferred write grant after snapshot preparation, or keep the write on the protected path.");
+			SortDiagnostics(result.diagnostics);
+			return result;
+		}
+		if (declaration.snapshotGeneration != 0
+			&& declaration.currentGeneration != 0
+			&& declaration.snapshotGeneration != declaration.currentGeneration)
+		{
+			result.fallbackReason = "Component access grant references a stale snapshot generation.";
+			AddDiagnostic(result.diagnostics, ComponentAccessDiagnosticSeverity::Error, ComponentAccessDiagnosticCode::StaleGeneration, declaration, "snapshot-generation", result.fallbackReason, "Rebuild the worker snapshot before granting component access.");
+			SortDiagnostics(result.diagnostics);
+			return result;
+		}
 
 		if (request.grantMode == ComponentAccessGrantMode::ProtectedCommit)
 		{

@@ -9,6 +9,7 @@
 
 #include "Core/Export.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,20 @@ namespace TerraEngine::Scheduling {
 		WorkerRead,
 		WorkerWriteDeferred,
 		ProtectedCommit
+	};
+
+	enum class ComponentAccessScope {
+		Component,
+		Snapshot,
+		DeferredWrite,
+		ProtectedWrite,
+		Render,
+		Script,
+		Input,
+		Window,
+		Resource,
+		UI,
+		Editor
 	};
 
 	enum class ComponentAccessConflictKind {
@@ -48,7 +63,9 @@ namespace TerraEngine::Scheduling {
 		ReadPromotedToWrite,
 		MissingWorkerDeclaration,
 		ProtectedFallback,
-		AccessConflict
+		AccessConflict,
+		AccessScopeConflict,
+		StaleGeneration
 	};
 
 	struct ComponentAccessDeclaration {
@@ -58,6 +75,9 @@ namespace TerraEngine::Scheduling {
 		std::vector<std::string> writeComponents;
 		std::vector<std::string> readResources;
 		std::vector<std::string> writeResources;
+		std::vector<ComponentAccessScope> scopes;
+		std::uint64_t snapshotGeneration = 0;
+		std::uint64_t currentGeneration = 0;
 		bool workerEligible = false;
 		std::string mainThreadReason;
 	};
@@ -92,6 +112,9 @@ namespace TerraEngine::Scheduling {
 		std::vector<std::string> readComponents;
 		std::vector<std::string> writeComponents;
 		std::string scope;
+		ComponentAccessScope scopeKind = ComponentAccessScope::Component;
+		std::uint64_t snapshotGeneration = 0;
+		std::uint64_t currentGeneration = 0;
 		ComponentAccessGrantMode grantMode = ComponentAccessGrantMode::WorkerWriteDeferred;
 		bool schedulerValidated = false;
 	};
@@ -105,6 +128,7 @@ namespace TerraEngine::Scheduling {
 
 	TERRAENGINE_API std::string ToString(ComponentAccessMode mode);
 	TERRAENGINE_API std::string ToString(ComponentAccessGrantMode mode);
+	TERRAENGINE_API std::string ToString(ComponentAccessScope scope);
 	TERRAENGINE_API std::string ToString(ComponentAccessConflictKind kind);
 	TERRAENGINE_API std::string ToString(ComponentAccessDiagnosticSeverity severity);
 	TERRAENGINE_API std::string ToString(ComponentAccessDiagnosticCode code);

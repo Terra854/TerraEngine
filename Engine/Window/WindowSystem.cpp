@@ -25,6 +25,12 @@ void WindowSystem::Configure(std::unique_ptr<IWindowBackend> backendInstance, Wi
 	onShutdownRequested = std::move(shutdownCallback);
 	configured = true;
 	initialized = false;
+	pollingDiagnostics = {};
+	latestWorkerSnapshot = {};
+	latestWorkerSnapshot.width = windowConfig.width;
+	latestWorkerSnapshot.height = windowConfig.height;
+	latestWorkerSnapshot.resizable = windowConfig.resizable;
+	latestWorkerSnapshot.title = windowConfig.title;
 	// Debug log makes backend selection visible before initialization runs.
 	TERRAENGINE_LOG(LogLevel::Debug, "WindowSystem configured with backend " << (backend ? backend->BackendName() : "null"));
 }
@@ -86,9 +92,18 @@ void WindowSystem::Update(float deltaTime)
 	pollingDiagnostics.protectedReason = "Platform event polling, close/resize callbacks, cursor state, and swap-buffer calls remain owned by the coordinator thread.";
 	pollingDiagnostics.workerSafeSubwork = "Workers may consume immutable input/window snapshots after polling.";
 	pollingDiagnostics.lastPollRan = true;
+	const bool closeRequested = backend->ShouldClose();
+	latestWorkerSnapshot.frameRevision = pollingDiagnostics.pollRevision;
+	latestWorkerSnapshot.width = windowConfig.width;
+	latestWorkerSnapshot.height = windowConfig.height;
+	latestWorkerSnapshot.resizable = windowConfig.resizable;
+	latestWorkerSnapshot.shouldClose = closeRequested;
+	latestWorkerSnapshot.workerReadable = true;
+	latestWorkerSnapshot.title = windowConfig.title;
+	latestWorkerSnapshot.boundarySummary = pollingDiagnostics.workerSafeSubwork;
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (backend->ShouldClose()) {
+	if (closeRequested) {
 		// Respect the request from the OS/user to close the application.
 		TERRAENGINE_LOG(LogLevel::Debug, "Window backend " << backend->BackendName() << " requested application shutdown");
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -110,6 +125,7 @@ void WindowSystem::Shutdown()
 	
 	backend->Shutdown();
 	initialized = false;
+	latestWorkerSnapshot.workerReadable = false;
 
 	TERRAENGINE_LOG(LogLevel::Info, "WindowSystem shutdown complete (backend " << backend->BackendName() << ").");
 }
@@ -123,4 +139,9 @@ std::string WindowSystem::SystemName()
 WindowSystem::WindowPollingBoundaryDiagnostics WindowSystem::GetPollingBoundaryDiagnostics() const
 {
 	return pollingDiagnostics;
+}
+
+WindowSystem::WindowWorkerSnapshot WindowSystem::GetLatestWorkerSnapshot() const
+{
+	return latestWorkerSnapshot;
 }

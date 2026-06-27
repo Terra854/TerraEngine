@@ -142,6 +142,10 @@ namespace TerraEngine::Renderer {
 		for (const RenderGraphValidationDiagnostic& diagnostic : submissionPlan.validationDiagnostics)
 		{
 			summary.resourceWarnings.push_back(diagnostic.code + ": " + diagnostic.message);
+			if (diagnostic.code.find("stale") != std::string::npos)
+			{
+				summary.backendFallbacks.push_back("Rejected stale render snapshot/submission work before protected GPU submit: " + diagnostic.recommendedAction);
+			}
 		}
 
 		if (summary.detailed)

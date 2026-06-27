@@ -45,11 +45,15 @@ public:
 	ObjectManager(const ObjectManager&) = delete;
 	ObjectManager& operator=(const ObjectManager&) = delete;
 
-	// Method to create a new Object.
+	// Method to create a new Object. This mutates the live registry and must
+	// stay on a protected scheduler path; worker code should enqueue a deferred
+	// SceneMutationQueue create request instead.
 	Object createObject(const std::string& name);
 	// Assign or clear a parent for the given object. Passing std::nullopt
 	// detaches the object to the root. The call validates cycles before
-	// mutating internal state and returns false on invalid input.
+	// mutating internal state and returns false on invalid input. Worker code
+	// must request this through SceneMutationQueue so hierarchy commits stay
+	// ordered at protected flush points.
 	bool setParent(Object child, std::optional<Object> parent);
 	// Query the immediate children for a parent object, returning empty when
 	// none are present or the parent is invalid.
@@ -221,7 +225,9 @@ public:
 	// chosen over EnTT entity order because entity ids are allocation details.
 	void SortObjectsByStableId(std::vector<Object>& objects);
 
-	// Method to remove an Object.
+	// Method to remove an Object. Deletion destroys components and hierarchy
+	// bookkeeping, so direct calls are protected-only; workers must enqueue a
+	// deferred delete request.
 	void removeObject(Object obj);
 	// Fetch the parent entity for a given child, or entt::null if unparented.
 	entt::entity getParentEntity(entt::entity child) const;

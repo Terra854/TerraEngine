@@ -92,11 +92,17 @@ namespace TerraEngine::Scene {
 		std::string formattedCommitSummary;
 	};
 
+	struct SceneMutationWorkerBuffer {
+		std::uint32_t workerIndex = 0;
+		std::vector<SceneMutationRequest> requests;
+	};
+
 	class TERRAENGINE_API SceneMutationQueue {
 	public:
 		static SceneMutationQueue& Instance();
 
 		void Enqueue(SceneMutationRequest request);
+		void EnqueueFromWorker(std::uint32_t workerIndex, SceneMutationRequest request);
 		bool Empty() const;
 		std::size_t Size() const;
 		std::vector<SceneMutationRequest> PendingRequests() const;
@@ -107,6 +113,7 @@ namespace TerraEngine::Scene {
 
 	private:
 		std::vector<SceneMutationRequest> requests;
+		std::vector<SceneMutationWorkerBuffer> workerBuffers;
 		mutable std::mutex requestsMutex;
 	};
 

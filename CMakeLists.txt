@@ -65,6 +65,7 @@ set(ENGINE_SOURCES
 	Engine/Core/Scheduling/FrameWorkload.cpp
 	Engine/Core/Scheduling/JobGraph.cpp
 	Engine/Core/Scheduling/SystemScheduler.cpp
+	Engine/Core/Scheduling/WorkerSafety.cpp
 	Engine/Core/Logger/Logger.cpp
 	Engine/Core/Object/Component.cpp
 	Engine/Core/Object/ActiveMembership.cpp
@@ -149,6 +150,7 @@ set(ENGINE_HEADERS
 	Engine/Core/Scheduling/FrameWorkload.h
 	Engine/Core/Scheduling/JobGraph.h
 	Engine/Core/Scheduling/SystemScheduler.h
+	Engine/Core/Scheduling/WorkerSafety.h
 	Engine/Core/Object/Component.h
 	Engine/Core/Object/ActiveMembership.h
 	Engine/Core/Object/CompactObjectReference.h

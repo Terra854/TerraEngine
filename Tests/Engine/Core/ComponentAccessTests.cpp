@@ -112,5 +112,68 @@ namespace TerraEngine::Tests {
 			context.Expect(!invalidRead.granted, "Worker-read grants should reject writes.");
 			context.Expect(protectedResult.normalized.scope.find("protected-commit") != std::string::npos, "Grant scope should name the protected commit mode.");
 		});
+
+		registry.Add("Engine.ComponentAccess.ScopeValidationRejectsSnapshotWrites", [](TestContext& context) {
+			auto declaration = MakeAccess();
+			declaration.scopes = {
+				TerraEngine::Scheduling::ComponentAccessScope::Snapshot,
+				TerraEngine::Scheduling::ComponentAccessScope::Input,
+				TerraEngine::Scheduling::ComponentAccessScope::Window
+			};
+			declaration.writeComponents = { "Transform" };
+
+			const auto result = TerraEngine::Scheduling::ValidateComponentAccessDeclaration(declaration);
+
+			context.Expect(!result.valid, "Read-only snapshot/input/window declarations should reject writes.");
+			context.Expect(HasCode(result.diagnostics, TerraEngine::Scheduling::ComponentAccessDiagnosticCode::AccessScopeConflict), "Scope conflict should be diagnosed with a stable code.");
+			context.Expect(result.formatted.find("snapshot") != std::string::npos, "Formatted diagnostics should name the rejected scope.");
+		});
+
+		registry.Add("Engine.ComponentAccess.ProtectedEditorScopeFallsBack", [](TestContext& context) {
+			auto declaration = MakeAccess();
+			declaration.scopes = {
+				TerraEngine::Scheduling::ComponentAccessScope::Editor,
+				TerraEngine::Scheduling::ComponentAccessScope::ProtectedWrite
+			};
+			declaration.writeComponents = { "Transform" };
+
+			const auto result = TerraEngine::Scheduling::ValidateComponentAccessDeclaration(declaration);
+
+			context.Expect(result.valid, "Protected/editor scopes should be valid, but not worker scheduled.");
+			context.Expect(result.protectedFallback, "Protected/editor scopes should force protected fallback.");
+			context.Expect(HasCode(result.diagnostics, TerraEngine::Scheduling::ComponentAccessDiagnosticCode::ProtectedFallback), "Fallback should be visible to diagnostics.");
+		});
+
+		registry.Add("Engine.ComponentAccess.StaleGenerationBlocksWorkerSnapshot", [](TestContext& context) {
+			auto declaration = MakeAccess();
+			declaration.scopes = { TerraEngine::Scheduling::ComponentAccessScope::Snapshot };
+			declaration.readComponents = { "Transform" };
+			declaration.snapshotGeneration = 7;
+			declaration.currentGeneration = 9;
+
+			const auto result = TerraEngine::Scheduling::ValidateComponentAccessDeclaration(declaration);
+
+			context.Expect(!result.valid, "Stale snapshot generations should fail closed before worker execution.");
+			context.Expect(HasCode(result.diagnostics, TerraEngine::Scheduling::ComponentAccessDiagnosticCode::StaleGeneration), "Stale generation should be diagnosed explicitly.");
+		});
+
+		registry.Add("Engine.ComponentAccess.GrantRejectsStaleInputSnapshot", [](TestContext& context) {
+			TerraEngine::Scheduling::ComponentAccessGrantRequest request;
+			request.grantId = "input-snapshot";
+			request.workloadName = "InputReaders";
+			request.readComponents = { "InputState" };
+			request.scope = "frame-input";
+			request.scopeKind = TerraEngine::Scheduling::ComponentAccessScope::Input;
+			request.grantMode = TerraEngine::Scheduling::ComponentAccessGrantMode::WorkerRead;
+			request.schedulerValidated = true;
+			request.snapshotGeneration = 12;
+			request.currentGeneration = 13;
+
+			const auto result = TerraEngine::Scheduling::ValidateComponentAccessGrant(request);
+
+			context.Expect(!result.granted, "Worker grants should reject stale input/window snapshots.");
+			context.Expect(result.fallbackReason.find("stale") != std::string::npos, "Fallback reason should explain stale generation.");
+			context.Expect(HasCode(result.diagnostics, TerraEngine::Scheduling::ComponentAccessDiagnosticCode::StaleGeneration), "Grant diagnostics should carry stale-generation code.");
+		});
 	}
 }

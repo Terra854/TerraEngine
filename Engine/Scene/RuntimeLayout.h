@@ -25,6 +25,7 @@ namespace TerraEngine::Scene {
 
 	struct HierarchySnapshot;
 	struct SceneGraph;
+	struct SceneDirtyTransformState;
 	struct SceneTransformPropagationResult;
 
 	enum class RuntimeLayoutRecordKind {
@@ -132,7 +133,9 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API RuntimeLayoutValidationResult ValidateRuntimeLayoutCompatibility(const CompatibilitySnapshot& optimized, const CompatibilitySnapshot& compatibility);
 	TERRAENGINE_API CompatibilitySnapshot BuildCompatibilitySnapshot(ObjectManager& objects);
 	TERRAENGINE_API FlatHierarchyLayout BuildFlatHierarchyLayout(ObjectManager& objects, const HierarchySnapshot& snapshot, const FlatHierarchyLayout* previousLayout = nullptr);
+	TERRAENGINE_API std::vector<std::size_t> BuildDirtyTransformLayoutIndices(const FlatHierarchyLayout& layout, const SceneDirtyTransformState& dirtyState);
 	TERRAENGINE_API std::vector<TransformRuntimeRecord> BuildTransformRuntimeRecords(const FlatHierarchyLayout& layout, const SceneTransformPropagationResult& propagation);
+	TERRAENGINE_API std::vector<TransformRuntimeRecord> BuildDirtyTransformRuntimeRecords(const FlatHierarchyLayout& layout, const SceneTransformPropagationResult& propagation, const SceneDirtyTransformState& dirtyState);
 	TERRAENGINE_API LayoutDiagnosticsSummary BuildLayoutDiagnosticsSummary(const FlatHierarchyLayout& layout, std::size_t transformRecordCount, std::size_t renderRecordCount, std::uint64_t frameId = 0);
 
 }

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace TerraEngine::Scene {
 	const char* ToString(RuntimeLayoutRecordKind kind)
@@ -163,6 +164,39 @@ namespace TerraEngine::Scene {
 		return layout;
 	}
 
+	std::vector<std::size_t> BuildDirtyTransformLayoutIndices(const FlatHierarchyLayout& layout, const SceneDirtyTransformState& dirtyState)
+	{
+		std::vector<std::size_t> indices;
+		indices.reserve(layout.activeObjectCount);
+		if (!layout.valid)
+		{
+			return indices;
+		}
+
+		std::unordered_set<TerraEngine::UUID> dirtyObjects(dirtyState.expandedDirtyObjects.begin(), dirtyState.expandedDirtyObjects.end());
+		for (const TerraEngine::UUID& dirtyRoot : dirtyState.dirtyRoots)
+		{
+			dirtyObjects.insert(dirtyRoot);
+		}
+
+		const bool includeAll = dirtyState.fullRefreshRequested || dirtyObjects.empty();
+		std::vector<bool> parentOrSelfDirty(layout.entries.size(), false);
+		for (std::size_t index = 0; index < layout.entries.size(); ++index)
+		{
+			const FlatHierarchyEntry& entry = layout.entries[index];
+			const bool parentDirty = entry.parentIndex.has_value()
+				&& *entry.parentIndex < parentOrSelfDirty.size()
+				&& parentOrSelfDirty[*entry.parentIndex];
+			const bool selfDirty = dirtyObjects.find(entry.objectId) != dirtyObjects.end();
+			parentOrSelfDirty[index] = includeAll || parentDirty || selfDirty;
+			if (entry.runtimeActive && parentOrSelfDirty[index])
+			{
+				indices.push_back(index);
+			}
+		}
+		return indices;
+	}
+
 	std::vector<TransformRuntimeRecord> BuildTransformRuntimeRecords(const FlatHierarchyLayout& layout, const SceneTransformPropagationResult& propagation)
 	{
 		std::unordered_map<TerraEngine::UUID, SceneWorldTransformRecord> propagatedByObject;
@@ -194,6 +228,17 @@ namespace TerraEngine::Scene {
 			}
 			records.push_back(record);
 		}
+		return records;
+	}
+
+	std::vector<TransformRuntimeRecord> BuildDirtyTransformRuntimeRecords(const FlatHierarchyLayout& layout, const SceneTransformPropagationResult& propagation, const SceneDirtyTransformState& dirtyState)
+	{
+		const std::vector<std::size_t> dirtyIndices = BuildDirtyTransformLayoutIndices(layout, dirtyState);
+		std::unordered_set<std::size_t> dirtyIndexSet(dirtyIndices.begin(), dirtyIndices.end());
+		std::vector<TransformRuntimeRecord> records = BuildTransformRuntimeRecords(layout, propagation);
+		records.erase(std::remove_if(records.begin(), records.end(), [&dirtyIndexSet](const TransformRuntimeRecord& record) {
+			return dirtyIndexSet.find(record.layoutIndex) == dirtyIndexSet.end();
+		}), records.end());
 		return records;
 	}
 

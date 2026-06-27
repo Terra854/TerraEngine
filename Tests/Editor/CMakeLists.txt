@@ -42,6 +42,7 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/GltfImportFailureTests.cpp
 	AssetPipeline/GltfReimportTests.cpp
 	Scene/ArchitectureHardeningPlayModeTests.cpp
+	Scene/FullParallelFrameDiagnosticsTests.cpp
 	Scene/RuntimeLayoutDiagnosticsTests.cpp
 	Scene/PrefabAuthoringWorkflowTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp

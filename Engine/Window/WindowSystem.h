@@ -47,7 +47,22 @@ public:
 		bool lastSwapRan = false;
 	};
 
+	struct WindowWorkerSnapshot
+	{
+		// A snapshot is copied after protected event polling so worker systems
+		// can read window state without calling the platform backend directly.
+		std::uint64_t frameRevision = 0;
+		int width = 0;
+		int height = 0;
+		bool resizable = true;
+		bool shouldClose = false;
+		bool workerReadable = false;
+		std::string title;
+		std::string boundarySummary;
+	};
+
 	[[nodiscard]] WindowPollingBoundaryDiagnostics GetPollingBoundaryDiagnostics() const;
+	[[nodiscard]] WindowWorkerSnapshot GetLatestWorkerSnapshot() const;
 
 	void Initialize() override;
 	void Update(float deltaTime) override;
@@ -61,6 +76,7 @@ private:
 	std::unique_ptr<IWindowBackend> backend;
 	std::function<void()> onShutdownRequested;
 	WindowPollingBoundaryDiagnostics pollingDiagnostics{};
+	WindowWorkerSnapshot latestWorkerSnapshot{};
 	bool initialized = false;
 	bool configured = false;
 };

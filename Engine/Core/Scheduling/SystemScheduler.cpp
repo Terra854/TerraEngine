@@ -11,6 +11,7 @@
 #include "Profiling/ProfilerScope.h"
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <queue>
 #include <set>
@@ -141,6 +142,26 @@ namespace TerraEngine::Scheduling {
 		{
 			return from < reachability.size() && to < reachability.size() && reachability[from][to];
 		}
+
+		bool IsTransientFrameDiagnostic(const ScheduleDiagnostic& diagnostic)
+		{
+			return diagnostic.systemName == "SystemScheduler"
+				&& (diagnostic.category == DiagnosticCategory::Mutation || diagnostic.category == DiagnosticCategory::Scheduler)
+				&& (diagnostic.message.find("frame workload execution") != std::string::npos
+					|| diagnostic.message.find("frame-end flush") != std::string::npos
+					|| diagnostic.message.find("Mutation flush point did not run") != std::string::npos);
+		}
+
+		bool CanRunWholeSystemUpdateOnWorker(const SystemDeclaration& declaration)
+		{
+			// A scheduler declaration can expose worker-safe preparation subwork
+			// while SystemsBase::Update still performs protected commits such as
+			// presentation, managed callbacks, or editor state mutation. The live
+			// frame path only moves the whole Update call to a worker after the
+			// system explicitly advertises a fully worker-safe boundary.
+			return !declaration.mainThread
+				&& declaration.boundaryClassification == HardBoundaryClassification::WorkerSafe;
+		}
 	}
 
 	std::vector<SchedulerPhaseDefinition> DefaultSchedulerPhases()
@@ -163,6 +184,10 @@ namespace TerraEngine::Scheduling {
 			{ "Window", "Native window and swapchain-facing platform state.", "" },
 			{ "Input", "Input backend and per-frame input state.", "" },
 			{ "SceneGraph", "Hierarchy and transform visibility for scene objects.", "Refined by safe transform and scene graph jobs in Part 3." },
+			{ "HierarchySnapshot", "Immutable parent-before-child hierarchy data published for worker readers.", "Prepared from SceneGraph before transform and layout jobs run." },
+			{ "DirtyTransformState", "Dirty transform roots and expanded branch state used to limit worker transform work.", "Prepared from SceneGraph before transform work units are planned." },
+			{ "TransformWorkUnits", "Depth-ordered transform propagation batches that worker jobs can execute independently.", "Consumes hierarchy and dirty transform inputs before runtime layout publication." },
+			{ "RuntimeLayout", "Compact active-object, transform, render, camera, and light records shared with worker-safe consumers.", "Published after hierarchy and transform preparation completes." },
 			{ "ObjectManager", "Entity/object storage and component ownership.", "Refined by component read/write query declarations in Part 3." },
 			{ "SceneMutationQueue", "Deferred structural scene mutation requests.", "Feeds deferred entity/component mutation in Part 3." },
 			{ "Scripting", "Managed runtime, script assemblies, and script component state.", "May later expose script component query resources." },
@@ -216,6 +241,8 @@ namespace TerraEngine::Scheduling {
 			return "main-thread";
 		case DiagnosticCategory::Mutation:
 			return "mutation";
+		case DiagnosticCategory::Scheduler:
+			return "scheduler";
 		case DiagnosticCategory::DefaultMetadata:
 			return "default-metadata";
 		case DiagnosticCategory::Summary:
@@ -387,6 +414,74 @@ namespace TerraEngine::Scheduling {
 	bool SystemScheduler::FrameWorkloadCompatibilityFallbackEnabled() const
 	{
 		return frameWorkloadCompatibilityFallbackEnabled;
+	}
+
+	std::vector<FrameWorkloadDeclaration> SystemScheduler::BuildSystemOwnedWorkloadDeclarations(SystemsBase& system, const SystemDeclaration& declaration, float deltaTime, std::size_t executionOrder) const
+	{
+		std::vector<FrameWorkloadDeclaration> declaredWorkloads = system.DeclareFrameWorkloads(deltaTime);
+		if (!declaredWorkloads.empty())
+		{
+			for (FrameWorkloadDeclaration& workload : declaredWorkloads)
+			{
+				// System-owned phases inherit the stable scheduler identity when
+				// the declaring system omits repeated metadata. Keeping the fill-in
+				// deterministic makes diagnostics readable without hiding bad access
+				// declarations from validation.
+				if (workload.ownerSystem.empty())
+				{
+					workload.ownerSystem = declaration.name;
+				}
+				if (workload.phase.empty())
+				{
+					workload.phase = declaration.phase;
+				}
+				if (workload.profilingLabel.empty())
+				{
+					workload.profilingLabel = workload.workloadName.empty() ? declaration.name : workload.workloadName;
+				}
+				if (workload.executionOrder == 0)
+				{
+					workload.executionOrder = executionOrder;
+				}
+			}
+			return declaredWorkloads;
+		}
+
+		FrameWorkloadDeclaration workload;
+		workload.workloadName = declaration.name;
+		workload.ownerSystem = declaration.name;
+		workload.phase = declaration.phase;
+		workload.reads = declaration.reads;
+		workload.writes = declaration.writes;
+		workload.executionOrder = executionOrder;
+		const bool wholeUpdateWorkerSafe = CanRunWholeSystemUpdateOnWorker(declaration);
+		workload.workerEligible = wholeUpdateWorkerSafe;
+		workload.mainThreadRequired = !wholeUpdateWorkerSafe;
+		workload.mutationPolicy = declaration.requiresFlushedSceneMutations
+			? FrameWorkloadMutationPolicy::DeferredOnly
+			: FrameWorkloadMutationPolicy::None;
+		workload.phaseKind = declaration.phaseKind;
+		workload.boundaryClassification = declaration.boundaryClassification;
+		workload.hardBoundary = declaration.hardBoundary;
+		workload.safeSubwork = declaration.safeSubwork;
+		workload.protectedCommit = declaration.protectedCommit;
+		workload.profilingLabel = declaration.profilingLabel.empty() ? declaration.name : declaration.profilingLabel;
+		workload.protectedReason = !declaration.protectedReason.empty()
+			? declaration.protectedReason
+			: !wholeUpdateWorkerSafe && !declaration.mainThread
+			? "Full SystemsBase::Update remains protected until the entire system boundary is worker-safe."
+			: declaration.mainThread
+			? "System declaration still requires the main thread."
+			: "System is eligible for worker execution after scheduler validation.";
+		workload.fallbackReason = declaration.fallbackReason;
+		workload.work = [&system, deltaTime](JobGraphContext&) {
+			// The default workload preserves the existing system entry point for
+			// unconverted systems. Converted systems should override
+			// DeclareFrameWorkloads() so only proven worker-safe phases run away
+			// from the protected coordinator path.
+			system.Update(deltaTime);
+		};
+		return { std::move(workload) };
 	}
 
 	const ScheduleSummary& SystemScheduler::BuildSchedule()
@@ -684,85 +779,24 @@ namespace TerraEngine::Scheduling {
 		{
 			BuildSchedule();
 		}
+		latestSummary.diagnostics.erase(std::remove_if(latestSummary.diagnostics.begin(), latestSummary.diagnostics.end(), IsTransientFrameDiagnostic), latestSummary.diagnostics.end());
+		latestSummary.valid = std::none_of(latestSummary.diagnostics.begin(), latestSummary.diagnostics.end(), IsError);
 		if (!latestSummary.valid)
 		{
+			latestSummary.formatted = FormatScheduleSummary(latestSummary);
 			return latestSummary;
 		}
 
-		std::vector<ScheduleDiagnostic> frameDiagnostics;
-		auto runFlush = [&](const MutationFlushPoint& point) {
-			if (!flushCallback)
-			{
-				return;
-			}
-			MutationFlushRuntimeState state = flushCallback(point);
-			if (!state.flushAttempted)
-			{
-				AddDiagnostic(frameDiagnostics, DiagnosticSeverity::Warning, DiagnosticCategory::Mutation, "", point.phaseName, "SceneMutationQueue", "Mutation flush point did not run.", "Verify the scheduler flush callback is connected to SceneMutationQueue.");
-			}
-			if (point.position == MutationFlushPosition::FrameEnd && point.diagnosePendingAtFrameEnd && state.pendingAfterFlush > 0)
-			{
-				AddDiagnostic(frameDiagnostics, DiagnosticSeverity::Error, DiagnosticCategory::Mutation, "", point.phaseName, "SceneMutationQueue", "Scene mutations remain pending after the frame-end flush.", "Inspect rejected mutation requests and clear or rebuild invalid requests before the next frame.");
-			}
-		};
-
-		std::vector<SchedulerPhaseDefinition> orderedPhases = phases;
-		std::stable_sort(orderedPhases.begin(), orderedPhases.end(), [](const SchedulerPhaseDefinition& left, const SchedulerPhaseDefinition& right) {
-			return std::tie(left.order, left.name) < std::tie(right.order, right.name);
-		});
-
-		for (const SchedulerPhaseDefinition& phase : orderedPhases)
+		FrameExecutionPlan plan = ExecuteFrameWorkloads(deltaTime, flushCallback);
+		latestFrameExecutionPlan = plan;
+		latestSummary.workerCoverageReport = ::TerraEngine::Scheduling::BuildWorkerCoverageReport(plan);
+		if (!plan.valid || !plan.completed)
 		{
-			for (const MutationFlushPoint& point : flushPoints)
-			{
-				if (point.position == MutationFlushPosition::BeforePhase && point.phaseName == phase.name)
-				{
-					runFlush(point);
-				}
-			}
-
-			for (std::size_t orderedIndex : orderedIndices)
-			{
-				RegisteredSystem& registeredSystem = systems[orderedIndex];
-				if (registeredSystem.declaration.phase != phase.name || registeredSystem.system == nullptr)
-				{
-					continue;
-				}
-				const std::string label = registeredSystem.declaration.profilingLabel.empty()
-					? registeredSystem.declaration.name
-					: registeredSystem.declaration.profilingLabel;
-				TERRAENGINE_PROFILE_TASK_SCOPE("SystemScheduler::SystemUpdate", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, label.c_str());
-				registeredSystem.system->Update(deltaTime);
-			}
-
-			for (const MutationFlushPoint& point : flushPoints)
-			{
-				if (point.position == MutationFlushPosition::AfterPhase && point.phaseName == phase.name)
-				{
-					runFlush(point);
-				}
-			}
-		}
-
-		for (const MutationFlushPoint& point : flushPoints)
-		{
-			if (point.position == MutationFlushPosition::FrameEnd)
-			{
-				runFlush(point);
-			}
-		}
-
-		if (!frameDiagnostics.empty())
-		{
-			latestSummary.diagnostics.insert(latestSummary.diagnostics.end(), frameDiagnostics.begin(), frameDiagnostics.end());
+			AddDiagnostic(latestSummary.diagnostics, DiagnosticSeverity::Error, DiagnosticCategory::Scheduler, "SystemScheduler", "", "", "Parallel frame workload execution did not complete.", "Inspect the frame execution plan and architecture diagnostics for failed worker/protected jobs.");
 			SortDiagnostics(latestSummary.diagnostics);
 			latestSummary.valid = std::none_of(latestSummary.diagnostics.begin(), latestSummary.diagnostics.end(), IsError);
-			latestSummary.formatted = FormatScheduleSummary(latestSummary);
-			// Runtime flush diagnostics describe this frame only. Mark the graph
-			// dirty so the next frame rebuilds the static schedule instead of
-			// treating a transient mutation rejection as a permanent graph state.
-			dirty = true;
 		}
+		latestSummary.formatted = FormatScheduleSummary(latestSummary);
 		return latestSummary;
 	}
 
@@ -779,54 +813,24 @@ namespace TerraEngine::Scheduling {
 			return workloads;
 		}
 
-		workloads.reserve(orderedIndices.size() + flushPoints.size());
-		for (std::size_t orderedIndex : orderedIndices)
-		{
-			RegisteredSystem& registeredSystem = systems[orderedIndex];
-			const SystemDeclaration& declaration = registeredSystem.declaration;
-			FrameWorkloadDeclaration workload;
-			workload.workloadName = declaration.name;
-			workload.ownerSystem = declaration.name;
-			workload.phase = declaration.phase;
-			workload.reads = declaration.reads;
-			workload.writes = declaration.writes;
-			workload.workerEligible = !declaration.mainThread;
-			workload.mainThreadRequired = declaration.mainThread;
-			workload.mutationPolicy = declaration.requiresFlushedSceneMutations
-				? FrameWorkloadMutationPolicy::DeferredOnly
-				: FrameWorkloadMutationPolicy::None;
-			workload.phaseKind = declaration.phaseKind;
-			workload.boundaryClassification = declaration.boundaryClassification;
-			workload.hardBoundary = declaration.hardBoundary;
-			workload.safeSubwork = declaration.safeSubwork;
-			workload.protectedCommit = declaration.protectedCommit;
-			workload.profilingLabel = declaration.profilingLabel.empty() ? declaration.name : declaration.profilingLabel;
-			workload.protectedReason = !declaration.protectedReason.empty()
-				? declaration.protectedReason
-				: declaration.mainThread
-				? "System declaration still requires the main thread."
-				: "Compatibility workload path validates worker-safe metadata before live worker execution is enabled.";
-			workload.fallbackReason = declaration.fallbackReason;
-			workload.work = [system = registeredSystem.system, deltaTime](JobGraphContext&) {
-				// Workload execution deliberately reuses the existing SystemsBase
-				// update call so conversion tests exercise the same code path as
-				// the serial scheduler while metadata hardening is in progress.
-				if (system != nullptr)
-				{
-					system->Update(deltaTime);
-				}
-			};
-			workloads.push_back(std::move(workload));
-		}
+		std::size_t nextExecutionOrder = 1;
+		auto appendSystemWorkload = [&](RegisteredSystem& registeredSystem, std::size_t executionOrder) {
+			if (registeredSystem.system == nullptr)
+			{
+				return;
+			}
+			std::vector<FrameWorkloadDeclaration> systemWorkloads = BuildSystemOwnedWorkloadDeclarations(*registeredSystem.system, registeredSystem.declaration, deltaTime, executionOrder);
+			workloads.insert(workloads.end(), std::make_move_iterator(systemWorkloads.begin()), std::make_move_iterator(systemWorkloads.end()));
+		};
 
-		for (const MutationFlushPoint& point : flushPoints)
-		{
+		auto appendFlushWorkload = [&](const MutationFlushPoint& point, std::size_t executionOrder) {
 			FrameWorkloadDeclaration workload;
 			workload.workloadName = "Flush:" + point.name;
 			workload.ownerSystem = "SystemScheduler";
 			workload.phase = point.phaseName.empty() ? "FrameEnd" : point.phaseName;
 			workload.reads = { "SceneMutationQueue" };
 			workload.writes = { "SceneMutationQueue" };
+			workload.executionOrder = executionOrder;
 			workload.workerEligible = false;
 			workload.mainThreadRequired = true;
 			workload.mutationPolicy = FrameWorkloadMutationPolicy::DeferredOnly;
@@ -834,6 +838,49 @@ namespace TerraEngine::Scheduling {
 			workload.protectedReason = "Mutation flushes remain protected barriers until deferred mutation batches are proven worker-safe.";
 			workload.profilingLabel = workload.workloadName;
 			workloads.push_back(std::move(workload));
+		};
+
+		std::vector<SchedulerPhaseDefinition> orderedPhases = phases;
+		std::stable_sort(orderedPhases.begin(), orderedPhases.end(), [](const SchedulerPhaseDefinition& left, const SchedulerPhaseDefinition& right) {
+			return std::tie(left.order, left.name) < std::tie(right.order, right.name);
+		});
+
+		workloads.reserve(orderedIndices.size() + flushPoints.size());
+		for (const SchedulerPhaseDefinition& phase : orderedPhases)
+		{
+			for (const MutationFlushPoint& point : flushPoints)
+			{
+				if (point.position == MutationFlushPosition::BeforePhase && point.phaseName == phase.name)
+				{
+					appendFlushWorkload(point, nextExecutionOrder++);
+				}
+			}
+
+			const std::size_t phaseExecutionOrder = nextExecutionOrder++;
+			for (std::size_t orderedIndex : orderedIndices)
+			{
+				RegisteredSystem& registeredSystem = systems[orderedIndex];
+				if (registeredSystem.declaration.phase == phase.name)
+				{
+					appendSystemWorkload(registeredSystem, phaseExecutionOrder);
+				}
+			}
+
+			for (const MutationFlushPoint& point : flushPoints)
+			{
+				if (point.position == MutationFlushPosition::AfterPhase && point.phaseName == phase.name)
+				{
+					appendFlushWorkload(point, nextExecutionOrder++);
+				}
+			}
+		}
+
+		for (const MutationFlushPoint& point : flushPoints)
+		{
+			if (point.position == MutationFlushPosition::FrameEnd)
+			{
+				appendFlushWorkload(point, nextExecutionOrder++);
+			}
 		}
 
 		return workloads;
@@ -841,9 +888,11 @@ namespace TerraEngine::Scheduling {
 
 	FrameExecutionPlan SystemScheduler::ExecuteFrameWorkloads(float deltaTime, const MutationFlushCallback& flushCallback)
 	{
+		TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Coordinator Wait Region", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		std::vector<FrameWorkloadDeclaration> workloads = BuildFrameWorkloadDeclarations(deltaTime);
 		if (!frameWorkloadCompatibilityFallbackEnabled)
 		{
+			TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Inline Region Validation", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			FrameExecutionPlan plan = TerraEngine::Scheduling::ValidateFrameWorkloads(std::move(workloads), "system-scheduler-frame");
 			AddArchitectureDiagnostic(plan.diagnostics, ArchitectureDiagnosticSeverity::Warning, ArchitectureDiagnosticCode::CompatibilityFallback, "SystemScheduler", "", "Frame workload compatibility execution is disabled; metadata was validated without calling SystemsBase::Update.", "Enable compatibility fallback before replacing the serial frame path, or lower the validated plan into the worker scheduler.");
 			plan.completed = false;
@@ -858,15 +907,25 @@ namespace TerraEngine::Scheduling {
 			}
 			const std::string flushName = workload.workloadName.substr(std::string("Flush:").size());
 			workload.work = [this, flushName, flushCallback](JobGraphContext&) {
+				TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Protected Region Flush", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				const auto found = std::find_if(flushPoints.begin(), flushPoints.end(), [&](const MutationFlushPoint& point) {
 					return point.name == flushName;
 				});
 				if (found != flushPoints.end())
 				{
-					(void)flushCallback(*found);
+					const MutationFlushRuntimeState state = flushCallback(*found);
+					if (!state.flushAttempted)
+					{
+						AddDiagnostic(latestSummary.diagnostics, DiagnosticSeverity::Warning, DiagnosticCategory::Mutation, "SystemScheduler", found->phaseName.empty() ? "FrameEnd" : found->phaseName, "SceneMutationQueue", "Mutation flush point did not run.", "Verify the scheduler flush callback is connected to SceneMutationQueue.");
+					}
+					if (found->position == MutationFlushPosition::FrameEnd && found->diagnosePendingAtFrameEnd && state.pendingAfterFlush > 0)
+					{
+						AddDiagnostic(latestSummary.diagnostics, DiagnosticSeverity::Warning, DiagnosticCategory::Mutation, "SystemScheduler", "FrameEnd", "SceneMutationQueue", "Scene mutations remain pending after the frame-end flush.", "Inspect rejected mutation requests; they no longer fail the scheduler frame by themselves.");
+					}
 				}
 			};
 		}
+		TERRAENGINE_PROFILE_SCOPE("SystemScheduler: Worker Protected Inline Execution Region", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		return TerraEngine::Scheduling::ExecuteFrameWorkloads(std::move(workloads), "system-scheduler-frame");
 	}
 
@@ -885,6 +944,11 @@ namespace TerraEngine::Scheduling {
 	const ScheduleSummary& SystemScheduler::LatestSummary() const
 	{
 		return latestSummary;
+	}
+
+	const FrameExecutionPlan& SystemScheduler::LatestFrameExecutionPlan() const
+	{
+		return latestFrameExecutionPlan;
 	}
 
 	const std::vector<SystemDeclaration>& SystemScheduler::OrderedDeclarations() const

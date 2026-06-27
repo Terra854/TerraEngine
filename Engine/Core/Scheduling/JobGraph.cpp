@@ -8,6 +8,7 @@
 
 #include "Profiling/ProfilerScope.h"
 #include "ThreadPool/ThreadPool.h"
+#include "WorkerSafety.h"
 
 #include <algorithm>
 #include <chrono>
@@ -353,9 +354,17 @@ namespace TerraEngine::Scheduling {
 					{
 						++summary.protectedJobCount;
 					}
+					if (node.executionPolicy == JobGraphExecutionPolicy::MainThread)
+					{
+						++summary.inlineJobCount;
+					}
 					if (node.state == JobGraphNodeState::Failed || node.state == JobGraphNodeState::Blocked || node.state == JobGraphNodeState::Cancelled)
 					{
 						++summary.rejectedJobCount;
+					}
+					if (node.state == JobGraphNodeState::Blocked)
+					{
+						++summary.blockedDependencyCount;
 					}
 					summary.jobs.push_back(std::move(entry));
 				}
@@ -534,8 +543,10 @@ namespace TerraEngine::Scheduling {
 		stream << "Coverage:"
 			<< " worker=" << summary.workerJobCount
 			<< " protected=" << summary.protectedJobCount
+			<< " inline=" << summary.inlineJobCount
 			<< " rejected=" << summary.rejectedJobCount
-			<< " fallback=" << summary.fallbackJobCount << '\n';
+			<< " fallback=" << summary.fallbackJobCount
+			<< " blocked=" << summary.blockedDependencyCount << '\n';
 
 		stream << "Task groups:";
 		for (const JobGraphResultEntry& entry : summary.taskGroups)
@@ -786,6 +797,9 @@ namespace TerraEngine::Scheduling {
 		JobGraphContext context;
 		context.cancellationRequested = &impl->cancellationRequested;
 		context.cancellationReason = &impl->cancellation.reason;
+		std::atomic<std::uint64_t> workerTimeNs{ 0 };
+		std::uint64_t protectedTimeNs = 0;
+		std::uint64_t coordinatorWaitTimeNs = 0;
 
 		auto completeNode = [&](std::size_t index, JobGraphNodeState state) {
 			impl->nodes[index].state = state;
@@ -891,13 +905,17 @@ namespace TerraEngine::Scheduling {
 				if (node.executionPolicy == JobGraphExecutionPolicy::WorkerEligible)
 				{
 					node.state = JobGraphNodeState::Running;
-					auto task = ThreadPool::instance().createTask([this, index, context]() mutable {
+					auto task = ThreadPool::instance().createTask([this, index, context, &workerTimeNs]() mutable {
+						const auto start = std::chrono::steady_clock::now();
 						Impl::Node& workerNode = impl->nodes[index];
+						WorkerSafetyScope workerSafetyScope(workerNode.name);
 						TERRAENGINE_PROFILE_TASK_SCOPE("JobGraph::WorkerJob", TerraEngine::Profiling::ProfilerModuleId::TaskExecution, workerNode.profilingLabel.c_str());
 						if (workerNode.work)
 						{
 							workerNode.work(context);
 						}
+						const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+						workerTimeNs.fetch_add(static_cast<std::uint64_t>(elapsed), std::memory_order_relaxed);
 					});
 					RunningWorker worker;
 					worker.index = index;
@@ -918,11 +936,14 @@ namespace TerraEngine::Scheduling {
 				try
 				{
 					node.state = JobGraphNodeState::Running;
+					const auto start = std::chrono::steady_clock::now();
 					TERRAENGINE_PROFILE_TASK_SCOPE("JobGraph::ProtectedJob", TerraEngine::Profiling::ProfilerModuleId::CpuEngine, node.profilingLabel.c_str());
 					if (node.work)
 					{
 						node.work(context);
 					}
+					const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+					protectedTimeNs += static_cast<std::uint64_t>(elapsed);
 					completeNode(index, JobGraphNodeState::Completed);
 				}
 				catch (...)
@@ -938,7 +959,10 @@ namespace TerraEngine::Scheduling {
 				Impl::Node& node = impl->nodes[worker.index];
 				try
 				{
+					const auto start = std::chrono::steady_clock::now();
 					worker.future.get();
+					const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+					coordinatorWaitTimeNs += static_cast<std::uint64_t>(elapsed);
 					completeNode(worker.index, JobGraphNodeState::Completed);
 				}
 				catch (...)
@@ -951,6 +975,14 @@ namespace TerraEngine::Scheduling {
 		}
 
 		impl->latestSummary = impl->BuildSummary(edges, std::move(diagnostics));
+		impl->latestSummary.workerTimeNs = workerTimeNs.load(std::memory_order_relaxed);
+		impl->latestSummary.protectedTimeNs = protectedTimeNs;
+		impl->latestSummary.coordinatorWaitTimeNs = coordinatorWaitTimeNs;
+		const std::uint64_t totalMeasuredTimeNs = impl->latestSummary.workerTimeNs + impl->latestSummary.protectedTimeNs + impl->latestSummary.coordinatorWaitTimeNs;
+		impl->latestSummary.workerUtilization = totalMeasuredTimeNs == 0
+			? 0.0
+			: static_cast<double>(impl->latestSummary.workerTimeNs) / static_cast<double>(totalMeasuredTimeNs);
+		impl->latestSummary.formatted = FormatJobGraphSummary(impl->latestSummary);
 		return impl->latestSummary;
 	}
 

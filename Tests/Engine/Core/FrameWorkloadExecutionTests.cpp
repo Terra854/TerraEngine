@@ -51,6 +51,38 @@ namespace TerraEngine::Tests {
 			context.Expect(plan.formatted.find("access-conflict") != std::string::npos, "Summary should explain the access conflict.");
 		});
 
+		registry.Add("Engine.FrameWorkload.OrderedWriteReadHandoffIsValid", [](TestContext& context) {
+			auto ui = MakeWorkload("UISystem", {}, { "UI" });
+			auto render = MakeWorkload("RenderSystem", { "UI" }, {});
+			ui.executionOrder = 10;
+			render.executionOrder = 20;
+
+			const auto plan = TerraEngine::Scheduling::ValidateFrameWorkloads({ render, ui }, "ordered-handoff");
+
+			context.Expect(plan.valid, "Worker-safe handoffs in different execution-order groups should be valid.");
+			context.ExpectEqual(static_cast<std::size_t>(0), plan.migrationSummary.rejectedCount, "Ordered handoffs should not be counted as rejected workloads.");
+			context.Expect(plan.formatted.find("access-conflict") == std::string::npos, "Ordered handoffs should not report an access conflict.");
+		});
+
+		registry.Add("Engine.FrameWorkload.CompatibilityModeReportsInlinePolicy", [](TestContext& context) {
+			std::atomic<int> calls = 0;
+			auto tiny = MakeWorkload("Tiny", { "SceneGraph" }, {});
+			tiny.estimatedWorkItemCount = 2;
+			tiny.inlineWorkItemThreshold = 8;
+			tiny.work = [&calls](TerraEngine::Scheduling::JobGraphContext&) {
+				calls.fetch_add(1);
+			};
+
+			const auto plan = TerraEngine::Scheduling::ExecuteFrameWorkloadsCompatibility({ tiny }, "compat-inline");
+
+			context.Expect(plan.valid, "Compatibility execution should validate inline-capable worker metadata.");
+			context.Expect(plan.completed, "Compatibility execution should still run the inline-capable workload.");
+			context.ExpectEqual(1, calls.load(), "Compatibility execution should invoke the workload once.");
+			context.ExpectEqual(static_cast<std::size_t>(1), plan.migrationSummary.inlineCount, "Compatibility diagnostics should preserve inline threshold decisions.");
+			context.Expect(plan.formatted.find("mode=compatibility") != std::string::npos, "Formatted plan should expose compatibility mode.");
+			context.Expect(plan.formatted.find("policy=inline") != std::string::npos, "Formatted plan should expose inline policy selection.");
+		});
+
 		registry.Add("Engine.FrameWorkload.ProtectedFallbackIsReported", [](TestContext& context) {
 			auto protectedWork = MakeWorkload("Protected", { "SceneGraph" }, {}, false);
 

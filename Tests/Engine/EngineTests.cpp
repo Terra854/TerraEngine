@@ -23,6 +23,8 @@ namespace TerraEngine::Tests {
 	void RegisterComponentAccessTests(TestRegistry& registry);
 	void RegisterEcsQueryTaskGraphTests(TestRegistry& registry);
 	void RegisterFrameWorkloadExecutionTests(TestRegistry& registry);
+	void RegisterFullParallelFrameExecutionTests(TestRegistry& registry);
+	void RegisterFullParallelFrameStressTests(TestRegistry& registry);
 	void RegisterWorkerConversionBaselineTests(TestRegistry& registry);
 	void RegisterWorkerConversionScenarioTests(TestRegistry& registry);
 	void RegisterWorkerCoverageReportTests(TestRegistry& registry);
@@ -89,6 +91,7 @@ namespace TerraEngine::Tests {
 	void RegisterRuntimeLayoutCompatibilityTests(TestRegistry& registry);
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
+	void RegisterParallelMutationBufferTests(TestRegistry& registry);
 	void RegisterSkyComponentSerializationTests(TestRegistry& registry);
 	void RegisterSceneStreamingDeferredLoadTests(TestRegistry& registry);
 	void RegisterScriptingComponentAccessTests(TestRegistry& registry);
@@ -139,6 +142,8 @@ int main() {
 	TerraEngine::Tests::RegisterComponentAccessTests(registry);
 	TerraEngine::Tests::RegisterEcsQueryTaskGraphTests(registry);
 	TerraEngine::Tests::RegisterFrameWorkloadExecutionTests(registry);
+	TerraEngine::Tests::RegisterFullParallelFrameExecutionTests(registry);
+	TerraEngine::Tests::RegisterFullParallelFrameStressTests(registry);
 	TerraEngine::Tests::RegisterWorkerConversionBaselineTests(registry);
 	TerraEngine::Tests::RegisterWorkerConversionScenarioTests(registry);
 	TerraEngine::Tests::RegisterWorkerCoverageReportTests(registry);
@@ -207,6 +212,7 @@ int main() {
 	TerraEngine::Tests::RegisterRuntimeLayoutCompatibilityTests(registry);
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
+	TerraEngine::Tests::RegisterParallelMutationBufferTests(registry);
 	TerraEngine::Tests::RegisterSkyComponentSerializationTests(registry);
 	TerraEngine::Tests::RegisterSceneStreamingDeferredLoadTests(registry);
 	TerraEngine::Tests::RegisterScriptingComponentAccessTests(registry);

@@ -308,6 +308,23 @@ namespace TerraEngine::Resource
 		return needs;
 	}
 
+	TerraEngine::Scheduling::FrameWorkloadDeclaration BuildResourcePreparationWorkloadDeclaration(std::size_t estimatedNeedCount)
+	{
+		TerraEngine::Scheduling::FrameWorkloadDeclaration declaration = TerraEngine::Scheduling::MakeWorkerPreparePhase(
+			"ResourceCandidatePlanning",
+			"ResourceStreaming",
+			{ "RenderVisibility", "StreamingPolicy", "PreloadRules" },
+			{ "StreamingNeeds" },
+			"ResourceStreaming: Candidate Planning");
+		declaration.estimatedWorkItemCount = estimatedNeedCount;
+		declaration.inlineWorkItemThreshold = 16u;
+		declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::WorkerSafe;
+		declaration.safeSubwork = "Dependency discovery, preload-rule evaluation, and residency candidate sorting on immutable inputs.";
+		declaration.protectedCommit = "ResourceManager registration, cache mutation, GPU upload scheduling, and residency publication.";
+		declaration.protectedReason = declaration.protectedCommit;
+		return declaration;
+	}
+
 	StreamingProtectionReason ProtectionForNeed(StreamingNeedType needType)
 	{
 		switch (needType)

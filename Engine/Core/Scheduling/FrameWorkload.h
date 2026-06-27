@@ -20,12 +20,18 @@ namespace TerraEngine::Scheduling {
 	enum class FrameWorkloadExecutionPolicy {
 		Protected,
 		WorkerSafe,
+		Inline,
 		Rejected
 	};
 
 	enum class FrameWorkloadMutationPolicy {
 		None,
 		DeferredOnly
+	};
+
+	enum class FrameWorkloadExecutionMode {
+		Parallel,
+		Compatibility
 	};
 
 	enum class WorkerConversionState {
@@ -97,6 +103,9 @@ namespace TerraEngine::Scheduling {
 		std::string phase;
 		std::vector<std::string> reads;
 		std::vector<std::string> writes;
+		std::size_t executionOrder = 0;
+		std::size_t estimatedWorkItemCount = 0;
+		std::size_t inlineWorkItemThreshold = 0;
 		bool workerEligible = false;
 		bool mainThreadRequired = true;
 		FrameWorkloadMutationPolicy mutationPolicy = FrameWorkloadMutationPolicy::None;
@@ -116,11 +125,13 @@ namespace TerraEngine::Scheduling {
 		FrameWorkloadExecutionPolicy executionPolicy = FrameWorkloadExecutionPolicy::Protected;
 		bool completed = false;
 		bool fallbackUsed = false;
+		bool inlineSelected = false;
 	};
 
 	struct ArchitectureMigrationSummary {
 		std::size_t workerSafeCount = 0;
 		std::size_t protectedCount = 0;
+		std::size_t inlineCount = 0;
 		std::size_t rejectedCount = 0;
 		std::size_t fallbackCount = 0;
 		std::size_t mutationFlushCount = 0;
@@ -132,6 +143,8 @@ namespace TerraEngine::Scheduling {
 		std::uint64_t protectedBaselineTimeNs = 0;
 		std::uint64_t workerPreparationTimeNs = 0;
 		std::uint64_t protectedCommitTimeNs = 0;
+		std::uint64_t coordinatorWaitTimeNs = 0;
+		double workerUtilization = 0.0;
 		std::size_t activeMembershipInvalidationCount = 0;
 		std::size_t staleCompactReferenceCount = 0;
 		std::size_t hierarchySnapshotRebuildCount = 0;
@@ -218,6 +231,8 @@ namespace TerraEngine::Scheduling {
 		std::vector<FrameWorkloadResult> results;
 		std::vector<ArchitectureDiagnostic> diagnostics;
 		ArchitectureMigrationSummary migrationSummary;
+		FrameWorkloadExecutionMode executionMode = FrameWorkloadExecutionMode::Parallel;
+		bool parallelExecutionUsed = false;
 		bool valid = true;
 		bool completed = false;
 		std::string formatted;
@@ -225,6 +240,7 @@ namespace TerraEngine::Scheduling {
 
 	TERRAENGINE_API std::string ToString(FrameWorkloadExecutionPolicy policy);
 	TERRAENGINE_API std::string ToString(FrameWorkloadMutationPolicy policy);
+	TERRAENGINE_API std::string ToString(FrameWorkloadExecutionMode mode);
 	TERRAENGINE_API std::string ToString(WorkerConversionState state);
 	TERRAENGINE_API std::string ToString(WorkerSystemPhaseKind kind);
 	TERRAENGINE_API std::string ToString(HardBoundaryClassification classification);
@@ -245,6 +261,7 @@ namespace TerraEngine::Scheduling {
 	TERRAENGINE_API WorkerCoverageReport BuildWorkerCoverageReport(const FrameExecutionPlan& plan);
 	TERRAENGINE_API FrameExecutionPlan ValidateFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId = "frame");
 	TERRAENGINE_API FrameExecutionPlan ExecuteFrameWorkloads(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId = "frame");
+	TERRAENGINE_API FrameExecutionPlan ExecuteFrameWorkloadsCompatibility(std::vector<FrameWorkloadDeclaration> workloads, std::string frameId = "frame");
 	TERRAENGINE_API void AddArchitectureDiagnostic(std::vector<ArchitectureDiagnostic>& diagnostics, ArchitectureDiagnosticSeverity severity, ArchitectureDiagnosticCode code, std::string workloadName, std::string resourceName, std::string message, std::string action);
 
 }

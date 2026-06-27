@@ -10,6 +10,7 @@
 #include "Export.h"
 #include "Scheduling/SystemScheduler.h"
 #include <string>
+#include <vector>
 
 class TERRAENGINE_API SystemsBase {
 public:
@@ -43,5 +44,12 @@ public:
 		declaration.profilingLabel = declaration.name;
 		declaration.usesDefaultMetadata = true;
 		return declaration;
+	}
+
+	// DeclareFrameWorkloads lets a system split its frame work into smaller
+	// snapshot, worker-preparation, and protected-commit phases. Returning an
+	// empty list keeps the legacy behavior where the scheduler wraps Update().
+	virtual std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float) {
+		return {};
 	}
 };

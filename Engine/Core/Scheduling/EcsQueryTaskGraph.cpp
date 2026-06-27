@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <thread>
 #include <tuple>
 #include <utility>
 
@@ -54,11 +55,48 @@ namespace TerraEngine::Scheduling {
 			{
 				return EcsQueryExecutionPolicy::Protected;
 			}
-			if (declaration.matchingObjects.size() < declaration.workerThreshold)
+			const std::size_t threshold = std::max<std::size_t>(1, declaration.workerThreshold);
+			if (declaration.matchingObjects.size() < threshold)
 			{
 				return EcsQueryExecutionPolicy::Inline;
 			}
 			return EcsQueryExecutionPolicy::WorkerTaskGroup;
+		}
+
+		std::size_t DefaultMaxWorkerChunks()
+		{
+			const std::uint32_t hardwareThreads = std::max<std::uint32_t>(1u, std::thread::hardware_concurrency());
+			return std::clamp<std::size_t>(static_cast<std::size_t>(hardwareThreads) * 4u, 4u, 64u);
+		}
+
+		std::size_t SelectChunkSize(const EcsComponentQueryDeclaration& declaration, std::size_t objectCount, EcsQueryExecutionPolicy policy)
+		{
+			if (objectCount == 0u)
+			{
+				return 1u;
+			}
+			if (policy != EcsQueryExecutionPolicy::WorkerTaskGroup || !declaration.adaptiveChunking)
+			{
+				return policy == EcsQueryExecutionPolicy::WorkerTaskGroup
+					? std::max<std::size_t>(1u, declaration.preferredChunkSize)
+					: objectCount;
+			}
+
+			const std::size_t preferred = std::max<std::size_t>(1u, declaration.preferredChunkSize);
+			const std::size_t minChunk = std::max<std::size_t>(1u, declaration.minChunkSize);
+			const std::size_t maxChunk = std::max(minChunk, declaration.maxChunkSize);
+			const std::size_t maxChunks = std::max<std::size_t>(1u, declaration.maxWorkerChunks == 0u ? DefaultMaxWorkerChunks() : declaration.maxWorkerChunks);
+			const std::size_t boundedByTaskCount = (objectCount + maxChunks - 1u) / maxChunks;
+			std::size_t chunkSize = std::max({ preferred, minChunk, boundedByTaskCount });
+
+			// The maximum chunk size is a soft cache-locality hint. The hard
+			// task-count bound wins when a very large query would otherwise emit
+			// more work items than the scheduler should coordinate this frame.
+			if (boundedByTaskCount <= maxChunk)
+			{
+				chunkSize = std::min(chunkSize, maxChunk);
+			}
+			return std::max<std::size_t>(1u, chunkSize);
 		}
 
 		std::vector<TerraEngine::CompactObjectReference> BuildCompactReferences(const std::vector<TerraEngine::UUID>& objects)
@@ -113,9 +151,7 @@ namespace TerraEngine::Scheduling {
 				return {};
 			}
 
-			const std::size_t chunkSize = policy == EcsQueryExecutionPolicy::WorkerTaskGroup
-				? std::max<std::size_t>(1, declaration.preferredChunkSize)
-				: objects.size();
+			const std::size_t chunkSize = SelectChunkSize(declaration, objects.size(), policy);
 			std::vector<EcsQueryChunk> chunks;
 			for (std::size_t begin = 0; begin < objects.size(); begin += chunkSize)
 			{
