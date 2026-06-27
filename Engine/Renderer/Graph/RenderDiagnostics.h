@@ -55,6 +55,9 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderBudgetDiagnostic> budgetDiagnostics;
 		std::vector<RenderQueueReadiness> queueReadiness;
 		std::vector<RenderPerformanceGateResult> performanceGates;
+		std::size_t runtimeLayoutRenderRecordCount = 0u;
+		std::size_t runtimeLayoutRejectedRecordCount = 0u;
+		std::vector<std::string> runtimeLayoutRejectionReasons;
 		// backendStalls contains only opt-in diagnostics so normal frames do
 		// not pay for stall classification while the editor window is closed.
 		std::vector<BackendStallDiagnostic> backendStalls;

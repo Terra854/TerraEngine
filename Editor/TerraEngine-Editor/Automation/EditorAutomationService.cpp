@@ -17,6 +17,7 @@
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
+#include "Engine/Scene/RuntimeLayout.h"
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Core/Scheduling/FrameWorkload.h"
 #include "Engine/Scripting/ScriptingSystem.h"
@@ -470,8 +471,18 @@ namespace TerraEngine::Editor::Automation
 				{"requiredEvidence", boundary.requiredEvidence}
 			});
 		}
+		const auto& runtimeMembership = ObjectManager::instance().GetRuntimeActiveMembershipSnapshot();
+		std::size_t activeRuntimeObjects = 0u;
+		for (const TerraEngine::Scene::RuntimeActiveMembership& membership : runtimeMembership)
+		{
+			if (membership.objectActive)
+			{
+				++activeRuntimeObjects;
+			}
+		}
 		data["surfaces"] = nlohmann::json::array({
 			{{"surface", "render"}, {"state", "available"}, {"details", includeDetails ? nlohmann::json{{"note", "Render diagnostics are available through the profiler/resource windows."}} : nlohmann::json::object()}},
+			{{"surface", "runtimeLayout"}, {"state", "available"}, {"details", nlohmann::json{{"authoredObjectCount", runtimeMembership.size()}, {"activeRuntimeObjectCount", activeRuntimeObjects}}}},
 			{{"surface", "resources"}, {"state", assetJobCount > 0 ? "compiling" : "available"}, {"details", nlohmann::json{{"assetCompileJobs", assetJobCount}}}},
 			{{"surface", "streaming"}, {"state", "available"}, {"details", nlohmann::json::object()}},
 			{{"surface", "scheduler"}, {"state", "available"}, {"details", nlohmann::json{{"workerBoundaries", boundaryFindings}}}},

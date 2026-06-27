@@ -131,6 +131,7 @@ namespace TerraEngine::Renderer {
 		summary.serializedReasons = packetPlan.serializedReasons;
 		summary.queueReadiness = submissionPlan.queueReadiness;
 		summary.degradedWork = submissionPlan.degradedWork;
+		summary.runtimeLayoutRenderRecordCount = snapshot.renderables.size() + snapshot.lights.size() + snapshot.viewRequests.size();
 		summary.valid = submissionPlan.valid;
 		summary.detailed = RenderDiagnosticsRequested();
 

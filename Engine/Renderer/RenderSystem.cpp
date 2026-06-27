@@ -677,6 +677,8 @@ void RenderSystem::Update(float deltaTime)
 	// touching the entity registry after this point.
 	FrameVector<LightEntry> lights;
 	lights.reserve(256);
+	std::size_t runtimeLayoutRejectedRecordCount = 0u;
+	std::vector<std::string> runtimeLayoutRejectionReasons;
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: ECS Collection Graph", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		const bool diagnosticsEnabled = TerraEngine::Scheduling::EcsGraphFrameDiagnosticsEnabled();
@@ -711,7 +713,7 @@ void RenderSystem::Update(float deltaTime)
 			{ "Transform", "MeshRenderComponent" },
 			{ "Render.CameraCollection" },
 			{ "Render.RenderableCollection" },
-			[&cameras, &renderables, this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
+			[&cameras, &renderables, &runtimeLayoutRejectedRecordCount, &runtimeLayoutRejectionReasons, this](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Collect Renderables", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				if (cameras.empty() && !hasSceneViewCamera)
@@ -727,12 +729,16 @@ void RenderSystem::Update(float deltaTime)
 						const bool objectTaskCullingEnabled = meshComp.taskShaderCullingEnabled;
 						if (meshId == TerraEngine::EMPTY_UUID || materialId == TerraEngine::EMPTY_UUID)
 						{
+							++runtimeLayoutRejectedRecordCount;
+							runtimeLayoutRejectionReasons.push_back("missing-render-resource-id");
 							return;
 						}
 
 						auto& rm = ResourceManager::Instance();
 						if (!rm.HasResource(meshId) || !rm.HasResource(materialId))
 						{
+							++runtimeLayoutRejectedRecordCount;
+							runtimeLayoutRejectionReasons.push_back("resource-not-loaded");
 							return;
 						}
 
@@ -949,6 +955,9 @@ void RenderSystem::Update(float deltaTime)
 		TERRAENGINE_LOG(LogLevel::Error, "Render graph rejected frame " << activeRenderFrameId << " before backend submission.");
 	}
 	TerraEngine::Renderer::RenderDiagnosticsSummary renderGraphDiagnostics = TerraEngine::Renderer::BuildRenderDiagnosticsSummary(renderFrameSnapshot, renderPacketPlan, renderSubmissionPlan, backendCapabilities);
+	renderGraphDiagnostics.runtimeLayoutRenderRecordCount = cameras.size() + renderables.size() + lights.size();
+	renderGraphDiagnostics.runtimeLayoutRejectedRecordCount = runtimeLayoutRejectedRecordCount;
+	renderGraphDiagnostics.runtimeLayoutRejectionReasons = runtimeLayoutRejectionReasons;
 	if (TerraEngine::Renderer::RenderDiagnosticsRequested() && rhi)
 	{
 		TerraEngine::Renderer::BackendFrameBreakdown backendBreakdown = rhi->GetLatestBackendFrameBreakdown();
@@ -1835,6 +1844,74 @@ TerraEngine::Scheduling::HardBoundary RenderSystem::GetLiveGpuSubmissionBoundary
 		}
 	}
 	return {};
+}
+
+std::vector<TerraEngine::Scene::RenderRuntimeRecord> RenderSystem::BuildCompactRenderRuntimeRecords()
+{
+	std::vector<TerraEngine::Scene::RenderRuntimeRecord> records;
+	objManager.forEachObjectWithComponents<Transform, CameraComponent>(
+		[&](Object object, Transform&, CameraComponent&)
+		{
+			TerraEngine::Scene::RenderRuntimeRecord record;
+			record.recordKind = TerraEngine::Scene::RuntimeLayoutRecordKind::Camera;
+			record.entity = object.EntityId();
+			record.objectId = object.getUUID();
+			record.sourceRevision = objManager.GetObjectSpatialRevision(object.EntityId());
+			records.push_back(std::move(record));
+		});
+
+	objManager.forEachObjectWithComponents<Transform, MeshRenderComponent>(
+		[&](Object object, Transform&, MeshRenderComponent& mesh)
+		{
+			TerraEngine::Scene::RenderRuntimeRecord record;
+			record.recordKind = TerraEngine::Scene::RuntimeLayoutRecordKind::Renderable;
+			record.entity = object.EntityId();
+			record.objectId = mesh.spatialObjectId != TerraEngine::EMPTY_UUID ? mesh.spatialObjectId : object.getUUID();
+			record.resourceIds = { mesh.meshId, mesh.materialId };
+			record.renderFlags = mesh.taskShaderCullingEnabled ? 1u : 0u;
+			record.sourceRevision = objManager.GetObjectSpatialRevision(object.EntityId());
+			if (mesh.meshId == TerraEngine::EMPTY_UUID || mesh.materialId == TerraEngine::EMPTY_UUID)
+			{
+				record.rejectionReason = "missing-render-resource-id";
+			}
+			records.push_back(std::move(record));
+		});
+
+	objManager.forEachObjectWithComponents<Transform, LightComponent>(
+		[&](Object object, Transform&, LightComponent& light)
+		{
+			TerraEngine::Scene::RenderRuntimeRecord record;
+			record.recordKind = TerraEngine::Scene::RuntimeLayoutRecordKind::Light;
+			record.entity = object.EntityId();
+			record.objectId = object.getUUID();
+			record.renderFlags = light.castsShadows ? 1u : 0u;
+			record.sourceRevision = objManager.GetObjectSpatialRevision(object.EntityId());
+			records.push_back(std::move(record));
+		});
+
+	return records;
+}
+
+bool RenderSystem::CompactRenderRecordsMatchSnapshot(const std::vector<TerraEngine::Scene::RenderRuntimeRecord>& records, const TerraEngine::Renderer::RenderFrameSnapshot& snapshot)
+{
+	std::size_t renderableCount = 0u;
+	std::size_t lightCount = 0u;
+	for (const TerraEngine::Scene::RenderRuntimeRecord& record : records)
+	{
+		if (!record.rejectionReason.empty())
+		{
+			continue;
+		}
+		if (record.recordKind == TerraEngine::Scene::RuntimeLayoutRecordKind::Renderable)
+		{
+			++renderableCount;
+		}
+		else if (record.recordKind == TerraEngine::Scene::RuntimeLayoutRecordKind::Light)
+		{
+			++lightCount;
+		}
+	}
+	return renderableCount == snapshot.renderables.size() && lightCount == snapshot.lights.size();
 }
 
 // RenderSystem::ReloadMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

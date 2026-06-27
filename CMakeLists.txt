@@ -85,6 +85,7 @@ set(ENGINE_SOURCES
 	Engine/Runtime/ExportStartupCoordinator.cpp
 	Engine/Scene/SceneGraphRuntime.cpp
 	Engine/Scene/HierarchySnapshot.cpp
+	Engine/Scene/RuntimeLayout.cpp
 	Engine/Scene/PrefabComposition.cpp
 	Engine/Scene/SceneMutationQueue.cpp
 	Engine/Scene/SceneManager.cpp
@@ -166,6 +167,7 @@ set(ENGINE_HEADERS
 	Engine/Resource/ShaderCollection.h
 	Engine/Scene/SceneGraphRuntime.h
 	Engine/Scene/HierarchySnapshot.h
+	Engine/Scene/RuntimeLayout.h
 	Engine/Scene/PrefabComposition.h
 	Engine/Scene/SceneMutationQueue.h
 	Engine/Scene/SceneManager.h

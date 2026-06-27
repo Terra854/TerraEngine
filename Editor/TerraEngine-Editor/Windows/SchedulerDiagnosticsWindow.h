@@ -22,6 +22,7 @@ protected:
 private:
 	void DrawSchedulerSummary();
 	void DrawWorkerCoverageSummary();
+	void DrawRuntimeLayoutSummary();
 	void DrawScriptingSummary();
 	void DrawRenderGraphSummary();
 	void DrawEcsGraphSummaries();

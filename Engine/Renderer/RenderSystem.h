@@ -24,6 +24,7 @@
 #include "Components/LightComponent.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Scene/RuntimeLayout.h"
 #include "Scene/SpatialDiagnostics.h"
 #include "Scene/SpatialIndex.h"
 
@@ -63,6 +64,8 @@ public:
 	TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const;
 	void SetRenderGraphDiagnosticsRequested(bool requested);
 	[[nodiscard]] TerraEngine::Scheduling::HardBoundary GetLiveGpuSubmissionBoundary() const;
+	std::vector<TerraEngine::Scene::RenderRuntimeRecord> BuildCompactRenderRuntimeRecords();
+	static bool CompactRenderRecordsMatchSnapshot(const std::vector<TerraEngine::Scene::RenderRuntimeRecord>& records, const TerraEngine::Renderer::RenderFrameSnapshot& snapshot);
 
 	void SetQualityPreset(QualityPreset preset);
 	// GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

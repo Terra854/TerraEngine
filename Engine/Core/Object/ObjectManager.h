@@ -23,6 +23,7 @@
 #include "ActiveMembership.h"
 #include "CompactObjectReference.h"
 #include "Components/Transform.h"
+#include "Scene/RuntimeLayout.h"
 #include "Utilities/UUID.h"
 
 struct ObjectMetadata {
@@ -126,6 +127,8 @@ public:
 	TerraEngine::CompactObjectReference makeCompactReference(entt::entity entityId) const;
 	TerraEngine::CompactObjectReferenceResolution validateCompactReference(const TerraEngine::CompactObjectReference& reference) const;
 	std::optional<Object> resolveCompactReference(const TerraEngine::CompactObjectReference& reference);
+	const std::vector<TerraEngine::Scene::RuntimeActiveMembership>& GetRuntimeActiveMembershipSnapshot();
+	std::uint64_t GetRuntimeActiveMembershipRevision() const { return runtimeActiveMembershipRevision; }
 	
 	// Get UUID for an entity.
 	TerraEngine::UUID getUUID(entt::entity entity);
@@ -141,15 +144,17 @@ public:
 	template<typename... Components, typename Func>
 	void forEachObjectWithComponents(Func&& func)
 	{
-		// ActiveObjectTag is an empty marker component. Iterating entities from
-		// the combined view keeps active membership as an EnTT filter while the
-		// callback still receives only the real component references callers
-		// already expect.
-		auto view = registry.view<TerraEngine::ActiveObjectTag, Components...>();
-		for (auto entity : view) {
-			auto activeComps = std::forward_as_tuple(view.template get<Components>(entity)...);
-			auto obj = makeHandle(entity);
-			if (std::apply([](auto&... comps) { return (comps.active && ...); }, activeComps)) {
+		// Runtime systems scan the compact active membership list first, then
+		// touch component storage only for entities that survived object-level
+		// active filtering. This keeps inactive authored objects visible to
+		// editor paths while removing a metadata lookup from hot queries.
+		for (const TerraEngine::Scene::RuntimeActiveMembership& membership : GetRuntimeActiveMembershipSnapshot()) {
+			if (!membership.objectActive || !registry.valid(membership.entity) || !registry.all_of<Components...>(membership.entity)) {
+				continue;
+			}
+			auto activeComps = std::forward_as_tuple(registry.get<Components>(membership.entity)...);
+			auto obj = makeHandle(membership.entity);
+			if (std::apply([](auto&... comps) { return (IsRuntimeComponentActive(comps) && ...); }, activeComps)) {
 				std::apply([&](auto&... comps) { func(obj, comps...); }, activeComps);
 			}
 		}
@@ -172,16 +177,19 @@ public:
 	std::vector<Object> getObjectsWithComponents()
 	{
 		std::vector<Object> objects;
-		// Entity iteration avoids EnTT's empty-component callback shortcut for
-		// ActiveObjectTag while still excluding inactive objects at the view
-		// level before component state is inspected.
-		auto view = registry.view<TerraEngine::ActiveObjectTag, Components...>();
-		for (auto entity : view)
+		// Entity iteration follows the retained active membership cache. That
+		// cache is rebuilt only when object/component membership changes, so
+		// repeated runtime scans avoid per-object metadata checks.
+		for (const TerraEngine::Scene::RuntimeActiveMembership& membership : GetRuntimeActiveMembershipSnapshot())
 		{
-			auto activeComps = std::forward_as_tuple(view.template get<Components>(entity)...);
-			if (std::apply([](auto&... comps) { return (comps.active && ...); }, activeComps))
+			if (!membership.objectActive || !registry.valid(membership.entity) || !registry.all_of<Components...>(membership.entity))
 			{
-				objects.push_back(makeHandle(entity));
+				continue;
+			}
+			auto activeComps = std::forward_as_tuple(registry.get<Components>(membership.entity)...);
+			if (std::apply([](auto&... comps) { return (IsRuntimeComponentActive(comps) && ...); }, activeComps))
+			{
+				objects.push_back(makeHandle(membership.entity));
 			}
 		}
 		return objects;
@@ -247,6 +255,9 @@ private:
 	std::uint64_t spatialRevision = 0;
 	std::uint64_t transformRevision = 0;
 	std::uint64_t hierarchyRevision = 0;
+	std::uint64_t runtimeActiveMembershipRevision = 0;
+	std::uint64_t cachedRuntimeActiveMembershipRevision = static_cast<std::uint64_t>(-1);
+	std::vector<TerraEngine::Scene::RuntimeActiveMembership> runtimeActiveMembershipCache;
 	std::unordered_map<Object, ObjectMetadata> metadataMap;
 	entt::registry registry;
 	std::unordered_map<entt::entity, entt::entity> parentMap;
@@ -274,6 +285,8 @@ private:
 	void removeFromLookupBucket(std::unordered_map<std::string, std::vector<entt::entity>>& index, const std::string& key, entt::entity entityId);
 	void notifySpatialObjectDirty(entt::entity entityId);
 	void notifyHierarchyDirty();
+	void invalidateRuntimeActiveMembership();
+	void rebuildRuntimeActiveMembershipCache();
 	void detachFromParent(entt::entity childId);
 	bool isDescendant(entt::entity ancestor, entt::entity potentialChild) const;
 };

@@ -16,6 +16,7 @@ namespace TerraEngine::Tests {
 	void RegisterLinuxStartupSmokeTests(TestRegistry& registry);
 	void RegisterMaterialRuntimeContractTests(TestRegistry& registry);
 	void RegisterActiveMembershipTests(TestRegistry& registry);
+	void RegisterRuntimeActiveMembershipTests(TestRegistry& registry);
 	void RegisterArchitectureMigrationSummaryTests(TestRegistry& registry);
 	void RegisterCompactObjectReferenceTests(TestRegistry& registry);
 	void RegisterComponentAccessGrantTests(TestRegistry& registry);
@@ -44,6 +45,7 @@ namespace TerraEngine::Tests {
 	void RegisterRenderTypesTests(TestRegistry& registry);
 	void RegisterRendererGraphSmokeTests(TestRegistry& registry);
 	void RegisterRenderDiagnosticsTests(TestRegistry& registry);
+	void RegisterRenderRuntimeLayoutTests(TestRegistry& registry);
 	void RegisterRenderFrameBreakdownTests(TestRegistry& registry);
 	void RegisterRenderFrameSnapshotTests(TestRegistry& registry);
 	void RegisterRenderGraphContractTests(TestRegistry& registry);
@@ -83,6 +85,8 @@ namespace TerraEngine::Tests {
 	void RegisterRenderProfileBootSummaryTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterHierarchySnapshotTests(TestRegistry& registry);
+	void RegisterRuntimeHierarchyLayoutTests(TestRegistry& registry);
+	void RegisterRuntimeLayoutCompatibilityTests(TestRegistry& registry);
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
 	void RegisterSkyComponentSerializationTests(TestRegistry& registry);
@@ -129,6 +133,7 @@ int main() {
 	TerraEngine::Tests::RegisterMaterialRuntimeContractTests(registry);
 	TerraEngine::Tests::RegisterArchitectureMigrationSummaryTests(registry);
 	TerraEngine::Tests::RegisterActiveMembershipTests(registry);
+	TerraEngine::Tests::RegisterRuntimeActiveMembershipTests(registry);
 	TerraEngine::Tests::RegisterCompactObjectReferenceTests(registry);
 	TerraEngine::Tests::RegisterComponentAccessGrantTests(registry);
 	TerraEngine::Tests::RegisterComponentAccessTests(registry);
@@ -158,6 +163,7 @@ int main() {
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
 	TerraEngine::Tests::RegisterRendererGraphSmokeTests(registry);
 	TerraEngine::Tests::RegisterRenderDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterRenderRuntimeLayoutTests(registry);
 	TerraEngine::Tests::RegisterRenderFrameBreakdownTests(registry);
 	TerraEngine::Tests::RegisterRenderFrameSnapshotTests(registry);
 	TerraEngine::Tests::RegisterRenderGraphContractTests(registry);
@@ -197,6 +203,8 @@ int main() {
 	TerraEngine::Tests::RegisterRenderProfileBootSummaryTests(registry);
 	TerraEngine::Tests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::Tests::RegisterHierarchySnapshotTests(registry);
+	TerraEngine::Tests::RegisterRuntimeHierarchyLayoutTests(registry);
+	TerraEngine::Tests::RegisterRuntimeLayoutCompatibilityTests(registry);
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
 	TerraEngine::Tests::RegisterSkyComponentSerializationTests(registry);

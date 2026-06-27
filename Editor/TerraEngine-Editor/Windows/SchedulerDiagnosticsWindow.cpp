@@ -148,6 +148,8 @@ void SchedulerDiagnosticsWindow::OnGui()
 	ImGui::Spacing();
 	DrawWorkerCoverageSummary();
 	ImGui::Spacing();
+	DrawRuntimeLayoutSummary();
+	ImGui::Spacing();
 	DrawScriptingSummary();
 	ImGui::Spacing();
 	ImGui::SeparatorText("UI Preparation");
@@ -324,6 +326,48 @@ void SchedulerDiagnosticsWindow::DrawWorkerCoverageSummary()
 	DrawStringList("Rejected:", report.rejectedCategories);
 	DrawStringList("Fallback:", report.fallbackCategories);
 	DrawStringList("Boundaries:", report.hardBoundaryFindings);
+}
+
+void SchedulerDiagnosticsWindow::DrawRuntimeLayoutSummary()
+{
+	if (owner == nullptr || owner->GetContext() == nullptr || owner->GetContext()->engine == nullptr)
+	{
+		ImGui::TextDisabled("Runtime layout diagnostics are not available.");
+		return;
+	}
+
+	const TerraEngine::Scene::LayoutDiagnosticsSummary& summary = owner->GetContext()->engine->GetRuntimeLayoutDiagnostics();
+	const TerraEngine::Renderer::RenderDiagnosticsSummary renderSummary = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+	ImGui::SeparatorText("Runtime Layout");
+	if (ImGui::BeginTable("SchedulerDiagnosticsRuntimeLayout", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Authored");
+		ImGui::TableSetupColumn("Active");
+		ImGui::TableSetupColumn("Transforms");
+		ImGui::TableSetupColumn("Render Records");
+		ImGui::TableSetupColumn("Rejected");
+		ImGui::TableSetupColumn("Fallbacks");
+		ImGui::TableSetupColumn("Small Guard");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::Text("%zu", summary.totalObjectCount);
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Text("%zu", summary.activeObjectCount);
+		ImGui::TableSetColumnIndex(2);
+		ImGui::Text("%zu", summary.transformRecordCount);
+		ImGui::TableSetColumnIndex(3);
+		ImGui::Text("%zu", renderSummary.runtimeLayoutRenderRecordCount);
+		ImGui::TableSetColumnIndex(4);
+		ImGui::Text("%zu", renderSummary.runtimeLayoutRejectedRecordCount);
+		ImGui::TableSetColumnIndex(5);
+		ImGui::Text("%zu", summary.fallbackCount);
+		ImGui::TableSetColumnIndex(6);
+		ImGui::TextUnformatted(summary.smallSceneGuardTriggered ? "yes" : "no");
+		ImGui::EndTable();
+	}
+	DrawStringList("Rebuild:", summary.rebuildReasons);
+	DrawStringList("Render rejects:", renderSummary.runtimeLayoutRejectionReasons);
 }
 
 void SchedulerDiagnosticsWindow::DrawScriptingSummary()

@@ -103,6 +103,49 @@ void ObjectManager::notifyHierarchyDirty()
 	++hierarchyRevision;
 }
 
+void ObjectManager::invalidateRuntimeActiveMembership()
+{
+	// Runtime membership changes whenever hot systems must rebuild their
+	// active-only entity list. Authored metadata remains in metadataMap so
+	// editor and serialization callers can still inspect inactive objects.
+	++runtimeActiveMembershipRevision;
+}
+
+void ObjectManager::rebuildRuntimeActiveMembershipCache()
+{
+	runtimeActiveMembershipCache.clear();
+	runtimeActiveMembershipCache.reserve(metadataMap.size());
+	for (const auto& [objectHandle, metadata] : metadataMap)
+	{
+		const entt::entity entityId = objectHandle.EntityId();
+		if (!registry.valid(entityId))
+		{
+			continue;
+		}
+		TerraEngine::Scene::RuntimeActiveMembership membership;
+		membership.entity = entityId;
+		membership.objectId = getUUID(entityId);
+		membership.objectActive = metadata.active && registry.any_of<TerraEngine::ActiveObjectTag>(entityId);
+		membership.componentActiveMask = membership.objectActive ? 1u : 0u;
+		membership.membershipRevision = runtimeActiveMembershipRevision;
+		membership.authoredStateVisible = true;
+		runtimeActiveMembershipCache.push_back(membership);
+	}
+	std::sort(runtimeActiveMembershipCache.begin(), runtimeActiveMembershipCache.end(), [](const TerraEngine::Scene::RuntimeActiveMembership& left, const TerraEngine::Scene::RuntimeActiveMembership& right) {
+		return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+	});
+	cachedRuntimeActiveMembershipRevision = runtimeActiveMembershipRevision;
+}
+
+const std::vector<TerraEngine::Scene::RuntimeActiveMembership>& ObjectManager::GetRuntimeActiveMembershipSnapshot()
+{
+	if (cachedRuntimeActiveMembershipRevision != runtimeActiveMembershipRevision)
+	{
+		rebuildRuntimeActiveMembershipCache();
+	}
+	return runtimeActiveMembershipCache;
+}
+
 void ObjectManager::MarkObjectTransformDirty(const Object& obj)
 {
 	if (!registry.valid(obj.EntityId()))
@@ -146,6 +189,7 @@ Object ObjectManager::createObject(const std::string& name) {
 	childrenMap.emplace(object.EntityId(), std::vector<entt::entity>{});
 	
 	// Structured modifications trigger the observer callback to sync dirty state.
+	invalidateRuntimeActiveMembership();
 	notifySpatialObjectDirty(object.EntityId());
 	notifyHierarchyDirty();
 	if (onModified) onModified();
@@ -209,6 +253,7 @@ void ObjectManager::removeObject(Object obj) {
 
 	// Erase the object from the map
 	metadataMap.erase(obj);
+	invalidateRuntimeActiveMembership();
 	notifyHierarchyDirty();
 
 	if (onModified) onModified();
@@ -508,6 +553,7 @@ void ObjectManager::setObjectActive(const Object& obj, bool active)
 		++it->second.metadataGeneration;
 		++it->second.componentGeneration;
 		++it->second.bindingGeneration;
+		invalidateRuntimeActiveMembership();
 		notifySpatialObjectDirty(obj.EntityId());
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (onModified) onModified();
@@ -557,6 +603,7 @@ void ObjectManager::notifyObjectStructureChanged(const Object& obj)
 		++it->second.componentGeneration;
 		++it->second.bindingGeneration;
 	}
+	invalidateRuntimeActiveMembership();
 	notifySpatialObjectDirty(obj.EntityId());
 	if (onModified) onModified();
 }
@@ -763,6 +810,7 @@ void ObjectManager::UpdateEntityUUID(entt::entity entity, const TerraEngine::UUI
 		uuidToEntity[newId] = entity;
 	}
 	generationByEntity.try_emplace(entity, nextObjectGeneration++);
+	invalidateRuntimeActiveMembership();
 	notifySpatialObjectDirty(entity);
 	notifyHierarchyDirty();
 }
@@ -845,6 +893,9 @@ void ObjectManager::clear()
 	transformRevision = 0;
 	spatialRevision = 0;
 	hierarchyRevision = 0;
+	runtimeActiveMembershipRevision = 0;
+	cachedRuntimeActiveMembershipRevision = static_cast<std::uint64_t>(-1);
+	runtimeActiveMembershipCache.clear();
 	nextObjectGeneration = 1;
 	nameIndex.clear();
 	tagIndex.clear();

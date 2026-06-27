@@ -23,6 +23,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackPlanner.cpp
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
 	Core/ActiveMembershipTests.cpp
+	Core/RuntimeActiveMembershipTests.cpp
 	Core/CompactObjectReferenceTests.cpp
 	Core/ComponentAccessGrantTests.cpp
 	Core/ComponentAccessTests.cpp
@@ -57,6 +58,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBudgetDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderDeferredRetirementTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderDiagnosticsTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderRuntimeLayoutTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFailureContainmentTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFrameBreakdownTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFrameSnapshotTests.cpp
@@ -97,6 +99,8 @@ add_executable(TerraEngine-EngineTests
 	Scripting/ScriptingWorkerBoundaryTests.cpp
 	Scene/PrefabCompositionTests.cpp
 	Scene/HierarchySnapshotTests.cpp
+	Scene/RuntimeHierarchyLayoutTests.cpp
+	Scene/RuntimeLayoutCompatibilityTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
 	Scene/SceneMutationQueueTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Scene/SkyComponentSerializationTests.cpp

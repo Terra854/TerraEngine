@@ -25,6 +25,7 @@
 #include "Scheduling/EcsQueryTaskGraph.h"
 #include "Scene/SceneMutationQueue.h"
 #include "Scene/SceneGraphRuntime.h"
+#include "Scene/RuntimeLayout.h"
 #include "Scripting/ScriptingSystem.h"
 #include "Scripting/ScriptGlue.h"
 #include "UI/UISystem.h"
@@ -314,6 +315,17 @@ bool Engine::Update(float deltaTime)
 			TerraEngine::Scheduling::FrameExecutionPlan coveragePlan = TerraEngine::Scheduling::ValidateFrameWorkloads(systemScheduler.BuildFrameWorkloadDeclarations(deltaTime), "engine-frame-coverage");
 			latestWorkerCoverageReport = TerraEngine::Scheduling::BuildWorkerCoverageReport(coveragePlan);
 			latestArchitectureSummary = coveragePlan.migrationSummary;
+			const auto& runtimeMembership = ObjectManager::instance().GetRuntimeActiveMembershipSnapshot();
+			latestRuntimeLayoutDiagnostics = {};
+			latestRuntimeLayoutDiagnostics.totalObjectCount = runtimeMembership.size();
+			for (const TerraEngine::Scene::RuntimeActiveMembership& membership : runtimeMembership)
+			{
+				if (membership.objectActive)
+				{
+					++latestRuntimeLayoutDiagnostics.activeObjectCount;
+				}
+			}
+			latestRuntimeLayoutDiagnostics.smallSceneGuardTriggered = latestRuntimeLayoutDiagnostics.totalObjectCount <= 8u;
 		}
 		if (ecsGraphDiagnosticsEnabled)
 		{

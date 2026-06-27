@@ -11,13 +11,29 @@ namespace TerraEngine {
 
 	struct ActiveMembershipState {
 		bool objectActive = true;
+		bool runtimeQueryMember = true;
 		std::uint64_t sourceRevision = 0;
 		bool serializedActive = true;
+		std::uint64_t componentActiveMask = 0;
 	};
 
-	inline bool IsActiveMember(const ActiveMembershipState& state)
+	constexpr bool IsActiveMember(const ActiveMembershipState& state)
 	{
-		return state.objectActive;
+		return state.objectActive && state.runtimeQueryMember;
+	}
+
+	constexpr ActiveMembershipState MakeRuntimeActiveMembershipState(bool authoredActive, std::uint64_t sourceRevision, std::uint64_t componentActiveMask = 0)
+	{
+		// Authored active state remains serialized/editor-visible while the
+		// runtime query bit says whether hot systems should include the object
+		// in their compact membership snapshot.
+		return ActiveMembershipState{
+			authoredActive,
+			authoredActive,
+			sourceRevision,
+			authoredActive,
+			componentActiveMask
+		};
 	}
 
 }

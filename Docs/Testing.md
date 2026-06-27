@@ -46,6 +46,27 @@ Large-scene regression coverage currently includes 10,000-object active queries,
 `TERRAENGINE_TEST_FILTER=ArchitectureMigrationSummary;ActiveMembership;CompactObjectReference;HierarchySnapshot;ComponentAccessGrant;SystemScheduler`
 for a focused local diagnosis pass before running the complete CTest surface.
 
+Hot runtime data layout coverage lives across `Tests/Engine/Core`,
+`Tests/Engine/Scene`, `Tests/Engine/Renderer`, and `Tests/Editor/Scene`. These
+checks validate compact active membership snapshots, retained flat hierarchy
+layout reuse, transform runtime record publication, render runtime layout
+diagnostics, compatibility mismatch fallback reporting, and editor-visible
+authored-versus-runtime counts. Use this focused pass while iterating on layout
+or cache behavior:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="RuntimeLayout;ActiveMembership;HierarchyLayout;RenderRuntimeLayout;LayoutCompatibility"
+.\out\build\CodexDebug\TerraEngine-EngineTests.exe
+.\out\build\CodexDebug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+The editor diagnostics window should show the runtime layout section with
+authored object count, active runtime count, compact render record count,
+rejections, fallbacks, and small-scene guard state. This section deliberately
+does not include lighting controls; lighting remains in renderer-specific
+diagnostic surfaces.
+
 Broad worker conversion coverage lives beside the existing scheduler tests. Use
 `TERRAENGINE_TEST_FILTER=WorkerConversion;WorkerCoverage;WorkerHardBoundary;ScriptingWorkerBoundary;LiveGpuSubmissionBoundary;WindowInputWorkerBoundary;Editor.ReflectionWorkerBoundary`
 to validate the worker coverage report, hard-boundary classifications, managed

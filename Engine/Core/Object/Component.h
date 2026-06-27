@@ -292,6 +292,22 @@ void SetComponentProperty(ComponentType& component, std::string_view propertyNam
 	TerraEngine::Reflection::SetPropertyValue(prop, component, wrappedValue);
 }
 
+template <typename ComponentType>
+bool IsRuntimeComponentActive(const ComponentType& component)
+{
+	// Hot runtime membership only needs the component enable bit. Keeping this
+	// helper typed and tiny lets ObjectManager scan compact entity ids first,
+	// then reject disabled hot components without touching reflection metadata.
+	if constexpr (requires { component.active; })
+	{
+		return component.active;
+	}
+	else
+	{
+		return true;
+	}
+}
+
 // Base component that all other components will inherit via CRTP.
 template <typename Derived>
 class Component

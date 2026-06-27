@@ -24,6 +24,7 @@
 #include "Scheduling/FrameWorkload.h"
 #include "Scheduling/SystemScheduler.h"
 #include "Object/ObjectManager.h"
+#include "Scene/RuntimeLayout.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Timer.h"
 
@@ -71,6 +72,7 @@ class TERRAENGINE_API Engine {
 		const TerraEngine::Scheduling::JobGraphSummary& GetJobGraphSummary() const { return latestJobGraphSummary; }
 		const TerraEngine::Scheduling::ArchitectureMigrationSummary& GetArchitectureMigrationSummary() const { return latestArchitectureSummary; }
 		const TerraEngine::Scheduling::WorkerCoverageReport& GetWorkerCoverageReport() const { return latestWorkerCoverageReport; }
+		const TerraEngine::Scene::LayoutDiagnosticsSummary& GetRuntimeLayoutDiagnostics() const { return latestRuntimeLayoutDiagnostics; }
 
 	private:
 		bool running = true;
@@ -81,6 +83,7 @@ class TERRAENGINE_API Engine {
 		TerraEngine::Scheduling::JobGraphSummary latestJobGraphSummary;
 		TerraEngine::Scheduling::ArchitectureMigrationSummary latestArchitectureSummary;
 		TerraEngine::Scheduling::WorkerCoverageReport latestWorkerCoverageReport;
+		TerraEngine::Scene::LayoutDiagnosticsSummary latestRuntimeLayoutDiagnostics;
 		FrameTimer frameTimer;
 
 		SystemsBase* editorSystem = nullptr;
