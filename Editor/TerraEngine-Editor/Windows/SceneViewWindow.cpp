@@ -643,6 +643,13 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (m_WasUsingGizmo && !ImGuizmo::IsUsing()) {
 						m_WasUsingGizmo = false;
+						// SceneView owns transient transform preview only. The
+						// structural editor operations named in the STM plan
+						// (create/delete/rename/reparent/component edits) are
+						// routed through Hierarchy, Inspector, and Automation
+						// command paths, where transaction grouping can wrap the
+						// resulting undo commands without disturbing gizmo drag
+						// feedback.
 						UndoRedoSystem::Instance().PushCommand(std::make_unique<ChangeTransformCommand>(
 							 *selectedEntity,
 							m_GizmoStartPos, m_GizmoStartRot, m_GizmoStartScale,

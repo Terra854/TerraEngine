@@ -167,6 +167,8 @@ namespace TerraEngine::Scene {
 	TERRAENGINE_API SceneTransformWorkPlan BuildTransformWorkPlan(const SceneGraph& graph, const HierarchySnapshot& snapshot);
 	TERRAENGINE_API SceneTransformPropagationResult PropagateWorldTransforms(SceneGraph& graph, const SceneDirtyTransformState& dirtyState = {});
 	TERRAENGINE_API SceneRuntimeSummary BuildSceneRuntimeSummary(const SceneGraph& graph);
+	TERRAENGINE_API std::uint64_t ObserveHierarchyRevision(const ObjectManager& objects);
+	TERRAENGINE_API std::uint64_t ObserveHierarchyRevision(const SceneGraph& graph);
 	TERRAENGINE_API bool ReparentPreserveWorld(ObjectManager& objects, entt::entity child, std::optional<entt::entity> parent);
 
 }

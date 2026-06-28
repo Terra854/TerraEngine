@@ -44,6 +44,8 @@ add_executable(TerraEngine-EditorTests
 	Scene/ArchitectureHardeningPlayModeTests.cpp
 	Scene/FullParallelFrameDiagnosticsTests.cpp
 	Scene/RuntimeLayoutDiagnosticsTests.cpp
+	Scene/TransactionalMutationDiagnosticsWindowTests.cpp
+	Scene/TransactionalMutationUndoTests.cpp
 	Scene/PrefabAuthoringWorkflowTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp

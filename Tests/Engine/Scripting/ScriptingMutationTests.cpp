@@ -4,6 +4,7 @@
 #include "Core/Object/ComponentRegistry.h"
 #include "Core/Object/ObjectManager.h"
 #include "Scene/SceneMutationQueue.h"
+#include "Scripting/ScriptGlue.h"
 #include "Scripting/ScriptingSystem.h"
 
 #include <glm/vec3.hpp>
@@ -49,6 +50,22 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(1), ObjectManager::instance().getRootObjects().size(), "Flush should create the requested object.");
 
 			ObjectManager::instance().clear();
+		});
+
+		registry.Add("Scripting.Mutation.ManagedTransactionJsonQueuesAndCommits", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			TerraEngine::Scene::SceneMutationQueue::Instance().Clear();
+
+			const char* response = Native_Scene_SubmitTransactionJson(R"({"id":"managed-create","originName":"test-managed-callback","writes":[{"op":"create","localObjectId":1,"name":"Managed Transaction Spawn"}]})");
+			const std::string responseText = response != nullptr ? response : "";
+			const TerraEngine::Scene::SceneMutationBatchResult result = TerraEngine::Scene::SceneMutationQueue::Instance().Apply(objects, "managed-transaction-test");
+
+			context.Expect(responseText.find(R"("ok":true)") != std::string::npos, "Managed transaction bridge should accept a valid JSON payload.");
+			context.Expect(result.applied, "Managed transaction payloads should commit through the protected mutation flush.");
+			context.ExpectEqual(static_cast<std::size_t>(1), objects.getRootObjects().size(), "Managed transaction create should become a scene object.");
+			context.Expect(TerraEngine::Scene::SceneMutationQueue::Instance().Empty(), "Managed transaction flush should clear pending queue state.");
+			objects.clear();
 		});
 
 		registry.Add("Scripting.Mutation.PendingRequestsAreSortedByFrameOrder", [](TestContext& context) {

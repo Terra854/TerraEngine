@@ -247,6 +247,21 @@ so this command runs only the project-owned CTest entries.
 ctest --test-dir out/build/Debug --output-on-failure
 ```
 
+### Transactional Mutation Checks
+
+Transactional scene mutation tests cover the engine-scoped STM path used by
+worker-prepared scene/object/component edits. The feature intentionally keeps
+live GPU submission, platform polling, arbitrary managed callback execution,
+and editor UI mutation outside the transaction write set; those operations
+remain protected boundaries.
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="TransactionalMutation,SystemScheduler.ComponentAccessDeferredWrite"
+.\out\build\CodexDebug\TerraEngine-EngineTests.exe
+.\out\build\CodexDebug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
 ## Export Runtime Baseline
 
 The baseline sample lives at `Tests/Fixtures/ExportRuntimeBaseline`. Its checked-in

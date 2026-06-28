@@ -121,6 +121,7 @@ public:
 	std::uint64_t getObjectMetadataGeneration(const Object& obj) const;
 	std::uint64_t getObjectComponentGeneration(const Object& obj) const;
 	std::uint64_t getObjectBindingGeneration(const Object& obj) const;
+	std::uint64_t getObjectLifetimeGeneration(entt::entity entityId) const;
 	std::uint64_t getObjectMetadataGeneration(entt::entity entityId) const;
 	std::uint64_t getObjectComponentGeneration(entt::entity entityId) const;
 	std::uint64_t getObjectBindingGeneration(entt::entity entityId) const;

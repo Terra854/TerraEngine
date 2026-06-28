@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Core/Scheduling/SystemScheduler.h"
+#include "Core/Scheduling/ComponentAccess.h"
 #include "Core/SystemBase.h"
 #include "Scene/SceneMutationQueue.h"
 
@@ -436,6 +437,28 @@ namespace TerraEngine::Tests {
 			context.Expect(!plan.completed, "Diagnostics-only fallback mode should not report execution completion.");
 			context.Expect(log.empty(), "Diagnostics-only fallback mode should not call SystemsBase::Update.");
 			context.Expect(plan.formatted.find("compatibility execution is disabled") != std::string::npos, "Fallback control diagnostics should explain why updates did not run.");
+		});
+
+		registry.Add("Engine.SystemScheduler.ComponentAccessDeferredWriteMapsToTransactionalHandoff", [](TestContext& context) {
+			TerraEngine::Scheduling::ComponentAccessGrantRequest workerRequest;
+			workerRequest.grantId = "stm-transform-write";
+			workerRequest.workloadName = "SceneSystem";
+			workerRequest.writeComponents = { "Transform" };
+			workerRequest.scopeKind = TerraEngine::Scheduling::ComponentAccessScope::DeferredWrite;
+			workerRequest.grantMode = TerraEngine::Scheduling::ComponentAccessGrantMode::WorkerWriteDeferred;
+			workerRequest.schedulerValidated = true;
+
+			TerraEngine::Scheduling::ComponentAccessGrantResult workerGrant = TerraEngine::Scheduling::ValidateComponentAccessGrant(workerRequest);
+
+			context.Expect(workerGrant.granted, "Scheduler-validated deferred writes should be granted for STM payload preparation.");
+			context.Expect(workerGrant.normalized.scope.find("worker-write-deferred") != std::string::npos, "Grant summary should name the deferred write mode.");
+
+			TerraEngine::Scheduling::ComponentAccessGrantRequest protectedRequest = workerRequest;
+			protectedRequest.grantMode = TerraEngine::Scheduling::ComponentAccessGrantMode::ProtectedCommit;
+			TerraEngine::Scheduling::ComponentAccessGrantResult protectedGrant = TerraEngine::Scheduling::ValidateComponentAccessGrant(protectedRequest);
+
+			context.Expect(protectedGrant.granted, "Protected commit grants should remain valid for serialized STM application.");
+			context.Expect(protectedGrant.fallbackReason.find("Protected commit") != std::string::npos, "Protected grant should explain that commit remains serialized.");
 		});
 
 		registry.Add("Engine.SystemScheduler.InvalidDiagnosticFieldsAreStructured", [](TestContext& context) {

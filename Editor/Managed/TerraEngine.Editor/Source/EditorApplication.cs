@@ -11,12 +11,32 @@ using TerraEngine.Editor.Framework;
 
 namespace TerraEngine.Editor
 {
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+	public delegate void EditorInitializeDelegate(IntPtr imguiContext);
+
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+	public delegate void EditorUpdateDelegate(float deltaTime);
+
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+	public delegate void EditorShutdownDelegate();
+
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+	public delegate void EditorDrawWindowMenuDelegate();
+
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+	public delegate void EditorGetWindowsDelegate(IntPtr callback);
+
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+	public delegate void EditorSetWindowVisibilityDelegate(IntPtr titlePtr, int visible);
+
+	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+	public delegate void EditorHideAllWindowsDelegate();
+
     public static unsafe class EditorApplication
     {
         private static bool _initialized = false;
         private static StatusWindow _statusWindow = null!;
 
-        [UnmanagedCallersOnly]
         // Initialize bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void Initialize(IntPtr imguiContext)
         {
@@ -53,7 +73,6 @@ namespace TerraEngine.Editor
             }
         }
 
-        [UnmanagedCallersOnly]
         // Update bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void Update(float deltaTime)
         {
@@ -79,7 +98,6 @@ namespace TerraEngine.Editor
             }
         }
 
-        [UnmanagedCallersOnly]
         // DrawWindowMenu bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void DrawWindowMenu()
         {
@@ -112,7 +130,6 @@ namespace TerraEngine.Editor
             }
         }
 
-        [UnmanagedCallersOnly]
         // Shutdown bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void Shutdown()
         {
@@ -127,12 +144,16 @@ namespace TerraEngine.Editor
             }
         }
 
-        [UnmanagedCallersOnly]
         // GetManagedWindows bridges managed callers to engine state; validate arguments before forwarding to native code.
-        public static void GetManagedWindows(delegate* unmanaged<IntPtr, int, void> callback)
+        public static void GetManagedWindows(IntPtr callbackPtr)
         {
             try
             {
+                // The native host passes a raw function pointer through the
+                // hosted delegate thunk. Keep it as IntPtr at the public
+                // boundary so hostfxr can generate the delegate wrapper, then
+                // reinterpret it inside the unsafe editor assembly.
+                delegate* unmanaged<IntPtr, int, void> callback = (delegate* unmanaged<IntPtr, int, void>)callbackPtr;
                 EnsureWindowsRegistered();
                 foreach (var window in WindowManager.GetWindows())
                 {
@@ -147,7 +168,6 @@ namespace TerraEngine.Editor
             }
         }
 
-        [UnmanagedCallersOnly]
         // SetWindowVisibility bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void SetWindowVisibility(IntPtr titlePtr, int visible)
         {
@@ -174,7 +194,6 @@ namespace TerraEngine.Editor
             }
         }
 
-        [UnmanagedCallersOnly]
         // HideAllWindows bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void HideAllWindows()
         {

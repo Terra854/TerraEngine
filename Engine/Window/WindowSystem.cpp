@@ -87,6 +87,10 @@ void WindowSystem::Update(float deltaTime)
 	}
 
 	backend->PollEvents();
+	// Platform polling and buffer swaps remain protected because they execute
+	// backend callbacks and OS-facing side effects. Window-derived scene changes
+	// should be expressed as transactions by the owning system after this
+	// immutable snapshot is published.
 	pollingDiagnostics.pollRevision += 1;
 	pollingDiagnostics.classification = "protected";
 	pollingDiagnostics.protectedReason = "Platform event polling, close/resize callbacks, cursor state, and swap-buffer calls remain owned by the coordinator thread.";

@@ -20,7 +20,9 @@
 
 #include <array>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -39,6 +41,7 @@ std::mutex g_ApplicationBridgeMutex;
 Engine* g_ApplicationHostEngine = nullptr;
 ApplicationEditorStopPlayModeCallback g_ApplicationEditorStopCallback = nullptr;
 thread_local std::string g_UIBridgeReturnBuffer;
+thread_local std::string g_SceneBridgeReturnBuffer;
 
 // ManagedUIStyleProperty names the supported states explicitly so serialization and switches stay readable.
 enum class ManagedUIStyleProperty : int
@@ -154,6 +157,216 @@ static nlohmann::json MarshallNativeValueToJson(void* data, ScriptType type)
 	return {};
 }
 
+static TerraEngine::Reflection::Variant MakeManagedTransactionVariant(const nlohmann::json& value, int valueKind)
+{
+	const auto readFloat = [&value](std::size_t index, float fallback) {
+		return value.is_array() && index < value.size()
+			? value.at(index).get<float>()
+			: fallback;
+	};
+
+	switch (static_cast<ScriptType>(valueKind))
+	{
+	case ScriptType::Bool:
+		return value.get<bool>();
+	case ScriptType::Int:
+		return value.get<int>();
+	case ScriptType::Float:
+		return value.get<float>();
+	case ScriptType::EntityID:
+		return value.get<std::uint32_t>();
+	case ScriptType::Vector2:
+		return glm::vec2(readFloat(0, 0.0f), readFloat(1, 0.0f));
+	case ScriptType::Vector3:
+		return glm::vec3(readFloat(0, 0.0f), readFloat(1, 0.0f), readFloat(2, 0.0f));
+	case ScriptType::Vector4:
+		return glm::vec4(readFloat(0, 0.0f), readFloat(1, 0.0f), readFloat(2, 0.0f), readFloat(3, 0.0f));
+	case ScriptType::Quaternion:
+		return glm::quat(readFloat(0, 1.0f), readFloat(1, 0.0f), readFloat(2, 0.0f), readFloat(3, 0.0f));
+	default:
+		return {};
+	}
+}
+
+static std::optional<TerraEngine::UUID> ResolveManagedTransactionObjectId(const nlohmann::json& value)
+{
+	if (value.is_string())
+	{
+		return TerraEngine::ParseUUID(value.get<std::string>());
+	}
+	if (value.is_number_unsigned())
+	{
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(value.get<std::uint32_t>());
+		if (objects.isEntityValid(entity))
+		{
+			return objects.getUUID(entity);
+		}
+		return std::nullopt;
+	}
+	if (!value.is_object())
+	{
+		return std::nullopt;
+	}
+	if (const auto uuidIt = value.find("uuid"); uuidIt != value.end() && uuidIt->is_string())
+	{
+		return TerraEngine::ParseUUID(uuidIt->get<std::string>());
+	}
+	if (const auto uuidIt = value.find("objectUuid"); uuidIt != value.end() && uuidIt->is_string())
+	{
+		return TerraEngine::ParseUUID(uuidIt->get<std::string>());
+	}
+	if (const auto entityIt = value.find("entity"); entityIt != value.end() && entityIt->is_number_unsigned())
+	{
+		return ResolveManagedTransactionObjectId(*entityIt);
+	}
+	if (const auto entityIt = value.find("objectId"); entityIt != value.end() && entityIt->is_number_unsigned())
+	{
+		return ResolveManagedTransactionObjectId(*entityIt);
+	}
+	return std::nullopt;
+}
+
+static TerraEngine::Scene::TransactionObjectRef ParseManagedTransactionObjectRef(const nlohmann::json& value)
+{
+	if (value.is_null())
+	{
+		return {};
+	}
+	if (value.is_object())
+	{
+		if (const auto localIt = value.find("localObjectId"); localIt != value.end() && localIt->is_number_integer())
+		{
+			return TerraEngine::Scene::LocalObject(localIt->get<std::int32_t>());
+		}
+	}
+	if (const std::optional<TerraEngine::UUID> objectId = ResolveManagedTransactionObjectId(value))
+	{
+		return TerraEngine::Scene::ExistingObject(*objectId);
+	}
+	return {};
+}
+
+static TerraEngine::Scene::Transaction ParseManagedSceneTransaction(const nlohmann::json& payload)
+{
+	if (!payload.is_object())
+	{
+		throw std::invalid_argument("Transaction payload must be a JSON object.");
+	}
+
+	const std::string transactionId = payload.value("id", std::string("managed-transaction"));
+	TerraEngine::Scene::TransactionalMutationBuilder builder(
+		transactionId,
+		TerraEngine::Scene::TransactionOrigin::ManagedCallback,
+		payload.value("originName", std::string("managed-callback")));
+	if (payload.value("preflightOnly", false))
+	{
+		builder.SetMode(TerraEngine::Scene::TransactionMode::PreflightOnly);
+	}
+	if (const std::string undoGroup = payload.value("undoGroup", std::string{}); !undoGroup.empty())
+	{
+		builder.SetUndoGroup(undoGroup);
+	}
+
+	const auto writesIt = payload.find("writes");
+	if (writesIt == payload.end() || !writesIt->is_array())
+	{
+		throw std::invalid_argument("Transaction payload needs a writes array.");
+	}
+
+	for (const nlohmann::json& write : *writesIt)
+	{
+		const std::string op = write.value("op", write.value("kind", std::string{}));
+		if (op == "create" || op == "createObject")
+		{
+			builder.CreateObject(
+				write.value("localObjectId", 1),
+				write.value("name", write.value("displayName", std::string("Managed Object"))),
+				ParseManagedTransactionObjectRef(write.value("parent", nlohmann::json{})));
+		}
+		else if (op == "delete" || op == "deleteObject")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				builder.DeleteObject(*target);
+			}
+		}
+		else if (op == "reparent" || op == "reparentObject")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				builder.ReparentObject(*target, ParseManagedTransactionObjectRef(write.value("parent", nlohmann::json{})));
+			}
+		}
+		else if (op == "setName")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				builder.SetName(*target, write.value("name", std::string{}));
+			}
+		}
+		else if (op == "setTag")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				builder.SetTag(*target, write.value("tag", std::string{}));
+			}
+		}
+		else if (op == "setLayer")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				builder.SetLayer(*target, write.value("layer", std::string{}));
+			}
+		}
+		else if (op == "setActive")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				builder.SetActive(*target, write.value("active", true));
+			}
+		}
+		else if (op == "setStatic")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				builder.SetStatic(*target, write.value("static", write.value("isStatic", false)));
+			}
+		}
+		else if (op == "addComponent")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				builder.AddComponent(*target, write.value("component", write.value("componentName", std::string{})));
+			}
+		}
+		else if (op == "removeComponent")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				builder.RemoveComponent(*target, write.value("component", write.value("componentName", std::string{})));
+			}
+		}
+		else if (op == "updateComponentProperty")
+		{
+			if (const std::optional<TerraEngine::UUID> target = ResolveManagedTransactionObjectId(write.value("object", nlohmann::json{})))
+			{
+				const int valueKind = write.value("valueKind", -1);
+				builder.UpdateComponentProperty(
+					*target,
+					write.value("component", write.value("componentName", std::string{})),
+					write.value("property", write.value("propertyName", std::string{})),
+					MakeManagedTransactionVariant(write.value("value", nlohmann::json{}), valueKind));
+			}
+		}
+		else
+		{
+			throw std::invalid_argument("Unsupported managed transaction op: " + op);
+		}
+	}
+	return builder.Build();
+}
+
 // ResolveBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static ScriptBinding* ResolveBinding(entt::entity object, const char* bindingId)
 {
@@ -190,6 +403,12 @@ static const char* WriteUIBridgeReturnText(std::string text)
 {
 	g_UIBridgeReturnBuffer = std::move(text);
 	return g_UIBridgeReturnBuffer.c_str();
+}
+
+static const char* WriteSceneBridgeReturnText(std::string text)
+{
+	g_SceneBridgeReturnBuffer = std::move(text);
+	return g_SceneBridgeReturnBuffer.c_str();
 }
 
 // GetApplicationHostEngine is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1612,6 +1831,42 @@ extern "C" {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!id) return false;
 		return SceneManager::Instance().SetActiveScene(*id);
+	}
+
+	// Native_Scene_SubmitTransactionJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+	const char* Native_Scene_SubmitTransactionJson(const char* transactionJson) {
+		if (transactionJson == nullptr || transactionJson[0] == '\0') {
+			return WriteSceneBridgeReturnText(R"({"ok":false,"error":"transactionJson is required"})");
+		}
+
+		try {
+			TerraEngine::Scene::Transaction transaction = ParseManagedSceneTransaction(nlohmann::json::parse(transactionJson));
+			const std::string transactionId = transaction.id;
+			if (transaction.mode == TerraEngine::Scene::TransactionMode::PreflightOnly) {
+				const TerraEngine::Scene::TransactionResult preflight = SceneManager::Instance().PreflightTransaction(transaction);
+				nlohmann::json response{
+					{ "ok", preflight.status == TerraEngine::Scene::TransactionStatus::PreflightAccepted },
+					{ "transactionId", transactionId },
+					{ "status", std::string(TerraEngine::Scene::ToString(preflight.status)) },
+					{ "conflicts", preflight.conflicts.size() }
+				};
+				return WriteSceneBridgeReturnText(response.dump());
+			}
+
+			TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(transaction));
+			nlohmann::json response{
+				{ "ok", true },
+				{ "transactionId", transactionId },
+				{ "pending", TerraEngine::Scene::SceneMutationQueue::Instance().Size() }
+			};
+			return WriteSceneBridgeReturnText(response.dump());
+		} catch (const std::exception& exception) {
+			nlohmann::json response{
+				{ "ok", false },
+				{ "error", exception.what() }
+			};
+			return WriteSceneBridgeReturnText(response.dump());
+		}
 	}
 
 	// Native_Time_GetDeltaTime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

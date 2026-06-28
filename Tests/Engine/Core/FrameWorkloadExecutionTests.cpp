@@ -64,6 +64,19 @@ namespace TerraEngine::Tests {
 			context.Expect(plan.formatted.find("access-conflict") == std::string::npos, "Ordered handoffs should not report an access conflict.");
 		});
 
+		registry.Add("Engine.FrameWorkload.WorkerPreparedDeferredMutationHandoffIsCovered", [](TestContext& context) {
+			auto workerPrepare = MakeWorkload("WorkerTransactionPrepare", { "SceneGraph" }, { "SceneMutationQueue" });
+			workerPrepare.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
+			workerPrepare.mutationPolicy = TerraEngine::Scheduling::FrameWorkloadMutationPolicy::DeferredOnly;
+
+			const auto plan = TerraEngine::Scheduling::ValidateFrameWorkloads({ workerPrepare }, "worker-transaction-handoff");
+
+			context.Expect(plan.valid, "Worker-prepared transaction payloads should validate when writes are deferred through SceneMutationQueue.");
+			context.ExpectEqual(static_cast<std::size_t>(1), plan.migrationSummary.workerSafeCount, "The worker preparation workload should stay worker-safe.");
+			context.ExpectEqual(static_cast<std::size_t>(1), plan.migrationSummary.mutationFlushCount, "Deferred transaction handoff should be counted for scheduler diagnostics.");
+			context.Expect(plan.formatted.find("deferred-only") != std::string::npos, "Formatted frame plan should expose the deferred mutation policy.");
+		});
+
 		registry.Add("Engine.FrameWorkload.CompatibilityModeReportsInlinePolicy", [](TestContext& context) {
 			std::atomic<int> calls = 0;
 			auto tiny = MakeWorkload("Tiny", { "SceneGraph" }, {});

@@ -149,10 +149,39 @@ namespace TerraEngine::Scene {
 		buffer->requests.push_back(std::move(request));
 	}
 
+	void SceneMutationQueue::EnqueueTransaction(Transaction transaction)
+	{
+		std::scoped_lock lock(requestsMutex);
+		if (transaction.id.empty())
+		{
+			transaction.id = "transaction-" + std::to_string(transactions.size());
+		}
+		transactions.push_back(std::move(transaction));
+	}
+
+	TransactionResult SceneMutationQueue::PreflightTransaction(const Transaction& transaction, ObjectManager& objects) const
+	{
+		return TerraEngine::Scene::PreflightTransaction(objects, transaction);
+	}
+
+	bool SceneMutationQueue::CancelTransaction(const std::string& transactionId)
+	{
+		std::scoped_lock lock(requestsMutex);
+		for (Transaction& transaction : transactions)
+		{
+			if (transaction.id == transactionId)
+			{
+				transaction.canceled = true;
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool SceneMutationQueue::Empty() const
 	{
 		std::scoped_lock lock(requestsMutex);
-		return requests.empty() && std::all_of(workerBuffers.begin(), workerBuffers.end(), [](const SceneMutationWorkerBuffer& buffer) {
+		return requests.empty() && transactions.empty() && std::all_of(workerBuffers.begin(), workerBuffers.end(), [](const SceneMutationWorkerBuffer& buffer) {
 			return buffer.requests.empty();
 		});
 	}
@@ -165,6 +194,7 @@ namespace TerraEngine::Scene {
 		{
 			total += buffer.requests.size();
 		}
+		total += transactions.size();
 		return total;
 	}
 
@@ -221,11 +251,24 @@ namespace TerraEngine::Scene {
 		return coalesced;
 	}
 
+	std::vector<Transaction> SceneMutationQueue::PendingTransactions() const
+	{
+		std::scoped_lock lock(requestsMutex);
+		return transactions;
+	}
+
+	TransactionDiagnostics SceneMutationQueue::GetTransactionDiagnostics() const
+	{
+		std::scoped_lock lock(requestsMutex);
+		return transactionDiagnostics;
+	}
+
 	void SceneMutationQueue::Clear()
 	{
 		std::scoped_lock lock(requestsMutex);
 		requests.clear();
 		workerBuffers.clear();
+		transactions.clear();
 	}
 
 	SceneMutationBatchResult SceneMutationQueue::Validate(const SceneGraph& graph) const
@@ -460,6 +503,19 @@ namespace TerraEngine::Scene {
 		}
 
 		batch.applied = true;
+		const std::vector<TransactionResult> transactionResults = DrainTransactions(objects);
+		for (const TransactionResult& transactionResult : transactionResults)
+		{
+			if (transactionResult.status == TransactionStatus::Committed)
+			{
+				batch.applied = true;
+				batch.acceptedMutationCount += transactionResult.appliedWriteCount;
+			}
+			else
+			{
+				batch.rejectedMutationCount += transactionResult.rejectedWriteCount;
+			}
+		}
 		{
 			std::scoped_lock lock(requestsMutex);
 			requests.clear();
@@ -467,5 +523,26 @@ namespace TerraEngine::Scene {
 		}
 		batch.formattedCommitSummary = FormatCommitSummary(batch);
 		return batch;
+	}
+
+	std::vector<TransactionResult> SceneMutationQueue::DrainTransactions(ObjectManager& objects)
+	{
+		std::vector<Transaction> pending;
+		{
+			std::scoped_lock lock(requestsMutex);
+			pending.swap(transactions);
+		}
+		std::vector<TransactionResult> results;
+		results.reserve(pending.size());
+		for (const Transaction& transaction : pending)
+		{
+			TransactionResult result = CommitTransaction(objects, transaction);
+			{
+				std::scoped_lock lock(requestsMutex);
+				AccumulateTransactionDiagnostics(transactionDiagnostics, transaction, result);
+			}
+			results.push_back(std::move(result));
+		}
+		return results;
 	}
 }

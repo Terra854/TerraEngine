@@ -28,11 +28,19 @@ namespace TerraEngine
 			return InternalCalls.ReadNativeUtf8(Native_Scene_LoadPrefab(path));
 		}
 
-        // SetActiveScene bridges managed callers to engine state; validate arguments before forwarding to native code.
-        public static bool SetActiveScene(string uuid)
-        {
-            return Native_Scene_SetActiveScene(uuid);
-        }
+		// SetActiveScene bridges managed callers to engine state; validate arguments before forwarding to native code.
+		public static bool SetActiveScene(string uuid)
+		{
+			return Native_Scene_SetActiveScene(uuid);
+		}
+
+		// SubmitTransactionJson queues a validated scene transaction for the next
+		// protected mutation flush. Scripts can prepare these payloads on worker
+		// callbacks without directly mutating live native scene storage.
+		public static string SubmitTransactionJson(string transactionJson)
+		{
+			return InternalCalls.ReadNativeUtf8(InternalCalls.Native_Scene_SubmitTransactionJson(transactionJson ?? string.Empty));
+		}
 
 		[DllImport("TerraEngine")]
 		// Native_Scene_LoadScene bridges managed callers to engine state; validate arguments before forwarding to native code.
@@ -42,8 +50,8 @@ namespace TerraEngine
 		// Native_Scene_LoadPrefab bridges managed callers to engine state; validate arguments before forwarding to native code.
 		private static extern IntPtr Native_Scene_LoadPrefab(string path);
 
-        [DllImport("TerraEngine")]
-        // Native_Scene_SetActiveScene bridges managed callers to engine state; validate arguments before forwarding to native code.
-        private static extern bool Native_Scene_SetActiveScene(string uuid);
-    }
+		[DllImport("TerraEngine")]
+		// Native_Scene_SetActiveScene bridges managed callers to engine state; validate arguments before forwarding to native code.
+		private static extern bool Native_Scene_SetActiveScene(string uuid);
+	}
 }

@@ -232,11 +232,12 @@ void SchedulerDiagnosticsWindow::DrawSchedulerSummary()
 	const EcsDiagnosticsTotals totals = CountEcsDiagnostics(ecsSummaries);
 
 	ImGui::SeparatorText("Health");
-	if (ImGui::BeginTable("SchedulerDiagnosticsHealth", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	if (ImGui::BeginTable("SchedulerDiagnosticsHealth", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("Scheduler");
 		ImGui::TableSetupColumn("ECS Graphs");
 		ImGui::TableSetupColumn("Queries");
+		ImGui::TableSetupColumn("Transactions");
 		ImGui::TableSetupColumn("Diagnostics");
 		ImGui::TableHeadersRow();
 		ImGui::TableNextRow();
@@ -247,6 +248,17 @@ void SchedulerDiagnosticsWindow::DrawSchedulerSummary()
 		ImGui::TableSetColumnIndex(2);
 		ImGui::Text("%zu", totals.queryCount);
 		ImGui::TableSetColumnIndex(3);
+		ImGui::Text("%llu / %llu",
+			static_cast<unsigned long long>(summary.transactionDiagnostics.committedCount),
+			static_cast<unsigned long long>(summary.transactionDiagnostics.submittedCount));
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Committed / submitted scene transactions. Rejected: %llu, conflicts: %llu, largest batch: %zu",
+				static_cast<unsigned long long>(summary.transactionDiagnostics.rejectedCount),
+				static_cast<unsigned long long>(summary.transactionDiagnostics.conflictCount),
+				summary.transactionDiagnostics.largestSubmittedBatchSize);
+		}
+		ImGui::TableSetColumnIndex(4);
 		ImGui::Text("%zu", summary.diagnostics.size() + totals.diagnosticCount);
 		ImGui::EndTable();
 	}

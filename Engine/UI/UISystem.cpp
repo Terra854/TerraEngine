@@ -468,8 +468,10 @@ TerraEngine::Scheduling::SystemDeclaration UISystem::SchedulerDeclaration()
 	declaration.writes = { "UI" };
 	// UI document preparation clones authored trees into UIPreparationRequest
 	// snapshots before worker layout/build. Publishing remains synchronized on
-	// the owning system, but the migration contract can classify preparation as
-	// worker eligible instead of a purely protected main-thread workload.
+	// the owning system, and scene-owned writes must still be submitted through
+	// SceneMutationQueue transactions instead of mutating ObjectManager here.
+	// The migration contract can classify preparation as worker eligible
+	// instead of a purely protected main-thread workload.
 	declaration.mainThread = false;
 	declaration.requiresFlushedSceneMutations = true;
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;

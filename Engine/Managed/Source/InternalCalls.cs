@@ -1942,6 +1942,10 @@ namespace TerraEngine
 		internal static extern bool Native_Scene_SetActiveScene(string uuid);
 
 		[DllImport("TerraEngine")]
+		// Native_Scene_SubmitTransactionJson bridges managed worker-safe mutation payloads to the protected native transaction queue.
+		internal static extern IntPtr Native_Scene_SubmitTransactionJson(string transactionJson);
+
+		[DllImport("TerraEngine")]
 		// Native_Time_GetDeltaTime bridges managed callers to engine state; validate arguments before forwarding to native code.
 		internal static extern float Native_Time_GetDeltaTime();
 	}

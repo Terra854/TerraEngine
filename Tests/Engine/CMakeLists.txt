@@ -108,6 +108,13 @@ add_executable(TerraEngine-EngineTests
 	Scene/SceneSerializationTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
 	Scene/SceneMutationQueueTests.cpp
+	Scene/TransactionalMutationTestFixtures.cpp
+	Scene/TransactionalMutationTests.cpp
+	Scene/TransactionalMutationConflictTests.cpp
+	Scene/TransactionalMutationStressTests.cpp
+	Scene/TransactionalMutationDiagnosticsTests.cpp
+	Scene/TransactionalMutationPolicyTests.cpp
+	Scene/TransactionalMutationSerializationTests.cpp
 	Scene/ParallelMutationBufferTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Scene/SkyComponentSerializationTests.cpp
 	Scene/SceneStreamingDeferredLoadTests.cpp

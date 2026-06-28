@@ -93,6 +93,12 @@ namespace TerraEngine::Tests {
 	void RegisterSceneSerializationTests(TestRegistry& registry);
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
+	void RegisterTransactionalMutationTests(TestRegistry& registry);
+	void RegisterTransactionalMutationConflictTests(TestRegistry& registry);
+	void RegisterTransactionalMutationStressTests(TestRegistry& registry);
+	void RegisterTransactionalMutationDiagnosticsTests(TestRegistry& registry);
+	void RegisterTransactionalMutationPolicyTests(TestRegistry& registry);
+	void RegisterTransactionalMutationSerializationTests(TestRegistry& registry);
 	void RegisterParallelMutationBufferTests(TestRegistry& registry);
 	void RegisterSkyComponentSerializationTests(TestRegistry& registry);
 	void RegisterSceneStreamingDeferredLoadTests(TestRegistry& registry);
@@ -216,6 +222,12 @@ int main() {
 	TerraEngine::Tests::RegisterSceneSerializationTests(registry);
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
+	TerraEngine::Tests::RegisterTransactionalMutationTests(registry);
+	TerraEngine::Tests::RegisterTransactionalMutationConflictTests(registry);
+	TerraEngine::Tests::RegisterTransactionalMutationStressTests(registry);
+	TerraEngine::Tests::RegisterTransactionalMutationDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterTransactionalMutationPolicyTests(registry);
+	TerraEngine::Tests::RegisterTransactionalMutationSerializationTests(registry);
 	TerraEngine::Tests::RegisterParallelMutationBufferTests(registry);
 	TerraEngine::Tests::RegisterSkyComponentSerializationTests(registry);
 	TerraEngine::Tests::RegisterSceneStreamingDeferredLoadTests(registry);

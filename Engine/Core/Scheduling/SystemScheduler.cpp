@@ -9,6 +9,7 @@
 #include "Core/SystemBase.h"
 #include "JobGraph.h"
 #include "Profiling/ProfilerScope.h"
+#include "Scene/SceneMutationQueue.h"
 
 #include <algorithm>
 #include <iterator>
@@ -313,6 +314,16 @@ namespace TerraEngine::Scheduling {
 		{
 			stream << summary.workerCoverageReport.formattedSummary << '\n';
 		}
+		stream << "Transaction diagnostics:"
+			<< " submitted=" << summary.transactionDiagnostics.submittedCount
+			<< " committed=" << summary.transactionDiagnostics.committedCount
+			<< " rejected=" << summary.transactionDiagnostics.rejectedCount
+			<< " conflicts=" << summary.transactionDiagnostics.conflictCount
+			<< " canceled=" << summary.transactionDiagnostics.canceledCount
+			<< " largestBatch=" << summary.transactionDiagnostics.largestSubmittedBatchSize
+			<< " validationNs=" << summary.transactionDiagnostics.averageValidationCostNs
+			<< " commitNs=" << summary.transactionDiagnostics.averageCommitCostNs
+			<< '\n';
 		if (summary.diagnostics.empty())
 		{
 			stream << "Diagnostics: none";
@@ -489,6 +500,7 @@ namespace TerraEngine::Scheduling {
 		latestSummary = {};
 		latestSummary.componentQueryGroups = latestComponentQueryGroups;
 		latestSummary.ecsGraphSummary = latestEcsGraphSummary;
+		latestSummary.transactionDiagnostics = TerraEngine::Scene::SceneMutationQueue::Instance().GetTransactionDiagnostics();
 		orderedIndices.clear();
 		orderedDeclarations.clear();
 
@@ -790,6 +802,7 @@ namespace TerraEngine::Scheduling {
 		FrameExecutionPlan plan = ExecuteFrameWorkloads(deltaTime, flushCallback);
 		latestFrameExecutionPlan = plan;
 		latestSummary.workerCoverageReport = ::TerraEngine::Scheduling::BuildWorkerCoverageReport(plan);
+		latestSummary.transactionDiagnostics = TerraEngine::Scene::SceneMutationQueue::Instance().GetTransactionDiagnostics();
 		if (!plan.valid || !plan.completed)
 		{
 			AddDiagnostic(latestSummary.diagnostics, DiagnosticSeverity::Error, DiagnosticCategory::Scheduler, "SystemScheduler", "", "", "Parallel frame workload execution did not complete.", "Inspect the frame execution plan and architecture diagnostics for failed worker/protected jobs.");

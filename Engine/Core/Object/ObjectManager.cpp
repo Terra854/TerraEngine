@@ -842,6 +842,19 @@ std::uint64_t ObjectManager::getObjectMetadataGeneration(const Object& obj) cons
 	return getObjectMetadataGeneration(obj.EntityId());
 }
 
+std::uint64_t ObjectManager::getObjectLifetimeGeneration(entt::entity entityId) const
+{
+	if (!registry.valid(entityId))
+	{
+		return 0;
+	}
+	if (auto it = generationByEntity.find(entityId); it != generationByEntity.end())
+	{
+		return it->second;
+	}
+	return 0;
+}
+
 std::uint64_t ObjectManager::getObjectMetadataGeneration(entt::entity entityId) const
 {
 	if (!registry.valid(entityId))

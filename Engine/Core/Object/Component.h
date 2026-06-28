@@ -90,9 +90,18 @@ struct ComponentAccessFunctions
 	std::function<void(entt::registry&, entt::entity, const nlohmann::json&)> entityDeserialize;
 };
 
+struct ComponentAccessObservation
+{
+	bool registered = false;
+	bool hasComponent = false;
+	std::string componentName;
+	std::uint64_t componentGeneration = 0;
+};
+
 TERRAENGINE_API std::unordered_map<std::string, ComponentAccessFunctions>& ComponentAccessRegistry();
 TERRAENGINE_API std::mutex& ComponentAccessRegistryMutex();
 TERRAENGINE_API entt::registry& ComponentAccessObjectRegistry();
+TERRAENGINE_API ComponentAccessObservation ObserveRegisteredComponentAccess(entt::registry& registry, entt::entity entity, std::string_view componentName, std::uint64_t componentGeneration);
 
 template <typename ComponentType>
 // RegisterComponentAccess is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

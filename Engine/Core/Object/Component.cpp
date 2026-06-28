@@ -33,3 +33,19 @@ entt::registry& ComponentAccessObjectRegistry()
 	// revive the old Object facade. Keep that bridge centralized here.
 	return ObjectManager::instance().getRegistry();
 }
+
+ComponentAccessObservation ObserveRegisteredComponentAccess(entt::registry& registry, entt::entity entity, std::string_view componentName, std::uint64_t componentGeneration)
+{
+	// Worker-side transaction builders use this read-only observation to bind
+	// a reflected component write to the generation that was visible during
+	// preparation. The protected commit path later revalidates that generation
+	// before invoking the type-erased setter.
+	std::lock_guard lock(ComponentAccessRegistryMutex());
+	ComponentAccessObservation observation;
+	observation.componentName = std::string(componentName);
+	observation.componentGeneration = componentGeneration;
+	auto component = ComponentAccessRegistry().find(observation.componentName);
+	observation.registered = component != ComponentAccessRegistry().end();
+	observation.hasComponent = observation.registered && component->second.entityHasComponent(registry, entity);
+	return observation;
+}

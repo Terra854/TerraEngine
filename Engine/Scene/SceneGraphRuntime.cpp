@@ -801,6 +801,22 @@ namespace TerraEngine::Scene {
 		return summary;
 	}
 
+	std::uint64_t ObserveHierarchyRevision(const ObjectManager& objects)
+	{
+		// Transactions only need a stable hierarchy token while preparing work.
+		// ObjectManager owns the authoritative parent/child revision, so this
+		// helper keeps SceneGraphRuntime callers from depending on storage details.
+		return objects.GetHierarchyRevision();
+	}
+
+	std::uint64_t ObserveHierarchyRevision(const SceneGraph& graph)
+	{
+		// SceneGraph snapshots carry the source revision used for traversal and
+		// transform work planning; returning it gives worker-prepared transactions
+		// the same conflict token without touching live ObjectManager state.
+		return graph.revision;
+	}
+
 	bool ReparentPreserveWorld(ObjectManager& objects, entt::entity child, std::optional<entt::entity> parent)
 	{
 		return objects.setParent(child, parent);

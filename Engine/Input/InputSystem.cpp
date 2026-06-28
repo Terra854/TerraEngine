@@ -105,6 +105,9 @@ void InputSystem::Update(float deltaTime)
 	backend->Update();
 	cursorPosition = backend->GetCursorPosition();
 
+	// Input polling is a protected platform boundary. If future input features
+	// need to touch scene-owned state, they must submit a SceneMutationQueue
+	// transaction and leave this system as a snapshot publisher for workers.
 	// WindowSystem polls platform events before InputSystem updates, so GLFW
 	// callbacks may already have advanced a press generation for this frame.
 	// Publishing a separate one-frame latch preserves quick press/release clicks

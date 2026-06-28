@@ -11,8 +11,48 @@
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 
+#include <utility>
+
 namespace
 {
+class TransactionCommandGroup final : public ICommand
+{
+public:
+	TransactionCommandGroup(std::string groupName, std::vector<std::unique_ptr<ICommand>> commands)
+		: m_GroupName(std::move(groupName)), m_Commands(std::move(commands))
+	{
+	}
+
+	void Undo() override
+	{
+		// Undo in reverse commit order so grouped editor transactions restore
+		// parent/child/component dependencies before their owners disappear.
+		for (auto command = m_Commands.rbegin(); command != m_Commands.rend(); ++command)
+		{
+			(*command)->Undo();
+		}
+	}
+
+	void Redo() override
+	{
+		// Redo in original commit order to replay the transaction the same way
+		// the protected mutation flush applied it.
+		for (const std::unique_ptr<ICommand>& command : m_Commands)
+		{
+			command->Redo();
+		}
+	}
+
+	std::string GetName() const override
+	{
+		return m_GroupName.empty() ? "Scene Transaction" : m_GroupName;
+	}
+
+private:
+	std::string m_GroupName;
+	std::vector<std::unique_ptr<ICommand>> m_Commands;
+};
+
 // ResolveEntity keeps undo/redo replay on the explicit ObjectManager service
 // path instead of rebuilding the removed mutable Object facade.
 std::optional<entt::entity> ResolveEntity(const TerraEngine::UUID& uuid)
@@ -358,6 +398,22 @@ void UndoRedoSystem::PushCommand(std::unique_ptr<ICommand> command) {
 	}
 
 	UpdateDirtyState();
+}
+
+void UndoRedoSystem::PushTransactionGroup(std::string groupName, std::vector<std::unique_ptr<ICommand>> commands)
+{
+	// Empty transaction groups are intentionally ignored; callers can submit a
+	// preflight-only transaction without creating a confusing undo history item.
+	if (commands.empty())
+	{
+		return;
+	}
+	if (commands.size() == 1)
+	{
+		PushCommand(std::move(commands.front()));
+		return;
+	}
+	PushCommand(std::make_unique<TransactionCommandGroup>(std::move(groupName), std::move(commands)));
 }
 
 // UndoRedoSystem::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -265,7 +265,18 @@ void* DotNetHost::GetManagedFunction(
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (rc != 0) {
-		TERRAENGINE_LOG(LogLevel::Error, "Failed to load managed function: " << std::hex << rc);
+		const auto narrowAscii = [](const std::wstring& value) {
+			std::string text;
+			text.reserve(value.size());
+			for (wchar_t character : value)
+			{
+				text.push_back(character <= 0x7f ? static_cast<char>(character) : '?');
+			}
+			return text;
+		};
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to load managed function "
+			<< narrowAscii(typeName) << "::" << narrowAscii(methodName)
+			<< ": " << std::hex << rc);
 		return nullptr;
 	}
 

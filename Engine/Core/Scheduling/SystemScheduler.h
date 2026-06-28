@@ -8,6 +8,7 @@
 
 #include "Core/Export.h"
 #include "FrameWorkload.h"
+#include "Scene/TransactionalMutation.h"
 
 #include <cstddef>
 #include <functional>
@@ -119,6 +120,7 @@ namespace TerraEngine::Scheduling {
 		std::string ecsGraphSummary;
 		std::vector<ScheduleDiagnostic> diagnostics;
 		WorkerCoverageReport workerCoverageReport;
+		TerraEngine::Scene::TransactionDiagnostics transactionDiagnostics;
 		std::string formatted;
 	};
 

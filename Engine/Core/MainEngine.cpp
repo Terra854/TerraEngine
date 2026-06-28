@@ -321,7 +321,7 @@ bool Engine::Update(float deltaTime)
 				// Structural scene mutations are applied only at declared flush
 				// points so systems that iterate hierarchy/component data never
 				// observe the ObjectManager changing midway through their update.
-				const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(ObjectManager::instance());
+				const TerraEngine::Scene::SceneMutationBatchResult result = SceneManager::Instance().ApplySceneMutations("system-scheduler-flush");
 				state.message = result.applied ? "Scene mutation queue flushed." : "Scene mutation queue rejected one or more requests.";
 			}
 			state.pendingAfterFlush = queue.Size();

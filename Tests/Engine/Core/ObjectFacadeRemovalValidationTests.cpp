@@ -13,7 +13,11 @@ namespace TerraEngine::Tests {
 			std::filesystem::path current = std::filesystem::current_path();
 			while (!current.empty())
 			{
-				if (std::filesystem::exists(current / "Engine") && std::filesystem::exists(current / "Tests"))
+				// CTest may launch from the binary tree, which can also contain copied
+				// Engine/Tests folders. Require source-only contract files so static
+				// migration checks always inspect the checkout rather than build output.
+				if (std::filesystem::exists(current / "Engine/Core/Object/Object.h")
+					&& std::filesystem::exists(current / "specs/023-compact-object-handles/contracts/migration-validation.md"))
 				{
 					return current;
 				}

@@ -655,6 +655,7 @@ namespace TerraEngine::Scheduling {
 				<< " phase=" << result.declaration.phase
 				<< " kind=" << ToString(result.declaration.phaseKind)
 				<< " policy=" << ToString(result.executionPolicy)
+				<< " mutation=" << ToString(result.declaration.mutationPolicy)
 				<< " completed=" << (result.completed ? "true" : "false")
 				<< "]";
 		}

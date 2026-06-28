@@ -24,6 +24,8 @@
 #include "Core/SystemBase.h"
 #include "File Formats/TerraEngineShaderFile.h"
 #include "Renderer/RenderTypes.h"
+#include "Scene/SceneMutationQueue.h"
+#include "Scene/TransactionalMutation.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
 
@@ -122,6 +124,9 @@ public:
 	// Manually clear the dirty flag for the active scene.
 	void ClearActiveSceneDirty();
 	void ClearAllDirty();
+	TerraEngine::Scene::TransactionDiagnostics GetTransactionDiagnostics() const;
+	TerraEngine::Scene::TransactionResult PreflightTransaction(const TerraEngine::Scene::Transaction& transaction) const;
+	TerraEngine::Scene::SceneMutationBatchResult ApplySceneMutations(std::string commitName = {});
 
 	// Clear all cached documents and abandon in-flight futures. Use during
 	// teardown to release memory when no other threads are reading scenes.

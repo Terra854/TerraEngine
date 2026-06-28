@@ -7,6 +7,7 @@
 #include "Core/Scheduling/JobGraph.h"
 #include "DotNet/DotNetHost.h"
 #include "Profiling/ProfilerScope.h"
+#include "Scene/SceneManager.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/PlatformUtils.h"
 
@@ -1166,7 +1167,7 @@ void ScriptingSystem::FlushScriptMutationsIntoResult(ScriptingFrameResult& resul
 		return;
 	}
 
-	TerraEngine::Scene::SceneMutationBatchResult mutationResult = queue.Apply(ObjectManager::instance());
+	TerraEngine::Scene::SceneMutationBatchResult mutationResult = SceneManager::Instance().ApplySceneMutations("scripting-mutation-flush");
 	for (const TerraEngine::Scene::SceneMutationResult& entry : mutationResult.results)
 	{
 		if (entry.accepted)
@@ -1432,8 +1433,8 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::ProtectedCommit;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Native script batch preparation, immutable dispatch inputs, generation validation, and deferred mutation capture.";
-	declaration.protectedCommit = "Arbitrary managed callback invocation, managed lifecycle/reload hooks, and immediate native/reflection API calls.";
+	declaration.safeSubwork = "Native script batch preparation, immutable dispatch inputs, generation validation, deferred mutation capture, and JSON transaction payload submission.";
+	declaration.protectedCommit = "Arbitrary managed callback invocation, managed lifecycle/reload hooks, immediate native/reflection API calls, and protected transaction commits.";
 	declaration.protectedReason = declaration.protectedCommit;
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -1442,7 +1443,7 @@ TerraEngine::Scheduling::SystemDeclaration ScriptingSystem::SchedulerDeclaration
 
 std::string ScriptingSystem::GetSchedulerBoundarySummary() const
 {
-	return "C# gameplay callbacks are scheduled as native script batches; C# authors keep the normal API while structural scene changes are deferred to SceneMutationQueue flush points.";
+	return "C# gameplay callbacks are scheduled as native script batches; C# authors keep the normal API while structural scene changes and submitted transaction payloads are deferred to SceneMutationQueue flush points.";
 }
 
 TerraEngine::Scheduling::HardBoundary ScriptingSystem::GetManagedCallbackBoundary() const

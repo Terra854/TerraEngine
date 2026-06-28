@@ -9,6 +9,7 @@
 #include "Core/Export.h"
 #include "Core/Object/Reflection.h"
 #include "SceneGraphRuntime.h"
+#include "TransactionalMutation.h"
 #include "Utilities/UUID.h"
 
 #include <cstdint>
@@ -103,17 +104,25 @@ namespace TerraEngine::Scene {
 
 		void Enqueue(SceneMutationRequest request);
 		void EnqueueFromWorker(std::uint32_t workerIndex, SceneMutationRequest request);
+		void EnqueueTransaction(Transaction transaction);
+		TransactionResult PreflightTransaction(const Transaction& transaction, ObjectManager& objects) const;
+		bool CancelTransaction(const std::string& transactionId);
 		bool Empty() const;
 		std::size_t Size() const;
 		std::vector<SceneMutationRequest> PendingRequests() const;
+		std::vector<Transaction> PendingTransactions() const;
+		TransactionDiagnostics GetTransactionDiagnostics() const;
 		void Clear();
 		SceneMutationBatchResult Validate(const SceneGraph& graph) const;
 		SceneMutationBatchResult Apply(ObjectManager& objects);
 		SceneMutationBatchResult Apply(ObjectManager& objects, std::string commitName);
+		std::vector<TransactionResult> DrainTransactions(ObjectManager& objects);
 
 	private:
 		std::vector<SceneMutationRequest> requests;
 		std::vector<SceneMutationWorkerBuffer> workerBuffers;
+		std::vector<Transaction> transactions;
+		TransactionDiagnostics transactionDiagnostics;
 		mutable std::mutex requestsMutex;
 	};
 

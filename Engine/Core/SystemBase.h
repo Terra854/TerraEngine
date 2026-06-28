@@ -8,9 +8,13 @@
 #pragma once
 
 #include "Export.h"
+#include "Scene/SceneMutationQueue.h"
 #include "Scheduling/SystemScheduler.h"
 #include <string>
+#include <utility>
 #include <vector>
+
+class ObjectManager;
 
 class TERRAENGINE_API SystemsBase {
 public:
@@ -51,5 +55,16 @@ public:
 	// empty list keeps the legacy behavior where the scheduler wraps Update().
 	virtual std::vector<TerraEngine::Scheduling::FrameWorkloadDeclaration> DeclareFrameWorkloads(float) {
 		return {};
+	}
+
+	// Systems submit scene-owned object/component mutations through the shared
+	// transaction queue instead of mutating live state from worker code. The
+	// queue performs protected validation and commit at the approved flush point.
+	void SubmitSceneTransaction(TerraEngine::Scene::Transaction transaction) {
+		TerraEngine::Scene::SceneMutationQueue::Instance().EnqueueTransaction(std::move(transaction));
+	}
+
+	TerraEngine::Scene::TransactionResult PreflightSceneTransaction(const TerraEngine::Scene::Transaction& transaction, ObjectManager& objects) const {
+		return TerraEngine::Scene::SceneMutationQueue::Instance().PreflightTransaction(transaction, objects);
 	}
 };

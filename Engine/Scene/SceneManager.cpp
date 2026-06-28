@@ -394,6 +394,29 @@ void SceneManager::ClearActiveSceneDirty()
 	activeSceneDirty = false;
 }
 
+TerraEngine::Scene::TransactionDiagnostics SceneManager::GetTransactionDiagnostics() const
+{
+	return TerraEngine::Scene::SceneMutationQueue::Instance().GetTransactionDiagnostics();
+}
+
+TerraEngine::Scene::TransactionResult SceneManager::PreflightTransaction(const TerraEngine::Scene::Transaction& transaction) const
+{
+	return TerraEngine::Scene::SceneMutationQueue::Instance().PreflightTransaction(transaction, ObjectManager::instance());
+}
+
+TerraEngine::Scene::SceneMutationBatchResult SceneManager::ApplySceneMutations(std::string commitName)
+{
+	// All transaction commits route through this protected scene-manager entry
+	// point so the dirty flag and sky-state invalidation stay coupled to the
+	// ObjectManager write that actually made it through validation.
+	TerraEngine::Scene::SceneMutationBatchResult result = TerraEngine::Scene::SceneMutationQueue::Instance().Apply(ObjectManager::instance(), std::move(commitName));
+	if (result.applied && result.acceptedMutationCount > 0)
+	{
+		ForceMarkActiveSceneDirty();
+	}
+	return result;
+}
+
 // SceneManager::SaveScene is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 {

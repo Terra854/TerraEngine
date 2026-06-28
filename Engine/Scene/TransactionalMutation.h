@@ -1,0 +1,205 @@
+// TransactionalMutation.h - engine-scoped STM for scene-owned mutations.
+//
+// The transaction layer lets worker systems prepare object, hierarchy,
+// metadata, and reflected component writes without touching live scene state.
+// Commit still runs on a protected engine path so external side effects and
+// EnTT storage ownership remain deterministic.
+
+#pragma once
+
+#include "Core/Export.h"
+#include "Core/Object/Reflection.h"
+#include "Utilities/UUID.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+class ObjectManager;
+
+namespace TerraEngine::Scene {
+
+	enum class TransactionOrigin {
+		System,
+		Editor,
+		ManagedCallback,
+		Automation,
+		Test
+	};
+
+	enum class TransactionMode {
+		Commit,
+		PreflightOnly
+	};
+
+	enum class TransactionStatus {
+		Pending,
+		Committed,
+		Rejected,
+		Conflicted,
+		Canceled,
+		Expired,
+		PreflightAccepted,
+		PreflightRejected
+	};
+
+	enum class TransactionConflictReason {
+		None,
+		StaleObjectIdentity,
+		MissingTarget,
+		ComponentVersionMismatch,
+		HierarchyConflict,
+		MetadataVersionMismatch,
+		PolicyRejection,
+		InvalidPayload,
+		CommitBudgetRejection,
+		SceneUnloadedOrSwitched,
+		Canceled,
+		Expired
+	};
+
+	enum class TransactionWriteKind {
+		CreateObject,
+		DeleteObject,
+		ReparentObject,
+		SetName,
+		SetTag,
+		SetLayer,
+		SetActive,
+		SetStatic,
+		AddComponent,
+		RemoveComponent,
+		UpdateComponentProperty
+	};
+
+	struct TransactionBudget {
+		std::size_t maxWriteCount = 4096;
+		std::size_t maxConflictCount = 128;
+	};
+
+	struct TransactionObjectRef {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::int32_t localObjectId = 0;
+
+		bool UsesLocalObject() const { return localObjectId != 0; }
+	};
+
+	struct TransactionObjectObservation {
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::uint64_t lifetimeGeneration = 0;
+		std::uint64_t metadataGeneration = 0;
+		std::uint64_t componentGeneration = 0;
+		std::uint64_t hierarchyRevision = 0;
+	};
+
+	struct TransactionReadSet {
+		std::uint64_t sceneRevision = 0;
+		std::vector<TransactionObjectObservation> objects;
+	};
+
+	struct TransactionWriteOperation {
+		TransactionWriteKind kind = TransactionWriteKind::CreateObject;
+		TransactionObjectRef target;
+		TransactionObjectRef parent;
+		std::int32_t createdLocalObjectId = 0;
+		std::string displayName;
+		std::string stringValue;
+		bool boolValue = false;
+		std::string componentName;
+		std::string propertyName;
+		TerraEngine::Reflection::Variant propertyValue;
+	};
+
+	struct TransactionWriteSet {
+		std::vector<TransactionWriteOperation> operations;
+	};
+
+	struct TransactionConflictRecord {
+		TransactionConflictReason reason = TransactionConflictReason::None;
+		TerraEngine::UUID targetObject = TerraEngine::EMPTY_UUID;
+		std::string componentType;
+		std::uint64_t expectedRevision = 0;
+		std::uint64_t actualRevision = 0;
+		std::size_t operationIndex = 0;
+		std::string humanMessage;
+	};
+
+	struct Transaction {
+		std::string id;
+		TransactionOrigin origin = TransactionOrigin::System;
+		TransactionMode mode = TransactionMode::Commit;
+		std::string originName;
+		std::string undoGroupName;
+		TransactionBudget budget;
+		TransactionReadSet readSet;
+		TransactionWriteSet writeSet;
+		bool canceled = false;
+	};
+
+	struct TransactionResult {
+		std::string transactionId;
+		TransactionStatus status = TransactionStatus::Pending;
+		std::size_t appliedWriteCount = 0;
+		std::size_t rejectedWriteCount = 0;
+		std::uint64_t validationCostNs = 0;
+		std::uint64_t commitCostNs = 0;
+		std::vector<TransactionConflictRecord> conflicts;
+		std::unordered_map<std::int32_t, TerraEngine::UUID> createdObjects;
+		std::string message;
+
+		bool MutatedScene() const { return status == TransactionStatus::Committed && appliedWriteCount > 0; }
+	};
+
+	struct TransactionDiagnostics {
+		std::uint64_t submittedCount = 0;
+		std::uint64_t committedCount = 0;
+		std::uint64_t rejectedCount = 0;
+		std::uint64_t conflictCount = 0;
+		std::uint64_t canceledCount = 0;
+		std::uint64_t expiredCount = 0;
+		std::uint64_t averageValidationCostNs = 0;
+		std::uint64_t averageCommitCostNs = 0;
+		std::size_t largestSubmittedBatchSize = 0;
+		std::size_t largestCommittedBatchSize = 0;
+		std::vector<TransactionResult> recentResults;
+	};
+
+	class TERRAENGINE_API TransactionalMutationBuilder {
+	public:
+		TransactionalMutationBuilder(std::string id, TransactionOrigin origin, std::string originName = {});
+
+		TransactionalMutationBuilder& SetMode(TransactionMode mode);
+		TransactionalMutationBuilder& SetUndoGroup(std::string undoGroupName);
+		TransactionalMutationBuilder& SetBudget(TransactionBudget budget);
+		TransactionalMutationBuilder& ObserveObject(ObjectManager& objects, TerraEngine::UUID objectId);
+		TransactionalMutationBuilder& ObserveScene(ObjectManager& objects);
+		TransactionalMutationBuilder& CreateObject(std::int32_t localObjectId, std::string displayName, TransactionObjectRef parent = {});
+		TransactionalMutationBuilder& DeleteObject(TerraEngine::UUID objectId);
+		TransactionalMutationBuilder& ReparentObject(TerraEngine::UUID objectId, TransactionObjectRef parent);
+		TransactionalMutationBuilder& SetName(TerraEngine::UUID objectId, std::string name);
+		TransactionalMutationBuilder& SetTag(TerraEngine::UUID objectId, std::string tag);
+		TransactionalMutationBuilder& SetLayer(TerraEngine::UUID objectId, std::string layer);
+		TransactionalMutationBuilder& SetActive(TerraEngine::UUID objectId, bool active);
+		TransactionalMutationBuilder& SetStatic(TerraEngine::UUID objectId, bool isStatic);
+		TransactionalMutationBuilder& AddComponent(TerraEngine::UUID objectId, std::string componentName);
+		TransactionalMutationBuilder& RemoveComponent(TerraEngine::UUID objectId, std::string componentName);
+		TransactionalMutationBuilder& UpdateComponentProperty(TerraEngine::UUID objectId, std::string componentName, std::string propertyName, TerraEngine::Reflection::Variant value);
+		Transaction Build() const;
+
+	private:
+		Transaction transaction;
+	};
+
+	TERRAENGINE_API std::string_view ToString(TransactionStatus status);
+	TERRAENGINE_API std::string_view ToString(TransactionConflictReason reason);
+	TERRAENGINE_API TransactionObjectRef ExistingObject(TerraEngine::UUID objectId);
+	TERRAENGINE_API TransactionObjectRef LocalObject(std::int32_t localObjectId);
+	TERRAENGINE_API TransactionResult PreflightTransaction(ObjectManager& objects, const Transaction& transaction);
+	TERRAENGINE_API TransactionResult CommitTransaction(ObjectManager& objects, const Transaction& transaction);
+	TERRAENGINE_API void AccumulateTransactionDiagnostics(TransactionDiagnostics& diagnostics, const Transaction& transaction, const TransactionResult& result);
+	TERRAENGINE_API TransactionDiagnostics MergeTransactionDiagnostics(const TransactionDiagnostics& left, const TransactionDiagnostics& right);
+
+}

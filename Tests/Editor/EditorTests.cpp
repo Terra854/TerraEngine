@@ -47,6 +47,8 @@ namespace TerraEngine::EditorTests {
 	void RegisterArchitectureHardeningPlayModeTests(TestRegistry& registry);
 	void RegisterFullParallelFrameDiagnosticsTests(TestRegistry& registry);
 	void RegisterRuntimeLayoutDiagnosticsTests(TestRegistry& registry);
+	void RegisterTransactionalMutationDiagnosticsWindowTests(TestRegistry& registry);
+	void RegisterTransactionalMutationUndoTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterStreamingEditorWorkflowTests(TestRegistry& registry);
 }
@@ -102,6 +104,8 @@ int main() {
 	TerraEngine::EditorTests::RegisterArchitectureHardeningPlayModeTests(registry);
 	TerraEngine::EditorTests::RegisterFullParallelFrameDiagnosticsTests(registry);
 	TerraEngine::EditorTests::RegisterRuntimeLayoutDiagnosticsTests(registry);
+	TerraEngine::EditorTests::RegisterTransactionalMutationDiagnosticsWindowTests(registry);
+	TerraEngine::EditorTests::RegisterTransactionalMutationUndoTests(registry);
 	TerraEngine::EditorTests::RegisterSceneRuntimeParityTests(registry);
 	TerraEngine::EditorTests::RegisterStreamingEditorWorkflowTests(registry);
 

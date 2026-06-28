@@ -1821,7 +1821,9 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	// Live ECS collection still runs protected inside RenderSystem, while draw,
 	// light, upload, and backend packet preparation consume immutable snapshots
 	// and are safe for the frame workload migration layer to classify as worker
-	// eligible system work.
+	// eligible system work. Live GPU submission is not transactional because it
+	// owns swapchain/fence side effects; scene-owned render metadata edits must
+	// be prepared as SceneMutationQueue transactions before this boundary.
 	declaration.mainThread = false;
 	declaration.requiresFlushedSceneMutations = true;
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;

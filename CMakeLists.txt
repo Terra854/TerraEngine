@@ -88,6 +88,7 @@ set(ENGINE_SOURCES
 	Engine/Scene/RuntimeLayout.cpp
 	Engine/Scene/PrefabComposition.cpp
 	Engine/Scene/SceneMutationQueue.cpp
+	Engine/Scene/TransactionalMutation.cpp
 	Engine/Scene/SceneManager.cpp
 	Engine/Scene/Serializer.cpp
 	Engine/Scene/SpatialIndex.cpp
@@ -170,6 +171,7 @@ set(ENGINE_HEADERS
 	Engine/Scene/RuntimeLayout.h
 	Engine/Scene/PrefabComposition.h
 	Engine/Scene/SceneMutationQueue.h
+	Engine/Scene/TransactionalMutation.h
 	Engine/Scene/SceneManager.h
 	Engine/Components/LightComponent.h
 	Engine/Components/UIComponent.h
@@ -496,7 +498,7 @@ if(WIN32)
 	# not manually decorated; this pairs with the TERRAENGINE_API macro so the
 	# launcher can link against the DLL reliably.
 	set_target_properties(TerraEngine-Engine PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-	target_compile_options(TerraEngine-Engine PRIVATE /FS)
+	target_compile_options(TerraEngine-Engine PRIVATE /FS /bigobj)
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine PREFIX "TerraEngine-Engine" FILES ${ENGINE_SOURCES} ${ENGINE_HEADERS})
@@ -606,6 +608,7 @@ set(MANAGED_CORE_SOURCES
 	Engine/Managed/Source/Light.cs
 	Engine/Managed/Source/MeshRenderer.cs
 	Engine/Managed/Source/Math.cs
+	Engine/Managed/Source/Scene.cs
 	Engine/Managed/Source/Script.cs
 	Engine/Managed/Source/Time.cs
 	Engine/Managed/Source/Graphics.cs

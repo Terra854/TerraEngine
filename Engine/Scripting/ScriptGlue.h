@@ -77,6 +77,10 @@ extern "C" {
 	TERRAENGINE_API void Native_UI_GetStyleColor(void* elementHandle, int property, float* outX, float* outY, float* outZ, float* outW);
 	TERRAENGINE_API bool Native_UI_SetEventCallback(void* elementHandle, int eventType, bool enabled);
 
+	// Scene transactions let managed callbacks submit structural/reflection
+	// writes as one validated batch instead of mutating live ObjectManager state.
+	TERRAENGINE_API const char* Native_Scene_SubmitTransactionJson(const char* transactionJson);
+
 	// Script binding helpers bypass the generic property layer because gameplay
 	// scripts live inside one ordered binding container component.
 	TERRAENGINE_API bool Native_ScriptComponent_AddBinding(uint32_t objectId, const char* className);

@@ -18,6 +18,7 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Core/Logger/Logger.h"
 #include "Engine/Core/Scheduling/EcsQueryTaskGraph.h"
+#include "Engine/Utilities/PlatformUtils.h"
 
 // ImGui
 #include <imgui.h>
@@ -39,6 +40,33 @@ static GLFWscrollfun g_PrevScrollCallback = nullptr;
 static GLFWkeyfun g_PrevKeyCallback = nullptr;
 static GLFWcharfun g_PrevCharCallback = nullptr;
 static GLFWdropfun g_PrevDropCallback = nullptr;
+
+// Resolve the managed editor directory from the executable first because the
+// editor can be launched by Visual Studio, MCP, or scripts with different
+// working directories. The installed/debug layout always stages the managed
+// runtime beside TerraEngine-Editor.exe.
+static std::filesystem::path ResolveManagedEditorDirectory() {
+	const std::filesystem::path executableDirectory = TerraEngine::PlatformUtils::GetExecutableDirectory();
+	const std::filesystem::path currentDirectory = std::filesystem::current_path();
+	const std::filesystem::path candidates[] = {
+		executableDirectory / "Managed",
+		executableDirectory / "Editor" / "Managed",
+		executableDirectory.parent_path() / "Editor" / "Managed",
+		currentDirectory / "Managed",
+		currentDirectory / "Editor" / "Managed"
+	};
+
+	for (const std::filesystem::path& candidate : candidates) {
+		// A runtimeconfig beside the editor assembly proves this is a staged
+		// publish directory rather than the source project folder.
+		if (!candidate.empty() && std::filesystem::exists(candidate / "TerraEngine.Editor.runtimeconfig.json")) {
+			return std::filesystem::absolute(candidate);
+		}
+	}
+
+	TERRAENGINE_LOG(LogLevel::Warning, "[DotNet] Could not find TerraEngine.Editor.runtimeconfig.json beside the executable or current working directory.");
+	return std::filesystem::absolute(executableDirectory.empty() ? currentDirectory / "Editor" / "Managed" : executableDirectory / "Managed");
+}
 
 void EditorSystem::SetStartupProjectPath(const std::filesystem::path& projectPath) {
 	startupProjectPath = projectPath;
@@ -441,18 +469,7 @@ void EditorSystem::Initialize() {
 	if (mainEditor) mainEditor->OnBackendReady();
 
 	// --- Initialize .NET Host and Load Editor Assembly ---
-	std::filesystem::path cwd = std::filesystem::current_path();
-	std::filesystem::path binDir;
-	
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (std::filesystem::exists(cwd / "Managed" / "TerraEngine.Editor.runtimeconfig.json")) {
-		binDir = cwd / "Managed";
-	} else {
-		binDir = cwd / "Editor" / "Managed"; 
-		TERRAENGINE_LOG(LogLevel::Warning, "[DotNet] Could not find runtimeconfig.json in " << cwd << " or subdirectories.");
-	}
-
-	binDir = std::filesystem::absolute(binDir);
+	std::filesystem::path binDir = ResolveManagedEditorDirectory();
 	std::filesystem::path dllPath = binDir / "TerraEngine.Editor.dll";
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -462,37 +479,44 @@ void EditorSystem::Initialize() {
 		managedInitialize = (ManagedInitFn)DotNetHost::Instance().GetManagedFunction(
 			dllPath,
 			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-			L"Initialize"
+			L"Initialize",
+			L"TerraEngine.Editor.EditorInitializeDelegate, TerraEngine.Editor"
 		);
 		managedUpdate = (ManagedUpdateFn)DotNetHost::Instance().GetManagedFunction(
 			dllPath,
 			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-			L"Update"
+			L"Update",
+			L"TerraEngine.Editor.EditorUpdateDelegate, TerraEngine.Editor"
 		);
 		managedShutdown = (ManagedShutdownFn)DotNetHost::Instance().GetManagedFunction(
 			dllPath,
 			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-			L"Shutdown"
+			L"Shutdown",
+			L"TerraEngine.Editor.EditorShutdownDelegate, TerraEngine.Editor"
 		);
 		managedDrawWindowMenu = (ManagedDrawWindowMenuFn)DotNetHost::Instance().GetManagedFunction(
 			dllPath,
 			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-			L"DrawWindowMenu"
+			L"DrawWindowMenu",
+			L"TerraEngine.Editor.EditorDrawWindowMenuDelegate, TerraEngine.Editor"
 		);
 		managedGetWindows = (ManagedGetWindowsFn)DotNetHost::Instance().GetManagedFunction(
 			dllPath,
 			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-			L"GetManagedWindows"
+			L"GetManagedWindows",
+			L"TerraEngine.Editor.EditorGetWindowsDelegate, TerraEngine.Editor"
 		);
 		managedSetWindowVisibility = (ManagedSetWindowVisibilityFn)DotNetHost::Instance().GetManagedFunction(
 			dllPath,
 			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-			L"SetWindowVisibility"
+			L"SetWindowVisibility",
+			L"TerraEngine.Editor.EditorSetWindowVisibilityDelegate, TerraEngine.Editor"
 		);
 		managedHideAllWindows = (ManagedHideAllWindowsFn)DotNetHost::Instance().GetManagedFunction(
 			dllPath,
 			L"TerraEngine.Editor.EditorApplication, TerraEngine.Editor",
-			L"HideAllWindows"
+			L"HideAllWindows",
+			L"TerraEngine.Editor.EditorHideAllWindowsDelegate, TerraEngine.Editor"
 		);
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

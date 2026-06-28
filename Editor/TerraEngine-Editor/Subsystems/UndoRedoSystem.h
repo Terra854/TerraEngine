@@ -8,6 +8,7 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <vector>
 #include <entt/entity/entity.hpp>
 #include <nlohmann/json.hpp>
 #include <glm/glm.hpp>
@@ -176,6 +177,7 @@ public:
 	// Adds a new action to the history. This clears any currently available 
 	// redo steps and marks the active scene as dirty.
 	void PushCommand(std::unique_ptr<ICommand> command);
+	void PushTransactionGroup(std::string groupName, std::vector<std::unique_ptr<ICommand>> commands);
 	
 	// Reverses the most recent command on the undo stack and moves it to the 
 	// redo stack.
