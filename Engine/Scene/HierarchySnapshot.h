@@ -3,7 +3,7 @@
 #pragma once
 
 #include "Core/Export.h"
-#include "Core/Object/CompactObjectReference.h"
+#include "Core/Object/Object.h"
 #include "SceneGraphRuntime.h"
 
 #include <cstdint>
@@ -34,7 +34,7 @@ namespace TerraEngine::Scene {
 	};
 
 	struct HierarchySnapshotEntry {
-		TerraEngine::CompactObjectReference object;
+		Object object;
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID parentId = TerraEngine::EMPTY_UUID;
 		std::int64_t parentIndex = -1;

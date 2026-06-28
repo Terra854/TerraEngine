@@ -149,7 +149,7 @@ namespace TerraEngine::Editor::Automation
 				{"coordinatorWaitTimeNs", summary.coordinatorWaitTimeNs},
 				{"workerUtilization", summary.workerUtilization},
 				{"activeMembershipInvalidationCount", summary.activeMembershipInvalidationCount},
-				{"staleCompactReferenceCount", summary.staleCompactReferenceCount},
+				{"staleObjectHandleCount", summary.staleObjectHandleCount},
 				{"hierarchySnapshotRebuildCount", summary.hierarchySnapshotRebuildCount},
 				{"componentAccessGrantDeniedCount", summary.componentAccessGrantDeniedCount},
 				{"fallbackReasons", summary.fallbackReasons},
@@ -223,8 +223,8 @@ namespace TerraEngine::Editor::Automation
 					{"fallbackCount", layout.fallbackCount},
 					{"metadataScanFallbackCount", layout.metadataScanFallbackCount},
 					{"fullObjectFacadeFallbackCount", layout.fullObjectFacadeFallbackCount},
-					{"compactReferenceFallbackCount", layout.compactReferenceFallbackCount},
-					{"staleCompactReferenceCount", layout.staleCompactReferenceCount},
+					{"objectHandleFallbackCount", layout.objectHandleFallbackCount},
+					{"staleObjectHandleCount", layout.staleObjectHandleCount},
 					{"validationMismatchCount", layout.validationMismatchCount},
 					{"smallSceneGuardTriggered", layout.smallSceneGuardTriggered}
 				}}
@@ -398,9 +398,9 @@ namespace TerraEngine::Editor::Automation
 			RegisterCapability(capability);
 		};
 
-		// Bridge enablement is editor-owned: MCP clients may change write scope
-		// while connected, but they must not expose or hide the listener itself.
-		add("bridge.set_write_mode", "bridge", MutationMode::EditorSelection, false, false, false, "writeMode: read_only|writes_enabled");
+		// Bridge enablement and write scope are editor-owned controls. MCP
+		// clients may inspect status and activity, but they cannot grant or
+		// revoke their own write permissions.
 		add("activity.list", "activity", MutationMode::ReadOnly, false, false, false, "limit?: integer, filter?: string");
 		add("scene.open", "scene", MutationMode::SceneMutation, true, false, true, "path: project-relative scene path");
 		add("scene.save", "scene", MutationMode::SceneMutation, true, true, false, "path?: project-relative scene path");
@@ -478,7 +478,7 @@ namespace TerraEngine::Editor::Automation
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Open a project before running this capability.");
 		}
 
-		if ((toolName == "bridge.set_write_mode" || toolName == "activity.list") && bridgeToolCallback)
+		if (toolName == "activity.list" && bridgeToolCallback)
 		{
 			return bridgeToolCallback(nlohmann::json{{"name", toolName}, {"arguments", arguments}, {"requestId", requestId}});
 		}
@@ -549,9 +549,9 @@ namespace TerraEngine::Editor::Automation
 		data["selectedObject"] = nullptr;
 		if (getSelectedEntity && getSelectedEntity().has_value())
 		{
-			if (auto object = ObjectManager::instance().getObject(*getSelectedEntity()))
+			if (ObjectManager::instance().isEntityValid(*getSelectedEntity()))
 			{
-				data["selectedObject"] = SerializeObjectSummary(*object, false);
+				data["selectedObject"] = SerializeObjectSummary(*getSelectedEntity(), false);
 			}
 		}
 		return data;
@@ -564,10 +564,10 @@ namespace TerraEngine::Editor::Automation
 		data["activeScene"] = scene != nullptr ? scene->name : "";
 		data["dirty"] = SceneManager::Instance().IsActiveSceneDirty();
 		data["roots"] = nlohmann::json::array();
-		std::vector<Object> roots = ObjectManager::instance().getRootObjects();
-		ObjectManager::instance().SortObjectsByStableId(roots);
+		std::vector<entt::entity> roots = ObjectManager::instance().getRootEntities();
+		ObjectManager::instance().SortEntitiesByStableId(roots);
 		std::size_t objectCount = 0;
-		for (Object object : roots)
+		for (entt::entity object : roots)
 		{
 			data["roots"].push_back(SerializeObjectSummary(object, true));
 			++objectCount;
@@ -669,16 +669,15 @@ namespace TerraEngine::Editor::Automation
 			return result;
 		}
 
-		Object object = *ObjectManager::instance().getObject(*target.entity);
 		std::lock_guard lock(ComponentAccessRegistryMutex());
 		auto componentIt = ComponentAccessRegistry().find(component);
-		if (componentIt == ComponentAccessRegistry().end() || !componentIt->second.hasComponent(object))
+		if (componentIt == ComponentAccessRegistry().end() || !componentIt->second.entityHasComponent(ObjectManager::instance().getRegistry(), *target.entity))
 		{
 			result.message = "Component is not present on the object.";
 			return result;
 		}
 
-		const nlohmann::json existingPayload = componentIt->second.serialize(object);
+		const nlohmann::json existingPayload = componentIt->second.entitySerialize(ObjectManager::instance().getRegistry(), *target.entity);
 		if (!existingPayload.contains(property))
 		{
 			result.message = "Property is not present in component reflection metadata.";
@@ -697,11 +696,12 @@ namespace TerraEngine::Editor::Automation
 		{
 			const auto entity = static_cast<entt::entity>(value.get<std::uint32_t>());
 			target.input = EntityToString(entity);
-			if (auto object = ObjectManager::instance().getObject(entity))
+			ObjectManager& objects = ObjectManager::instance();
+			if (objects.isEntityValid(entity))
 			{
-				target.entity = object->EntityId();
-				target.displayName = object->getName();
-				target.uuid = TerraEngine::ToHexString(object->getUUID());
+				target.entity = entity;
+				target.displayName = objects.getObjectName(entity);
+				target.uuid = TerraEngine::ToHexString(objects.getUUID(entity));
 				target.resolved = true;
 			}
 			return target;
@@ -714,44 +714,45 @@ namespace TerraEngine::Editor::Automation
 		target.input = value.get<std::string>();
 		if (const auto parsed = TerraEngine::ParseUUID(target.input))
 		{
-			if (auto object = ObjectManager::instance().getObject(*parsed))
+			ObjectManager& objects = ObjectManager::instance();
+			if (auto entity = objects.getEntity(*parsed))
 			{
-				target.entity = object->EntityId();
-				target.displayName = object->getName();
-				target.uuid = TerraEngine::ToHexString(object->getUUID());
+				target.entity = *entity;
+				target.displayName = objects.getObjectName(*entity);
+				target.uuid = TerraEngine::ToHexString(objects.getUUID(*entity));
 				target.resolved = true;
 				return target;
 			}
 		}
-		if (auto object = ObjectManager::instance().FindObjectByName(target.input))
+		if (auto entity = ObjectManager::instance().FindEntityByName(target.input))
 		{
-			target.entity = object->EntityId();
-			target.displayName = object->getName();
-			target.uuid = TerraEngine::ToHexString(object->getUUID());
+			target.entity = *entity;
+			target.displayName = ObjectManager::instance().getObjectName(*entity);
+			target.uuid = TerraEngine::ToHexString(ObjectManager::instance().getUUID(*entity));
 			target.resolved = true;
 		}
 		return target;
 	}
 
-	nlohmann::json EditorAutomationService::SerializeObjectSummary(Object object, bool includeComponents) const
+	nlohmann::json EditorAutomationService::SerializeObjectSummary(entt::entity object, bool includeComponents) const
 	{
+		ObjectManager& objectManager = ObjectManager::instance();
 		nlohmann::json data;
-		data["entity"] = static_cast<std::uint32_t>(object.EntityId());
-		data["uuid"] = TerraEngine::ToHexString(object.getUUID());
-		data["name"] = object.getName();
-		data["tag"] = object.getTag();
-		data["layer"] = object.getLayer();
-		data["active"] = object.isActive();
-		data["static"] = object.isStatic();
-		data["parent"] = ObjectManager::instance().getParentEntity(object.EntityId()) == entt::null ? nullptr : nlohmann::json(static_cast<std::uint32_t>(ObjectManager::instance().getParentEntity(object.EntityId())));
+		data["entity"] = static_cast<std::uint32_t>(object);
+		data["uuid"] = TerraEngine::ToHexString(objectManager.getUUID(object));
+		data["name"] = objectManager.getObjectName(object);
+		data["tag"] = objectManager.getObjectTag(object);
+		data["layer"] = objectManager.getObjectLayer(object);
+		data["active"] = objectManager.isObjectActive(object);
+		data["static"] = objectManager.isObjectStatic(object);
+		data["parent"] = objectManager.getParentEntity(object) == entt::null ? nullptr : nlohmann::json(static_cast<std::uint32_t>(objectManager.getParentEntity(object)));
 		if (includeComponents)
 		{
 			nlohmann::json components = nlohmann::json::array();
 			std::lock_guard lock(ComponentAccessRegistryMutex());
 			for (const auto& [name, access] : ComponentAccessRegistry())
 			{
-				Object mutableObject = object;
-				if (access.hasComponent && access.hasComponent(mutableObject))
+				if (access.entityHasComponent && access.entityHasComponent(objectManager.getRegistry(), object))
 				{
 					components.push_back(name);
 				}
@@ -766,14 +767,14 @@ namespace TerraEngine::Editor::Automation
 		const bool includeComponents = arguments.value("includeComponents", false);
 		const std::string search = arguments.value("search", "");
 		nlohmann::json objects = nlohmann::json::array();
-		std::vector<Object> roots = ObjectManager::instance().getRootObjects();
-		ObjectManager::instance().SortObjectsByStableId(roots);
-		for (Object object : roots)
+		std::vector<entt::entity> roots = ObjectManager::instance().getRootEntities();
+		ObjectManager::instance().SortEntitiesByStableId(roots);
+		for (entt::entity object : roots)
 		{
 			const bool matches = search.empty()
-				|| ContainsCaseInsensitive(object.getName(), search)
-				|| ContainsCaseInsensitive(object.getTag(), search)
-				|| ContainsCaseInsensitive(object.getLayer(), search);
+				|| ContainsCaseInsensitive(ObjectManager::instance().getObjectName(object), search)
+				|| ContainsCaseInsensitive(ObjectManager::instance().getObjectTag(object), search)
+				|| ContainsCaseInsensitive(ObjectManager::instance().getObjectLayer(object), search);
 			if (matches)
 			{
 				objects.push_back(SerializeObjectSummary(object, includeComponents));
@@ -805,23 +806,24 @@ namespace TerraEngine::Editor::Automation
 			return BuildError(requestId, ErrorCategory::Validation, "object.create requires a string name.");
 		}
 		Object object = ObjectManager::instance().createObject(arguments["name"].get<std::string>());
+		const entt::entity entity = object.EntityId();
 		if (arguments.contains("parent") && !arguments["parent"].is_null())
 		{
 			EditorTarget parent = ResolveTarget(arguments["parent"]);
 			if (!parent.resolved)
 			{
-				ObjectManager::instance().removeObject(object);
+				ObjectManager::instance().removeObject(entity);
 				return BuildError(requestId, ErrorCategory::MissingTarget, "Parent object was not found.", parent.input);
 			}
-			ObjectManager::instance().setParent(object, ObjectManager::instance().getObject(*parent.entity));
+			ObjectManager::instance().setParent(entity, parent.entity);
 		}
 		if (arguments.value("select", false) && setSelectedEntity)
 		{
-			setSelectedEntity(object.EntityId());
+			setSelectedEntity(entity);
 		}
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(object.EntityId()));
-		MarkSceneMutated(ActivityEventType::Mutation, requestId, "object.create", "Created object " + object.getName() + ".");
-		return BuildSuccess(requestId, "Created object.", {{"object", SerializeObjectSummary(object, true)}});
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(entity));
+		MarkSceneMutated(ActivityEventType::Mutation, requestId, "object.create", "Created object " + ObjectManager::instance().getObjectName(entity) + ".");
+		return BuildSuccess(requestId, "Created object.", {{"object", SerializeObjectSummary(entity, true)}});
 	}
 
 	nlohmann::json EditorAutomationService::HandleObjectDelete(const nlohmann::json& arguments, const std::string& requestId)
@@ -834,7 +836,7 @@ namespace TerraEngine::Editor::Automation
 		// DeleteObjectCommand snapshots the object before it disappears, so the
 		// command is created first and pushed only after the mutation succeeds.
 		auto command = std::make_unique<DeleteObjectCommand>(*target.entity);
-		ObjectManager::instance().removeObject(*ObjectManager::instance().getObject(*target.entity));
+		ObjectManager::instance().removeObject(*target.entity);
 		UndoRedoSystem::Instance().PushCommand(std::move(command));
 		MarkSceneMutated(ActivityEventType::Mutation, requestId, "object.delete", "Deleted object " + target.displayName + ".");
 		return BuildSuccess(requestId, "Deleted object.", {{"object", target.displayName}});
@@ -858,27 +860,28 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Object was not found.", target.input);
 		}
-		Object object = *ObjectManager::instance().getObject(*target.entity);
+		ObjectManager& objectManager = ObjectManager::instance();
+		const entt::entity object = *target.entity;
 		const nlohmann::json oldMetadata = {
-			{"name", object.getName()},
-			{"tag", object.getTag()},
-			{"layer", object.getLayer()},
-			{"active", object.isActive()},
-			{"static", object.isStatic()}
+			{"name", objectManager.getObjectName(object)},
+			{"tag", objectManager.getObjectTag(object)},
+			{"layer", objectManager.getObjectLayer(object)},
+			{"active", objectManager.isObjectActive(object)},
+			{"static", objectManager.isObjectStatic(object)}
 		};
-		if (arguments.contains("name") && arguments["name"].is_string()) object.setName(arguments["name"].get<std::string>());
-		if (arguments.contains("tag") && arguments["tag"].is_string()) object.setTag(arguments["tag"].get<std::string>());
-		if (arguments.contains("layer") && arguments["layer"].is_string()) object.setLayer(arguments["layer"].get<std::string>());
-		if (arguments.contains("active") && arguments["active"].is_boolean()) object.setActive(arguments["active"].get<bool>());
-		if (arguments.contains("static") && arguments["static"].is_boolean()) object.setStatic(arguments["static"].get<bool>());
+		if (arguments.contains("name") && arguments["name"].is_string()) objectManager.setObjectName(object, arguments["name"].get<std::string>());
+		if (arguments.contains("tag") && arguments["tag"].is_string()) objectManager.setObjectTag(object, arguments["tag"].get<std::string>());
+		if (arguments.contains("layer") && arguments["layer"].is_string()) objectManager.setObjectLayer(object, arguments["layer"].get<std::string>());
+		if (arguments.contains("active") && arguments["active"].is_boolean()) objectManager.setObjectActive(object, arguments["active"].get<bool>());
+		if (arguments.contains("static") && arguments["static"].is_boolean()) objectManager.setObjectStatic(object, arguments["static"].get<bool>());
 		const nlohmann::json newMetadata = {
-			{"name", object.getName()},
-			{"tag", object.getTag()},
-			{"layer", object.getLayer()},
-			{"active", object.isActive()},
-			{"static", object.isStatic()}
+			{"name", objectManager.getObjectName(object)},
+			{"tag", objectManager.getObjectTag(object)},
+			{"layer", objectManager.getObjectLayer(object)},
+			{"active", objectManager.isObjectActive(object)},
+			{"static", objectManager.isObjectStatic(object)}
 		};
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<SetObjectMetadataCommand>(object.EntityId(), oldMetadata, newMetadata));
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<SetObjectMetadataCommand>(object, oldMetadata, newMetadata));
 		MarkSceneMutated(ActivityEventType::Mutation, requestId, "object.set_metadata", "Updated object metadata.");
 		return BuildSuccess(requestId, "Updated object metadata.", {{"object", SerializeObjectSummary(object, true)}});
 	}
@@ -890,13 +893,13 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Child object was not found.", childTarget.input);
 		}
-		Object child = *ObjectManager::instance().getObject(*childTarget.entity);
+		const entt::entity child = *childTarget.entity;
 		std::optional<TerraEngine::UUID> oldParentUuid;
-		if (const entt::entity oldParent = ObjectManager::instance().getParentEntity(child.EntityId()); oldParent != entt::null)
+		if (const entt::entity oldParent = ObjectManager::instance().getParentEntity(child); oldParent != entt::null)
 		{
 			oldParentUuid = ObjectManager::instance().getUUID(oldParent);
 		}
-		std::optional<Object> parent;
+		std::optional<entt::entity> parent;
 		std::optional<TerraEngine::UUID> newParentUuid;
 		if (arguments.contains("parent") && !arguments["parent"].is_null())
 		{
@@ -905,14 +908,14 @@ namespace TerraEngine::Editor::Automation
 			{
 				return BuildError(requestId, ErrorCategory::MissingTarget, "Parent object was not found.", parentTarget.input);
 			}
-			parent = ObjectManager::instance().getObject(*parentTarget.entity);
-			newParentUuid = parent->getUUID();
+			parent = *parentTarget.entity;
+			newParentUuid = ObjectManager::instance().getUUID(*parent);
 		}
 		if (!ObjectManager::instance().setParent(child, parent))
 		{
 			return BuildError(requestId, ErrorCategory::Conflict, "Parent change would create an invalid hierarchy.");
 		}
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<SetParentCommand>(child.EntityId(), oldParentUuid, newParentUuid));
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<SetParentCommand>(child, oldParentUuid, newParentUuid));
 		MarkSceneMutated(ActivityEventType::Mutation, requestId, "object.set_parent", "Updated object parent.");
 		return BuildSuccess(requestId, "Updated object parent.", {{"object", SerializeObjectSummary(child, true)}});
 	}
@@ -925,16 +928,17 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Object or component name was not found.", target.input);
 		}
-		Object object = *ObjectManager::instance().getObject(*target.entity);
+		ObjectManager& objectManager = ObjectManager::instance();
+		const entt::entity object = *target.entity;
 		std::lock_guard lock(ComponentAccessRegistryMutex());
 		auto it = ComponentAccessRegistry().find(component);
 		if (it == ComponentAccessRegistry().end())
 		{
 			return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Component is not registered for automation.", component);
 		}
-		it->second.addComponent(object);
-		ObjectManager::instance().notifyObjectStructureChanged(object);
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<AddComponentCommand>(object.EntityId(), component));
+		it->second.entityAddComponent(objectManager.getRegistry(), object);
+		objectManager.notifyObjectStructureChanged(object);
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<AddComponentCommand>(object, component));
 		MarkSceneMutated(ActivityEventType::Mutation, requestId, "component.add", "Added component " + component + ".");
 		return BuildSuccess(requestId, "Added component.", {{"object", target.displayName}, {"component", component}});
 	}
@@ -947,18 +951,19 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Object or component name was not found.", target.input);
 		}
-		Object object = *ObjectManager::instance().getObject(*target.entity);
+		ObjectManager& objectManager = ObjectManager::instance();
+		const entt::entity object = *target.entity;
 		std::lock_guard lock(ComponentAccessRegistryMutex());
 		auto it = ComponentAccessRegistry().find(component);
-		if (it == ComponentAccessRegistry().end() || !it->second.hasComponent(object))
+		if (it == ComponentAccessRegistry().end() || !it->second.entityHasComponent(objectManager.getRegistry(), object))
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Component is not present on the object.", component);
 		}
 		// RemoveComponentCommand captures the existing component payload for
 		// undo, so construct it while the component is still attached.
-		auto command = std::make_unique<RemoveComponentCommand>(object.EntityId(), component);
-		it->second.removeComponent(object);
-		ObjectManager::instance().notifyObjectStructureChanged(object);
+		auto command = std::make_unique<RemoveComponentCommand>(object, component);
+		it->second.entityRemoveComponent(objectManager.getRegistry(), object);
+		objectManager.notifyObjectStructureChanged(object);
 		UndoRedoSystem::Instance().PushCommand(std::move(command));
 		MarkSceneMutated(ActivityEventType::Mutation, requestId, "component.remove", "Removed component " + component + ".");
 		return BuildSuccess(requestId, "Removed component.", {{"object", target.displayName}, {"component", component}});
@@ -972,14 +977,15 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Object or component name was not found.", target.input);
 		}
-		Object object = *ObjectManager::instance().getObject(*target.entity);
+		ObjectManager& objectManager = ObjectManager::instance();
+		const entt::entity object = *target.entity;
 		std::lock_guard lock(ComponentAccessRegistryMutex());
 		auto it = ComponentAccessRegistry().find(component);
-		if (it == ComponentAccessRegistry().end() || !it->second.hasComponent(object))
+		if (it == ComponentAccessRegistry().end() || !it->second.entityHasComponent(objectManager.getRegistry(), object))
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Component is not present on the object.", component);
 		}
-		return BuildSuccess(requestId, "Read component.", {{"component", component}, {"properties", it->second.serialize(object)}});
+		return BuildSuccess(requestId, "Read component.", {{"component", component}, {"properties", it->second.entitySerialize(objectManager.getRegistry(), object)}});
 	}
 
 	nlohmann::json EditorAutomationService::HandleComponentSetProperty(const nlohmann::json& arguments, const std::string& requestId)
@@ -992,18 +998,19 @@ namespace TerraEngine::Editor::Automation
 		{
 			return BuildError(requestId, ErrorCategory::Validation, preflight.message);
 		}
-		Object object = *ObjectManager::instance().getObject(*target.entity);
+		ObjectManager& objectManager = ObjectManager::instance();
+		const entt::entity object = *target.entity;
 		std::lock_guard lock(ComponentAccessRegistryMutex());
 		auto it = ComponentAccessRegistry().find(component);
-		if (it == ComponentAccessRegistry().end() || !it->second.hasComponent(object))
+		if (it == ComponentAccessRegistry().end() || !it->second.entityHasComponent(objectManager.getRegistry(), object))
 		{
 			return BuildError(requestId, ErrorCategory::MissingTarget, "Component is not present on the object.", component);
 		}
-		const nlohmann::json oldPayload = it->second.serialize(object);
-		it->second.deserialize(object, nlohmann::json{{property, arguments["value"]}});
-		const nlohmann::json newPayload = it->second.serialize(object);
-		ObjectManager::instance().notifyObjectStructureChanged(object);
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<SetComponentPayloadCommand>(object.EntityId(), component, oldPayload, newPayload));
+		const nlohmann::json oldPayload = it->second.entitySerialize(objectManager.getRegistry(), object);
+		it->second.entityDeserialize(objectManager.getRegistry(), object, nlohmann::json{{property, arguments["value"]}});
+		const nlohmann::json newPayload = it->second.entitySerialize(objectManager.getRegistry(), object);
+		objectManager.notifyObjectStructureChanged(object);
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<SetComponentPayloadCommand>(object, component, oldPayload, newPayload));
 		MarkSceneMutated(ActivityEventType::Mutation, requestId, "component.set_property", "Updated component property.");
 		return BuildSuccess(requestId, "Updated component property.", {{"component", component}, {"property", property}});
 	}

@@ -22,8 +22,9 @@ namespace TerraEngine::Tests {
 
 	Object CreateScriptedRuntimeObject(std::string_view objectName, std::string_view className)
 	{
-		Object object = ObjectManager::instance().createObject(std::string(objectName));
-		ScriptComponent& component = object.addComponent<ScriptComponent>();
+		ObjectManager& objects = ObjectManager::instance();
+		Object object = objects.createObject(std::string(objectName));
+		ScriptComponent& component = *objects.AddComponent<ScriptComponent>(object.EntityId());
 		component.AddBinding(TerraEngine::EMPTY_UUID, std::string(className));
 		return object;
 	}

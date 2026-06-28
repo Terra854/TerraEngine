@@ -10,17 +10,20 @@
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-// SerializeObjectRecursive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-nlohmann::json SerializeObjectRecursive(Object& obj) {
+// SerializeObjectRecursive is the entity-based scene snapshot path. It reads
+// authoritative state through ObjectManager so serialization does not need the
+// legacy mutable Object facade.
+nlohmann::json SerializeObjectRecursive(entt::entity entity) {
 	ObjectManager& objManager = ObjectManager::instance();
+	entt::registry& enttRegistry = objManager.getRegistry();
 	nlohmann::json objJson;
-	objJson["name"] = obj.getName();
-	objJson["tag"] = obj.getTag();
-	objJson["layer"] = obj.getLayer();
-	objJson["active"] = obj.isActive();
-	objJson["isStatic"] = obj.isStatic();
+	objJson["name"] = objManager.getObjectName(entity);
+	objJson["tag"] = objManager.getObjectTag(entity);
+	objJson["layer"] = objManager.getObjectLayer(entity);
+	objJson["active"] = objManager.isObjectActive(entity);
+	objJson["isStatic"] = objManager.isObjectStatic(entity);
 	
-	auto uuid = obj.getUUID();
+	auto uuid = objManager.getUUID(entity);
 	objJson["uuid"] = TerraEngine::ToHexString(uuid);
 	
 	objJson["components"] = nlohmann::json::object();
@@ -34,7 +37,7 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (compName == "TagComponent") continue; // Skip TagComponent as it's now embedded in Object
 
-		if (functions.hasComponent(obj))
+		if (functions.entityHasComponent && functions.entityHasComponent(enttRegistry, entity))
 		{
 			nlohmann::json compJson = nlohmann::json::object();
 			TerraEngine::Reflection::Type type = functions.reflectionType;
@@ -47,7 +50,7 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
 				for (const TerraEngine::Reflection::Property& prop : TerraEngine::Reflection::GetProperties(type))
 				{
 					std::string propName = TerraEngine::Reflection::GetPropertyName(prop);
-					TerraEngine::Reflection::Variant val = functions.getter(obj, propName);
+					TerraEngine::Reflection::Variant val = functions.entityGetter(enttRegistry, entity, propName);
 					
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (TerraEngine::Reflection::IsType<float>(val)) compJson[propName] = TerraEngine::Reflection::GetValue<float>(val);
@@ -76,11 +79,11 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
 		}
 	}
 	
-	auto children = objManager.getChildren(obj);
+	auto children = objManager.getChildEntities(entity);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!children.empty()) {
 		objJson["children"] = nlohmann::json::array();
-		for (auto& child : children) {
+		for (entt::entity child : children) {
 			objJson["children"].push_back(SerializeObjectRecursive(child));
 		}
 	}
@@ -88,11 +91,15 @@ nlohmann::json SerializeObjectRecursive(Object& obj) {
 }
 
 // Serializer::SerializeObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-nlohmann::json Serializer::SerializeObject(Object& obj) {
+nlohmann::json Serializer::SerializeObject(entt::entity entity) {
 	// Acquire an exclusive lock once for the entire graph to ensure a consistent
 	// snapshot while the recursion proceeds without further locking.
 	std::lock_guard lock(ComponentAccessRegistryMutex());
-	return SerializeObjectRecursive(obj);
+	return SerializeObjectRecursive(entity);
+}
+
+nlohmann::json Serializer::SerializeObject(Object& obj) {
+	return SerializeObject(obj.EntityId());
 }
 
 // Serializer::SerializeSceneRenderSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -129,9 +136,11 @@ SceneRenderSettings Serializer::DeserializeSceneRenderSettings(const nlohmann::j
 	return SanitizeSceneRenderSettings(settings);
 }
 
-// Serializer::DeserializeObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<Object> parent) {
+// Serializer::DeserializeObjectEntity restores authored state through manager
+// APIs so stale identity and component access stay centralized.
+entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std::optional<entt::entity> parent) {
 	ObjectManager& objManager = ObjectManager::instance();
+	entt::registry& enttRegistry = objManager.getRegistry();
 	std::string name = json.value("name", "Unnamed");
 	
 	// Identity restoration is critical for maintaining cross-object references 
@@ -159,22 +168,23 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
 	}
 
 	Object obj = objManager.createObject(name);
+	const entt::entity entity = obj.EntityId();
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasUuid) {
 		// Force the newly created object to use the original identity from the
 		// JSON document instead of its automatically generated transient UUID.
-		objManager.UpdateEntityUUID(obj.EntityId(), uuid);
+		objManager.UpdateEntityUUID(entity, uuid);
 	}
 
-	obj.setTag(json.value("tag", "Untagged"));
-	obj.setLayer(json.value("layer", "Default"));
-	obj.setActive(json.value("active", true));
-	obj.setStatic(json.value("isStatic", false));
+	objManager.setObjectTag(entity, json.value("tag", "Untagged"));
+	objManager.setObjectLayer(entity, json.value("layer", "Default"));
+	objManager.setObjectActive(entity, json.value("active", true));
+	objManager.setObjectStatic(entity, json.value("isStatic", false));
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (parent) {
-		objManager.setParent(obj, *parent);
+		objManager.setParent(entity, *parent);
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -187,7 +197,11 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
 
 			if (registry.count(compName)) {
 				auto& functions = registry[compName];
-				functions.addComponent(obj);
+				if (functions.entityAddComponent)
+				{
+					functions.entityAddComponent(enttRegistry, entity);
+					objManager.notifyObjectStructureChanged(entity);
+				}
 
 					TerraEngine::Reflection::Type type = functions.reflectionType;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -238,7 +252,7 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
 							
 							// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 							if (TerraEngine::Reflection::IsValid(val)) {
-								functions.setter(obj, propName, val);
+								functions.entitySetter(enttRegistry, entity, propName, val);
 							}
 						}
 					}
@@ -251,9 +265,19 @@ Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<O
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (json.contains("children") && json["children"].is_array()) {
 		for (auto& childJson : json["children"]) {
-			DeserializeObject(childJson, obj);
+			DeserializeObjectEntity(childJson, entity);
 		}
 	}
 	
-	return obj;
+	return entity;
+}
+
+Object Serializer::DeserializeObject(const nlohmann::json& json, std::optional<Object> parent) {
+	std::optional<entt::entity> parentEntity;
+	if (parent)
+	{
+		parentEntity = parent->EntityId();
+	}
+	const entt::entity entity = DeserializeObjectEntity(json, parentEntity);
+	return *ObjectManager::instance().getObject(entity);
 }

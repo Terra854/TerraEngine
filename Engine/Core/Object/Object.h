@@ -1,109 +1,90 @@
-// Object.h — Handle-based interface for scene entities in the ECS.
-//
-// This file defines the Object class, which wraps an EnTT entity identifier and
-// a registry pointer to provide a consistent API for entity manipulation. It
-// manages component lifecycle and provides stable access to entity-specific
-// metadata through the ObjectManager.
+// Object.h - compact validated object identity for runtime and editor paths.
 
 #pragma once
 
-#include <entt/entt.hpp>
-
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <utility>
-
-#include "Core/Scheduling/WorkerSafety.h"
 #include "Utilities/UUID.h"
 
-// Object now serves as an interface to manage entities in EnTT
-class Object {
-public:
-	explicit Object(entt::registry& registry);
-	// Construct an Object handle that references an existing entity without
-	// creating a new one. Restricted to the ObjectManager so stray handles
-	// cannot be built without registry ownership.
-	Object(entt::registry& registry, entt::entity existingId);
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <type_traits>
 
-	TerraEngine::UUID getUUID() const;
+#include <entt/entt.hpp>
 
-	std::string getName() const;
-	void setName(const std::string& name);
+// Object is a small value, not a component facade. It can be copied into worker
+// snapshots and must be validated through ObjectManager before mutable access.
+struct Object
+{
+	std::uint32_t entityValue = 0;
+	std::uint32_t generation = 0;
+	std::uint64_t stableIdHash = 0;
 
-	std::string getTag() const;
-	void setTag(const std::string& tag);
-
-	std::string getLayer() const;
-	void setLayer(const std::string& layer);
-
-	bool isActive() const;
-	void setActive(bool active);
-
-	bool isStatic() const;
-	void setStatic(bool isStatic);
-
-	// Component management with EnTT. Adding a component changes live storage,
-	// so worker phases must enqueue a deferred SceneMutationQueue request
-	// instead of calling this protected-only API directly.
-	template<typename T, typename... Args>
-	T& addComponent(Args&&... args) {
-		if (TerraEngine::Scheduling::IsWorkerSafetyScopeActive()) {
-			TerraEngine::Scheduling::ReportWorkerSafetyViolation(
-				TerraEngine::Scheduling::WorkerSafetySeverity::Error,
-				"Object.addComponent",
-				"Worker code attempted to add a live component directly.",
-				"Capture a SceneMutationQueue AddComponent request and apply it at a protected scheduler flush.");
-			throw std::runtime_error("Worker code cannot add live components directly.");
-		}
-		return registry->emplace<T>(id, std::forward<Args>(args)...);
-	}
-
-	// Function to get a component
-	template<typename T>
-	T* getComponent() {
-		return registry->try_get<T>(id);
-	}
-
-	// Function to remove a component. Removal is protected-only for the same
-	// reason as addComponent: worker phases record intent and let the scheduler
-	// apply it at a mutation flush point.
-	template<typename T>
-	void removeComponent() {
-		if (TerraEngine::Scheduling::IsWorkerSafetyScopeActive()) {
-			TerraEngine::Scheduling::ReportWorkerSafetyViolation(
-				TerraEngine::Scheduling::WorkerSafetySeverity::Error,
-				"Object.removeComponent",
-				"Worker code attempted to remove a live component directly.",
-				"Capture a SceneMutationQueue RemoveComponent request and apply it at a protected scheduler flush.");
-			return;
-		}
-		registry->remove<T>(id);
-	}
-
-	// Expose the underlying entity identifier for systems that need stable IDs
-	// when building UI lists or other external bookkeeping.
-	entt::entity EntityId() const { return id; }
-
-	// Needed for using Object as a key in std::unordered_map
-	bool operator==(const Object& other) const {
-		return id == other.id;
-	}
-
-private:
-	friend struct std::hash<Object>;
-	friend class ObjectManager; // Needed to delete objects
-	entt::entity id{}; // EnTT entity ID
-	entt::registry* registry{};
+	bool operator==(const Object& other) const = default;
+	bool IsEmpty() const;
+	entt::entity EntityId() const { return static_cast<entt::entity>(entityValue); }
 };
 
-// Needed for using Object as a key in std::unordered_map
+namespace TerraEngine {
+
+	enum class ObjectIdentityValidity {
+		Valid,
+		Stale,
+		Missing,
+		Unresolved
+	};
+
+	struct ObjectIdentityResolution {
+		Object reference;
+		ObjectIdentityValidity validity = ObjectIdentityValidity::Unresolved;
+		std::string message;
+	};
+
+	constexpr std::size_t kObjectIdentityTargetBytes = 16;
+
+	static_assert(std::is_trivially_copyable_v<::Object>, "Object must remain cheap to copy into worker snapshots.");
+	static_assert(sizeof(::Object) <= kObjectIdentityTargetBytes, "Object exceeded the hot snapshot footprint target.");
+
+	constexpr std::size_t ObjectIdentityFootprintBytes()
+	{
+		return sizeof(::Object);
+	}
+
+	constexpr bool IsObjectIdentityWithinFootprint()
+	{
+		return ObjectIdentityFootprintBytes() <= kObjectIdentityTargetBytes;
+	}
+
+	constexpr bool IsResolvedObjectIdentity(ObjectIdentityValidity validity)
+	{
+		return validity == ObjectIdentityValidity::Valid;
+	}
+
+	constexpr std::uint32_t CompressObjectGeneration(std::uint64_t generation)
+	{
+		constexpr std::uint64_t maxCompactGeneration = std::numeric_limits<std::uint32_t>::max();
+		return generation == 0
+			? 0
+			: static_cast<std::uint32_t>(((generation - 1) % maxCompactGeneration) + 1);
+	}
+
+	std::uint64_t MakeObjectStableHash(const TerraEngine::UUID& stableId);
+	bool IsResolvedObjectIdentity(const ObjectIdentityResolution& resolution);
+	std::string ToString(ObjectIdentityValidity validity);
+	std::string FormatObjectIdentity(const Object& reference);
+
+}
+
 namespace std {
 	template<>
-	struct hash<Object> {
-		// operator is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-		std::size_t operator()(const Object& k) const {
-			return static_cast<std::size_t>(k.id);
+	struct hash<Object>
+	{
+		std::size_t operator()(const Object& value) const noexcept
+		{
+			std::size_t result = std::hash<std::uint32_t>{}(value.entityValue);
+			result ^= std::hash<std::uint32_t>{}(value.generation) + 0x9e3779b9u + (result << 6) + (result >> 2);
+			result ^= std::hash<std::uint64_t>{}(value.stableIdHash) + 0x9e3779b97f4a7c15ull + (result << 6) + (result >> 2);
+			return result;
 		}
 	};
 }

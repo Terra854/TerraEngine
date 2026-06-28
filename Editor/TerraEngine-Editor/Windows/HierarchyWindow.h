@@ -11,7 +11,6 @@
 #include "Engine/Utilities/UUID.h"
 
 class MainEditorSubsystem;
-class Object;
 
 // class HierarchyWindow groups related state and operations so callers have one documented contract.
 class HierarchyWindow : public EditorWindow {
@@ -22,8 +21,8 @@ protected:
 	virtual void OnGui() override;
 
 private:
-	void DrawEntityNode(Object& obj, const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds = nullptr);
-	void CreatePrefabFromSelection(Object& obj);
+	void DrawEntityNode(entt::entity obj, const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds = nullptr);
+	void CreatePrefabFromSelection(entt::entity obj);
 	
 	MainEditorSubsystem* m_Owner;
 	std::string m_SearchFilter;

@@ -81,10 +81,18 @@ struct ComponentAccessFunctions
 	std::function<void(Object&)> removeComponent;
 	std::function<nlohmann::json(Object&)> serialize;
 	std::function<void(Object&, const nlohmann::json&)> deserialize;
+	std::function<TerraEngine::Reflection::Variant(entt::registry&, entt::entity, std::string_view)> entityGetter;
+	std::function<bool(entt::registry&, entt::entity, std::string_view, const TerraEngine::Reflection::Variant&)> entitySetter;
+	std::function<bool(entt::registry&, entt::entity)> entityHasComponent;
+	std::function<void(entt::registry&, entt::entity)> entityAddComponent;
+	std::function<void(entt::registry&, entt::entity)> entityRemoveComponent;
+	std::function<nlohmann::json(entt::registry&, entt::entity)> entitySerialize;
+	std::function<void(entt::registry&, entt::entity, const nlohmann::json&)> entityDeserialize;
 };
 
 TERRAENGINE_API std::unordered_map<std::string, ComponentAccessFunctions>& ComponentAccessRegistry();
 TERRAENGINE_API std::mutex& ComponentAccessRegistryMutex();
+TERRAENGINE_API entt::registry& ComponentAccessObjectRegistry();
 
 template <typename ComponentType>
 // RegisterComponentAccess is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -101,11 +109,11 @@ void RegisterComponentAccess(const std::string& name)
 
 	ComponentAccessFunctions functions;
 	functions.reflectionType = TerraEngine::Reflection::ResolveType<ComponentType>();
-	functions.getter = [](Object& object, std::string_view property) -> TerraEngine::Reflection::Variant
+	functions.entityGetter = [](entt::registry& registry, entt::entity entity, std::string_view property) -> TerraEngine::Reflection::Variant
 	{
 		// Fetch the concrete component by type-safe API, then take a shared
 		// lock so concurrent reads remain safe while writers block.
-		ComponentType* component = object.getComponent<ComponentType>();
+		ComponentType* component = registry.valid(entity) ? registry.try_get<ComponentType>(entity) : nullptr;
 		if (!component)
 		{
 			return {};
@@ -121,11 +129,11 @@ void RegisterComponentAccess(const std::string& name)
 		return TerraEngine::Reflection::GetPropertyValue(prop, *component);
 	};
 
-	functions.setter = [](Object& object, std::string_view property, const TerraEngine::Reflection::Variant& value) -> bool
+	functions.entitySetter = [](entt::registry& registry, entt::entity entity, std::string_view property, const TerraEngine::Reflection::Variant& value) -> bool
 	{
 		// Promote to exclusive access before mutating reflected properties
 		// to keep writer updates serialized relative to readers.
-		ComponentType* component = object.getComponent<ComponentType>();
+		ComponentType* component = registry.valid(entity) ? registry.try_get<ComponentType>(entity) : nullptr;
 		if (!component)
 		{
 			return false;
@@ -141,28 +149,30 @@ void RegisterComponentAccess(const std::string& name)
 		return TerraEngine::Reflection::SetPropertyValue(prop, *component, value);
 	};
 
-	functions.hasComponent = [](Object& object) -> bool
+	functions.entityHasComponent = [](entt::registry& registry, entt::entity entity) -> bool
 	{
-		return object.getComponent<ComponentType>() != nullptr;
+		return registry.valid(entity) && registry.any_of<ComponentType>(entity);
 	};
 
-	functions.addComponent = [](Object& object) -> void
+	functions.entityAddComponent = [](entt::registry& registry, entt::entity entity) -> void
 	{
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!object.getComponent<ComponentType>()) {
-			object.addComponent<ComponentType>();
+		if (!registry.valid(entity) || registry.any_of<ComponentType>(entity)) {
+			return;
+		}
+		registry.emplace<ComponentType>(entity);
+	};
+
+	functions.entityRemoveComponent = [](entt::registry& registry, entt::entity entity) -> void
+	{
+		if (registry.valid(entity) && registry.any_of<ComponentType>(entity)) {
+			registry.remove<ComponentType>(entity);
 		}
 	};
 
-	functions.removeComponent = [](Object& object) -> void
-	{
-		object.removeComponent<ComponentType>();
-	};
-
-	functions.serialize = [name](Object& object) -> nlohmann::json
+	functions.entitySerialize = [name](entt::registry& registry, entt::entity entity) -> nlohmann::json
 	{
 		nlohmann::json compJson = nlohmann::json::object();
-		ComponentType* component = object.getComponent<ComponentType>();
+		ComponentType* component = registry.valid(entity) ? registry.try_get<ComponentType>(entity) : nullptr;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!component) return compJson;
 
@@ -198,9 +208,9 @@ void RegisterComponentAccess(const std::string& name)
 		return compJson;
 	};
 
-	functions.deserialize = [](Object& object, const nlohmann::json& compData) -> void
+	functions.entityDeserialize = [](entt::registry& registry, entt::entity entity, const nlohmann::json& compData) -> void
 	{
-		ComponentType* component = object.getComponent<ComponentType>();
+		ComponentType* component = registry.valid(entity) ? registry.try_get<ComponentType>(entity) : nullptr;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!component) return;
 
@@ -250,6 +260,48 @@ void RegisterComponentAccess(const std::string& name)
 				}
 			}
 		}
+	};
+
+	auto entityGetter = functions.entityGetter;
+	functions.getter = [entityGetter](Object& object, std::string_view property) -> TerraEngine::Reflection::Variant
+	{
+		return entityGetter(ComponentAccessObjectRegistry(), object.EntityId(), property);
+	};
+
+	auto entitySetter = functions.entitySetter;
+	functions.setter = [entitySetter](Object& object, std::string_view property, const TerraEngine::Reflection::Variant& value) -> bool
+	{
+		return entitySetter(ComponentAccessObjectRegistry(), object.EntityId(), property, value);
+	};
+
+	auto entityHasComponent = functions.entityHasComponent;
+	functions.hasComponent = [entityHasComponent](Object& object) -> bool
+	{
+		return entityHasComponent(ComponentAccessObjectRegistry(), object.EntityId());
+	};
+
+	auto entityAddComponent = functions.entityAddComponent;
+	functions.addComponent = [entityAddComponent](Object& object) -> void
+	{
+		entityAddComponent(ComponentAccessObjectRegistry(), object.EntityId());
+	};
+
+	auto entityRemoveComponent = functions.entityRemoveComponent;
+	functions.removeComponent = [entityRemoveComponent](Object& object) -> void
+	{
+		entityRemoveComponent(ComponentAccessObjectRegistry(), object.EntityId());
+	};
+
+	auto entitySerialize = functions.entitySerialize;
+	functions.serialize = [entitySerialize](Object& object) -> nlohmann::json
+	{
+		return entitySerialize(ComponentAccessObjectRegistry(), object.EntityId());
+	};
+
+	auto entityDeserialize = functions.entityDeserialize;
+	functions.deserialize = [entityDeserialize](Object& object, const nlohmann::json& compData) -> void
+	{
+		entityDeserialize(ComponentAccessObjectRegistry(), object.EntityId(), compData);
 	};
 
 	reg.emplace(name, std::move(functions));

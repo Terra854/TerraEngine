@@ -192,7 +192,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(1), summary.queryPlans[1].chunks.size(), "Small query should use one deterministic chunk.");
 		});
 
-		registry.Add("Engine.EcsQueryTaskGraph.ChunksCarryCompactObjectReferences", [](TestContext& context) {
+		registry.Add("Engine.EcsQueryTaskGraph.ChunksCarryObjectHandles", [](TestContext& context) {
 			ObjectManager& objects = ObjectManager::instance();
 			objects.clear();
 			std::vector<TerraEngine::UUID> ids;
@@ -210,9 +210,12 @@ namespace TerraEngine::Tests {
 			const auto& summary = graph.Validate();
 
 			context.Expect(summary.valid, "Compact reference query fixture should validate.");
-			context.ExpectEqual(ids.size(), summary.queryPlans.front().compactMatchingObjects.size(), "Query plan should snapshot one compact reference per object.");
-			context.ExpectEqual(static_cast<std::size_t>(3), summary.queryPlans.front().chunks.front().compactObjects.size(), "Chunk should carry compact references beside UUIDs.");
-			context.Expect(objects.validateCompactReference(summary.queryPlans.front().chunks.front().compactObjects.front()).validity == TerraEngine::CompactObjectReferenceValidity::Valid, "Chunk compact reference should validate against live ObjectManager state.");
+			context.ExpectEqual(ids.size(), summary.queryPlans.front().matchingObjectHandles.size(), "Query plan should snapshot one compact reference per object.");
+			context.ExpectEqual(static_cast<std::size_t>(3), summary.queryPlans.front().chunks.front().objectHandles.size(), "Chunk should carry compact references beside UUIDs.");
+			const Object firstChunkReference = summary.queryPlans.front().chunks.front().objectHandles.front();
+			context.Expect(objects.validateObjectHandle(firstChunkReference).validity == TerraEngine::ObjectIdentityValidity::Valid, "Chunk compact reference should validate against live ObjectManager state.");
+			objects.removeObject(static_cast<entt::entity>(firstChunkReference.entityValue));
+			context.Expect(objects.validateObjectHandle(firstChunkReference).validity != TerraEngine::ObjectIdentityValidity::Valid, "Chunk compact reference should fail closed after the object is removed.");
 			objects.clear();
 		});
 

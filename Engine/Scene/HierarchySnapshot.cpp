@@ -90,7 +90,7 @@ namespace TerraEngine::Scene {
 			}
 			const SceneGraphObject& graphObject = found->second;
 			HierarchySnapshotEntry entry;
-			entry.object = objects.makeCompactReference(graphObject.entity);
+			entry.object = objects.makeObjectHandle(graphObject.entity);
 			entry.objectId = objectId;
 			entry.parentId = graphObject.parentId;
 			entry.depth = 0;

@@ -56,8 +56,8 @@ public:
 	// Opens a prefab asset in an isolated hierarchy so the existing scene is
 	// protected while authoring prefab defaults.
 	bool OpenPrefabAsset(const std::filesystem::path& path);
-	bool OpenPrefabFromObject(Object& object);
-	bool ResetPrefabInstanceToDefaults(Object& object);
+	bool OpenPrefabFromObject(entt::entity object);
+	bool ResetPrefabInstanceToDefaults(entt::entity object);
 	bool SaveOpenPrefab();
 	void ClosePrefabMode();
 	bool IsPrefabEditingMode() const { return m_IsPrefabEditingMode; }

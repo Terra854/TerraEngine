@@ -32,7 +32,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(2), authoredObjects.size(), "Authored queries should still see inactive objects.");
 			context.ExpectEqual(static_cast<std::size_t>(2), membership.size(), "Membership snapshot should retain authored rows for diagnostics.");
 			context.Expect(membership[0].authoredStateVisible && membership[1].authoredStateVisible, "Runtime snapshot must not hide authored state.");
-			context.Expect(!membership[0].compactReference.IsEmpty(), "Runtime membership rows should carry compact references for worker-readable snapshots.");
+			context.Expect(!membership[0].objectHandle.IsEmpty(), "Runtime membership rows should carry compact references for worker-readable snapshots.");
 			context.Expect(activeObjects.front().EntityId() == active.EntityId(), "Active object should survive compact membership filtering.");
 			objects.clear();
 		});

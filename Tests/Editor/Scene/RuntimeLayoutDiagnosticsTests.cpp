@@ -12,7 +12,7 @@ namespace TerraEngine::EditorTests {
 			summary.transformRecordCount = 2;
 			summary.renderRecordCount = 3;
 			summary.metadataScanFallbackCount = 1;
-			summary.staleCompactReferenceCount = 2;
+			summary.staleObjectHandleCount = 2;
 
 			context.Expect(summary.totalObjectCount > summary.activeObjectCount, "Editor diagnostics should preserve authored inactive count separately from runtime active count.");
 			context.Expect(TerraEngine::Scene::FormatLayoutDiagnosticsSummary(summary).find("total=4") != std::string::npos, "Formatted diagnostics should expose authored total count.");

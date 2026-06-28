@@ -181,12 +181,31 @@ namespace TerraEngine::Tests {
 			ObjectManager& objects = ObjectManager::instance();
 			objects.clear();
 			Object object = objects.createObject("WorkerReference");
-			TerraEngine::CompactObjectReference reference = objects.makeCompactReference(object.EntityId());
-			context.Expect(TerraEngine::IsResolvedCompactObjectReference(objects.validateCompactReference(reference)), "Fresh compact references should be valid before worker-readable use.");
+			Object reference = objects.makeObjectHandle(object.EntityId());
+			context.Expect(TerraEngine::IsResolvedObjectIdentity(objects.validateObjectHandle(reference)), "Fresh compact references should be valid before worker-readable use.");
 
 			objects.removeObject(object);
 
-			context.Expect(!TerraEngine::IsResolvedCompactObjectReference(objects.validateCompactReference(reference)), "Worker-readable compact references should fail closed after deletion.");
+			context.Expect(!TerraEngine::IsResolvedObjectIdentity(objects.validateObjectHandle(reference)), "Worker-readable compact references should fail closed after deletion.");
+			objects.clear();
+		});
+
+		registry.Add("Engine.ComponentAccess.ObjectManagerEntityComponentOperationsUpdateGenerations", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object object = objects.createObject("EntityComponentAccess");
+			const entt::entity entity = object.EntityId();
+			const std::uint64_t before = objects.getObjectComponentGeneration(entity);
+
+			context.Expect(objects.HasComponent<Transform>(entity), "New objects should start with a Transform component.");
+			objects.RemoveComponent<Transform>(entity);
+			context.Expect(!objects.HasComponent<Transform>(entity), "Entity component removal should remove the Transform without a facade call.");
+			context.Expect(objects.getObjectComponentGeneration(entity) > before, "Removing a component through ObjectManager should bump component generation.");
+
+			Transform* restored = objects.AddComponent<Transform>(entity);
+
+			context.Expect(restored != nullptr, "Entity component add should restore Transform without a facade call.");
+			context.Expect(objects.GetComponent<Transform>(entity) == restored, "Entity component get should return the restored component.");
 			objects.clear();
 		});
 	}

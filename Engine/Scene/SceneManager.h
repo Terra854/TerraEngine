@@ -107,7 +107,7 @@ public:
 	const SceneRenderSettings& GetActiveSceneRenderSettings() const;
 	void SetActiveSceneRenderSettings(const SceneRenderSettings& settings);
 	const SkyComponent* GetActiveSkyComponent() const;
-	std::optional<Object> GetActiveSkyObject() const;
+	std::optional<entt::entity> GetActiveSkyObject() const;
 	bool HasActiveSkyComponent() const;
 	void MarkActiveSceneSkyStateDirty();
 
@@ -219,11 +219,11 @@ private:
 
 	// Track the generated preview object and the user's interaction state so
 	// mouse motion/scroll can manipulate the on-screen demo model.
-	std::optional<Object> previewObject;
+	std::optional<entt::entity> previewObject;
 
 	// Preview camera that replaces the hardcoded view/projection used by the
 	// renderer so authored camera settings can be reflected into the frame.
-	std::optional<Object> previewCamera;
+	std::optional<entt::entity> previewCamera;
 
 	glm::vec2 lastCursorPosition{0.0f, 0.0f};
 	bool isDraggingPreview = false;

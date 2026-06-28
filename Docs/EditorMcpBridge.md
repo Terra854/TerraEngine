@@ -10,6 +10,8 @@ code never edits scene or project state directly.
 - The bridge starts disabled and read-only.
 - Local peer checks accept `localhost`, `127.0.0.1`, and `::1`; non-local peers
   are rejected and recorded in activity history.
+- Enablement and write mode can only be changed in the editor UI. MCP clients
+  cannot expose, hide, upgrade, or downgrade their own permission state.
 - Read-only mode allows resources and read-only tools such as diagnostics,
   activity, capabilities, scene listing, asset listing, and export validation.
 - Write mode is required for scene, object, component, asset, and export
@@ -63,11 +65,12 @@ cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -h
 ```
 
 Manual validation should use the installed editor tree. Open a project, show the
-MCP Bridge window, confirm disabled/read-only startup, enable the bridge, inspect
-status/capabilities/resources, switch write mode, exercise object/component
-tools, import a glTF package with `asset.import`, verify the returned generated
-asset identifiers and diagnostics, then disable the bridge and confirm local
-client requests are rejected.
+MCP Bridge window, confirm disabled/read-only startup, enable the bridge, switch
+write mode from the editor window, inspect status/capabilities/resources,
+confirm no `bridge.set_write_mode` MCP tool is advertised, exercise
+object/component tools, import a glTF package with `asset.import`, verify the
+returned generated asset identifiers and diagnostics, then disable the bridge
+from the editor window and confirm local client requests are rejected.
 
 ## Limitations
 

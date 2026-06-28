@@ -515,23 +515,22 @@ void SceneViewWindow::HandleCameraInput(float deltaTime) {
 void SceneViewWindow::CollectFocusedPrefabObjectIds(entt::entity entity, std::unordered_set<TerraEngine::UUID>& objectIds)
 {
 	auto& objectManager = ObjectManager::instance();
-	auto object = objectManager.getObject(entity);
-	if (!object.has_value())
+	if (!objectManager.isEntityValid(entity))
 	{
 		return;
 	}
 
-	objectIds.insert(object->getUUID());
-	if (const auto* mesh = object->getComponent<MeshRenderComponent>(); mesh != nullptr && mesh->spatialObjectId != TerraEngine::EMPTY_UUID)
+	objectIds.insert(objectManager.getUUID(entity));
+	if (const auto* mesh = objectManager.GetComponent<MeshRenderComponent>(entity); mesh != nullptr && mesh->spatialObjectId != TerraEngine::EMPTY_UUID)
 	{
 		// RenderSystem keys draw commands by spatial object id when a mesh has
 		// one. Include that id too so prefab-focus tinting matches the renderer
 		// instead of accidentally washing out the selected object.
 		objectIds.insert(mesh->spatialObjectId);
 	}
-	for (Object child : objectManager.getChildren(*object))
+	for (entt::entity child : objectManager.getChildEntities(entity))
 	{
-		CollectFocusedPrefabObjectIds(child.EntityId(), objectIds);
+		CollectFocusedPrefabObjectIds(child, objectIds);
 	}
 }
 

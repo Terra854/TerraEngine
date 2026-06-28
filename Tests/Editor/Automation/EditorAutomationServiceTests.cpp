@@ -109,7 +109,7 @@ namespace TerraEngine::EditorTests
 			EditorAutomationService service;
 			const nlohmann::json result = service.HandleTool("scene.list_objects", {{"includeComponents", false}}, WriteMode::ReadOnly, "req-3");
 			context.Expect(result.value("ok", false), "Read-only scene listing should succeed without project state.");
-			context.ExpectEqual(result["data"]["objects"][0].value("name", std::string()), object.getName(), "Scene listing should include created object.");
+			context.ExpectEqual(result["data"]["objects"][0].value("name", std::string()), ObjectManager::instance().getObjectName(object.EntityId()), "Scene listing should include created object.");
 			ObjectManager::instance().clear();
 		});
 
@@ -121,6 +121,8 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json create = service.HandleTool("object.create", {{"name", "Assistant Cube"}}, WriteMode::WritesEnabled, "obj-1");
 			context.Expect(create.value("ok", false), "Object create should succeed.");
 			const auto entity = static_cast<entt::entity>(create["data"]["object"]["entity"].get<std::uint32_t>());
+			const Object objectHandle = ObjectManager::instance().makeObjectHandle(entity);
+			context.Expect(TerraEngine::IsResolvedObjectIdentity(ObjectManager::instance().validateObjectHandle(objectHandle)), "Editor-created objects should have a validated compact identity before facade migration.");
 			const nlohmann::json metadata = service.HandleTool("object.set_metadata", {{"object", create["data"]["object"]["uuid"]}, {"name", "Renamed Cube"}, {"tag", "Generated"}}, WriteMode::WritesEnabled, "obj-2");
 			context.Expect(metadata.value("ok", false), "Metadata edit should succeed.");
 			context.Expect(ObjectManager::instance().FindObjectByName("Renamed Cube").has_value(), "Renamed object should be findable.");
@@ -129,6 +131,7 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json deleted = service.HandleTool("object.delete", {{"object", static_cast<std::uint32_t>(entity)}}, WriteMode::WritesEnabled, "obj-3");
 			context.Expect(deleted.value("ok", false), "Object delete should succeed.");
 			context.Expect(!ObjectManager::instance().getObject(entity).has_value(), "Deleted object should leave object manager.");
+			context.Expect(!TerraEngine::IsResolvedObjectIdentity(ObjectManager::instance().validateObjectHandle(objectHandle)), "Deleted editor objects should invalidate compact identity before undo restores authored state.");
 			UndoRedoSystem::Instance().Undo();
 			context.Expect(ObjectManager::instance().FindObjectByName("Assistant Cube").has_value(), "Undo should restore deleted object.");
 			ObjectManager::instance().clear();
@@ -142,16 +145,17 @@ namespace TerraEngine::EditorTests
 			SkyComponent::registerType();
 			EditorAutomationService service;
 			Object object = ObjectManager::instance().createObject("Sky Source");
-			const nlohmann::json add = service.HandleTool("component.add", {{"object", object.getName()}, {"component", "SkyComponent"}}, WriteMode::WritesEnabled, "cmp-1");
+			const std::string objectName = ObjectManager::instance().getObjectName(object.EntityId());
+			const nlohmann::json add = service.HandleTool("component.add", {{"object", objectName}, {"component", "SkyComponent"}}, WriteMode::WritesEnabled, "cmp-1");
 			context.Expect(add.value("ok", false), "Component add should succeed.");
-			const nlohmann::json set = service.HandleTool("component.set_property", {{"object", object.getName()}, {"component", "SkyComponent"}, {"property", "sourceAsset"}, {"value", "Textures/Sky/Automation.tetf"}}, WriteMode::WritesEnabled, "cmp-2");
+			const nlohmann::json set = service.HandleTool("component.set_property", {{"object", objectName}, {"component", "SkyComponent"}, {"property", "sourceAsset"}, {"value", "Textures/Sky/Automation.tetf"}}, WriteMode::WritesEnabled, "cmp-2");
 			context.Expect(set.value("ok", false), "Component property edit should succeed.");
-			const nlohmann::json get = service.HandleTool("component.get", {{"object", object.getName()}, {"component", "SkyComponent"}}, WriteMode::ReadOnly, "cmp-3");
+			const nlohmann::json get = service.HandleTool("component.get", {{"object", objectName}, {"component", "SkyComponent"}}, WriteMode::ReadOnly, "cmp-3");
 			context.ExpectEqual(std::string("Textures/Sky/Automation.tetf"), get["data"]["properties"].value("sourceAsset", std::string()), "Component get should return reflected property data.");
-			const nlohmann::json remove = service.HandleTool("component.remove", {{"object", object.getName()}, {"component", "SkyComponent"}}, WriteMode::WritesEnabled, "cmp-4");
+			const nlohmann::json remove = service.HandleTool("component.remove", {{"object", objectName}, {"component", "SkyComponent"}}, WriteMode::WritesEnabled, "cmp-4");
 			context.Expect(remove.value("ok", false), "Component remove should succeed.");
 			UndoRedoSystem::Instance().Undo();
-			const nlohmann::json restored = service.HandleTool("component.get", {{"object", object.getName()}, {"component", "SkyComponent"}}, WriteMode::ReadOnly, "cmp-5");
+			const nlohmann::json restored = service.HandleTool("component.get", {{"object", objectName}, {"component", "SkyComponent"}}, WriteMode::ReadOnly, "cmp-5");
 			context.Expect(restored.value("ok", false), "Undo should restore removed component.");
 			ObjectManager::instance().clear();
 			UndoRedoSystem::Instance().Clear();
@@ -206,7 +210,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(detailed["data"]["parallelFrame"].contains("migrationSummary"), "Parallel-frame diagnostics should expose migration counters.");
 			context.Expect(detailed["data"]["parallelFrame"].contains("workerCoverage"), "Parallel-frame diagnostics should expose worker coverage.");
 			context.Expect(detailed["data"]["parallelFrame"]["runtimeLayout"].contains("metadataScanFallbackCount"), "Runtime layout diagnostics should expose metadata scan fallback count.");
-			context.Expect(detailed["data"]["parallelFrame"]["runtimeLayout"].contains("staleCompactReferenceCount"), "Runtime layout diagnostics should expose stale compact reference count.");
+			context.Expect(detailed["data"]["parallelFrame"]["runtimeLayout"].contains("staleObjectHandleCount"), "Runtime layout diagnostics should expose stale compact reference count.");
 			context.Expect(!detailed["data"]["hardBoundaries"].empty(), "Hard-boundary classifications should be serialized.");
 			context.Expect(detailed["data"]["surfaces"][4]["details"].contains("parallelFrame"), "Scheduler surface should mirror parallel-frame diagnostics.");
 			context.Expect(detailed["data"]["surfaces"][4]["details"].contains("mutationDiagnostics"), "Scheduler surface should mirror mutation diagnostics.");
@@ -217,7 +221,7 @@ namespace TerraEngine::EditorTests
 			UndoRedoSystem::Instance().Clear();
 			EditorAutomationService service;
 			Object object = ObjectManager::instance().createObject("Toggle");
-			const std::string uuid = TerraEngine::ToHexString(object.getUUID());
+			const std::string uuid = TerraEngine::ToHexString(ObjectManager::instance().getUUID(object.EntityId()));
 
 			const nlohmann::json inactive = service.HandleTool("object.set_metadata", {{"object", uuid}, {"active", false}}, WriteMode::WritesEnabled, "active-1");
 			context.Expect(inactive.value("ok", false), "Automation active toggle should succeed.");

@@ -71,15 +71,15 @@ namespace TerraEngine::Tests {
 			Object child = objects.createObject("Child");
 			Object newParent = objects.createObject("NewParent");
 
-			parent.getComponent<Transform>()->position = glm::vec3(10.0f, 0.0f, 0.0f);
-			child.getComponent<Transform>()->position = glm::vec3(1.0f, 0.0f, 0.0f);
-			newParent.getComponent<Transform>()->position = glm::vec3(-5.0f, 0.0f, 0.0f);
+			objects.GetComponent<Transform>(parent.EntityId())->position = glm::vec3(10.0f, 0.0f, 0.0f);
+			objects.GetComponent<Transform>(child.EntityId())->position = glm::vec3(1.0f, 0.0f, 0.0f);
+			objects.GetComponent<Transform>(newParent.EntityId())->position = glm::vec3(-5.0f, 0.0f, 0.0f);
 
 			context.Expect(objects.setParent(child, parent), "Initial parenting should succeed.");
 			auto before = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects);
 			const glm::vec3 worldBefore = before.objects.at(objects.getUUID(child.EntityId())).worldPosition;
 
-			context.Expect(TerraEngine::Scene::ReparentPreserveWorld(objects, child, newParent), "Graph-backed reparent should succeed.");
+			context.Expect(TerraEngine::Scene::ReparentPreserveWorld(objects, child.EntityId(), newParent.EntityId()), "Graph-backed reparent should succeed.");
 			auto after = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objects);
 			const glm::vec3 worldAfter = after.objects.at(objects.getUUID(child.EntityId())).worldPosition;
 
@@ -147,8 +147,8 @@ namespace TerraEngine::Tests {
 			const std::vector<Object> reloadedChildren = objects.getChildren(reloadedRoot);
 
 			context.ExpectEqual(static_cast<std::size_t>(1), reloadedChildren.size(), "Reloaded root should keep its child.");
-			context.Expect(reloadedRoot.isActive(), "Root should keep the default active state after reload.");
-			context.Expect(!reloadedChildren.front().isActive(), "Inactive child should remain inactive after save/load.");
+			context.Expect(objects.isObjectActive(reloadedRoot.EntityId()), "Root should keep the default active state after reload.");
+			context.Expect(!objects.isObjectActive(reloadedChildren.front().EntityId()), "Inactive child should remain inactive after save/load.");
 			context.ExpectEqual(static_cast<std::size_t>(1), objects.getObjectsWithComponents<Transform>().size(), "Active-only queries should still skip the reloaded inactive child.");
 			objects.clear();
 		});

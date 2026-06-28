@@ -155,14 +155,14 @@ static nlohmann::json MarshallNativeValueToJson(void* data, ScriptType type)
 }
 
 // ResolveBinding is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-static ScriptBinding* ResolveBinding(Object& object, const char* bindingId)
+static ScriptBinding* ResolveBinding(entt::entity object, const char* bindingId)
 {
 	if (bindingId == nullptr || bindingId[0] == '\0')
 	{
 		return nullptr;
 	}
 
-	ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+	ScriptComponent* scriptComponent = ObjectManager::instance().GetComponent<ScriptComponent>(object);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (scriptComponent == nullptr)
 	{
@@ -213,13 +213,16 @@ static const char* GetMeshRendererAssetReference(uint32_t objectId, std::string_
 	assetReferenceBuffer.clear();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId)))
+	ObjectManager& objects = ObjectManager::instance();
+	const entt::entity entity = static_cast<entt::entity>(objectId);
+	if (objects.isEntityValid(entity))
 	{
+		entt::registry& enttRegistry = objects.getRegistry();
 		auto& registry = ComponentAccessRegistry();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto it = registry.find("MeshRenderComponent"); it != registry.end())
 		{
-			TerraEngine::Reflection::Variant value = it->second.getter(*objOpt, propertyName);
+			TerraEngine::Reflection::Variant value = it->second.entityGetter(enttRegistry, entity, propertyName);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (TerraEngine::Reflection::IsType<TerraEngine::UUID>(value))
 			{
@@ -236,8 +239,11 @@ static const char* GetMeshRendererAssetReference(uint32_t objectId, std::string_
 // SetMeshRendererAssetReference is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static void SetMeshRendererAssetReference(uint32_t objectId, std::string_view propertyName, AssetType type, const char* assetReference)
 {
-	if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId)))
+	ObjectManager& objects = ObjectManager::instance();
+	const entt::entity entity = static_cast<entt::entity>(objectId);
+	if (objects.isEntityValid(entity))
 	{
+		entt::registry& enttRegistry = objects.getRegistry();
 		auto& registry = ComponentAccessRegistry();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto it = registry.find("MeshRenderComponent"); it != registry.end())
@@ -257,7 +263,8 @@ static void SetMeshRendererAssetReference(uint32_t objectId, std::string_view pr
 				}
 			}
 
-			it->second.setter(*objOpt, propertyName, resolvedId);
+			it->second.entitySetter(enttRegistry, entity, propertyName, resolvedId);
+			objects.notifyObjectStructureChanged(entity);
 		}
 	}
 }
@@ -575,8 +582,10 @@ extern "C" {
 		context.componentGeneration = componentGeneration;
 		context.bindingGeneration = bindingGeneration;
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			context.sourceObjectUuid = objOpt->getUUID();
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			context.sourceObjectUuid = objects.getUUID(entity);
 		}
 		ScriptingSystem::SetCurrentScriptDispatchContext(std::move(context));
 	}
@@ -627,12 +636,14 @@ extern "C" {
 	void Native_Object_Destroy(uint32_t objectId) {
 		if (auto context = ScriptingSystem::CurrentScriptDispatchContext(); context.has_value() && context->workerDispatch) {
 			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-			if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			ObjectManager& objects = ObjectManager::instance();
+			const entt::entity entity = static_cast<entt::entity>(objectId);
+			if (objects.isEntityValid(entity)) {
 				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 				scriptingSystem.RecordScriptMutationRequest(scriptingSystem.BuildScriptMutationRequest(
 					TerraEngine::Scene::SceneMutationOperation::DeleteObject,
 					*context,
-					objOpt->getUUID()));
+					objects.getUUID(entity)));
 			}
 			return;
 		}
@@ -641,8 +652,10 @@ extern "C" {
 		// Destruction remains immediate for existing C# gameplay compatibility.
 		// Worker jobs must use SceneMutationQueue instead, so no managed callback
 		// observes object storage changing from a background thread.
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			ObjectManager::instance().removeObject(*objOpt);
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			objects.removeObject(entity);
 		}
 	}
 
@@ -651,8 +664,10 @@ extern "C" {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		static thread_local std::string nameBuffer;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			nameBuffer = ObjectManager::instance().getObjectName(*objOpt);
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			nameBuffer = objects.getObjectName(entity);
 			return nameBuffer.c_str();
 		}
 		return "";
@@ -661,8 +676,10 @@ extern "C" {
 	// Native_Object_SetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_Object_SetName(uint32_t objectId, const char* name) {
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			ObjectManager::instance().setObjectName(*objOpt, name ? name : "");
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			objects.setObjectName(entity, name ? name : "");
 		}
 	}
 
@@ -674,8 +691,8 @@ extern "C" {
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto objOpt = ObjectManager::instance().FindObjectByName(name)) {
-			return static_cast<uint32_t>(objOpt->EntityId());
+		if (auto entity = ObjectManager::instance().FindEntityByName(name)) {
+			return static_cast<uint32_t>(*entity);
 		}
 
 		return InvalidObjectId();
@@ -689,8 +706,8 @@ extern "C" {
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto objOpt = ObjectManager::instance().FindObjectByTag(tag)) {
-			return static_cast<uint32_t>(objOpt->EntityId());
+		if (auto entity = ObjectManager::instance().FindEntityByTag(tag)) {
+			return static_cast<uint32_t>(*entity);
 		}
 
 		return InvalidObjectId();
@@ -751,11 +768,13 @@ extern "C" {
 	// Native_HasComponent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool Native_HasComponent(uint32_t objectId, const char* componentType) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
 			auto& reg = ComponentAccessRegistry();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto it = reg.find(componentType); it != reg.end()) {
-				return it->second.hasComponent(*objOpt);
+				return it->second.entityHasComponent(objects.getRegistry(), entity);
 			}
 		}
 		return false;
@@ -768,12 +787,14 @@ extern "C" {
 				return false;
 			}
 			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-			if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			ObjectManager& objects = ObjectManager::instance();
+			const entt::entity entity = static_cast<entt::entity>(objectId);
+			if (objects.isEntityValid(entity)) {
 				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 				scriptingSystem.RecordScriptMutationRequest(scriptingSystem.BuildScriptMutationRequest(
 					TerraEngine::Scene::SceneMutationOperation::AddComponent,
 					*context,
-					objOpt->getUUID(),
+					objects.getUUID(entity),
 					{},
 					componentType));
 				return true;
@@ -782,12 +803,14 @@ extern "C" {
 		}
 
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
 			auto& reg = ComponentAccessRegistry();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto it = reg.find(componentType); it != reg.end()) {
-				it->second.addComponent(*objOpt);
-				ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
+				it->second.entityAddComponent(objects.getRegistry(), entity);
+				objects.notifyObjectStructureChanged(entity);
 				return true;
 			}
 		}
@@ -796,24 +819,30 @@ extern "C" {
 
 	std::uint64_t Native_Object_GetComponentGeneration(uint32_t objectId) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			return ObjectManager::instance().getObjectComponentGeneration(*objOpt);
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			return objects.getObjectComponentGeneration(entity);
 		}
 		return 0;
 	}
 
 	std::uint64_t Native_Object_GetMetadataGeneration(uint32_t objectId) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			return ObjectManager::instance().getObjectMetadataGeneration(*objOpt);
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			return objects.getObjectMetadataGeneration(entity);
 		}
 		return 0;
 	}
 
 	std::uint64_t Native_Object_GetBindingGeneration(uint32_t objectId) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			return ObjectManager::instance().getObjectBindingGeneration(*objOpt);
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			return objects.getObjectBindingGeneration(entity);
 		}
 		return 0;
 	}
@@ -826,15 +855,20 @@ extern "C" {
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>();
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			ScriptComponent* scriptComponent = objects.GetComponent<ScriptComponent>(entity);
 			if (scriptComponent == nullptr) {
-				scriptComponent = &objOpt->addComponent<ScriptComponent>();
+				scriptComponent = objects.AddComponent<ScriptComponent>(entity);
+			}
+			if (scriptComponent == nullptr) {
+				return false;
 			}
 
 			auto guard = scriptComponent->acquireWriteLock();
 			scriptComponent->AddBinding(TerraEngine::EMPTY_UUID, className);
-			ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
+			objects.notifyObjectStructureChanged(entity);
 			return true;
 		}
 
@@ -849,8 +883,10 @@ extern "C" {
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			if (ScriptComponent* scriptComponent = objects.GetComponent<ScriptComponent>(entity)) {
 				auto guard = scriptComponent->acquireReadLock();
 				return scriptComponent->HasBinding(className);
 			}
@@ -869,8 +905,10 @@ extern "C" {
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			if (ScriptComponent* scriptComponent = objects.GetComponent<ScriptComponent>(entity)) {
 				auto guard = scriptComponent->acquireReadLock();
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (const ScriptBinding* binding = scriptComponent->FindBinding(bindingId)) {
@@ -890,8 +928,10 @@ extern "C" {
 			return 0;
 		}
 
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			if (ScriptComponent* scriptComponent = objects.GetComponent<ScriptComponent>(entity)) {
 				auto guard = scriptComponent->acquireReadLock();
 				if (const ScriptBinding* binding = scriptComponent->FindBinding(bindingId)) {
 					return binding->authoredStateVersion;
@@ -911,8 +951,10 @@ extern "C" {
 			return;
 		}
 
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			if (ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>()) {
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			if (ScriptComponent* scriptComponent = objects.GetComponent<ScriptComponent>(entity)) {
 				auto guard = scriptComponent->acquireWriteLock();
 				if (ScriptBinding* binding = scriptComponent->FindBinding(bindingId)) {
 					binding->snapshotVersion = observedVersion;
@@ -929,15 +971,17 @@ extern "C" {
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>();
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			ScriptComponent* scriptComponent = objects.GetComponent<ScriptComponent>(entity);
 			if (scriptComponent == nullptr) {
 				return false;
 			}
 
 			{
 				auto guard = scriptComponent->acquireWriteLock();
-				ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
+				ScriptBinding* binding = ResolveBinding(entity, bindingId);
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (binding == nullptr) {
 					return false;
@@ -963,7 +1007,7 @@ extern "C" {
 				fieldValue.sourceTypeFingerprint = sourceTypeFingerprint != nullptr ? sourceTypeFingerprint : "";
 				scriptComponent->SynchronizeStorageFromBindings();
 			}
-			ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
+			objects.notifyObjectStructureChanged(entity);
 			return true;
 		}
 
@@ -978,15 +1022,17 @@ extern "C" {
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			ScriptComponent* scriptComponent = objOpt->getComponent<ScriptComponent>();
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
+			ScriptComponent* scriptComponent = objects.GetComponent<ScriptComponent>(entity);
 			if (scriptComponent == nullptr) {
 				return false;
 			}
 
 			{
 				auto guard = scriptComponent->acquireWriteLock();
-				ScriptBinding* binding = ResolveBinding(*objOpt, bindingId);
+				ScriptBinding* binding = ResolveBinding(entity, bindingId);
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (binding == nullptr || !binding->RemoveSerializedValue(fieldPath)) {
 					return false;
@@ -994,7 +1040,7 @@ extern "C" {
 
 				scriptComponent->SynchronizeStorageFromBindings();
 			}
-			ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
+			objects.notifyObjectStructureChanged(entity);
 			return true;
 		}
 
@@ -1004,11 +1050,13 @@ extern "C" {
 	// Native_GetComponentProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void Native_GetComponentProperty(uint32_t objectId, const char* componentType, const char* propertyName, void* outValue, int type) {
 		std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
 			auto& reg = ComponentAccessRegistry();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (auto it = reg.find(componentType); it != reg.end()) {
-				TerraEngine::Reflection::Variant val = it->second.getter(*objOpt, propertyName);
+				TerraEngine::Reflection::Variant val = it->second.entityGetter(objects.getRegistry(), entity, propertyName);
 				MarshallToNative(val, outValue, static_cast<ScriptType>(type));
 			}
 		}
@@ -1022,12 +1070,14 @@ extern "C" {
 			}
 
 			std::shared_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-			if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+			ObjectManager& objects = ObjectManager::instance();
+			const entt::entity entity = static_cast<entt::entity>(objectId);
+			if (objects.isEntityValid(entity)) {
 				ScriptingSystem& scriptingSystem = ScriptingSystem::Instance();
 				TerraEngine::Scene::SceneMutationRequest request = scriptingSystem.BuildScriptMutationRequest(
 					TerraEngine::Scene::SceneMutationOperation::UpdateComponent,
 					*context,
-					objOpt->getUUID(),
+					objects.getUUID(entity),
 					{},
 					componentType);
 				request.typedComponentPayload.propertyName = propertyName;
@@ -1044,7 +1094,7 @@ extern "C" {
 					request.usedJsonFallback = true;
 				}
 				request.coalescingKey = std::to_string(context->frameOrder)
-					+ "|" + TerraEngine::ToHexString(objOpt->getUUID())
+					+ "|" + TerraEngine::ToHexString(objects.getUUID(entity))
 					+ "|" + componentType
 					+ "|" + propertyName;
 				scriptingSystem.RecordScriptMutationRequest(std::move(request));
@@ -1053,17 +1103,19 @@ extern "C" {
 		}
 
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
-		if (auto objOpt = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
+		if (objects.isEntityValid(entity)) {
 			auto& reg = ComponentAccessRegistry();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (componentType != nullptr && propertyName != nullptr && inValue != nullptr && componentType[0] != '\0' && propertyName[0] != '\0') {
 				if (auto it = reg.find(componentType); it != reg.end()) {
 					TerraEngine::Reflection::Variant val = MarshallFromNative(inValue, static_cast<ScriptType>(type));
-					it->second.setter(*objOpt, propertyName, val);
+					it->second.entitySetter(objects.getRegistry(), entity, propertyName, val);
 					if (std::string_view(componentType) == Transform::kComponentName) {
-						ObjectManager::instance().MarkObjectTransformDirty(*objOpt);
+						objects.MarkObjectTransformDirty(entity);
 					} else {
-						ObjectManager::instance().notifyObjectStructureChanged(*objOpt);
+						objects.notifyObjectStructureChanged(entity);
 					}
 				}
 			}
@@ -1195,11 +1247,13 @@ extern "C" {
 
 	// Native_UI_GetRootElement is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void* Native_UI_GetRootElement(uint32_t objectId) {
+		ObjectManager& objects = ObjectManager::instance();
+		const entt::entity entity = static_cast<entt::entity>(objectId);
 		{
 			std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (auto object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-				UIComponent* component = object->getComponent<UIComponent>();
+			if (objects.isEntityValid(entity)) {
+				UIComponent* component = objects.GetComponent<UIComponent>(entity);
 				if (component == nullptr) {
 					return nullptr;
 				}
@@ -1215,16 +1269,16 @@ extern "C" {
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			if (UIComponent* component = object->getComponent<UIComponent>()) {
-				UISystem::Instance().EnsureDocumentReady(object->EntityId(), *component);
+		if (objects.isEntityValid(entity)) {
+			if (UIComponent* component = objects.GetComponent<UIComponent>(entity)) {
+				UISystem::Instance().EnsureDocumentReady(entity, *component);
 			}
 		}
 
 		std::unique_lock<std::shared_mutex> lock(g_ScriptGlueMutex);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto object = ObjectManager::instance().getObject(static_cast<entt::entity>(objectId))) {
-			UIComponent* component = object->getComponent<UIComponent>();
+		if (objects.isEntityValid(entity)) {
+			UIComponent* component = objects.GetComponent<UIComponent>(entity);
 			if (component == nullptr) {
 				return nullptr;
 			}

@@ -18,7 +18,7 @@ namespace TerraEngine::Tests {
 	void RegisterActiveMembershipTests(TestRegistry& registry);
 	void RegisterRuntimeActiveMembershipTests(TestRegistry& registry);
 	void RegisterArchitectureMigrationSummaryTests(TestRegistry& registry);
-	void RegisterCompactObjectReferenceTests(TestRegistry& registry);
+	void RegisterObjectIdentityTests(TestRegistry& registry);
 	void RegisterComponentAccessGrantTests(TestRegistry& registry);
 	void RegisterComponentAccessTests(TestRegistry& registry);
 	void RegisterEcsQueryTaskGraphTests(TestRegistry& registry);
@@ -29,6 +29,7 @@ namespace TerraEngine::Tests {
 	void RegisterWorkerConversionScenarioTests(TestRegistry& registry);
 	void RegisterWorkerCoverageReportTests(TestRegistry& registry);
 	void RegisterWorkerHardBoundaryTests(TestRegistry& registry);
+	void RegisterObjectFacadeRemovalValidationTests(TestRegistry& registry);
 	void RegisterObjectManagerTests(TestRegistry& registry);
 	void RegisterInputSystemTests(TestRegistry& registry);
 	void RegisterWindowInputWorkerBoundaryTests(TestRegistry& registry);
@@ -138,7 +139,7 @@ int main() {
 	TerraEngine::Tests::RegisterArchitectureMigrationSummaryTests(registry);
 	TerraEngine::Tests::RegisterActiveMembershipTests(registry);
 	TerraEngine::Tests::RegisterRuntimeActiveMembershipTests(registry);
-	TerraEngine::Tests::RegisterCompactObjectReferenceTests(registry);
+	TerraEngine::Tests::RegisterObjectIdentityTests(registry);
 	TerraEngine::Tests::RegisterComponentAccessGrantTests(registry);
 	TerraEngine::Tests::RegisterComponentAccessTests(registry);
 	TerraEngine::Tests::RegisterEcsQueryTaskGraphTests(registry);
@@ -149,6 +150,7 @@ int main() {
 	TerraEngine::Tests::RegisterWorkerConversionScenarioTests(registry);
 	TerraEngine::Tests::RegisterWorkerCoverageReportTests(registry);
 	TerraEngine::Tests::RegisterWorkerHardBoundaryTests(registry);
+	TerraEngine::Tests::RegisterObjectFacadeRemovalValidationTests(registry);
 	TerraEngine::Tests::RegisterWorkerPoolTests(registry);
 	TerraEngine::Tests::RegisterThreadPoolSingletonTests(registry);
 	TerraEngine::Tests::RegisterObjectManagerTests(registry);

@@ -205,7 +205,7 @@ namespace TerraEngine::Scheduling {
 				}
 				else if (diagnostic.code == ArchitectureDiagnosticCode::CompactReferenceStale)
 				{
-					++summary.staleCompactReferenceCount;
+					++summary.staleObjectHandleCount;
 				}
 				else if (diagnostic.code == ArchitectureDiagnosticCode::HierarchySnapshotBlocked)
 				{
@@ -444,7 +444,7 @@ namespace TerraEngine::Scheduling {
 			<< " coordinatorWaitNs=" << summary.coordinatorWaitTimeNs
 			<< " workerUtilization=" << summary.workerUtilization
 			<< " activeInvalidations=" << summary.activeMembershipInvalidationCount
-			<< " staleReferences=" << summary.staleCompactReferenceCount
+			<< " staleReferences=" << summary.staleObjectHandleCount
 			<< " hierarchyRebuilds=" << summary.hierarchySnapshotRebuildCount
 			<< " grantDenials=" << summary.componentAccessGrantDeniedCount;
 		for (const std::string& reason : summary.fallbackReasons)

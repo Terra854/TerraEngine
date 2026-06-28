@@ -106,7 +106,7 @@ namespace TerraEngine::Tests {
 			ComponentRegistry::RegisterAllComponents();
 			Object target = objects.createObject("Component Removal Target");
 			const TerraEngine::UUID targetId = objects.getUUID(target.EntityId());
-			context.Expect(target.getComponent<Transform>() != nullptr, "Created objects should start with a Transform component.");
+			context.Expect(objects.GetComponent<Transform>(target.EntityId()) != nullptr, "Created objects should start with a Transform component.");
 
 			TerraEngine::Scene::SceneMutationQueue queue;
 			TerraEngine::Scene::SceneMutationRequest request;
@@ -120,7 +120,7 @@ namespace TerraEngine::Tests {
 			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
 
 			context.Expect(result.applied, "Valid remove-component requests should apply through the protected flush.");
-			context.Expect(target.getComponent<Transform>() == nullptr, "The reflected component registry should remove the requested component.");
+			context.Expect(objects.GetComponent<Transform>(target.EntityId()) == nullptr, "The reflected component registry should remove the requested component.");
 			context.Expect(queue.Empty(), "Applied remove-component requests should clear the queue.");
 			objects.clear();
 		});

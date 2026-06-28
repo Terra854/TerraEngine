@@ -52,27 +52,30 @@ namespace
 	{
 		// Validation fixtures need deterministic light ownership, so remove any
 		// prior light-only objects before spawning the new arrangement.
-		const std::vector<Object> existingLights = objects.getObjectsWithComponents<LightComponent>();
-		for (const Object& lightObject : existingLights)
+		const std::vector<entt::entity> existingLights = objects.getEntitiesWithComponents<LightComponent>();
+		for (entt::entity lightObject : existingLights)
 		{
 			objects.removeObject(lightObject);
 		}
 	}
 
 	// ConfigureValidationPointLight is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void ConfigureValidationPointLight(Object lightObject, const glm::vec3& position, const glm::vec3& color, float intensity, float range)
+	void ConfigureValidationPointLight(ObjectManager& objects, entt::entity lightObject, const glm::vec3& position, const glm::vec3& color, float intensity, float range)
 	{
-		if (Transform* transform = lightObject.getComponent<Transform>())
+		if (Transform* transform = objects.GetComponent<Transform>(lightObject))
 		{
 			SetComponentProperty(*transform, "Position", position);
+			objects.MarkObjectTransformDirty(lightObject);
 		}
 
-		auto& light = lightObject.addComponent<LightComponent>();
-		SetComponentProperty(light, "type", static_cast<std::uint32_t>(LightType::Point));
-		SetComponentProperty(light, "color", color);
-		SetComponentProperty(light, "intensity", std::max(intensity, 0.0f));
-		SetComponentProperty(light, "range", std::max(range, 0.1f));
-		SetComponentProperty(light, "castsShadows", false);
+		if (LightComponent* light = objects.AddComponent<LightComponent>(lightObject))
+		{
+			SetComponentProperty(*light, "type", static_cast<std::uint32_t>(LightType::Point));
+			SetComponentProperty(*light, "color", color);
+			SetComponentProperty(*light, "intensity", std::max(intensity, 0.0f));
+			SetComponentProperty(*light, "range", std::max(range, 0.1f));
+			SetComponentProperty(*light, "castsShadows", false);
+		}
 	}
 }
 
@@ -261,14 +264,14 @@ bool SceneManager::SetActiveScene(const TerraEngine::UUID& id)
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (doc->parsedJson.contains("objects")) {
 		for (const auto& objJson : doc->parsedJson["objects"]) {
-			Serializer::DeserializeObject(objJson);
+			Serializer::DeserializeObjectEntity(objJson);
 		}
 	}
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (doc->parsedJson.contains("entities")) {
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const auto& objJson : doc->parsedJson["entities"]) {
-			Serializer::DeserializeObject(objJson);
+			Serializer::DeserializeObjectEntity(objJson);
 		}
 	}
 
@@ -324,36 +327,36 @@ void SceneManager::SetActiveSceneRenderSettings(const SceneRenderSettings& setti
 // as a read-only view into the current ObjectManager state.
 const SkyComponent* SceneManager::GetActiveSkyComponent() const
 {
-	std::optional<Object> skyObject = GetActiveSkyObject();
+	std::optional<entt::entity> skyObject = GetActiveSkyObject();
 	if (!skyObject.has_value())
 	{
 		return nullptr;
 	}
 
-	return skyObject->getComponent<SkyComponent>();
+	return ObjectManager::instance().GetComponent<SkyComponent>(*skyObject);
 }
 
 // SceneManager::GetActiveSkyObject resolves the object that owns the first
 // active SkyComponent. The owning object matters because its LightComponent is
 // now the only source allowed to drive sky sun direction.
-std::optional<Object> SceneManager::GetActiveSkyObject() const
+std::optional<entt::entity> SceneManager::GetActiveSkyObject() const
 {
 	ObjectManager& objManager = ObjectManager::instance();
 	const TerraEngine::Scene::SceneGraph graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager, false);
 	const std::vector<TerraEngine::UUID> traversalOrder = TerraEngine::Scene::BuildTraversalOrder(graph);
 	for (const TerraEngine::UUID& objectId : traversalOrder)
 	{
-		std::optional<Object> object = objManager.getObject(objectId);
+		std::optional<entt::entity> object = objManager.getEntity(objectId);
 		if (!object.has_value())
 		{
 			continue;
 		}
-		if (!object->isActive())
+		if (!objManager.isObjectActive(*object))
 		{
 			continue;
 		}
 
-		const SkyComponent* skyComponent = object->getComponent<SkyComponent>();
+		const SkyComponent* skyComponent = objManager.GetComponent<SkyComponent>(*object);
 		if (skyComponent == nullptr || !skyComponent->active)
 		{
 			continue;
@@ -434,7 +437,7 @@ bool SceneManager::SaveScene(std::optional<std::filesystem::path> path)
 	// Leverage the centralized Serializer to convert the live object graph 
 	// into a JSON structure suitable for disk storage.
 	for (const TerraEngine::UUID& rootId : graph.rootObjects) {
-		if (auto root = objManager.getObject(rootId))
+		if (auto root = objManager.getEntity(rootId))
 		{
 			sceneJson["objects"].push_back(Serializer::SerializeObject(*root));
 		}
@@ -526,8 +529,8 @@ void SceneManager::NullifyAssetReferences(const TerraEngine::UUID& assetId)
 {
 	// MainEngine mirrors this mesh/material asset scan into EcsQueryTaskGraph metadata so scheduler diagnostics can
 	// reason about the component access before this protected scene-maintenance path mutates existing components.
-	ObjectManager::instance().forEachObjectWithComponents<MeshRenderComponent>(
-		[&](Object object, MeshRenderComponent& meshComp)
+	ObjectManager::instance().forEachEntityWithComponents<MeshRenderComponent>(
+		[&](entt::entity object, MeshRenderComponent& meshComp)
 		{
 			bool changed = false;
 			const TerraEngine::UUID meshId = GetComponentProperty<MeshRenderComponent, TerraEngine::UUID>(meshComp, "meshId");
@@ -578,25 +581,29 @@ void SceneManager::SpawnLightStressTestGrid(std::uint32_t gridWidth, std::uint32
 		for (std::uint32_t x = 0; x < safeGridWidth; ++x)
 		{
 			auto lightObject = objects.createObject("StressPointLight");
+			const entt::entity lightEntity = lightObject.EntityId();
 
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (Transform* transform = lightObject.getComponent<Transform>())
+			if (Transform* transform = objects.GetComponent<Transform>(lightEntity))
 			{
 				const float worldX = (static_cast<float>(x) - centerX) * safeSpacing;
 				const float worldZ = (static_cast<float>(z) - centerZ) * safeSpacing;
 				const float worldY = 1.5f + std::sin(static_cast<float>(x + z) * 0.37f) * 0.5f;
 				SetComponentProperty(*transform, "Position", glm::vec3(worldX, worldY, worldZ));
+				objects.MarkObjectTransformDirty(lightEntity);
 			}
 
-			auto& light = lightObject.addComponent<LightComponent>();
-			SetComponentProperty(light, "type", static_cast<std::uint32_t>(LightType::Point));
-			SetComponentProperty(light, "color", glm::vec3(
-				0.4f + static_cast<float>((x * 17u + z * 3u) % 60u) / 100.0f,
-				0.4f + static_cast<float>((x * 11u + z * 5u) % 60u) / 100.0f,
-				0.4f + static_cast<float>((x * 7u + z * 13u) % 60u) / 100.0f));
-			SetComponentProperty(light, "intensity", safeIntensity);
-			SetComponentProperty(light, "range", std::max(3.0f, safeSpacing * 1.75f));
-			SetComponentProperty(light, "castsShadows", false);
+			if (LightComponent* light = objects.AddComponent<LightComponent>(lightEntity))
+			{
+				SetComponentProperty(*light, "type", static_cast<std::uint32_t>(LightType::Point));
+				SetComponentProperty(*light, "color", glm::vec3(
+					0.4f + static_cast<float>((x * 17u + z * 3u) % 60u) / 100.0f,
+					0.4f + static_cast<float>((x * 11u + z * 5u) % 60u) / 100.0f,
+					0.4f + static_cast<float>((x * 7u + z * 13u) % 60u) / 100.0f));
+				SetComponentProperty(*light, "intensity", safeIntensity);
+				SetComponentProperty(*light, "range", std::max(3.0f, safeSpacing * 1.75f));
+				SetComponentProperty(*light, "castsShadows", false);
+			}
 		}
 	}
 
@@ -629,7 +636,8 @@ void SceneManager::SpawnClusterBinDenseFixture()
 			0.60f + static_cast<float>((lightIndex * 13u) % 20u) / 100.0f);
 
 		ConfigureValidationPointLight(
-			objects.createObject("DenseClusterValidationLight"),
+			objects,
+			objects.createObject("DenseClusterValidationLight").EntityId(),
 			position,
 			color,
 			24.0f,
@@ -669,7 +677,8 @@ void SceneManager::SpawnClusterBinSparseFixture()
 				0.55f + static_cast<float>((x * 3u + z * 17u) % 20u) / 100.0f);
 
 			ConfigureValidationPointLight(
-				objects.createObject("SparseClusterValidationLight"),
+				objects,
+				objects.createObject("SparseClusterValidationLight").EntityId(),
 				position,
 				color,
 				8.0f,
@@ -903,49 +912,55 @@ void SceneManager::SpawnPreviewObject(const TerraEngine::UUID& meshId, const Ter
 	ObjectManager& objects = ObjectManager::instance();
 	// Persist the preview object so input-driven camera controls can adjust it
 	// every frame without re-querying the registry.
-	previewObject = objects.createObject("GeneratedPreview");
+	previewObject = objects.createObject("GeneratedPreview").EntityId();
 
 	// Initialize transform through the generic setter so locks are respected.
-	Transform* t = previewObject->getComponent<Transform>();
+	Transform* t = objects.GetComponent<Transform>(*previewObject);
 	if (t)
 	{
 		SetComponentProperty(*t, "Position", glm::vec3(0.0f, 0.0f, 0.0f));
 		SetComponentProperty(*t, "Rotation", glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
 		SetComponentProperty(*t, "Scale", glm::vec3(1.0f, 1.0f, 1.0f));
+		objects.MarkObjectTransformDirty(*previewObject);
 	}
 
 	// Attach a simple render binding component so downstream renderer work can
 	// read which authored assets should be drawn together.
-	auto& renderComponent = previewObject->addComponent<MeshRenderComponent>();
-	// Bind authored assets via the reflection-based setter to ensure thread-safe writes.
-	SetComponentProperty(renderComponent, "meshId", meshId);
-	SetComponentProperty(renderComponent, "materialId", materialId);
+	if (MeshRenderComponent* renderComponent = objects.AddComponent<MeshRenderComponent>(*previewObject))
+	{
+		// Bind authored assets via the reflection-based setter to ensure thread-safe writes.
+		SetComponentProperty(*renderComponent, "meshId", meshId);
+		SetComponentProperty(*renderComponent, "materialId", materialId);
+	}
 }
 
 // SceneManager::SpawnPreviewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneManager::SpawnPreviewCamera()
 {
 	ObjectManager& objects = ObjectManager::instance();
-	previewCamera = objects.createObject("PreviewCamera");
+	previewCamera = objects.createObject("PreviewCamera").EntityId();
 
 	// Match the legacy hardcoded camera by positioning it three units away
 	// from the origin while keeping an identity rotation and uniform scale.
-	Transform* transform = previewCamera->getComponent<Transform>();
+	Transform* transform = objects.GetComponent<Transform>(*previewCamera);
 	if (transform)
 	{
 		SetComponentProperty(*transform, "Position", glm::vec3(0.0f, 0.0f, 3.0f));
 		SetComponentProperty(*transform, "Rotation", glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
 		SetComponentProperty(*transform, "Scale", glm::vec3(1.0f, 1.0f, 1.0f));
+		objects.MarkObjectTransformDirty(*previewCamera);
 	}
 
 	// Add a camera component with projection defaults that mirror the previous
 	// hardcoded parameters so the preview looks identical.
-	auto& camera = previewCamera->addComponent<CameraComponent>();
-	SetComponentProperty(camera, "verticalFovDegrees", 45.0f);
-	SetComponentProperty(camera, "aspectRatio", 16.0f / 9.0f);
-	SetComponentProperty(camera, "nearPlane", 0.1f);
-	SetComponentProperty(camera, "farPlane", 100.0f);
-	SetComponentProperty(camera, "up", glm::vec3(0.0f, 1.0f, 0.0f));
+	if (CameraComponent* camera = objects.AddComponent<CameraComponent>(*previewCamera))
+	{
+		SetComponentProperty(*camera, "verticalFovDegrees", 45.0f);
+		SetComponentProperty(*camera, "aspectRatio", 16.0f / 9.0f);
+		SetComponentProperty(*camera, "nearPlane", 0.1f);
+		SetComponentProperty(*camera, "farPlane", 100.0f);
+		SetComponentProperty(*camera, "up", glm::vec3(0.0f, 1.0f, 0.0f));
+	}
 }
 
 // SceneManager::GetPreviewTransform is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -956,5 +971,5 @@ Transform* SceneManager::GetPreviewTransform()
 		return nullptr;
 	}
 
-	return previewObject->getComponent<Transform>();
+	return ObjectManager::instance().GetComponent<Transform>(*previewObject);
 }

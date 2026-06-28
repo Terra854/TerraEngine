@@ -843,11 +843,11 @@ private:
 	// ApplyValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ApplyValue(const ReflectionVariant& val) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
+		if (auto obj = ObjectManager::instance().getEntity(m_Uuid)) {
 			auto& reg = ComponentAccessRegistry();
 			if (reg.count(m_Component)) {
 				// Setters handle thread-safety internally via component mutexes.
-				reg[m_Component].setter(*obj, m_Property, val);
+				reg[m_Component].entitySetter(ObjectManager::instance().getRegistry(), *obj, m_Property, val);
 				NotifySceneAfterComponentMutation(m_Component);
 			}
 		}
@@ -894,13 +894,13 @@ private:
 	// ApplyValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void ApplyValue(const ReflectionVariant& val) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
+		if (auto obj = ObjectManager::instance().getEntity(m_Uuid)) {
 			// Dispatch by explicit engine state so each case documents one supported behavior.
 			switch (m_Field) {
-				case ObjectMetadataField::Tag: obj->setTag(MetaValue<std::string>(val)); break;
-				case ObjectMetadataField::Layer: obj->setLayer(MetaValue<std::string>(val)); break;
-				case ObjectMetadataField::Active: obj->setActive(MetaValue<bool>(val)); break;
-				case ObjectMetadataField::Static: obj->setStatic(MetaValue<bool>(val)); break;
+				case ObjectMetadataField::Tag: ObjectManager::instance().setObjectTag(*obj, MetaValue<std::string>(val)); break;
+				case ObjectMetadataField::Layer: ObjectManager::instance().setObjectLayer(*obj, MetaValue<std::string>(val)); break;
+				case ObjectMetadataField::Active: ObjectManager::instance().setObjectActive(*obj, MetaValue<bool>(val)); break;
+				case ObjectMetadataField::Static: ObjectManager::instance().setObjectStatic(*obj, MetaValue<bool>(val)); break;
 			}
 		}
 	}
@@ -916,9 +916,9 @@ InspectorWindow::InspectorWindow(MainEditorSubsystem* owner)
 	: EditorWindow("Inspector"), m_Owner(owner) {
 }
 
-bool InspectorWindow::IsPrefabOverride(Object& obj, const std::string& compName, const std::string& propertyName) const
+bool InspectorWindow::IsPrefabOverride(entt::entity obj, const std::string& compName, const std::string& propertyName) const
 {
-	PrefabLinkComponent* link = obj.getComponent<PrefabLinkComponent>();
+	PrefabLinkComponent* link = ObjectManager::instance().GetComponent<PrefabLinkComponent>(obj);
 	if (link == nullptr)
 	{
 		return false;
@@ -937,9 +937,9 @@ bool InspectorWindow::IsPrefabOverride(Object& obj, const std::string& compName,
 	return false;
 }
 
-void InspectorWindow::ResetPrefabOverride(Object& obj, const std::string& compName, const std::string& propertyName)
+void InspectorWindow::ResetPrefabOverride(entt::entity obj, const std::string& compName, const std::string& propertyName)
 {
-	PrefabLinkComponent* link = obj.getComponent<PrefabLinkComponent>();
+	PrefabLinkComponent* link = ObjectManager::instance().GetComponent<PrefabLinkComponent>(obj);
 	if (link == nullptr)
 	{
 		return;
@@ -972,15 +972,15 @@ void InspectorWindow::ResetPrefabOverride(Object& obj, const std::string& compNa
 	TERRAENGINE_LOG(LogLevel::Info, "Prefab override reset requested for " << compName << "." << propertyName);
 }
 
-void InspectorWindow::DrawPrefabLinkInspector(Object& obj)
+void InspectorWindow::DrawPrefabLinkInspector(entt::entity obj)
 {
-	PrefabLinkComponent* link = obj.getComponent<PrefabLinkComponent>();
+	PrefabLinkComponent* link = ObjectManager::instance().GetComponent<PrefabLinkComponent>(obj);
 	if (link == nullptr)
 	{
 		return;
 	}
 
-	const std::string prefabName = link->prefabName.empty() ? obj.getName() : link->prefabName;
+	const std::string prefabName = link->prefabName.empty() ? ObjectManager::instance().getObjectName(obj) : link->prefabName;
 	if (ImGui::CollapsingHeader("Prefab", ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::Text("Prefab: %s", prefabName.c_str());
 		if (!link->prefabPath.empty()) {
@@ -991,7 +991,7 @@ void InspectorWindow::DrawPrefabLinkInspector(Object& obj)
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Unlink")) {
-			obj.removeComponent<PrefabLinkComponent>();
+			ObjectManager::instance().RemoveComponent<PrefabLinkComponent>(obj);
 			SceneManager::Instance().ForceMarkActiveSceneDirty();
 			return;
 		}
@@ -1014,10 +1014,10 @@ void InspectorWindow::UpdateInspectorDragState() {
 }
 
 // InspectorWindow::DrawProperty is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProperty prop, Object& obj, ComponentAccessFunctions& access) {
+void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProperty prop, entt::entity obj, ComponentAccessFunctions& access) {
 	std::string name = MetaPropertyName(prop);
 	const std::string displayName = BuildDisplayPropertyName(compName, name);
-	ReflectionVariant var = access.getter(obj, name);
+	ReflectionVariant var = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
 	ReflectionType type = MetaPropertyType(prop);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1034,8 +1034,8 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 	// (e.g. mouse button released after a drag).
 	auto endEditing = [&]() {
 		if (ImGui::IsItemDeactivatedAfterEdit()) {
-			ReflectionVariant newVal = access.getter(obj, name);
-			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, m_PreEditValue, newVal));
+			ReflectionVariant newVal = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, name, m_PreEditValue, newVal));
 			NotifySceneAfterComponentMutation(compName);
 		}
 	};
@@ -1072,18 +1072,18 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (val < 0.001f) val = 0.001f;
 					
-					ReflectionVariant farVar = access.getter(obj, "farPlane");
+					ReflectionVariant farVar = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "farPlane");
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (IsValid(farVar)) {
 						float farP = MetaValue<float>(farVar);
 						if (farP < val + 0.001f) {
-							access.setter(obj, "farPlane", val + 0.001f);
+							access.entitySetter(ObjectManager::instance().getRegistry(), obj, "farPlane", val + 0.001f);
 						}
 					}
 				}
 				// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 				else if (name == "farPlane") {
-					ReflectionVariant nearVar = access.getter(obj, "nearPlane");
+					ReflectionVariant nearVar = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "nearPlane");
 					if (IsValid(nearVar)) {
 						float nearP = MetaValue<float>(nearVar);
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1091,7 +1091,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 					}
 				}
 			}
-			access.setter(obj, name, val);
+			access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, val);
 		}
 		startEditing(var);
 		endEditing();
@@ -1103,7 +1103,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		ImGui::SetNextItemWidth(-1.0f);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::DragInt(("##" + name).c_str(), &val)) {
-			access.setter(obj, name, val);
+			access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, val);
 		}
 		startEditing(var);
 		endEditing();
@@ -1117,7 +1117,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::DragInt(("##" + name).c_str(), &signedValue, 1.0f, 0, std::numeric_limits<int>::max())) {
 			const std::uint32_t clampedValue = static_cast<std::uint32_t>(std::max(0, signedValue));
-			access.setter(obj, name, clampedValue);
+			access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, clampedValue);
 		}
 		startEditing(var);
 		endEditing();
@@ -1129,10 +1129,10 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		if (ImGui::Checkbox(("##" + name).c_str(), &val)) {
 			// Checkboxes are instantaneous interactions, so we push the 
 			// command immediately.
-			ReflectionVariant oldB = access.getter(obj, name);
-			access.setter(obj, name, val);
-			ReflectionVariant newB = access.getter(obj, name);
-			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldB, newB));
+			ReflectionVariant oldB = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+			access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, val);
+			ReflectionVariant newB = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, name, oldB, newB));
 			NotifySceneAfterComponentMutation(compName);
 		}
 	}
@@ -1144,7 +1144,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		ImGui::SetNextItemWidth(-1.0f);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::InputText(("##" + name).c_str(), buffer, sizeof(buffer))) {
-			access.setter(obj, name, std::string(buffer));
+			access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, std::string(buffer));
 		}
 		startEditing(var);
 		endEditing();
@@ -1162,10 +1162,10 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (const AssetMetadata* meta = AssetDatabase::Instance().FindAssetByGuid(newId)) {
 						std::string path = meta->sourcePath.generic_string();
-						ReflectionVariant oldV = access.getter(obj, name);
-						access.setter(obj, name, path);
-						ReflectionVariant newV = access.getter(obj, name);
-						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldV, newV));
+						ReflectionVariant oldV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+						access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, path);
+						ReflectionVariant newV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, name, oldV, newV));
 						NotifySceneAfterComponentMutation(compName);
 					}
 				}
@@ -1179,7 +1179,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		ImGui::SetNextItemWidth(-1.0f);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::DragFloat3(("##" + name).c_str(), &val.x, 0.1f)) {
-			access.setter(obj, name, val);
+			access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, val);
 		}
 		startEditing(var);
 		endEditing();
@@ -1193,7 +1193,7 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::DragFloat3(("##" + name).c_str(), &euler.x, 0.1f)) {
 			glm::quat newQ = glm::quat(glm::radians(euler));
-			access.setter(obj, name, newQ);
+			access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, newQ);
 		}
 		startEditing(var);
 		endEditing();
@@ -1231,10 +1231,10 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginPopupContextItem()) {
 			if (ImGui::MenuItem("Clear")) {
-				ReflectionVariant oldId = access.getter(obj, name);
-				access.setter(obj, name, TerraEngine::EMPTY_UUID);
-				ReflectionVariant nextId = access.getter(obj, name);
-				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
+				ReflectionVariant oldId = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+				access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, TerraEngine::EMPTY_UUID);
+				ReflectionVariant nextId = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, name, oldId, nextId));
 				NotifySceneAfterComponentMutation(compName);
 			}
 			ImGui::EndPopup();
@@ -1255,10 +1255,10 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 				if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(expected)) {
 					IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 					TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
-					ReflectionVariant oldId = access.getter(obj, name);
-					access.setter(obj, name, newId);
-					ReflectionVariant nextId = access.getter(obj, name);
-					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
+					ReflectionVariant oldId = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+					access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, newId);
+					ReflectionVariant nextId = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, name, oldId, nextId));
 					NotifySceneAfterComponentMutation(compName);
 				}
 			} else {
@@ -1268,10 +1268,10 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 					if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(p)) {
 						IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
 						TerraEngine::UUID newId = *(const TerraEngine::UUID*)payload->Data;
-						ReflectionVariant oldId = access.getter(obj, name);
-						access.setter(obj, name, newId);
-						ReflectionVariant nextId = access.getter(obj, name);
-						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, name, oldId, nextId));
+						ReflectionVariant oldId = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+						access.entitySetter(ObjectManager::instance().getRegistry(), obj, name, newId);
+						ReflectionVariant nextId = access.entityGetter(ObjectManager::instance().getRegistry(), obj, name);
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, name, oldId, nextId));
 						NotifySceneAfterComponentMutation(compName);
 						break;
 					}
@@ -1283,8 +1283,8 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 }
 
 // InspectorWindow::DrawScriptComponentInspector is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
-	ScriptComponent* scriptComponent = obj.getComponent<ScriptComponent>();
+void InspectorWindow::DrawScriptComponentInspector(entt::entity obj) {
+	ScriptComponent* scriptComponent = ObjectManager::instance().GetComponent<ScriptComponent>(obj);
 	if (scriptComponent == nullptr) {
 		return;
 	}
@@ -1392,7 +1392,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 			binding.enabled = bindingEnabled;
 			scriptComponent->SynchronizeStorageFromBindings();
 			const std::string newJson = scriptComponent->GetBindingsJson();
-			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, "Script", "BindingsJson", oldJson, newJson));
 		}
 		ImGui::PopStyleColor();
 
@@ -1408,7 +1408,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 			const std::string oldJson = scriptComponent->GetBindingsJson();
 			scriptComponent->RemoveBinding(binding.bindingId);
 			const std::string newJson = scriptComponent->GetBindingsJson();
-			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, "Script", "BindingsJson", oldJson, newJson));
 			ImGui::Separator();
 			ImGui::PopID();
 			break;
@@ -1456,7 +1456,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (playMode) {
 					std::string liveWriteError;
-					if (!ScriptingSystem::Instance().WriteLiveBindingValue(static_cast<uint32_t>(obj.EntityId()), binding, rootDescriptor.fieldPath, nextRootValue, &liveWriteError)) {
+					if (!ScriptingSystem::Instance().WriteLiveBindingValue(static_cast<uint32_t>(obj), binding, rootDescriptor.fieldPath, nextRootValue, &liveWriteError)) {
 						m_LastScriptMessage = liveWriteError.empty() ? "TerraEngine could not apply the live script edit." : liveWriteError;
 						m_LastScriptMessageIsError = true;
 						return false;
@@ -1482,7 +1482,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 				const std::string newJson = scriptComponent->GetBindingsJson();
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (pushUndoImmediately && oldJson != newJson) {
-					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, "Script", "BindingsJson", oldJson, newJson));
 				}
 
 				return true;
@@ -1494,7 +1494,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 				if (binding.RemoveSerializedValue(fieldPath)) {
 					scriptComponent->SynchronizeStorageFromBindings();
 					const std::string newJson = scriptComponent->GetBindingsJson();
-					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, "Script", "BindingsJson", oldJson, newJson));
 				}
 			};
 
@@ -1631,7 +1631,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 					if (ImGui::IsItemDeactivatedAfterEdit()) {
 						const std::string newJson = scriptComponent->GetBindingsJson();
 						if (m_PreEditScriptJson != newJson) {
-							UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", m_PreEditScriptJson, newJson));
+							UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, "Script", "BindingsJson", m_PreEditScriptJson, newJson));
 						}
 					}
 				};
@@ -1928,7 +1928,7 @@ void InspectorWindow::DrawScriptComponentInspector(Object& obj) {
 }
 
 // InspectorWindow::DrawScriptDropTarget is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void InspectorWindow::DrawScriptDropTarget(Object& obj) {
+void InspectorWindow::DrawScriptDropTarget(entt::entity obj) {
 	// Use the visible inspector body as the drop zone so scripts can be
 	// attached by drag-and-drop without rendering a dedicated placeholder box.
 	ImGuiWindow* inspectorWindow = ImGui::GetCurrentWindow();
@@ -1958,10 +1958,15 @@ void InspectorWindow::DrawScriptDropTarget(Object& obj) {
 				m_LastScriptMessage = "The dropped script source does not currently inherit from TerraEngine.Script.";
 				m_LastScriptMessageIsError = true;
 			} else {
-				ScriptComponent* scriptComponent = obj.getComponent<ScriptComponent>();
+				ScriptComponent* scriptComponent = ObjectManager::instance().GetComponent<ScriptComponent>(obj);
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (scriptComponent == nullptr) {
-					scriptComponent = &obj.addComponent<ScriptComponent>();
+					scriptComponent = ObjectManager::instance().AddComponent<ScriptComponent>(obj);
+				}
+				if (scriptComponent == nullptr) {
+					m_LastScriptMessage = "Could not attach ScriptComponent to the selected object.";
+					m_LastScriptMessageIsError = true;
+					return;
 				}
 
 				auto guard = scriptComponent->acquireWriteLock();
@@ -1974,7 +1979,7 @@ void InspectorWindow::DrawScriptDropTarget(Object& obj) {
 				const bool assemblyCanAttachImmediately = binding.status == "Attached";
 				scriptComponent->SynchronizeStorageFromBindings();
 				const std::string newJson = scriptComponent->GetBindingsJson();
-				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), "Script", "BindingsJson", oldJson, newJson));
+				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, "Script", "BindingsJson", oldJson, newJson));
 
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (assemblyCanAttachImmediately) {
@@ -2001,7 +2006,7 @@ void InspectorWindow::DrawScriptDropTarget(Object& obj) {
 }
 
 // InspectorWindow::DrawLightComponentInspector is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void InspectorWindow::DrawLightComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access)
+void InspectorWindow::DrawLightComponentInspector(const std::string& compName, entt::entity obj, ComponentAccessFunctions& access)
 {
 	auto drawLabeledWidget = [&](const char* label, auto widgetFunc) {
 		ImGui::TableNextRow();
@@ -2016,7 +2021,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 	// Keeping undo/redo efficient by updating live values during interaction
 	// and only committing the final state to the undo stack on deactivation.
 	auto setFloatProperty = [&](const char* propertyName, float newValue) {
-		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		ReflectionVariant oldVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
 		if (!IsValid(oldVariant) || !IsMetaValueType<float>(oldVariant))
 		{
 			return;
@@ -2029,11 +2034,11 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			return;
 		}
 
-		access.setter(obj, propertyName, newValue);
+		access.entitySetter(ObjectManager::instance().getRegistry(), obj, propertyName, newValue);
 	};
 
 	auto setBoolProperty = [&](const char* propertyName, bool newValue) {
-		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		ReflectionVariant oldVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!IsValid(oldVariant) || !IsMetaValueType<bool>(oldVariant))
 		{
@@ -2047,15 +2052,15 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			return;
 		}
 
-		access.setter(obj, propertyName, newValue);
+		access.entitySetter(ObjectManager::instance().getRegistry(), obj, propertyName, newValue);
 		
 		// Checkboxes are instantaneous, push immediately
-		ReflectionVariant nextVariant = access.getter(obj, propertyName);
-		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, oldVariant, nextVariant));
+		ReflectionVariant nextVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
+		UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, propertyName, oldVariant, nextVariant));
 	};
 
 	auto setUintProperty = [&](const char* propertyName, std::uint32_t newValue) {
-		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		ReflectionVariant oldVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!IsValid(oldVariant) || !IsMetaValueType<std::uint32_t>(oldVariant))
 		{
@@ -2069,11 +2074,11 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			return;
 		}
 
-		access.setter(obj, propertyName, newValue);
+		access.entitySetter(ObjectManager::instance().getRegistry(), obj, propertyName, newValue);
 	};
 
 	auto setVec3Property = [&](const char* propertyName, const glm::vec3& newValue) {
-		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		ReflectionVariant oldVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!IsValid(oldVariant) || !IsMetaValueType<glm::vec3>(oldVariant))
 		{
@@ -2087,28 +2092,28 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			return;
 		}
 
-		access.setter(obj, propertyName, newValue);
+		access.entitySetter(ObjectManager::instance().getRegistry(), obj, propertyName, newValue);
 	};
 
 	auto startEditing = [&](const char* propertyName) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::IsItemActivated()) {
-			m_PreEditValue = access.getter(obj, propertyName);
+			m_PreEditValue = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
 		}
 	};
 
 	auto endEditing = [&](const char* propertyName) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::IsItemDeactivatedAfterEdit()) {
-			ReflectionVariant newVal = access.getter(obj, propertyName);
-			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, m_PreEditValue, newVal));
+			ReflectionVariant newVal = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, propertyName, m_PreEditValue, newVal));
 		}
 	};
 
 	constexpr std::uint32_t kMaxAuthorableType = static_cast<std::uint32_t>(LightType::Area);
 	std::uint32_t encodedType = static_cast<std::uint32_t>(LightType::Point);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ReflectionVariant typeVariant = access.getter(obj, "type"); IsValid(typeVariant) && IsMetaValueType<std::uint32_t>(typeVariant))
+	if (ReflectionVariant typeVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "type"); IsValid(typeVariant) && IsMetaValueType<std::uint32_t>(typeVariant))
 	{
 		encodedType = MetaValue<std::uint32_t>(typeVariant);
 	}
@@ -2148,16 +2153,16 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 					typeIndex = std::clamp(typeIndex, 0, static_cast<int>(kMaxAuthorableType));
 					effectiveType = static_cast<std::uint32_t>(typeIndex);
 					
-					ReflectionVariant oldV = access.getter(obj, "type");
+					ReflectionVariant oldV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "type");
 					setUintProperty("type", effectiveType);
-					ReflectionVariant nextV = access.getter(obj, "type");
-					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "type", oldV, nextV));
+					ReflectionVariant nextV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "type");
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, "type", oldV, nextV));
 				}
 			});
 
 			std::uint32_t currentAppearance = 0u;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ReflectionVariant appVariant = access.getter(obj, "appearance"); IsValid(appVariant) && IsMetaValueType<std::uint32_t>(appVariant))
+			if (ReflectionVariant appVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "appearance"); IsValid(appVariant) && IsMetaValueType<std::uint32_t>(appVariant))
 			{
 				currentAppearance = MetaValue<std::uint32_t>(appVariant);
 			}
@@ -2168,16 +2173,16 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::Combo("##Appearance", &appIndex, appearanceTypes, IM_ARRAYSIZE(appearanceTypes)))
 				{
-					ReflectionVariant oldV = access.getter(obj, "appearance");
+					ReflectionVariant oldV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "appearance");
 					setUintProperty("appearance", static_cast<std::uint32_t>(appIndex));
-					ReflectionVariant nextV = access.getter(obj, "appearance");
-					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "appearance", oldV, nextV));
+					ReflectionVariant nextV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "appearance");
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, "appearance", oldV, nextV));
 				}
 			});
 
 			glm::vec3 lightColor = glm::vec3(1.0f);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ReflectionVariant colorVariant = access.getter(obj, "color"); IsValid(colorVariant) && IsMetaValueType<glm::vec3>(colorVariant))
+			if (ReflectionVariant colorVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "color"); IsValid(colorVariant) && IsMetaValueType<glm::vec3>(colorVariant))
 			{
 				lightColor = MetaValue<glm::vec3>(colorVariant);
 			}
@@ -2196,7 +2201,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			{
 				float temperature = 6500.0f;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ReflectionVariant tempVariant = access.getter(obj, "temperature"); IsValid(tempVariant) && IsMetaValueType<float>(tempVariant))
+				if (ReflectionVariant tempVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "temperature"); IsValid(tempVariant) && IsMetaValueType<float>(tempVariant))
 				{
 					temperature = MetaValue<float>(tempVariant);
 				}
@@ -2213,14 +2218,14 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 
 			float intensity = 1.0f;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ReflectionVariant intensityVariant = access.getter(obj, "intensity"); IsValid(intensityVariant) && IsMetaValueType<float>(intensityVariant))
+			if (ReflectionVariant intensityVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "intensity"); IsValid(intensityVariant) && IsMetaValueType<float>(intensityVariant))
 			{
 				intensity = MetaValue<float>(intensityVariant);
 			}
 
 			std::uint32_t currentUnit = 0u;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ReflectionVariant unitVariant = access.getter(obj, "unit"); IsValid(unitVariant) && IsMetaValueType<std::uint32_t>(unitVariant))
+			if (ReflectionVariant unitVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "unit"); IsValid(unitVariant) && IsMetaValueType<std::uint32_t>(unitVariant))
 			{
 				currentUnit = MetaValue<std::uint32_t>(unitVariant);
 			}
@@ -2256,8 +2261,8 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (ImGui::Combo("##Unit", &unitIndex, lightUnits, IM_ARRAYSIZE(lightUnits)))
 					{
-						ReflectionVariant oldUnit = access.getter(obj, "unit");
-						ReflectionVariant oldInt = access.getter(obj, "intensity");
+						ReflectionVariant oldUnit = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "unit");
+						ReflectionVariant oldInt = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "intensity");
 
 						setUintProperty("unit", static_cast<std::uint32_t>(unitIndex));
 
@@ -2272,18 +2277,18 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 							setFloatProperty("intensity", std::max(0.0f, intensity * (4.0f * glm::pi<float>())));
 						}
 
-						ReflectionVariant newUnit = access.getter(obj, "unit");
-						ReflectionVariant newInt = access.getter(obj, "intensity");
+						ReflectionVariant newUnit = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "unit");
+						ReflectionVariant newInt = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "intensity");
 						
-						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "unit", oldUnit, newUnit));
-						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "intensity", oldInt, newInt));
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, "unit", oldUnit, newUnit));
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, "intensity", oldInt, newInt));
 					}
 				});
 			}
 
 			float indirectMultiplier = 1.0f;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ReflectionVariant indVariant = access.getter(obj, "indirectMultiplier"); IsValid(indVariant) && IsMetaValueType<float>(indVariant))
+			if (ReflectionVariant indVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "indirectMultiplier"); IsValid(indVariant) && IsMetaValueType<float>(indVariant))
 			{
 				indirectMultiplier = MetaValue<float>(indVariant);
 			}
@@ -2314,7 +2319,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			{
 				float range = 10.0f;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ReflectionVariant rangeVariant = access.getter(obj, "range"); IsValid(rangeVariant) && IsMetaValueType<float>(rangeVariant))
+				if (ReflectionVariant rangeVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "range"); IsValid(rangeVariant) && IsMetaValueType<float>(rangeVariant))
 				{
 					range = MetaValue<float>(rangeVariant);
 				}
@@ -2336,12 +2341,12 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 				float innerDegrees = 20.0f;
 				float outerDegrees = 30.0f;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ReflectionVariant innerVariant = access.getter(obj, "innerConeAngle"); IsValid(innerVariant) && IsMetaValueType<float>(innerVariant))
+				if (ReflectionVariant innerVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "innerConeAngle"); IsValid(innerVariant) && IsMetaValueType<float>(innerVariant))
 				{
 					innerDegrees = glm::degrees(MetaValue<float>(innerVariant));
 				}
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ReflectionVariant outerVariant = access.getter(obj, "outerConeAngle"); IsValid(outerVariant) && IsMetaValueType<float>(outerVariant))
+				if (ReflectionVariant outerVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "outerConeAngle"); IsValid(outerVariant) && IsMetaValueType<float>(outerVariant))
 				{
 					outerDegrees = glm::degrees(MetaValue<float>(outerVariant));
 				}
@@ -2384,12 +2389,12 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 				float width = 1.0f;
 				float height = 1.0f;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ReflectionVariant wVariant = access.getter(obj, "width"); IsValid(wVariant) && IsMetaValueType<float>(wVariant))
+				if (ReflectionVariant wVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "width"); IsValid(wVariant) && IsMetaValueType<float>(wVariant))
 				{
 					width = MetaValue<float>(wVariant);
 				}
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ReflectionVariant hVariant = access.getter(obj, "height"); IsValid(hVariant) && IsMetaValueType<float>(hVariant))
+				if (ReflectionVariant hVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "height"); IsValid(hVariant) && IsMetaValueType<float>(hVariant))
 				{
 					height = MetaValue<float>(hVariant);
 				}
@@ -2424,7 +2429,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 
 			bool castsShadows = false;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ReflectionVariant castVariant = access.getter(obj, "castsShadows"); IsValid(castVariant) && IsMetaValueType<bool>(castVariant))
+			if (ReflectionVariant castVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "castsShadows"); IsValid(castVariant) && IsMetaValueType<bool>(castVariant))
 			{
 				castsShadows = MetaValue<bool>(castVariant);
 			}
@@ -2441,7 +2446,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 			{
 				float shadowStrength = 1.0f;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ReflectionVariant strVariant = access.getter(obj, "shadowStrength"); IsValid(strVariant) && IsMetaValueType<float>(strVariant))
+				if (ReflectionVariant strVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "shadowStrength"); IsValid(strVariant) && IsMetaValueType<float>(strVariant))
 				{
 					shadowStrength = MetaValue<float>(strVariant);
 				}
@@ -2457,7 +2462,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 
 				float shadowBias = 0.005f;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ReflectionVariant biasVariant = access.getter(obj, "shadowBias"); IsValid(biasVariant) && IsMetaValueType<float>(biasVariant))
+				if (ReflectionVariant biasVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "shadowBias"); IsValid(biasVariant) && IsMetaValueType<float>(biasVariant))
 				{
 					shadowBias = MetaValue<float>(biasVariant);
 				}
@@ -2487,7 +2492,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 
 			float authoredPriority = 0.0f;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ReflectionVariant priorityVariant = access.getter(obj, "authoredPriority"); IsValid(priorityVariant) && IsMetaValueType<float>(priorityVariant))
+			if (ReflectionVariant priorityVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "authoredPriority"); IsValid(priorityVariant) && IsMetaValueType<float>(priorityVariant))
 			{
 				authoredPriority = MetaValue<float>(priorityVariant);
 			}
@@ -2504,7 +2509,7 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 
 			float stabilityPreference = 0.0f;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ReflectionVariant stabilityVariant = access.getter(obj, "stabilityPreference"); IsValid(stabilityVariant) && IsMetaValueType<float>(stabilityVariant))
+			if (ReflectionVariant stabilityVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "stabilityPreference"); IsValid(stabilityVariant) && IsMetaValueType<float>(stabilityVariant))
 			{
 				stabilityPreference = MetaValue<float>(stabilityVariant);
 			}
@@ -2525,9 +2530,9 @@ void InspectorWindow::DrawLightComponentInspector(const std::string& compName, O
 }
 
 // InspectorWindow::DrawUIComponentInspector is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Object& obj, ComponentAccessFunctions& access)
+void InspectorWindow::DrawUIComponentInspector(const std::string& compName, entt::entity obj, ComponentAccessFunctions& access)
 {
-	UIComponent* uiComponent = obj.getComponent<UIComponent>();
+	UIComponent* uiComponent = ObjectManager::instance().GetComponent<UIComponent>(obj);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (uiComponent == nullptr)
 	{
@@ -2545,7 +2550,7 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 	};
 
 	auto setStringProperty = [&](const char* propertyName, const std::string& newValue) {
-		ReflectionVariant oldVariant = access.getter(obj, propertyName);
+		ReflectionVariant oldVariant = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!IsValid(oldVariant) || !IsMetaValueType<std::string>(oldVariant))
 		{
@@ -2559,21 +2564,21 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 			return;
 		}
 
-		access.setter(obj, propertyName, newValue);
+		access.entitySetter(ObjectManager::instance().getRegistry(), obj, propertyName, newValue);
 	};
 
 	auto startEditing = [&](const char* propertyName) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::IsItemActivated()) {
-			m_PreEditValue = access.getter(obj, propertyName);
+			m_PreEditValue = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
 		}
 	};
 
 	auto endEditing = [&](const char* propertyName) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::IsItemDeactivatedAfterEdit()) {
-			ReflectionVariant newVal = access.getter(obj, propertyName);
-			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, propertyName, m_PreEditValue, newVal));
+			ReflectionVariant newVal = access.entityGetter(ObjectManager::instance().getRegistry(), obj, propertyName);
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, propertyName, m_PreEditValue, newVal));
 		}
 	};
 
@@ -2602,10 +2607,10 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 			{
 				if (ImGui::MenuItem("Clear"))
 				{
-					ReflectionVariant oldV = access.getter(obj, "sourceMarkup");
+					ReflectionVariant oldV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "sourceMarkup");
 					setStringProperty("sourceMarkup", "");
-					ReflectionVariant nextV = access.getter(obj, "sourceMarkup");
-					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "sourceMarkup", oldV, nextV));
+					ReflectionVariant nextV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "sourceMarkup");
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, "sourceMarkup", oldV, nextV));
 				}
 				ImGui::EndPopup();
 			}
@@ -2620,10 +2625,10 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, Obje
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (const AssetMetadata* meta = AssetDatabase::Instance().FindAssetByGuid(assetGuid))
 					{
-						ReflectionVariant oldV = access.getter(obj, "sourceMarkup");
+						ReflectionVariant oldV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "sourceMarkup");
 						setStringProperty("sourceMarkup", meta->sourcePath.generic_string());
-						ReflectionVariant nextV = access.getter(obj, "sourceMarkup");
-						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "sourceMarkup", oldV, nextV));
+						ReflectionVariant nextV = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "sourceMarkup");
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, "sourceMarkup", oldV, nextV));
 					}
 				}
 				ImGui::EndDragDropTarget();
@@ -2663,27 +2668,27 @@ void InspectorWindow::OnGui() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectedEntity) {
 		auto& objManager = ObjectManager::instance();
-		if (auto objOpt = objManager.getObject(*selectedEntity)) {
-			Object obj = *objOpt;
+		if (objManager.isEntityValid(*selectedEntity)) {
+			entt::entity obj = *selectedEntity;
 			
 			auto& accessReg = ComponentAccessRegistry();
 
 			// Header: Active Checkbox, Name Input, Static Checkbox
 			ImGui::PushID("InspectorHeaderTop");
 			
-			bool isActive = obj.isActive();
+			bool isActive = ObjectManager::instance().isObjectActive(obj);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::Checkbox("##ActiveGlobal", &isActive)) {
-				ReflectionVariant oldVal = obj.isActive();
-				obj.setActive(isActive);
-				ReflectionVariant newVal = obj.isActive();
-				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Active, oldVal, newVal));
+				ReflectionVariant oldVal = ObjectManager::instance().isObjectActive(obj);
+				ObjectManager::instance().setObjectActive(obj, isActive);
+				ReflectionVariant newVal = ObjectManager::instance().isObjectActive(obj);
+				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj, ObjectMetadataField::Active, oldVal, newVal));
 			}
 			ImGui::PopID();
 			
 			ImGui::SameLine();
 			
-			std::string name = obj.getName();
+			std::string name = ObjectManager::instance().getObjectName(obj);
 			char nameBuf[256];
 			strncpy(nameBuf, name.c_str(), sizeof(nameBuf));
 			
@@ -2693,7 +2698,7 @@ void InspectorWindow::OnGui() {
 			
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::InputText("##ObjectName", nameBuf, sizeof(nameBuf))) {
-				obj.setName(nameBuf);
+				ObjectManager::instance().setObjectName(obj, nameBuf);
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::IsItemActivated()) {
@@ -2703,19 +2708,19 @@ void InspectorWindow::OnGui() {
 			if (ImGui::IsItemDeactivatedAfterEdit()) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (m_PreEditName != nameBuf) {
-					UndoRedoSystem::Instance().PushCommand(std::make_unique<RenameObjectCommand>(obj.EntityId(), m_PreEditName, nameBuf));
+					UndoRedoSystem::Instance().PushCommand(std::make_unique<RenameObjectCommand>(obj, m_PreEditName, nameBuf));
 				}
 			}
 			
 			ImGui::SameLine();
 			
-			bool isStatic = obj.isStatic();
+			bool isStatic = ObjectManager::instance().isObjectStatic(obj);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (ImGui::Checkbox("Static", &isStatic)) {
-				ReflectionVariant oldVal = obj.isStatic();
-				obj.setStatic(isStatic);
-				ReflectionVariant newVal = obj.isStatic();
-				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Static, oldVal, newVal));
+				ReflectionVariant oldVal = ObjectManager::instance().isObjectStatic(obj);
+				ObjectManager::instance().setObjectStatic(obj, isStatic);
+				ReflectionVariant newVal = ObjectManager::instance().isObjectStatic(obj);
+				UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj, ObjectMetadataField::Static, oldVal, newVal));
 			}
 
 			// Tag and Layer
@@ -2736,7 +2741,7 @@ void InspectorWindow::OnGui() {
 				ImGui::TextDisabled("Tag");
 				
 				ImGui::TableSetColumnIndex(1);
-				std::string tag = obj.getTag();
+				std::string tag = ObjectManager::instance().getObjectTag(obj);
 				ImGui::SetNextItemWidth(-1.0f);
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::BeginCombo("##TagCombo", tag.c_str())) {
@@ -2748,9 +2753,9 @@ void InspectorWindow::OnGui() {
 							// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 							if (tag != t) {
 								ReflectionVariant oldV = tag;
-								obj.setTag(t);
+								ObjectManager::instance().setObjectTag(obj, t);
 								ReflectionVariant newV = t;
-								UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Tag, oldV, newV));
+								UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj, ObjectMetadataField::Tag, oldV, newV));
 							}
 						}
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2792,7 +2797,7 @@ void InspectorWindow::OnGui() {
 				ImGui::TextDisabled("Layer");
 				
 				ImGui::TableSetColumnIndex(3);
-				std::string layer = obj.getLayer();
+				std::string layer = ObjectManager::instance().getObjectLayer(obj);
 				ImGui::SetNextItemWidth(-1.0f);
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (ImGui::BeginCombo("##LayerCombo", layer.c_str())) {
@@ -2804,9 +2809,9 @@ void InspectorWindow::OnGui() {
 							// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 							if (layer != l) {
 								ReflectionVariant oldV = layer;
-								obj.setLayer(l);
+								ObjectManager::instance().setObjectLayer(obj, l);
 								ReflectionVariant newV = l;
-								UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj.EntityId(), ObjectMetadataField::Layer, oldV, newV));
+								UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyObjectMetadataCommand>(obj, ObjectMetadataField::Layer, oldV, newV));
 							}
 						}
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2850,7 +2855,7 @@ void InspectorWindow::OnGui() {
 
 			ImGui::Separator();
 			
-			std::vector<std::string>& inspectorComponentOrder = m_PerObjectComponentOrders[obj.EntityId()];
+			std::vector<std::string>& inspectorComponentOrder = m_PerObjectComponentOrders[obj];
 			
 			std::unordered_set<std::string> activeComponents;
 			bool hasTransform = false;
@@ -2860,7 +2865,7 @@ void InspectorWindow::OnGui() {
 					continue;
 				}
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (access.hasComponent(obj)) {
+				if (access.entityHasComponent(ObjectManager::instance().getRegistry(), obj)) {
 					activeComponents.insert(compName);
 					if (compName == "Transform") hasTransform = true;
 				}
@@ -2905,7 +2910,7 @@ void InspectorWindow::OnGui() {
 				const std::string displayName = BuildDisplayComponentName(compName);
 
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!access.hasComponent(obj)) continue; 
+				if (!access.entityHasComponent(ObjectManager::instance().getRegistry(), obj)) continue; 
 
 				ImGui::PushID(compName.c_str());
 				
@@ -2916,7 +2921,7 @@ void InspectorWindow::OnGui() {
 				ReflectionType type = access.reflectionType;
 				ReflectionProperty activeProp = FindMetaProperty(type, "active");
 				if (IsValid(activeProp)) {
-					ReflectionVariant var = access.getter(obj, "active");
+					ReflectionVariant var = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "active");
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (IsValid(var)) compActive = MetaValue<bool>(var);
 				}
@@ -2939,8 +2944,8 @@ void InspectorWindow::OnGui() {
 				if (compName != "Transform") {
 					if (ImGui::BeginPopupContextItem("ComponentSettings")) {
 						if (ImGui::MenuItem("Remove Component")) {
-							UndoRedoSystem::Instance().PushCommand(std::make_unique<RemoveComponentCommand>(obj.EntityId(), compName));
-							access.removeComponent(obj);
+							UndoRedoSystem::Instance().PushCommand(std::make_unique<RemoveComponentCommand>(obj, compName));
+							access.entityRemoveComponent(ObjectManager::instance().getRegistry(), obj);
 							NotifySceneAfterComponentMutation(compName);
 						}
 						ImGui::EndPopup();
@@ -2948,7 +2953,7 @@ void InspectorWindow::OnGui() {
 				}
 
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (!access.hasComponent(obj)) {
+				if (!access.entityHasComponent(ObjectManager::instance().getRegistry(), obj)) {
 					ImGui::PopID();
 					continue;
 				}
@@ -3002,10 +3007,10 @@ void InspectorWindow::OnGui() {
 					if (ImGui::Checkbox("##compActive", &compActive)) {
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (IsValid(activeProp)) {
-							ReflectionVariant oldA = access.getter(obj, "active");
-							access.setter(obj, "active", compActive);
-							ReflectionVariant newA = access.getter(obj, "active");
-							UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj.EntityId(), compName, "active", oldA, newA));
+							ReflectionVariant oldA = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "active");
+							access.entitySetter(ObjectManager::instance().getRegistry(), obj, "active", compActive);
+							ReflectionVariant newA = access.entityGetter(ObjectManager::instance().getRegistry(), obj, "active");
+							UndoRedoSystem::Instance().PushCommand(std::make_unique<ModifyComponentCommand>(obj, compName, "active", oldA, newA));
 							NotifySceneAfterComponentMutation(compName);
 						}
 					}
@@ -3085,7 +3090,7 @@ void InspectorWindow::OnGui() {
 				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 				for (auto& [name, access] : accessReg) {
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (name != "Script" && !access.hasComponent(obj)) {
+					if (name != "Script" && !access.entityHasComponent(ObjectManager::instance().getRegistry(), obj)) {
 						availableComponents.push_back(name);
 					}
 				}
@@ -3114,8 +3119,8 @@ void InspectorWindow::OnGui() {
 					ImGui::PushID(compName.c_str());
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (ImGui::Selectable(displayName.c_str())) {
-						UndoRedoSystem::Instance().PushCommand(std::make_unique<AddComponentCommand>(obj.EntityId(), compName));
-						accessReg[compName].addComponent(obj);
+						UndoRedoSystem::Instance().PushCommand(std::make_unique<AddComponentCommand>(obj, compName));
+						accessReg[compName].entityAddComponent(ObjectManager::instance().getRegistry(), obj);
 						NotifySceneAfterComponentMutation(compName);
 						ImGui::CloseCurrentPopup();
 					}

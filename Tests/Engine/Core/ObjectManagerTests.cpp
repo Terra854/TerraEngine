@@ -68,31 +68,31 @@ namespace TerraEngine::Tests {
 			});
 
 			Object object = manager.createObject("Player");
-			const TerraEngine::UUID originalUuid = object.getUUID();
+			const TerraEngine::UUID originalUuid = manager.getUUID(object.EntityId());
 
-			context.Expect(object.getComponent<Transform>() != nullptr, "Created objects should receive a Transform component by default.");
+			context.Expect(manager.GetComponent<Transform>(object.EntityId()) != nullptr, "Created objects should receive a Transform component by default.");
 			context.Expect(manager.getObject(originalUuid).has_value(), "Created object UUIDs should resolve back to live objects.");
-			context.ExpectEqual(std::string("Player"), object.getName(), "Created objects should keep their authored name.");
-			context.ExpectEqual(std::string("Untagged"), object.getTag(), "Created objects should use the default tag.");
-			context.ExpectEqual(std::string("Default"), object.getLayer(), "Created objects should use the default layer.");
-			context.Expect(object.isActive(), "Created objects should start active.");
-			context.Expect(!object.isStatic(), "Created objects should start non-static.");
+			context.ExpectEqual(std::string("Player"), manager.getObjectName(object.EntityId()), "Created objects should keep their authored name.");
+			context.ExpectEqual(std::string("Untagged"), manager.getObjectTag(object.EntityId()), "Created objects should use the default tag.");
+			context.ExpectEqual(std::string("Default"), manager.getObjectLayer(object.EntityId()), "Created objects should use the default layer.");
+			context.Expect(manager.isObjectActive(object.EntityId()), "Created objects should start active.");
+			context.Expect(!manager.isObjectStatic(object.EntityId()), "Created objects should start non-static.");
 
-			object.setName("Hero");
-			object.setTag("Gameplay");
-			object.setLayer("Characters");
-			object.setActive(false);
-			object.setStatic(true);
+			manager.setObjectName(object.EntityId(), "Hero");
+			manager.setObjectTag(object.EntityId(), "Gameplay");
+			manager.setObjectLayer(object.EntityId(), "Characters");
+			manager.setObjectActive(object.EntityId(), false);
+			manager.setObjectStatic(object.EntityId(), true);
 
-			context.ExpectEqual(std::string("Hero"), object.getName(), "Name updates should be stored in object metadata.");
-			context.ExpectEqual(std::string("Gameplay"), object.getTag(), "Tag updates should be stored in object metadata.");
-			context.ExpectEqual(std::string("Characters"), object.getLayer(), "Layer updates should be stored in object metadata.");
-			context.Expect(!object.isActive(), "Active-state updates should be stored in object metadata.");
-			context.Expect(object.isStatic(), "Static-state updates should be stored in object metadata.");
+			context.ExpectEqual(std::string("Hero"), manager.getObjectName(object.EntityId()), "Name updates should be stored in object metadata.");
+			context.ExpectEqual(std::string("Gameplay"), manager.getObjectTag(object.EntityId()), "Tag updates should be stored in object metadata.");
+			context.ExpectEqual(std::string("Characters"), manager.getObjectLayer(object.EntityId()), "Layer updates should be stored in object metadata.");
+			context.Expect(!manager.isObjectActive(object.EntityId()), "Active-state updates should be stored in object metadata.");
+			context.Expect(manager.isObjectStatic(object.EntityId()), "Static-state updates should be stored in object metadata.");
 			context.Expect(manager.FindObjectByName("Hero").has_value(), "Name lookup should find live objects by display name.");
 			context.Expect(!manager.FindObjectByTag("Gameplay").has_value(), "Tag lookup should ignore inactive objects.");
 
-			object.setActive(true);
+			manager.setObjectActive(object.EntityId(), true);
 			context.Expect(manager.FindObjectByTag("Gameplay").has_value(), "Tag lookup should include active objects.");
 			context.Expect(modifiedCount >= 6, "Metadata mutations should notify the scene modified callback.");
 			context.Expect(spatialDirtyCount >= 3, "Creation and spatial metadata mutations should notify spatial dirty callbacks.");
@@ -108,8 +108,8 @@ namespace TerraEngine::Tests {
 			Object child = manager.createObject("Child");
 			Object grandchild = manager.createObject("Grandchild");
 
-			Transform* rootTransform = root.getComponent<Transform>();
-			Transform* childTransform = child.getComponent<Transform>();
+			Transform* rootTransform = manager.GetComponent<Transform>(root.EntityId());
+			Transform* childTransform = manager.GetComponent<Transform>(child.EntityId());
 			rootTransform->position = glm::vec3(10.0f, 0.0f, 0.0f);
 			rootTransform->scale = glm::vec3(2.0f, 2.0f, 2.0f);
 			childTransform->position = glm::vec3(4.0f, 0.0f, 0.0f);
@@ -137,9 +137,9 @@ namespace TerraEngine::Tests {
 			Object root = manager.createObject("Root");
 			Object child = manager.createObject("Child");
 			Object grandchild = manager.createObject("Grandchild");
-			const TerraEngine::UUID rootUuid = root.getUUID();
-			const TerraEngine::UUID childUuid = child.getUUID();
-			const TerraEngine::UUID grandchildUuid = grandchild.getUUID();
+			const TerraEngine::UUID rootUuid = manager.getUUID(root.EntityId());
+			const TerraEngine::UUID childUuid = manager.getUUID(child.EntityId());
+			const TerraEngine::UUID grandchildUuid = manager.getUUID(grandchild.EntityId());
 
 			context.Expect(manager.setParent(child, root), "The child should parent under the root before removal.");
 			context.Expect(manager.setParent(grandchild, child), "The grandchild should parent under the child before removal.");
@@ -160,21 +160,21 @@ namespace TerraEngine::Tests {
 			Object first = manager.createObject("Player");
 			Object second = manager.createObject("Player");
 
-			first.setTag("Enemy");
-			second.setTag("Enemy");
+			manager.setObjectTag(first.EntityId(), "Enemy");
+			manager.setObjectTag(second.EntityId(), "Enemy");
 			context.Expect(manager.FindObjectByName("Player").has_value(), "The name index should find newly created objects.");
 			context.Expect(manager.FindObjectByTag("Enemy").has_value(), "The tag index should find active tagged objects.");
 
-			first.setName("Hero");
+			manager.setObjectName(first.EntityId(), "Hero");
 			context.Expect(manager.FindObjectByName("Hero").has_value(), "Renaming should insert the object into the new name bucket.");
 			context.Expect(manager.FindObjectByName("Player").has_value(), "Renaming one duplicate should preserve other objects in the old name bucket.");
 
-			second.setName("Villain");
+			manager.setObjectName(second.EntityId(), "Villain");
 			context.Expect(!manager.FindObjectByName("Player").has_value(), "Renaming the final duplicate should remove the old name bucket.");
 
-			first.setTag("Player");
+			manager.setObjectTag(first.EntityId(), "Player");
 			context.Expect(manager.FindObjectByTag("Player").has_value(), "Changing tags should insert the object into the new tag bucket.");
-			first.setActive(false);
+			manager.setObjectActive(first.EntityId(), false);
 			context.Expect(!manager.FindObjectByTag("Player").has_value(), "Inactive objects should not be returned from the tag index.");
 
 			manager.removeObject(second);
@@ -198,7 +198,7 @@ namespace TerraEngine::Tests {
 			context.Expect(manager.getObjectMetadataGeneration(object) > initialMetadataGeneration, "Object name edits should advance the metadata generation used by managed Object.Name caches.");
 			context.ExpectEqual(initialComponentGeneration, manager.getObjectComponentGeneration(object), "Name edits should not invalidate component wrapper caches.");
 
-			object.addComponent<ScriptComponent>();
+			manager.AddComponent<ScriptComponent>(object.EntityId());
 			manager.notifyObjectStructureChanged(object);
 			context.Expect(manager.getObjectComponentGeneration(object) > initialComponentGeneration, "Component changes should advance the component generation used by managed GetComponent caches.");
 			context.Expect(manager.getObjectBindingGeneration(object) > initialBindingGeneration, "Script binding capable structure changes should advance binding cache generations.");
@@ -232,7 +232,7 @@ namespace TerraEngine::Tests {
 				{"active", false}
 			});
 
-			Transform* transform = object.getComponent<Transform>();
+			Transform* transform = ObjectManager::instance().GetComponent<Transform>(object.EntityId());
 			TerraEngine::Reflection::Variant deserializedPosition = transformAccess.getter(object, "Position");
 			context.Expect(NearlyEqualVec3(transform->position, glm::vec3(7.0f, 8.0f, 9.0f)), "Deserialization should write reflected vec3 values back to the component.");
 			context.Expect(NearlyEqualVec3(transform->scale, glm::vec3(1.0f, 1.5f, 2.0f)), "Deserialization should write reflected scale values back to the component.");

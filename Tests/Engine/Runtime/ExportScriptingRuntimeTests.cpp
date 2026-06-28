@@ -182,8 +182,9 @@ namespace TerraEngine::Tests {
 	void RegisterExportScriptingRuntimeTests(TestRegistry& registry) {
 		registry.Add("Engine.ExportScriptingRuntime.CreatesHydratesAndUpdatesStagedScriptBindings", [](TestContext& context) {
 			ExportScriptingFixture fixture;
-			Object object = ObjectManager::instance().createObject("Scripted Object");
-			ScriptComponent& scriptComponent = object.addComponent<ScriptComponent>();
+			ObjectManager& objects = ObjectManager::instance();
+			Object object = objects.createObject("Scripted Object");
+			ScriptComponent& scriptComponent = *objects.AddComponent<ScriptComponent>(object.EntityId());
 			ScriptBinding& binding = scriptComponent.AddBinding(TerraEngine::EMPTY_UUID, "Game.PlayerController");
 			binding.scriptId = kScriptId;
 			ScriptFieldValue speedValue;

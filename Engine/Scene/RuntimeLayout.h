@@ -7,7 +7,7 @@
 #pragma once
 
 #include "Core/Export.h"
-#include "Core/Object/CompactObjectReference.h"
+#include "Core/Object/Object.h"
 #include "Components/Transform.h"
 #include "Utilities/UUID.h"
 
@@ -37,7 +37,7 @@ namespace TerraEngine::Scene {
 
 	struct RuntimeActiveMembership {
 		entt::entity entity = entt::null;
-		TerraEngine::CompactObjectReference compactReference;
+		Object objectHandle;
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		bool objectActive = false;
 		std::uint64_t componentActiveMask = 0;
@@ -50,7 +50,7 @@ namespace TerraEngine::Scene {
 
 	struct FlatHierarchyEntry {
 		entt::entity entity = entt::null;
-		TerraEngine::CompactObjectReference compactReference;
+		Object objectHandle;
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		std::optional<std::size_t> parentIndex;
 		std::size_t firstChildIndex = 0;
@@ -75,7 +75,7 @@ namespace TerraEngine::Scene {
 
 	struct TransformRuntimeRecord {
 		entt::entity entity = entt::null;
-		TerraEngine::CompactObjectReference compactReference;
+		Object objectHandle;
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		std::size_t layoutIndex = 0;
 		std::optional<std::size_t> parentIndex;
@@ -91,7 +91,7 @@ namespace TerraEngine::Scene {
 	struct RenderRuntimeRecord {
 		RuntimeLayoutRecordKind recordKind = RuntimeLayoutRecordKind::Renderable;
 		entt::entity entity = entt::null;
-		TerraEngine::CompactObjectReference compactReference;
+		Object objectHandle;
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		std::optional<std::size_t> transformIndex;
 		std::vector<TerraEngine::UUID> resourceIds;
@@ -112,8 +112,8 @@ namespace TerraEngine::Scene {
 		std::size_t fallbackCount = 0;
 		std::size_t metadataScanFallbackCount = 0;
 		std::size_t fullObjectFacadeFallbackCount = 0;
-		std::size_t compactReferenceFallbackCount = 0;
-		std::size_t staleCompactReferenceCount = 0;
+		std::size_t objectHandleFallbackCount = 0;
+		std::size_t staleObjectHandleCount = 0;
 		std::size_t validationMismatchCount = 0;
 		bool smallSceneGuardTriggered = false;
 	};

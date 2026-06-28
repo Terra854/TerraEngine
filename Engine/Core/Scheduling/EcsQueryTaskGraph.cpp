@@ -99,20 +99,20 @@ namespace TerraEngine::Scheduling {
 			return std::max<std::size_t>(1u, chunkSize);
 		}
 
-		std::vector<TerraEngine::CompactObjectReference> BuildCompactReferences(const std::vector<TerraEngine::UUID>& objects)
+		std::vector<Object> BuildObjectHandles(const std::vector<TerraEngine::UUID>& objects)
 		{
 			ObjectManager& objectManager = ObjectManager::instance();
-			std::vector<TerraEngine::CompactObjectReference> references;
+			std::vector<Object> references;
 			references.reserve(objects.size());
 			for (const TerraEngine::UUID& objectId : objects)
 			{
 				if (auto object = objectManager.getObject(objectId))
 				{
-					references.push_back(objectManager.makeCompactReference(object->EntityId()));
+					references.push_back(objectManager.makeObjectHandle(object->EntityId()));
 					continue;
 				}
-				TerraEngine::CompactObjectReference unresolved;
-				unresolved.stableId = objectId;
+				Object unresolved;
+				unresolved.stableIdHash = TerraEngine::MakeObjectStableHash(objectId);
 				references.push_back(unresolved);
 			}
 			return references;
@@ -135,7 +135,7 @@ namespace TerraEngine::Scheduling {
 			return ValidateComponentAccessGrant(std::move(request));
 		}
 
-		std::vector<EcsQueryChunk> BuildChunks(const EcsComponentQueryDeclaration& declaration, EcsQueryExecutionPolicy policy, const std::vector<TerraEngine::CompactObjectReference>& compactObjects, const ComponentAccessGrantResult& accessGrant)
+		std::vector<EcsQueryChunk> BuildChunks(const EcsComponentQueryDeclaration& declaration, EcsQueryExecutionPolicy policy, const std::vector<Object>& objectHandles, const ComponentAccessGrantResult& accessGrant)
 		{
 			const std::vector<TerraEngine::UUID>& objects = declaration.matchingObjects;
 			if (objects.empty())
@@ -163,7 +163,7 @@ namespace TerraEngine::Scheduling {
 				if (declaration.copyObjectIdsIntoChunks)
 				{
 					chunk.objects.assign(objects.begin() + static_cast<std::ptrdiff_t>(begin), objects.begin() + static_cast<std::ptrdiff_t>(end));
-					chunk.compactObjects.assign(compactObjects.begin() + static_cast<std::ptrdiff_t>(begin), compactObjects.begin() + static_cast<std::ptrdiff_t>(end));
+					chunk.objectHandles.assign(objectHandles.begin() + static_cast<std::ptrdiff_t>(begin), objectHandles.begin() + static_cast<std::ptrdiff_t>(end));
 				}
 				chunk.accessGrant = accessGrant;
 				chunk.profilingLabel = declaration.queryName + ".chunk" + std::to_string(chunk.chunkIndex);
@@ -246,7 +246,7 @@ namespace TerraEngine::Scheduling {
 			stream << " [" << plan.declaration.queryName
 				<< " policy=" << ToString(plan.executionPolicy)
 				<< " objects=" << plan.matchingObjects.size()
-				<< " compactRefs=" << plan.compactMatchingObjects.size()
+				<< " objectHandles=" << plan.matchingObjectHandles.size()
 				<< " chunks=" << plan.chunks.size()
 				<< " phase=" << ToString(plan.phaseKind)
 				<< " label=" << plan.phaseLabel
@@ -512,7 +512,7 @@ namespace TerraEngine::Scheduling {
 				? WorkerSystemPhaseKind::ProtectedCommit
 				: query.phaseKind;
 			plan.phaseLabel = query.phaseLabel;
-			plan.compactMatchingObjects = BuildCompactReferences(plan.matchingObjects);
+			plan.matchingObjectHandles = BuildObjectHandles(plan.matchingObjects);
 			plan.accessGrant = BuildAccessGrant(query, plan.executionPolicy);
 			for (const ComponentAccessDiagnostic& diagnostic : plan.accessGrant.diagnostics)
 			{
@@ -521,7 +521,7 @@ namespace TerraEngine::Scheduling {
 					latestSummary.diagnostics.push_back(FromAccessDiagnostic(diagnostic));
 				}
 			}
-			plan.chunks = BuildChunks(query, plan.executionPolicy, plan.compactMatchingObjects, plan.accessGrant);
+			plan.chunks = BuildChunks(query, plan.executionPolicy, plan.matchingObjectHandles, plan.accessGrant);
 			latestSummary.queryPlans.push_back(std::move(plan));
 			if (options.validateAccessDeclarations)
 			{

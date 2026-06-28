@@ -747,7 +747,7 @@ void RenderSystem::Update(float deltaTime)
 						reflectedMesh.materialId = materialId;
 						reflectedMesh.spatialObjectId = spatialObjectId;
 						reflectedMesh.taskShaderCullingEnabled = objectTaskCullingEnabled;
-						const TerraEngine::UUID objectId = spatialObjectId != TerraEngine::EMPTY_UUID ? spatialObjectId : object.getUUID();
+						const TerraEngine::UUID objectId = spatialObjectId != TerraEngine::EMPTY_UUID ? spatialObjectId : objManager.getUUID(object.EntityId());
 						renderables.push_back({ object.EntityId(), objectId, objManager.isObjectStatic(object), reflectedMesh });
 					}
 				);
@@ -797,7 +797,7 @@ void RenderSystem::Update(float deltaTime)
 					reflectedLight.authoredPriority = lightComp.authoredPriority;
 					reflectedLight.stabilityPreference = lightComp.stabilityPreference;
 
-					lights.push_back({ object.EntityId(), object.getUUID(), reflectedLight });
+					lights.push_back({ object.EntityId(), objManager.getUUID(object.EntityId()), reflectedLight });
 					}
 				);
 			}));
@@ -1445,8 +1445,9 @@ void RenderSystem::Update(float deltaTime)
 	const LightEntry* activeSkyDirectionalLight = nullptr;
 	{
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Resolve Sky State", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-		std::optional<Object> activeSkyObject = SceneManager::Instance().GetActiveSkyObject();
-		activeSkyComponent = activeSkyObject.has_value() ? activeSkyObject->getComponent<SkyComponent>() : nullptr;
+		ObjectManager& objectManager = ObjectManager::instance();
+		std::optional<entt::entity> activeSkyObject = SceneManager::Instance().GetActiveSkyObject();
+		activeSkyComponent = activeSkyObject.has_value() ? objectManager.GetComponent<SkyComponent>(*activeSkyObject) : nullptr;
 		const bool hasActiveSkyComponent = activeSkyComponent != nullptr;
 		skyRuntimeState.isValid = true;
 		skyRuntimeState.usingFallback = true;
@@ -1455,7 +1456,7 @@ void RenderSystem::Update(float deltaTime)
 		skyRuntimeState.forceBlackFallback = !hasActiveSkyComponent;
 		std::string skyIssueMessage;
 
-		const TerraEngine::UUID skyObjectId = activeSkyObject.has_value() ? activeSkyObject->getUUID() : TerraEngine::EMPTY_UUID;
+		const TerraEngine::UUID skyObjectId = activeSkyObject.has_value() ? objectManager.getUUID(*activeSkyObject) : TerraEngine::EMPTY_UUID;
 		const LightEntry* skyObjectDirectionalLight = nullptr;
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const LightEntry& lightEntry : lights)
@@ -1855,7 +1856,7 @@ std::vector<TerraEngine::Scene::RenderRuntimeRecord> RenderSystem::BuildCompactR
 			TerraEngine::Scene::RenderRuntimeRecord record;
 			record.recordKind = TerraEngine::Scene::RuntimeLayoutRecordKind::Camera;
 			record.entity = object.EntityId();
-			record.objectId = object.getUUID();
+			record.objectId = objManager.getUUID(object.EntityId());
 			record.sourceRevision = objManager.GetObjectSpatialRevision(object.EntityId());
 			records.push_back(std::move(record));
 		});
@@ -1866,7 +1867,7 @@ std::vector<TerraEngine::Scene::RenderRuntimeRecord> RenderSystem::BuildCompactR
 			TerraEngine::Scene::RenderRuntimeRecord record;
 			record.recordKind = TerraEngine::Scene::RuntimeLayoutRecordKind::Renderable;
 			record.entity = object.EntityId();
-			record.objectId = mesh.spatialObjectId != TerraEngine::EMPTY_UUID ? mesh.spatialObjectId : object.getUUID();
+			record.objectId = mesh.spatialObjectId != TerraEngine::EMPTY_UUID ? mesh.spatialObjectId : objManager.getUUID(object.EntityId());
 			record.resourceIds = { mesh.meshId, mesh.materialId };
 			record.renderFlags = mesh.taskShaderCullingEnabled ? 1u : 0u;
 			record.sourceRevision = objManager.GetObjectSpatialRevision(object.EntityId());
@@ -1883,7 +1884,7 @@ std::vector<TerraEngine::Scene::RenderRuntimeRecord> RenderSystem::BuildCompactR
 			TerraEngine::Scene::RenderRuntimeRecord record;
 			record.recordKind = TerraEngine::Scene::RuntimeLayoutRecordKind::Light;
 			record.entity = object.EntityId();
-			record.objectId = object.getUUID();
+			record.objectId = objManager.getUUID(object.EntityId());
 			record.renderFlags = light.castsShadows ? 1u : 0u;
 			record.sourceRevision = objManager.GetObjectSpatialRevision(object.EntityId());
 			records.push_back(std::move(record));

@@ -147,19 +147,20 @@ void HierarchyWindow::OnGui() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::MenuItem("Create Empty Object")) {
 			Object obj = objManager.createObject("Object");
+			const entt::entity objEntity = obj.EntityId();
 			if (m_Owner != nullptr && m_Owner->IsPrefabEditingMode()) {
 				// Prefab assets must remain a single authored object tree. The
 				// hierarchy add button therefore creates a child of the current
 				// prefab root instead of introducing a second root beside it.
 				auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
 				for (const TerraEngine::UUID& rootId : graph.rootObjects) {
-					if (auto rootObject = objManager.getObject(rootId); rootObject && rootObject->EntityId() != obj.EntityId()) {
-						objManager.setParent(obj, *rootObject);
+					if (auto rootObject = objManager.getEntity(rootId); rootObject && *rootObject != objEntity) {
+						objManager.setParent(objEntity, *rootObject);
 						break;
 					}
 				}
 			}
-			UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(obj.EntityId()));
+			UndoRedoSystem::Instance().PushCommand(std::make_unique<CreateObjectCommand>(objEntity));
 		}
 		ImGui::EndPopup();
 	}
@@ -179,7 +180,7 @@ void HierarchyWindow::OnGui() {
 	if (m_Owner->IsPrefabEditingMode()) {
 		auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
 		for (const TerraEngine::UUID& rootId : graph.rootObjects) {
-			if (auto obj = objManager.getObject(rootId)) {
+			if (auto obj = objManager.getEntity(rootId)) {
 				DrawEntityNode(*obj);
 			}
 		}
@@ -203,9 +204,9 @@ void HierarchyWindow::OnGui() {
 				entt::entity payload_n = *(const entt::entity*)payload->Data;
 				
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (auto childObj = objManager.getObject(payload_n)) {
+				if (objManager.isEntityValid(payload_n)) {
 					// Detach from parent (make root)
-					objManager.setParent(*childObj, std::nullopt);
+					objManager.setParent(payload_n, std::nullopt);
 				}
 			}
 			ImGui::EndDragDropTarget();
@@ -215,7 +216,7 @@ void HierarchyWindow::OnGui() {
 		if (sceneOpened) {
 			auto graph = TerraEngine::Scene::BuildSceneGraphFromObjectManager(objManager);
 			for (const TerraEngine::UUID& rootId : graph.rootObjects) {
-				if (auto obj = objManager.getObject(rootId)) {
+				if (auto obj = objManager.getEntity(rootId)) {
 					DrawEntityNode(*obj);
 				}
 			}
@@ -231,15 +232,12 @@ void HierarchyWindow::OnGui() {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginPopup("EntityContextMenu")) {
-		if (m_ContextEntityId != entt::null && objManager.getObject(m_ContextEntityId)) {
-			auto contextObject = objManager.getObject(m_ContextEntityId);
-			const bool hasPrefabLink = contextObject && contextObject->getComponent<PrefabLinkComponent>() != nullptr;
+		if (m_ContextEntityId != entt::null && objManager.isEntityValid(m_ContextEntityId)) {
+			const bool hasPrefabLink = ObjectManager::instance().GetComponent<PrefabLinkComponent>(m_ContextEntityId) != nullptr;
 			if (ImGui::MenuItem("Delete")) {
 				UndoRedoSystem::Instance().PushCommand(std::make_unique<DeleteObjectCommand>(m_ContextEntityId));
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (auto obj = objManager.getObject(m_ContextEntityId)) {
-					objManager.removeObject(*obj);
-				}
+				objManager.removeObject(m_ContextEntityId);
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (auto selected = m_Owner->GetSelectedEntity(); selected && *selected == m_ContextEntityId) {
 					m_Owner->SetSelectedEntity(std::nullopt);
@@ -248,25 +246,17 @@ void HierarchyWindow::OnGui() {
 			}
 			ImGui::Separator();
 			if (ImGui::MenuItem("Create Prefab From Selection")) {
-				if (contextObject) {
-					CreatePrefabFromSelection(*contextObject);
-				}
+				CreatePrefabFromSelection(m_ContextEntityId);
 			}
 			if (ImGui::MenuItem("Open Prefab Source", nullptr, false, hasPrefabLink)) {
-				if (contextObject) {
-					m_Owner->OpenPrefabFromObject(*contextObject);
-				}
+				m_Owner->OpenPrefabFromObject(m_ContextEntityId);
 			}
 			if (ImGui::MenuItem("Reset To Prefab Defaults", nullptr, false, hasPrefabLink)) {
-				if (contextObject) {
-					m_Owner->ResetPrefabInstanceToDefaults(*contextObject);
-				}
+				m_Owner->ResetPrefabInstanceToDefaults(m_ContextEntityId);
 			}
 			if (ImGui::MenuItem("Unlink Prefab", nullptr, false, hasPrefabLink)) {
-				if (contextObject) {
-					contextObject->removeComponent<PrefabLinkComponent>();
-					SceneManager::Instance().ForceMarkActiveSceneDirty();
-				}
+				ObjectManager::instance().RemoveComponent<PrefabLinkComponent>(m_ContextEntityId);
+				SceneManager::Instance().ForceMarkActiveSceneDirty();
 			}
 		}
 		ImGui::EndPopup();
@@ -276,18 +266,15 @@ void HierarchyWindow::OnGui() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::IsKeyReleased(ImGuiKey_Delete)) {
 		auto selected = m_Owner->GetSelectedEntity();
-		if (selected && objManager.getObject(*selected)) {
+		if (selected && objManager.isEntityValid(*selected)) {
 			UndoRedoSystem::Instance().PushCommand(std::make_unique<DeleteObjectCommand>(*selected));
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (auto obj = objManager.getObject(*selected)) {
-				objManager.removeObject(*obj);
-			}
+			objManager.removeObject(*selected);
 			m_Owner->SetSelectedEntity(std::nullopt);
 		}
 	}
 }
 
-void HierarchyWindow::CreatePrefabFromSelection(Object& obj)
+void HierarchyWindow::CreatePrefabFromSelection(entt::entity obj)
 {
 	if (m_Owner == nullptr)
 	{
@@ -330,10 +317,16 @@ void HierarchyWindow::CreatePrefabFromSelection(Object& obj)
 	prefabOutput << prefabJson.dump(4);
 	prefabOutput.close();
 
-	PrefabLinkComponent* existingLink = obj.getComponent<PrefabLinkComponent>();
-	PrefabLinkComponent& link = existingLink != nullptr ? *existingLink : obj.addComponent<PrefabLinkComponent>();
+	PrefabLinkComponent* existingLink = ObjectManager::instance().GetComponent<PrefabLinkComponent>(obj);
+	PrefabLinkComponent* ensuredLink = existingLink != nullptr ? existingLink : ObjectManager::instance().AddComponent<PrefabLinkComponent>(obj);
+	if (ensuredLink == nullptr)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to add prefab link to selected object.");
+		return;
+	}
+	PrefabLinkComponent& link = *ensuredLink;
 	link.prefabSourceId = TerraEngine::GenerateUUID();
-	link.sourceObjectId = obj.getUUID();
+	link.sourceObjectId = ObjectManager::instance().getUUID(obj);
 	link.prefabName = prefabPath.stem().string();
 
 	std::error_code relativeError;
@@ -342,12 +335,12 @@ void HierarchyWindow::CreatePrefabFromSelection(Object& obj)
 	link.overriddenProperties.clear();
 
 	SceneManager::Instance().ForceMarkActiveSceneDirty();
-	m_Owner->SetSelectedEntity(obj.EntityId());
+	m_Owner->SetSelectedEntity(obj);
 	TERRAENGINE_LOG(LogLevel::Info, "Created prefab from selection: " << prefabPath);
 }
 
 // HierarchyWindow::DrawEntityNode is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds) {
+void HierarchyWindow::DrawEntityNode(entt::entity obj, const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds) {
 	auto& objManager = ObjectManager::instance();
 	std::string name = objManager.getObjectName(obj);
 	
@@ -374,11 +367,11 @@ void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<Terra
 	
 	auto selected = m_Owner->GetSelectedEntity();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (selected && *selected == obj.EntityId()) {
+	if (selected && *selected == obj) {
 		flags |= ImGuiTreeNodeFlags_Selected;
 	}
 	
-	auto children = objManager.getChildren(obj);
+	auto children = objManager.getChildEntities(obj);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (children.empty()) {
 		flags |= ImGuiTreeNodeFlags_Leaf;
@@ -389,7 +382,7 @@ void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<Terra
 		flags |= ImGuiTreeNodeFlags_DefaultOpen;
 	}
 	
-	PrefabLinkComponent* prefabLink = obj.getComponent<PrefabLinkComponent>();
+	PrefabLinkComponent* prefabLink = ObjectManager::instance().GetComponent<PrefabLinkComponent>(obj);
 	std::unordered_set<TerraEngine::UUID> localPrefabSourceObjectIds;
 	const std::unordered_set<TerraEngine::UUID>* activePrefabSourceObjectIds = prefabSourceObjectIds;
 	if (prefabLink != nullptr)
@@ -399,7 +392,7 @@ void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<Terra
 	}
 
 	const bool isPrefabAuthoredObject = prefabLink != nullptr
-		|| (activePrefabSourceObjectIds != nullptr && activePrefabSourceObjectIds->find(obj.getUUID()) != activePrefabSourceObjectIds->end());
+		|| (activePrefabSourceObjectIds != nullptr && activePrefabSourceObjectIds->find(ObjectManager::instance().getUUID(obj)) != activePrefabSourceObjectIds->end());
 	if (isPrefabAuthoredObject) {
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.72f, 1.0f, 1.0f));
 	}
@@ -407,7 +400,7 @@ void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<Terra
 	// Scene View render path, which can change transient entt handles between
 	// frames. Key the ImGui tree by the authored object UUID so expanded child
 	// branches remain stable while the prefab is being edited in context.
-	const std::string treeNodeId = TerraEngine::ToHexString(obj.getUUID());
+	const std::string treeNodeId = TerraEngine::ToHexString(ObjectManager::instance().getUUID(obj));
 	bool opened = ImGui::TreeNodeEx(treeNodeId.c_str(), flags, "%s", name.c_str());
 	if (isPrefabAuthoredObject) {
 		ImGui::PopStyleColor();
@@ -415,7 +408,7 @@ void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<Terra
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::IsItemClicked()) {
-		m_Owner->SetSelectedEntity(obj.EntityId());
+		m_Owner->SetSelectedEntity(obj);
 	}
 	if (prefabLink != nullptr && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
 		m_Owner->OpenPrefabFromObject(obj);
@@ -423,14 +416,14 @@ void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<Terra
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-		m_ContextEntityId = obj.EntityId();
+		m_ContextEntityId = obj;
 		m_OpenEntityMenu = true;
 	}
 
 	// Drag Source
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginDragDropSource()) {
-		entt::entity entityId = obj.EntityId();
+		entt::entity entityId = obj;
 		ImGui::SetDragDropPayload("ENTITY_CELL", &entityId, sizeof(entt::entity));
 		ImGui::Text("%s", name.c_str());
 		ImGui::EndDragDropSource();
@@ -444,9 +437,9 @@ void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<Terra
 			entt::entity payload_n = *(const entt::entity*)payload->Data;
 			
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (payload_n != obj.EntityId()) {
-				if (auto childObj = objManager.getObject(payload_n)) {
-					objManager.setParent(*childObj, obj);
+			if (payload_n != obj) {
+				if (objManager.isEntityValid(payload_n)) {
+					objManager.setParent(payload_n, obj);
 				}
 			}
 		}
@@ -455,7 +448,7 @@ void HierarchyWindow::DrawEntityNode(Object& obj, const std::unordered_set<Terra
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (opened) {
-		for (auto& child : children) {
+		for (entt::entity child : children) {
 			DrawEntityNode(child, activePrefabSourceObjectIds);
 		}
 		ImGui::TreePop();

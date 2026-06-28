@@ -13,15 +13,16 @@
 
 namespace
 {
-// ResolveObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::optional<Object> ResolveObject(const TerraEngine::UUID& uuid)
+// ResolveEntity keeps undo/redo replay on the explicit ObjectManager service
+// path instead of rebuilding the removed mutable Object facade.
+std::optional<entt::entity> ResolveEntity(const TerraEngine::UUID& uuid)
 {
 	if (uuid == TerraEngine::EMPTY_UUID)
 	{
 		return std::nullopt;
 	}
 
-	return ObjectManager::instance().getObject(uuid);
+	return ObjectManager::instance().getEntity(uuid);
 }
 
 bool IsSkyComponentName(const std::string& componentName)
@@ -41,22 +42,22 @@ void NotifySceneAfterComponentMutation(const std::string& componentName)
 
 CreateObjectCommand::CreateObjectCommand(entt::entity entity) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto obj = ObjectManager::instance().getObject(entity)) {
-		m_Uuid = obj->getUUID();
-		m_Json = Serializer::SerializeObject(*obj);
+	if (ObjectManager::instance().isEntityValid(entity)) {
+		m_Uuid = ObjectManager::instance().getUUID(entity);
+		m_Json = Serializer::SerializeObject(entity);
 	}
 }
 
 // CreateObjectCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void CreateObjectCommand::Undo() {
-	if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
+	if (auto obj = ObjectManager::instance().getEntity(m_Uuid)) {
 		ObjectManager::instance().removeObject(*obj);
 	}
 }
 
 // CreateObjectCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void CreateObjectCommand::Redo() {
-	Serializer::DeserializeObject(m_Json);
+	Serializer::DeserializeObjectEntity(m_Json);
 }
 
 // CreateObjectCommand::GetName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -64,20 +65,20 @@ std::string CreateObjectCommand::GetName() const { return "Create Object"; }
 
 DeleteObjectCommand::DeleteObjectCommand(entt::entity entity) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto obj = ObjectManager::instance().getObject(entity)) {
-		m_Json = Serializer::SerializeObject(*obj);
-		m_Uuid = obj->getUUID();
+	if (ObjectManager::instance().isEntityValid(entity)) {
+		m_Json = Serializer::SerializeObject(entity);
+		m_Uuid = ObjectManager::instance().getUUID(entity);
 	}
 }
 
 // DeleteObjectCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void DeleteObjectCommand::Undo() {
-	Serializer::DeserializeObject(m_Json);
+	Serializer::DeserializeObjectEntity(m_Json);
 }
 
 // DeleteObjectCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void DeleteObjectCommand::Redo() {
-	if (auto obj = ObjectManager::instance().getObject(m_Uuid)) {
+	if (auto obj = ObjectManager::instance().getEntity(m_Uuid)) {
 		ObjectManager::instance().removeObject(*obj);
 	}
 }
@@ -91,14 +92,14 @@ RenameObjectCommand::RenameObjectCommand(entt::entity entity, const std::string&
 
 void RenameObjectCommand::Undo() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto obj = ResolveObject(m_Uuid)) {
+	if (auto obj = ResolveEntity(m_Uuid)) {
 		ObjectManager::instance().setObjectName(*obj, m_OldName);
 	}
 }
 
 // RenameObjectCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RenameObjectCommand::Redo() {
-	if (auto obj = ResolveObject(m_Uuid)) {
+	if (auto obj = ResolveEntity(m_Uuid)) {
 		ObjectManager::instance().setObjectName(*obj, m_NewName);
 	}
 }
@@ -110,24 +111,25 @@ namespace
 {
 void ApplyObjectMetadata(const TerraEngine::UUID& uuid, const nlohmann::json& metadata)
 {
-	if (auto obj = ResolveObject(uuid))
+	if (auto obj = ResolveEntity(uuid))
 	{
-		if (metadata.contains("name") && metadata["name"].is_string()) obj->setName(metadata["name"].get<std::string>());
-		if (metadata.contains("tag") && metadata["tag"].is_string()) obj->setTag(metadata["tag"].get<std::string>());
-		if (metadata.contains("layer") && metadata["layer"].is_string()) obj->setLayer(metadata["layer"].get<std::string>());
-		if (metadata.contains("active") && metadata["active"].is_boolean()) obj->setActive(metadata["active"].get<bool>());
-		if (metadata.contains("static") && metadata["static"].is_boolean()) obj->setStatic(metadata["static"].get<bool>());
+		ObjectManager& objects = ObjectManager::instance();
+		if (metadata.contains("name") && metadata["name"].is_string()) objects.setObjectName(*obj, metadata["name"].get<std::string>());
+		if (metadata.contains("tag") && metadata["tag"].is_string()) objects.setObjectTag(*obj, metadata["tag"].get<std::string>());
+		if (metadata.contains("layer") && metadata["layer"].is_string()) objects.setObjectLayer(*obj, metadata["layer"].get<std::string>());
+		if (metadata.contains("active") && metadata["active"].is_boolean()) objects.setObjectActive(*obj, metadata["active"].get<bool>());
+		if (metadata.contains("static") && metadata["static"].is_boolean()) objects.setObjectStatic(*obj, metadata["static"].get<bool>());
 		SceneManager::Instance().ForceMarkActiveSceneDirty();
 	}
 }
 
-std::optional<Object> ResolveParent(const std::optional<TerraEngine::UUID>& parentUuid)
+std::optional<entt::entity> ResolveParent(const std::optional<TerraEngine::UUID>& parentUuid)
 {
 	if (!parentUuid.has_value())
 	{
 		return std::nullopt;
 	}
-	return ResolveObject(*parentUuid);
+	return ResolveEntity(*parentUuid);
 }
 }
 
@@ -155,7 +157,7 @@ SetParentCommand::SetParentCommand(entt::entity child, std::optional<TerraEngine
 
 void SetParentCommand::Undo()
 {
-	if (auto child = ResolveObject(m_ChildUuid))
+	if (auto child = ResolveEntity(m_ChildUuid))
 	{
 		ObjectManager::instance().setParent(*child, ResolveParent(m_OldParent));
 		SceneManager::Instance().ForceMarkActiveSceneDirty();
@@ -164,7 +166,7 @@ void SetParentCommand::Undo()
 
 void SetParentCommand::Redo()
 {
-	if (auto child = ResolveObject(m_ChildUuid))
+	if (auto child = ResolveEntity(m_ChildUuid))
 	{
 		ObjectManager::instance().setParent(*child, ResolveParent(m_NewParent));
 		SceneManager::Instance().ForceMarkActiveSceneDirty();
@@ -179,10 +181,10 @@ AddComponentCommand::AddComponentCommand(entt::entity entity, const std::string&
 
 void AddComponentCommand::Undo() {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto obj = ResolveObject(m_Uuid)) {
+	if (auto obj = ResolveEntity(m_Uuid)) {
 		auto& reg = ComponentAccessRegistry();
 		if (reg.count(m_ComponentName)) {
-			reg[m_ComponentName].removeComponent(*obj);
+			reg[m_ComponentName].entityRemoveComponent(ObjectManager::instance().getRegistry(), *obj);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -190,11 +192,11 @@ void AddComponentCommand::Undo() {
 
 // AddComponentCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AddComponentCommand::Redo() {
-	if (auto obj = ResolveObject(m_Uuid)) {
+	if (auto obj = ResolveEntity(m_Uuid)) {
 		auto& reg = ComponentAccessRegistry();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (reg.count(m_ComponentName)) {
-			reg[m_ComponentName].addComponent(*obj);
+			reg[m_ComponentName].entityAddComponent(ObjectManager::instance().getRegistry(), *obj);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -207,22 +209,22 @@ RemoveComponentCommand::RemoveComponentCommand(entt::entity entity, const std::s
 	// m_Uuid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: m_Uuid(ObjectManager::instance().getUUID(entity)), m_ComponentName(componentName) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (auto obj = ObjectManager::instance().getObject(entity)) {
+	if (ObjectManager::instance().isEntityValid(entity)) {
 		auto& reg = ComponentAccessRegistry();
 		if (reg.count(m_ComponentName)) {
-			m_ComponentJson = reg[m_ComponentName].serialize(*obj);
+			m_ComponentJson = reg[m_ComponentName].entitySerialize(ObjectManager::instance().getRegistry(), entity);
 		}
 	}
 }
 
 // RemoveComponentCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RemoveComponentCommand::Undo() {
-	if (auto obj = ResolveObject(m_Uuid)) {
+	if (auto obj = ResolveEntity(m_Uuid)) {
 		auto& reg = ComponentAccessRegistry();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (reg.count(m_ComponentName)) {
-			reg[m_ComponentName].addComponent(*obj);
-			reg[m_ComponentName].deserialize(*obj, m_ComponentJson);
+			reg[m_ComponentName].entityAddComponent(ObjectManager::instance().getRegistry(), *obj);
+			reg[m_ComponentName].entityDeserialize(ObjectManager::instance().getRegistry(), *obj, m_ComponentJson);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -230,11 +232,11 @@ void RemoveComponentCommand::Undo() {
 
 // RemoveComponentCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void RemoveComponentCommand::Redo() {
-	if (auto obj = ResolveObject(m_Uuid)) {
+	if (auto obj = ResolveEntity(m_Uuid)) {
 		auto& reg = ComponentAccessRegistry();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (reg.count(m_ComponentName)) {
-			reg[m_ComponentName].removeComponent(*obj);
+			reg[m_ComponentName].entityRemoveComponent(ObjectManager::instance().getRegistry(), *obj);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -250,12 +252,12 @@ SetComponentPayloadCommand::SetComponentPayloadCommand(entt::entity entity, cons
 
 void SetComponentPayloadCommand::Undo()
 {
-	if (auto obj = ResolveObject(m_Uuid))
+	if (auto obj = ResolveEntity(m_Uuid))
 	{
 		auto& reg = ComponentAccessRegistry();
 		if (reg.count(m_ComponentName))
 		{
-			reg[m_ComponentName].deserialize(*obj, m_OldPayload);
+			reg[m_ComponentName].entityDeserialize(ObjectManager::instance().getRegistry(), *obj, m_OldPayload);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -263,12 +265,12 @@ void SetComponentPayloadCommand::Undo()
 
 void SetComponentPayloadCommand::Redo()
 {
-	if (auto obj = ResolveObject(m_Uuid))
+	if (auto obj = ResolveEntity(m_Uuid))
 	{
 		auto& reg = ComponentAccessRegistry();
 		if (reg.count(m_ComponentName))
 		{
-			reg[m_ComponentName].deserialize(*obj, m_NewPayload);
+			reg[m_ComponentName].entityDeserialize(ObjectManager::instance().getRegistry(), *obj, m_NewPayload);
 			NotifySceneAfterComponentMutation(m_ComponentName);
 		}
 	}
@@ -283,22 +285,24 @@ ChangeTransformCommand::ChangeTransformCommand(entt::entity entity, const glm::v
 
 // ChangeTransformCommand::Undo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ChangeTransformCommand::Undo() {
-	if (auto obj = ResolveObject(m_Uuid)) {
-		if (auto* t = obj->getComponent<Transform>()) {
+	if (auto obj = ResolveEntity(m_Uuid)) {
+		if (auto* t = ObjectManager::instance().GetComponent<Transform>(*obj)) {
 			t->position = m_OldPos;
 			t->rotation = m_OldRot;
 			t->scale = m_OldScale;
+			ObjectManager::instance().MarkObjectTransformDirty(*obj);
 		}
 	}
 }
 
 // ChangeTransformCommand::Redo is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ChangeTransformCommand::Redo() {
-	if (auto obj = ResolveObject(m_Uuid)) {
-		if (auto* t = obj->getComponent<Transform>()) {
+	if (auto obj = ResolveEntity(m_Uuid)) {
+		if (auto* t = ObjectManager::instance().GetComponent<Transform>(*obj)) {
 			t->position = m_NewPos;
 			t->rotation = m_NewRot;
 			t->scale = m_NewScale;
+			ObjectManager::instance().MarkObjectTransformDirty(*obj);
 		}
 	}
 }

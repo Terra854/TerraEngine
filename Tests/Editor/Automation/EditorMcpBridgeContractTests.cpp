@@ -14,7 +14,7 @@ namespace TerraEngine::EditorTests
 			bridge.SetEnabled(true);
 			const nlohmann::json capabilities = bridge.BuildCapabilityListJson();
 			const nlohmann::json resources = bridge.ListResources();
-			context.Expect(capabilities["count"].get<std::size_t>() >= 20u, "Bridge should expose the planned tool surface.");
+			context.Expect(capabilities["count"].get<std::size_t>() >= 19u, "Bridge should expose the planned tool surface.");
 			context.Expect(!resources.empty(), "Bridge should expose resources.");
 			context.ExpectEqual(resources[0].value("uri", std::string()), std::string("terraengine://bridge/status"), "Status should be listed first.");
 		});
@@ -46,8 +46,13 @@ namespace TerraEngine::EditorTests
 			bool sawAssetImport = false;
 			bool sawExportStart = false;
 			bool sawAssetDeleteApproval = false;
+			bool sawWriteModeTool = false;
 			for (const auto& capability : capabilities)
 			{
+				if (capability.value("name", "") == "bridge.set_write_mode")
+				{
+					sawWriteModeTool = true;
+				}
 				if (capability.value("name", "") == "asset.import")
 				{
 					sawAssetImport = capability.value("mutatesState", false) && capability.value("requiresProject", false);
@@ -64,6 +69,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(sawAssetImport, "asset.import should advertise project-scoped mutation behavior.");
 			context.Expect(sawExportStart, "export.start should advertise approval-gated export mutation behavior.");
 			context.Expect(sawAssetDeleteApproval, "asset.prepare_delete should advertise destructive approval behavior.");
+			context.Expect(!sawWriteModeTool, "MCP discovery should not advertise editor-owned write-mode changes.");
 		});
 	}
 }

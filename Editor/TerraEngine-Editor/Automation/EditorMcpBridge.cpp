@@ -24,20 +24,6 @@ namespace TerraEngine::Editor::Automation
 			const std::string name = request.value("name", "");
 			const nlohmann::json arguments = request.value("arguments", nlohmann::json::object());
 			const std::string requestId = request.value("requestId", "");
-			if (name == "bridge.set_write_mode")
-			{
-				if (!arguments.contains("writeMode") || !arguments["writeMode"].is_string())
-				{
-					return service.BuildError(requestId, ErrorCategory::Validation, "bridge.set_write_mode requires writeMode.");
-				}
-				const auto parsed = ParseWriteMode(arguments["writeMode"].get<std::string>());
-				if (!parsed)
-				{
-					return service.BuildError(requestId, ErrorCategory::Validation, "writeMode must be read_only or writes_enabled.");
-				}
-				SetWriteMode(*parsed);
-				return service.BuildSuccess(requestId, "Updated bridge write mode.", BuildStatusJson());
-			}
 			if (name == "activity.list")
 			{
 				const std::size_t limit = arguments.value("limit", 64u);

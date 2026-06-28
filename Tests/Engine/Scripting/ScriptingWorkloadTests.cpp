@@ -8,8 +8,9 @@ namespace TerraEngine::Tests {
 	namespace {
 		Object CreateScriptedObject(std::string_view className)
 		{
-			Object object = ObjectManager::instance().createObject("Scripted");
-			ScriptComponent& component = object.addComponent<ScriptComponent>();
+			ObjectManager& objects = ObjectManager::instance();
+			Object object = objects.createObject("Scripted");
+			ScriptComponent& component = *objects.AddComponent<ScriptComponent>(object.EntityId());
 			component.AddBinding(TerraEngine::EMPTY_UUID, className);
 			return object;
 		}
@@ -23,7 +24,7 @@ namespace TerraEngine::Tests {
 			CreateScriptedObject("");
 
 			Object disabled = CreateScriptedObject("Game.Disabled");
-			ScriptComponent* disabledComponent = disabled.getComponent<ScriptComponent>();
+			ScriptComponent* disabledComponent = ObjectManager::instance().GetComponent<ScriptComponent>(disabled.EntityId());
 			disabledComponent->GetBindings().front().enabled = false;
 
 			ScriptingSystem::ScriptUpdateWorkload workload = ScriptingSystem::Instance().BuildScriptUpdateWorkload(0.016f, false);
@@ -58,7 +59,7 @@ namespace TerraEngine::Tests {
 		registry.Add("Scripting.Workload.ReadViewCarriesDeterministicScriptRecords", [](TestContext& context) {
 			ObjectManager::instance().clear();
 			Object scripted = CreateScriptedObject("Game.Reader");
-			ScriptComponent* scriptComponent = scripted.getComponent<ScriptComponent>();
+			ScriptComponent* scriptComponent = ObjectManager::instance().GetComponent<ScriptComponent>(scripted.EntityId());
 			ScriptBinding& binding = scriptComponent->GetBindings().front();
 			ScriptFieldValue field;
 			field.fieldPath = "Speed";
@@ -71,8 +72,10 @@ namespace TerraEngine::Tests {
 
 			ScriptingSystem::ScriptUpdateWorkload workload = ScriptingSystem::Instance().BuildScriptUpdateWorkload(0.016f, false);
 			ScriptingSystem::ScriptFrameReadView readView = ScriptingSystem::Instance().BuildScriptFrameReadView(workload);
+			Object objectHandle = ObjectManager::instance().makeObjectHandle(static_cast<entt::entity>(workload.items.front().objectId));
 
 			context.ExpectEqual(static_cast<std::size_t>(1), readView.scriptRecords.size(), "The read view should mirror the planned scripting workload.");
+			context.Expect(TerraEngine::IsResolvedObjectIdentity(ObjectManager::instance().validateObjectHandle(objectHandle)), "Scripting workload object ids should map to valid compact identities.");
 			context.ExpectEqual(workload.readViewVersion, readView.readViewVersion, "The workload and read view should share the same immutable version.");
 			context.ExpectEqual(binding.authoredStateVersion, readView.scriptRecords.front().authoredStateVersion, "Read-view records should carry authored binding versions for dirty hydration.");
 			context.ExpectEqual(workload.items.front().bindingGeneration, readView.scriptRecords.front().bindingGeneration, "Read-view records should carry the binding generation used by worker scripts.");
@@ -83,7 +86,7 @@ namespace TerraEngine::Tests {
 		registry.Add("Scripting.Workload.ActiveBindingIndexRefreshesAuthoredVersions", [](TestContext& context) {
 			ObjectManager::instance().clear();
 			Object scripted = CreateScriptedObject("Game.CachedReader");
-			ScriptComponent* scriptComponent = scripted.getComponent<ScriptComponent>();
+			ScriptComponent* scriptComponent = ObjectManager::instance().GetComponent<ScriptComponent>(scripted.EntityId());
 			ScriptBinding& binding = scriptComponent->GetBindings().front();
 
 			const ScriptingSystem::ScriptUpdateWorkload firstWorkload = ScriptingSystem::Instance().BuildScriptUpdateWorkload(0.016f, false);

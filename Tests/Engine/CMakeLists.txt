@@ -24,7 +24,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
 	Core/ActiveMembershipTests.cpp
 	Core/RuntimeActiveMembershipTests.cpp
-	Core/CompactObjectReferenceTests.cpp
+	Core/ObjectIdentityTests.cpp
 	Core/ComponentAccessGrantTests.cpp
 	Core/ComponentAccessTests.cpp
 	Core/EcsQueryTaskGraphTests.cpp
@@ -36,6 +36,7 @@ add_executable(TerraEngine-EngineTests
 	Core/WorkerConversionScenarioTests.cpp
 	Core/WorkerCoverageReportTests.cpp
 	Core/WorkerHardBoundaryTests.cpp
+	Core/ObjectFacadeRemovalValidationTests.cpp
 	Core/ObjectManagerTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Core/JobGraphTests.cpp
 	Core/SystemSchedulerTests.cpp

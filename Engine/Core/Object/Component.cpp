@@ -7,6 +7,8 @@
 
 #include "Component.h"
 
+#include "ObjectManager.h"
+
 #include <unordered_map>
 #include <mutex>
 
@@ -23,4 +25,11 @@ std::mutex& ComponentAccessRegistryMutex()
 {
 	static std::mutex mutex;
 	return mutex;
+}
+
+entt::registry& ComponentAccessObjectRegistry()
+{
+	// Compatibility callbacks need the authoritative registry but should not
+	// revive the old Object facade. Keep that bridge centralized here.
+	return ObjectManager::instance().getRegistry();
 }

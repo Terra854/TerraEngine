@@ -473,7 +473,7 @@ void SchedulerDiagnosticsWindow::DrawRuntimeLayoutSummary()
 		ImGui::TableSetColumnIndex(5);
 		ImGui::Text("%zu", summary.fallbackCount);
 		ImGui::TableSetColumnIndex(6);
-		ImGui::Text("%zu", summary.staleCompactReferenceCount);
+		ImGui::Text("%zu", summary.staleObjectHandleCount);
 		ImGui::TableSetColumnIndex(7);
 		ImGui::TextUnformatted(summary.smallSceneGuardTriggered ? "yes" : "no");
 		ImGui::EndTable();
@@ -481,7 +481,7 @@ void SchedulerDiagnosticsWindow::DrawRuntimeLayoutSummary()
 	ImGui::Text("Fallback details: metadata scans=%zu, object facades=%zu, compact refs=%zu",
 		summary.metadataScanFallbackCount,
 		summary.fullObjectFacadeFallbackCount,
-		summary.compactReferenceFallbackCount);
+		summary.objectHandleFallbackCount);
 	DrawStringList("Rebuild:", summary.rebuildReasons);
 	DrawStringList("Render rejects:", renderSummary.runtimeLayoutRejectionReasons);
 }
@@ -570,9 +570,10 @@ void SchedulerDiagnosticsWindow::DrawScriptingSummary()
 				ImGui::TableNextRow();
 				ImGui::TableSetColumnIndex(0);
 				std::string objectName = "Object " + std::to_string(record.objectId);
-				if (auto obj = ObjectManager::instance().getObject(static_cast<entt::entity>(record.objectId)))
+				const entt::entity objectEntity = static_cast<entt::entity>(record.objectId);
+				if (ObjectManager::instance().isEntityValid(objectEntity))
 				{
-					objectName = ObjectManager::instance().getObjectName(*obj);
+					objectName = ObjectManager::instance().getObjectName(objectEntity);
 				}
 				ImGui::TextUnformatted(objectName.c_str());
 

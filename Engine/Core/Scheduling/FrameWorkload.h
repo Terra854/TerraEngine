@@ -146,7 +146,7 @@ namespace TerraEngine::Scheduling {
 		std::uint64_t coordinatorWaitTimeNs = 0;
 		double workerUtilization = 0.0;
 		std::size_t activeMembershipInvalidationCount = 0;
-		std::size_t staleCompactReferenceCount = 0;
+		std::size_t staleObjectHandleCount = 0;
 		std::size_t hierarchySnapshotRebuildCount = 0;
 		std::size_t componentAccessGrantDeniedCount = 0;
 		std::vector<std::string> fallbackReasons;

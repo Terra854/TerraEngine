@@ -77,11 +77,12 @@ namespace TerraEngine::Scene {
 			}
 		}
 
-		bool ApplyComponentPropertyPayload(Object& target, const ComponentAccessFunctions& component, const SceneMutationRequest& request)
+		bool ApplyComponentPropertyPayload(ObjectManager& objects, entt::entity target, const ComponentAccessFunctions& component, const SceneMutationRequest& request)
 		{
+			entt::registry& registry = objects.getRegistry();
 			if (request.typedComponentPayload.valid)
 			{
-				return component.setter(target, request.typedComponentPayload.propertyName, request.typedComponentPayload.value);
+				return component.entitySetter(registry, target, request.typedComponentPayload.propertyName, request.typedComponentPayload.value);
 			}
 
 			const nlohmann::json payload = nlohmann::json::parse(request.payloadJson);
@@ -93,7 +94,7 @@ namespace TerraEngine::Scene {
 			}
 
 			TerraEngine::Reflection::Variant value = MakeVariantFromMutationPayload(payload["value"], valueKind);
-			return component.setter(target, propertyName, value);
+			return component.entitySetter(registry, target, propertyName, value);
 		}
 
 		std::string FormatCommitSummary(const SceneMutationBatchResult& batch)
@@ -348,40 +349,41 @@ namespace TerraEngine::Scene {
 				result.createdObjectId = objects.getUUID(created.EntityId());
 				if (request.parentObjectId != TerraEngine::EMPTY_UUID)
 				{
-					if (auto parent = objects.getObject(request.parentObjectId))
+					if (auto parent = objects.getEntity(request.parentObjectId))
 					{
-						objects.setParent(created, *parent);
+						objects.setParent(created.EntityId(), *parent);
 					}
 				}
 				break;
 			}
 			case SceneMutationOperation::DeleteObject:
-				if (auto target = objects.getObject(request.targetObjectId))
+				if (auto target = objects.getEntity(request.targetObjectId))
 				{
 					objects.removeObject(*target);
 				}
 				break;
 			case SceneMutationOperation::ReparentObject:
-				if (auto target = objects.getObject(request.targetObjectId))
+				if (auto target = objects.getEntity(request.targetObjectId))
 				{
-					std::optional<Object> parent;
+					std::optional<entt::entity> parent;
 					if (request.parentObjectId != TerraEngine::EMPTY_UUID)
 					{
-						parent = objects.getObject(request.parentObjectId);
+						parent = objects.getEntity(request.parentObjectId);
 					}
 					objects.setParent(*target, parent);
 				}
 				break;
 			case SceneMutationOperation::AddComponent:
-				if (auto target = objects.getObject(request.targetObjectId))
+				if (auto target = objects.getEntity(request.targetObjectId))
 				{
 					std::lock_guard registryLock(ComponentAccessRegistryMutex());
 					auto& registry = ComponentAccessRegistry();
 					if (auto component = registry.find(request.componentName); component != registry.end())
 					{
-						if (!component->second.hasComponent(*target))
+						entt::registry& enttRegistry = objects.getRegistry();
+						if (!component->second.entityHasComponent(enttRegistry, *target))
 						{
-							component->second.addComponent(*target);
+							component->second.entityAddComponent(enttRegistry, *target);
 							objects.notifyObjectStructureChanged(*target);
 						}
 					}
@@ -392,15 +394,16 @@ namespace TerraEngine::Scene {
 				}
 				break;
 			case SceneMutationOperation::RemoveComponent:
-				if (auto target = objects.getObject(request.targetObjectId))
+				if (auto target = objects.getEntity(request.targetObjectId))
 				{
 					std::lock_guard registryLock(ComponentAccessRegistryMutex());
 					auto& registry = ComponentAccessRegistry();
 					if (auto component = registry.find(request.componentName); component != registry.end())
 					{
-						if (component->second.hasComponent(*target))
+						entt::registry& enttRegistry = objects.getRegistry();
+						if (component->second.entityHasComponent(enttRegistry, *target))
 						{
-							component->second.removeComponent(*target);
+							component->second.entityRemoveComponent(enttRegistry, *target);
 							objects.notifyObjectStructureChanged(*target);
 						}
 					}
@@ -411,7 +414,7 @@ namespace TerraEngine::Scene {
 				}
 				break;
 			case SceneMutationOperation::UpdateComponent:
-				if (auto target = objects.getObject(request.targetObjectId))
+				if (auto target = objects.getEntity(request.targetObjectId))
 				{
 					std::lock_guard registryLock(ComponentAccessRegistryMutex());
 					auto& registry = ComponentAccessRegistry();
@@ -431,7 +434,7 @@ namespace TerraEngine::Scene {
 							break;
 						}
 
-						if (!ApplyComponentPropertyPayload(*target, component->second, request))
+						if (!ApplyComponentPropertyPayload(objects, *target, component->second, request))
 						{
 							result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component update could not write the reflected property.", "Verify the property name and value type match the component reflection metadata."));
 						}

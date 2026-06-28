@@ -39,7 +39,7 @@ namespace TerraEngine::Tests {
 			context.Expect(layout.valid, "Flat hierarchy layout should validate.");
 			context.Expect(layout.entries[1].parentIndex.has_value(), "Child should carry a parent index.");
 			context.Expect(*layout.entries[1].parentIndex < 1, "Parent index should point before the child.");
-			context.Expect(!layout.entries[0].compactReference.IsEmpty(), "Flat hierarchy entries should carry compact references.");
+			context.Expect(!layout.entries[0].objectHandle.IsEmpty(), "Flat hierarchy entries should carry compact references.");
 			context.Expect(formatted.find("active=2") != std::string::npos, "Diagnostics should include active count.");
 			context.Expect(formatted.find("frame=42") != std::string::npos, "Diagnostics should include frame id.");
 			objects.clear();
@@ -59,7 +59,7 @@ namespace TerraEngine::Tests {
 			const std::vector<TerraEngine::Scene::TransformRuntimeRecord> records = TerraEngine::Scene::BuildTransformRuntimeRecords(layout, propagation);
 
 			context.ExpectEqual(static_cast<std::size_t>(2), records.size(), "Transform runtime records should cover active hierarchy entries.");
-			context.Expect(!records.front().compactReference.IsEmpty(), "Transform runtime records should preserve compact object references.");
+			context.Expect(!records.front().objectHandle.IsEmpty(), "Transform runtime records should preserve compact object references.");
 			context.Expect(records[0].processed || records[1].processed, "At least one runtime transform record should be marked processed from propagation.");
 			objects.clear();
 		});

@@ -282,7 +282,9 @@ void RegisterUISystemPreparationTests(TestRegistry& registry)
 		uiSystem.SetGameViewportSize(glm::vec2(800.0f, 600.0f));
 
 		Object object = objects.createObject("UI Root");
-		UIComponent& component = object.addComponent<UIComponent>();
+		Object objectHandle = objects.makeObjectHandle(object.EntityId());
+		context.Expect(TerraEngine::IsResolvedObjectIdentity(objects.validateObjectHandle(objectHandle)), "UI preparation objects should have a valid compact identity before runtime collection.");
+		UIComponent& component = *objects.AddComponent<UIComponent>(object.EntityId());
 		component.SetRoot(MakeRootWithChildren(4));
 		component.MarkDirty();
 		uiSystem.Update(1.0f / 60.0f);
@@ -344,7 +346,9 @@ void RegisterUISystemPreparationTests(TestRegistry& registry)
 		root->AddChild(button);
 
 		Object object = objects.createObject("Export UI Root");
-		UIComponent& component = object.addComponent<UIComponent>();
+		Object objectHandle = objects.makeObjectHandle(object.EntityId());
+		context.Expect(TerraEngine::IsResolvedObjectIdentity(objects.validateObjectHandle(objectHandle)), "Export UI preparation should start from a valid compact identity.");
+		UIComponent& component = *objects.AddComponent<UIComponent>(object.EntityId());
 		component.SetRoot(root);
 		component.MarkDirty();
 

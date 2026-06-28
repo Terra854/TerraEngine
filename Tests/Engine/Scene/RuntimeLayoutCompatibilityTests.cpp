@@ -36,8 +36,8 @@ namespace TerraEngine::Tests {
 			TerraEngine::Scene::LayoutDiagnosticsSummary summary;
 			summary.metadataScanFallbackCount = 2;
 			summary.fullObjectFacadeFallbackCount = 1;
-			summary.compactReferenceFallbackCount = 3;
-			summary.staleCompactReferenceCount = 4;
+			summary.objectHandleFallbackCount = 3;
+			summary.staleObjectHandleCount = 4;
 			TerraEngine::Scene::AddRuntimeLayoutFallback(summary, "metadata-scan", 2);
 
 			const std::string formatted = TerraEngine::Scene::FormatLayoutDiagnosticsSummary(summary);
@@ -47,6 +47,19 @@ namespace TerraEngine::Tests {
 			context.Expect(formatted.find("facadeFallbacks=1") != std::string::npos, "Formatted diagnostics should expose full Object facade fallback count.");
 			context.Expect(formatted.find("compactFallbacks=3") != std::string::npos, "Formatted diagnostics should expose compact reference fallback count.");
 			context.Expect(formatted.find("staleRefs=4") != std::string::npos, "Formatted diagnostics should expose stale compact reference count.");
+		});
+
+		registry.Add("Engine.RuntimeLayout.Compatibility.RuntimeRecordsCarryCompactIdentityFootprint", [](TestContext& context) {
+			TerraEngine::Scene::RuntimeActiveMembership membership;
+			TerraEngine::Scene::FlatHierarchyEntry hierarchyEntry;
+			TerraEngine::Scene::TransformRuntimeRecord transformRecord;
+			TerraEngine::Scene::RenderRuntimeRecord renderRecord;
+
+			context.Expect(TerraEngine::ObjectIdentityFootprintBytes() <= 16, "Runtime layout compact identity should stay within the hot snapshot footprint.");
+			context.ExpectEqual(TerraEngine::ObjectIdentityFootprintBytes(), sizeof(membership.objectHandle), "Active membership should carry the compact identity value.");
+			context.ExpectEqual(TerraEngine::ObjectIdentityFootprintBytes(), sizeof(hierarchyEntry.objectHandle), "Hierarchy entries should carry the compact identity value.");
+			context.ExpectEqual(TerraEngine::ObjectIdentityFootprintBytes(), sizeof(transformRecord.objectHandle), "Transform records should carry the compact identity value.");
+			context.ExpectEqual(TerraEngine::ObjectIdentityFootprintBytes(), sizeof(renderRecord.objectHandle), "Render records should carry the compact identity value.");
 		});
 	}
 }

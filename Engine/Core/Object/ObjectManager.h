@@ -15,14 +15,15 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "Object.h"
 #include "ActiveMembership.h"
-#include "CompactObjectReference.h"
 #include "Components/Transform.h"
+#include "Core/Scheduling/WorkerSafety.h"
 #include "Scene/RuntimeLayout.h"
 #include "Utilities/UUID.h"
 
@@ -49,58 +50,80 @@ public:
 	// stay on a protected scheduler path; worker code should enqueue a deferred
 	// SceneMutationQueue create request instead.
 	Object createObject(const std::string& name);
+	// Resolve a compact reference to its current entity id without exposing the
+	// legacy Object facade. Protected services use this before mutating state.
+	std::optional<entt::entity> resolveEntity(const Object& reference) const;
+	bool isEntityValid(entt::entity entityId) const;
 	// Assign or clear a parent for the given object. Passing std::nullopt
 	// detaches the object to the root. The call validates cycles before
 	// mutating internal state and returns false on invalid input. Worker code
 	// must request this through SceneMutationQueue so hierarchy commits stay
 	// ordered at protected flush points.
 	bool setParent(Object child, std::optional<Object> parent);
+	bool setParent(entt::entity child, std::optional<entt::entity> parent);
 	// Query the immediate children for a parent object, returning empty when
 	// none are present or the parent is invalid.
 	std::vector<Object> getChildren(const Object& parent);
+	std::vector<entt::entity> getChildEntities(entt::entity parent) const;
 	// Enumerate all root-level objects (entities without a parent) so editors
 	// can display a hierarchy tree.
 	std::vector<Object> getRootObjects();
+	std::vector<entt::entity> getRootEntities() const;
 	// Return a stable display name for the object, defaulting to "Unnamed"
 	// when the object is missing from the internal metadata table.
 	std::string getObjectName(const Object& obj) const;
+	std::string getObjectName(entt::entity entityId) const;
 	// Update the display name for the object.
 	void setObjectName(const Object& obj, const std::string& name);
+	void setObjectName(entt::entity entityId, const std::string& name);
 
 	// Return the object's gameplay-specific tag, defaulting to "Untagged"
 	// when the object is missing from the internal metadata table.
 	std::string getObjectTag(const Object& obj) const;
+	std::string getObjectTag(entt::entity entityId) const;
 	// Update the gameplay-specific tag for the object.
 	void setObjectTag(const Object& obj, const std::string& tag);
+	void setObjectTag(entt::entity entityId, const std::string& tag);
 
 	// Return the object's layer assignment, defaulting to "Default"
 	// when the object is missing from the internal metadata table.
 	std::string getObjectLayer(const Object& obj) const;
+	std::string getObjectLayer(entt::entity entityId) const;
 	// Update the layer assignment for the object.
 	void setObjectLayer(const Object& obj, const std::string& layer);
+	void setObjectLayer(entt::entity entityId, const std::string& layer);
 
 	// Return whether the object is considered active in the scene.
 	bool isObjectActive(const Object& obj) const;
+	bool isObjectActive(entt::entity entityId) const;
 	// Set the object's active state in the scene.
 	void setObjectActive(const Object& obj, bool active);
+	void setObjectActive(entt::entity entityId, bool active);
 
 	// Return whether the object is marked as static for engine optimizations.
 	bool isObjectStatic(const Object& obj) const;
+	bool isObjectStatic(entt::entity entityId) const;
 	// Set the object's static state for engine optimizations.
 	void setObjectStatic(const Object& obj, bool isStatic);
+	void setObjectStatic(entt::entity entityId, bool isStatic);
 	// Notify systems and managed wrapper caches that component membership or
 	// other object-local structure changed without changing transform values.
 	void notifyObjectStructureChanged(const Object& obj);
+	void notifyObjectStructureChanged(entt::entity entityId);
 	// Mark a transform-affecting edit. This is separate from generic component
 	// structure changes so transform propagation can expand only affected
 	// hierarchy branches while spatial refresh still sees the object as dirty.
 	void MarkObjectTransformDirty(const Object& obj);
+	void MarkObjectTransformDirty(entt::entity entityId);
 	// Object metadata generations let managed wrappers reuse names and lookup
 	// answers during one script dispatch without calling back into native code
 	// on every property access.
 	std::uint64_t getObjectMetadataGeneration(const Object& obj) const;
 	std::uint64_t getObjectComponentGeneration(const Object& obj) const;
 	std::uint64_t getObjectBindingGeneration(const Object& obj) const;
+	std::uint64_t getObjectMetadataGeneration(entt::entity entityId) const;
+	std::uint64_t getObjectComponentGeneration(entt::entity entityId) const;
+	std::uint64_t getObjectBindingGeneration(entt::entity entityId) const;
 
 	// Get the list of all globally available tags defined in the project.
 	// getAvailableTags is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -117,20 +140,23 @@ public:
 	// Find the first valid object whose authored display name matches the
 	// requested text exactly. Returns std::nullopt when no match exists.
 	std::optional<Object> FindObjectByName(std::string_view name) const;
+	std::optional<entt::entity> FindEntityByName(std::string_view name) const;
 	// Find the first valid object whose tag string matches exactly.
 	// Returns std::nullopt when no tagged object matches.
 	std::optional<Object> FindObjectByTag(std::string_view tag) const;
+	std::optional<entt::entity> FindEntityByTag(std::string_view tag) const;
 	// Build an Object handle for an existing entity id if it is valid.
 	std::optional<Object> getObject(entt::entity id);
 	// Build an Object handle for an existing entity by UUID.
 	std::optional<Object> getObject(const TerraEngine::UUID& id);
+	std::optional<entt::entity> getEntity(const TerraEngine::UUID& id) const;
 
-	// Compact references are cheap identifiers for snapshots and worker
-	// results. They include a generation so stale references are rejected when
-	// an EnTT entity id is destroyed and later reused.
-	TerraEngine::CompactObjectReference makeCompactReference(entt::entity entityId) const;
-	TerraEngine::CompactObjectReferenceResolution validateCompactReference(const TerraEngine::CompactObjectReference& reference) const;
-	std::optional<Object> resolveCompactReference(const TerraEngine::CompactObjectReference& reference);
+	// Object handles are cheap identifiers for snapshots and worker results.
+	// They include a generation so stale handles are rejected when an EnTT
+	// entity id is destroyed and later reused.
+	Object makeObjectHandle(entt::entity entityId) const;
+	TerraEngine::ObjectIdentityResolution validateObjectHandle(const Object& reference) const;
+	std::optional<Object> resolveObjectHandle(const Object& reference);
 	const std::vector<TerraEngine::Scene::RuntimeActiveMembership>& GetRuntimeActiveMembershipSnapshot();
 	std::uint64_t GetRuntimeActiveMembershipRevision() const { return runtimeActiveMembershipRevision; }
 	
@@ -160,6 +186,24 @@ public:
 			auto obj = makeHandle(membership.entity);
 			if (std::apply([](auto&... comps) { return (IsRuntimeComponentActive(comps) && ...); }, activeComps)) {
 				std::apply([&](auto&... comps) { func(obj, comps...); }, activeComps);
+			}
+		}
+	};
+
+	template<typename... Components, typename Func>
+	void forEachEntityWithComponents(Func&& func)
+	{
+		// Runtime systems should prefer this entity-based iterator so hot paths
+		// do not materialize the legacy Object facade while the migration is in
+		// progress. Component references still come from authoritative EnTT
+		// storage after active-membership filtering.
+		for (const TerraEngine::Scene::RuntimeActiveMembership& membership : GetRuntimeActiveMembershipSnapshot()) {
+			if (!membership.objectActive || !registry.valid(membership.entity) || !registry.all_of<Components...>(membership.entity)) {
+				continue;
+			}
+			auto activeComps = std::forward_as_tuple(registry.get<Components>(membership.entity)...);
+			if (std::apply([](auto&... comps) { return (IsRuntimeComponentActive(comps) && ...); }, activeComps)) {
+				std::apply([&](auto&... comps) { func(membership.entity, comps...); }, activeComps);
 			}
 		}
 	};
@@ -200,6 +244,25 @@ public:
 	}
 
 	template<typename... Components>
+	std::vector<entt::entity> getEntitiesWithComponents()
+	{
+		std::vector<entt::entity> entities;
+		for (const TerraEngine::Scene::RuntimeActiveMembership& membership : GetRuntimeActiveMembershipSnapshot())
+		{
+			if (!membership.objectActive || !registry.valid(membership.entity) || !registry.all_of<Components...>(membership.entity))
+			{
+				continue;
+			}
+			auto activeComps = std::forward_as_tuple(registry.get<Components>(membership.entity)...);
+			if (std::apply([](auto&... comps) { return (IsRuntimeComponentActive(comps) && ...); }, activeComps))
+			{
+				entities.push_back(membership.entity);
+			}
+		}
+		return entities;
+	}
+
+	template<typename... Components>
 	std::vector<Object> getObjectsWithComponentsIncludingInactive()
 	{
 		std::vector<Object> objects;
@@ -221,14 +284,95 @@ public:
 		return objects;
 	}
 
+	template<typename... Components>
+	std::vector<entt::entity> SnapshotEntitiesWithComponents()
+	{
+		std::vector<entt::entity> entities = getEntitiesWithComponents<Components...>();
+		SortEntitiesByStableId(entities);
+		return entities;
+	}
+
 	// Shared stable sorter used by ECS query planning and tests. UUID order is
 	// chosen over EnTT entity order because entity ids are allocation details.
 	void SortObjectsByStableId(std::vector<Object>& objects);
+	void SortEntitiesByStableId(std::vector<entt::entity>& entities);
+
+	template<typename T>
+	bool HasComponent(entt::entity entityId) const
+	{
+		return registry.valid(entityId) && registry.any_of<T>(entityId);
+	}
+
+	template<typename T>
+	T* GetComponent(entt::entity entityId)
+	{
+		return registry.valid(entityId) ? registry.try_get<T>(entityId) : nullptr;
+	}
+
+	template<typename T>
+	const T* GetComponent(entt::entity entityId) const
+	{
+		return registry.valid(entityId) ? registry.try_get<T>(entityId) : nullptr;
+	}
+
+	template<typename T, typename... Args>
+	T* AddComponent(entt::entity entityId, Args&&... args)
+	{
+		if (TerraEngine::Scheduling::IsWorkerSafetyScopeActive())
+		{
+			TerraEngine::Scheduling::ReportWorkerSafetyViolation(
+				TerraEngine::Scheduling::WorkerSafetySeverity::Error,
+				"ObjectManager.AddComponent",
+				"Worker code attempted to add a live component directly.",
+				"Capture a SceneMutationQueue AddComponent request and apply it at a protected scheduler flush.");
+			return nullptr;
+		}
+		if (!registry.valid(entityId))
+		{
+			return nullptr;
+		}
+		if (T* existing = registry.try_get<T>(entityId))
+		{
+			return existing;
+		}
+		T& component = registry.emplace<T>(entityId, std::forward<Args>(args)...);
+		notifyObjectStructureChanged(entityId);
+		if constexpr (std::is_same_v<T, Transform>)
+		{
+			MarkObjectTransformDirty(entityId);
+		}
+		return &component;
+	}
+
+	template<typename T>
+	void RemoveComponent(entt::entity entityId)
+	{
+		if (TerraEngine::Scheduling::IsWorkerSafetyScopeActive())
+		{
+			TerraEngine::Scheduling::ReportWorkerSafetyViolation(
+				TerraEngine::Scheduling::WorkerSafetySeverity::Error,
+				"ObjectManager.RemoveComponent",
+				"Worker code attempted to remove a live component directly.",
+				"Capture a SceneMutationQueue RemoveComponent request and apply it at a protected scheduler flush.");
+			return;
+		}
+		if (!registry.valid(entityId) || !registry.any_of<T>(entityId))
+		{
+			return;
+		}
+		registry.remove<T>(entityId);
+		notifyObjectStructureChanged(entityId);
+		if constexpr (std::is_same_v<T, Transform>)
+		{
+			MarkObjectTransformDirty(entityId);
+		}
+	}
 
 	// Method to remove an Object. Deletion destroys components and hierarchy
 	// bookkeeping, so direct calls are protected-only; workers must enqueue a
 	// deferred delete request.
 	void removeObject(Object obj);
+	void removeObject(entt::entity entityId);
 	// Fetch the parent entity for a given child, or entt::null if unparented.
 	entt::entity getParentEntity(entt::entity child) const;
 
@@ -264,7 +408,7 @@ private:
 	std::uint64_t runtimeActiveMembershipRevision = 0;
 	std::uint64_t cachedRuntimeActiveMembershipRevision = static_cast<std::uint64_t>(-1);
 	std::vector<TerraEngine::Scene::RuntimeActiveMembership> runtimeActiveMembershipCache;
-	std::unordered_map<Object, ObjectMetadata> metadataMap;
+	std::unordered_map<entt::entity, ObjectMetadata> metadataMap;
 	entt::registry registry;
 	std::unordered_map<entt::entity, entt::entity> parentMap;
 	std::unordered_map<entt::entity, std::vector<entt::entity>> childrenMap;

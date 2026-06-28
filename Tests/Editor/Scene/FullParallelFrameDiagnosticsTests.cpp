@@ -28,12 +28,13 @@ namespace TerraEngine::EditorTests {
 		registry.Add("Editor.FullParallelFrame.ReflectionPreflightValidatesBeforeProtectedCommit", [](TestContext& context) {
 			ObjectManager::instance().clear();
 			SkyComponent::registerType();
-			Object object = ObjectManager::instance().createObject("Reflection Target");
-			(void)object.addComponent<SkyComponent>();
+			ObjectManager& objects = ObjectManager::instance();
+			Object object = objects.createObject("Reflection Target");
+			(void)objects.AddComponent<SkyComponent>(object.EntityId());
 
 			TerraEngine::Editor::Automation::EditorAutomationService service;
 			const auto preflight = service.PreflightReflectionMutation({
-				{"object", object.getName()},
+				{"object", objects.getObjectName(object.EntityId())},
 				{"component", "SkyComponent"},
 				{"property", "sourceAsset"},
 				{"value", "Textures/Sky/WorkerSafe.tetf"}
@@ -49,14 +50,15 @@ namespace TerraEngine::EditorTests {
 		registry.Add("Editor.FullParallelFrame.ReflectionMutationAppliesOnlyThroughProtectedHandler", [](TestContext& context) {
 			ObjectManager::instance().clear();
 			SkyComponent::registerType();
-			Object object = ObjectManager::instance().createObject("Reflection Commit");
-			(void)object.addComponent<SkyComponent>();
+			ObjectManager& objects = ObjectManager::instance();
+			Object object = objects.createObject("Reflection Commit");
+			(void)objects.AddComponent<SkyComponent>(object.EntityId());
 
 			TerraEngine::Editor::Automation::EditorAutomationService service;
 			const nlohmann::json result = service.HandleTool(
 				"component.set_property",
 				{
-					{"object", object.getName()},
+					{"object", objects.getObjectName(object.EntityId())},
 					{"component", "SkyComponent"},
 					{"property", "sourceAsset"},
 					{"value", "Textures/Sky/ProtectedCommit.tetf"}
@@ -65,7 +67,7 @@ namespace TerraEngine::EditorTests {
 				"reflection-protected");
 
 			context.Expect(result.value("ok", false), "Protected reflection handler should apply validated property edits.");
-			const SkyComponent* component = object.getComponent<SkyComponent>();
+			const SkyComponent* component = objects.GetComponent<SkyComponent>(object.EntityId());
 			context.Expect(component != nullptr, "Edited object should still own the sky component.");
 			context.ExpectEqual(std::string("Textures/Sky/ProtectedCommit.tetf"), component->sourceAsset, "Protected reflection handler should update the reflected property.");
 			ObjectManager::instance().clear();

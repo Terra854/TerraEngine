@@ -593,10 +593,11 @@ bool ScriptCompilationSubsystem::TryReloadWorkspaceAssembly(std::string* outErro
 void ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets()
 {
 	auto& assetDatabase = AssetDatabase::Instance();
+	auto& objectManager = ObjectManager::instance();
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (Object object : ObjectManager::instance().getObjectsWithComponents<ScriptComponent>())
+	for (entt::entity object : objectManager.getEntitiesWithComponents<ScriptComponent>())
 	{
-		ScriptComponent* scriptComponent = object.getComponent<ScriptComponent>();
+		ScriptComponent* scriptComponent = objectManager.GetComponent<ScriptComponent>(object);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (scriptComponent == nullptr)
 		{

@@ -69,7 +69,6 @@ set(ENGINE_SOURCES
 	Engine/Core/Logger/Logger.cpp
 	Engine/Core/Object/Component.cpp
 	Engine/Core/Object/ActiveMembership.cpp
-	Engine/Core/Object/CompactObjectReference.cpp
 	Engine/Core/Object/Object.cpp
 	Engine/Core/Object/ObjectManager.cpp
 	Engine/Core/Object/ComponentRegistry.cpp
@@ -153,7 +152,6 @@ set(ENGINE_HEADERS
 	Engine/Core/Scheduling/WorkerSafety.h
 	Engine/Core/Object/Component.h
 	Engine/Core/Object/ActiveMembership.h
-	Engine/Core/Object/CompactObjectReference.h
 	Engine/Core/Object/Object.h
 	Engine/Core/Object/ObjectManager.h
 	Engine/Components/Transform.h

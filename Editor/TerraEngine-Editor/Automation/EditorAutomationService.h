@@ -65,7 +65,7 @@ namespace TerraEngine::Editor::Automation
 
 	private:
 		EditorTarget ResolveTarget(const nlohmann::json& value) const;
-		nlohmann::json SerializeObjectSummary(Object object, bool includeComponents) const;
+		nlohmann::json SerializeObjectSummary(entt::entity object, bool includeComponents) const;
 		nlohmann::json HandleSceneListObjects(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleSceneSave(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleObjectCreate(const nlohmann::json& arguments, const std::string& requestId);

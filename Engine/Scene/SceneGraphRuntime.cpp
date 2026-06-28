@@ -260,16 +260,16 @@ namespace TerraEngine::Scene {
 		SceneGraph graph;
 		graph.revision = objects.GetSpatialRevision();
 
-		std::function<void(Object, SceneObjectId)> visitObject = [&](Object object, SceneObjectId parentId) {
+		std::function<void(entt::entity, SceneObjectId)> visitObject = [&](entt::entity object, SceneObjectId parentId) {
 			SceneGraphObject graphObject;
-			graphObject.objectId = objects.getUUID(object.EntityId());
-			graphObject.entity = object.EntityId();
+			graphObject.objectId = objects.getUUID(object);
+			graphObject.entity = object;
 			graphObject.parentId = parentId;
 			graphObject.name = objects.getObjectName(object);
 			graphObject.active = objects.isObjectActive(object);
-			graphObject.transformRevision = objects.GetObjectTransformRevision(object.EntityId());
-			graphObject.spatialRevision = objects.GetObjectSpatialRevision(object.EntityId());
-			if (Transform* transform = object.getComponent<Transform>())
+			graphObject.transformRevision = objects.GetObjectTransformRevision(object);
+			graphObject.spatialRevision = objects.GetObjectSpatialRevision(object);
+			if (Transform* transform = objects.GetComponent<Transform>(object))
 			{
 				graphObject.localPosition = GetComponentProperty<Transform, glm::vec3>(*transform, "Position");
 				graphObject.localRotation = GetComponentProperty<Transform, glm::quat>(*transform, "Rotation");
@@ -287,17 +287,15 @@ namespace TerraEngine::Scene {
 			}
 
 			graph.objects.emplace(objectId, std::move(graphObject));
-			for (Object child : objects.getChildren(object))
+			for (entt::entity child : objects.getChildEntities(object))
 			{
 				visitObject(child, objectId);
 			}
 		};
 
-		std::vector<Object> roots = objects.getRootObjects();
-		std::sort(roots.begin(), roots.end(), [&](const Object& lhs, const Object& rhs) {
-			return TerraEngine::ToHexString(objects.getUUID(lhs.EntityId())) < TerraEngine::ToHexString(objects.getUUID(rhs.EntityId()));
-		});
-		for (Object root : roots)
+		std::vector<entt::entity> roots = objects.getRootEntities();
+		objects.SortEntitiesByStableId(roots);
+		for (entt::entity root : roots)
 		{
 			visitObject(root, TerraEngine::EMPTY_UUID);
 		}
@@ -803,7 +801,7 @@ namespace TerraEngine::Scene {
 		return summary;
 	}
 
-	bool ReparentPreserveWorld(ObjectManager& objects, Object child, std::optional<Object> parent)
+	bool ReparentPreserveWorld(ObjectManager& objects, entt::entity child, std::optional<entt::entity> parent)
 	{
 		return objects.setParent(child, parent);
 	}

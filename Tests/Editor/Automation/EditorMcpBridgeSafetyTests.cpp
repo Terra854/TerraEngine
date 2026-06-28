@@ -137,6 +137,23 @@ namespace TerraEngine::EditorTests
 			bridge.Shutdown();
 		});
 
+		registry.Add("Editor.MCP.Safety.EnabledBridgeRejectsWriteModeTool", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			bridge.SetWriteMode(WriteMode::WritesEnabled);
+			const nlohmann::json capabilities = bridge.BuildCapabilityListJson()["capabilities"];
+			const auto advertisedWriteModeTool = std::find_if(capabilities.begin(), capabilities.end(), [](const nlohmann::json& capability) {
+				return capability.value("name", std::string()) == "bridge.set_write_mode";
+			});
+			context.Expect(advertisedWriteModeTool == capabilities.end(), "MCP discovery should not advertise editor-owned write-mode changes.");
+			const nlohmann::json result = bridge.CallTool("bridge.set_write_mode", {{"writeMode", "read_only"}});
+			context.Expect(!result.value("ok", true), "Enabled bridge should reject write-mode changes through the MCP tool path.");
+			context.ExpectEqual(std::string("unsupported_capability"), result["error"].value("category", std::string()), "Write-mode MCP attempts should be unsupported.");
+			context.ExpectEqual(std::string("writes_enabled"), std::string(TerraEngine::Editor::Automation::ToString(bridge.GetWriteMode())), "Rejected write-mode attempt should leave the editor-owned mode unchanged.");
+			bridge.Shutdown();
+		});
+
 		registry.Add("Editor.MCP.Safety.RequestQueueIsFifo", [](TestContext& context) {
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);
