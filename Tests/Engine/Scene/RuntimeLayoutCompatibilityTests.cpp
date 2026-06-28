@@ -29,6 +29,24 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(1), result.diagnostics.validationMismatchCount, "Mismatch diagnostics should count the failing category.");
 			context.ExpectEqual(static_cast<std::size_t>(1), result.diagnostics.fallbackCount, "Mismatch diagnostics should request compatibility fallback.");
 			context.Expect(result.mismatches.front().fallbackRecommendation.find("compatibility") != std::string::npos, "Mismatch should provide fallback guidance.");
+			context.Expect(TerraEngine::Scene::FormatLayoutDiagnosticsSummary(result.diagnostics).find("compatibility-snapshot-mismatch") != std::string::npos, "Formatted diagnostics should include fallback reason.");
+		});
+
+		registry.Add("Engine.RuntimeLayout.Compatibility.FallbackCountersFormat", [](TestContext& context) {
+			TerraEngine::Scene::LayoutDiagnosticsSummary summary;
+			summary.metadataScanFallbackCount = 2;
+			summary.fullObjectFacadeFallbackCount = 1;
+			summary.compactReferenceFallbackCount = 3;
+			summary.staleCompactReferenceCount = 4;
+			TerraEngine::Scene::AddRuntimeLayoutFallback(summary, "metadata-scan", 2);
+
+			const std::string formatted = TerraEngine::Scene::FormatLayoutDiagnosticsSummary(summary);
+
+			context.ExpectEqual(static_cast<std::size_t>(2), summary.fallbackCount, "Fallback helper should accumulate affected fallback count.");
+			context.Expect(formatted.find("metadataScans=2") != std::string::npos, "Formatted diagnostics should expose metadata scan fallback count.");
+			context.Expect(formatted.find("facadeFallbacks=1") != std::string::npos, "Formatted diagnostics should expose full Object facade fallback count.");
+			context.Expect(formatted.find("compactFallbacks=3") != std::string::npos, "Formatted diagnostics should expose compact reference fallback count.");
+			context.Expect(formatted.find("staleRefs=4") != std::string::npos, "Formatted diagnostics should expose stale compact reference count.");
 		});
 	}
 }

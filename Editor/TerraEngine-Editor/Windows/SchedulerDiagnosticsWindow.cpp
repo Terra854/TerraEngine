@@ -448,7 +448,7 @@ void SchedulerDiagnosticsWindow::DrawRuntimeLayoutSummary()
 	const TerraEngine::Scene::LayoutDiagnosticsSummary& summary = owner->GetContext()->engine->GetRuntimeLayoutDiagnostics();
 	const TerraEngine::Renderer::RenderDiagnosticsSummary renderSummary = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
 	ImGui::SeparatorText("Runtime Layout");
-	if (ImGui::BeginTable("SchedulerDiagnosticsRuntimeLayout", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	if (ImGui::BeginTable("SchedulerDiagnosticsRuntimeLayout", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("Authored");
 		ImGui::TableSetupColumn("Active");
@@ -456,6 +456,7 @@ void SchedulerDiagnosticsWindow::DrawRuntimeLayoutSummary()
 		ImGui::TableSetupColumn("Render Records");
 		ImGui::TableSetupColumn("Rejected");
 		ImGui::TableSetupColumn("Fallbacks");
+		ImGui::TableSetupColumn("Stale Refs");
 		ImGui::TableSetupColumn("Small Guard");
 		ImGui::TableHeadersRow();
 		ImGui::TableNextRow();
@@ -472,9 +473,15 @@ void SchedulerDiagnosticsWindow::DrawRuntimeLayoutSummary()
 		ImGui::TableSetColumnIndex(5);
 		ImGui::Text("%zu", summary.fallbackCount);
 		ImGui::TableSetColumnIndex(6);
+		ImGui::Text("%zu", summary.staleCompactReferenceCount);
+		ImGui::TableSetColumnIndex(7);
 		ImGui::TextUnformatted(summary.smallSceneGuardTriggered ? "yes" : "no");
 		ImGui::EndTable();
 	}
+	ImGui::Text("Fallback details: metadata scans=%zu, object facades=%zu, compact refs=%zu",
+		summary.metadataScanFallbackCount,
+		summary.fullObjectFacadeFallbackCount,
+		summary.compactReferenceFallbackCount);
 	DrawStringList("Rebuild:", summary.rebuildReasons);
 	DrawStringList("Render rejects:", renderSummary.runtimeLayoutRejectionReasons);
 }

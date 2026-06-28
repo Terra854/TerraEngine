@@ -38,6 +38,10 @@ namespace TerraEngine::Scene {
 			<< " transforms=" << summary.transformRecordCount
 			<< " renderRecords=" << summary.renderRecordCount
 			<< " fallbacks=" << summary.fallbackCount
+			<< " metadataScans=" << summary.metadataScanFallbackCount
+			<< " facadeFallbacks=" << summary.fullObjectFacadeFallbackCount
+			<< " compactFallbacks=" << summary.compactReferenceFallbackCount
+			<< " staleRefs=" << summary.staleCompactReferenceCount
 			<< " mismatches=" << summary.validationMismatchCount
 			<< " smallSceneGuard=" << (summary.smallSceneGuardTriggered ? "true" : "false");
 		for (const std::string& reason : summary.rebuildReasons)
@@ -45,6 +49,15 @@ namespace TerraEngine::Scene {
 			stream << " [" << reason << "]";
 		}
 		return stream.str();
+	}
+
+	void AddRuntimeLayoutFallback(LayoutDiagnosticsSummary& summary, std::string reason, std::size_t affectedCount)
+	{
+		// Fallback counters intentionally live beside the formatted reason list
+		// so tests, automation, and the editor window can all distinguish a
+		// compatibility path from an optimized active-membership reuse path.
+		summary.fallbackCount += affectedCount;
+		summary.rebuildReasons.push_back(std::move(reason));
 	}
 
 	RuntimeLayoutValidationResult ValidateRuntimeLayoutCompatibility(const CompatibilitySnapshot& optimized, const CompatibilitySnapshot& compatibility)
@@ -72,7 +85,7 @@ namespace TerraEngine::Scene {
 		result.diagnostics.validationMismatchCount = result.mismatches.size();
 		if (!result.valid)
 		{
-			result.diagnostics.fallbackCount += 1;
+			AddRuntimeLayoutFallback(result.diagnostics, "compatibility-snapshot-mismatch");
 		}
 		return result;
 	}
@@ -103,6 +116,11 @@ namespace TerraEngine::Scene {
 		snapshot.diagnostics.activeObjectCount = snapshot.activeObjectIds.size();
 		snapshot.diagnostics.totalObjectCount = graph.objects.size();
 		snapshot.diagnostics.transformRecordCount = snapshot.transformOutputs.size();
+		if (!graph.objects.empty())
+		{
+			snapshot.diagnostics.fullObjectFacadeFallbackCount = graph.objects.size();
+			AddRuntimeLayoutFallback(snapshot.diagnostics, "compatibility-full-object-facade", graph.objects.size());
+		}
 		return snapshot;
 	}
 
@@ -129,9 +147,11 @@ namespace TerraEngine::Scene {
 		layout.totalObjectCount = snapshot.orderedObjects.size();
 
 		std::unordered_map<TerraEngine::UUID, bool> activeByObjectId;
+		std::unordered_map<TerraEngine::UUID, TerraEngine::CompactObjectReference> compactByObjectId;
 		for (const RuntimeActiveMembership& membership : objects.GetRuntimeActiveMembershipSnapshot())
 		{
 			activeByObjectId[membership.objectId] = membership.objectActive;
+			compactByObjectId[membership.objectId] = membership.compactReference;
 		}
 
 		layout.entries.reserve(snapshot.orderedObjects.size());
@@ -141,6 +161,14 @@ namespace TerraEngine::Scene {
 			FlatHierarchyEntry entry;
 			entry.entity = static_cast<entt::entity>(source.object.entityValue);
 			entry.objectId = source.objectId;
+			if (const auto compact = compactByObjectId.find(source.objectId); compact != compactByObjectId.end())
+			{
+				entry.compactReference = compact->second;
+			}
+			else
+			{
+				entry.compactReference = objects.makeCompactReference(entry.entity);
+			}
 			if (source.parentIndex >= 0)
 			{
 				entry.parentIndex = static_cast<std::size_t>(source.parentIndex);
@@ -216,6 +244,7 @@ namespace TerraEngine::Scene {
 			}
 			TransformRuntimeRecord record;
 			record.entity = entry.entity;
+			record.compactReference = entry.compactReference;
 			record.objectId = entry.objectId;
 			record.layoutIndex = index;
 			record.parentIndex = entry.parentIndex;
@@ -257,7 +286,15 @@ namespace TerraEngine::Scene {
 		summary.transformRecordCount = transformRecordCount;
 		summary.renderRecordCount = renderRecordCount;
 		summary.fallbackCount = layout.valid ? 0u : 1u;
+		summary.metadataScanFallbackCount = 0u;
+		summary.fullObjectFacadeFallbackCount = 0u;
+		summary.compactReferenceFallbackCount = 0u;
+		summary.staleCompactReferenceCount = 0u;
 		summary.smallSceneGuardTriggered = layout.totalObjectCount <= 8u;
+		if (!layout.valid)
+		{
+			summary.rebuildReasons.push_back("runtime-layout-invalid");
+		}
 		return summary;
 	}
 }

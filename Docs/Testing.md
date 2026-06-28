@@ -67,6 +67,19 @@ rejections, fallbacks, and small-scene guard state. This section deliberately
 does not include lighting controls; lighting remains in renderer-specific
 diagnostic surfaces.
 
+Active object handle coverage for `specs/022-active-object-handles` extends the
+same pass with compact reference footprint helpers, stale-reference rejection,
+runtime membership reuse flags, active authored-state serialization, and
+automation fallback counters. Use this tighter filter when changing
+`ObjectManager`, `RuntimeLayout`, compact references, or ECS query snapshots:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="ActiveMembership;RuntimeLayout.ActiveMembership;CompactObjectReference;RuntimeLayout;EcsQuery;Scene.Serialization"
+.\out\build\CodexDebug\TerraEngine-EngineTests.exe
+.\out\build\CodexDebug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
 Broad worker conversion coverage lives beside the existing scheduler tests. Use
 `TERRAENGINE_TEST_FILTER=WorkerConversion;WorkerCoverage;WorkerHardBoundary;ScriptingWorkerBoundary;LiveGpuSubmissionBoundary;WindowInputWorkerBoundary;Editor.ReflectionWorkerBoundary`
 to validate the worker coverage report, hard-boundary classifications, managed

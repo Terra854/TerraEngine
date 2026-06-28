@@ -1,5 +1,6 @@
 #include "../TestHarness.h"
 
+#include "Core/Object/ObjectManager.h"
 #include "Core/Scheduling/ComponentAccess.h"
 
 #include <algorithm>
@@ -174,6 +175,19 @@ namespace TerraEngine::Tests {
 			context.Expect(!result.granted, "Worker grants should reject stale input/window snapshots.");
 			context.Expect(result.fallbackReason.find("stale") != std::string::npos, "Fallback reason should explain stale generation.");
 			context.Expect(HasCode(result.diagnostics, TerraEngine::Scheduling::ComponentAccessDiagnosticCode::StaleGeneration), "Grant diagnostics should carry stale-generation code.");
+		});
+
+		registry.Add("Engine.ComponentAccess.ValidatesCompactReferenceBeforeWorkerUse", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object object = objects.createObject("WorkerReference");
+			TerraEngine::CompactObjectReference reference = objects.makeCompactReference(object.EntityId());
+			context.Expect(TerraEngine::IsResolvedCompactObjectReference(objects.validateCompactReference(reference)), "Fresh compact references should be valid before worker-readable use.");
+
+			objects.removeObject(object);
+
+			context.Expect(!TerraEngine::IsResolvedCompactObjectReference(objects.validateCompactReference(reference)), "Worker-readable compact references should fail closed after deletion.");
+			objects.clear();
 		});
 	}
 }

@@ -89,6 +89,7 @@ namespace TerraEngine::Tests {
 	void RegisterHierarchySnapshotTests(TestRegistry& registry);
 	void RegisterRuntimeHierarchyLayoutTests(TestRegistry& registry);
 	void RegisterRuntimeLayoutCompatibilityTests(TestRegistry& registry);
+	void RegisterSceneSerializationTests(TestRegistry& registry);
 	void RegisterSceneGraphRuntimeTests(TestRegistry& registry);
 	void RegisterSceneMutationQueueTests(TestRegistry& registry);
 	void RegisterParallelMutationBufferTests(TestRegistry& registry);
@@ -210,6 +211,7 @@ int main() {
 	TerraEngine::Tests::RegisterHierarchySnapshotTests(registry);
 	TerraEngine::Tests::RegisterRuntimeHierarchyLayoutTests(registry);
 	TerraEngine::Tests::RegisterRuntimeLayoutCompatibilityTests(registry);
+	TerraEngine::Tests::RegisterSceneSerializationTests(registry);
 	TerraEngine::Tests::RegisterSceneGraphRuntimeTests(registry);
 	TerraEngine::Tests::RegisterSceneMutationQueueTests(registry);
 	TerraEngine::Tests::RegisterParallelMutationBufferTests(registry);

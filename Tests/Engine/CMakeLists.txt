@@ -104,6 +104,7 @@ add_executable(TerraEngine-EngineTests
 	Scene/HierarchySnapshotTests.cpp
 	Scene/RuntimeHierarchyLayoutTests.cpp
 	Scene/RuntimeLayoutCompatibilityTests.cpp
+	Scene/SceneSerializationTests.cpp
 	Scene/SceneGraphRuntimeTests.cpp
 	Scene/SceneMutationQueueTests.cpp
 	Scene/ParallelMutationBufferTests.cpp

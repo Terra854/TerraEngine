@@ -205,9 +205,29 @@ namespace TerraEngine::EditorTests
 			context.Expect(detailed["data"]["parallelFrame"].value("available", false), "Parallel-frame diagnostics should be available when an engine is attached.");
 			context.Expect(detailed["data"]["parallelFrame"].contains("migrationSummary"), "Parallel-frame diagnostics should expose migration counters.");
 			context.Expect(detailed["data"]["parallelFrame"].contains("workerCoverage"), "Parallel-frame diagnostics should expose worker coverage.");
+			context.Expect(detailed["data"]["parallelFrame"]["runtimeLayout"].contains("metadataScanFallbackCount"), "Runtime layout diagnostics should expose metadata scan fallback count.");
+			context.Expect(detailed["data"]["parallelFrame"]["runtimeLayout"].contains("staleCompactReferenceCount"), "Runtime layout diagnostics should expose stale compact reference count.");
 			context.Expect(!detailed["data"]["hardBoundaries"].empty(), "Hard-boundary classifications should be serialized.");
 			context.Expect(detailed["data"]["surfaces"][4]["details"].contains("parallelFrame"), "Scheduler surface should mirror parallel-frame diagnostics.");
 			context.Expect(detailed["data"]["surfaces"][4]["details"].contains("mutationDiagnostics"), "Scheduler surface should mirror mutation diagnostics.");
+		});
+
+		registry.Add("Editor.Automation.Service.ActiveToggleUndoRestoresAuthoredState", [](TestContext& context) {
+			ObjectManager::instance().clear();
+			UndoRedoSystem::Instance().Clear();
+			EditorAutomationService service;
+			Object object = ObjectManager::instance().createObject("Toggle");
+			const std::string uuid = TerraEngine::ToHexString(object.getUUID());
+
+			const nlohmann::json inactive = service.HandleTool("object.set_metadata", {{"object", uuid}, {"active", false}}, WriteMode::WritesEnabled, "active-1");
+			context.Expect(inactive.value("ok", false), "Automation active toggle should succeed.");
+			context.Expect(!ObjectManager::instance().isObjectActive(object), "Inactive authored state should be applied.");
+
+			UndoRedoSystem::Instance().Undo();
+
+			context.Expect(ObjectManager::instance().isObjectActive(object), "Undo should restore authored active state.");
+			ObjectManager::instance().clear();
+			UndoRedoSystem::Instance().Clear();
 		});
 
 		registry.Add("Editor.Automation.Service.AssetImportListAndExportJobsUseEditorSystems", [](TestContext& context) {

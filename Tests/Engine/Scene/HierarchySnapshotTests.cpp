@@ -35,6 +35,22 @@ namespace TerraEngine::Tests {
 			objects.clear();
 		});
 
+		registry.Add("Engine.HierarchySnapshot.ActiveToggleInvalidatesRuntimeHierarchyFreshness", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object parent = objects.createObject("Parent");
+			Object child = objects.createObject("Child");
+			context.Expect(objects.setParent(child, parent), "Fixture parent assignment should succeed.");
+			const std::uint64_t hierarchyBefore = objects.GetHierarchyRevision();
+			const std::uint64_t membershipBefore = objects.GetRuntimeActiveMembershipRevision();
+
+			objects.setObjectActive(child, false);
+
+			context.Expect(objects.GetHierarchyRevision() > hierarchyBefore, "Active toggles should invalidate hierarchy freshness for runtime layout consumers.");
+			context.Expect(objects.GetRuntimeActiveMembershipRevision() > membershipBefore, "Active toggles should invalidate active membership freshness.");
+			objects.clear();
+		});
+
 		registry.Add("Engine.HierarchySnapshot.FormattedSummaryIsDeterministic", [](TestContext& context) {
 			ObjectManager& objects = ObjectManager::instance();
 			objects.clear();

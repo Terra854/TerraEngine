@@ -145,11 +145,15 @@ void ObjectManager::rebuildRuntimeActiveMembershipCache()
 		}
 		TerraEngine::Scene::RuntimeActiveMembership membership;
 		membership.entity = entityId;
+		membership.compactReference = makeCompactReference(entityId);
 		membership.objectId = getUUID(entityId);
 		membership.objectActive = metadata.active && registry.any_of<TerraEngine::ActiveObjectTag>(entityId);
 		membership.componentActiveMask = membership.objectActive ? 1u : 0u;
 		membership.membershipRevision = runtimeActiveMembershipRevision;
+		membership.sourceMembershipRevision = runtimeActiveMembershipRevision;
 		membership.authoredStateVisible = true;
+		membership.reusedFromCache = false;
+		membership.fallbackScannedFromMetadata = true;
 		runtimeActiveMembershipCache.push_back(membership);
 	}
 	std::sort(runtimeActiveMembershipCache.begin(), runtimeActiveMembershipCache.end(), [](const TerraEngine::Scene::RuntimeActiveMembership& left, const TerraEngine::Scene::RuntimeActiveMembership& right) {
@@ -163,6 +167,14 @@ const std::vector<TerraEngine::Scene::RuntimeActiveMembership>& ObjectManager::G
 	if (cachedRuntimeActiveMembershipRevision != runtimeActiveMembershipRevision)
 	{
 		rebuildRuntimeActiveMembershipCache();
+	}
+	else
+	{
+		for (TerraEngine::Scene::RuntimeActiveMembership& membership : runtimeActiveMembershipCache)
+		{
+			membership.reusedFromCache = true;
+			membership.fallbackScannedFromMetadata = false;
+		}
 	}
 	return runtimeActiveMembershipCache;
 }
@@ -591,6 +603,7 @@ void ObjectManager::setObjectActive(const Object& obj, bool active)
 		++it->second.bindingGeneration;
 		invalidateRuntimeActiveMembership();
 		notifySpatialObjectDirty(obj.EntityId());
+		notifyHierarchyDirty();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (onModified) onModified();
 	}
@@ -791,6 +804,13 @@ TerraEngine::CompactObjectReferenceResolution ObjectManager::validateCompactRefe
 		resolution.message = "Referenced object is missing.";
 		return resolution;
 	}
+	const auto uuid = entityToUuid.find(entityId);
+	if (reference.stableId == TerraEngine::EMPTY_UUID || uuid == entityToUuid.end())
+	{
+		resolution.validity = TerraEngine::CompactObjectReferenceValidity::Stale;
+		resolution.message = "Referenced object UUID is missing.";
+		return resolution;
+	}
 	const auto generation = generationByEntity.find(entityId);
 	if (generation == generationByEntity.end() || generation->second != reference.generation)
 	{
@@ -798,8 +818,7 @@ TerraEngine::CompactObjectReferenceResolution ObjectManager::validateCompactRefe
 		resolution.message = "Referenced object generation is stale.";
 		return resolution;
 	}
-	const auto uuid = entityToUuid.find(entityId);
-	if (reference.stableId != TerraEngine::EMPTY_UUID && (uuid == entityToUuid.end() || uuid->second != reference.stableId))
+	if (uuid->second != reference.stableId)
 	{
 		resolution.validity = TerraEngine::CompactObjectReferenceValidity::Stale;
 		resolution.message = "Referenced object UUID no longer matches.";

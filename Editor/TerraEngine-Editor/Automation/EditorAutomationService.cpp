@@ -221,6 +221,10 @@ namespace TerraEngine::Editor::Automation
 					{"transformRecordCount", layout.transformRecordCount},
 					{"renderRecordCount", layout.renderRecordCount},
 					{"fallbackCount", layout.fallbackCount},
+					{"metadataScanFallbackCount", layout.metadataScanFallbackCount},
+					{"fullObjectFacadeFallbackCount", layout.fullObjectFacadeFallbackCount},
+					{"compactReferenceFallbackCount", layout.compactReferenceFallbackCount},
+					{"staleCompactReferenceCount", layout.staleCompactReferenceCount},
 					{"validationMismatchCount", layout.validationMismatchCount},
 					{"smallSceneGuardTriggered", layout.smallSceneGuardTriggered}
 				}}
@@ -608,7 +612,7 @@ namespace TerraEngine::Editor::Automation
 		}
 		data["surfaces"] = nlohmann::json::array({
 			{{"surface", "render"}, {"state", "available"}, {"details", includeDetails ? nlohmann::json{{"note", "Render diagnostics are available through the profiler/resource windows."}} : nlohmann::json::object()}},
-			{{"surface", "runtimeLayout"}, {"state", "available"}, {"details", nlohmann::json{{"authoredObjectCount", runtimeMembership.size()}, {"activeRuntimeObjectCount", activeRuntimeObjects}}}},
+			{{"surface", "runtimeLayout"}, {"state", "available"}, {"details", nlohmann::json{{"authoredObjectCount", runtimeMembership.size()}, {"activeRuntimeObjectCount", activeRuntimeObjects}, {"membershipRevision", ObjectManager::instance().GetRuntimeActiveMembershipRevision()}}}},
 			{{"surface", "resources"}, {"state", assetJobCount > 0 ? "compiling" : "available"}, {"details", nlohmann::json{{"assetCompileJobs", assetJobCount}}}},
 			{{"surface", "streaming"}, {"state", "available"}, {"details", nlohmann::json::object()}},
 			{{"surface", "scheduler"}, {"state", "available"}, {"details", nlohmann::json{{"workerBoundaries", boundaryFindings}, {"parallelFrame", parallelFrame}, {"mutationDiagnostics", mutationDiagnostics}}}},

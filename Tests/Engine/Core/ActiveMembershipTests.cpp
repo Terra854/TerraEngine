@@ -36,6 +36,22 @@ namespace TerraEngine::Tests {
 			objects.clear();
 		});
 
+		registry.Add("Engine.ActiveMembership.UnchangedSnapshotReportsCacheReuse", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			objects.createObject("Reusable");
+
+			const auto& firstSnapshot = objects.GetRuntimeActiveMembershipSnapshot();
+			const std::uint64_t firstRevision = objects.GetRuntimeActiveMembershipRevision();
+			const auto& secondSnapshot = objects.GetRuntimeActiveMembershipSnapshot();
+
+			context.ExpectEqual(firstRevision, objects.GetRuntimeActiveMembershipRevision(), "Unchanged membership reads should keep the same revision.");
+			context.ExpectEqual(firstSnapshot.size(), secondSnapshot.size(), "Reused membership snapshot should preserve row count.");
+			context.Expect(!secondSnapshot.empty() && secondSnapshot.front().reusedFromCache, "Second unchanged membership read should be tagged as cache reuse.");
+			context.Expect(!secondSnapshot.empty() && !secondSnapshot.front().fallbackScannedFromMetadata, "Reused membership rows should not report a metadata scan fallback.");
+			objects.clear();
+		});
+
 		registry.Add("Engine.ActiveMembership.StateHelperReportsActive", [](TestContext& context) {
 			TerraEngine::ActiveMembershipState state;
 			context.Expect(TerraEngine::IsActiveMember(state), "Default active membership state should be active.");

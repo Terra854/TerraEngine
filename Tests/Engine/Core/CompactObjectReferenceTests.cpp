@@ -10,6 +10,8 @@ namespace TerraEngine::Tests {
 	{
 		registry.Add("Engine.CompactObjectReference.IsCompactAndCopyable", [](TestContext& context) {
 			context.Expect(sizeof(TerraEngine::CompactObjectReference) <= 40, "Compact object references should remain small enough for snapshots.");
+			context.Expect(TerraEngine::IsCompactObjectReferenceWithinFootprint(), "Footprint helper should enforce the compact snapshot target.");
+			context.ExpectEqual(sizeof(TerraEngine::CompactObjectReference), TerraEngine::CompactObjectReferenceFootprintBytes(), "Footprint helper should report the real type size.");
 			TerraEngine::CompactObjectReference reference;
 			reference.entityValue = 7;
 			reference.generation = 11;
@@ -58,6 +60,21 @@ namespace TerraEngine::Tests {
 			context.Expect(beforeReload.stableId == afterReload.stableId, "Reload fixture should preserve the authored stable UUID.");
 			context.Expect(objects.validateCompactReference(beforeReload).validity != TerraEngine::CompactObjectReferenceValidity::Valid, "Old compact reference should be stale after reload replacement.");
 			context.Expect(objects.validateCompactReference(afterReload).validity == TerraEngine::CompactObjectReferenceValidity::Valid, "New compact reference should validate after reload replacement.");
+			objects.clear();
+		});
+
+		registry.Add("Engine.CompactObjectReference.RejectsStableUuidMismatch", [](TestContext& context) {
+			ObjectManager& objects = ObjectManager::instance();
+			objects.clear();
+			Object object = objects.createObject("UuidMismatch");
+			TerraEngine::CompactObjectReference reference = objects.makeCompactReference(object.EntityId());
+			reference.stableId = TerraEngine::GenerateUUID();
+
+			const TerraEngine::CompactObjectReferenceResolution resolution = objects.validateCompactReference(reference);
+
+			context.Expect(!TerraEngine::IsResolvedCompactObjectReference(resolution), "UUID-mismatched compact references should fail closed.");
+			context.Expect(resolution.validity == TerraEngine::CompactObjectReferenceValidity::Stale, "UUID mismatch should be reported as stale.");
+			context.Expect(TerraEngine::FormatCompactObjectReference(reference).find("bytes=") != std::string::npos, "Formatted compact references should expose footprint diagnostics.");
 			objects.clear();
 		});
 	}

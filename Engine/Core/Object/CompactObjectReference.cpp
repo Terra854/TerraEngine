@@ -10,6 +10,11 @@ namespace TerraEngine {
 		return entityValue == 0 && generation == 0 && stableId == TerraEngine::EMPTY_UUID;
 	}
 
+	bool IsResolvedCompactObjectReference(const CompactObjectReferenceResolution& resolution)
+	{
+		return IsResolvedCompactObjectReference(resolution.validity);
+	}
+
 	std::string ToString(CompactObjectReferenceValidity validity)
 	{
 		switch (validity)
@@ -31,7 +36,8 @@ namespace TerraEngine {
 		std::ostringstream stream;
 		stream << "entity=" << reference.entityValue
 			<< " generation=" << reference.generation
-			<< " uuid=" << TerraEngine::ToHexString(reference.stableId);
+			<< " uuid=" << TerraEngine::ToHexString(reference.stableId)
+			<< " bytes=" << CompactObjectReferenceFootprintBytes();
 		return stream.str();
 	}
 }
