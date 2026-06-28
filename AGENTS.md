@@ -15,6 +15,13 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 5. **Systems inheritance** – All engine systems must inherit from `SystemsBase` to ensure consistent lifecycle handling and extensibility across modules.
 6. **Indent requirements** – Indentation must use a single tab level.
 
+## Runtime Architecture Expectations
+1. **Scheduler declarations required** – Every new or modified engine/editor system must declare its scheduler phase, read resources, write resources, worker-safe preparation work, and protected boundary work. Diagnostics should make those declarations visible when the system affects frame execution.
+2. **Transactional mutation path** – Scene, object, hierarchy, and component writes that originate from worker jobs, managed C# callbacks, MCP/editor automation, future physics/animation/networking/AI systems, or other cross-system producers must use `SceneMutationQueue`, transactional mutation APIs, or a typed deferred mutation path. Do not mutate live `ObjectManager` or component storage from worker-safe code.
+3. **Visibility boundaries** – Queued transactional/deferred mutations become visible only after a declared protected flush boundary. Add a flush after a phase only when later same-frame systems must observe those writes; otherwise prefer the frame-end flush to preserve throughput.
+4. **Rejected mutations are atomic** – Rejected or conflicting mutation batches must leave no partial live-state changes. Add regression tests for conflict, rollback, and visibility timing whenever a feature adds new mutation operations or new system phases.
+5. **Hot paths stay typed** – Native high-frequency systems should use typed transaction batches, snapshots, packets, or scheduler-owned prepared data. JSON transaction payloads are for managed scripting, editor automation, MCP, compatibility, and tests unless explicitly justified.
+
 ## Repository Structure
 1. Keep engine sources under `Engine/`, third-party code in `External/`, and **all engine shaders in `Engine/Shaders/` with editor only shaders in `Editor/Shaders/`** (use module-specific subdirectories beneath that folder).
 2. Place build tooling/scripts under `Tools/` with usage comments explaining prerequisites and commands.
@@ -22,8 +29,9 @@ Welcome to TerraEngine! Please follow these repo-wide guidelines whenever you ad
 ## Testing & Verification
 1. Provide reproducible instructions (README or per-feature docs) describing how to configure, build, install, and run relevant tests/demos from a clean checkout.
 2. When adding features affecting rendering or threading, include stress or regression tests demonstrating correctness under multithreaded loads.
-3. After all implementation tasks are complete, run a test compile of the codebase before finishing so the changed code is proven to compile successfully.
-4. Use `Docs/Testing.md` for the current CTest workflow; keep engine unit tests under `Tests/Engine` and editor unit tests under `Tests/Editor` unless a later feature explicitly expands the scope.
+3. When adding systems or mutation behavior, include tests proving scheduler read/write declarations, flush-boundary visibility, and rejected-batch rollback behavior.
+4. After all implementation tasks are complete, run a test compile of the codebase before finishing so the changed code is proven to compile successfully.
+5. Use `Docs/Testing.md` for the current CTest workflow; keep engine unit tests under `Tests/Engine` and editor unit tests under `Tests/Editor` unless a later feature explicitly expands the scope.
 
 ## Commit Message Expectations
 1. Follow the detailed, area-first style used by the earlier project history through commit `3aa8ae41466ea3c6ffed54cfeb1d881a1aad2d8c`: `<Area>: <short imperative summary>.`
