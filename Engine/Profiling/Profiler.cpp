@@ -98,6 +98,7 @@ void Profiler::StartRecording(const ProfilerCaptureMetadata& metadata, const Pro
 	lastError.clear();
 	statusText = "Recording";
 	state = ProfilerSessionState::Recording;
+	UpdateFastRecordingFlagsLocked();
 }
 
 // Profiler::PauseRecording is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -109,6 +110,7 @@ void Profiler::PauseRecording()
 	{
 		state = ProfilerSessionState::Paused;
 		statusText = "Paused";
+		UpdateFastRecordingFlagsLocked();
 	}
 }
 
@@ -121,6 +123,7 @@ void Profiler::ResumeRecording()
 	{
 		state = ProfilerSessionState::Recording;
 		statusText = "Recording";
+		UpdateFastRecordingFlagsLocked();
 	}
 }
 
@@ -142,6 +145,7 @@ ProfilerCaptureDocument Profiler::FinishRecording()
 	document.metadata.settings.captureMode = ProfilerCaptureMode::FinalizingToArtifact;
 	state = ProfilerSessionState::Finalizing;
 	statusText = "Finalizing capture";
+	UpdateFastRecordingFlagsLocked();
 	return document;
 }
 
@@ -156,6 +160,7 @@ void Profiler::Clear()
 	state = ProfilerSessionState::Idle;
 	statusText = "Idle";
 	lastError.clear();
+	UpdateFastRecordingFlagsLocked();
 }
 
 // Profiler::LoadDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -170,6 +175,7 @@ void Profiler::LoadDocument(const ProfilerCaptureDocument& loadedDocument)
 	state = ProfilerSessionState::Loaded;
 	statusText = "Loaded capture";
 	lastError.clear();
+	UpdateFastRecordingFlagsLocked();
 }
 
 // Profiler::BeginFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -227,13 +233,21 @@ void Profiler::EndFrame()
 }
 
 // Profiler::BeginSample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel)
+bool Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel)
 {
+	// Most frames run with profiling idle. Check the cheap flag first so the
+	// many RAII scope markers compiled into engine systems avoid a mutex round
+	// trip until a real capture is recording.
+	if (!markerRecordingActive.load(std::memory_order_acquire))
+	{
+		return false;
+	}
+
 	std::lock_guard<std::mutex> lock(mutex);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (state != ProfilerSessionState::Recording || !currentFrame.has_value() || !settings.recordMarkers)
 	{
-		return;
+		return false;
 	}
 
 	ProfilerSample sample;
@@ -246,6 +260,7 @@ void Profiler::BeginSample(const char* name, ProfilerModuleId moduleId, const ch
 	sample.startMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - currentFrameStart).count();
 	sample.depth = static_cast<std::uint32_t>(t_sampleState.openSamples.size());
 	t_sampleState.openSamples.push_back(std::move(sample));
+	return true;
 }
 
 // Profiler::EndSample is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -253,13 +268,20 @@ void Profiler::EndSample()
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (state != ProfilerSessionState::Recording || !currentFrame.has_value() || t_sampleState.openSamples.empty())
+	if (!currentFrame.has_value() || t_sampleState.openSamples.empty())
 	{
 		return;
 	}
 
 	ProfilerSample sample = t_sampleState.openSamples.back();
 	t_sampleState.openSamples.pop_back();
+	// If recording stopped while a worker-owned scope was open, discard that
+	// unfinished sample after popping it so thread-local stacks do not leak
+	// stale parent ids into a later capture.
+	if (state != ProfilerSessionState::Recording)
+	{
+		return;
+	}
 	sample.durationMs = std::max(0.0, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - currentFrameStart).count() - sample.startMs);
 	currentFrame->samples.push_back(std::move(sample));
 }
@@ -292,25 +314,55 @@ void Profiler::RecordRenderStats(const RenderStatsSnapshot& gameStats, const Ren
 // Profiler::RecordTaskQueued is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void Profiler::RecordTaskQueued()
 {
+	if (!taskRecordingActive.load(std::memory_order_acquire))
+	{
+		return;
+	}
+
 	std::lock_guard<std::mutex> lock(mutex);
+	if (state != ProfilerSessionState::Recording || !settings.taskExecutionEnabled)
+	{
+		return;
+	}
 	++queuedTaskCount;
 }
 
 // Profiler::RecordTaskStarted is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void Profiler::RecordTaskStarted(const char* taskLabel)
+bool Profiler::RecordTaskStarted(const char* taskLabel)
 {
+	if (!taskRecordingActive.load(std::memory_order_acquire))
+	{
+		return false;
+	}
+
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+		if (state != ProfilerSessionState::Recording || !settings.taskExecutionEnabled)
+		{
+			return false;
+		}
 		++startedTaskCount;
 	}
-	BeginSample("ThreadPool Task", ProfilerModuleId::TaskExecution, taskLabel);
+	return BeginSample("ThreadPool Task", ProfilerModuleId::TaskExecution, taskLabel);
 }
 
 // Profiler::RecordTaskFinished is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void Profiler::RecordTaskFinished()
+void Profiler::RecordTaskFinished(bool sampleActive)
 {
-	EndSample();
+	if (sampleActive)
+	{
+		EndSample();
+	}
+	if (!taskRecordingActive.load(std::memory_order_acquire))
+	{
+		return;
+	}
+
 	std::lock_guard<std::mutex> lock(mutex);
+	if (state != ProfilerSessionState::Recording || !settings.taskExecutionEnabled)
+	{
+		return;
+	}
 	++finishedTaskCount;
 }
 
@@ -346,6 +398,30 @@ ProfilerCaptureDocument Profiler::GetDocumentSnapshot() const
 		snapshot.frames.push_back(*currentFrame);
 	}
 	return snapshot;
+}
+
+// Profiler::GetFrameListSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+std::vector<ProfilerFrameListItem> Profiler::GetFrameListSnapshot() const
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	std::vector<ProfilerFrameListItem> frames;
+	frames.reserve(document.frames.size() + (currentFrame.has_value() ? 1u : 0u));
+	auto appendFrame = [&frames](const ProfilerFrameRecord& frame) {
+		ProfilerFrameListItem item;
+		item.frameIndex = frame.frameIndex;
+		item.durationMs = frame.durationMs;
+		item.complete = frame.complete;
+		frames.push_back(item);
+	};
+	for (const ProfilerFrameRecord& frame : document.frames)
+	{
+		appendFrame(frame);
+	}
+	if (currentFrame.has_value())
+	{
+		appendFrame(*currentFrame);
+	}
+	return frames;
 }
 
 // Profiler::GetFramesSnapshot is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -468,5 +544,13 @@ void Profiler::AggregateSamplesForFrame(ProfilerFrameRecord& frame) const
 		}
 		return left.startMs < right.startMs;
 	});
+}
+
+// Profiler::UpdateFastRecordingFlagsLocked is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void Profiler::UpdateFastRecordingFlagsLocked()
+{
+	const bool recording = state == ProfilerSessionState::Recording;
+	markerRecordingActive.store(recording && settings.recordMarkers, std::memory_order_release);
+	taskRecordingActive.store(recording && settings.taskExecutionEnabled, std::memory_order_release);
 }
 }

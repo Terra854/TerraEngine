@@ -94,6 +94,16 @@ struct ProfilerFrameRecord
 	std::vector<ProfilerSample> samples;
 };
 
+// struct ProfilerFrameListItem keeps the editor frame list cheap to redraw.
+// It intentionally mirrors only the columns shown in the list so opening the
+// profiler window does not copy every sample string for every retained frame.
+struct ProfilerFrameListItem
+{
+	std::uint64_t frameIndex = 0u;
+	double durationMs = 0.0;
+	bool complete = true;
+};
+
 // struct ProfilerCaptureMetadata groups related state and operations so callers have one documented contract.
 struct ProfilerCaptureMetadata
 {
@@ -137,5 +147,6 @@ std::vector<ProfilerModuleSummary> MakeDefaultModuleSummaries(const ProfilerCapt
 void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCaptureSettings& settings);
 bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::filesystem::path& path, std::string& outError);
 bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocument& outDocument, std::string& outError);
+bool TryReadCaptureArtifactMetadata(const std::filesystem::path& path, ProfilerCaptureArtifact& outArtifact);
 bool TryReadCaptureArtifact(const std::filesystem::path& path, ProfilerCaptureArtifact& outArtifact);
 }

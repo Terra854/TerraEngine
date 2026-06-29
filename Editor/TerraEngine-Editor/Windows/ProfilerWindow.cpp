@@ -21,6 +21,7 @@
 #include <unordered_map>
 
 using TerraEngine::Profiling::Profiler;
+using TerraEngine::Profiling::ProfilerFrameListItem;
 using TerraEngine::Profiling::ProfilerFrameRecord;
 using TerraEngine::Profiling::ProfilerModuleId;
 using TerraEngine::Profiling::ProfilerSample;
@@ -335,24 +336,32 @@ void ProfilerWindow::DrawFrameList()
 {
 	ImGui::TextUnformatted("Frames");
 	ImGui::BeginChild("ProfilerFrames", ImVec2(0, 0), true);
-	const auto frames = Profiler::Instance().GetFramesSnapshot();
+	const std::vector<ProfilerFrameListItem> frames = Profiler::Instance().GetFrameListSnapshot();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (frames.empty())
 	{
 		ImGui::TextDisabled("No frames captured.");
 	}
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const ProfilerFrameRecord& frame : frames)
+	// The rolling capture can hold thousands of frames. Clip visible rows so
+	// opening the profiler does not spend every editor frame formatting labels
+	// that are outside the scroll viewport.
+	ImGuiListClipper clipper;
+	clipper.Begin(static_cast<int>(frames.size()));
+	while (clipper.Step())
 	{
-		char label[128];
-		std::snprintf(label, sizeof(label), "#%llu  %.2f ms%s",
-			static_cast<unsigned long long>(frame.frameIndex),
-			frame.durationMs,
-			frame.complete ? "" : " (partial)");
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (ImGui::Selectable(label))
+		for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
 		{
-			Profiler::Instance().SelectFrame(frame.frameIndex);
+			const ProfilerFrameListItem& frame = frames[static_cast<std::size_t>(rowIndex)];
+			char label[128];
+			std::snprintf(label, sizeof(label), "#%llu  %.2f ms%s",
+				static_cast<unsigned long long>(frame.frameIndex),
+				frame.durationMs,
+				frame.complete ? "" : " (partial)");
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (ImGui::Selectable(label))
+			{
+				Profiler::Instance().SelectFrame(frame.frameIndex);
+			}
 		}
 	}
 	ImGui::EndChild();

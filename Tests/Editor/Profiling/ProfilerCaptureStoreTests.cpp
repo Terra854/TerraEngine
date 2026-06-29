@@ -177,6 +177,7 @@ namespace TerraEngine::EditorTests {
 			context.Expect(HasArtifactNamed(captures, "a-first.teprof") && HasArtifactNamed(captures, "z-second.teprof"), "Listing should include every valid capture artifact.");
 			context.Expect(!HasArtifactNamed(captures, "broken.teprof"), "Listing should ignore unsupported .teprof files.");
 			context.ExpectEqual(1ULL, captures[0].frameCount, "Listed artifacts should expose their capture frame count.");
+			context.ExpectEqual(std::string("Second"), captures[0].metadata.projectName, "Listed artifacts should expose project metadata without fully loading frames.");
 		});
 
 		registry.Add("Editor.ProfilerCaptureStore.ListCapturesStopsWhenCancelled", [](TestContext& context) {

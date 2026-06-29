@@ -81,6 +81,325 @@ ProfilerCaptureSettings SettingsFromJson(const nlohmann::json& json)
 	settings.maxDurationSeconds = std::max(0.0, json.value("maxDurationSeconds", 0.0));
 	return settings;
 }
+
+// SaxContainerKind names the active JSON container so the metadata reader can
+// tell top-level capture fields from similarly named fields inside frames.
+enum class SaxContainerKind
+{
+	Object,
+	Array
+};
+
+// SaxContainer stores the current object/array name and the object key that is
+// waiting for its value. Keeping this tiny stack avoids building a full JSON
+// document while scanning large profiler captures for sidebar metadata.
+struct SaxContainer
+{
+	SaxContainerKind kind = SaxContainerKind::Object;
+	std::string name;
+	std::string pendingKey;
+};
+
+// ProfilerArtifactMetadataSax streams enough capture data for the artifact
+// list. Full frame/sample validation intentionally remains in LoadCaptureDocument.
+class ProfilerArtifactMetadataSax final : public nlohmann::json_sax<nlohmann::json>
+{
+public:
+	using Base = nlohmann::json_sax<nlohmann::json>;
+	using binary_t = typename Base::binary_t;
+	using number_float_t = typename Base::number_float_t;
+	using number_integer_t = typename Base::number_integer_t;
+	using number_unsigned_t = typename Base::number_unsigned_t;
+	using string_t = typename Base::string_t;
+
+	explicit ProfilerArtifactMetadataSax(ProfilerCaptureArtifact& artifact)
+		: outArtifact(artifact)
+	{
+	}
+
+	bool null() override
+	{
+		ConsumePendingKey();
+		return true;
+	}
+
+	bool boolean(bool value) override
+	{
+		const std::string key = ConsumePendingKey();
+		if (ParentIsNamedObject("settings"))
+		{
+			if (key == "cpuEngineEnabled")
+			{
+				outArtifact.metadata.settings.cpuEngineEnabled = value;
+			}
+			else if (key == "taskExecutionEnabled")
+			{
+				outArtifact.metadata.settings.taskExecutionEnabled = value;
+			}
+			else if (key == "recordMarkers")
+			{
+				outArtifact.metadata.settings.recordMarkers = value;
+			}
+			else if (key == "recordTaskContext")
+			{
+				outArtifact.metadata.settings.recordTaskContext = value;
+			}
+		}
+		return true;
+	}
+
+	bool number_integer(number_integer_t value) override
+	{
+		if (value < 0)
+		{
+			ConsumePendingKey();
+			return true;
+		}
+		return number_unsigned(static_cast<number_unsigned_t>(value));
+	}
+
+	bool number_unsigned(number_unsigned_t value) override
+	{
+		const std::string key = ConsumePendingKey();
+		if (IsTopLevelObject() && key == "payloadVersion")
+		{
+			hasPayloadVersion = true;
+			outArtifact.payloadVersion = static_cast<std::uint32_t>(value);
+			if (outArtifact.payloadVersion != kProfilerCaptureVersion)
+			{
+				error = "Profiler capture format version is unsupported.";
+				return false;
+			}
+		}
+		else if (IsTopLevelObject() && key == "frameCount")
+		{
+			hasFrameCount = true;
+			outArtifact.frameCount = static_cast<std::uint64_t>(value);
+		}
+		else if (ParentIsNamedObject("settings") && key == "maxFrames")
+		{
+			outArtifact.metadata.settings.maxFrames = std::max<std::uint32_t>(1u, static_cast<std::uint32_t>(value));
+		}
+		return true;
+	}
+
+	bool number_float(number_float_t value, const string_t&) override
+	{
+		const std::string key = ConsumePendingKey();
+		if (ParentIsNamedObject("settings") && key == "maxDurationSeconds")
+		{
+			outArtifact.metadata.settings.maxDurationSeconds = std::max(0.0, static_cast<double>(value));
+		}
+		return true;
+	}
+
+	bool string(string_t& value) override
+	{
+		const std::string key = ConsumePendingKey();
+		if (IsTopLevelObject() && key == "format")
+		{
+			hasFormat = true;
+			if (value != "TerraEngineProfilerCapture")
+			{
+				error = "File is not a TerraEngine profiler capture.";
+				return false;
+			}
+		}
+		else if (ParentIsNamedObject("metadata"))
+		{
+			if (key == "terraEngineVersion")
+			{
+				outArtifact.metadata.terraEngineVersion = value;
+			}
+			else if (key == "projectName")
+			{
+				outArtifact.metadata.projectName = value;
+			}
+			else if (key == "projectPathHint")
+			{
+				outArtifact.metadata.projectPathHint = value;
+			}
+			else if (key == "scenePath")
+			{
+				outArtifact.metadata.scenePath = value;
+			}
+			else if (key == "startedAt")
+			{
+				outArtifact.metadata.startedAt = value;
+			}
+			else if (key == "savedAt")
+			{
+				outArtifact.metadata.savedAt = value;
+			}
+		}
+		return true;
+	}
+
+	bool binary(binary_t&) override
+	{
+		ConsumePendingKey();
+		return true;
+	}
+
+	bool start_object(std::size_t) override
+	{
+		std::string valueName = ConsumePendingKey();
+		if (!containers.empty()
+			&& containers.back().kind == SaxContainerKind::Array
+			&& containers.back().name == "frames"
+			&& containers.size() == 2u)
+		{
+			if (!hasFrameCount)
+			{
+				++outArtifact.frameCount;
+			}
+			valueName = "frame";
+		}
+		containers.push_back({SaxContainerKind::Object, std::move(valueName), {}});
+		return true;
+	}
+
+	bool key(string_t& value) override
+	{
+		if (containers.empty() || containers.back().kind != SaxContainerKind::Object)
+		{
+			error = "Profiler capture JSON contains an object key outside an object.";
+			return false;
+		}
+		containers.back().pendingKey = value;
+		return true;
+	}
+
+	bool end_object() override
+	{
+		if (containers.empty() || containers.back().kind != SaxContainerKind::Object)
+		{
+			error = "Profiler capture JSON ended an object without a matching start.";
+			return false;
+		}
+		const std::string endedName = containers.back().name;
+		containers.pop_back();
+		if (endedName == "metadata")
+		{
+			hasMetadata = true;
+		}
+		return true;
+	}
+
+	bool start_array(std::size_t elements) override
+	{
+		std::string valueName = ConsumePendingKey();
+		if (IsTopLevelObject() && valueName == "frames")
+		{
+			if (CanStopBeforeFrames())
+			{
+				completedEarly = true;
+				return false;
+			}
+			if (!hasFrameCount && elements != nlohmann::detail::unknown_size())
+			{
+				hasFrameCount = true;
+				outArtifact.frameCount = static_cast<std::uint64_t>(elements);
+			}
+		}
+		containers.push_back({SaxContainerKind::Array, std::move(valueName), {}});
+		return true;
+	}
+
+	bool end_array() override
+	{
+		if (containers.empty() || containers.back().kind != SaxContainerKind::Array)
+		{
+			error = "Profiler capture JSON ended an array without a matching start.";
+			return false;
+		}
+		const std::string endedName = containers.back().name;
+		containers.pop_back();
+		if (endedName == "frames")
+		{
+			hasFrameCount = true;
+		}
+		return true;
+	}
+
+	bool parse_error(std::size_t, const std::string&, const nlohmann::detail::exception& exception) override
+	{
+		error = exception.what();
+		return false;
+	}
+
+	bool Finish()
+	{
+		if (!hasFormat)
+		{
+			error = "File is not a TerraEngine profiler capture.";
+			return false;
+		}
+		if (!hasPayloadVersion)
+		{
+			error = "Profiler capture format version is unsupported.";
+			return false;
+		}
+		if (!hasMetadata)
+		{
+			error = "Profiler capture metadata is missing.";
+			return false;
+		}
+		if (!hasFrameCount)
+		{
+			error = "Profiler capture frame list is missing.";
+			return false;
+		}
+
+		outArtifact.metadata.settings.captureMode = ProfilerCaptureMode::LoadedReadOnly;
+		outArtifact.supported = true;
+		outArtifact.status = completedEarly ? "Ready (metadata)" : "Ready";
+		outArtifact.moduleIds = {
+			ProfilerModuleId::CpuEngine,
+			ProfilerModuleId::TaskExecution
+		};
+		return true;
+	}
+
+	ProfilerCaptureArtifact& outArtifact;
+	std::string error;
+	bool completedEarly = false;
+
+private:
+	bool IsTopLevelObject() const
+	{
+		return containers.size() == 1u && containers.back().kind == SaxContainerKind::Object;
+	}
+
+	bool ParentIsNamedObject(const char* name) const
+	{
+		return !containers.empty()
+			&& containers.back().kind == SaxContainerKind::Object
+			&& containers.back().name == name;
+	}
+
+	bool CanStopBeforeFrames() const
+	{
+		return hasFormat && hasPayloadVersion && hasMetadata && hasFrameCount;
+	}
+
+	std::string ConsumePendingKey()
+	{
+		if (containers.empty() || containers.back().kind != SaxContainerKind::Object)
+		{
+			return {};
+		}
+		std::string key = std::move(containers.back().pendingKey);
+		containers.back().pendingKey.clear();
+		return key;
+	}
+
+	std::vector<SaxContainer> containers;
+	bool hasFormat = false;
+	bool hasPayloadVersion = false;
+	bool hasMetadata = false;
+	bool hasFrameCount = false;
+};
 }
 
 // ToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -195,7 +514,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 {
 	try
 	{
-		nlohmann::json json;
+		nlohmann::ordered_json json;
 		json["format"] = "TerraEngineProfilerCapture";
 		json["payloadVersion"] = kProfilerCaptureVersion;
 		json["metadata"] = {
@@ -207,6 +526,7 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 			{"savedAt", document.metadata.savedAt},
 			{"settings", SettingsToJson(document.metadata.settings)}
 		};
+		json["frameCount"] = document.frames.size();
 		json["frames"] = nlohmann::json::array();
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -381,6 +701,38 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 		outError = exception.what();
 		return false;
 	}
+}
+
+// TryReadCaptureArtifact is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool TryReadCaptureArtifactMetadata(const std::filesystem::path& path, ProfilerCaptureArtifact& outArtifact)
+{
+	outArtifact = {};
+	outArtifact.absolutePath = path;
+	outArtifact.fileName = path.filename().string();
+
+	std::ifstream input(path, std::ios::binary);
+	if (!input)
+	{
+		outArtifact.supported = false;
+		outArtifact.status = "Failed to open profiler capture for reading.";
+		return false;
+	}
+
+	ProfilerArtifactMetadataSax sax(outArtifact);
+	const bool parsed = nlohmann::json::sax_parse(input, &sax);
+	if (!parsed && !sax.completedEarly)
+	{
+		outArtifact.supported = false;
+		outArtifact.status = sax.error.empty() ? "Failed to parse profiler capture metadata." : sax.error;
+		return false;
+	}
+	if (!sax.Finish())
+	{
+		outArtifact.supported = false;
+		outArtifact.status = sax.error;
+		return false;
+	}
+	return true;
 }
 
 // TryReadCaptureArtifact is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

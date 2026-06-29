@@ -4,6 +4,7 @@
 
 #include "Profiling/ProfilerCapture.h"
 
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <optional>
@@ -29,17 +30,18 @@ public:
 
 	void BeginFrame();
 	void EndFrame();
-	void BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel = nullptr);
+	bool BeginSample(const char* name, ProfilerModuleId moduleId, const char* taskLabel = nullptr);
 	void EndSample();
 	void RecordRenderStats(const RenderStatsSnapshot& gameStats, const RenderStatsSnapshot& sceneStats);
 	void RecordTaskQueued();
-	void RecordTaskStarted(const char* taskLabel);
-	void RecordTaskFinished();
+	bool RecordTaskStarted(const char* taskLabel);
+	void RecordTaskFinished(bool sampleActive);
 	void SelectFrame(std::uint64_t frameIndex);
 
 	ProfilerSessionState GetState() const;
 	ProfilerCaptureSettings GetSettings() const;
 	ProfilerCaptureDocument GetDocumentSnapshot() const;
+	std::vector<ProfilerFrameListItem> GetFrameListSnapshot() const;
 	std::vector<ProfilerFrameRecord> GetFramesSnapshot() const;
 	std::optional<ProfilerFrameRecord> GetSelectedFrameSnapshot() const;
 	std::optional<std::filesystem::path> GetSourcePath() const;
@@ -53,6 +55,7 @@ private:
 	double NowMs() const;
 	void RebuildCurrentFrameModules();
 	void AggregateSamplesForFrame(ProfilerFrameRecord& frame) const;
+	void UpdateFastRecordingFlagsLocked();
 
 	mutable std::mutex mutex;
 	ProfilerSessionState state = ProfilerSessionState::Idle;
@@ -69,5 +72,10 @@ private:
 	std::uint64_t finishedTaskCount = 0u;
 	std::string statusText = "Idle";
 	std::string lastError;
+	// These atomics are read by hot instrumentation sites before they touch the
+	// profiler mutex. The locked state remains authoritative; the flags only
+	// keep idle frames from paying synchronization costs for skipped samples.
+	std::atomic_bool markerRecordingActive = false;
+	std::atomic_bool taskRecordingActive = false;
 };
 }

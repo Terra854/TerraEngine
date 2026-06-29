@@ -84,10 +84,13 @@ void ThreadPool::enqueue(std::shared_ptr<ITask> task) {
 			{
 				std::unique_lock<std::mutex> lock(queue_mutex);
 				tasks.emplace([task]() {
-					TerraEngine::Profiling::Profiler::Instance().RecordTaskStarted("ThreadPool Task");
+					// The profiler returns whether a task sample was actually
+					// opened. Carry that through to completion so idle profiler
+					// sessions do not pay an unmatched EndSample call.
+					const bool profilerSampleActive = TerraEngine::Profiling::Profiler::Instance().RecordTaskStarted("ThreadPool Task");
 					task->run();
 					ThreadPool::instance().completeTask(task);
-					TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished();
+					TerraEngine::Profiling::Profiler::Instance().RecordTaskFinished(profilerSampleActive);
 				});
 			} // Release the lock asap when done to minimize the chances of deadlocks
 

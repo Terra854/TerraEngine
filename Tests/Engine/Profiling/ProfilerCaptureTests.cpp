@@ -168,6 +168,13 @@ namespace TerraEngine::Tests {
 			context.Expect(artifact.supported, "Saved captures should be reported as supported artifacts.");
 			context.ExpectEqual(std::string("round-trip.teprof"), artifact.fileName, "Capture artifacts should expose the source file name.");
 			context.ExpectEqual(1ULL, artifact.frameCount, "Capture artifacts should expose the saved frame count.");
+
+			ProfilerCaptureArtifact metadataArtifact;
+			context.Expect(TryReadCaptureArtifactMetadata(capturePath, metadataArtifact), "Capture artifact metadata inspection should accept a saved capture without loading frames.");
+			context.Expect(metadataArtifact.supported, "Metadata-only capture inspection should report saved captures as supported artifacts.");
+			context.ExpectEqual(std::string("Profiler Tests"), metadataArtifact.metadata.projectName, "Metadata-only inspection should preserve the saved project name.");
+			context.ExpectEqual(1ULL, metadataArtifact.frameCount, "Metadata-only inspection should expose the saved frame count.");
+			context.ExpectEqual(std::string("Ready (metadata)"), metadataArtifact.status, "Newly saved captures should place metadata before frames so sidebar refresh can stop before sample payloads.");
 		});
 
 		registry.Add("Engine.ProfilerCapture.LoadRejectsInvalidFormatAndUnknownModules", [](TestContext& context) {
@@ -222,9 +229,11 @@ namespace TerraEngine::Tests {
 			profiler.StartRecording(metadata, settings);
 			profiler.RecordTaskQueued();
 			profiler.BeginFrame();
-			profiler.BeginSample("Outer", ProfilerModuleId::CpuEngine);
-			profiler.RecordTaskStarted("UnitTask");
-			profiler.RecordTaskFinished();
+			const bool outerSampleActive = profiler.BeginSample("Outer", ProfilerModuleId::CpuEngine);
+			context.Expect(outerSampleActive, "Profiler scopes should report that a sample was opened while recording.");
+			const bool taskSampleActive = profiler.RecordTaskStarted("UnitTask");
+			context.Expect(taskSampleActive, "Task profiler scopes should report an active sample while recording.");
+			profiler.RecordTaskFinished(taskSampleActive);
 			profiler.EndSample();
 			profiler.EndFrame();
 
@@ -243,10 +252,30 @@ namespace TerraEngine::Tests {
 			context.Expect(startedMetric != nullptr && startedMetric->value == 1.0, "Task start counters should be aggregated into frame metrics.");
 			context.Expect(finishedMetric != nullptr && finishedMetric->value == 1.0, "Task finish counters should be aggregated into frame metrics.");
 
+			const std::vector<ProfilerFrameListItem> frameList = profiler.GetFrameListSnapshot();
+			context.ExpectEqual(1u, static_cast<unsigned int>(frameList.size()), "The profiler window should be able to request a lightweight frame list.");
+			context.ExpectEqual(frames.front().frameIndex, frameList.front().frameIndex, "Frame list items should expose the recorded frame index.");
+			context.ExpectEqual(frames.front().complete, frameList.front().complete, "Frame list items should expose completion state without copying samples.");
+
 			ProfilerCaptureDocument finishedDocument = profiler.FinishRecording();
 			context.ExpectEqual(1u, static_cast<unsigned int>(finishedDocument.frames.size()), "Finishing after a complete frame should preserve recorded frames.");
 			context.Expect(profiler.GetState() == ProfilerSessionState::Finalizing, "Finishing a capture should transition the profiler to finalizing.");
 			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.IdleInstrumentationSkipsSamplesAndTaskCounters", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+
+			context.Expect(!profiler.BeginSample("Idle", ProfilerModuleId::CpuEngine), "Idle profiler scopes should report that no sample was opened.");
+			const bool taskSampleActive = profiler.RecordTaskStarted("IdleTask");
+			context.Expect(!taskSampleActive, "Idle task instrumentation should avoid opening profiler samples.");
+			profiler.RecordTaskQueued();
+			profiler.RecordTaskFinished(taskSampleActive);
+			context.Expect(profiler.GetFramesSnapshot().empty(), "Idle instrumentation should not create profiler frames.");
+			context.Expect(profiler.GetFrameListSnapshot().empty(), "Idle instrumentation should leave the lightweight frame list empty.");
 		});
 	}
 }

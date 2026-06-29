@@ -12,8 +12,10 @@ class ProfilerScope
 public:
 	ProfilerScope(const char* name, ProfilerModuleId moduleId, const char* taskLabel = nullptr)
 	{
-		Profiler::Instance().BeginSample(name, moduleId, taskLabel);
-		active = true;
+		// BeginSample returns false on the common idle path. Remember that
+		// result so the destructor can skip EndSample without touching the
+		// profiler mutex when no sample was pushed.
+		active = Profiler::Instance().BeginSample(name, moduleId, taskLabel);
 	}
 
 	~ProfilerScope()

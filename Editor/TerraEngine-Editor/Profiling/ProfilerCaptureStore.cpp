@@ -197,7 +197,7 @@ std::vector<TerraEngine::Profiling::ProfilerCaptureArtifact> ProfilerCaptureStor
 		}
 
 		TerraEngine::Profiling::ProfilerCaptureArtifact artifact;
-		TerraEngine::Profiling::TryReadCaptureArtifact(entry.path(), artifact);
+		TerraEngine::Profiling::TryReadCaptureArtifactMetadata(entry.path(), artifact);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (artifact.supported)
 		{
