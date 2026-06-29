@@ -284,7 +284,7 @@ void RegisterUISystemPreparationTests(TestRegistry& registry)
 		Object object = objects.createObject("UI Root");
 		Object objectHandle = objects.makeObjectHandle(object.EntityId());
 		context.Expect(TerraEngine::IsResolvedObjectIdentity(objects.validateObjectHandle(objectHandle)), "UI preparation objects should have a valid compact identity before runtime collection.");
-		UIComponent& component = *objects.AddComponent<UIComponent>(object.EntityId());
+		UIComponent& component = *objects.AddComponent<UIComponent>(object);
 		component.SetRoot(MakeRootWithChildren(4));
 		component.MarkDirty();
 		uiSystem.Update(1.0f / 60.0f);
@@ -348,7 +348,7 @@ void RegisterUISystemPreparationTests(TestRegistry& registry)
 		Object object = objects.createObject("Export UI Root");
 		Object objectHandle = objects.makeObjectHandle(object.EntityId());
 		context.Expect(TerraEngine::IsResolvedObjectIdentity(objects.validateObjectHandle(objectHandle)), "Export UI preparation should start from a valid compact identity.");
-		UIComponent& component = *objects.AddComponent<UIComponent>(object.EntityId());
+		UIComponent& component = *objects.AddComponent<UIComponent>(object);
 		component.SetRoot(root);
 		component.MarkDirty();
 

@@ -31,7 +31,7 @@ namespace TerraEngine::Tests {
 			const TerraEngine::Scene::TransactionResult result = TerraEngine::Scene::PreflightTransaction(fixture.objects, transaction);
 
 			context.Expect(result.status == TerraEngine::Scene::TransactionStatus::PreflightAccepted, "Valid preflight should be accepted.");
-			context.ExpectEqual(std::string("TransactionRoot"), fixture.objects.getObjectName(fixture.root.EntityId()), "Preflight should not mutate.");
+			context.ExpectEqual(std::string("TransactionRoot"), fixture.objects.getObjectName(fixture.root), "Preflight should not mutate.");
 		});
 	}
 }

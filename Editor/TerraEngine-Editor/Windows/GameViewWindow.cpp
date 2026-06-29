@@ -137,13 +137,13 @@ void GameViewWindow::OnGui() {
 	if (!hasPrefabModeSceneCameras)
 	{
 		auto& objectManager = ObjectManager::instance();
-		auto cameras = objectManager.getEntitiesWithComponents<Transform, CameraComponent>();
+		auto cameras = objectManager.getObjectsWithComponents<Transform, CameraComponent>();
 		hasCameras = !cameras.empty();
 		const std::size_t cameraCount = isAssetPrefabEditing ? std::min<std::size_t>(cameras.size(), 1u) : cameras.size();
 		// Iterate over the active camera snapshot; asset-prefab preview uses the
 		// first active prefab camera only so one camera owns the Game View output.
 		for (std::size_t cameraIndex = 0; cameraIndex < cameraCount; ++cameraIndex) {
-			entt::entity obj = cameras[cameraIndex];
+			Object obj = cameras[cameraIndex];
 			Transform* transform = objectManager.GetComponent<Transform>(obj);
 			CameraComponent* camera = objectManager.GetComponent<CameraComponent>(obj);
 			if (transform == nullptr || camera == nullptr)

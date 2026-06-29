@@ -42,7 +42,7 @@ namespace TerraEngine::Tests {
 			Object object = ObjectManager::instance().createObject("Cache Target");
 			const std::uint64_t beforeGeneration = ObjectManager::instance().getObjectComponentGeneration(object);
 
-			ObjectManager::instance().AddComponent<ScriptComponent>(object.EntityId());
+			ObjectManager::instance().AddComponent<ScriptComponent>(object);
 			ObjectManager::instance().notifyObjectStructureChanged(object);
 			const std::uint64_t afterGeneration = ObjectManager::instance().getObjectComponentGeneration(object);
 
@@ -65,7 +65,7 @@ namespace TerraEngine::Tests {
 			Object object = ObjectManager::instance().createObject("Binding Target");
 			const std::uint64_t beforeGeneration = ObjectManager::instance().getObjectBindingGeneration(object);
 
-			ScriptComponent& component = *ObjectManager::instance().AddComponent<ScriptComponent>(object.EntityId());
+			ScriptComponent& component = *ObjectManager::instance().AddComponent<ScriptComponent>(object);
 			component.AddBinding(TerraEngine::EMPTY_UUID, "Game.BindingProbe");
 			ObjectManager::instance().notifyObjectStructureChanged(object);
 			const std::uint64_t afterGeneration = ObjectManager::instance().getObjectBindingGeneration(object);

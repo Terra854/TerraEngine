@@ -595,7 +595,7 @@ void ScriptCompilationSubsystem::SynchronizeBoundScriptTypesFromAssets()
 	auto& assetDatabase = AssetDatabase::Instance();
 	auto& objectManager = ObjectManager::instance();
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (entt::entity object : objectManager.getEntitiesWithComponents<ScriptComponent>())
+	for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>())
 	{
 		ScriptComponent* scriptComponent = objectManager.GetComponent<ScriptComponent>(object);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

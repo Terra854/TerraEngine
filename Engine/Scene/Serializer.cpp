@@ -10,20 +10,21 @@
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-// SerializeObjectRecursive is the entity-based scene snapshot path. It reads
-// authoritative state through ObjectManager so serialization does not need the
-// legacy mutable Object facade.
-nlohmann::json SerializeObjectRecursive(entt::entity entity) {
+// SerializeObjectRecursive snapshots authored scene state through the canonical
+// Object handle path while still letting reflection read the underlying EnTT
+// registry needed for component serialization.
+nlohmann::json SerializeObjectRecursive(Object object) {
 	ObjectManager& objManager = ObjectManager::instance();
 	entt::registry& enttRegistry = objManager.getRegistry();
+	const entt::entity entity = object.EntityId();
 	nlohmann::json objJson;
-	objJson["name"] = objManager.getObjectName(entity);
-	objJson["tag"] = objManager.getObjectTag(entity);
-	objJson["layer"] = objManager.getObjectLayer(entity);
-	objJson["active"] = objManager.isObjectActive(entity);
-	objJson["isStatic"] = objManager.isObjectStatic(entity);
+	objJson["name"] = objManager.getObjectName(object);
+	objJson["tag"] = objManager.getObjectTag(object);
+	objJson["layer"] = objManager.getObjectLayer(object);
+	objJson["active"] = objManager.isObjectActive(object);
+	objJson["isStatic"] = objManager.isObjectStatic(object);
 	
-	auto uuid = objManager.getUUID(entity);
+	auto uuid = objManager.getUUID(object);
 	objJson["uuid"] = TerraEngine::ToHexString(uuid);
 	
 	objJson["components"] = nlohmann::json::object();
@@ -79,11 +80,11 @@ nlohmann::json SerializeObjectRecursive(entt::entity entity) {
 		}
 	}
 	
-	auto children = objManager.getChildEntities(entity);
+	auto children = objManager.getChildren(object);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!children.empty()) {
 		objJson["children"] = nlohmann::json::array();
-		for (entt::entity child : children) {
+		for (Object child : children) {
 			objJson["children"].push_back(SerializeObjectRecursive(child));
 		}
 	}
@@ -95,7 +96,11 @@ nlohmann::json Serializer::SerializeObject(entt::entity entity) {
 	// Acquire an exclusive lock once for the entire graph to ensure a consistent
 	// snapshot while the recursion proceeds without further locking.
 	std::lock_guard lock(ComponentAccessRegistryMutex());
-	return SerializeObjectRecursive(entity);
+	if (std::optional<Object> object = ObjectManager::instance().getObject(entity))
+	{
+		return SerializeObjectRecursive(*object);
+	}
+	return nlohmann::json::object();
 }
 
 nlohmann::json Serializer::SerializeObject(Object& obj) {
@@ -174,17 +179,20 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 	if (hasUuid) {
 		// Force the newly created object to use the original identity from the
 		// JSON document instead of its automatically generated transient UUID.
-		objManager.UpdateEntityUUID(entity, uuid);
+		objManager.UpdateObjectUUID(obj, uuid);
 	}
 
-	objManager.setObjectTag(entity, json.value("tag", "Untagged"));
-	objManager.setObjectLayer(entity, json.value("layer", "Default"));
-	objManager.setObjectActive(entity, json.value("active", true));
-	objManager.setObjectStatic(entity, json.value("isStatic", false));
+	objManager.setObjectTag(obj, json.value("tag", "Untagged"));
+	objManager.setObjectLayer(obj, json.value("layer", "Default"));
+	objManager.setObjectActive(obj, json.value("active", true));
+	objManager.setObjectStatic(obj, json.value("isStatic", false));
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (parent) {
-		objManager.setParent(entity, *parent);
+		if (std::optional<Object> parentObject = objManager.getObject(*parent))
+		{
+			objManager.setParent(obj, parentObject);
+		}
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -200,7 +208,7 @@ entt::entity Serializer::DeserializeObjectEntity(const nlohmann::json& json, std
 				if (functions.entityAddComponent)
 				{
 					functions.entityAddComponent(enttRegistry, entity);
-					objManager.notifyObjectStructureChanged(entity);
+					objManager.notifyObjectStructureChanged(obj);
 				}
 
 					TerraEngine::Reflection::Type type = functions.reflectionType;

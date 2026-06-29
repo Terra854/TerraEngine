@@ -583,9 +583,9 @@ void SchedulerDiagnosticsWindow::DrawScriptingSummary()
 				ImGui::TableSetColumnIndex(0);
 				std::string objectName = "Object " + std::to_string(record.objectId);
 				const entt::entity objectEntity = static_cast<entt::entity>(record.objectId);
-				if (ObjectManager::instance().isEntityValid(objectEntity))
+				if (std::optional<Object> object = ObjectManager::instance().getObject(objectEntity))
 				{
-					objectName = ObjectManager::instance().getObjectName(objectEntity);
+					objectName = ObjectManager::instance().getObjectName(*object);
 				}
 				ImGui::TextUnformatted(objectName.c_str());
 

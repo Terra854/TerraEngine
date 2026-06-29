@@ -92,7 +92,7 @@ namespace TerraEngine::Tests {
 			objects.clear();
 			ComponentRegistry::RegisterAllComponents();
 			Object target = objects.createObject("Mover");
-			const TerraEngine::UUID targetId = objects.getUUID(target.EntityId());
+			const TerraEngine::UUID targetId = objects.getUUID(target);
 
 			TerraEngine::Scene::SceneMutationQueue queue;
 			TerraEngine::Scene::SceneMutationRequest request;
@@ -104,7 +104,7 @@ namespace TerraEngine::Tests {
 			queue.Enqueue(request);
 
 			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
-			const Transform* transform = objects.GetComponent<Transform>(target.EntityId());
+			const Transform* transform = objects.GetComponent<Transform>(target);
 
 			context.Expect(result.applied, "Component update mutations should apply through the scene mutation queue.");
 			context.Expect(transform != nullptr, "The test object should still own its transform.");
@@ -119,7 +119,7 @@ namespace TerraEngine::Tests {
 			objects.clear();
 			ComponentRegistry::RegisterAllComponents();
 			Object target = objects.createObject("Typed Mover");
-			const TerraEngine::UUID targetId = objects.getUUID(target.EntityId());
+			const TerraEngine::UUID targetId = objects.getUUID(target);
 
 			TerraEngine::Scene::SceneMutationQueue queue;
 			TerraEngine::Scene::SceneMutationRequest request;
@@ -134,7 +134,7 @@ namespace TerraEngine::Tests {
 			queue.Enqueue(request);
 
 			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
-			const Transform* transform = objects.GetComponent<Transform>(target.EntityId());
+			const Transform* transform = objects.GetComponent<Transform>(target);
 
 			context.Expect(result.applied, "Typed component update mutations should apply through the scene mutation queue.");
 			context.ExpectEqual(static_cast<std::size_t>(1), result.typedMutationCount, "Typed component updates should be counted separately from JSON fallbacks.");
@@ -150,7 +150,7 @@ namespace TerraEngine::Tests {
 			objects.clear();
 			ComponentRegistry::RegisterAllComponents();
 			Object target = objects.createObject("Json Mover");
-			const TerraEngine::UUID targetId = objects.getUUID(target.EntityId());
+			const TerraEngine::UUID targetId = objects.getUUID(target);
 
 			TerraEngine::Scene::SceneMutationQueue queue;
 			TerraEngine::Scene::SceneMutationRequest request;
@@ -163,7 +163,7 @@ namespace TerraEngine::Tests {
 			queue.Enqueue(request);
 
 			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
-			const Transform* transform = objects.GetComponent<Transform>(target.EntityId());
+			const Transform* transform = objects.GetComponent<Transform>(target);
 
 			context.Expect(result.applied, "Legacy JSON component payloads should remain supported.");
 			context.ExpectEqual(static_cast<std::size_t>(0), result.typedMutationCount, "JSON component updates should not increment typed counters.");
@@ -179,7 +179,7 @@ namespace TerraEngine::Tests {
 			objects.clear();
 			ComponentRegistry::RegisterAllComponents();
 			Object target = objects.createObject("Coalesced Mover");
-			const TerraEngine::UUID targetId = objects.getUUID(target.EntityId());
+			const TerraEngine::UUID targetId = objects.getUUID(target);
 
 			TerraEngine::Scene::SceneMutationQueue queue;
 			TerraEngine::Scene::SceneMutationRequest first;
@@ -200,7 +200,7 @@ namespace TerraEngine::Tests {
 
 			const std::vector<TerraEngine::Scene::SceneMutationRequest> pending = queue.PendingRequests();
 			const TerraEngine::Scene::SceneMutationBatchResult result = queue.Apply(objects);
-			const Transform* transform = objects.GetComponent<Transform>(target.EntityId());
+			const Transform* transform = objects.GetComponent<Transform>(target);
 
 			context.ExpectEqual(static_cast<std::size_t>(1), pending.size(), "Same-key writes should coalesce before validation.");
 			context.ExpectEqual(static_cast<std::size_t>(1), result.coalescedMutationCount, "Coalesced write count should report removed duplicate payloads.");

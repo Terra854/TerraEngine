@@ -71,32 +71,9 @@ Object ObjectManager::makeHandle(entt::entity entityId)
 	return makeObjectHandle(entityId);
 }
 
-std::optional<entt::entity> ObjectManager::resolveEntity(const Object& reference) const
+bool ObjectManager::isObjectValid(const Object& object) const
 {
-	const entt::entity entityId = static_cast<entt::entity>(reference.entityValue);
-	if (reference.IsEmpty() || !registry.valid(entityId))
-	{
-		return std::nullopt;
-	}
-	const auto generation = generationByEntity.find(entityId);
-	const auto uuid = entityToUuid.find(entityId);
-	if (generation == generationByEntity.end() || uuid == entityToUuid.end())
-	{
-		return std::nullopt;
-	}
-	if (TerraEngine::CompressObjectGeneration(generation->second) != reference.generation)
-	{
-		return std::nullopt;
-	}
-	if (TerraEngine::MakeObjectStableHash(uuid->second) != reference.stableIdHash)
-	{
-		return std::nullopt;
-	}
-	return entityId;
-}
-
-bool ObjectManager::isEntityValid(entt::entity entityId) const
-{
+	const entt::entity entityId = object.EntityId();
 	return registry.valid(entityId);
 }
 
@@ -173,7 +150,7 @@ void ObjectManager::rebuildRuntimeActiveMembershipCache()
 		TerraEngine::Scene::RuntimeActiveMembership membership;
 		membership.entity = entityId;
 		membership.objectHandle = makeObjectHandle(entityId);
-		membership.objectId = getUUID(entityId);
+		membership.objectId = getEntityUUID(entityId);
 		membership.objectActive = metadata.active && registry.any_of<TerraEngine::ActiveObjectTag>(entityId);
 		membership.componentActiveMask = membership.objectActive ? 1u : 0u;
 		membership.membershipRevision = runtimeActiveMembershipRevision;
@@ -208,11 +185,7 @@ const std::vector<TerraEngine::Scene::RuntimeActiveMembership>& ObjectManager::G
 
 void ObjectManager::MarkObjectTransformDirty(const Object& obj)
 {
-	MarkObjectTransformDirty(obj.EntityId());
-}
-
-void ObjectManager::MarkObjectTransformDirty(entt::entity entityId)
-{
+	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
 		return;
@@ -268,15 +241,6 @@ Object ObjectManager::createObject(const std::string& name) {
 	return object;
 }
 
-void ObjectManager::removeObject(entt::entity entityId)
-{
-	if (!registry.valid(entityId))
-	{
-		return;
-	}
-	removeObject(makeHandle(entityId));
-}
-
 // Remove an Object
 // ObjectManager::removeObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::removeObject(Object obj) {
@@ -288,7 +252,7 @@ void ObjectManager::removeObject(Object obj) {
 	const entt::entity entityId = obj.EntityId();
 	if (registry.valid(entityId))
 	{
-		MarkObjectTransformDirty(entityId);
+		MarkObjectTransformDirty(obj);
 	}
 	if (auto metadataIter = metadataMap.find(entityId); metadataIter != metadataMap.end())
 	{
@@ -399,7 +363,7 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 				return cached->second;
 			}
 			Transform local = readTransform(entityId);
-			entt::entity p = getParentEntity(entityId);
+			entt::entity p = getParentEntityInternal(entityId);
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (p != entt::null && visiting.insert(entityId).second)
 			{
@@ -457,30 +421,9 @@ bool ObjectManager::setParent(Object child, std::optional<Object> parent)
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (onModified) onModified();
 	notifyHierarchyDirty();
-	MarkObjectTransformDirty(makeHandle(childId));
+	MarkObjectTransformDirty(child);
 
 	return true;
-}
-
-bool ObjectManager::setParent(entt::entity child, std::optional<entt::entity> parent)
-{
-	if (ReportWorkerObjectMutation("ObjectManager.setParent", "Worker code attempted to reparent live hierarchy directly."))
-	{
-		return false;
-	}
-	if (!registry.valid(child))
-	{
-		return false;
-	}
-	const entt::entity parentId = parent.value_or(entt::null);
-	if (parentId != entt::null && !registry.valid(parentId))
-	{
-		return false;
-	}
-	std::optional<Object> parentObject = parentId == entt::null
-		? std::nullopt
-		: std::optional<Object>(makeHandle(parentId));
-	return setParent(makeHandle(child), parentObject);
 }
 
 // ObjectManager::getChildren is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -510,25 +453,9 @@ std::vector<Object> ObjectManager::getChildren(const Object& parent)
 	// and runtime summaries. Sort by UUID instead of transient EnTT ids so
 	// reloads and undo sessions keep the same parent-before-child ordering.
 	std::sort(children.begin(), children.end(), [this](const Object& lhs, const Object& rhs) {
-		return TerraEngine::ToHexString(getUUID(lhs.EntityId())) < TerraEngine::ToHexString(getUUID(rhs.EntityId()));
+		return TerraEngine::ToHexString(getUUID(lhs)) < TerraEngine::ToHexString(getUUID(rhs));
 	});
 	return children;
-}
-
-std::vector<entt::entity> ObjectManager::getChildEntities(entt::entity parent) const
-{
-	std::vector<entt::entity> entities;
-	if (!registry.valid(parent))
-	{
-		return entities;
-	}
-	std::vector<Object> children = const_cast<ObjectManager*>(this)->getChildren(const_cast<ObjectManager*>(this)->makeHandle(parent));
-	entities.reserve(children.size());
-	for (const Object& child : children)
-	{
-		entities.push_back(child.EntityId());
-	}
-	return entities;
 }
 
 // ObjectManager::getRootObjects is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -549,31 +476,25 @@ std::vector<Object> ObjectManager::getRootObjects()
 	// Root order is part of the authored scene surface, so make it independent
 	// from unordered_map bucket order and stable across editor/runtime/export.
 	std::sort(roots.begin(), roots.end(), [this](const Object& lhs, const Object& rhs) {
-		return TerraEngine::ToHexString(getUUID(lhs.EntityId())) < TerraEngine::ToHexString(getUUID(rhs.EntityId()));
+		return TerraEngine::ToHexString(getUUID(lhs)) < TerraEngine::ToHexString(getUUID(rhs));
 	});
 	return roots;
 }
 
-std::vector<entt::entity> ObjectManager::getRootEntities() const
+std::optional<Object> ObjectManager::getParent(const Object& child) const
 {
-	std::vector<Object> roots = const_cast<ObjectManager*>(this)->getRootObjects();
-	std::vector<entt::entity> entities;
-	entities.reserve(roots.size());
-	for (const Object& root : roots)
+	const entt::entity parentId = getParentEntityInternal(child.EntityId());
+	if (parentId == entt::null || !registry.valid(parentId))
 	{
-		entities.push_back(root.EntityId());
+		return std::nullopt;
 	}
-	return entities;
+	return const_cast<ObjectManager*>(this)->makeHandle(parentId);
 }
 
 // ObjectManager::getObjectName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ObjectManager::getObjectName(const Object& obj) const
 {
-	return getObjectName(obj.EntityId());
-}
-
-std::string ObjectManager::getObjectName(entt::entity entityId) const
-{
+	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
 		return "Unnamed";
@@ -585,17 +506,29 @@ std::string ObjectManager::getObjectName(entt::entity entityId) const
 // ObjectManager::setObjectName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::setObjectName(const Object& obj, const std::string& name)
 {
-	setObjectName(obj.EntityId(), name);
+	const entt::entity entityId = obj.EntityId();
+	if (!registry.valid(entityId))
+	{
+		return;
+	}
+	if (auto it = metadataMap.find(entityId); it != metadataMap.end())
+	{
+		if (it->second.name == name)
+		{
+			return;
+		}
+		removeFromLookupBucket(nameIndex, it->second.name, entityId);
+		it->second.name = name;
+		++it->second.metadataGeneration;
+		nameIndex[name].push_back(entityId);
+		if (onModified) onModified();
+	}
 }
 
-// ObjectManager::getObjectTag is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+// ObjectManager::setObjectActive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ObjectManager::getObjectTag(const Object& obj) const
 {
-	return getObjectTag(obj.EntityId());
-}
-
-std::string ObjectManager::getObjectTag(entt::entity entityId) const
-{
+	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
 		return "Untagged";
@@ -604,20 +537,30 @@ std::string ObjectManager::getObjectTag(entt::entity entityId) const
 	return iter != metadataMap.end() ? iter->second.tag : "Untagged";
 }
 
-// ObjectManager::setObjectTag is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::setObjectTag(const Object& obj, const std::string& tag)
 {
-	setObjectTag(obj.EntityId(), tag);
+	const entt::entity entityId = obj.EntityId();
+	if (!registry.valid(entityId))
+	{
+		return;
+	}
+	if (auto it = metadataMap.find(entityId); it != metadataMap.end())
+	{
+		if (it->second.tag == tag)
+		{
+			return;
+		}
+		removeFromLookupBucket(tagIndex, it->second.tag, entityId);
+		it->second.tag = tag;
+		++it->second.metadataGeneration;
+		tagIndex[tag].push_back(entityId);
+		if (onModified) onModified();
+	}
 }
 
-// ObjectManager::getObjectLayer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string ObjectManager::getObjectLayer(const Object& obj) const
 {
-	return getObjectLayer(obj.EntityId());
-}
-
-std::string ObjectManager::getObjectLayer(entt::entity entityId) const
-{
+	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
 		return "Default";
@@ -626,20 +569,28 @@ std::string ObjectManager::getObjectLayer(entt::entity entityId) const
 	return iter != metadataMap.end() ? iter->second.layer : "Default";
 }
 
-// ObjectManager::setObjectLayer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::setObjectLayer(const Object& obj, const std::string& layer)
 {
-	setObjectLayer(obj.EntityId(), layer);
+	const entt::entity entityId = obj.EntityId();
+	if (!registry.valid(entityId))
+	{
+		return;
+	}
+	if (auto it = metadataMap.find(entityId); it != metadataMap.end())
+	{
+		if (it->second.layer == layer)
+		{
+			return;
+		}
+		it->second.layer = layer;
+		++it->second.metadataGeneration;
+		if (onModified) onModified();
+	}
 }
 
-// ObjectManager::isObjectActive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ObjectManager::isObjectActive(const Object& obj) const
 {
-	return isObjectActive(obj.EntityId());
-}
-
-bool ObjectManager::isObjectActive(entt::entity entityId) const
-{
+	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
 		return false;
@@ -648,7 +599,6 @@ bool ObjectManager::isObjectActive(entt::entity entityId) const
 	return iter != metadataMap.end() ? iter->second.active : false;
 }
 
-// ObjectManager::setObjectActive is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ObjectManager::setObjectActive(const Object& obj, bool active)
 {
 	const entt::entity entityId = obj.EntityId();
@@ -681,81 +631,10 @@ void ObjectManager::setObjectActive(const Object& obj, bool active)
 	}
 }
 
-void ObjectManager::setObjectActive(entt::entity entityId, bool active)
-{
-	if (!registry.valid(entityId))
-	{
-		return;
-	}
-	setObjectActive(makeHandle(entityId), active);
-}
-
-void ObjectManager::setObjectLayer(entt::entity entityId, const std::string& layer)
-{
-	if (!registry.valid(entityId))
-	{
-		return;
-	}
-	if (auto it = metadataMap.find(entityId); it != metadataMap.end())
-	{
-		if (it->second.layer == layer)
-		{
-			return;
-		}
-		it->second.layer = layer;
-		++it->second.metadataGeneration;
-		if (onModified) onModified();
-	}
-}
-
-void ObjectManager::setObjectTag(entt::entity entityId, const std::string& tag)
-{
-	if (!registry.valid(entityId))
-	{
-		return;
-	}
-	if (auto it = metadataMap.find(entityId); it != metadataMap.end())
-	{
-		if (it->second.tag == tag)
-		{
-			return;
-		}
-		removeFromLookupBucket(tagIndex, it->second.tag, entityId);
-		it->second.tag = tag;
-		++it->second.metadataGeneration;
-		tagIndex[tag].push_back(entityId);
-		if (onModified) onModified();
-	}
-}
-
-void ObjectManager::setObjectName(entt::entity entityId, const std::string& name)
-{
-	if (!registry.valid(entityId))
-	{
-		return;
-	}
-	if (auto it = metadataMap.find(entityId); it != metadataMap.end())
-	{
-		if (it->second.name == name)
-		{
-			return;
-		}
-		removeFromLookupBucket(nameIndex, it->second.name, entityId);
-		it->second.name = name;
-		++it->second.metadataGeneration;
-		nameIndex[name].push_back(entityId);
-		if (onModified) onModified();
-	}
-}
-
 // ObjectManager::isObjectStatic is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool ObjectManager::isObjectStatic(const Object& obj) const
 {
-	return isObjectStatic(obj.EntityId());
-}
-
-bool ObjectManager::isObjectStatic(entt::entity entityId) const
-{
+	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
 		return false;
@@ -782,15 +661,6 @@ void ObjectManager::setObjectStatic(const Object& obj, bool isStatic)
 	}
 }
 
-void ObjectManager::setObjectStatic(entt::entity entityId, bool isStatic)
-{
-	if (!registry.valid(entityId))
-	{
-		return;
-	}
-	setObjectStatic(makeHandle(entityId), isStatic);
-}
-
 void ObjectManager::notifyObjectStructureChanged(const Object& obj)
 {
 	if (!registry.valid(obj.EntityId()))
@@ -810,17 +680,9 @@ void ObjectManager::notifyObjectStructureChanged(const Object& obj)
 	if (onModified) onModified();
 }
 
-void ObjectManager::notifyObjectStructureChanged(entt::entity entityId)
+std::uint64_t ObjectManager::GetObjectTransformRevision(const Object& object) const
 {
-	if (!registry.valid(entityId))
-	{
-		return;
-	}
-	notifyObjectStructureChanged(makeHandle(entityId));
-}
-
-std::uint64_t ObjectManager::GetObjectTransformRevision(entt::entity entityId) const
-{
+	const entt::entity entityId = object.EntityId();
 	if (auto it = transformRevisionByEntity.find(entityId); it != transformRevisionByEntity.end())
 	{
 		return it->second;
@@ -828,8 +690,9 @@ std::uint64_t ObjectManager::GetObjectTransformRevision(entt::entity entityId) c
 	return 0;
 }
 
-std::uint64_t ObjectManager::GetObjectSpatialRevision(entt::entity entityId) const
+std::uint64_t ObjectManager::GetObjectSpatialRevision(const Object& object) const
 {
+	const entt::entity entityId = object.EntityId();
 	if (auto it = spatialRevisionByEntity.find(entityId); it != spatialRevisionByEntity.end())
 	{
 		return it->second;
@@ -839,24 +702,7 @@ std::uint64_t ObjectManager::GetObjectSpatialRevision(entt::entity entityId) con
 
 std::uint64_t ObjectManager::getObjectMetadataGeneration(const Object& obj) const
 {
-	return getObjectMetadataGeneration(obj.EntityId());
-}
-
-std::uint64_t ObjectManager::getObjectLifetimeGeneration(entt::entity entityId) const
-{
-	if (!registry.valid(entityId))
-	{
-		return 0;
-	}
-	if (auto it = generationByEntity.find(entityId); it != generationByEntity.end())
-	{
-		return it->second;
-	}
-	return 0;
-}
-
-std::uint64_t ObjectManager::getObjectMetadataGeneration(entt::entity entityId) const
-{
+	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
 		return 0;
@@ -868,13 +714,23 @@ std::uint64_t ObjectManager::getObjectMetadataGeneration(entt::entity entityId) 
 	return 0;
 }
 
-std::uint64_t ObjectManager::getObjectComponentGeneration(const Object& obj) const
+std::uint64_t ObjectManager::getObjectLifetimeGeneration(const Object& obj) const
 {
-	return getObjectComponentGeneration(obj.EntityId());
+	const entt::entity entityId = obj.EntityId();
+	if (!registry.valid(entityId))
+	{
+		return 0;
+	}
+	if (auto it = generationByEntity.find(entityId); it != generationByEntity.end())
+	{
+		return it->second;
+	}
+	return 0;
 }
 
-std::uint64_t ObjectManager::getObjectComponentGeneration(entt::entity entityId) const
+std::uint64_t ObjectManager::getObjectComponentGeneration(const Object& obj) const
 {
+	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
 		return 0;
@@ -888,11 +744,7 @@ std::uint64_t ObjectManager::getObjectComponentGeneration(entt::entity entityId)
 
 std::uint64_t ObjectManager::getObjectBindingGeneration(const Object& obj) const
 {
-	return getObjectBindingGeneration(obj.EntityId());
-}
-
-std::uint64_t ObjectManager::getObjectBindingGeneration(entt::entity entityId) const
-{
+	const entt::entity entityId = obj.EntityId();
 	if (!registry.valid(entityId))
 	{
 		return 0;
@@ -906,15 +758,6 @@ std::uint64_t ObjectManager::getObjectBindingGeneration(entt::entity entityId) c
 
 // ObjectManager::FindObjectByName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<Object> ObjectManager::FindObjectByName(std::string_view name) const
-{
-	if (std::optional<entt::entity> entityId = FindEntityByName(name))
-	{
-		return const_cast<ObjectManager*>(this)->makeHandle(*entityId);
-	}
-	return std::nullopt;
-}
-
-std::optional<entt::entity> ObjectManager::FindEntityByName(std::string_view name) const
 {
 	auto bucket = nameIndex.find(std::string(name));
 	if (bucket == nameIndex.end())
@@ -932,7 +775,7 @@ std::optional<entt::entity> ObjectManager::FindEntityByName(std::string_view nam
 		auto metadata = metadataMap.find(entityId);
 		if (metadata != metadataMap.end() && metadata->second.name == name)
 		{
-			return entityId;
+			return const_cast<ObjectManager*>(this)->makeHandle(entityId);
 		}
 	}
 
@@ -941,15 +784,6 @@ std::optional<entt::entity> ObjectManager::FindEntityByName(std::string_view nam
 
 // ObjectManager::FindObjectByTag is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<Object> ObjectManager::FindObjectByTag(std::string_view tag) const
-{
-	if (std::optional<entt::entity> entityId = FindEntityByTag(tag))
-	{
-		return const_cast<ObjectManager*>(this)->makeHandle(*entityId);
-	}
-	return std::nullopt;
-}
-
-std::optional<entt::entity> ObjectManager::FindEntityByTag(std::string_view tag) const
 {
 	auto bucket = tagIndex.find(std::string(tag));
 	if (bucket == tagIndex.end())
@@ -967,7 +801,7 @@ std::optional<entt::entity> ObjectManager::FindEntityByTag(std::string_view tag)
 		auto metadata = metadataMap.find(entityId);
 		if (metadata != metadataMap.end() && metadata->second.active && metadata->second.tag == tag)
 		{
-			return entityId;
+			return const_cast<ObjectManager*>(this)->makeHandle(entityId);
 		}
 	}
 
@@ -987,19 +821,10 @@ std::optional<Object> ObjectManager::getObject(entt::entity id)
 // ObjectManager::getObject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::optional<Object> ObjectManager::getObject(const TerraEngine::UUID& id)
 {
-	if (std::optional<entt::entity> entityId = getEntity(id))
-	{
-		return getObject(*entityId);
-	}
-	return std::nullopt;
-}
-
-std::optional<entt::entity> ObjectManager::getEntity(const TerraEngine::UUID& id) const
-{
 	auto it = uuidToEntity.find(id);
 	if (it != uuidToEntity.end() && registry.valid(it->second))
 	{
-		return it->second;
+		return makeHandle(it->second);
 	}
 	return std::nullopt;
 }
@@ -1067,20 +892,14 @@ std::optional<Object> ObjectManager::resolveObjectHandle(const Object& reference
 void ObjectManager::SortObjectsByStableId(std::vector<Object>& objects)
 {
 	std::sort(objects.begin(), objects.end(), [this](const Object& lhs, const Object& rhs) {
-		return TerraEngine::ToHexString(getUUID(lhs.EntityId())) < TerraEngine::ToHexString(getUUID(rhs.EntityId()));
-	});
-}
-
-void ObjectManager::SortEntitiesByStableId(std::vector<entt::entity>& entities)
-{
-	std::sort(entities.begin(), entities.end(), [this](entt::entity lhs, entt::entity rhs) {
 		return TerraEngine::ToHexString(getUUID(lhs)) < TerraEngine::ToHexString(getUUID(rhs));
 	});
 }
 
-// ObjectManager::UpdateEntityUUID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void ObjectManager::UpdateEntityUUID(entt::entity entity, const TerraEngine::UUID& newId)
+// ObjectManager::UpdateObjectUUID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void ObjectManager::UpdateObjectUUID(const Object& object, const TerraEngine::UUID& newId)
 {
+	const entt::entity entity = object.EntityId();
 	if (!registry.valid(entity)) return;
 
 	// Allows the identity of an existing entity to be swapped. Primarily used
@@ -1144,8 +963,8 @@ bool ObjectManager::isDescendant(entt::entity ancestor, entt::entity potentialCh
 	return false;
 }
 
-// ObjectManager::getParentEntity is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-entt::entity ObjectManager::getParentEntity(entt::entity child) const
+// ObjectManager::getParentEntityInternal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+entt::entity ObjectManager::getParentEntityInternal(entt::entity child) const
 {
 	auto iter = parentMap.find(child);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1156,8 +975,12 @@ entt::entity ObjectManager::getParentEntity(entt::entity child) const
 	return entt::null;
 }
 
-// ObjectManager::getUUID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-TerraEngine::UUID ObjectManager::getUUID(entt::entity entity)
+TerraEngine::UUID ObjectManager::getUUID(const Object& object) const
+{
+	return getEntityUUID(object.EntityId());
+}
+
+TerraEngine::UUID ObjectManager::getEntityUUID(entt::entity entity) const
 {
 	if (auto it = entityToUuid.find(entity); it != entityToUuid.end())
 	{

@@ -106,7 +106,7 @@ namespace TerraEngine::Tests {
 			SkyComponent::registerType();
 
 			Object skyObject = ObjectManager::instance().createObject("Sky");
-			SkyComponent& sky = *ObjectManager::instance().AddComponent<SkyComponent>(skyObject.EntityId());
+			SkyComponent& sky = *ObjectManager::instance().AddComponent<SkyComponent>(skyObject);
 			SetComponentProperty(sky, "sourceAsset", std::string("Textures/Sky/Test.tetf"));
 
 			nlohmann::json objectJson = Serializer::SerializeObject(skyObject);
@@ -126,7 +126,7 @@ namespace TerraEngine::Tests {
 			context.Expect(LoadAndActivateScene(scenePath), "Scene with no initial objects should load before save verification.");
 
 			Object skyObject = ObjectManager::instance().createObject("Saved Sky");
-			SkyComponent& sky = *ObjectManager::instance().AddComponent<SkyComponent>(skyObject.EntityId());
+			SkyComponent& sky = *ObjectManager::instance().AddComponent<SkyComponent>(skyObject);
 			SetComponentProperty(sky, "sourceAsset", std::string("Textures/Sky/Saved.tetf"));
 			SceneManager::Instance().ForceMarkActiveSceneDirty();
 			context.Expect(SceneManager::Instance().SaveScene(), "Saving a scene with SkyComponent should succeed.");
@@ -164,7 +164,7 @@ namespace TerraEngine::Tests {
 				MakeSceneJson(nlohmann::json::array({ MakeObjectJson(MakeUuid(3), "Plain Object") }), sceneSettings));
 			context.Expect(LoadAndActivateScene(scenePath), "Scene with obsolete sceneSettings.sky should still load.");
 
-			const std::vector<entt::entity> skyObjects = ObjectManager::instance().getEntitiesWithComponents<SkyComponent>();
+			const std::vector<Object> skyObjects = ObjectManager::instance().getObjectsWithComponents<SkyComponent>();
 			context.Expect(skyObjects.empty(), "Obsolete sceneSettings.sky must not create a SkyComponent.");
 			context.Expect(!SceneManager::Instance().HasActiveSkyComponent(), "No SkyComponent should leave the active sky component absent.");
 			ResetSceneState();
@@ -213,7 +213,7 @@ namespace TerraEngine::Tests {
 			for (int cycle = 1; cycle <= 10; ++cycle)
 			{
 				context.Expect(LoadAndActivateScene(scenePath), "SkyComponent scene should load for every edit-save-reload cycle.");
-				std::vector<entt::entity> skyObjects = ObjectManager::instance().getEntitiesWithComponents<SkyComponent>();
+				std::vector<Object> skyObjects = ObjectManager::instance().getObjectsWithComponents<SkyComponent>();
 				context.ExpectEqual(static_cast<std::size_t>(1), skyObjects.size(), "Exactly one SkyComponent should exist during edit-save-reload.");
 				SkyComponent* sky = ObjectManager::instance().GetComponent<SkyComponent>(skyObjects.front());
 				context.Expect(sky != nullptr, "Sky object should expose SkyComponent during edit-save-reload.");

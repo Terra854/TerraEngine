@@ -389,44 +389,45 @@ namespace TerraEngine::Scene {
 			case SceneMutationOperation::CreateObject:
 			{
 				Object created = objects.createObject(request.displayName.empty() ? "Object" : request.displayName);
-				result.createdObjectId = objects.getUUID(created.EntityId());
+				result.createdObjectId = objects.getUUID(created);
 				if (request.parentObjectId != TerraEngine::EMPTY_UUID)
 				{
-					if (auto parent = objects.getEntity(request.parentObjectId))
+					if (auto parent = objects.getObject(request.parentObjectId))
 					{
-						objects.setParent(created.EntityId(), *parent);
+						objects.setParent(created, parent);
 					}
 				}
 				break;
 			}
 			case SceneMutationOperation::DeleteObject:
-				if (auto target = objects.getEntity(request.targetObjectId))
+				if (auto target = objects.getObject(request.targetObjectId))
 				{
 					objects.removeObject(*target);
 				}
 				break;
 			case SceneMutationOperation::ReparentObject:
-				if (auto target = objects.getEntity(request.targetObjectId))
+				if (auto target = objects.getObject(request.targetObjectId))
 				{
-					std::optional<entt::entity> parent;
+					std::optional<Object> parent;
 					if (request.parentObjectId != TerraEngine::EMPTY_UUID)
 					{
-						parent = objects.getEntity(request.parentObjectId);
+						parent = objects.getObject(request.parentObjectId);
 					}
 					objects.setParent(*target, parent);
 				}
 				break;
 			case SceneMutationOperation::AddComponent:
-				if (auto target = objects.getEntity(request.targetObjectId))
+				if (auto target = objects.getObject(request.targetObjectId))
 				{
 					std::lock_guard registryLock(ComponentAccessRegistryMutex());
 					auto& registry = ComponentAccessRegistry();
 					if (auto component = registry.find(request.componentName); component != registry.end())
 					{
 						entt::registry& enttRegistry = objects.getRegistry();
-						if (!component->second.entityHasComponent(enttRegistry, *target))
+						const entt::entity targetEntity = target->EntityId();
+						if (!component->second.entityHasComponent(enttRegistry, targetEntity))
 						{
-							component->second.entityAddComponent(enttRegistry, *target);
+							component->second.entityAddComponent(enttRegistry, targetEntity);
 							objects.notifyObjectStructureChanged(*target);
 						}
 					}
@@ -437,16 +438,17 @@ namespace TerraEngine::Scene {
 				}
 				break;
 			case SceneMutationOperation::RemoveComponent:
-				if (auto target = objects.getEntity(request.targetObjectId))
+				if (auto target = objects.getObject(request.targetObjectId))
 				{
 					std::lock_guard registryLock(ComponentAccessRegistryMutex());
 					auto& registry = ComponentAccessRegistry();
 					if (auto component = registry.find(request.componentName); component != registry.end())
 					{
 						entt::registry& enttRegistry = objects.getRegistry();
-						if (component->second.entityHasComponent(enttRegistry, *target))
+						const entt::entity targetEntity = target->EntityId();
+						if (component->second.entityHasComponent(enttRegistry, targetEntity))
 						{
-							component->second.entityRemoveComponent(enttRegistry, *target);
+							component->second.entityRemoveComponent(enttRegistry, targetEntity);
 							objects.notifyObjectStructureChanged(*target);
 						}
 					}
@@ -457,7 +459,7 @@ namespace TerraEngine::Scene {
 				}
 				break;
 			case SceneMutationOperation::UpdateComponent:
-				if (auto target = objects.getEntity(request.targetObjectId))
+				if (auto target = objects.getObject(request.targetObjectId))
 				{
 					std::lock_guard registryLock(ComponentAccessRegistryMutex());
 					auto& registry = ComponentAccessRegistry();
@@ -477,7 +479,7 @@ namespace TerraEngine::Scene {
 							break;
 						}
 
-						if (!ApplyComponentPropertyPayload(objects, *target, component->second, request))
+						if (!ApplyComponentPropertyPayload(objects, target->EntityId(), component->second, request))
 						{
 							result.diagnostics.push_back(MakeMutationDiagnostic(SceneDiagnosticSeverity::Warning, request, "Component update could not write the reflected property.", "Verify the property name and value type match the component reflection metadata."));
 						}

@@ -109,7 +109,7 @@ namespace TerraEngine::EditorTests
 			EditorAutomationService service;
 			const nlohmann::json result = service.HandleTool("scene.list_objects", {{"includeComponents", false}}, WriteMode::ReadOnly, "req-3");
 			context.Expect(result.value("ok", false), "Read-only scene listing should succeed without project state.");
-			context.ExpectEqual(result["data"]["objects"][0].value("name", std::string()), ObjectManager::instance().getObjectName(object.EntityId()), "Scene listing should include created object.");
+			context.ExpectEqual(result["data"]["objects"][0].value("name", std::string()), ObjectManager::instance().getObjectName(object), "Scene listing should include created object.");
 			ObjectManager::instance().clear();
 		});
 
@@ -145,7 +145,7 @@ namespace TerraEngine::EditorTests
 			SkyComponent::registerType();
 			EditorAutomationService service;
 			Object object = ObjectManager::instance().createObject("Sky Source");
-			const std::string objectName = ObjectManager::instance().getObjectName(object.EntityId());
+			const std::string objectName = ObjectManager::instance().getObjectName(object);
 			const nlohmann::json add = service.HandleTool("component.add", {{"object", objectName}, {"component", "SkyComponent"}}, WriteMode::WritesEnabled, "cmp-1");
 			context.Expect(add.value("ok", false), "Component add should succeed.");
 			const nlohmann::json set = service.HandleTool("component.set_property", {{"object", objectName}, {"component", "SkyComponent"}, {"property", "sourceAsset"}, {"value", "Textures/Sky/Automation.tetf"}}, WriteMode::WritesEnabled, "cmp-2");
@@ -221,7 +221,7 @@ namespace TerraEngine::EditorTests
 			UndoRedoSystem::Instance().Clear();
 			EditorAutomationService service;
 			Object object = ObjectManager::instance().createObject("Toggle");
-			const std::string uuid = TerraEngine::ToHexString(ObjectManager::instance().getUUID(object.EntityId()));
+			const std::string uuid = TerraEngine::ToHexString(ObjectManager::instance().getUUID(object));
 
 			const nlohmann::json inactive = service.HandleTool("object.set_metadata", {{"object", uuid}, {"active", false}}, WriteMode::WritesEnabled, "active-1");
 			context.Expect(inactive.value("ok", false), "Automation active toggle should succeed.");

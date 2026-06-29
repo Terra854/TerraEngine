@@ -13,12 +13,12 @@ namespace TerraEngine::Tests {
 				.ObserveObject(fixture.objects, fixture.rootId)
 				.SetName(fixture.rootId, "ShouldNotApply")
 				.Build();
-			fixture.objects.setObjectName(fixture.root.EntityId(), "ChangedOutsideTransaction");
+			fixture.objects.setObjectName(fixture.root, "ChangedOutsideTransaction");
 
 			const TerraEngine::Scene::TransactionResult result = TerraEngine::Scene::CommitTransaction(fixture.objects, transaction);
 
 			context.Expect(result.status == TerraEngine::Scene::TransactionStatus::Conflicted, "Stale metadata observation should conflict.");
-			context.ExpectEqual(std::string("ChangedOutsideTransaction"), fixture.objects.getObjectName(fixture.root.EntityId()), "Rejected transaction must not apply partial writes.");
+			context.ExpectEqual(std::string("ChangedOutsideTransaction"), fixture.objects.getObjectName(fixture.root), "Rejected transaction must not apply partial writes.");
 		});
 
 		registry.Add("Engine.TransactionalMutation.RejectsMissingTarget", [](TestContext& context) {
@@ -26,7 +26,7 @@ namespace TerraEngine::Tests {
 			TerraEngine::Scene::Transaction transaction = TerraEngine::Scene::TransactionalMutationBuilder("tx-missing", TerraEngine::Scene::TransactionOrigin::Test, "test")
 				.SetName(fixture.rootId, "DeletedTarget")
 				.Build();
-			fixture.objects.removeObject(fixture.root.EntityId());
+			fixture.objects.removeObject(fixture.root);
 
 			const TerraEngine::Scene::TransactionResult result = TerraEngine::Scene::CommitTransaction(fixture.objects, transaction);
 

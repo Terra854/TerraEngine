@@ -237,11 +237,11 @@ void UISystem::Update(float deltaTime)
 			[&liveComponents](const TerraEngine::Scheduling::EcsQueryChunk&, TerraEngine::Scheduling::JobGraphContext&)
 			{
 				TERRAENGINE_PROFILE_SCOPE("UISystem: Collect UI Components", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				ObjectManager::instance().forEachEntityWithComponents<UIComponent>([&](entt::entity entity, UIComponent& component) {
+				ObjectManager::instance().forEachObjectWithComponents<UIComponent>([&](Object object, UIComponent& component) {
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (component.IsVisible())
 					{
-						liveComponents.emplace_back(entity, &component);
+						liveComponents.emplace_back(object.EntityId(), &component);
 					}
 				});
 			}));
@@ -895,9 +895,9 @@ bool UISystem::PublishPreparedResult(entt::entity entity, UIDocumentState& state
 		// assigned. If that source fails to parse, restore the last valid tree so
 		// scripts and visible UI keep seeing the same document as the batch.
 		auto& objectManager = ObjectManager::instance();
-		if (objectManager.isEntityValid(entity))
+		if (std::optional<Object> object = objectManager.getObject(entity))
 		{
-			if (UIComponent* component = objectManager.GetComponent<UIComponent>(entity))
+			if (UIComponent* component = objectManager.GetComponent<UIComponent>(*object))
 			{
 				component->SetRoot(state.root);
 			}
@@ -912,9 +912,9 @@ bool UISystem::PublishPreparedResult(entt::entity entity, UIDocumentState& state
 		state.lastError.clear();
 
 		auto& objectManager = ObjectManager::instance();
-		if (objectManager.isEntityValid(entity))
+		if (std::optional<Object> object = objectManager.getObject(entity))
 		{
-			if (UIComponent* component = objectManager.GetComponent<UIComponent>(entity))
+			if (UIComponent* component = objectManager.GetComponent<UIComponent>(*object))
 			{
 				component->SetRoot(result.root);
 			}

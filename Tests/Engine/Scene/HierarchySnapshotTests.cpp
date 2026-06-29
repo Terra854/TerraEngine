@@ -19,7 +19,7 @@ namespace TerraEngine::Tests {
 
 			context.Expect(snapshot.valid, "Simple hierarchy snapshot should be valid.");
 			context.ExpectEqual(static_cast<std::size_t>(2), snapshot.orderedObjects.size(), "Snapshot should include both objects.");
-			context.Expect(snapshot.orderedObjects[0].objectId == objects.getUUID(parent.EntityId()), "Parent should appear before child.");
+			context.Expect(snapshot.orderedObjects[0].objectId == objects.getUUID(parent), "Parent should appear before child.");
 			context.ExpectEqual(static_cast<std::int64_t>(0), snapshot.orderedObjects[1].parentIndex, "Child should point at parent index.");
 			objects.clear();
 		});

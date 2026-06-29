@@ -190,22 +190,21 @@ namespace TerraEngine::Tests {
 			objects.clear();
 		});
 
-		registry.Add("Engine.ComponentAccess.ObjectManagerEntityComponentOperationsUpdateGenerations", [](TestContext& context) {
+		registry.Add("Engine.ComponentAccess.ObjectManagerObjectComponentOperationsUpdateGenerations", [](TestContext& context) {
 			ObjectManager& objects = ObjectManager::instance();
 			objects.clear();
-			Object object = objects.createObject("EntityComponentAccess");
-			const entt::entity entity = object.EntityId();
-			const std::uint64_t before = objects.getObjectComponentGeneration(entity);
+			Object object = objects.createObject("ObjectComponentAccess");
+			const std::uint64_t before = objects.getObjectComponentGeneration(object);
 
-			context.Expect(objects.HasComponent<Transform>(entity), "New objects should start with a Transform component.");
-			objects.RemoveComponent<Transform>(entity);
-			context.Expect(!objects.HasComponent<Transform>(entity), "Entity component removal should remove the Transform without a facade call.");
-			context.Expect(objects.getObjectComponentGeneration(entity) > before, "Removing a component through ObjectManager should bump component generation.");
+			context.Expect(objects.HasComponent<Transform>(object), "New objects should start with a Transform component.");
+			objects.RemoveComponent<Transform>(object);
+			context.Expect(!objects.HasComponent<Transform>(object), "Object component removal should remove the Transform through the canonical ObjectManager path.");
+			context.Expect(objects.getObjectComponentGeneration(object) > before, "Removing a component through ObjectManager should bump component generation.");
 
-			Transform* restored = objects.AddComponent<Transform>(entity);
+			Transform* restored = objects.AddComponent<Transform>(object);
 
-			context.Expect(restored != nullptr, "Entity component add should restore Transform without a facade call.");
-			context.Expect(objects.GetComponent<Transform>(entity) == restored, "Entity component get should return the restored component.");
+			context.Expect(restored != nullptr, "Object component add should restore Transform.");
+			context.Expect(objects.GetComponent<Transform>(object) == restored, "Object component get should return the restored component.");
 			objects.clear();
 		});
 	}

@@ -180,8 +180,8 @@ namespace TerraEngine::Scene {
 			}
 			entry.depth = source.depth;
 			entry.runtimeActive = activeByObjectId.contains(source.objectId) ? activeByObjectId[source.objectId] : true;
-			entry.transformRevision = objects.GetObjectTransformRevision(entry.entity);
-			entry.spatialRevision = objects.GetObjectSpatialRevision(entry.entity);
+			entry.transformRevision = objects.GetObjectTransformRevision(entry.objectHandle);
+			entry.spatialRevision = objects.GetObjectSpatialRevision(entry.objectHandle);
 			if (entry.runtimeActive)
 			{
 				++layout.activeObjectCount;

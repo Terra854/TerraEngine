@@ -1122,13 +1122,14 @@ bool UIBuilderWindow::LoadSelectedComponentInternal(entt::entity targetEntity)
 	const entt::entity entity = targetEntity;
 	auto& objectManager = ObjectManager::instance();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!objectManager.isEntityValid(entity))
+	std::optional<Object> object = objectManager.getObject(entity);
+	if (!object)
 	{
 		m_StatusMessage = "The selected object no longer exists.";
 		return false;
 	}
 
-	UIComponent* component = objectManager.GetComponent<UIComponent>(entity);
+	UIComponent* component = objectManager.GetComponent<UIComponent>(*object);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (component == nullptr)
 	{
@@ -1425,10 +1426,10 @@ bool UIBuilderWindow::SaveWorkingDocument()
 	if (m_DocumentSession.sceneEntity != entt::null)
 	{
 		auto& objectManager = ObjectManager::instance();
-		if (objectManager.isEntityValid(m_DocumentSession.sceneEntity))
+		if (std::optional<Object> object = objectManager.getObject(m_DocumentSession.sceneEntity))
 		{
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (UIComponent* component = objectManager.GetComponent<UIComponent>(m_DocumentSession.sceneEntity))
+			if (UIComponent* component = objectManager.GetComponent<UIComponent>(*object))
 			{
 				// UIComponent now points only at the authored .tuiml asset. Any
 				// attached .tuss files stay authored inside that document so the

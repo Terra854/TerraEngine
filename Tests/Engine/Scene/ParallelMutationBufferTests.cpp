@@ -52,7 +52,7 @@ namespace TerraEngine::Tests {
 			for (std::uint32_t index = 0; index < 12u; ++index)
 			{
 				Object object = objects.createObject("Mutation Target " + std::to_string(index));
-				existingObjects.push_back(objects.getUUID(object.EntityId()));
+				existingObjects.push_back(objects.getUUID(object));
 			}
 
 			TerraEngine::Scene::SceneMutationQueue queue;

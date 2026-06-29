@@ -260,10 +260,10 @@ namespace TerraEngine::Scene {
 		SceneGraph graph;
 		graph.revision = objects.GetSpatialRevision();
 
-		std::function<void(entt::entity, SceneObjectId)> visitObject = [&](entt::entity object, SceneObjectId parentId) {
+		std::function<void(Object, SceneObjectId)> visitObject = [&](Object object, SceneObjectId parentId) {
 			SceneGraphObject graphObject;
 			graphObject.objectId = objects.getUUID(object);
-			graphObject.entity = object;
+			graphObject.entity = object.EntityId();
 			graphObject.parentId = parentId;
 			graphObject.name = objects.getObjectName(object);
 			graphObject.active = objects.isObjectActive(object);
@@ -287,15 +287,15 @@ namespace TerraEngine::Scene {
 			}
 
 			graph.objects.emplace(objectId, std::move(graphObject));
-			for (entt::entity child : objects.getChildEntities(object))
+			for (Object child : objects.getChildren(object))
 			{
 				visitObject(child, objectId);
 			}
 		};
 
-		std::vector<entt::entity> roots = objects.getRootEntities();
-		objects.SortEntitiesByStableId(roots);
-		for (entt::entity root : roots)
+		std::vector<Object> roots = objects.getRootObjects();
+		objects.SortObjectsByStableId(roots);
+		for (Object root : roots)
 		{
 			visitObject(root, TerraEngine::EMPTY_UUID);
 		}
@@ -819,6 +819,20 @@ namespace TerraEngine::Scene {
 
 	bool ReparentPreserveWorld(ObjectManager& objects, entt::entity child, std::optional<entt::entity> parent)
 	{
-		return objects.setParent(child, parent);
+		std::optional<Object> childObject = objects.getObject(child);
+		if (!childObject)
+		{
+			return false;
+		}
+		std::optional<Object> parentObject;
+		if (parent)
+		{
+			parentObject = objects.getObject(*parent);
+			if (!parentObject)
+			{
+				return false;
+			}
+		}
+		return objects.setParent(*childObject, parentObject);
 	}
 }

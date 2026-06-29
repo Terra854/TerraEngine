@@ -76,12 +76,12 @@ namespace TerraEngine::Tests {
 			ObjectManager& objects = ObjectManager::instance();
 			objects.clear();
 			Object original = objects.createObject("Reloaded");
-			const TerraEngine::UUID stableId = objects.getUUID(original.EntityId());
+			const TerraEngine::UUID stableId = objects.getUUID(original);
 			const Object beforeReload = objects.makeObjectHandle(original.EntityId());
 			objects.clear();
 
 			Object reloaded = objects.createObject("Reloaded");
-			objects.UpdateEntityUUID(reloaded.EntityId(), stableId);
+			objects.UpdateObjectUUID(reloaded, stableId);
 			const Object afterReload = objects.makeObjectHandle(reloaded.EntityId());
 
 			// Scene reloads can intentionally keep stable UUIDs while replacing

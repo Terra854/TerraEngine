@@ -24,7 +24,7 @@ namespace TerraEngine::Tests {
 	{
 		ObjectManager& objects = ObjectManager::instance();
 		Object object = objects.createObject(std::string(objectName));
-		ScriptComponent& component = *objects.AddComponent<ScriptComponent>(object.EntityId());
+		ScriptComponent& component = *objects.AddComponent<ScriptComponent>(object);
 		component.AddBinding(TerraEngine::EMPTY_UUID, std::string(className));
 		return object;
 	}

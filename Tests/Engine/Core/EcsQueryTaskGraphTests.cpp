@@ -199,7 +199,7 @@ namespace TerraEngine::Tests {
 			for (std::size_t index = 0; index < 6; ++index)
 			{
 				Object object = objects.createObject("ChunkObject");
-				ids.push_back(objects.getUUID(object.EntityId()));
+				ids.push_back(objects.getUUID(object));
 			}
 			TerraEngine::Scheduling::EcsQueryTaskGraph graph({ "compact", "Compact References" });
 			auto query = MakeQuery("CompactSystem", "CompactQuery", ids);
@@ -214,7 +214,12 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(3), summary.queryPlans.front().chunks.front().objectHandles.size(), "Chunk should carry compact references beside UUIDs.");
 			const Object firstChunkReference = summary.queryPlans.front().chunks.front().objectHandles.front();
 			context.Expect(objects.validateObjectHandle(firstChunkReference).validity == TerraEngine::ObjectIdentityValidity::Valid, "Chunk compact reference should validate against live ObjectManager state.");
-			objects.removeObject(static_cast<entt::entity>(firstChunkReference.entityValue));
+			std::optional<Object> objectToRemove = objects.resolveObjectHandle(firstChunkReference);
+			context.Expect(objectToRemove.has_value(), "Chunk compact reference should resolve before deletion.");
+			if (objectToRemove)
+			{
+				objects.removeObject(*objectToRemove);
+			}
 			context.Expect(objects.validateObjectHandle(firstChunkReference).validity != TerraEngine::ObjectIdentityValidity::Valid, "Chunk compact reference should fail closed after the object is removed.");
 			objects.clear();
 		});

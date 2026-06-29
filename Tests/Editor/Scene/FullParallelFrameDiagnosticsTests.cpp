@@ -30,11 +30,11 @@ namespace TerraEngine::EditorTests {
 			SkyComponent::registerType();
 			ObjectManager& objects = ObjectManager::instance();
 			Object object = objects.createObject("Reflection Target");
-			(void)objects.AddComponent<SkyComponent>(object.EntityId());
+			(void)objects.AddComponent<SkyComponent>(object);
 
 			TerraEngine::Editor::Automation::EditorAutomationService service;
 			const auto preflight = service.PreflightReflectionMutation({
-				{"object", objects.getObjectName(object.EntityId())},
+				{"object", objects.getObjectName(object)},
 				{"component", "SkyComponent"},
 				{"property", "sourceAsset"},
 				{"value", "Textures/Sky/WorkerSafe.tetf"}
@@ -52,13 +52,13 @@ namespace TerraEngine::EditorTests {
 			SkyComponent::registerType();
 			ObjectManager& objects = ObjectManager::instance();
 			Object object = objects.createObject("Reflection Commit");
-			(void)objects.AddComponent<SkyComponent>(object.EntityId());
+			(void)objects.AddComponent<SkyComponent>(object);
 
 			TerraEngine::Editor::Automation::EditorAutomationService service;
 			const nlohmann::json result = service.HandleTool(
 				"component.set_property",
 				{
-					{"object", objects.getObjectName(object.EntityId())},
+					{"object", objects.getObjectName(object)},
 					{"component", "SkyComponent"},
 					{"property", "sourceAsset"},
 					{"value", "Textures/Sky/ProtectedCommit.tetf"}
@@ -67,7 +67,7 @@ namespace TerraEngine::EditorTests {
 				"reflection-protected");
 
 			context.Expect(result.value("ok", false), "Protected reflection handler should apply validated property edits.");
-			const SkyComponent* component = objects.GetComponent<SkyComponent>(object.EntityId());
+			const SkyComponent* component = objects.GetComponent<SkyComponent>(object);
 			context.Expect(component != nullptr, "Edited object should still own the sky component.");
 			context.ExpectEqual(std::string("Textures/Sky/ProtectedCommit.tetf"), component->sourceAsset, "Protected reflection handler should update the reflected property.");
 			ObjectManager::instance().clear();

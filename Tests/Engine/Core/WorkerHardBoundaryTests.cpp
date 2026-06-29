@@ -150,13 +150,13 @@ namespace TerraEngine::Tests {
 			bool addBlocked = false;
 			{
 				TerraEngine::Scheduling::WorkerSafetyScope scope("ComponentWorker");
-				addBlocked = objects.AddComponent<WorkerSafetyFixtureComponent>(object.EntityId()) == nullptr;
-				objects.RemoveComponent<Transform>(object.EntityId());
+				addBlocked = objects.AddComponent<WorkerSafetyFixtureComponent>(object) == nullptr;
+				objects.RemoveComponent<Transform>(object);
 			}
 			const auto violations = TerraEngine::Scheduling::DrainWorkerSafetyViolations();
 
 			context.Expect(addBlocked, "Direct worker component add should be blocked.");
-			context.Expect(objects.GetComponent<Transform>(object.EntityId()) != nullptr, "Blocked worker component removal should leave existing components intact.");
+			context.Expect(objects.GetComponent<Transform>(object) != nullptr, "Blocked worker component removal should leave existing components intact.");
 			context.Expect(violations.size() >= 2, "Component add and remove attempts should both report safety violations.");
 			objects.clear();
 		});

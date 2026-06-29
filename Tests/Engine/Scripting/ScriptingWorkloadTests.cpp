@@ -10,7 +10,7 @@ namespace TerraEngine::Tests {
 		{
 			ObjectManager& objects = ObjectManager::instance();
 			Object object = objects.createObject("Scripted");
-			ScriptComponent& component = *objects.AddComponent<ScriptComponent>(object.EntityId());
+			ScriptComponent& component = *objects.AddComponent<ScriptComponent>(object);
 			component.AddBinding(TerraEngine::EMPTY_UUID, className);
 			return object;
 		}
@@ -24,7 +24,7 @@ namespace TerraEngine::Tests {
 			CreateScriptedObject("");
 
 			Object disabled = CreateScriptedObject("Game.Disabled");
-			ScriptComponent* disabledComponent = ObjectManager::instance().GetComponent<ScriptComponent>(disabled.EntityId());
+			ScriptComponent* disabledComponent = ObjectManager::instance().GetComponent<ScriptComponent>(disabled);
 			disabledComponent->GetBindings().front().enabled = false;
 
 			ScriptingSystem::ScriptUpdateWorkload workload = ScriptingSystem::Instance().BuildScriptUpdateWorkload(0.016f, false);
@@ -59,7 +59,7 @@ namespace TerraEngine::Tests {
 		registry.Add("Scripting.Workload.ReadViewCarriesDeterministicScriptRecords", [](TestContext& context) {
 			ObjectManager::instance().clear();
 			Object scripted = CreateScriptedObject("Game.Reader");
-			ScriptComponent* scriptComponent = ObjectManager::instance().GetComponent<ScriptComponent>(scripted.EntityId());
+			ScriptComponent* scriptComponent = ObjectManager::instance().GetComponent<ScriptComponent>(scripted);
 			ScriptBinding& binding = scriptComponent->GetBindings().front();
 			ScriptFieldValue field;
 			field.fieldPath = "Speed";
@@ -86,7 +86,7 @@ namespace TerraEngine::Tests {
 		registry.Add("Scripting.Workload.ActiveBindingIndexRefreshesAuthoredVersions", [](TestContext& context) {
 			ObjectManager::instance().clear();
 			Object scripted = CreateScriptedObject("Game.CachedReader");
-			ScriptComponent* scriptComponent = ObjectManager::instance().GetComponent<ScriptComponent>(scripted.EntityId());
+			ScriptComponent* scriptComponent = ObjectManager::instance().GetComponent<ScriptComponent>(scripted);
 			ScriptBinding& binding = scriptComponent->GetBindings().front();
 
 			const ScriptingSystem::ScriptUpdateWorkload firstWorkload = ScriptingSystem::Instance().BuildScriptUpdateWorkload(0.016f, false);

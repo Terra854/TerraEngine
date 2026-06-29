@@ -22,9 +22,9 @@ namespace TerraEngine::Tests {
 			const TerraEngine::Scene::TransactionResult result = TerraEngine::Scene::CommitTransaction(fixture.objects, builder.Build());
 
 			context.Expect(result.status == TerraEngine::Scene::TransactionStatus::Committed, "Valid transaction should commit.");
-			context.ExpectEqual(std::string("RenamedRoot"), fixture.objects.getObjectName(fixture.root.EntityId()), "Metadata write should apply.");
-			context.Expect(!fixture.objects.isObjectActive(fixture.root.EntityId()), "Active state should apply.");
-			Transform* transform = fixture.objects.GetComponent<Transform>(fixture.root.EntityId());
+			context.ExpectEqual(std::string("RenamedRoot"), fixture.objects.getObjectName(fixture.root), "Metadata write should apply.");
+			context.Expect(!fixture.objects.isObjectActive(fixture.root), "Active state should apply.");
+			Transform* transform = fixture.objects.GetComponent<Transform>(fixture.root);
 			context.Expect(transform != nullptr, "Root should still have a Transform.");
 			context.ExpectEqual(2.0f, transform->position.x, "Reflected component write should use ComponentAccessRegistry.");
 		});
@@ -40,9 +40,9 @@ namespace TerraEngine::Tests {
 			context.Expect(result.status == TerraEngine::Scene::TransactionStatus::Committed, "Local object transaction should commit.");
 			context.Expect(result.createdObjects.contains(1), "Parent local id should resolve.");
 			context.Expect(result.createdObjects.contains(2), "Child local id should resolve.");
-			const auto childEntity = fixture.objects.getEntity(result.createdObjects.at(2));
-			context.Expect(childEntity.has_value(), "Child entity should exist.");
-			context.Expect(fixture.objects.getParentEntity(*childEntity) != entt::null, "Child should be parented to transaction-local parent.");
+			const auto childObject = fixture.objects.getObject(result.createdObjects.at(2));
+			context.Expect(childObject.has_value(), "Child object should exist.");
+			context.Expect(childObject && fixture.objects.getParent(*childObject).has_value(), "Child should be parented to transaction-local parent.");
 		});
 	}
 }

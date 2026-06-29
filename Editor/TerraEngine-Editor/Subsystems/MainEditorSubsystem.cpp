@@ -116,7 +116,7 @@ namespace
 		return std::nullopt;
 	}
 
-	void PublishMeshRenderAssetNeeds(entt::entity object, TerraEngine::Resource::StreamingNeedType needType, std::string_view reason)
+	void PublishMeshRenderAssetNeeds(Object object, TerraEngine::Resource::StreamingNeedType needType, std::string_view reason)
 	{
 		MeshRenderComponent* meshRenderer = ObjectManager::instance().GetComponent<MeshRenderComponent>(object);
 		if (meshRenderer == nullptr)
@@ -352,7 +352,7 @@ void MainEditorSubsystem::CapturePlayModeSceneState()
 	// Capture the full live hierarchy and reflected component payloads before
 	// play starts so Stop can rebuild the exact authored scene state without
 	// touching the on-disk scene file.
-	for (entt::entity rootObject : ObjectManager::instance().getRootEntities())
+	for (Object rootObject : ObjectManager::instance().getRootObjects())
 	{
 		snapshotJson["objects"].push_back(Serializer::SerializeObject(rootObject));
 	}
@@ -364,7 +364,10 @@ void MainEditorSubsystem::CapturePlayModeSceneState()
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectedEntity.has_value())
 	{
-		m_PlayModeSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedEntity);
+		if (std::optional<Object> selectedObject = ObjectManager::instance().getObject(*selectedEntity))
+		{
+			m_PlayModeSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedObject);
+		}
 	}
 
 	m_PlayModeSceneSnapshotJson = snapshotJson.dump();
@@ -424,9 +427,9 @@ void MainEditorSubsystem::RestorePlayModeSceneState()
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_PlayModeSelectedEntityUuid.has_value())
 	{
-		if (auto restoredObject = ObjectManager::instance().getEntity(*m_PlayModeSelectedEntityUuid))
+		if (auto restoredObject = ObjectManager::instance().getObject(*m_PlayModeSelectedEntityUuid))
 		{
-			SetSelectedEntity(*restoredObject);
+			SetSelectedEntity(restoredObject->EntityId());
 		}
 		else
 		{
@@ -458,8 +461,8 @@ void MainEditorSubsystem::CapturePrefabReturnSceneState()
 	m_PrefabReturnSceneWasDirty = SceneManager::Instance().IsActiveSceneDirty();
 	m_PrefabReturnGameViewCameras.clear();
 
-	const auto sceneCameras = ObjectManager::instance().getEntitiesWithComponents<Transform, CameraComponent>();
-	for (entt::entity cameraObject : sceneCameras)
+	const auto sceneCameras = ObjectManager::instance().getObjectsWithComponents<Transform, CameraComponent>();
+	for (Object cameraObject : sceneCameras)
 	{
 		const Transform* transform = ObjectManager::instance().GetComponent<Transform>(cameraObject);
 		const CameraComponent* camera = ObjectManager::instance().GetComponent<CameraComponent>(cameraObject);
@@ -486,14 +489,17 @@ void MainEditorSubsystem::CapturePrefabReturnSceneState()
 	snapshotJson["sceneSettings"] = Serializer::SerializeSceneRenderSettings(SceneManager::Instance().GetActiveSceneRenderSettings());
 	snapshotJson["objects"] = nlohmann::json::array();
 
-	for (entt::entity rootObject : ObjectManager::instance().getRootEntities())
+	for (Object rootObject : ObjectManager::instance().getRootObjects())
 	{
 		snapshotJson["objects"].push_back(Serializer::SerializeObject(rootObject));
 	}
 
 	if (selectedEntity.has_value())
 	{
-		m_PrefabReturnSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedEntity);
+		if (std::optional<Object> selectedObject = ObjectManager::instance().getObject(*selectedEntity))
+		{
+			m_PrefabReturnSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedObject);
+		}
 	}
 
 	m_PrefabReturnSceneSnapshotJson = snapshotJson.dump();
@@ -528,14 +534,17 @@ void MainEditorSubsystem::CaptureCurrentPrefabEditingState()
 	nlohmann::json prefabJson;
 	prefabJson["name"] = m_PrefabEditingPath.empty() ? "Prefab" : m_PrefabEditingPath.stem().string();
 	prefabJson["objects"] = nlohmann::json::array();
-	for (entt::entity rootObject : ObjectManager::instance().getRootEntities())
+	for (Object rootObject : ObjectManager::instance().getRootObjects())
 	{
 		prefabJson["objects"].push_back(Serializer::SerializeObject(rootObject));
 	}
 
 	if (selectedEntity.has_value())
 	{
-		m_PrefabEditingSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedEntity);
+		if (std::optional<Object> selectedObject = ObjectManager::instance().getObject(*selectedEntity))
+		{
+			m_PrefabEditingSelectedEntityUuid = ObjectManager::instance().getUUID(*selectedObject);
+		}
 	}
 	else
 	{
@@ -608,9 +617,9 @@ bool MainEditorSubsystem::LoadPrefabEditingSnapshotIntoObjectManager()
 	m_PrefabObjectsLoadedForEditor = true;
 	if (m_PrefabEditingSelectedEntityUuid.has_value())
 	{
-		if (auto restoredObject = ObjectManager::instance().getEntity(*m_PrefabEditingSelectedEntityUuid))
+		if (auto restoredObject = ObjectManager::instance().getObject(*m_PrefabEditingSelectedEntityUuid))
 		{
-			SetSelectedEntity(*restoredObject);
+			SetSelectedEntity(restoredObject->EntityId());
 		}
 		else
 		{
@@ -670,9 +679,9 @@ bool MainEditorSubsystem::LoadPrefabReturnSceneSnapshotIntoObjectManager(bool re
 
 	if (restoreSelection && m_PrefabReturnSelectedEntityUuid.has_value())
 	{
-		if (auto restoredObject = ObjectManager::instance().getEntity(*m_PrefabReturnSelectedEntityUuid))
+		if (auto restoredObject = ObjectManager::instance().getObject(*m_PrefabReturnSelectedEntityUuid))
 		{
-			SetSelectedEntity(*restoredObject);
+			SetSelectedEntity(restoredObject->EntityId());
 		}
 		else
 		{
@@ -841,7 +850,8 @@ bool MainEditorSubsystem::OpenPrefabAssetInternal(const std::filesystem::path& p
 
 bool MainEditorSubsystem::OpenPrefabFromObject(entt::entity object)
 {
-	PrefabLinkComponent* link = ObjectManager::instance().GetComponent<PrefabLinkComponent>(object);
+	std::optional<Object> objectHandle = ObjectManager::instance().getObject(object);
+	PrefabLinkComponent* link = objectHandle ? ObjectManager::instance().GetComponent<PrefabLinkComponent>(*objectHandle) : nullptr;
 	if (link == nullptr || link->prefabPath.empty())
 	{
 		return false;
@@ -857,7 +867,9 @@ bool MainEditorSubsystem::OpenPrefabFromObject(entt::entity object)
 
 bool MainEditorSubsystem::ResetPrefabInstanceToDefaults(entt::entity object)
 {
-	PrefabLinkComponent* link = ObjectManager::instance().GetComponent<PrefabLinkComponent>(object);
+	ObjectManager& objManager = ObjectManager::instance();
+	std::optional<Object> objectHandle = objManager.getObject(object);
+	PrefabLinkComponent* link = objectHandle ? objManager.GetComponent<PrefabLinkComponent>(*objectHandle) : nullptr;
 	if (link == nullptr || link->prefabPath.empty())
 	{
 		return false;
@@ -895,25 +907,29 @@ bool MainEditorSubsystem::ResetPrefabInstanceToDefaults(entt::entity object)
 
 	const TerraEngine::UUID prefabSourceId = link->prefabSourceId;
 	const std::string prefabName = link->prefabName;
-	ObjectManager& objManager = ObjectManager::instance();
-	const entt::entity parentEntity = objManager.getParentEntity(object);
+	std::optional<Object> parentHandle = objectHandle ? objManager.getParent(*objectHandle) : std::nullopt;
 	std::optional<entt::entity> parentObject;
-	if (parentEntity != entt::null)
+	if (parentHandle)
 	{
-		parentObject = parentEntity;
+		parentObject = parentHandle->EntityId();
 	}
 
-	objManager.removeObject(object);
+	objManager.removeObject(*objectHandle);
 	entt::entity restoredObject = Serializer::DeserializeObjectEntity(prefabJson["objects"].front(), parentObject);
-	PrefabLinkComponent* existingRestoredLink = objManager.GetComponent<PrefabLinkComponent>(restoredObject);
-	PrefabLinkComponent* addedRestoredLink = existingRestoredLink != nullptr ? existingRestoredLink : objManager.AddComponent<PrefabLinkComponent>(restoredObject);
+	std::optional<Object> restoredHandle = objManager.getObject(restoredObject);
+	if (!restoredHandle)
+	{
+		return false;
+	}
+	PrefabLinkComponent* existingRestoredLink = objManager.GetComponent<PrefabLinkComponent>(*restoredHandle);
+	PrefabLinkComponent* addedRestoredLink = existingRestoredLink != nullptr ? existingRestoredLink : objManager.AddComponent<PrefabLinkComponent>(*restoredHandle);
 	if (addedRestoredLink == nullptr)
 	{
 		return false;
 	}
 	PrefabLinkComponent& restoredLink = *addedRestoredLink;
 	restoredLink.prefabSourceId = prefabSourceId;
-	restoredLink.sourceObjectId = objManager.getUUID(restoredObject);
+	restoredLink.sourceObjectId = objManager.getUUID(*restoredHandle);
 	restoredLink.prefabName = prefabName.empty() ? prefabPath.stem().string() : prefabName;
 
 	std::error_code relativeError;
@@ -962,7 +978,7 @@ bool MainEditorSubsystem::SaveOpenPrefab()
 	nlohmann::json prefabJson;
 	prefabJson["name"] = m_PrefabEditingPath.stem().string();
 	prefabJson["objects"] = nlohmann::json::array();
-	for (entt::entity rootObject : ObjectManager::instance().getRootEntities())
+	for (Object rootObject : ObjectManager::instance().getRootObjects())
 	{
 		prefabJson["objects"].push_back(Serializer::SerializeObject(rootObject));
 	}
@@ -1159,10 +1175,10 @@ void MainEditorSubsystem::PublishEditorStreamingNeeds()
 	// residency bookkeeping in their ImGui draw code.
 	if (selectedEntity.has_value())
 	{
-		if (ObjectManager::instance().isEntityValid(*selectedEntity))
+		if (std::optional<Object> object = ObjectManager::instance().getObject(*selectedEntity))
 		{
-			PublishMeshRenderAssetNeeds(*selectedEntity, TerraEngine::Resource::StreamingNeedType::EditorSelection, "editor selected object");
-			PublishMeshRenderAssetNeeds(*selectedEntity, TerraEngine::Resource::StreamingNeedType::InspectorPreview, "inspector selected object preview");
+			PublishMeshRenderAssetNeeds(*object, TerraEngine::Resource::StreamingNeedType::EditorSelection, "editor selected object");
+			PublishMeshRenderAssetNeeds(*object, TerraEngine::Resource::StreamingNeedType::InspectorPreview, "inspector selected object preview");
 		}
 	}
 
@@ -1187,7 +1203,7 @@ void MainEditorSubsystem::PublishEditorStreamingNeeds()
 
 	if (m_IsPrefabEditingMode)
 	{
-		ObjectManager::instance().forEachEntityWithComponents<MeshRenderComponent>([](entt::entity object, MeshRenderComponent&) {
+		ObjectManager::instance().forEachObjectWithComponents<MeshRenderComponent>([](Object object, MeshRenderComponent&) {
 			PublishMeshRenderAssetNeeds(object, TerraEngine::Resource::StreamingNeedType::PrefabEditing, "open prefab editing session");
 		});
 	}

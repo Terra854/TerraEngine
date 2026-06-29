@@ -21,7 +21,7 @@ namespace TerraEngine::Scene {
 			return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
 		}
 
-		std::optional<entt::entity> ResolveRef(ObjectManager& objects, const TransactionObjectRef& ref, const std::unordered_map<std::int32_t, TerraEngine::UUID>& localObjects)
+		std::optional<Object> ResolveRef(ObjectManager& objects, const TransactionObjectRef& ref, const std::unordered_map<std::int32_t, TerraEngine::UUID>& localObjects)
 		{
 			TerraEngine::UUID objectId = ref.objectId;
 			if (ref.UsesLocalObject())
@@ -37,7 +37,7 @@ namespace TerraEngine::Scene {
 			{
 				return std::nullopt;
 			}
-			return objects.getEntity(objectId);
+			return objects.getObject(objectId);
 		}
 
 		void AddConflict(TransactionResult& result, TransactionConflictReason reason, TerraEngine::UUID target, std::size_t operationIndex, std::string message, std::uint64_t expected = 0, std::uint64_t actual = 0, std::string component = {})
@@ -197,26 +197,26 @@ namespace TerraEngine::Scene {
 
 			for (const TransactionObjectObservation& observation : transaction.readSet.objects)
 			{
-				const std::optional<entt::entity> entity = objects.getEntity(observation.objectId);
-				if (!entity)
+				const std::optional<Object> object = objects.getObject(observation.objectId);
+				if (!object)
 				{
 					result.status = TransactionStatus::Conflicted;
 					AddConflict(result, TransactionConflictReason::MissingTarget, observation.objectId, 0, "Observed object no longer exists.");
 					continue;
 				}
-				const std::uint64_t lifetimeGeneration = objects.getObjectLifetimeGeneration(*entity);
+				const std::uint64_t lifetimeGeneration = objects.getObjectLifetimeGeneration(*object);
 				if (observation.lifetimeGeneration != 0 && observation.lifetimeGeneration != lifetimeGeneration)
 				{
 					result.status = TransactionStatus::Conflicted;
 					AddConflict(result, TransactionConflictReason::StaleObjectIdentity, observation.objectId, 0, "Observed object lifetime generation changed.", observation.lifetimeGeneration, lifetimeGeneration);
 				}
-				const std::uint64_t metadataGeneration = objects.getObjectMetadataGeneration(*entity);
+				const std::uint64_t metadataGeneration = objects.getObjectMetadataGeneration(*object);
 				if (observation.metadataGeneration != 0 && observation.metadataGeneration != metadataGeneration)
 				{
 					result.status = TransactionStatus::Conflicted;
 					AddConflict(result, TransactionConflictReason::MetadataVersionMismatch, observation.objectId, 0, "Observed metadata revision changed.", observation.metadataGeneration, metadataGeneration);
 				}
-				const std::uint64_t componentGeneration = objects.getObjectComponentGeneration(*entity);
+				const std::uint64_t componentGeneration = objects.getObjectComponentGeneration(*object);
 				if (observation.componentGeneration != 0 && observation.componentGeneration != componentGeneration)
 				{
 					result.status = TransactionStatus::Conflicted;
@@ -246,7 +246,7 @@ namespace TerraEngine::Scene {
 					}
 					continue;
 				}
-				if (RequiresExistingTarget(operation.kind) && !operation.target.UsesLocalObject() && objects.getEntity(operation.target.objectId) == std::nullopt)
+				if (RequiresExistingTarget(operation.kind) && !operation.target.UsesLocalObject() && objects.getObject(operation.target.objectId) == std::nullopt)
 				{
 					result.status = TransactionStatus::Conflicted;
 					AddConflict(result, TransactionConflictReason::MissingTarget, operation.target.objectId, index, "Write target no longer exists.");
@@ -308,13 +308,13 @@ namespace TerraEngine::Scene {
 
 	TransactionalMutationBuilder& TransactionalMutationBuilder::ObserveObject(ObjectManager& objects, TerraEngine::UUID objectId)
 	{
-		if (const std::optional<entt::entity> entity = objects.getEntity(objectId))
+		if (const std::optional<Object> object = objects.getObject(objectId))
 		{
 			transaction.readSet.objects.push_back(TransactionObjectObservation{
 				objectId,
-				objects.getObjectLifetimeGeneration(*entity),
-				objects.getObjectMetadataGeneration(*entity),
-				objects.getObjectComponentGeneration(*entity),
+				objects.getObjectLifetimeGeneration(*object),
+				objects.getObjectMetadataGeneration(*object),
+				objects.getObjectComponentGeneration(*object),
 				objects.GetHierarchyRevision()
 			});
 		}
@@ -532,53 +532,53 @@ namespace TerraEngine::Scene {
 			case TransactionWriteKind::CreateObject:
 			{
 				Object created = objects.createObject(operation.displayName.empty() ? "Object" : operation.displayName);
-				const TerraEngine::UUID createdId = objects.getUUID(created.EntityId());
+				const TerraEngine::UUID createdId = objects.getUUID(created);
 				localObjects[operation.createdLocalObjectId] = createdId;
 				result.createdObjects[operation.createdLocalObjectId] = createdId;
-				if (const std::optional<entt::entity> parent = ResolveRef(objects, operation.parent, localObjects))
+				if (const std::optional<Object> parent = ResolveRef(objects, operation.parent, localObjects))
 				{
-					objects.setParent(created.EntityId(), *parent);
+					objects.setParent(created, parent);
 				}
 				break;
 			}
 			case TransactionWriteKind::DeleteObject:
-				if (const std::optional<entt::entity> target = ResolveRef(objects, operation.target, localObjects))
+				if (const std::optional<Object> target = ResolveRef(objects, operation.target, localObjects))
 				{
 					objects.removeObject(*target);
 				}
 				break;
 			case TransactionWriteKind::ReparentObject:
-				if (const std::optional<entt::entity> target = ResolveRef(objects, operation.target, localObjects))
+				if (const std::optional<Object> target = ResolveRef(objects, operation.target, localObjects))
 				{
 					objects.setParent(*target, ResolveRef(objects, operation.parent, localObjects));
 				}
 				break;
 			case TransactionWriteKind::SetName:
-				if (const std::optional<entt::entity> target = ResolveRef(objects, operation.target, localObjects))
+				if (const std::optional<Object> target = ResolveRef(objects, operation.target, localObjects))
 				{
 					objects.setObjectName(*target, operation.stringValue);
 				}
 				break;
 			case TransactionWriteKind::SetTag:
-				if (const std::optional<entt::entity> target = ResolveRef(objects, operation.target, localObjects))
+				if (const std::optional<Object> target = ResolveRef(objects, operation.target, localObjects))
 				{
 					objects.setObjectTag(*target, operation.stringValue);
 				}
 				break;
 			case TransactionWriteKind::SetLayer:
-				if (const std::optional<entt::entity> target = ResolveRef(objects, operation.target, localObjects))
+				if (const std::optional<Object> target = ResolveRef(objects, operation.target, localObjects))
 				{
 					objects.setObjectLayer(*target, operation.stringValue);
 				}
 				break;
 			case TransactionWriteKind::SetActive:
-				if (const std::optional<entt::entity> target = ResolveRef(objects, operation.target, localObjects))
+				if (const std::optional<Object> target = ResolveRef(objects, operation.target, localObjects))
 				{
 					objects.setObjectActive(*target, operation.boolValue);
 				}
 				break;
 			case TransactionWriteKind::SetStatic:
-				if (const std::optional<entt::entity> target = ResolveRef(objects, operation.target, localObjects))
+				if (const std::optional<Object> target = ResolveRef(objects, operation.target, localObjects))
 				{
 					objects.setObjectStatic(*target, operation.boolValue);
 				}
@@ -586,7 +586,7 @@ namespace TerraEngine::Scene {
 			case TransactionWriteKind::AddComponent:
 			case TransactionWriteKind::RemoveComponent:
 			case TransactionWriteKind::UpdateComponentProperty:
-				if (const std::optional<entt::entity> target = ResolveRef(objects, operation.target, localObjects))
+				if (const std::optional<Object> target = ResolveRef(objects, operation.target, localObjects))
 				{
 					std::lock_guard registryLock(ComponentAccessRegistryMutex());
 					auto& registry = ComponentAccessRegistry();
@@ -597,19 +597,20 @@ namespace TerraEngine::Scene {
 						break;
 					}
 					entt::registry& enttRegistry = objects.getRegistry();
-					if (operation.kind == TransactionWriteKind::AddComponent && !component->second.entityHasComponent(enttRegistry, *target))
+					const entt::entity targetEntity = target->EntityId();
+					if (operation.kind == TransactionWriteKind::AddComponent && !component->second.entityHasComponent(enttRegistry, targetEntity))
 					{
-						component->second.entityAddComponent(enttRegistry, *target);
+						component->second.entityAddComponent(enttRegistry, targetEntity);
 						objects.notifyObjectStructureChanged(*target);
 					}
-					else if (operation.kind == TransactionWriteKind::RemoveComponent && component->second.entityHasComponent(enttRegistry, *target))
+					else if (operation.kind == TransactionWriteKind::RemoveComponent && component->second.entityHasComponent(enttRegistry, targetEntity))
 					{
-						component->second.entityRemoveComponent(enttRegistry, *target);
+						component->second.entityRemoveComponent(enttRegistry, targetEntity);
 						objects.notifyObjectStructureChanged(*target);
 					}
 					else if (operation.kind == TransactionWriteKind::UpdateComponentProperty)
 					{
-						if (!component->second.entitySetter(enttRegistry, *target, operation.propertyName, operation.propertyValue))
+						if (!component->second.entitySetter(enttRegistry, targetEntity, operation.propertyName, operation.propertyValue))
 						{
 							AddConflict(result, TransactionConflictReason::InvalidPayload, objects.getUUID(*target), index, "Reflected component property write failed.", 0, 0, operation.componentName);
 						}

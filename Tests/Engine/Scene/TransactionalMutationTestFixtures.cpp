@@ -13,7 +13,7 @@ namespace TerraEngine::Tests {
 		return TransactionalMutationFixture{
 			objects,
 			root,
-			objects.getUUID(root.EntityId())
+			objects.getUUID(root)
 		};
 	}
 }

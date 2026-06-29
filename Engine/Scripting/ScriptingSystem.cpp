@@ -713,13 +713,13 @@ ScriptingSystem::ScriptUpdateWorkload ScriptingSystem::BuildScriptUpdateWorkload
 		m_ActiveScriptBindingIndexRevision = currentSceneRevision;
 		m_ActiveScriptBindingIndexExportMode = exportMode;
 
-		const std::vector<entt::entity> objects = objectManager.SnapshotEntitiesWithComponents<ScriptComponent>();
+		const std::vector<Object> objects = objectManager.SnapshotObjectsWithComponents<ScriptComponent>();
 		m_ActiveScriptBindingIndex.reserve(objects.size());
 
 		// Snapshot active script bindings into a main-thread index. Stable frames
 		// can reuse these records directly, while structural or binding changes
 		// rebuild the index before any worker script sees it.
-		for (entt::entity object : objects)
+		for (Object object : objects)
 		{
 			ScriptComponent* scriptComponent = objectManager.GetComponent<ScriptComponent>(object);
 			if (scriptComponent == nullptr || !scriptComponent->active)
@@ -736,7 +736,7 @@ ScriptingSystem::ScriptUpdateWorkload ScriptingSystem::BuildScriptUpdateWorkload
 				}
 				if (exportMode && binding.scriptId == 0)
 				{
-					TERRAENGINE_LOG(LogLevel::Error, "[Scripting] Export binding " << binding.bindingId << " on object " << static_cast<std::uint32_t>(object) << " is missing staged scriptId data.");
+					TERRAENGINE_LOG(LogLevel::Error, "[Scripting] Export binding " << binding.bindingId << " on object " << static_cast<std::uint32_t>(object.EntityId()) << " is missing staged scriptId data.");
 					continue;
 				}
 				if (!exportMode && binding.className.empty())
@@ -745,7 +745,7 @@ ScriptingSystem::ScriptUpdateWorkload ScriptingSystem::BuildScriptUpdateWorkload
 				}
 
 				ScriptWorkItem item;
-				item.objectId = static_cast<std::uint32_t>(object);
+				item.objectId = static_cast<std::uint32_t>(object.EntityId());
 				item.objectUuid = objectManager.getUUID(object);
 				item.bindingId = binding.bindingId;
 				item.scriptType = binding.className.empty() ? ("scriptId:" + std::to_string(binding.scriptId)) : binding.className;
@@ -766,10 +766,11 @@ ScriptingSystem::ScriptUpdateWorkload ScriptingSystem::BuildScriptUpdateWorkload
 	bool activeBindingIndexStillValid = true;
 	for (const ScriptWorkItem& cachedItem : m_ActiveScriptBindingIndex)
 	{
-		const entt::entity object = static_cast<entt::entity>(cachedItem.objectId);
-		if (!objectManager.isEntityValid(object)
-			|| objectManager.getObjectComponentGeneration(object) != cachedItem.componentGeneration
-			|| objectManager.getObjectBindingGeneration(object) != cachedItem.bindingGeneration)
+		const entt::entity entity = static_cast<entt::entity>(cachedItem.objectId);
+		std::optional<Object> object = objectManager.getObject(entity);
+		if (!object
+			|| objectManager.getObjectComponentGeneration(*object) != cachedItem.componentGeneration
+			|| objectManager.getObjectBindingGeneration(*object) != cachedItem.bindingGeneration)
 		{
 			activeBindingIndexStillValid = false;
 			break;
@@ -814,10 +815,10 @@ ScriptingSystem::ScriptFrameReadView ScriptingSystem::BuildScriptFrameReadView(c
 		record.bindingGeneration = item.bindingGeneration;
 		// Query runtimeObservedVersion from the live script binding's snapshotVersion via ObjectManager
 		ObjectManager& objectManager = ObjectManager::instance();
-		const entt::entity object = static_cast<entt::entity>(item.objectId);
-		if (objectManager.isEntityValid(object))
+		const entt::entity entity = static_cast<entt::entity>(item.objectId);
+		if (std::optional<Object> object = objectManager.getObject(entity))
 		{
-			if (auto* scriptComponent = objectManager.GetComponent<ScriptComponent>(object))
+			if (auto* scriptComponent = objectManager.GetComponent<ScriptComponent>(*object))
 			{
 				auto guard = scriptComponent->acquireReadLock();
 				if (const ScriptBinding* binding = scriptComponent->FindBinding(item.bindingId))
@@ -1668,7 +1669,7 @@ bool ScriptingSystem::WriteLiveBindingValue(uint32_t objectId, ScriptBinding& bi
 void ScriptingSystem::RefreshBindingStatuses() {
 	const std::string previousAssemblyId = m_LoadedGameplayAssemblyPath.string();
 	ObjectManager& objectManager = ObjectManager::instance();
-	for (entt::entity object : objectManager.getEntitiesWithComponents<ScriptComponent>()) {
+	for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>()) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ScriptComponent* scriptComponent = objectManager.GetComponent<ScriptComponent>(object)) {
 			auto guard = scriptComponent->acquireWriteLock();
@@ -1879,12 +1880,13 @@ void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 	auto& objectManager = ObjectManager::instance();
 	const entt::entity watchedEntity = static_cast<entt::entity>(*watchedObjectId);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!objectManager.isEntityValid(watchedEntity))
+	std::optional<Object> watchedObject = objectManager.getObject(watchedEntity);
+	if (!watchedObject)
 	{
 		return;
 	}
 
-	ScriptComponent* scriptComponent = objectManager.GetComponent<ScriptComponent>(watchedEntity);
+	ScriptComponent* scriptComponent = objectManager.GetComponent<ScriptComponent>(*watchedObject);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (scriptComponent == nullptr)
 	{
@@ -1989,7 +1991,7 @@ void ScriptingSystem::RefreshWatchedBindingSnapshots(float deltaTime)
 void ScriptingSystem::ClearRuntimeInspectorState()
 {
 	ObjectManager& objectManager = ObjectManager::instance();
-	for (entt::entity object : objectManager.getEntitiesWithComponents<ScriptComponent>())
+	for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>())
 	{
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ScriptComponent* scriptComponent = objectManager.GetComponent<ScriptComponent>(object))
@@ -2011,7 +2013,7 @@ void ScriptingSystem::ClearRuntimeInspectorState()
 // ScriptingSystem::SetAllBindingStatuses is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ScriptingSystem::SetAllBindingStatuses(const std::string& statusText) {
 	ObjectManager& objectManager = ObjectManager::instance();
-	for (entt::entity object : objectManager.getEntitiesWithComponents<ScriptComponent>()) {
+	for (Object object : objectManager.getObjectsWithComponents<ScriptComponent>()) {
 		if (ScriptComponent* scriptComponent = objectManager.GetComponent<ScriptComponent>(object)) {
 			auto guard = scriptComponent->acquireWriteLock();
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.

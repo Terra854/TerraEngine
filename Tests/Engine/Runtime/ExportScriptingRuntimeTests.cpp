@@ -184,7 +184,7 @@ namespace TerraEngine::Tests {
 			ExportScriptingFixture fixture;
 			ObjectManager& objects = ObjectManager::instance();
 			Object object = objects.createObject("Scripted Object");
-			ScriptComponent& scriptComponent = *objects.AddComponent<ScriptComponent>(object.EntityId());
+			ScriptComponent& scriptComponent = *objects.AddComponent<ScriptComponent>(object);
 			ScriptBinding& binding = scriptComponent.AddBinding(TerraEngine::EMPTY_UUID, "Game.PlayerController");
 			binding.scriptId = kScriptId;
 			ScriptFieldValue speedValue;

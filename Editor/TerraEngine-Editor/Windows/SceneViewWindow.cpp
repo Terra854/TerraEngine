@@ -361,7 +361,15 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 				local = glm::scale(local, t->scale);
 				world = local * world;
 			}
-			current = ObjectManager::instance().getParentEntity(current);
+			if (std::optional<Object> currentObject = ObjectManager::instance().getObject(current))
+			{
+				std::optional<Object> parent = ObjectManager::instance().getParent(*currentObject);
+				current = parent ? parent->EntityId() : entt::null;
+			}
+			else
+			{
+				current = entt::null;
+			}
 		}
 		return world;
 	};
@@ -515,22 +523,23 @@ void SceneViewWindow::HandleCameraInput(float deltaTime) {
 void SceneViewWindow::CollectFocusedPrefabObjectIds(entt::entity entity, std::unordered_set<TerraEngine::UUID>& objectIds)
 {
 	auto& objectManager = ObjectManager::instance();
-	if (!objectManager.isEntityValid(entity))
+	std::optional<Object> object = objectManager.getObject(entity);
+	if (!object)
 	{
 		return;
 	}
 
-	objectIds.insert(objectManager.getUUID(entity));
-	if (const auto* mesh = objectManager.GetComponent<MeshRenderComponent>(entity); mesh != nullptr && mesh->spatialObjectId != TerraEngine::EMPTY_UUID)
+	objectIds.insert(objectManager.getUUID(*object));
+	if (const auto* mesh = objectManager.GetComponent<MeshRenderComponent>(*object); mesh != nullptr && mesh->spatialObjectId != TerraEngine::EMPTY_UUID)
 	{
 		// RenderSystem keys draw commands by spatial object id when a mesh has
 		// one. Include that id too so prefab-focus tinting matches the renderer
 		// instead of accidentally washing out the selected object.
 		objectIds.insert(mesh->spatialObjectId);
 	}
-	for (entt::entity child : objectManager.getChildEntities(entity))
+	for (Object child : objectManager.getChildren(*object))
 	{
-		CollectFocusedPrefabObjectIds(child, objectIds);
+		CollectFocusedPrefabObjectIds(child.EntityId(), objectIds);
 	}
 }
 
@@ -592,7 +601,15 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 							local = glm::scale(local, t->scale);
 							world = local * world; // Parent * Child
 						}
-						current = ObjectManager::instance().getParentEntity(current);
+						if (std::optional<Object> currentObject = ObjectManager::instance().getObject(current))
+						{
+							std::optional<Object> parent = ObjectManager::instance().getParent(*currentObject);
+							current = parent ? parent->EntityId() : entt::null;
+						}
+						else
+						{
+							current = entt::null;
+						}
 					}
 					return world;
 				};
@@ -620,9 +637,10 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 
 						// Convert updated World Matrix back to Local Matrix
 						glm::mat4 parentMatrix(1.0f);
-						entt::entity parent = ObjectManager::instance().getParentEntity(*selectedEntity);
-						if (parent != entt::null) {
-							parentMatrix = computeWorldMatrix(parent);
+						std::optional<Object> selectedObject = ObjectManager::instance().getObject(*selectedEntity);
+						std::optional<Object> parent = selectedObject ? ObjectManager::instance().getParent(*selectedObject) : std::nullopt;
+						if (parent) {
+							parentMatrix = computeWorldMatrix(parent->EntityId());
 						}
 						
 						glm::mat4 localMatrix = glm::inverse(parentMatrix) * model;
