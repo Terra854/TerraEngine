@@ -37,14 +37,50 @@ namespace TerraEngine::Renderer {
 		std::uint32_t outputId = 0u;
 	};
 
+	struct VirtualGeometryDrawRange
+	{
+		std::uint32_t selectedLodIndex = 0u;
+		std::uint32_t meshletOffset = 0u;
+		std::uint32_t meshletCount = 0u;
+		bool virtualGeometryActive = false;
+		bool failOpen = false;
+		std::string fallbackReason;
+		bool hiZSelfOcclusionGuardPassed = false;
+	};
+
 	struct RenderFrameRenderableRecord
 	{
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
 		glm::mat4 modelMatrix = glm::mat4(1.0f);
+		VirtualGeometryDrawRange virtualGeometry;
 		bool taskShaderCullingEnabled = true;
 		bool usingFallback = false;
+	};
+
+	struct VirtualGeometryViewDrawRecord
+	{
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		VirtualGeometryDrawRange range;
+		bool taskShaderCullingEnabled = true;
+	};
+
+	struct VirtualGeometryViewSelectionState
+	{
+		// One state belongs to one camera-like producer. Scene, Game, shadow,
+		// and exported-runtime views may see the same object with different LOD,
+		// culling, and Hi-Z decisions, so workers read these copied ranges
+		// instead of sharing one mutable renderable-side answer.
+		RenderOutputKind outputKind = RenderOutputKind::GameView;
+		RenderViewType viewType = RenderViewType::Game;
+		glm::uvec2 targetSize = glm::uvec2(0u);
+		std::uint32_t outputId = 0u;
+		bool shadowPass = false;
+		bool exportRuntime = false;
+		bool hiZOcclusionAllowed = true;
+		std::vector<VirtualGeometryViewDrawRecord> draws;
 	};
 
 	struct RenderFrameLightRecord
@@ -78,6 +114,7 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderFrameResourceRecord> materials;
 		std::vector<RenderFrameResourceRecord> meshes;
 		std::vector<RenderFrameResourceRecord> textures;
+		std::vector<VirtualGeometryViewSelectionState> virtualGeometryViewSelections;
 		RenderSettings renderSettings;
 		std::uint64_t resourceRevision = 0u;
 		std::uint64_t sceneRevision = 0u;
@@ -97,5 +134,7 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API bool SnapshotContainsLiveMutableState(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API std::uint64_t BuildSnapshotDeterministicHash(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API std::uint64_t EstimateSnapshotWorkload(const RenderFrameSnapshot& snapshot);
+	TERRAENGINE_API VirtualGeometryViewSelectionState BuildVirtualGeometryViewSelectionState(const RenderFrameViewRequest& view, const std::vector<RenderFrameRenderableRecord>& renderables);
+	TERRAENGINE_API std::vector<VirtualGeometryViewSelectionState> BuildVirtualGeometryViewSelectionStates(const RenderFrameSnapshot& snapshot);
 
 }

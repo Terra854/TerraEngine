@@ -11,12 +11,69 @@
 #include <cctype>
 #include <cstring>
 #include <limits>
+#include <string>
 
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineMeshFile.h"
 
 namespace
 {
+	enum class VirtualMeshLoadDecision
+	{
+		Accepted,
+		Rejected,
+		Downgraded
+	};
+
+	struct VirtualMeshValidationResult
+	{
+		VirtualMeshLoadDecision decision = VirtualMeshLoadDecision::Accepted;
+		std::string reason;
+		std::vector<std::string> warnings;
+	};
+
+	bool VirtualMeshValidationRejected(const VirtualMeshValidationResult& result)
+	{
+		return result.decision == VirtualMeshLoadDecision::Rejected;
+	}
+
+	VirtualMeshValidationResult ValidateVirtualGeometryPayloadMetadata(const MeshHeader& header, const Mesh& mesh, const std::filesystem::path& resolvedPath)
+	{
+		VirtualMeshValidationResult result;
+		const bool hasVirtualGeometryFlag = (header.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u;
+		if (!hasVirtualGeometryFlag)
+		{
+			return result;
+		}
+
+		// The foundation phase defines the atomic validation boundary before US1
+		// teaches the loader how to parse the full table set. Until then, a file
+		// that advertises virtual geometry but does not publish valid detail
+		// metadata is rejected before ResourceManager caches or GPU uploads see
+		// partially initialized state.
+		if (mesh.virtualGeometryDetailLevels.empty())
+		{
+			result.decision = VirtualMeshLoadDecision::Rejected;
+			result.reason = "virtual-geometry-detail-table-missing";
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TEMF virtual geometry payload is present but has no validated detail table in "
+				<< resolvedPath << ". Rebuild the mesh after the virtual geometry cooker lands.");
+			return result;
+		}
+
+		if (mesh.virtualGeometryPayloadGeneration != kVirtualGeometryPayloadGeneration)
+		{
+			result.decision = VirtualMeshLoadDecision::Rejected;
+			result.reason = "virtual-geometry-generation-mismatch";
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TEMF virtual geometry generation mismatch in " << resolvedPath
+				<< ". Expected generation " << kVirtualGeometryPayloadGeneration << ".");
+			return result;
+		}
+
+		return result;
+	}
+
 	// TryMultiply is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool TryMultiply(std::size_t lhs, std::size_t rhs, std::size_t& outValue)
 	{
@@ -124,6 +181,329 @@ namespace
 		// Values outside [-1, 1] are treated by the task shader as "disabled".
 		bounds.coneCutoff = 2.0f;
 		bounds.coneApexOffset = 0.0f;
+	}
+
+	bool ValidateVirtualGeometryStringRange(
+		std::uint32_t offset,
+		std::uint32_t size,
+		std::size_t stringTableSize,
+		const std::filesystem::path& resolvedPath,
+		const char* rangeName)
+	{
+		if (size == 0u)
+		{
+			return true;
+		}
+
+		std::size_t rangeEnd = 0u;
+		if (offset > stringTableSize || !TryAdd(static_cast<std::size_t>(offset), static_cast<std::size_t>(size), rangeEnd) || rangeEnd > stringTableSize)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry " << rangeName << " string range overruns string table in " << resolvedPath);
+			return false;
+		}
+		return true;
+	}
+
+	template <typename Record>
+	bool ReadVirtualGeometryTable(
+		const MeshHeader& header,
+		const std::uint8_t* payload,
+		std::size_t payloadSize,
+		std::uint32_t absoluteOffset,
+		std::uint32_t count,
+		const std::filesystem::path& resolvedPath,
+		const char* rangeName,
+		std::vector<Record>& outRecords)
+	{
+		outRecords.clear();
+		if (count == 0u)
+		{
+			if (absoluteOffset != 0u)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry " << rangeName << " offset must be zero when count is zero in " << resolvedPath);
+				return false;
+			}
+			return true;
+		}
+
+		if (absoluteOffset == 0u)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry " << rangeName << " offset is missing in " << resolvedPath);
+			return false;
+		}
+
+		std::size_t tableBytes = 0u;
+		if (!TryMultiply(static_cast<std::size_t>(count), sizeof(Record), tableBytes))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry " << rangeName << " byte size overflow in " << resolvedPath);
+			return false;
+		}
+
+		std::size_t relativeOffset = 0u;
+		if (!ResolvePayloadRange(header, payloadSize, absoluteOffset, tableBytes, resolvedPath, rangeName, relativeOffset))
+		{
+			return false;
+		}
+
+		outRecords.resize(count);
+		std::memcpy(outRecords.data(), payload + relativeOffset, tableBytes);
+		return true;
+	}
+
+	bool ValidateVirtualGeometryAddRange(
+		std::uint32_t offset,
+		std::uint32_t count,
+		std::uint32_t limit,
+		const std::filesystem::path& resolvedPath,
+		const char* rangeName)
+	{
+		std::size_t rangeEnd = 0u;
+		if (!TryAdd(static_cast<std::size_t>(offset), static_cast<std::size_t>(count), rangeEnd) || rangeEnd > static_cast<std::size_t>(limit))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry " << rangeName << " references data outside its table in " << resolvedPath);
+			return false;
+		}
+		return true;
+	}
+
+	bool ValidateVirtualGeometryPayloadTables(const MeshHeader& header, const Mesh& mesh, const std::filesystem::path& resolvedPath)
+	{
+		if (mesh.virtualGeometryDetailLevels.empty())
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry detail table is empty in " << resolvedPath);
+			return false;
+		}
+		if (mesh.virtualGeometryCullableGroups.empty())
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry cullable group table is empty in " << resolvedPath);
+			return false;
+		}
+
+		for (std::size_t detailIndex = 0; detailIndex < mesh.virtualGeometryDetailLevels.size(); ++detailIndex)
+		{
+			const VirtualGeometryDetailLevelRecord& detail = mesh.virtualGeometryDetailLevels[detailIndex];
+			if (detail.lodIndex != detailIndex
+				|| detail.meshletCount == 0u
+				|| detail.primitiveCount == 0u
+				|| !ValidateVirtualGeometryAddRange(detail.meshletOffset, detail.meshletCount, header.meshletCount, resolvedPath, "detail meshlet range")
+				|| !ValidateVirtualGeometryAddRange(detail.sectionRangeOffset, detail.sectionRangeCount, static_cast<std::uint32_t>(mesh.virtualGeometrySectionRanges.size()), resolvedPath, "detail section range")
+				|| !ValidateVirtualGeometryAddRange(detail.pageRangeOffset, detail.pageRangeCount, static_cast<std::uint32_t>(mesh.virtualGeometryPages.size()), resolvedPath, "detail page range"))
+			{
+				return false;
+			}
+
+			if (!IsFiniteFloat(detail.geometricError)
+				|| detail.geometricError < 0.0f
+				|| !IsFiniteFloat(detail.targetRatio)
+				|| detail.targetRatio <= 0.0f)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry detail has invalid error metadata in " << resolvedPath);
+				return false;
+			}
+
+			for (int component = 0; component < 3; ++component)
+			{
+				if (!IsFiniteFloat(detail.boundsMin[component]) || !IsFiniteFloat(detail.boundsMax[component]) || detail.boundsMin[component] > detail.boundsMax[component])
+				{
+					TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry detail has invalid bounds in " << resolvedPath);
+					return false;
+				}
+			}
+		}
+
+		for (const VirtualGeometryMaterialSectionRecord& section : mesh.virtualGeometryMaterialSections)
+		{
+			if (section.sourceTriangleCount == 0u
+				|| !ValidateVirtualGeometryAddRange(section.perLodRangeOffset, section.perLodRangeCount, static_cast<std::uint32_t>(mesh.virtualGeometrySectionRanges.size()), resolvedPath, "material section LOD range")
+				|| !ValidateVirtualGeometryStringRange(section.sourceNameStringOffset, section.sourceNameStringSize, mesh.virtualGeometryDiagnosticStrings.size(), resolvedPath, "material section name"))
+			{
+				return false;
+			}
+		}
+
+		std::vector<std::uint8_t> sectionMeshletCoverage(static_cast<std::size_t>(header.meshletCount), 0u);
+		for (const VirtualGeometrySectionRangeRecord& range : mesh.virtualGeometrySectionRanges)
+		{
+			if (range.lodIndex >= mesh.virtualGeometryDetailLevels.size()
+				|| range.meshletCount == 0u
+				|| range.primitiveCount == 0u
+				|| !ValidateVirtualGeometryAddRange(range.meshletOffset, range.meshletCount, header.meshletCount, resolvedPath, "section meshlet range"))
+			{
+				return false;
+			}
+
+			std::size_t primitiveElementCount = 0u;
+			if (!TryMultiply(static_cast<std::size_t>(range.primitiveCount), 3u, primitiveElementCount)
+				|| !ValidateVirtualGeometryAddRange(range.primitiveOffset, static_cast<std::uint32_t>(primitiveElementCount), header.meshletPrimitiveIndexCount, resolvedPath, "section primitive range"))
+			{
+				return false;
+			}
+
+			for (std::uint32_t meshlet = range.meshletOffset; meshlet < range.meshletOffset + range.meshletCount; ++meshlet)
+			{
+				if (sectionMeshletCoverage[meshlet] != 0u)
+				{
+					TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry section ranges overlap meshlets in " << resolvedPath);
+					return false;
+				}
+				sectionMeshletCoverage[meshlet] = 1u;
+			}
+		}
+		if (std::any_of(sectionMeshletCoverage.begin(), sectionMeshletCoverage.end(), [](std::uint8_t covered) { return covered == 0u; }))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry section ranges do not cover every resident meshlet in " << resolvedPath);
+			return false;
+		}
+
+		for (const VirtualGeometryCullableGroupRecord& group : mesh.virtualGeometryCullableGroups)
+		{
+			if (group.lodIndex >= mesh.virtualGeometryDetailLevels.size()
+				|| group.vertexCount == 0u
+				|| group.primitiveCount == 0u
+				|| !ValidateVirtualGeometryAddRange(group.vertexOffset, group.vertexCount, header.meshletVertexRemapCount, resolvedPath, "cullable group vertex range"))
+			{
+				return false;
+			}
+
+			std::size_t primitiveElementCount = 0u;
+			if (!TryMultiply(static_cast<std::size_t>(group.primitiveCount), 3u, primitiveElementCount)
+				|| !ValidateVirtualGeometryAddRange(group.primitiveOffset, static_cast<std::uint32_t>(primitiveElementCount), header.meshletPrimitiveIndexCount, resolvedPath, "cullable group primitive range"))
+			{
+				return false;
+			}
+
+			if (!IsFiniteFloat(group.boundsCenter[0])
+				|| !IsFiniteFloat(group.boundsCenter[1])
+				|| !IsFiniteFloat(group.boundsCenter[2])
+				|| !IsFiniteFloat(group.boundsRadius)
+				|| group.boundsRadius < 0.0f)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry cullable group has invalid bounds in " << resolvedPath);
+				return false;
+			}
+		}
+
+		bool hasRenderableFallbackPage = mesh.virtualGeometryPages.empty();
+		for (const VirtualGeometryPageRecord& page : mesh.virtualGeometryPages)
+		{
+			if (!ValidateVirtualGeometryAddRange(page.firstLodIndex, page.lodCount, static_cast<std::uint32_t>(mesh.virtualGeometryDetailLevels.size()), resolvedPath, "page LOD range")
+				|| !ValidateVirtualGeometryAddRange(page.groupOffset, page.groupCount, static_cast<std::uint32_t>(mesh.virtualGeometryCullableGroups.size()), resolvedPath, "page group range"))
+			{
+				return false;
+			}
+			if (page.pageId >= mesh.virtualGeometryPages.size()
+				|| page.fallbackPageId >= mesh.virtualGeometryPages.size()
+				|| page.byteSize == 0u)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page has invalid identity, fallback, or byte-size metadata in " << resolvedPath);
+				return false;
+			}
+			if (page.firstLodIndex == 0u && page.fallbackPageId == page.pageId)
+			{
+				hasRenderableFallbackPage = true;
+			}
+		}
+		if (!hasRenderableFallbackPage)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page table does not keep LOD0 tied to a resident fallback page in " << resolvedPath);
+			return false;
+		}
+
+		for (const VirtualGeometryDiagnosticRecord& diagnostic : mesh.virtualGeometryDiagnostics)
+		{
+			if (!ValidateVirtualGeometryStringRange(diagnostic.codeStringOffset, diagnostic.codeStringSize, mesh.virtualGeometryDiagnosticStrings.size(), resolvedPath, "diagnostic code")
+				|| !ValidateVirtualGeometryStringRange(diagnostic.messageStringOffset, diagnostic.messageStringSize, mesh.virtualGeometryDiagnosticStrings.size(), resolvedPath, "diagnostic message"))
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	bool ParseVirtualGeometryPayload(
+		const MeshHeader& header,
+		const std::uint8_t* payload,
+		std::size_t payloadSize,
+		const std::filesystem::path& resolvedPath,
+		Mesh& mesh)
+	{
+		const bool hasVirtualGeometryFlag = (header.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u;
+		if (!hasVirtualGeometryFlag)
+		{
+			return true;
+		}
+
+		if (header.virtualGeometryHeaderOffset == 0u
+			|| header.virtualGeometryHeaderSize != sizeof(VirtualGeometryHeader)
+			|| header.virtualGeometryPayloadGeneration != kVirtualGeometryPayloadGeneration)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TEMF virtual geometry header metadata is stale or incomplete in " << resolvedPath
+				<< ". Rebuild the mesh with the current virtual geometry cooker.");
+			return false;
+		}
+
+		std::size_t virtualHeaderOffset = 0u;
+		if (!ResolvePayloadRange(header, payloadSize, header.virtualGeometryHeaderOffset, sizeof(VirtualGeometryHeader), resolvedPath, "virtual geometry header", virtualHeaderOffset))
+		{
+			return false;
+		}
+
+		VirtualGeometryHeader virtualHeader{};
+		std::memcpy(&virtualHeader, payload + virtualHeaderOffset, sizeof(VirtualGeometryHeader));
+		if (virtualHeader.payloadGeneration != kVirtualGeometryPayloadGeneration
+			|| virtualHeader.headerSize != sizeof(VirtualGeometryHeader)
+			|| virtualHeader.detailLevelCount == 0u
+			|| virtualHeader.sourceTriangleCount == 0u
+			|| virtualHeader.sourceVertexCount == 0u)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TEMF virtual geometry payload root is invalid in " << resolvedPath
+				<< ". Rebuild the mesh with the current virtual geometry cooker.");
+			return false;
+		}
+
+		std::vector<VirtualGeometryDetailLevelRecord> detailLevels;
+		std::vector<VirtualGeometryMaterialSectionRecord> materialSections;
+		std::vector<VirtualGeometrySectionRangeRecord> sectionRanges;
+		std::vector<VirtualGeometryCullableGroupRecord> cullableGroups;
+		std::vector<VirtualGeometryPageRecord> pages;
+		std::vector<VirtualGeometryDiagnosticRecord> diagnostics;
+
+		if (!ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.detailLevelTableOffset, virtualHeader.detailLevelCount, resolvedPath, "virtual geometry detail table", detailLevels)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.materialSectionTableOffset, virtualHeader.materialSectionCount, resolvedPath, "virtual geometry material section table", materialSections)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.sectionRangeTableOffset, virtualHeader.sectionRangeCount, resolvedPath, "virtual geometry section range table", sectionRanges)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.cullableGroupTableOffset, virtualHeader.cullableGroupCount, resolvedPath, "virtual geometry cullable group table", cullableGroups)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.pageTableOffset, virtualHeader.pageCount, resolvedPath, "virtual geometry page table", pages)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.diagnosticTableOffset, virtualHeader.diagnosticRecordCount, resolvedPath, "virtual geometry diagnostic table", diagnostics))
+		{
+			return false;
+		}
+
+		std::string stringTable;
+		if (virtualHeader.diagnosticStringSize != 0u)
+		{
+			std::size_t stringTableOffset = 0u;
+			if (!ResolvePayloadRange(header, payloadSize, virtualHeader.diagnosticStringOffset, virtualHeader.diagnosticStringSize, resolvedPath, "virtual geometry string table", stringTableOffset))
+			{
+				return false;
+			}
+			stringTable.assign(reinterpret_cast<const char*>(payload + stringTableOffset), static_cast<std::size_t>(virtualHeader.diagnosticStringSize));
+		}
+
+		mesh.hasVirtualGeometry = true;
+		mesh.virtualGeometryPayloadGeneration = virtualHeader.payloadGeneration;
+		mesh.virtualGeometryHeader = virtualHeader;
+		mesh.virtualGeometryDetailLevels = std::move(detailLevels);
+		mesh.virtualGeometryMaterialSections = std::move(materialSections);
+		mesh.virtualGeometrySectionRanges = std::move(sectionRanges);
+		mesh.virtualGeometryCullableGroups = std::move(cullableGroups);
+		mesh.virtualGeometryPages = std::move(pages);
+		mesh.virtualGeometryDiagnostics = std::move(diagnostics);
+		mesh.virtualGeometryDiagnosticStrings = std::move(stringTable);
+
+		return ValidateVirtualGeometryPayloadTables(header, mesh, resolvedPath);
 	}
 
 	// IsCompiledMeshPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -307,7 +687,7 @@ namespace
 		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if ((header.meshletFlags & ~kMeshletHeaderFlagHasBounds) != 0u)
+		if ((header.meshletFlags & ~(kMeshletHeaderFlagHasBounds | kMeshletHeaderFlagHasVirtualGeometry)) != 0u)
 		{
 			TERRAENGINE_LOG(LogLevel::Error, "TEMF meshletFlags has unsupported bits in " << resolvedPath);
 			return nullptr;
@@ -654,6 +1034,21 @@ namespace
 				TERRAENGINE_LOG(LogLevel::Error, "TEMF meshlet section[" << sectionIndex << "] references out-of-range meshlets in " << resolvedPath);
 				return nullptr;
 			}
+		}
+
+		if (!ParseVirtualGeometryPayload(header, payload, payloadSize, resolvedPath, *mesh))
+		{
+			return nullptr;
+		}
+
+		const VirtualMeshValidationResult virtualGeometryValidation = ValidateVirtualGeometryPayloadMetadata(header, *mesh, resolvedPath);
+		if (VirtualMeshValidationRejected(virtualGeometryValidation))
+		{
+			return nullptr;
+		}
+		for (const std::string& warning : virtualGeometryValidation.warnings)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, warning);
 		}
 
 		return mesh;

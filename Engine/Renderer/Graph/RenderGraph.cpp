@@ -167,6 +167,18 @@ namespace TerraEngine::Renderer {
 			}
 			return hash;
 		}
+
+		std::uint64_t HashVirtualGeometryRange(const VirtualGeometryDrawRange& range)
+		{
+			std::uint64_t hash = 1469598103934665603ull;
+			HashCombine(hash, range.selectedLodIndex);
+			HashCombine(hash, range.meshletOffset);
+			HashCombine(hash, range.meshletCount);
+			HashCombine(hash, range.virtualGeometryActive ? 1u : 0u);
+			HashCombine(hash, range.failOpen ? 1u : 0u);
+			HashCombine(hash, range.hiZSelfOcclusionGuardPassed ? 1u : 0u);
+			return hash;
+		}
 	}
 
 	PreparedDrawPacketSignature BuildPreparedDrawPacketSignature(const RenderFrameRenderableRecord& record)
@@ -178,6 +190,7 @@ namespace TerraEngine::Renderer {
 		signature.transformHash = HashMatrix(record.modelMatrix);
 		signature.visibilityHash = record.taskShaderCullingEnabled ? 1u : 0u;
 		signature.overrideHash = record.usingFallback ? 1u : 0u;
+		signature.virtualGeometryHash = HashVirtualGeometryRange(record.virtualGeometry);
 		return signature;
 	}
 
@@ -189,6 +202,7 @@ namespace TerraEngine::Renderer {
 		HashCombine(hash, signature.transformHash);
 		HashCombine(hash, signature.visibilityHash);
 		HashCombine(hash, signature.overrideHash);
+		HashCombine(hash, signature.virtualGeometryHash);
 		return hash;
 	}
 

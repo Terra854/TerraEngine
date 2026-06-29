@@ -103,6 +103,7 @@ struct VulkanMesh {
 	VulkanBuffer meshDecodeInfoBuffer;
 	VulkanBuffer indexBuffer;
 	VulkanBuffer meshletBuffer;
+	VulkanBuffer meshletSectionBuffer;
 	VulkanBuffer meshletBoundsBuffer;
 	uint32_t indexCount;
 	VkIndexType indexType;
@@ -507,7 +508,7 @@ struct VulkanContext::Impl {
 			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImageView depthView);
 			void RestoreDepthForAttachment(VkCommandBuffer cmd);
 			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, uint32_t viewIndex, const glm::mat4& viewProjection);
-			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView, uint32_t snapshotSlotIndex);
+			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory);
 			bool GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
@@ -565,6 +566,10 @@ struct VulkanContext::Impl {
 		uint32_t clusterDataOffset;
 		uint32_t lightIndexOffset;
 		uint32_t indirectDrawOffset;
+		uint32_t virtualMeshletOffset;
+		uint32_t virtualMeshletCount;
+		uint32_t selectedVirtualLod;
+		uint32_t virtualGeometryFlags;
 		// Editor-only tint is part of the default mesh push-constant contract so
 		// every default shader stage observes the same byte layout.
 		alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);

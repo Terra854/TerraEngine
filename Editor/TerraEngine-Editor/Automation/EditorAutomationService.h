@@ -79,6 +79,8 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleComponentSetProperty(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleAssetList(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleAssetImport(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleVirtualGeometryRebuild(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleVirtualGeometryInspect(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleAssetPrepareDelete(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleExportValidate(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleExportStart(const nlohmann::json& arguments, const std::string& requestId);

@@ -157,6 +157,11 @@ bool SaveBuildProfile(const BuildProfile& profile, const std::filesystem::path& 
 		j["includeDebugSymbols"] = profile.includeDebugSymbols;
 		j["stripNativeAotOutput"] = profile.stripNativeAotOutput;
 		j["additionalPublishArgs"] = profile.additionalPublishArgs;
+		j["virtualGeometry"] = {
+			{ "qualityLevel", profile.virtualGeometryQualityLevel },
+			{ "diagnosticsEnabled", profile.virtualGeometryDiagnosticsEnabled },
+			{ "geometryBudgetBytes", profile.virtualGeometryBudgetBytes }
+		};
 		j["includedScenes"] = profile.includedScenes;
 
 		// Ensure the parent directory exists before writing.
@@ -207,6 +212,12 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path) {
 		if (j.contains("stripNativeAotOutput"))    profile.stripNativeAotOutput = j["stripNativeAotOutput"].get<bool>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("additionalPublishArgs"))   profile.additionalPublishArgs = j["additionalPublishArgs"].get<std::string>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (auto virtualGeometryIt = j.find("virtualGeometry"); virtualGeometryIt != j.end() && virtualGeometryIt->is_object()) {
+			profile.virtualGeometryQualityLevel = virtualGeometryIt->value("qualityLevel", profile.virtualGeometryQualityLevel);
+			profile.virtualGeometryDiagnosticsEnabled = virtualGeometryIt->value("diagnosticsEnabled", profile.virtualGeometryDiagnosticsEnabled);
+			profile.virtualGeometryBudgetBytes = virtualGeometryIt->value("geometryBudgetBytes", profile.virtualGeometryBudgetBytes);
+		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("includedScenes")) {
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.

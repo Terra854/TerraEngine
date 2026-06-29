@@ -141,6 +141,9 @@ void VulkanContext::Impl::Cleanup() {
 		vmaDestroyBuffer(allocator, mesh.meshSkinningBuffer.buffer, mesh.meshSkinningBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshDecodeInfoBuffer.buffer, mesh.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletBuffer.buffer, mesh.meshletBuffer.allocation);
+		if (mesh.meshletSectionBuffer.buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(allocator, mesh.meshletSectionBuffer.buffer, mesh.meshletSectionBuffer.allocation);
+		}
 		vmaDestroyBuffer(allocator, mesh.meshletBoundsBuffer.buffer, mesh.meshletBoundsBuffer.allocation);
 	}
 	meshCache.clear();

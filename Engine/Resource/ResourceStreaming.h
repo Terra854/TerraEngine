@@ -141,6 +141,28 @@ namespace TerraEngine::Resource
 		std::string reason;
 	};
 
+	struct VirtualGeometryStreamingPage
+	{
+		std::uint32_t pageId = 0u;
+		std::uint32_t firstLodIndex = 0u;
+		std::uint32_t lodCount = 0u;
+		std::uint32_t fallbackPageId = 0u;
+		std::uint64_t byteSize = 0u;
+		std::int32_t priority = 0;
+		bool resident = false;
+		bool failed = false;
+	};
+
+	struct VirtualGeometryPageNeedInput
+	{
+		StreamableAssetId assetId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::string viewId;
+		std::uint32_t desiredLodIndex = 0u;
+		double retentionSeconds = 0.0;
+		std::vector<VirtualGeometryStreamingPage> pages;
+	};
+
 	struct StreamingView
 	{
 		std::string viewId;
@@ -259,6 +281,7 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::int32_t PriorityClassBias(StreamingPriorityClass priorityClass);
 	TERRAENGINE_API bool ValidatePreloadRule(const PreloadRule& rule, std::string* reason = nullptr);
 	TERRAENGINE_API std::vector<StreamingNeed> EvaluatePreloadRules(const std::vector<PreloadRule>& rules, double nowSeconds = 0.0);
+	TERRAENGINE_API std::vector<StreamingNeed> BuildVirtualGeometryPageStreamingNeeds(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy, double nowSeconds = 0.0);
 	TERRAENGINE_API std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds = 0.0);
 	// This declaration describes the worker-safe planning phase. The actual
 	// ResourceManager registration and load/upload mutation still happens later

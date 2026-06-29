@@ -33,6 +33,18 @@ namespace {
 		return signature;
 	}
 
+	std::uint64_t HashVirtualGeometryRange(const VirtualGeometryDrawRange& range)
+	{
+		std::uint64_t signature = 1469598103934665603ull;
+		HashCombine(signature, range.selectedLodIndex);
+		HashCombine(signature, range.meshletOffset);
+		HashCombine(signature, range.meshletCount);
+		HashCombine(signature, range.virtualGeometryActive ? 1u : 0u);
+		HashCombine(signature, range.failOpen ? 1u : 0u);
+		HashCombine(signature, range.hiZSelfOcclusionGuardPassed ? 1u : 0u);
+		return signature;
+	}
+
 	std::uint64_t HashRenderableRecords(const std::vector<RenderFrameRenderableRecord>& records)
 	{
 		std::uint64_t signature = 1099511628211ull;
@@ -42,6 +54,7 @@ namespace {
 			HashCombine(signature, HashUuid(record.meshId));
 			HashCombine(signature, HashUuid(record.materialId));
 			HashCombine(signature, record.taskShaderCullingEnabled ? 1u : 0u);
+			HashCombine(signature, HashVirtualGeometryRange(record.virtualGeometry));
 		}
 		return signature;
 	}
@@ -75,6 +88,7 @@ namespace {
 		std::uint64_t signature = HashUuid(record.meshId);
 		HashCombine(signature, HashUuid(record.materialId));
 		HashCombine(signature, record.taskShaderCullingEnabled ? 1u : 0u);
+		HashCombine(signature, HashVirtualGeometryRange(record.virtualGeometry));
 		return signature;
 	}
 }

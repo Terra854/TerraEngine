@@ -5,6 +5,11 @@
 
 #include "ModelPackageImportTypes.h"
 
+#include "File Formats/TerraEngineMeshFile.h"
+
+#include <cstring>
+#include <fstream>
+
 namespace TerraEngine::AssetPipeline
 {
 	namespace
@@ -24,6 +29,46 @@ namespace TerraEngine::AssetPipeline
 		{
 			return value.has_value() ? nlohmann::json(*value) : nlohmann::json(nullptr);
 		}
+	}
+
+	TerraEngine::UUID BuildStableGeneratedModelUuid(const TerraEngine::UUID& packageGuid, std::string_view role, std::size_t index)
+	{
+		// Generated package children must survive reimport when the package GUID
+		// and source role/index are stable. A compact FNV-1a fold gives each
+		// child type a deterministic UUID without storing extra state in .meta files.
+		std::uint64_t high = 1469598103934665603ull;
+		std::uint64_t low = 1099511628211ull;
+		constexpr std::uint64_t prime = 1099511628211ull;
+		for (std::uint8_t byte : packageGuid)
+		{
+			high ^= byte;
+			high *= prime;
+			low ^= static_cast<std::uint8_t>(byte + 31u);
+			low *= prime;
+		}
+		for (char ch : role)
+		{
+			high ^= static_cast<std::uint8_t>(ch);
+			high *= prime;
+			low ^= static_cast<std::uint8_t>(ch * 3);
+			low *= prime;
+		}
+		for (std::size_t shift = 0; shift < sizeof(index); ++shift)
+		{
+			const auto byte = static_cast<std::uint8_t>((index >> (shift * 8u)) & 0xffu);
+			high ^= byte;
+			high *= prime;
+			low ^= static_cast<std::uint8_t>(byte + 17u);
+			low *= prime;
+		}
+
+		TerraEngine::UUID uuid{};
+		for (std::size_t byte = 0; byte < 8u; ++byte)
+		{
+			uuid[byte] = static_cast<std::uint8_t>((high >> (byte * 8u)) & 0xffu);
+			uuid[byte + 8u] = static_cast<std::uint8_t>((low >> (byte * 8u)) & 0xffu);
+		}
+		return uuid;
 	}
 
 	const char* ToString(ModelPackageKind kind)
@@ -152,6 +197,12 @@ namespace TerraEngine::AssetPipeline
 
 	nlohmann::json ToJson(const GeneratedModelMeshAsset& value)
 	{
+		nlohmann::json virtualGeometryWarnings = nlohmann::json::array();
+		for (const std::string& warning : value.virtualGeometryWarnings)
+		{
+			virtualGeometryWarnings.push_back(warning);
+		}
+
 		return {
 			{ "guid", TerraEngine::ToHexString(value.guid) },
 			{ "sourceMeshIndex", value.sourceMeshIndex },
@@ -165,6 +216,15 @@ namespace TerraEngine::AssetPipeline
 			{ "localBounds", {
 				{ "min", ArrayToJson(value.localBoundsMin) },
 				{ "max", ArrayToJson(value.localBoundsMax) }
+			} },
+			{ "virtualGeometry", {
+				{ "requested", value.virtualGeometryRequested },
+				{ "cooked", value.virtualGeometryCooked },
+				{ "status", value.virtualGeometryStatus },
+				{ "detailLevels", value.virtualGeometryDetailLevels },
+				{ "meshlets", value.virtualGeometryMeshlets },
+				{ "sourceTriangles", value.virtualGeometrySourceTriangles },
+				{ "warnings", virtualGeometryWarnings }
 			} }
 		};
 	}
@@ -222,5 +282,72 @@ namespace TerraEngine::AssetPipeline
 			{ "materialAssignments", assignments },
 			{ "diagnostics", diagnostics }
 		};
+	}
+
+	void PopulateGeneratedMeshVirtualGeometryMetadata(const std::filesystem::path& compiledMeshPath, GeneratedModelMeshAsset& mesh, std::vector<ModelImportDiagnostic>& diagnostics)
+	{
+		mesh.virtualGeometryRequested = true;
+		mesh.virtualGeometryCooked = false;
+		mesh.virtualGeometryStatus = "Failed";
+		mesh.virtualGeometryWarnings.clear();
+
+		std::ifstream input(compiledMeshPath, std::ios::binary);
+		if (!input)
+		{
+			mesh.virtualGeometryStatus = "Failed";
+			mesh.virtualGeometryWarnings.push_back("Compiled mesh was not available for virtual geometry metadata inspection.");
+			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryMetadataUnavailable", mesh.displayName, "Package mesh was imported, but virtual geometry metadata could not be inspected.", "The generated mesh remains available for rebuild." });
+			return;
+		}
+
+		MeshHeader header{};
+		input.read(reinterpret_cast<char*>(&header), sizeof(header));
+		if (!input || std::memcmp(header.magic, "TEMF", 4) != 0)
+		{
+			mesh.virtualGeometryStatus = "Failed";
+			mesh.virtualGeometryWarnings.push_back("Compiled mesh header is not a valid TEMF file.");
+			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryInvalidCompiledMesh", mesh.displayName, "Package mesh compiled output is not a readable TEMF file.", "Reimport the package to regenerate mesh outputs." });
+			return;
+		}
+
+		mesh.virtualGeometryMeshlets = header.meshletCount;
+		if ((header.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) == 0u)
+		{
+			mesh.virtualGeometryStatus = "Skipped";
+			mesh.virtualGeometryWarnings.push_back("Compiled mesh does not contain a virtual geometry payload.");
+			return;
+		}
+
+		if (header.virtualGeometryHeaderOffset == 0u
+			|| header.virtualGeometryHeaderSize != sizeof(VirtualGeometryHeader)
+			|| header.virtualGeometryPayloadGeneration != kVirtualGeometryPayloadGeneration)
+		{
+			mesh.virtualGeometryStatus = "NeedsRebuild";
+			mesh.virtualGeometryWarnings.push_back("Virtual geometry payload metadata is stale or incomplete.");
+			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryNeedsRebuild", mesh.displayName, "Generated package mesh has stale virtual geometry metadata.", "Reimport the package to rebuild generated mesh outputs." });
+			return;
+		}
+
+		VirtualGeometryHeader virtualHeader{};
+		input.seekg(static_cast<std::streamoff>(header.virtualGeometryHeaderOffset), std::ios::beg);
+		input.read(reinterpret_cast<char*>(&virtualHeader), sizeof(virtualHeader));
+		if (!input || virtualHeader.payloadGeneration != kVirtualGeometryPayloadGeneration)
+		{
+			mesh.virtualGeometryStatus = "NeedsRebuild";
+			mesh.virtualGeometryWarnings.push_back("Virtual geometry root header could not be read.");
+			diagnostics.push_back({ ModelDiagnosticSeverity::Warning, "VirtualGeometryRootHeaderUnreadable", mesh.displayName, "Generated package mesh virtual geometry root header could not be read.", "Reimport the package to rebuild generated mesh outputs." });
+			return;
+		}
+
+		mesh.virtualGeometryCooked = true;
+		mesh.virtualGeometryStatus = "Cooked";
+		mesh.virtualGeometryDetailLevels = virtualHeader.detailLevelCount;
+		mesh.virtualGeometrySourceTriangles = virtualHeader.sourceTriangleCount;
+		if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u)
+		{
+			mesh.virtualGeometryCooked = false;
+			mesh.virtualGeometryStatus = "NeedsRebuild";
+			mesh.virtualGeometryWarnings.push_back("Virtual geometry payload has no renderable details or cullable groups.");
+		}
 	}
 }

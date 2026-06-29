@@ -231,6 +231,10 @@ namespace TerraEngine::Renderer {
 		std::uint64_t transformHash = 0u;
 		std::uint64_t visibilityHash = 0u;
 		std::uint64_t overrideHash = 0u;
+		// Virtual geometry LOD selection changes which meshlet range the backend
+		// dispatches, so it must invalidate prepared draw packets just like a
+		// material or transform change.
+		std::uint64_t virtualGeometryHash = 0u;
 	};
 
 	struct RenderGraphValidationDiagnostic

@@ -10,6 +10,9 @@ struct PushConstants
 {
 	uint2 inputSize; // Source depth/mip size for this pass.
 	uint2 outputSize; // Destination mip size; threads outside this area do no work.
+	uint occlusionState; // 1 when the next-frame task shader may use this pyramid for occlusion.
+	uint invalidReason; // CPU-authored reason code when occlusionState is 0; generation still runs.
+	uint2 reserved;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> config;

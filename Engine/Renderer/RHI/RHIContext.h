@@ -62,6 +62,10 @@ public:
 	}
 	// IsTaskShaderSupported is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual bool IsTaskShaderSupported() const { return false; }
+	// Virtual geometry can still render through TerraEngine's mesh-only shader
+	// collection when task shaders are absent, so this capability is tracked
+	// separately from task-shader culling support.
+	virtual bool SupportsVirtualGeometryMeshShaderRoute() const { return false; }
 	virtual TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const
 	{
 		return TerraEngine::Renderer::LatestRenderDiagnostics();

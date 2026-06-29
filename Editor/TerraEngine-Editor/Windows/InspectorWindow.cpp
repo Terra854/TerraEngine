@@ -36,8 +36,10 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <sstream>
 
@@ -1239,12 +1241,40 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 					break;
 				}
 			}
+
+			if (!found) {
+				// Generated model-package children are registered directly with
+				// ResourceManager instead of becoming independent editable assets.
+				// Resolve those runtime registrations so valid GLB/FBX sub-assets
+				// do not appear as missing in component UUID fields.
+				std::vector<AssetType> candidateTypes;
+				if (name == "meshId") candidateTypes.push_back(AssetType::Mesh);
+				else if (name == "materialId") candidateTypes.push_back(AssetType::Material);
+				else if (name.find("Texture") != std::string::npos || name.find("texture") != std::string::npos) candidateTypes.push_back(AssetType::Texture);
+				else {
+					candidateTypes = {
+						AssetType::Mesh,
+						AssetType::Material,
+						AssetType::Texture,
+						AssetType::ShaderCollection
+					};
+				}
+
+				for (AssetType candidateType : candidateTypes) {
+					const std::filesystem::path resourcePath = ResourceManager::Instance().DescribeAssetReference(val, candidateType);
+					if (!resourcePath.empty()) {
+						label = resourcePath.stem().string();
+						found = true;
+						break;
+					}
+				}
+			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!found) label = "(Missing)";
 		}
 
-		char buf[128];
-		strncpy(buf, label.c_str(), sizeof(buf));
+		char buf[128]{};
+		strncpy(buf, label.c_str(), sizeof(buf) - 1u);
 		
 		ImGui::SetNextItemWidth(-1.0f);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2674,6 +2704,16 @@ void InspectorWindow::DrawUIComponentInspector(const std::string& compName, entt
 void InspectorWindow::OnGui() {
 	m_InspectorValueDragging = false;
 	
+	auto selectedPackageChild = m_Owner->GetSelectedPackageChildAsset();
+	if (selectedPackageChild) {
+		DrawModelPackageChildInspector(
+			selectedPackageChild->packagePath,
+			selectedPackageChild->guid,
+			selectedPackageChild->kind,
+			selectedPackageChild->displayName);
+		return;
+	}
+
 	auto selectedAsset = m_Owner->GetSelectedAsset();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (selectedAsset) {
@@ -3225,6 +3265,143 @@ void InspectorWindow::DrawModelPackageInspector(const std::filesystem::path& pat
 	}
 }
 
+// InspectorWindow::DrawModelPackageChildInspector shows generated package children that do not have standalone source files.
+void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path& packagePath, TerraEngine::UUID guid, const std::string& kind, const std::string& displayName) {
+	const std::filesystem::path absolutePath = std::filesystem::absolute(packagePath);
+	TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+	const bool hasImportResult = TerraEngine::AssetPipeline::LoadModelPackageImportResult(absolutePath, importResult);
+
+	ImGui::Text("Generated %s: %s", kind.empty() ? "Sub-Asset" : kind.c_str(), displayName.empty() ? TerraEngine::ToHexString(guid).c_str() : displayName.c_str());
+	ImGui::Separator();
+
+	if (!hasImportResult) {
+		ImGui::TextDisabled("This package has no generated import result yet.");
+		return;
+	}
+
+	auto drawRow = [](const char* label, const std::string& value) {
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::TextUnformatted(label);
+		ImGui::TableSetColumnIndex(1);
+		ImGui::TextWrapped("%s", value.empty() ? "-" : value.c_str());
+	};
+
+	auto drawRowU32 = [&](const char* label, std::uint32_t value) {
+		drawRow(label, std::to_string(value));
+	};
+
+	auto drawCommonTable = [&](const char* tableName, const std::function<void()>& rows) {
+		if (ImGui::BeginTable(tableName, 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+			ImGui::TableSetupColumn("Field", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+			ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+			rows();
+			ImGui::EndTable();
+		}
+	};
+
+	for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes) {
+		if (mesh.guid != guid) {
+			continue;
+		}
+
+		drawCommonTable("GeneratedMeshChildSummary", [&]() {
+			drawRow("GUID", TerraEngine::ToHexString(mesh.guid));
+			drawRow("Package", absolutePath.filename().string());
+			drawRow("Source Node", mesh.sourceNodePath);
+			drawRowU32("Source Mesh", static_cast<std::uint32_t>(mesh.sourceMeshIndex));
+			drawRow("Source Primitive", mesh.sourcePrimitiveIndex ? std::to_string(*mesh.sourcePrimitiveIndex) : "-");
+			drawRow("Compiled Mesh", mesh.compiledPath.generic_string());
+			drawRow("Bounds Min", std::to_string(mesh.localBoundsMin[0]) + ", " + std::to_string(mesh.localBoundsMin[1]) + ", " + std::to_string(mesh.localBoundsMin[2]));
+			drawRow("Bounds Max", std::to_string(mesh.localBoundsMax[0]) + ", " + std::to_string(mesh.localBoundsMax[1]) + ", " + std::to_string(mesh.localBoundsMax[2]));
+		});
+
+		const std::filesystem::path compiledPath = AssetDatabase::Instance().GetBuildRoot() / mesh.compiledPath;
+		MeshHeader header{};
+		std::ifstream input(compiledPath, std::ios::binary);
+		if (input.is_open()) {
+			input.read(reinterpret_cast<char*>(&header), sizeof(header));
+		}
+
+		if (std::memcmp(header.magic, "TEMF", 4) == 0) {
+			ImGui::Spacing();
+			ImGui::Text("Compiled Info (.temf - meshlet only)");
+			drawCommonTable("GeneratedMeshCompiledSummary", [&]() {
+				drawRowU32("Version", static_cast<std::uint32_t>(header.version));
+				drawRowU32("Meshlets", header.meshletCount);
+				drawRowU32("Meshlet Vertices", header.meshletVertexCount);
+				drawRowU32("Meshlet Sections", header.meshletSectionCount);
+				drawRowU32("Meshlet Bounds", header.meshletBoundsCount);
+			});
+		}
+		else {
+			ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.0f, 1.0f), "Compiled TEMF is missing or invalid.");
+		}
+
+		ImGui::Spacing();
+		if (ImGui::CollapsingHeader("Virtual Geometry", ImGuiTreeNodeFlags_DefaultOpen)) {
+			drawCommonTable("GeneratedMeshVirtualGeometrySummary", [&]() {
+				drawRow("Requested", mesh.virtualGeometryRequested ? "Yes" : "No");
+				drawRow("Cooked", mesh.virtualGeometryCooked ? "Yes" : "No");
+				drawRow("Status", mesh.virtualGeometryStatus);
+				drawRowU32("Detail Levels", mesh.virtualGeometryDetailLevels);
+				drawRowU32("Meshlets", mesh.virtualGeometryMeshlets);
+				drawRowU32("Source Triangles", mesh.virtualGeometrySourceTriangles);
+			});
+
+			for (const std::string& warning : mesh.virtualGeometryWarnings) {
+				ImGui::TextWrapped("%s", warning.c_str());
+			}
+		}
+
+		if (!importResult.materialAssignments.empty() && ImGui::CollapsingHeader("Material Assignments", ImGuiTreeNodeFlags_DefaultOpen)) {
+			for (const TerraEngine::AssetPipeline::ModelMaterialAssignment& assignment : importResult.materialAssignments) {
+				if (assignment.meshGuid == mesh.guid) {
+					ImGui::TextWrapped("%s -> %s", assignment.slotName.empty() ? "Material Slot" : assignment.slotName.c_str(), TerraEngine::ToHexString(assignment.materialGuid).c_str());
+				}
+			}
+		}
+		return;
+	}
+
+	for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures) {
+		if (texture.guid != guid) {
+			continue;
+		}
+
+		drawCommonTable("GeneratedTextureChildSummary", [&]() {
+			drawRow("GUID", TerraEngine::ToHexString(texture.guid));
+			drawRow("Package", absolutePath.filename().string());
+			drawRow("Source", texture.sourcePath.generic_string());
+			drawRow("Compiled Texture", texture.compiledPath.generic_string());
+			drawRow("Usage", TerraEngine::AssetPipeline::ToString(texture.usage));
+			drawRow("Semantic", TerraEngine::AssetPipeline::ToString(texture.semantic));
+		});
+		return;
+	}
+
+	for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials) {
+		if (material.guid != guid) {
+			continue;
+		}
+
+		drawCommonTable("GeneratedMaterialChildSummary", [&]() {
+			drawRow("GUID", TerraEngine::ToHexString(material.guid));
+			drawRow("Package", absolutePath.filename().string());
+			drawRow("Source", material.sourcePath.generic_string());
+			drawRow("Compiled Material", material.compiledPath.generic_string());
+			drawRow("Base Color", std::to_string(material.baseColorFactor[0]) + ", " + std::to_string(material.baseColorFactor[1]) + ", " + std::to_string(material.baseColorFactor[2]) + ", " + std::to_string(material.baseColorFactor[3]));
+			drawRow("Metallic", std::to_string(material.metallicFactor));
+			drawRow("Roughness", std::to_string(material.roughnessFactor));
+			drawRow("Double Sided", material.doubleSided ? "Yes" : "No");
+			drawRowU32("Textures", static_cast<std::uint32_t>(material.textureGuids.size()));
+		});
+		return;
+	}
+
+	ImGui::TextDisabled("Generated child %s was not found in the package import result.", TerraEngine::ToHexString(guid).c_str());
+}
+
 // InspectorWindow::DrawMaterialInspector is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
 	if (m_LastInspectedAsset != path) {
@@ -3697,6 +3874,47 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 		drawInfoRow("Meshlet Flags", flagsBuf);
 
 		ImGui::EndTable();
+	}
+
+	VirtualGeometryAssetMetadata virtualGeometryMetadata{};
+	if (AssetDatabase::Instance().TryGetVirtualGeometryMetadata(meta, virtualGeometryMetadata))
+	{
+		ImGui::Spacing();
+		if (ImGui::CollapsingHeader("Virtual Geometry", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			const char* status = "Missing";
+			if (virtualGeometryMetadata.needsRebuild)
+			{
+				status = "Needs Rebuild";
+			}
+			else if (virtualGeometryMetadata.hasVirtualGeometry)
+			{
+				status = "Cooked";
+			}
+
+			if (ImGui::BeginTable("VirtualGeometryInfoTable", 2, ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 180.0f);
+				ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+
+				drawInfoRow("Status", status);
+				drawInfoRowU32("Payload Generation", virtualGeometryMetadata.payloadGeneration);
+				drawInfoRowU32("Detail Levels", virtualGeometryMetadata.detailLevelCount);
+				drawInfoRowU32("Source Triangles", virtualGeometryMetadata.sourceTriangleCount);
+				drawInfoRowU32("Resident Meshlets", virtualGeometryMetadata.meshletCount);
+
+				ImGui::EndTable();
+			}
+
+			for (const std::string& warning : virtualGeometryMetadata.warnings)
+			{
+				ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.25f, 1.0f), "%s", warning.c_str());
+			}
+			if (!virtualGeometryMetadata.rebuildGuidance.empty())
+			{
+				ImGui::TextWrapped("%s", virtualGeometryMetadata.rebuildGuidance.c_str());
+			}
+		}
 	}
 
 	ImGui::Spacing();

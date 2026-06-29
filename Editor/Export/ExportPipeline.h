@@ -101,6 +101,7 @@ private:
 		std::string guid;
 		std::string path;
 		AssetType type;
+		bool virtualGeometryRequired = false;
 	};
 
 	ExportValidator m_Validator;

@@ -1223,6 +1223,7 @@ void MainEditorSubsystem::SetSelectedEntity(std::optional<entt::entity> entity)
 	if (entity)
 	{
 		selectedAsset = std::nullopt;
+		selectedPackageChildAsset = std::nullopt;
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1238,6 +1239,27 @@ void MainEditorSubsystem::SetSelectedEntity(std::optional<entt::entity> entity)
 void MainEditorSubsystem::SetSelectedAsset(std::optional<std::filesystem::path> asset)
 {
 	selectedAsset = asset;
+	selectedPackageChildAsset = std::nullopt;
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (asset)
+	{
+		selectedEntity = std::nullopt;
+	}
+
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (ctx != nullptr)
+	{
+		ctx->scripting.selectionVersion++;
+		ctx->scripting.hasWatchedObject = false;
+		ctx->scripting.watchedObjectId = 0;
+	}
+}
+
+// MainEditorSubsystem::SetSelectedPackageChildAsset records a read-only generated child selection from a model package.
+void MainEditorSubsystem::SetSelectedPackageChildAsset(std::optional<SelectedPackageChildAsset> asset)
+{
+	selectedPackageChildAsset = asset;
+	selectedAsset = asset ? std::optional<std::filesystem::path>(asset->packagePath) : std::nullopt;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (asset)
 	{

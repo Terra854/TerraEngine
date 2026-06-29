@@ -92,7 +92,7 @@ namespace
 	// RenderViewTypeToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	const char* RenderViewTypeToString(RenderViewType viewType)
 	{
-		return (viewType == RenderViewType::Scene) ? "Scene" : "Game";
+		return ToString(viewType);
 	}
 
 	// QualityPresetToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1060,7 +1060,7 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	materialIndexMap[materialId] = materialIndex;
 	
 	VkDeviceSize bufferSize = sizeof(MaterialData);
-	VulkanBuffer stagingBuffer = CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+	VulkanBuffer stagingBuffer = CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, "Material Data Staging Buffer");
 	WriteMappedBuffer(allocator, stagingBuffer, &data, bufferSize);
 	
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
@@ -1136,6 +1136,9 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 		vmaDestroyBuffer(allocator, it->second.meshDecodeInfoBuffer.buffer, it->second.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.indexBuffer.buffer, it->second.indexBuffer.allocation);
 		vmaDestroyBuffer(allocator, it->second.meshletBuffer.buffer, it->second.meshletBuffer.allocation);
+		if (it->second.meshletSectionBuffer.buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(allocator, it->second.meshletSectionBuffer.buffer, it->second.meshletSectionBuffer.allocation);
+		}
 		vmaDestroyBuffer(allocator, it->second.meshletBoundsBuffer.buffer, it->second.meshletBoundsBuffer.allocation);
 		meshCache.erase(it);
 	}
@@ -1222,6 +1225,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 			+ mesh.meshDecodeInfoBuffer.size
 			+ mesh.indexBuffer.size
 			+ mesh.meshletBuffer.size
+			+ mesh.meshletSectionBuffer.size
 			+ mesh.meshletBoundsBuffer.size;
 		ResourceManager::Instance().MarkResourceUploadedToGpu(
 			meshId,
@@ -1241,6 +1245,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	const VkDeviceSize skinningDataSize = static_cast<VkDeviceSize>(cpuMesh->meshletSkinningData.size());
 	const VkDeviceSize primitiveIndexSize = static_cast<VkDeviceSize>(cpuMesh->meshletPrimitiveIndexData.size());
 	const VkDeviceSize meshletTableSize = static_cast<VkDeviceSize>(cpuMesh->meshletRecords.size() * sizeof(MeshletRecord));
+	const VkDeviceSize meshletSectionSize = static_cast<VkDeviceSize>(cpuMesh->meshletSections.size() * sizeof(MeshletSection));
 	const VkDeviceSize meshletBoundsSize = static_cast<VkDeviceSize>(cpuMesh->meshletBounds.size() * sizeof(MeshletBounds));
 	const bool hasBoundsPayload = meshletBoundsSize > 0;
 	const VkDeviceSize boundsUploadSize = hasBoundsPayload ? meshletBoundsSize : static_cast<VkDeviceSize>(sizeof(MeshletBounds));
@@ -1249,6 +1254,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		|| vertexRemapSize == 0
 		|| primitiveIndexSize == 0
 		|| meshletTableSize == 0
+		|| meshletSectionSize == 0
 		|| cpuMesh->header.meshletCount == 0)
 	{
 		TERRAENGINE_LOG(LogLevel::Error, "Mesh payload is missing packed vertex/remap/primitive/table data for UUID " << ToHexString(meshId));
@@ -1318,6 +1324,12 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	VulkanBuffer stagingMeshletTable = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 	WriteMappedBuffer(allocator, stagingMeshletTable, cpuMesh->meshletRecords.data(), meshletTableSize);
 
+	VulkanBuffer stagingMeshletSection = CreateBuffer(meshletSectionSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+	// Virtual geometry stores one meshlet section range per emitted LOD in the MVP.
+	// Upload it with the other resident streams now; later stories bind it when
+	// shaders start selecting LOD ranges directly.
+	WriteMappedBuffer(allocator, stagingMeshletSection, cpuMesh->meshletSections.data(), meshletSectionSize);
+
 	VulkanBuffer stagingMeshletBounds = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (hasBoundsPayload)
@@ -1345,6 +1357,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	vMesh.meshDecodeInfoBuffer = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	vMesh.indexBuffer = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	vMesh.meshletBuffer = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	vMesh.meshletSectionBuffer = CreateBuffer(meshletSectionSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	vMesh.meshletBoundsBuffer = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	vMesh.hasMeshletBounds = hasBoundsPayload;
 	vMesh.indexCount = cpuMesh->header.meshletPrimitiveIndexCount;
@@ -1361,6 +1374,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	CopyBuffer(stagingDecodeInfo.buffer, vMesh.meshDecodeInfoBuffer.buffer, sizeof(MeshDecodeInfo));
 	CopyBuffer(stagingIndex.buffer, vMesh.indexBuffer.buffer, primitiveIndexSize);
 	CopyBuffer(stagingMeshletTable.buffer, vMesh.meshletBuffer.buffer, meshletTableSize);
+	CopyBuffer(stagingMeshletSection.buffer, vMesh.meshletSectionBuffer.buffer, meshletSectionSize);
 	CopyBuffer(stagingMeshletBounds.buffer, vMesh.meshletBoundsBuffer.buffer, boundsUploadSize);
 
 	vmaDestroyBuffer(allocator, stagingPackedVertex.buffer, stagingPackedVertex.allocation);
@@ -1373,6 +1387,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	vmaDestroyBuffer(allocator, stagingDecodeInfo.buffer, stagingDecodeInfo.allocation);
 	vmaDestroyBuffer(allocator, stagingIndex.buffer, stagingIndex.allocation);
 	vmaDestroyBuffer(allocator, stagingMeshletTable.buffer, stagingMeshletTable.allocation);
+	vmaDestroyBuffer(allocator, stagingMeshletSection.buffer, stagingMeshletSection.allocation);
 	vmaDestroyBuffer(allocator, stagingMeshletBounds.buffer, stagingMeshletBounds.allocation);
 
 	vMesh.bindlessIndex = AllocateBufferIndex();
@@ -1386,6 +1401,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		+ static_cast<VkDeviceSize>(sizeof(MeshDecodeInfo))
 		+ primitiveIndexSize
 		+ meshletTableSize
+		+ meshletSectionSize
 		+ boundsUploadSize;
 	ResourceManager::Instance().MarkResourceUploadedToGpu(
 		meshId,

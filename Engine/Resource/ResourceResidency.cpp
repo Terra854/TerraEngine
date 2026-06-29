@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <limits>
 #include <unordered_map>
+#include <utility>
 
 #include "Resource/ResourceManager.h"
 
@@ -289,6 +290,21 @@ namespace TerraEngine::Resource
 		return "cpu+gpu";
 	}
 
+	std::string_view ToString(VirtualGeometryPageResidencyState state)
+	{
+		switch (state)
+		{
+		case VirtualGeometryPageResidencyState::NotResident: return "not-resident";
+		case VirtualGeometryPageResidencyState::Requested: return "requested";
+		case VirtualGeometryPageResidencyState::Loading: return "loading";
+		case VirtualGeometryPageResidencyState::Resident: return "resident";
+		case VirtualGeometryPageResidencyState::Failed: return "failed";
+		case VirtualGeometryPageResidencyState::Evicting: return "evicting";
+		case VirtualGeometryPageResidencyState::Evicted: return "evicted";
+		}
+		return "not-resident";
+	}
+
 	std::uint64_t EstimateResidentBytes(const ResidentAsset& asset)
 	{
 		constexpr std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
@@ -491,6 +507,223 @@ namespace TerraEngine::Resource
 			summary.idleCandidateCount = summary.candidates.size();
 			summary.records = records;
 		}
+		return summary;
+	}
+
+	VirtualGeometryPageTransitionResult ApplyVirtualGeometryPageTransition(VirtualGeometryResidentPage& page, VirtualGeometryPageResidencyEvent event, std::uint64_t frameId, std::string_view reason)
+	{
+		VirtualGeometryPageTransitionResult result;
+		result.previousState = page.state;
+		result.newState = page.state;
+
+		const auto apply = [&](VirtualGeometryPageResidencyState state, std::string text) {
+			page.state = state;
+			page.lastUsedFrame = frameId;
+			result.applied = true;
+			result.newState = state;
+			result.reason = std::move(text);
+		};
+
+		switch (event)
+		{
+		case VirtualGeometryPageResidencyEvent::Request:
+			if (page.state == VirtualGeometryPageResidencyState::NotResident
+				|| page.state == VirtualGeometryPageResidencyState::Evicted
+				|| page.state == VirtualGeometryPageResidencyState::Failed)
+			{
+				page.failureReason.clear();
+				apply(VirtualGeometryPageResidencyState::Requested, "page requested");
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::BeginLoad:
+			if (page.state == VirtualGeometryPageResidencyState::Requested)
+			{
+				apply(VirtualGeometryPageResidencyState::Loading, "page load started");
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::MarkResident:
+			if (page.state == VirtualGeometryPageResidencyState::Requested
+				|| page.state == VirtualGeometryPageResidencyState::Loading)
+			{
+				page.failureReason.clear();
+				apply(VirtualGeometryPageResidencyState::Resident, "page became resident");
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::MarkFailed:
+			if (page.state == VirtualGeometryPageResidencyState::Requested
+				|| page.state == VirtualGeometryPageResidencyState::Loading)
+			{
+				page.failureReason = reason.empty() ? "page load failed" : std::string(reason);
+				apply(VirtualGeometryPageResidencyState::Failed, page.failureReason);
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::BeginEvict:
+			if (page.fallbackPage)
+			{
+				result.reason = "fallback page preserved";
+				break;
+			}
+			if (page.state == VirtualGeometryPageResidencyState::Resident)
+			{
+				apply(VirtualGeometryPageResidencyState::Evicting, "page eviction started");
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::MarkEvicted:
+			if (page.state == VirtualGeometryPageResidencyState::Evicting)
+			{
+				apply(VirtualGeometryPageResidencyState::Evicted, "page eviction completed");
+			}
+			break;
+		}
+
+		return result;
+	}
+
+	std::vector<VirtualGeometryPageEvictionCandidate> BuildVirtualGeometryPageEvictionCandidates(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget)
+	{
+		if (budget.memoryBudgetBytes == 0u)
+		{
+			return {};
+		}
+
+		std::uint64_t residentBytes = 0u;
+		for (const VirtualGeometryResidentPage& page : pages)
+		{
+			if (page.state == VirtualGeometryPageResidencyState::Resident)
+			{
+				residentBytes = AddSaturated(residentBytes, page.byteSize);
+			}
+		}
+		if (residentBytes <= budget.memoryBudgetBytes)
+		{
+			return {};
+		}
+
+		const std::uint64_t requiredReclaim = residentBytes - budget.memoryBudgetBytes;
+		std::vector<VirtualGeometryPageEvictionCandidate> candidates;
+		for (const VirtualGeometryResidentPage& page : pages)
+		{
+			if (page.state != VirtualGeometryPageResidencyState::Resident || page.fallbackPage || page.byteSize == 0u)
+			{
+				continue;
+			}
+
+			VirtualGeometryPageEvictionCandidate candidate;
+			candidate.assetId = page.assetId;
+			candidate.pageId = page.pageId;
+			candidate.reclaimableBytes = page.byteSize;
+			candidate.priority = page.priority;
+			candidate.lastUsedFrame = page.lastUsedFrame;
+			candidates.push_back(candidate);
+		}
+
+		std::sort(candidates.begin(), candidates.end(), [](const VirtualGeometryPageEvictionCandidate& lhs, const VirtualGeometryPageEvictionCandidate& rhs) {
+			if (lhs.priority != rhs.priority)
+			{
+				return lhs.priority < rhs.priority;
+			}
+			if (lhs.lastUsedFrame != rhs.lastUsedFrame)
+			{
+				return lhs.lastUsedFrame < rhs.lastUsedFrame;
+			}
+			if (lhs.reclaimableBytes != rhs.reclaimableBytes)
+			{
+				return lhs.reclaimableBytes > rhs.reclaimableBytes;
+			}
+			return TerraEngine::ToHexString(lhs.assetId) < TerraEngine::ToHexString(rhs.assetId);
+		});
+
+		std::uint64_t plannedReclaim = 0u;
+		std::vector<VirtualGeometryPageEvictionCandidate> trimmed;
+		for (VirtualGeometryPageEvictionCandidate candidate : candidates)
+		{
+			if (plannedReclaim >= requiredReclaim)
+			{
+				break;
+			}
+			plannedReclaim = AddSaturated(plannedReclaim, candidate.reclaimableBytes);
+			trimmed.push_back(std::move(candidate));
+		}
+		return trimmed;
+	}
+
+	VirtualGeometryPageBudgetPressureSummary BuildVirtualGeometryPageBudgetPressureSummary(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget)
+	{
+		VirtualGeometryPageBudgetPressureSummary summary;
+		summary.budgetBytes = budget.memoryBudgetBytes;
+		std::unordered_map<std::string, std::size_t> contributorByAsset;
+
+		const auto contributorFor = [&](const VirtualGeometryResidentPage& page) -> VirtualGeometryPageBudgetPressureContributor& {
+			const std::string key = TerraEngine::ToHexString(page.assetId);
+			if (const auto existing = contributorByAsset.find(key); existing != contributorByAsset.end())
+			{
+				return summary.contributors[existing->second];
+			}
+			VirtualGeometryPageBudgetPressureContributor contributor;
+			contributor.assetId = page.assetId;
+			summary.contributors.push_back(contributor);
+			const std::size_t index = summary.contributors.size() - 1u;
+			contributorByAsset.emplace(key, index);
+			return summary.contributors[index];
+		};
+
+		for (const VirtualGeometryResidentPage& page : pages)
+		{
+			VirtualGeometryPageBudgetPressureContributor& contributor = contributorFor(page);
+			switch (page.state)
+			{
+			case VirtualGeometryPageResidencyState::Resident:
+				++summary.residentPages;
+				++contributor.residentPages;
+				summary.residentBytes = AddSaturated(summary.residentBytes, page.byteSize);
+				contributor.residentBytes = AddSaturated(contributor.residentBytes, page.byteSize);
+				if (!page.fallbackPage)
+				{
+					contributor.reclaimableBytes = AddSaturated(contributor.reclaimableBytes, page.byteSize);
+				}
+				break;
+			case VirtualGeometryPageResidencyState::Requested:
+			case VirtualGeometryPageResidencyState::Loading:
+				++summary.requestedPages;
+				++contributor.requestedPages;
+				break;
+			case VirtualGeometryPageResidencyState::Failed:
+				++summary.failedPages;
+				++summary.missingPages;
+				++contributor.failedPages;
+				++contributor.missingPages;
+				break;
+			case VirtualGeometryPageResidencyState::Evicted:
+				++summary.evictedPages;
+				++summary.missingPages;
+				++contributor.evictedPages;
+				++contributor.missingPages;
+				break;
+			case VirtualGeometryPageResidencyState::NotResident:
+			case VirtualGeometryPageResidencyState::Evicting:
+				++summary.missingPages;
+				++contributor.missingPages;
+				break;
+			}
+		}
+
+		if (summary.budgetBytes > 0u && summary.residentBytes > summary.budgetBytes)
+		{
+			summary.overBudgetBytes = summary.residentBytes - summary.budgetBytes;
+		}
+
+		std::sort(summary.contributors.begin(), summary.contributors.end(), [](const VirtualGeometryPageBudgetPressureContributor& lhs, const VirtualGeometryPageBudgetPressureContributor& rhs) {
+			if (lhs.reclaimableBytes != rhs.reclaimableBytes)
+			{
+				return lhs.reclaimableBytes > rhs.reclaimableBytes;
+			}
+			if (lhs.residentBytes != rhs.residentBytes)
+			{
+				return lhs.residentBytes > rhs.residentBytes;
+			}
+			return TerraEngine::ToHexString(lhs.assetId) < TerraEngine::ToHexString(rhs.assetId);
+		});
+
 		return summary;
 	}
 }

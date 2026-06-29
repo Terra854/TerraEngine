@@ -194,6 +194,9 @@ namespace TerraEngine::Scheduling {
 			{ "Scripting", "Managed runtime, script assemblies, and script component state.", "May later expose script component query resources." },
 			{ "UI", "Runtime UI document, style, and generated geometry state.", "" },
 			{ "Renderer", "Renderer frame graph, GPU submission, and render backend state.", "" },
+			{ "VirtualGeometryQualityProfile", "Renderer-owned virtual geometry quality, LOD, Hi-Z, debug visualization, and budget settings.", "Read by render preparation when choosing whole-mesh LOD/page ranges." },
+			{ "VirtualGeometryResidencySnapshots", "Immutable virtual geometry page residency state prepared before render selection.", "Read by render preparation; publication remains protected by ResourceManager/resource residency boundaries." },
+			{ "VirtualGeometryDiagnostics", "Per-view virtual geometry counters, scheduler boundary metadata, and fail-open warnings.", "Written after protected render/RHI work so editor diagnostics and automation read a stable snapshot." },
 			{ "Resources", "Runtime asset and content mount state.", "" },
 			{ "Profiler", "CPU/GPU profiling capture state.", "" },
 			{ "Editor", "Editor-only systems and tooling state.", "" }

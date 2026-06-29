@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <utility>
 
 namespace TerraEngine::Resource
 {
@@ -50,6 +51,50 @@ namespace TerraEngine::Resource
 				&& left.needId == right.needId
 				&& left.viewId == right.viewId
 				&& left.objectId == right.objectId;
+		}
+
+		bool PageCoversLod(const VirtualGeometryStreamingPage& page, std::uint32_t lodIndex)
+		{
+			if (page.lodCount == 0u)
+			{
+				return false;
+			}
+			const std::uint64_t first = page.firstLodIndex;
+			const std::uint64_t lastExclusive = first + page.lodCount;
+			return static_cast<std::uint64_t>(lodIndex) >= first && static_cast<std::uint64_t>(lodIndex) < lastExclusive;
+		}
+
+		const VirtualGeometryStreamingPage* FindPageById(const std::vector<VirtualGeometryStreamingPage>& pages, std::uint32_t pageId)
+		{
+			for (const VirtualGeometryStreamingPage& page : pages)
+			{
+				if (page.pageId == pageId)
+				{
+					return &page;
+				}
+			}
+			return nullptr;
+		}
+
+		void AppendVirtualGeometryPageNeed(
+			std::vector<StreamingNeed>& needs,
+			const VirtualGeometryPageNeedInput& input,
+			const VirtualGeometryStreamingPage& page,
+			StreamingNeedType needType,
+			std::int32_t priority,
+			double expiresAtSeconds,
+			std::string reason)
+		{
+			StreamingNeed need;
+			need.needId = "virtual-geometry-page:" + std::to_string(page.pageId);
+			need.assetId = input.assetId;
+			need.needType = needType;
+			need.viewId = input.viewId;
+			need.objectId = input.objectId;
+			need.expiresAtSeconds = expiresAtSeconds;
+			need.priority = priority;
+			need.reason = std::move(reason);
+			needs.push_back(std::move(need));
 		}
 
 		bool ParseNonNegativeDouble(std::string_view text)
@@ -297,6 +342,67 @@ namespace TerraEngine::Resource
 		return MergeStreamingNeeds(std::move(needs), nowSeconds);
 	}
 
+	std::vector<StreamingNeed> BuildVirtualGeometryPageStreamingNeeds(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy, double nowSeconds)
+	{
+		const StreamingPolicy sanitized = SanitizeStreamingPolicy(policy);
+		if (!sanitized.enabled)
+		{
+			return {};
+		}
+
+		std::vector<StreamingNeed> needs;
+		for (const VirtualGeometryPageNeedInput& input : inputs)
+		{
+			if (input.assetId == TerraEngine::EMPTY_UUID || input.pages.empty())
+			{
+				continue;
+			}
+
+			const double retention = input.retentionSeconds > 0.0 ? input.retentionSeconds : sanitized.neededRetentionSeconds;
+			const double expiresAtSeconds = retention > 0.0 && nowSeconds > 0.0 ? nowSeconds + retention : 0.0;
+			const VirtualGeometryStreamingPage* desiredPage = nullptr;
+			for (const VirtualGeometryStreamingPage& page : input.pages)
+			{
+				if (PageCoversLod(page, input.desiredLodIndex))
+				{
+					desiredPage = &page;
+					break;
+				}
+			}
+			if (desiredPage == nullptr || desiredPage->failed)
+			{
+				continue;
+			}
+
+			if (!desiredPage->resident)
+			{
+				AppendVirtualGeometryPageNeed(
+					needs,
+					input,
+					*desiredPage,
+					StreamingNeedType::RuntimeExplicit,
+					desiredPage->priority + PriorityClassBias(StreamingPriorityClass::Important),
+					expiresAtSeconds,
+					"virtual geometry desired LOD page");
+			}
+
+			const VirtualGeometryStreamingPage* fallbackPage = FindPageById(input.pages, desiredPage->fallbackPageId);
+			if (fallbackPage != nullptr && !fallbackPage->resident && !fallbackPage->failed)
+			{
+				AppendVirtualGeometryPageNeed(
+					needs,
+					input,
+					*fallbackPage,
+					StreamingNeedType::FallbackDefault,
+					fallbackPage->priority + PriorityClassBias(StreamingPriorityClass::Critical),
+					expiresAtSeconds,
+					"virtual geometry fallback page");
+			}
+		}
+
+		return MergeStreamingNeeds(std::move(needs), nowSeconds);
+	}
+
 	std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds)
 	{
 		needs.erase(std::remove_if(needs.begin(), needs.end(), [nowSeconds](const StreamingNeed& need) {
@@ -319,8 +425,8 @@ namespace TerraEngine::Resource
 		declaration.estimatedWorkItemCount = estimatedNeedCount;
 		declaration.inlineWorkItemThreshold = 16u;
 		declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::WorkerSafe;
-		declaration.safeSubwork = "Dependency discovery, preload-rule evaluation, and residency candidate sorting on immutable inputs.";
-		declaration.protectedCommit = "ResourceManager registration, cache mutation, GPU upload scheduling, and residency publication.";
+		declaration.safeSubwork = "Dependency discovery, preload-rule evaluation, virtual geometry page need calculation, and residency candidate sorting on immutable inputs.";
+		declaration.protectedCommit = "ResourceManager registration, cache mutation, GPU upload scheduling, virtual geometry page publication, and residency publication.";
 		declaration.protectedReason = declaration.protectedCommit;
 		return declaration;
 	}

@@ -399,6 +399,33 @@ namespace
 		std::vector<MeshletBounds> meshletBounds;
 	};
 
+	struct VirtualGeometryLodSource
+	{
+		// indices is a complete whole-mesh LOD. The MVP deliberately switches
+		// whole ranges instead of mixing per-meshlet simplification, which keeps
+		// material ranges and fallback rendering easy to reason about.
+		std::vector<std::uint32_t> indices;
+		float targetRatio = 1.0f;
+		float geometricError = 0.0f;
+	};
+
+	struct VirtualGeometryBuildOutput
+	{
+		// These arrays become the contiguous virtual-geometry payload after the
+		// normal meshlet streams. Offsets written into VirtualGeometryHeader are
+		// absolute file positions so the loader can validate every table before
+		// publishing the mesh as usable runtime state.
+		MeshletBuildOutput meshletPayload;
+		VirtualGeometryHeader header{};
+		std::vector<VirtualGeometryDetailLevelRecord> detailLevels;
+		std::vector<VirtualGeometryMaterialSectionRecord> materialSections;
+		std::vector<VirtualGeometrySectionRangeRecord> sectionRanges;
+		std::vector<VirtualGeometryCullableGroupRecord> cullableGroups;
+		std::vector<VirtualGeometryPageRecord> pages;
+		std::vector<VirtualGeometryDiagnosticRecord> diagnostics;
+		std::string stringTable;
+	};
+
 	// NormalizeExtension is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string NormalizeExtension(const std::filesystem::path& filePath)
 	{
@@ -880,6 +907,7 @@ namespace
 		std::uint32_t meshletTableBytes = 0;
 		std::uint32_t meshletSectionBytes = 0;
 		std::uint32_t meshletBoundsBytes = 0;
+		std::uint32_t virtualGeometryBytes = 0;
 		std::uint32_t vertexDataOffset = 0;
 		std::uint32_t vertexRemapDataOffset = 0;
 		std::uint32_t skinningDataOffset = 0;
@@ -887,6 +915,7 @@ namespace
 		std::uint32_t meshletTableOffset = 0;
 		std::uint32_t meshletSectionOffset = 0;
 		std::uint32_t meshletBoundsOffset = 0;
+		std::uint32_t virtualGeometryHeaderOffset = 0;
 	};
 
 	bool TryBuildPayloadLayout(
@@ -898,6 +927,7 @@ namespace
 		std::size_t meshletTableBytes,
 		std::size_t meshletSectionBytes,
 		std::size_t meshletBoundsBytes,
+		std::size_t virtualGeometryBytes,
 		PayloadLayout& outLayout)
 	{
 		const auto TryToU32 = [](std::size_t value, const char* label, std::uint32_t& outValue) -> bool {
@@ -919,7 +949,8 @@ namespace
 			|| !TryToU32(primitiveBytes, "primitive stream", outLayout.primitiveBytes)
 			|| !TryToU32(meshletTableBytes, "meshlet table", outLayout.meshletTableBytes)
 			|| !TryToU32(meshletSectionBytes, "meshlet section table", outLayout.meshletSectionBytes)
-			|| !TryToU32(meshletBoundsBytes, "meshlet bounds table", outLayout.meshletBoundsBytes))
+			|| !TryToU32(meshletBoundsBytes, "meshlet bounds table", outLayout.meshletBoundsBytes)
+			|| !TryToU32(virtualGeometryBytes, "virtual geometry payload", outLayout.virtualGeometryBytes))
 		{
 			return false;
 		}
@@ -942,6 +973,12 @@ namespace
 		outLayout.meshletBoundsOffset = outLayout.meshletBoundsBytes == 0u
 			? 0u
 			: AlignUp(outLayout.meshletSectionOffset + AlignUp(outLayout.meshletSectionBytes, 4096u), 4096u);
+		const std::uint32_t lastGeometryOffset = outLayout.meshletBoundsOffset != 0u
+			? outLayout.meshletBoundsOffset + AlignUp(outLayout.meshletBoundsBytes, 4096u)
+			: outLayout.meshletSectionOffset + AlignUp(outLayout.meshletSectionBytes, 4096u);
+		outLayout.virtualGeometryHeaderOffset = outLayout.virtualGeometryBytes == 0u
+			? 0u
+			: AlignUp(lastGeometryOffset, 4096u);
 		return true;
 	}
 
@@ -954,7 +991,8 @@ namespace
 		const std::vector<std::uint8_t>& primitiveIndices,
 		const std::vector<MeshletRecord>& meshletRecords,
 		const std::vector<MeshletSection>& meshletSections,
-		const std::vector<MeshletBounds>& meshletBounds)
+		const std::vector<MeshletBounds>& meshletBounds,
+		const VirtualGeometryBuildOutput* virtualGeometry)
 	{
 		std::ofstream out(outputPath, std::ios::binary);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -992,6 +1030,48 @@ namespace
 		{
 			WritePadding(out, header.meshletBoundsOffset);
 			out.write(reinterpret_cast<const char*>(meshletBounds.data()), static_cast<std::streamsize>(meshletBounds.size() * sizeof(MeshletBounds)));
+		}
+
+		if (virtualGeometry != nullptr && header.virtualGeometryHeaderOffset != 0u)
+		{
+			WritePadding(out, header.virtualGeometryHeaderOffset);
+			out.write(reinterpret_cast<const char*>(&virtualGeometry->header), sizeof(VirtualGeometryHeader));
+
+			if (!virtualGeometry->detailLevels.empty())
+			{
+				WritePadding(out, virtualGeometry->header.detailLevelTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->detailLevels.data()), static_cast<std::streamsize>(virtualGeometry->detailLevels.size() * sizeof(VirtualGeometryDetailLevelRecord)));
+			}
+			if (!virtualGeometry->materialSections.empty())
+			{
+				WritePadding(out, virtualGeometry->header.materialSectionTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->materialSections.data()), static_cast<std::streamsize>(virtualGeometry->materialSections.size() * sizeof(VirtualGeometryMaterialSectionRecord)));
+			}
+			if (!virtualGeometry->sectionRanges.empty())
+			{
+				WritePadding(out, virtualGeometry->header.sectionRangeTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->sectionRanges.data()), static_cast<std::streamsize>(virtualGeometry->sectionRanges.size() * sizeof(VirtualGeometrySectionRangeRecord)));
+			}
+			if (!virtualGeometry->cullableGroups.empty())
+			{
+				WritePadding(out, virtualGeometry->header.cullableGroupTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->cullableGroups.data()), static_cast<std::streamsize>(virtualGeometry->cullableGroups.size() * sizeof(VirtualGeometryCullableGroupRecord)));
+			}
+			if (!virtualGeometry->pages.empty())
+			{
+				WritePadding(out, virtualGeometry->header.pageTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->pages.data()), static_cast<std::streamsize>(virtualGeometry->pages.size() * sizeof(VirtualGeometryPageRecord)));
+			}
+			if (!virtualGeometry->diagnostics.empty())
+			{
+				WritePadding(out, virtualGeometry->header.diagnosticTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->diagnostics.data()), static_cast<std::streamsize>(virtualGeometry->diagnostics.size() * sizeof(VirtualGeometryDiagnosticRecord)));
+			}
+			if (!virtualGeometry->stringTable.empty())
+			{
+				WritePadding(out, virtualGeometry->header.diagnosticStringOffset);
+				out.write(virtualGeometry->stringTable.data(), static_cast<std::streamsize>(virtualGeometry->stringTable.size()));
+			}
 		}
 	}
 
@@ -1160,6 +1240,405 @@ namespace
 
 		return true;
 	}
+
+	std::uint32_t AppendVirtualGeometryString(VirtualGeometryBuildOutput& output, std::string_view value)
+	{
+		const std::uint32_t offset = static_cast<std::uint32_t>(output.stringTable.size());
+		output.stringTable.append(value.data(), value.size());
+		output.stringTable.push_back('\0');
+		return offset;
+	}
+
+	void BuildPositionBounds(
+		const std::vector<VertexRaw>& vertices,
+		float (&outMin)[3],
+		float (&outMax)[3])
+	{
+		outMin[0] = outMin[1] = outMin[2] = std::numeric_limits<float>::max();
+		outMax[0] = outMax[1] = outMax[2] = std::numeric_limits<float>::lowest();
+		for (const VertexRaw& vertex : vertices)
+		{
+			for (int component = 0; component < 3; ++component)
+			{
+				outMin[component] = std::min(outMin[component], vertex.position[component]);
+				outMax[component] = std::max(outMax[component], vertex.position[component]);
+			}
+		}
+	}
+
+	bool BuildVirtualGeometryLods(
+		const std::vector<VertexRaw>& vertices,
+		const std::vector<std::uint32_t>& sourceIndices,
+		MeshCompileReport& report,
+		std::vector<VirtualGeometryLodSource>& outLods)
+	{
+		constexpr std::uint32_t kSmallMeshTriangleThreshold = 32u;
+		constexpr std::array<float, 3> kTargetRatios = { 0.5f, 0.25f, 0.125f };
+		constexpr float kSimplificationTargetError = 0.02f;
+		outLods.clear();
+
+		VirtualGeometryLodSource baseLod{};
+		baseLod.indices = sourceIndices;
+		baseLod.targetRatio = 1.0f;
+		baseLod.geometricError = 0.0f;
+		outLods.push_back(std::move(baseLod));
+
+		const std::uint32_t sourceTriangleCount = static_cast<std::uint32_t>(sourceIndices.size() / 3u);
+		report.virtualGeometry.sourceTriangleCount = sourceTriangleCount;
+		report.virtualGeometry.selectedFallbackAvailable = 1u;
+
+		// Very small meshes keep a one-detail virtual-geometry payload. That is
+		// cheaper and safer than forcing simplification that cannot remove enough
+		// triangles to pay for the extra LOD switch.
+		if (sourceTriangleCount <= kSmallMeshTriangleThreshold)
+		{
+			report.virtualGeometry.status = VirtualGeometryCompileStatus::Skipped;
+			report.virtualGeometry.warnings.push_back("virtual geometry simplification skipped: source mesh is below the small-mesh threshold");
+			return true;
+		}
+
+		std::vector<std::uint32_t> currentIndices = sourceIndices;
+		const float* positions = vertices.front().position.data();
+		float maxError = 0.0f;
+
+		for (float targetRatio : kTargetRatios)
+		{
+			std::size_t targetIndexCount = static_cast<std::size_t>(static_cast<float>(sourceIndices.size()) * targetRatio);
+			targetIndexCount = std::max<std::size_t>(3u, (targetIndexCount / 3u) * 3u);
+			if (targetIndexCount >= currentIndices.size())
+			{
+				continue;
+			}
+
+			std::vector<std::uint32_t> simplified(currentIndices.size());
+			float resultError = 0.0f;
+			std::size_t simplifiedIndexCount = meshopt_simplify(
+				simplified.data(),
+				currentIndices.data(),
+				currentIndices.size(),
+				positions,
+				vertices.size(),
+				sizeof(VertexRaw),
+				targetIndexCount,
+				kSimplificationTargetError,
+				0u,
+				&resultError);
+			simplifiedIndexCount = (simplifiedIndexCount / 3u) * 3u;
+
+			if (simplifiedIndexCount < 3u || simplifiedIndexCount >= currentIndices.size())
+			{
+				continue;
+			}
+
+			resultError = std::max(resultError, maxError);
+			if (!std::isfinite(resultError) || resultError > 0.05f)
+			{
+				// Rejecting one candidate does not poison the entire asset. The
+				// previous detail remains the fallback so the renderer never sees
+				// a lower-detail mesh with unbounded visual error.
+				report.virtualGeometry.warnings.push_back("virtual geometry simplification skipped a candidate LOD: geometric error exceeded the US2 tolerance");
+				continue;
+			}
+
+			simplified.resize(simplifiedIndexCount);
+			VirtualGeometryLodSource lod{};
+			lod.targetRatio = static_cast<float>(simplifiedIndexCount) / static_cast<float>(sourceIndices.size());
+			lod.geometricError = resultError;
+			lod.indices = simplified;
+			maxError = std::max(maxError, resultError);
+			currentIndices = std::move(simplified);
+			outLods.push_back(std::move(lod));
+
+			if ((currentIndices.size() / 3u) <= kSmallMeshTriangleThreshold)
+			{
+				break;
+			}
+		}
+
+		if (outLods.size() == 1u)
+		{
+			report.virtualGeometry.status = VirtualGeometryCompileStatus::Skipped;
+			report.virtualGeometry.warnings.push_back("virtual geometry simplification skipped: meshoptimizer did not produce a smaller valid detail level");
+			return true;
+		}
+
+		report.virtualGeometry.status = VirtualGeometryCompileStatus::Cooked;
+		report.virtualGeometry.maxGeometricError = maxError;
+		return true;
+	}
+
+	bool AppendLodMeshlets(
+		const MeshletBuildOutput& source,
+		std::uint32_t lodIndex,
+		std::uint32_t sectionId,
+		std::uint32_t sourcePrimitiveCount,
+		const VirtualGeometryLodSource& lod,
+		const std::vector<VertexRaw>& vertices,
+		VirtualGeometryBuildOutput& output)
+	{
+		std::uint32_t meshletOffset = 0u;
+		std::uint32_t remapOffset = 0u;
+		std::uint32_t primitiveOffset = 0u;
+		if (!TryConvertCount(output.meshletPayload.meshletRecords.size(), "virtual geometry meshlet offset", meshletOffset)
+			|| !TryConvertCount(output.meshletPayload.vertexRemapIndices.size(), "virtual geometry remap offset", remapOffset)
+			|| !TryConvertCount(output.meshletPayload.primitiveIndices.size(), "virtual geometry primitive offset", primitiveOffset))
+		{
+			return false;
+		}
+
+		output.meshletPayload.vertexRemapIndices.insert(
+			output.meshletPayload.vertexRemapIndices.end(),
+			source.vertexRemapIndices.begin(),
+			source.vertexRemapIndices.end());
+		output.meshletPayload.primitiveIndices.insert(
+			output.meshletPayload.primitiveIndices.end(),
+			source.primitiveIndices.begin(),
+			source.primitiveIndices.end());
+
+		for (MeshletRecord record : source.meshletRecords)
+		{
+			record.vertexOffset += remapOffset;
+			record.primitiveIndexOffset += primitiveOffset;
+			output.meshletPayload.meshletRecords.push_back(record);
+		}
+
+		output.meshletPayload.meshletBounds.insert(
+			output.meshletPayload.meshletBounds.end(),
+			source.meshletBounds.begin(),
+			source.meshletBounds.end());
+
+		MeshletSection meshletSection{};
+		meshletSection.meshletOffset = meshletOffset;
+		if (!TryConvertCount(source.meshletRecords.size(), "virtual geometry section meshlet count", meshletSection.meshletCount))
+		{
+			return false;
+		}
+		output.meshletPayload.meshletSections.push_back(meshletSection);
+
+		VirtualGeometrySectionRangeRecord sectionRange{};
+		sectionRange.lodIndex = lodIndex;
+		sectionRange.sectionId = sectionId;
+		sectionRange.meshletOffset = meshletOffset;
+		sectionRange.meshletCount = meshletSection.meshletCount;
+		sectionRange.primitiveOffset = primitiveOffset;
+		sectionRange.primitiveCount = static_cast<std::uint32_t>(lod.indices.size() / 3u);
+		const std::uint32_t sectionRangeIndex = static_cast<std::uint32_t>(output.sectionRanges.size());
+		output.sectionRanges.push_back(sectionRange);
+		const std::uint32_t pageIndex = static_cast<std::uint32_t>(output.pages.size());
+		const std::uint32_t groupOffset = static_cast<std::uint32_t>(output.cullableGroups.size());
+
+		// One detail, one section range, and one page are emitted per LOD in the
+		// MVP. Keeping the relationships explicit makes future page refinement
+		// possible without changing editor metadata or diagnostics contracts.
+		VirtualGeometryDetailLevelRecord detail{};
+		detail.lodIndex = lodIndex;
+		detail.meshletOffset = meshletOffset;
+		detail.meshletCount = meshletSection.meshletCount;
+		detail.vertexCount = static_cast<std::uint32_t>(vertices.size());
+		detail.primitiveCount = static_cast<std::uint32_t>(lod.indices.size() / 3u);
+		detail.sectionRangeOffset = sectionRangeIndex;
+		detail.sectionRangeCount = 1u;
+		detail.pageRangeOffset = pageIndex;
+		detail.pageRangeCount = 1u;
+		detail.geometricError = lod.geometricError;
+		detail.targetRatio = lod.targetRatio;
+		BuildPositionBounds(vertices, detail.boundsMin, detail.boundsMax);
+		output.detailLevels.push_back(detail);
+
+		for (std::size_t localMeshlet = 0; localMeshlet < source.meshletRecords.size(); ++localMeshlet)
+		{
+			const std::size_t globalMeshlet = static_cast<std::size_t>(meshletOffset) + localMeshlet;
+			const MeshletRecord& record = output.meshletPayload.meshletRecords[globalMeshlet];
+			VirtualGeometryCullableGroupRecord group{};
+			group.groupIndex = static_cast<std::uint32_t>(output.cullableGroups.size());
+			group.lodIndex = lodIndex;
+			group.vertexOffset = record.vertexOffset;
+			group.vertexCount = record.vertexCount;
+			group.primitiveOffset = record.primitiveIndexOffset;
+			group.primitiveCount = record.primitiveIndexCount / 3u;
+			group.sectionId = sectionId;
+			group.pageId = pageIndex;
+
+			if (globalMeshlet < output.meshletPayload.meshletBounds.size())
+			{
+				const MeshletBounds& bounds = output.meshletPayload.meshletBounds[globalMeshlet];
+				group.boundsCenter[0] = bounds.center[0];
+				group.boundsCenter[1] = bounds.center[1];
+				group.boundsCenter[2] = bounds.center[2];
+				group.boundsRadius = bounds.radius;
+				group.coneApex[0] = bounds.coneApex[0];
+				group.coneApex[1] = bounds.coneApex[1];
+				group.coneApex[2] = bounds.coneApex[2];
+				group.coneCutoff = bounds.coneCutoff;
+				group.coneAxis[0] = bounds.coneAxis[0];
+				group.coneAxis[1] = bounds.coneAxis[1];
+				group.coneAxis[2] = bounds.coneAxis[2];
+				group.coneApexOffset = bounds.coneApexOffset;
+			}
+			else
+			{
+				// Missing bounds disable aggressive culling for this group. The
+				// loader and task shader interpret this as conservative visibility
+				// rather than letting malformed metadata hide geometry.
+				group.boundsRadius = 1.0f;
+				group.coneCutoff = 2.0f;
+			}
+
+			output.cullableGroups.push_back(group);
+		}
+
+		VirtualGeometryPageRecord page{};
+		page.pageId = pageIndex;
+		page.firstLodIndex = lodIndex;
+		page.lodCount = 1u;
+		page.groupOffset = groupOffset;
+		page.groupCount = static_cast<std::uint32_t>(output.cullableGroups.size()) - groupOffset;
+		page.fallbackPageId = 0u;
+		page.priority = lodIndex == 0u ? 1000u : std::max<std::uint32_t>(1u, 1000u - (lodIndex * 100u));
+		page.byteOffset = static_cast<std::uint64_t>(meshletOffset) * sizeof(MeshletRecord);
+		page.byteSize =
+			static_cast<std::uint64_t>(meshletSection.meshletCount) * (sizeof(MeshletRecord) + sizeof(MeshletBounds))
+			+ static_cast<std::uint64_t>(lod.indices.size()) * sizeof(std::uint8_t)
+			+ static_cast<std::uint64_t>(vertices.size()) * kMeshletPackedVertexStrideBytes;
+		output.pages.push_back(page);
+
+		(void)sourcePrimitiveCount;
+		return true;
+	}
+
+	bool BuildVirtualGeometryPayload(
+		const std::vector<VertexRaw>& vertices,
+		const std::vector<VirtualGeometryLodSource>& lods,
+		bool includeBounds,
+		MeshCompileReport& report,
+		VirtualGeometryBuildOutput& output)
+	{
+		output = {};
+		const std::uint32_t sectionId = 0u;
+		const std::uint32_t sourcePrimitiveCount = lods.empty() ? 0u : static_cast<std::uint32_t>(lods.front().indices.size() / 3u);
+
+		for (std::size_t lodIndex = 0; lodIndex < lods.size(); ++lodIndex)
+		{
+			MeshletBuildOutput lodMeshlets{};
+			if (!BuildMeshletPayload(vertices, lods[lodIndex].indices, includeBounds, lodMeshlets))
+			{
+				report.virtualGeometry.status = VirtualGeometryCompileStatus::Failed;
+				report.virtualGeometry.errors.push_back("virtual geometry meshlet generation failed for LOD " + std::to_string(lodIndex));
+				return false;
+			}
+
+			if (!AppendLodMeshlets(
+				lodMeshlets,
+				static_cast<std::uint32_t>(lodIndex),
+				sectionId,
+				sourcePrimitiveCount,
+				lods[lodIndex],
+				vertices,
+				output))
+			{
+				report.virtualGeometry.status = VirtualGeometryCompileStatus::Failed;
+				report.virtualGeometry.errors.push_back("virtual geometry meshlet range overflow");
+				return false;
+			}
+		}
+
+		const std::uint32_t sectionNameOffset = AppendVirtualGeometryString(output, "DefaultSection");
+		VirtualGeometryMaterialSectionRecord section{};
+		section.sectionId = sectionId;
+		section.materialSlot = 0u;
+		section.sourceTriangleCount = sourcePrimitiveCount;
+		section.perLodRangeOffset = 0u;
+		section.perLodRangeCount = static_cast<std::uint32_t>(output.sectionRanges.size());
+		section.sourceNameStringOffset = sectionNameOffset;
+		section.sourceNameStringSize = static_cast<std::uint32_t>(std::string_view("DefaultSection").size());
+		output.materialSections.push_back(section);
+
+		for (const std::string& warning : report.virtualGeometry.warnings)
+		{
+			const std::uint32_t codeOffset = AppendVirtualGeometryString(output, "VirtualGeometryCookWarning");
+			const std::uint32_t messageOffset = AppendVirtualGeometryString(output, warning);
+			VirtualGeometryDiagnosticRecord diagnostic{};
+			diagnostic.severity = 1u;
+			diagnostic.codeStringOffset = codeOffset;
+			diagnostic.codeStringSize = static_cast<std::uint32_t>(std::string_view("VirtualGeometryCookWarning").size());
+			diagnostic.messageStringOffset = messageOffset;
+			diagnostic.messageStringSize = static_cast<std::uint32_t>(warning.size());
+			output.diagnostics.push_back(diagnostic);
+		}
+
+		report.virtualGeometry.detailLevelCount = static_cast<std::uint32_t>(output.detailLevels.size());
+		report.virtualGeometry.cullableGroupCount = static_cast<std::uint32_t>(output.cullableGroups.size());
+		report.virtualGeometry.pageCount = static_cast<std::uint32_t>(output.pages.size());
+		return true;
+	}
+
+	bool TryComputeVirtualGeometryPayloadBytes(const VirtualGeometryBuildOutput& output, std::uint32_t& outBytes)
+	{
+		std::uint32_t cursor = static_cast<std::uint32_t>(sizeof(VirtualGeometryHeader));
+		const auto AddTable = [&](std::size_t count, std::size_t stride, const char* label) -> bool {
+			cursor = AlignUp(cursor, 4u);
+			std::size_t bytes = 0u;
+			if (count != 0u && stride > (std::numeric_limits<std::size_t>::max() / count))
+			{
+				std::cerr << "Virtual geometry table size overflow for " << label << ".\n";
+				return false;
+			}
+			bytes = count * stride;
+			if (bytes > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max() - cursor))
+			{
+				std::cerr << "Virtual geometry payload size overflow for " << label << ".\n";
+				return false;
+			}
+			cursor += static_cast<std::uint32_t>(bytes);
+			return true;
+		};
+
+		if (!AddTable(output.detailLevels.size(), sizeof(VirtualGeometryDetailLevelRecord), "detail levels")
+			|| !AddTable(output.materialSections.size(), sizeof(VirtualGeometryMaterialSectionRecord), "material sections")
+			|| !AddTable(output.sectionRanges.size(), sizeof(VirtualGeometrySectionRangeRecord), "section ranges")
+			|| !AddTable(output.cullableGroups.size(), sizeof(VirtualGeometryCullableGroupRecord), "cullable groups")
+			|| !AddTable(output.pages.size(), sizeof(VirtualGeometryPageRecord), "pages")
+			|| !AddTable(output.diagnostics.size(), sizeof(VirtualGeometryDiagnosticRecord), "diagnostics")
+			|| !AddTable(output.stringTable.size(), sizeof(char), "string table"))
+		{
+			return false;
+		}
+
+		outBytes = cursor;
+		return true;
+	}
+
+	void PopulateVirtualGeometryHeader(VirtualGeometryBuildOutput& output, std::uint32_t rootOffset)
+	{
+		VirtualGeometryHeader header{};
+		header.payloadGeneration = kVirtualGeometryPayloadGeneration;
+		header.headerSize = static_cast<std::uint32_t>(sizeof(VirtualGeometryHeader));
+		header.detailLevelCount = static_cast<std::uint32_t>(output.detailLevels.size());
+		header.materialSectionCount = static_cast<std::uint32_t>(output.materialSections.size());
+		header.sectionRangeCount = static_cast<std::uint32_t>(output.sectionRanges.size());
+		header.cullableGroupCount = static_cast<std::uint32_t>(output.cullableGroups.size());
+		header.pageCount = static_cast<std::uint32_t>(output.pages.size());
+		header.diagnosticRecordCount = static_cast<std::uint32_t>(output.diagnostics.size());
+		header.sourceTriangleCount = output.detailLevels.empty() ? 0u : output.detailLevels.front().primitiveCount;
+		header.sourceVertexCount = output.detailLevels.empty() ? 0u : output.detailLevels.front().vertexCount;
+
+		std::uint32_t cursor = rootOffset + static_cast<std::uint32_t>(sizeof(VirtualGeometryHeader));
+		const auto AssignTable = [&](std::uint32_t& offset, std::size_t count, std::size_t stride) {
+			cursor = AlignUp(cursor, 4u);
+			offset = count == 0u ? 0u : cursor;
+			cursor += static_cast<std::uint32_t>(count * stride);
+		};
+
+		AssignTable(header.detailLevelTableOffset, output.detailLevels.size(), sizeof(VirtualGeometryDetailLevelRecord));
+		AssignTable(header.materialSectionTableOffset, output.materialSections.size(), sizeof(VirtualGeometryMaterialSectionRecord));
+		AssignTable(header.sectionRangeTableOffset, output.sectionRanges.size(), sizeof(VirtualGeometrySectionRangeRecord));
+		AssignTable(header.cullableGroupTableOffset, output.cullableGroups.size(), sizeof(VirtualGeometryCullableGroupRecord));
+		AssignTable(header.pageTableOffset, output.pages.size(), sizeof(VirtualGeometryPageRecord));
+		AssignTable(header.diagnosticTableOffset, output.diagnostics.size(), sizeof(VirtualGeometryDiagnosticRecord));
+		AssignTable(header.diagnosticStringOffset, output.stringTable.size(), sizeof(char));
+		header.diagnosticStringSize = static_cast<std::uint32_t>(output.stringTable.size());
+		output.header = header;
+	}
 }
 
 // IsSupportedMeshSourceExtension is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1303,17 +1782,27 @@ bool CompileMesh(
 		return FinalizeReport(false);
 	}
 
-	MeshletBuildOutput meshletPayload{};
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!BuildMeshletPayload(vertices, indices, includeMeshletBounds, meshletPayload))
+	std::vector<VirtualGeometryLodSource> virtualGeometryLods;
+	if (!BuildVirtualGeometryLods(vertices, indices, report, virtualGeometryLods))
 	{
 		report.status = "compile_fail";
-		report.failureReason = "meshlet-build-failed";
+		report.failureReason = "virtual-geometry-lod-build-failed";
 		return FinalizeReport(false);
 	}
 
+	VirtualGeometryBuildOutput virtualGeometryPayload{};
+	if (!BuildVirtualGeometryPayload(vertices, virtualGeometryLods, includeMeshletBounds, report, virtualGeometryPayload))
+	{
+		report.status = "compile_fail";
+		report.failureReason = "virtual-geometry-payload-build-failed";
+		return FinalizeReport(false);
+	}
+
+	MeshletBuildOutput& meshletPayload = virtualGeometryPayload.meshletPayload;
+
 	// Meshlet generation is the last consumer of the index buffer.
 	ReleaseVectorMemory(indices);
+	ReleaseVectorMemory(virtualGeometryLods);
 
 	MeshHeader header{};
 	header.magic[0] = 'T';
@@ -1358,7 +1847,7 @@ bool CompileMesh(
 		header.meshletVertexCount <= std::numeric_limits<std::uint16_t>::max()
 			? MeshletRemapEncoding::Uint16
 			: MeshletRemapEncoding::Uint32);
-	header.meshletFlags = meshletPayload.meshletBounds.empty() ? 0u : kMeshletHeaderFlagHasBounds;
+	header.meshletFlags = (meshletPayload.meshletBounds.empty() ? 0u : kMeshletHeaderFlagHasBounds) | kMeshletHeaderFlagHasVirtualGeometry;
 	header.meshletSkinningDataOffset = 0;
 	header.meshletSkinningDataCount = 0;
 
@@ -1468,6 +1957,14 @@ bool CompileMesh(
 
 	report.usedU16RemapEncoding = (remapEncoding == MeshletRemapEncoding::Uint16);
 
+	std::uint32_t virtualGeometryPayloadBytes = 0u;
+	if (!TryComputeVirtualGeometryPayloadBytes(virtualGeometryPayload, virtualGeometryPayloadBytes))
+	{
+		report.status = "compile_fail";
+		report.failureReason = "virtual-geometry-layout-overflow";
+		return FinalizeReport(false);
+	}
+
 	PayloadLayout payloadLayout{};
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TryBuildPayloadLayout(
@@ -1479,6 +1976,7 @@ bool CompileMesh(
 		meshletPayload.meshletRecords.size() * sizeof(MeshletRecord),
 		meshletPayload.meshletSections.size() * sizeof(MeshletSection),
 		meshletPayload.meshletBounds.size() * sizeof(MeshletBounds),
+		virtualGeometryPayloadBytes,
 		payloadLayout))
 	{
 		report.status = "compile_fail";
@@ -1494,6 +1992,10 @@ bool CompileMesh(
 	header.meshletTableOffset = payloadLayout.meshletTableOffset;
 	header.meshletSectionOffset = payloadLayout.meshletSectionOffset;
 	header.meshletBoundsOffset = payloadLayout.meshletBoundsOffset;
+	header.virtualGeometryHeaderOffset = payloadLayout.virtualGeometryHeaderOffset;
+	header.virtualGeometryHeaderSize = static_cast<std::uint32_t>(sizeof(VirtualGeometryHeader));
+	header.virtualGeometryPayloadGeneration = kVirtualGeometryPayloadGeneration;
+	PopulateVirtualGeometryHeader(virtualGeometryPayload, header.virtualGeometryHeaderOffset);
 
 	try
 	{
@@ -1507,7 +2009,8 @@ bool CompileMesh(
 			meshletPayload.primitiveIndices,
 			meshletPayload.meshletRecords,
 			meshletPayload.meshletSections,
-			meshletPayload.meshletBounds);
+			meshletPayload.meshletBounds,
+			&virtualGeometryPayload);
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(output))

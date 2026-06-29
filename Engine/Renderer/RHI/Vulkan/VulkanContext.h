@@ -31,6 +31,7 @@ public:
 	bool ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan) override;
 	TerraEngine::Renderer::BackendFrameBreakdown GetLatestBackendFrameBreakdown() const override;
 	bool IsTaskShaderSupported() const override;
+	bool SupportsVirtualGeometryMeshShaderRoute() const override;
 	RenderStatsSnapshot GetLatestRenderStats(RenderViewType viewType) const override;
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const override;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const override;

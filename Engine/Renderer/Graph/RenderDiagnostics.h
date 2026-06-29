@@ -6,6 +6,7 @@
 #include "RenderWorkerTaskGroup.h"
 #include "RenderSubmissionPlan.h"
 #include "Core/Export.h"
+#include "Renderer/RenderTypes.h"
 
 #include <atomic>
 #include <cstdint>
@@ -40,6 +41,77 @@ namespace TerraEngine::Renderer {
 		bool passed = true;
 	};
 
+	struct VirtualGeometryBudgetContributor
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		RenderViewType viewType = RenderViewType::Game;
+		std::uint64_t residentBytes = 0u;
+		std::uint64_t reclaimableBytes = 0u;
+		std::uint32_t residentPages = 0u;
+		std::uint32_t missingPages = 0u;
+	};
+
+	struct VirtualGeometryViewDiagnosticsSnapshot
+	{
+		RenderViewType viewType = RenderViewType::Game;
+		std::uint64_t frameId = 0u;
+		bool active = false;
+		VirtualGeometryInactiveReason inactiveReason = VirtualGeometryInactiveReason::None;
+		std::uint32_t sourceMeshlets = 0u;
+		std::uint32_t selectedMeshlets = 0u;
+		std::uint32_t dispatchedMeshlets = 0u;
+		std::uint32_t culledMeshlets = 0u;
+		std::uint32_t culledByFrustum = 0u;
+		std::uint32_t culledByCone = 0u;
+		std::uint32_t culledByHiZ = 0u;
+		bool hiZActive = false;
+		bool hiZHistoryValid = false;
+		std::uint32_t hiZInactiveFrames = 0u;
+		std::uint32_t hiZFalseOcclusionRiskWarnings = 0u;
+		std::string hiZInvalidReason;
+		std::uint32_t residentPages = 0u;
+		std::uint32_t requestedPages = 0u;
+		std::uint32_t missingPages = 0u;
+		std::uint32_t failedPages = 0u;
+		std::uint32_t evictedPages = 0u;
+		std::uint32_t lodTransitionCandidates = 0u;
+		std::uint32_t poppingRiskWarnings = 0u;
+		float maxGeometricError = 0.0f;
+		float effectiveLodErrorScale = 1.0f;
+		std::uint32_t configuredMaxLodDrop = 0u;
+		std::uint64_t geometryBudgetBytes = 0u;
+		std::uint64_t budgetPressureBytes = 0u;
+		std::uint64_t estimatedGeometryBytes = 0u;
+		std::vector<std::uint32_t> selectedLodHistogram;
+		std::vector<VirtualGeometryBudgetContributor> budgetContributors;
+		std::vector<std::string> warnings;
+	};
+
+	struct VirtualGeometrySchedulerDiagnostics
+	{
+		std::string owningSystem;
+		std::string schedulerPhase;
+		std::vector<std::string> readResources;
+		std::vector<std::string> writeResources;
+		std::string workerSafePreparation;
+		std::string protectedBoundary;
+		std::string visibilityBoundary;
+	};
+
+	struct VirtualGeometryHiZDiagnosticsInput
+	{
+		RenderViewType viewType = RenderViewType::Game;
+		std::uint64_t frameId = 0u;
+		bool qualityRequested = false;
+		bool historyValid = false;
+		bool hiZActive = false;
+		std::string invalidReason;
+		std::uint32_t culledByFrustum = 0u;
+		std::uint32_t culledByCone = 0u;
+		std::uint32_t culledByHiZ = 0u;
+		std::uint32_t falseOcclusionRiskWarnings = 0u;
+	};
+
 	struct RenderDiagnosticsSummary
 	{
 		std::uint64_t frameId = 0u;
@@ -55,6 +127,9 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderBudgetDiagnostic> budgetDiagnostics;
 		std::vector<RenderQueueReadiness> queueReadiness;
 		std::vector<RenderPerformanceGateResult> performanceGates;
+		std::vector<VirtualGeometryViewDiagnosticsSnapshot> virtualGeometryViews;
+		std::vector<VirtualGeometryBudgetContributor> virtualGeometryBudgetContributors;
+		std::vector<VirtualGeometrySchedulerDiagnostics> virtualGeometrySchedulers;
 		std::size_t runtimeLayoutRenderRecordCount = 0u;
 		std::size_t runtimeLayoutRejectedRecordCount = 0u;
 		std::vector<std::string> runtimeLayoutRejectionReasons;
@@ -76,12 +151,20 @@ namespace TerraEngine::Renderer {
 
 	TERRAENGINE_API RenderBudgetDiagnostic BuildRenderBudgetDiagnostic(const RenderWorkBudget& budget);
 	TERRAENGINE_API RenderPerformanceGateResult EvaluateRenderPerformanceGate(std::string workloadName, float baselineValue, float latestValue, float thresholdPercent);
+	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildInactiveVirtualGeometryDiagnostics(RenderViewType viewType, std::uint64_t frameId, VirtualGeometryInactiveReason reason);
+	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryLodQualityDiagnostics(RenderViewType viewType, std::uint64_t frameId, const std::vector<VirtualGeometryAssetRuntime>& assets, const VirtualGeometryQualityProfile& qualityProfile);
+	TERRAENGINE_API std::vector<VirtualGeometryViewDiagnosticsSnapshot> BuildVirtualGeometryViewDiagnosticsFromSnapshot(const RenderFrameSnapshot& snapshot, const VirtualGeometryQualityProfile& qualityProfile, VirtualGeometryInactiveReason inactiveReason);
+	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryHiZDiagnostics(const VirtualGeometryHiZDiagnosticsInput& input);
+	TERRAENGINE_API void AddVirtualGeometryFailOpenDiagnostic(RenderDiagnosticsSummary& summary, const TerraEngine::UUID& meshId, const VirtualGeometryDrawRange& range);
+	TERRAENGINE_API VirtualGeometrySchedulerDiagnostics BuildVirtualGeometrySchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::vector<std::string> readResources, std::vector<std::string> writeResources, std::string workerSafePreparation, std::string protectedBoundary, std::string visibilityBoundary);
+	TERRAENGINE_API void ApplyVirtualGeometryDiagnostics(RenderDiagnosticsSummary& summary, std::vector<VirtualGeometryViewDiagnosticsSnapshot> viewSnapshots, std::vector<VirtualGeometrySchedulerDiagnostics> schedulerSnapshots);
 	TERRAENGINE_API void ApplyBackendBreakdownToRenderDiagnostics(RenderDiagnosticsSummary& summary, const BackendFrameBreakdown& breakdown);
 	TERRAENGINE_API bool RenderDiagnosticsRequested();
 	TERRAENGINE_API void SetRenderDiagnosticsRequested(bool requested);
 	TERRAENGINE_API void ClearPublishedRenderDiagnostics();
 	TERRAENGINE_API void PublishRenderDiagnostics(RenderDiagnosticsSummary summary);
 	TERRAENGINE_API RenderDiagnosticsSummary LatestRenderDiagnostics();
+	TERRAENGINE_API std::vector<VirtualGeometryViewDiagnosticsSnapshot> LatestVirtualGeometryDiagnosticsSnapshots();
 	TERRAENGINE_API RenderDiagnosticsSummary BuildRenderDiagnosticsSummary(
 		const RenderFrameSnapshot& snapshot,
 		const RenderWorkPacketPlan& packetPlan,

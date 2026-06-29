@@ -1,5 +1,11 @@
 #pragma pack_matrix(column_major)
 
+// Default.task.hlsl is the task-stage visibility filter for the default
+// mesh-shader route. It consumes TEMF meshlet bounds plus the selected
+// virtual-geometry LOD range chosen on the CPU, compacts visible meshlet indices
+// into TaskPayload, and always fails open when culling data or Hi-Z history is
+// not trustworthy.
+
 // Sphere + cone bounds emitted per meshlet by meshoptimizer.
 struct MeshletBounds
 {
@@ -17,7 +23,7 @@ struct MeshDecodeInfo
 	float4 positionOffset;
 	float4 positionScale;
 	float4 uvOffsetScale;
-	uint4 counts;
+	uint4 counts; // x/y/z are mesh stream counts; w is the total meshlet count with the high bit reserved for future flags.
 };
 
 struct FrameCullingData
@@ -79,6 +85,10 @@ struct PushConstants
 	uint clusterDataOffset;
 	uint lightIndexOffset;
 	uint indirectDrawOffset;
+	uint virtualMeshletOffset; // First meshlet of the selected whole-mesh virtual-geometry LOD range.
+	uint virtualMeshletCount; // Number of meshlets in the selected range; zero means consume the rest of the meshlet table.
+	uint selectedVirtualLod; // CPU-selected LOD index for diagnostics and debug visualization.
+	uint virtualGeometryFlags; // bit 2: Hi-Z self-occlusion guard passed; unset keeps Hi-Z fail-open.
 	float4 editorTint;
 };
 
@@ -195,12 +205,20 @@ void main(uint3 groupId : SV_GroupID)
 {
 	const MeshDecodeInfo decode = meshDecodeInfo[0];
 	const uint meshletCount = decode.counts.w & 0x7FFFFFFFu;
+	const uint selectedMeshletOffset = min(SceneUniforms.virtualMeshletOffset, meshletCount);
+	const uint selectedMeshletCount = SceneUniforms.virtualMeshletCount == 0u
+		? (meshletCount - selectedMeshletOffset)
+		: min(SceneUniforms.virtualMeshletCount, meshletCount - selectedMeshletOffset);
 	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
 	const FrameCullingData frameData = frameCullingData[statsIndex];
 	const float epsilon = max(SceneUniforms.cullingEpsilon, frameData.cameraPositionAndEpsilon.w);
 	const float3 cameraPosition = frameData.cameraPositionAndEpsilon.xyz;
+	const bool hiZHistoryValidated = frameData.renderSettings2.w > 0.5f;
+	const bool hiZSelfOcclusionGuardPassed = (SceneUniforms.virtualGeometryFlags & 4u) != 0u;
+	const uint virtualGeometryDebugMode = (SceneUniforms.virtualGeometryFlags >> 8u) & 0xFFu;
+	const bool debugCulledMeshlets = virtualGeometryDebugMode == 4u;
 
-	const uint meshletBase = groupId.x * kTaskBatchSize;
+	const uint meshletBase = selectedMeshletOffset + groupId.x * kTaskBatchSize;
 	uint visibleCount = 0u;
 	uint ignored = 0u;
 
@@ -210,8 +228,9 @@ void main(uint3 groupId : SV_GroupID)
 
 	for (uint localIndex = 0u; localIndex < kTaskBatchSize; ++localIndex)
 	{
+		const uint selectedLocalIndex = groupId.x * kTaskBatchSize + localIndex;
 		const uint meshletIndex = meshletBase + localIndex;
-		if (meshletIndex >= meshletCount)
+		if (selectedLocalIndex >= selectedMeshletCount || meshletIndex >= meshletCount)
 		{
 			break;
 		}
@@ -236,7 +255,7 @@ void main(uint3 groupId : SV_GroupID)
 			{
 				culled = IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, worldRadius, cameraPosition, epsilon);
 			}
-			if (!culled && frameData.renderSettings2.w > 0.5f)
+			if (!culled && hiZHistoryValidated && hiZSelfOcclusionGuardPassed)
 			{
 				if (IsOccluded(worldCenter, worldRadius, frameData, epsilon))
 				{
@@ -246,10 +265,17 @@ void main(uint3 groupId : SV_GroupID)
 			}
 		}
 
-		if (culled)
+		if (culled && !debugCulledMeshlets)
 		{
 			InterlockedAdd(meshletCounters[statsIndex].meshletsCulled, 1u, ignored);
 			continue;
+		}
+		if (culled)
+		{
+			// Culled debug mode deliberately keeps rejected meshlets in the
+			// payload so the mesh/fragment stages can color them by the rejection
+			// reason. Normal rendering still drops them above.
+			InterlockedAdd(meshletCounters[statsIndex].meshletsCulled, 1u, ignored);
 		}
 
 		gTaskPayload.meshletIndices[visibleCount] = meshletIndex;

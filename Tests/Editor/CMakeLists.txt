@@ -19,6 +19,7 @@ add_executable(TerraEngine-EditorTests
 	Export/PackagingRequestValidationTests.cpp
 	Export/ResidencyPolicyExportTests.cpp
 	Export/StreamingPolicyExportTests.cpp
+	Export/VirtualGeometryExportTests.cpp
 	Profiling/ProfilerCaptureStoreTests.cpp
 	Project/LinuxScriptCompilationTests.cpp
 	Project/LinuxScriptEditorLaunchTests.cpp
@@ -34,6 +35,7 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorMcpTransportTests.cpp
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp
+	Automation/VirtualGeometryAutomationTests.cpp
 	AssetPipeline/ModelPackageImportResultTests.cpp
 	AssetPipeline/FbxPackageImporterTests.cpp
 	AssetPipeline/FbxReimportTests.cpp
@@ -49,6 +51,12 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/GltfUnsupportedFeatureTests.cpp
 	AssetPipeline/GltfImportFailureTests.cpp
 	AssetPipeline/GltfReimportTests.cpp
+	AssetPipeline/VirtualGeometryInspectorTests.cpp
+	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
+	AssetPipeline/VirtualGeometryPackageImportTests.cpp
+	Renderer/VirtualGeometryDebugViewTests.cpp
+	# Virtual geometry asset-pipeline, automation, and export tests will be
+	# registered here when their story-specific test files are added.
 	Scene/ArchitectureHardeningPlayModeTests.cpp
 	Scene/FullParallelFrameDiagnosticsTests.cpp
 	Scene/RuntimeLayoutDiagnosticsTests.cpp
@@ -163,3 +171,27 @@ endif()
 
 add_test(NAME Editor.ExportUnitTests COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.ExportUnitTests PROPERTIES LABELS "Editor")
+
+add_test(NAME Editor.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.VirtualGeometryFoundation PROPERTIES
+	LABELS "Editor;VirtualGeometry"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry,Editor.AssetPipeline.ModelPackage,Editor.Automation"
+)
+
+add_test(NAME Editor.VirtualGeometryAssetPipeline COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.VirtualGeometryAssetPipeline PROPERTIES
+	LABELS "Editor;VirtualGeometry;AssetPipeline"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Editor.AssetPipeline.VirtualGeometry,VirtualGeometry.Editor.PackageImport,VirtualGeometry.Editor.Inspector,VirtualGeometry.Editor.AssetDatabase"
+)
+
+add_test(NAME Editor.VirtualGeometryAutomation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.VirtualGeometryAutomation PROPERTIES
+	LABELS "Editor;VirtualGeometry;Automation"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation"
+)
+
+add_test(NAME Editor.VirtualGeometryExport COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.VirtualGeometryExport PROPERTIES
+	LABELS "Editor;VirtualGeometry;Export"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Export,VirtualGeometry.Editor.DebugView"
+)

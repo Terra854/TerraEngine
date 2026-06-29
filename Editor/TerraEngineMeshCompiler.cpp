@@ -33,6 +33,23 @@ namespace
 		return value ? "true" : "false";
 	}
 
+	std::string ToVirtualGeometryCompileStatusText(VirtualGeometryCompileStatus status)
+	{
+		switch (status)
+		{
+		case VirtualGeometryCompileStatus::Cooked:
+			return "cooked";
+		case VirtualGeometryCompileStatus::Skipped:
+			return "skipped";
+		case VirtualGeometryCompileStatus::Failed:
+			return "failed";
+		case VirtualGeometryCompileStatus::NeedsRebuild:
+			return "needsRebuild";
+		default:
+			return "unknown";
+		}
+	}
+
 	// BuildMetadataPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::filesystem::path BuildMetadataPath(const std::filesystem::path& artifactPath)
 	{
@@ -206,6 +223,20 @@ namespace
 		return escaped;
 	}
 
+	void AppendStringArrayJson(std::ostringstream& json, const std::vector<std::string>& values)
+	{
+		json << "[";
+		for (std::size_t index = 0; index < values.size(); ++index)
+		{
+			if (index != 0u)
+			{
+				json << ",";
+			}
+			json << "\"" << EscapeJson(values[index]) << "\"";
+		}
+		json << "]";
+	}
+
 	// BuildReportJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string BuildReportJson(const MeshCompileReport& report)
 	{
@@ -226,6 +257,19 @@ namespace
 		json << "\"runtimeValidationPass\":" << ToBoolText(report.runtimeValidationPass) << ",";
 		json << "\"usedU16RemapEncoding\":" << ToBoolText(report.usedU16RemapEncoding) << ",";
 		json << "\"meshletGlobalVertexCount\":" << report.meshletGlobalVertexCount << ",";
+		json << "\"virtualGeometry\":{";
+		json << "\"status\":\"" << ToVirtualGeometryCompileStatusText(report.virtualGeometry.status) << "\",";
+		json << "\"detailLevelCount\":" << report.virtualGeometry.detailLevelCount << ",";
+		json << "\"cullableGroupCount\":" << report.virtualGeometry.cullableGroupCount << ",";
+		json << "\"pageCount\":" << report.virtualGeometry.pageCount << ",";
+		json << "\"sourceTriangleCount\":" << report.virtualGeometry.sourceTriangleCount << ",";
+		json << "\"selectedFallbackAvailable\":" << ToBoolText(report.virtualGeometry.selectedFallbackAvailable != 0u) << ",";
+		json << "\"maxGeometricError\":" << report.virtualGeometry.maxGeometricError << ",";
+		json << "\"warnings\":";
+		AppendStringArrayJson(json, report.virtualGeometry.warnings);
+		json << ",\"errors\":";
+		AppendStringArrayJson(json, report.virtualGeometry.errors);
+		json << "},";
 		json << "\"status\":\"" << EscapeJson(report.status) << "\",";
 		json << "\"failureReason\":\"" << EscapeJson(report.failureReason) << "\"";
 		json << "}";
@@ -249,6 +293,11 @@ namespace
 		out << "outputBytes=" << report.outputBytes << "\n";
 		out << "formatVersion=" << report.formatVersion << "\n";
 		out << "status=" << report.status << "\n";
+		out << "virtualGeometryStatus=" << ToVirtualGeometryCompileStatusText(report.virtualGeometry.status) << "\n";
+		out << "virtualGeometryDetailLevelCount=" << report.virtualGeometry.detailLevelCount << "\n";
+		out << "virtualGeometryMeshletCount=" << report.virtualGeometry.cullableGroupCount << "\n";
+		out << "virtualGeometrySourceTriangleCount=" << report.virtualGeometry.sourceTriangleCount << "\n";
+		out << "virtualGeometryWarningCount=" << report.virtualGeometry.warnings.size() << "\n";
 	}
 
 	// LoadMetadataFile is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -344,6 +393,13 @@ namespace
 			<< " version=" << report.formatVersion
 			<< " deterministicReady=" << ToBoolText(report.deterministicReady)
 			<< " gpuDirectPass=" << ToBoolText(report.runtimeValidationPass)
+			<< " virtualGeometryStatus=" << ToVirtualGeometryCompileStatusText(report.virtualGeometry.status)
+			<< " virtualGeometryDetailLevels=" << report.virtualGeometry.detailLevelCount
+			<< " virtualGeometryMeshlets=" << report.virtualGeometry.cullableGroupCount
+			<< " virtualGeometryCullableGroups=" << report.virtualGeometry.cullableGroupCount
+			<< " virtualGeometrySourceTriangles=" << report.virtualGeometry.sourceTriangleCount
+			<< " virtualGeometryFallbackAvailable=" << ToBoolText(report.virtualGeometry.selectedFallbackAvailable != 0u)
+			<< " virtualGeometryWarnings=" << report.virtualGeometry.warnings.size()
 			<< " cpu-repack-used=false"
 			<< " baselinePass=" << ToBoolText(report.baselinePass)
 			<< " status=" << report.status

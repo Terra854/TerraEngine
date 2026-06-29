@@ -26,6 +26,14 @@ class Object;
 // class MainEditorSubsystem groups related state and operations so callers have one documented contract.
 class MainEditorSubsystem : public IEditorSubsystem {
 public:
+	struct SelectedPackageChildAsset
+	{
+		std::filesystem::path packagePath;
+		TerraEngine::UUID guid = TerraEngine::EMPTY_UUID;
+		std::string kind;
+		std::string displayName;
+	};
+
 	virtual void Initialize(EditorContext& context) override;
 	virtual void OnBackendReady() override;
 	virtual void Update(float deltaTime) override;
@@ -50,6 +58,11 @@ public:
 	// GetSelectedAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::optional<std::filesystem::path> GetSelectedAsset() const { return selectedAsset; }
 	void SetSelectedAsset(std::optional<std::filesystem::path> asset);
+	// Generated package children are not standalone source files, so the
+	// inspector needs their package path plus GUID to show the right read-only
+	// sub-asset details instead of falling back to the parent glTF/FBX summary.
+	std::optional<SelectedPackageChildAsset> GetSelectedPackageChildAsset() const { return selectedPackageChildAsset; }
+	void SetSelectedPackageChildAsset(std::optional<SelectedPackageChildAsset> asset);
 	
 	// Opens a scene and updates the last opened scene tracking.
 	void OpenScene(const std::filesystem::path& path);
@@ -160,6 +173,7 @@ private:
 	
 	std::optional<entt::entity> selectedEntity;
 	std::optional<std::filesystem::path> selectedAsset;
+	std::optional<SelectedPackageChildAsset> selectedPackageChildAsset;
 	std::filesystem::path m_CurrentScenePath;
 
 	// PendingAction names the supported states explicitly so serialization and switches stay readable.

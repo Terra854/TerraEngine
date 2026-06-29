@@ -97,6 +97,33 @@ static std::string AmbientOcclusionQualityFromSettings(const nlohmann::json& set
 	return QualityFromRank(settings.value("ambientOcclusionQuality", 2u));
 }
 
+static bool IsModelPackageImporterName(const std::string& importer)
+{
+	return importer == "FbxPackageImporter" || importer == "GltfPackageImporter";
+}
+
+static bool IsCompiledVirtualGeometryMeshPath(const std::string& path)
+{
+	std::filesystem::path compiledPath(path);
+	return compiledPath.extension() == ".temf" || compiledPath.extension() == ".TEMF";
+}
+
+static nlohmann::json BuildVirtualGeometryExportManifest(const BuildProfile& profile)
+{
+	nlohmann::json virtualGeometry;
+	virtualGeometry["quality"] = QualityFromRank(profile.virtualGeometryQualityLevel);
+	virtualGeometry["qualityLevel"] = profile.virtualGeometryQualityLevel;
+	virtualGeometry["diagnosticsEnabled"] = profile.virtualGeometryDiagnosticsEnabled;
+	virtualGeometry["geometryBudgetBytes"] = profile.virtualGeometryBudgetBytes;
+	virtualGeometry["requiredShaders"] = nlohmann::json::array({
+		"Shaders/Default.task.tspf",
+		"Shaders/Default.mesh.tspf",
+		"Shaders/Default.frag.tspf",
+		"Shaders/PostProcess/HiZGenerate.comp.spv"
+	});
+	return virtualGeometry;
+}
+
 static nlohmann::json ResolveRenderProfileManifest(const std::filesystem::path& projectRoot)
 {
 	nlohmann::json renderProfile;
@@ -641,7 +668,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					AssetType type;
 					bool supported = true;
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (importer == "MeshImporter") type = AssetType::Mesh;
+					if (importer == "MeshImporter" || IsModelPackageImporterName(importer)) type = AssetType::Mesh;
 					else if (importer == "TextureImporter") type = AssetType::Texture;
 					else if (importer == "MaterialImporter") type = AssetType::Material;
 					else supported = false;
@@ -664,6 +691,8 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 							auto rel = std::filesystem::relative(entry.path().parent_path() / meta.value("sourcePath", ""), rawAssets);
 							asset.path = rel.generic_string();
 						}
+						asset.virtualGeometryRequired = asset.type == AssetType::Mesh
+							&& IsCompiledVirtualGeometryMeshPath(asset.path);
 						m_StagedAssets.push_back(std::move(asset));
 					}
 				}
@@ -871,6 +900,7 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		}
 		manifest["residencyPolicy"] = BuildResidencyPolicyManifest();
 		manifest["streamingPolicy"] = BuildStreamingPolicyManifest();
+		manifest["virtualGeometry"] = BuildVirtualGeometryExportManifest(profile);
 
 		// Include the asset GUID map so the engine runtime can resolve 
 		// cross-resource references (UUIDs) back to filenames in the archive.
@@ -880,6 +910,14 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 			entry["guid"] = asset.guid;
 			entry["path"] = asset.path;
 			entry["type"] = static_cast<uint32_t>(asset.type);
+			if (asset.virtualGeometryRequired)
+			{
+				entry["virtualGeometry"] = {
+					{ "required", true },
+					{ "compiledPayload", asset.path },
+					{ "diagnosticsEnabled", profile.virtualGeometryDiagnosticsEnabled }
+				};
+			}
 			manifest["assets"].push_back(std::move(entry));
 		}
 

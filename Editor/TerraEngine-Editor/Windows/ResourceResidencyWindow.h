@@ -23,6 +23,7 @@ private:
 	void DrawPolicyControls();
 	void DrawSummary();
 	void DrawStreamingSummary();
+	void DrawVirtualGeometrySummary();
 	void DrawCandidates();
 	void DrawReleaseRecords();
 	void DrawDiagnosticsFilters();

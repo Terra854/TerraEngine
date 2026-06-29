@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -116,6 +117,13 @@ namespace TerraEngine::AssetPipeline
 		std::string displayName;
 		std::array<float, 3> localBoundsMin = { 0.0f, 0.0f, 0.0f };
 		std::array<float, 3> localBoundsMax = { 0.0f, 0.0f, 0.0f };
+		bool virtualGeometryRequested = true;
+		bool virtualGeometryCooked = false;
+		std::string virtualGeometryStatus = "Unknown";
+		std::uint32_t virtualGeometryDetailLevels = 0u;
+		std::uint32_t virtualGeometryMeshlets = 0u;
+		std::uint32_t virtualGeometrySourceTriangles = 0u;
+		std::vector<std::string> virtualGeometryWarnings;
 	};
 
 	struct ModelMaterialAssignment
@@ -144,6 +152,7 @@ namespace TerraEngine::AssetPipeline
 	[[nodiscard]] const char* ToString(ModelDiagnosticSeverity severity);
 	[[nodiscard]] const char* ToString(ModelTextureUsage usage);
 	[[nodiscard]] const char* ToString(ModelTextureSemantic semantic);
+	[[nodiscard]] TerraEngine::UUID BuildStableGeneratedModelUuid(const TerraEngine::UUID& packageGuid, std::string_view role, std::size_t index);
 
 	[[nodiscard]] nlohmann::json ToJson(const ImportedModelPackage& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelImportDiagnostic& value);
@@ -152,4 +161,5 @@ namespace TerraEngine::AssetPipeline
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshAsset& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelMaterialAssignment& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelPackageImportResult& value);
+	void PopulateGeneratedMeshVirtualGeometryMetadata(const std::filesystem::path& compiledMeshPath, GeneratedModelMeshAsset& mesh, std::vector<ModelImportDiagnostic>& diagnostics);
 }

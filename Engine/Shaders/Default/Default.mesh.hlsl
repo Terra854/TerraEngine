@@ -18,6 +18,33 @@ struct MeshDecodeInfo
 	uint4 counts;          // x = vertex count, y = remap count, z = primitive count, w = meshlet count
 };
 
+struct MeshletBounds
+{
+	float3 center;
+	float radius;
+	float3 coneApex;
+	float coneCutoff;
+	float3 coneAxis;
+	float coneApexOffset;
+};
+
+struct FrameCullingData
+{
+	float4 frustumPlanes[6];
+	float4 cameraPositionAndEpsilon;
+	uint4 clusterGridAndLightCount;
+	float4 clusterDepthAndViewport;
+	column_major float4x4 viewMatrix;
+	column_major float4x4 invProjection;
+	uint4 renderSettings0;
+	uint4 renderSettings1;
+	float4 renderSettings2;
+	uint globalTaskCullingEnabled;
+	uint taskShaderSupported;
+	uint clusteredLightingValid;
+	uint clusteredLightingOverflowed;
+};
+
 // Task stage writes a compacted visible meshlet index list into payload.
 static const uint kTaskBatchSize = 32u;
 struct TaskPayload
@@ -25,11 +52,13 @@ struct TaskPayload
 	uint meshletIndices[kTaskBatchSize];
 };
 
+[[vk::binding(2, 0)]] StructuredBuffer<FrameCullingData> frameCullingData;
 [[vk::binding(0, 1)]] ByteAddressBuffer meshletVertexBytes;
 [[vk::binding(1, 1)]] ByteAddressBuffer primitiveIndices;
 [[vk::binding(2, 1)]] StructuredBuffer<MeshletRecord> meshletRecords;
 [[vk::binding(3, 1)]] ByteAddressBuffer meshletVertexRemap;
 [[vk::binding(4, 1)]] StructuredBuffer<MeshDecodeInfo> meshDecodeInfo;
+[[vk::binding(5, 1)]] StructuredBuffer<MeshletBounds> meshletBounds;
 
 struct PushConstants
 {
@@ -46,6 +75,10 @@ struct PushConstants
 	uint clusterDataOffset;
 	uint lightIndexOffset;
 	uint indirectDrawOffset;
+	uint virtualMeshletOffset;
+	uint virtualMeshletCount;
+	uint selectedVirtualLod;
+	uint virtualGeometryFlags;
 	float4 editorTint;
 };
 
@@ -58,10 +91,109 @@ struct PSIn
 	float3 worldPosition : TEXCOORD1;
 	float3 normal : NORMAL;
 	float4 tangent : TANGENT;
+	nointerpolation uint meshletIndex : TEXCOORD2;
+	nointerpolation float meshletBoundsRadius : TEXCOORD3;
+	nointerpolation uint meshletCullFlags : TEXCOORD4;
 };
 
 static const uint kMaxMeshletVertices = 64;
 static const uint kMaxMeshletTriangles = 124;
+static const uint kMaxStatsSlots = 16u;
+static const uint kMeshletCullFlagFrustum = 1u;
+static const uint kMeshletCullFlagCone = 2u;
+static const uint kMeshletCullFlagUnavailable = 4u;
+
+bool IsFrustumCulled(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const float epsilon)
+{
+	[unroll]
+	for (uint planeIndex = 0u; planeIndex < 6u; ++planeIndex)
+	{
+		const float4 plane = frameData.frustumPlanes[planeIndex];
+		const float signedDistance = dot(plane.xyz, centerWorld) + plane.w;
+		if (signedDistance < -(radiusWorld + epsilon))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool IsConeBackfacing(const float3 coneApexWorld, const float3 coneAxisWorld, const float coneCutoff, const float radiusWorld, const float3 cameraPosition, const float epsilon)
+{
+	const float axisLengthSq = dot(coneAxisWorld, coneAxisWorld);
+	if (axisLengthSq < 1e-6f || coneCutoff < -1.0f || coneCutoff > 1.0f)
+	{
+		return false;
+	}
+
+	const float3 axis = coneAxisWorld * rsqrt(axisLengthSq);
+	const float3 cameraToApex = coneApexWorld - cameraPosition;
+	const float apexDistanceSq = dot(cameraToApex, cameraToApex);
+	if (apexDistanceSq < 1e-8f)
+	{
+		return false;
+	}
+
+	const float apexDistance = sqrt(apexDistanceSq);
+	if (radiusWorld >= apexDistance)
+	{
+		return false;
+	}
+
+	const float3 viewDirection = cameraToApex / apexDistance;
+	const float facing = dot(viewDirection, axis);
+	return facing >= (coneCutoff + epsilon);
+}
+
+float MaxModelScale()
+{
+	const float3 worldAxisX = mul((float3x3)SceneUniforms.model, float3(1.0f, 0.0f, 0.0f));
+	const float3 worldAxisY = mul((float3x3)SceneUniforms.model, float3(0.0f, 1.0f, 0.0f));
+	const float3 worldAxisZ = mul((float3x3)SceneUniforms.model, float3(0.0f, 0.0f, 1.0f));
+	return max(length(worldAxisX), max(length(worldAxisY), length(worldAxisZ)));
+}
+
+void BuildMeshletDebugData(uint meshletIndex, uint meshletCount, out float boundsRadius, out uint cullFlags)
+{
+	boundsRadius = 0.0f;
+	cullFlags = 0u;
+	if (meshletIndex >= meshletCount)
+	{
+		cullFlags = kMeshletCullFlagUnavailable;
+		return;
+	}
+
+	const MeshletBounds bounds = meshletBounds[meshletIndex];
+	const float maxScale = max(MaxModelScale(), 1e-6f);
+	boundsRadius = bounds.radius * maxScale;
+	if (!isfinite(boundsRadius) || boundsRadius < 0.0f)
+	{
+		cullFlags = kMeshletCullFlagUnavailable;
+		return;
+	}
+
+	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
+	const FrameCullingData frameData = frameCullingData[statsIndex];
+	if (SceneUniforms.taskCullingEnabled == 0u || frameData.globalTaskCullingEnabled == 0u || frameData.taskShaderSupported == 0u)
+	{
+		return;
+	}
+
+	const float epsilon = max(SceneUniforms.cullingEpsilon, frameData.cameraPositionAndEpsilon.w);
+	const float3 worldCenter = mul(SceneUniforms.model, float4(bounds.center, 1.0f)).xyz;
+	if (IsFrustumCulled(worldCenter, boundsRadius, frameData, epsilon))
+	{
+		cullFlags |= kMeshletCullFlagFrustum;
+		return;
+	}
+
+	const float3 worldConeApex = mul(SceneUniforms.model, float4(bounds.coneApex, 1.0f)).xyz;
+	const float3 worldConeAxis = mul((float3x3)SceneUniforms.model, bounds.coneAxis);
+	if (IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, boundsRadius, frameData.cameraPositionAndEpsilon.xyz, epsilon))
+	{
+		cullFlags |= kMeshletCullFlagCone;
+	}
+}
 
 float DecodeSnorm10(uint packedValue, uint bitOffset)
 {
@@ -144,6 +276,9 @@ void EmitMeshlet(
 	}
 
 	const MeshletRecord record = meshletRecords[meshletIndex];
+	float meshletBoundsRadius = 0.0f;
+	uint meshletCullFlags = 0u;
+	BuildMeshletDebugData(meshletIndex, meshletCount, meshletBoundsRadius, meshletCullFlags);
 
 	// Defensive clamps keep malformed payloads from writing outside shader-declared arrays.
 	const uint vertexCount = min(record.vertexCount, kMaxMeshletVertices);
@@ -209,6 +344,11 @@ void EmitMeshlet(
 		outVertex.worldPosition = worldPosition.xyz;
 		outVertex.normal = TransformNormal(normal);
 		outVertex.tangent = float4(TransformDirection(tangent), tangentW);
+		// The fragment visualizer uses the true meshlet index so the Meshlet Id
+		// mode shows selected LOD density instead of an unrelated world-space hash.
+		outVertex.meshletIndex = meshletIndex;
+		outVertex.meshletBoundsRadius = meshletBoundsRadius;
+		outVertex.meshletCullFlags = meshletCullFlags;
 		outputVertices[vertexIndex] = outVertex;
 	}
 
@@ -239,6 +379,20 @@ void main(
 	out indices uint3 outputTriangles[kMaxMeshletTriangles])
 {
 	const uint visibleIndex = groupId.x;
-	const uint meshletIndex = taskPayload.meshletIndices[visibleIndex];
+	const MeshDecodeInfo decode = meshDecodeInfo[0];
+	const uint meshletCount = decode.counts.w & 0x7FFFFFFFu;
+	const uint selectedMeshletOffset = min(SceneUniforms.virtualMeshletOffset, meshletCount);
+	const uint selectedMeshletCount = SceneUniforms.virtualMeshletCount == 0u
+		? (meshletCount - selectedMeshletOffset)
+		: min(SceneUniforms.virtualMeshletCount, meshletCount - selectedMeshletOffset);
+	if (visibleIndex >= selectedMeshletCount)
+	{
+		SetMeshOutputCounts(0, 0);
+		return;
+	}
+
+	const uint meshletIndex = (SceneUniforms.taskCullingEnabled != 0u)
+		? taskPayload.meshletIndices[visibleIndex]
+		: selectedMeshletOffset + visibleIndex;
 	EmitMeshlet(meshletIndex, outputVertices, outputTriangles);
 }

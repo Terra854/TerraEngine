@@ -45,6 +45,9 @@ namespace TerraEngine::EditorTests {
 			profile.includeDebugSymbols = true;
 			profile.stripNativeAotOutput = true;
 			profile.additionalPublishArgs = "--self-contained true";
+			profile.virtualGeometryQualityLevel = 3u;
+			profile.virtualGeometryDiagnosticsEnabled = true;
+			profile.virtualGeometryBudgetBytes = 256ull * 1024ull * 1024ull;
 			profile.includedScenes = {"Scenes/TestScene.tescene", "Scenes/Secondary.tescene"};
 
 			context.Expect(SaveBuildProfile(profile, profilePath), "Saving a complete build profile should succeed.");
@@ -61,6 +64,9 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(profile.includeDebugSymbols, loaded.includeDebugSymbols, "The debug symbol toggle should round-trip through JSON.");
 			context.ExpectEqual(profile.stripNativeAotOutput, loaded.stripNativeAotOutput, "The NativeAOT strip toggle should round-trip through JSON.");
 			context.ExpectEqual(profile.additionalPublishArgs, loaded.additionalPublishArgs, "Additional publish arguments should round-trip through JSON.");
+			context.ExpectEqual(profile.virtualGeometryQualityLevel, loaded.virtualGeometryQualityLevel, "Virtual geometry export quality should round-trip through JSON.");
+			context.ExpectEqual(profile.virtualGeometryDiagnosticsEnabled, loaded.virtualGeometryDiagnosticsEnabled, "Virtual geometry diagnostics should round-trip through JSON.");
+			context.ExpectEqual(profile.virtualGeometryBudgetBytes, loaded.virtualGeometryBudgetBytes, "Virtual geometry geometry budget should round-trip through JSON.");
 			context.ExpectEqual(profile.includedScenes.size(), loaded.includedScenes.size(), "All included scenes should round-trip through JSON.");
 			context.ExpectEqual(profilePath.string(), loaded.filePath.string(), "The loaded profile should remember its source file path.");
 		});

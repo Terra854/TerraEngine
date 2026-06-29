@@ -10,6 +10,30 @@
 #include <string>
 #include <vector>
 
+enum class VirtualGeometryCompileStatus : std::uint32_t
+{
+	Unknown = 0u,
+	Cooked = 1u,
+	Skipped = 2u,
+	Failed = 3u,
+	NeedsRebuild = 4u
+};
+
+struct VirtualGeometryCompileReport
+{
+	// Status names whether this compile produced virtual geometry metadata or
+	// intentionally stayed on the existing flat meshlet path.
+	VirtualGeometryCompileStatus status = VirtualGeometryCompileStatus::Unknown;
+	std::uint32_t detailLevelCount = 0u;
+	std::uint32_t cullableGroupCount = 0u;
+	std::uint32_t pageCount = 0u;
+	std::uint32_t sourceTriangleCount = 0u;
+	std::uint32_t selectedFallbackAvailable = 0u;
+	float maxGeometricError = 0.0f;
+	std::vector<std::string> warnings;
+	std::vector<std::string> errors;
+};
+
 // Normalized compile report consumed by CLI output and validation scripts.
 struct MeshCompileReport
 {
@@ -27,6 +51,7 @@ struct MeshCompileReport
 	std::string sourceHashHex;
 	std::string status = "compile_fail";
 	std::string failureReason;
+	VirtualGeometryCompileReport virtualGeometry;
 };
 
 // RawMeshVertex is the package-import handoff format used when another parser,

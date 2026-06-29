@@ -101,7 +101,7 @@ namespace
 
 	const char* RenderViewText(RenderViewType viewType)
 	{
-		return viewType == RenderViewType::Scene ? "Scene" : "Game";
+		return ToString(viewType);
 	}
 
 	const char* UiPublishStatusText(UISystem::UIPublishStatus status)

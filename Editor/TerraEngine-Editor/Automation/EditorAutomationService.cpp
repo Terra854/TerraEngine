@@ -22,6 +22,7 @@
 #include "Engine/Scene/RuntimeLayout.h"
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Core/Scheduling/FrameWorkload.h"
+#include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Utilities/UUID.h"
 
@@ -32,6 +33,7 @@
 #include <mutex>
 #include <fstream>
 #include <sstream>
+#include <chrono>
 #include <unordered_set>
 
 namespace TerraEngine::Editor::Automation
@@ -63,6 +65,198 @@ namespace TerraEngine::Editor::Automation
 			std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 			std::transform(query.begin(), query.end(), query.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 			return value.find(query) != std::string::npos;
+		}
+
+		std::string LowerAscii(std::string value)
+		{
+			std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			return value;
+		}
+
+		std::string NormalizeVirtualGeometryStatus(std::string status)
+		{
+			status = LowerAscii(std::move(status));
+			if (status == "needsrebuild")
+			{
+				return "needsRebuild";
+			}
+			if (status.empty() || status == "unknown")
+			{
+				return "unknown";
+			}
+			return status;
+		}
+
+		std::string VirtualGeometryStatusFromMetadata(const VirtualGeometryAssetMetadata& metadata)
+		{
+			if (!metadata.readable)
+			{
+				return "unreadable";
+			}
+			if (metadata.needsRebuild)
+			{
+				return "needsRebuild";
+			}
+			if (metadata.hasVirtualGeometry)
+			{
+				return "cooked";
+			}
+			return "missing";
+		}
+
+		nlohmann::json SerializeVirtualGeometryMetadata(const VirtualGeometryAssetMetadata& metadata)
+		{
+			return {
+				{"readable", metadata.readable},
+				{"hasVirtualGeometry", metadata.hasVirtualGeometry},
+				{"needsRebuild", metadata.needsRebuild},
+				{"virtualGeometryStatus", VirtualGeometryStatusFromMetadata(metadata)},
+				{"payloadGeneration", metadata.payloadGeneration},
+				{"detailLevelCount", metadata.detailLevelCount},
+				{"sourceTriangleCount", metadata.sourceTriangleCount},
+				{"meshletCounts", {{"resident", metadata.meshletCount}}},
+				{"boundsStatus", metadata.meshletCount > 0u ? "available" : "unknown"},
+				{"cookWarnings", metadata.warnings},
+				{"rebuildGuidance", metadata.rebuildGuidance}
+			};
+		}
+
+		bool PackageVirtualGeometryStatusIsUsable(std::string_view status)
+		{
+			return status == "Cooked" || status == "Skipped" || status == "cooked" || status == "skipped";
+		}
+
+		nlohmann::json SerializePackageGeneratedMeshForAutomation(const nlohmann::json& mesh, bool packageSucceeded)
+		{
+			const nlohmann::json virtualGeometry = mesh.value("virtualGeometry", nlohmann::json::object());
+			const std::string rawStatus = virtualGeometry.value("status", "Unknown");
+			const bool usable = packageSucceeded && PackageVirtualGeometryStatusIsUsable(rawStatus);
+			nlohmann::json errors = nlohmann::json::array();
+			if (!usable && rawStatus != "Unknown")
+			{
+				errors.push_back("Generated mesh is not marked usable for virtual geometry automation because its package import or metadata validation failed.");
+			}
+
+			return {
+				{"guid", mesh.value("guid", std::string())},
+				{"sourcePath", mesh.value("sourcePath", std::string())},
+				{"compiledPath", mesh.value("compiledPath", std::string())},
+				{"displayName", mesh.value("displayName", std::string())},
+				{"usable", usable},
+				{"virtualGeometryStatus", NormalizeVirtualGeometryStatus(rawStatus)},
+				{"detailLevelCount", virtualGeometry.value("detailLevels", 0u)},
+				{"sourceTriangleCount", virtualGeometry.value("sourceTriangles", 0u)},
+				{"selectedFallbackAvailable", usable || virtualGeometry.value("meshlets", 0u) > 0u},
+				{"warnings", virtualGeometry.value("warnings", nlohmann::json::array())},
+				{"errors", errors}
+			};
+		}
+
+		nlohmann::json BuildPackageVirtualGeometryAutomationSummary(const nlohmann::json& importResult)
+		{
+			const bool packageSucceeded = importResult.value("status", std::string()) != "Failed";
+			nlohmann::json generatedMeshes = nlohmann::json::array();
+			std::uint32_t usableCount = 0u;
+			std::uint32_t failedCount = 0u;
+			for (const nlohmann::json& mesh : importResult.value("generatedMeshes", nlohmann::json::array()))
+			{
+				nlohmann::json normalized = SerializePackageGeneratedMeshForAutomation(mesh, packageSucceeded);
+				usableCount += normalized.value("usable", false) ? 1u : 0u;
+				failedCount += normalized.value("usable", false) ? 0u : 1u;
+				generatedMeshes.push_back(std::move(normalized));
+			}
+
+			return {
+				{"generatedMeshes", generatedMeshes},
+				{"usableGeneratedMeshCount", usableCount},
+				{"failedGeneratedMeshCount", failedCount},
+				{"assetRegistrationBoundary", "asset-database-finish-import"}
+			};
+		}
+
+		std::filesystem::path NormalizeAutomationAssetRelativePath(const AssetDatabase& database, const std::filesystem::path& input)
+		{
+			if (input.is_absolute())
+			{
+				std::error_code ec;
+				return std::filesystem::relative(input, database.GetAssetRoot(), ec).lexically_normal();
+			}
+
+			std::filesystem::path relative = input.lexically_normal();
+			auto begin = relative.begin();
+			if (begin != relative.end())
+			{
+				std::string first = begin->string();
+				std::transform(first.begin(), first.end(), first.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+				if (first == "assets")
+				{
+					std::filesystem::path stripped;
+					for (++begin; begin != relative.end(); ++begin)
+					{
+						stripped /= *begin;
+					}
+					relative = stripped;
+				}
+			}
+			return relative.lexically_normal();
+		}
+
+		const AssetMetadata* ResolveAutomationAssetMetadata(AssetDatabase& database, const std::string& target, std::filesystem::path& outAbsolutePath)
+		{
+			if (const auto parsedUuid = TerraEngine::ParseUUID(target))
+			{
+				if (const AssetMetadata* metadata = database.FindAssetByGuid(*parsedUuid))
+				{
+					outAbsolutePath = database.GetAssetRoot() / metadata->sourcePath;
+					return metadata;
+				}
+			}
+
+			const std::filesystem::path relative = NormalizeAutomationAssetRelativePath(database, target);
+			outAbsolutePath = std::filesystem::absolute(database.GetAssetRoot() / relative);
+			if (const auto it = database.GetAssets().find(outAbsolutePath); it != database.GetAssets().end())
+			{
+				return &it->second;
+			}
+			return nullptr;
+		}
+
+		std::optional<RenderViewType> ParseAutomationRenderViewType(const nlohmann::json& value)
+		{
+			if (!value.is_string())
+			{
+				return std::nullopt;
+			}
+			const std::string view = LowerAscii(value.get<std::string>());
+			if (view == "game") return RenderViewType::Game;
+			if (view == "scene") return RenderViewType::Scene;
+			if (view == "shadow") return RenderViewType::Shadow;
+			if (view == "exportruntime" || view == "export_runtime" || view == "export runtime") return RenderViewType::ExportRuntime;
+			return std::nullopt;
+		}
+
+		nlohmann::json SerializeVirtualGeometryRuntimeView(const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view)
+		{
+			return {
+				{"viewType", ToString(view.viewType)},
+				{"frameId", view.frameId},
+				{"active", view.active},
+				{"inactiveReason", ToString(view.inactiveReason)},
+				{"sourceMeshlets", view.sourceMeshlets},
+				{"selectedMeshlets", view.selectedMeshlets},
+				{"dispatchedMeshlets", view.dispatchedMeshlets},
+				{"culledMeshlets", view.culledMeshlets},
+				{"hiZActive", view.hiZActive},
+				{"hiZHistoryValid", view.hiZHistoryValid},
+				{"residentPages", view.residentPages},
+				{"requestedPages", view.requestedPages},
+				{"missingPages", view.missingPages},
+				{"failedPages", view.failedPages},
+				{"evictedPages", view.evictedPages},
+				{"geometryBudgetBytes", view.geometryBudgetBytes},
+				{"budgetPressureBytes", view.budgetPressureBytes},
+				{"warnings", view.warnings}
+			};
 		}
 
 		nlohmann::json SerializeExportDiagnostic(const ExportDiagnostic& diagnostic)
@@ -416,6 +610,8 @@ namespace TerraEngine::Editor::Automation
 		add("component.set_property", "component", MutationMode::SceneMutation, false, true, false, "object/component/property/value");
 		add("asset.list", "asset", MutationMode::ReadOnly, true, false, false, "type?: string, search?: string");
 		add("asset.import", "asset", MutationMode::AssetMutation, true, false, false, "path: project-relative asset path, force?: bool; model packages such as glTF/FBX return generated asset ids and diagnostics");
+		add("asset.virtualGeometry.rebuild", "asset", MutationMode::AssetMutation, true, false, false, "target: asset path|uuid|all, force?: bool, includePackageOutputs?: bool, diagnosticsLevel?: summary|detailed|debug");
+		add("asset.virtualGeometry.inspect", "asset", MutationMode::ReadOnly, true, false, false, "asset: asset path|uuid, includeRuntimeState?: bool, viewType?: Game|Scene|Shadow|ExportRuntime");
 		add("asset.prepare_delete", "asset", MutationMode::Destructive, true, false, true, "path: project-relative asset path");
 		add("export.validate", "export", MutationMode::ReadOnly, true, false, false, "profile: string");
 		add("export.start", "export", MutationMode::ExportMutation, true, false, true, "profile: string, confirmOutput?: string");
@@ -508,6 +704,8 @@ namespace TerraEngine::Editor::Automation
 		if (toolName == "component.set_property") return HandleComponentSetProperty(arguments, requestId);
 		if (toolName == "asset.list") return HandleAssetList(arguments, requestId);
 		if (toolName == "asset.import") return HandleAssetImport(arguments, requestId);
+		if (toolName == "asset.virtualGeometry.rebuild") return HandleVirtualGeometryRebuild(arguments, requestId);
+		if (toolName == "asset.virtualGeometry.inspect") return HandleVirtualGeometryInspect(arguments, requestId);
 		if (toolName == "asset.prepare_delete") return HandleAssetPrepareDelete(arguments, requestId);
 		if (toolName == "export.validate") return HandleExportValidate(arguments, requestId);
 		if (toolName == "export.start") return HandleExportStart(arguments, requestId);
@@ -1151,6 +1349,8 @@ namespace TerraEngine::Editor::Automation
 				nlohmann::json importResult = nlohmann::json::object();
 				in >> importResult;
 				data["status"] = importResult.value("status", "Unknown");
+				data["virtualGeometry"] = BuildPackageVirtualGeometryAutomationSummary(importResult);
+				data["generatedMeshes"] = data["virtualGeometry"]["generatedMeshes"];
 				data["importResult"] = std::move(importResult);
 			}
 			else
@@ -1158,7 +1358,226 @@ namespace TerraEngine::Editor::Automation
 				data["importResult"] = nullptr;
 			}
 		}
+		else
+		{
+			std::filesystem::path resolvedPath;
+			if (const AssetMetadata* metadata = ResolveAutomationAssetMetadata(*editorContext->assetDatabase, relative.generic_string(), resolvedPath))
+			{
+				VirtualGeometryAssetMetadata virtualGeometryMetadata{};
+				if (editorContext->assetDatabase->TryGetVirtualGeometryMetadata(*metadata, virtualGeometryMetadata))
+				{
+					data["virtualGeometry"] = SerializeVirtualGeometryMetadata(virtualGeometryMetadata);
+					data["status"] = virtualGeometryMetadata.needsRebuild ? "needsRebuild" : "imported";
+				}
+			}
+		}
 		return BuildSuccess(requestId, "Queued asset import.", std::move(data));
+	}
+
+	nlohmann::json EditorAutomationService::HandleVirtualGeometryRebuild(const nlohmann::json& arguments, const std::string& requestId)
+	{
+		if (editorContext == nullptr || editorContext->assetDatabase == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Asset database is not available.");
+		}
+
+		const std::string target = arguments.value("target", std::string());
+		if (target.empty())
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "asset.virtualGeometry.rebuild requires a target.");
+		}
+
+		const bool force = arguments.value("force", false);
+		const bool includePackageOutputs = arguments.value("includePackageOutputs", true);
+		const std::string diagnosticsLevel = arguments.value("diagnosticsLevel", "summary");
+		const auto started = std::chrono::steady_clock::now();
+
+		std::vector<std::filesystem::path> rebuildTargets;
+		if (LowerAscii(target) == "all")
+		{
+			for (const auto& [absolutePath, metadata] : editorContext->assetDatabase->GetAssets())
+			{
+				if (metadata.importerName == "MeshImporter" || TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
+				{
+					rebuildTargets.push_back(absolutePath);
+				}
+			}
+		}
+		else
+		{
+			std::filesystem::path absolutePath;
+			const AssetMetadata* metadata = ResolveAutomationAssetMetadata(*editorContext->assetDatabase, target, absolutePath);
+			if (metadata == nullptr && std::filesystem::exists(absolutePath))
+			{
+				rebuildTargets.push_back(absolutePath);
+			}
+			else if (metadata != nullptr)
+			{
+				rebuildTargets.push_back(absolutePath);
+			}
+			else
+			{
+				return BuildError(requestId, ErrorCategory::MissingTarget, "Virtual geometry rebuild target was not found.", target);
+			}
+		}
+
+		nlohmann::json rebuiltAssets = nlohmann::json::array();
+		nlohmann::json skippedAssets = nlohmann::json::array();
+		nlohmann::json failedAssets = nlohmann::json::array();
+		nlohmann::json warnings = nlohmann::json::array();
+		const std::filesystem::path assetRoot = editorContext->assetDatabase->GetAssetRoot();
+
+		for (const std::filesystem::path& absolutePath : rebuildTargets)
+		{
+			const std::filesystem::path relative = std::filesystem::relative(absolutePath, assetRoot);
+			if (!std::filesystem::exists(absolutePath))
+			{
+				failedAssets.push_back({{"path", relative.generic_string()}, {"reason", "missing source asset"}});
+				continue;
+			}
+
+			editorContext->assetDatabase->ImportAsset(absolutePath, force);
+			std::filesystem::path resolvedPath;
+			const AssetMetadata* metadata = ResolveAutomationAssetMetadata(*editorContext->assetDatabase, relative.generic_string(), resolvedPath);
+			if (metadata == nullptr)
+			{
+				failedAssets.push_back({{"path", relative.generic_string()}, {"reason", "asset metadata was not published"}});
+				continue;
+			}
+
+			VirtualGeometryAssetMetadata virtualGeometryMetadata{};
+			const bool readable = editorContext->assetDatabase->TryGetVirtualGeometryMetadata(*metadata, virtualGeometryMetadata);
+			nlohmann::json record = {
+				{"path", relative.generic_string()},
+				{"guid", TerraEngine::ToHexString(metadata->guid)},
+				{"importer", metadata->importerName},
+				{"compiledPath", metadata->compiledPath.generic_string()},
+				{"virtualGeometry", readable ? SerializeVirtualGeometryMetadata(virtualGeometryMetadata) : nlohmann::json::object()}
+			};
+
+			if (!readable || virtualGeometryMetadata.needsRebuild)
+			{
+				record["reason"] = readable ? "virtual geometry metadata needs rebuild" : "virtual geometry metadata is not readable";
+				failedAssets.push_back(record);
+			}
+			else if (!virtualGeometryMetadata.hasVirtualGeometry && metadata->importerName != "MeshImporter" && !TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata->importerName))
+			{
+				record["reason"] = "asset is not a virtual geometry mesh source";
+				skippedAssets.push_back(record);
+			}
+			else
+			{
+				if (includePackageOutputs && TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata->importerName))
+				{
+					const std::filesystem::path resultPath = TerraEngine::AssetPipeline::GetImportResultPath(absolutePath);
+					if (std::filesystem::exists(resultPath))
+					{
+						std::ifstream input(resultPath);
+						nlohmann::json importResult = nlohmann::json::object();
+						input >> importResult;
+						record["generatedMeshes"] = BuildPackageVirtualGeometryAutomationSummary(importResult)["generatedMeshes"];
+					}
+				}
+				rebuiltAssets.push_back(record);
+			}
+		}
+
+		const auto finished = std::chrono::steady_clock::now();
+		const double durationMs = std::chrono::duration<double, std::milli>(finished - started).count();
+		const std::string status = failedAssets.empty()
+			? "completed"
+			: (rebuiltAssets.empty() ? "failed" : "partial");
+		if (activityCallback)
+		{
+			activityCallback(ActivityEventType::Mutation, requestId, "asset.virtualGeometry.rebuild", "Processed virtual geometry rebuild request.");
+		}
+
+		return BuildSuccess(requestId, "Processed virtual geometry rebuild.", {
+			{"status", status},
+			{"target", target},
+			{"force", force},
+			{"includePackageOutputs", includePackageOutputs},
+			{"diagnosticsLevel", diagnosticsLevel},
+			{"assetRegistrationBoundary", "asset-database-finish-import"},
+			{"rebuiltAssets", rebuiltAssets},
+			{"skippedAssets", skippedAssets},
+			{"failedAssets", failedAssets},
+			{"warnings", warnings},
+			{"durationMs", durationMs}
+		});
+	}
+
+	nlohmann::json EditorAutomationService::HandleVirtualGeometryInspect(const nlohmann::json& arguments, const std::string& requestId)
+	{
+		if (editorContext == nullptr || editorContext->assetDatabase == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Asset database is not available.");
+		}
+
+		const std::string asset = arguments.value("asset", std::string());
+		if (asset.empty())
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "asset.virtualGeometry.inspect requires an asset.");
+		}
+
+		std::filesystem::path absolutePath;
+		const AssetMetadata* metadata = ResolveAutomationAssetMetadata(*editorContext->assetDatabase, asset, absolutePath);
+		if (metadata == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Virtual geometry asset was not found.", asset);
+		}
+
+		VirtualGeometryAssetMetadata virtualGeometryMetadata{};
+		const bool readable = editorContext->assetDatabase->TryGetVirtualGeometryMetadata(*metadata, virtualGeometryMetadata);
+		nlohmann::json cookMetadata = readable ? SerializeVirtualGeometryMetadata(virtualGeometryMetadata) : nlohmann::json::object();
+
+		nlohmann::json runtimeDiagnostics = {
+			{"available", false},
+			{"views", nlohmann::json::array()}
+		};
+		nlohmann::json residencyDiagnostics = {
+			{"residentPages", 0u},
+			{"requestedPages", 0u},
+			{"missingPages", 0u},
+			{"budgetPressureBytes", 0u}
+		};
+		if (arguments.value("includeRuntimeState", false))
+		{
+			const auto viewFilter = arguments.contains("viewType")
+				? ParseAutomationRenderViewType(arguments["viewType"])
+				: std::optional<RenderViewType>{};
+			const TerraEngine::Renderer::RenderDiagnosticsSummary summary = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+			for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : summary.virtualGeometryViews)
+			{
+				if (viewFilter && view.viewType != *viewFilter)
+				{
+					continue;
+				}
+				runtimeDiagnostics["available"] = true;
+				runtimeDiagnostics["views"].push_back(SerializeVirtualGeometryRuntimeView(view));
+				residencyDiagnostics["residentPages"] = residencyDiagnostics.value("residentPages", 0u) + view.residentPages;
+				residencyDiagnostics["requestedPages"] = residencyDiagnostics.value("requestedPages", 0u) + view.requestedPages;
+				residencyDiagnostics["missingPages"] = residencyDiagnostics.value("missingPages", 0u) + view.missingPages;
+				residencyDiagnostics["budgetPressureBytes"] = residencyDiagnostics.value("budgetPressureBytes", 0ull) + view.budgetPressureBytes;
+			}
+		}
+
+		const std::filesystem::path relative = std::filesystem::relative(absolutePath, editorContext->assetDatabase->GetAssetRoot());
+		return BuildSuccess(requestId, "Inspected virtual geometry asset.", {
+			{"assetId", TerraEngine::ToHexString(metadata->guid)},
+			{"sourceKey", relative.generic_string()},
+			{"compiledPath", metadata->compiledPath.generic_string()},
+			{"virtualGeometryStatus", readable ? cookMetadata.value("virtualGeometryStatus", "unreadable") : "unreadable"},
+			{"detailLevels", readable ? cookMetadata.value("detailLevelCount", 0u) : 0u},
+			{"sourceTriangleCount", readable ? cookMetadata.value("sourceTriangleCount", 0u) : 0u},
+			{"meshletCounts", readable ? cookMetadata["meshletCounts"] : nlohmann::json{{"resident", 0u}}},
+			{"boundsStatus", readable ? cookMetadata.value("boundsStatus", "unknown") : "unknown"},
+			{"cookWarnings", readable ? cookMetadata["cookWarnings"] : nlohmann::json::array()},
+			{"cookMetadata", cookMetadata},
+			{"runtimeDiagnostics", runtimeDiagnostics},
+			{"residencyDiagnostics", residencyDiagnostics},
+			{"assetRegistrationBoundary", "asset-database-finish-import"}
+		});
 	}
 
 	nlohmann::json EditorAutomationService::HandleAssetPrepareDelete(const nlohmann::json& arguments, const std::string& requestId)

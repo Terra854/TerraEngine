@@ -1,6 +1,9 @@
 #include "RenderDiagnostics.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <utility>
 
 namespace TerraEngine::Renderer {
 
@@ -32,6 +35,261 @@ namespace TerraEngine::Renderer {
 		const float allowed = baselineValue * (1.0f + thresholdPercent / 100.0f);
 		result.passed = latestValue <= allowed;
 		return result;
+	}
+
+	VirtualGeometryViewDiagnosticsSnapshot BuildInactiveVirtualGeometryDiagnostics(RenderViewType viewType, std::uint64_t frameId, VirtualGeometryInactiveReason reason)
+	{
+		VirtualGeometryViewDiagnosticsSnapshot snapshot;
+		snapshot.viewType = viewType;
+		snapshot.frameId = frameId;
+		snapshot.active = false;
+		snapshot.inactiveReason = reason;
+		snapshot.warnings.push_back("Virtual geometry is inactive for this view; rendering must use the conservative fallback path.");
+		return snapshot;
+	}
+
+	VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryLodQualityDiagnostics(
+		RenderViewType viewType,
+		std::uint64_t frameId,
+		const std::vector<VirtualGeometryAssetRuntime>& assets,
+		const VirtualGeometryQualityProfile& qualityProfile)
+	{
+		const VirtualGeometryQualityProfile quality = SanitizeVirtualGeometryQualityProfile(qualityProfile);
+		VirtualGeometryViewDiagnosticsSnapshot snapshot;
+		snapshot.viewType = viewType;
+		snapshot.frameId = frameId;
+		snapshot.active = true;
+		snapshot.effectiveLodErrorScale = quality.lodErrorScale;
+		snapshot.configuredMaxLodDrop = quality.maxLodDrop;
+		snapshot.geometryBudgetBytes = quality.geometryBudgetBytes;
+
+		for (const VirtualGeometryAssetRuntime& asset : assets)
+		{
+			VirtualGeometryBudgetContributor contributor;
+			contributor.assetId = asset.assetId;
+			contributor.viewType = viewType;
+			snapshot.sourceMeshlets += static_cast<std::uint32_t>(asset.cullableGroups.size());
+			snapshot.estimatedGeometryBytes +=
+				static_cast<std::uint64_t>(asset.detailLevels.size() * sizeof(VirtualGeometryDetailRuntime))
+				+ static_cast<std::uint64_t>(asset.cullableGroups.size() * sizeof(VirtualGeometryCullableGroupRuntime))
+				+ static_cast<std::uint64_t>(asset.pages.size() * sizeof(GeometryPageRuntime));
+			for (const GeometryPageRuntime& page : asset.pages)
+			{
+				snapshot.estimatedGeometryBytes += page.byteSize;
+				switch (page.state)
+				{
+				case GeometryPageState::Resident:
+					++snapshot.residentPages;
+					++contributor.residentPages;
+					contributor.residentBytes += page.byteSize;
+					if (!page.fallbackPage)
+					{
+						contributor.reclaimableBytes += page.byteSize;
+					}
+					break;
+				case GeometryPageState::Requested:
+				case GeometryPageState::Loading:
+					++snapshot.requestedPages;
+					break;
+				case GeometryPageState::NotResident:
+				case GeometryPageState::Evicting:
+					++snapshot.missingPages;
+					++contributor.missingPages;
+					break;
+				case GeometryPageState::Failed:
+					++snapshot.failedPages;
+					++snapshot.missingPages;
+					++contributor.missingPages;
+					break;
+				case GeometryPageState::Evicted:
+					++snapshot.evictedPages;
+					++snapshot.missingPages;
+					++contributor.missingPages;
+					break;
+				}
+			}
+			if (!asset.pages.empty() && snapshot.missingPages > 0u)
+			{
+				snapshot.warnings.push_back("Virtual geometry has missing or failed high-detail pages; renderer must use resident fallback detail until streaming catches up.");
+			}
+
+			if (asset.detailLevels.empty())
+			{
+				++snapshot.poppingRiskWarnings;
+				snapshot.warnings.push_back("Virtual geometry asset has no detail levels; renderer must use a conservative fallback.");
+				if (contributor.residentBytes > 0u || contributor.reclaimableBytes > 0u || contributor.missingPages > 0u)
+				{
+					snapshot.budgetContributors.push_back(contributor);
+				}
+				continue;
+			}
+
+			snapshot.selectedMeshlets += asset.detailLevels.front().meshletCount;
+			snapshot.dispatchedMeshlets += asset.detailLevels.front().meshletCount;
+			if (asset.detailLevels.size() > 1u)
+			{
+				snapshot.lodTransitionCandidates += static_cast<std::uint32_t>(asset.detailLevels.size() - 1u);
+			}
+
+			if (quality.maxLodDrop > 1u && asset.detailLevels.size() > 2u)
+			{
+				++snapshot.poppingRiskWarnings;
+				snapshot.warnings.push_back("Virtual geometry max LOD drop permits skipping intermediate detail levels; popping risk increases during fast camera motion.");
+			}
+
+			float previousTargetRatio = 2.0f;
+			std::uint32_t previousTriangleCount = std::numeric_limits<std::uint32_t>::max();
+			for (const VirtualGeometryDetailRuntime& detail : asset.detailLevels)
+			{
+				if (detail.lodIndex >= snapshot.selectedLodHistogram.size())
+				{
+					snapshot.selectedLodHistogram.resize(static_cast<std::size_t>(detail.lodIndex) + 1u, 0u);
+				}
+				snapshot.selectedLodHistogram[detail.lodIndex] += detail.meshletCount;
+				snapshot.maxGeometricError = std::max(snapshot.maxGeometricError, detail.geometricError);
+
+				const float effectiveError = detail.geometricError * quality.lodErrorScale;
+				if (!std::isfinite(detail.geometricError)
+					|| !std::isfinite(detail.targetRatio)
+					|| detail.targetRatio <= 0.0f
+					|| detail.targetRatio > previousTargetRatio
+					|| detail.triangleCount >= previousTriangleCount
+					|| effectiveError > 0.1f)
+				{
+					++snapshot.poppingRiskWarnings;
+					snapshot.warnings.push_back("Virtual geometry LOD transition has popping-risk metadata; inspect geometric error, target ratio, and section fallback.");
+				}
+
+				previousTargetRatio = detail.targetRatio;
+				previousTriangleCount = detail.triangleCount;
+			}
+
+			if (contributor.residentBytes > 0u || contributor.reclaimableBytes > 0u || contributor.missingPages > 0u)
+			{
+				snapshot.budgetContributors.push_back(contributor);
+			}
+		}
+
+		if (snapshot.geometryBudgetBytes > 0u && snapshot.estimatedGeometryBytes > snapshot.geometryBudgetBytes)
+		{
+			snapshot.budgetPressureBytes = snapshot.estimatedGeometryBytes - snapshot.geometryBudgetBytes;
+			snapshot.warnings.push_back("Virtual geometry estimated memory exceeds the configured geometry budget.");
+		}
+
+		std::sort(snapshot.budgetContributors.begin(), snapshot.budgetContributors.end(), [](const VirtualGeometryBudgetContributor& lhs, const VirtualGeometryBudgetContributor& rhs) {
+			if (lhs.reclaimableBytes != rhs.reclaimableBytes)
+			{
+				return lhs.reclaimableBytes > rhs.reclaimableBytes;
+			}
+			if (lhs.residentBytes != rhs.residentBytes)
+			{
+				return lhs.residentBytes > rhs.residentBytes;
+			}
+			return TerraEngine::ToHexString(lhs.assetId) < TerraEngine::ToHexString(rhs.assetId);
+		});
+
+		return snapshot;
+	}
+
+	VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryHiZDiagnostics(const VirtualGeometryHiZDiagnosticsInput& input)
+	{
+		VirtualGeometryViewDiagnosticsSnapshot snapshot;
+		snapshot.viewType = input.viewType;
+		snapshot.frameId = input.frameId;
+		snapshot.active = input.qualityRequested;
+		snapshot.hiZActive = input.hiZActive;
+		snapshot.hiZHistoryValid = input.historyValid;
+		snapshot.hiZInvalidReason = input.invalidReason;
+		snapshot.culledByFrustum = input.culledByFrustum;
+		snapshot.culledByCone = input.culledByCone;
+		snapshot.culledByHiZ = input.culledByHiZ;
+		snapshot.culledMeshlets = input.culledByFrustum + input.culledByCone + input.culledByHiZ;
+		snapshot.hiZFalseOcclusionRiskWarnings = input.falseOcclusionRiskWarnings;
+
+		if (!input.hiZActive)
+		{
+			++snapshot.hiZInactiveFrames;
+			snapshot.warnings.push_back("Virtual geometry Hi-Z occlusion is inactive: " + (input.invalidReason.empty() ? std::string("unknown") : input.invalidReason));
+		}
+		if (input.falseOcclusionRiskWarnings > 0u)
+		{
+			snapshot.warnings.push_back("Virtual geometry Hi-Z remained fail-open because validation reported false-occlusion risk.");
+		}
+		return snapshot;
+	}
+
+	void AddVirtualGeometryFailOpenDiagnostic(RenderDiagnosticsSummary& summary, const TerraEngine::UUID& meshId, const VirtualGeometryDrawRange& range)
+	{
+		if (!range.failOpen)
+		{
+			return;
+		}
+
+		const std::string reason = range.fallbackReason.empty()
+			? "no reason was recorded"
+			: range.fallbackReason;
+		summary.backendFallbacks.push_back(
+			"Virtual geometry fail-open for mesh "
+			+ TerraEngine::ToHexString(meshId)
+			+ ": "
+			+ reason
+			+ ". The renderer kept the highest-detail visible fallback range.");
+	}
+
+	VirtualGeometrySchedulerDiagnostics BuildVirtualGeometrySchedulerDiagnostics(
+		std::string owningSystem,
+		std::string schedulerPhase,
+		std::vector<std::string> readResources,
+		std::vector<std::string> writeResources,
+		std::string workerSafePreparation,
+		std::string protectedBoundary,
+		std::string visibilityBoundary)
+	{
+		// Keep scheduler metadata as plain strings so editor diagnostics,
+		// automation responses, and tests can report the same worker/protected
+		// boundary contract without depending on scheduler internals.
+		VirtualGeometrySchedulerDiagnostics diagnostics;
+		diagnostics.owningSystem = std::move(owningSystem);
+		diagnostics.schedulerPhase = std::move(schedulerPhase);
+		diagnostics.readResources = std::move(readResources);
+		diagnostics.writeResources = std::move(writeResources);
+		diagnostics.workerSafePreparation = std::move(workerSafePreparation);
+		diagnostics.protectedBoundary = std::move(protectedBoundary);
+		diagnostics.visibilityBoundary = std::move(visibilityBoundary);
+		return diagnostics;
+	}
+
+	void ApplyVirtualGeometryDiagnostics(
+		RenderDiagnosticsSummary& summary,
+		std::vector<VirtualGeometryViewDiagnosticsSnapshot> viewSnapshots,
+		std::vector<VirtualGeometrySchedulerDiagnostics> schedulerSnapshots)
+	{
+		// Diagnostics are copied into the published summary only when callers ask
+		// for them. Normal frames can keep virtual geometry counters closed until
+		// an editor window, test, or automation request enables collection.
+		if (!summary.detailed && viewSnapshots.empty() && schedulerSnapshots.empty())
+		{
+			return;
+		}
+
+		summary.virtualGeometryViews = std::move(viewSnapshots);
+		summary.virtualGeometrySchedulers = std::move(schedulerSnapshots);
+		summary.virtualGeometryBudgetContributors.clear();
+		for (const VirtualGeometryViewDiagnosticsSnapshot& snapshot : summary.virtualGeometryViews)
+		{
+			summary.virtualGeometryBudgetContributors.insert(
+				summary.virtualGeometryBudgetContributors.end(),
+				snapshot.budgetContributors.begin(),
+				snapshot.budgetContributors.end());
+			if (!snapshot.active)
+			{
+				summary.resourceWarnings.push_back(
+					"Virtual geometry inactive for view "
+					+ std::to_string(static_cast<int>(snapshot.viewType))
+					+ ": "
+					+ ToString(snapshot.inactiveReason));
+			}
+		}
 	}
 
 	void ApplyBackendBreakdownToRenderDiagnostics(RenderDiagnosticsSummary& summary, const BackendFrameBreakdown& breakdown)
@@ -115,6 +373,12 @@ namespace TerraEngine::Renderer {
 	{
 		std::lock_guard<std::mutex> lock(g_renderDiagnosticsMutex);
 		return g_latestRenderDiagnostics;
+	}
+
+	std::vector<VirtualGeometryViewDiagnosticsSnapshot> LatestVirtualGeometryDiagnosticsSnapshots()
+	{
+		std::lock_guard<std::mutex> lock(g_renderDiagnosticsMutex);
+		return g_latestRenderDiagnostics.virtualGeometryViews;
 	}
 
 	RenderDiagnosticsSummary BuildRenderDiagnosticsSummary(

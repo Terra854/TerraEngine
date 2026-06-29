@@ -63,6 +63,15 @@ struct BuildProfile {
 	/// Additional NativeAOT publish arguments passed verbatim to dotnet publish.
 	std::string additionalPublishArgs;
 
+	/// Coarse export quality rank: 0 = fallback only, 1 = low, 2 = medium, 3 = high.
+	uint32_t virtualGeometryQualityLevel = 2;
+
+	/// Whether exported builds keep virtual geometry diagnostics available for runtime tooling.
+	bool virtualGeometryDiagnosticsEnabled = false;
+
+	/// Optional exported runtime geometry page budget. Zero keeps the runtime default.
+	std::uint64_t virtualGeometryBudgetBytes = 0;
+
 	/// Additional scenes to include in the export (beyond the active scene).
 	std::vector<std::string> includedScenes;
 

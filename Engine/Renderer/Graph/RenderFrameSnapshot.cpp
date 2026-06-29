@@ -1,4 +1,5 @@
 #include "RenderFrameSnapshot.h"
+#include "RenderDiagnostics.h"
 
 #include <functional>
 
@@ -22,6 +23,16 @@ namespace TerraEngine::Renderer {
 				return TerraEngine::ToHexString(left.*member) < TerraEngine::ToHexString(right.*member);
 			});
 		}
+
+		void HashVirtualGeometryRange(std::uint64_t& hash, const VirtualGeometryDrawRange& range)
+		{
+			HashCombine(hash, range.selectedLodIndex);
+			HashCombine(hash, range.meshletOffset);
+			HashCombine(hash, range.meshletCount);
+			HashCombine(hash, range.virtualGeometryActive ? 1u : 0u);
+			HashCombine(hash, range.failOpen ? 1u : 0u);
+			HashCombine(hash, range.hiZSelfOcclusionGuardPassed ? 1u : 0u);
+		}
 	}
 
 	void SortSnapshotDeterministically(RenderFrameSnapshot& snapshot)
@@ -40,6 +51,19 @@ namespace TerraEngine::Renderer {
 		SortByUuid(snapshot.materials, &RenderFrameResourceRecord::resourceId);
 		SortByUuid(snapshot.meshes, &RenderFrameResourceRecord::resourceId);
 		SortByUuid(snapshot.textures, &RenderFrameResourceRecord::resourceId);
+		std::sort(snapshot.virtualGeometryViewSelections.begin(), snapshot.virtualGeometryViewSelections.end(), [](const VirtualGeometryViewSelectionState& left, const VirtualGeometryViewSelectionState& right) {
+			if (left.outputId != right.outputId)
+			{
+				return left.outputId < right.outputId;
+			}
+			return static_cast<std::uint8_t>(left.viewType) < static_cast<std::uint8_t>(right.viewType);
+		});
+		for (VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
+		{
+			std::sort(state.draws.begin(), state.draws.end(), [](const VirtualGeometryViewDrawRecord& left, const VirtualGeometryViewDrawRecord& right) {
+				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
+			});
+		}
 	}
 
 	bool SnapshotUsesOnlyResolvedResources(const RenderFrameSnapshot& snapshot)
@@ -80,8 +104,27 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, HashUuid(renderable.objectId));
 			HashCombine(hash, HashUuid(renderable.meshId));
 			HashCombine(hash, HashUuid(renderable.materialId));
+			HashVirtualGeometryRange(hash, renderable.virtualGeometry);
 			HashCombine(hash, renderable.taskShaderCullingEnabled ? 1u : 0u);
 			HashCombine(hash, renderable.usingFallback ? 1u : 0u);
+		}
+		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
+		{
+			HashCombine(hash, state.outputId);
+			HashCombine(hash, static_cast<std::uint64_t>(state.outputKind));
+			HashCombine(hash, static_cast<std::uint64_t>(state.viewType));
+			HashCombine(hash, state.targetSize.x);
+			HashCombine(hash, state.targetSize.y);
+			HashCombine(hash, state.shadowPass ? 1u : 0u);
+			HashCombine(hash, state.exportRuntime ? 1u : 0u);
+			HashCombine(hash, state.hiZOcclusionAllowed ? 1u : 0u);
+			for (const VirtualGeometryViewDrawRecord& draw : state.draws)
+			{
+				HashCombine(hash, HashUuid(draw.objectId));
+				HashCombine(hash, HashUuid(draw.meshId));
+				HashVirtualGeometryRange(hash, draw.range);
+				HashCombine(hash, draw.taskShaderCullingEnabled ? 1u : 0u);
+			}
 		}
 		for (const RenderFrameLightRecord& light : snapshot.lights)
 		{
@@ -98,7 +141,109 @@ namespace TerraEngine::Renderer {
 		// units the graph can split, not GPU timings or API-specific commands.
 		return static_cast<std::uint64_t>(snapshot.renderables.size())
 			+ static_cast<std::uint64_t>(snapshot.lights.size())
-			+ static_cast<std::uint64_t>(snapshot.viewRequests.size() * 8u);
+			+ static_cast<std::uint64_t>(snapshot.viewRequests.size() * 8u)
+			+ static_cast<std::uint64_t>(snapshot.virtualGeometryViewSelections.size() * 4u);
+	}
+
+	VirtualGeometryViewSelectionState BuildVirtualGeometryViewSelectionState(const RenderFrameViewRequest& view, const std::vector<RenderFrameRenderableRecord>& renderables)
+	{
+		VirtualGeometryViewSelectionState state;
+		state.outputKind = view.outputKind;
+		state.viewType = view.outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : view.viewType;
+		state.targetSize = view.targetSize;
+		state.outputId = view.outputId;
+		state.shadowPass = view.viewType == RenderViewType::Shadow;
+		state.exportRuntime = view.viewType == RenderViewType::ExportRuntime || view.outputKind == RenderOutputKind::MainRuntimeView;
+		state.hiZOcclusionAllowed = !state.shadowPass;
+		state.draws.reserve(renderables.size());
+		for (const RenderFrameRenderableRecord& renderable : renderables)
+		{
+			if (!renderable.virtualGeometry.virtualGeometryActive
+				&& renderable.virtualGeometry.meshletCount == 0u
+				&& !renderable.virtualGeometry.failOpen)
+			{
+				continue;
+			}
+
+			state.draws.push_back({
+				renderable.objectId,
+				renderable.meshId,
+				renderable.virtualGeometry,
+				renderable.taskShaderCullingEnabled
+			});
+		}
+		return state;
+	}
+
+	std::vector<VirtualGeometryViewSelectionState> BuildVirtualGeometryViewSelectionStates(const RenderFrameSnapshot& snapshot)
+	{
+		if (!snapshot.virtualGeometryViewSelections.empty())
+		{
+			// Explicit per-view selections are authored by RenderSystem after each
+			// visibility pass. Returning a copy preserves immutability for editor
+			// diagnostics and prevents one view from mutating another view's range.
+			return snapshot.virtualGeometryViewSelections;
+		}
+
+		std::vector<VirtualGeometryViewSelectionState> states;
+		states.reserve(snapshot.viewRequests.size());
+		for (const RenderFrameViewRequest& view : snapshot.viewRequests)
+		{
+			states.push_back(BuildVirtualGeometryViewSelectionState(view, snapshot.renderables));
+		}
+		return states;
+	}
+
+	std::vector<VirtualGeometryViewDiagnosticsSnapshot> BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+		const RenderFrameSnapshot& snapshot,
+		const VirtualGeometryQualityProfile& qualityProfile,
+		VirtualGeometryInactiveReason inactiveReason)
+	{
+		const VirtualGeometryQualityProfile quality = SanitizeVirtualGeometryQualityProfile(qualityProfile);
+		std::vector<VirtualGeometryViewSelectionState> states = BuildVirtualGeometryViewSelectionStates(snapshot);
+		std::vector<VirtualGeometryViewDiagnosticsSnapshot> diagnostics;
+		diagnostics.reserve(states.size());
+		for (const VirtualGeometryViewSelectionState& state : states)
+		{
+			VirtualGeometryViewDiagnosticsSnapshot viewDiagnostics;
+			viewDiagnostics.viewType = state.viewType;
+			viewDiagnostics.frameId = snapshot.frameId;
+			viewDiagnostics.active = true;
+			viewDiagnostics.inactiveReason = VirtualGeometryInactiveReason::None;
+			viewDiagnostics.hiZActive = state.hiZOcclusionAllowed && quality.hiZOcclusionEnabled;
+			viewDiagnostics.hiZHistoryValid = viewDiagnostics.hiZActive;
+			viewDiagnostics.hiZInvalidReason = state.hiZOcclusionAllowed ? std::string{} : "view disables camera Hi-Z occlusion";
+			viewDiagnostics.effectiveLodErrorScale = quality.lodErrorScale;
+			viewDiagnostics.configuredMaxLodDrop = quality.maxLodDrop;
+			viewDiagnostics.geometryBudgetBytes = quality.geometryBudgetBytes;
+			for (const VirtualGeometryViewDrawRecord& draw : state.draws)
+			{
+				viewDiagnostics.selectedMeshlets += draw.range.meshletCount;
+				viewDiagnostics.dispatchedMeshlets += draw.range.meshletCount;
+				if (viewDiagnostics.selectedLodHistogram.size() <= draw.range.selectedLodIndex)
+				{
+					viewDiagnostics.selectedLodHistogram.resize(static_cast<std::size_t>(draw.range.selectedLodIndex) + 1u, 0u);
+				}
+				viewDiagnostics.selectedLodHistogram[draw.range.selectedLodIndex] += 1u;
+				if (draw.range.failOpen)
+				{
+					viewDiagnostics.warnings.push_back(draw.range.fallbackReason.empty()
+						? "Virtual geometry failed open to preserve visibility."
+						: draw.range.fallbackReason);
+				}
+			}
+			viewDiagnostics.sourceMeshlets = std::max(viewDiagnostics.sourceMeshlets, viewDiagnostics.selectedMeshlets);
+			if (state.shadowPass)
+			{
+				viewDiagnostics.warnings.push_back("Shadow virtual geometry uses conservative LOD and disables camera Hi-Z occlusion.");
+			}
+			if (state.exportRuntime)
+			{
+				viewDiagnostics.warnings.push_back("Export runtime virtual geometry state is isolated from editor Scene View diagnostics.");
+			}
+			diagnostics.push_back(std::move(viewDiagnostics));
+		}
+		return diagnostics;
 	}
 
 }

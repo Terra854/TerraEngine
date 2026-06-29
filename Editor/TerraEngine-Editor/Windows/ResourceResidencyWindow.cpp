@@ -10,6 +10,7 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Resource/ResourceResidency.h"
 #include "Engine/Resource/ResourceStreaming.h"
+#include "Engine/Renderer/Graph/RenderDiagnostics.h"
 
 #include <algorithm>
 #include <cctype>
@@ -406,6 +407,8 @@ void ResourceResidencyWindow::OnGui()
 	ImGui::Spacing();
 	DrawStreamingSummary();
 	ImGui::Spacing();
+	DrawVirtualGeometrySummary();
+	ImGui::Spacing();
 	DrawCandidates();
 	ImGui::Spacing();
 	DrawReleaseRecords();
@@ -780,6 +783,52 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 			ImGui::Text("%zu", record.needSources.size());
 			ImGui::TableSetColumnIndex(11);
 			ImGui::TextWrapped("%s", record.releaseEligibility.c_str());
+		}
+		ImGui::EndTable();
+	}
+}
+
+void ResourceResidencyWindow::DrawVirtualGeometrySummary()
+{
+	const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> snapshots =
+		TerraEngine::Renderer::LatestVirtualGeometryDiagnosticsSnapshots();
+	ImGui::SeparatorText("Virtual Geometry");
+	if (snapshots.empty())
+	{
+		ImGui::TextDisabled("No virtual geometry diagnostics published.");
+		return;
+	}
+
+	if (ImGui::BeginTable("ResourceVirtualGeometrySummary", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("View");
+		ImGui::TableSetupColumn("State");
+		ImGui::TableSetupColumn("Resident");
+		ImGui::TableSetupColumn("Requested");
+		ImGui::TableSetupColumn("Missing");
+		ImGui::TableSetupColumn("Failed");
+		ImGui::TableSetupColumn("Evicted");
+		ImGui::TableSetupColumn("Bytes");
+		ImGui::TableHeadersRow();
+		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot : snapshots)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::Text("%s", ToString(snapshot.viewType));
+			ImGui::TableSetColumnIndex(1);
+			ImGui::Text("%s", snapshot.active ? "active" : ToString(snapshot.inactiveReason));
+			ImGui::TableSetColumnIndex(2);
+			ImGui::Text("%u", snapshot.residentPages);
+			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%u", snapshot.requestedPages);
+			ImGui::TableSetColumnIndex(4);
+			ImGui::Text("%u", snapshot.missingPages);
+			ImGui::TableSetColumnIndex(5);
+			ImGui::Text("%u", snapshot.failedPages);
+			ImGui::TableSetColumnIndex(6);
+			ImGui::Text("%u", snapshot.evictedPages);
+			ImGui::TableSetColumnIndex(7);
+			ImGui::Text("%llu", static_cast<unsigned long long>(snapshot.estimatedGeometryBytes));
 		}
 		ImGui::EndTable();
 	}

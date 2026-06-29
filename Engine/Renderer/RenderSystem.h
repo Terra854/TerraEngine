@@ -66,12 +66,18 @@ public:
 	[[nodiscard]] TerraEngine::Scheduling::HardBoundary GetLiveGpuSubmissionBoundary() const;
 	std::vector<TerraEngine::Scene::RenderRuntimeRecord> BuildCompactRenderRuntimeRecords();
 	static bool CompactRenderRecordsMatchSnapshot(const std::vector<TerraEngine::Scene::RenderRuntimeRecord>& records, const TerraEngine::Renderer::RenderFrameSnapshot& snapshot);
+	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, bool taskShaderCullingEnabled, bool boundsValid);
+	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryResidentLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, bool taskShaderCullingEnabled, bool boundsValid);
+	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryShadowLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, bool boundsValid);
 
 	void SetQualityPreset(QualityPreset preset);
 	// GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	QualityPreset GetQualityPreset() const { return currentPreset; }
 	void SetRenderSettings(const RenderSettings& settings);
 	const RenderSettings& GetRenderSettings() const { return currentSettings; }
+	void SetVirtualGeometryQualityProfile(const VirtualGeometryQualityProfile& profile);
+	VirtualGeometryQualityProfile GetVirtualGeometryQualityProfile() const;
+	VirtualGeometryInactiveReason GetVirtualGeometryInactiveReason() const;
 	SkyRuntimeState GetLatestSkyRuntimeState() const;
 	void MarkSkyStateDirty();
 

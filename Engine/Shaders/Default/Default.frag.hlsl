@@ -101,6 +101,10 @@ struct PushConstants
 	uint clusterDataOffset;
 	uint lightIndexOffset;
 	uint indirectDrawOffset;
+	uint virtualMeshletOffset;
+	uint virtualMeshletCount;
+	uint selectedVirtualLod;
+	uint virtualGeometryFlags;
 	float4 editorTint;
 };
 
@@ -113,6 +117,9 @@ struct PSIn
 	float3 worldPosition : TEXCOORD1;
 	float3 normal : NORMAL;
 	float4 tangent : TANGENT;
+	nointerpolation uint meshletIndex : TEXCOORD2;
+	nointerpolation float meshletBoundsRadius : TEXCOORD3;
+	nointerpolation uint meshletCullFlags : TEXCOORD4;
 };
 
 static const uint kLightTypeDirectional = 0u;
@@ -138,6 +145,9 @@ static const uint kMaxBindlessTextureCount = 1024u;
 // Match the sky system rule: once the sun is roughly ten degrees below the
 // horizon, direct sunlight should no longer illuminate scene geometry.
 static const float kDirectionalLightNightHeight = -0.17364818f;
+static const uint kMeshletCullFlagFrustum = 1u;
+static const uint kMeshletCullFlagCone = 2u;
+static const uint kMeshletCullFlagUnavailable = 4u;
 // Point lights with zero height relative to a surface have almost no Lambert
 // term on grazing faces. This small wrapped term approximates nearby bounce and
 // finite light size until full global illumination/area-light sampling exists.
@@ -665,6 +675,71 @@ float3 ApplyEditorTint(float3 color)
 	return lerp(color, SceneUniforms.editorTint.rgb, saturate(SceneUniforms.editorTint.a));
 }
 
+float3 BuildVirtualGeometryHashColor(uint value)
+{
+	value ^= value >> 16u;
+	value *= 0x7feb352du;
+	value ^= value >> 15u;
+	value *= 0x846ca68bu;
+	value ^= value >> 16u;
+	return float3(
+		(float)(value & 255u) / 255.0f,
+		(float)((value >> 8u) & 255u) / 255.0f,
+		(float)((value >> 16u) & 255u) / 255.0f);
+}
+
+float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingData frame)
+{
+	const uint virtualActive = SceneUniforms.virtualGeometryFlags & 1u;
+	const uint failOpen = (SceneUniforms.virtualGeometryFlags >> 1u) & 1u;
+	if (debugMode == 1u)
+	{
+		return BuildVirtualGeometryHashColor(SceneUniforms.selectedVirtualLod + 17u);
+	}
+	if (debugMode == 2u)
+	{
+		return BuildVirtualGeometryHashColor(input.meshletIndex + 31u);
+	}
+	if (debugMode == 3u)
+	{
+		if ((input.meshletCullFlags & kMeshletCullFlagUnavailable) != 0u)
+		{
+			return float3(1.0f, 0.0f, 1.0f);
+		}
+		const float radiusBand = saturate(log2(max(input.meshletBoundsRadius, 1e-5f) * 64.0f + 1.0f) / 8.0f);
+		return lerp(float3(0.05f, 0.25f, 1.0f), float3(1.0f, 0.9f, 0.05f), radiusBand);
+	}
+	if (debugMode == 4u)
+	{
+		if ((input.meshletCullFlags & kMeshletCullFlagUnavailable) != 0u)
+		{
+			return float3(1.0f, 0.0f, 1.0f);
+		}
+		if ((input.meshletCullFlags & kMeshletCullFlagFrustum) != 0u)
+		{
+			return float3(1.0f, 0.0f, 0.15f);
+		}
+		if ((input.meshletCullFlags & kMeshletCullFlagCone) != 0u)
+		{
+			return float3(1.0f, 0.55f, 0.05f);
+		}
+		return failOpen != 0u ? float3(0.55f, 0.35f, 0.1f) : float3(0.1f, 0.85f, 0.25f);
+	}
+	if (debugMode == 5u)
+	{
+		return frame.renderSettings2.w > 0.5f ? float3(0.05f, 0.8f, 1.0f) : float3(0.35f, 0.35f, 0.35f);
+	}
+	if (debugMode == 6u)
+	{
+		return virtualActive != 0u ? float3(0.0f, 0.75f, 0.45f) : float3(0.55f, 0.35f, 0.1f);
+	}
+	if (debugMode == 7u)
+	{
+		return failOpen != 0u ? float3(1.0f, 0.0f, 0.15f) : float3(0.2f, 0.9f, 0.9f);
+	}
+	return float3(0.0f, 0.0f, 0.0f);
+}
+
 float4 main(PSIn input) : SV_Target0
 {
 	const MaterialData mat = allMaterials[SceneUniforms.materialIndex];
@@ -686,6 +761,18 @@ float4 main(PSIn input) : SV_Target0
 		// before material lighting so the shadow pass does not sample the same
 		// shadow maps it is currently updating.
 		return float4(0.0f, 0.0f, 0.0f, 1.0f);
+	}
+
+	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
+	const FrameCullingData frame = frameCullingData[statsIndex];
+	const uint virtualGeometryDebugMode = (SceneUniforms.virtualGeometryFlags >> 8u) & 0xFFu;
+	if (virtualGeometryDebugMode != 0u)
+	{
+		// Debug visualization is allowed to render even when virtual geometry
+		// has failed open or is disabled. That makes the overlay useful for
+		// diagnosing why a mesh is still taking the conservative fallback path,
+		// instead of silently looking identical to normal material rendering.
+		return float4(ApplyEditorTint(BuildVirtualGeometryDebugColor(virtualGeometryDebugMode, input, frame)), finalColor.a);
 	}
 
 	float3 sampledNormal = globalTextures[NonUniformResourceIndex(min(mat.NormalTextureIndex, kMaxBindlessTextureCount - 1u))].Sample(globalSamplers[NonUniformResourceIndex(min(mat.NormalTextureIndex, kMaxBindlessTextureCount - 1u))], uv).rgb;
@@ -713,8 +800,6 @@ float4 main(PSIn input) : SV_Target0
 		return float4(ApplyEditorTint(finalColor.rgb + emissive), finalColor.a);
 	}
 
-	const uint statsIndex = min(SceneUniforms.statsSlotIndex, kMaxStatsSlots - 1u);
-	const FrameCullingData frame = frameCullingData[statsIndex];
 	const uint lightCount = frame.clusterGridAndLightCount.w;
 	const float3 normal = BuildLightingNormal(input.normal, input.worldPosition, uv, sampledNormal, mat.NormalScale, input.tangent);
 	const float3 viewDir = SafeNormalize(frame.cameraPositionAndEpsilon.xyz - input.worldPosition, float3(0.0f, 0.0f, 1.0f));

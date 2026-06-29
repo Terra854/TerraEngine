@@ -86,6 +86,11 @@ namespace TerraEngine::AssetPipeline
 			return out.str();
 		}
 
+		TerraEngine::UUID StableChildUuid(const TerraEngine::UUID& packageGuid, std::string_view role, std::size_t index)
+		{
+			return BuildStableGeneratedModelUuid(packageGuid, role, index);
+		}
+
 		bool SourceTextContains(const std::filesystem::path& filePath, std::string_view token)
 		{
 			if (NormalizeExtension(filePath) != ".gltf")
@@ -293,12 +298,13 @@ namespace TerraEngine::AssetPipeline
 			GltfImportResult& result,
 			std::size_t textureIndex,
 			GltfTextureUsage usage,
+			const TerraEngine::UUID& packageGuid,
 			const std::filesystem::path& packageFolderRelative,
 			const std::filesystem::path& importRoot)
 		{
 			const std::optional<std::size_t> imageIndex = ResolveImageIndex(asset, textureIndex);
 			GeneratedGltfTextureAsset texture{};
-			texture.guid = TerraEngine::GenerateUUID();
+			texture.guid = StableChildUuid(packageGuid, "gltf-texture", textureIndex);
 			texture.sourceTextureIndex = textureIndex;
 			texture.sourceImageIndex = imageIndex;
 			texture.usage = usage;
@@ -526,7 +532,7 @@ namespace TerraEngine::AssetPipeline
 			const fastgltf::Material& sourceMaterial = asset.materials[materialIndex];
 			const std::string materialName = SanitizeAssetName(std::string(sourceMaterial.name), "Material_" + std::to_string(materialIndex));
 			GeneratedGltfMaterialAsset material{};
-			material.guid = TerraEngine::GenerateUUID();
+			material.guid = StableChildUuid(options.packageGuid, "gltf-material", materialIndex);
 			material.sourceMaterialIndex = materialIndex;
 			material.displayName = materialName;
 			material.sourcePath = result.package.importRoot / (materialName + ".tmat");
@@ -556,23 +562,23 @@ namespace TerraEngine::AssetPipeline
 
 			if (sourceMaterial.pbrData.baseColorTexture.has_value())
 			{
-				AddTextureRecord(asset, result, sourceMaterial.pbrData.baseColorTexture->textureIndex, GltfTextureUsage::BaseColor, packageFolderRelative, result.package.importRoot);
+				AddTextureRecord(asset, result, sourceMaterial.pbrData.baseColorTexture->textureIndex, GltfTextureUsage::BaseColor, options.packageGuid, packageFolderRelative, result.package.importRoot);
 			}
 			if (sourceMaterial.pbrData.metallicRoughnessTexture.has_value())
 			{
-				AddTextureRecord(asset, result, sourceMaterial.pbrData.metallicRoughnessTexture->textureIndex, GltfTextureUsage::MetallicRoughness, packageFolderRelative, result.package.importRoot);
+				AddTextureRecord(asset, result, sourceMaterial.pbrData.metallicRoughnessTexture->textureIndex, GltfTextureUsage::MetallicRoughness, options.packageGuid, packageFolderRelative, result.package.importRoot);
 			}
 			if (sourceMaterial.normalTexture.has_value())
 			{
-				AddTextureRecord(asset, result, sourceMaterial.normalTexture->textureIndex, GltfTextureUsage::Normal, packageFolderRelative, result.package.importRoot);
+				AddTextureRecord(asset, result, sourceMaterial.normalTexture->textureIndex, GltfTextureUsage::Normal, options.packageGuid, packageFolderRelative, result.package.importRoot);
 			}
 			if (sourceMaterial.occlusionTexture.has_value())
 			{
-				AddTextureRecord(asset, result, sourceMaterial.occlusionTexture->textureIndex, GltfTextureUsage::Occlusion, packageFolderRelative, result.package.importRoot);
+				AddTextureRecord(asset, result, sourceMaterial.occlusionTexture->textureIndex, GltfTextureUsage::Occlusion, options.packageGuid, packageFolderRelative, result.package.importRoot);
 			}
 			if (sourceMaterial.emissiveTexture.has_value())
 			{
-				AddTextureRecord(asset, result, sourceMaterial.emissiveTexture->textureIndex, GltfTextureUsage::Emissive, packageFolderRelative, result.package.importRoot);
+				AddTextureRecord(asset, result, sourceMaterial.emissiveTexture->textureIndex, GltfTextureUsage::Emissive, options.packageGuid, packageFolderRelative, result.package.importRoot);
 			}
 
 			MaterialAssetWriteDesc materialDesc{};
@@ -656,7 +662,7 @@ namespace TerraEngine::AssetPipeline
 		{
 			const fastgltf::Mesh& sourceMesh = asset.meshes[meshIndex];
 			GeneratedGltfMeshAsset mesh{};
-			mesh.guid = TerraEngine::GenerateUUID();
+			mesh.guid = StableChildUuid(options.packageGuid, "gltf-mesh", meshIndex);
 			mesh.sourceMeshIndex = meshIndex;
 			mesh.sourcePath = options.sourceRelativePath;
 			mesh.compiledPath = options.sourceRelativePath;
@@ -717,6 +723,10 @@ namespace TerraEngine::AssetPipeline
 			if (!CompileMeshFromRaw(options.sourceRelativePath, options.buildRoot / compiledPackagePath, packageVertices, packageIndices))
 			{
 				AddDiagnostic(result, GltfDiagnosticSeverity::Error, "MeshCompileFailed", compiledPackagePath.generic_string(), "Extracted glTF geometry failed Terra mesh compilation.");
+			}
+			for (GeneratedGltfMeshAsset& mesh : result.generatedMeshes)
+			{
+				PopulateGeneratedMeshVirtualGeometryMetadata(options.buildRoot / compiledPackagePath, mesh, result.diagnostics);
 			}
 		}
 

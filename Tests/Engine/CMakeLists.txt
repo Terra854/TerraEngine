@@ -53,6 +53,8 @@ add_executable(TerraEngine-EngineTests
 	Resource/ResourceStreamingPolicyTests.cpp
 	Resource/ResourceStreamingPreloadTests.cpp
 	Resource/ResourceStreamingResidencyIntegrationTests.cpp
+	Resource/VirtualGeometryResourceTests.cpp
+	Resource/VirtualGeometryResidencyTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/MockRenderBackendTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererThreadingTestFixtures.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderBackendCompatibilityTests.cpp
@@ -80,10 +82,20 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSmallSceneOverheadTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSnapshotContractTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionOwnershipTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryDiagnosticsTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHiZTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMultiViewTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryQualityTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryRenderTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryShaderLayoutTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryShadowTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryStressTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkerTaskGroupTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionPlanTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/LiveGpuSubmissionBoundaryTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderTestRegistration.cpp
+	# Virtual geometry renderer tests will be registered here as each
+	# implementation story adds real test files.
 	Renderer/RenderTypesTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderUiPreparationTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderUploadBudgetTests.cpp
@@ -174,3 +186,21 @@ endif()
 
 add_test(NAME Engine.SpatialUnitTests COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.SpatialUnitTests PROPERTIES LABELS "Engine")
+
+add_test(NAME Engine.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryFoundation PROPERTIES
+	LABELS "Engine;VirtualGeometry"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry,RenderTypes,Renderer.Diagnostics,Resource.Residency"
+)
+
+add_test(NAME Engine.VirtualGeometryRenderer COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryRenderer PROPERTIES
+	LABELS "Engine;VirtualGeometry;Renderer;Stress"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Render,VirtualGeometry.Diagnostics,VirtualGeometry.HiZ,VirtualGeometry.ShaderLayout,VirtualGeometry.Quality,VirtualGeometry.Stress"
+)
+
+add_test(NAME Engine.VirtualGeometryResource COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryResource PROPERTIES
+	LABELS "Engine;VirtualGeometry;Resource;Streaming"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Resource,Resource.Residency"
+)

@@ -16,6 +16,12 @@ void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenW
 	width = std::max(screenWidth, 1u);
 	height = std::max(screenHeight, 1u);
 	mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
+	history = {};
+	history.width = width;
+	history.height = height;
+	history.invalidReason = VulkanHiZInvalidReason::Resize;
+	latestInvalidReason = VulkanHiZInvalidReason::Resize;
+	latestOcclusionAllowed = false;
 
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -118,4 +124,8 @@ void VulkanHiZ::Destroy(VkDevice device, VmaAllocator allocator) {
 		vmaDestroyImage(allocator, image, allocation);
 		image = VK_NULL_HANDLE;
 	}
+	history = {};
+	history.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
+	latestInvalidReason = VulkanHiZInvalidReason::MissingPyramid;
+	latestOcclusionAllowed = false;
 }

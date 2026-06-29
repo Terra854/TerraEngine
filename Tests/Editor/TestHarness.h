@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -46,10 +47,34 @@ namespace TerraEngine::EditorTests {
 		int RunAll(std::ostream& output) const {
 			TestContext context;
 			int failedCount = 0;
+			const char* filterValue = std::getenv("TERRAENGINE_TEST_FILTER");
+			const std::string filter = filterValue != nullptr ? filterValue : "";
+
+			auto matchesFilter = [&filter](const std::string& testName) {
+				if(filter.empty()) {
+					return true;
+				}
+				std::size_t begin = 0;
+				while(begin <= filter.size()) {
+					const std::size_t end = filter.find_first_of(",;", begin);
+					const std::string token = filter.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+					if(!token.empty() && testName.find(token) != std::string::npos) {
+						return true;
+					}
+					if(end == std::string::npos) {
+						break;
+					}
+					begin = end + 1;
+				}
+				return false;
+			};
 
 			// Run every registered test even after one failure so CTest output
 			// identifies the full set of broken editor behaviors in one pass.
 			for(const TestCase& test : tests_) {
+				if(!matchesFilter(test.name)) {
+					continue;
+				}
 				try {
 					test.body(context);
 					output << "[PASS] " << test.name << '\n';

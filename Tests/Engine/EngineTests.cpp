@@ -45,6 +45,8 @@ namespace TerraEngine::Tests {
 	void RegisterResourceStreamingPolicyTests(TestRegistry& registry);
 	void RegisterResourceStreamingPreloadTests(TestRegistry& registry);
 	void RegisterResourceStreamingResidencyIntegrationTests(TestRegistry& registry);
+	void RegisterVirtualGeometryResourceTests(TestRegistry& registry);
+	void RegisterVirtualGeometryResidencyTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
 	void RegisterRendererGraphSmokeTests(TestRegistry& registry);
 	void RegisterRenderDiagnosticsTests(TestRegistry& registry);
@@ -80,6 +82,14 @@ namespace TerraEngine::Tests {
 	void RegisterRenderSmallSceneOverheadTests(TestRegistry& registry);
 	void RegisterRenderSnapshotContractTests(TestRegistry& registry);
 	void RegisterRenderSubmissionOwnershipTests(TestRegistry& registry);
+	void RegisterVirtualGeometryDiagnosticsTests(TestRegistry& registry);
+	void RegisterVirtualGeometryHiZTests(TestRegistry& registry);
+	void RegisterVirtualGeometryMultiViewTests(TestRegistry& registry);
+	void RegisterVirtualGeometryQualityTests(TestRegistry& registry);
+	void RegisterVirtualGeometryRenderTests(TestRegistry& registry);
+	void RegisterVirtualGeometryShaderLayoutTests(TestRegistry& registry);
+	void RegisterVirtualGeometryShadowTests(TestRegistry& registry);
+	void RegisterVirtualGeometryStressTests(TestRegistry& registry);
 	void RegisterRenderUiPreparationTests(TestRegistry& registry);
 	void RegisterRenderUploadBudgetTests(TestRegistry& registry);
 	void RegisterRenderViewSubmitReuseTests(TestRegistry& registry);
@@ -174,6 +184,8 @@ int main() {
 	TerraEngine::Tests::RegisterResourceStreamingPolicyTests(registry);
 	TerraEngine::Tests::RegisterResourceStreamingPreloadTests(registry);
 	TerraEngine::Tests::RegisterResourceStreamingResidencyIntegrationTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryResourceTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryResidencyTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
 	TerraEngine::Tests::RegisterRendererGraphSmokeTests(registry);
 	TerraEngine::Tests::RegisterRenderDiagnosticsTests(registry);
@@ -187,6 +199,14 @@ int main() {
 	TerraEngine::Tests::RegisterRenderPreparationCacheTests(registry);
 	TerraEngine::Tests::RegisterRenderSmallSceneOverheadTests(registry);
 	TerraEngine::Tests::RegisterRenderShadowParallelParityTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryHiZTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryMultiViewTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryQualityTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryRenderTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryShaderLayoutTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryShadowTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryStressTests(registry);
 	TerraEngine::Tests::RegisterRenderUiPreparationTests(registry);
 	TerraEngine::Tests::RegisterRenderResourceReadinessTests(registry);
 	TerraEngine::Tests::RegisterRenderStreamingNeedTests(registry);

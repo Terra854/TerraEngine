@@ -230,6 +230,31 @@ void SceneViewWindow::OnGui() {
 	ImGuizmo::BeginFrame();
 
 	void* texID = m_Owner->GetSceneTextureID();
+
+	VirtualGeometryQualityProfile virtualGeometryProfile = RenderSystem::Instance().GetVirtualGeometryQualityProfile();
+	int virtualGeometryDebugMode = static_cast<int>(virtualGeometryProfile.debugVisualizationMode);
+	ImGui::SetNextItemWidth(115.0f);
+	if (ImGui::BeginCombo("VG", ToString(static_cast<VirtualGeometryDebugVisualizationMode>(virtualGeometryDebugMode))))
+	{
+		for (int modeIndex = static_cast<int>(VirtualGeometryDebugVisualizationMode::None);
+			modeIndex <= static_cast<int>(VirtualGeometryDebugVisualizationMode::Error);
+			++modeIndex)
+		{
+			const auto mode = static_cast<VirtualGeometryDebugVisualizationMode>(modeIndex);
+			const bool selected = virtualGeometryDebugMode == modeIndex;
+			if (ImGui::Selectable(ToString(mode), selected))
+			{
+				virtualGeometryDebugMode = modeIndex;
+				virtualGeometryProfile.debugVisualizationMode = mode;
+				RenderSystem::Instance().SetVirtualGeometryQualityProfile(virtualGeometryProfile);
+			}
+			if (selected)
+			{
+				ImGui::SetItemDefaultFocus();
+			}
+		}
+		ImGui::EndCombo();
+	}
 	
 	// We draw the image filling the content region
 	ImVec2 contentSize = ImGui::GetContentRegionAvail();

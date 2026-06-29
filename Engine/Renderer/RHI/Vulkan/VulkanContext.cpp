@@ -2413,6 +2413,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		&& (ResourceManager::Instance().GetShaderCollection(defaultTaskCollectionId) != nullptr);
 
 	VkRenderPass currentPass = impl->editorMode ? impl->offscreenRenderPass : impl->renderPass;
+	if (currentPass == VK_NULL_HANDLE) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Skipping Vulkan draw submission because the active render pass is not ready.");
+		return;
+	}
 
 	const auto PrepareDrawResources = [&](const DrawCommand& command) {
 		Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
@@ -2928,7 +2932,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			VkPushConstantRange hiZPushRange{};
 			hiZPushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 			hiZPushRange.offset = 0u;
-			hiZPushRange.size = 16u;
+			hiZPushRange.size = 32u;
 
 			VkPipelineLayoutCreateInfo hiZPipelineLayoutInfo{};
 			hiZPipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -3025,11 +3029,18 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	VkImageView aoDepthHistoryView = aoDepthHistoryMatchesView
 		? depthHistory.ambientOcclusionDepthByFrame[impl->currentFrame].view
 		: VK_NULL_HANDLE;
-	const bool previousDepthMatchesView = !impl->editorMode
-		&& firstPrimaryPassForFrame
-		&& depthHistory.valid
-		&& MatricesApproximatelyEqual(currentViewProjection, depthHistory.lastViewProjectionMatrix, kDepthHistoryMatrixEpsilon);
-	const bool hiZPyramidReady = previousDepthMatchesView
+	const std::uint32_t hiZTargetWidth = std::max<std::uint32_t>(impl->swapchainExtent.width, 1u);
+	const std::uint32_t hiZTargetHeight = std::max<std::uint32_t>(impl->swapchainExtent.height, 1u);
+	const std::uint64_t hiZProjectionSignature = BuildVulkanHiZProjectionSignature(currentViewProjection);
+	VulkanHiZHistoryMetadata currentHiZHistory{};
+	currentHiZHistory.viewId = viewIndex;
+	currentHiZHistory.width = hiZTargetWidth;
+	currentHiZHistory.height = hiZTargetHeight;
+	currentHiZHistory.projectionSignature = hiZProjectionSignature;
+	currentHiZHistory.frameId = impl->pendingBackendFrameBreakdown.frameId;
+	const bool hiZResourcesReady =
+		impl->hiZ.width == hiZTargetWidth
+		&& impl->hiZ.height == hiZTargetHeight
 		&& impl->hiZ.image != VK_NULL_HANDLE
 		&& impl->hiZ.fullView != VK_NULL_HANDLE
 		&& impl->hiZ.sampler != VK_NULL_HANDLE
@@ -3037,13 +3048,25 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		&& impl->hiZComputePipeline != VK_NULL_HANDLE
 		&& impl->hiZPipelineLayout != VK_NULL_HANDLE
 		&& impl->hiZDescriptorSetLayout != VK_NULL_HANDLE;
-	// Keep Hi-Z mip generation active, but do not let the mesh task shader use
-	// it for visibility yet. The current per-meshlet test can self-occlude on
-	// optimized/export builds because the previous frame pyramid contains the
-	// same object; a later object-level or occluder-only culler can safely flip
-	// this back on after it proves conservative behavior.
-	constexpr bool kEnableMeshletHiZOcclusion = false;
-	const bool hiZOcclusionActive = hiZPyramidReady && kEnableMeshletHiZOcclusion;
+	const VirtualGeometryQualityProfile virtualGeometryQuality = SanitizeVirtualGeometryQualityProfile(frameData.settings.virtualGeometry);
+	const VulkanHiZValidationInput hiZValidationInput{
+		viewIndex,
+		hiZTargetWidth,
+		hiZTargetHeight,
+		hiZProjectionSignature,
+		hiZResourcesReady,
+		virtualGeometryQuality.hiZOcclusionEnabled,
+		!impl->editorMode && firstPrimaryPassForFrame,
+		virtualGeometryQuality.hiZSelfOcclusionGuardEnabled
+	};
+	const VulkanHiZValidationResult hiZValidation = ValidateVulkanHiZHistory(impl->hiZ.history, hiZValidationInput);
+	const bool hiZOcclusionActive = hiZValidation.occlusionAllowed;
+	impl->hiZ.latestInvalidReason = hiZValidation.invalidReason;
+	impl->hiZ.latestOcclusionAllowed = hiZOcclusionActive;
+	if (!hiZValidation.historyValid)
+	{
+		impl->hiZ.history.invalidReason = hiZValidation.invalidReason;
+	}
 
 	FrameCullingDataGPU analysisCullingData{};
 	analysisCullingData.frustumPlanes = BuildFrustumPlanes(currentViewProjection);
@@ -3321,6 +3344,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	pendingStats.valid = true;
 
 	const auto ResolvePipeline = [&](const TerraEngine::UUID& shaderCollectionId, VkRenderPass currentPass, uint32_t materialFlags) -> VulkanPipeline* {
+		if (currentPass == VK_NULL_HANDLE) {
+			// Material edits can invalidate resources while editor offscreen
+			// targets are being rebuilt. A missing render pass means this frame
+			// has nothing valid to bind against, so fail closed without asking
+			// EnsurePipeline to log the lower-level error repeatedly.
+			return nullptr;
+		}
 		impl->EnsurePipeline(shaderCollectionId, currentPass, materialFlags);
 		auto passIt = impl->pipelineCache.find(currentPass);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -3450,6 +3480,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.clusterDataOffset = renderSnapshot.clusterDataOffset;
 		push.lightIndexOffset = renderSnapshot.lightIndexOffset;
 		push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
+		const uint32_t selectedMeshletOffset = std::min(command.virtualMeshletOffset, mesh.meshletCount);
+		const uint32_t selectedMeshletCount = command.virtualMeshletCount == 0u
+			? (mesh.meshletCount - selectedMeshletOffset)
+			: std::min(command.virtualMeshletCount, mesh.meshletCount - selectedMeshletOffset);
+		push.virtualMeshletOffset = selectedMeshletOffset;
+		push.virtualMeshletCount = selectedMeshletCount;
+		push.selectedVirtualLod = command.selectedVirtualLod;
+		push.virtualGeometryFlags = command.virtualGeometryFlags;
 		push.editorTint = command.editorTint;
 
 		PreparedDraw draw{};
@@ -3465,8 +3503,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		
 		const uint32_t kTaskBatchSize = 32u;
 		const uint32_t taskGroupCount = pipeline->hasTaskStage
-			? ((mesh.meshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
-			: mesh.meshletCount;
+			? ((selectedMeshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
+			: selectedMeshletCount;
 
 		VkDrawMeshTasksIndirectCommandEXT indirectCmd{};
 		indirectCmd.groupCountX = taskGroupCount;
@@ -3504,6 +3542,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					// recursive shadow sampling are skipped while depth writes.
 					shadowDraw.push.vrsActive = 2u;
 					shadowDraw.push.taskCullingEnabled = 0u;
+					// Shadow visibility is evaluated from the light point of
+					// view. A camera-owned Hi-Z pyramid would be the wrong
+					// occluder history here, so clear the self-occlusion guard
+					// bit before the shadow pass sees this draw.
+					shadowDraw.push.virtualGeometryFlags &= ~4u;
 					shadowDraw.push.editorTint = glm::vec4(0.0f);
 					
 					VkDrawMeshTasksIndirectCommandEXT shadowIndirectCmd{};
@@ -3520,7 +3563,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 		pendingStats.drawCalls += 1u;
 		pendingStats.triangleCount += (mesh.indexCount / 3u);
-		pendingStats.meshletsTotal += mesh.meshletCount;
+		pendingStats.meshletsTotal += selectedMeshletCount;
 		pendingStats.taskCullingActive = pendingStats.taskCullingActive || activeTaskCulling;
 		pendingStats.hiZActive = pendingStats.hiZActive || hiZOcclusionActive;
 		pendingStats.vrsActive = pendingStats.vrsActive || impl->UsesVrsAttachment();
@@ -3528,7 +3571,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// Mesh-only and pass-through fallback paths keep conservative CPU estimates.
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!pipeline->hasTaskStage || !activeTaskCulling) {
-			pendingStats.meshletsDispatched += mesh.meshletCount;
+			pendingStats.meshletsDispatched += selectedMeshletCount;
 		}
 	}
 
@@ -3623,13 +3666,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			shadowDraw.push.clusterDataOffset = renderSnapshot.clusterDataOffset;
 			shadowDraw.push.lightIndexOffset = renderSnapshot.lightIndexOffset;
 			shadowDraw.push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
+			const uint32_t selectedShadowMeshletOffset = std::min(command.virtualMeshletOffset, mesh.meshletCount);
+			const uint32_t selectedShadowMeshletCount = command.virtualMeshletCount == 0u
+				? (mesh.meshletCount - selectedShadowMeshletOffset)
+				: std::min(command.virtualMeshletCount, mesh.meshletCount - selectedShadowMeshletOffset);
+			shadowDraw.push.virtualMeshletOffset = selectedShadowMeshletOffset;
+			shadowDraw.push.virtualMeshletCount = selectedShadowMeshletCount;
+			shadowDraw.push.selectedVirtualLod = command.selectedVirtualLod;
+			shadowDraw.push.virtualGeometryFlags = command.virtualGeometryFlags & ~4u;
 			shadowDraw.push.editorTint = glm::vec4(0.0f);
 			shadowDraw.materialFlags = materialFlags;
 
 			const uint32_t kTaskBatchSize = 32u;
 			const uint32_t taskGroupCount = shadowPipeline->hasTaskStage
-				? ((mesh.meshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
-				: mesh.meshletCount;
+				? ((selectedShadowMeshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)
+				: selectedShadowMeshletCount;
 			VkDrawMeshTasksIndirectCommandEXT shadowIndirectCmd{};
 			shadowIndirectCmd.groupCountX = taskGroupCount;
 			shadowIndirectCmd.groupCountY = 1u;
@@ -3951,6 +4002,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 			PushConstants shadowPush = draw.push;
 			shadowPush.viewProj = lightViewProjection;
+			shadowPush.taskCullingEnabled = 0u;
+			shadowPush.virtualGeometryFlags &= ~4u;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (draw.pipeline->supportsDefaultPushConstants) {
 				vkCmdPushConstants(cmd, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &shadowPush);
@@ -4301,7 +4354,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (kEnableHiZMipGeneration) {
 		// Build Hi-Z after the depth attachment contains the final scene depth.
 		// The next frame can then use this stable pyramid for conservative occlusion.
-		impl->GenerateHiZPyramid(cmd, impl->depthImageView, snapshotSlotIndex);
+		impl->GenerateHiZPyramid(cmd, impl->depthImageView, snapshotSlotIndex, currentHiZHistory);
 	}
 			
 	vkEndCommandBuffer(cmd);
@@ -4564,7 +4617,7 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 }
 
 // VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView, uint32_t snapshotSlotIndex) {
+void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory) {
 	if (cmd == VK_NULL_HANDLE
 		|| depthImage == VK_NULL_HANDLE
 		|| depthView == VK_NULL_HANDLE
@@ -4720,6 +4773,10 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		uint32_t inputHeight = 1u;
 		uint32_t outputWidth = 1u;
 		uint32_t outputHeight = 1u;
+		uint32_t occlusionState = 0u;
+		uint32_t invalidReason = static_cast<uint32_t>(VulkanHiZInvalidReason::FirstFrame);
+		uint32_t reserved0 = 0u;
+		uint32_t reserved1 = 0u;
 	};
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hiZComputePipeline);
@@ -4740,6 +4797,8 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 	levelZeroPush.inputHeight = hiZ.height;
 	levelZeroPush.outputWidth = hiZ.width;
 	levelZeroPush.outputHeight = hiZ.height;
+	levelZeroPush.occlusionState = hiZ.latestOcclusionAllowed ? 1u : 0u;
+	levelZeroPush.invalidReason = static_cast<uint32_t>(hiZ.latestInvalidReason);
 	vkCmdPushConstants(cmd, hiZPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(levelZeroPush), &levelZeroPush);
 	vkCmdDispatch(cmd, (hiZ.width + 7u) / 8u, (hiZ.height + 7u) / 8u, 1u);
 
@@ -4779,6 +4838,8 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		mipPush.inputHeight = sourceHeight;
 		mipPush.outputWidth = outputWidth;
 		mipPush.outputHeight = outputHeight;
+		mipPush.occlusionState = hiZ.latestOcclusionAllowed ? 1u : 0u;
+		mipPush.invalidReason = static_cast<uint32_t>(hiZ.latestInvalidReason);
 		vkCmdPushConstants(cmd, hiZPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(mipPush), &mipPush);
 		vkCmdDispatch(cmd, (outputWidth + 7u) / 8u, (outputHeight + 7u) / 8u, 1u);
 
@@ -4818,6 +4879,9 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		0, nullptr,
 		1, &restoreDepthBarrier);
 
+	hiZ.history = completedHistory;
+	hiZ.history.valid = true;
+	hiZ.history.invalidReason = VulkanHiZInvalidReason::None;
 }
 
 // VulkanContext::Impl::GenerateAmbientOcclusion is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -5443,6 +5507,11 @@ bool VulkanContext::IsTaskShaderSupported() const {
 	return impl != nullptr && impl->taskShaderSupported;
 }
 
+bool VulkanContext::SupportsVirtualGeometryMeshShaderRoute() const
+{
+	return impl != nullptr && impl->meshShaderSupported;
+}
+
 // VulkanContext::GetLatestRenderStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 RenderStatsSnapshot VulkanContext::GetLatestRenderStats(RenderViewType viewType) const {
 	if (!impl) {
@@ -5512,6 +5581,9 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 		{ "presentation", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, "Presentation stays on the coordinator." }
 	};
 	profile.diagnosticCapabilities = { "packet-counts", "serialized-reasons", "pass-labels", "resource-warnings", "backend-fallbacks", "backend-frame-breakdown", "worker-recording-batches", "queue-readiness", "work-budgets", "performance-gates" };
+	profile.diagnosticCapabilities.push_back(SupportsVirtualGeometryMeshShaderRoute()
+		? "virtual-geometry-mesh-shader-route"
+		: "virtual-geometry-unsupported-missing-mesh-shader");
 	return profile;
 }
 
@@ -5847,7 +5919,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 			colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 			VkAttachmentReference2 colorAttachmentRef{};
@@ -5902,8 +5974,8 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 			dependencies[0].sType = VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2;
 			dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 			dependencies[0].dstSubpass = 0;
-			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-			dependencies[0].srcAccessMask = 0;
+			dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+			dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 			dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
 			dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
@@ -5931,7 +6003,7 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 			colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 			colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			colorAttachment.initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 			VkAttachmentReference colorAttachmentRef{};
@@ -6014,6 +6086,11 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 
 	vmaCreateImage(allocator, &imageInfo, &allocInfo, &res.image, &res.allocation, nullptr);
 	vmaSetAllocationName(allocator, res.allocation, "Offscreen Render Target Image");
+	// Editor scene/game views are registered with ImGui as shader-readable
+	// textures immediately after creation. Transition the image up front so a
+	// skipped or delayed first scene render cannot leave ImGui sampling an
+	// image that still has Vulkan's UNDEFINED layout.
+	TransitionImageLayout(res.image, offscreenColorFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 	// Create View
 	res.view = CreateImageView(res.image, offscreenColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -6095,6 +6172,9 @@ void VulkanContext::Impl::ClearResources() {
 		vmaDestroyBuffer(allocator, mesh.meshSkinningBuffer.buffer, mesh.meshSkinningBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshDecodeInfoBuffer.buffer, mesh.meshDecodeInfoBuffer.allocation);
 		vmaDestroyBuffer(allocator, mesh.meshletBuffer.buffer, mesh.meshletBuffer.allocation);
+		if (mesh.meshletSectionBuffer.buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(allocator, mesh.meshletSectionBuffer.buffer, mesh.meshletSectionBuffer.allocation);
+		}
 		vmaDestroyBuffer(allocator, mesh.meshletBoundsBuffer.buffer, mesh.meshletBoundsBuffer.allocation);
 	}
 	meshCache.clear();

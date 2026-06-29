@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <chrono>
 #include <algorithm>
+#include <cstring>
 #include <cstdlib>
 #include <regex>
 
@@ -22,6 +23,7 @@
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scene/SceneManager.h"
+#include "Engine/File Formats/TerraEngineMeshFile.h"
 
 using json = nlohmann::json;
 
@@ -76,6 +78,64 @@ namespace {
 		return IsImportSidecarPath(path);
 	}
 
+	bool PublishCompiledAssetAtomically(const std::filesystem::path& stagedPath, const std::filesystem::path& finalPath)
+	{
+		std::error_code ec;
+		std::filesystem::create_directories(finalPath.parent_path(), ec);
+		if (ec)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to create compiled asset directory " << finalPath.parent_path() << ": " << ec.message());
+			return false;
+		}
+
+		if (!std::filesystem::exists(stagedPath))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Compiled asset staging file is missing: " << stagedPath);
+			return false;
+		}
+
+		const std::filesystem::path backupPath = finalPath.string() + ".previous";
+		std::filesystem::remove(backupPath, ec);
+		ec.clear();
+
+		const bool hadPreviousOutput = std::filesystem::exists(finalPath);
+		if (hadPreviousOutput)
+		{
+			std::filesystem::rename(finalPath, backupPath, ec);
+			if (ec)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "Failed to preserve previous compiled asset before publish: " << finalPath << " (" << ec.message() << ")");
+				return false;
+			}
+		}
+
+		std::filesystem::rename(stagedPath, finalPath, ec);
+		if (ec)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Failed to publish staged compiled asset " << stagedPath << " to " << finalPath << ": " << ec.message());
+			if (hadPreviousOutput)
+			{
+				std::error_code restoreError;
+				std::filesystem::rename(backupPath, finalPath, restoreError);
+				if (restoreError)
+				{
+					TERRAENGINE_LOG(LogLevel::Error, "Failed to restore previous compiled asset " << finalPath << ": " << restoreError.message());
+				}
+			}
+			return false;
+		}
+
+		if (hadPreviousOutput)
+		{
+			std::filesystem::remove(backupPath, ec);
+			if (ec)
+			{
+				TERRAENGINE_LOG(LogLevel::Warning, "Published compiled asset but could not remove backup " << backupPath << ": " << ec.message());
+			}
+		}
+		return true;
+	}
+
 	// RegisterGeneratedModelPackageResources bridges package-owned sub-assets into the
 	// runtime resource table. Some generated package outputs, especially
 	// textures, are not standalone source assets in the browser, but materials
@@ -110,7 +170,14 @@ namespace {
 		for (const json& mesh : result.value("generatedMeshes", json::array()))
 		{
 			const auto guid = TerraEngine::ParseUUID(mesh.value("guid", ""));
-			if (!guid || !mesh.contains("compiledPath"))
+			const json virtualGeometry = mesh.value("virtualGeometry", json::object());
+			const std::string packageStatus = result.value("status", std::string());
+			const std::string virtualGeometryStatus = virtualGeometry.value("status", std::string());
+			if (!guid
+				|| packageStatus == "Failed"
+				|| !mesh.contains("compiledPath")
+				|| virtualGeometryStatus == "Failed"
+				|| virtualGeometryStatus == "NeedsRebuild")
 			{
 				continue;
 			}
@@ -701,18 +768,6 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 		options.forceReimport = true;
 
 		TerraEngine::AssetPipeline::ModelPackageImportResult importResult = TerraEngine::AssetPipeline::ImportModelPackage(options);
-		for (TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
-		{
-			const TerraEngine::UUID previousGuid = mesh.guid;
-			mesh.guid = metadata.guid;
-			for (TerraEngine::AssetPipeline::ModelMaterialAssignment& assignment : importResult.materialAssignments)
-			{
-				if (assignment.meshGuid == previousGuid)
-				{
-					assignment.meshGuid = metadata.guid;
-				}
-			}
-		}
 		for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials)
 		{
 			const std::filesystem::path materialSourcePath = assetRoot / material.sourcePath;
@@ -728,7 +783,12 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 			materialMetadata.compiledPath = material.compiledPath;
 			materialMetadata.lastModified = std::filesystem::last_write_time(materialSourcePath);
 			materialMetadata.settings = json::object();
-			FinishImport(materialMetadata, std::filesystem::absolute(materialSourcePath), true);
+			// Package import is already publishing a coherent package sidecar and
+			// generated material files. Register the generated material metadata
+			// without forcing a renderer hot-reload for every child material; doing
+			// that during startup/package import can invalidate renderer resources
+			// before editor render passes are ready.
+			FinishImport(materialMetadata, std::filesystem::absolute(materialSourcePath), false);
 		}
 		if (!TerraEngine::AssetPipeline::SaveModelPackageImportResult(fullSourcePath, importResult)) {
 			TERRAENGINE_LOG(LogLevel::Warning, "Failed to save model package import result sidecar for " << fullSourcePath);
@@ -740,7 +800,23 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 		return std::filesystem::exists(fullCompiledPath);
 	}
 	else if (metadata.importerName == "MeshImporter") {
-		return CompileMesh(fullSourcePath, fullCompiledPath);
+		const std::filesystem::path stagedCompiledPath = fullCompiledPath.string() + "." + UuidToString(metadata.guid) + ".tmp";
+		std::error_code cleanupError;
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		// Compile into a sibling file first. The live compiled asset is replaced
+		// only after the compiler reports success, so failed rebuilds never
+		// unregister or corrupt the previous usable mesh.
+		if (!CompileMesh(fullSourcePath, stagedCompiledPath))
+		{
+			std::filesystem::remove(stagedCompiledPath, cleanupError);
+			return false;
+		}
+		if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath))
+		{
+			std::filesystem::remove(stagedCompiledPath, cleanupError);
+			return false;
+		}
+		return true;
 	} 
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (metadata.importerName == "TextureImporter") {
@@ -874,6 +950,66 @@ const AssetMetadata* AssetDatabase::FindAssetByGuid(const TerraEngine::UUID& gui
 	}
 
 	return nullptr;
+}
+
+bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata, VirtualGeometryAssetMetadata& outMetadata) const {
+	outMetadata = {};
+	if (metadata.compiledPath.empty()) {
+		outMetadata.warnings.push_back("Compiled mesh path is empty.");
+		return false;
+	}
+
+	const std::filesystem::path compiledPath = buildRoot / metadata.compiledPath;
+	std::ifstream input(compiledPath, std::ios::binary);
+	if (!input) {
+		outMetadata.warnings.push_back("Compiled mesh file is missing.");
+		return false;
+	}
+
+	MeshHeader header{};
+	input.read(reinterpret_cast<char*>(&header), sizeof(MeshHeader));
+	if (!input || std::memcmp(header.magic, "TEMF", 4) != 0) {
+		outMetadata.warnings.push_back("Compiled mesh header is not a valid TEMF file.");
+		return false;
+	}
+
+	outMetadata.readable = true;
+	outMetadata.meshletCount = header.meshletCount;
+	outMetadata.payloadGeneration = header.virtualGeometryPayloadGeneration;
+	outMetadata.hasVirtualGeometry = (header.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) != 0u;
+	if (!outMetadata.hasVirtualGeometry) {
+		outMetadata.warnings.push_back("Virtual geometry payload is not present; rebuild the mesh to generate it.");
+		outMetadata.rebuildGuidance = "Rebuild this mesh from source to generate virtual geometry metadata for the current TEMF v1 contract.";
+		return true;
+	}
+
+	if (header.virtualGeometryHeaderOffset == 0u
+		|| header.virtualGeometryHeaderSize != sizeof(VirtualGeometryHeader)
+		|| header.virtualGeometryPayloadGeneration != kVirtualGeometryPayloadGeneration) {
+		outMetadata.needsRebuild = true;
+		outMetadata.warnings.push_back("Virtual geometry payload metadata is stale or incomplete; rebuild this mesh.");
+		outMetadata.rebuildGuidance = "Rebuild this mesh so the compiled artifact is regenerated with the current virtual geometry payload generation.";
+		return true;
+	}
+
+	VirtualGeometryHeader virtualHeader{};
+	input.seekg(static_cast<std::streamoff>(header.virtualGeometryHeaderOffset), std::ios::beg);
+	input.read(reinterpret_cast<char*>(&virtualHeader), sizeof(VirtualGeometryHeader));
+	if (!input || virtualHeader.payloadGeneration != kVirtualGeometryPayloadGeneration) {
+		outMetadata.needsRebuild = true;
+		outMetadata.warnings.push_back("Virtual geometry root header could not be read; rebuild this mesh.");
+		outMetadata.rebuildGuidance = "Rebuild this mesh because the virtual geometry root header is unreadable or incompatible.";
+		return true;
+	}
+
+	outMetadata.detailLevelCount = virtualHeader.detailLevelCount;
+	outMetadata.sourceTriangleCount = virtualHeader.sourceTriangleCount;
+	if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u) {
+		outMetadata.needsRebuild = true;
+		outMetadata.warnings.push_back("Virtual geometry contains no renderable detail levels or cullable groups.");
+		outMetadata.rebuildGuidance = "Rebuild this mesh because the compiled virtual geometry tables contain no renderable detail.";
+	}
+	return true;
 }
 
 // AssetDatabase::FindScriptAssetByFullName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

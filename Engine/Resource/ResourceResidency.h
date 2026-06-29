@@ -94,6 +94,27 @@ namespace TerraEngine::Resource
 		CpuAndGpu
 	};
 
+	enum class VirtualGeometryPageResidencyState : std::uint8_t
+	{
+		NotResident,
+		Requested,
+		Loading,
+		Resident,
+		Failed,
+		Evicting,
+		Evicted
+	};
+
+	enum class VirtualGeometryPageResidencyEvent : std::uint8_t
+	{
+		Request,
+		BeginLoad,
+		MarkResident,
+		MarkFailed,
+		BeginEvict,
+		MarkEvicted
+	};
+
 	struct ResidencyMemoryPolicy
 	{
 		double idleSecondsThreshold = 10.0;
@@ -188,6 +209,66 @@ namespace TerraEngine::Resource
 		std::vector<ReleaseRecord> records;
 	};
 
+	struct VirtualGeometryResidentPage
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		std::uint32_t pageId = 0u;
+		std::uint32_t fallbackPageId = 0u;
+		VirtualGeometryPageResidencyState state = VirtualGeometryPageResidencyState::NotResident;
+		std::uint64_t byteSize = 0u;
+		std::int32_t priority = 0;
+		std::uint64_t lastUsedFrame = 0u;
+		bool fallbackPage = false;
+		std::string failureReason;
+	};
+
+	struct VirtualGeometryPageTransitionResult
+	{
+		bool applied = false;
+		VirtualGeometryPageResidencyState previousState = VirtualGeometryPageResidencyState::NotResident;
+		VirtualGeometryPageResidencyState newState = VirtualGeometryPageResidencyState::NotResident;
+		std::string reason;
+	};
+
+	struct VirtualGeometryPageEvictionCandidate
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		std::uint32_t pageId = 0u;
+		std::uint64_t reclaimableBytes = 0u;
+		std::int32_t priority = 0;
+		std::uint64_t lastUsedFrame = 0u;
+	};
+
+	struct VirtualGeometryPageBudget
+	{
+		std::uint64_t memoryBudgetBytes = 0u;
+	};
+
+	struct VirtualGeometryPageBudgetPressureContributor
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		std::uint64_t residentBytes = 0u;
+		std::uint64_t reclaimableBytes = 0u;
+		std::uint32_t residentPages = 0u;
+		std::uint32_t requestedPages = 0u;
+		std::uint32_t missingPages = 0u;
+		std::uint32_t failedPages = 0u;
+		std::uint32_t evictedPages = 0u;
+	};
+
+	struct VirtualGeometryPageBudgetPressureSummary
+	{
+		std::uint64_t budgetBytes = 0u;
+		std::uint64_t residentBytes = 0u;
+		std::uint64_t overBudgetBytes = 0u;
+		std::uint32_t residentPages = 0u;
+		std::uint32_t requestedPages = 0u;
+		std::uint32_t missingPages = 0u;
+		std::uint32_t failedPages = 0u;
+		std::uint32_t evictedPages = 0u;
+		std::vector<VirtualGeometryPageBudgetPressureContributor> contributors;
+	};
+
 	TERRAENGINE_API ResidencyPolicy MakeDefaultResidencyPolicy();
 	TERRAENGINE_API ResidencyPolicy SanitizeResidencyPolicy(const ResidencyPolicy& policy);
 	TERRAENGINE_API ResidencyAssetType ToResidencyAssetType(AssetType type);
@@ -198,8 +279,12 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::string_view ToString(ResidencyReleaseResult result);
 	TERRAENGINE_API std::string_view ToString(ResidencyBlockedReason reason);
 	TERRAENGINE_API std::string_view ToString(ResidencyReleaseDomain domain);
+	TERRAENGINE_API std::string_view ToString(VirtualGeometryPageResidencyState state);
 	TERRAENGINE_API std::uint64_t EstimateResidentBytes(const ResidentAsset& asset);
 	TERRAENGINE_API ResidencyBlockedReason EvaluateReleaseBlocker(const ResidentAsset& asset, const ResidencyPolicy& policy, double nowSeconds);
 	TERRAENGINE_API std::vector<ReleaseCandidate> BuildReleaseCandidates(const ResidencySnapshot& snapshot);
 	TERRAENGINE_API ResidencyDiagnosticsSummary BuildResidencyDiagnostics(const ResidencySnapshot& snapshot, const std::vector<ReleaseRecord>& records, bool includeCandidates);
+	TERRAENGINE_API VirtualGeometryPageTransitionResult ApplyVirtualGeometryPageTransition(VirtualGeometryResidentPage& page, VirtualGeometryPageResidencyEvent event, std::uint64_t frameId, std::string_view reason = {});
+	TERRAENGINE_API std::vector<VirtualGeometryPageEvictionCandidate> BuildVirtualGeometryPageEvictionCandidates(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget);
+	TERRAENGINE_API VirtualGeometryPageBudgetPressureSummary BuildVirtualGeometryPageBudgetPressureSummary(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget);
 }

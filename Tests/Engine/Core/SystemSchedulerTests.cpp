@@ -3,6 +3,7 @@
 #include "Core/Scheduling/SystemScheduler.h"
 #include "Core/Scheduling/ComponentAccess.h"
 #include "Core/SystemBase.h"
+#include "Renderer/RenderSystem.h"
 #include "Scene/SceneMutationQueue.h"
 
 #include <algorithm>
@@ -339,6 +340,17 @@ namespace TerraEngine::Tests {
 			context.Expect(!summary.flushPoints.empty(), "Summary should include configured flush points.");
 			context.Expect(Contains(summary.mainThreadSystems, "Input"), "Summary should include main-thread systems.");
 			context.Expect(summary.formatted.find("System scheduler summary: valid") != std::string::npos, "Formatted summary should include validity.");
+		});
+
+		registry.Add("Engine.SystemScheduler.DefaultResourcesAcceptVirtualGeometryRenderDeclaration", [](TestContext& context) {
+			TerraEngine::Scheduling::SystemScheduler scheduler;
+			RenderSystem& renderSystem = RenderSystem::Instance();
+			scheduler.RegisterSystem(renderSystem, renderSystem.SchedulerDeclaration());
+
+			const TerraEngine::Scheduling::ScheduleSummary& summary = scheduler.BuildSchedule();
+
+			context.Expect(summary.valid, "Default scheduler resources should accept RenderSystem's virtual geometry read/write declarations.");
+			context.Expect(!HasDiagnostic(summary, TerraEngine::Scheduling::DiagnosticCategory::Resource), "Virtual geometry scheduler resources should not produce unknown-resource diagnostics.");
 		});
 
 		registry.Add("Engine.SystemScheduler.FrameWorkloadsConvertProtectedAndWorkerSystems", [](TestContext& context) {

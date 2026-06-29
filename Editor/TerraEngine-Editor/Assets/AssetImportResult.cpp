@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <iomanip>
+#include <system_error>
 
 namespace TerraEngine::AssetPipeline
 {
@@ -106,6 +107,48 @@ namespace TerraEngine::AssetPipeline
 			const std::optional<TerraEngine::UUID> parsed = TerraEngine::ParseUUID(object[key].get<std::string>());
 			return parsed.value_or(TerraEngine::EMPTY_UUID);
 		}
+
+		bool PublishImportResultAtomically(const std::filesystem::path& stagedPath, const std::filesystem::path& resultPath)
+		{
+			std::error_code ec;
+			const std::filesystem::path backupPath = resultPath.string() + ".previous";
+			std::filesystem::remove(backupPath, ec);
+			ec.clear();
+
+			// Sidecar publication mirrors compiled mesh publication: move the
+			// previous readable result away first, then either install the staged
+			// result or restore the previous one. That keeps failed rebuilds from
+			// replacing a good package graph with a half-written JSON file.
+			const bool hadPrevious = std::filesystem::exists(resultPath, ec);
+			ec.clear();
+			if (hadPrevious)
+			{
+				std::filesystem::rename(resultPath, backupPath, ec);
+				if (ec)
+				{
+					std::filesystem::remove(stagedPath, ec);
+					return false;
+				}
+			}
+
+			std::filesystem::rename(stagedPath, resultPath, ec);
+			if (ec)
+			{
+				if (hadPrevious)
+				{
+					std::error_code restoreError;
+					std::filesystem::rename(backupPath, resultPath, restoreError);
+				}
+				std::filesystem::remove(stagedPath, ec);
+				return false;
+			}
+
+			if (hadPrevious)
+			{
+				std::filesystem::remove(backupPath, ec);
+			}
+			return true;
+		}
 	}
 
 	std::filesystem::path GetImportResultPath(const std::filesystem::path& sourceAssetPath)
@@ -117,15 +160,24 @@ namespace TerraEngine::AssetPipeline
 	{
 		const std::filesystem::path resultPath = GetImportResultPath(sourceAssetPath);
 		std::filesystem::create_directories(resultPath.parent_path());
+		const std::filesystem::path stagedPath = resultPath.string() + ".tmp";
+		std::error_code cleanupError;
+		std::filesystem::remove(stagedPath, cleanupError);
 
-		std::ofstream out(resultPath);
+		std::ofstream out(stagedPath);
 		if (!out)
 		{
 			return false;
 		}
 
 		out << std::setw(4) << ToJson(result) << '\n';
-		return static_cast<bool>(out);
+		out.close();
+		if (!out)
+		{
+			std::filesystem::remove(stagedPath, cleanupError);
+			return false;
+		}
+		return PublishImportResultAtomically(stagedPath, resultPath);
 	}
 
 	bool LoadModelPackageImportResult(const std::filesystem::path& sourceAssetPath, ModelPackageImportResult& outResult)
@@ -169,6 +221,17 @@ namespace TerraEngine::AssetPipeline
 				record.displayName = mesh.value("name", std::string());
 				record.localBoundsMin = ReadBoundsVector(mesh, "localBoundsMin", "min", record.localBoundsMin);
 				record.localBoundsMax = ReadBoundsVector(mesh, "localBoundsMax", "max", record.localBoundsMax);
+				const nlohmann::json virtualGeometry = mesh.value("virtualGeometry", nlohmann::json::object());
+				record.virtualGeometryRequested = virtualGeometry.value("requested", record.virtualGeometryRequested);
+				record.virtualGeometryCooked = virtualGeometry.value("cooked", record.virtualGeometryCooked);
+				record.virtualGeometryStatus = virtualGeometry.value("status", record.virtualGeometryStatus);
+				record.virtualGeometryDetailLevels = virtualGeometry.value("detailLevels", record.virtualGeometryDetailLevels);
+				record.virtualGeometryMeshlets = virtualGeometry.value("meshlets", record.virtualGeometryMeshlets);
+				record.virtualGeometrySourceTriangles = virtualGeometry.value("sourceTriangles", record.virtualGeometrySourceTriangles);
+				for (const nlohmann::json& warning : virtualGeometry.value("warnings", nlohmann::json::array()))
+				{
+					record.virtualGeometryWarnings.push_back(warning.get<std::string>());
+				}
 				result.generatedMeshes.push_back(std::move(record));
 			}
 

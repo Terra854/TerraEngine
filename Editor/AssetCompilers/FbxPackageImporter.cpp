@@ -100,42 +100,7 @@ namespace TerraEngine::AssetPipeline
 
 		TerraEngine::UUID StableChildUuid(const TerraEngine::UUID& packageGuid, std::string_view role, std::size_t index)
 		{
-			// Generated FBX children need deterministic IDs across reimport. A
-			// small FNV-1a fold over the package GUID, child role, and source index
-			// is enough here because the result is scoped to one package sidecar.
-			std::uint64_t high = 1469598103934665603ull;
-			std::uint64_t low = 1099511628211ull;
-			constexpr std::uint64_t prime = 1099511628211ull;
-			for (std::uint8_t byte : packageGuid)
-			{
-				high ^= byte;
-				high *= prime;
-				low ^= static_cast<std::uint8_t>(byte + 31u);
-				low *= prime;
-			}
-			for (char ch : role)
-			{
-				high ^= static_cast<std::uint8_t>(ch);
-				high *= prime;
-				low ^= static_cast<std::uint8_t>(ch * 3);
-				low *= prime;
-			}
-			for (std::size_t shift = 0; shift < sizeof(index); ++shift)
-			{
-				const auto byte = static_cast<std::uint8_t>((index >> (shift * 8u)) & 0xffu);
-				high ^= byte;
-				high *= prime;
-				low ^= static_cast<std::uint8_t>(byte + 17u);
-				low *= prime;
-			}
-
-			TerraEngine::UUID uuid{};
-			for (std::size_t byte = 0; byte < 8u; ++byte)
-			{
-				uuid[byte] = static_cast<std::uint8_t>((high >> (byte * 8u)) & 0xffu);
-				uuid[byte + 8u] = static_cast<std::uint8_t>((low >> (byte * 8u)) & 0xffu);
-			}
-			return uuid;
+			return BuildStableGeneratedModelUuid(packageGuid, role, index);
 		}
 
 		void AddDiagnostic(
@@ -702,10 +667,12 @@ namespace TerraEngine::AssetPipeline
 		}
 		else
 		{
-			if (!CompileMeshFromRaw(options.sourceRelativePath, options.buildRoot / packageMesh.compiledPath, vertices, indices))
+			const std::filesystem::path compiledMeshPath = options.buildRoot / packageMesh.compiledPath;
+			if (!CompileMeshFromRaw(options.sourceRelativePath, compiledMeshPath, vertices, indices))
 			{
 				AddDiagnostic(result, ModelDiagnosticSeverity::Error, "MeshCompileFailed", packageMesh.compiledPath.generic_string(), "Extracted FBX geometry failed Terra mesh compilation.");
 			}
+			PopulateGeneratedMeshVirtualGeometryMetadata(compiledMeshPath, packageMesh, result.diagnostics);
 			result.generatedMeshes.push_back(std::move(packageMesh));
 		}
 

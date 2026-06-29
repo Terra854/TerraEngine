@@ -1393,6 +1393,19 @@ endif()
 		FILES_MATCHING PATTERN "*.cs"
 	)
 
+	# Install rule: keep virtual-geometry validation notes with the installed
+	# editor/runtime tree so clean-checkout QA does not depend on source paths.
+	install(FILES
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/Renderer/VirtualGeometry.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/TerraEngineMeshFile.md"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Docs/Testing.md"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Docs"
+	)
+	install(FILES
+		"${CMAKE_CURRENT_SOURCE_DIR}/Tests/Fixtures/VirtualGeometry/README.md"
+		DESTINATION "${ENGINE_INSTALL_DESTINATION}/Tests/Fixtures/VirtualGeometry"
+	)
+
 	# Install cimgui (TerraEngine-ImGui)
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(FILES $<TARGET_FILE:cimgui> DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor)

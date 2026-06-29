@@ -6,6 +6,7 @@
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include "Engine/Core/Object/Reflection.h"
+#include "Engine/Utilities/UUID.h"
 #include <entt/entity/entity.hpp>
 #include <map>
 #include <vector>
@@ -37,6 +38,7 @@ private:
 	void DrawLightComponentInspector(const std::string& compName, entt::entity obj, ComponentAccessFunctions& access);
 	void DrawUIComponentInspector(const std::string& compName, entt::entity obj, ComponentAccessFunctions& access);
 	void DrawModelPackageInspector(const std::filesystem::path& path);
+	void DrawModelPackageChildInspector(const std::filesystem::path& packagePath, TerraEngine::UUID guid, const std::string& kind, const std::string& displayName);
 	void DrawMaterialInspector(const std::filesystem::path& path);
 	void DrawMeshInspector(const std::filesystem::path& path);
 	void DrawTextureInspector(const std::filesystem::path& path);

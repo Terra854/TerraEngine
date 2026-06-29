@@ -236,6 +236,21 @@ const char* PackageChildPayload(PackageChildKind kind)
 	}
 }
 
+const char* PackageChildKindName(PackageChildKind kind)
+{
+	switch (kind)
+	{
+	case PackageChildKind::Mesh:
+		return "Mesh";
+	case PackageChildKind::Material:
+		return "Material";
+	case PackageChildKind::Texture:
+		return "Texture";
+	default:
+		return "SubAsset";
+	}
+}
+
 bool DrawPackageChildTile(const PackageChildTile& child, float thumbnailSize, bool isSelected)
 {
 	// Generated package children are virtual sub-assets. They can be dragged by
@@ -265,6 +280,7 @@ bool DrawPackageChildTile(const PackageChildTile& child, float thumbnailSize, bo
 	}
 
 	ImGui::TextDisabled("%s", EllipsizeMiddle(child.name, 14u).c_str());
+	ImGui::TextDisabled("Read-only");
 	if (ImGui::IsItemHovered())
 	{
 		ImGui::SetTooltip("%s\n%s", child.name.c_str(), child.sourcePath.c_str());
@@ -776,6 +792,15 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 						if (child.kind == PackageChildKind::Material && !child.sourcePath.empty() && std::filesystem::exists(childSourcePath))
 						{
 							m_Owner->SetSelectedAsset(std::filesystem::absolute(childSourcePath));
+						}
+						else if (const std::optional<TerraEngine::UUID> childGuid = TerraEngine::ParseUUID(child.guidHex))
+						{
+							MainEditorSubsystem::SelectedPackageChildAsset selection{};
+							selection.packagePath = absoluteEntryPath;
+							selection.guid = *childGuid;
+							selection.kind = PackageChildKindName(child.kind);
+							selection.displayName = child.name;
+							m_Owner->SetSelectedPackageChildAsset(std::move(selection));
 						}
 						else
 						{

@@ -190,6 +190,33 @@ $env:TERRAENGINE_TEST_FILTER="Resource.Streaming;Scene.Streaming;Renderer.Stream
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
+Virtual geometry coverage will build on the renderer, resource residency,
+streaming, asset pipeline, automation, and export suites. Use this focused pass
+while implementing `specs/026-virtual-geometry` tasks:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="VirtualGeometry;MeshCompiler;HiZ;ResourceStreaming;ResourceResidency;Renderer;AssetPipeline;Editor.Automation;Export"
+.\out\build\Debug\TerraEngine-EngineTests.exe
+.\out\build\Debug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+The CTest labels also expose stable virtual-geometry slices:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
+```
+
+Fixture guidance for clean-checkout synthetic meshes, dense-scene thresholds,
+and residency churn invariants lives in
+`Tests/Fixtures/VirtualGeometry/README.md`. The install target copies
+`Docs/Renderer/VirtualGeometry.md`, `Docs/TerraEngineMeshFile.md`,
+`Docs/Testing.md`, and that fixture README into the Debug install tree for QA.
+
+After virtual geometry code changes, always finish with the normal compile,
+CTest, and install verification flow so the installed editor/runtime tree has
+the matching TEMF loader, shaders, diagnostics, and asset pipeline behavior.
+
 The editor MCP bridge checks live under `Tests/Editor/Automation`. They cover
 automation envelopes, capability metadata, local-only transport checks, bridge
 state transitions, bounded activity history, approval prompts, and resource/tool

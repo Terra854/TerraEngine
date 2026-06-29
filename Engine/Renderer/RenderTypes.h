@@ -19,8 +19,22 @@
 enum class RenderViewType : std::uint8_t
 {
 	Game = 0,
-	Scene = 1
+	Scene = 1,
+	Shadow = 2,
+	ExportRuntime = 3
 };
+
+inline const char* ToString(RenderViewType viewType)
+{
+	switch (viewType)
+	{
+	case RenderViewType::Game: return "Game";
+	case RenderViewType::Scene: return "Scene";
+	case RenderViewType::Shadow: return "Shadow";
+	case RenderViewType::ExportRuntime: return "Export Runtime";
+	default: return "Unknown";
+	}
+}
 
 // RenderOutputKind names the supported states explicitly so serialization and switches stay readable.
 enum class RenderOutputKind : std::uint8_t
@@ -79,6 +93,195 @@ enum class QualityPreset : std::uint32_t
 	High = 2,
 	Ultra = 3,
 	Custom = 4
+};
+
+// VirtualGeometryDebugVisualizationMode names the editor visualizer modes that
+// can be selected without changing material authoring or scene state.
+enum class VirtualGeometryDebugVisualizationMode : std::uint32_t
+{
+	None = 0u,
+	LOD = 1u,
+	MeshletId = 2u,
+	Bounds = 3u,
+	Culled = 4u,
+	HiZ = 5u,
+	Residency = 6u,
+	Error = 7u
+};
+
+inline const char* ToString(VirtualGeometryDebugVisualizationMode mode)
+{
+	switch (mode)
+	{
+	case VirtualGeometryDebugVisualizationMode::None: return "Off";
+	case VirtualGeometryDebugVisualizationMode::LOD: return "LOD";
+	case VirtualGeometryDebugVisualizationMode::MeshletId: return "Meshlet Id";
+	case VirtualGeometryDebugVisualizationMode::Bounds: return "Bounds";
+	case VirtualGeometryDebugVisualizationMode::Culled: return "Culled";
+	case VirtualGeometryDebugVisualizationMode::HiZ: return "Hi-Z";
+	case VirtualGeometryDebugVisualizationMode::Residency: return "Residency";
+	case VirtualGeometryDebugVisualizationMode::Error: return "Error";
+	default: return "Unknown";
+	}
+}
+
+// VirtualGeometryInactiveReason keeps fail-open renderer states explainable in
+// diagnostics instead of showing misleading zero counters.
+enum class VirtualGeometryInactiveReason : std::uint32_t
+{
+	None = 0u,
+	MissingMeshShaderRoute = 2u,
+	InvalidAssetMetadata = 3u,
+	MissingCullingMetadata = 4u,
+	MissingResidencyData = 5u,
+	UnsupportedView = 6u
+};
+
+inline const char* ToString(VirtualGeometryInactiveReason reason)
+{
+	switch (reason)
+	{
+	case VirtualGeometryInactiveReason::None: return "None";
+	case VirtualGeometryInactiveReason::MissingMeshShaderRoute: return "Missing Mesh Shader Route";
+	case VirtualGeometryInactiveReason::InvalidAssetMetadata: return "Invalid Asset Metadata";
+	case VirtualGeometryInactiveReason::MissingCullingMetadata: return "Missing Culling Metadata";
+	case VirtualGeometryInactiveReason::MissingResidencyData: return "Missing Residency Data";
+	case VirtualGeometryInactiveReason::UnsupportedView: return "Unsupported View";
+	default: return "Unknown";
+	}
+}
+
+enum class VirtualGeometryCookStatus : std::uint32_t
+{
+	Unknown = 0u,
+	Cooked = 1u,
+	Skipped = 2u,
+	Failed = 3u,
+	NeedsRebuild = 4u
+};
+
+enum class VirtualGeometryCullOutcome : std::uint32_t
+{
+	Visible = 0u,
+	FrustumCulled = 1u,
+	ConeCulled = 2u,
+	HiZCulled = 3u,
+	FailOpen = 4u
+};
+
+enum class GeometryPageState : std::uint32_t
+{
+	NotResident = 0u,
+	Requested = 1u,
+	Loading = 2u,
+	Resident = 3u,
+	Failed = 4u,
+	Evicting = 5u,
+	Evicted = 6u
+};
+
+// VirtualGeometryQualityProfile is copied into immutable render snapshots so
+// worker preparation can select detail and request pages without reading live UI
+// or project-settings objects.
+struct VirtualGeometryQualityProfile
+{
+	float lodErrorScale = 1.0f;
+	std::uint32_t maxLodDrop = 0u;
+	bool hiZOcclusionEnabled = false;
+	bool hiZSelfOcclusionGuardEnabled = true;
+	VirtualGeometryDebugVisualizationMode debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
+	std::uint64_t geometryBudgetBytes = 0u;
+	float preloadBias = 1.0f;
+};
+
+inline VirtualGeometryQualityProfile MakeDefaultVirtualGeometryQualityProfile()
+{
+	VirtualGeometryQualityProfile profile;
+	profile.lodErrorScale = 1.0f;
+	profile.maxLodDrop = 0u;
+	profile.hiZOcclusionEnabled = false;
+	profile.hiZSelfOcclusionGuardEnabled = true;
+	profile.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
+	profile.geometryBudgetBytes = 0u;
+	profile.preloadBias = 1.0f;
+	return profile;
+}
+
+inline VirtualGeometryQualityProfile SanitizeVirtualGeometryQualityProfile(const VirtualGeometryQualityProfile& input)
+{
+	VirtualGeometryQualityProfile sanitized = input;
+	sanitized.lodErrorScale = std::isfinite(sanitized.lodErrorScale)
+		? glm::clamp(sanitized.lodErrorScale, 0.05f, 64.0f)
+		: 1.0f;
+	sanitized.preloadBias = std::isfinite(sanitized.preloadBias)
+		? glm::clamp(sanitized.preloadBias, 0.0f, 16.0f)
+		: 1.0f;
+	return sanitized;
+}
+
+inline VirtualGeometryInactiveReason ResolveVirtualGeometryInactiveReason(
+	const VirtualGeometryQualityProfile& quality,
+	bool meshShaderRouteSupported)
+{
+	const VirtualGeometryQualityProfile sanitized = SanitizeVirtualGeometryQualityProfile(quality);
+	if (!meshShaderRouteSupported)
+	{
+		return VirtualGeometryInactiveReason::MissingMeshShaderRoute;
+	}
+	return VirtualGeometryInactiveReason::None;
+}
+
+// Runtime detail metadata is the CPU-side mirror of the cooked asset contract.
+// It is intentionally compact so render preparation can copy it into snapshots.
+struct VirtualGeometryDetailRuntime
+{
+	std::uint32_t lodIndex = 0u;
+	std::uint32_t meshletOffset = 0u;
+	std::uint32_t meshletCount = 0u;
+	std::uint32_t triangleCount = 0u;
+	float geometricError = 0.0f;
+	float targetRatio = 1.0f;
+	glm::vec3 boundsMin = glm::vec3(0.0f);
+	glm::vec3 boundsMax = glm::vec3(0.0f);
+};
+
+struct VirtualGeometryCullableGroupRuntime
+{
+	std::uint32_t groupIndex = 0u;
+	std::uint32_t lodIndex = 0u;
+	std::uint32_t meshletIndex = 0u;
+	std::uint32_t sectionId = 0u;
+	std::uint32_t pageId = 0u;
+	glm::vec3 boundsCenter = glm::vec3(0.0f);
+	float boundsRadius = 0.0f;
+	VirtualGeometryCullOutcome lastOutcome = VirtualGeometryCullOutcome::Visible;
+};
+
+struct GeometryPageRuntime
+{
+	std::uint32_t pageId = 0u;
+	std::uint32_t firstLodIndex = 0u;
+	std::uint32_t lodCount = 0u;
+	std::uint32_t groupOffset = 0u;
+	std::uint32_t groupCount = 0u;
+	GeometryPageState state = GeometryPageState::NotResident;
+	std::uint64_t byteSize = 0u;
+	float priority = 0.0f;
+	std::uint32_t fallbackPageId = 0u;
+	std::uint64_t lastUsedFrame = 0u;
+	bool fallbackPage = false;
+};
+
+struct VirtualGeometryAssetRuntime
+{
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	VirtualGeometryCookStatus cookStatus = VirtualGeometryCookStatus::Unknown;
+	std::uint32_t sourceTriangleCount = 0u;
+	std::uint32_t sourceVertexCount = 0u;
+	std::vector<VirtualGeometryDetailRuntime> detailLevels;
+	std::vector<VirtualGeometryCullableGroupRuntime> cullableGroups;
+	std::vector<GeometryPageRuntime> pages;
+	std::vector<std::string> warnings;
 };
 
 // LightingReductionCategory names the supported states explicitly so serialization and switches stay readable.
@@ -199,6 +402,9 @@ struct RenderSettings
 	// Variable-rate shading changes the render-pass attachment layout, so it
 	// is treated as a startup/render-profile option rather than a hot toggle.
 	std::uint32_t variableRateShading = 0u;
+	// Virtual geometry defaults disabled until the cooked TEMF payload, shader
+	// path, and diagnostics have been implemented and validated story by story.
+	VirtualGeometryQualityProfile virtualGeometry = MakeDefaultVirtualGeometryQualityProfile();
 };
 
 // Scene-level render settings can grow over time while keeping one explicit
@@ -296,6 +502,10 @@ struct DrawCommand
 	// Editor-only tint is submitted per draw so Scene View context modes can
 	// de-emphasize surrounding objects without changing runtime materials.
 	glm::vec4 editorTint = glm::vec4(0.0f);
+	std::uint32_t virtualMeshletOffset = 0u;
+	std::uint32_t virtualMeshletCount = 0u;
+	std::uint32_t selectedVirtualLod = 0u;
+	std::uint32_t virtualGeometryFlags = 0u;
 	bool taskShaderCullingEnabled = true;
 };
 
@@ -323,6 +533,10 @@ struct PushConstants
 	std::uint32_t clusterDataOffset = 0u;
 	std::uint32_t lightIndexOffset = 0u;
 	std::uint32_t indirectDrawOffset = 0u;
+	std::uint32_t virtualMeshletOffset = 0u;
+	std::uint32_t virtualMeshletCount = 0u;
+	std::uint32_t selectedVirtualLod = 0u;
+	std::uint32_t virtualGeometryFlags = 0u;
 	// rgb is the tint target color and a is blend strength. Runtime draws leave
 	// this at zero so authoring cues never leak into exported/game rendering.
 	alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);
@@ -724,10 +938,9 @@ struct alignas(16) FrameCullingDataGPU
 	glm::uvec4 renderSettings0 = glm::uvec4(2048u, 5u, 128u, 1u); // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
 	glm::uvec4 renderSettings1 = glm::uvec4(1u, 4u, 4u, 256u);    // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
 	// x: indirectStrength, y: ambientOcclusionStrength, z: ambientOcclusionQuality,
-	// w: 1 when the previous depth buffer matches this view and can be used for
-	// temporal Hi-Z occlusion. Keeping this in its own 16-byte vector avoids
-	// mixing float tuning values with integer feature flags, which keeps the
-	// shader mirror unambiguous.
+	// w: 1 only after the view-owned Hi-Z history, quality toggle, and
+	// self-occlusion guard all pass. A zero value is a fail-open instruction for
+	// task shaders, not a rendering error.
 	glm::vec4 renderSettings2 = glm::vec4(1.0f, 1.0f, 2.0f, 0.0f);
 	std::uint32_t globalTaskCullingEnabled = 1u;
 	std::uint32_t taskShaderSupported = 0u;

@@ -2,9 +2,11 @@
 
 #include "ExportPackageValidator.h"
 
+#include "File Formats/TerraEngineMeshFile.h"
 #include "TEPAK/PackReader.h"
 
 #include <array>
+#include <cstring>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_set>
@@ -44,6 +46,51 @@ bool RequireEntry(const std::unordered_set<std::string>& entries, std::string_vi
 
 	outError = "Export package is missing required runtime entry: " + normalized;
 	return false;
+}
+
+bool ValidateVirtualGeometryTemfPayload(const tepak::ByteBuffer& bytes, std::string_view path, std::string& outError)
+{
+	const std::string normalizedPath = NormalizePackagePath(path);
+	if (bytes.size() < sizeof(MeshHeader)) {
+		outError = "Virtual geometry mesh payload is too small: " + normalizedPath;
+		return false;
+	}
+
+	MeshHeader header{};
+	std::memcpy(&header, bytes.data(), sizeof(MeshHeader));
+	std::uint32_t magic = 0u;
+	std::memcpy(&magic, header.magic, sizeof(magic));
+	if (magic != kMeshMagicValue || header.version != kMeshCurrentVersion) {
+		outError = "Virtual geometry mesh payload is not a current TEMF file: " + normalizedPath;
+		return false;
+	}
+
+	if ((header.meshletFlags & kMeshletHeaderFlagHasVirtualGeometry) == 0u
+		|| header.virtualGeometryHeaderOffset == 0u
+		|| header.virtualGeometryHeaderSize != sizeof(VirtualGeometryHeader)
+		|| header.virtualGeometryPayloadGeneration != kVirtualGeometryPayloadGeneration) {
+		outError = "Virtual geometry mesh payload is stale or missing its current TEMF virtual geometry header: " + normalizedPath;
+		return false;
+	}
+
+	const std::uint64_t virtualHeaderEnd = static_cast<std::uint64_t>(header.virtualGeometryHeaderOffset) + sizeof(VirtualGeometryHeader);
+	if (virtualHeaderEnd > bytes.size()) {
+		outError = "Virtual geometry mesh payload header range is outside the packed file: " + normalizedPath;
+		return false;
+	}
+
+	VirtualGeometryHeader virtualHeader{};
+	std::memcpy(&virtualHeader, bytes.data() + header.virtualGeometryHeaderOffset, sizeof(VirtualGeometryHeader));
+	if (virtualHeader.payloadGeneration != kVirtualGeometryPayloadGeneration
+		|| virtualHeader.headerSize != sizeof(VirtualGeometryHeader)
+		|| virtualHeader.detailLevelCount == 0u
+		|| virtualHeader.sourceTriangleCount == 0u
+		|| virtualHeader.sourceVertexCount == 0u) {
+		outError = "Virtual geometry mesh payload root metadata is invalid and must be rebuilt: " + normalizedPath;
+		return false;
+	}
+
+	return true;
 }
 }
 
@@ -104,6 +151,21 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 		const std::string manifestText(reinterpret_cast<const char*>(manifestBytes.data()), manifestBytes.size());
 		const nlohmann::json manifest = nlohmann::json::parse(manifestText);
 
+		if (manifest.contains("virtualGeometry") && manifest["virtualGeometry"].is_object()) {
+			static constexpr std::array<std::string_view, 4> kRequiredVirtualGeometryEntries = {
+				"shaders/default.task.tspf",
+				"shaders/default.mesh.tspf",
+				"shaders/default.frag.tspf",
+				"shaders/postprocess/hizgenerate.comp.spv",
+			};
+			for (std::string_view requiredVirtualGeometryEntry : kRequiredVirtualGeometryEntries) {
+				if (!RequireEntry(entries, requiredVirtualGeometryEntry, outError)) {
+					outError = "Virtual geometry export is missing required shader resource: " + NormalizePackagePath(requiredVirtualGeometryEntry);
+					return false;
+				}
+			}
+		}
+
 		if (auto startupIt = manifest.find("startupScene"); startupIt != manifest.end() && startupIt->is_string()) {
 			const std::string startupScene = startupIt->get<std::string>();
 			if (!startupScene.empty() && !RequireEntry(entries, startupScene, outError)) {
@@ -122,6 +184,19 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 				if (!assetPath.empty() && !RequireEntry(entries, assetPath, outError)) {
 					outError = "Export package manifest references missing asset path: " + NormalizePackagePath(assetPath);
 					return false;
+				}
+				const bool requiresVirtualGeometry = assetEntry.contains("virtualGeometry")
+					&& assetEntry["virtualGeometry"].is_object()
+					&& assetEntry["virtualGeometry"].value("required", false);
+				if (requiresVirtualGeometry) {
+					if (assetPath.empty()) {
+						outError = "Virtual geometry manifest asset is missing its compiled TEMF path.";
+						return false;
+					}
+					const tepak::ByteBuffer assetBytes = reader.ReadAll(assetPath);
+					if (!ValidateVirtualGeometryTemfPayload(assetBytes, assetPath, outError)) {
+						return false;
+					}
 				}
 			}
 		}

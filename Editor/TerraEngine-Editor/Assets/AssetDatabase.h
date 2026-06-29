@@ -12,6 +12,7 @@
 #include <map>
 #include <future>
 #include <chrono>
+#include <cstdint>
 #include <nlohmann/json.hpp>
 #include <string_view>
 
@@ -22,6 +23,18 @@ struct AssetMetadata {
 	std::filesystem::path sourcePath;   
 	std::filesystem::path compiledPath; 
 	nlohmann::json settings; // Importer-specific settings
+};
+
+struct VirtualGeometryAssetMetadata {
+	bool readable = false;
+	bool hasVirtualGeometry = false;
+	bool needsRebuild = false;
+	std::uint32_t payloadGeneration = 0u;
+	std::uint32_t detailLevelCount = 0u;
+	std::uint32_t meshletCount = 0u;
+	std::uint32_t sourceTriangleCount = 0u;
+	std::string rebuildGuidance;
+	std::vector<std::string> warnings;
 };
 
 // class AssetDatabase groups related state and operations so callers have one documented contract.
@@ -48,6 +61,7 @@ public:
 	std::filesystem::path GetAssetRoot() const { return assetRoot; }
 	std::filesystem::path GetBuildRoot() const { return buildRoot; }
 	const AssetMetadata* FindAssetByGuid(const TerraEngine::UUID& guid) const;
+	bool TryGetVirtualGeometryMetadata(const AssetMetadata& metadata, VirtualGeometryAssetMetadata& outMetadata) const;
 	const AssetMetadata* FindScriptAssetByFullName(std::string_view fullName) const;
 	std::string GetScriptFullName(const TerraEngine::UUID& guid) const;
 	void SetScriptCompileState(const std::string& compileState, const std::string& summary);
