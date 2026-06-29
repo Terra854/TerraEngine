@@ -34,6 +34,14 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorMcpTransportTests.cpp
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp
+	AssetPipeline/ModelPackageImportResultTests.cpp
+	AssetPipeline/FbxPackageImporterTests.cpp
+	AssetPipeline/FbxReimportTests.cpp
+	AssetPipeline/FbxMaterialTextureTests.cpp
+	AssetPipeline/FbxMaterialAssignmentTests.cpp
+	AssetPipeline/FbxImportDiagnosticsTests.cpp
+	AssetPipeline/FbxPackageBrowserContractTests.cpp
+	AssetPipeline/FbxReadOnlySubAssetTests.cpp
 	AssetPipeline/GltfPackageImporterTests.cpp
 	AssetPipeline/GltfMaterialTextureTests.cpp
 	AssetPipeline/GltfMaterialAssignmentTests.cpp
@@ -64,6 +72,9 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MeshCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/TextureCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ShaderCompiler.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ModelPackageImportTypes.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ModelPackageImporter.cpp
+	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/FbxPackageImporter.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/GltfImportTypes.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/GltfPackageImporter.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MaterialAssetWriter.cpp

@@ -404,6 +404,8 @@ set(ASSIMP_INSTALL OFF CACHE BOOL "Disable Assimp install target" FORCE)
 set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "Build Assimp's bundled zlib" FORCE)
 set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "Build only the importers TerraEngine uses" FORCE)
 set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "Enable Assimp OBJ importer" FORCE)
+# FBX package import reuses the existing bundled Assimp importer; no External/
+# dependency change is required for this feature.
 set(ASSIMP_BUILD_FBX_IMPORTER ON CACHE BOOL "Enable Assimp FBX importer" FORCE)
 set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "Enable Assimp glTF importer" FORCE)
 set(ASSIMP_BUILD_COLLADA_IMPORTER ON CACHE BOOL "Enable Assimp COLLADA importer" FORCE)
@@ -856,6 +858,9 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
+	Editor/AssetCompilers/ModelPackageImportTypes.cpp
+	Editor/AssetCompilers/ModelPackageImporter.cpp
+	Editor/AssetCompilers/FbxPackageImporter.cpp
 	Editor/AssetCompilers/GltfImportTypes.cpp
 	Editor/AssetCompilers/GltfPackageImporter.cpp
 	Editor/AssetCompilers/MaterialAssetWriter.cpp

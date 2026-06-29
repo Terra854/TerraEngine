@@ -3,6 +3,7 @@
 // Implements the primary editor workspace logic, including the main menu bar, toolbars, and global hotkey handling. It manages the lifecycle of all native editor windows and provides the necessary hooks for scene state capture and restoration during play mode.
 
 #include "MainEditorSubsystem.h"
+#include "Editor/AssetCompilers/ModelPackageImporter.h"
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
 #include "EditorSystem.h"
@@ -78,7 +79,7 @@ namespace
 
 	std::optional<AssetType> AssetTypeFromImporter(std::string_view importerName)
 	{
-		if (importerName == "MeshImporter" || importerName == "GltfPackageImporter")
+		if (importerName == "MeshImporter" || TerraEngine::AssetPipeline::IsModelPackageImporterName(importerName))
 		{
 			return AssetType::Mesh;
 		}

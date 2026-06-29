@@ -52,6 +52,10 @@ namespace TerraEngine::EditorTests {
 			const nlohmann::json absolute = service.HandleTool("asset.import", {{"path", (project.root / "outside.gltf").string()}}, TerraEngine::Editor::Automation::WriteMode::WritesEnabled, "mcp-import-safe-2");
 			context.Expect(!absolute.value("ok", true), "Absolute imports should be rejected.");
 			context.ExpectEqual(std::string("validation"), absolute["error"].value("category", std::string()), "Absolute rejection should be a validation error.");
+
+			const nlohmann::json missingFbx = service.HandleTool("asset.import", {{"path", "Models/missing.fbx"}}, TerraEngine::Editor::Automation::WriteMode::WritesEnabled, "mcp-import-safe-3");
+			context.Expect(!missingFbx.value("ok", true), "Missing FBX imports should be rejected before package import begins.");
+			context.ExpectEqual(std::string("missing_target"), missingFbx["error"].value("category", std::string()), "Missing FBX rejection should be a missing-target error.");
 		});
 	}
 }

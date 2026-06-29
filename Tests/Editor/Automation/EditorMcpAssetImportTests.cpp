@@ -57,5 +57,23 @@ namespace TerraEngine::EditorTests {
 			context.Expect(!result["data"]["importResult"]["generatedMeshes"].empty(), "MCP response should include generated mesh ids.");
 			context.Expect(!result["data"]["importResult"]["generatedMaterials"].empty(), "MCP response should include generated material ids.");
 		});
+
+		registry.Add("Editor.MCP.AssetImport.ReturnsFbxPackageResult", [](TestContext& context) {
+			TempMcpImportProject project("FbxResponse");
+			EditorContext editorContext = MakeContext(project);
+			const std::filesystem::path sourceRoot = std::filesystem::path(TERRAENGINE_SOURCE_DIR);
+			const std::filesystem::path sourceFixture = sourceRoot / "External/assimp/test/models/FBX/box.fbx";
+			const std::filesystem::path projectAsset = editorContext.assetDatabase->GetAssetRoot() / "Models" / "box.fbx";
+			std::filesystem::create_directories(projectAsset.parent_path());
+			std::filesystem::copy_file(sourceFixture, projectAsset, std::filesystem::copy_options::overwrite_existing);
+
+			TerraEngine::Editor::Automation::EditorAutomationService service;
+			service.SetEditorContext(&editorContext);
+			const nlohmann::json result = service.HandleTool("asset.import", {{"path", "Models/box.fbx"}, {"force", true}}, TerraEngine::Editor::Automation::WriteMode::WritesEnabled, "mcp-import-fbx-1");
+			context.Expect(result.value("ok", false), "MCP asset import should succeed for a project FBX.");
+			context.Expect(result["data"].contains("importResult"), "MCP FBX response should include package import details.");
+			context.ExpectEqual(std::string("Fbx"), result["data"]["importResult"]["package"].value("packageKind", std::string()), "MCP FBX response should report package kind.");
+			context.Expect(!result["data"]["importResult"]["generatedMeshes"].empty(), "MCP FBX response should include generated mesh ids.");
+		});
 	}
 }

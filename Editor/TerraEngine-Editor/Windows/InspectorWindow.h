@@ -36,7 +36,7 @@ private:
 	void DrawScriptDropTarget(entt::entity obj);
 	void DrawLightComponentInspector(const std::string& compName, entt::entity obj, ComponentAccessFunctions& access);
 	void DrawUIComponentInspector(const std::string& compName, entt::entity obj, ComponentAccessFunctions& access);
-	void DrawGltfPackageInspector(const std::filesystem::path& path);
+	void DrawModelPackageInspector(const std::filesystem::path& path);
 	void DrawMaterialInspector(const std::filesystem::path& path);
 	void DrawMeshInspector(const std::filesystem::path& path);
 	void DrawTextureInspector(const std::filesystem::path& path);

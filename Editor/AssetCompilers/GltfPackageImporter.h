@@ -9,20 +9,11 @@
 #include <filesystem>
 
 #include "GltfImportTypes.h"
-#include "Utilities/UUID.h"
+#include "ModelPackageImporter.h"
 
 namespace TerraEngine::AssetPipeline
 {
-	struct GltfPackageImportOptions
-	{
-		std::filesystem::path sourcePath;
-		std::filesystem::path assetRoot;
-		std::filesystem::path buildRoot;
-		std::filesystem::path sourceRelativePath;
-		TerraEngine::UUID packageGuid = TerraEngine::EMPTY_UUID;
-		TerraEngine::UUID shaderCollectionId = TerraEngine::EMPTY_UUID;
-		bool forceReimport = false;
-	};
+	using GltfPackageImportOptions = ModelPackageImportOptions;
 
 	[[nodiscard]] bool IsGltfPackageSourceExtension(const std::filesystem::path& filePath);
 	[[nodiscard]] GltfImportResult ImportGltfPackage(const GltfPackageImportOptions& options);

@@ -13,7 +13,7 @@
 #include "../Subsystems/UndoRedoSystem.h"
 #include "../../Export/BuildProfile.h"
 #include "../../Export/ExportValidator.h"
-#include "../../AssetCompilers/GltfPackageImporter.h"
+#include "../../AssetCompilers/ModelPackageImporter.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Core/Object/ObjectManager.h"
@@ -415,7 +415,7 @@ namespace TerraEngine::Editor::Automation
 		add("component.get", "component", MutationMode::ReadOnly, false, true, false, "object: target, component: string");
 		add("component.set_property", "component", MutationMode::SceneMutation, false, true, false, "object/component/property/value");
 		add("asset.list", "asset", MutationMode::ReadOnly, true, false, false, "type?: string, search?: string");
-		add("asset.import", "asset", MutationMode::AssetMutation, true, false, false, "path: project-relative asset path, force?: bool; glTF returns generated asset ids and diagnostics");
+		add("asset.import", "asset", MutationMode::AssetMutation, true, false, false, "path: project-relative asset path, force?: bool; model packages such as glTF/FBX return generated asset ids and diagnostics");
 		add("asset.prepare_delete", "asset", MutationMode::Destructive, true, false, true, "path: project-relative asset path");
 		add("export.validate", "export", MutationMode::ReadOnly, true, false, false, "profile: string");
 		add("export.start", "export", MutationMode::ExportMutation, true, false, true, "profile: string, confirmOutput?: string");
@@ -1142,7 +1142,7 @@ namespace TerraEngine::Editor::Automation
 			{"force", arguments.value("force", false)},
 			{"status", "queued"}
 		};
-		if (TerraEngine::AssetPipeline::IsGltfPackageSourceExtension(absolutePath))
+		if (TerraEngine::AssetPipeline::IsModelPackageSourceExtension(absolutePath))
 		{
 			const std::filesystem::path resultPath = TerraEngine::AssetPipeline::GetImportResultPath(absolutePath);
 			if (std::filesystem::exists(resultPath))

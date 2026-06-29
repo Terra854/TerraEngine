@@ -10,7 +10,7 @@
 #include "ProjectManager.h"
 #include "AssetDatabase.h"
 #include "AssetImportResult.h"
-#include "GltfPackageImporter.h"
+#include "ModelPackageImporter.h"
 #include "Engine/Resource/ResourceManager.h"
 #include <imgui.h>
 #include <ImGuiFileDialog.h>
@@ -61,9 +61,9 @@ void OpenMarkupAssetInBuilder(MainEditorSubsystem* owner, const std::filesystem:
 	}
 }
 
-bool IsGltfPackagePath(const std::filesystem::path& path)
+bool IsModelPackagePath(const std::filesystem::path& path)
 {
-	return TerraEngine::AssetPipeline::IsGltfPackageSourceExtension(path);
+	return TerraEngine::AssetPipeline::IsModelPackageSourceExtension(path);
 }
 
 bool IsImportResultSidecarPath(const std::filesystem::path& path)
@@ -92,7 +92,8 @@ bool IsGeneratedFolderForPackage(const std::filesystem::path& directory)
 	const std::filesystem::path parent = directory.parent_path();
 	const std::string packageStem = folderName.substr(0, folderName.size() - generatedSuffix.size());
 	return std::filesystem::exists(parent / (packageStem + ".gltf"))
-		|| std::filesystem::exists(parent / (packageStem + ".glb"));
+		|| std::filesystem::exists(parent / (packageStem + ".glb"))
+		|| std::filesystem::exists(parent / (packageStem + ".fbx"));
 }
 
 nlohmann::json LoadPackageImportResultJson(const std::filesystem::path& packagePath)
@@ -634,7 +635,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 	if (ImGui::BeginTable("ContentTable", columnCount)) {
 		for (const auto& entry : entries) {
 			std::string filename = entry.path().filename().string();
-			const bool isPackage = !entry.is_directory() && IsGltfPackagePath(entry.path());
+			const bool isPackage = !entry.is_directory() && IsModelPackagePath(entry.path());
 			const std::vector<PackageChildTile> packageChildren = isPackage ? BuildPackageChildTiles(entry.path()) : std::vector<PackageChildTile>{};
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!m_SearchFilter.empty()) {
@@ -657,7 +658,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				icon = "[UI]";
 			} else if (!entry.is_directory() && entry.path().extension() == ".teprefab") {
 				icon = "[PFB]";
-			} else if (!entry.is_directory() && IsGltfPackagePath(entry.path())) {
+			} else if (!entry.is_directory() && IsModelPackagePath(entry.path())) {
 				icon = "[PKG]";
 			}
 			
@@ -697,7 +698,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 					const char* payloadType = "ASSET_GUID";
 
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (importer == "MeshImporter" || importer == "GltfPackageImporter") payloadType = "ASSET_MESH";
+					if (importer == "MeshImporter" || TerraEngine::AssetPipeline::IsModelPackageImporterName(importer)) payloadType = "ASSET_MESH";
 					else if (importer == "TextureImporter") payloadType = "ASSET_TEXTURE";
 					else if (importer == "ShaderImporter") payloadType = "ASSET_SHADER";
 					else if (importer == "MaterialImporter") payloadType = "ASSET_MATERIAL";

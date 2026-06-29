@@ -9,50 +9,54 @@ namespace TerraEngine::AssetPipeline
 {
 	namespace
 	{
-		GltfImportStatus ParseImportStatus(const std::string& value)
+		ModelImportStatus ParseImportStatus(const std::string& value)
 		{
 			if (value == "Succeeded")
 			{
-				return GltfImportStatus::Succeeded;
+				return ModelImportStatus::Succeeded;
 			}
 			if (value == "SucceededWithWarnings")
 			{
-				return GltfImportStatus::SucceededWithWarnings;
+				return ModelImportStatus::SucceededWithWarnings;
 			}
-			return GltfImportStatus::Failed;
+			return ModelImportStatus::Failed;
 		}
 
-		GltfPackageKind ParsePackageKind(const std::string& value)
+		ModelPackageKind ParsePackageKind(const std::string& value)
 		{
-			return value == "GltfBinary" ? GltfPackageKind::GltfBinary : GltfPackageKind::GltfText;
+			if (value == "Fbx")
+			{
+				return ModelPackageKind::Fbx;
+			}
+			return value == "GltfBinary" ? ModelPackageKind::GltfBinary : ModelPackageKind::GltfText;
 		}
 
-		GltfDiagnosticSeverity ParseDiagnosticSeverity(const std::string& value)
+		ModelDiagnosticSeverity ParseDiagnosticSeverity(const std::string& value)
 		{
 			if (value == "Info")
 			{
-				return GltfDiagnosticSeverity::Info;
+				return ModelDiagnosticSeverity::Info;
 			}
 			if (value == "Warning")
 			{
-				return GltfDiagnosticSeverity::Warning;
+				return ModelDiagnosticSeverity::Warning;
 			}
-			return GltfDiagnosticSeverity::Error;
+			return ModelDiagnosticSeverity::Error;
 		}
 
-		GltfTextureUsage ParseTextureUsage(const std::string& value)
+		ModelTextureUsage ParseTextureUsage(const std::string& value)
 		{
-			if (value == "BaseColor") return GltfTextureUsage::BaseColor;
-			if (value == "Normal") return GltfTextureUsage::Normal;
-			if (value == "MetallicRoughness") return GltfTextureUsage::MetallicRoughness;
-			if (value == "Occlusion") return GltfTextureUsage::Occlusion;
-			if (value == "Emissive") return GltfTextureUsage::Emissive;
-			return GltfTextureUsage::Unknown;
+			if (value == "BaseColor") return ModelTextureUsage::BaseColor;
+			if (value == "Normal") return ModelTextureUsage::Normal;
+			if (value == "MetallicRoughness") return ModelTextureUsage::MetallicRoughness;
+			if (value == "Occlusion") return ModelTextureUsage::Occlusion;
+			if (value == "Emissive") return ModelTextureUsage::Emissive;
+			return ModelTextureUsage::Unknown;
 		}
 
-		GltfTextureSemantic ParseTextureSemantic(const std::string& value)
+		ModelTextureSemantic ParseTextureSemantic(const std::string& value)
 		{
-			return value == "Color" ? GltfTextureSemantic::Color : GltfTextureSemantic::Data;
+			return value == "Color" ? ModelTextureSemantic::Color : ModelTextureSemantic::Data;
 		}
 
 		std::optional<std::size_t> ReadOptionalIndex(const nlohmann::json& object, const char* key)
@@ -71,6 +75,16 @@ namespace TerraEngine::AssetPipeline
 				return fallback;
 			}
 			return { object[key][0].get<float>(), object[key][1].get<float>(), object[key][2].get<float>() };
+		}
+
+		std::array<float, 3> ReadBoundsVector(const nlohmann::json& object, const char* flatKey, const char* nestedKey, const std::array<float, 3>& fallback)
+		{
+			if (object.contains(flatKey))
+			{
+				return ReadFloat3(object, flatKey, fallback);
+			}
+			const nlohmann::json bounds = object.value("localBounds", nlohmann::json::object());
+			return ReadFloat3(bounds, nestedKey, fallback);
 		}
 
 		std::array<float, 4> ReadFloat4(const nlohmann::json& object, const char* key, const std::array<float, 4>& fallback)
@@ -99,7 +113,7 @@ namespace TerraEngine::AssetPipeline
 		return std::filesystem::path(sourceAssetPath.string() + ".import.json");
 	}
 
-	bool SaveImportResult(const std::filesystem::path& sourceAssetPath, const GltfImportResult& result)
+	bool SaveModelPackageImportResult(const std::filesystem::path& sourceAssetPath, const ModelPackageImportResult& result)
 	{
 		const std::filesystem::path resultPath = GetImportResultPath(sourceAssetPath);
 		std::filesystem::create_directories(resultPath.parent_path());
@@ -114,7 +128,7 @@ namespace TerraEngine::AssetPipeline
 		return static_cast<bool>(out);
 	}
 
-	bool LoadImportResult(const std::filesystem::path& sourceAssetPath, GltfImportResult& outResult)
+	bool LoadModelPackageImportResult(const std::filesystem::path& sourceAssetPath, ModelPackageImportResult& outResult)
 	{
 		const std::filesystem::path resultPath = GetImportResultPath(sourceAssetPath);
 		std::ifstream input(resultPath);
@@ -128,7 +142,7 @@ namespace TerraEngine::AssetPipeline
 		{
 			input >> document;
 
-			GltfImportResult result;
+			ModelPackageImportResult result;
 			result.status = ParseImportStatus(document.value("status", std::string("Failed")));
 			result.packageGuid = ReadUuid(document, "packageGuid");
 
@@ -145,21 +159,22 @@ namespace TerraEngine::AssetPipeline
 			// Rehydrate generated child records so every editor surface can read the same durable import result.
 			for (const nlohmann::json& mesh : document.value("generatedMeshes", nlohmann::json::array()))
 			{
-				GeneratedGltfMeshAsset record;
+				GeneratedModelMeshAsset record;
 				record.guid = ReadUuid(mesh, "guid");
 				record.sourceMeshIndex = mesh.value("sourceMeshIndex", std::size_t{ 0 });
 				record.sourcePrimitiveIndex = ReadOptionalIndex(mesh, "sourcePrimitiveIndex");
+				record.sourceNodePath = mesh.value("sourceNodePath", std::string());
 				record.sourcePath = mesh.value("sourcePath", std::string());
 				record.compiledPath = mesh.value("compiledPath", std::string());
 				record.displayName = mesh.value("name", std::string());
-				record.localBoundsMin = ReadFloat3(mesh, "localBoundsMin", record.localBoundsMin);
-				record.localBoundsMax = ReadFloat3(mesh, "localBoundsMax", record.localBoundsMax);
+				record.localBoundsMin = ReadBoundsVector(mesh, "localBoundsMin", "min", record.localBoundsMin);
+				record.localBoundsMax = ReadBoundsVector(mesh, "localBoundsMax", "max", record.localBoundsMax);
 				result.generatedMeshes.push_back(std::move(record));
 			}
 
 			for (const nlohmann::json& material : document.value("generatedMaterials", nlohmann::json::array()))
 			{
-				GeneratedGltfMaterialAsset record;
+				GeneratedModelMaterialAsset record;
 				record.guid = ReadUuid(material, "guid");
 				record.sourceMaterialIndex = ReadOptionalIndex(material, "sourceMaterialIndex");
 				record.sourcePath = material.value("sourcePath", std::string());
@@ -184,7 +199,7 @@ namespace TerraEngine::AssetPipeline
 
 			for (const nlohmann::json& texture : document.value("generatedTextures", nlohmann::json::array()))
 			{
-				GeneratedGltfTextureAsset record;
+				GeneratedModelTextureAsset record;
 				record.guid = ReadUuid(texture, "guid");
 				record.sourceImageIndex = ReadOptionalIndex(texture, "sourceImageIndex");
 				record.sourceTextureIndex = ReadOptionalIndex(texture, "sourceTextureIndex");
@@ -198,7 +213,7 @@ namespace TerraEngine::AssetPipeline
 
 			for (const nlohmann::json& assignment : document.value("materialAssignments", nlohmann::json::array()))
 			{
-				GltfMaterialAssignment record;
+				ModelMaterialAssignment record;
 				record.meshGuid = ReadUuid(assignment, "meshGuid");
 				record.materialGuid = ReadUuid(assignment, "materialGuid");
 				record.sourceMeshIndex = assignment.value("sourceMeshIndex", std::size_t{ 0 });
@@ -209,7 +224,7 @@ namespace TerraEngine::AssetPipeline
 
 			for (const nlohmann::json& diagnostic : document.value("diagnostics", nlohmann::json::array()))
 			{
-				GltfImportDiagnostic record;
+				ModelImportDiagnostic record;
 				record.severity = ParseDiagnosticSeverity(diagnostic.value("severity", std::string("Error")));
 				record.code = diagnostic.value("code", std::string());
 				record.source = diagnostic.value("source", std::string());
@@ -225,5 +240,15 @@ namespace TerraEngine::AssetPipeline
 		{
 			return false;
 		}
+	}
+
+	bool SaveImportResult(const std::filesystem::path& sourceAssetPath, const GltfImportResult& result)
+	{
+		return SaveModelPackageImportResult(sourceAssetPath, result);
+	}
+
+	bool LoadImportResult(const std::filesystem::path& sourceAssetPath, GltfImportResult& outResult)
+	{
+		return LoadModelPackageImportResult(sourceAssetPath, outResult);
 	}
 }

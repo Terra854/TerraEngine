@@ -9,10 +9,13 @@
 #include <filesystem>
 
 #include "Editor/AssetCompilers/GltfImportTypes.h"
+#include "Editor/AssetCompilers/ModelPackageImportTypes.h"
 
 namespace TerraEngine::AssetPipeline
 {
 	[[nodiscard]] std::filesystem::path GetImportResultPath(const std::filesystem::path& sourceAssetPath);
+	[[nodiscard]] bool SaveModelPackageImportResult(const std::filesystem::path& sourceAssetPath, const ModelPackageImportResult& result);
+	[[nodiscard]] bool LoadModelPackageImportResult(const std::filesystem::path& sourceAssetPath, ModelPackageImportResult& outResult);
 	[[nodiscard]] bool SaveImportResult(const std::filesystem::path& sourceAssetPath, const GltfImportResult& result);
 	[[nodiscard]] bool LoadImportResult(const std::filesystem::path& sourceAssetPath, GltfImportResult& outResult);
 }

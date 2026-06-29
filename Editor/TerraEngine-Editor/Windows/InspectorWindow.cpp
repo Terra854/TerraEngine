@@ -22,7 +22,7 @@
 #include "AssetImportResult.h"
 #include "Editor/AssetCompilers/MeshCompiler.h"
 #include "Editor/AssetCompilers/TextureCompiler.h"
-#include "GltfPackageImporter.h"
+#include "ModelPackageImporter.h"
 #include "Engine/File Formats/TerraEngineMaterialFile.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/File Formats/TerraEngineTextureFile.h"
@@ -2683,8 +2683,8 @@ void InspectorWindow::OnGui() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ext == ".tmat") {
 			DrawMaterialInspector(*selectedAsset);
-		} else if (TerraEngine::AssetPipeline::IsGltfPackageSourceExtension(*selectedAsset)) {
-			DrawGltfPackageInspector(*selectedAsset);
+		} else if (TerraEngine::AssetPipeline::IsModelPackageSourceExtension(*selectedAsset)) {
+			DrawModelPackageInspector(*selectedAsset);
 		} else if (IsSupportedMeshSourceExtension(*selectedAsset)) {
 			DrawMeshInspector(*selectedAsset);
 		} else if (IsSupportedTextureSourceExtension(*selectedAsset)) {
@@ -3166,14 +3166,14 @@ void InspectorWindow::OnGui() {
 	}
 }
 
-// InspectorWindow::DrawGltfPackageInspector shows the source package itself, not the read-only generated children.
+// InspectorWindow::DrawModelPackageInspector shows the source package itself, not the read-only generated children.
 // Generated mesh/material/texture sub-assets stay selectable in the Project Browser, while this view remains package-level.
-void InspectorWindow::DrawGltfPackageInspector(const std::filesystem::path& path) {
+void InspectorWindow::DrawModelPackageInspector(const std::filesystem::path& path) {
 	const std::filesystem::path absolutePath = std::filesystem::absolute(path);
 	const auto& assets = AssetDatabase::Instance().GetAssets();
 	const auto metaIt = assets.find(absolutePath);
 
-	ImGui::Text("glTF Package: %s", path.filename().string().c_str());
+	ImGui::Text("Model Package: %s", path.filename().string().c_str());
 	ImGui::Separator();
 
 	if (metaIt == assets.end()) {
@@ -3182,8 +3182,8 @@ void InspectorWindow::DrawGltfPackageInspector(const std::filesystem::path& path
 	}
 
 	const AssetMetadata& metadata = metaIt->second;
-	TerraEngine::AssetPipeline::GltfImportResult importResult;
-	const bool hasImportResult = TerraEngine::AssetPipeline::LoadImportResult(absolutePath, importResult);
+	TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+	const bool hasImportResult = TerraEngine::AssetPipeline::LoadModelPackageImportResult(absolutePath, importResult);
 
 	// Keep the package inspector read-only because edits belong either on the source glTF file
 	// or on explicitly generated sub-assets selected from the Project Browser.
@@ -3204,11 +3204,24 @@ void InspectorWindow::DrawGltfPackageInspector(const std::filesystem::path& path
 		drawRow("Compiled Mesh", metadata.compiledPath.generic_string());
 		drawRow("Import Status", hasImportResult ? TerraEngine::AssetPipeline::ToString(importResult.status) : "Not imported");
 		drawRow("Package Type", hasImportResult
-			? (importResult.package.packageKind == TerraEngine::AssetPipeline::GltfPackageKind::GltfBinary ? "GLB" : "glTF")
+			? TerraEngine::AssetPipeline::ToString(importResult.package.packageKind)
 			: "-");
 		drawRow("Generated Root", hasImportResult ? importResult.package.importRoot.generic_string() : "-");
 
 		ImGui::EndTable();
+	}
+
+	if (hasImportResult && !importResult.diagnostics.empty()) {
+		ImGui::SeparatorText("Diagnostics");
+		for (const TerraEngine::AssetPipeline::ModelImportDiagnostic& diagnostic : importResult.diagnostics) {
+			ImGui::TextWrapped("[%s] %s: %s",
+				TerraEngine::AssetPipeline::ToString(diagnostic.severity),
+				diagnostic.code.c_str(),
+				diagnostic.message.c_str());
+			if (!diagnostic.fallback.empty()) {
+				ImGui::TextDisabled("%s", diagnostic.fallback.c_str());
+			}
+		}
 	}
 }
 
@@ -3242,7 +3255,7 @@ void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
 	ImGui::Separator();
 	const bool readOnlyPackageSubAsset = IsGeneratedPackageSubAssetPath(path);
 	if (readOnlyPackageSubAsset) {
-		ImGui::TextDisabled("Read-only generated glTF sub-asset.");
+		ImGui::TextDisabled("Read-only generated package sub-asset.");
 		ImGui::BeginDisabled();
 	}
 
