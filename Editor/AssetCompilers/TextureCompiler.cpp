@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -36,6 +37,8 @@
 #include "basisu_enc.h"
 
 namespace {
+	constexpr std::uint32_t kDefaultTextureCompileWorkers = 2u;
+	constexpr std::uint32_t kMaximumTextureCompileWorkers = 4u;
 	constexpr std::array<std::string_view, 11> kSupportedTextureSourceExtensions = {
 		".png",
 		".jpg",
@@ -62,6 +65,24 @@ namespace {
 			return static_cast<char>(std::tolower(c));
 		});
 		return ext;
+	}
+
+	std::uint32_t ResolveTextureCompilerWorkerCount(std::uint32_t hardwareThreads, const char* overrideText) {
+		const std::uint32_t availableThreads = std::max(1u, hardwareThreads);
+		const std::uint32_t maximumWorkers = std::min(availableThreads, kMaximumTextureCompileWorkers);
+		if (overrideText != nullptr && overrideText[0] != '\0') {
+			char* parseEnd = nullptr;
+			const unsigned long requestedWorkers = std::strtoul(overrideText, &parseEnd, 10);
+			if (parseEnd != overrideText && requestedWorkers > 0ul) {
+				const unsigned long boundedRequest = std::min<unsigned long>(requestedWorkers, static_cast<unsigned long>(maximumWorkers));
+				return std::clamp(static_cast<std::uint32_t>(boundedRequest), 1u, maximumWorkers);
+			}
+		}
+
+		// Package imports can compile several textures while the file watcher is
+		// also responding to source-image changes. Keeping each BasisU pool small
+		// prevents one MCP import from multiplying into many all-core workers.
+		return std::min(kDefaultTextureCompileWorkers, maximumWorkers);
 	}
 
 	// InitializeBasisu is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -179,6 +200,10 @@ std::uint32_t ComputeCrc32(const std::uint8_t* data, size_t size) {
 	return crc ^ 0xFFFFFFFFu;
 }
 
+std::uint32_t ResolveTextureCompilerWorkerCountForTests(std::uint32_t hardwareThreads, const char* overrideText) {
+	return ResolveTextureCompilerWorkerCount(hardwareThreads, overrideText);
+}
+
 // CompileTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality, bool generateMipmaps, TextureFilterType filter) {
 	InitializeBasisu();
@@ -225,9 +250,12 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	params.m_source_images.push_back(std::move(sourceImage));
 	params.m_create_ktx2_file = true;
 	params.m_ktx2_and_basis_srgb_transfer_function = isSRGB;
-	params.m_multithreading = true;
+	const std::uint32_t textureWorkerCount = ResolveTextureCompilerWorkerCount(
+		static_cast<std::uint32_t>(std::thread::hardware_concurrency()),
+		std::getenv("TERRAENGINE_TEXTURE_COMPILE_THREADS"));
+	params.m_multithreading = textureWorkerCount > 1u;
 
-	basisu::job_pool jpool(std::thread::hardware_concurrency());
+	basisu::job_pool jpool(textureWorkerCount);
 	params.m_pJob_pool = &jpool;
 
 	basisu::basis_compressor compressor;

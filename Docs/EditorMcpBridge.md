@@ -53,6 +53,12 @@ assignment, bounds, package kind, and diagnostic arrays. Missing or unsupported
 package content remains machine-readable through diagnostics so MCP clients can
 decide whether to place partial imports or ask for human review.
 
+Texture compression triggered by MCP package imports uses a conservative worker
+cap by default so generated package textures and file-watcher reimports do not
+spawn multiple all-core BasisU pools. Set `TERRAENGINE_TEXTURE_COMPILE_THREADS`
+before launching the editor only when a workstation can safely tolerate more
+concurrent texture-compression work.
+
 ## Validation
 
 Use the Visual Studio developer environment on Windows so MSVC can locate the

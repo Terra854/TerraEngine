@@ -44,6 +44,7 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/FbxImportDiagnosticsTests.cpp
 	AssetPipeline/FbxPackageBrowserContractTests.cpp
 	AssetPipeline/FbxReadOnlySubAssetTests.cpp
+	AssetPipeline/TextureCompilerWorkerTests.cpp
 	AssetPipeline/GltfPackageImporterTests.cpp
 	AssetPipeline/GltfMaterialTextureTests.cpp
 	AssetPipeline/GltfMaterialAssignmentTests.cpp

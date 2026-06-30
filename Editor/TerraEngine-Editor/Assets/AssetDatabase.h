@@ -107,6 +107,7 @@ private:
 		float timer; // Seconds until process
 	};
 	std::map<std::filesystem::path, PendingEvent> pendingEvents;
+	std::map<std::filesystem::path, bool> deferredImports;
 
 	// struct AsyncCompileJob groups related state and operations so callers have one documented contract.
 	struct AsyncCompileJob {

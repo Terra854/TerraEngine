@@ -47,6 +47,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterFbxImportDiagnosticsTests(TestRegistry& registry);
 	void RegisterFbxPackageBrowserContractTests(TestRegistry& registry);
 	void RegisterFbxReadOnlySubAssetTests(TestRegistry& registry);
+	void RegisterTextureCompilerWorkerTests(TestRegistry& registry);
 	void RegisterGltfPackageImporterTests(TestRegistry& registry);
 	void RegisterGltfMaterialTextureTests(TestRegistry& registry);
 	void RegisterGltfMaterialAssignmentTests(TestRegistry& registry);
@@ -118,6 +119,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterFbxImportDiagnosticsTests(registry);
 	TerraEngine::EditorTests::RegisterFbxPackageBrowserContractTests(registry);
 	TerraEngine::EditorTests::RegisterFbxReadOnlySubAssetTests(registry);
+	TerraEngine::EditorTests::RegisterTextureCompilerWorkerTests(registry);
 	TerraEngine::EditorTests::RegisterGltfPackageImporterTests(registry);
 	TerraEngine::EditorTests::RegisterGltfMaterialTextureTests(registry);
 	TerraEngine::EditorTests::RegisterGltfMaterialAssignmentTests(registry);

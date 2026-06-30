@@ -240,6 +240,7 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 void AssetDatabase::Shutdown() {
 	fileWatcher.Stop();
 	assets.clear();
+	deferredImports.clear();
 	recentlyRemovedAssets.clear();
 }
 
@@ -272,9 +273,11 @@ void AssetDatabase::Update() {
 	}
 
 	// Process Async Jobs
+	std::vector<std::pair<std::filesystem::path, bool>> readyDeferredImports;
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto jobIt = asyncJobs.begin(); jobIt != asyncJobs.end(); ) {
 		if (jobIt->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+			const std::filesystem::path completedPath = jobIt->absSourcePath;
 			bool compiled = jobIt->future.get();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!compiled) {
@@ -283,8 +286,17 @@ void AssetDatabase::Update() {
 				FinishImport(jobIt->metadata, jobIt->absSourcePath, jobIt->needsImport);
 			}
 			jobIt = asyncJobs.erase(jobIt);
+			if (const auto deferredIt = deferredImports.find(completedPath); deferredIt != deferredImports.end()) {
+				readyDeferredImports.push_back(*deferredIt);
+				deferredImports.erase(deferredIt);
+			}
 		} else {
 			++jobIt;
+		}
+	}
+	for (const auto& [path, force] : readyDeferredImports) {
+		if (std::filesystem::exists(path)) {
+			ImportAsset(path, force);
 		}
 	}
 }
@@ -383,6 +395,15 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 	if (IsIgnoredAssetDatabasePath(absSourcePath)) return;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::is_directory(absSourcePath)) return;
+	if (IsAssetCompiling(absSourcePath)) {
+		// Texture imports are worker jobs. File watcher events and MCP reimport
+		// requests can both target the same source while compression is still in
+		// flight, so coalesce them into one follow-up pass instead of starting
+		// multiple BasisU pools for the same file.
+		deferredImports[absSourcePath] = deferredImports[absSourcePath] || force;
+		TERRAENGINE_LOG(LogLevel::Info, "Deferred duplicate asset import while compile is active: " << absSourcePath);
+		return;
+	}
 
 	const std::string importerName = GetImporterName(absSourcePath);
 	AssetMetadata metadata;

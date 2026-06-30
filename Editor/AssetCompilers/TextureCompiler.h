@@ -36,3 +36,7 @@ bool CompileTextureFromBytes(
 	std::uint32_t quality = 1,
 	bool generateMipmaps = true,
 	TextureFilterType filter = TextureFilterType::Lanczos);
+
+// Exposes the texture compiler's worker-count policy to focused tests so MCP
+// package imports cannot accidentally return to all-core compression bursts.
+std::uint32_t ResolveTextureCompilerWorkerCountForTests(std::uint32_t hardwareThreads, const char* overrideText);
