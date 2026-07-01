@@ -48,7 +48,57 @@ namespace TerraEngine::Renderer {
 		std::uint64_t residentBytes = 0u;
 		std::uint64_t reclaimableBytes = 0u;
 		std::uint32_t residentPages = 0u;
+		std::uint32_t pinnedFallbackPages = 0u;
 		std::uint32_t missingPages = 0u;
+	};
+
+	struct VirtualGeometryAdaptiveSettingsDiagnostics
+	{
+		VirtualGeometrySettingsSource settingsSource = VirtualGeometrySettingsSource::ProjectDefaults;
+		VirtualGeometryMaterialSafetyPolicy materialSafetyPolicy = VirtualGeometryMaterialSafetyPolicy::Conservative;
+		VirtualGeometryFallbackPolicy fallbackPolicy = VirtualGeometryFallbackPolicy::PreserveHighestSafeFallback;
+		std::uint32_t requestedTargetCount = 0u;
+		std::uint32_t minimumSourceTriangles = 0u;
+		std::uint32_t minimumGeneratedTriangles = 0u;
+		float minimumUsefulTriangleReduction = 0.0f;
+		float minimumUsefulMeshletReduction = 0.0f;
+	};
+
+	struct VirtualGeometryCookOutputDiagnostics
+	{
+		std::uint32_t generatedLevelCount = 0u;
+		std::uint32_t skippedDetailCount = 0u;
+		std::uint32_t mergedDetailCount = 0u;
+		std::uint32_t rejectedDetailCount = 0u;
+		std::uint32_t clusterCount = 0u;
+		std::uint32_t pageCount = 0u;
+	};
+
+	struct VirtualGeometryClusterSelectionDiagnostics
+	{
+		std::uint32_t selectedClusters = 0u;
+		std::uint32_t fallbackClusters = 0u;
+		std::uint32_t rejectedSelections = 0u;
+		std::uint32_t parentChildConflictWarnings = 0u;
+	};
+
+	struct VirtualGeometryPageResidencyDiagnostics
+	{
+		std::uint32_t pendingIoPages = 0u;
+		std::uint32_t pendingUploadPages = 0u;
+		std::uint32_t evictingPages = 0u;
+		std::uint32_t pinnedFallbackPages = 0u;
+		std::uint32_t failedPageReasons = 0u;
+	};
+
+	struct VirtualGeometryHiZValidationDiagnostics
+	{
+		RenderViewType ownerViewType = RenderViewType::Game;
+		bool sameViewHistory = false;
+		bool sameTargetHistory = false;
+		bool projectionMatches = false;
+		bool failOpen = true;
+		std::string inactiveReason;
 	};
 
 	struct VirtualGeometryViewDiagnosticsSnapshot
@@ -73,7 +123,9 @@ namespace TerraEngine::Renderer {
 		std::uint32_t requestedPages = 0u;
 		std::uint32_t missingPages = 0u;
 		std::uint32_t failedPages = 0u;
+		std::uint32_t evictingPages = 0u;
 		std::uint32_t evictedPages = 0u;
+		std::uint32_t pinnedFallbackPages = 0u;
 		std::uint32_t lodTransitionCandidates = 0u;
 		std::uint32_t poppingRiskWarnings = 0u;
 		float maxGeometricError = 0.0f;
@@ -82,6 +134,11 @@ namespace TerraEngine::Renderer {
 		std::uint64_t geometryBudgetBytes = 0u;
 		std::uint64_t budgetPressureBytes = 0u;
 		std::uint64_t estimatedGeometryBytes = 0u;
+		VirtualGeometryAdaptiveSettingsDiagnostics adaptiveSettings;
+		VirtualGeometryCookOutputDiagnostics cookOutput;
+		VirtualGeometryClusterSelectionDiagnostics clusterSelection;
+		VirtualGeometryPageResidencyDiagnostics pageResidency;
+		VirtualGeometryHiZValidationDiagnostics hiZValidation;
 		std::vector<std::uint32_t> selectedLodHistogram;
 		std::vector<VirtualGeometryBudgetContributor> budgetContributors;
 		std::vector<std::string> warnings;
@@ -101,10 +158,15 @@ namespace TerraEngine::Renderer {
 	struct VirtualGeometryHiZDiagnosticsInput
 	{
 		RenderViewType viewType = RenderViewType::Game;
+		RenderViewType ownerViewType = RenderViewType::Game;
 		std::uint64_t frameId = 0u;
 		bool qualityRequested = false;
 		bool historyValid = false;
 		bool hiZActive = false;
+		bool sameViewHistory = false;
+		bool sameTargetHistory = false;
+		bool projectionMatches = false;
+		bool failOpen = true;
 		std::string invalidReason;
 		std::uint32_t culledByFrustum = 0u;
 		std::uint32_t culledByCone = 0u;
@@ -152,6 +214,10 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API RenderBudgetDiagnostic BuildRenderBudgetDiagnostic(const RenderWorkBudget& budget);
 	TERRAENGINE_API RenderPerformanceGateResult EvaluateRenderPerformanceGate(std::string workloadName, float baselineValue, float latestValue, float thresholdPercent);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildInactiveVirtualGeometryDiagnostics(RenderViewType viewType, std::uint64_t frameId, VirtualGeometryInactiveReason reason);
+	TERRAENGINE_API VirtualGeometryAdaptiveSettingsDiagnostics BuildVirtualGeometryAdaptiveSettingsDiagnostics(const AdaptiveVirtualGeometryCookProfile& profile);
+	TERRAENGINE_API VirtualGeometryCookOutputDiagnostics BuildVirtualGeometryCookOutputDiagnostics(const std::vector<VirtualGeometryAssetRuntime>& assets);
+	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildDefaultAdaptiveVirtualGeometryDiagnostics(RenderViewType viewType, std::uint64_t frameId, const AdaptiveVirtualGeometryCookProfile& profile);
+	TERRAENGINE_API void ApplyVirtualGeometryAdaptiveDiagnostics(VirtualGeometryViewDiagnosticsSnapshot& snapshot, VirtualGeometryAdaptiveSettingsDiagnostics settings, VirtualGeometryCookOutputDiagnostics cookOutput, VirtualGeometryClusterSelectionDiagnostics clusterSelection, VirtualGeometryPageResidencyDiagnostics pageResidency, VirtualGeometryHiZValidationDiagnostics hiZValidation);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryLodQualityDiagnostics(RenderViewType viewType, std::uint64_t frameId, const std::vector<VirtualGeometryAssetRuntime>& assets, const VirtualGeometryQualityProfile& qualityProfile);
 	TERRAENGINE_API std::vector<VirtualGeometryViewDiagnosticsSnapshot> BuildVirtualGeometryViewDiagnosticsFromSnapshot(const RenderFrameSnapshot& snapshot, const VirtualGeometryQualityProfile& qualityProfile, VirtualGeometryInactiveReason inactiveReason);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryHiZDiagnostics(const VirtualGeometryHiZDiagnosticsInput& input);

@@ -26,8 +26,42 @@ constexpr std::uint32_t kMeshletMaxVertices = 64;
 constexpr std::uint32_t kMeshletMaxTriangles = 124;
 constexpr std::uint32_t kMeshletHeaderFlagHasBounds = 1u << 0u;
 constexpr std::uint32_t kMeshletHeaderFlagHasVirtualGeometry = 1u << 1u;
-constexpr std::uint32_t kVirtualGeometryPayloadGeneration = 1u;
+constexpr std::uint32_t kVirtualGeometryPayloadGeneration = 2u;
 constexpr std::uint32_t kVirtualGeometryInvalidIndex = 0xffffffffu;
+constexpr std::uint32_t kVirtualGeometryValidationFlagAdaptiveTargetsPresent = 1u << 0u;
+constexpr std::uint32_t kVirtualGeometryValidationFlagFallbackCoverageValidated = 1u << 1u;
+constexpr std::uint32_t kVirtualGeometryValidationFlagClusterHierarchyValidated = 1u << 2u;
+constexpr std::uint32_t kVirtualGeometryValidationFlagPageLinksValidated = 1u << 3u;
+constexpr std::uint32_t kVirtualGeometryValidationFlagClusterCoverageValidated = 1u << 4u;
+
+// Detail target status mirrors the renderer diagnostics. Records store integer
+// values so the unstable TEMF v1 payload can be read by simple tools without
+// including renderer headers.
+enum class VirtualGeometryDetailTargetRecordStatus : std::uint32_t
+{
+	Requested = 0u,
+	Generated = 1u,
+	Merged = 2u,
+	Skipped = 3u,
+	Rejected = 4u
+};
+
+// Skipped reasons explain why a requested adaptive ratio did not become its
+// own level. These names are intentionally specific enough for Inspector text
+// and automation responses to avoid guessing from counts alone.
+enum class VirtualGeometrySkippedDetailRecordReason : std::uint32_t
+{
+	None = 0u,
+	MeshTooSmall = 1u,
+	TooFewTriangles = 2u,
+	TooFewMeshlets = 3u,
+	InsufficientTriangleReduction = 4u,
+	InsufficientMeshletReduction = 5u,
+	InvalidSimplificationOutput = 6u,
+	MaterialSafetyRejected = 7u,
+	GeometricErrorRejected = 8u,
+	DuplicateOfPreviousLevel = 9u
+};
 
 // Vertex attribute semantics mirror typical DCC exports and describe what the data represents.
 // AttributeSemantic names the supported states explicitly so serialization and switches stay readable.
@@ -140,14 +174,36 @@ struct VirtualGeometryHeader
 	std::uint32_t flags;
 	std::uint32_t sourceTriangleCount;
 	std::uint32_t sourceVertexCount;
+	std::uint32_t requestedTargetCount;
+	std::uint32_t skippedDetailCount;
+	std::uint32_t clusterCount;
+	std::uint32_t clusterPageLinkCount;
+	std::uint32_t validationFlagCount;
 	std::uint32_t detailLevelTableOffset;
 	std::uint32_t materialSectionTableOffset;
 	std::uint32_t sectionRangeTableOffset;
 	std::uint32_t cullableGroupTableOffset;
 	std::uint32_t pageTableOffset;
 	std::uint32_t diagnosticTableOffset;
+	std::uint32_t requestedTargetTableOffset;
+	std::uint32_t skippedDetailTableOffset;
+	std::uint32_t clusterTableOffset;
+	std::uint32_t clusterPageLinkTableOffset;
+	std::uint32_t validationFlagTableOffset;
 	std::uint32_t diagnosticStringOffset;
 	std::uint32_t diagnosticStringSize;
+};
+
+// A requested target records the ratio the developer asked for before the
+// cooker decides whether that level is useful enough to generate. The fields
+// are counts, not offsets, because no geometry has been emitted at this point.
+struct VirtualGeometryRequestedTargetRecord
+{
+	std::uint32_t targetIndex;        // Stable index in the requested target list.
+	std::uint32_t status;             // VirtualGeometryDetailTargetRecordStatus.
+	std::uint32_t desiredTriangleCount; // Approximate triangle goal after simplification.
+	std::uint32_t desiredMeshletCount;  // Approximate meshlet goal for diagnostics.
+	float requestedRatio;             // Advisory ratio relative to the source mesh.
 };
 
 // A detail level is a complete selectable representation for the MVP. Later
@@ -155,6 +211,8 @@ struct VirtualGeometryHeader
 struct VirtualGeometryDetailLevelRecord
 {
 	std::uint32_t lodIndex;
+	std::uint32_t requestedTargetIndex;
+	std::uint32_t targetStatus;
 	std::uint32_t meshletOffset;
 	std::uint32_t meshletCount;
 	std::uint32_t vertexCount;
@@ -167,6 +225,26 @@ struct VirtualGeometryDetailLevelRecord
 	float targetRatio;
 	float boundsMin[3];
 	float boundsMax[3];
+};
+
+using VirtualGeometryGeneratedLevelRecord = VirtualGeometryDetailLevelRecord;
+
+// Skipped detail records keep every rejected or merged target visible to users.
+// The message range points at the shared diagnostic string table to avoid fixed
+// record bloat when most targets generate successfully.
+struct VirtualGeometrySkippedDetailRecord
+{
+	std::uint32_t targetIndex;                 // Requested target that did not produce a unique level.
+	std::uint32_t status;                      // VirtualGeometryDetailTargetRecordStatus, usually Skipped/Merged/Rejected.
+	std::uint32_t reason;                      // VirtualGeometrySkippedDetailRecordReason.
+	std::uint32_t nearestGeneratedLodIndex;    // Fallback/generated LOD used instead.
+	std::uint32_t messageStringOffset;         // Offset into virtualGeometryDiagnosticStrings.
+	std::uint32_t messageStringSize;           // Byte count for the explanatory message.
+	std::uint32_t candidateTriangleCount;      // Actual attempted simplification triangles, or zero when no candidate existed.
+	std::uint32_t candidateMeshletCount;       // Actual attempted simplification meshlets, or zero when no candidate existed.
+	float requestedRatio;                      // Original advisory ratio.
+	float actualCandidateRatio;                // Candidate triangle ratio relative to source geometry, or zero when unavailable.
+	float actualNearestRatio;                  // Ratio of the selected/generated fallback.
 };
 
 // Section records preserve material identity independently from the physical
@@ -226,9 +304,51 @@ struct VirtualGeometryPageRecord
 	std::uint32_t groupOffset;
 	std::uint32_t groupCount;
 	std::uint32_t fallbackPageId;
+	std::uint32_t clusterPageLinkOffset;
+	std::uint32_t clusterPageLinkCount;
 	std::uint32_t priority;
 	std::uint64_t byteOffset;
 	std::uint64_t byteSize;
+};
+
+// Cluster records describe a hierarchical coverage tree for mixed-detail cuts.
+// Cookers split each detail into source-region-backed spatial clusters, then
+// validate parent/child coverage before allowing sparse mixed-detail selection.
+struct VirtualGeometryClusterRecord
+{
+	std::uint32_t clusterId;            // Stable cluster identifier inside the mesh.
+	std::uint32_t parentClusterId;      // kVirtualGeometryInvalidIndex for the root.
+	std::uint32_t firstChildClusterId;  // First child id when children are contiguous.
+	std::uint32_t childCount;           // Number of child clusters.
+	std::uint32_t lodIndex;             // Detail level that owns the cluster geometry.
+	std::uint32_t groupOffset;          // First cullable group covered by this cluster.
+	std::uint32_t groupCount;           // Number of cullable groups covered by this cluster.
+	std::uint32_t materialSectionId;    // Material section ownership used by validation.
+	std::uint32_t pageId;               // Primary page containing the cluster data.
+	std::uint32_t fallbackClusterId;    // Coarser resident cluster used when the primary page is missing.
+	float geometricError;               // Screen-error input for refinement decisions.
+	float boundsCenter[3];              // Conservative local-space sphere center.
+	float boundsRadius;                 // Conservative local-space sphere radius.
+};
+
+// Cluster-page links are a compact join table. They let one page provide data
+// for multiple clusters and let one cluster reference fallback/streaming pages.
+struct VirtualGeometryClusterPageLinkRecord
+{
+	std::uint32_t clusterId;   // Cluster whose geometry or fallback coverage is represented.
+	std::uint32_t pageId;      // Page that must be resident for this link.
+	std::uint32_t firstGroup;  // First cullable group supplied by the page.
+	std::uint32_t groupCount;  // Number of groups supplied by the page.
+	std::uint32_t flags;       // Reserved for fallback/primary/streaming role bits.
+};
+
+// Validation flags record which expensive cook/load checks were run. Tools can
+// warn about stale data without revalidating the whole hierarchy every frame.
+struct VirtualGeometryValidationFlagRecord
+{
+	std::uint32_t flags;                  // kVirtualGeometryValidationFlag* bit mask.
+	std::uint32_t messageStringOffset;    // Optional text in the diagnostic string table.
+	std::uint32_t messageStringSize;      // Byte count for that text.
 };
 
 // Diagnostic records point into the shared diagnostic string table. Keeping the
@@ -301,6 +421,11 @@ struct Mesh
 	std::vector<VirtualGeometrySectionRangeRecord> virtualGeometrySectionRanges;
 	std::vector<VirtualGeometryCullableGroupRecord> virtualGeometryCullableGroups;
 	std::vector<VirtualGeometryPageRecord> virtualGeometryPages;
+	std::vector<VirtualGeometryRequestedTargetRecord> virtualGeometryRequestedTargets;
+	std::vector<VirtualGeometrySkippedDetailRecord> virtualGeometrySkippedDetails;
+	std::vector<VirtualGeometryClusterRecord> virtualGeometryClusters;
+	std::vector<VirtualGeometryClusterPageLinkRecord> virtualGeometryClusterPageLinks;
+	std::vector<VirtualGeometryValidationFlagRecord> virtualGeometryValidationFlags;
 	std::vector<VirtualGeometryDiagnosticRecord> virtualGeometryDiagnostics;
 	std::string virtualGeometryDiagnosticStrings;
 	// Object-level culling needs one conservative mesh bound before the GPU

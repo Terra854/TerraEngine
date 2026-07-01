@@ -54,6 +54,21 @@ namespace TerraEngine::EditorTests
 			std::filesystem::copy_file(sourceFixture, projectAsset, std::filesystem::copy_options::overwrite_existing);
 			return projectAsset;
 		}
+
+		std::filesystem::path WriteAutomationTinyObj(EditorContext& context, std::string_view fileName)
+		{
+			const std::filesystem::path projectAsset = context.assetDatabase->GetAssetRoot() / "Meshes" / std::string(fileName);
+			std::filesystem::create_directories(projectAsset.parent_path());
+			std::ofstream output(projectAsset, std::ios::trunc);
+			output << "v 0 0 0\n";
+			output << "v 1 0 0\n";
+			output << "v 0 1 0\n";
+			output << "vt 0 0\n";
+			output << "vt 1 0\n";
+			output << "vt 0 1\n";
+			output << "f 1/1 2/2 3/3\n";
+			return projectAsset;
+		}
 	}
 
 	void RegisterVirtualGeometryAutomationTests(TestRegistry& registry)
@@ -79,6 +94,9 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(std::string("cooked"), mesh.value("virtualGeometryStatus", std::string()), "Generated mesh should report normalized cooked status.");
 			context.Expect(mesh.value("detailLevelCount", 0u) > 0u, "Generated mesh should report detail level count.");
 			context.Expect(mesh.value("sourceTriangleCount", 0u) > 0u, "Generated mesh should report source triangle count.");
+			context.Expect(mesh.contains("settings"), "Generated mesh import response should include resolved adaptive settings.");
+			context.Expect(mesh.contains("cookDiagnostics"), "Generated mesh import response should include cook diagnostics.");
+			context.Expect(mesh["cookDiagnostics"].value("requestedTargetCount", 0u) > 0u, "Generated mesh cook diagnostics should include requested targets.");
 			context.Expect(mesh.contains("warnings"), "Generated mesh should include warnings array.");
 			context.Expect(mesh.contains("errors"), "Generated mesh should include errors array.");
 		});
@@ -105,6 +123,10 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(std::string("completed"), packageRebuild["data"].value("status", std::string()), "Package rebuild should complete.");
 			context.Expect(!packageRebuild["data"]["rebuiltAssets"].empty(), "Package rebuild should report rebuilt assets.");
 			context.Expect(packageRebuild["data"]["rebuiltAssets"].front().contains("generatedMeshes"), "Package rebuild should include generated output diagnostics when requested.");
+			context.Expect(packageRebuild["data"]["rebuiltAssets"].front().contains("requestedDetailCount"), "Package rebuild should report requested adaptive detail count.");
+			context.Expect(packageRebuild["data"]["rebuiltAssets"].front().contains("clusterCount"), "Package rebuild should report cluster count.");
+			context.Expect(packageRebuild["data"]["rebuiltAssets"].front().contains("pageCount"), "Package rebuild should report page count.");
+			context.Expect(packageRebuild["data"]["rebuiltAssets"].front().contains("fallbackCoverageValid"), "Package rebuild should report fallback coverage validation.");
 			context.ExpectEqual(std::string("debug"), packageRebuild["data"].value("diagnosticsLevel", std::string()), "Rebuild response should echo diagnostics level.");
 
 			const nlohmann::json allRebuild = service.HandleTool(
@@ -141,7 +163,112 @@ namespace TerraEngine::EditorTests
 			context.Expect(inspect["data"].value("detailLevels", 0u) > 0u, "Inspect should expose cooked detail count.");
 			context.Expect(inspect["data"].contains("runtimeDiagnostics"), "Inspect should include runtime diagnostics container.");
 			context.Expect(inspect["data"].contains("residencyDiagnostics"), "Inspect should include residency diagnostics container.");
+			context.Expect(inspect["data"].contains("settings"), "Inspect should include resolved adaptive settings.");
+			context.Expect(inspect["data"].contains("cookDiagnostics"), "Inspect should include cook diagnostics.");
+			context.Expect(inspect["data"]["cookDiagnostics"].contains("requestedTargets"), "Inspect cook diagnostics should include requested target rows.");
+			context.Expect(inspect["data"].contains("clusterSummary"), "Inspect should include cluster hierarchy summary.");
+			context.Expect(inspect["data"].contains("pageResidencySummary"), "Inspect should include page residency summary.");
+			context.Expect(inspect["data"].contains("selectionSummary"), "Inspect should include runtime selection summary.");
+			context.Expect(inspect["data"].contains("hiZValidation"), "Inspect should include Hi-Z validation summary.");
+			context.Expect(inspect["data"].contains("staleReasons"), "Inspect should include stale settings reasons.");
+			context.Expect(inspect["data"].contains("packageVirtualGeometry"), "Package inspect should include generated mesh virtual geometry diagnostics.");
 			context.Expect(inspect["data"].contains("assetRegistrationBoundary"), "Inspect should state the asset publication boundary.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.Automation.SettingsGetSetResetRoundTrip", [](TestContext& context) {
+			TempVirtualGeometryAutomationProject project("SettingsRoundTrip");
+			EditorContext editorContext = MakeVirtualGeometryAutomationContext(project);
+			WriteAutomationTinyObj(editorContext, "automation-settings.obj");
+
+			TerraEngine::Editor::Automation::EditorAutomationService service;
+			service.SetEditorContext(&editorContext);
+			service.HandleTool(
+				"asset.import",
+				{{"path", "Meshes/automation-settings.obj"}, {"force", true}},
+				TerraEngine::Editor::Automation::WriteMode::WritesEnabled,
+				"vg-settings-import");
+
+			const nlohmann::json before = service.HandleTool(
+				"asset.virtualGeometry.settings.get",
+				{{"asset", "Meshes/automation-settings.obj"}, {"includeResolved", true}},
+				TerraEngine::Editor::Automation::WriteMode::ReadOnly,
+				"vg-settings-get-before");
+			context.Expect(before.value("ok", false), "Settings get should resolve imported mesh defaults.");
+			context.Expect(!before["data"].value("hasMeshOverride", true), "Freshly imported meshes should not have a per-mesh override.");
+			context.Expect(before["data"].contains("projectDefaults"), "Settings get should include project defaults.");
+			context.Expect(before["data"].contains("settingsSignature"), "Settings get should include a stable settings signature.");
+
+			const nlohmann::json saved = service.HandleTool(
+				"asset.virtualGeometry.settings.set",
+				{
+					{"asset", "Meshes/automation-settings.obj"},
+					{"override", {
+						{"targetRatios", nlohmann::json::array({ 1.0f, 0.5f })},
+						{"minimumSourceTriangles", 16u},
+						{"minimumGeneratedTriangles", 8u}
+					}},
+					{"rebuildAfterSave", false}
+				},
+				TerraEngine::Editor::Automation::WriteMode::WritesEnabled,
+				"vg-settings-set");
+			context.Expect(saved.value("ok", false), "Valid automation override should save.");
+			context.ExpectEqual(std::string("saved"), saved["data"].value("status", std::string()), "Settings set should report saved status without rebuild.");
+			context.Expect(saved["data"].value("hasMeshOverride", false), "Settings set should report that an override now exists.");
+			context.ExpectEqual(static_cast<std::size_t>(2u), saved["data"]["resolvedSettings"]["targetRatios"].size(), "Resolved settings should include saved override ratios.");
+
+			const nlohmann::json reset = service.HandleTool(
+				"asset.virtualGeometry.settings.reset",
+				{{"asset", "Meshes/automation-settings.obj"}, {"rebuildAfterReset", false}},
+				TerraEngine::Editor::Automation::WriteMode::WritesEnabled,
+				"vg-settings-reset");
+			context.Expect(reset.value("ok", false), "Settings reset should clear the per-mesh override.");
+			context.ExpectEqual(std::string("reset"), reset["data"].value("status", std::string()), "Settings reset should report reset status without rebuild.");
+			context.Expect(!reset["data"].value("hasMeshOverride", true), "Reset settings should no longer report an override.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.Automation.InvalidSettingsAreAtomic", [](TestContext& context) {
+			TempVirtualGeometryAutomationProject project("SettingsAtomicity");
+			EditorContext editorContext = MakeVirtualGeometryAutomationContext(project);
+			WriteAutomationTinyObj(editorContext, "automation-atomic.obj");
+
+			TerraEngine::Editor::Automation::EditorAutomationService service;
+			service.SetEditorContext(&editorContext);
+			service.HandleTool(
+				"asset.import",
+				{{"path", "Meshes/automation-atomic.obj"}, {"force", true}},
+				TerraEngine::Editor::Automation::WriteMode::WritesEnabled,
+				"vg-atomic-import");
+
+			const nlohmann::json valid = service.HandleTool(
+				"asset.virtualGeometry.settings.set",
+				{
+					{"asset", "Meshes/automation-atomic.obj"},
+					{"override", {{"targetRatios", nlohmann::json::array({ 1.0f, 0.5f })}}},
+					{"rebuildAfterSave", false}
+				},
+				TerraEngine::Editor::Automation::WriteMode::WritesEnabled,
+				"vg-atomic-valid");
+			context.Expect(valid.value("ok", false), "Initial valid settings should save before atomicity check.");
+
+			const nlohmann::json invalid = service.HandleTool(
+				"asset.virtualGeometry.settings.set",
+				{
+					{"asset", "Meshes/automation-atomic.obj"},
+					{"override", {{"targetRatios", nlohmann::json::array({ 1.0f, 0.75f, 0.8f })}}},
+					{"rebuildAfterSave", false}
+				},
+				TerraEngine::Editor::Automation::WriteMode::WritesEnabled,
+				"vg-atomic-invalid");
+			context.Expect(!invalid.value("ok", true), "Invalid non-descending override ratios should be rejected.");
+
+			const nlohmann::json after = service.HandleTool(
+				"asset.virtualGeometry.settings.get",
+				{{"asset", "Meshes/automation-atomic.obj"}, {"includeResolved", true}},
+				TerraEngine::Editor::Automation::WriteMode::ReadOnly,
+				"vg-atomic-after");
+			context.Expect(after.value("ok", false), "Settings get should still succeed after a rejected override.");
+			context.Expect(after["data"].value("hasMeshOverride", false), "Rejected settings should leave the previous override intact.");
+			context.ExpectEqual(static_cast<std::size_t>(2u), after["data"]["resolvedSettings"]["targetRatios"].size(), "Rejected settings should not replace the previous valid ratios.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.Automation.InvalidRequestsDoNotPublishPartialSuccess", [](TestContext& context) {

@@ -7,18 +7,45 @@ break during engine development.
 
 ## Implementation Stages
 
-1. Cook virtual mesh assets with automatic whole-mesh LOD chains, meshlets,
-   material section metadata, conservative bounds, and cook diagnostics.
+1. Cook virtual mesh assets with adaptive detail chains, spatial clusters,
+   meshlets, material section metadata, conservative bounds, and cook diagnostics.
 2. Validate LOD correctness so generated detail levels preserve material
    identity, conservative bounds, and acceptable geometric error.
-3. Render selected LOD ranges through the existing task/mesh shader path with
-   fail-open behavior for missing metadata.
+3. Render selected sparse cluster ranges through the existing task/mesh shader
+   path with fail-open behavior for missing metadata.
 4. Repair Hi-Z usage by keeping depth pyramid generation warm while occlusion
    remains gated by view-history validation and zero-false-occlusion tests.
 5. Expose editor inspection and a Virtual Geometry Visualizer with LOD,
    meshlet/triangle identity, bounds, culled, Hi-Z, residency, and error modes.
 6. Extend model package import, page residency, automation, export validation,
    and stress tests after the cooked asset and render contracts are stable.
+
+## Adaptive Virtual Geometry Roadmap
+
+The next virtual geometry milestone turns the first whole-object LOD path into
+an adaptive, page-streamed system. The order is intentionally conservative:
+
+1. Replace fixed cook ratios with an adaptive profile that requests smoother
+   half-octave-style targets, then skips tiny, duplicate-looking, unsafe, or
+   non-beneficial levels.
+2. Let developers select an imported or package-generated mesh asset and tune
+   sparse per-mesh LOD overrides in the Inspector. These controls must not be
+   shown for non-mesh asset selections.
+3. Explain every requested target as generated, skipped, merged, or rejected so
+   artists can trust the cooker without reading raw TEMF payloads.
+4. Stream real high-detail geometry pages under budgets while keeping fallback
+   pages pinned so missing detail never becomes missing geometry.
+5. Strengthen Hi-Z validation until first-frame, camera-cut, resize,
+   projection-change, multi-view, shadow, thin-geometry, and self-occlusion
+   cases all fail open with explicit reasons.
+6. Select a non-overlapping cluster hierarchy cut per view so one large object
+   can use high detail nearby and coarser resident fallback detail farther away.
+
+Validation for this milestone is phased the same way: each setup, foundation,
+and user-story slice must pass its focused tests before the next slice begins.
+Final acceptance still requires the full compile, focused CTest, regression,
+and install flow so the installed editor/runtime tree contains matching docs,
+shaders, binaries, and generated metadata.
 
 ## Asset Rebuild Expectations
 
@@ -27,13 +54,12 @@ rebuild affected static mesh and model package outputs from source after the
 virtual geometry payload lands. No legacy compatibility loader is planned while
 the engine format is still unstable.
 
-### MVP Rebuild Workflow
+### Rebuild Workflow
 
 1. Rebuild each source mesh or model package through the editor asset import
    path or `TerraEngineMeshCompiler`.
-2. Keep meshlet bounds enabled for virtual geometry cooks. The MVP maps each
-   cullable group to a meshlet bounds record, so bounds are required for useful
-   renderer diagnostics.
+2. Keep meshlet bounds enabled for virtual geometry cooks. The renderer uses
+   cullable-group and cluster bounds for useful selection and diagnostics.
 3. Treat `virtualGeometryStatus=Cooked` as a generated LOD chain and
    `virtualGeometryStatus=Skipped` as a valid one-detail fallback for small
    meshes that do not benefit from simplification.
@@ -43,15 +69,90 @@ the engine format is still unstable.
 
 Expected cook diagnostics:
 
-- `virtualGeometryDetailLevels`: number of selectable whole-mesh LODs.
+- `virtualGeometryDetailLevels`: number of selectable adaptive detail levels.
 - `virtualGeometryMeshlets`: resident meshlet/cullable-group count across all
   emitted LODs.
 - `virtualGeometrySourceTriangles`: original source triangle count before
   simplification.
 - `virtualGeometryFallbackAvailable`: whether a renderable fallback detail is
   present.
+- `virtualGeometryRequestedTargets`: number of adaptive targets the cook tried
+  to satisfy.
+- `virtualGeometryGeneratedLevels`: number of actual detail levels emitted into
+  the TEMF payload.
+- `virtualGeometrySkippedLevels`: number of requested targets that were skipped,
+  merged into a nearby generated level, or rejected for safety.
 - `virtualGeometryWarnings`: count of warnings also stored in the JSON report
   and TEMF diagnostic table.
+
+### Adaptive Default Ratios And Skips
+
+The default adaptive profile requests eight half-octave-style triangle ratios:
+`1.0`, `0.70710677`, `0.5`, `0.35355338`, `0.25`, `0.17677669`,
+`0.125`, and `0.08838835`. This gives smoother transitions than the earlier
+hardcoded coarse chain while keeping the default cook small enough for fast
+iteration.
+
+Those ratios are targets, not guarantees. The cooker records every requested
+target, then decides whether it became:
+
+- `Generated`: a real emitted detail level with triangle count, meshlet count,
+  actual ratio, and geometric error.
+- `Merged`: close enough to a previous generated level that a separate LOD
+  would add switching cost without useful visual or meshlet savings.
+- `Skipped`: intentionally omitted because the requested output would be too
+  small to be useful.
+- `Rejected`: simplification produced invalid output or exceeded safety limits.
+
+Small meshes stay renderable by emitting only the highest-detail fallback. By
+default, meshes below `512` source triangles skip simplification with
+`MeshTooSmall`; generated candidates below `64` triangles, below `2` meshlets,
+or below the `15%` useful triangle/meshlet reduction threshold are skipped or
+merged. Candidates with non-finite error or geometric error above `0.1` are
+rejected, and the nearest valid generated detail remains the fallback.
+
+### Inspector Per-Mesh Overrides
+
+Per-mesh adaptive settings are authored from the Inspector, not from project
+settings JSON by hand. Select a loose imported mesh asset to edit a `.meta`
+override, or select a generated package mesh child to edit that child's package
+sidecar override. The source glTF/GLB/FBX package row itself, materials,
+textures, scripts, scenes, and other non-mesh assets do not show these controls.
+
+The Inspector override panel stages the resolved project defaults first. Enable
+`Per-Mesh Override`, tune the target count, ratios, thresholds, useful
+reduction limits, and maximum geometric error, then choose `Save Settings` or
+`Rebuild`. Rebuild requests go through the normal AssetDatabase import boundary,
+so compiled mesh publication remains atomic and failed rebuilds leave the last
+usable compiled mesh intact. `Reset` removes the override and returns the mesh
+to project defaults on the next rebuild.
+
+Package-generated mesh overrides are preserved by stable generated mesh GUIDs
+in the import sidecar. The current package compiler still emits one package
+TEMF for the package path, so the first preserved generated-mesh override is
+used as the package cook profile until later work splits package meshes into
+independent virtual-geometry cook units.
+
+### Cook Diagnostic Interpretation
+
+Every requested adaptive target is exposed through compiler JSON, package
+import sidecars, the mesh Inspector, and `asset.virtualGeometry.inspect`.
+Loose mesh Inspector rows are read from TEMF requested/skipped/detail tables;
+package generated mesh rows are read from the package sidecar.
+
+- `Generated`: the request produced a renderable detail level. The row reports
+  actual ratio, triangle count, meshlet count, and geometric error where
+  available.
+- `Merged`: the candidate was too similar to the previous accepted level, so
+  the previous generated level remains the nearest fallback.
+- `Skipped`: the request was intentionally omitted, usually because it was too
+  small to meet triangle or meshlet thresholds.
+- `Rejected`: the candidate was unsafe, invalid, or exceeded the geometric
+  error limit and is never registered as renderable data.
+
+For automation, read `settings` to see the resolved project/default or
+per-mesh profile, and read `cookDiagnostics.requestedTargets` to explain each
+target without opening the cooked file.
 
 ## Visual Correctness Rules
 
@@ -60,13 +161,13 @@ section-aware import metadata:
 
 - Each detail level owns at least one non-empty material section range, and the
   ranges must not overlap resident meshlets.
-- The current MVP compiler emits one default material section per LOD; package
+- The current compiler emits one default material section per LOD; package
   importers can expand this once source primitive/material slots are threaded
   through the raw mesh handoff.
-- Detail bounds must remain conservative. The MVP stores source-position bounds
+- Detail bounds must remain conservative. The cooker stores source-position bounds
   on every detail so renderer-side LOD choice cannot shrink object culling
   below the authored mesh extent.
-- Geometric error must be finite, monotonic, and no greater than `0.05` for an
+- Geometric error must be finite, monotonic, and no greater than `0.1` for an
   accepted simplification candidate. Candidates outside that tolerance are
   skipped and the previous safe detail remains the fallback.
 - Runtime diagnostics should flag aggressive `maxLodDrop` and scaled error
@@ -76,42 +177,91 @@ section-aware import metadata:
 
 The first renderer path is intentionally mesh-shader-only. A cooked virtual mesh
 is still submitted through the existing task and mesh shaders; render
-preparation selects one whole-mesh LOD range per visible object and passes the
-selected meshlet offset/count through push constants.
+preparation selects a non-overlapping sparse cluster cut per visible object and
+expands it into one mesh-shader draw range per selected cluster.
 
-- `virtualGeometry.enabled` must be true before render preparation selects lower
-  detail levels as active virtual geometry. Disabled virtual geometry still
-  draws through a fail-open path and chooses the best resident fallback detail
-  instead of trusting a non-resident high-detail page.
+- All imported mesh assets are treated as virtual geometry candidates. Render
+  preparation still fails open to the best resident fallback detail when a mesh
+  lacks valid cooked metadata or a requested high-detail page is unavailable.
 - Task shader culling must be available and enabled for the object. If task
   culling is disabled, unsupported, or missing required meshlet bounds, virtual
   geometry fails open to LOD0.
 - `lodErrorScale` tightens or relaxes geometric-error acceptance after cooking.
   A selected LOD whose scaled error is above the current tolerance backs down to
   a safer detail level.
-- `maxLodDrop` limits how many whole-mesh LODs a single selection step may skip.
+- `maxLodDrop` limits how many adaptive detail levels a single selection step may skip.
   Use small values while tuning camera-motion popping.
-- Render-preparation cache signatures include the selected LOD index and
-  meshlet range, so camera-distance changes cannot reuse stale immutable draw
-  packets.
+- Render-preparation cache signatures include the selected detail index,
+  cluster packet, and meshlet range, so camera-distance changes cannot reuse
+  stale immutable draw packets.
 - Fail-open diagnostics record the mesh identifier and the reason visibility was
   preserved through fallback rendering. Current reasons include disabled quality
   settings, disabled task culling, invalid bounds, and missing detail metadata.
+
+### Hierarchical Cluster Selection
+
+Mixed-detail rendering is expressed as a non-overlapping cluster hierarchy cut,
+not as independent per-meshlet picks from unrelated whole-mesh LODs. The cooker
+emits stable cluster ids, parent/child links, material section ownership, page
+references, conservative bounds, geometric error, and a fallback cluster path.
+The loader rejects cycles, missing fallback coverage, invalid material sections,
+and cluster-page links that do not fit the declared cluster/page group ranges.
+
+Current cooks sort source triangles into Morton-ordered fine regions, then build
+every emitted cluster from a contiguous range of those source regions. Dense
+source meshes can produce up to sixty-four fine regions by default, while tiny
+meshes stay whole so the cooker does not create pointless dispatch work. Coarser
+LOD clusters cover unions of fine regions and link only to adjacent-detail child
+clusters whose source-region ranges exactly tile the parent. The cooker sets
+`ClusterCoverageValidated` only after that tiling proof passes; otherwise render
+preparation fails open to the complete highest-detail range instead of
+dispatching a sparse mixed-detail cut that could create holes.
+
+At render preparation time, the selector starts from each root cluster. If the
+projected screen error is small, the parent cluster is selected. If the screen
+error is large enough, the selector refines into child clusters and publishes
+those children instead. Screen error is evaluated from each cluster's own
+conservative bounds when camera data is available, so a nearby region can refine
+while a far region of the same object stays coarse. A selected set may contain
+siblings, but it must not contain a parent beside any child that covers the same
+surface.
+
+When a desired child cluster page is missing, failed, evicting, or evicted, the
+selector records a page need and substitutes the first resident fallback cluster
+in the cluster fallback chain. If that fallback is an ancestor of the desired
+child, the ancestor suppresses sibling child selections for that subtree so the
+frame keeps coverage without cracks or double-drawn parent/child regions.
+
+The visible renderer expands the selected cluster cut into one draw command per
+selected cluster. Each command pushes that cluster's meshlet offset/count and a
+single selected-cluster packet record, so the task and mesh shaders dispatch the
+actual sparse cluster set instead of a whole-object min/max envelope. Arbitrary
+per-meshlet LOD mixing is still avoided because independent meshlets from
+unrelated LODs do not prove shared coverage, material ownership, or fallback
+ancestry, and can therefore create holes, duplicate surfaces, or unstable debug
+output.
+
+`ClusterHierarchyValidated` means ids, ranges, parent links, fallback links, and
+page links are structurally valid. `ClusterCoverageValidated` is the stronger
+bit required for mixed-detail rendering; it means every LOD cluster covers a
+disjoint source-region range, every detail level tiles the full source region
+set, and every parent-child relationship preserves that coverage exactly.
+Missing coverage validation is visible as fail-open diagnostics and conservative
+LOD0 dispatch.
 
 ## Quality Controls And Failure Modes
 
 Virtual geometry quality lives in the project/runtime `RenderSettings.json`
 under `settings.virtualGeometry`. The current fields are:
 
-- `enabled`: toggles active virtual geometry selection. Off means visible,
-  fail-open resident fallback rendering.
 - `lodErrorScale`: clamps to `[0.05, 64.0]` and scales cooked geometric error
   before a lower detail level is accepted.
 - `maxLodDrop`: limits how far selection may move away from the highest detail.
-- `hiZOcclusionEnabled`: allows meshlet Hi-Z culling only after the view-owned
-  history gates pass.
-- `hiZSelfOcclusionGuardEnabled`: requires the per-draw guard bit before Hi-Z
-  can reject meshlets.
+- `hiZOcclusionEnabled`: retained for settings compatibility, but the runtime
+  Hi-Z path is always active once the pyramid resource exists.
+- `hiZSelfOcclusionGuardEnabled`, `hiZNearPlaneGuardEnabled`, and
+  `hiZThinGeometryGuardEnabled`: retained for settings compatibility and
+  diagnostics, but no longer gate task-shader Hi-Z culling.
 - `debugVisualizationMode`: selects the editor/game-view false-color debug
   output.
 - `geometryBudgetBytes`: feeds residency diagnostics and budget pressure
@@ -138,24 +288,25 @@ compatibility shim.
 
 ## Hi-Z Validation Gates
 
-Hi-Z mip generation stays active after the scene depth pass so the renderer can
-warm the pyramid without trusting it for visibility. Meshlet occlusion only
-activates when every gate below passes:
+Hi-Z mip generation stays active after the scene depth pass. New pyramids are
+cleared to standard-Z far depth (`1.0`) before first use, so task shaders can
+sample them immediately without false occlusion. Meshlet occlusion only requires
+that the GPU pyramid resource exists; all history, quality, guard, ownership,
+camera, and depth-scene metadata is diagnostic-only.
 
-- The previous pyramid belongs to the same view/output, target size, and
-  view-projection signature as the current frame.
-- Virtual geometry and `hiZOcclusionEnabled` are both enabled in the runtime
-  quality profile.
-- The per-draw self-occlusion guard bit is present. Missing guard data fails
-  open so thin geometry and self-overlapping meshlets remain visible.
-- Editor/offscreen and first-frame paths are treated as unsupported or
-  first-frame history until they publish their own matching history.
+View ownership, target ownership, projection, and depth-scene signatures remain
+visible in diagnostics, but they do not hard-disable Hi-Z during normal
+camera/object/editor-view motion. The task shader still requires sampled depth
+to conservatively prove that a meshlet is hidden; if the previous pyramid cannot
+prove occlusion for the projected bounds, that meshlet stays visible.
 
-Invalid reasons are tracked explicitly: first frame, missing pyramid, resize,
-projection change, view mismatch, quality disabled, unsupported view, and
-self-occlusion risk. Task shaders only sample Hi-Z when the frame culling
-payload says the history is validated and the draw packet says the guard
-passed. Otherwise they keep the meshlet visible and record no Hi-Z cull.
+The only inactive reason that should affect runtime Hi-Z is a missing pyramid
+resource. First frame, resize, view/target ownership, projection changes,
+camera-cut metadata, depth-scene changes, quality toggles, and guard metadata
+remain diagnostic fields without turning Hi-Z off. Task shaders sample Hi-Z
+whenever the frame culling payload says the pyramid exists. If sampled depth is
+invalid or cannot conservatively prove occlusion for a meshlet's projected
+bounds, that meshlet stays visible and records no Hi-Z cull.
 
 ## Scheduler And Mutation Boundaries
 
@@ -168,16 +319,29 @@ diagnostics.
 
 ## Debug Visualization Inventory
 
-The editor visualizer should expose these modes as the implementation matures:
+The Scene View and Game View `VG` selector expose the same compact mode
+inventory. Both views read `GetVirtualGeometryDebugVisualizationModes()`, so
+the editor cannot drift into different menus per viewport.
 
-- `None`: normal material rendering.
-- `LOD`: false-color selected detail level.
-- `MeshletId`: stable false-color meshlet, cullable group, or triangle identity.
-- `Bounds`: cullable-unit or group bounds.
-- `Culled`: rejected and fail-open units.
-- `HiZ`: Hi-Z accepted, rejected, disabled, and invalid-history states.
-- `Residency`: resident, requested, missing, failed, and fallback pages.
-- `Error`: geometric error and quality pressure.
+| Mode | Color meaning |
+| --- | --- |
+| `Off` | Normal material rendering. |
+| `LOD` | Stable false color per selected detail level. Different colors should appear as the adaptive selector chooses coarser or finer detail. |
+| `Cluster` | Stable false color from the selected cluster packet. This helps spot when adaptive cluster identity changes. |
+| `Meshlet Id` | Stable false color per rendered meshlet id. This is the easiest way to inspect selected meshlet density. |
+| `Bounds` | Blue to yellow maps small to large bounds. Magenta means bounds or culling metadata is unavailable. |
+| `Culling` | Green means drawn, red means frustum, cyan means drawn while a Hi-Z pyramid is available, and magenta means culling data is missing. Cone culling is disabled until imported mesh sidedness is validated. |
+| `Residency` | Green means resident/active virtual geometry, orange means requested or missing page pressure, and brown means inactive fallback. |
+| `Hi-Z` | Cyan means the current view has a sampled Hi-Z pyramid. Gray means the pyramid resource is missing. |
+| `Error` | Cyan means no error pressure, orange means missing-page pressure, and red means fail-open. |
+
+Mode changes are part of the virtual geometry quality-profile signature used by
+the visible-command cache. Scene View and Game View therefore refresh on the
+next rendered frame even when the camera is stationary. The current mesh shader
+path colors the selected sparse cluster draw range and passes selected cluster
+count, page-need count, and fallback pressure through a compact payload word.
+Future page-backed GPU buffers can replace that packed word with richer
+per-cluster records without changing authored materials.
 
 ## Editor Inspection And Visualizer Workflow
 
@@ -259,53 +423,83 @@ meshes:
 }
 ```
 
-`asset.virtualGeometry.rebuild` accepts `target`, `force`,
-`includePackageOutputs`, and `diagnosticsLevel`. `target` may be an asset path,
-asset UUID, or `all`. The response reports `completed`, `partial`, or `failed`
-status plus `rebuiltAssets`, `skippedAssets`, `failedAssets`, `warnings`, and
-`durationMs`.
+`asset.virtualGeometry.settings.get` reads the project defaults when no asset is
+provided. When `asset` names an imported mesh or a package-generated mesh, the
+response also includes `hasMeshOverride`, the sparse `meshOverride`, the
+resolved inherited settings, a deterministic `settingsSignature`, and validation
+messages. Non-mesh assets fail validation instead of showing virtual geometry
+override controls.
 
-`asset.virtualGeometry.inspect` accepts `asset`, `includeRuntimeState`, and an
-optional `viewType`. The response includes cook metadata, meshlet counts,
-runtime virtual geometry view snapshots when available, and residency totals.
+`asset.virtualGeometry.settings.set` saves a sparse per-mesh override for an
+imported mesh asset. The command accepts `validateOnly` for dry-run editor or
+MCP workflows and `rebuildAfterSave` when the caller wants the compiled TEMF to
+be refreshed immediately. Invalid overrides are rejected before metadata is
+written, so the previously usable settings and cooked mesh remain intact.
+
+`asset.virtualGeometry.settings.reset` clears the per-mesh override and resolves
+the selected mesh back to project defaults. `rebuildAfterReset` follows the same
+asset registration boundary as a normal rebuild.
+
+`asset.virtualGeometry.rebuild` accepts `target`, `force`,
+`includePackageOutputs`, `settingsMode`, and `diagnosticsLevel`. `target` may be
+an asset path, asset UUID, package source, or `all`. The response reports
+`completed`, `partial`, or `failed` status plus `rebuiltAssets`,
+`skippedAssets`, `failedAssets`, `warnings`, and `durationMs`. Rebuilt records
+include the settings source, requested/generated/skipped detail counts, cluster
+count, page count, fallback coverage state, resolved settings, cluster summary,
+and page residency summary.
+
+`asset.virtualGeometry.inspect` accepts `asset`, `includeSettings`,
+`includeCookDiagnostics`, `includeClusterHierarchy`, `includeRuntimeState`, and
+an optional `viewType`. The response includes settings, cook diagnostics,
+cluster summary, page residency summary, runtime selection summary,
+Hi-Z validation state, stale reasons, meshlet counts, and the latest immutable
+runtime virtual geometry view snapshots when available.
 
 Successful automation rebuild/import results become visible only after the
 AssetDatabase `FinishImport` registration boundary. Failed requests do not mark
 generated mesh outputs usable; failed package imports, failed virtual geometry
-metadata, and `NeedsRebuild` generated mesh records are skipped during generated
-resource registration.
+metadata, invalid override requests, failed rebuilds, and `NeedsRebuild`
+generated mesh records are skipped during generated resource registration.
 
 ## Geometry Page Residency
 
-US7 introduces MVP page metadata and deterministic residency planning while
-keeping LOD0 visible as the fallback detail. The cooker emits one page record
-per detail level for now. Each record names the covered LOD range, cullable
-group range, byte estimate, priority, and fallback page. LOD0 is its own
-fallback page and is treated as resident when a mesh is first mirrored into
-runtime virtual geometry metadata.
+The cooker emits streamable page metadata for every adaptive detail level. Each
+page record names the covered LOD range, cullable group range, byte estimate,
+priority, fallback page, and cluster-page coverage links. LOD0 is its own
+fallback page and the loader rejects current virtual geometry payloads that do
+not carry fallback coverage validation flags, page byte costs, and cluster-page
+links. TEMF remains v1 while this format is still allowed to break.
 
 The Resource layer owns page state transitions:
 
 - `NotResident` -> `Requested` when a visible view needs a page.
-- `Requested` -> `Loading` while IO or upload work is pending.
-- `Loading` -> `Resident` only at the protected publication boundary.
-- `Requested` or `Loading` -> `Failed` when a page cannot be loaded.
-- `Resident` -> `Evicting` -> `Evicted` for non-fallback pages under budget
-  pressure.
+- `Requested` -> `PendingIO` when asynchronous file work starts.
+- `PendingIO` -> `PendingUpload` after page data validates and awaits the
+  protected GPU publication boundary.
+- `PendingUpload` -> `Resident`, or `Pinned` for visible fallback pages, after
+  protected backend upload publication.
+- `Requested`, `PendingIO`, or `PendingUpload` -> `Failed` when load,
+  validation, upload, or stale-version checks fail.
+- `Resident` -> `Evicting` -> `Evicted` for non-fallback pages after deferred
+  GPU retirement is safe.
 
-Fallback pages are preserved by the page eviction planner even when the geometry
-budget is exceeded. Higher-detail pages are ordered for eviction by lower
-priority, older use, and larger reclaimable byte size. Streaming need planning
-is worker-safe: it turns visible virtual geometry intent into ordinary
-`StreamingNeed` records for desired and fallback pages, but ResourceManager cache
-mutation, GPU upload scheduling, and residency publication remain protected
-boundaries.
+Fallback pages are pinned while an asset is renderable. They are excluded from
+eviction candidates even when the geometry budget is exceeded, so missing
+high-detail data reduces quality instead of creating holes. Higher-detail pages
+are ordered for eviction by lower priority, older use, and larger reclaimable
+byte size. Streaming need planning is worker-safe: immutable render selection
+snapshots are converted into page need inputs and async request packets for
+desired and fallback pages, while ResourceManager cache mutation, GPU upload
+scheduling, and residency publication remain protected boundaries.
 
-Render preparation selects the desired whole-mesh LOD first, then checks page
-residency. If the desired page is missing, failed, or evicted, the draw fails
-open to the resident fallback page and records a fallback reason. Diagnostics
-count resident, requested/loading, and missing/failed pages and include page byte
-estimates in virtual geometry memory totals.
+Render preparation selects the desired sparse cluster cut first, then checks
+page residency for every desired cluster. If a desired page is missing, failed,
+evicting, or evicted, the selector records a page need and substitutes the best
+resident fallback cluster or ancestor for that region. Current Vulkan upload
+still mirrors page data through the owning mesh buffers; page-level upload and
+retirement policy is exposed through testable planning hooks before separate
+GPU page allocations are introduced.
 
 ## Runtime Counter Domains
 
@@ -314,16 +508,21 @@ and later shadow/export views can be compared without sharing mutable state.
 Current CPU-side counters mean:
 
 - `sourceMeshlets`: cullable groups available in the asset metadata.
-- `selectedMeshlets`: meshlets selected by the current whole-mesh LOD choice.
-- `dispatchedMeshlets`: selected meshlets submitted before GPU cull readback is
-  available.
+- `selectedMeshlets`: meshlets selected by the current sparse cluster draw
+  ranges.
+- `dispatchedMeshlets`: selected cluster meshlets submitted before GPU cull
+  readback is available.
 - `culledByFrustum`, `culledByCone`, `culledByHiZ`: separated cull domains.
 - `residentPages`: pages available for rendering, including the fallback page.
-- `requestedPages`: desired pages in requested or loading state.
+- `requestedPages`: desired pages in requested, loading, pending IO, or pending
+  upload state.
+- `pendingIoPages` / `pendingUploadPages`: page work waiting for disk or
+  protected GPU publication.
 - `missingPages`: not-resident, failed, evicting, or evicted pages that require
   fallback rendering.
-- `failedPages` and `evictedPages`: subsets of `missingPages` with stronger
-  failure/budget meaning.
+- `failedPages`, `evictingPages`, and `evictedPages`: subsets of
+  `missingPages` with stronger failure, upload-retirement, or budget meaning.
+- `pinnedFallbackPages`: resident fallback pages protected from eviction.
 - `estimatedGeometryBytes`: metadata plus page byte estimates for the view.
 - `budgetPressureBytes`: estimated bytes above the configured geometry budget.
 
@@ -335,10 +534,11 @@ pages, budget pressure, risky LOD transitions, and Hi-Z fail-open history.
 
 The Game View visualizer overlay shows selected/dispatched/source meshlets,
 page residency, cull reason totals, and a compact LOD histogram. The Resource
-Residency window shows the latest per-view page counters and byte totals beside
-the existing RAM/VRAM streaming tables. Budget contributor data is sorted by
-reclaimable high-detail bytes so developers can identify which virtual geometry
-assets create the most pressure.
+Residency window shows the latest per-view resident/requested/pending/missing
+page counters, pinned fallback pages, budget pressure, byte totals, and top
+pressure assets beside the existing RAM/VRAM streaming tables. Budget
+contributor data is sorted by reclaimable high-detail bytes so developers can
+identify which virtual geometry assets create the most pressure.
 
 ## Multi-View, Shadow, And Export Correctness
 
@@ -349,17 +549,23 @@ same object without mutating another view's decision, and diagnostics are built
 from those immutable per-view records.
 
 Shadow passes use conservative visibility. They select the highest resident
-fallback detail, disable camera-owned Hi-Z occlusion, clear the Hi-Z
-self-occlusion guard bit before Vulkan records shadow draws, and keep task
-culling disabled for the shadow depth pass. This preserves silhouettes until a
-light-space virtual geometry culling path exists.
+fallback detail and keep task culling disabled for the shadow depth pass. This
+preserves silhouettes until a light-space virtual geometry culling path exists.
 
 Export manifests include a `virtualGeometry` block with the export profile
 switches, required mesh shader resources, diagnostics toggle, and optional page
-budget. Mesh entries that reference `.temf` payloads can mark
+budget. The block also serializes the adaptive quality controls used by export:
+`geometryBudgetBytes`, `lodErrorScale`, `maxLodDrop`, `preloadBias`, and the required metadata list
+`adaptiveTargets`, `fallbackCoverage`, `clusterHierarchy`, and `pageLinks`.
+Mesh entries that reference `.temf` payloads can mark
 `virtualGeometry.required = true`; package validation then checks that the
-compiled mesh payload carries the current in-place TEMF virtual geometry header
-and generation before the build is accepted.
+compiled mesh payload carries the current in-place TEMF virtual geometry header,
+requested-target metadata, cluster hierarchy, page table, cluster-page links,
+and fallback coverage flag before the build is accepted.
+
+Validation blocks packaging when required adaptive cook data, fallback coverage,
+or page metadata is missing. Missing optional high-detail data can only become a
+warning after the fallback path remains complete and renderable.
 
 ## Verification Checkpoints
 
@@ -432,9 +638,15 @@ Current virtual geometry content support is intentionally narrow:
 - Mesh-shader support is required for active virtual geometry. Missing backend
   support reports `Missing Mesh Shader Route` and keeps visible fallback
   rendering.
-- Camera-owned Hi-Z occlusion remains fail-open unless the history belongs to
-  the same view, target size, and projection signature and the self-occlusion
-  guard is present.
+- Camera-owned Hi-Z occlusion is resource-gated only. It samples as soon as a
+  same-size pyramid exists; self-occlusion, near-plane, thin-geometry, view,
+  target, projection, and depth-scene metadata remain diagnostics only during
+  interactive editor rendering.
+- The Hi-Z history also stores a depth-scene signature built from the visible
+  draw list, transforms, materials, and selected virtual-geometry cluster
+  ranges. Moving or editing an occluder reports the diagnostic change while
+  keeping Hi-Z active; individual meshlets still fail open when the sampled
+  pyramid cannot prove occlusion.
 
 Validation scenes should include a deterministic grid/high-curvature static
 mesh, a small simplification-skip mesh, a multi-material or material-band mesh,

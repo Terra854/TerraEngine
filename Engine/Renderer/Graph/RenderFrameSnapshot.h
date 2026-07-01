@@ -46,6 +46,46 @@ namespace TerraEngine::Renderer {
 		bool failOpen = false;
 		std::string fallbackReason;
 		bool hiZSelfOcclusionGuardPassed = false;
+		bool hiZNearPlaneGuardPassed = false;
+		bool hiZThinGeometryGuardPassed = false;
+		std::string hiZInactiveReason;
+		std::uint32_t selectedClusterOffset = 0u;
+		std::uint32_t selectedClusterCount = 0u;
+		std::uint32_t pageNeedOffset = 0u;
+		std::uint32_t pageNeedCount = 0u;
+	};
+
+	struct VirtualGeometrySelectedClusterRecord
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::uint32_t clusterId = 0u;
+		std::uint32_t lodIndex = 0u;
+		std::uint32_t pageId = 0u;
+		std::uint32_t fallbackClusterId = 0xffffffffu;
+		bool usingFallback = false;
+	};
+
+	struct VirtualGeometryPageNeedRecord
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::uint32_t pageId = 0u;
+		std::uint32_t clusterId = 0u;
+		std::uint32_t desiredLodIndex = 0u;
+		float screenImportance = 0.0f;
+		bool fallbackRequired = false;
+	};
+
+	struct VirtualGeometryClusterSelectionResult
+	{
+		// range stores fail-open guards and whole-object fallback data. Normal
+		// virtual geometry draws are expanded from selectedClusters so the GPU
+		// dispatches the non-overlapping sparse cluster cut directly.
+		VirtualGeometryDrawRange range;
+		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
+		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
+		std::uint32_t invalidSelectionReasons = 0u;
 	};
 
 	struct RenderFrameRenderableRecord
@@ -80,7 +120,13 @@ namespace TerraEngine::Renderer {
 		bool shadowPass = false;
 		bool exportRuntime = false;
 		bool hiZOcclusionAllowed = true;
+		bool hiZSelfOcclusionGuardPassed = true;
+		bool hiZNearPlaneGuardPassed = true;
+		bool hiZThinGeometryGuardPassed = true;
+		std::string hiZInactiveReason;
 		std::vector<VirtualGeometryViewDrawRecord> draws;
+		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
+		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
 	};
 
 	struct RenderFrameLightRecord

@@ -13,9 +13,14 @@ namespace TerraEngine::Tests
 			input.viewType = RenderViewType::Game;
 			input.frameId = 91u;
 			input.qualityRequested = true;
-			input.historyValid = false;
-			input.hiZActive = false;
-			input.invalidReason = "projection-changed";
+			input.historyValid = true;
+			input.hiZActive = true;
+			input.invalidReason = "projection-changed-diagnostic";
+			input.ownerViewType = RenderViewType::Game;
+			input.sameViewHistory = true;
+			input.sameTargetHistory = true;
+			input.projectionMatches = false;
+			input.failOpen = false;
 			input.culledByFrustum = 3u;
 			input.culledByCone = 2u;
 			input.culledByHiZ = 1u;
@@ -28,10 +33,45 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(2u, snapshot.culledByCone, "Cone cull counts should stay separate from frustum and Hi-Z counts.");
 			context.ExpectEqual(1u, snapshot.culledByHiZ, "Hi-Z cull counts should stay separate from geometric cull counts.");
 			context.ExpectEqual(6u, snapshot.culledMeshlets, "Total culled meshlets should sum the separated cull domains.");
-			context.Expect(!snapshot.hiZActive, "Inactive Hi-Z diagnostics should mark Hi-Z inactive.");
-			context.ExpectEqual(static_cast<std::uint32_t>(1u), snapshot.hiZInactiveFrames, "Inactive Hi-Z should increment the inactive-frame counter.");
-			context.Expect(snapshot.hiZInvalidReason.find("projection-changed") != std::string::npos, "Hi-Z diagnostics should preserve the invalid reason.");
+			context.Expect(snapshot.hiZActive, "Projection metadata should not mark Hi-Z inactive once the pyramid exists.");
+			context.ExpectEqual(static_cast<std::uint32_t>(0u), snapshot.hiZInactiveFrames, "Diagnostic metadata should not increment the inactive-frame counter.");
+			context.Expect(snapshot.hiZInvalidReason.empty(), "Active Hi-Z diagnostics should not publish an inactive reason.");
 			context.ExpectEqual(1u, snapshot.hiZFalseOcclusionRiskWarnings, "False-occlusion risk should have its own counter.");
+			context.Expect(!snapshot.hiZValidation.failOpen, "Active Hi-Z diagnostics should not publish fail-open validation state.");
+			context.Expect(snapshot.hiZValidation.sameViewHistory, "Diagnostics should expose whether the history belongs to the same view.");
+			context.Expect(snapshot.hiZValidation.sameTargetHistory, "Diagnostics should expose whether the history belongs to the same render target.");
+			context.Expect(!snapshot.hiZValidation.projectionMatches, "Diagnostics should expose projection mismatch separately from target ownership.");
+			context.Expect(snapshot.hiZValidation.inactiveReason.empty(), "Validation diagnostics should only carry inactive reasons for true missing-resource failures.");
+		});
+
+		registry.Add("VirtualGeometry.Diagnostics.PublishesHiZInactiveReasonAndFailOpenState", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryHiZDiagnosticsInput input{};
+			input.viewType = RenderViewType::Scene;
+			input.frameId = 92u;
+			input.qualityRequested = true;
+			input.historyValid = true;
+			input.hiZActive = true;
+			input.invalidReason = "thin-geometry-risk";
+			input.ownerViewType = RenderViewType::Game;
+			input.sameViewHistory = false;
+			input.sameTargetHistory = false;
+			input.projectionMatches = true;
+			input.failOpen = false;
+			input.falseOcclusionRiskWarnings = 2u;
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot snapshot =
+				TerraEngine::Renderer::BuildVirtualGeometryHiZDiagnostics(input);
+
+			context.Expect(snapshot.hiZActive, "Thin-geometry metadata should remain diagnostic-only for always-on Hi-Z.");
+			context.Expect(snapshot.hiZHistoryValid, "Fresh history and metadata diagnostics should be reported separately.");
+			context.ExpectEqual(0u, snapshot.hiZInactiveFrames, "Diagnostic-only metadata should not increment the inactive frame counter.");
+			context.ExpectEqual(2u, snapshot.hiZFalseOcclusionRiskWarnings, "Guard-driven false-occlusion risks should be counted.");
+			context.Expect(snapshot.hiZValidation.ownerViewType == RenderViewType::Game, "Diagnostics should expose the pyramid owner view.");
+			context.Expect(!snapshot.hiZValidation.sameViewHistory, "Scene view diagnostics should reveal that the camera history came from another view.");
+			context.Expect(!snapshot.hiZValidation.sameTargetHistory, "Scene view diagnostics should reveal target mismatch separately.");
+			context.Expect(snapshot.hiZValidation.projectionMatches, "Projection match should stay true when ownership is the only problem.");
+			context.Expect(!snapshot.hiZValidation.failOpen, "Diagnostic-only guard metadata should not force fail-open state.");
+			context.Expect(snapshot.hiZValidation.inactiveReason.empty(), "Inactive reason should stay empty while Hi-Z remains active.");
 		});
 
 		registry.Add("VirtualGeometry.Diagnostics.KeepsSelectionDispatchAndResidencyCountersConsistent", [](TestContext& context) {
@@ -101,6 +141,63 @@ namespace TerraEngine::Tests
 			context.Expect(scheduler.workerSafePreparation.find("LOD/page") != std::string::npos, "Scheduler diagnostics should describe worker-safe virtual geometry preparation.");
 			context.Expect(scheduler.protectedBoundary.find("Protected") != std::string::npos, "Scheduler diagnostics should describe protected work.");
 			context.Expect(scheduler.visibilityBoundary.find("SceneMutationQueue") != std::string::npos, "Scheduler diagnostics should describe the visibility boundary.");
+		});
+
+		registry.Add("AdaptiveVirtualGeometry.Diagnostics.DefaultProfileIsSafeAndExplainable", [](TestContext& context) {
+			AdaptiveVirtualGeometryCookProfile profile = MakeDefaultAdaptiveVirtualGeometryCookProfile();
+			profile.targetRatios[1] = 2.0f;
+			profile.minimumUsefulTriangleReduction = -1.0f;
+
+			const AdaptiveVirtualGeometryCookProfile sanitized = SanitizeAdaptiveVirtualGeometryCookProfile(profile);
+			const TerraEngine::Renderer::VirtualGeometryAdaptiveSettingsDiagnostics settings =
+				TerraEngine::Renderer::BuildVirtualGeometryAdaptiveSettingsDiagnostics(sanitized);
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot snapshot =
+				TerraEngine::Renderer::BuildDefaultAdaptiveVirtualGeometryDiagnostics(RenderViewType::Scene, 2027u, sanitized);
+
+			context.ExpectEqual(kVirtualGeometryAdaptiveTargetCapacity, settings.requestedTargetCount, "Default adaptive virtual geometry should publish the full half-octave target list.");
+			context.Expect(sanitized.targetRatios[1] <= sanitized.targetRatios[0], "Sanitization should keep target ratios monotonic.");
+			context.Expect(settings.minimumUsefulTriangleReduction >= 0.0f, "Unsafe reduction thresholds should clamp to safe values.");
+			context.Expect(snapshot.active, "Default adaptive diagnostics should be publishable before any cooked asset exists.");
+			context.Expect(!snapshot.hiZValidation.failOpen, "Foundation diagnostics should not synthesize a Hi-Z disable path.");
+			context.Expect(snapshot.hiZValidation.inactiveReason.empty(), "Default Hi-Z validation should leave inactive reason empty until a real missing-resource failure.");
+		});
+
+		registry.Add("AdaptiveVirtualGeometry.Diagnostics.CountsPendingPinnedAndCookOutputDefaults", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset{};
+			asset.adaptiveCookProfile = MakeDefaultAdaptiveVirtualGeometryCookProfile();
+			asset.detailLevels = {
+				{ 0u, 0u, 5u, 300u, 0.0f, 1.0f, glm::vec3(-1.0f), glm::vec3(1.0f) }
+			};
+			asset.generatedLevels = {
+				{ 0u, 0u, 0u, 1.0f, 300u, 5u, 0.0f }
+			};
+			asset.skippedDetails = {
+				{ 1u, 0.70710677f, VirtualGeometryDetailTargetStatus::Skipped, VirtualGeometrySkippedDetailReason::InsufficientTriangleReduction, 0u, 0u, 0u, 0.0f, "not enough reduction" }
+			};
+			GeometryPageRuntime pinned{};
+			pinned.pageId = 0u;
+			pinned.state = GeometryPageState::Pinned;
+			pinned.byteSize = 256u;
+			pinned.fallbackPage = true;
+			pinned.pinnedFallback = true;
+			GeometryPageRuntime pendingIo{};
+			pendingIo.pageId = 1u;
+			pendingIo.state = GeometryPageState::PendingIO;
+			GeometryPageRuntime pendingUpload{};
+			pendingUpload.pageId = 2u;
+			pendingUpload.state = GeometryPageState::PendingUpload;
+			asset.pages = { pinned, pendingIo, pendingUpload };
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot snapshot =
+				TerraEngine::Renderer::BuildVirtualGeometryLodQualityDiagnostics(RenderViewType::Game, 2028u, { asset }, MakeDefaultVirtualGeometryQualityProfile());
+
+			context.ExpectEqual(1u, snapshot.cookOutput.generatedLevelCount, "Generated-level diagnostics should use explicit adaptive generated records when present.");
+			context.ExpectEqual(1u, snapshot.cookOutput.skippedDetailCount, "Skipped adaptive targets should publish a count even before Inspector UI exists.");
+			context.ExpectEqual(1u, snapshot.residentPages, "Pinned fallback pages should count as resident for rendering.");
+			context.ExpectEqual(2u, snapshot.requestedPages, "Pending IO and pending upload pages should count as requested work.");
+			context.ExpectEqual(1u, snapshot.pinnedFallbackPages, "Pinned fallback pages should have a dedicated diagnostics counter.");
+			context.ExpectEqual(1u, snapshot.pageResidency.pendingIoPages, "Pending IO pages should be counted separately.");
+			context.ExpectEqual(1u, snapshot.pageResidency.pendingUploadPages, "Pending upload pages should be counted separately.");
 		});
 	}
 }

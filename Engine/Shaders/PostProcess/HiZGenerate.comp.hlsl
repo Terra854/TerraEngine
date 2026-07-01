@@ -26,7 +26,9 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 	}
 
 	if (all(config.inputSize == config.outputSize)) {
-		// Level 0: Direct copy/conversion from depth buffer
+		// Level 0 always copies depth, even when occlusionState is 0. The CPU
+		// may publish a fail-open reason for the current frame while still
+		// warming this pyramid for a later same-view/same-target validation.
 		float d = inputDepth.Load(uint3(outputCoords, 0));
 		outputMip[outputCoords] = d;
 		return;

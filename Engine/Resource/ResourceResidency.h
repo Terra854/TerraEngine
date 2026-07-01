@@ -102,17 +102,24 @@ namespace TerraEngine::Resource
 		Resident,
 		Failed,
 		Evicting,
-		Evicted
+		Evicted,
+		PendingIO,
+		PendingUpload,
+		Pinned
 	};
 
 	enum class VirtualGeometryPageResidencyEvent : std::uint8_t
 	{
 		Request,
 		BeginLoad,
+		BeginIO,
+		BeginUpload,
 		MarkResident,
 		MarkFailed,
 		BeginEvict,
-		MarkEvicted
+		MarkEvicted,
+		PinFallback,
+		UnpinFallback
 	};
 
 	struct ResidencyMemoryPolicy
@@ -219,6 +226,10 @@ namespace TerraEngine::Resource
 		std::int32_t priority = 0;
 		std::uint64_t lastUsedFrame = 0u;
 		bool fallbackPage = false;
+		bool pinnedFallback = false;
+		float screenImportance = 0.0f;
+		float predictedNeed = 0.0f;
+		std::string requestReason;
 		std::string failureReason;
 	};
 
@@ -254,6 +265,7 @@ namespace TerraEngine::Resource
 		std::uint32_t missingPages = 0u;
 		std::uint32_t failedPages = 0u;
 		std::uint32_t evictedPages = 0u;
+		std::uint32_t pinnedFallbackPages = 0u;
 	};
 
 	struct VirtualGeometryPageBudgetPressureSummary
@@ -266,6 +278,7 @@ namespace TerraEngine::Resource
 		std::uint32_t missingPages = 0u;
 		std::uint32_t failedPages = 0u;
 		std::uint32_t evictedPages = 0u;
+		std::uint32_t pinnedFallbackPages = 0u;
 		std::vector<VirtualGeometryPageBudgetPressureContributor> contributors;
 	};
 
@@ -280,6 +293,8 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::string_view ToString(ResidencyBlockedReason reason);
 	TERRAENGINE_API std::string_view ToString(ResidencyReleaseDomain domain);
 	TERRAENGINE_API std::string_view ToString(VirtualGeometryPageResidencyState state);
+	TERRAENGINE_API bool IsVirtualGeometryPagePinnedFallback(const VirtualGeometryResidentPage& page);
+	TERRAENGINE_API bool IsVirtualGeometryPageResidentForRendering(const VirtualGeometryResidentPage& page);
 	TERRAENGINE_API std::uint64_t EstimateResidentBytes(const ResidentAsset& asset);
 	TERRAENGINE_API ResidencyBlockedReason EvaluateReleaseBlocker(const ResidentAsset& asset, const ResidencyPolicy& policy, double nowSeconds);
 	TERRAENGINE_API std::vector<ReleaseCandidate> BuildReleaseCandidates(const ResidencySnapshot& snapshot);

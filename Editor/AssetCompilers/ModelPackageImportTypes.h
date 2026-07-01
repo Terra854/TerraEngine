@@ -106,6 +106,46 @@ namespace TerraEngine::AssetPipeline
 		std::vector<TerraEngine::UUID> textureGuids;
 	};
 
+	struct GeneratedModelMeshVirtualGeometrySettings
+	{
+		bool hasOverride = false;
+		std::vector<float> targetRatios;
+		std::uint32_t minimumSourceTriangles = 512u;
+		std::uint32_t minimumGeneratedTriangles = 64u;
+		std::uint32_t minimumMeshletsPerGeneratedLevel = 2u;
+		float minimumUsefulTriangleReduction = 0.15f;
+		float minimumUsefulMeshletReduction = 0.15f;
+		float maximumGeometricError = 0.1f;
+		std::string settingsSource = "ProjectDefaults";
+	};
+
+	struct GeneratedModelMeshVirtualGeometryTarget
+	{
+		std::uint32_t targetIndex = 0u;
+		float requestedRatio = 1.0f;
+		std::string status = "Requested";
+		std::string reason;
+		// Desired counts are the advisory request; actual counts are the
+		// generated or attempted candidate that the cooker evaluated.
+		std::uint32_t desiredTriangleCount = 0u;
+		std::uint32_t desiredMeshletCount = 0u;
+		float actualRatio = 1.0f;
+		std::uint32_t actualTriangleCount = 0u;
+		std::uint32_t actualMeshletCount = 0u;
+		std::uint32_t triangleCount = 0u;
+		std::uint32_t meshletCount = 0u;
+		std::uint32_t nearestGeneratedLevelIndex = 0u;
+		float geometricError = 0.0f;
+		std::string message;
+	};
+
+	struct GeneratedModelMeshVirtualGeometryClusterSummary
+	{
+		std::uint32_t clusterCount = 0u;
+		std::uint32_t pageLinkCount = 0u;
+		bool fallbackCoverageValid = false;
+	};
+
 	struct GeneratedModelMeshAsset
 	{
 		TerraEngine::UUID guid = TerraEngine::EMPTY_UUID;
@@ -123,6 +163,9 @@ namespace TerraEngine::AssetPipeline
 		std::uint32_t virtualGeometryDetailLevels = 0u;
 		std::uint32_t virtualGeometryMeshlets = 0u;
 		std::uint32_t virtualGeometrySourceTriangles = 0u;
+		GeneratedModelMeshVirtualGeometrySettings virtualGeometrySettings;
+		std::vector<GeneratedModelMeshVirtualGeometryTarget> virtualGeometryTargets;
+		GeneratedModelMeshVirtualGeometryClusterSummary virtualGeometryClusterSummary;
 		std::vector<std::string> virtualGeometryWarnings;
 	};
 
@@ -158,6 +201,9 @@ namespace TerraEngine::AssetPipeline
 	[[nodiscard]] nlohmann::json ToJson(const ModelImportDiagnostic& value);
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelTextureAsset& value);
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMaterialAsset& value);
+	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometrySettings& value);
+	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryTarget& value);
+	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryClusterSummary& value);
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshAsset& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelMaterialAssignment& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelPackageImportResult& value);

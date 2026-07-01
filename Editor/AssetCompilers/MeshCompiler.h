@@ -19,6 +19,73 @@ enum class VirtualGeometryCompileStatus : std::uint32_t
 	NeedsRebuild = 4u
 };
 
+struct VirtualGeometryAdaptiveCompileSettings
+{
+	std::vector<float> targetRatios;
+	std::uint32_t minimumSourceTriangles = 512u;
+	std::uint32_t minimumGeneratedTriangles = 64u;
+	std::uint32_t minimumMeshletsPerGeneratedLevel = 2u;
+	float minimumUsefulTriangleReduction = 0.15f;
+	float minimumUsefulMeshletReduction = 0.15f;
+	float maximumGeometricError = 0.1f;
+	std::string settingsSource = "ProjectDefaults";
+};
+
+struct VirtualGeometryRequestedTargetCompileReport
+{
+	std::uint32_t targetIndex = 0u;
+	float requestedRatio = 1.0f;
+	std::uint32_t desiredTriangleCount = 0u;
+	std::uint32_t desiredMeshletCount = 0u;
+	std::string status = "Requested";
+};
+
+struct VirtualGeometryGeneratedLevelCompileReport
+{
+	std::uint32_t generatedLevelIndex = 0u;
+	std::uint32_t requestedTargetIndex = 0u;
+	std::uint32_t lodIndex = 0u;
+	float actualRatio = 1.0f;
+	std::uint32_t triangleCount = 0u;
+	std::uint32_t meshletCount = 0u;
+	float geometricError = 0.0f;
+};
+
+struct VirtualGeometrySkippedLevelCompileReport
+{
+	std::uint32_t targetIndex = 0u;
+	float requestedRatio = 1.0f;
+	std::string status = "Skipped";
+	std::string reason = "None";
+	std::uint32_t nearestGeneratedLevelIndex = 0u;
+	// Candidate counts describe what meshoptimizer actually produced before
+	// the adaptive gates merged, skipped, or rejected the requested target.
+	std::uint32_t candidateTriangleCount = 0u;
+	std::uint32_t candidateMeshletCount = 0u;
+	float actualCandidateRatio = 0.0f;
+	std::string message;
+};
+
+struct VirtualGeometryClusterCompileReport
+{
+	std::uint32_t clusterId = 0u;
+	std::uint32_t parentClusterId = 0xffffffffu;
+	std::uint32_t lodIndex = 0u;
+	std::uint32_t groupCount = 0u;
+	std::uint32_t pageId = 0u;
+	std::uint32_t fallbackClusterId = 0xffffffffu;
+};
+
+struct VirtualGeometryPageCompileReport
+{
+	std::uint32_t pageId = 0u;
+	std::uint32_t firstLodIndex = 0u;
+	std::uint32_t lodCount = 0u;
+	std::uint32_t fallbackPageId = 0u;
+	std::uint64_t byteSize = 0u;
+	bool pinnedFallback = false;
+};
+
 struct VirtualGeometryCompileReport
 {
 	// Status names whether this compile produced virtual geometry metadata or
@@ -30,9 +97,18 @@ struct VirtualGeometryCompileReport
 	std::uint32_t sourceTriangleCount = 0u;
 	std::uint32_t selectedFallbackAvailable = 0u;
 	float maxGeometricError = 0.0f;
+	VirtualGeometryAdaptiveCompileSettings adaptiveSettings;
+	std::vector<VirtualGeometryRequestedTargetCompileReport> requestedTargets;
+	std::vector<VirtualGeometryGeneratedLevelCompileReport> generatedLevels;
+	std::vector<VirtualGeometrySkippedLevelCompileReport> skippedLevels;
+	std::vector<VirtualGeometryClusterCompileReport> clusters;
+	std::vector<VirtualGeometryPageCompileReport> pages;
 	std::vector<std::string> warnings;
 	std::vector<std::string> errors;
 };
+
+VirtualGeometryAdaptiveCompileSettings MakeDefaultVirtualGeometryAdaptiveCompileSettings();
+VirtualGeometryAdaptiveCompileSettings SanitizeVirtualGeometryAdaptiveCompileSettings(const VirtualGeometryAdaptiveCompileSettings& settings);
 
 // Normalized compile report consumed by CLI output and validation scripts.
 struct MeshCompileReport
@@ -82,7 +158,8 @@ bool CompileMesh(
 	bool includeMeshletBounds = true,
 	MeshCompileReport* outReport = nullptr,
 	float smoothingAngle = 60.0f,
-	float weldThreshold = 1e-6f);
+	float weldThreshold = 1e-6f,
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = nullptr);
 
 // Compiles geometry that has already been extracted from a package importer.
 // Input: stable logical source name for reports plus decoded triangle vertices
@@ -95,4 +172,5 @@ bool CompileMeshFromRaw(
 	bool includeMeshletBounds = true,
 	MeshCompileReport* outReport = nullptr,
 	float smoothingAngle = 60.0f,
-	float weldThreshold = 1e-6f);
+	float weldThreshold = 1e-6f,
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = nullptr);

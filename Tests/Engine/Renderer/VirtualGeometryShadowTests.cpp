@@ -28,7 +28,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(0u, shadowRange.selectedLodIndex, "Shadow visibility should keep LOD0 for conservative silhouettes.");
 			context.ExpectEqual(16u, shadowRange.meshletCount, "Shadow visibility should dispatch the highest-detail meshlet range.");
 			context.Expect(shadowRange.virtualGeometryActive, "Shadow virtual geometry should stay active when the quality profile enables it.");
-			context.Expect(!shadowRange.hiZSelfOcclusionGuardPassed, "Shadow views must not inherit camera Hi-Z self-occlusion guards.");
+			context.Expect(shadowRange.hiZSelfOcclusionGuardPassed, "Shadow views should keep Hi-Z guard metadata diagnostic-only instead of clearing it.");
 			context.Expect(shadowRange.fallbackReason.find("shadow pass") != std::string::npos, "Shadow selection should explain its conservative policy.");
 		});
 
@@ -45,7 +45,7 @@ namespace TerraEngine::Tests
 
 			context.Expect(shadowRange.failOpen, "Invalid shadow meshlet bounds should fail open.");
 			context.ExpectEqual(0u, shadowRange.selectedLodIndex, "Invalid shadow bounds should preserve highest-detail visibility.");
-			context.Expect(!shadowRange.hiZSelfOcclusionGuardPassed, "Fail-open shadow visibility should still keep camera Hi-Z disabled.");
+			context.Expect(shadowRange.hiZSelfOcclusionGuardPassed, "Fail-open shadow visibility should not clear camera Hi-Z diagnostics.");
 		});
 	}
 }

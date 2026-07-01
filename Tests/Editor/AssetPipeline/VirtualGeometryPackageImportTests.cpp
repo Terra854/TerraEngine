@@ -114,6 +114,10 @@ namespace TerraEngine::EditorTests
 			const nlohmann::json sidecar = TerraEngine::AssetPipeline::ToJson(result);
 			context.Expect(sidecar["generatedMeshes"][0]["virtualGeometry"].is_object(), "Sidecar JSON should persist virtual geometry metadata for generated meshes.");
 			context.ExpectEqual(std::string("Cooked"), sidecar["generatedMeshes"][0]["virtualGeometry"].value("status", std::string()), "Sidecar JSON should expose the cooked status.");
+			const nlohmann::json targets = sidecar["generatedMeshes"][0]["virtualGeometry"].value("targets", nlohmann::json::array());
+			context.Expect(!targets.empty(), "Sidecar JSON should persist requested-target diagnostics for generated meshes.");
+			context.Expect(targets.front().contains("desiredTriangleCount"), "Sidecar requested-target diagnostics should include desired triangle counts.");
+			context.Expect(targets.front().contains("actualTriangleCount"), "Sidecar requested-target diagnostics should include actual generated or candidate triangle counts.");
 
 			const std::filesystem::path sourceAssetPath = tempRoot / "Assets/Models/virtual-multi-mesh.gltf";
 			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(sourceAssetPath, result), "Virtual geometry package sidecar should save.");
@@ -121,6 +125,10 @@ namespace TerraEngine::EditorTests
 			context.Expect(TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourceAssetPath, loaded), "Virtual geometry package sidecar should reload.");
 			context.ExpectEqual(std::string("Cooked"), loaded.generatedMeshes.front().virtualGeometryStatus, "Virtual geometry status should round-trip through the sidecar loader.");
 			context.Expect(loaded.generatedMeshes.front().virtualGeometryCooked, "Virtual geometry cooked flag should round-trip through the sidecar loader.");
+			context.Expect(loaded.generatedMeshes.front().virtualGeometryClusterSummary.clusterCount > 0u, "Virtual geometry cluster summary should round-trip through the sidecar loader.");
+			context.Expect(!loaded.generatedMeshes.front().virtualGeometryTargets.empty(), "Requested-target diagnostics should round-trip through the sidecar loader.");
+			context.Expect(loaded.generatedMeshes.front().virtualGeometryTargets.front().desiredTriangleCount > 0u, "Desired target counts should round-trip through the sidecar loader.");
+			context.Expect(loaded.generatedMeshes.front().virtualGeometryTargets.front().actualTriangleCount > 0u, "Actual target counts should round-trip through the sidecar loader.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.PackageImport.PreservesStableGeneratedIdentifiers", [](TestContext& context) {
@@ -145,6 +153,33 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(TerraEngine::ToHexString(first.generatedMaterials.front().guid), TerraEngine::ToHexString(second.generatedMaterials.front().guid), "Generated material GUID should remain stable across reimport.");
 			context.ExpectEqual(TerraEngine::ToHexString(first.materialAssignments.front().meshGuid), TerraEngine::ToHexString(second.materialAssignments.front().meshGuid), "Material slot mesh reference should remain stable across reimport.");
 			context.Expect(TerraEngine::ToHexString(first.generatedMeshes.front().guid) != TerraEngine::ToHexString(packageGuid), "Generated mesh should keep a package-child ID instead of being overwritten by the package GUID.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.PackageImport.PreservesGeneratedMeshOverrideSettings", [](TestContext& context) {
+			const std::filesystem::path tempRoot = MakeVirtualGeometryPackageTempRoot("GeneratedOverrideSettings");
+			const nlohmann::json document = LoadBaseGltfFixture();
+			const std::filesystem::path fixturePath = WriteGltfFixture(tempRoot, "override-settings.gltf", document);
+			const TerraEngine::UUID packageGuid = TerraEngine::GenerateUUID();
+			auto options = BuildPackageOptions(tempRoot, fixturePath, "Models/override-settings.gltf", packageGuid);
+			options.hasVirtualGeometrySettings = true;
+			options.virtualGeometrySettings.hasOverride = true;
+			options.virtualGeometrySettings.settingsSource = "PerMeshOverride";
+			options.virtualGeometrySettings.targetRatios = { 1.0f, 0.5f };
+			options.virtualGeometrySettings.minimumGeneratedTriangles = 32u;
+
+			const auto result = TerraEngine::AssetPipeline::ImportModelPackage(options);
+			context.Expect(result.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed, "Package import with generated mesh override settings should succeed.");
+			context.Expect(!result.generatedMeshes.empty(), "Package import should produce a generated mesh record.");
+			context.Expect(result.generatedMeshes.front().virtualGeometrySettings.hasOverride, "Generated mesh record should preserve the override flag.");
+			context.ExpectEqual(static_cast<std::size_t>(2u), result.generatedMeshes.front().virtualGeometrySettings.targetRatios.size(), "Generated mesh override ratios should be stored in the import result.");
+			context.ExpectEqual(32u, result.generatedMeshes.front().virtualGeometrySettings.minimumGeneratedTriangles, "Generated mesh override thresholds should be stored in the import result.");
+
+			const std::filesystem::path sourceAssetPath = tempRoot / "Assets/Models/override-settings.gltf";
+			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(sourceAssetPath, result), "Override package sidecar should save.");
+			TerraEngine::AssetPipeline::ModelPackageImportResult loaded;
+			context.Expect(TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourceAssetPath, loaded), "Override package sidecar should reload.");
+			context.Expect(loaded.generatedMeshes.front().virtualGeometrySettings.hasOverride, "Generated mesh override flag should round-trip through the sidecar.");
+			context.ExpectEqual(static_cast<std::size_t>(2u), loaded.generatedMeshes.front().virtualGeometrySettings.targetRatios.size(), "Generated mesh override ratios should round-trip through the sidecar.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.PackageImport.UnsupportedContentStaysNonBlocking", [](TestContext& context) {

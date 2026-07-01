@@ -18,6 +18,7 @@
 
 #include "Core/Export.h"
 #include "Core/Scheduling/FrameWorkload.h"
+#include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Utilities/UUID.h"
 
 namespace TerraEngine::Resource
@@ -151,6 +152,7 @@ namespace TerraEngine::Resource
 		std::int32_t priority = 0;
 		bool resident = false;
 		bool failed = false;
+		std::uint32_t clusterId = 0u;
 	};
 
 	struct VirtualGeometryPageNeedInput
@@ -159,8 +161,35 @@ namespace TerraEngine::Resource
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		std::string viewId;
 		std::uint32_t desiredLodIndex = 0u;
+		std::uint32_t desiredClusterId = 0u;
 		double retentionSeconds = 0.0;
+		float screenImportance = 0.0f;
+		float predictedNeed = 0.0f;
+		std::int32_t assetPriority = 0;
+		std::uint64_t budgetPressureBytes = 0u;
+		bool fallbackRequired = true;
 		std::vector<VirtualGeometryStreamingPage> pages;
+	};
+
+	struct VirtualGeometryPageRequestPacket
+	{
+		StreamableAssetId assetId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::string viewId;
+		std::uint32_t pageId = 0u;
+		std::uint32_t clusterId = 0u;
+		std::uint32_t desiredLodIndex = 0u;
+		std::int32_t priority = 0;
+		bool fallbackRequest = false;
+		std::string reason;
+	};
+
+	struct VirtualGeometryPageCatalogEntry
+	{
+		StreamableAssetId assetId = TerraEngine::EMPTY_UUID;
+		std::vector<VirtualGeometryStreamingPage> pages;
+		std::int32_t assetPriority = 0;
+		std::uint64_t budgetPressureBytes = 0u;
 	};
 
 	struct StreamingView
@@ -281,7 +310,9 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::int32_t PriorityClassBias(StreamingPriorityClass priorityClass);
 	TERRAENGINE_API bool ValidatePreloadRule(const PreloadRule& rule, std::string* reason = nullptr);
 	TERRAENGINE_API std::vector<StreamingNeed> EvaluatePreloadRules(const std::vector<PreloadRule>& rules, double nowSeconds = 0.0);
+	TERRAENGINE_API std::vector<VirtualGeometryPageNeedInput> BuildVirtualGeometryPageNeedInputsFromSelectionStates(const std::vector<TerraEngine::Renderer::VirtualGeometryViewSelectionState>& states, const std::vector<VirtualGeometryPageCatalogEntry>& catalogs, float preloadBias = 1.0f);
 	TERRAENGINE_API std::vector<StreamingNeed> BuildVirtualGeometryPageStreamingNeeds(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy, double nowSeconds = 0.0);
+	TERRAENGINE_API std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy);
 	TERRAENGINE_API std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds = 0.0);
 	// This declaration describes the worker-safe planning phase. The actual
 	// ResourceManager registration and load/upload mutation still happens later

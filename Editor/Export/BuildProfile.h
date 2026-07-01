@@ -72,6 +72,19 @@ struct BuildProfile {
 	/// Optional exported runtime geometry page budget. Zero keeps the runtime default.
 	std::uint64_t virtualGeometryBudgetBytes = 0;
 
+	/// Runtime LOD error scale applied by exported virtual geometry selection.
+	float virtualGeometryLodErrorScale = 1.0f;
+
+	/// Maximum number of detail levels an exported build may drop from desired detail.
+	uint32_t virtualGeometryMaxLodDrop = 0;
+
+	/// Whether exported builds may trust validated Hi-Z history for VG occlusion.
+	/// The runtime still fails open when history, view, or guard metadata is unsafe.
+	bool virtualGeometryHiZOcclusionEnabled = true;
+
+	/// Runtime page preload bias used when exported builds request VG pages.
+	float virtualGeometryPreloadBias = 1.0f;
+
 	/// Additional scenes to include in the export (beyond the active scene).
 	std::vector<std::string> includedScenes;
 

@@ -160,7 +160,11 @@ bool SaveBuildProfile(const BuildProfile& profile, const std::filesystem::path& 
 		j["virtualGeometry"] = {
 			{ "qualityLevel", profile.virtualGeometryQualityLevel },
 			{ "diagnosticsEnabled", profile.virtualGeometryDiagnosticsEnabled },
-			{ "geometryBudgetBytes", profile.virtualGeometryBudgetBytes }
+			{ "geometryBudgetBytes", profile.virtualGeometryBudgetBytes },
+			{ "lodErrorScale", profile.virtualGeometryLodErrorScale },
+			{ "maxLodDrop", profile.virtualGeometryMaxLodDrop },
+			{ "hiZOcclusionEnabled", profile.virtualGeometryHiZOcclusionEnabled },
+			{ "preloadBias", profile.virtualGeometryPreloadBias }
 		};
 		j["includedScenes"] = profile.includedScenes;
 
@@ -217,6 +221,10 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path) {
 			profile.virtualGeometryQualityLevel = virtualGeometryIt->value("qualityLevel", profile.virtualGeometryQualityLevel);
 			profile.virtualGeometryDiagnosticsEnabled = virtualGeometryIt->value("diagnosticsEnabled", profile.virtualGeometryDiagnosticsEnabled);
 			profile.virtualGeometryBudgetBytes = virtualGeometryIt->value("geometryBudgetBytes", profile.virtualGeometryBudgetBytes);
+			profile.virtualGeometryLodErrorScale = virtualGeometryIt->value("lodErrorScale", profile.virtualGeometryLodErrorScale);
+			profile.virtualGeometryMaxLodDrop = virtualGeometryIt->value("maxLodDrop", profile.virtualGeometryMaxLodDrop);
+			profile.virtualGeometryHiZOcclusionEnabled = virtualGeometryIt->value("hiZOcclusionEnabled", profile.virtualGeometryHiZOcclusionEnabled);
+			profile.virtualGeometryPreloadBias = virtualGeometryIt->value("preloadBias", profile.virtualGeometryPreloadBias);
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("includedScenes")) {

@@ -42,20 +42,45 @@ namespace TerraEngine::Tests
 
 			auto result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::Request, 10u);
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Requested, "A missing page should move to Requested when visibility asks for it.");
-			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginLoad, 11u);
-			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Loading, "Requested page should enter Loading before publication.");
-			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::MarkResident, 12u);
-			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Resident, "Loaded page should become Resident only at the publication step.");
-			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginEvict, 13u);
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginIO, 11u);
+			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::PendingIO, "Requested page should enter PendingIO when async disk work starts.");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginUpload, 12u);
+			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::PendingUpload, "Validated IO output should enter PendingUpload before GPU publication.");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::MarkResident, 13u);
+			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Resident, "Uploaded page should become Resident only at the protected publication step.");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginEvict, 14u);
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Evicting, "Resident non-fallback page should enter Evicting under budget pressure.");
-			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::MarkEvicted, 14u);
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::MarkEvicted, 15u);
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Evicted, "Evicting page should become Evicted after the protected release boundary.");
 
-			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::Request, 15u);
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::Request, 16u);
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Requested, "Evicted pages should be requestable again.");
-			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::MarkFailed, 16u, "io-error");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::MarkFailed, 17u, "io-error");
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Failed, "Failed loads should publish Failed state atomically.");
 			context.ExpectEqual(std::string("io-error"), page.failureReason, "Failure reason should be retained for diagnostics.");
+		});
+
+		registry.Add("VirtualGeometry.Resource.Residency.PinnedFallbackPublishesWithoutVisibleHoles", [](TestContext& context) {
+			Resource::VirtualGeometryResidentPage page;
+			page.assetId = MakePageAssetId(3u);
+			page.pageId = 0u;
+			page.fallbackPageId = 0u;
+			page.byteSize = 256u;
+
+			auto result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::PinFallback, 1u, "visible fallback");
+			context.Expect(!result.applied && page.pinnedFallback, "Fallback pin should be recorded even before the page is resident.");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::Request, 2u);
+			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Requested, "Pinned fallback pages should still follow the normal request flow.");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginIO, 3u);
+			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::PendingIO, "Pinned fallback pages should enter PendingIO.");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginUpload, 4u);
+			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::PendingUpload, "Pinned fallback pages should enter PendingUpload.");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::MarkResident, 5u);
+			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Pinned, "Resident fallback pages should publish as Pinned while visible.");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginEvict, 6u);
+			context.Expect(!result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Pinned, "Pinned fallback pages must not enter eviction under budget pressure.");
+			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::UnpinFallback, 7u);
+			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Resident, "Unpinning should return the fallback page to ordinary resident state.");
 		});
 
 		registry.Add("VirtualGeometry.Resource.Residency.BudgetEvictsHighDetailBeforeFallback", [](TestContext& context) {
@@ -105,6 +130,73 @@ namespace TerraEngine::Tests
 			}
 			context.Expect(sawDesired, "Desired high-detail page should be requested.");
 			context.Expect(sawFallback, "Fallback page should be requested when it is not resident.");
+		});
+
+		registry.Add("VirtualGeometry.Resource.Streaming.PrioritizesVisibilityPredictionImportanceAndPressure", [](TestContext& context) {
+			Resource::VirtualGeometryPageNeedInput important;
+			important.assetId = MakePageAssetId(20u);
+			important.objectId = MakePageAssetId(21u);
+			important.viewId = "game";
+			important.desiredLodIndex = 2u;
+			important.screenImportance = 0.9f;
+			important.predictedNeed = 0.8f;
+			important.assetPriority = 50;
+			important.budgetPressureBytes = 64u * 1024u * 1024u;
+			important.pages = {
+				{ 0u, 0u, 1u, 0u, 128u, 1000, true, false },
+				{ 2u, 2u, 1u, 0u, 512u, 10, false, false }
+			};
+
+			Resource::VirtualGeometryPageNeedInput background = important;
+			background.assetId = MakePageAssetId(22u);
+			background.objectId = MakePageAssetId(23u);
+			background.screenImportance = 0.1f;
+			background.predictedNeed = 0.0f;
+			background.assetPriority = 0;
+			background.budgetPressureBytes = 0u;
+
+			const std::vector<Resource::StreamingNeed> needs =
+				Resource::BuildVirtualGeometryPageStreamingNeeds({ background, important }, Resource::MakeDefaultStreamingPolicy(), 50.0);
+
+			context.ExpectEqual(static_cast<std::size_t>(2u), needs.size(), "Two missing desired pages should produce two streaming needs.");
+			context.ExpectEqual(TerraEngine::ToHexString(important.assetId), TerraEngine::ToHexString(needs.front().assetId), "High-importance predicted page under pressure should sort first.");
+			context.Expect(needs.front().priority > needs.back().priority, "Priority should combine page priority, screen importance, prediction, asset bias, and pressure.");
+		});
+
+		registry.Add("VirtualGeometry.Resource.Streaming.BuildsSnapshotPageRequestPackets", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState state;
+			state.viewType = RenderViewType::Game;
+			state.outputId = 2u;
+			state.pageNeeds.push_back({
+				MakePageAssetId(30u),
+				MakePageAssetId(31u),
+				3u,
+				9u,
+				3u,
+				0.75f,
+				true
+			});
+
+			Resource::VirtualGeometryPageCatalogEntry catalog;
+			catalog.assetId = MakePageAssetId(30u);
+			catalog.assetPriority = 25;
+			catalog.budgetPressureBytes = 8u * 1024u * 1024u;
+			catalog.pages = {
+				{ 0u, 0u, 1u, 0u, 128u, 1000, false, false },
+				{ 3u, 3u, 1u, 0u, 512u, 100, false, false }
+			};
+
+			const std::vector<Resource::VirtualGeometryPageNeedInput> inputs =
+				Resource::BuildVirtualGeometryPageNeedInputsFromSelectionStates({ state }, { catalog }, 2.0f);
+			const std::vector<Resource::VirtualGeometryPageRequestPacket> packets =
+				Resource::BuildVirtualGeometryPageRequestPackets(inputs, Resource::MakeDefaultStreamingPolicy());
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), inputs.size(), "Render selection snapshots should become page need inputs.");
+			context.ExpectEqual(std::string("Game:2"), inputs.front().viewId, "Snapshot adapter should preserve view ownership in a stable string.");
+			context.ExpectEqual(static_cast<std::size_t>(2u), packets.size(), "Async handoff should request desired and fallback pages when neither is resident.");
+			context.Expect(packets.front().fallbackRequest, "Fallback request should sort first because it protects visibility.");
+			context.ExpectEqual(0u, packets.front().pageId, "Fallback packet should target the fallback page.");
+			context.ExpectEqual(3u, packets.back().pageId, "Desired packet should target the requested high-detail page.");
 		});
 
 		registry.Add("VirtualGeometry.Resource.Residency.BudgetPressureReportsTopContributors", [](TestContext& context) {

@@ -41,6 +41,7 @@
 #include <future>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <utility>
 #include <unordered_map>
@@ -96,6 +97,8 @@ namespace
 		std::uint64_t signature = 0u;
 		std::uint64_t lastTouchedFrameId = 0u;
 		std::vector<DrawCommand> commands;
+		std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord> selectedClusters;
+		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
 		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
 	};
 
@@ -123,8 +126,19 @@ namespace
 	struct VisibleCommandBuildResult
 	{
 		std::vector<DrawCommand> commands;
+		std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord> selectedClusters;
+		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
 		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
 		bool cacheHit = false;
+	};
+
+	struct VirtualGeometryViewSelectionPacket
+	{
+		// RenderSystem prepares these vectors from immutable mesh/runtime data
+		// before the protected GPU submit boundary. Streaming and diagnostics
+		// consume the copied packet, not ResourceManager's live mesh cache.
+		std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord> selectedClusters;
+		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
 	};
 
 	VirtualGeometryAssetRuntime BuildVirtualGeometryRuntimeFromMesh(const TerraEngine::UUID& meshId, const Mesh& mesh)
@@ -134,11 +148,24 @@ namespace
 		runtime.cookStatus = mesh.hasVirtualGeometry ? VirtualGeometryCookStatus::Cooked : VirtualGeometryCookStatus::NeedsRebuild;
 		runtime.sourceTriangleCount = mesh.virtualGeometryHeader.sourceTriangleCount;
 		runtime.sourceVertexCount = mesh.virtualGeometryHeader.sourceVertexCount;
+		runtime.clusterCoverageValidated =
+			(mesh.virtualGeometryHeader.flags & kVirtualGeometryValidationFlagClusterCoverageValidated) != 0u;
 
 		// Convert the loader-owned TEMF tables into a compact runtime mirror.
 		// Render preparation copies this mirror into immutable frame snapshots,
 		// so workers can choose LOD/page ranges without touching ResourceManager
 		// caches or live scene/component storage.
+		runtime.requestedTargets.reserve(mesh.virtualGeometryRequestedTargets.size());
+		for (const VirtualGeometryRequestedTargetRecord& target : mesh.virtualGeometryRequestedTargets)
+		{
+			VirtualGeometryRequestedTargetRuntime record{};
+			record.targetIndex = target.targetIndex;
+			record.requestedRatio = target.requestedRatio;
+			record.desiredTriangleCount = target.desiredTriangleCount;
+			record.desiredMeshletCount = target.desiredMeshletCount;
+			record.status = static_cast<VirtualGeometryDetailTargetStatus>(target.status);
+			runtime.requestedTargets.push_back(record);
+		}
 		runtime.detailLevels.reserve(mesh.virtualGeometryDetailLevels.size());
 		for (const VirtualGeometryDetailLevelRecord& detail : mesh.virtualGeometryDetailLevels)
 		{
@@ -151,20 +178,75 @@ namespace
 			record.targetRatio = detail.targetRatio;
 			record.boundsMin = glm::vec3(detail.boundsMin[0], detail.boundsMin[1], detail.boundsMin[2]);
 			record.boundsMax = glm::vec3(detail.boundsMax[0], detail.boundsMax[1], detail.boundsMax[2]);
+			record.requestedTargetIndex = detail.requestedTargetIndex;
+			record.targetStatus = static_cast<VirtualGeometryDetailTargetStatus>(detail.targetStatus);
 			runtime.detailLevels.push_back(record);
+
+			VirtualGeometryGeneratedLevelRuntime generated{};
+			generated.generatedLevelIndex = static_cast<std::uint32_t>(runtime.generatedLevels.size());
+			generated.requestedTargetIndex = detail.requestedTargetIndex;
+			generated.lodIndex = detail.lodIndex;
+			generated.actualRatio = detail.targetRatio;
+			generated.triangleCount = detail.primitiveCount;
+			generated.meshletCount = detail.meshletCount;
+			generated.geometricError = detail.geometricError;
+			runtime.generatedLevels.push_back(generated);
+		}
+		runtime.skippedDetails.reserve(mesh.virtualGeometrySkippedDetails.size());
+		for (const VirtualGeometrySkippedDetailRecord& skipped : mesh.virtualGeometrySkippedDetails)
+		{
+			VirtualGeometrySkippedDetailRuntime record{};
+			record.requestedTargetIndex = skipped.targetIndex;
+			record.requestedRatio = skipped.requestedRatio;
+			record.status = static_cast<VirtualGeometryDetailTargetStatus>(skipped.status);
+			record.reason = static_cast<VirtualGeometrySkippedDetailReason>(skipped.reason);
+			record.nearestGeneratedLevelIndex = skipped.nearestGeneratedLodIndex;
+			record.candidateTriangleCount = skipped.candidateTriangleCount;
+			record.candidateMeshletCount = skipped.candidateMeshletCount;
+			record.actualCandidateRatio = skipped.actualCandidateRatio;
+			if (skipped.messageStringSize > 0u
+				&& skipped.messageStringOffset + skipped.messageStringSize <= mesh.virtualGeometryDiagnosticStrings.size())
+			{
+				record.message = mesh.virtualGeometryDiagnosticStrings.substr(skipped.messageStringOffset, skipped.messageStringSize);
+			}
+			runtime.skippedDetails.push_back(std::move(record));
 		}
 		runtime.cullableGroups.reserve(mesh.virtualGeometryCullableGroups.size());
 		for (const VirtualGeometryCullableGroupRecord& group : mesh.virtualGeometryCullableGroups)
 		{
+			const std::uint32_t groupOrdinal = static_cast<std::uint32_t>(runtime.cullableGroups.size());
 			VirtualGeometryCullableGroupRuntime record{};
 			record.groupIndex = group.groupIndex;
 			record.lodIndex = group.lodIndex;
-			record.meshletIndex = group.vertexOffset;
+			// TEMF v1 stores one cullable group per meshlet. The group index is
+			// therefore the meshlet table coordinate the task shader needs; the
+			// vertex offset points into the remap stream and must never be used as
+			// a meshlet dispatch offset.
+			record.meshletIndex = group.groupIndex < mesh.meshletRecords.size() ? group.groupIndex : groupOrdinal;
 			record.sectionId = group.sectionId;
 			record.pageId = group.pageId;
 			record.boundsCenter = glm::vec3(group.boundsCenter[0], group.boundsCenter[1], group.boundsCenter[2]);
 			record.boundsRadius = group.boundsRadius;
 			runtime.cullableGroups.push_back(record);
+		}
+		runtime.clusters.reserve(mesh.virtualGeometryClusters.size());
+		for (const VirtualGeometryClusterRecord& cluster : mesh.virtualGeometryClusters)
+		{
+			VirtualGeometryClusterRuntime record{};
+			record.clusterId = cluster.clusterId;
+			record.parentClusterId = cluster.parentClusterId;
+			record.firstChildClusterId = cluster.firstChildClusterId;
+			record.childCount = cluster.childCount;
+			record.lodIndex = cluster.lodIndex;
+			record.firstGroupIndex = cluster.groupOffset;
+			record.groupCount = cluster.groupCount;
+			record.materialSectionId = cluster.materialSectionId;
+			record.pageId = cluster.pageId;
+			record.fallbackClusterId = cluster.fallbackClusterId;
+			record.geometricError = cluster.geometricError;
+			record.boundsCenter = glm::vec3(cluster.boundsCenter[0], cluster.boundsCenter[1], cluster.boundsCenter[2]);
+			record.boundsRadius = cluster.boundsRadius;
+			runtime.clusters.push_back(record);
 		}
 		runtime.pages.reserve(mesh.virtualGeometryPages.size());
 		for (const VirtualGeometryPageRecord& page : mesh.virtualGeometryPages)
@@ -179,6 +261,9 @@ namespace
 			record.priority = static_cast<float>(page.priority);
 			record.fallbackPageId = page.fallbackPageId;
 			record.fallbackPage = page.pageId == page.fallbackPageId || page.firstLodIndex == 0u;
+			record.clusterOffset = page.clusterPageLinkOffset;
+			record.clusterCount = page.clusterPageLinkCount;
+			record.pinnedFallback = record.fallbackPage;
 			// TEMF v1 keeps the cooked virtual-geometry pages inside the loaded
 			// mesh payload. Until page streaming starts replacing these embedded
 			// ranges with demand-loaded storage, every published page is resident
@@ -202,7 +287,7 @@ namespace
 
 	bool GeometryPageIsResident(const GeometryPageRuntime& page)
 	{
-		return page.state == GeometryPageState::Resident;
+		return page.state == GeometryPageState::Resident || page.state == GeometryPageState::Pinned;
 	}
 
 	const GeometryPageRuntime* FindGeometryPageForLod(const VirtualGeometryAssetRuntime& asset, std::uint32_t lodIndex)
@@ -227,6 +312,73 @@ namespace
 			}
 		}
 		return nullptr;
+	}
+
+	const VirtualGeometryClusterRuntime* FindVirtualGeometryClusterById(const VirtualGeometryAssetRuntime& asset, std::uint32_t clusterId)
+	{
+		for (const VirtualGeometryClusterRuntime& cluster : asset.clusters)
+		{
+			if (cluster.clusterId == clusterId)
+			{
+				return &cluster;
+			}
+		}
+		return nullptr;
+	}
+
+	bool VirtualGeometryClusterPageIsResident(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryClusterRuntime& cluster)
+	{
+		if (asset.pages.empty())
+		{
+			return true;
+		}
+		const GeometryPageRuntime* page = FindGeometryPageById(asset, cluster.pageId);
+		return page != nullptr && GeometryPageIsResident(*page);
+	}
+
+	struct VirtualGeometryClusterMeshletRange
+	{
+		std::uint32_t meshletOffset = 0u;
+		std::uint32_t meshletCount = 0u;
+		bool valid = false;
+	};
+
+	VirtualGeometryClusterMeshletRange ResolveVirtualGeometryClusterMeshletRange(
+		const VirtualGeometryAssetRuntime& asset,
+		const VirtualGeometryClusterRuntime& cluster)
+	{
+		VirtualGeometryClusterMeshletRange range{};
+		if (cluster.groupCount == 0u || cluster.firstGroupIndex >= asset.cullableGroups.size())
+		{
+			return range;
+		}
+
+		const std::uint32_t firstGroup = cluster.firstGroupIndex;
+		const std::uint32_t lastGroupExclusive = std::min<std::uint32_t>(
+			static_cast<std::uint32_t>(asset.cullableGroups.size()),
+			firstGroup + cluster.groupCount);
+		std::uint32_t minMeshlet = std::numeric_limits<std::uint32_t>::max();
+		std::uint32_t maxMeshlet = 0u;
+		for (std::uint32_t groupIndex = firstGroup; groupIndex < lastGroupExclusive; ++groupIndex)
+		{
+			const VirtualGeometryCullableGroupRuntime& group = asset.cullableGroups[groupIndex];
+			minMeshlet = std::min(minMeshlet, group.meshletIndex);
+			maxMeshlet = std::max(maxMeshlet, group.meshletIndex);
+		}
+
+		if (minMeshlet == std::numeric_limits<std::uint32_t>::max() || maxMeshlet < minMeshlet)
+		{
+			return range;
+		}
+
+		// The current task shader accepts one contiguous meshlet range per draw.
+		// If a future page layout stores non-contiguous group coverage, dispatch
+		// the conservative envelope instead of dropping visible geometry; the
+		// selected-cluster packet still records the sparse identity for tooling.
+		range.meshletOffset = minMeshlet;
+		range.meshletCount = (maxMeshlet - minMeshlet) + 1u;
+		range.valid = true;
+		return range;
 	}
 
 	std::size_t DetailIndexForLod(const VirtualGeometryAssetRuntime& asset, std::uint32_t lodIndex)
@@ -267,6 +419,24 @@ namespace
 			// streaming system catches up or reports a page failure.
 			outFallbackReason = "desired virtual geometry page is not resident; using resident fallback page";
 			return DetailIndexForLod(asset, fallbackPage->firstLodIndex);
+		}
+
+		const GeometryPageRuntime* bestResidentFallback = nullptr;
+		for (const GeometryPageRuntime& page : asset.pages)
+		{
+			if (!GeometryPageIsResident(page) || page.firstLodIndex > desiredLod)
+			{
+				continue;
+			}
+			if (bestResidentFallback == nullptr || page.firstLodIndex > bestResidentFallback->firstLodIndex)
+			{
+				bestResidentFallback = &page;
+			}
+		}
+		if (bestResidentFallback != nullptr)
+		{
+			outFallbackReason = "desired virtual geometry page is not resident; using best resident fallback page";
+			return DetailIndexForLod(asset, bestResidentFallback->firstLodIndex);
 		}
 
 		for (const GeometryPageRuntime& page : asset.pages)
@@ -338,6 +508,26 @@ namespace
 		const float viewportMax = static_cast<float>(std::max(targetSize.x, targetSize.y));
 		const float projectedRadius = (localRadius * std::max(worldScale, 1e-6f) / distance) * viewportMax;
 		return std::isfinite(projectedRadius) ? projectedRadius : 512.0f;
+	}
+
+	float EstimateProjectedClusterRadiusPixels(const VirtualGeometryClusterRuntime& cluster, const glm::mat4& modelMatrix, const glm::vec3& cameraPosition, const glm::uvec2& targetSize, float fallbackProjectedRadiusPixels)
+	{
+		// Cluster LOD is decided from the cluster's own conservative sphere.
+		// When tests call the legacy overload without camera data, fall back to
+		// the already-computed object radius so selection remains deterministic.
+		if (targetSize.x == 0u || targetSize.y == 0u || cluster.boundsRadius <= 0.0f)
+		{
+			return fallbackProjectedRadiusPixels;
+		}
+
+		const glm::vec3 worldCenter = glm::vec3(modelMatrix * glm::vec4(cluster.boundsCenter, 1.0f));
+		const float worldScale = std::max(
+			glm::length(glm::vec3(modelMatrix[0])),
+			std::max(glm::length(glm::vec3(modelMatrix[1])), glm::length(glm::vec3(modelMatrix[2]))));
+		const float distance = std::max(glm::length(worldCenter - cameraPosition), 1e-3f);
+		const float viewportMax = static_cast<float>(std::max(targetSize.x, targetSize.y));
+		const float projectedRadius = (cluster.boundsRadius * std::max(worldScale, 1e-6f) / distance) * viewportMax;
+		return std::isfinite(projectedRadius) ? projectedRadius : fallbackProjectedRadiusPixels;
 	}
 
 	std::uint64_t HashFloat(float value)
@@ -455,18 +645,11 @@ namespace
 		HashCombine(seed, settings.ambientOcclusionQuality);
 		HashCombine(seed, settings.anisotropicFiltering);
 		HashCombine(seed, settings.variableRateShading);
-		const VirtualGeometryQualityProfile virtualGeometry = SanitizeVirtualGeometryQualityProfile(settings.virtualGeometry);
 		// Virtual-geometry debug and quality settings affect the selected meshlet
 		// range stored in cached draw commands. Include them in the cache key so
 		// editor dropdown changes are visible immediately, without waiting for a
 		// camera move to invalidate the view-projection portion of the key.
-		HashCombine(seed, HashFloat(virtualGeometry.lodErrorScale));
-		HashCombine(seed, virtualGeometry.maxLodDrop);
-		HashCombine(seed, virtualGeometry.hiZOcclusionEnabled ? 1u : 0u);
-		HashCombine(seed, virtualGeometry.hiZSelfOcclusionGuardEnabled ? 1u : 0u);
-		HashCombine(seed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(virtualGeometry.debugVisualizationMode)));
-		HashCombine(seed, virtualGeometry.geometryBudgetBytes);
-		HashCombine(seed, HashFloat(virtualGeometry.preloadBias));
+		HashCombine(seed, BuildVirtualGeometryQualityProfileSignature(settings.virtualGeometry));
 		return seed;
 	}
 
@@ -1383,24 +1566,31 @@ void RenderSystem::Update(float deltaTime)
 		std::vector<VirtualGeometryAssetRuntime>& target = viewType == RenderViewType::Scene
 			? sceneVirtualGeometryDiagnosticsAssets
 			: (viewType == RenderViewType::Shadow ? shadowVirtualGeometryDiagnosticsAssets : gameVirtualGeometryDiagnosticsAssets);
+		std::unordered_set<TerraEngine::UUID> seenMeshes;
 		for (const DrawCommand& command : commands)
 		{
+			if (seenMeshes.contains(command.meshId))
+			{
+				continue;
+			}
 			if (const Mesh* mesh = ResourceManager::Instance().GetMesh(command.meshId); mesh != nullptr && mesh->hasVirtualGeometry)
 			{
 				target.push_back(BuildVirtualGeometryRuntimeFromMesh(command.meshId, *mesh));
+				seenMeshes.insert(command.meshId);
 			}
 		}
 	};
 
 	auto recordVirtualGeometryViewSelection = [&](
 		const std::vector<DrawCommand>& commands,
+		const std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord>& selectedClusters,
+		const std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord>& pageNeeds,
 		RenderOutputKind outputKind,
 		RenderViewType viewType,
 		const glm::uvec2& targetSize,
 		std::uint32_t outputId,
 		bool shadowPass,
-		bool exportRuntime,
-		bool hiZOcclusionAllowed) {
+		bool exportRuntime) {
 		TerraEngine::Renderer::VirtualGeometryViewSelectionState state;
 		state.outputKind = outputKind;
 		state.viewType = viewType;
@@ -1408,16 +1598,32 @@ void RenderSystem::Update(float deltaTime)
 		state.outputId = outputId;
 		state.shadowPass = shadowPass;
 		state.exportRuntime = exportRuntime;
-		state.hiZOcclusionAllowed = hiZOcclusionAllowed;
+		state.hiZOcclusionAllowed = true;
+		state.hiZInactiveReason.clear();
+		state.selectedClusters = selectedClusters;
+		state.pageNeeds = pageNeeds;
 		for (const DrawCommand& command : commands)
 		{
 			TerraEngine::Renderer::VirtualGeometryDrawRange range{};
 			range.selectedLodIndex = command.selectedVirtualLod;
 			range.meshletOffset = command.virtualMeshletOffset;
 			range.meshletCount = command.virtualMeshletCount;
-			range.virtualGeometryActive = (command.virtualGeometryFlags & 1u) != 0u;
-			range.failOpen = (command.virtualGeometryFlags & 2u) != 0u;
-			range.hiZSelfOcclusionGuardPassed = (command.virtualGeometryFlags & 4u) != 0u;
+			range.virtualGeometryActive = (command.virtualGeometryFlags & kVirtualGeometryFlagActive) != 0u;
+			range.failOpen = (command.virtualGeometryFlags & kVirtualGeometryFlagFailOpen) != 0u;
+			range.hiZSelfOcclusionGuardPassed = true;
+			range.hiZNearPlaneGuardPassed = true;
+			range.hiZThinGeometryGuardPassed = true;
+			range.selectedClusterOffset = command.selectedVirtualClusterOffset;
+			range.selectedClusterCount = command.selectedVirtualClusterCount;
+			range.pageNeedOffset = command.selectedVirtualPageNeedOffset;
+			range.pageNeedCount = command.selectedVirtualPageNeedCount;
+			state.hiZSelfOcclusionGuardPassed = state.hiZSelfOcclusionGuardPassed && range.hiZSelfOcclusionGuardPassed;
+			state.hiZNearPlaneGuardPassed = state.hiZNearPlaneGuardPassed && range.hiZNearPlaneGuardPassed;
+			state.hiZThinGeometryGuardPassed = state.hiZThinGeometryGuardPassed && range.hiZThinGeometryGuardPassed;
+			if (state.hiZInactiveReason.empty() && !range.hiZInactiveReason.empty())
+			{
+				state.hiZInactiveReason = range.hiZInactiveReason;
+			}
 			if (range.failOpen)
 			{
 				range.fallbackReason = shadowPass
@@ -1439,37 +1645,115 @@ void RenderSystem::Update(float deltaTime)
 	};
 
 	auto applyVirtualGeometrySelection = [&](std::vector<DrawCommand>& commands, RenderViewType viewType, const glm::vec3& cameraPosition, const glm::uvec2& targetSize) {
+		VirtualGeometryViewSelectionPacket packet;
+		std::vector<DrawCommand> expandedCommands;
+		expandedCommands.reserve(commands.size());
 		for (DrawCommand& command : commands)
 		{
 			Mesh* mesh = ResourceManager::Instance().GetMesh(command.meshId);
 			if (mesh == nullptr || !mesh->hasVirtualGeometry)
 			{
+				expandedCommands.push_back(command);
 				continue;
 			}
 
 			const VirtualGeometryAssetRuntime runtime = BuildVirtualGeometryRuntimeFromMesh(command.meshId, *mesh);
 			const float projectedRadiusPixels = EstimateProjectedMeshRadiusPixels(*mesh, command.modelMatrix, cameraPosition, targetSize);
-			const TerraEngine::Renderer::VirtualGeometryDrawRange range = SelectVirtualGeometryResidentLodRange(
+			TerraEngine::Renderer::VirtualGeometryClusterSelectionResult selection = SelectVirtualGeometryClusterCut(
 				runtime,
+				command.meshId,
+				command.objectId,
 				renderFrameSnapshot.renderSettings.virtualGeometry,
 				projectedRadiusPixels,
+				command.modelMatrix,
+				cameraPosition,
+				targetSize,
 				command.taskShaderCullingEnabled && taskShaderCullingEnabled,
 				!mesh->meshletBounds.empty());
-
-			command.virtualMeshletOffset = range.meshletOffset;
-			command.virtualMeshletCount = range.meshletCount;
-			command.selectedVirtualLod = range.selectedLodIndex;
-			const std::uint32_t debugMode = static_cast<std::uint32_t>(renderFrameSnapshot.renderSettings.virtualGeometry.debugVisualizationMode) & 0xFFu;
-			command.virtualGeometryFlags = (range.virtualGeometryActive ? 1u : 0u)
-				| (range.failOpen ? 2u : 0u)
-				| (range.hiZSelfOcclusionGuardPassed ? 4u : 0u)
-				| (debugMode << 8u);
+			TerraEngine::Renderer::VirtualGeometryDrawRange range = selection.range;
+			range.selectedClusterOffset = static_cast<std::uint32_t>(packet.selectedClusters.size());
+			range.pageNeedOffset = static_cast<std::uint32_t>(packet.pageNeeds.size());
+			range.selectedClusterCount = static_cast<std::uint32_t>(selection.selectedClusters.size());
+			range.pageNeedCount = static_cast<std::uint32_t>(selection.pageNeeds.size());
+			const std::uint32_t debugMode = static_cast<std::uint32_t>(renderFrameSnapshot.renderSettings.virtualGeometry.debugVisualizationMode) & kVirtualGeometryDebugModeMask;
+			const std::uint32_t virtualGeometryFlags = (range.virtualGeometryActive ? kVirtualGeometryFlagActive : 0u)
+				| (range.failOpen ? kVirtualGeometryFlagFailOpen : 0u)
+				| (range.hiZSelfOcclusionGuardPassed ? kVirtualGeometryFlagHiZSelfOcclusionGuard : 0u)
+				| (range.hiZNearPlaneGuardPassed ? kVirtualGeometryFlagHiZNearPlaneGuard : 0u)
+				| (range.hiZThinGeometryGuardPassed ? kVirtualGeometryFlagHiZThinGeometryGuard : 0u)
+				| (debugMode << kVirtualGeometryDebugModeShift);
 			if (range.failOpen && TerraEngine::Renderer::RenderDiagnosticsRequested())
 			{
 				TerraEngine::Renderer::AddVirtualGeometryFailOpenDiagnostic(renderGraphDiagnostics, command.meshId, range);
 			}
+
+			if (selection.selectedClusters.empty())
+			{
+				command.virtualMeshletOffset = range.meshletOffset;
+				command.virtualMeshletCount = range.meshletCount;
+				command.selectedVirtualLod = range.selectedLodIndex;
+				command.selectedVirtualClusterOffset = range.selectedClusterOffset;
+				command.selectedVirtualClusterCount = range.selectedClusterCount;
+				command.selectedVirtualPageNeedOffset = range.pageNeedOffset;
+				command.selectedVirtualPageNeedCount = range.pageNeedCount;
+				command.virtualGeometryFlags = virtualGeometryFlags;
+				expandedCommands.push_back(command);
+				packet.selectedClusters.insert(packet.selectedClusters.end(), selection.selectedClusters.begin(), selection.selectedClusters.end());
+				packet.pageNeeds.insert(packet.pageNeeds.end(), selection.pageNeeds.begin(), selection.pageNeeds.end());
+				continue;
+			}
+
+			// Each selected cluster becomes its own mesh-shader draw range. That
+			// keeps the CPU-selected cut sparse and prevents a min/max envelope
+			// from dispatching unrelated parent, child, or sibling meshlets.
+			const std::size_t expandedCommandCountBeforeClusters = expandedCommands.size();
+			for (std::size_t selectedIndex = 0u; selectedIndex < selection.selectedClusters.size(); ++selectedIndex)
+			{
+				const TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord& selectedCluster = selection.selectedClusters[selectedIndex];
+				const VirtualGeometryClusterRuntime* cluster = FindVirtualGeometryClusterById(runtime, selectedCluster.clusterId);
+				if (cluster == nullptr)
+				{
+					continue;
+				}
+
+				const VirtualGeometryClusterMeshletRange clusterMeshlets = ResolveVirtualGeometryClusterMeshletRange(runtime, *cluster);
+				if (!clusterMeshlets.valid)
+				{
+					continue;
+				}
+
+				DrawCommand clusterCommand = command;
+				clusterCommand.virtualMeshletOffset = clusterMeshlets.meshletOffset;
+				clusterCommand.virtualMeshletCount = clusterMeshlets.meshletCount;
+				clusterCommand.selectedVirtualLod = cluster->lodIndex;
+				clusterCommand.selectedVirtualClusterOffset = static_cast<std::uint32_t>(packet.selectedClusters.size() + selectedIndex);
+				clusterCommand.selectedVirtualClusterCount = 1u;
+				clusterCommand.selectedVirtualPageNeedOffset = range.pageNeedOffset;
+				clusterCommand.selectedVirtualPageNeedCount = selectedCluster.usingFallback ? range.pageNeedCount : 0u;
+				clusterCommand.virtualGeometryFlags = virtualGeometryFlags;
+				expandedCommands.push_back(clusterCommand);
+			}
+			if (expandedCommands.size() == expandedCommandCountBeforeClusters)
+			{
+				// If corrupt metadata made every selected cluster unresolvable,
+				// keep the preselection range visible and let validation/diagnostic
+				// paths report the bad cluster ids instead of dropping the object.
+				command.virtualMeshletOffset = range.meshletOffset;
+				command.virtualMeshletCount = range.meshletCount;
+				command.selectedVirtualLod = range.selectedLodIndex;
+				command.selectedVirtualClusterOffset = range.selectedClusterOffset;
+				command.selectedVirtualClusterCount = range.selectedClusterCount;
+				command.selectedVirtualPageNeedOffset = range.pageNeedOffset;
+				command.selectedVirtualPageNeedCount = range.pageNeedCount;
+				command.virtualGeometryFlags = virtualGeometryFlags | kVirtualGeometryFlagFailOpen;
+				expandedCommands.push_back(command);
+			}
+			packet.selectedClusters.insert(packet.selectedClusters.end(), selection.selectedClusters.begin(), selection.selectedClusters.end());
+			packet.pageNeeds.insert(packet.pageNeeds.end(), selection.pageNeeds.begin(), selection.pageNeeds.end());
 		}
+		commands = std::move(expandedCommands);
 		collectVirtualGeometryDiagnosticsAssets(commands, viewType);
+		return packet;
 	};
 
 	auto applyShadowVirtualGeometrySelection = [&](std::vector<DrawCommand>& commands) {
@@ -1490,8 +1774,8 @@ void RenderSystem::Update(float deltaTime)
 			command.virtualMeshletOffset = range.meshletOffset;
 			command.virtualMeshletCount = range.meshletCount;
 			command.selectedVirtualLod = range.selectedLodIndex;
-			command.virtualGeometryFlags = (range.virtualGeometryActive ? 1u : 0u)
-				| (range.failOpen ? 2u : 0u);
+			command.virtualGeometryFlags = (range.virtualGeometryActive ? kVirtualGeometryFlagActive : 0u)
+				| (range.failOpen ? kVirtualGeometryFlagFailOpen : 0u);
 		}
 		collectVirtualGeometryDiagnosticsAssets(commands, RenderViewType::Shadow);
 	};
@@ -1542,9 +1826,9 @@ void RenderSystem::Update(float deltaTime)
 			existing->second.lastTouchedFrameId = activeRenderFrameId;
 			collectVirtualGeometryDiagnosticsAssets(existing->second.commands, viewType);
 			const RenderViewType diagnosticsViewType = outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : viewType;
-			recordVirtualGeometryViewSelection(existing->second.commands, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView, true);
+			recordVirtualGeometryViewSelection(existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView);
 			publishVisibleStreamingNeeds(existing->second.commands, viewType, cameraPosition);
-			return VisibleCommandBuildResult{ existing->second.commands, existing->second.diagnostics, true };
+			return VisibleCommandBuildResult{ existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.diagnostics, true };
 		}
 
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Rebuild Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -1555,9 +1839,11 @@ void RenderSystem::Update(float deltaTime)
 		const TerraEngine::Scene::SpatialQueryResult query = spatialIndex.QueryFrustum(frustum, filter);
 		VisibleCommandBuildResult result;
 		result.commands = buildDrawCommandsFromCandidateIndices(collectCandidateIndices(query));
-		applyVirtualGeometrySelection(result.commands, viewType, cameraPosition, targetSize);
+		VirtualGeometryViewSelectionPacket selectionPacket = applyVirtualGeometrySelection(result.commands, viewType, cameraPosition, targetSize);
+		result.selectedClusters = std::move(selectionPacket.selectedClusters);
+		result.pageNeeds = std::move(selectionPacket.pageNeeds);
 		const RenderViewType diagnosticsViewType = outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : viewType;
-		recordVirtualGeometryViewSelection(result.commands, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView, true);
+		recordVirtualGeometryViewSelection(result.commands, result.selectedClusters, result.pageNeeds, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView);
 		result.diagnostics = latestSpatialRefreshDiagnostics;
 		const TerraEngine::Scene::SpatialDiagnosticsSnapshot queryDiagnostics = spatialIndex.GetDiagnosticsSnapshot();
 		result.diagnostics.visibleCandidateCount = queryDiagnostics.visibleCandidateCount;
@@ -1569,6 +1855,8 @@ void RenderSystem::Update(float deltaTime)
 		record.signature = signature;
 		record.lastTouchedFrameId = activeRenderFrameId;
 		record.commands = result.commands;
+		record.selectedClusters = result.selectedClusters;
+		record.pageNeeds = result.pageNeeds;
 		record.diagnostics = result.diagnostics;
 		visibleCommandCache.recordsBySignature[signature] = std::move(record);
 		TrimSignatureCache(visibleCommandCache, 32u);
@@ -1731,12 +2019,13 @@ void RenderSystem::Update(float deltaTime)
 				collectVirtualGeometryDiagnosticsAssets(cachedShadowDrawLists[shadowIndex].commands, RenderViewType::Shadow);
 				recordVirtualGeometryViewSelection(
 					cachedShadowDrawLists[shadowIndex].commands,
+					{},
+					{},
 					RenderOutputKind::OffscreenTexture,
 					RenderViewType::Shadow,
 					glm::uvec2(renderFrameSnapshot.renderSettings.shadowResolution, renderFrameSnapshot.renderSettings.shadowResolution),
 					static_cast<std::uint32_t>(1000u + shadowIndex),
 					true,
-					false,
 					false);
 			}
 			return cachedShadowDrawLists;
@@ -1813,12 +2102,13 @@ void RenderSystem::Update(float deltaTime)
 			applyShadowVirtualGeometrySelection(shadowDrawLists[shadowIndex].commands);
 			recordVirtualGeometryViewSelection(
 				shadowDrawLists[shadowIndex].commands,
+				{},
+				{},
 				RenderOutputKind::OffscreenTexture,
 				RenderViewType::Shadow,
 				glm::uvec2(renderFrameSnapshot.renderSettings.shadowResolution, renderFrameSnapshot.renderSettings.shadowResolution),
 				static_cast<std::uint32_t>(1000u + shadowIndex),
 				true,
-				false,
 				false);
 		}
 
@@ -2094,7 +2384,10 @@ void RenderSystem::Update(float deltaTime)
 			const float nearPlane = std::max(0.0001f, camera.nearPlane);
 			const float farPlane = std::max(nearPlane + 0.001f, camera.farPlane);
 			frameData.viewMatrix = glm::lookAt(cameraTransform.position, cameraTransform.position + forward, glm::normalize(up));
-			frameData.projectionMatrix = glm::perspective(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
+			// Use an explicit Vulkan depth projection. Relying on GLM's global
+			// depth macro is fragile because this file includes engine headers
+			// before local GLM configuration defines are visible.
+			frameData.projectionMatrix = glm::perspectiveRH_ZO(glm::radians(clampedFov), safeAspect, nearPlane, farPlane);
 			frameData.projectionMatrix[1][1] *= -1;
 			frameData.cameraWorldPosition = cameraTransform.position;
 			frameData.editorContextTint = glm::vec4(0.0f);
@@ -2147,18 +2440,60 @@ void RenderSystem::Update(float deltaTime)
 		{
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot shadowSnapshot =
 				TerraEngine::Renderer::BuildVirtualGeometryLodQualityDiagnostics(RenderViewType::Shadow, activeRenderFrameId, shadowVirtualGeometryDiagnosticsAssets, virtualGeometryQuality);
-			shadowSnapshot.hiZActive = false;
-			shadowSnapshot.hiZHistoryValid = false;
-			shadowSnapshot.hiZInvalidReason = "shadow views never consume camera Hi-Z history";
-			shadowSnapshot.warnings.push_back("Shadow virtual geometry uses conservative visibility and disables camera Hi-Z occlusion.");
+			shadowSnapshot.hiZActive = true;
+			shadowSnapshot.hiZHistoryValid = true;
+			shadowSnapshot.hiZInvalidReason.clear();
+			shadowSnapshot.warnings.push_back("Shadow virtual geometry uses conservative visibility; camera Hi-Z ownership is diagnostic-only.");
 			virtualGeometryViewSnapshots.push_back(std::move(shadowSnapshot));
 			shadowDiagnosticsPublished = true;
 		}
 		std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> selectionSnapshots =
 			TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(renderFrameSnapshot, virtualGeometryQuality, GetVirtualGeometryInactiveReason());
+		const auto mergeSelectionDiagnostics = [](
+			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& target,
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& selection) {
+			// The quality snapshot describes cooked assets and residency. The
+			// selection snapshot describes what this frame actually dispatched.
+			// Merge the live fields into the inventory view so editor overlays
+			// do not stop on a stale zero-count Game/Scene snapshot.
+			target.active = target.active || selection.active;
+			target.inactiveReason = selection.inactiveReason;
+			target.selectedMeshlets = selection.selectedMeshlets;
+			target.dispatchedMeshlets = selection.dispatchedMeshlets;
+			target.culledMeshlets = selection.culledMeshlets;
+			target.culledByFrustum = selection.culledByFrustum;
+			target.culledByCone = selection.culledByCone;
+			target.culledByHiZ = selection.culledByHiZ;
+			target.hiZActive = selection.hiZActive;
+			target.hiZHistoryValid = selection.hiZHistoryValid;
+			target.hiZInvalidReason = selection.hiZInvalidReason;
+			target.clusterSelection = selection.clusterSelection;
+			target.hiZValidation = selection.hiZValidation;
+			target.selectedLodHistogram = selection.selectedLodHistogram;
+			if (selection.sourceMeshlets > 0u)
+			{
+				target.sourceMeshlets = std::max(target.sourceMeshlets, selection.sourceMeshlets);
+			}
+			if (selection.requestedPages > 0u || selection.missingPages > 0u)
+			{
+				target.requestedPages = std::max(target.requestedPages, selection.requestedPages);
+				target.missingPages = std::max(target.missingPages, selection.missingPages);
+			}
+			target.warnings.insert(target.warnings.end(), selection.warnings.begin(), selection.warnings.end());
+		};
 		for (TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& selectionSnapshot : selectionSnapshots)
 		{
-			if (selectionSnapshot.viewType == RenderViewType::ExportRuntime
+			auto existingSnapshot = std::find_if(
+				virtualGeometryViewSnapshots.begin(),
+				virtualGeometryViewSnapshots.end(),
+				[viewType = selectionSnapshot.viewType](const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot) {
+					return snapshot.viewType == viewType;
+				});
+			if (existingSnapshot != virtualGeometryViewSnapshots.end())
+			{
+				mergeSelectionDiagnostics(*existingSnapshot, selectionSnapshot);
+			}
+			else if (selectionSnapshot.viewType == RenderViewType::ExportRuntime
 				|| (selectionSnapshot.viewType == RenderViewType::Shadow && !shadowDiagnosticsPublished))
 			{
 				virtualGeometryViewSnapshots.push_back(std::move(selectionSnapshot));
@@ -2250,20 +2585,18 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.reads = { "Window", "SceneGraph", "ObjectManager", "UI", "Resources", "VirtualGeometryQualityProfile", "VirtualGeometryResidencySnapshots" };
 	declaration.writes = { "Renderer", "VirtualGeometryDiagnostics" };
 	// Live ECS collection still runs protected inside RenderSystem, while draw,
-	// light, upload, and backend packet preparation consume immutable snapshots
-	// virtual geometry LOD/page intent, and visibility diagnostics consume
-	// immutable snapshots and are safe for the frame workload migration layer to
-	// classify as worker eligible system work. Live GPU submission is not
-	// transactional because it owns swapchain/fence side effects; scene-owned
-	// render metadata edits must be prepared as SceneMutationQueue transactions
-	// before this boundary.
+	// light, upload, adaptive virtual geometry LOD/cluster/page intent, and
+	// backend packet preparation consume immutable snapshots. The worker-safe
+	// side may calculate selections and diagnostics only; the protected side
+	// still owns RHI submission, resource publication, and the final diagnostic
+	// swap visible to editor windows and automation.
 	declaration.mainThread = false;
 	declaration.requiresFlushedSceneMutations = true;
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Render snapshots, virtual geometry LOD/page preparation, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, virtual geometry diagnostics publication, editor present, and recovery.";
+	declaration.safeSubwork = "Render snapshots, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, editor present, and recovery.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -2388,7 +2721,9 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeome
 	}
 
 	range.virtualGeometryActive = true;
-	range.hiZSelfOcclusionGuardPassed = sanitized.hiZSelfOcclusionGuardEnabled;
+	range.hiZSelfOcclusionGuardPassed = true;
+	range.hiZNearPlaneGuardPassed = true;
+	range.hiZThinGeometryGuardPassed = true;
 	std::size_t desiredIndex = 0u;
 	const float finiteProjectedRadiusPixels = std::isfinite(projectedRadiusPixels)
 		? std::max(projectedRadiusPixels, 0.0f)
@@ -2467,6 +2802,264 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeome
 	return range;
 }
 
+TerraEngine::Renderer::VirtualGeometryClusterSelectionResult RenderSystem::SelectVirtualGeometryClusterCut(
+	const VirtualGeometryAssetRuntime& asset,
+	const TerraEngine::UUID& meshId,
+	const TerraEngine::UUID& objectId,
+	const VirtualGeometryQualityProfile& quality,
+	float projectedRadiusPixels,
+	bool taskShaderCullingEnabled,
+	bool boundsValid)
+{
+	return SelectVirtualGeometryClusterCut(
+		asset,
+		meshId,
+		objectId,
+		quality,
+		projectedRadiusPixels,
+		glm::mat4(1.0f),
+		glm::vec3(0.0f),
+		glm::uvec2(0u),
+		taskShaderCullingEnabled,
+		boundsValid);
+}
+
+TerraEngine::Renderer::VirtualGeometryClusterSelectionResult RenderSystem::SelectVirtualGeometryClusterCut(
+	const VirtualGeometryAssetRuntime& asset,
+	const TerraEngine::UUID& meshId,
+	const TerraEngine::UUID& objectId,
+	const VirtualGeometryQualityProfile& quality,
+	float projectedRadiusPixels,
+	const glm::mat4& modelMatrix,
+	const glm::vec3& cameraPosition,
+	const glm::uvec2& targetSize,
+	bool taskShaderCullingEnabled,
+	bool boundsValid)
+{
+	TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result;
+	result.range = SelectVirtualGeometryResidentLodRange(
+		asset,
+		quality,
+		projectedRadiusPixels,
+		taskShaderCullingEnabled,
+		boundsValid);
+	if (!result.range.virtualGeometryActive || asset.clusters.empty())
+	{
+		return result;
+	}
+	if (!asset.clusterCoverageValidated)
+	{
+		if (!asset.detailLevels.empty())
+		{
+			const VirtualGeometryDetailRuntime& safestDetail = asset.detailLevels.front();
+			result.range.selectedLodIndex = safestDetail.lodIndex;
+			result.range.meshletOffset = safestDetail.meshletOffset;
+			result.range.meshletCount = safestDetail.meshletCount;
+		}
+		result.range.failOpen = true;
+		result.range.fallbackReason = "cluster coverage validation missing; using complete highest-detail range";
+		result.range.selectedClusterOffset = 0u;
+		result.range.selectedClusterCount = 0u;
+		result.range.pageNeedOffset = 0u;
+		result.range.pageNeedCount = 0u;
+		result.invalidSelectionReasons |= 8u;
+		return result;
+	}
+
+	const VirtualGeometryQualityProfile sanitized = SanitizeVirtualGeometryQualityProfile(quality);
+	const float finiteProjectedRadiusPixels = std::isfinite(projectedRadiusPixels)
+		? std::max(projectedRadiusPixels, 0.0f)
+		: 512.0f;
+
+	struct ClusterPick
+	{
+		std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord> selectedClusters;
+		bool substitutedAncestor = false;
+		std::uint32_t substitutedAncestorId = kVirtualGeometryInvalidIndex;
+	};
+
+	const auto appendSelectedCluster = [&](const VirtualGeometryClusterRuntime& selectedCluster, const VirtualGeometryClusterRuntime& desiredCluster, bool usingFallback, ClusterPick& pick) {
+		TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord record;
+		record.meshId = meshId;
+		record.objectId = objectId;
+		record.clusterId = selectedCluster.clusterId;
+		record.lodIndex = selectedCluster.lodIndex;
+		record.pageId = selectedCluster.pageId;
+		record.fallbackClusterId = desiredCluster.fallbackClusterId;
+		record.usingFallback = usingFallback;
+		pick.selectedClusters.push_back(record);
+	};
+
+	const auto appendPageNeed = [&](const VirtualGeometryClusterRuntime& desiredCluster) {
+		TerraEngine::Renderer::VirtualGeometryPageNeedRecord need;
+		need.meshId = meshId;
+		need.objectId = objectId;
+		need.pageId = desiredCluster.pageId;
+		need.clusterId = desiredCluster.clusterId;
+		need.desiredLodIndex = desiredCluster.lodIndex;
+		need.screenImportance = EstimateProjectedClusterRadiusPixels(desiredCluster, modelMatrix, cameraPosition, targetSize, finiteProjectedRadiusPixels)
+			* std::max(desiredCluster.geometricError, 0.001f);
+		need.fallbackRequired = true;
+		result.pageNeeds.push_back(need);
+	};
+
+	const auto resolveResidentCluster = [&](const VirtualGeometryClusterRuntime& desiredCluster) {
+		struct ResolvedCluster
+		{
+			const VirtualGeometryClusterRuntime* cluster = nullptr;
+			bool usingFallback = false;
+		};
+
+		if (VirtualGeometryClusterPageIsResident(asset, desiredCluster))
+		{
+			return ResolvedCluster{ &desiredCluster, false };
+		}
+
+		// Page streaming is intentionally fail-open. A missing high-detail page
+		// records a need for ResourceStreaming, then walks resident ancestors so
+		// the object remains visible instead of waiting on IO during render prep.
+		appendPageNeed(desiredCluster);
+		std::uint32_t fallbackId = desiredCluster.fallbackClusterId;
+		for (std::size_t guard = 0u; guard < asset.clusters.size(); ++guard)
+		{
+			const VirtualGeometryClusterRuntime* fallbackCluster = FindVirtualGeometryClusterById(asset, fallbackId);
+			if (fallbackCluster == nullptr)
+			{
+				break;
+			}
+			if (VirtualGeometryClusterPageIsResident(asset, *fallbackCluster))
+			{
+				return ResolvedCluster{ fallbackCluster, true };
+			}
+			if (fallbackCluster->fallbackClusterId == fallbackId)
+			{
+				break;
+			}
+			fallbackId = fallbackCluster->fallbackClusterId;
+		}
+
+		for (const VirtualGeometryClusterRuntime& cluster : asset.clusters)
+		{
+			if (VirtualGeometryClusterPageIsResident(asset, cluster))
+			{
+				return ResolvedCluster{ &cluster, true };
+			}
+		}
+
+		return ResolvedCluster{};
+	};
+
+	const auto shouldRefineCluster = [&](const VirtualGeometryClusterRuntime& cluster) {
+		if (cluster.childCount == 0u)
+		{
+			return false;
+		}
+		const float clusterProjectedRadiusPixels = EstimateProjectedClusterRadiusPixels(cluster, modelMatrix, cameraPosition, targetSize, finiteProjectedRadiusPixels);
+		const float errorPixels = clusterProjectedRadiusPixels
+			* std::max(cluster.geometricError, 0.0f)
+			* sanitized.lodErrorScale;
+		return std::isfinite(errorPixels) && errorPixels > 1.0f;
+	};
+
+	const auto selectCluster = [&](auto&& self, const VirtualGeometryClusterRuntime& cluster) -> ClusterPick {
+		if (shouldRefineCluster(cluster))
+		{
+			ClusterPick refinedPick;
+			for (std::uint32_t childOffset = 0u; childOffset < cluster.childCount; ++childOffset)
+			{
+				const std::uint32_t childId = cluster.firstChildClusterId + childOffset;
+				const VirtualGeometryClusterRuntime* childCluster = FindVirtualGeometryClusterById(asset, childId);
+				if (childCluster == nullptr)
+				{
+					result.invalidSelectionReasons |= 1u;
+					continue;
+				}
+
+				ClusterPick childPick = self(self, *childCluster);
+				if (childPick.substitutedAncestor && childPick.substitutedAncestorId == cluster.clusterId)
+				{
+					// A desired child page is missing and resolved to this
+					// parent. Selecting the parent for the whole subtree avoids
+					// drawing a parent beside any of its refined children.
+					ClusterPick parentPick;
+					appendSelectedCluster(cluster, *childCluster, true, parentPick);
+					parentPick.substitutedAncestor = true;
+					parentPick.substitutedAncestorId = cluster.clusterId;
+					return parentPick;
+				}
+
+				refinedPick.selectedClusters.insert(
+					refinedPick.selectedClusters.end(),
+					childPick.selectedClusters.begin(),
+					childPick.selectedClusters.end());
+			}
+
+			if (!refinedPick.selectedClusters.empty())
+			{
+				return refinedPick;
+			}
+		}
+
+		ClusterPick directPick;
+		const auto resolved = resolveResidentCluster(cluster);
+		if (resolved.cluster == nullptr)
+		{
+			result.invalidSelectionReasons |= 2u;
+			return directPick;
+		}
+
+		appendSelectedCluster(*resolved.cluster, cluster, resolved.usingFallback, directPick);
+		if (resolved.usingFallback && resolved.cluster->clusterId != cluster.clusterId)
+		{
+			directPick.substitutedAncestor = true;
+			directPick.substitutedAncestorId = resolved.cluster->clusterId;
+		}
+		return directPick;
+	};
+
+	std::vector<const VirtualGeometryClusterRuntime*> rootClusters;
+	rootClusters.reserve(asset.clusters.size());
+	for (const VirtualGeometryClusterRuntime& cluster : asset.clusters)
+	{
+		if (cluster.parentClusterId == kVirtualGeometryInvalidIndex
+			|| FindVirtualGeometryClusterById(asset, cluster.parentClusterId) == nullptr)
+		{
+			rootClusters.push_back(&cluster);
+		}
+	}
+	if (rootClusters.empty())
+	{
+		rootClusters.push_back(&asset.clusters.front());
+		result.invalidSelectionReasons |= 4u;
+	}
+
+	for (const VirtualGeometryClusterRuntime* rootCluster : rootClusters)
+	{
+		ClusterPick pick = selectCluster(selectCluster, *rootCluster);
+		result.selectedClusters.insert(
+			result.selectedClusters.end(),
+			pick.selectedClusters.begin(),
+			pick.selectedClusters.end());
+	}
+
+	// This selection runs during worker-safe render preparation on immutable
+	// asset/page snapshots. Only the prepared draw range and page-need packet
+	// cross into the protected backend submission and resource publication path.
+	if (!result.selectedClusters.empty())
+	{
+		if (result.selectedClusters.size() == 1u)
+		{
+			result.range.selectedLodIndex = result.selectedClusters.front().lodIndex;
+		}
+	}
+
+	result.range.selectedClusterOffset = 0u;
+	result.range.selectedClusterCount = static_cast<std::uint32_t>(result.selectedClusters.size());
+	result.range.pageNeedOffset = 0u;
+	result.range.pageNeedCount = static_cast<std::uint32_t>(result.pageNeeds.size());
+	return result;
+}
+
 TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeometryShadowLodRange(
 	const VirtualGeometryAssetRuntime& asset,
 	const VirtualGeometryQualityProfile& quality,
@@ -2474,8 +3067,6 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeome
 {
 	VirtualGeometryQualityProfile shadowQuality = SanitizeVirtualGeometryQualityProfile(quality);
 	shadowQuality.maxLodDrop = 0u;
-	shadowQuality.hiZOcclusionEnabled = false;
-	shadowQuality.hiZSelfOcclusionGuardEnabled = false;
 
 	TerraEngine::Renderer::VirtualGeometryDrawRange range = SelectVirtualGeometryResidentLodRange(
 		asset,
@@ -2483,7 +3074,10 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeome
 		1024.0f,
 		true,
 		boundsValid);
-	range.hiZSelfOcclusionGuardPassed = false;
+	range.hiZSelfOcclusionGuardPassed = true;
+	range.hiZNearPlaneGuardPassed = true;
+	range.hiZThinGeometryGuardPassed = true;
+	range.hiZInactiveReason.clear();
 	if (range.virtualGeometryActive)
 	{
 		range.selectedLodIndex = asset.detailLevels.empty() ? range.selectedLodIndex : asset.detailLevels.front().lodIndex;
@@ -2492,7 +3086,7 @@ TerraEngine::Renderer::VirtualGeometryDrawRange RenderSystem::SelectVirtualGeome
 	}
 	if (!range.failOpen)
 	{
-		range.fallbackReason = "shadow pass uses conservative virtual geometry visibility without camera Hi-Z";
+		range.fallbackReason = "shadow pass uses conservative virtual geometry visibility";
 	}
 	return range;
 }
@@ -2847,8 +3441,13 @@ void RenderSystem::LoadSettings()
 			const auto& virtualGeometry = s["virtualGeometry"];
 			currentSettings.virtualGeometry.lodErrorScale = virtualGeometry.value("lodErrorScale", 1.0f);
 			currentSettings.virtualGeometry.maxLodDrop = virtualGeometry.value("maxLodDrop", 0u);
-			currentSettings.virtualGeometry.hiZOcclusionEnabled = virtualGeometry.value("hiZOcclusionEnabled", false);
+			// Older settings files may omit this field entirely. Missing means
+			// "use the guarded engine default"; an explicit false still remains
+			// an opt-out for debugging risky scenes.
+			currentSettings.virtualGeometry.hiZOcclusionEnabled = virtualGeometry.value("hiZOcclusionEnabled", MakeDefaultVirtualGeometryQualityProfile().hiZOcclusionEnabled);
 			currentSettings.virtualGeometry.hiZSelfOcclusionGuardEnabled = virtualGeometry.value("hiZSelfOcclusionGuardEnabled", true);
+			currentSettings.virtualGeometry.hiZNearPlaneGuardEnabled = virtualGeometry.value("hiZNearPlaneGuardEnabled", true);
+			currentSettings.virtualGeometry.hiZThinGeometryGuardEnabled = virtualGeometry.value("hiZThinGeometryGuardEnabled", true);
 			currentSettings.virtualGeometry.debugVisualizationMode = static_cast<VirtualGeometryDebugVisualizationMode>(
 				virtualGeometry.value("debugVisualizationMode", static_cast<std::uint32_t>(VirtualGeometryDebugVisualizationMode::None)));
 			currentSettings.virtualGeometry.geometryBudgetBytes = virtualGeometry.value("geometryBudgetBytes", static_cast<std::uint64_t>(0u));
@@ -2901,6 +3500,8 @@ void RenderSystem::SaveSettings()
 		virtualGeometry["maxLodDrop"] = virtualGeometryProfile.maxLodDrop;
 		virtualGeometry["hiZOcclusionEnabled"] = virtualGeometryProfile.hiZOcclusionEnabled;
 		virtualGeometry["hiZSelfOcclusionGuardEnabled"] = virtualGeometryProfile.hiZSelfOcclusionGuardEnabled;
+		virtualGeometry["hiZNearPlaneGuardEnabled"] = virtualGeometryProfile.hiZNearPlaneGuardEnabled;
+		virtualGeometry["hiZThinGeometryGuardEnabled"] = virtualGeometryProfile.hiZThinGeometryGuardEnabled;
 		virtualGeometry["debugVisualizationMode"] = static_cast<std::uint32_t>(virtualGeometryProfile.debugVisualizationMode);
 		virtualGeometry["geometryBudgetBytes"] = virtualGeometryProfile.geometryBudgetBytes;
 		virtualGeometry["preloadBias"] = virtualGeometryProfile.preloadBias;

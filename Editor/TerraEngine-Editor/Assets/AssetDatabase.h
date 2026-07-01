@@ -33,8 +33,54 @@ struct VirtualGeometryAssetMetadata {
 	std::uint32_t detailLevelCount = 0u;
 	std::uint32_t meshletCount = 0u;
 	std::uint32_t sourceTriangleCount = 0u;
+	std::uint32_t requestedTargetCount = 0u;
+	std::uint32_t skippedDetailCount = 0u;
+	std::uint32_t clusterCount = 0u;
+	std::uint32_t pageCount = 0u;
 	std::string rebuildGuidance;
 	std::vector<std::string> warnings;
+};
+
+struct VirtualGeometryAdaptiveSettingsMetadata {
+	bool valid = true;
+	bool overridePresent = false;
+	std::string settingsSource = "ProjectDefaults";
+	std::vector<float> targetRatios;
+	std::uint32_t minimumSourceTriangles = 512u;
+	std::uint32_t minimumGeneratedTriangles = 64u;
+	std::uint32_t minimumMeshletsPerGeneratedLevel = 2u;
+	float minimumUsefulTriangleReduction = 0.15f;
+	float minimumUsefulMeshletReduction = 0.15f;
+	float maximumGeometricError = 0.1f;
+	std::vector<std::string> validationErrors;
+};
+
+struct VirtualGeometryDetailDiagnosticMetadata {
+	std::uint32_t targetIndex = 0u;
+	float requestedRatio = 1.0f;
+	std::string status = "Requested";
+	std::string reason;
+	std::uint32_t desiredTriangleCount = 0u;
+	std::uint32_t desiredMeshletCount = 0u;
+	std::uint32_t actualTriangleCount = 0u;
+	std::uint32_t actualMeshletCount = 0u;
+	std::uint32_t nearestGeneratedLevelIndex = 0u;
+	std::uint32_t triangleCount = 0u;
+	std::uint32_t meshletCount = 0u;
+};
+
+struct VirtualGeometryClusterSummaryMetadata {
+	std::uint32_t clusterCount = 0u;
+	std::uint32_t selectedClusterCount = 0u;
+	std::uint32_t fallbackClusterCount = 0u;
+	bool fallbackCoverageValid = false;
+};
+
+struct VirtualGeometryPageSummaryMetadata {
+	std::uint32_t pageCount = 0u;
+	std::uint32_t residentPageCount = 0u;
+	std::uint32_t pinnedFallbackPageCount = 0u;
+	std::uint64_t estimatedBytes = 0u;
 };
 
 // class AssetDatabase groups related state and operations so callers have one documented contract.
@@ -61,7 +107,22 @@ public:
 	std::filesystem::path GetAssetRoot() const { return assetRoot; }
 	std::filesystem::path GetBuildRoot() const { return buildRoot; }
 	const AssetMetadata* FindAssetByGuid(const TerraEngine::UUID& guid) const;
+	bool IsMeshAsset(const AssetMetadata& metadata) const;
 	bool TryGetVirtualGeometryMetadata(const AssetMetadata& metadata, VirtualGeometryAssetMetadata& outMetadata) const;
+	VirtualGeometryAdaptiveSettingsMetadata GetDefaultVirtualGeometryAdaptiveSettings() const;
+	bool CanEditVirtualGeometryPerMeshOverride(const AssetMetadata& metadata) const;
+	bool TryGetVirtualGeometryAdaptiveSettings(const AssetMetadata& metadata, VirtualGeometryAdaptiveSettingsMetadata& outSettings) const;
+	bool HasVirtualGeometryPerMeshOverride(const AssetMetadata& metadata) const;
+	bool SaveVirtualGeometryPerMeshOverride(const TerraEngine::UUID& assetGuid, const VirtualGeometryAdaptiveSettingsMetadata& settings, std::string* outError = nullptr);
+	bool ClearVirtualGeometryPerMeshOverride(const TerraEngine::UUID& assetGuid, std::string* outError = nullptr);
+	bool RebuildVirtualGeometryAsset(const TerraEngine::UUID& assetGuid, std::string* outError = nullptr);
+	bool TryGetGeneratedMeshVirtualGeometryAdaptiveSettings(const std::filesystem::path& packagePath, const TerraEngine::UUID& meshGuid, VirtualGeometryAdaptiveSettingsMetadata& outSettings) const;
+	bool SaveGeneratedMeshVirtualGeometryPerMeshOverride(const std::filesystem::path& packagePath, const TerraEngine::UUID& meshGuid, const VirtualGeometryAdaptiveSettingsMetadata& settings, std::string* outError = nullptr);
+	bool ClearGeneratedMeshVirtualGeometryPerMeshOverride(const std::filesystem::path& packagePath, const TerraEngine::UUID& meshGuid, std::string* outError = nullptr);
+	bool RebuildGeneratedMeshVirtualGeometryAsset(const std::filesystem::path& packagePath, std::string* outError = nullptr);
+	bool TryGetVirtualGeometryDetailDiagnostics(const AssetMetadata& metadata, std::vector<VirtualGeometryDetailDiagnosticMetadata>& outDiagnostics) const;
+	bool TryGetVirtualGeometryClusterSummary(const AssetMetadata& metadata, VirtualGeometryClusterSummaryMetadata& outSummary) const;
+	bool TryGetVirtualGeometryPageSummary(const AssetMetadata& metadata, VirtualGeometryPageSummaryMetadata& outSummary) const;
 	const AssetMetadata* FindScriptAssetByFullName(std::string_view fullName) const;
 	std::string GetScriptFullName(const TerraEngine::UUID& guid) const;
 	void SetScriptCompileState(const std::string& compileState, const std::string& summary);

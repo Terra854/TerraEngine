@@ -84,6 +84,7 @@ public:
 	void RequestOpenScene(const std::filesystem::path& path);
 	void RequestCloseProject();
 	void RequestExit();
+	bool RebuildAssetFromInspector(const std::filesystem::path& path, std::string* outError = nullptr);
 
 	// GetSceneTextureID is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void* GetSceneTextureID() const { return sceneTextureID; }

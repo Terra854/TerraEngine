@@ -8,13 +8,18 @@ namespace TerraEngine::Tests
 {
 	namespace
 	{
+		constexpr std::uint64_t kStableDepthSceneSignature = 0x5eed1234ull;
+
 		VulkanHiZHistoryMetadata MakeValidHistory(std::uint32_t viewId, std::uint32_t width, std::uint32_t height, const glm::mat4& viewProjection)
 		{
 			VulkanHiZHistoryMetadata history{};
 			history.viewId = viewId;
+			history.viewClass = VulkanHiZViewClass::Game;
+			history.targetId = 41u;
 			history.width = width;
 			history.height = height;
 			history.projectionSignature = BuildVulkanHiZProjectionSignature(viewProjection);
+			history.depthSceneSignature = kStableDepthSceneSignature;
 			history.frameId = 11u;
 			history.valid = true;
 			history.invalidReason = VulkanHiZInvalidReason::None;
@@ -25,63 +30,124 @@ namespace TerraEngine::Tests
 		{
 			VulkanHiZValidationInput input{};
 			input.viewId = viewId;
+			input.viewClass = VulkanHiZViewClass::Game;
+			input.targetId = 41u;
 			input.width = width;
 			input.height = height;
 			input.projectionSignature = BuildVulkanHiZProjectionSignature(viewProjection);
+			input.depthSceneSignature = kStableDepthSceneSignature;
 			input.pyramidReady = true;
 			input.qualityAllowsOcclusion = true;
 			input.viewSupported = true;
 			input.selfOcclusionGuardPassed = true;
+			input.nearPlaneGuardPassed = true;
+			input.thinGeometryGuardPassed = true;
 			return input;
 		}
 	}
 
 	void RegisterVirtualGeometryHiZTests(TestRegistry& registry)
 	{
-		registry.Add("VirtualGeometry.HiZ.Validation.RejectsFirstFrameResizeProjectionAndViewMismatch", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.Validation.KeepsOcclusionActiveAcrossCameraAndDepthSceneMotion", [](TestContext& context) {
 			glm::mat4 viewProjection(1.0f);
 			VulkanHiZValidationInput input = MakeValidationInput(1u, 1920u, 1080u, viewProjection);
 
 			const VulkanHiZValidationResult firstFrame = ValidateVulkanHiZHistory({}, input);
-			context.Expect(!firstFrame.occlusionAllowed, "The first frame should fail open because no previous Hi-Z pyramid exists.");
-			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::FirstFrame), static_cast<std::uint32_t>(firstFrame.invalidReason), "First-frame validation should report the first-frame reason.");
+			context.Expect(firstFrame.occlusionAllowed, "A cleared Hi-Z pyramid should be usable immediately; first-frame metadata is diagnostic-only.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(firstFrame.invalidReason), "First-frame metadata should not disable always-on Hi-Z.");
 
 			const VulkanHiZHistoryMetadata history = MakeValidHistory(1u, 1920u, 1080u, viewProjection);
+			VulkanHiZValidationInput missingPyramidInput = input;
+			missingPyramidInput.pyramidReady = false;
+			const VulkanHiZValidationResult missingPyramid = ValidateVulkanHiZHistory(history, missingPyramidInput);
+			context.Expect(!missingPyramid.occlusionAllowed, "Missing pyramid resources are the only validation path that should disable Hi-Z.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::MissingPyramid), static_cast<std::uint32_t>(missingPyramid.invalidReason), "Missing Hi-Z pyramid resources should have a distinct fail-open reason.");
+
 			VulkanHiZValidationInput resizeInput = input;
 			resizeInput.width = 1280u;
 			const VulkanHiZValidationResult resize = ValidateVulkanHiZHistory(history, resizeInput);
-			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::Resize), static_cast<std::uint32_t>(resize.invalidReason), "Target-size changes should invalidate Hi-Z history.");
+			context.Expect(resize.occlusionAllowed, "Resize metadata should not disable Hi-Z once a same-frame pyramid resource is ready.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(resize.invalidReason), "Resize metadata is diagnostic-only for always-on Hi-Z.");
+
+			VulkanHiZValidationInput targetInput = input;
+			targetInput.targetId = 99u;
+			const VulkanHiZValidationResult targetMismatch = ValidateVulkanHiZHistory(history, targetInput);
+			context.Expect(targetMismatch.occlusionAllowed, "Editor target switches should keep Hi-Z active because the shared warm pyramid is diagnostic-gated, not ownership-gated.");
+			context.Expect(!targetMismatch.sameTargetHistory, "Validation should still expose that the previous pyramid came from a different render target.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(targetMismatch.invalidReason), "Target mismatch is diagnostic-only for the always-active editor Hi-Z path.");
 
 			glm::mat4 changedProjection = viewProjection;
 			changedProjection[3][2] = 0.25f;
 			VulkanHiZValidationInput projectionInput = MakeValidationInput(1u, 1920u, 1080u, changedProjection);
 			const VulkanHiZValidationResult projectionChanged = ValidateVulkanHiZHistory(history, projectionInput);
-			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::ProjectionChanged), static_cast<std::uint32_t>(projectionChanged.invalidReason), "Projection changes should invalidate Hi-Z history.");
+			context.Expect(projectionChanged.occlusionAllowed, "Camera/view-projection motion should keep Hi-Z active so VG culling remains continuous while navigating.");
+			context.Expect(!projectionChanged.projectionMatches, "Validation should still expose that the previous pyramid was generated from a different projection.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(projectionChanged.invalidReason), "Projection mismatch is diagnostic-only and should not become the active fail-open reason.");
+
+			VulkanHiZValidationInput cameraCutInput = input;
+			cameraCutInput.cameraCut = true;
+			const VulkanHiZValidationResult cameraCut = ValidateVulkanHiZHistory(history, cameraCutInput);
+			context.Expect(cameraCut.occlusionAllowed, "Camera-cut metadata should not disable Hi-Z while the editor is continuously updating the view.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(cameraCut.invalidReason), "Camera-cut metadata is diagnostic-only for the always-active Hi-Z path.");
+
+			VulkanHiZValidationInput movedOccluderInput = input;
+			movedOccluderInput.depthSceneSignature = kStableDepthSceneSignature + 1u;
+			const VulkanHiZValidationResult movedOccluder = ValidateVulkanHiZHistory(history, movedOccluderInput);
+			context.Expect(movedOccluder.occlusionAllowed, "Moving occluders should keep Hi-Z active so wall/blocker tests recover immediately after motion.");
+			context.Expect(!movedOccluder.depthSceneMatches, "Validation should expose that the depth-producing draw scene changed.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(movedOccluder.invalidReason), "Depth-scene changes are diagnostic-only for the always-active Hi-Z path.");
 
 			VulkanHiZValidationInput viewInput = input;
 			viewInput.viewId = 2u;
 			const VulkanHiZValidationResult viewMismatch = ValidateVulkanHiZHistory(history, viewInput);
-			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::ViewMismatch), static_cast<std::uint32_t>(viewMismatch.invalidReason), "Another view must not reuse this view's Hi-Z pyramid.");
+			context.Expect(viewMismatch.occlusionAllowed, "Another editor camera view should not permanently disable the shared warm Hi-Z pyramid.");
+			context.Expect(!viewMismatch.sameViewHistory, "Validation should still expose that the previous pyramid was produced by another view.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(viewMismatch.invalidReason), "View mismatch is diagnostic-only for the always-active editor Hi-Z path.");
 
 			const VulkanHiZValidationResult valid = ValidateVulkanHiZHistory(history, input);
-			context.Expect(valid.historyValid, "Matching view-owned Hi-Z metadata should validate.");
-			context.Expect(valid.occlusionAllowed, "Matching view-owned Hi-Z metadata should allow occlusion when quality and guard gates pass.");
+			context.Expect(valid.historyValid, "Ready Hi-Z resources should validate regardless of metadata history.");
+			context.Expect(valid.occlusionAllowed, "Ready Hi-Z resources should allow occlusion while quality and guard metadata remain diagnostic-only.");
+			context.Expect(valid.depthSceneMatches, "Matching draw-scene metadata should keep Hi-Z eligible for occlusion.");
 		});
 
-		registry.Add("VirtualGeometry.HiZ.Validation.FailsOpenForSelfOcclusionRisk", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.Validation.IgnoresQualityAndGuardDisableSignals", [](TestContext& context) {
 			const glm::mat4 viewProjection(1.0f);
 			const VulkanHiZHistoryMetadata history = MakeValidHistory(3u, 1024u, 768u, viewProjection);
 			VulkanHiZValidationInput input = MakeValidationInput(3u, 1024u, 768u, viewProjection);
+			input.qualityAllowsOcclusion = false;
 			input.selfOcclusionGuardPassed = false;
+			input.nearPlaneGuardPassed = false;
+			input.thinGeometryGuardPassed = false;
+			input.viewSupported = false;
 
 			const VulkanHiZValidationResult result = ValidateVulkanHiZHistory(history, input);
 
-			context.Expect(result.historyValid, "Self-occlusion guard failures should keep the history classified separately from stale data.");
-			context.Expect(!result.occlusionAllowed, "Self-occlusion risk should fail open instead of hiding thin or self-overlapping geometry.");
-			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::SelfOcclusionRisk), static_cast<std::uint32_t>(result.invalidReason), "Self-occlusion guard failure should report its own reason.");
+			context.Expect(result.historyValid, "Ready Hi-Z resources should stay valid when legacy disable metadata is present.");
+			context.Expect(result.occlusionAllowed, "Quality, support, and guard metadata must not disable always-on Hi-Z.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(result.invalidReason), "Legacy disable metadata should not become active invalid reasons.");
 		});
 
-		registry.Add("VirtualGeometry.HiZ.Validation.CameraCutAndMultiViewReuseStayFailOpen", [](TestContext& context) {
+		registry.Add("VirtualGeometry.HiZ.Validation.KeepsThinAndNearPlaneSignalsDiagnosticOnly", [](TestContext& context) {
+			const glm::mat4 viewProjection(1.0f);
+			const VulkanHiZHistoryMetadata history = MakeValidHistory(5u, 1440u, 900u, viewProjection);
+
+			VulkanHiZValidationInput thinGeometryInput = MakeValidationInput(5u, 1440u, 900u, viewProjection);
+			thinGeometryInput.thinGeometryGuardPassed = false;
+			const VulkanHiZValidationResult thinGeometry = ValidateVulkanHiZHistory(history, thinGeometryInput);
+
+			VulkanHiZValidationInput nearPlaneInput = MakeValidationInput(5u, 1440u, 900u, viewProjection);
+			nearPlaneInput.nearPlaneGuardPassed = false;
+			const VulkanHiZValidationResult nearPlane = ValidateVulkanHiZHistory(history, nearPlaneInput);
+
+			context.Expect(thinGeometry.historyValid, "Thin-geometry metadata should not disable a ready Hi-Z pyramid.");
+			context.Expect(thinGeometry.occlusionAllowed, "Thin-geometry metadata must be diagnostic-only.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(thinGeometry.invalidReason), "Thin-geometry metadata should not become an active invalid reason.");
+			context.Expect(nearPlane.historyValid, "Near-plane metadata should not disable a ready Hi-Z pyramid.");
+			context.Expect(nearPlane.occlusionAllowed, "Near-plane metadata must be diagnostic-only.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(nearPlane.invalidReason), "Near-plane metadata should not become an active invalid reason.");
+		});
+
+		registry.Add("VirtualGeometry.HiZ.Validation.CameraAndEditorViewMotionStayActive", [](TestContext& context) {
 			glm::mat4 previousViewProjection(1.0f);
 			const VulkanHiZHistoryMetadata history = MakeValidHistory(9u, 1600u, 900u, previousViewProjection);
 
@@ -92,12 +158,21 @@ namespace TerraEngine::Tests
 			const VulkanHiZValidationResult cameraCut = ValidateVulkanHiZHistory(history, cameraCutInput);
 
 			VulkanHiZValidationInput sceneViewInput = MakeValidationInput(10u, 1600u, 900u, previousViewProjection);
+			sceneViewInput.viewClass = VulkanHiZViewClass::Scene;
 			const VulkanHiZValidationResult multiViewReuse = ValidateVulkanHiZHistory(history, sceneViewInput);
 
-			context.Expect(!cameraCut.occlusionAllowed, "Camera cuts should fail open instead of trusting stale Hi-Z depth.");
-			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::ProjectionChanged), static_cast<std::uint32_t>(cameraCut.invalidReason), "Camera-cut validation should report projection/view-projection change.");
-			context.Expect(!multiViewReuse.occlusionAllowed, "A second view must not reuse another view's Hi-Z history.");
-			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::ViewMismatch), static_cast<std::uint32_t>(multiViewReuse.invalidReason), "Multi-view reuse should stay isolated by view id.");
+			VulkanHiZValidationInput shadowInput = MakeValidationInput(9u, 1600u, 900u, previousViewProjection);
+			shadowInput.viewClass = VulkanHiZViewClass::Shadow;
+			const VulkanHiZValidationResult shadowView = ValidateVulkanHiZHistory(history, shadowInput);
+
+			context.Expect(cameraCut.occlusionAllowed, "Camera movement should keep Hi-Z active so virtual geometry does not lose occlusion while navigating.");
+			context.Expect(!cameraCut.projectionMatches, "Diagnostics should still show that the sampled pyramid came from a different view-projection.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(cameraCut.invalidReason), "Projection movement is diagnostic-only in the always-active Hi-Z path.");
+			context.Expect(multiViewReuse.occlusionAllowed, "Scene/Game view switches should keep Hi-Z active so editor interaction cannot permanently disable occlusion.");
+			context.Expect(!multiViewReuse.sameViewHistory, "Diagnostics should still reveal that the previous pyramid owner was another view.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(multiViewReuse.invalidReason), "View mismatch is diagnostic-only for the always-active editor Hi-Z path.");
+			context.Expect(shadowView.occlusionAllowed, "Shadow-view metadata should not latch the shared Hi-Z validation state off.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(shadowView.invalidReason), "Shadow-view metadata should stay diagnostic-only in validation.");
 		});
 	}
 }

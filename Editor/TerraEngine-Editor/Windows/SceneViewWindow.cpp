@@ -232,15 +232,21 @@ void SceneViewWindow::OnGui() {
 	void* texID = m_Owner->GetSceneTextureID();
 
 	VirtualGeometryQualityProfile virtualGeometryProfile = RenderSystem::Instance().GetVirtualGeometryQualityProfile();
+	const VirtualGeometryDebugVisualizationMode normalizedDebugMode = NormalizeVirtualGeometryDebugVisualizationMode(virtualGeometryProfile.debugVisualizationMode);
+	if (normalizedDebugMode != virtualGeometryProfile.debugVisualizationMode)
+	{
+		// Collapse legacy/internal visualizer modes before the combo draws so
+		// the toolbar cannot get stuck on a hidden duplicate entry.
+		virtualGeometryProfile.debugVisualizationMode = normalizedDebugMode;
+		RenderSystem::Instance().SetVirtualGeometryQualityProfile(virtualGeometryProfile);
+	}
 	int virtualGeometryDebugMode = static_cast<int>(virtualGeometryProfile.debugVisualizationMode);
 	ImGui::SetNextItemWidth(115.0f);
 	if (ImGui::BeginCombo("VG", ToString(static_cast<VirtualGeometryDebugVisualizationMode>(virtualGeometryDebugMode))))
 	{
-		for (int modeIndex = static_cast<int>(VirtualGeometryDebugVisualizationMode::None);
-			modeIndex <= static_cast<int>(VirtualGeometryDebugVisualizationMode::Error);
-			++modeIndex)
+		for (const VirtualGeometryDebugVisualizationMode mode : GetVirtualGeometryDebugVisualizationModes())
 		{
-			const auto mode = static_cast<VirtualGeometryDebugVisualizationMode>(modeIndex);
+			const int modeIndex = static_cast<int>(mode);
 			const bool selected = virtualGeometryDebugMode == modeIndex;
 			if (ImGui::Selectable(ToString(mode), selected))
 			{
@@ -300,7 +306,10 @@ void SceneViewWindow::OnGui() {
 	float aspect = (contentSize.y > 0.0001f) ? (contentSize.x / contentSize.y) : 1.0f;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (aspect <= 0.0001f) aspect = 1.0f;
-	glm::mat4 projNoFlip = glm::perspective(glm::radians(std::max(m_Fov, 0.1f)), aspect, 0.1f, 1000.0f);
+	// Scene View feeds the same projection into picking, gizmos, rendering, and
+	// Hi-Z validation. Make the depth convention explicit so all those users
+	// agree on Vulkan's 0..1 clip-space depth.
+	glm::mat4 projNoFlip = glm::perspectiveRH_ZO(glm::radians(std::max(m_Fov, 0.1f)), aspect, 0.1f, 1000.0f);
 	proj = projNoFlip;
 	proj[1][1] *= -1; // Vulkan flip
 

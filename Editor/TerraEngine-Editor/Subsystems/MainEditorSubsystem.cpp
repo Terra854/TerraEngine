@@ -721,7 +721,9 @@ bool MainEditorSubsystem::TryApplyPrefabModeGameViewCameras(float aspect) const
 		// Feed the renderer through its normal Game View camera entry point, so
 		// prefab editing only changes camera ownership, not render behavior.
 		const glm::mat4 view = glm::lookAt(camera.position, camera.position + forward, glm::normalize(up));
-		glm::mat4 proj = glm::perspective(glm::radians(camera.verticalFovDegrees), aspect, camera.nearPlane, camera.farPlane);
+		// Keep prefab-return Game View cameras in Vulkan's 0..1 depth space so
+		// renderer depth tests and Hi-Z occlusion interpret the same projection.
+		glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(camera.verticalFovDegrees), aspect, camera.nearPlane, camera.farPlane);
 		proj[1][1] *= -1.0f;
 		RenderSystem::Instance().SetGameViewCamera(view, proj, camera.position);
 	}
@@ -1253,6 +1255,22 @@ void MainEditorSubsystem::SetSelectedAsset(std::optional<std::filesystem::path> 
 		ctx->scripting.hasWatchedObject = false;
 		ctx->scripting.watchedObjectId = 0;
 	}
+}
+
+bool MainEditorSubsystem::RebuildAssetFromInspector(const std::filesystem::path& path, std::string* outError) {
+	const std::filesystem::path absolutePath = std::filesystem::absolute(path);
+	if (!std::filesystem::exists(absolutePath)) {
+		if (outError != nullptr) {
+			*outError = "Source asset does not exist.";
+		}
+		return false;
+	}
+
+	// Reuse the asset database import boundary so Inspector-triggered rebuilds
+	// follow the same atomic compile, sidecar, ResourceManager, and renderer
+	// reload behavior as Project Browser and file-watcher imports.
+	AssetDatabase::Instance().ImportAsset(absolutePath, true);
+	return true;
 }
 
 // MainEditorSubsystem::SetSelectedPackageChildAsset records a read-only generated child selection from a model package.

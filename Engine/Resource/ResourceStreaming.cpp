@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <utility>
 
 namespace TerraEngine::Resource
@@ -76,6 +77,20 @@ namespace TerraEngine::Resource
 			return nullptr;
 		}
 
+		const VirtualGeometryPageCatalogEntry* FindPageCatalog(
+			const std::vector<VirtualGeometryPageCatalogEntry>& catalogs,
+			const StreamableAssetId& assetId)
+		{
+			for (const VirtualGeometryPageCatalogEntry& catalog : catalogs)
+			{
+				if (catalog.assetId == assetId)
+				{
+					return &catalog;
+				}
+			}
+			return nullptr;
+		}
+
 		void AppendVirtualGeometryPageNeed(
 			std::vector<StreamingNeed>& needs,
 			const VirtualGeometryPageNeedInput& input,
@@ -95,6 +110,27 @@ namespace TerraEngine::Resource
 			need.priority = priority;
 			need.reason = std::move(reason);
 			needs.push_back(std::move(need));
+		}
+
+		std::int32_t ScoreVirtualGeometryPagePriority(
+			const VirtualGeometryPageNeedInput& input,
+			const VirtualGeometryStreamingPage& page,
+			StreamingPriorityClass priorityClass)
+		{
+			// Page request scoring is pure data math. ResourceManager still owns
+			// the later protected cache mutation, IO dispatch, and GPU upload
+			// publication boundary.
+			const float importance = std::isfinite(input.screenImportance) ? std::clamp(input.screenImportance, 0.0f, 1.0f) : 0.0f;
+			const float predicted = std::isfinite(input.predictedNeed) ? std::clamp(input.predictedNeed, 0.0f, 1.0f) : 0.0f;
+			const std::int32_t budgetBoost = input.budgetPressureBytes > 0u
+				? 25 + static_cast<std::int32_t>(std::min<std::uint64_t>(75u, input.budgetPressureBytes / (1024u * 1024u)))
+				: 0;
+			return page.priority
+				+ input.assetPriority
+				+ PriorityClassBias(priorityClass)
+				+ static_cast<std::int32_t>(importance * 100.0f)
+				+ static_cast<std::int32_t>(predicted * 50.0f)
+				+ budgetBoost;
 		}
 
 		bool ParseNonNegativeDouble(std::string_view text)
@@ -342,6 +378,47 @@ namespace TerraEngine::Resource
 		return MergeStreamingNeeds(std::move(needs), nowSeconds);
 	}
 
+	std::vector<VirtualGeometryPageNeedInput> BuildVirtualGeometryPageNeedInputsFromSelectionStates(
+		const std::vector<TerraEngine::Renderer::VirtualGeometryViewSelectionState>& states,
+		const std::vector<VirtualGeometryPageCatalogEntry>& catalogs,
+		float preloadBias)
+	{
+		const float finitePreloadBias = std::isfinite(preloadBias) ? std::clamp(preloadBias, 0.0f, 16.0f) : 1.0f;
+		std::vector<VirtualGeometryPageNeedInput> inputs;
+		for (const TerraEngine::Renderer::VirtualGeometryViewSelectionState& state : states)
+		{
+			const std::string viewId = std::string(::ToString(state.viewType)) + ":" + std::to_string(state.outputId);
+			for (const TerraEngine::Renderer::VirtualGeometryPageNeedRecord& need : state.pageNeeds)
+			{
+				const VirtualGeometryPageCatalogEntry* catalog = FindPageCatalog(catalogs, need.meshId);
+				if (catalog == nullptr || catalog->pages.empty())
+				{
+					continue;
+				}
+
+				VirtualGeometryPageNeedInput input;
+				input.assetId = need.meshId;
+				input.objectId = need.objectId;
+				input.viewId = viewId;
+				input.desiredLodIndex = need.desiredLodIndex;
+				input.desiredClusterId = need.clusterId;
+				input.screenImportance = std::isfinite(need.screenImportance)
+					? std::clamp(need.screenImportance, 0.0f, 1.0f)
+					: 0.0f;
+				// The render snapshot carries current screen importance; applying
+				// preload bias turns that into a short-term prediction without
+				// reading camera objects or mutable scene state from workers.
+				input.predictedNeed = std::clamp(input.screenImportance * finitePreloadBias, 0.0f, 1.0f);
+				input.assetPriority = catalog->assetPriority;
+				input.budgetPressureBytes = catalog->budgetPressureBytes;
+				input.fallbackRequired = need.fallbackRequired;
+				input.pages = catalog->pages;
+				inputs.push_back(std::move(input));
+			}
+		}
+		return inputs;
+	}
+
 	std::vector<StreamingNeed> BuildVirtualGeometryPageStreamingNeeds(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy, double nowSeconds)
 	{
 		const StreamingPolicy sanitized = SanitizeStreamingPolicy(policy);
@@ -381,26 +458,109 @@ namespace TerraEngine::Resource
 					input,
 					*desiredPage,
 					StreamingNeedType::RuntimeExplicit,
-					desiredPage->priority + PriorityClassBias(StreamingPriorityClass::Important),
+					ScoreVirtualGeometryPagePriority(input, *desiredPage, StreamingPriorityClass::Important),
 					expiresAtSeconds,
 					"virtual geometry desired LOD page");
 			}
 
+			// Desired pages improve quality, but fallback pages protect
+			// visibility. Keeping them as separate needs lets the scheduler load
+			// the fallback first when memory or IO pressure forces a tradeoff.
 			const VirtualGeometryStreamingPage* fallbackPage = FindPageById(input.pages, desiredPage->fallbackPageId);
-			if (fallbackPage != nullptr && !fallbackPage->resident && !fallbackPage->failed)
+			if (input.fallbackRequired && fallbackPage != nullptr && !fallbackPage->resident && !fallbackPage->failed)
 			{
 				AppendVirtualGeometryPageNeed(
 					needs,
 					input,
 					*fallbackPage,
 					StreamingNeedType::FallbackDefault,
-					fallbackPage->priority + PriorityClassBias(StreamingPriorityClass::Critical),
+					ScoreVirtualGeometryPagePriority(input, *fallbackPage, StreamingPriorityClass::Critical),
 					expiresAtSeconds,
 					"virtual geometry fallback page");
 			}
 		}
 
 		return MergeStreamingNeeds(std::move(needs), nowSeconds);
+	}
+
+	std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy)
+	{
+		const StreamingPolicy sanitized = SanitizeStreamingPolicy(policy);
+		if (!sanitized.enabled)
+		{
+			return {};
+		}
+
+		std::vector<VirtualGeometryPageRequestPacket> packets;
+		for (const VirtualGeometryPageNeedInput& input : inputs)
+		{
+			if (input.assetId == TerraEngine::EMPTY_UUID || input.pages.empty())
+			{
+				continue;
+			}
+
+			const VirtualGeometryStreamingPage* desiredPage = nullptr;
+			for (const VirtualGeometryStreamingPage& page : input.pages)
+			{
+				if (PageCoversLod(page, input.desiredLodIndex))
+				{
+					desiredPage = &page;
+					break;
+				}
+			}
+			if (desiredPage == nullptr || desiredPage->resident || desiredPage->failed)
+			{
+				continue;
+			}
+
+			VirtualGeometryPageRequestPacket desiredPacket;
+			desiredPacket.assetId = input.assetId;
+			desiredPacket.objectId = input.objectId;
+			desiredPacket.viewId = input.viewId;
+			desiredPacket.pageId = desiredPage->pageId;
+			desiredPacket.clusterId = input.desiredClusterId;
+			desiredPacket.desiredLodIndex = input.desiredLodIndex;
+			desiredPacket.priority = ScoreVirtualGeometryPagePriority(input, *desiredPage, StreamingPriorityClass::Important);
+			desiredPacket.fallbackRequest = false;
+			desiredPacket.reason = "virtual geometry desired page async IO request";
+			packets.push_back(std::move(desiredPacket));
+
+			// Request packets are immutable handoff records. The worker-safe
+			// planner can build them in bulk, while ResourceManager and the RHI
+			// remain responsible for protected cache mutation and GPU upload.
+			const VirtualGeometryStreamingPage* fallbackPage = FindPageById(input.pages, desiredPage->fallbackPageId);
+			if (input.fallbackRequired && fallbackPage != nullptr && !fallbackPage->resident && !fallbackPage->failed)
+			{
+				VirtualGeometryPageRequestPacket fallbackPacket;
+				fallbackPacket.assetId = input.assetId;
+				fallbackPacket.objectId = input.objectId;
+				fallbackPacket.viewId = input.viewId;
+				fallbackPacket.pageId = fallbackPage->pageId;
+				fallbackPacket.clusterId = input.desiredClusterId;
+				fallbackPacket.desiredLodIndex = fallbackPage->firstLodIndex;
+				fallbackPacket.priority = ScoreVirtualGeometryPagePriority(input, *fallbackPage, StreamingPriorityClass::Critical);
+				fallbackPacket.fallbackRequest = true;
+				fallbackPacket.reason = "virtual geometry fallback page async IO request";
+				packets.push_back(std::move(fallbackPacket));
+			}
+		}
+
+		std::sort(packets.begin(), packets.end(), [](const VirtualGeometryPageRequestPacket& left, const VirtualGeometryPageRequestPacket& right) {
+			if (left.priority != right.priority)
+			{
+				return left.priority > right.priority;
+			}
+			if (left.assetId != right.assetId)
+			{
+				return UuidLess(left.assetId, right.assetId);
+			}
+			if (left.pageId != right.pageId)
+			{
+				return left.pageId < right.pageId;
+			}
+			return left.fallbackRequest && !right.fallbackRequest;
+		});
+		return packets;
 	}
 
 	std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds)

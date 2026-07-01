@@ -1,7 +1,9 @@
 #include "TestHarness.h"
 
+#include "AssetImportResult.h"
 #include "AssetDatabase.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
+#include "Utilities/UUID.h"
 
 #include <cstring>
 #include <filesystem>
@@ -64,6 +66,19 @@ namespace TerraEngine::EditorTests
 			return std::string(
 				std::istreambuf_iterator<char>(input),
 				std::istreambuf_iterator<char>());
+		}
+
+		void WriteTinyObj(const std::filesystem::path& path)
+		{
+			std::filesystem::create_directories(path.parent_path());
+			std::ofstream output(path, std::ios::trunc);
+			output << "v 0 0 0\n";
+			output << "v 1 0 0\n";
+			output << "v 0 1 0\n";
+			output << "vt 0 0\n";
+			output << "vt 1 0\n";
+			output << "vt 0 1\n";
+			output << "f 1/1 2/2 3/3\n";
 		}
 	}
 
@@ -133,6 +148,152 @@ namespace TerraEngine::EditorTests
 
 			context.ExpectEqual(before, after, "Failed mesh rebuilds should leave the previous compiled artifact untouched.");
 			context.Expect(!std::filesystem::exists(compiledPath.string() + ".previous"), "Successful rollback should not leave a publish backup beside the compiled mesh.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.Inspector.SavesLoadsAndResetsLooseMeshOverrides", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			AssetDatabase::Instance().Initialize(root);
+
+			const std::filesystem::path sourcePath = AssetDatabase::Instance().GetAssetRoot() / "override.obj";
+			WriteTinyObj(sourcePath);
+			AssetDatabase::Instance().ImportAsset(sourcePath, true);
+
+			const auto& assets = AssetDatabase::Instance().GetAssets();
+			const auto assetIt = assets.find(std::filesystem::absolute(sourcePath));
+			context.Expect(assetIt != assets.end(), "Imported mesh should be registered for inspector override tests.");
+
+			VirtualGeometryAdaptiveSettingsMetadata settings = AssetDatabase::Instance().GetDefaultVirtualGeometryAdaptiveSettings();
+			settings.targetRatios = { 1.0f, 0.5f, 0.25f };
+			settings.minimumSourceTriangles = 24u;
+			settings.minimumGeneratedTriangles = 8u;
+			std::string error;
+			context.Expect(AssetDatabase::Instance().SaveVirtualGeometryPerMeshOverride(assetIt->second.guid, settings, &error), error.empty() ? "Per-mesh override should save." : error);
+
+			VirtualGeometryAdaptiveSettingsMetadata loaded;
+			context.Expect(AssetDatabase::Instance().TryGetVirtualGeometryAdaptiveSettings(assetIt->second, loaded), "Saved mesh override should resolve.");
+			context.Expect(loaded.overridePresent, "Resolved settings should report a per-mesh override.");
+			context.ExpectEqual(static_cast<std::size_t>(3u), loaded.targetRatios.size(), "Override target ratios should round-trip in memory.");
+			context.ExpectEqual(24u, loaded.minimumSourceTriangles, "Override minimum source triangles should round-trip in memory.");
+
+			AssetDatabase::Instance().Shutdown();
+			AssetDatabase::Instance().Initialize(root);
+			const auto& reloadedAssets = AssetDatabase::Instance().GetAssets();
+			const auto reloadedIt = reloadedAssets.find(std::filesystem::absolute(sourcePath));
+			context.Expect(reloadedIt != reloadedAssets.end(), "Mesh metadata should reload from disk.");
+			context.Expect(AssetDatabase::Instance().HasVirtualGeometryPerMeshOverride(reloadedIt->second), "Override should persist in the .meta file.");
+
+			context.Expect(AssetDatabase::Instance().ClearVirtualGeometryPerMeshOverride(reloadedIt->second.guid, &error), error.empty() ? "Override should reset." : error);
+			VirtualGeometryAdaptiveSettingsMetadata resetSettings;
+			context.Expect(AssetDatabase::Instance().TryGetVirtualGeometryAdaptiveSettings(reloadedIt->second, resetSettings), "Reset mesh settings should resolve to defaults.");
+			context.Expect(!AssetDatabase::Instance().HasVirtualGeometryPerMeshOverride(reloadedIt->second), "Reset should remove the .meta override block.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.Inspector.ShowsOverrideControlsOnlyForMeshAssets", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			AssetDatabase::Instance().Initialize(root);
+
+			AssetMetadata meshMetadata{};
+			meshMetadata.importerName = "MeshImporter";
+			AssetMetadata packageMetadata{};
+			packageMetadata.importerName = "GltfPackageImporter";
+			AssetMetadata textureMetadata{};
+			textureMetadata.importerName = "TextureImporter";
+
+			context.Expect(AssetDatabase::Instance().CanEditVirtualGeometryPerMeshOverride(meshMetadata), "Loose imported meshes should expose Inspector override controls.");
+			context.Expect(!AssetDatabase::Instance().CanEditVirtualGeometryPerMeshOverride(packageMetadata), "Package source assets should not expose per-mesh controls directly.");
+			context.Expect(!AssetDatabase::Instance().CanEditVirtualGeometryPerMeshOverride(textureMetadata), "Non-mesh assets should not expose virtual geometry override controls.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.Inspector.ReadsRequestedTargetCookDiagnostics", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			AssetDatabase::Instance().Initialize(root);
+
+			const std::filesystem::path sourcePath = AssetDatabase::Instance().GetAssetRoot() / "diagnostics.obj";
+			WriteTinyObj(sourcePath);
+			AssetDatabase::Instance().ImportAsset(sourcePath, true);
+			const auto& assets = AssetDatabase::Instance().GetAssets();
+			const auto assetIt = assets.find(std::filesystem::absolute(sourcePath));
+			context.Expect(assetIt != assets.end(), "Imported mesh should be registered before reading cook diagnostics.");
+
+			std::vector<VirtualGeometryDetailDiagnosticMetadata> diagnostics;
+			context.Expect(AssetDatabase::Instance().TryGetVirtualGeometryDetailDiagnostics(assetIt->second, diagnostics), "Cook diagnostics should be queryable for mesh assets.");
+			context.Expect(!diagnostics.empty(), "Cook diagnostics should include at least one requested target row.");
+			context.ExpectEqual(0u, diagnostics.front().targetIndex, "First cook diagnostic should describe LOD0/source target.");
+			context.ExpectEqual(std::string("Generated"), diagnostics.front().status, "LOD0/source target should be reported as generated.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.Inspector.RebuildsWithCurrentSettingsAndResetsToDefaults", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			AssetDatabase::Instance().Initialize(root);
+
+			const std::filesystem::path sourcePath = AssetDatabase::Instance().GetAssetRoot() / "rebuild.obj";
+			WriteTinyObj(sourcePath);
+			AssetDatabase::Instance().ImportAsset(sourcePath, true);
+			const auto& assets = AssetDatabase::Instance().GetAssets();
+			const auto assetIt = assets.find(std::filesystem::absolute(sourcePath));
+			context.Expect(assetIt != assets.end(), "Imported mesh should be registered before rebuild.");
+
+			VirtualGeometryAdaptiveSettingsMetadata settings = AssetDatabase::Instance().GetDefaultVirtualGeometryAdaptiveSettings();
+			settings.targetRatios = { 1.0f, 0.5f };
+			settings.minimumSourceTriangles = 16u;
+			std::string error;
+			context.Expect(AssetDatabase::Instance().SaveVirtualGeometryPerMeshOverride(assetIt->second.guid, settings, &error), error.empty() ? "Override should save before rebuild." : error);
+			context.Expect(AssetDatabase::Instance().RebuildVirtualGeometryAsset(assetIt->second.guid, &error), error.empty() ? "Rebuild should route through AssetDatabase import." : error);
+			context.Expect(AssetDatabase::Instance().HasVirtualGeometryPerMeshOverride(assetIt->second), "Rebuild should preserve the current override metadata.");
+			context.Expect(AssetDatabase::Instance().ClearVirtualGeometryPerMeshOverride(assetIt->second.guid, &error), error.empty() ? "Reset should clear override after rebuild." : error);
+			context.Expect(!AssetDatabase::Instance().HasVirtualGeometryPerMeshOverride(assetIt->second), "Reset-to-defaults should remove override metadata.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.PackageImport.GeneratedMeshOverridesRoundTripThroughSidecar", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			AssetDatabase::Instance().Initialize(root);
+
+			const std::filesystem::path packagePath = AssetDatabase::Instance().GetAssetRoot() / "package.glb";
+			std::ofstream(packagePath, std::ios::binary | std::ios::trunc).put('\0');
+			TerraEngine::AssetPipeline::ModelPackageImportResult result{};
+			result.status = TerraEngine::AssetPipeline::ModelImportStatus::Succeeded;
+			result.packageGuid = TerraEngine::GenerateUUID();
+			result.package.sourcePath = "package.glb";
+			result.package.importRoot = "package_Generated";
+			TerraEngine::AssetPipeline::GeneratedModelMeshAsset mesh{};
+			mesh.guid = TerraEngine::GenerateUUID();
+			mesh.displayName = "GeneratedMesh";
+			mesh.sourcePath = "package.glb";
+			mesh.compiledPath = "package.temf";
+			result.generatedMeshes.push_back(mesh);
+			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(packagePath, result), "Fixture package sidecar should save.");
+
+			VirtualGeometryAdaptiveSettingsMetadata settings = AssetDatabase::Instance().GetDefaultVirtualGeometryAdaptiveSettings();
+			settings.targetRatios = { 1.0f, 0.70710677f, 0.5f };
+			settings.minimumGeneratedTriangles = 32u;
+			std::string error;
+			context.Expect(AssetDatabase::Instance().SaveGeneratedMeshVirtualGeometryPerMeshOverride(packagePath, mesh.guid, settings, &error), error.empty() ? "Generated mesh override should save." : error);
+
+			VirtualGeometryAdaptiveSettingsMetadata loaded;
+			context.Expect(AssetDatabase::Instance().TryGetGeneratedMeshVirtualGeometryAdaptiveSettings(packagePath, mesh.guid, loaded), "Generated mesh override should load.");
+			context.Expect(loaded.overridePresent, "Generated mesh settings should report a sidecar override.");
+			context.ExpectEqual(static_cast<std::size_t>(3u), loaded.targetRatios.size(), "Generated mesh override ratios should round-trip.");
+			context.ExpectEqual(32u, loaded.minimumGeneratedTriangles, "Generated mesh threshold should round-trip.");
+
+			context.Expect(AssetDatabase::Instance().ClearGeneratedMeshVirtualGeometryPerMeshOverride(packagePath, mesh.guid, &error), error.empty() ? "Generated mesh reset should save." : error);
+			VirtualGeometryAdaptiveSettingsMetadata resetSettings;
+			context.Expect(AssetDatabase::Instance().TryGetGeneratedMeshVirtualGeometryAdaptiveSettings(packagePath, mesh.guid, resetSettings), "Generated mesh default settings should load after reset.");
+			context.Expect(!resetSettings.overridePresent, "Generated mesh reset should remove the sidecar override.");
 
 			AssetDatabase::Instance().Shutdown();
 			std::filesystem::remove_all(root);

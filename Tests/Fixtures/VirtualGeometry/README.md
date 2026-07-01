@@ -10,6 +10,10 @@ clear source attribution instead of committed as heavy binary files.
 - High-detail static mesh: at least one source mesh large enough to generate
   multiple useful LOD levels.
 - Small static mesh: a mesh where simplification should be skipped cleanly.
+- Adaptive medium mesh: a mesh that produces only part of the default requested
+  half-octave target chain so tests can prove ratios are advisory.
+- Per-mesh override mesh: a generated package mesh with stable identity for
+  Inspector override, rebuild, reset, and reimport tests.
 - Multi-material mesh: separate material sections that must remain stable across
   generated detail levels.
 - Border continuity mesh: adjacent regions that reveal cracks or holes if LOD
@@ -18,6 +22,8 @@ clear source attribution instead of committed as heavy binary files.
   resizes, and multi-view mismatch cases.
 - Streaming pressure scene: enough virtual geometry pages to exceed a small test
   budget while preserving visible fallback detail.
+- Mixed-distance cluster scene: one large object spanning near and far view
+  regions so hierarchical cluster selection can refine only nearby regions.
 
 ## Visual Correctness Stress Notes
 
@@ -30,6 +36,12 @@ clear source attribution instead of committed as heavy binary files.
   error and `maxLodDrop` settings can produce obvious popping.
 - Hi-Z fixtures should include thin occluders and self-occluding meshes once
   occlusion is enabled for virtual geometry.
+- Adaptive LOD fixtures should include a tiny mesh, a medium mesh, and a large
+  mesh so tests can validate skipped targets, partial chains, and full chains.
+- Streaming fixtures should keep page `0` or an equivalent fallback page small
+  and resident while high-detail pages exceed the configured test budget.
+- Mixed-detail fixtures should expose parent/child cluster coverage mistakes by
+  making overlapping or missing regions obvious in false-color debug modes.
 
 ## Attribution Rules
 

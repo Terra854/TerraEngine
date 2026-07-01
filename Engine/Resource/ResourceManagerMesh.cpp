@@ -25,12 +25,37 @@ namespace
 		Downgraded
 	};
 
+	enum class AdaptiveVirtualMeshRejectionReason
+	{
+		None,
+		RequestedTargetOutOfRange,
+		SkippedDetailOutOfRange,
+		ClusterHierarchyOutOfRange,
+		ClusterPageLinkOutOfRange,
+		ValidationFlagStringOutOfRange
+	};
+
 	struct VirtualMeshValidationResult
 	{
 		VirtualMeshLoadDecision decision = VirtualMeshLoadDecision::Accepted;
+		AdaptiveVirtualMeshRejectionReason adaptiveReason = AdaptiveVirtualMeshRejectionReason::None;
 		std::string reason;
 		std::vector<std::string> warnings;
 	};
+
+	const char* ToString(AdaptiveVirtualMeshRejectionReason reason)
+	{
+		switch (reason)
+		{
+		case AdaptiveVirtualMeshRejectionReason::None: return "none";
+		case AdaptiveVirtualMeshRejectionReason::RequestedTargetOutOfRange: return "requested-target-out-of-range";
+		case AdaptiveVirtualMeshRejectionReason::SkippedDetailOutOfRange: return "skipped-detail-out-of-range";
+		case AdaptiveVirtualMeshRejectionReason::ClusterHierarchyOutOfRange: return "cluster-hierarchy-out-of-range";
+		case AdaptiveVirtualMeshRejectionReason::ClusterPageLinkOutOfRange: return "cluster-page-link-out-of-range";
+		case AdaptiveVirtualMeshRejectionReason::ValidationFlagStringOutOfRange: return "validation-flag-string-out-of-range";
+		}
+		return "unknown";
+	}
 
 	bool VirtualMeshValidationRejected(const VirtualMeshValidationResult& result)
 	{
@@ -266,6 +291,155 @@ namespace
 		return true;
 	}
 
+	bool ValidateAdaptiveVirtualGeometryPayloadTables(const Mesh& mesh, const std::filesystem::path& resolvedPath, AdaptiveVirtualMeshRejectionReason& outReason)
+	{
+		outReason = AdaptiveVirtualMeshRejectionReason::None;
+
+		for (const VirtualGeometryRequestedTargetRecord& target : mesh.virtualGeometryRequestedTargets)
+		{
+			if (target.targetIndex >= mesh.virtualGeometryRequestedTargets.size()
+				|| target.status > static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Rejected)
+				|| !IsFiniteFloat(target.requestedRatio)
+				|| target.requestedRatio <= 0.0f)
+			{
+				outReason = AdaptiveVirtualMeshRejectionReason::RequestedTargetOutOfRange;
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry requested target is invalid in " << resolvedPath);
+				return false;
+			}
+		}
+
+		for (const VirtualGeometrySkippedDetailRecord& skipped : mesh.virtualGeometrySkippedDetails)
+		{
+			const bool targetValid = mesh.virtualGeometryRequestedTargets.empty()
+				|| skipped.targetIndex < mesh.virtualGeometryRequestedTargets.size();
+			const bool fallbackValid = mesh.virtualGeometryDetailLevels.empty()
+				|| skipped.nearestGeneratedLodIndex < mesh.virtualGeometryDetailLevels.size();
+			if (!targetValid
+				|| !fallbackValid
+				|| skipped.status > static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Rejected)
+				|| skipped.reason > static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::DuplicateOfPreviousLevel)
+				|| !IsFiniteFloat(skipped.requestedRatio)
+				|| !IsFiniteFloat(skipped.actualCandidateRatio)
+				|| !IsFiniteFloat(skipped.actualNearestRatio)
+				|| !ValidateVirtualGeometryStringRange(skipped.messageStringOffset, skipped.messageStringSize, mesh.virtualGeometryDiagnosticStrings.size(), resolvedPath, "skipped detail message"))
+			{
+				outReason = AdaptiveVirtualMeshRejectionReason::SkippedDetailOutOfRange;
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry skipped detail is invalid in " << resolvedPath);
+				return false;
+			}
+		}
+
+		for (std::size_t clusterIndex = 0u; clusterIndex < mesh.virtualGeometryClusters.size(); ++clusterIndex)
+		{
+			const VirtualGeometryClusterRecord& cluster = mesh.virtualGeometryClusters[clusterIndex];
+			const bool parentValid = cluster.parentClusterId == kVirtualGeometryInvalidIndex
+				|| cluster.parentClusterId < mesh.virtualGeometryClusters.size();
+			const bool firstChildValid = cluster.childCount == 0u
+				|| cluster.firstChildClusterId < mesh.virtualGeometryClusters.size();
+			const bool childRangeValid = cluster.childCount == 0u
+				|| ValidateVirtualGeometryAddRange(cluster.firstChildClusterId, cluster.childCount, static_cast<std::uint32_t>(mesh.virtualGeometryClusters.size()), resolvedPath, "cluster child range");
+			const bool fallbackValid = cluster.fallbackClusterId < mesh.virtualGeometryClusters.size();
+			const bool lodValid = cluster.lodIndex < mesh.virtualGeometryDetailLevels.size();
+			const bool pageValid = mesh.virtualGeometryPages.empty()
+				|| cluster.pageId < mesh.virtualGeometryPages.size();
+			const bool materialValid = mesh.virtualGeometryMaterialSections.empty()
+				|| std::any_of(mesh.virtualGeometryMaterialSections.begin(), mesh.virtualGeometryMaterialSections.end(), [&](const VirtualGeometryMaterialSectionRecord& section) {
+					return section.sectionId == cluster.materialSectionId;
+				});
+			if (!parentValid
+				|| !firstChildValid
+				|| !childRangeValid
+				|| !fallbackValid
+				|| !lodValid
+				|| !pageValid
+				|| !materialValid
+				|| cluster.clusterId != static_cast<std::uint32_t>(clusterIndex)
+				|| !ValidateVirtualGeometryAddRange(cluster.groupOffset, cluster.groupCount, static_cast<std::uint32_t>(mesh.virtualGeometryCullableGroups.size()), resolvedPath, "cluster group range")
+				|| !IsFiniteFloat(cluster.geometricError)
+				|| !IsFiniteFloat(cluster.boundsCenter[0])
+				|| !IsFiniteFloat(cluster.boundsCenter[1])
+				|| !IsFiniteFloat(cluster.boundsCenter[2])
+				|| !IsFiniteFloat(cluster.boundsRadius)
+				|| cluster.boundsRadius < 0.0f)
+			{
+				outReason = AdaptiveVirtualMeshRejectionReason::ClusterHierarchyOutOfRange;
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry cluster metadata is invalid in " << resolvedPath);
+				return false;
+			}
+			for (std::uint32_t childOffset = 0u; childOffset < cluster.childCount; ++childOffset)
+			{
+				const std::uint32_t childIndex = cluster.firstChildClusterId + childOffset;
+				if (mesh.virtualGeometryClusters[childIndex].parentClusterId != cluster.clusterId)
+				{
+					outReason = AdaptiveVirtualMeshRejectionReason::ClusterHierarchyOutOfRange;
+					TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry cluster child does not point back to its parent in " << resolvedPath);
+					return false;
+				}
+			}
+		}
+
+		for (const VirtualGeometryClusterRecord& cluster : mesh.virtualGeometryClusters)
+		{
+			std::vector<std::uint8_t> visited(mesh.virtualGeometryClusters.size(), 0u);
+			std::uint32_t parentId = cluster.parentClusterId;
+			for (std::size_t guard = 0u; parentId != kVirtualGeometryInvalidIndex && guard < mesh.virtualGeometryClusters.size(); ++guard)
+			{
+				if (parentId >= mesh.virtualGeometryClusters.size()
+					|| parentId == cluster.clusterId
+					|| visited[parentId] != 0u)
+				{
+					outReason = AdaptiveVirtualMeshRejectionReason::ClusterHierarchyOutOfRange;
+					TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry cluster hierarchy contains a cycle in " << resolvedPath);
+					return false;
+				}
+				visited[parentId] = 1u;
+				parentId = mesh.virtualGeometryClusters[parentId].parentClusterId;
+			}
+		}
+
+		for (const VirtualGeometryClusterPageLinkRecord& link : mesh.virtualGeometryClusterPageLinks)
+		{
+			if (link.clusterId >= mesh.virtualGeometryClusters.size()
+				|| link.pageId >= mesh.virtualGeometryPages.size()
+				|| !ValidateVirtualGeometryAddRange(link.firstGroup, link.groupCount, static_cast<std::uint32_t>(mesh.virtualGeometryCullableGroups.size()), resolvedPath, "cluster page link group range"))
+			{
+				outReason = AdaptiveVirtualMeshRejectionReason::ClusterPageLinkOutOfRange;
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry cluster-page link is invalid in " << resolvedPath);
+				return false;
+			}
+			const VirtualGeometryClusterRecord& cluster = mesh.virtualGeometryClusters[link.clusterId];
+			const VirtualGeometryPageRecord& page = mesh.virtualGeometryPages[link.pageId];
+			const std::uint64_t linkFirst = link.firstGroup;
+			const std::uint64_t linkLast = linkFirst + link.groupCount;
+			const std::uint64_t clusterFirst = cluster.groupOffset;
+			const std::uint64_t clusterLast = clusterFirst + cluster.groupCount;
+			const std::uint64_t pageFirst = page.groupOffset;
+			const std::uint64_t pageLast = pageFirst + page.groupCount;
+			if (link.groupCount == 0u
+				|| linkFirst < clusterFirst
+				|| linkLast > clusterLast
+				|| linkFirst < pageFirst
+				|| linkLast > pageLast)
+			{
+				outReason = AdaptiveVirtualMeshRejectionReason::ClusterPageLinkOutOfRange;
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry cluster-page link does not fit its cluster/page coverage in " << resolvedPath);
+				return false;
+			}
+		}
+
+		for (const VirtualGeometryValidationFlagRecord& flag : mesh.virtualGeometryValidationFlags)
+		{
+			if (!ValidateVirtualGeometryStringRange(flag.messageStringOffset, flag.messageStringSize, mesh.virtualGeometryDiagnosticStrings.size(), resolvedPath, "validation flag message"))
+			{
+				outReason = AdaptiveVirtualMeshRejectionReason::ValidationFlagStringOutOfRange;
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry validation flag text is invalid in " << resolvedPath);
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	bool ValidateVirtualGeometryPayloadTables(const MeshHeader& header, const Mesh& mesh, const std::filesystem::path& resolvedPath)
 	{
 		if (mesh.virtualGeometryDetailLevels.empty())
@@ -283,12 +457,18 @@ namespace
 		{
 			const VirtualGeometryDetailLevelRecord& detail = mesh.virtualGeometryDetailLevels[detailIndex];
 			if (detail.lodIndex != detailIndex
+				|| detail.targetStatus > static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Rejected)
 				|| detail.meshletCount == 0u
 				|| detail.primitiveCount == 0u
 				|| !ValidateVirtualGeometryAddRange(detail.meshletOffset, detail.meshletCount, header.meshletCount, resolvedPath, "detail meshlet range")
 				|| !ValidateVirtualGeometryAddRange(detail.sectionRangeOffset, detail.sectionRangeCount, static_cast<std::uint32_t>(mesh.virtualGeometrySectionRanges.size()), resolvedPath, "detail section range")
 				|| !ValidateVirtualGeometryAddRange(detail.pageRangeOffset, detail.pageRangeCount, static_cast<std::uint32_t>(mesh.virtualGeometryPages.size()), resolvedPath, "detail page range"))
 			{
+				return false;
+			}
+			if (!mesh.virtualGeometryRequestedTargets.empty() && detail.requestedTargetIndex >= mesh.virtualGeometryRequestedTargets.size())
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry detail references a missing requested target in " << resolvedPath);
 				return false;
 			}
 
@@ -384,18 +564,37 @@ namespace
 		}
 
 		bool hasRenderableFallbackPage = mesh.virtualGeometryPages.empty();
+		if (!mesh.virtualGeometryPages.empty()
+			&& (mesh.virtualGeometryClusters.empty() || mesh.virtualGeometryClusterPageLinks.empty()))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page table is missing required cluster-page coverage metadata in " << resolvedPath);
+			return false;
+		}
 		for (const VirtualGeometryPageRecord& page : mesh.virtualGeometryPages)
 		{
 			if (!ValidateVirtualGeometryAddRange(page.firstLodIndex, page.lodCount, static_cast<std::uint32_t>(mesh.virtualGeometryDetailLevels.size()), resolvedPath, "page LOD range")
-				|| !ValidateVirtualGeometryAddRange(page.groupOffset, page.groupCount, static_cast<std::uint32_t>(mesh.virtualGeometryCullableGroups.size()), resolvedPath, "page group range"))
+				|| !ValidateVirtualGeometryAddRange(page.groupOffset, page.groupCount, static_cast<std::uint32_t>(mesh.virtualGeometryCullableGroups.size()), resolvedPath, "page group range")
+				|| !ValidateVirtualGeometryAddRange(page.clusterPageLinkOffset, page.clusterPageLinkCount, static_cast<std::uint32_t>(mesh.virtualGeometryClusterPageLinks.size()), resolvedPath, "page cluster-link range"))
 			{
 				return false;
 			}
 			if (page.pageId >= mesh.virtualGeometryPages.size()
+				|| mesh.virtualGeometryPages[page.pageId].pageId != page.pageId
 				|| page.fallbackPageId >= mesh.virtualGeometryPages.size()
 				|| page.byteSize == 0u)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page has invalid identity, fallback, or byte-size metadata in " << resolvedPath);
+				return false;
+			}
+			if (page.clusterPageLinkCount == 0u)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page does not declare cluster-page coverage metadata in " << resolvedPath);
+				return false;
+			}
+			const VirtualGeometryPageRecord& fallbackPage = mesh.virtualGeometryPages[page.fallbackPageId];
+			if (fallbackPage.firstLodIndex > page.firstLodIndex)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page fallback points to a higher-detail page in " << resolvedPath);
 				return false;
 			}
 			if (page.firstLodIndex == 0u && page.fallbackPageId == page.pageId)
@@ -416,6 +615,13 @@ namespace
 			{
 				return false;
 			}
+		}
+
+		AdaptiveVirtualMeshRejectionReason adaptiveReason = AdaptiveVirtualMeshRejectionReason::None;
+		if (!ValidateAdaptiveVirtualGeometryPayloadTables(mesh, resolvedPath, adaptiveReason))
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry rejected: " << ToString(adaptiveReason));
+			return false;
 		}
 
 		return true;
@@ -463,12 +669,28 @@ namespace
 				<< ". Rebuild the mesh with the current virtual geometry cooker.");
 			return false;
 		}
+		constexpr std::uint32_t kRequiredVirtualGeometryValidationFlags =
+			kVirtualGeometryValidationFlagFallbackCoverageValidated
+			| kVirtualGeometryValidationFlagClusterHierarchyValidated
+			| kVirtualGeometryValidationFlagPageLinksValidated;
+		if ((virtualHeader.flags & kRequiredVirtualGeometryValidationFlags) != kRequiredVirtualGeometryValidationFlags)
+		{
+			TERRAENGINE_LOG(LogLevel::Error,
+				"TEMF virtual geometry payload lacks current fallback, hierarchy, or page-link validation flags in " << resolvedPath
+				<< ". Rebuild the mesh with the current virtual geometry cooker.");
+			return false;
+		}
 
 		std::vector<VirtualGeometryDetailLevelRecord> detailLevels;
 		std::vector<VirtualGeometryMaterialSectionRecord> materialSections;
 		std::vector<VirtualGeometrySectionRangeRecord> sectionRanges;
 		std::vector<VirtualGeometryCullableGroupRecord> cullableGroups;
 		std::vector<VirtualGeometryPageRecord> pages;
+		std::vector<VirtualGeometryRequestedTargetRecord> requestedTargets;
+		std::vector<VirtualGeometrySkippedDetailRecord> skippedDetails;
+		std::vector<VirtualGeometryClusterRecord> clusters;
+		std::vector<VirtualGeometryClusterPageLinkRecord> clusterPageLinks;
+		std::vector<VirtualGeometryValidationFlagRecord> validationFlags;
 		std::vector<VirtualGeometryDiagnosticRecord> diagnostics;
 
 		if (!ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.detailLevelTableOffset, virtualHeader.detailLevelCount, resolvedPath, "virtual geometry detail table", detailLevels)
@@ -476,6 +698,11 @@ namespace
 			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.sectionRangeTableOffset, virtualHeader.sectionRangeCount, resolvedPath, "virtual geometry section range table", sectionRanges)
 			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.cullableGroupTableOffset, virtualHeader.cullableGroupCount, resolvedPath, "virtual geometry cullable group table", cullableGroups)
 			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.pageTableOffset, virtualHeader.pageCount, resolvedPath, "virtual geometry page table", pages)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.requestedTargetTableOffset, virtualHeader.requestedTargetCount, resolvedPath, "virtual geometry requested target table", requestedTargets)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.skippedDetailTableOffset, virtualHeader.skippedDetailCount, resolvedPath, "virtual geometry skipped detail table", skippedDetails)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.clusterTableOffset, virtualHeader.clusterCount, resolvedPath, "virtual geometry cluster table", clusters)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.clusterPageLinkTableOffset, virtualHeader.clusterPageLinkCount, resolvedPath, "virtual geometry cluster page link table", clusterPageLinks)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.validationFlagTableOffset, virtualHeader.validationFlagCount, resolvedPath, "virtual geometry validation flag table", validationFlags)
 			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.diagnosticTableOffset, virtualHeader.diagnosticRecordCount, resolvedPath, "virtual geometry diagnostic table", diagnostics))
 		{
 			return false;
@@ -500,6 +727,11 @@ namespace
 		mesh.virtualGeometrySectionRanges = std::move(sectionRanges);
 		mesh.virtualGeometryCullableGroups = std::move(cullableGroups);
 		mesh.virtualGeometryPages = std::move(pages);
+		mesh.virtualGeometryRequestedTargets = std::move(requestedTargets);
+		mesh.virtualGeometrySkippedDetails = std::move(skippedDetails);
+		mesh.virtualGeometryClusters = std::move(clusters);
+		mesh.virtualGeometryClusterPageLinks = std::move(clusterPageLinks);
+		mesh.virtualGeometryValidationFlags = std::move(validationFlags);
 		mesh.virtualGeometryDiagnostics = std::move(diagnostics);
 		mesh.virtualGeometryDiagnosticStrings = std::move(stringTable);
 

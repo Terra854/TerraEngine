@@ -79,6 +79,10 @@ struct PushConstants
 	uint virtualMeshletCount;
 	uint selectedVirtualLod;
 	uint virtualGeometryFlags;
+	uint selectedVirtualClusterOffset;
+	uint selectedVirtualClusterCount;
+	uint selectedVirtualPageNeedOffset;
+	uint selectedVirtualPageNeedCount;
 	float4 editorTint;
 };
 
@@ -94,6 +98,7 @@ struct PSIn
 	nointerpolation uint meshletIndex : TEXCOORD2;
 	nointerpolation float meshletBoundsRadius : TEXCOORD3;
 	nointerpolation uint meshletCullFlags : TEXCOORD4;
+	nointerpolation uint virtualGeometryDebugData : TEXCOORD5;
 };
 
 static const uint kMaxMeshletVertices = 64;
@@ -187,12 +192,11 @@ void BuildMeshletDebugData(uint meshletIndex, uint meshletCount, out float bound
 		return;
 	}
 
-	const float3 worldConeApex = mul(SceneUniforms.model, float4(bounds.coneApex, 1.0f)).xyz;
-	const float3 worldConeAxis = mul((float3x3)SceneUniforms.model, bounds.coneAxis);
-	if (IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, boundsRadius, frameData.cameraPositionAndEpsilon.xyz, epsilon))
-	{
-		cullFlags |= kMeshletCullFlagCone;
-	}
+	// The task shader no longer rejects meshlets through cone backface culling
+	// because imported GLB/FBX meshes do not yet carry enough sidedness and
+	// winding validation metadata to make cone rejection conservative. Keep the
+	// debug reason aligned with the runtime path so Culling does not mark
+	// meshlets as cone-culled when they would actually be submitted.
 }
 
 float DecodeSnorm10(uint packedValue, uint bitOffset)
@@ -349,6 +353,14 @@ void EmitMeshlet(
 		outVertex.meshletIndex = meshletIndex;
 		outVertex.meshletBoundsRadius = meshletBoundsRadius;
 		outVertex.meshletCullFlags = meshletCullFlags;
+		// Pack the per-draw adaptive state into a single interpolator. Visible
+		// virtual geometry now draws one selected cluster range at a time, so the
+		// fragment visualizer sees the same sparse cut that the GPU dispatched.
+		outVertex.virtualGeometryDebugData =
+			(SceneUniforms.selectedVirtualLod & 0xFFu) |
+			((SceneUniforms.selectedVirtualClusterCount & 0xFFu) << 8u) |
+			((SceneUniforms.selectedVirtualPageNeedCount & 0xFFu) << 16u) |
+			((SceneUniforms.selectedVirtualClusterOffset & 0xFFu) << 24u);
 		outputVertices[vertexIndex] = outVertex;
 	}
 
@@ -385,6 +397,8 @@ void main(
 	const uint selectedMeshletCount = SceneUniforms.virtualMeshletCount == 0u
 		? (meshletCount - selectedMeshletOffset)
 		: min(SceneUniforms.virtualMeshletCount, meshletCount - selectedMeshletOffset);
+	// The selected-cluster packet describes the exact CPU cluster cut. This draw
+	// emits one selected cluster range rather than a whole-object envelope.
 	if (visibleIndex >= selectedMeshletCount)
 	{
 		SetMeshOutputCounts(0, 0);

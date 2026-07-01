@@ -2,8 +2,8 @@
 
 // Default.task.hlsl is the task-stage visibility filter for the default
 // mesh-shader route. It consumes TEMF meshlet bounds plus the selected
-// virtual-geometry LOD range chosen on the CPU, compacts visible meshlet indices
-// into TaskPayload, and always fails open when culling data or Hi-Z history is
+// virtual-geometry cluster range chosen on the CPU, compacts visible meshlet indices
+// into TaskPayload, and always fails open when culling data or the Hi-Z pyramid is
 // not trustworthy.
 
 // Sphere + cone bounds emitted per meshlet by meshoptimizer.
@@ -36,7 +36,7 @@ struct FrameCullingData
 	column_major float4x4 invProjection;
 	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
 	uint4 renderSettings1; // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
-	float4 renderSettings2; // x: indirectStrength, y: aoStrength, z: aoQuality, w: hiZHistoryValid
+	float4 renderSettings2; // x: indirectStrength, y: aoStrength, z: aoQuality, w: hiZPyramidAvailable
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
 	uint clusteredLightingValid;
@@ -65,7 +65,7 @@ struct TaskPayload
 [[vk::binding(4, 1)]] StructuredBuffer<MeshDecodeInfo> meshDecodeInfo;
 [[vk::binding(5, 1)]] StructuredBuffer<MeshletBounds> meshletBounds;
 [[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
-[[vk::binding(10, 0)]] Texture2D<float> hiZPyramid;
+[[vk::binding(10, 0)]] Texture2D<float> hiZPyramids[2];
 [[vk::binding(11, 0)]] SamplerState hiZSampler;
 
 groupshared TaskPayload gTaskPayload;
@@ -85,16 +85,26 @@ struct PushConstants
 	uint clusterDataOffset;
 	uint lightIndexOffset;
 	uint indirectDrawOffset;
-	uint virtualMeshletOffset; // First meshlet of the selected whole-mesh virtual-geometry LOD range.
-	uint virtualMeshletCount; // Number of meshlets in the selected range; zero means consume the rest of the meshlet table.
+	uint virtualMeshletOffset; // First meshlet of the selected virtual-geometry cluster range.
+	uint virtualMeshletCount; // Number of meshlets in the selected cluster; zero means consume the rest of the meshlet table.
 	uint selectedVirtualLod; // CPU-selected LOD index for diagnostics and debug visualization.
-	uint virtualGeometryFlags; // bit 2: Hi-Z self-occlusion guard passed; unset keeps Hi-Z fail-open.
+	uint virtualGeometryFlags; // Debug/diagnostic bits authored by RenderSystem.
+	// Cluster/page fields mirror the CPU's sparse adaptive selection packet.
+	// RenderSystem expands one draw per selected cluster, so this draw normally
+	// references one record and one page-backed meshlet range.
+	uint selectedVirtualClusterOffset; // First selected cluster record in the per-view packet.
+	uint selectedVirtualClusterCount; // Number of selected clusters for this draw; normally one for sparse VG dispatch.
+	uint selectedVirtualPageNeedOffset; // First missing-page request record for this draw.
+	uint selectedVirtualPageNeedCount; // Number of desired pages that fell back to resident coverage.
 	float4 editorTint;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> SceneUniforms;
 
 static const uint kMaxStatsSlots = 16u;
+static const uint kHiZViewCount = 2u;
+static const uint kVirtualGeometryDebugModeShift = 8u;
+static const uint kVirtualGeometryDebugModeMask = 0xFFu;
 
 bool IsFrustumCulled(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const float epsilon)
 {
@@ -138,39 +148,158 @@ bool IsConeBackfacing(const float3 coneApexWorld, const float3 coneAxisWorld, co
 	return facing >= (coneCutoff + epsilon);
 }
 
-bool IsOccluded(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const float epsilon)
+uint HiZViewIndexFromStatsSlot(const uint statsSlotIndex)
 {
-	// Project bounding sphere to NDC
+	// Stats slots are packed as frame * 2 + view, with Game at 0 and Scene at
+	// 1. The Hi-Z descriptor array mirrors that view order so editor Scene/Game
+	// command buffers can be recorded together without rebinding the texture.
+	return min(statsSlotIndex % kHiZViewCount, kHiZViewCount - 1u);
+}
+
+bool TryGetHiZProjectionScale(const FrameCullingData frameData, out float2 projectionScale)
+{
+	projectionScale = float2(0.0f, 0.0f);
+
+	// A pure projection matrix has stable X/Y scale on its diagonal. The old
+	// path read the view-projection diagonal, which changes as the camera
+	// rotates and can inflate or shrink the Hi-Z rectangle until occlusion
+	// appears sticky. The inverse projection is already uploaded for clustered
+	// lighting, so invert its diagonal back to projection scale here.
+	const float2 inverseProjectionDiagonal = float2(frameData.invProjection[0][0], frameData.invProjection[1][1]);
+	if (!all(isfinite(inverseProjectionDiagonal)) || any(abs(inverseProjectionDiagonal) <= 1e-6f))
+	{
+		return false;
+	}
+
+	projectionScale = rcp(abs(inverseProjectionDiagonal));
+	return all(isfinite(projectionScale));
+}
+
+bool IsOccluded(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const uint hiZViewIndex, const float epsilon)
+{
+	// Project the meshlet sphere into screen space. Hi-Z must stay conservative:
+	// if the sphere crosses the view edge or produces invalid math, draw it.
 	float4 centerClip = mul(SceneUniforms.viewProj, float4(centerWorld, 1.0f));
 	if (centerClip.w <= 0.0f) return false; // Near plane clipping
 
 	float3 centerNdc = centerClip.xyz / centerClip.w;
 	// Projection is already Y-flipped on CPU for Vulkan, so do not flip again here.
-	float2 uv = centerNdc.xy * 0.5f + 0.5f;
+	float2 uvCenter = centerNdc.xy * 0.5f + 0.5f;
+	if (any(uvCenter < 0.0f) || any(uvCenter > 1.0f)) return false;
 
-	// Clamp UV to avoid sampling border/background
-	if (any(uv < 0.0) || any(uv > 1.0)) return false;
-
-	// Conservative radius in screen space for mip selection.
-	// Use absolute projection scale because Vulkan's Y-flip makes [1][1] negative.
-	float2 projectionScale = abs(float2(SceneUniforms.viewProj[0][0], SceneUniforms.viewProj[1][1]));
-	float screenRadius = (radiusWorld * max(projectionScale.x, projectionScale.y)) / max(centerClip.w, 1e-6f);
-	
-	float2 viewportSize = frameData.clusterDepthAndViewport.zw;
-	float sizeInPixels = max(1.0f, screenRadius * max(viewportSize.x, viewportSize.y));
-	if (!isfinite(sizeInPixels))
+	// Estimate a projected screen rectangle for the sphere. The rectangle is
+	// padded below so tiny math differences, diagonal camera angles, and mip
+	// quantization fail open instead of clipping a visible edge.
+	float2 projectionScale = float2(0.0f, 0.0f);
+	if (!TryGetHiZProjectionScale(frameData, projectionScale))
 	{
 		return false;
 	}
-	
-	// Choose mip level where the sphere covers roughly 2x2 texels
-	float mip = max(0.0f, ceil(log2(sizeInPixels / 2.0f)));
-	// Clamp to the mip range derived from the current viewport to avoid invalid samples.
-	float maxMip = max(0.0f, floor(log2(max(viewportSize.x, viewportSize.y))));
-	mip = min(mip, maxMip);
-	
-	// Sample furthest depth in the region
-	float furthestDepth = hiZPyramid.SampleLevel(hiZSampler, uv, mip).r;
+	float2 uvRadius = 0.5f * (radiusWorld * projectionScale) / max(centerClip.w, 1e-6f);
+	if (!all(isfinite(uvRadius)))
+	{
+		return false;
+	}
+
+	float2 viewportSize = max(frameData.clusterDepthAndViewport.zw, float2(1.0f, 1.0f));
+	const float2 uvPadding = 2.0f / viewportSize;
+	float2 uvMin = max(uvCenter - uvRadius - uvPadding, 0.0f);
+	float2 uvMax = min(uvCenter + uvRadius + uvPadding, 1.0f);
+	float2 rectPixels = max((uvMax - uvMin) * viewportSize, float2(1.0f, 1.0f));
+	float rectExtentPixels = max(rectPixels.x, rectPixels.y);
+	if (!isfinite(rectExtentPixels))
+	{
+		return false;
+	}
+
+	// Query the full projected rectangle, not a fixed 3x3 pattern. We choose
+	// the finest mip whose covered texel range fits in a bounded loop. Because
+	// the pyramid stores max depth, sampling extra/coarser texels is conservative:
+	// background or holes inside/near the rect increase furthestDepth and keep
+	// the meshlet visible instead of producing a false occlusion. Keep the total
+	// texel budget separate from the per-axis cap so solid occluders do not get
+	// collapsed into overly coarse mips during common wall-in-front tests.
+	static const uint kMaxHiZRectTexelSamples = 1024u;
+	static const uint kMaxHiZRectAxisSamples = 64u;
+	uint baseWidth = 1u;
+	uint baseHeight = 1u;
+	uint mipLevels = 1u;
+	hiZPyramids[hiZViewIndex].GetDimensions(0u, baseWidth, baseHeight, mipLevels);
+	if (baseWidth == 0u || baseHeight == 0u || mipLevels == 0u)
+	{
+		return false;
+	}
+
+	uint mipIndex = 0u;
+	uint2 selectedMinTexel = uint2(0u, 0u);
+	uint2 selectedMaxTexel = uint2(0u, 0u);
+	uint selectedWidth = 1u;
+	uint selectedHeight = 1u;
+	const uint maxMipIndex = mipLevels - 1u;
+	[loop]
+	for (uint candidateMip = 0u; candidateMip <= maxMipIndex; ++candidateMip)
+	{
+		uint mipWidth = 1u;
+		uint mipHeight = 1u;
+		uint ignoredMipLevels = 1u;
+		hiZPyramids[hiZViewIndex].GetDimensions(candidateMip, mipWidth, mipHeight, ignoredMipLevels);
+		mipWidth = max(mipWidth, 1u);
+		mipHeight = max(mipHeight, 1u);
+
+		const float2 mipSize = float2(mipWidth, mipHeight);
+		uint2 minTexel = min((uint2)floor(uvMin * mipSize), uint2(mipWidth - 1u, mipHeight - 1u));
+		uint2 maxTexel = min((uint2)floor(uvMax * mipSize), uint2(mipWidth - 1u, mipHeight - 1u));
+		if (any(maxTexel < minTexel))
+		{
+			return false;
+		}
+
+		const uint sampleWidth = maxTexel.x - minTexel.x + 1u;
+		const uint sampleHeight = maxTexel.y - minTexel.y + 1u;
+		const uint sampleCount = sampleWidth * sampleHeight;
+		const bool fitsBoundedLoop =
+			sampleWidth <= kMaxHiZRectAxisSamples
+			&& sampleHeight <= kMaxHiZRectAxisSamples
+			&& sampleCount <= kMaxHiZRectTexelSamples;
+		if (fitsBoundedLoop || candidateMip == maxMipIndex)
+		{
+			mipIndex = candidateMip;
+			selectedMinTexel = minTexel;
+			selectedMaxTexel = maxTexel;
+			selectedWidth = sampleWidth;
+			selectedHeight = sampleHeight;
+			break;
+		}
+	}
+
+	float furthestDepth = 0.0f;
+	[loop]
+	for (uint sampleY = 0u; sampleY < kMaxHiZRectAxisSamples; ++sampleY)
+	{
+		if (sampleY >= selectedHeight)
+		{
+			break;
+		}
+		[loop]
+		for (uint sampleX = 0u; sampleX < kMaxHiZRectAxisSamples; ++sampleX)
+		{
+			if (sampleX >= selectedWidth)
+			{
+				break;
+			}
+			const uint2 texel = selectedMinTexel + uint2(sampleX, sampleY);
+			if (any(texel > selectedMaxTexel))
+			{
+				return false;
+			}
+			float sampledDepth = hiZPyramids[hiZViewIndex].Load(int3(texel, mipIndex)).r;
+			if (!isfinite(sampledDepth))
+			{
+				return false;
+			}
+			furthestDepth = max(furthestDepth, sampledDepth);
+		}
+	}
 	// Fail open when Hi-Z is invalid/uninitialized so visibility stays correct.
 	if (!isfinite(furthestDepth) || furthestDepth <= 0.0f)
 	{
@@ -194,10 +323,23 @@ bool IsOccluded(const float3 centerWorld, const float radiusWorld, const FrameCu
 		return false;
 	}
 	float meshletClosestDepth = saturate(closestClip.z / closestClip.w);
-	float occlusionBias = max(epsilon * 4.0f, 0.002f);
+	// Depth-buffer values are non-linear. A world-space culling epsilon becomes
+	// far too large when applied directly to normalized device depth, especially
+	// with a 0.1-1000 camera where useful occluders commonly sit above 0.995.
+	// Keep the bias in depth units and cap the epsilon contribution so distant
+	// walls can still occlude distant meshlets without creating edge flicker.
+	float occlusionBias = clamp(epsilon * 0.05f, 0.00001f, 0.0001f);
 	
 	// Occluded if the nearest point on the meshlet is still deeper than occluders in the Hi-Z region.
-	return meshletClosestDepth > (furthestDepth + occlusionBias);
+	if (meshletClosestDepth > (furthestDepth + occlusionBias))
+	{
+		return true;
+	}
+
+	// Do not fall back to center-only samples. A meshlet can have its center
+	// behind a wall while a visible edge or silhouette remains outside the
+	// occluder, so anything weaker than the full-bounds test can pop geometry.
+	return false;
 }
 
 [numthreads(1, 1, 1)]
@@ -213,10 +355,10 @@ void main(uint3 groupId : SV_GroupID)
 	const FrameCullingData frameData = frameCullingData[statsIndex];
 	const float epsilon = max(SceneUniforms.cullingEpsilon, frameData.cameraPositionAndEpsilon.w);
 	const float3 cameraPosition = frameData.cameraPositionAndEpsilon.xyz;
-	const bool hiZHistoryValidated = frameData.renderSettings2.w > 0.5f;
-	const bool hiZSelfOcclusionGuardPassed = (SceneUniforms.virtualGeometryFlags & 4u) != 0u;
-	const uint virtualGeometryDebugMode = (SceneUniforms.virtualGeometryFlags >> 8u) & 0xFFu;
+	const bool hiZPyramidAvailable = frameData.renderSettings2.w > 0.5f;
+	const uint virtualGeometryDebugMode = (SceneUniforms.virtualGeometryFlags >> kVirtualGeometryDebugModeShift) & kVirtualGeometryDebugModeMask;
 	const bool debugCulledMeshlets = virtualGeometryDebugMode == 4u;
+	const uint hiZViewIndex = HiZViewIndexFromStatsSlot(statsIndex);
 
 	const uint meshletBase = selectedMeshletOffset + groupId.x * kTaskBatchSize;
 	uint visibleCount = 0u;
@@ -242,8 +384,6 @@ void main(uint3 groupId : SV_GroupID)
 		{
 			const MeshletBounds bounds = meshletBounds[meshletIndex];
 			const float3 worldCenter = mul(SceneUniforms.model, float4(bounds.center, 1.0f)).xyz;
-			const float3 worldConeApex = mul(SceneUniforms.model, float4(bounds.coneApex, 1.0f)).xyz;
-			const float3 worldConeAxis = mul((float3x3)SceneUniforms.model, bounds.coneAxis);
 			const float3 worldAxisX = mul((float3x3)SceneUniforms.model, float3(1.0f, 0.0f, 0.0f));
 			const float3 worldAxisY = mul((float3x3)SceneUniforms.model, float3(0.0f, 1.0f, 0.0f));
 			const float3 worldAxisZ = mul((float3x3)SceneUniforms.model, float3(0.0f, 0.0f, 1.0f));
@@ -251,13 +391,15 @@ void main(uint3 groupId : SV_GroupID)
 			const float worldRadius = bounds.radius * max(maxScale, 1e-6f);
 
 			culled = IsFrustumCulled(worldCenter, worldRadius, frameData, epsilon);
-			if (!culled)
+			// Cone backface culling is intentionally disabled for the always-on
+			// virtual-geometry path until material sidedness, thin-shell hints,
+			// and imported winding validation are available in this shader. A
+			// valid meshoptimizer cone can still be unsafe for GLB/FBX content
+			// that expects two-sided or mixed-winding visibility, so frustum and
+			// Hi-Z remain the only meshlet rejection paths here.
+			if (!culled && hiZPyramidAvailable)
 			{
-				culled = IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, worldRadius, cameraPosition, epsilon);
-			}
-			if (!culled && hiZHistoryValidated && hiZSelfOcclusionGuardPassed)
-			{
-				if (IsOccluded(worldCenter, worldRadius, frameData, epsilon))
+				if (IsOccluded(worldCenter, worldRadius, frameData, hiZViewIndex, epsilon))
 				{
 					InterlockedAdd(meshletCounters[statsIndex].meshletsCulledHiZ, 1u, ignored);
 					culled = true;

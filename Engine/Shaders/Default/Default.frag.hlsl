@@ -105,6 +105,10 @@ struct PushConstants
 	uint virtualMeshletCount;
 	uint selectedVirtualLod;
 	uint virtualGeometryFlags;
+	uint selectedVirtualClusterOffset;
+	uint selectedVirtualClusterCount;
+	uint selectedVirtualPageNeedOffset;
+	uint selectedVirtualPageNeedCount;
 	float4 editorTint;
 };
 
@@ -120,6 +124,7 @@ struct PSIn
 	nointerpolation uint meshletIndex : TEXCOORD2;
 	nointerpolation float meshletBoundsRadius : TEXCOORD3;
 	nointerpolation uint meshletCullFlags : TEXCOORD4;
+	nointerpolation uint virtualGeometryDebugData : TEXCOORD5;
 };
 
 static const uint kLightTypeDirectional = 0u;
@@ -148,6 +153,14 @@ static const float kDirectionalLightNightHeight = -0.17364818f;
 static const uint kMeshletCullFlagFrustum = 1u;
 static const uint kMeshletCullFlagCone = 2u;
 static const uint kMeshletCullFlagUnavailable = 4u;
+static const uint kVirtualGeometryDebugModeLOD = 1u;
+static const uint kVirtualGeometryDebugModeMeshletId = 2u;
+static const uint kVirtualGeometryDebugModeBounds = 3u;
+static const uint kVirtualGeometryDebugModeCulling = 4u;
+static const uint kVirtualGeometryDebugModeHiZ = 5u;
+static const uint kVirtualGeometryDebugModeResidency = 6u;
+static const uint kVirtualGeometryDebugModeError = 7u;
+static const uint kVirtualGeometryDebugModeCluster = 8u;
 // Point lights with zero height relative to a surface have almost no Lambert
 // term on grazing faces. This small wrapped term approximates nearby bounce and
 // finite light size until full global illumination/area-light sampling exists.
@@ -692,15 +705,21 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 {
 	const uint virtualActive = SceneUniforms.virtualGeometryFlags & 1u;
 	const uint failOpen = (SceneUniforms.virtualGeometryFlags >> 1u) & 1u;
-	if (debugMode == 1u)
+	const uint selectedLod = input.virtualGeometryDebugData & 0xFFu;
+	const uint selectedClusterCount = (input.virtualGeometryDebugData >> 8u) & 0xFFu;
+	const uint packedMissingPageCount = (input.virtualGeometryDebugData >> 16u) & 0xFFu;
+	const uint clusterHashSeed = (input.virtualGeometryDebugData >> 24u) & 0xFFu;
+	const uint missingPageCount = max(SceneUniforms.selectedVirtualPageNeedCount, packedMissingPageCount);
+	const bool hiZTrusted = frame.renderSettings2.w > 0.5f;
+	if (debugMode == kVirtualGeometryDebugModeLOD)
 	{
-		return BuildVirtualGeometryHashColor(SceneUniforms.selectedVirtualLod + 17u);
+		return BuildVirtualGeometryHashColor(selectedLod + 17u);
 	}
-	if (debugMode == 2u)
+	if (debugMode == kVirtualGeometryDebugModeMeshletId)
 	{
 		return BuildVirtualGeometryHashColor(input.meshletIndex + 31u);
 	}
-	if (debugMode == 3u)
+	if (debugMode == kVirtualGeometryDebugModeBounds)
 	{
 		if ((input.meshletCullFlags & kMeshletCullFlagUnavailable) != 0u)
 		{
@@ -709,7 +728,7 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 		const float radiusBand = saturate(log2(max(input.meshletBoundsRadius, 1e-5f) * 64.0f + 1.0f) / 8.0f);
 		return lerp(float3(0.05f, 0.25f, 1.0f), float3(1.0f, 0.9f, 0.05f), radiusBand);
 	}
-	if (debugMode == 4u)
+	if (debugMode == kVirtualGeometryDebugModeCulling)
 	{
 		if ((input.meshletCullFlags & kMeshletCullFlagUnavailable) != 0u)
 		{
@@ -723,19 +742,32 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 		{
 			return float3(1.0f, 0.55f, 0.05f);
 		}
-		return failOpen != 0u ? float3(0.55f, 0.35f, 0.1f) : float3(0.1f, 0.85f, 0.25f);
+		return hiZTrusted ? float3(0.05f, 0.8f, 1.0f) : float3(0.1f, 0.85f, 0.25f);
 	}
-	if (debugMode == 5u)
+	if (debugMode == kVirtualGeometryDebugModeHiZ)
 	{
-		return frame.renderSettings2.w > 0.5f ? float3(0.05f, 0.8f, 1.0f) : float3(0.35f, 0.35f, 0.35f);
+		return hiZTrusted ? float3(0.05f, 0.8f, 1.0f) : float3(0.35f, 0.35f, 0.35f);
 	}
-	if (debugMode == 6u)
+	if (debugMode == kVirtualGeometryDebugModeResidency)
 	{
-		return virtualActive != 0u ? float3(0.0f, 0.75f, 0.45f) : float3(0.55f, 0.35f, 0.1f);
+		if (virtualActive == 0u)
+		{
+			return float3(0.55f, 0.35f, 0.1f);
+		}
+		return missingPageCount > 0u ? float3(1.0f, 0.55f, 0.05f) : float3(0.0f, 0.75f, 0.45f);
 	}
-	if (debugMode == 7u)
+	if (debugMode == kVirtualGeometryDebugModeError)
 	{
-		return failOpen != 0u ? float3(1.0f, 0.0f, 0.15f) : float3(0.2f, 0.9f, 0.9f);
+		if (failOpen != 0u)
+		{
+			return float3(1.0f, 0.0f, 0.15f);
+		}
+		return missingPageCount > 0u ? float3(1.0f, 0.55f, 0.05f) : float3(0.2f, 0.9f, 0.9f);
+	}
+	if (debugMode == kVirtualGeometryDebugModeCluster)
+	{
+		const uint clusterSeed = clusterHashSeed + selectedClusterCount * 101u + input.meshletIndex;
+		return BuildVirtualGeometryHashColor(clusterSeed + 73u);
 	}
 	return float3(0.0f, 0.0f, 0.0f);
 }

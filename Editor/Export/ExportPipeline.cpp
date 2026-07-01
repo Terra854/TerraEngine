@@ -115,6 +115,16 @@ static nlohmann::json BuildVirtualGeometryExportManifest(const BuildProfile& pro
 	virtualGeometry["qualityLevel"] = profile.virtualGeometryQualityLevel;
 	virtualGeometry["diagnosticsEnabled"] = profile.virtualGeometryDiagnosticsEnabled;
 	virtualGeometry["geometryBudgetBytes"] = profile.virtualGeometryBudgetBytes;
+	virtualGeometry["lodErrorScale"] = profile.virtualGeometryLodErrorScale;
+	virtualGeometry["maxLodDrop"] = profile.virtualGeometryMaxLodDrop;
+	virtualGeometry["hiZOcclusionEnabled"] = profile.virtualGeometryHiZOcclusionEnabled;
+	virtualGeometry["preloadBias"] = profile.virtualGeometryPreloadBias;
+	virtualGeometry["requiredMetadata"] = nlohmann::json::array({
+		"adaptiveTargets",
+		"fallbackCoverage",
+		"clusterHierarchy",
+		"pageLinks"
+	});
 	virtualGeometry["requiredShaders"] = nlohmann::json::array({
 		"Shaders/Default.task.tspf",
 		"Shaders/Default.mesh.tspf",
@@ -915,7 +925,10 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 				entry["virtualGeometry"] = {
 					{ "required", true },
 					{ "compiledPayload", asset.path },
-					{ "diagnosticsEnabled", profile.virtualGeometryDiagnosticsEnabled }
+					{ "diagnosticsEnabled", profile.virtualGeometryDiagnosticsEnabled },
+					{ "requiresAdaptiveCookData", true },
+					{ "requiresClusterFallback", true },
+					{ "requiresPageData", true }
 				};
 			}
 			manifest["assets"].push_back(std::move(entry));

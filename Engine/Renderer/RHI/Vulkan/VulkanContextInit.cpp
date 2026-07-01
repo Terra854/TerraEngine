@@ -51,8 +51,20 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	if (!CreateDepthResources()) return false;
 
 	VkFormat depthFmt = FindDepthFormat();
-	hiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
-	TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	for (std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>& viewHiZFrames : hiZByViewFrame) {
+		for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
+			for (VulkanHiZ& frameHiZ : frameHiZPair) {
+				frameHiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
+				InitializeHiZPyramidToFarDepth(frameHiZ);
+			}
+		}
+	}
+	for (std::array<uint32_t, MAX_FRAMES_IN_FLIGHT>& readIndices : hiZReadIndexByViewFrame) {
+		readIndices.fill(0u);
+	}
+	for (std::array<bool, MAX_FRAMES_IN_FLIGHT>& pendingSwaps : hiZWritePendingSwapByViewFrame) {
+		pendingSwaps.fill(false);
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vrsFeatures.pipelineFragmentShadingRate) {
@@ -69,7 +81,9 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!CreateGlobalDescriptorResources()) return false;
 	
-	UpdateGlobalHiZ(hiZ);
+	for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
+		UpdateGlobalHiZ(frameIndex);
+	}
 
 	try {
 		CreateDefaultTexture();
@@ -110,7 +124,13 @@ void VulkanContext::Impl::Cleanup() {
 		aoDescriptorPool = VK_NULL_HANDLE;
 		aoDescriptorSets.clear();
 	}
-	hiZ.Destroy(device, allocator);
+	for (std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>& viewHiZFrames : hiZByViewFrame) {
+		for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
+			for (VulkanHiZ& frameHiZ : frameHiZPair) {
+				frameHiZ.Destroy(device, allocator);
+			}
+		}
+	}
 	vrs.Destroy(device, allocator);
 
 	DestroyWorkerPools();
@@ -168,17 +188,19 @@ void VulkanContext::Impl::Cleanup() {
 	textureCache.clear();
 
 	auto DestroyOffscreenResources = [&](OffscreenResources& res) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (res.image != VK_NULL_HANDLE) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (device) {
-				vkDestroySampler(device, res.sampler, nullptr);
-				vkDestroyFramebuffer(device, res.framebuffer, nullptr);
-				vkDestroyImageView(device, res.view, nullptr);
-			}
-			vmaDestroyImage(allocator, res.image, res.allocation);
-			res = {};
+		if (device) {
+			if (res.sampler != VK_NULL_HANDLE) vkDestroySampler(device, res.sampler, nullptr);
+			if (res.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, res.framebuffer, nullptr);
+			if (res.view != VK_NULL_HANDLE) vkDestroyImageView(device, res.view, nullptr);
+			if (res.depthView != VK_NULL_HANDLE) vkDestroyImageView(device, res.depthView, nullptr);
 		}
+		if (res.image != VK_NULL_HANDLE && res.allocation != VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, res.image, res.allocation);
+		}
+		if (res.depthImage != VK_NULL_HANDLE && res.depthAllocation != VK_NULL_HANDLE) {
+			vmaDestroyImage(allocator, res.depthImage, res.depthAllocation);
+		}
+		res = {};
 	};
 
 	DestroyOffscreenResources(sceneView);
@@ -517,7 +539,13 @@ void VulkanContext::Impl::Cleanup() {
 	DestroyBufferVector(indirectDrawBuffers);
 	DestroyAmbientOcclusionResources();
 
-	hiZ.Destroy(device, allocator);
+	for (std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>& viewHiZFrames : hiZByViewFrame) {
+		for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
+			for (VulkanHiZ& frameHiZ : frameHiZPair) {
+				frameHiZ.Destroy(device, allocator);
+			}
+		}
+	}
 	vrs.Destroy(device, allocator);
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -1613,7 +1641,13 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		aoDescriptorPool = VK_NULL_HANDLE;
 		aoDescriptorSets.clear();
 	}
-	hiZ.Destroy(device, allocator);
+	for (std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>& viewHiZFrames : hiZByViewFrame) {
+		for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
+			for (VulkanHiZ& frameHiZ : frameHiZPair) {
+				frameHiZ.Destroy(device, allocator);
+			}
+		}
+	}
 	vrs.Destroy(device, allocator);
 
 	vkDestroyImageView(device, depthImageView, nullptr);
@@ -1641,8 +1675,20 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	CreateDepthResources();
 
 	VkFormat depthFmt = FindDepthFormat();
-	hiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
-	TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	for (std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>& viewHiZFrames : hiZByViewFrame) {
+		for (std::array<VulkanHiZ, 2>& frameHiZPair : viewHiZFrames) {
+			for (VulkanHiZ& frameHiZ : frameHiZPair) {
+				frameHiZ.Create(device, allocator, swapchainExtent.width, swapchainExtent.height, depthFmt);
+				InitializeHiZPyramidToFarDepth(frameHiZ);
+			}
+		}
+	}
+	for (std::array<uint32_t, MAX_FRAMES_IN_FLIGHT>& readIndices : hiZReadIndexByViewFrame) {
+		readIndices.fill(0u);
+	}
+	for (std::array<bool, MAX_FRAMES_IN_FLIGHT>& pendingSwaps : hiZWritePendingSwapByViewFrame) {
+		pendingSwaps.fill(false);
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (vrsFeatures.pipelineFragmentShadingRate) {
@@ -1659,7 +1705,9 @@ void VulkanContext::Impl::RecreateSwapChain() {
 	CreateLightingBufferResources();
 	CreateAmbientOcclusionResources();
 	CreateIndirectDrawResources();
-	UpdateGlobalHiZ(hiZ);
+	for (uint32_t frameIndex = 0u; frameIndex < MAX_FRAMES_IN_FLIGHT; ++frameIndex) {
+		UpdateGlobalHiZ(frameIndex);
+	}
 }
 
 // VulkanContext::Impl::DebugCallback is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

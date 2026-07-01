@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <chrono>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <regex>
@@ -203,6 +204,279 @@ namespace {
 			}
 			ResourceManager::Instance().RegisterAssetPath(*guid, buildRoot / texture["compiledPath"].get<std::string>(), AssetType::Texture);
 		}
+	}
+
+	bool AreClose(float lhs, float rhs)
+	{
+		return std::abs(lhs - rhs) <= 0.0001f;
+	}
+
+	bool AreRatiosEqual(const std::vector<float>& lhs, const std::vector<float>& rhs)
+	{
+		if (lhs.size() != rhs.size())
+		{
+			return false;
+		}
+		for (std::size_t index = 0; index < lhs.size(); ++index)
+		{
+			if (!AreClose(lhs[index], rhs[index]))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	std::vector<std::string> ValidateVirtualGeometryAdaptiveSettings(const VirtualGeometryAdaptiveSettingsMetadata& settings)
+	{
+		std::vector<std::string> errors;
+		if (settings.targetRatios.empty())
+		{
+			errors.push_back("At least one target ratio is required.");
+		}
+
+		float previousRatio = 2.0f;
+		for (std::size_t index = 0; index < settings.targetRatios.size(); ++index)
+		{
+			const float ratio = settings.targetRatios[index];
+			if (!std::isfinite(ratio) || ratio <= 0.0f || ratio > 1.0f)
+			{
+				errors.push_back("Target ratios must be finite values in the range (0, 1].");
+				break;
+			}
+			if (index > 0u && ratio >= previousRatio)
+			{
+				errors.push_back("Target ratios must be strictly descending.");
+				break;
+			}
+			previousRatio = ratio;
+		}
+
+		if (settings.targetRatios.empty() || !AreClose(settings.targetRatios.front(), 1.0f))
+		{
+			errors.push_back("The first target ratio must be 1.0 so LOD0 preserves the source detail.");
+		}
+		if (settings.minimumSourceTriangles == 0u)
+		{
+			errors.push_back("Minimum source triangles must be greater than zero.");
+		}
+		if (settings.minimumGeneratedTriangles == 0u)
+		{
+			errors.push_back("Minimum generated triangles must be greater than zero.");
+		}
+		if (settings.minimumMeshletsPerGeneratedLevel == 0u)
+		{
+			errors.push_back("Minimum meshlets per generated level must be greater than zero.");
+		}
+		if (!std::isfinite(settings.minimumUsefulTriangleReduction)
+			|| settings.minimumUsefulTriangleReduction < 0.0f
+			|| settings.minimumUsefulTriangleReduction > 0.95f)
+		{
+			errors.push_back("Minimum useful triangle reduction must be between 0 and 0.95.");
+		}
+		if (!std::isfinite(settings.minimumUsefulMeshletReduction)
+			|| settings.minimumUsefulMeshletReduction < 0.0f
+			|| settings.minimumUsefulMeshletReduction > 0.95f)
+		{
+			errors.push_back("Minimum useful meshlet reduction must be between 0 and 0.95.");
+		}
+		if (!std::isfinite(settings.maximumGeometricError) || settings.maximumGeometricError < 0.0f)
+		{
+			errors.push_back("Maximum geometric error must be finite and non-negative.");
+		}
+		return errors;
+	}
+
+	json BuildVirtualGeometryOverrideJson(
+		const VirtualGeometryAdaptiveSettingsMetadata& settings,
+		const VirtualGeometryAdaptiveSettingsMetadata& defaults)
+	{
+		json overrideBlock = json::object();
+		json overriddenFields = json::array();
+		overrideBlock["enabled"] = true;
+		overrideBlock["settingsSource"] = "PerMeshOverride";
+
+		if (!AreRatiosEqual(settings.targetRatios, defaults.targetRatios))
+		{
+			json ratios = json::array();
+			for (float ratio : settings.targetRatios)
+			{
+				ratios.push_back(ratio);
+			}
+			overrideBlock["targetRatios"] = ratios;
+			overriddenFields.push_back("targetRatios");
+		}
+		if (settings.minimumSourceTriangles != defaults.minimumSourceTriangles)
+		{
+			overrideBlock["minimumSourceTriangles"] = settings.minimumSourceTriangles;
+			overriddenFields.push_back("minimumSourceTriangles");
+		}
+		if (settings.minimumGeneratedTriangles != defaults.minimumGeneratedTriangles)
+		{
+			overrideBlock["minimumGeneratedTriangles"] = settings.minimumGeneratedTriangles;
+			overriddenFields.push_back("minimumGeneratedTriangles");
+		}
+		if (settings.minimumMeshletsPerGeneratedLevel != defaults.minimumMeshletsPerGeneratedLevel)
+		{
+			overrideBlock["minimumMeshletsPerGeneratedLevel"] = settings.minimumMeshletsPerGeneratedLevel;
+			overriddenFields.push_back("minimumMeshletsPerGeneratedLevel");
+		}
+		if (!AreClose(settings.minimumUsefulTriangleReduction, defaults.minimumUsefulTriangleReduction))
+		{
+			overrideBlock["minimumUsefulTriangleReduction"] = settings.minimumUsefulTriangleReduction;
+			overriddenFields.push_back("minimumUsefulTriangleReduction");
+		}
+		if (!AreClose(settings.minimumUsefulMeshletReduction, defaults.minimumUsefulMeshletReduction))
+		{
+			overrideBlock["minimumUsefulMeshletReduction"] = settings.minimumUsefulMeshletReduction;
+			overriddenFields.push_back("minimumUsefulMeshletReduction");
+		}
+		if (!AreClose(settings.maximumGeometricError, defaults.maximumGeometricError))
+		{
+			overrideBlock["maximumGeometricError"] = settings.maximumGeometricError;
+			overriddenFields.push_back("maximumGeometricError");
+		}
+
+		overrideBlock["overriddenFields"] = overriddenFields;
+		return overrideBlock;
+	}
+
+	void ApplyVirtualGeometryOverrideJson(const json& overrideBlock, VirtualGeometryAdaptiveSettingsMetadata& settings)
+	{
+		if (!overrideBlock.is_object() || !overrideBlock.value("enabled", true))
+		{
+			return;
+		}
+
+		settings.overridePresent = true;
+		settings.settingsSource = "PerMeshOverride";
+		if (overrideBlock.contains("targetRatios") && overrideBlock["targetRatios"].is_array())
+		{
+			settings.targetRatios.clear();
+			for (const json& value : overrideBlock["targetRatios"])
+			{
+				if (value.is_number())
+				{
+					settings.targetRatios.push_back(value.get<float>());
+				}
+			}
+		}
+		settings.minimumSourceTriangles = overrideBlock.value("minimumSourceTriangles", settings.minimumSourceTriangles);
+		settings.minimumGeneratedTriangles = overrideBlock.value("minimumGeneratedTriangles", settings.minimumGeneratedTriangles);
+		settings.minimumMeshletsPerGeneratedLevel = overrideBlock.value("minimumMeshletsPerGeneratedLevel", settings.minimumMeshletsPerGeneratedLevel);
+		settings.minimumUsefulTriangleReduction = overrideBlock.value("minimumUsefulTriangleReduction", settings.minimumUsefulTriangleReduction);
+		settings.minimumUsefulMeshletReduction = overrideBlock.value("minimumUsefulMeshletReduction", settings.minimumUsefulMeshletReduction);
+		settings.maximumGeometricError = overrideBlock.value("maximumGeometricError", settings.maximumGeometricError);
+	}
+
+	TerraEngine::AssetPipeline::GeneratedModelMeshVirtualGeometrySettings ToGeneratedVirtualGeometrySettings(const VirtualGeometryAdaptiveSettingsMetadata& settings, bool hasOverride)
+	{
+		TerraEngine::AssetPipeline::GeneratedModelMeshVirtualGeometrySettings generatedSettings;
+		generatedSettings.hasOverride = hasOverride;
+		generatedSettings.targetRatios = hasOverride ? settings.targetRatios : std::vector<float>{};
+		generatedSettings.minimumSourceTriangles = settings.minimumSourceTriangles;
+		generatedSettings.minimumGeneratedTriangles = settings.minimumGeneratedTriangles;
+		generatedSettings.minimumMeshletsPerGeneratedLevel = settings.minimumMeshletsPerGeneratedLevel;
+		generatedSettings.minimumUsefulTriangleReduction = settings.minimumUsefulTriangleReduction;
+		generatedSettings.minimumUsefulMeshletReduction = settings.minimumUsefulMeshletReduction;
+		generatedSettings.maximumGeometricError = settings.maximumGeometricError;
+		generatedSettings.settingsSource = hasOverride ? "PerMeshOverride" : "ProjectDefaults";
+		return generatedSettings;
+	}
+
+	void ApplyGeneratedVirtualGeometrySettings(
+		const TerraEngine::AssetPipeline::GeneratedModelMeshVirtualGeometrySettings& generatedSettings,
+		VirtualGeometryAdaptiveSettingsMetadata& settings)
+	{
+		if (!generatedSettings.hasOverride)
+		{
+			return;
+		}
+		settings.overridePresent = true;
+		settings.settingsSource = "PerMeshOverride";
+		if (!generatedSettings.targetRatios.empty())
+		{
+			settings.targetRatios = generatedSettings.targetRatios;
+		}
+		settings.minimumSourceTriangles = generatedSettings.minimumSourceTriangles;
+		settings.minimumGeneratedTriangles = generatedSettings.minimumGeneratedTriangles;
+		settings.minimumMeshletsPerGeneratedLevel = generatedSettings.minimumMeshletsPerGeneratedLevel;
+		settings.minimumUsefulTriangleReduction = generatedSettings.minimumUsefulTriangleReduction;
+		settings.minimumUsefulMeshletReduction = generatedSettings.minimumUsefulMeshletReduction;
+		settings.maximumGeometricError = generatedSettings.maximumGeometricError;
+	}
+
+	VirtualGeometryAdaptiveCompileSettings ToCompileVirtualGeometrySettings(const VirtualGeometryAdaptiveSettingsMetadata& settings)
+	{
+		VirtualGeometryAdaptiveCompileSettings compileSettings;
+		compileSettings.targetRatios = settings.targetRatios;
+		compileSettings.minimumSourceTriangles = settings.minimumSourceTriangles;
+		compileSettings.minimumGeneratedTriangles = settings.minimumGeneratedTriangles;
+		compileSettings.minimumMeshletsPerGeneratedLevel = settings.minimumMeshletsPerGeneratedLevel;
+		compileSettings.minimumUsefulTriangleReduction = settings.minimumUsefulTriangleReduction;
+		compileSettings.minimumUsefulMeshletReduction = settings.minimumUsefulMeshletReduction;
+		compileSettings.maximumGeometricError = settings.maximumGeometricError;
+		compileSettings.settingsSource = settings.overridePresent ? "PerMeshOverride" : settings.settingsSource;
+		return compileSettings;
+	}
+
+	std::string JoinValidationErrors(const std::vector<std::string>& errors)
+	{
+		std::string message;
+		for (std::size_t index = 0; index < errors.size(); ++index)
+		{
+			if (index != 0u)
+			{
+				message += " ";
+			}
+			message += errors[index];
+		}
+		return message;
+	}
+
+	const char* ToVirtualGeometryTargetStatusText(std::uint32_t status)
+	{
+		switch (static_cast<VirtualGeometryDetailTargetRecordStatus>(status))
+		{
+		case VirtualGeometryDetailTargetRecordStatus::Requested: return "Requested";
+		case VirtualGeometryDetailTargetRecordStatus::Generated: return "Generated";
+		case VirtualGeometryDetailTargetRecordStatus::Merged: return "Merged";
+		case VirtualGeometryDetailTargetRecordStatus::Skipped: return "Skipped";
+		case VirtualGeometryDetailTargetRecordStatus::Rejected: return "Rejected";
+		}
+		return "Unknown";
+	}
+
+	const char* ToVirtualGeometrySkippedReasonText(std::uint32_t reason)
+	{
+		switch (static_cast<VirtualGeometrySkippedDetailRecordReason>(reason))
+		{
+		case VirtualGeometrySkippedDetailRecordReason::None: return "";
+		case VirtualGeometrySkippedDetailRecordReason::MeshTooSmall: return "MeshTooSmall";
+		case VirtualGeometrySkippedDetailRecordReason::TooFewTriangles: return "TooFewTriangles";
+		case VirtualGeometrySkippedDetailRecordReason::TooFewMeshlets: return "TooFewMeshlets";
+		case VirtualGeometrySkippedDetailRecordReason::InsufficientTriangleReduction: return "InsufficientTriangleReduction";
+		case VirtualGeometrySkippedDetailRecordReason::InsufficientMeshletReduction: return "InsufficientMeshletReduction";
+		case VirtualGeometrySkippedDetailRecordReason::InvalidSimplificationOutput: return "InvalidSimplificationOutput";
+		case VirtualGeometrySkippedDetailRecordReason::MaterialSafetyRejected: return "MaterialSafetyRejected";
+		case VirtualGeometrySkippedDetailRecordReason::GeometricErrorRejected: return "GeometricErrorRejected";
+		case VirtualGeometrySkippedDetailRecordReason::DuplicateOfPreviousLevel: return "DuplicateOfPreviousLevel";
+		}
+		return "Unknown";
+	}
+
+	template <typename RecordType>
+	bool ReadVirtualGeometryRecordTable(std::ifstream& input, std::uint32_t offset, std::uint32_t count, std::vector<RecordType>& outRecords)
+	{
+		outRecords.clear();
+		if (offset == 0u || count == 0u)
+		{
+			return true;
+		}
+		outRecords.resize(count);
+		input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+		input.read(reinterpret_cast<char*>(outRecords.data()), static_cast<std::streamsize>(outRecords.size() * sizeof(RecordType)));
+		return static_cast<bool>(input);
 	}
 }
 
@@ -788,7 +1062,36 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 		options.shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
 		options.forceReimport = true;
 
+		TerraEngine::AssetPipeline::ModelPackageImportResult previousImportResult;
+		const bool hasPreviousImportResult = TerraEngine::AssetPipeline::LoadModelPackageImportResult(fullSourcePath, previousImportResult);
+		if (hasPreviousImportResult)
+		{
+			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& previousMesh : previousImportResult.generatedMeshes)
+			{
+				if (previousMesh.virtualGeometrySettings.hasOverride)
+				{
+					options.virtualGeometrySettings = previousMesh.virtualGeometrySettings;
+					options.hasVirtualGeometrySettings = true;
+					break;
+				}
+			}
+		}
+
 		TerraEngine::AssetPipeline::ModelPackageImportResult importResult = TerraEngine::AssetPipeline::ImportModelPackage(options);
+		if (hasPreviousImportResult)
+		{
+			for (TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
+			{
+				for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& previousMesh : previousImportResult.generatedMeshes)
+				{
+					if (mesh.guid == previousMesh.guid && previousMesh.virtualGeometrySettings.hasOverride)
+					{
+						mesh.virtualGeometrySettings = previousMesh.virtualGeometrySettings;
+						break;
+					}
+				}
+			}
+		}
 		for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials)
 		{
 			const std::filesystem::path materialSourcePath = assetRoot / material.sourcePath;
@@ -824,10 +1127,17 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 		const std::filesystem::path stagedCompiledPath = fullCompiledPath.string() + "." + UuidToString(metadata.guid) + ".tmp";
 		std::error_code cleanupError;
 		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		VirtualGeometryAdaptiveSettingsMetadata resolvedSettings;
+		TryGetVirtualGeometryAdaptiveSettings(metadata, resolvedSettings);
+		if (!resolvedSettings.valid)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Invalid virtual geometry override for " << fullSourcePath << ": " << JoinValidationErrors(resolvedSettings.validationErrors));
+		}
+		const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileVirtualGeometrySettings(resolvedSettings);
 		// Compile into a sibling file first. The live compiled asset is replaced
 		// only after the compiler reports success, so failed rebuilds never
 		// unregister or corrupt the previous usable mesh.
-		if (!CompileMesh(fullSourcePath, stagedCompiledPath))
+		if (!CompileMesh(fullSourcePath, stagedCompiledPath, true, nullptr, 60.0f, 1e-6f, &compileSettings))
 		{
 			std::filesystem::remove(stagedCompiledPath, cleanupError);
 			return false;
@@ -973,6 +1283,11 @@ const AssetMetadata* AssetDatabase::FindAssetByGuid(const TerraEngine::UUID& gui
 	return nullptr;
 }
 
+bool AssetDatabase::IsMeshAsset(const AssetMetadata& metadata) const {
+	return metadata.importerName == "MeshImporter"
+		|| TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName);
+}
+
 bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata, VirtualGeometryAssetMetadata& outMetadata) const {
 	outMetadata = {};
 	if (metadata.compiledPath.empty()) {
@@ -1025,11 +1340,378 @@ bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata,
 
 	outMetadata.detailLevelCount = virtualHeader.detailLevelCount;
 	outMetadata.sourceTriangleCount = virtualHeader.sourceTriangleCount;
+	outMetadata.requestedTargetCount = virtualHeader.requestedTargetCount;
+	outMetadata.skippedDetailCount = virtualHeader.skippedDetailCount;
+	outMetadata.clusterCount = virtualHeader.clusterCount;
+	outMetadata.pageCount = virtualHeader.pageCount;
 	if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u) {
 		outMetadata.needsRebuild = true;
 		outMetadata.warnings.push_back("Virtual geometry contains no renderable detail levels or cullable groups.");
 		outMetadata.rebuildGuidance = "Rebuild this mesh because the compiled virtual geometry tables contain no renderable detail.";
 	}
+	return true;
+}
+
+VirtualGeometryAdaptiveSettingsMetadata AssetDatabase::GetDefaultVirtualGeometryAdaptiveSettings() const {
+	VirtualGeometryAdaptiveSettingsMetadata settings;
+	settings.settingsSource = "ProjectDefaults";
+	settings.targetRatios.clear();
+	for (float ratio : kVirtualGeometryDefaultHalfOctaveRatios) {
+		settings.targetRatios.push_back(ratio);
+	}
+	return settings;
+}
+
+bool AssetDatabase::CanEditVirtualGeometryPerMeshOverride(const AssetMetadata& metadata) const {
+	return metadata.importerName == "MeshImporter";
+}
+
+bool AssetDatabase::TryGetVirtualGeometryAdaptiveSettings(const AssetMetadata& metadata, VirtualGeometryAdaptiveSettingsMetadata& outSettings) const {
+	outSettings = GetDefaultVirtualGeometryAdaptiveSettings();
+	if (!IsMeshAsset(metadata)) {
+		outSettings.valid = false;
+		outSettings.validationErrors.push_back("Selected asset is not a mesh asset.");
+		return false;
+	}
+
+	const json overrideBlock = metadata.settings.is_object()
+		? metadata.settings.value("virtualGeometryOverride", json::object())
+		: json::object();
+	if (!overrideBlock.is_object() || overrideBlock.empty()) {
+		return true;
+	}
+
+	// Sparse per-mesh overrides inherit any missing fields from project
+	// defaults. Validation happens after merging so an incomplete override block
+	// cannot corrupt the resolved settings used by rebuilds.
+	ApplyVirtualGeometryOverrideJson(overrideBlock, outSettings);
+	outSettings.validationErrors = ValidateVirtualGeometryAdaptiveSettings(outSettings);
+	outSettings.valid = outSettings.validationErrors.empty();
+	return true;
+}
+
+bool AssetDatabase::HasVirtualGeometryPerMeshOverride(const AssetMetadata& metadata) const {
+	return IsMeshAsset(metadata)
+		&& metadata.settings.is_object()
+		&& metadata.settings.contains("virtualGeometryOverride")
+		&& metadata.settings["virtualGeometryOverride"].is_object()
+		&& !metadata.settings["virtualGeometryOverride"].empty()
+		&& metadata.settings["virtualGeometryOverride"].value("enabled", true);
+}
+
+bool AssetDatabase::SaveVirtualGeometryPerMeshOverride(const TerraEngine::UUID& assetGuid, const VirtualGeometryAdaptiveSettingsMetadata& settings, std::string* outError) {
+	for (auto& [path, metadata] : assets) {
+		if (metadata.guid != assetGuid) {
+			continue;
+		}
+		if (!CanEditVirtualGeometryPerMeshOverride(metadata)) {
+			if (outError != nullptr) {
+				*outError = "Selected asset is not a mesh asset.";
+			}
+			return false;
+		}
+
+		std::vector<std::string> errors = ValidateVirtualGeometryAdaptiveSettings(settings);
+		if (!errors.empty()) {
+			if (outError != nullptr) {
+				*outError = JoinValidationErrors(errors);
+			}
+			return false;
+		}
+
+		if (!metadata.settings.is_object()) {
+			metadata.settings = json::object();
+		}
+		metadata.settings["virtualGeometryOverride"] = BuildVirtualGeometryOverrideJson(settings, GetDefaultVirtualGeometryAdaptiveSettings());
+		if (!SaveMetadata(metadata)) {
+			if (outError != nullptr) {
+				*outError = "Failed to save mesh metadata.";
+			}
+			return false;
+		}
+		return true;
+	}
+
+	if (outError != nullptr) {
+		*outError = "Mesh asset was not found in the asset database.";
+	}
+	return false;
+}
+
+bool AssetDatabase::ClearVirtualGeometryPerMeshOverride(const TerraEngine::UUID& assetGuid, std::string* outError) {
+	for (auto& [path, metadata] : assets) {
+		if (metadata.guid != assetGuid) {
+			continue;
+		}
+		if (!CanEditVirtualGeometryPerMeshOverride(metadata)) {
+			if (outError != nullptr) {
+				*outError = "Selected asset is not a mesh asset.";
+			}
+			return false;
+		}
+		if (metadata.settings.is_object()) {
+			metadata.settings.erase("virtualGeometryOverride");
+		}
+		if (!SaveMetadata(metadata)) {
+			if (outError != nullptr) {
+				*outError = "Failed to save mesh metadata.";
+			}
+			return false;
+		}
+		return true;
+	}
+
+	if (outError != nullptr) {
+		*outError = "Mesh asset was not found in the asset database.";
+	}
+	return false;
+}
+
+bool AssetDatabase::RebuildVirtualGeometryAsset(const TerraEngine::UUID& assetGuid, std::string* outError) {
+	for (const auto& [path, metadata] : assets) {
+		if (metadata.guid != assetGuid) {
+			continue;
+		}
+		if (!CanEditVirtualGeometryPerMeshOverride(metadata)) {
+			if (outError != nullptr) {
+				*outError = "Selected asset is not a mesh asset.";
+			}
+			return false;
+		}
+		ImportAsset(assetRoot / metadata.sourcePath, true);
+		return true;
+	}
+
+	if (outError != nullptr) {
+		*outError = "Mesh asset was not found in the asset database.";
+	}
+	return false;
+}
+
+bool AssetDatabase::TryGetGeneratedMeshVirtualGeometryAdaptiveSettings(const std::filesystem::path& packagePath, const TerraEngine::UUID& meshGuid, VirtualGeometryAdaptiveSettingsMetadata& outSettings) const {
+	outSettings = GetDefaultVirtualGeometryAdaptiveSettings();
+	TerraEngine::AssetPipeline::ModelPackageImportResult result;
+	if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(std::filesystem::absolute(packagePath), result)) {
+		outSettings.valid = false;
+		outSettings.validationErrors.push_back("Package import sidecar is missing.");
+		return false;
+	}
+
+	for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : result.generatedMeshes) {
+		if (mesh.guid != meshGuid) {
+			continue;
+		}
+		ApplyGeneratedVirtualGeometrySettings(mesh.virtualGeometrySettings, outSettings);
+		outSettings.validationErrors = ValidateVirtualGeometryAdaptiveSettings(outSettings);
+		outSettings.valid = outSettings.validationErrors.empty();
+		return true;
+	}
+
+	outSettings.valid = false;
+	outSettings.validationErrors.push_back("Generated mesh was not found in the package sidecar.");
+	return false;
+}
+
+bool AssetDatabase::SaveGeneratedMeshVirtualGeometryPerMeshOverride(const std::filesystem::path& packagePath, const TerraEngine::UUID& meshGuid, const VirtualGeometryAdaptiveSettingsMetadata& settings, std::string* outError) {
+	std::vector<std::string> errors = ValidateVirtualGeometryAdaptiveSettings(settings);
+	if (!errors.empty()) {
+		if (outError != nullptr) {
+			*outError = JoinValidationErrors(errors);
+		}
+		return false;
+	}
+
+	const std::filesystem::path absolutePackagePath = std::filesystem::absolute(packagePath);
+	TerraEngine::AssetPipeline::ModelPackageImportResult result;
+	if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(absolutePackagePath, result)) {
+		if (outError != nullptr) {
+			*outError = "Package import sidecar is missing.";
+		}
+		return false;
+	}
+
+	for (TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : result.generatedMeshes) {
+		if (mesh.guid != meshGuid) {
+			continue;
+		}
+		mesh.virtualGeometrySettings = ToGeneratedVirtualGeometrySettings(settings, true);
+		if (!TerraEngine::AssetPipeline::SaveModelPackageImportResult(absolutePackagePath, result)) {
+			if (outError != nullptr) {
+				*outError = "Failed to save package import sidecar.";
+			}
+			return false;
+		}
+		return true;
+	}
+
+	if (outError != nullptr) {
+		*outError = "Generated mesh was not found in the package sidecar.";
+	}
+	return false;
+}
+
+bool AssetDatabase::ClearGeneratedMeshVirtualGeometryPerMeshOverride(const std::filesystem::path& packagePath, const TerraEngine::UUID& meshGuid, std::string* outError) {
+	const std::filesystem::path absolutePackagePath = std::filesystem::absolute(packagePath);
+	TerraEngine::AssetPipeline::ModelPackageImportResult result;
+	if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(absolutePackagePath, result)) {
+		if (outError != nullptr) {
+			*outError = "Package import sidecar is missing.";
+		}
+		return false;
+	}
+
+	for (TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : result.generatedMeshes) {
+		if (mesh.guid != meshGuid) {
+			continue;
+		}
+		mesh.virtualGeometrySettings = ToGeneratedVirtualGeometrySettings(GetDefaultVirtualGeometryAdaptiveSettings(), false);
+		if (!TerraEngine::AssetPipeline::SaveModelPackageImportResult(absolutePackagePath, result)) {
+			if (outError != nullptr) {
+				*outError = "Failed to save package import sidecar.";
+			}
+			return false;
+		}
+		return true;
+	}
+
+	if (outError != nullptr) {
+		*outError = "Generated mesh was not found in the package sidecar.";
+	}
+	return false;
+}
+
+bool AssetDatabase::RebuildGeneratedMeshVirtualGeometryAsset(const std::filesystem::path& packagePath, std::string* outError) {
+	const std::filesystem::path absolutePackagePath = std::filesystem::absolute(packagePath);
+	if (!std::filesystem::exists(absolutePackagePath)) {
+		if (outError != nullptr) {
+			*outError = "Package source file is missing.";
+		}
+		return false;
+	}
+	ImportAsset(absolutePackagePath, true);
+	return true;
+}
+
+bool AssetDatabase::TryGetVirtualGeometryDetailDiagnostics(const AssetMetadata& metadata, std::vector<VirtualGeometryDetailDiagnosticMetadata>& outDiagnostics) const {
+	outDiagnostics.clear();
+	if (!IsMeshAsset(metadata)) {
+		return false;
+	}
+
+	VirtualGeometryAssetMetadata meshMetadata;
+	if (!TryGetVirtualGeometryMetadata(metadata, meshMetadata) || !meshMetadata.hasVirtualGeometry) {
+		return true;
+	}
+
+	const std::filesystem::path compiledPath = buildRoot / metadata.compiledPath;
+	std::ifstream input(compiledPath, std::ios::binary);
+	if (!input) {
+		return true;
+	}
+
+	MeshHeader header{};
+	input.read(reinterpret_cast<char*>(&header), sizeof(header));
+	if (!input
+		|| std::memcmp(header.magic, "TEMF", 4) != 0
+		|| header.virtualGeometryHeaderOffset == 0u
+		|| header.virtualGeometryHeaderSize != sizeof(VirtualGeometryHeader)) {
+		return true;
+	}
+
+	VirtualGeometryHeader virtualHeader{};
+	input.seekg(static_cast<std::streamoff>(header.virtualGeometryHeaderOffset), std::ios::beg);
+	input.read(reinterpret_cast<char*>(&virtualHeader), sizeof(virtualHeader));
+	if (!input || virtualHeader.payloadGeneration != kVirtualGeometryPayloadGeneration) {
+		return true;
+	}
+
+	std::vector<VirtualGeometryRequestedTargetRecord> requestedTargets;
+	std::vector<VirtualGeometryDetailLevelRecord> detailLevels;
+	std::vector<VirtualGeometrySkippedDetailRecord> skippedDetails;
+	if (!ReadVirtualGeometryRecordTable(input, virtualHeader.requestedTargetTableOffset, virtualHeader.requestedTargetCount, requestedTargets)
+		|| !ReadVirtualGeometryRecordTable(input, virtualHeader.detailLevelTableOffset, virtualHeader.detailLevelCount, detailLevels)
+		|| !ReadVirtualGeometryRecordTable(input, virtualHeader.skippedDetailTableOffset, virtualHeader.skippedDetailCount, skippedDetails)) {
+		return true;
+	}
+
+	for (const VirtualGeometryRequestedTargetRecord& target : requestedTargets) {
+		VirtualGeometryDetailDiagnosticMetadata diagnostic;
+		diagnostic.targetIndex = target.targetIndex;
+		diagnostic.requestedRatio = target.requestedRatio;
+		diagnostic.status = ToVirtualGeometryTargetStatusText(target.status);
+		diagnostic.desiredTriangleCount = target.desiredTriangleCount;
+		diagnostic.desiredMeshletCount = target.desiredMeshletCount;
+		diagnostic.triangleCount = target.desiredTriangleCount;
+		diagnostic.meshletCount = target.desiredMeshletCount;
+
+		for (const VirtualGeometryDetailLevelRecord& detail : detailLevels) {
+			if (detail.requestedTargetIndex == target.targetIndex) {
+				diagnostic.status = ToVirtualGeometryTargetStatusText(detail.targetStatus);
+				diagnostic.actualTriangleCount = detail.primitiveCount;
+				diagnostic.actualMeshletCount = detail.meshletCount;
+				diagnostic.nearestGeneratedLevelIndex = detail.lodIndex;
+				diagnostic.triangleCount = diagnostic.actualTriangleCount;
+				diagnostic.meshletCount = diagnostic.actualMeshletCount;
+				break;
+			}
+		}
+		for (const VirtualGeometrySkippedDetailRecord& skipped : skippedDetails) {
+			if (skipped.targetIndex == target.targetIndex) {
+				diagnostic.status = ToVirtualGeometryTargetStatusText(skipped.status);
+				diagnostic.reason = ToVirtualGeometrySkippedReasonText(skipped.reason);
+				diagnostic.actualTriangleCount = skipped.candidateTriangleCount;
+				diagnostic.actualMeshletCount = skipped.candidateMeshletCount;
+				diagnostic.nearestGeneratedLevelIndex = skipped.nearestGeneratedLodIndex;
+				diagnostic.triangleCount = diagnostic.actualTriangleCount > 0u ? diagnostic.actualTriangleCount : diagnostic.triangleCount;
+				diagnostic.meshletCount = diagnostic.actualMeshletCount > 0u ? diagnostic.actualMeshletCount : diagnostic.meshletCount;
+				break;
+			}
+		}
+		outDiagnostics.push_back(std::move(diagnostic));
+	}
+
+	if (outDiagnostics.empty()) {
+		VirtualGeometryDetailDiagnosticMetadata summary;
+		summary.status = meshMetadata.needsRebuild ? "NeedsRebuild" : "Cooked";
+		summary.desiredTriangleCount = meshMetadata.sourceTriangleCount;
+		summary.desiredMeshletCount = meshMetadata.meshletCount;
+		summary.actualTriangleCount = meshMetadata.sourceTriangleCount;
+		summary.actualMeshletCount = meshMetadata.meshletCount;
+		summary.triangleCount = meshMetadata.sourceTriangleCount;
+		summary.meshletCount = meshMetadata.meshletCount;
+		outDiagnostics.push_back(summary);
+	}
+	return true;
+}
+
+bool AssetDatabase::TryGetVirtualGeometryClusterSummary(const AssetMetadata& metadata, VirtualGeometryClusterSummaryMetadata& outSummary) const {
+	outSummary = {};
+	if (!IsMeshAsset(metadata)) {
+		return false;
+	}
+
+	VirtualGeometryAssetMetadata meshMetadata;
+	if (!TryGetVirtualGeometryMetadata(metadata, meshMetadata)) {
+		return true;
+	}
+	outSummary.clusterCount = meshMetadata.clusterCount;
+	outSummary.fallbackCoverageValid = meshMetadata.clusterCount == 0u || !meshMetadata.needsRebuild;
+	return true;
+}
+
+bool AssetDatabase::TryGetVirtualGeometryPageSummary(const AssetMetadata& metadata, VirtualGeometryPageSummaryMetadata& outSummary) const {
+	outSummary = {};
+	if (!IsMeshAsset(metadata)) {
+		return false;
+	}
+
+	VirtualGeometryAssetMetadata meshMetadata;
+	if (!TryGetVirtualGeometryMetadata(metadata, meshMetadata)) {
+		return true;
+	}
+	outSummary.pageCount = meshMetadata.pageCount;
+	outSummary.residentPageCount = meshMetadata.pageCount;
+	outSummary.pinnedFallbackPageCount = meshMetadata.pageCount > 0u ? 1u : 0u;
 	return true;
 }
 

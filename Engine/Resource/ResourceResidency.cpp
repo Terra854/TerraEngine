@@ -301,8 +301,21 @@ namespace TerraEngine::Resource
 		case VirtualGeometryPageResidencyState::Failed: return "failed";
 		case VirtualGeometryPageResidencyState::Evicting: return "evicting";
 		case VirtualGeometryPageResidencyState::Evicted: return "evicted";
+		case VirtualGeometryPageResidencyState::PendingIO: return "pending-io";
+		case VirtualGeometryPageResidencyState::PendingUpload: return "pending-upload";
+		case VirtualGeometryPageResidencyState::Pinned: return "pinned";
 		}
 		return "not-resident";
+	}
+
+	bool IsVirtualGeometryPagePinnedFallback(const VirtualGeometryResidentPage& page)
+	{
+		return page.fallbackPage || page.pinnedFallback || page.state == VirtualGeometryPageResidencyState::Pinned;
+	}
+
+	bool IsVirtualGeometryPageResidentForRendering(const VirtualGeometryResidentPage& page)
+	{
+		return page.state == VirtualGeometryPageResidencyState::Resident || page.state == VirtualGeometryPageResidencyState::Pinned;
 	}
 
 	std::uint64_t EstimateResidentBytes(const ResidentAsset& asset)
@@ -541,24 +554,43 @@ namespace TerraEngine::Resource
 				apply(VirtualGeometryPageResidencyState::Loading, "page load started");
 			}
 			break;
-		case VirtualGeometryPageResidencyEvent::MarkResident:
+		case VirtualGeometryPageResidencyEvent::BeginIO:
 			if (page.state == VirtualGeometryPageResidencyState::Requested
 				|| page.state == VirtualGeometryPageResidencyState::Loading)
 			{
+				apply(VirtualGeometryPageResidencyState::PendingIO, "page IO started");
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::BeginUpload:
+			if (page.state == VirtualGeometryPageResidencyState::PendingIO
+				|| page.state == VirtualGeometryPageResidencyState::Loading)
+			{
+				apply(VirtualGeometryPageResidencyState::PendingUpload, "page upload queued");
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::MarkResident:
+			if (page.state == VirtualGeometryPageResidencyState::Requested
+				|| page.state == VirtualGeometryPageResidencyState::Loading
+				|| page.state == VirtualGeometryPageResidencyState::PendingIO
+				|| page.state == VirtualGeometryPageResidencyState::PendingUpload
+				|| page.state == VirtualGeometryPageResidencyState::Pinned)
+			{
 				page.failureReason.clear();
-				apply(VirtualGeometryPageResidencyState::Resident, "page became resident");
+				apply(IsVirtualGeometryPagePinnedFallback(page) ? VirtualGeometryPageResidencyState::Pinned : VirtualGeometryPageResidencyState::Resident, "page became resident");
 			}
 			break;
 		case VirtualGeometryPageResidencyEvent::MarkFailed:
 			if (page.state == VirtualGeometryPageResidencyState::Requested
-				|| page.state == VirtualGeometryPageResidencyState::Loading)
+				|| page.state == VirtualGeometryPageResidencyState::Loading
+				|| page.state == VirtualGeometryPageResidencyState::PendingIO
+				|| page.state == VirtualGeometryPageResidencyState::PendingUpload)
 			{
 				page.failureReason = reason.empty() ? "page load failed" : std::string(reason);
 				apply(VirtualGeometryPageResidencyState::Failed, page.failureReason);
 			}
 			break;
 		case VirtualGeometryPageResidencyEvent::BeginEvict:
-			if (page.fallbackPage)
+			if (IsVirtualGeometryPagePinnedFallback(page))
 			{
 				result.reason = "fallback page preserved";
 				break;
@@ -572,6 +604,26 @@ namespace TerraEngine::Resource
 			if (page.state == VirtualGeometryPageResidencyState::Evicting)
 			{
 				apply(VirtualGeometryPageResidencyState::Evicted, "page eviction completed");
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::PinFallback:
+			page.fallbackPage = true;
+			page.pinnedFallback = true;
+			if (page.state == VirtualGeometryPageResidencyState::Resident
+				|| page.state == VirtualGeometryPageResidencyState::Pinned)
+			{
+				apply(VirtualGeometryPageResidencyState::Pinned, reason.empty() ? "fallback page pinned" : std::string(reason));
+			}
+			else
+			{
+				result.reason = "fallback pin recorded until the page becomes resident";
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::UnpinFallback:
+			page.pinnedFallback = false;
+			if (page.state == VirtualGeometryPageResidencyState::Pinned)
+			{
+				apply(VirtualGeometryPageResidencyState::Resident, reason.empty() ? "fallback page unpinned" : std::string(reason));
 			}
 			break;
 		}
@@ -589,7 +641,7 @@ namespace TerraEngine::Resource
 		std::uint64_t residentBytes = 0u;
 		for (const VirtualGeometryResidentPage& page : pages)
 		{
-			if (page.state == VirtualGeometryPageResidencyState::Resident)
+			if (IsVirtualGeometryPageResidentForRendering(page))
 			{
 				residentBytes = AddSaturated(residentBytes, page.byteSize);
 			}
@@ -603,7 +655,7 @@ namespace TerraEngine::Resource
 		std::vector<VirtualGeometryPageEvictionCandidate> candidates;
 		for (const VirtualGeometryResidentPage& page : pages)
 		{
-			if (page.state != VirtualGeometryPageResidencyState::Resident || page.fallbackPage || page.byteSize == 0u)
+			if (!IsVirtualGeometryPageResidentForRendering(page) || IsVirtualGeometryPagePinnedFallback(page) || page.byteSize == 0u)
 			{
 				continue;
 			}
@@ -673,17 +725,25 @@ namespace TerraEngine::Resource
 			switch (page.state)
 			{
 			case VirtualGeometryPageResidencyState::Resident:
+			case VirtualGeometryPageResidencyState::Pinned:
 				++summary.residentPages;
 				++contributor.residentPages;
 				summary.residentBytes = AddSaturated(summary.residentBytes, page.byteSize);
 				contributor.residentBytes = AddSaturated(contributor.residentBytes, page.byteSize);
-				if (!page.fallbackPage)
+				if (IsVirtualGeometryPagePinnedFallback(page))
+				{
+					++summary.pinnedFallbackPages;
+					++contributor.pinnedFallbackPages;
+				}
+				if (!IsVirtualGeometryPagePinnedFallback(page))
 				{
 					contributor.reclaimableBytes = AddSaturated(contributor.reclaimableBytes, page.byteSize);
 				}
 				break;
 			case VirtualGeometryPageResidencyState::Requested:
 			case VirtualGeometryPageResidencyState::Loading:
+			case VirtualGeometryPageResidencyState::PendingIO:
+			case VirtualGeometryPageResidencyState::PendingUpload:
 				++summary.requestedPages;
 				++contributor.requestedPages;
 				break;

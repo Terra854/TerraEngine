@@ -3,11 +3,170 @@
 #include "Renderer/RenderSystem.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderGraph.h"
+#include "Renderer/RHI/Vulkan/VulkanUploadPlanning.h"
+#include "File Formats/TerraEngineMeshFile.h"
 
 #include <algorithm>
 
 namespace TerraEngine::Tests
 {
+	namespace
+	{
+		VirtualGeometryAssetRuntime MakeMixedClusterAsset()
+		{
+			VirtualGeometryAssetRuntime asset{};
+			asset.assetId = TerraEngine::GenerateUUID();
+			asset.clusterCoverageValidated = true;
+			asset.detailLevels = {
+				{ 0u, 0u, 16u, 1024u, 0.0f, 1.0f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 1u, 16u, 8u, 512u, 0.02f, 0.5f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 2u, 24u, 4u, 128u, 0.03f, 0.125f, glm::vec3(-1.0f), glm::vec3(1.0f) }
+			};
+			asset.cullableGroups.resize(28u);
+
+			GeometryPageRuntime rootPage{};
+			rootPage.pageId = 0u;
+			rootPage.firstLodIndex = 1u;
+			rootPage.lodCount = 1u;
+			rootPage.groupOffset = 16u;
+			rootPage.groupCount = 8u;
+			rootPage.state = GeometryPageState::Resident;
+			rootPage.fallbackPageId = 0u;
+			rootPage.fallbackPage = true;
+			GeometryPageRuntime nearPage{};
+			nearPage.pageId = 1u;
+			nearPage.firstLodIndex = 0u;
+			nearPage.lodCount = 1u;
+			nearPage.groupOffset = 0u;
+			nearPage.groupCount = 16u;
+			nearPage.state = GeometryPageState::Resident;
+			nearPage.fallbackPageId = 0u;
+			GeometryPageRuntime farPage{};
+			farPage.pageId = 2u;
+			farPage.firstLodIndex = 2u;
+			farPage.lodCount = 1u;
+			farPage.groupOffset = 24u;
+			farPage.groupCount = 4u;
+			farPage.state = GeometryPageState::Resident;
+			farPage.fallbackPageId = 0u;
+			asset.pages = { rootPage, nearPage, farPage };
+
+			VirtualGeometryClusterRuntime root{};
+			root.clusterId = 0u;
+			root.parentClusterId = kVirtualGeometryInvalidIndex;
+			root.firstChildClusterId = 1u;
+			root.childCount = 2u;
+			root.lodIndex = 1u;
+			root.firstGroupIndex = 16u;
+			root.groupCount = 8u;
+			root.pageId = 0u;
+			root.fallbackClusterId = 0u;
+			root.geometricError = 0.02f;
+			root.boundsRadius = 2.0f;
+			VirtualGeometryClusterRuntime nearChild{};
+			nearChild.clusterId = 1u;
+			nearChild.parentClusterId = 0u;
+			nearChild.firstChildClusterId = kVirtualGeometryInvalidIndex;
+			nearChild.childCount = 0u;
+			nearChild.lodIndex = 0u;
+			nearChild.firstGroupIndex = 0u;
+			nearChild.groupCount = 16u;
+			nearChild.pageId = 1u;
+			nearChild.fallbackClusterId = 0u;
+			nearChild.geometricError = 0.0f;
+			nearChild.boundsRadius = 1.0f;
+			VirtualGeometryClusterRuntime farChild{};
+			farChild.clusterId = 2u;
+			farChild.parentClusterId = 0u;
+			farChild.firstChildClusterId = kVirtualGeometryInvalidIndex;
+			farChild.childCount = 0u;
+			farChild.lodIndex = 2u;
+			farChild.firstGroupIndex = 24u;
+			farChild.groupCount = 4u;
+			farChild.pageId = 2u;
+			farChild.fallbackClusterId = 0u;
+			farChild.geometricError = 0.01f;
+			farChild.boundsRadius = 0.25f;
+			asset.clusters = { root, nearChild, farChild };
+			return asset;
+		}
+
+		bool SelectionContainsCluster(const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult& result, std::uint32_t clusterId)
+		{
+			return std::any_of(result.selectedClusters.begin(), result.selectedClusters.end(), [clusterId](const TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord& record) {
+				return record.clusterId == clusterId;
+			});
+		}
+
+		VirtualGeometryAssetRuntime MakeTwoRegionClusterAsset()
+		{
+			VirtualGeometryAssetRuntime asset{};
+			asset.assetId = TerraEngine::GenerateUUID();
+			asset.clusterCoverageValidated = true;
+			asset.detailLevels = {
+				{ 0u, 0u, 8u, 512u, 0.0f, 1.0f, glm::vec3(-2.0f), glm::vec3(2.0f) },
+				{ 1u, 8u, 8u, 256u, 0.02f, 0.5f, glm::vec3(-2.0f), glm::vec3(2.0f) }
+			};
+			asset.cullableGroups.resize(16u);
+
+			for (std::uint32_t pageId = 0u; pageId < 2u; ++pageId)
+			{
+				GeometryPageRuntime page{};
+				page.pageId = pageId;
+				page.firstLodIndex = pageId;
+				page.lodCount = 1u;
+				page.groupOffset = pageId == 0u ? 0u : 8u;
+				page.groupCount = 8u;
+				page.state = GeometryPageState::Resident;
+				page.fallbackPageId = 0u;
+				page.fallbackPage = pageId == 0u;
+				asset.pages.push_back(page);
+			}
+
+			VirtualGeometryClusterRuntime nearRoot{};
+			nearRoot.clusterId = 0u;
+			nearRoot.parentClusterId = kVirtualGeometryInvalidIndex;
+			nearRoot.firstChildClusterId = 2u;
+			nearRoot.childCount = 1u;
+			nearRoot.lodIndex = 1u;
+			nearRoot.firstGroupIndex = 8u;
+			nearRoot.groupCount = 4u;
+			nearRoot.pageId = 1u;
+			nearRoot.fallbackClusterId = 0u;
+			nearRoot.geometricError = 0.02f;
+			nearRoot.boundsCenter = glm::vec3(-1.0f, 0.0f, -5.0f);
+			nearRoot.boundsRadius = 1.0f;
+
+			VirtualGeometryClusterRuntime farRoot = nearRoot;
+			farRoot.clusterId = 1u;
+			farRoot.firstChildClusterId = 3u;
+			farRoot.firstGroupIndex = 12u;
+			farRoot.boundsCenter = glm::vec3(1.0f, 0.0f, -200.0f);
+
+			VirtualGeometryClusterRuntime nearChild{};
+			nearChild.clusterId = 2u;
+			nearChild.parentClusterId = 0u;
+			nearChild.firstChildClusterId = kVirtualGeometryInvalidIndex;
+			nearChild.childCount = 0u;
+			nearChild.lodIndex = 0u;
+			nearChild.firstGroupIndex = 0u;
+			nearChild.groupCount = 4u;
+			nearChild.pageId = 0u;
+			nearChild.fallbackClusterId = 0u;
+			nearChild.geometricError = 0.0f;
+			nearChild.boundsCenter = glm::vec3(-1.0f, 0.0f, -5.0f);
+			nearChild.boundsRadius = 1.0f;
+
+			VirtualGeometryClusterRuntime farChild = nearChild;
+			farChild.clusterId = 3u;
+			farChild.parentClusterId = 1u;
+			farChild.firstGroupIndex = 4u;
+			farChild.boundsCenter = glm::vec3(1.0f, 0.0f, -200.0f);
+			asset.clusters = { nearRoot, farRoot, nearChild, farChild };
+			return asset;
+		}
+	}
+
 	void RegisterVirtualGeometryRenderTests(TestRegistry& registry)
 	{
 		registry.Add("VirtualGeometry.Render.Diagnostics.ReportsLodTransitionPoppingRisk", [](TestContext& context) {
@@ -257,6 +416,188 @@ namespace TerraEngine::Tests
 			context.Expect(range.fallbackReason.find("resident fallback") != std::string::npos, "Fallback reason should explain page residency.");
 		});
 
+		registry.Add("VirtualGeometry.Render.Residency.ChoosesBestResidentCoarserPage", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset{};
+			asset.detailLevels = {
+				{ 0u, 0u, 16u, 1024u, 0.0f, 1.0f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 1u, 16u, 8u, 512u, 0.01f, 0.5f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 2u, 24u, 4u, 256u, 0.02f, 0.25f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 3u, 28u, 2u, 128u, 0.03f, 0.125f, glm::vec3(-1.0f), glm::vec3(1.0f) }
+			};
+			GeometryPageRuntime fallback{};
+			fallback.pageId = 0u;
+			fallback.firstLodIndex = 0u;
+			fallback.lodCount = 1u;
+			fallback.state = GeometryPageState::Resident;
+			fallback.fallbackPage = true;
+			GeometryPageRuntime mid{};
+			mid.pageId = 2u;
+			mid.firstLodIndex = 2u;
+			mid.lodCount = 1u;
+			mid.state = GeometryPageState::Resident;
+			GeometryPageRuntime missingHigh{};
+			missingHigh.pageId = 3u;
+			missingHigh.firstLodIndex = 3u;
+			missingHigh.lodCount = 1u;
+			missingHigh.state = GeometryPageState::Failed;
+			missingHigh.fallbackPageId = 99u;
+			asset.pages = { fallback, mid, missingHigh };
+
+			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
+			quality.maxLodDrop = 3u;
+			const TerraEngine::Renderer::VirtualGeometryDrawRange range =
+				RenderSystem::SelectVirtualGeometryResidentLodRange(asset, quality, 64.0f, true, true);
+
+			context.Expect(range.failOpen, "Missing desired page should fail open through resident fallback data.");
+			context.ExpectEqual(2u, range.selectedLodIndex, "Renderer should choose the best resident coarser page instead of always dropping to LOD0.");
+			context.Expect(range.fallbackReason.find("best resident fallback") != std::string::npos, "Fallback reason should identify best resident fallback selection.");
+		});
+
+		registry.Add("VirtualGeometry.Render.ClusterSelection.SelectsMixedDetailWithinOneObject", [](TestContext& context) {
+			const VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
+
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(asset, meshId, objectId, quality, 512.0f, true, true);
+
+			context.ExpectEqual(static_cast<std::size_t>(2u), result.selectedClusters.size(), "Near projected size should refine the root into its child cluster cut.");
+			context.Expect(SelectionContainsCluster(result, 1u), "The near child should keep high-detail LOD0 inside the object.");
+			context.Expect(SelectionContainsCluster(result, 2u), "The far/small child should keep a lower-detail cluster inside the same object.");
+			context.Expect(!SelectionContainsCluster(result, 0u), "A refined cluster cut should not also include the parent root.");
+			context.ExpectEqual(2u, result.range.selectedClusterCount, "Draw range should expose the selected cluster count for shader payload binding.");
+		});
+
+		registry.Add("VirtualGeometry.Render.ClusterSelection.FailsOpenWhenCoverageProofIsMissing", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
+			asset.clusterCoverageValidated = false;
+
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(
+					asset,
+					asset.assetId,
+					TerraEngine::GenerateUUID(),
+					MakeDefaultVirtualGeometryQualityProfile(),
+					512.0f,
+					true,
+					true);
+
+			context.Expect(result.range.failOpen, "Unsafe mixed-detail metadata should fail open instead of selecting partial child coverage.");
+			context.Expect(result.selectedClusters.empty(), "Missing coverage proof should prevent sparse mixed-detail cluster dispatch.");
+			context.ExpectEqual(0u, result.range.selectedLodIndex, "Fail-open coverage safety should use the complete highest-detail range.");
+			context.ExpectEqual(asset.detailLevels.front().meshletCount, result.range.meshletCount, "Fail-open coverage safety should draw every meshlet in the complete highest-detail range.");
+			context.Expect(result.range.fallbackReason.find("cluster coverage validation missing") != std::string::npos, "Fail-open reason should identify the missing coverage proof.");
+		});
+
+		registry.Add("VirtualGeometry.Render.ClusterSelection.UsesPerClusterScreenErrorWithinOneObject", [](TestContext& context) {
+			const VirtualGeometryAssetRuntime asset = MakeTwoRegionClusterAsset();
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(
+					asset,
+					asset.assetId,
+					TerraEngine::GenerateUUID(),
+					MakeDefaultVirtualGeometryQualityProfile(),
+					512.0f,
+					glm::mat4(1.0f),
+					glm::vec3(0.0f),
+					glm::uvec2(1000u, 1000u),
+					true,
+					true);
+
+			context.Expect(SelectionContainsCluster(result, 2u), "The nearby region should refine to its high-detail child cluster.");
+			context.Expect(SelectionContainsCluster(result, 1u), "The far region should remain at its coarser root cluster.");
+			context.Expect(!SelectionContainsCluster(result, 0u), "The refined nearby parent should not overlap its child.");
+			context.Expect(!SelectionContainsCluster(result, 3u), "The distant child should stay unrefined because its own screen error is small.");
+		});
+
+		registry.Add("VirtualGeometry.Render.ClusterSelection.DoesNotPublishContiguousEnvelopeRange", [](TestContext& context) {
+			const VirtualGeometryAssetRuntime asset = MakeTwoRegionClusterAsset();
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(
+					asset,
+					asset.assetId,
+					TerraEngine::GenerateUUID(),
+					MakeDefaultVirtualGeometryQualityProfile(),
+					512.0f,
+					glm::mat4(1.0f),
+					glm::vec3(0.0f),
+					glm::uvec2(1000u, 1000u),
+					true,
+					true);
+
+			context.ExpectEqual(static_cast<std::size_t>(2u), result.selectedClusters.size(), "Fixture should select two sparse clusters before checking the dispatched range.");
+			context.Expect(result.range.meshletCount != 16u, "Cluster selection must not publish the old min/max whole-object envelope.");
+			context.Expect(result.range.selectedClusterCount == 2u, "Selection metadata should still expose the selected sparse cluster count.");
+		});
+
+		registry.Add("VirtualGeometry.Render.Diagnostics.CountsSparseClusterDrawRanges", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot{};
+			snapshot.frameId = 123u;
+			snapshot.renderSettings.virtualGeometry = MakeDefaultVirtualGeometryQualityProfile();
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState state{};
+			state.viewType = RenderViewType::Game;
+			state.targetSize = glm::uvec2(1000u, 1000u);
+			state.hiZOcclusionAllowed = true;
+			state.selectedClusters = {
+				{ TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID(), 2u, 0u, 0u, 0u, false },
+				{ TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID(), 1u, 1u, 1u, 0u, false }
+			};
+			TerraEngine::Renderer::VirtualGeometryDrawRange nearRange{};
+			nearRange.selectedLodIndex = 0u;
+			nearRange.meshletOffset = 0u;
+			nearRange.meshletCount = 4u;
+			nearRange.virtualGeometryActive = true;
+			nearRange.selectedClusterOffset = 0u;
+			nearRange.selectedClusterCount = 1u;
+			TerraEngine::Renderer::VirtualGeometryDrawRange farRange = nearRange;
+			farRange.selectedLodIndex = 1u;
+			farRange.meshletOffset = 12u;
+			farRange.selectedClusterOffset = 1u;
+			state.draws.push_back({ TerraEngine::GenerateUUID(), state.selectedClusters[0].meshId, nearRange, true });
+			state.draws.push_back({ TerraEngine::GenerateUUID(), state.selectedClusters[1].meshId, farRange, true });
+			snapshot.virtualGeometryViewSelections.push_back(std::move(state));
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+					snapshot,
+					snapshot.renderSettings.virtualGeometry,
+					VirtualGeometryInactiveReason::None);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), diagnostics.size(), "Explicit sparse selection state should produce one diagnostics snapshot.");
+			context.ExpectEqual(8u, diagnostics.front().selectedMeshlets, "Diagnostics should sum per-cluster draw ranges, not a contiguous envelope.");
+			context.ExpectEqual(1u, diagnostics.front().selectedLodHistogram[0], "Sparse draw diagnostics should count the high-detail cluster draw.");
+			context.ExpectEqual(1u, diagnostics.front().selectedLodHistogram[1], "Sparse draw diagnostics should count the coarse cluster draw.");
+		});
+
+		registry.Add("VirtualGeometry.Render.ClusterSelection.EnforcesParentChildExclusivity", [](TestContext& context) {
+			const VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult farResult =
+				RenderSystem::SelectVirtualGeometryClusterCut(asset, TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID(), MakeDefaultVirtualGeometryQualityProfile(), 16.0f, true, true);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), farResult.selectedClusters.size(), "Small projected size should keep the coarse parent cluster.");
+			context.Expect(SelectionContainsCluster(farResult, 0u), "Coarse selection should use the root cluster.");
+			context.Expect(!SelectionContainsCluster(farResult, 1u), "Coarse selection should not overlap root coverage with child cluster 1.");
+			context.Expect(!SelectionContainsCluster(farResult, 2u), "Coarse selection should not overlap root coverage with child cluster 2.");
+		});
+
+		registry.Add("VirtualGeometry.Render.ClusterSelection.UsesResidentFallbackAncestorForMissingChildPage", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
+			asset.pages[1].state = GeometryPageState::Failed;
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(asset, meshId, objectId, MakeDefaultVirtualGeometryQualityProfile(), 512.0f, true, true);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), result.selectedClusters.size(), "A fallback ancestor should suppress overlapping sibling child selections.");
+			context.Expect(SelectionContainsCluster(result, 0u), "Missing high-detail child page should fall back to the resident root cluster.");
+			context.Expect(result.selectedClusters.front().usingFallback, "Fallback ancestor selection should be visible in diagnostics.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), result.pageNeeds.size(), "Desired non-resident child page should generate one page need request.");
+			context.ExpectEqual(1u, result.pageNeeds.front().clusterId, "Page need should name the desired child cluster.");
+			context.Expect(result.pageNeeds.front().fallbackRequired, "Page need should mark that fallback is currently preserving visibility.");
+		});
+
 		registry.Add("VirtualGeometry.Render.Diagnostics.CountsResidencyPageStates", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset{};
 			asset.detailLevels = {
@@ -274,7 +615,11 @@ namespace TerraEngine::Tests
 			failed.pageId = 2u;
 			failed.state = GeometryPageState::Failed;
 			failed.byteSize = 1024u;
-			asset.pages = { resident, requested, failed };
+			GeometryPageRuntime evicting{};
+			evicting.pageId = 3u;
+			evicting.state = GeometryPageState::Evicting;
+			evicting.byteSize = 512u;
+			asset.pages = { resident, requested, failed, evicting };
 
 			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
 			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot snapshot =
@@ -282,9 +627,40 @@ namespace TerraEngine::Tests
 
 			context.ExpectEqual(1u, snapshot.residentPages, "Diagnostics should count resident virtual geometry pages.");
 			context.ExpectEqual(1u, snapshot.requestedPages, "Diagnostics should count requested or loading virtual geometry pages.");
-			context.ExpectEqual(1u, snapshot.missingPages, "Diagnostics should count missing or failed virtual geometry pages.");
+			context.ExpectEqual(1u, snapshot.failedPages, "Diagnostics should count failed virtual geometry pages.");
+			context.ExpectEqual(1u, snapshot.evictingPages, "Diagnostics should count pages waiting for protected GPU retirement.");
+			context.ExpectEqual(2u, snapshot.missingPages, "Diagnostics should count missing, failed, and evicting virtual geometry pages.");
 			context.Expect(snapshot.estimatedGeometryBytes >= 1792u, "Diagnostics should include page byte estimates in geometry memory.");
 			context.Expect(!snapshot.warnings.empty(), "Missing pages should surface a visible diagnostics warning.");
+		});
+
+		registry.Add("VirtualGeometry.Render.Vulkan.PageUploadAndRetirementHooksAreConservative", [](TestContext& context) {
+			GeometryPageRuntime fallbackUpload{};
+			fallbackUpload.pageId = 0u;
+			fallbackUpload.state = GeometryPageState::PendingUpload;
+			fallbackUpload.byteSize = 256u;
+			fallbackUpload.fallbackPage = true;
+			const TerraEngine::Renderer::Vulkan::VirtualGeometryPageUploadPublication fallbackPublication =
+				TerraEngine::Renderer::Vulkan::PlanVirtualGeometryPageUploadPublication(fallbackUpload);
+
+			GeometryPageRuntime highDetail{};
+			highDetail.pageId = 4u;
+			highDetail.state = GeometryPageState::Evicting;
+			highDetail.byteSize = 1024u;
+			const TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan highDetailRetirement =
+				TerraEngine::Renderer::Vulkan::PlanVirtualGeometryPageRetirement(highDetail, 40u);
+
+			GeometryPageRuntime protectedFallback = highDetail;
+			protectedFallback.pageId = 0u;
+			protectedFallback.fallbackPage = true;
+			const TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan fallbackRetirement =
+				TerraEngine::Renderer::Vulkan::PlanVirtualGeometryPageRetirement(protectedFallback, 40u);
+
+			context.Expect(fallbackPublication.accepted, "Pending upload fallback pages should be publishable after protected GPU upload.");
+			context.Expect(fallbackPublication.publishedState == GeometryPageState::Pinned, "Uploaded fallback pages should publish as pinned.");
+			context.Expect(highDetailRetirement.canRetire, "Evicting high-detail pages should be eligible for deferred retirement.");
+			context.ExpectEqual(42u, highDetailRetirement.retireAfterFrameId, "Retirement should wait for the configured completed-frame lag.");
+			context.Expect(!fallbackRetirement.canRetire, "Fallback pages should not retire while they protect visibility.");
 		});
 
 		registry.Add("VirtualGeometry.Render.WorkerPreparation.DeclaresImmutableInputsAndProtectedBoundaries", [](TestContext& context) {

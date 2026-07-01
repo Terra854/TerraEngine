@@ -12,6 +12,15 @@
 #include <cstring>
 #include <vector>
 
+enum class VulkanHiZViewClass : std::uint32_t
+{
+	Unknown = 0u,
+	Game = 1u,
+	Scene = 2u,
+	Shadow = 3u,
+	ExportRuntime = 4u
+};
+
 enum class VulkanHiZInvalidReason : std::uint32_t
 {
 	None = 0u,
@@ -22,17 +31,35 @@ enum class VulkanHiZInvalidReason : std::uint32_t
 	ViewMismatch = 5u,
 	QualityDisabled = 6u,
 	UnsupportedView = 7u,
-	SelfOcclusionRisk = 8u
+	SelfOcclusionRisk = 8u,
+	TargetMismatch = 9u,
+	CameraCut = 10u,
+	ShadowView = 11u,
+	NearPlaneRisk = 12u,
+	ThinGeometryRisk = 13u,
+	DepthSceneChanged = 14u
 };
 
 struct VulkanHiZHistoryMetadata
 {
 	// The history owner is the renderer output/view that produced the pyramid.
-	// A later view must match it before task-shader occlusion can sample Hi-Z.
+	// The current implementation keeps one warm pyramid per frame slot, so
+	// ownership mismatches are diagnostic-only for editor camera/game views.
 	uint32_t viewId = 0u;
+	VulkanHiZViewClass viewClass = VulkanHiZViewClass::Unknown;
+	// targetId separates Scene View, Game View, export, and future render-texture
+	// outputs that may share a camera index but render into different surfaces.
+	uint32_t targetId = 0u;
 	uint32_t width = 0u;
 	uint32_t height = 0u;
+	// The projection signature includes the view-projection matrix for
+	// diagnostics. Interactive editor movement must not hard-disable Hi-Z,
+	// because virtual geometry needs occlusion feedback while the camera moves.
 	std::uint64_t projectionSignature = 0u;
+	// Identifies the draw list and transforms that produced this depth pyramid.
+	// This stays diagnostic-only: the task shader already fails open when the
+	// sampled depth cannot conservatively prove the meshlet is hidden.
+	std::uint64_t depthSceneSignature = 0u;
 	std::uint64_t frameId = 0u;
 	bool valid = false;
 	VulkanHiZInvalidReason invalidReason = VulkanHiZInvalidReason::FirstFrame;
@@ -41,13 +68,19 @@ struct VulkanHiZHistoryMetadata
 struct VulkanHiZValidationInput
 {
 	uint32_t viewId = 0u;
+	VulkanHiZViewClass viewClass = VulkanHiZViewClass::Unknown;
+	uint32_t targetId = 0u;
 	uint32_t width = 0u;
 	uint32_t height = 0u;
 	std::uint64_t projectionSignature = 0u;
+	std::uint64_t depthSceneSignature = 0u;
 	bool pyramidReady = false;
 	bool qualityAllowsOcclusion = false;
 	bool viewSupported = true;
+	bool cameraCut = false;
 	bool selfOcclusionGuardPassed = false;
+	bool nearPlaneGuardPassed = false;
+	bool thinGeometryGuardPassed = false;
 };
 
 struct VulkanHiZValidationResult
@@ -55,6 +88,12 @@ struct VulkanHiZValidationResult
 	bool historyValid = false;
 	bool occlusionAllowed = false;
 	VulkanHiZInvalidReason invalidReason = VulkanHiZInvalidReason::FirstFrame;
+	VulkanHiZViewClass ownerViewClass = VulkanHiZViewClass::Unknown;
+	bool sameViewHistory = false;
+	bool sameTargetHistory = false;
+	bool projectionMatches = false;
+	bool depthSceneMatches = false;
+	bool failOpen = true;
 };
 
 inline const char* ToString(VulkanHiZInvalidReason reason)
@@ -70,6 +109,12 @@ inline const char* ToString(VulkanHiZInvalidReason reason)
 	case VulkanHiZInvalidReason::QualityDisabled: return "quality-disabled";
 	case VulkanHiZInvalidReason::UnsupportedView: return "unsupported-view";
 	case VulkanHiZInvalidReason::SelfOcclusionRisk: return "self-occlusion-risk";
+	case VulkanHiZInvalidReason::TargetMismatch: return "target-mismatch";
+	case VulkanHiZInvalidReason::CameraCut: return "camera-cut";
+	case VulkanHiZInvalidReason::ShadowView: return "shadow-view";
+	case VulkanHiZInvalidReason::NearPlaneRisk: return "near-plane-risk";
+	case VulkanHiZInvalidReason::ThinGeometryRisk: return "thin-geometry-risk";
+	case VulkanHiZInvalidReason::DepthSceneChanged: return "depth-scene-changed";
 	default: return "unknown";
 	}
 }
@@ -98,51 +143,27 @@ inline std::uint64_t BuildVulkanHiZProjectionSignature(const glm::mat4& viewProj
 inline VulkanHiZValidationResult ValidateVulkanHiZHistory(const VulkanHiZHistoryMetadata& history, const VulkanHiZValidationInput& input)
 {
 	VulkanHiZValidationResult result{};
-	if (!input.viewSupported)
-	{
-		result.invalidReason = VulkanHiZInvalidReason::UnsupportedView;
-		return result;
-	}
-	if (!input.qualityAllowsOcclusion)
-	{
-		result.invalidReason = VulkanHiZInvalidReason::QualityDisabled;
-		return result;
-	}
-	if (!history.valid)
-	{
-		result.invalidReason = VulkanHiZInvalidReason::FirstFrame;
-		return result;
-	}
+	result.ownerViewClass = history.viewClass;
+	result.sameViewHistory = history.viewId == input.viewId && history.viewClass == input.viewClass;
+	result.sameTargetHistory = history.targetId == input.targetId;
+	result.projectionMatches = history.projectionSignature == input.projectionSignature;
+	result.depthSceneMatches = history.depthSceneSignature == input.depthSceneSignature;
+
 	if (!input.pyramidReady)
 	{
 		result.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
 		return result;
 	}
-	if (history.viewId != input.viewId)
-	{
-		result.invalidReason = VulkanHiZInvalidReason::ViewMismatch;
-		return result;
-	}
-	if (history.width != input.width || history.height != input.height)
-	{
-		result.invalidReason = VulkanHiZInvalidReason::Resize;
-		return result;
-	}
-	if (history.projectionSignature != input.projectionSignature)
-	{
-		result.invalidReason = VulkanHiZInvalidReason::ProjectionChanged;
-		return result;
-	}
-	if (!input.selfOcclusionGuardPassed)
-	{
-		result.invalidReason = VulkanHiZInvalidReason::SelfOcclusionRisk;
-		result.historyValid = true;
-		return result;
-	}
+
+	// All other validation inputs are diagnostics only. The task shader already
+	// fails open per meshlet when the pyramid cannot conservatively prove
+	// occlusion, so quality toggles, ownership, camera motion, guard metadata,
+	// and first-frame history must not latch Hi-Z off for the running editor.
 
 	result.historyValid = true;
 	result.occlusionAllowed = true;
 	result.invalidReason = VulkanHiZInvalidReason::None;
+	result.failOpen = false;
 	return result;
 }
 
@@ -157,6 +178,7 @@ struct VulkanHiZ {
 	uint32_t mipLevels = 0;
 	VulkanHiZHistoryMetadata history{};
 	VulkanHiZInvalidReason latestInvalidReason = VulkanHiZInvalidReason::FirstFrame;
+	VulkanHiZValidationResult latestValidation{};
 	bool latestOcclusionAllowed = false;
 
 	void Create(VkDevice device, VmaAllocator allocator, uint32_t screenWidth, uint32_t screenHeight, VkFormat format);

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -103,10 +104,11 @@ enum class VirtualGeometryDebugVisualizationMode : std::uint32_t
 	LOD = 1u,
 	MeshletId = 2u,
 	Bounds = 3u,
-	Culled = 4u,
+	Culling = 4u,
 	HiZ = 5u,
 	Residency = 6u,
-	Error = 7u
+	Error = 7u,
+	Cluster = 8u
 };
 
 inline const char* ToString(VirtualGeometryDebugVisualizationMode mode)
@@ -117,13 +119,90 @@ inline const char* ToString(VirtualGeometryDebugVisualizationMode mode)
 	case VirtualGeometryDebugVisualizationMode::LOD: return "LOD";
 	case VirtualGeometryDebugVisualizationMode::MeshletId: return "Meshlet Id";
 	case VirtualGeometryDebugVisualizationMode::Bounds: return "Bounds";
-	case VirtualGeometryDebugVisualizationMode::Culled: return "Culled";
+	case VirtualGeometryDebugVisualizationMode::Culling: return "Culling";
 	case VirtualGeometryDebugVisualizationMode::HiZ: return "Hi-Z";
 	case VirtualGeometryDebugVisualizationMode::Residency: return "Residency";
 	case VirtualGeometryDebugVisualizationMode::Error: return "Error";
+	case VirtualGeometryDebugVisualizationMode::Cluster: return "Cluster";
 	default: return "Unknown";
 	}
 }
+
+inline constexpr std::array<VirtualGeometryDebugVisualizationMode, 9u> kVirtualGeometryDebugVisualizationModes = {
+	VirtualGeometryDebugVisualizationMode::None,
+	VirtualGeometryDebugVisualizationMode::LOD,
+	VirtualGeometryDebugVisualizationMode::Cluster,
+	VirtualGeometryDebugVisualizationMode::MeshletId,
+	VirtualGeometryDebugVisualizationMode::Bounds,
+	VirtualGeometryDebugVisualizationMode::Culling,
+	VirtualGeometryDebugVisualizationMode::Residency,
+	VirtualGeometryDebugVisualizationMode::HiZ,
+	VirtualGeometryDebugVisualizationMode::Error
+};
+
+inline constexpr const std::array<VirtualGeometryDebugVisualizationMode, 9u>& GetVirtualGeometryDebugVisualizationModes()
+{
+	// This is the complete editor-facing visualizer inventory. Keep it in sync
+	// with the shader constants so the toolbar never exposes dead branches.
+	return kVirtualGeometryDebugVisualizationModes;
+}
+
+inline constexpr bool IsVirtualGeometryDebugVisualizationModeExposed(VirtualGeometryDebugVisualizationMode mode)
+{
+	for (const VirtualGeometryDebugVisualizationMode exposedMode : kVirtualGeometryDebugVisualizationModes)
+	{
+		if (exposedMode == mode)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+inline constexpr VirtualGeometryDebugVisualizationMode NormalizeVirtualGeometryDebugVisualizationMode(VirtualGeometryDebugVisualizationMode mode)
+{
+	// Project files can still contain obsolete numeric debug-mode values. Those
+	// are no longer real enum members, so fail closed to normal rendering.
+	return IsVirtualGeometryDebugVisualizationModeExposed(mode) ? mode : VirtualGeometryDebugVisualizationMode::None;
+}
+
+struct VirtualGeometryDebugVisualizationLegendEntry
+{
+	VirtualGeometryDebugVisualizationMode mode = VirtualGeometryDebugVisualizationMode::None;
+	const char* meaning = "";
+};
+
+inline constexpr std::array<VirtualGeometryDebugVisualizationLegendEntry, 9u> kVirtualGeometryDebugVisualizationLegend = {
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::None, "Normal material rendering." },
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::LOD, "Stable false color per selected detail level; nearby/high detail and far/coarse detail should hash differently." },
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::MeshletId, "Stable false color per rendered meshlet id so density and selected triangle groups are easy to read." },
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Bounds, "Blue to yellow shows small to large meshlet bounds; magenta means bounds data is unavailable." },
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Culling, "Green means drawn, red means frustum, cyan means drawn with trusted Hi-Z, magenta means missing culling data; cone culling is disabled until imported mesh sidedness is validated." },
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::HiZ, "Cyan means Hi-Z history is trusted for this view; gray means Hi-Z is inactive or invalid for culling." },
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Residency, "Green means resident/active virtual geometry; orange means requested or missing pages; brown means inactive fallback." },
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Error, "Cyan means no error pressure; red means fail-open, and orange means missing-page pressure." },
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Cluster, "Stable false color per selected cluster packet so adaptive cluster identity changes are visible." }
+};
+
+inline const char* GetVirtualGeometryDebugVisualizationLegend(VirtualGeometryDebugVisualizationMode mode)
+{
+	for (const VirtualGeometryDebugVisualizationLegendEntry& entry : kVirtualGeometryDebugVisualizationLegend)
+	{
+		if (entry.mode == mode)
+		{
+			return entry.meaning;
+		}
+	}
+	return "Unknown virtual geometry visualizer mode.";
+}
+
+inline constexpr std::uint32_t kVirtualGeometryFlagActive = 1u << 0u;
+inline constexpr std::uint32_t kVirtualGeometryFlagFailOpen = 1u << 1u;
+inline constexpr std::uint32_t kVirtualGeometryFlagHiZSelfOcclusionGuard = 1u << 2u;
+inline constexpr std::uint32_t kVirtualGeometryFlagHiZNearPlaneGuard = 1u << 3u;
+inline constexpr std::uint32_t kVirtualGeometryFlagHiZThinGeometryGuard = 1u << 4u;
+inline constexpr std::uint32_t kVirtualGeometryDebugModeShift = 8u;
+inline constexpr std::uint32_t kVirtualGeometryDebugModeMask = 0xFFu;
 
 // VirtualGeometryInactiveReason keeps fail-open renderer states explainable in
 // diagnostics instead of showing misleading zero counters.
@@ -177,8 +256,206 @@ enum class GeometryPageState : std::uint32_t
 	Resident = 3u,
 	Failed = 4u,
 	Evicting = 5u,
-	Evicted = 6u
+	Evicted = 6u,
+	PendingIO = 7u,
+	PendingUpload = 8u,
+	Pinned = 9u
 };
+
+// Adaptive virtual geometry settings can come from project defaults, a sparse
+// per-mesh Inspector override, or a temporary debug override. Keeping the source
+// with the resolved profile lets diagnostics explain why a mesh cooked the way it did.
+enum class VirtualGeometrySettingsSource : std::uint32_t
+{
+	ProjectDefaults = 0u,
+	PerMeshOverride = 1u,
+	DebugOverride = 2u
+};
+
+inline const char* ToString(VirtualGeometrySettingsSource source)
+{
+	switch (source)
+	{
+	case VirtualGeometrySettingsSource::ProjectDefaults: return "Project Defaults";
+	case VirtualGeometrySettingsSource::PerMeshOverride: return "Per-Mesh Override";
+	case VirtualGeometrySettingsSource::DebugOverride: return "Debug Override";
+	default: return "Unknown";
+	}
+}
+
+// Material safety tells the cooker how much simplification risk is acceptable
+// before it rejects a candidate. Conservative is the default because material
+// section mismatches create very visible holes and wrong-surface shading.
+enum class VirtualGeometryMaterialSafetyPolicy : std::uint32_t
+{
+	Conservative = 0u,
+	Balanced = 1u,
+	Aggressive = 2u
+};
+
+inline const char* ToString(VirtualGeometryMaterialSafetyPolicy policy)
+{
+	switch (policy)
+	{
+	case VirtualGeometryMaterialSafetyPolicy::Conservative: return "Conservative";
+	case VirtualGeometryMaterialSafetyPolicy::Balanced: return "Balanced";
+	case VirtualGeometryMaterialSafetyPolicy::Aggressive: return "Aggressive";
+	default: return "Unknown";
+	}
+}
+
+// Fallback policy controls which always-renderable page/detail survives when a
+// target is skipped or streaming cannot provide high detail in time.
+enum class VirtualGeometryFallbackPolicy : std::uint32_t
+{
+	PreserveHighestSafeFallback = 0u,
+	PreserveLowestSafeFallback = 1u,
+	DebugForceRequested = 2u
+};
+
+inline const char* ToString(VirtualGeometryFallbackPolicy policy)
+{
+	switch (policy)
+	{
+	case VirtualGeometryFallbackPolicy::PreserveHighestSafeFallback: return "Preserve Highest Safe Fallback";
+	case VirtualGeometryFallbackPolicy::PreserveLowestSafeFallback: return "Preserve Lowest Safe Fallback";
+	case VirtualGeometryFallbackPolicy::DebugForceRequested: return "Debug Force Requested";
+	default: return "Unknown";
+	}
+}
+
+// Requested LOD targets are advisory. The cooker may generate, merge, skip, or
+// reject a target when the resulting meshlet set would not be useful or safe.
+enum class VirtualGeometryDetailTargetStatus : std::uint32_t
+{
+	Requested = 0u,
+	Generated = 1u,
+	Merged = 2u,
+	Skipped = 3u,
+	Rejected = 4u
+};
+
+inline const char* ToString(VirtualGeometryDetailTargetStatus status)
+{
+	switch (status)
+	{
+	case VirtualGeometryDetailTargetStatus::Requested: return "Requested";
+	case VirtualGeometryDetailTargetStatus::Generated: return "Generated";
+	case VirtualGeometryDetailTargetStatus::Merged: return "Merged";
+	case VirtualGeometryDetailTargetStatus::Skipped: return "Skipped";
+	case VirtualGeometryDetailTargetStatus::Rejected: return "Rejected";
+	default: return "Unknown";
+	}
+}
+
+enum class VirtualGeometrySkippedDetailReason : std::uint32_t
+{
+	None = 0u,
+	MeshTooSmall = 1u,
+	TooFewTriangles = 2u,
+	TooFewMeshlets = 3u,
+	InsufficientTriangleReduction = 4u,
+	InsufficientMeshletReduction = 5u,
+	InvalidSimplificationOutput = 6u,
+	MaterialSafetyRejected = 7u,
+	GeometricErrorRejected = 8u,
+	DuplicateOfPreviousLevel = 9u
+};
+
+inline const char* ToString(VirtualGeometrySkippedDetailReason reason)
+{
+	switch (reason)
+	{
+	case VirtualGeometrySkippedDetailReason::None: return "None";
+	case VirtualGeometrySkippedDetailReason::MeshTooSmall: return "Mesh Too Small";
+	case VirtualGeometrySkippedDetailReason::TooFewTriangles: return "Too Few Triangles";
+	case VirtualGeometrySkippedDetailReason::TooFewMeshlets: return "Too Few Meshlets";
+	case VirtualGeometrySkippedDetailReason::InsufficientTriangleReduction: return "Insufficient Triangle Reduction";
+	case VirtualGeometrySkippedDetailReason::InsufficientMeshletReduction: return "Insufficient Meshlet Reduction";
+	case VirtualGeometrySkippedDetailReason::InvalidSimplificationOutput: return "Invalid Simplification Output";
+	case VirtualGeometrySkippedDetailReason::MaterialSafetyRejected: return "Material Safety Rejected";
+	case VirtualGeometrySkippedDetailReason::GeometricErrorRejected: return "Geometric Error Rejected";
+	case VirtualGeometrySkippedDetailReason::DuplicateOfPreviousLevel: return "Duplicate Of Previous Level";
+	default: return "Unknown";
+	}
+}
+
+inline constexpr std::uint32_t kVirtualGeometryAdaptiveTargetCapacity = 8u;
+inline constexpr std::array<float, kVirtualGeometryAdaptiveTargetCapacity> kVirtualGeometryDefaultHalfOctaveRatios = {
+	1.0f,
+	0.70710677f,
+	0.5f,
+	0.35355338f,
+	0.25f,
+	0.17677669f,
+	0.125f,
+	0.08838835f
+};
+
+// AdaptiveVirtualGeometryCookProfile is the resolved cook contract shared by
+// project defaults, Inspector overrides, importers, and diagnostics. The target
+// ratios are intentionally advisory so small or already-simple meshes can stop early.
+struct AdaptiveVirtualGeometryCookProfile
+{
+	VirtualGeometrySettingsSource settingsSource = VirtualGeometrySettingsSource::ProjectDefaults;
+	VirtualGeometryMaterialSafetyPolicy materialSafetyPolicy = VirtualGeometryMaterialSafetyPolicy::Conservative;
+	VirtualGeometryFallbackPolicy fallbackPolicy = VirtualGeometryFallbackPolicy::PreserveHighestSafeFallback;
+	std::array<float, kVirtualGeometryAdaptiveTargetCapacity> targetRatios = kVirtualGeometryDefaultHalfOctaveRatios;
+	std::uint32_t targetRatioCount = kVirtualGeometryAdaptiveTargetCapacity;
+	std::uint32_t minimumSourceTriangles = 512u;
+	std::uint32_t minimumGeneratedTriangles = 64u;
+	std::uint32_t minimumMeshletsPerGeneratedLevel = 2u;
+	float minimumUsefulTriangleReduction = 0.15f;
+	float minimumUsefulMeshletReduction = 0.15f;
+	float maximumGeometricError = 0.1f;
+	bool allowCustomTargetRatios = false;
+};
+
+inline AdaptiveVirtualGeometryCookProfile MakeDefaultAdaptiveVirtualGeometryCookProfile()
+{
+	AdaptiveVirtualGeometryCookProfile profile;
+	return profile;
+}
+
+inline AdaptiveVirtualGeometryCookProfile SanitizeAdaptiveVirtualGeometryCookProfile(const AdaptiveVirtualGeometryCookProfile& input)
+{
+	AdaptiveVirtualGeometryCookProfile sanitized = input;
+	if (sanitized.targetRatioCount == 0u || sanitized.targetRatioCount > kVirtualGeometryAdaptiveTargetCapacity)
+	{
+		sanitized.targetRatioCount = kVirtualGeometryAdaptiveTargetCapacity;
+		sanitized.targetRatios = kVirtualGeometryDefaultHalfOctaveRatios;
+	}
+
+	float previousRatio = 2.0f;
+	for (std::uint32_t index = 0u; index < sanitized.targetRatioCount; ++index)
+	{
+		float& ratio = sanitized.targetRatios[index];
+		if (!std::isfinite(ratio) || ratio <= 0.0f)
+		{
+			ratio = index == 0u ? 1.0f : sanitized.targetRatios[index - 1u] * 0.5f;
+		}
+		ratio = glm::clamp(ratio, 0.01f, 1.0f);
+		if (ratio > previousRatio)
+		{
+			ratio = previousRatio;
+		}
+		previousRatio = ratio;
+	}
+
+	sanitized.minimumSourceTriangles = std::max(sanitized.minimumSourceTriangles, 1u);
+	sanitized.minimumGeneratedTriangles = std::max(sanitized.minimumGeneratedTriangles, 1u);
+	sanitized.minimumMeshletsPerGeneratedLevel = std::max(sanitized.minimumMeshletsPerGeneratedLevel, 1u);
+	sanitized.minimumUsefulTriangleReduction = std::isfinite(sanitized.minimumUsefulTriangleReduction)
+		? glm::clamp(sanitized.minimumUsefulTriangleReduction, 0.0f, 0.95f)
+		: 0.15f;
+	sanitized.minimumUsefulMeshletReduction = std::isfinite(sanitized.minimumUsefulMeshletReduction)
+		? glm::clamp(sanitized.minimumUsefulMeshletReduction, 0.0f, 0.95f)
+		: 0.15f;
+	sanitized.maximumGeometricError = std::isfinite(sanitized.maximumGeometricError)
+		? glm::clamp(sanitized.maximumGeometricError, 0.0f, 1000.0f)
+		: 0.1f;
+	return sanitized;
+}
 
 // VirtualGeometryQualityProfile is copied into immutable render snapshots so
 // worker preparation can select detail and request pages without reading live UI
@@ -187,8 +464,14 @@ struct VirtualGeometryQualityProfile
 {
 	float lodErrorScale = 1.0f;
 	std::uint32_t maxLodDrop = 0u;
-	bool hiZOcclusionEnabled = false;
+	// Hi-Z occlusion is always attempted once the pyramid resource exists. The
+	// legacy setting fields remain serialized for compatibility, but shader-side
+	// conservative sampling is the only thing that decides whether a meshlet can
+	// be hidden behind previously rendered depth.
+	bool hiZOcclusionEnabled = true;
 	bool hiZSelfOcclusionGuardEnabled = true;
+	bool hiZNearPlaneGuardEnabled = true;
+	bool hiZThinGeometryGuardEnabled = true;
 	VirtualGeometryDebugVisualizationMode debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
 	std::uint64_t geometryBudgetBytes = 0u;
 	float preloadBias = 1.0f;
@@ -199,8 +482,10 @@ inline VirtualGeometryQualityProfile MakeDefaultVirtualGeometryQualityProfile()
 	VirtualGeometryQualityProfile profile;
 	profile.lodErrorScale = 1.0f;
 	profile.maxLodDrop = 0u;
-	profile.hiZOcclusionEnabled = false;
+	profile.hiZOcclusionEnabled = true;
 	profile.hiZSelfOcclusionGuardEnabled = true;
+	profile.hiZNearPlaneGuardEnabled = true;
+	profile.hiZThinGeometryGuardEnabled = true;
 	profile.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
 	profile.geometryBudgetBytes = 0u;
 	profile.preloadBias = 1.0f;
@@ -216,7 +501,37 @@ inline VirtualGeometryQualityProfile SanitizeVirtualGeometryQualityProfile(const
 	sanitized.preloadBias = std::isfinite(sanitized.preloadBias)
 		? glm::clamp(sanitized.preloadBias, 0.0f, 16.0f)
 		: 1.0f;
+	sanitized.debugVisualizationMode = NormalizeVirtualGeometryDebugVisualizationMode(sanitized.debugVisualizationMode);
 	return sanitized;
+}
+
+inline void HashVirtualGeometryQualityValue(std::uint64_t& seed, std::uint64_t value)
+{
+	// This helper is intentionally tiny and header-only because editor tests
+	// use the same signature rule as the renderer: if any visible quality field
+	// changes, cached visible-command packets must be invalidated.
+	seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+}
+
+inline std::uint64_t HashVirtualGeometryQualityFloat(float value)
+{
+	if (!std::isfinite(value))
+	{
+		return 0u;
+	}
+	return static_cast<std::uint64_t>(std::llround(static_cast<double>(value) * 100000.0));
+}
+
+inline std::uint64_t BuildVirtualGeometryQualityProfileSignature(const VirtualGeometryQualityProfile& input)
+{
+	const VirtualGeometryQualityProfile sanitized = SanitizeVirtualGeometryQualityProfile(input);
+	std::uint64_t seed = 1469598103934665603ull;
+	HashVirtualGeometryQualityValue(seed, HashVirtualGeometryQualityFloat(sanitized.lodErrorScale));
+	HashVirtualGeometryQualityValue(seed, sanitized.maxLodDrop);
+	HashVirtualGeometryQualityValue(seed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(sanitized.debugVisualizationMode)));
+	HashVirtualGeometryQualityValue(seed, sanitized.geometryBudgetBytes);
+	HashVirtualGeometryQualityValue(seed, HashVirtualGeometryQualityFloat(sanitized.preloadBias));
+	return seed;
 }
 
 inline VirtualGeometryInactiveReason ResolveVirtualGeometryInactiveReason(
@@ -243,6 +558,41 @@ struct VirtualGeometryDetailRuntime
 	float targetRatio = 1.0f;
 	glm::vec3 boundsMin = glm::vec3(0.0f);
 	glm::vec3 boundsMax = glm::vec3(0.0f);
+	std::uint32_t requestedTargetIndex = 0u;
+	VirtualGeometryDetailTargetStatus targetStatus = VirtualGeometryDetailTargetStatus::Generated;
+};
+
+struct VirtualGeometryRequestedTargetRuntime
+{
+	std::uint32_t targetIndex = 0u;
+	float requestedRatio = 1.0f;
+	std::uint32_t desiredTriangleCount = 0u;
+	std::uint32_t desiredMeshletCount = 0u;
+	VirtualGeometryDetailTargetStatus status = VirtualGeometryDetailTargetStatus::Requested;
+};
+
+struct VirtualGeometryGeneratedLevelRuntime
+{
+	std::uint32_t generatedLevelIndex = 0u;
+	std::uint32_t requestedTargetIndex = 0u;
+	std::uint32_t lodIndex = 0u;
+	float actualRatio = 1.0f;
+	std::uint32_t triangleCount = 0u;
+	std::uint32_t meshletCount = 0u;
+	float geometricError = 0.0f;
+};
+
+struct VirtualGeometrySkippedDetailRuntime
+{
+	std::uint32_t requestedTargetIndex = 0u;
+	float requestedRatio = 1.0f;
+	VirtualGeometryDetailTargetStatus status = VirtualGeometryDetailTargetStatus::Skipped;
+	VirtualGeometrySkippedDetailReason reason = VirtualGeometrySkippedDetailReason::None;
+	std::uint32_t nearestGeneratedLevelIndex = 0u;
+	std::uint32_t candidateTriangleCount = 0u;
+	std::uint32_t candidateMeshletCount = 0u;
+	float actualCandidateRatio = 0.0f;
+	std::string message;
 };
 
 struct VirtualGeometryCullableGroupRuntime
@@ -255,6 +605,25 @@ struct VirtualGeometryCullableGroupRuntime
 	glm::vec3 boundsCenter = glm::vec3(0.0f);
 	float boundsRadius = 0.0f;
 	VirtualGeometryCullOutcome lastOutcome = VirtualGeometryCullOutcome::Visible;
+};
+
+struct VirtualGeometryClusterRuntime
+{
+	std::uint32_t clusterId = 0u;
+	std::uint32_t parentClusterId = 0xffffffffu;
+	std::uint32_t firstChildClusterId = 0xffffffffu;
+	std::uint32_t childCount = 0u;
+	std::uint32_t lodIndex = 0u;
+	std::uint32_t firstGroupIndex = 0u;
+	std::uint32_t groupCount = 0u;
+	// Material ownership is kept with the cluster so validation and debug
+	// tooling can prove a mixed-detail cut did not splice unrelated sections.
+	std::uint32_t materialSectionId = 0u;
+	std::uint32_t pageId = 0u;
+	std::uint32_t fallbackClusterId = 0xffffffffu;
+	float geometricError = 0.0f;
+	glm::vec3 boundsCenter = glm::vec3(0.0f);
+	float boundsRadius = 0.0f;
 };
 
 struct GeometryPageRuntime
@@ -270,6 +639,11 @@ struct GeometryPageRuntime
 	std::uint32_t fallbackPageId = 0u;
 	std::uint64_t lastUsedFrame = 0u;
 	bool fallbackPage = false;
+	bool pinnedFallback = false;
+	std::uint32_t clusterOffset = 0u;
+	std::uint32_t clusterCount = 0u;
+	float screenImportance = 0.0f;
+	std::string failureReason;
 };
 
 struct VirtualGeometryAssetRuntime
@@ -278,8 +652,17 @@ struct VirtualGeometryAssetRuntime
 	VirtualGeometryCookStatus cookStatus = VirtualGeometryCookStatus::Unknown;
 	std::uint32_t sourceTriangleCount = 0u;
 	std::uint32_t sourceVertexCount = 0u;
+	// Cluster hierarchy validity only proves ids, ranges, and parent links are
+	// well-formed. Mixed-detail rendering also needs a stronger coverage proof
+	// that child clusters cover the same surface region as their parent.
+	bool clusterCoverageValidated = false;
+	AdaptiveVirtualGeometryCookProfile adaptiveCookProfile = MakeDefaultAdaptiveVirtualGeometryCookProfile();
+	std::vector<VirtualGeometryRequestedTargetRuntime> requestedTargets;
+	std::vector<VirtualGeometryGeneratedLevelRuntime> generatedLevels;
+	std::vector<VirtualGeometrySkippedDetailRuntime> skippedDetails;
 	std::vector<VirtualGeometryDetailRuntime> detailLevels;
 	std::vector<VirtualGeometryCullableGroupRuntime> cullableGroups;
+	std::vector<VirtualGeometryClusterRuntime> clusters;
 	std::vector<GeometryPageRuntime> pages;
 	std::vector<std::string> warnings;
 };
@@ -506,6 +889,13 @@ struct DrawCommand
 	std::uint32_t virtualMeshletCount = 0u;
 	std::uint32_t selectedVirtualLod = 0u;
 	std::uint32_t virtualGeometryFlags = 0u;
+	// These offsets/counts point at the immutable per-view selection packet.
+	// Visible virtual geometry expands one draw per selected cluster, so each
+	// command normally references a single sparse cluster record.
+	std::uint32_t selectedVirtualClusterOffset = 0u;
+	std::uint32_t selectedVirtualClusterCount = 0u;
+	std::uint32_t selectedVirtualPageNeedOffset = 0u;
+	std::uint32_t selectedVirtualPageNeedCount = 0u;
 	bool taskShaderCullingEnabled = true;
 };
 
@@ -537,6 +927,12 @@ struct PushConstants
 	std::uint32_t virtualMeshletCount = 0u;
 	std::uint32_t selectedVirtualLod = 0u;
 	std::uint32_t virtualGeometryFlags = 0u;
+	// Cluster/page packet metadata follows the selected cluster range so shader
+	// layouts can visualize sparse cluster dispatch and fallback page choices.
+	std::uint32_t selectedVirtualClusterOffset = 0u;
+	std::uint32_t selectedVirtualClusterCount = 0u;
+	std::uint32_t selectedVirtualPageNeedOffset = 0u;
+	std::uint32_t selectedVirtualPageNeedCount = 0u;
 	// rgb is the tint target color and a is blend strength. Runtime draws leave
 	// this at zero so authoring cues never leak into exported/game rendering.
 	alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);
@@ -938,9 +1334,10 @@ struct alignas(16) FrameCullingDataGPU
 	glm::uvec4 renderSettings0 = glm::uvec4(2048u, 5u, 128u, 1u); // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
 	glm::uvec4 renderSettings1 = glm::uvec4(1u, 4u, 4u, 256u);    // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
 	// x: indirectStrength, y: ambientOcclusionStrength, z: ambientOcclusionQuality,
-	// w: 1 only after the view-owned Hi-Z history, quality toggle, and
-	// self-occlusion guard all pass. A zero value is a fail-open instruction for
-	// task shaders, not a rendering error.
+	// w: 1 only after an initialized same-size Hi-Z pyramid, quality toggle,
+	// and per-draw Hi-Z guard bits pass. View/target/projection/depth-scene
+	// ownership is diagnostic-only, so a zero value means a hard
+	// resource/guard gate failed.
 	glm::vec4 renderSettings2 = glm::vec4(1.0f, 1.0f, 2.0f, 0.0f);
 	std::uint32_t globalTaskCullingEnabled = 1u;
 	std::uint32_t taskShaderSupported = 0u;

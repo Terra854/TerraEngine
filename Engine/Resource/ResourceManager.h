@@ -571,13 +571,34 @@ Resource* ResourceManager::GetResourceById(const TerraEngine::UUID& id, Resource
 			{
 				const std::string path = it->second;
 				lock.unlock(); // Must release shared lock before triggering a load which acquires unique lock
-				loader(path);
+				const TerraEngine::UUID loadedId = loader(path);
 				
 				// Re-acquire shared lock and return from cache
 				std::shared_lock relock(cache.mutex);
 				if (auto reloaded = cache.resources.find(id); reloaded != cache.resources.end())
 				{
 					return reloaded->second.get();
+				}
+				// Package imports can expose several stable child GUIDs that all
+				// reference one cooked runtime file. The path cache has a single
+				// canonical UUID for that file, so a load requested through an older
+				// sibling GUID may populate the canonical entry instead of the exact
+				// requested id. Returning the canonical payload keeps every registered
+				// GUID renderable while preserving the source GUID stored on components.
+				if (loadedId != TerraEngine::EMPTY_UUID && loadedId != id)
+				{
+					if (auto aliased = cache.resources.find(loadedId); aliased != cache.resources.end())
+					{
+						CacheLoadedMeshBounds(id, aliased->second.get());
+						UpdateStreamableLoadResult(
+							id,
+							cache.assetType,
+							path,
+							true,
+							cache.tracksResidency ? EstimateLoadedResourceBytes(aliased->second) : 0u,
+							0u);
+						return aliased->second.get();
+					}
 				}
 			}
 		}

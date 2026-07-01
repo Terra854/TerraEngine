@@ -799,15 +799,18 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 		return;
 	}
 
-	if (ImGui::BeginTable("ResourceVirtualGeometrySummary", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	if (ImGui::BeginTable("ResourceVirtualGeometrySummary", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("View");
 		ImGui::TableSetupColumn("State");
 		ImGui::TableSetupColumn("Resident");
 		ImGui::TableSetupColumn("Requested");
+		ImGui::TableSetupColumn("IO/Upload");
 		ImGui::TableSetupColumn("Missing");
 		ImGui::TableSetupColumn("Failed");
-		ImGui::TableSetupColumn("Evicted");
+		ImGui::TableSetupColumn("Evict/Evicted");
+		ImGui::TableSetupColumn("Pinned");
+		ImGui::TableSetupColumn("Budget/Pressure");
 		ImGui::TableSetupColumn("Bytes");
 		ImGui::TableHeadersRow();
 		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot : snapshots)
@@ -822,13 +825,70 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 			ImGui::TableSetColumnIndex(3);
 			ImGui::Text("%u", snapshot.requestedPages);
 			ImGui::TableSetColumnIndex(4);
-			ImGui::Text("%u", snapshot.missingPages);
+			ImGui::Text("%u/%u", snapshot.pageResidency.pendingIoPages, snapshot.pageResidency.pendingUploadPages);
 			ImGui::TableSetColumnIndex(5);
-			ImGui::Text("%u", snapshot.failedPages);
+			ImGui::Text("%u", snapshot.missingPages);
 			ImGui::TableSetColumnIndex(6);
-			ImGui::Text("%u", snapshot.evictedPages);
+			ImGui::Text("%u", snapshot.failedPages);
 			ImGui::TableSetColumnIndex(7);
+			ImGui::Text("%u/%u", snapshot.evictingPages, snapshot.evictedPages);
+			ImGui::TableSetColumnIndex(8);
+			ImGui::Text("%u", snapshot.pinnedFallbackPages);
+			ImGui::TableSetColumnIndex(9);
+			ImGui::Text("%llu/%llu",
+				static_cast<unsigned long long>(snapshot.geometryBudgetBytes),
+				static_cast<unsigned long long>(snapshot.budgetPressureBytes));
+			ImGui::TableSetColumnIndex(10);
 			ImGui::Text("%llu", static_cast<unsigned long long>(snapshot.estimatedGeometryBytes));
+		}
+		ImGui::EndTable();
+	}
+
+	std::vector<TerraEngine::Renderer::VirtualGeometryBudgetContributor> contributors;
+	for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot : snapshots)
+	{
+		contributors.insert(contributors.end(), snapshot.budgetContributors.begin(), snapshot.budgetContributors.end());
+	}
+	std::sort(contributors.begin(), contributors.end(), [](const auto& left, const auto& right) {
+		if (left.reclaimableBytes != right.reclaimableBytes)
+		{
+			return left.reclaimableBytes > right.reclaimableBytes;
+		}
+		if (left.residentBytes != right.residentBytes)
+		{
+			return left.residentBytes > right.residentBytes;
+		}
+		return TerraEngine::ToHexString(left.assetId) < TerraEngine::ToHexString(right.assetId);
+	});
+
+	if (!contributors.empty()
+		&& ImGui::BeginTable("ResourceVirtualGeometryPressureAssets", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("View");
+		ImGui::TableSetupColumn("Asset");
+		ImGui::TableSetupColumn("Resident Bytes");
+		ImGui::TableSetupColumn("Reclaimable Bytes");
+		ImGui::TableSetupColumn("Resident Pages");
+		ImGui::TableSetupColumn("Pinned");
+		ImGui::TableSetupColumn("Missing");
+		ImGui::TableHeadersRow();
+		for (const TerraEngine::Renderer::VirtualGeometryBudgetContributor& contributor : contributors)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::Text("%s", ToString(contributor.viewType));
+			ImGui::TableSetColumnIndex(1);
+			DrawAssetCell(contributor.assetId, AssetType::Mesh);
+			ImGui::TableSetColumnIndex(2);
+			ImGui::Text("%llu", static_cast<unsigned long long>(contributor.residentBytes));
+			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%llu", static_cast<unsigned long long>(contributor.reclaimableBytes));
+			ImGui::TableSetColumnIndex(4);
+			ImGui::Text("%u", contributor.residentPages);
+			ImGui::TableSetColumnIndex(5);
+			ImGui::Text("%u", contributor.pinnedFallbackPages);
+			ImGui::TableSetColumnIndex(6);
+			ImGui::Text("%u", contributor.missingPages);
 		}
 		ImGui::EndTable();
 	}

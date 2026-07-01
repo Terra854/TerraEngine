@@ -2,6 +2,7 @@
 
 #include "Renderer/RenderSystem.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
+#include "File Formats/TerraEngineMeshFile.h"
 
 #include <cstdint>
 #include <vector>
@@ -38,6 +39,43 @@ namespace TerraEngine::Tests
 				page.fallbackPageId = 0u;
 				page.fallbackPage = lod == 0u;
 				asset.pages.push_back(page);
+			}
+			return asset;
+		}
+
+		VirtualGeometryAssetRuntime MakeDenseClusterAsset(std::uint8_t assetByte)
+		{
+			VirtualGeometryAssetRuntime asset = MakeDenseVirtualGeometryAsset(assetByte, 48u);
+			asset.clusterCoverageValidated = true;
+			asset.clusters.clear();
+			VirtualGeometryClusterRuntime root{};
+			root.clusterId = 0u;
+			root.parentClusterId = kVirtualGeometryInvalidIndex;
+			root.firstChildClusterId = 1u;
+			root.childCount = 8u;
+			root.lodIndex = 1u;
+			root.firstGroupIndex = 48u;
+			root.groupCount = 24u;
+			root.pageId = 1u;
+			root.fallbackClusterId = 0u;
+			root.geometricError = 0.02f;
+			root.boundsRadius = 2.0f;
+			asset.clusters.push_back(root);
+			for (std::uint32_t child = 0u; child < 8u; ++child)
+			{
+				VirtualGeometryClusterRuntime cluster{};
+				cluster.clusterId = child + 1u;
+				cluster.parentClusterId = 0u;
+				cluster.firstChildClusterId = kVirtualGeometryInvalidIndex;
+				cluster.childCount = 0u;
+				cluster.lodIndex = (child % 2u) == 0u ? 0u : 2u;
+				cluster.firstGroupIndex = (child % 2u) == 0u ? child * 6u : 72u + child;
+				cluster.groupCount = (child % 2u) == 0u ? 6u : 1u;
+				cluster.pageId = (child % 2u) == 0u ? 0u : 2u;
+				cluster.fallbackClusterId = 0u;
+				cluster.geometricError = 0.0f;
+				cluster.boundsRadius = (child % 2u) == 0u ? 1.0f : 0.25f;
+				asset.clusters.push_back(cluster);
 			}
 			return asset;
 		}
@@ -104,6 +142,38 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::uint32_t>(assets.size() * 2u), diagnostics.lodTransitionCandidates, "Every dense stress asset should publish two transition candidates.");
 			context.Expect(diagnostics.budgetPressureBytes > 0u, "Stress fixture should exceed the small diagnostic geometry budget.");
 			context.Expect(!diagnostics.budgetContributors.empty(), "Stress diagnostics should include budget contributors.");
+		});
+
+		registry.Add("VirtualGeometry.Stress.MixedDetailClusterSelectionRemainsDeterministic", [](TestContext& context) {
+			std::vector<VirtualGeometryAssetRuntime> assets;
+			for (std::uint32_t index = 0u; index < 64u; ++index)
+			{
+				assets.push_back(MakeDenseClusterAsset(static_cast<std::uint8_t>(index + 1u)));
+			}
+
+			std::uint64_t selectedClusters = 0u;
+			std::uint64_t pageNeeds = 0u;
+			for (std::uint32_t frame = 0u; frame < 32u; ++frame)
+			{
+				for (std::size_t assetIndex = 0u; assetIndex < assets.size(); ++assetIndex)
+				{
+					const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+						RenderSystem::SelectVirtualGeometryClusterCut(
+							assets[assetIndex],
+							assets[assetIndex].assetId,
+							TerraEngine::GenerateUUID(),
+							MakeDefaultVirtualGeometryQualityProfile(),
+							ProjectedRadiusForFrame(frame, static_cast<std::uint32_t>(assetIndex)) * 2.0f,
+							true,
+							true);
+					context.Expect(!result.selectedClusters.empty(), "Every mixed-detail stress selection should keep visible cluster coverage.");
+					selectedClusters += result.selectedClusters.size();
+					pageNeeds += result.pageNeeds.size();
+				}
+			}
+
+			context.Expect(selectedClusters > assets.size(), "Mixed-detail stress should refine some objects into child cluster cuts.");
+			context.ExpectEqual(static_cast<std::uint64_t>(0u), pageNeeds, "Fully resident mixed-detail stress fixtures should not request fallback pages.");
 		});
 	}
 }

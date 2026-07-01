@@ -228,10 +228,50 @@ namespace TerraEngine::AssetPipeline
 				record.virtualGeometryDetailLevels = virtualGeometry.value("detailLevels", record.virtualGeometryDetailLevels);
 				record.virtualGeometryMeshlets = virtualGeometry.value("meshlets", record.virtualGeometryMeshlets);
 				record.virtualGeometrySourceTriangles = virtualGeometry.value("sourceTriangles", record.virtualGeometrySourceTriangles);
+				const nlohmann::json settings = virtualGeometry.value("settings", nlohmann::json::object());
+				record.virtualGeometrySettings.hasOverride = settings.value("hasOverride", record.virtualGeometrySettings.hasOverride);
+				record.virtualGeometrySettings.settingsSource = settings.value("settingsSource", record.virtualGeometrySettings.settingsSource);
+				record.virtualGeometrySettings.targetRatios.clear();
+				for (const nlohmann::json& ratio : settings.value("targetRatios", nlohmann::json::array()))
+				{
+					if (ratio.is_number())
+					{
+						record.virtualGeometrySettings.targetRatios.push_back(ratio.get<float>());
+					}
+				}
+				record.virtualGeometrySettings.minimumSourceTriangles = settings.value("minimumSourceTriangles", record.virtualGeometrySettings.minimumSourceTriangles);
+				record.virtualGeometrySettings.minimumGeneratedTriangles = settings.value("minimumGeneratedTriangles", record.virtualGeometrySettings.minimumGeneratedTriangles);
+				record.virtualGeometrySettings.minimumMeshletsPerGeneratedLevel = settings.value("minimumMeshletsPerGeneratedLevel", record.virtualGeometrySettings.minimumMeshletsPerGeneratedLevel);
+				record.virtualGeometrySettings.minimumUsefulTriangleReduction = settings.value("minimumUsefulTriangleReduction", record.virtualGeometrySettings.minimumUsefulTriangleReduction);
+				record.virtualGeometrySettings.minimumUsefulMeshletReduction = settings.value("minimumUsefulMeshletReduction", record.virtualGeometrySettings.minimumUsefulMeshletReduction);
+				record.virtualGeometrySettings.maximumGeometricError = settings.value("maximumGeometricError", record.virtualGeometrySettings.maximumGeometricError);
 				for (const nlohmann::json& warning : virtualGeometry.value("warnings", nlohmann::json::array()))
 				{
 					record.virtualGeometryWarnings.push_back(warning.get<std::string>());
 				}
+				for (const nlohmann::json& target : virtualGeometry.value("targets", nlohmann::json::array()))
+				{
+					GeneratedModelMeshVirtualGeometryTarget targetRecord;
+					targetRecord.targetIndex = target.value("targetIndex", targetRecord.targetIndex);
+					targetRecord.requestedRatio = target.value("requestedRatio", targetRecord.requestedRatio);
+					targetRecord.status = target.value("status", targetRecord.status);
+					targetRecord.reason = target.value("reason", targetRecord.reason);
+					targetRecord.desiredTriangleCount = target.value("desiredTriangleCount", target.value("triangleCount", targetRecord.desiredTriangleCount));
+					targetRecord.desiredMeshletCount = target.value("desiredMeshletCount", target.value("meshletCount", targetRecord.desiredMeshletCount));
+					targetRecord.actualRatio = target.value("actualRatio", targetRecord.actualRatio);
+					targetRecord.actualTriangleCount = target.value("actualTriangleCount", target.value("triangleCount", targetRecord.actualTriangleCount));
+					targetRecord.actualMeshletCount = target.value("actualMeshletCount", target.value("meshletCount", targetRecord.actualMeshletCount));
+					targetRecord.triangleCount = target.value("triangleCount", targetRecord.actualTriangleCount);
+					targetRecord.meshletCount = target.value("meshletCount", targetRecord.actualMeshletCount);
+					targetRecord.nearestGeneratedLevelIndex = target.value("nearestGeneratedLevelIndex", targetRecord.nearestGeneratedLevelIndex);
+					targetRecord.geometricError = target.value("geometricError", targetRecord.geometricError);
+					targetRecord.message = target.value("message", targetRecord.message);
+					record.virtualGeometryTargets.push_back(std::move(targetRecord));
+				}
+				const nlohmann::json clusterSummary = virtualGeometry.value("clusterSummary", nlohmann::json::object());
+				record.virtualGeometryClusterSummary.clusterCount = clusterSummary.value("clusterCount", record.virtualGeometryClusterSummary.clusterCount);
+				record.virtualGeometryClusterSummary.pageLinkCount = clusterSummary.value("pageLinkCount", record.virtualGeometryClusterSummary.pageLinkCount);
+				record.virtualGeometryClusterSummary.fallbackCoverageValid = clusterSummary.value("fallbackCoverageValid", record.virtualGeometryClusterSummary.fallbackCoverageValid);
 				result.generatedMeshes.push_back(std::move(record));
 			}
 

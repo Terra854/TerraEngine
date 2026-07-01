@@ -71,6 +71,85 @@ namespace TerraEngine::AssetPipeline
 			return value.empty() ? std::string(fallback) : value;
 		}
 
+		VirtualGeometryAdaptiveCompileSettings ToCompileSettings(const GeneratedModelMeshVirtualGeometrySettings& settings)
+		{
+			VirtualGeometryAdaptiveCompileSettings compileSettings;
+			compileSettings.targetRatios = settings.targetRatios;
+			compileSettings.minimumSourceTriangles = settings.minimumSourceTriangles;
+			compileSettings.minimumGeneratedTriangles = settings.minimumGeneratedTriangles;
+			compileSettings.minimumMeshletsPerGeneratedLevel = settings.minimumMeshletsPerGeneratedLevel;
+			compileSettings.minimumUsefulTriangleReduction = settings.minimumUsefulTriangleReduction;
+			compileSettings.minimumUsefulMeshletReduction = settings.minimumUsefulMeshletReduction;
+			compileSettings.maximumGeometricError = settings.maximumGeometricError;
+			compileSettings.settingsSource = settings.hasOverride ? "PerMeshOverride" : settings.settingsSource;
+			return compileSettings;
+		}
+
+		GeneratedModelMeshVirtualGeometrySettings ToGeneratedSettings(const VirtualGeometryAdaptiveCompileSettings& settings, bool hasOverride)
+		{
+			GeneratedModelMeshVirtualGeometrySettings generatedSettings;
+			generatedSettings.hasOverride = hasOverride;
+			generatedSettings.targetRatios = settings.targetRatios;
+			generatedSettings.minimumSourceTriangles = settings.minimumSourceTriangles;
+			generatedSettings.minimumGeneratedTriangles = settings.minimumGeneratedTriangles;
+			generatedSettings.minimumMeshletsPerGeneratedLevel = settings.minimumMeshletsPerGeneratedLevel;
+			generatedSettings.minimumUsefulTriangleReduction = settings.minimumUsefulTriangleReduction;
+			generatedSettings.minimumUsefulMeshletReduction = settings.minimumUsefulMeshletReduction;
+			generatedSettings.maximumGeometricError = settings.maximumGeometricError;
+			generatedSettings.settingsSource = hasOverride ? "PerMeshOverride" : settings.settingsSource;
+			return generatedSettings;
+		}
+
+		void PopulateVirtualGeometryTargetDiagnostics(const MeshCompileReport& report, GeneratedModelMeshAsset& mesh)
+		{
+			mesh.virtualGeometryTargets.clear();
+			for (const VirtualGeometryRequestedTargetCompileReport& requested : report.virtualGeometry.requestedTargets)
+			{
+				GeneratedModelMeshVirtualGeometryTarget target{};
+				target.targetIndex = requested.targetIndex;
+				target.requestedRatio = requested.requestedRatio;
+				target.status = requested.status;
+				target.desiredTriangleCount = requested.desiredTriangleCount;
+				target.desiredMeshletCount = requested.desiredMeshletCount;
+				target.triangleCount = requested.desiredTriangleCount;
+				target.meshletCount = requested.desiredMeshletCount;
+				target.actualRatio = requested.requestedRatio;
+
+				for (const VirtualGeometryGeneratedLevelCompileReport& generated : report.virtualGeometry.generatedLevels)
+				{
+					if (generated.requestedTargetIndex == requested.targetIndex)
+					{
+						target.status = "Generated";
+						target.actualRatio = generated.actualRatio;
+						target.actualTriangleCount = generated.triangleCount;
+						target.actualMeshletCount = generated.meshletCount;
+						target.triangleCount = target.actualTriangleCount;
+						target.meshletCount = target.actualMeshletCount;
+						target.geometricError = generated.geometricError;
+						target.nearestGeneratedLevelIndex = generated.generatedLevelIndex;
+						break;
+					}
+				}
+				for (const VirtualGeometrySkippedLevelCompileReport& skipped : report.virtualGeometry.skippedLevels)
+				{
+					if (skipped.targetIndex == requested.targetIndex)
+					{
+						target.status = skipped.status;
+						target.reason = skipped.reason;
+						target.message = skipped.message;
+						target.nearestGeneratedLevelIndex = skipped.nearestGeneratedLevelIndex;
+						target.actualRatio = skipped.actualCandidateRatio > 0.0f ? skipped.actualCandidateRatio : target.actualRatio;
+						target.actualTriangleCount = skipped.candidateTriangleCount;
+						target.actualMeshletCount = skipped.candidateMeshletCount;
+						target.triangleCount = target.actualTriangleCount > 0u ? target.actualTriangleCount : target.triangleCount;
+						target.meshletCount = target.actualMeshletCount > 0u ? target.actualMeshletCount : target.meshletCount;
+						break;
+					}
+				}
+				mesh.virtualGeometryTargets.push_back(std::move(target));
+			}
+		}
+
 		std::string ComputeFileHashHex(const std::filesystem::path& filePath)
 		{
 			std::ifstream in(filePath, std::ios::binary);
@@ -668,10 +747,15 @@ namespace TerraEngine::AssetPipeline
 		else
 		{
 			const std::filesystem::path compiledMeshPath = options.buildRoot / packageMesh.compiledPath;
-			if (!CompileMeshFromRaw(options.sourceRelativePath, compiledMeshPath, vertices, indices))
+			MeshCompileReport compileReport{};
+			const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileSettings(options.virtualGeometrySettings);
+			const VirtualGeometryAdaptiveCompileSettings* compileSettingsPtr = options.hasVirtualGeometrySettings ? &compileSettings : nullptr;
+			if (!CompileMeshFromRaw(options.sourceRelativePath, compiledMeshPath, vertices, indices, true, &compileReport, 60.0f, 1e-6f, compileSettingsPtr))
 			{
 				AddDiagnostic(result, ModelDiagnosticSeverity::Error, "MeshCompileFailed", packageMesh.compiledPath.generic_string(), "Extracted FBX geometry failed Terra mesh compilation.");
 			}
+			packageMesh.virtualGeometrySettings = ToGeneratedSettings(compileReport.virtualGeometry.adaptiveSettings, options.hasVirtualGeometrySettings);
+			PopulateVirtualGeometryTargetDiagnostics(compileReport, packageMesh);
 			PopulateGeneratedMeshVirtualGeometryMetadata(compiledMeshPath, packageMesh, result.diagnostics);
 			result.generatedMeshes.push_back(std::move(packageMesh));
 		}

@@ -573,6 +573,50 @@ void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 	EndSingleTimeCommands(commandBuffer);
 }
 
+// VulkanContext::Impl::InitializeHiZPyramidToFarDepth prepares a new Hi-Z image for always-on sampling.
+void VulkanContext::Impl::InitializeHiZPyramidToFarDepth(VulkanHiZ& hiZ)
+{
+	if (hiZ.image == VK_NULL_HANDLE || hiZ.mipLevels == 0u)
+	{
+		return;
+	}
+
+	// Clear all mips to standard-Z far depth. A freshly created pyramid can then
+	// be sampled immediately without false occlusion; every meshlet fails open
+	// until GenerateHiZPyramid writes real scene depth.
+	TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+	VkClearColorValue clearValue{};
+	clearValue.float32[0] = 1.0f;
+	clearValue.float32[1] = 1.0f;
+	clearValue.float32[2] = 1.0f;
+	clearValue.float32[3] = 1.0f;
+
+	VkImageSubresourceRange clearRange{};
+	clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	clearRange.baseMipLevel = 0u;
+	clearRange.levelCount = hiZ.mipLevels;
+	clearRange.baseArrayLayer = 0u;
+	clearRange.layerCount = 1u;
+	vkCmdClearColorImage(commandBuffer, hiZ.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1u, &clearRange);
+	EndSingleTimeCommands(commandBuffer);
+
+	TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+	hiZ.history.valid = true;
+	hiZ.history.width = hiZ.width;
+	hiZ.history.height = hiZ.height;
+	hiZ.history.invalidReason = VulkanHiZInvalidReason::None;
+	hiZ.latestInvalidReason = VulkanHiZInvalidReason::None;
+	hiZ.latestValidation = {};
+	hiZ.latestValidation.historyValid = true;
+	hiZ.latestValidation.occlusionAllowed = true;
+	hiZ.latestValidation.invalidReason = VulkanHiZInvalidReason::None;
+	hiZ.latestValidation.failOpen = false;
+	hiZ.latestOcclusionAllowed = true;
+}
+
 // VulkanContext::Impl::CopyBufferToImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
@@ -1403,12 +1447,17 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 		+ meshletTableSize
 		+ meshletSectionSize
 		+ boundsUploadSize;
+	const bool hasVirtualGeometryPageMetadata = cpuMesh->hasVirtualGeometry && !cpuMesh->virtualGeometryPages.empty();
+	// Virtual geometry pages are still uploaded as part of the owning mesh
+	// buffers in this milestone. Keep the publication reason distinct so
+	// ResourceManager diagnostics can later split page-resident publication
+	// without changing the protected Vulkan upload boundary.
 	ResourceManager::Instance().MarkResourceUploadedToGpu(
 		meshId,
 		AssetType::Mesh,
 		static_cast<std::uint64_t>(currentFrame),
 		static_cast<std::uint64_t>(totalGpuBytes),
-		"vulkan mesh buffer upload");
+		hasVirtualGeometryPageMetadata ? "vulkan mesh buffer upload with virtual geometry page metadata" : "vulkan mesh buffer upload");
 }
 
 // VulkanContext::Impl::EnsureMeshDescriptorSet is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2133,7 +2182,7 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	// Hi-Z Pyramid Texture
 	bindings[10].binding = 10;
 	bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	bindings[10].descriptorCount = 1;
+	bindings[10].descriptorCount = kHiZViewCount;
 	bindings[10].stageFlags = VK_SHADER_STAGE_ALL;
 	bindings[10].pImmutableSamplers = nullptr;
 	// Hi-Z Sampler
@@ -2279,7 +2328,7 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	poolSizes[0].descriptorCount = MAX_BINDLESS_TEXTURES * MAX_FRAMES_IN_FLIGHT;
 	poolSizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	poolSizes[1].descriptorCount = (7 + MAX_SHADOW_RESOURCE_SLOTS) * MAX_FRAMES_IN_FLIGHT; // Point shadows + Hi-Z + Depth + VRS Color + AO + AO history + AO raw
+	poolSizes[1].descriptorCount = (6 + kHiZViewCount + MAX_SHADOW_RESOURCE_SLOTS) * MAX_FRAMES_IN_FLIGHT; // Point shadows + per-view Hi-Z + Depth + VRS Color + AO + AO history + AO raw
 	poolSizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
 	poolSizes[2].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // Point shadow + Hi-Z
 	poolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -2584,7 +2633,10 @@ void VulkanContext::Impl::CreateLightingBufferResources() {
 		VkDescriptorImageInfo depthInfo{};
 		depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		depthInfo.imageView = depthImageView;
-		depthInfo.sampler = hiZ.sampler; 
+		// Cluster-depth consumers only need a sampler object. Reuse the
+		// sampler from the same frame's Hi-Z resource so descriptor set `i`
+		// never references a sampler owned by another frame slot.
+		depthInfo.sampler = HiZForFrame(kHiZGameViewIndex, i).sampler;
 
 		VkDescriptorBufferInfo clusterDepthInfo{};
 		clusterDepthInfo.buffer = clusterDepthSSBOs[i].buffer;
@@ -3715,7 +3767,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			gameSnapshot.meshletsCulled = gameCounters.meshletsCulled;
 			gameSnapshot.meshletsCulledHiZ = gameCounters.meshletsCulledHiZ;
 		}
-		gameSnapshot.hiZActive = gameSnapshot.hiZActive && hiZ.image != VK_NULL_HANDLE;
+		gameSnapshot.hiZActive = gameSnapshot.hiZActive && HiZForFrame(kHiZGameViewIndex, frameIndex).image != VK_NULL_HANDLE;
 		gameSnapshot.vrsActive = gameSnapshot.vrsActive && UsesVrsAttachment();
 	}
 
@@ -3730,7 +3782,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			sceneSnapshot.meshletsCulled = sceneCounters.meshletsCulled;
 			sceneSnapshot.meshletsCulledHiZ = sceneCounters.meshletsCulledHiZ;
 		}
-		sceneSnapshot.hiZActive = sceneSnapshot.hiZActive && hiZ.image != VK_NULL_HANDLE;
+		sceneSnapshot.hiZActive = sceneSnapshot.hiZActive && HiZForFrame(kHiZSceneViewIndex, frameIndex).image != VK_NULL_HANDLE;
 		sceneSnapshot.vrsActive = sceneSnapshot.vrsActive && UsesVrsAttachment();
 	}
 
@@ -4358,37 +4410,43 @@ void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 }
 
 // VulkanContext::Impl::UpdateGlobalHiZ is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::UpdateGlobalHiZ(const VulkanHiZ& hiZ) {
-	if (hiZ.fullView == VK_NULL_HANDLE) return;
+void VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
+	if (frameIndex >= globalDescriptorSets.size()) return;
 	WaitForDescriptorMutationIdle();
 
-	VkDescriptorImageInfo imageInfo{};
-	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	imageInfo.imageView = hiZ.fullView;
-	imageInfo.sampler = VK_NULL_HANDLE;
+	std::array<VkDescriptorImageInfo, kHiZViewCount> imageInfos{};
+	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < kHiZViewCount; ++hiZViewIndex) {
+		const VulkanHiZ& hiZ = HiZForFrame(hiZViewIndex, frameIndex);
+		if (hiZ.fullView == VK_NULL_HANDLE || hiZ.sampler == VK_NULL_HANDLE) return;
+
+		// Binding 10 is an array so editor Scene/Game command buffers can be
+		// recorded once and submitted together without racing a descriptor
+		// mutation between views. The task shader indexes this array from the
+		// same stats slot that already selects per-view culling data.
+		imageInfos[hiZViewIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		imageInfos[hiZViewIndex].imageView = hiZ.fullView;
+		imageInfos[hiZViewIndex].sampler = VK_NULL_HANDLE;
+	}
 
 	VkDescriptorImageInfo samplerInfo{};
-	samplerInfo.sampler = hiZ.sampler;
+	samplerInfo.sampler = HiZForFrame(kHiZGameViewIndex, frameIndex).sampler;
 
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-		VkWriteDescriptorSet writes[2]{};
-		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[0].dstSet = globalDescriptorSets[i];
-		writes[0].dstBinding = 10;
-		writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		writes[0].descriptorCount = 1;
-		writes[0].pImageInfo = &imageInfo;
+	VkWriteDescriptorSet writes[2]{};
+	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[0].dstSet = globalDescriptorSets[frameIndex];
+	writes[0].dstBinding = 10;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	writes[0].descriptorCount = kHiZViewCount;
+	writes[0].pImageInfo = imageInfos.data();
 
-		writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[1].dstSet = globalDescriptorSets[i];
-		writes[1].dstBinding = 11;
-		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-		writes[1].descriptorCount = 1;
-		writes[1].pImageInfo = &samplerInfo;
+	writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	writes[1].dstSet = globalDescriptorSets[frameIndex];
+	writes[1].dstBinding = 11;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+	writes[1].descriptorCount = 1;
+	writes[1].pImageInfo = &samplerInfo;
 
-		vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-	}
+	vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 }
 
 void VulkanContext::Impl::WaitForDescriptorMutationIdle() {

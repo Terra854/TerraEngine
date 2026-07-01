@@ -6,7 +6,6 @@
 #include "GameViewWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Renderer/RenderSystem.h"
-#include "Engine/Renderer/Graph/RenderDiagnostics.h"
 #include "Engine/Components/CameraComponent.h"
 #include "Engine/Components/Transform.h"
 #include "Engine/Core/Object/ObjectManager.h"
@@ -18,7 +17,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
-#include <iterator>
 
 GameViewWindow::GameViewWindow(MainEditorSubsystem* owner)
 	: EditorWindow("Game View"), m_Owner(owner) {
@@ -74,15 +72,21 @@ void GameViewWindow::OnGui() {
 	ImGui::Checkbox("Gizmos", &m_Gizmos);
 	ImGui::SameLine();
 	VirtualGeometryQualityProfile virtualGeometryProfile = RenderSystem::Instance().GetVirtualGeometryQualityProfile();
+	const VirtualGeometryDebugVisualizationMode normalizedDebugMode = NormalizeVirtualGeometryDebugVisualizationMode(virtualGeometryProfile.debugVisualizationMode);
+	if (normalizedDebugMode != virtualGeometryProfile.debugVisualizationMode)
+	{
+		// Collapse legacy/internal visualizer modes before the combo draws so
+		// the toolbar cannot get stuck on a hidden duplicate entry.
+		virtualGeometryProfile.debugVisualizationMode = normalizedDebugMode;
+		RenderSystem::Instance().SetVirtualGeometryQualityProfile(virtualGeometryProfile);
+	}
 	int virtualGeometryDebugMode = static_cast<int>(virtualGeometryProfile.debugVisualizationMode);
 	ImGui::SetNextItemWidth(115.0f);
 	if (ImGui::BeginCombo("VG", ToString(static_cast<VirtualGeometryDebugVisualizationMode>(virtualGeometryDebugMode))))
 	{
-		for (int modeIndex = static_cast<int>(VirtualGeometryDebugVisualizationMode::None);
-			modeIndex <= static_cast<int>(VirtualGeometryDebugVisualizationMode::Error);
-			++modeIndex)
+		for (const VirtualGeometryDebugVisualizationMode mode : GetVirtualGeometryDebugVisualizationModes())
 		{
-			const auto mode = static_cast<VirtualGeometryDebugVisualizationMode>(modeIndex);
+			const int modeIndex = static_cast<int>(mode);
 			const bool selected = virtualGeometryDebugMode == modeIndex;
 			if (ImGui::Selectable(ToString(mode), selected))
 			{
@@ -188,7 +192,10 @@ void GameViewWindow::OnGui() {
 			if (glm::length(up) < 0.0001f) up = glm::vec3(0.0f, 1.0f, 0.0f);
 
 			glm::mat4 view = glm::lookAt(pos, pos + forward, glm::normalize(up));
-			glm::mat4 proj = glm::perspective(glm::radians(camera->verticalFovDegrees), aspect, camera->nearPlane, camera->farPlane);
+			// The Vulkan renderer and Hi-Z culling both expect 0..1 clip-space
+			// depth, so use the explicit GLM helper instead of relying on
+			// translation-unit include order for GLM_FORCE_DEPTH_ZERO_TO_ONE.
+			glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(camera->verticalFovDegrees), aspect, camera->nearPlane, camera->farPlane);
 			proj[1][1] *= -1;
 			RenderSystem::Instance().SetGameViewCamera(view, proj, pos);
 		}
@@ -252,64 +259,10 @@ void GameViewWindow::OnGui() {
 		ImGui::Text("%s", text);
 	}
 
-	const auto activeVirtualGeometryMode = RenderSystem::Instance().GetVirtualGeometryQualityProfile().debugVisualizationMode;
-	if (activeVirtualGeometryMode != VirtualGeometryDebugVisualizationMode::None && texID && hasCameras)
-	{
-		std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> virtualGeometrySnapshots =
-			TerraEngine::Renderer::LatestVirtualGeometryDiagnosticsSnapshots();
-		TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot gameSnapshot{};
-		bool hasVirtualGeometrySnapshot = false;
-		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot : virtualGeometrySnapshots)
-		{
-			if (snapshot.viewType == RenderViewType::Game)
-			{
-				gameSnapshot = snapshot;
-				hasVirtualGeometrySnapshot = true;
-				break;
-			}
-		}
-
-		char modeLine[96];
-		char meshletLine[96];
-		char hiZLine[96];
-		char residencyLine[128];
-		char cullLine[128];
-		char lodLine[128];
-		std::snprintf(modeLine, sizeof(modeLine), "VG: %s", ToString(activeVirtualGeometryMode));
-		std::snprintf(meshletLine, sizeof(meshletLine), "Meshlets: %u selected, %u dispatched / %u", gameSnapshot.selectedMeshlets, gameSnapshot.dispatchedMeshlets, gameSnapshot.sourceMeshlets);
-		std::snprintf(hiZLine, sizeof(hiZLine), "Hi-Z: %s", hasVirtualGeometrySnapshot && gameSnapshot.hiZActive ? "Active" : "Off");
-		std::snprintf(residencyLine, sizeof(residencyLine), "Pages: %u resident, %u requested, %u missing", gameSnapshot.residentPages, gameSnapshot.requestedPages, gameSnapshot.missingPages);
-		std::snprintf(cullLine, sizeof(cullLine), "Cull: F%u C%u H%u", gameSnapshot.culledByFrustum, gameSnapshot.culledByCone, gameSnapshot.culledByHiZ);
-		if (!gameSnapshot.selectedLodHistogram.empty())
-		{
-			std::snprintf(lodLine, sizeof(lodLine), "LOD: 0=%u 1=%u 2=%u",
-				gameSnapshot.selectedLodHistogram.size() > 0u ? gameSnapshot.selectedLodHistogram[0] : 0u,
-				gameSnapshot.selectedLodHistogram.size() > 1u ? gameSnapshot.selectedLodHistogram[1] : 0u,
-				gameSnapshot.selectedLodHistogram.size() > 2u ? gameSnapshot.selectedLodHistogram[2] : 0u);
-		}
-		else
-		{
-			std::snprintf(lodLine, sizeof(lodLine), "LOD: none");
-		}
-		const char* lines[] = { modeLine, meshletLine, residencyLine, cullLine, lodLine, hiZLine };
-		float textWidth = 0.0f;
-		for (const char* line : lines)
-		{
-			textWidth = std::max(textWidth, ImGui::CalcTextSize(line).x);
-		}
-
-		const float panelPadding = 8.0f;
-		const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
-		const ImVec2 panelMin(imageMin.x + 10.0f, imageMin.y + 10.0f);
-		const ImVec2 panelMax(panelMin.x + textWidth + panelPadding * 2.0f, panelMin.y + panelPadding * 2.0f + lineHeight * static_cast<float>(std::size(lines)));
-		drawList->AddRectFilled(panelMin, panelMax, IM_COL32(22, 32, 38, 205), 4.0f);
-		float textY = panelMin.y + panelPadding;
-		for (const char* line : lines)
-		{
-			drawList->AddText(ImVec2(panelMin.x + panelPadding, textY), IM_COL32(235, 235, 235, 255), line);
-			textY += lineHeight;
-		}
-	}
+	// The VG toolbar combo still controls visualization modes, but the retired
+	// top-left diagnostic panel is intentionally absent. It was sourced from
+	// renderer summary snapshots that can lag behind the live Game View path,
+	// while the right-side Stats panel reads the completed draw counters.
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (m_Stats) {

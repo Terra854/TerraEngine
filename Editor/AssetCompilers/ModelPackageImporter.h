@@ -23,6 +23,8 @@ namespace TerraEngine::AssetPipeline
 		std::filesystem::path sourceRelativePath;
 		TerraEngine::UUID packageGuid = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID shaderCollectionId = TerraEngine::EMPTY_UUID;
+		GeneratedModelMeshVirtualGeometrySettings virtualGeometrySettings;
+		bool hasVirtualGeometrySettings = false;
 		bool forceReimport = false;
 	};
 

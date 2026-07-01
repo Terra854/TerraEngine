@@ -5,6 +5,7 @@
 
 #pragma once
 #include "../Framework/EditorWindow.h"
+#include "AssetDatabase.h"
 #include "Engine/Core/Object/Reflection.h"
 #include "Engine/Utilities/UUID.h"
 #include <entt/entity/entity.hpp>
@@ -39,6 +40,8 @@ private:
 	void DrawUIComponentInspector(const std::string& compName, entt::entity obj, ComponentAccessFunctions& access);
 	void DrawModelPackageInspector(const std::filesystem::path& path);
 	void DrawModelPackageChildInspector(const std::filesystem::path& packagePath, TerraEngine::UUID guid, const std::string& kind, const std::string& displayName);
+	void DrawVirtualGeometryOverrideControls(const AssetMetadata& metadata);
+	void DrawGeneratedMeshVirtualGeometryOverrideControls(const std::filesystem::path& packagePath, TerraEngine::UUID meshGuid);
 	void DrawMaterialInspector(const std::filesystem::path& path);
 	void DrawMeshInspector(const std::filesystem::path& path);
 	void DrawTextureInspector(const std::filesystem::path& path);
@@ -56,6 +59,10 @@ private:
 	std::vector<uint8_t> m_MaterialDataBuffer;
 	std::string m_LastScriptMessage;
 	bool m_LastScriptMessageIsError = false;
+	VirtualGeometryAdaptiveSettingsMetadata m_VirtualGeometryEditSettings;
+	std::string m_VirtualGeometryEditKey;
+	std::string m_VirtualGeometrySettingsMessage;
+	bool m_VirtualGeometrySettingsMessageIsError = false;
 
 	char m_TagInputBuffer[256] = "";
 	char m_LayerInputBuffer[256] = "";

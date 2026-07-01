@@ -11,3 +11,9 @@ can consume through validated renderer state.
 
 Hi-Z changes for virtual geometry must keep occlusion decisions conservative and
 must expose invalidation reasons through renderer diagnostics.
+
+Adaptive virtual geometry validation must keep pyramid generation independent
+from trust. The compute pass may keep depth history warm, but culling decisions
+must still fail open for first frame, camera cut, projection change, resize,
+view mismatch, shadow mismatch, thin-geometry risk, self-occlusion risk, or
+explicit validation failure.

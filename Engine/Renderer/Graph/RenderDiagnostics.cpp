@@ -48,6 +48,88 @@ namespace TerraEngine::Renderer {
 		return snapshot;
 	}
 
+	VirtualGeometryAdaptiveSettingsDiagnostics BuildVirtualGeometryAdaptiveSettingsDiagnostics(const AdaptiveVirtualGeometryCookProfile& profile)
+	{
+		const AdaptiveVirtualGeometryCookProfile sanitized = SanitizeAdaptiveVirtualGeometryCookProfile(profile);
+		VirtualGeometryAdaptiveSettingsDiagnostics diagnostics;
+		diagnostics.settingsSource = sanitized.settingsSource;
+		diagnostics.materialSafetyPolicy = sanitized.materialSafetyPolicy;
+		diagnostics.fallbackPolicy = sanitized.fallbackPolicy;
+		diagnostics.requestedTargetCount = sanitized.targetRatioCount;
+		diagnostics.minimumSourceTriangles = sanitized.minimumSourceTriangles;
+		diagnostics.minimumGeneratedTriangles = sanitized.minimumGeneratedTriangles;
+		diagnostics.minimumUsefulTriangleReduction = sanitized.minimumUsefulTriangleReduction;
+		diagnostics.minimumUsefulMeshletReduction = sanitized.minimumUsefulMeshletReduction;
+		return diagnostics;
+	}
+
+	VirtualGeometryCookOutputDiagnostics BuildVirtualGeometryCookOutputDiagnostics(const std::vector<VirtualGeometryAssetRuntime>& assets)
+	{
+		VirtualGeometryCookOutputDiagnostics diagnostics;
+		for (const VirtualGeometryAssetRuntime& asset : assets)
+		{
+			diagnostics.generatedLevelCount += static_cast<std::uint32_t>(asset.generatedLevels.empty() ? asset.detailLevels.size() : asset.generatedLevels.size());
+			diagnostics.skippedDetailCount += static_cast<std::uint32_t>(asset.skippedDetails.size());
+			diagnostics.clusterCount += static_cast<std::uint32_t>(asset.clusters.size());
+			diagnostics.pageCount += static_cast<std::uint32_t>(asset.pages.size());
+			for (const VirtualGeometrySkippedDetailRuntime& skipped : asset.skippedDetails)
+			{
+				if (skipped.status == VirtualGeometryDetailTargetStatus::Merged)
+				{
+					++diagnostics.mergedDetailCount;
+				}
+				if (skipped.status == VirtualGeometryDetailTargetStatus::Rejected)
+				{
+					++diagnostics.rejectedDetailCount;
+				}
+			}
+		}
+		return diagnostics;
+	}
+
+	VirtualGeometryViewDiagnosticsSnapshot BuildDefaultAdaptiveVirtualGeometryDiagnostics(
+		RenderViewType viewType,
+		std::uint64_t frameId,
+		const AdaptiveVirtualGeometryCookProfile& profile)
+	{
+		VirtualGeometryViewDiagnosticsSnapshot snapshot;
+		snapshot.viewType = viewType;
+		snapshot.frameId = frameId;
+		snapshot.active = true;
+		snapshot.adaptiveSettings = BuildVirtualGeometryAdaptiveSettingsDiagnostics(profile);
+		snapshot.cookOutput = {};
+		snapshot.clusterSelection = {};
+		snapshot.pageResidency = {};
+		snapshot.hiZValidation = {};
+		snapshot.hiZValidation.ownerViewType = viewType;
+		snapshot.hiZActive = true;
+		snapshot.hiZHistoryValid = true;
+		// This configuration-only snapshot is not tied to a concrete pyramid
+		// resource. Leave inactive state empty so default diagnostics cannot
+		// masquerade as a runtime Hi-Z disable path.
+		snapshot.hiZValidation.failOpen = false;
+		snapshot.hiZValidation.inactiveReason.clear();
+		return snapshot;
+	}
+
+	void ApplyVirtualGeometryAdaptiveDiagnostics(
+		VirtualGeometryViewDiagnosticsSnapshot& snapshot,
+		VirtualGeometryAdaptiveSettingsDiagnostics settings,
+		VirtualGeometryCookOutputDiagnostics cookOutput,
+		VirtualGeometryClusterSelectionDiagnostics clusterSelection,
+		VirtualGeometryPageResidencyDiagnostics pageResidency,
+		VirtualGeometryHiZValidationDiagnostics hiZValidation)
+	{
+		// This helper is deliberately a value copy. Worker jobs can build these
+		// small diagnostic records from immutable snapshots, and the protected
+		// publication step swaps the finished summary without sharing live state.
+		snapshot.adaptiveSettings = std::move(settings);
+		snapshot.cookOutput = std::move(cookOutput);
+		snapshot.clusterSelection = std::move(clusterSelection);
+		snapshot.pageResidency = std::move(pageResidency);
+		snapshot.hiZValidation = std::move(hiZValidation);
+	}
+
 	VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryLodQualityDiagnostics(
 		RenderViewType viewType,
 		std::uint64_t frameId,
@@ -62,9 +144,11 @@ namespace TerraEngine::Renderer {
 		snapshot.effectiveLodErrorScale = quality.lodErrorScale;
 		snapshot.configuredMaxLodDrop = quality.maxLodDrop;
 		snapshot.geometryBudgetBytes = quality.geometryBudgetBytes;
+		snapshot.cookOutput = BuildVirtualGeometryCookOutputDiagnostics(assets);
 
 		for (const VirtualGeometryAssetRuntime& asset : assets)
 		{
+			snapshot.adaptiveSettings = BuildVirtualGeometryAdaptiveSettingsDiagnostics(asset.adaptiveCookProfile);
 			VirtualGeometryBudgetContributor contributor;
 			contributor.assetId = asset.assetId;
 			contributor.viewType = viewType;
@@ -79,10 +163,17 @@ namespace TerraEngine::Renderer {
 				switch (page.state)
 				{
 				case GeometryPageState::Resident:
+				case GeometryPageState::Pinned:
 					++snapshot.residentPages;
 					++contributor.residentPages;
 					contributor.residentBytes += page.byteSize;
-					if (!page.fallbackPage)
+					if (page.fallbackPage || page.pinnedFallback || page.state == GeometryPageState::Pinned)
+					{
+						++snapshot.pinnedFallbackPages;
+						++snapshot.pageResidency.pinnedFallbackPages;
+						++contributor.pinnedFallbackPages;
+					}
+					if (!page.fallbackPage && !page.pinnedFallback && page.state != GeometryPageState::Pinned)
 					{
 						contributor.reclaimableBytes += page.byteSize;
 					}
@@ -91,14 +182,31 @@ namespace TerraEngine::Renderer {
 				case GeometryPageState::Loading:
 					++snapshot.requestedPages;
 					break;
-				case GeometryPageState::NotResident:
+				case GeometryPageState::PendingIO:
+					++snapshot.requestedPages;
+					++snapshot.pageResidency.pendingIoPages;
+					break;
+				case GeometryPageState::PendingUpload:
+					++snapshot.requestedPages;
+					++snapshot.pageResidency.pendingUploadPages;
+					break;
 				case GeometryPageState::Evicting:
+					++snapshot.evictingPages;
+					++snapshot.pageResidency.evictingPages;
+					++snapshot.missingPages;
+					++contributor.missingPages;
+					break;
+				case GeometryPageState::NotResident:
 					++snapshot.missingPages;
 					++contributor.missingPages;
 					break;
 				case GeometryPageState::Failed:
 					++snapshot.failedPages;
 					++snapshot.missingPages;
+					if (!page.failureReason.empty())
+					{
+						++snapshot.pageResidency.failedPageReasons;
+					}
 					++contributor.missingPages;
 					break;
 				case GeometryPageState::Evicted:
@@ -130,6 +238,7 @@ namespace TerraEngine::Renderer {
 			{
 				snapshot.lodTransitionCandidates += static_cast<std::uint32_t>(asset.detailLevels.size() - 1u);
 			}
+			snapshot.clusterSelection.selectedClusters += static_cast<std::uint32_t>(asset.clusters.size());
 
 			if (quality.maxLodDrop > 1u && asset.detailLevels.size() > 2u)
 			{
@@ -194,26 +303,33 @@ namespace TerraEngine::Renderer {
 	VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryHiZDiagnostics(const VirtualGeometryHiZDiagnosticsInput& input)
 	{
 		VirtualGeometryViewDiagnosticsSnapshot snapshot;
+		const bool hiZInactive = !input.hiZActive;
 		snapshot.viewType = input.viewType;
 		snapshot.frameId = input.frameId;
 		snapshot.active = input.qualityRequested;
 		snapshot.hiZActive = input.hiZActive;
 		snapshot.hiZHistoryValid = input.historyValid;
-		snapshot.hiZInvalidReason = input.invalidReason;
+		snapshot.hiZInvalidReason = hiZInactive ? input.invalidReason : std::string();
+		snapshot.hiZValidation.ownerViewType = input.ownerViewType;
+		snapshot.hiZValidation.sameViewHistory = input.sameViewHistory;
+		snapshot.hiZValidation.sameTargetHistory = input.sameTargetHistory;
+		snapshot.hiZValidation.projectionMatches = input.projectionMatches;
+		snapshot.hiZValidation.failOpen = hiZInactive;
+		snapshot.hiZValidation.inactiveReason = hiZInactive ? input.invalidReason : std::string();
 		snapshot.culledByFrustum = input.culledByFrustum;
 		snapshot.culledByCone = input.culledByCone;
 		snapshot.culledByHiZ = input.culledByHiZ;
 		snapshot.culledMeshlets = input.culledByFrustum + input.culledByCone + input.culledByHiZ;
 		snapshot.hiZFalseOcclusionRiskWarnings = input.falseOcclusionRiskWarnings;
 
-		if (!input.hiZActive)
+		if (hiZInactive)
 		{
 			++snapshot.hiZInactiveFrames;
 			snapshot.warnings.push_back("Virtual geometry Hi-Z occlusion is inactive: " + (input.invalidReason.empty() ? std::string("unknown") : input.invalidReason));
 		}
 		if (input.falseOcclusionRiskWarnings > 0u)
 		{
-			snapshot.warnings.push_back("Virtual geometry Hi-Z remained fail-open because validation reported false-occlusion risk.");
+			snapshot.warnings.push_back("Virtual geometry Hi-Z validation reported diagnostic false-occlusion risk metadata.");
 		}
 		return snapshot;
 	}

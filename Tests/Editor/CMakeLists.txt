@@ -196,3 +196,9 @@ set_tests_properties(Editor.VirtualGeometryExport PROPERTIES
 	LABELS "Editor;VirtualGeometry;Export"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Export,VirtualGeometry.Editor.DebugView"
 )
+
+add_test(NAME Editor.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.AdaptiveVirtualGeometry PROPERTIES
+	LABELS "Editor;VirtualGeometry;AdaptiveVirtualGeometry"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AdaptiveVirtualGeometry;Editor.AssetPipeline.VirtualGeometry;VirtualGeometry.Editor.Inspector;VirtualGeometry.Editor.Automation;VirtualGeometry.Editor.Export;VirtualGeometry.Editor.DebugView"
+)

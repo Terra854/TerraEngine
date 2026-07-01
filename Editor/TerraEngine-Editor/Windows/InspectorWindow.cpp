@@ -204,6 +204,97 @@ void NotifySceneAfterComponentMutation(const std::string& componentName)
 	}
 }
 
+void ResizeVirtualGeometryTargetRatios(VirtualGeometryAdaptiveSettingsMetadata& settings, int targetCount)
+{
+	const std::vector<float> defaults = AssetDatabase::Instance().GetDefaultVirtualGeometryAdaptiveSettings().targetRatios;
+	targetCount = std::clamp(targetCount, 1, static_cast<int>(defaults.size()));
+	const std::size_t previousSize = settings.targetRatios.size();
+	settings.targetRatios.resize(static_cast<std::size_t>(targetCount));
+	for (std::size_t index = previousSize; index < settings.targetRatios.size(); ++index)
+	{
+		settings.targetRatios[index] = index < defaults.size()
+			? defaults[index]
+			: settings.targetRatios[index - 1u] * 0.5f;
+	}
+	if (!settings.targetRatios.empty())
+	{
+		settings.targetRatios.front() = 1.0f;
+	}
+}
+
+void DrawVirtualGeometrySettingsFields(VirtualGeometryAdaptiveSettingsMetadata& settings)
+{
+	if (settings.targetRatios.empty())
+	{
+		settings.targetRatios = AssetDatabase::Instance().GetDefaultVirtualGeometryAdaptiveSettings().targetRatios;
+	}
+
+	if (ImGui::BeginTable("VirtualGeometryOverrideSettingsTable", 2, ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Setting", ImGuiTableColumnFlags_WidthFixed, 180.0f);
+		ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+
+		auto drawLabeled = [](const char* label, const std::function<void()>& widget) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::SetNextItemWidth(-1.0f);
+			widget();
+		};
+
+		int targetCount = static_cast<int>(settings.targetRatios.size());
+		drawLabeled("Target Count", [&]() {
+			if (ImGui::SliderInt("##VirtualGeometryTargetCount", &targetCount, 1, 8))
+			{
+				ResizeVirtualGeometryTargetRatios(settings, targetCount);
+			}
+		});
+
+		for (std::size_t index = 0; index < settings.targetRatios.size(); ++index)
+		{
+			const std::string label = "Ratio " + std::to_string(index);
+			const std::string id = "##VirtualGeometryRatio" + std::to_string(index);
+			drawLabeled(label.c_str(), [&]() {
+				const float minimum = index == 0u ? 1.0f : 0.001f;
+				const float maximum = index == 0u ? 1.0f : 0.999f;
+				ImGui::DragFloat(id.c_str(), &settings.targetRatios[index], 0.005f, minimum, maximum, "%.4f");
+				if (index == 0u)
+				{
+					settings.targetRatios[index] = 1.0f;
+				}
+			});
+		}
+
+		auto drawU32 = [&](const char* label, const char* id, std::uint32_t& value, int minimum, int maximum) {
+			drawLabeled(label, [&]() {
+				int signedValue = static_cast<int>(value);
+				if (ImGui::DragInt(id, &signedValue, 1.0f, minimum, maximum))
+				{
+					value = static_cast<std::uint32_t>(std::max(minimum, signedValue));
+				}
+			});
+		};
+
+		drawU32("Min Source Tris", "##VirtualGeometryMinSourceTriangles", settings.minimumSourceTriangles, 1, 10000000);
+		drawU32("Min Generated Tris", "##VirtualGeometryMinGeneratedTriangles", settings.minimumGeneratedTriangles, 1, 10000000);
+		drawU32("Min Meshlets", "##VirtualGeometryMinMeshlets", settings.minimumMeshletsPerGeneratedLevel, 1, 1000000);
+
+		drawLabeled("Triangle Reduction", [&]() {
+			ImGui::DragFloat("##VirtualGeometryTriangleReduction", &settings.minimumUsefulTriangleReduction, 0.005f, 0.0f, 0.95f, "%.3f");
+		});
+		drawLabeled("Meshlet Reduction", [&]() {
+			ImGui::DragFloat("##VirtualGeometryMeshletReduction", &settings.minimumUsefulMeshletReduction, 0.005f, 0.0f, 0.95f, "%.3f");
+		});
+		drawLabeled("Max Error", [&]() {
+			ImGui::DragFloat("##VirtualGeometryMaxError", &settings.maximumGeometricError, 0.005f, 0.0f, 1000.0f, "%.3f");
+		});
+
+		ImGui::EndTable();
+	}
+}
+
 // VkFormatToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const char* VkFormatToString(uint32_t vkFormat)
 {
@@ -3352,7 +3443,52 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 			for (const std::string& warning : mesh.virtualGeometryWarnings) {
 				ImGui::TextWrapped("%s", warning.c_str());
 			}
+			if (!mesh.virtualGeometryTargets.empty() && ImGui::BeginTable("GeneratedMeshVirtualGeometryTargets", 8, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+				ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+				ImGui::TableSetupColumn("Ratio", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+				ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+				ImGui::TableSetupColumn("Reason", ImGuiTableColumnFlags_WidthStretch);
+				ImGui::TableSetupColumn("Desired T/M", ImGuiTableColumnFlags_WidthFixed, 95.0f);
+				ImGui::TableSetupColumn("Actual T/M", ImGuiTableColumnFlags_WidthFixed, 95.0f);
+				ImGui::TableSetupColumn("Nearest LOD", ImGuiTableColumnFlags_WidthFixed, 85.0f);
+				ImGui::TableSetupColumn("Error", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+				ImGui::TableHeadersRow();
+				for (const TerraEngine::AssetPipeline::GeneratedModelMeshVirtualGeometryTarget& target : mesh.virtualGeometryTargets) {
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::Text("%u", target.targetIndex);
+					ImGui::TableSetColumnIndex(1);
+					ImGui::Text("%.3f", target.requestedRatio);
+					ImGui::TableSetColumnIndex(2);
+					ImGui::TextUnformatted(target.status.c_str());
+					ImGui::TableSetColumnIndex(3);
+					ImGui::TextWrapped("%s", target.reason.empty() ? "-" : target.reason.c_str());
+					ImGui::TableSetColumnIndex(4);
+					// Requested targets and actual candidates are different
+					// facts. Showing both keeps merged rows from masquerading as
+					// generated LODs when the cooker rejected the candidate.
+					ImGui::Text("%u / %u", target.desiredTriangleCount, target.desiredMeshletCount);
+					ImGui::TableSetColumnIndex(5);
+					if (target.actualTriangleCount > 0u || target.actualMeshletCount > 0u) {
+						ImGui::Text("%u / %u", target.actualTriangleCount, target.actualMeshletCount);
+					}
+					else {
+						ImGui::TextUnformatted("-");
+					}
+					ImGui::TableSetColumnIndex(6);
+					ImGui::Text("%u", target.nearestGeneratedLevelIndex);
+					ImGui::TableSetColumnIndex(7);
+					if (target.geometricError > 0.0f) {
+						ImGui::Text("%.4f", target.geometricError);
+					}
+					else {
+						ImGui::TextUnformatted("-");
+					}
+				}
+				ImGui::EndTable();
+			}
 		}
+		DrawGeneratedMeshVirtualGeometryOverrideControls(absolutePath, mesh.guid);
 
 		if (!importResult.materialAssignments.empty() && ImGui::CollapsingHeader("Material Assignments", ImGuiTreeNodeFlags_DefaultOpen)) {
 			for (const TerraEngine::AssetPipeline::ModelMaterialAssignment& assignment : importResult.materialAssignments) {
@@ -3400,6 +3536,208 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 	}
 
 	ImGui::TextDisabled("Generated child %s was not found in the package import result.", TerraEngine::ToHexString(guid).c_str());
+}
+
+void InspectorWindow::DrawVirtualGeometryOverrideControls(const AssetMetadata& metadata) {
+	AssetDatabase& assetDatabase = AssetDatabase::Instance();
+	if (!assetDatabase.CanEditVirtualGeometryPerMeshOverride(metadata)) {
+		return;
+	}
+
+	VirtualGeometryAdaptiveSettingsMetadata resolvedSettings;
+	assetDatabase.TryGetVirtualGeometryAdaptiveSettings(metadata, resolvedSettings);
+	const std::string editKey = "mesh:" + TerraEngine::ToHexString(metadata.guid);
+	if (m_VirtualGeometryEditKey != editKey) {
+		m_VirtualGeometryEditKey = editKey;
+		m_VirtualGeometryEditSettings = resolvedSettings;
+		m_VirtualGeometrySettingsMessage.clear();
+		m_VirtualGeometrySettingsMessageIsError = false;
+	}
+
+	ImGui::Spacing();
+	if (!ImGui::CollapsingHeader("Virtual Geometry LOD Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+		return;
+	}
+
+	bool overrideEnabled = m_VirtualGeometryEditSettings.overridePresent || assetDatabase.HasVirtualGeometryPerMeshOverride(metadata);
+	if (ImGui::Checkbox("Per-Mesh Override", &overrideEnabled)) {
+		if (overrideEnabled) {
+			m_VirtualGeometryEditSettings = resolvedSettings;
+			m_VirtualGeometryEditSettings.overridePresent = true;
+			m_VirtualGeometryEditSettings.settingsSource = "PerMeshOverride";
+		}
+		else {
+			std::string error;
+			if (assetDatabase.ClearVirtualGeometryPerMeshOverride(metadata.guid, &error)) {
+				m_VirtualGeometryEditSettings = assetDatabase.GetDefaultVirtualGeometryAdaptiveSettings();
+				m_VirtualGeometrySettingsMessage = "Per-mesh override reset to project defaults.";
+				m_VirtualGeometrySettingsMessageIsError = false;
+			}
+			else {
+				m_VirtualGeometrySettingsMessage = error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+		}
+	}
+
+	ImGui::TextDisabled("Source: %s", overrideEnabled ? "PerMeshOverride" : "ProjectDefaults");
+	if (!resolvedSettings.valid) {
+		for (const std::string& error : resolvedSettings.validationErrors) {
+			ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "%s", error.c_str());
+		}
+	}
+
+	if (overrideEnabled) {
+		m_VirtualGeometryEditSettings.overridePresent = true;
+		m_VirtualGeometryEditSettings.settingsSource = "PerMeshOverride";
+		DrawVirtualGeometrySettingsFields(m_VirtualGeometryEditSettings);
+		if (ImGui::Button("Save Settings")) {
+			std::string error;
+			if (assetDatabase.SaveVirtualGeometryPerMeshOverride(metadata.guid, m_VirtualGeometryEditSettings, &error)) {
+				m_VirtualGeometrySettingsMessage = "Per-mesh virtual geometry settings saved.";
+				m_VirtualGeometrySettingsMessageIsError = false;
+			}
+			else {
+				m_VirtualGeometrySettingsMessage = error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Rebuild")) {
+			std::string error;
+			if (!assetDatabase.SaveVirtualGeometryPerMeshOverride(metadata.guid, m_VirtualGeometryEditSettings, &error)) {
+				m_VirtualGeometrySettingsMessage = error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+			else if (m_Owner != nullptr && m_Owner->RebuildAssetFromInspector(assetDatabase.GetAssetRoot() / metadata.sourcePath, &error)) {
+				m_VirtualGeometrySettingsMessage = "Rebuild requested with current per-mesh settings.";
+				m_VirtualGeometrySettingsMessageIsError = false;
+			}
+			else {
+				m_VirtualGeometrySettingsMessage = error.empty() ? "Rebuild request failed." : error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Reset")) {
+			std::string error;
+			if (assetDatabase.ClearVirtualGeometryPerMeshOverride(metadata.guid, &error)) {
+				m_VirtualGeometryEditSettings = assetDatabase.GetDefaultVirtualGeometryAdaptiveSettings();
+				m_VirtualGeometrySettingsMessage = "Per-mesh override reset to project defaults.";
+				m_VirtualGeometrySettingsMessageIsError = false;
+			}
+			else {
+				m_VirtualGeometrySettingsMessage = error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+		}
+	}
+
+	if (!m_VirtualGeometrySettingsMessage.empty()) {
+		const ImVec4 color = m_VirtualGeometrySettingsMessageIsError
+			? ImVec4(1.0f, 0.45f, 0.35f, 1.0f)
+			: ImVec4(0.55f, 0.85f, 0.65f, 1.0f);
+		ImGui::TextColored(color, "%s", m_VirtualGeometrySettingsMessage.c_str());
+	}
+}
+
+void InspectorWindow::DrawGeneratedMeshVirtualGeometryOverrideControls(const std::filesystem::path& packagePath, TerraEngine::UUID meshGuid) {
+	AssetDatabase& assetDatabase = AssetDatabase::Instance();
+	VirtualGeometryAdaptiveSettingsMetadata resolvedSettings;
+	assetDatabase.TryGetGeneratedMeshVirtualGeometryAdaptiveSettings(packagePath, meshGuid, resolvedSettings);
+	const std::string editKey = "generated-mesh:" + TerraEngine::ToHexString(meshGuid);
+	if (m_VirtualGeometryEditKey != editKey) {
+		m_VirtualGeometryEditKey = editKey;
+		m_VirtualGeometryEditSettings = resolvedSettings;
+		m_VirtualGeometrySettingsMessage.clear();
+		m_VirtualGeometrySettingsMessageIsError = false;
+	}
+
+	ImGui::Spacing();
+	if (!ImGui::CollapsingHeader("Virtual Geometry LOD Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+		return;
+	}
+
+	bool overrideEnabled = m_VirtualGeometryEditSettings.overridePresent;
+	if (ImGui::Checkbox("Per-Mesh Override", &overrideEnabled)) {
+		if (overrideEnabled) {
+			m_VirtualGeometryEditSettings = resolvedSettings;
+			m_VirtualGeometryEditSettings.overridePresent = true;
+			m_VirtualGeometryEditSettings.settingsSource = "PerMeshOverride";
+		}
+		else {
+			std::string error;
+			if (assetDatabase.ClearGeneratedMeshVirtualGeometryPerMeshOverride(packagePath, meshGuid, &error)) {
+				m_VirtualGeometryEditSettings = assetDatabase.GetDefaultVirtualGeometryAdaptiveSettings();
+				m_VirtualGeometrySettingsMessage = "Generated mesh override reset to project defaults.";
+				m_VirtualGeometrySettingsMessageIsError = false;
+			}
+			else {
+				m_VirtualGeometrySettingsMessage = error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+		}
+	}
+
+	ImGui::TextDisabled("Source: %s", overrideEnabled ? "PerMeshOverride" : "ProjectDefaults");
+	if (!resolvedSettings.valid) {
+		for (const std::string& error : resolvedSettings.validationErrors) {
+			ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.35f, 1.0f), "%s", error.c_str());
+		}
+	}
+
+	if (overrideEnabled) {
+		m_VirtualGeometryEditSettings.overridePresent = true;
+		m_VirtualGeometryEditSettings.settingsSource = "PerMeshOverride";
+		DrawVirtualGeometrySettingsFields(m_VirtualGeometryEditSettings);
+		if (ImGui::Button("Save Settings")) {
+			std::string error;
+			if (assetDatabase.SaveGeneratedMeshVirtualGeometryPerMeshOverride(packagePath, meshGuid, m_VirtualGeometryEditSettings, &error)) {
+				m_VirtualGeometrySettingsMessage = "Generated mesh virtual geometry settings saved.";
+				m_VirtualGeometrySettingsMessageIsError = false;
+			}
+			else {
+				m_VirtualGeometrySettingsMessage = error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Rebuild Package")) {
+			std::string error;
+			if (!assetDatabase.SaveGeneratedMeshVirtualGeometryPerMeshOverride(packagePath, meshGuid, m_VirtualGeometryEditSettings, &error)) {
+				m_VirtualGeometrySettingsMessage = error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+			else if (m_Owner != nullptr && m_Owner->RebuildAssetFromInspector(packagePath, &error)) {
+				m_VirtualGeometrySettingsMessage = "Package rebuild requested with current generated mesh settings.";
+				m_VirtualGeometrySettingsMessageIsError = false;
+			}
+			else {
+				m_VirtualGeometrySettingsMessage = error.empty() ? "Package rebuild request failed." : error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Reset")) {
+			std::string error;
+			if (assetDatabase.ClearGeneratedMeshVirtualGeometryPerMeshOverride(packagePath, meshGuid, &error)) {
+				m_VirtualGeometryEditSettings = assetDatabase.GetDefaultVirtualGeometryAdaptiveSettings();
+				m_VirtualGeometrySettingsMessage = "Generated mesh override reset to project defaults.";
+				m_VirtualGeometrySettingsMessageIsError = false;
+			}
+			else {
+				m_VirtualGeometrySettingsMessage = error;
+				m_VirtualGeometrySettingsMessageIsError = true;
+			}
+		}
+	}
+
+	if (!m_VirtualGeometrySettingsMessage.empty()) {
+		const ImVec4 color = m_VirtualGeometrySettingsMessageIsError
+			? ImVec4(1.0f, 0.45f, 0.35f, 1.0f)
+			: ImVec4(0.55f, 0.85f, 0.65f, 1.0f);
+		ImGui::TextColored(color, "%s", m_VirtualGeometrySettingsMessage.c_str());
+	}
 }
 
 // InspectorWindow::DrawMaterialInspector is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -3914,6 +4252,50 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 			{
 				ImGui::TextWrapped("%s", virtualGeometryMetadata.rebuildGuidance.c_str());
 			}
+		}
+	}
+	DrawVirtualGeometryOverrideControls(meta);
+	std::vector<VirtualGeometryDetailDiagnosticMetadata> detailDiagnostics;
+	if (AssetDatabase::Instance().TryGetVirtualGeometryDetailDiagnostics(meta, detailDiagnostics) && !detailDiagnostics.empty())
+	{
+		ImGui::Spacing();
+		if (ImGui::CollapsingHeader("Virtual Geometry Cook Diagnostics", ImGuiTreeNodeFlags_DefaultOpen)
+			&& ImGui::BeginTable("VirtualGeometryCookDiagnostics", 7, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+			ImGui::TableSetupColumn("Ratio", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+			ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+			ImGui::TableSetupColumn("Reason", ImGuiTableColumnFlags_WidthStretch);
+			ImGui::TableSetupColumn("Desired T/M", ImGuiTableColumnFlags_WidthFixed, 95.0f);
+			ImGui::TableSetupColumn("Actual T/M", ImGuiTableColumnFlags_WidthFixed, 95.0f);
+			ImGui::TableSetupColumn("Nearest LOD", ImGuiTableColumnFlags_WidthFixed, 85.0f);
+			ImGui::TableHeadersRow();
+			for (const VirtualGeometryDetailDiagnosticMetadata& diagnostic : detailDiagnostics)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::Text("%u", diagnostic.targetIndex);
+				ImGui::TableSetColumnIndex(1);
+				ImGui::Text("%.3f", diagnostic.requestedRatio);
+				ImGui::TableSetColumnIndex(2);
+				ImGui::TextUnformatted(diagnostic.status.c_str());
+				ImGui::TableSetColumnIndex(3);
+				ImGui::TextWrapped("%s", diagnostic.reason.empty() ? "-" : diagnostic.reason.c_str());
+				ImGui::TableSetColumnIndex(4);
+				ImGui::Text("%u / %u", diagnostic.desiredTriangleCount, diagnostic.desiredMeshletCount);
+				ImGui::TableSetColumnIndex(5);
+				if (diagnostic.actualTriangleCount > 0u || diagnostic.actualMeshletCount > 0u)
+				{
+					ImGui::Text("%u / %u", diagnostic.actualTriangleCount, diagnostic.actualMeshletCount);
+				}
+				else
+				{
+					ImGui::TextUnformatted("-");
+				}
+				ImGui::TableSetColumnIndex(6);
+				ImGui::Text("%u", diagnostic.nearestGeneratedLevelIndex);
+			}
+			ImGui::EndTable();
 		}
 	}
 

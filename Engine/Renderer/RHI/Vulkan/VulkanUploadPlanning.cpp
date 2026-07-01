@@ -32,4 +32,62 @@ namespace TerraEngine::Renderer::Vulkan {
 		return plan;
 	}
 
+	VirtualGeometryPageUploadPublication PlanVirtualGeometryPageUploadPublication(const GeometryPageRuntime& page)
+	{
+		VirtualGeometryPageUploadPublication publication;
+		publication.pageId = page.pageId;
+		if (page.state == GeometryPageState::Resident || page.state == GeometryPageState::Pinned)
+		{
+			publication.accepted = true;
+			publication.publishedState = page.state;
+			publication.reason = "virtual geometry page is already published";
+			return publication;
+		}
+		if (page.state != GeometryPageState::PendingUpload)
+		{
+			publication.reason = "virtual geometry page is not waiting for protected GPU upload";
+			return publication;
+		}
+		if (page.byteSize == 0u)
+		{
+			publication.reason = "virtual geometry page upload has no byte payload";
+			return publication;
+		}
+
+		// The actual Vulkan buffer creation and descriptor publication stay in
+		// the coordinator-owned backend path. This pure hook lets workers and
+		// tests agree on the state that may be published once upload succeeds.
+		publication.accepted = true;
+		publication.publishedState = (page.fallbackPage || page.pinnedFallback)
+			? GeometryPageState::Pinned
+			: GeometryPageState::Resident;
+		publication.reason = publication.publishedState == GeometryPageState::Pinned
+			? "virtual geometry fallback page uploaded and pinned"
+			: "virtual geometry page uploaded";
+		return publication;
+	}
+
+	VirtualGeometryPageRetirementPlan PlanVirtualGeometryPageRetirement(const GeometryPageRuntime& page, std::uint64_t frameId, std::uint64_t safeFrameLag)
+	{
+		VirtualGeometryPageRetirementPlan plan;
+		plan.pageId = page.pageId;
+		if (page.fallbackPage || page.pinnedFallback || page.state == GeometryPageState::Pinned)
+		{
+			plan.reason = "virtual geometry fallback page is protected from retirement";
+			return plan;
+		}
+		if (page.state != GeometryPageState::Evicting)
+		{
+			plan.reason = "virtual geometry page is not marked evicting";
+			return plan;
+		}
+
+		// Page retirement waits for completed frames so in-flight command
+		// buffers never read buffers after the backend releases them.
+		plan.canRetire = true;
+		plan.retireAfterFrameId = frameId + safeFrameLag;
+		plan.reason = "virtual geometry page queued for deferred retirement";
+		return plan;
+	}
+
 }

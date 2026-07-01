@@ -1,6 +1,7 @@
 #include "VulkanRendererWorkCache.h"
 
 #include <algorithm>
+#include <functional>
 #include <unordered_set>
 
 namespace TerraEngine::Renderer::Vulkan {
@@ -42,6 +43,13 @@ namespace {
 		HashCombine(signature, range.virtualGeometryActive ? 1u : 0u);
 		HashCombine(signature, range.failOpen ? 1u : 0u);
 		HashCombine(signature, range.hiZSelfOcclusionGuardPassed ? 1u : 0u);
+		HashCombine(signature, range.hiZNearPlaneGuardPassed ? 1u : 0u);
+		HashCombine(signature, range.hiZThinGeometryGuardPassed ? 1u : 0u);
+		HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string>{}(range.hiZInactiveReason)));
+		HashCombine(signature, range.selectedClusterOffset);
+		HashCombine(signature, range.selectedClusterCount);
+		HashCombine(signature, range.pageNeedOffset);
+		HashCombine(signature, range.pageNeedCount);
 		return signature;
 	}
 

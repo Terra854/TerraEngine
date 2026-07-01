@@ -177,6 +177,13 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, range.virtualGeometryActive ? 1u : 0u);
 			HashCombine(hash, range.failOpen ? 1u : 0u);
 			HashCombine(hash, range.hiZSelfOcclusionGuardPassed ? 1u : 0u);
+			HashCombine(hash, range.hiZNearPlaneGuardPassed ? 1u : 0u);
+			HashCombine(hash, range.hiZThinGeometryGuardPassed ? 1u : 0u);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(range.hiZInactiveReason)));
+			HashCombine(hash, range.selectedClusterOffset);
+			HashCombine(hash, range.selectedClusterCount);
+			HashCombine(hash, range.pageNeedOffset);
+			HashCombine(hash, range.pageNeedCount);
 			return hash;
 		}
 	}

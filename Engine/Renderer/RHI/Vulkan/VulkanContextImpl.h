@@ -25,6 +25,7 @@
 #include <vector>
 #include <set>
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <optional>
 #include <map>
@@ -340,8 +341,79 @@ struct VulkanContext::Impl {
 		std::vector<VulkanBuffer> clusterDepthSSBOs;
 	std::vector<VulkanBuffer> lightAnalysisSSBOs;
 				std::vector<VulkanBuffer> indirectDrawBuffers;
-				VulkanHiZ hiZ;
+				static constexpr uint32_t kHiZViewCount = 2u;
+				static constexpr uint32_t kHiZGameViewIndex = 0u;
+				static constexpr uint32_t kHiZSceneViewIndex = 1u;
+				// Each view/frame slot owns two Hi-Z pyramids: one stable read
+				// image sampled by task shaders, and one write image warmed by
+				// the post-depth compute pass. Scene View and Game View must not
+				// share these images because their command buffers are recorded
+				// separately but submitted together at the end of the editor frame.
+				std::array<std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> hiZByViewFrame{};
+				std::array<std::array<uint32_t, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> hiZReadIndexByViewFrame{};
+				std::array<std::array<bool, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> hiZWritePendingSwapByViewFrame{};
+				// Validation reads this frozen copy for the whole CPU frame.
+				// GenerateHiZPyramid updates the write history while recording,
+				// so using a per-view snapshot avoids same-frame scene/game
+				// outputs accidentally validating against another view's pyramid.
+				std::array<std::array<VulkanHiZHistoryMetadata, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> readableHiZHistoryByViewFrame{};
 				VulkanVRS vrs;
+
+				uint32_t HiZViewIndexForView(VulkanContext::ViewType view) const
+				{
+					return (view == VulkanContext::ViewType::Scene) ? kHiZSceneViewIndex : kHiZGameViewIndex;
+				}
+
+				VulkanHiZ& HiZForFrame(uint32_t viewIndex, uint32_t frameIndex)
+				{
+					const uint32_t viewSlot = std::min(viewIndex, kHiZViewCount - 1u);
+					const uint32_t slot = std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1));
+					return hiZByViewFrame[viewSlot][slot][std::min(hiZReadIndexByViewFrame[viewSlot][slot], 1u)];
+				}
+
+				const VulkanHiZ& HiZForFrame(uint32_t viewIndex, uint32_t frameIndex) const
+				{
+					const uint32_t viewSlot = std::min(viewIndex, kHiZViewCount - 1u);
+					const uint32_t slot = std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1));
+					return hiZByViewFrame[viewSlot][slot][std::min(hiZReadIndexByViewFrame[viewSlot][slot], 1u)];
+				}
+
+				VulkanHiZ& WritableHiZForFrame(uint32_t viewIndex, uint32_t frameIndex)
+				{
+					const uint32_t viewSlot = std::min(viewIndex, kHiZViewCount - 1u);
+					const uint32_t slot = std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1));
+					return hiZByViewFrame[viewSlot][slot][std::min(hiZReadIndexByViewFrame[viewSlot][slot] ^ 1u, 1u)];
+				}
+
+				void MarkHiZWritePending(uint32_t viewIndex, uint32_t frameIndex)
+				{
+					const uint32_t viewSlot = std::min(viewIndex, kHiZViewCount - 1u);
+					const uint32_t slot = std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1));
+					hiZWritePendingSwapByViewFrame[viewSlot][slot] = true;
+				}
+
+				bool PromoteCompletedHiZWrite(uint32_t viewIndex, uint32_t frameIndex)
+				{
+					const uint32_t viewSlot = std::min(viewIndex, kHiZViewCount - 1u);
+					const uint32_t slot = std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1));
+					if (!hiZWritePendingSwapByViewFrame[viewSlot][slot])
+					{
+						return false;
+					}
+					hiZReadIndexByViewFrame[viewSlot][slot] ^= 1u;
+					hiZWritePendingSwapByViewFrame[viewSlot][slot] = false;
+					return true;
+				}
+
+				VulkanHiZ& CurrentHiZ(uint32_t viewIndex)
+				{
+					return HiZForFrame(viewIndex, currentFrame);
+				}
+
+				const VulkanHiZ& CurrentHiZ(uint32_t viewIndex) const
+				{
+					return HiZForFrame(viewIndex, currentFrame);
+				}
 				
 	// Shadow resources are tracked by live typed demand. The fixed arrays cap
 	// descriptor usage, while activeShadowResourceRequest decides how many
@@ -505,10 +577,11 @@ struct VulkanContext::Impl {
 		bool EnsureShadowRenderResources(const ShadowResourceRequest& request);
 		void UploadLightingData(const std::vector<GPULight>& lights);
 		void UploadLightAnalysisInputData(const std::vector<GPULight>& lights);
-			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImageView depthView);
-			void RestoreDepthForAttachment(VkCommandBuffer cmd);
-			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, uint32_t viewIndex, const glm::mat4& viewProjection);
-			void GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory);
+			bool PrepareDepthForCompute(VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, bool updateGlobalDepthDescriptor);
+			void RestoreDepthForAttachment(VkCommandBuffer cmd, VkImage sourceDepthImage);
+			void StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, VkImage sourceDepthImage, uint32_t viewIndex, const glm::mat4& viewProjection);
+			void InitializeHiZPyramidToFarDepth(VulkanHiZ& hiZ);
+			bool GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory);
 			bool GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
@@ -545,7 +618,7 @@ struct VulkanContext::Impl {
 
 	uint32_t AllocateBufferIndex();
 	void UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
-	void UpdateGlobalHiZ(const VulkanHiZ& hiZ);
+	void UpdateGlobalHiZ(uint32_t frameIndex);
 	void WaitForDescriptorMutationIdle();
 
 	uint32_t AllocateMaterialIndex();
@@ -570,6 +643,10 @@ struct VulkanContext::Impl {
 		uint32_t virtualMeshletCount;
 		uint32_t selectedVirtualLod;
 		uint32_t virtualGeometryFlags;
+		uint32_t selectedVirtualClusterOffset;
+		uint32_t selectedVirtualClusterCount;
+		uint32_t selectedVirtualPageNeedOffset;
+		uint32_t selectedVirtualPageNeedCount;
 		// Editor-only tint is part of the default mesh push-constant contract so
 		// every default shader stage observes the same byte layout.
 		alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);
@@ -581,6 +658,9 @@ struct VulkanContext::Impl {
 	VmaAllocation allocation = VK_NULL_HANDLE;
 	VkImageView view = VK_NULL_HANDLE;
 	VkSampler sampler = VK_NULL_HANDLE;
+	VkImage depthImage = VK_NULL_HANDLE;
+	VmaAllocation depthAllocation = VK_NULL_HANDLE;
+	VkImageView depthView = VK_NULL_HANDLE;
 	VkFramebuffer framebuffer = VK_NULL_HANDLE;
 	};
 	OffscreenResources sceneView;

@@ -35,6 +35,10 @@
 namespace
 {
 	constexpr float kPi = 3.14159265358979323846f;
+	// meshoptimizer stops simplifying once this error budget is reached. The
+	// adaptive cook then applies the user-facing maximumGeometricError gate so
+	// bad candidates are rejected without changing the renderer-facing fallback.
+	constexpr float kSimplificationTargetError = 0.02f;
 	constexpr std::array<std::string_view, 7> kSupportedMeshSourceExtensions = {
 		".obj",
 		".fbx",
@@ -401,12 +405,43 @@ namespace
 
 	struct VirtualGeometryLodSource
 	{
-		// indices is a complete whole-mesh LOD. The MVP deliberately switches
-		// whole ranges instead of mixing per-meshlet simplification, which keeps
-		// material ranges and fallback rendering easy to reason about.
+		// indices is the requested whole-mesh simplification target used for
+		// adaptive diagnostics. The final virtual-geometry payload rebuilds
+		// each LOD from source-coverage regions so mixed cluster cuts can prove
+		// that parent and child clusters represent the same source surface.
 		std::vector<std::uint32_t> indices;
 		float targetRatio = 1.0f;
 		float geometricError = 0.0f;
+		std::uint32_t requestedTargetIndex = 0u;
+	};
+
+	struct VirtualGeometrySourceRegion
+	{
+		// Source regions are the cook-time coverage truth. Each region owns a
+		// disjoint set of source triangles, and every emitted cluster is built
+		// from a contiguous range of these regions.
+		std::uint32_t firstFineRegion = 0u;
+		std::uint32_t fineRegionCount = 0u;
+		std::vector<std::uint32_t> indices;
+	};
+
+	struct VirtualGeometryClusterCoverage
+	{
+		// This table is transient and intentionally not serialized in TEMF v1.
+		// It lets the cooker validate exact source-region tiling before setting
+		// the persisted ClusterCoverageValidated bit.
+		std::uint32_t firstFineRegion = 0u;
+		std::uint32_t fineRegionCount = 0u;
+	};
+
+	struct VirtualGeometryClusterCookPayload
+	{
+		MeshletBuildOutput meshlets;
+		std::uint32_t firstFineRegion = 0u;
+		std::uint32_t fineRegionCount = 0u;
+		std::uint32_t primitiveCount = 0u;
+		float geometricError = 0.0f;
+		float targetRatio = 1.0f;
 	};
 
 	struct VirtualGeometryBuildOutput
@@ -422,6 +457,12 @@ namespace
 		std::vector<VirtualGeometrySectionRangeRecord> sectionRanges;
 		std::vector<VirtualGeometryCullableGroupRecord> cullableGroups;
 		std::vector<VirtualGeometryPageRecord> pages;
+		std::vector<VirtualGeometryRequestedTargetRecord> requestedTargets;
+		std::vector<VirtualGeometrySkippedDetailRecord> skippedDetails;
+		std::vector<VirtualGeometryClusterRecord> clusters;
+		std::vector<VirtualGeometryClusterCoverage> clusterCoverage;
+		std::vector<VirtualGeometryClusterPageLinkRecord> clusterPageLinks;
+		std::vector<VirtualGeometryValidationFlagRecord> validationFlags;
 		std::vector<VirtualGeometryDiagnosticRecord> diagnostics;
 		std::string stringTable;
 	};
@@ -1062,6 +1103,31 @@ namespace
 				WritePadding(out, virtualGeometry->header.pageTableOffset);
 				out.write(reinterpret_cast<const char*>(virtualGeometry->pages.data()), static_cast<std::streamsize>(virtualGeometry->pages.size() * sizeof(VirtualGeometryPageRecord)));
 			}
+			if (!virtualGeometry->requestedTargets.empty())
+			{
+				WritePadding(out, virtualGeometry->header.requestedTargetTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->requestedTargets.data()), static_cast<std::streamsize>(virtualGeometry->requestedTargets.size() * sizeof(VirtualGeometryRequestedTargetRecord)));
+			}
+			if (!virtualGeometry->skippedDetails.empty())
+			{
+				WritePadding(out, virtualGeometry->header.skippedDetailTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->skippedDetails.data()), static_cast<std::streamsize>(virtualGeometry->skippedDetails.size() * sizeof(VirtualGeometrySkippedDetailRecord)));
+			}
+			if (!virtualGeometry->clusters.empty())
+			{
+				WritePadding(out, virtualGeometry->header.clusterTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->clusters.data()), static_cast<std::streamsize>(virtualGeometry->clusters.size() * sizeof(VirtualGeometryClusterRecord)));
+			}
+			if (!virtualGeometry->clusterPageLinks.empty())
+			{
+				WritePadding(out, virtualGeometry->header.clusterPageLinkTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->clusterPageLinks.data()), static_cast<std::streamsize>(virtualGeometry->clusterPageLinks.size() * sizeof(VirtualGeometryClusterPageLinkRecord)));
+			}
+			if (!virtualGeometry->validationFlags.empty())
+			{
+				WritePadding(out, virtualGeometry->header.validationFlagTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->validationFlags.data()), static_cast<std::streamsize>(virtualGeometry->validationFlags.size() * sizeof(VirtualGeometryValidationFlagRecord)));
+			}
 			if (!virtualGeometry->diagnostics.empty())
 			{
 				WritePadding(out, virtualGeometry->header.diagnosticTableOffset);
@@ -1266,47 +1332,259 @@ namespace
 		}
 	}
 
+	const char* ToCompileTargetStatusText(VirtualGeometryDetailTargetRecordStatus status)
+	{
+		switch (status)
+		{
+		case VirtualGeometryDetailTargetRecordStatus::Requested: return "Requested";
+		case VirtualGeometryDetailTargetRecordStatus::Generated: return "Generated";
+		case VirtualGeometryDetailTargetRecordStatus::Merged: return "Merged";
+		case VirtualGeometryDetailTargetRecordStatus::Skipped: return "Skipped";
+		case VirtualGeometryDetailTargetRecordStatus::Rejected: return "Rejected";
+		}
+		return "Unknown";
+	}
+
+	const char* ToCompileSkippedReasonText(VirtualGeometrySkippedDetailRecordReason reason)
+	{
+		switch (reason)
+		{
+		case VirtualGeometrySkippedDetailRecordReason::None: return "None";
+		case VirtualGeometrySkippedDetailRecordReason::MeshTooSmall: return "MeshTooSmall";
+		case VirtualGeometrySkippedDetailRecordReason::TooFewTriangles: return "TooFewTriangles";
+		case VirtualGeometrySkippedDetailRecordReason::TooFewMeshlets: return "TooFewMeshlets";
+		case VirtualGeometrySkippedDetailRecordReason::InsufficientTriangleReduction: return "InsufficientTriangleReduction";
+		case VirtualGeometrySkippedDetailRecordReason::InsufficientMeshletReduction: return "InsufficientMeshletReduction";
+		case VirtualGeometrySkippedDetailRecordReason::InvalidSimplificationOutput: return "InvalidSimplificationOutput";
+		case VirtualGeometrySkippedDetailRecordReason::MaterialSafetyRejected: return "MaterialSafetyRejected";
+		case VirtualGeometrySkippedDetailRecordReason::GeometricErrorRejected: return "GeometricErrorRejected";
+		case VirtualGeometrySkippedDetailRecordReason::DuplicateOfPreviousLevel: return "DuplicateOfPreviousLevel";
+		}
+		return "Unknown";
+	}
+
+	std::uint32_t ParseCompileTargetStatus(std::string_view status)
+	{
+		if (status == "Generated")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Generated);
+		}
+		if (status == "Merged")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Merged);
+		}
+		if (status == "Rejected")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Rejected);
+		}
+		if (status == "Requested")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Requested);
+		}
+		return static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Skipped);
+	}
+
+	std::uint32_t ParseCompileSkippedReason(std::string_view reason)
+	{
+		if (reason == "TooFewTriangles")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::TooFewTriangles);
+		}
+		if (reason == "TooFewMeshlets")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::TooFewMeshlets);
+		}
+		if (reason == "InsufficientTriangleReduction")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::InsufficientTriangleReduction);
+		}
+		if (reason == "InsufficientMeshletReduction")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::InsufficientMeshletReduction);
+		}
+		if (reason == "InvalidSimplificationOutput")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::InvalidSimplificationOutput);
+		}
+		if (reason == "MaterialSafetyRejected")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::MaterialSafetyRejected);
+		}
+		if (reason == "GeometricErrorRejected")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::GeometricErrorRejected);
+		}
+		if (reason == "DuplicateOfPreviousLevel")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::DuplicateOfPreviousLevel);
+		}
+		if (reason == "MeshTooSmall")
+		{
+			return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::MeshTooSmall);
+		}
+		return static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::None);
+	}
+
+	std::uint32_t EstimateMeshletCountForLod(
+		const std::vector<VertexRaw>& vertices,
+		const std::vector<std::uint32_t>& indices,
+		std::uint32_t fallbackCount)
+	{
+		MeshletBuildOutput meshletOutput{};
+		if (!BuildMeshletPayload(vertices, indices, false, meshletOutput))
+		{
+			return fallbackCount;
+		}
+		return static_cast<std::uint32_t>(meshletOutput.meshletRecords.size());
+	}
+
+	void AppendRequestedTargetReport(
+		MeshCompileReport& report,
+		std::uint32_t targetIndex,
+		float requestedRatio,
+		std::uint32_t desiredTriangleCount,
+		std::uint32_t desiredMeshletCount,
+		VirtualGeometryDetailTargetRecordStatus status)
+	{
+		VirtualGeometryRequestedTargetCompileReport target;
+		target.targetIndex = targetIndex;
+		target.requestedRatio = requestedRatio;
+		target.desiredTriangleCount = desiredTriangleCount;
+		target.desiredMeshletCount = desiredMeshletCount;
+		target.status = ToCompileTargetStatusText(status);
+		report.virtualGeometry.requestedTargets.push_back(target);
+	}
+
+	void AppendSkippedTargetReport(
+		MeshCompileReport& report,
+		std::uint32_t targetIndex,
+		float requestedRatio,
+		VirtualGeometryDetailTargetRecordStatus status,
+		VirtualGeometrySkippedDetailRecordReason reason,
+		std::uint32_t nearestGeneratedLevelIndex,
+		std::string message,
+		std::uint32_t candidateTriangleCount = 0u,
+		std::uint32_t candidateMeshletCount = 0u,
+		float actualCandidateRatio = 0.0f)
+	{
+		VirtualGeometrySkippedLevelCompileReport skipped;
+		skipped.targetIndex = targetIndex;
+		skipped.requestedRatio = requestedRatio;
+		skipped.status = ToCompileTargetStatusText(status);
+		skipped.reason = ToCompileSkippedReasonText(reason);
+		skipped.nearestGeneratedLevelIndex = nearestGeneratedLevelIndex;
+		// Store the attempted candidate separately from the requested target
+		// and nearest fallback so Inspector tables can explain merged rows.
+		skipped.candidateTriangleCount = candidateTriangleCount;
+		skipped.candidateMeshletCount = candidateMeshletCount;
+		skipped.actualCandidateRatio = actualCandidateRatio;
+		skipped.message = std::move(message);
+		report.virtualGeometry.skippedLevels.push_back(skipped);
+	}
+
 	bool BuildVirtualGeometryLods(
 		const std::vector<VertexRaw>& vertices,
 		const std::vector<std::uint32_t>& sourceIndices,
 		MeshCompileReport& report,
 		std::vector<VirtualGeometryLodSource>& outLods)
 	{
-		constexpr std::uint32_t kSmallMeshTriangleThreshold = 32u;
-		constexpr std::array<float, 3> kTargetRatios = { 0.5f, 0.25f, 0.125f };
-		constexpr float kSimplificationTargetError = 0.02f;
 		outLods.clear();
+		report.virtualGeometry.requestedTargets.clear();
+		report.virtualGeometry.generatedLevels.clear();
+		report.virtualGeometry.skippedLevels.clear();
+		report.virtualGeometry.clusters.clear();
+		report.virtualGeometry.pages.clear();
+		report.virtualGeometry.adaptiveSettings = SanitizeVirtualGeometryAdaptiveCompileSettings(
+			report.virtualGeometry.adaptiveSettings.targetRatios.empty()
+				? MakeDefaultVirtualGeometryAdaptiveCompileSettings()
+				: report.virtualGeometry.adaptiveSettings);
+		const VirtualGeometryAdaptiveCompileSettings settings = report.virtualGeometry.adaptiveSettings;
 
 		VirtualGeometryLodSource baseLod{};
 		baseLod.indices = sourceIndices;
 		baseLod.targetRatio = 1.0f;
 		baseLod.geometricError = 0.0f;
+		baseLod.requestedTargetIndex = 0u;
 		outLods.push_back(std::move(baseLod));
 
 		const std::uint32_t sourceTriangleCount = static_cast<std::uint32_t>(sourceIndices.size() / 3u);
+		const std::uint32_t sourceMeshletCount = EstimateMeshletCountForLod(vertices, sourceIndices, 1u);
 		report.virtualGeometry.sourceTriangleCount = sourceTriangleCount;
 		report.virtualGeometry.selectedFallbackAvailable = 1u;
+		AppendRequestedTargetReport(report, 0u, 1.0f, sourceTriangleCount, sourceMeshletCount, VirtualGeometryDetailTargetRecordStatus::Generated);
+		report.virtualGeometry.generatedLevels.push_back({ 0u, 0u, 0u, 1.0f, sourceTriangleCount, sourceMeshletCount, 0.0f });
 
+		// LOD0 is always accepted before optional simplification starts. That
+		// gives the renderer a known-good resident fallback even when every
+		// lower target is skipped, merged, or rejected by the adaptive gates.
 		// Very small meshes keep a one-detail virtual-geometry payload. That is
 		// cheaper and safer than forcing simplification that cannot remove enough
 		// triangles to pay for the extra LOD switch.
-		if (sourceTriangleCount <= kSmallMeshTriangleThreshold)
+		if (sourceTriangleCount < settings.minimumSourceTriangles)
 		{
 			report.virtualGeometry.status = VirtualGeometryCompileStatus::Skipped;
 			report.virtualGeometry.warnings.push_back("virtual geometry simplification skipped: source mesh is below the small-mesh threshold");
+			for (std::uint32_t targetIndex = 1u; targetIndex < settings.targetRatios.size(); ++targetIndex)
+			{
+				const float ratio = settings.targetRatios[targetIndex];
+				const std::uint32_t desiredTriangles = std::max(1u, static_cast<std::uint32_t>(static_cast<float>(sourceTriangleCount) * ratio));
+				AppendRequestedTargetReport(report, targetIndex, ratio, desiredTriangles, sourceMeshletCount, VirtualGeometryDetailTargetRecordStatus::Skipped);
+				AppendSkippedTargetReport(
+					report,
+					targetIndex,
+					ratio,
+					VirtualGeometryDetailTargetRecordStatus::Skipped,
+					VirtualGeometrySkippedDetailRecordReason::MeshTooSmall,
+					0u,
+					"source mesh is too small for useful adaptive LOD generation");
+			}
 			return true;
 		}
 
 		std::vector<std::uint32_t> currentIndices = sourceIndices;
 		const float* positions = vertices.front().position.data();
 		float maxError = 0.0f;
+		std::uint32_t previousTriangleCount = sourceTriangleCount;
+		std::uint32_t previousMeshletCount = sourceMeshletCount;
 
-		for (float targetRatio : kTargetRatios)
+		for (std::uint32_t targetIndex = 1u; targetIndex < settings.targetRatios.size(); ++targetIndex)
 		{
+			const float targetRatio = settings.targetRatios[targetIndex];
+			const std::uint32_t desiredTriangleCount = std::max(1u, static_cast<std::uint32_t>(static_cast<float>(sourceTriangleCount) * targetRatio));
+			const std::uint32_t desiredMeshletCount = std::max(1u, static_cast<std::uint32_t>(static_cast<float>(sourceMeshletCount) * targetRatio));
 			std::size_t targetIndexCount = static_cast<std::size_t>(static_cast<float>(sourceIndices.size()) * targetRatio);
 			targetIndexCount = std::max<std::size_t>(3u, (targetIndexCount / 3u) * 3u);
+			// Ratios are requests, not obligations. Each gate below explains why
+			// a target did or did not become a real level so artists can tune the
+			// source mesh instead of guessing from a silent hardcoded LOD chain.
+			if (desiredTriangleCount < settings.minimumGeneratedTriangles)
+			{
+				AppendRequestedTargetReport(report, targetIndex, targetRatio, desiredTriangleCount, desiredMeshletCount, VirtualGeometryDetailTargetRecordStatus::Skipped);
+				AppendSkippedTargetReport(
+					report,
+					targetIndex,
+					targetRatio,
+					VirtualGeometryDetailTargetRecordStatus::Skipped,
+					VirtualGeometrySkippedDetailRecordReason::TooFewTriangles,
+					static_cast<std::uint32_t>(outLods.size() - 1u),
+					"target triangle count is below the minimum generated detail threshold");
+				continue;
+			}
+
 			if (targetIndexCount >= currentIndices.size())
 			{
+				AppendRequestedTargetReport(report, targetIndex, targetRatio, desiredTriangleCount, desiredMeshletCount, VirtualGeometryDetailTargetRecordStatus::Merged);
+				AppendSkippedTargetReport(
+					report,
+					targetIndex,
+					targetRatio,
+					VirtualGeometryDetailTargetRecordStatus::Merged,
+					VirtualGeometrySkippedDetailRecordReason::DuplicateOfPreviousLevel,
+					static_cast<std::uint32_t>(outLods.size() - 1u),
+					"target ratio would not reduce the previous generated detail",
+					previousTriangleCount,
+					previousMeshletCount,
+					static_cast<float>(previousTriangleCount) / static_cast<float>(sourceTriangleCount));
 				continue;
 			}
 
@@ -1327,29 +1605,122 @@ namespace
 
 			if (simplifiedIndexCount < 3u || simplifiedIndexCount >= currentIndices.size())
 			{
+				AppendRequestedTargetReport(report, targetIndex, targetRatio, desiredTriangleCount, desiredMeshletCount, VirtualGeometryDetailTargetRecordStatus::Rejected);
+				AppendSkippedTargetReport(
+					report,
+					targetIndex,
+					targetRatio,
+					VirtualGeometryDetailTargetRecordStatus::Rejected,
+					VirtualGeometrySkippedDetailRecordReason::InvalidSimplificationOutput,
+					static_cast<std::uint32_t>(outLods.size() - 1u),
+					"meshoptimizer did not return a smaller valid triangle list");
 				continue;
 			}
 
+			const std::uint32_t candidateTriangleCount = static_cast<std::uint32_t>(simplifiedIndexCount / 3u);
 			resultError = std::max(resultError, maxError);
-			if (!std::isfinite(resultError) || resultError > 0.05f)
+			if (!std::isfinite(resultError) || resultError > settings.maximumGeometricError)
 			{
 				// Rejecting one candidate does not poison the entire asset. The
 				// previous detail remains the fallback so the renderer never sees
 				// a lower-detail mesh with unbounded visual error.
 				report.virtualGeometry.warnings.push_back("virtual geometry simplification skipped a candidate LOD: geometric error exceeded the US2 tolerance");
+				AppendRequestedTargetReport(report, targetIndex, targetRatio, desiredTriangleCount, desiredMeshletCount, VirtualGeometryDetailTargetRecordStatus::Rejected);
+				AppendSkippedTargetReport(
+					report,
+					targetIndex,
+					targetRatio,
+					VirtualGeometryDetailTargetRecordStatus::Rejected,
+					VirtualGeometrySkippedDetailRecordReason::GeometricErrorRejected,
+					static_cast<std::uint32_t>(outLods.size() - 1u),
+					"simplified detail exceeded the configured geometric error limit",
+					candidateTriangleCount,
+					0u,
+					static_cast<float>(candidateTriangleCount) / static_cast<float>(sourceTriangleCount));
 				continue;
 			}
 
 			simplified.resize(simplifiedIndexCount);
+			const std::uint32_t candidateMeshletCount = EstimateMeshletCountForLod(vertices, simplified, previousMeshletCount);
+			const float actualCandidateRatio = static_cast<float>(candidateTriangleCount) / static_cast<float>(sourceTriangleCount);
+			if (candidateMeshletCount < settings.minimumMeshletsPerGeneratedLevel)
+			{
+				AppendRequestedTargetReport(report, targetIndex, targetRatio, desiredTriangleCount, desiredMeshletCount, VirtualGeometryDetailTargetRecordStatus::Skipped);
+				AppendSkippedTargetReport(
+					report,
+					targetIndex,
+					targetRatio,
+					VirtualGeometryDetailTargetRecordStatus::Skipped,
+					VirtualGeometrySkippedDetailRecordReason::TooFewMeshlets,
+					static_cast<std::uint32_t>(outLods.size() - 1u),
+					"candidate would produce too few meshlets to justify a separate detail level",
+					candidateTriangleCount,
+					candidateMeshletCount,
+					actualCandidateRatio);
+				continue;
+			}
+
+			const float triangleReduction = previousTriangleCount > 0u
+				? 1.0f - (static_cast<float>(candidateTriangleCount) / static_cast<float>(previousTriangleCount))
+				: 0.0f;
+			const float meshletReduction = previousMeshletCount > 0u
+				? 1.0f - (static_cast<float>(candidateMeshletCount) / static_cast<float>(previousMeshletCount))
+				: 0.0f;
+			if (triangleReduction < settings.minimumUsefulTriangleReduction)
+			{
+				AppendRequestedTargetReport(report, targetIndex, targetRatio, desiredTriangleCount, desiredMeshletCount, VirtualGeometryDetailTargetRecordStatus::Merged);
+				AppendSkippedTargetReport(
+					report,
+					targetIndex,
+					targetRatio,
+					VirtualGeometryDetailTargetRecordStatus::Merged,
+					VirtualGeometrySkippedDetailRecordReason::InsufficientTriangleReduction,
+					static_cast<std::uint32_t>(outLods.size() - 1u),
+					"candidate triangle reduction is too small to justify another detail level",
+					candidateTriangleCount,
+					candidateMeshletCount,
+					actualCandidateRatio);
+				continue;
+			}
+			if (meshletReduction < settings.minimumUsefulMeshletReduction)
+			{
+				AppendRequestedTargetReport(report, targetIndex, targetRatio, desiredTriangleCount, desiredMeshletCount, VirtualGeometryDetailTargetRecordStatus::Merged);
+				AppendSkippedTargetReport(
+					report,
+					targetIndex,
+					targetRatio,
+					VirtualGeometryDetailTargetRecordStatus::Merged,
+					VirtualGeometrySkippedDetailRecordReason::InsufficientMeshletReduction,
+					static_cast<std::uint32_t>(outLods.size() - 1u),
+					"candidate meshlet reduction is too small to justify another detail level",
+					candidateTriangleCount,
+					candidateMeshletCount,
+					actualCandidateRatio);
+				continue;
+			}
+
 			VirtualGeometryLodSource lod{};
 			lod.targetRatio = static_cast<float>(simplifiedIndexCount) / static_cast<float>(sourceIndices.size());
 			lod.geometricError = resultError;
 			lod.indices = simplified;
+			lod.requestedTargetIndex = targetIndex;
 			maxError = std::max(maxError, resultError);
 			currentIndices = std::move(simplified);
 			outLods.push_back(std::move(lod));
+			AppendRequestedTargetReport(report, targetIndex, targetRatio, desiredTriangleCount, desiredMeshletCount, VirtualGeometryDetailTargetRecordStatus::Generated);
+			report.virtualGeometry.generatedLevels.push_back({
+				static_cast<std::uint32_t>(report.virtualGeometry.generatedLevels.size()),
+				targetIndex,
+				static_cast<std::uint32_t>(outLods.size() - 1u),
+				actualCandidateRatio,
+				candidateTriangleCount,
+				candidateMeshletCount,
+				resultError
+			});
+			previousTriangleCount = candidateTriangleCount;
+			previousMeshletCount = candidateMeshletCount;
 
-			if ((currentIndices.size() / 3u) <= kSmallMeshTriangleThreshold)
+			if ((currentIndices.size() / 3u) <= settings.minimumGeneratedTriangles)
 			{
 				break;
 			}
@@ -1367,124 +1738,525 @@ namespace
 		return true;
 	}
 
-	bool AppendLodMeshlets(
-		const MeshletBuildOutput& source,
+	std::uint32_t ComputeVirtualGeometrySpatialClusterCount(std::uint32_t groupCount)
+	{
+		// Spatial clusters are the dispatch unit for mixed-detail cuts. Tiny
+		// LODs stay whole, while dense LODs are split enough for nearby and far
+		// regions of the same object to make different refinement decisions.
+		constexpr std::uint32_t kTargetGroupsPerCluster = 8u;
+		constexpr std::uint32_t kMaxSpatialClustersPerLod = 64u;
+		if (groupCount == 0u)
+		{
+			return 0u;
+		}
+		const std::uint32_t desiredClusters = (groupCount + kTargetGroupsPerCluster - 1u) / kTargetGroupsPerCluster;
+		return std::clamp(desiredClusters, 1u, std::min(groupCount, kMaxSpatialClustersPerLod));
+	}
+
+	std::uint32_t FloorPowerOfTwo(std::uint32_t value)
+	{
+		std::uint32_t result = 1u;
+		while (result <= (std::numeric_limits<std::uint32_t>::max() / 2u) && (result * 2u) <= value)
+		{
+			result *= 2u;
+		}
+		return result;
+	}
+
+	std::uint32_t ComputeVirtualGeometryFineRegionCount(std::uint32_t sourceTriangleCount, std::uint32_t sourceMeshletCount)
+	{
+		if (sourceTriangleCount == 0u || sourceMeshletCount == 0u)
+		{
+			return 0u;
+		}
+
+		const std::uint32_t desiredFromMeshlets = ComputeVirtualGeometrySpatialClusterCount(sourceMeshletCount);
+		const std::uint32_t desiredFromTriangles = std::max(1u, sourceTriangleCount / 16u);
+		const std::uint32_t desired = std::max(1u, std::min(desiredFromMeshlets, desiredFromTriangles));
+		return std::min(FloorPowerOfTwo(desired), sourceTriangleCount);
+	}
+
+	std::uint32_t ComputeVirtualGeometryCoverageClusterCount(std::uint32_t fineRegionCount, float targetRatio)
+	{
+		if (fineRegionCount == 0u)
+		{
+			return 0u;
+		}
+		if (!std::isfinite(targetRatio) || targetRatio >= 0.999f)
+		{
+			return fineRegionCount;
+		}
+
+		const float clampedRatio = std::clamp(targetRatio, 0.001f, 1.0f);
+		const std::uint32_t desired = std::max(1u, static_cast<std::uint32_t>(std::ceil(static_cast<float>(fineRegionCount) * clampedRatio)));
+		return std::min(fineRegionCount, FloorPowerOfTwo(desired));
+	}
+
+	std::uint32_t ExpandMortonBits(std::uint32_t value)
+	{
+		value &= 0x000003ffu;
+		value = (value | (value << 16u)) & 0x030000ffu;
+		value = (value | (value << 8u)) & 0x0300f00fu;
+		value = (value | (value << 4u)) & 0x030c30c3u;
+		value = (value | (value << 2u)) & 0x09249249u;
+		return value;
+	}
+
+	std::uint32_t QuantizeMortonAxis(float value, float minimum, float maximum)
+	{
+		const float extent = maximum - minimum;
+		if (!std::isfinite(value) || !std::isfinite(extent) || extent <= 0.0f)
+		{
+			return 0u;
+		}
+
+		const float normalized = std::clamp((value - minimum) / extent, 0.0f, 1.0f);
+		return static_cast<std::uint32_t>(std::round(normalized * 1023.0f));
+	}
+
+	std::uint32_t EncodeMorton3D(float x, float y, float z, const float boundsMin[3], const float boundsMax[3])
+	{
+		const std::uint32_t qx = QuantizeMortonAxis(x, boundsMin[0], boundsMax[0]);
+		const std::uint32_t qy = QuantizeMortonAxis(y, boundsMin[1], boundsMax[1]);
+		const std::uint32_t qz = QuantizeMortonAxis(z, boundsMin[2], boundsMax[2]);
+		return ExpandMortonBits(qx) | (ExpandMortonBits(qy) << 1u) | (ExpandMortonBits(qz) << 2u);
+	}
+
+	std::vector<VirtualGeometrySourceRegion> BuildVirtualGeometrySourceRegions(
+		const std::vector<VertexRaw>& vertices,
+		const std::vector<std::uint32_t>& sourceIndices,
+		std::uint32_t desiredFineRegionCount)
+	{
+		struct TriangleSortKey
+		{
+			std::uint32_t triangleIndex = 0u;
+			std::uint32_t mortonKey = 0u;
+		};
+
+		std::vector<VirtualGeometrySourceRegion> regions;
+		const std::uint32_t sourceTriangleCount = static_cast<std::uint32_t>(sourceIndices.size() / 3u);
+		if (vertices.empty() || sourceTriangleCount == 0u || desiredFineRegionCount == 0u)
+		{
+			return regions;
+		}
+
+		float boundsMin[3];
+		float boundsMax[3];
+		BuildPositionBounds(vertices, boundsMin, boundsMax);
+
+		std::vector<TriangleSortKey> sortedTriangles;
+		sortedTriangles.reserve(sourceTriangleCount);
+		for (std::uint32_t triangleIndex = 0u; triangleIndex < sourceTriangleCount; ++triangleIndex)
+		{
+			const std::uint32_t i0 = sourceIndices[(static_cast<std::size_t>(triangleIndex) * 3u) + 0u];
+			const std::uint32_t i1 = sourceIndices[(static_cast<std::size_t>(triangleIndex) * 3u) + 1u];
+			const std::uint32_t i2 = sourceIndices[(static_cast<std::size_t>(triangleIndex) * 3u) + 2u];
+			if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size())
+			{
+				continue;
+			}
+
+			const float cx = (vertices[i0].position[0] + vertices[i1].position[0] + vertices[i2].position[0]) / 3.0f;
+			const float cy = (vertices[i0].position[1] + vertices[i1].position[1] + vertices[i2].position[1]) / 3.0f;
+			const float cz = (vertices[i0].position[2] + vertices[i1].position[2] + vertices[i2].position[2]) / 3.0f;
+			sortedTriangles.push_back({ triangleIndex, EncodeMorton3D(cx, cy, cz, boundsMin, boundsMax) });
+		}
+
+		if (sortedTriangles.empty())
+		{
+			return regions;
+		}
+
+		std::sort(sortedTriangles.begin(), sortedTriangles.end(), [](const TriangleSortKey& left, const TriangleSortKey& right) {
+			if (left.mortonKey != right.mortonKey)
+			{
+				return left.mortonKey < right.mortonKey;
+			}
+			return left.triangleIndex < right.triangleIndex;
+		});
+
+		const std::uint32_t fineRegionCount = std::min<std::uint32_t>(desiredFineRegionCount, static_cast<std::uint32_t>(sortedTriangles.size()));
+		regions.reserve(fineRegionCount);
+		for (std::uint32_t regionIndex = 0u; regionIndex < fineRegionCount; ++regionIndex)
+		{
+			const std::uint32_t firstTriangle = static_cast<std::uint32_t>((static_cast<std::uint64_t>(sortedTriangles.size()) * regionIndex) / fineRegionCount);
+			const std::uint32_t lastTriangle = static_cast<std::uint32_t>((static_cast<std::uint64_t>(sortedTriangles.size()) * (regionIndex + 1u)) / fineRegionCount);
+			VirtualGeometrySourceRegion region{};
+			region.firstFineRegion = regionIndex;
+			region.fineRegionCount = 1u;
+			region.indices.reserve(static_cast<std::size_t>(lastTriangle - firstTriangle) * 3u);
+			for (std::uint32_t sortedIndex = firstTriangle; sortedIndex < lastTriangle; ++sortedIndex)
+			{
+				const std::uint32_t triangleIndex = sortedTriangles[sortedIndex].triangleIndex;
+				region.indices.push_back(sourceIndices[(static_cast<std::size_t>(triangleIndex) * 3u) + 0u]);
+				region.indices.push_back(sourceIndices[(static_cast<std::size_t>(triangleIndex) * 3u) + 1u]);
+				region.indices.push_back(sourceIndices[(static_cast<std::size_t>(triangleIndex) * 3u) + 2u]);
+			}
+			if (!region.indices.empty())
+			{
+				regions.push_back(std::move(region));
+			}
+		}
+		return regions;
+	}
+
+	std::vector<std::uint32_t> CollectVirtualGeometryCoverageIndices(
+		const std::vector<VirtualGeometrySourceRegion>& fineRegions,
+		std::uint32_t firstFineRegion,
+		std::uint32_t fineRegionCount)
+	{
+		std::vector<std::uint32_t> indices;
+		const std::uint32_t lastFineRegion = std::min<std::uint32_t>(
+			static_cast<std::uint32_t>(fineRegions.size()),
+			firstFineRegion + fineRegionCount);
+		std::size_t indexCount = 0u;
+		for (std::uint32_t regionIndex = firstFineRegion; regionIndex < lastFineRegion; ++regionIndex)
+		{
+			indexCount += fineRegions[regionIndex].indices.size();
+		}
+		indices.reserve(indexCount);
+		for (std::uint32_t regionIndex = firstFineRegion; regionIndex < lastFineRegion; ++regionIndex)
+		{
+			const std::vector<std::uint32_t>& regionIndices = fineRegions[regionIndex].indices;
+			indices.insert(indices.end(), regionIndices.begin(), regionIndices.end());
+		}
+		return indices;
+	}
+
+	float ComputeVirtualGeometrySelectionErrorFloor(float targetRatio)
+	{
+		if (!std::isfinite(targetRatio))
+		{
+			return 0.0f;
+		}
+		return std::max(0.0f, 1.0f - std::clamp(targetRatio, 0.0f, 1.0f)) * 0.01f;
+	}
+
+	std::vector<std::uint32_t> SimplifyVirtualGeometryCoverageCluster(
+		const std::vector<VertexRaw>& vertices,
+		const std::vector<std::uint32_t>& sourceIndices,
+		float targetRatio,
+		float& outGeometricError)
+	{
+		outGeometricError = 0.0f;
+		if (sourceIndices.size() < 6u || !std::isfinite(targetRatio) || targetRatio >= 0.999f)
+		{
+			return sourceIndices;
+		}
+
+		std::size_t targetIndexCount = static_cast<std::size_t>(static_cast<float>(sourceIndices.size()) * std::clamp(targetRatio, 0.001f, 1.0f));
+		targetIndexCount = std::max<std::size_t>(3u, (targetIndexCount / 3u) * 3u);
+		if (targetIndexCount >= sourceIndices.size())
+		{
+			return sourceIndices;
+		}
+
+		std::vector<std::uint32_t> simplified(sourceIndices.size());
+		float resultError = 0.0f;
+		const float* positions = vertices.front().position.data();
+		std::size_t simplifiedIndexCount = meshopt_simplify(
+			simplified.data(),
+			sourceIndices.data(),
+			sourceIndices.size(),
+			positions,
+			vertices.size(),
+			sizeof(VertexRaw),
+			targetIndexCount,
+			kSimplificationTargetError,
+			0u,
+			&resultError);
+		simplifiedIndexCount = (simplifiedIndexCount / 3u) * 3u;
+
+		if (simplifiedIndexCount < 3u || simplifiedIndexCount >= sourceIndices.size() || !std::isfinite(resultError))
+		{
+			return sourceIndices;
+		}
+
+		simplified.resize(simplifiedIndexCount);
+		outGeometricError = resultError;
+		return simplified;
+	}
+
+	void ComputeVirtualGeometryClusterBounds(
+		const std::vector<VirtualGeometryCullableGroupRecord>& groups,
+		std::uint32_t groupOffset,
+		std::uint32_t groupCount,
+		float outCenter[3],
+		float& outRadius)
+	{
+		// Build a conservative sphere around the meshlet bounds owned by this
+		// cluster. Render preparation relies on this worker-safe metadata instead
+		// of reading individual meshlet records while choosing a cluster cut.
+		std::array<float, 3> minBounds = {
+			std::numeric_limits<float>::max(),
+			std::numeric_limits<float>::max(),
+			std::numeric_limits<float>::max()
+		};
+		std::array<float, 3> maxBounds = {
+			-std::numeric_limits<float>::max(),
+			-std::numeric_limits<float>::max(),
+			-std::numeric_limits<float>::max()
+		};
+		for (std::uint32_t groupIndex = groupOffset; groupIndex < groupOffset + groupCount && groupIndex < groups.size(); ++groupIndex)
+		{
+			const VirtualGeometryCullableGroupRecord& group = groups[groupIndex];
+			const float radius = std::isfinite(group.boundsRadius) ? std::max(group.boundsRadius, 0.0f) : 1.0f;
+			for (int axis = 0; axis < 3; ++axis)
+			{
+				const float center = std::isfinite(group.boundsCenter[axis]) ? group.boundsCenter[axis] : 0.0f;
+				minBounds[axis] = std::min(minBounds[axis], center - radius);
+				maxBounds[axis] = std::max(maxBounds[axis], center + radius);
+			}
+		}
+
+		for (int axis = 0; axis < 3; ++axis)
+		{
+			if (minBounds[axis] > maxBounds[axis])
+			{
+				minBounds[axis] = -0.5f;
+				maxBounds[axis] = 0.5f;
+			}
+			outCenter[axis] = (minBounds[axis] + maxBounds[axis]) * 0.5f;
+		}
+
+		outRadius = 0.0f;
+		for (std::uint32_t groupIndex = groupOffset; groupIndex < groupOffset + groupCount && groupIndex < groups.size(); ++groupIndex)
+		{
+			const VirtualGeometryCullableGroupRecord& group = groups[groupIndex];
+			const float radius = std::isfinite(group.boundsRadius) ? std::max(group.boundsRadius, 0.0f) : 1.0f;
+			const float dx = group.boundsCenter[0] - outCenter[0];
+			const float dy = group.boundsCenter[1] - outCenter[1];
+			const float dz = group.boundsCenter[2] - outCenter[2];
+			outRadius = std::max(outRadius, std::sqrt((dx * dx) + (dy * dy) + (dz * dz)) + radius);
+		}
+		if (!std::isfinite(outRadius) || outRadius <= 0.0f)
+		{
+			outRadius = 1.0f;
+		}
+	}
+
+	bool AppendRegionalLodMeshlets(
+		const std::vector<VirtualGeometrySourceRegion>& fineRegions,
 		std::uint32_t lodIndex,
 		std::uint32_t sectionId,
-		std::uint32_t sourcePrimitiveCount,
 		const VirtualGeometryLodSource& lod,
 		const std::vector<VertexRaw>& vertices,
+		bool includeBounds,
 		VirtualGeometryBuildOutput& output)
 	{
+		if (fineRegions.empty())
+		{
+			std::cerr << "Virtual geometry source coverage regions are empty.\n";
+			return false;
+		}
+
+		const std::uint32_t coverageClusterCount = ComputeVirtualGeometryCoverageClusterCount(
+			static_cast<std::uint32_t>(fineRegions.size()),
+			lod.targetRatio);
+		if (coverageClusterCount == 0u)
+		{
+			std::cerr << "Virtual geometry coverage cluster count resolved to zero.\n";
+			return false;
+		}
+
+		std::vector<VirtualGeometryClusterCookPayload> clusterPayloads;
+		clusterPayloads.reserve(coverageClusterCount);
+		std::uint32_t totalPrimitiveCount = 0u;
+		std::uint32_t totalMeshletCount = 0u;
+		float maxClusterError = 0.0f;
+
+		for (std::uint32_t coverageClusterIndex = 0u; coverageClusterIndex < coverageClusterCount; ++coverageClusterIndex)
+		{
+			const std::uint32_t firstFineRegion = (static_cast<std::uint32_t>(fineRegions.size()) * coverageClusterIndex) / coverageClusterCount;
+			const std::uint32_t lastFineRegion = (static_cast<std::uint32_t>(fineRegions.size()) * (coverageClusterIndex + 1u)) / coverageClusterCount;
+			const std::uint32_t fineRegionCount = lastFineRegion > firstFineRegion ? lastFineRegion - firstFineRegion : 1u;
+			std::vector<std::uint32_t> sourceCoverageIndices = CollectVirtualGeometryCoverageIndices(
+				fineRegions,
+				firstFineRegion,
+				fineRegionCount);
+			if (sourceCoverageIndices.empty())
+			{
+				std::cerr << "Virtual geometry coverage cluster has no source triangles.\n";
+				return false;
+			}
+
+			float simplificationError = 0.0f;
+			std::vector<std::uint32_t> clusterIndices = SimplifyVirtualGeometryCoverageCluster(
+				vertices,
+				sourceCoverageIndices,
+				lod.targetRatio,
+				simplificationError);
+
+			VirtualGeometryClusterCookPayload payload{};
+			payload.firstFineRegion = firstFineRegion;
+			payload.fineRegionCount = fineRegionCount;
+			payload.primitiveCount = static_cast<std::uint32_t>(clusterIndices.size() / 3u);
+			payload.targetRatio = sourceCoverageIndices.empty()
+				? 1.0f
+				: static_cast<float>(clusterIndices.size()) / static_cast<float>(sourceCoverageIndices.size());
+			payload.geometricError = std::max(simplificationError, ComputeVirtualGeometrySelectionErrorFloor(lod.targetRatio));
+			if (!BuildMeshletPayload(vertices, clusterIndices, includeBounds, payload.meshlets))
+			{
+				std::cerr << "Virtual geometry coverage cluster meshlet generation failed.\n";
+				return false;
+			}
+
+			if (payload.meshlets.meshletRecords.empty())
+			{
+				std::cerr << "Virtual geometry coverage cluster generated no meshlets.\n";
+				return false;
+			}
+
+			totalPrimitiveCount += payload.primitiveCount;
+			totalMeshletCount += static_cast<std::uint32_t>(payload.meshlets.meshletRecords.size());
+			maxClusterError = std::max(maxClusterError, payload.geometricError);
+			clusterPayloads.push_back(std::move(payload));
+		}
+
 		std::uint32_t meshletOffset = 0u;
-		std::uint32_t remapOffset = 0u;
 		std::uint32_t primitiveOffset = 0u;
+		std::uint32_t groupOffset = 0u;
 		if (!TryConvertCount(output.meshletPayload.meshletRecords.size(), "virtual geometry meshlet offset", meshletOffset)
-			|| !TryConvertCount(output.meshletPayload.vertexRemapIndices.size(), "virtual geometry remap offset", remapOffset)
-			|| !TryConvertCount(output.meshletPayload.primitiveIndices.size(), "virtual geometry primitive offset", primitiveOffset))
+			|| !TryConvertCount(output.meshletPayload.primitiveIndices.size(), "virtual geometry primitive offset", primitiveOffset)
+			|| !TryConvertCount(output.cullableGroups.size(), "virtual geometry group offset", groupOffset))
 		{
 			return false;
 		}
 
-		output.meshletPayload.vertexRemapIndices.insert(
-			output.meshletPayload.vertexRemapIndices.end(),
-			source.vertexRemapIndices.begin(),
-			source.vertexRemapIndices.end());
-		output.meshletPayload.primitiveIndices.insert(
-			output.meshletPayload.primitiveIndices.end(),
-			source.primitiveIndices.begin(),
-			source.primitiveIndices.end());
-
-		for (MeshletRecord record : source.meshletRecords)
-		{
-			record.vertexOffset += remapOffset;
-			record.primitiveIndexOffset += primitiveOffset;
-			output.meshletPayload.meshletRecords.push_back(record);
-		}
-
-		output.meshletPayload.meshletBounds.insert(
-			output.meshletPayload.meshletBounds.end(),
-			source.meshletBounds.begin(),
-			source.meshletBounds.end());
+		const std::uint32_t sectionRangeIndex = static_cast<std::uint32_t>(output.sectionRanges.size());
+		const std::uint32_t pageIndex = static_cast<std::uint32_t>(output.pages.size());
+		const std::uint32_t clusterLinkOffset = static_cast<std::uint32_t>(output.clusterPageLinks.size());
 
 		MeshletSection meshletSection{};
 		meshletSection.meshletOffset = meshletOffset;
-		if (!TryConvertCount(source.meshletRecords.size(), "virtual geometry section meshlet count", meshletSection.meshletCount))
-		{
-			return false;
-		}
+		meshletSection.meshletCount = totalMeshletCount;
 		output.meshletPayload.meshletSections.push_back(meshletSection);
 
 		VirtualGeometrySectionRangeRecord sectionRange{};
 		sectionRange.lodIndex = lodIndex;
 		sectionRange.sectionId = sectionId;
 		sectionRange.meshletOffset = meshletOffset;
-		sectionRange.meshletCount = meshletSection.meshletCount;
+		sectionRange.meshletCount = totalMeshletCount;
 		sectionRange.primitiveOffset = primitiveOffset;
-		sectionRange.primitiveCount = static_cast<std::uint32_t>(lod.indices.size() / 3u);
-		const std::uint32_t sectionRangeIndex = static_cast<std::uint32_t>(output.sectionRanges.size());
+		sectionRange.primitiveCount = totalPrimitiveCount;
 		output.sectionRanges.push_back(sectionRange);
-		const std::uint32_t pageIndex = static_cast<std::uint32_t>(output.pages.size());
-		const std::uint32_t groupOffset = static_cast<std::uint32_t>(output.cullableGroups.size());
 
-		// One detail, one section range, and one page are emitted per LOD in the
-		// MVP. Keeping the relationships explicit makes future page refinement
-		// possible without changing editor metadata or diagnostics contracts.
 		VirtualGeometryDetailLevelRecord detail{};
 		detail.lodIndex = lodIndex;
+		detail.requestedTargetIndex = lod.requestedTargetIndex;
+		detail.targetStatus = static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Generated);
 		detail.meshletOffset = meshletOffset;
-		detail.meshletCount = meshletSection.meshletCount;
+		detail.meshletCount = totalMeshletCount;
 		detail.vertexCount = static_cast<std::uint32_t>(vertices.size());
-		detail.primitiveCount = static_cast<std::uint32_t>(lod.indices.size() / 3u);
+		detail.primitiveCount = totalPrimitiveCount;
 		detail.sectionRangeOffset = sectionRangeIndex;
 		detail.sectionRangeCount = 1u;
 		detail.pageRangeOffset = pageIndex;
 		detail.pageRangeCount = 1u;
-		detail.geometricError = lod.geometricError;
+		detail.geometricError = maxClusterError;
 		detail.targetRatio = lod.targetRatio;
 		BuildPositionBounds(vertices, detail.boundsMin, detail.boundsMax);
 		output.detailLevels.push_back(detail);
 
-		for (std::size_t localMeshlet = 0; localMeshlet < source.meshletRecords.size(); ++localMeshlet)
+		for (VirtualGeometryClusterCookPayload& payload : clusterPayloads)
 		{
-			const std::size_t globalMeshlet = static_cast<std::size_t>(meshletOffset) + localMeshlet;
-			const MeshletRecord& record = output.meshletPayload.meshletRecords[globalMeshlet];
-			VirtualGeometryCullableGroupRecord group{};
-			group.groupIndex = static_cast<std::uint32_t>(output.cullableGroups.size());
-			group.lodIndex = lodIndex;
-			group.vertexOffset = record.vertexOffset;
-			group.vertexCount = record.vertexCount;
-			group.primitiveOffset = record.primitiveIndexOffset;
-			group.primitiveCount = record.primitiveIndexCount / 3u;
-			group.sectionId = sectionId;
-			group.pageId = pageIndex;
-
-			if (globalMeshlet < output.meshletPayload.meshletBounds.size())
+			std::uint32_t clusterMeshletOffset = 0u;
+			std::uint32_t clusterRemapOffset = 0u;
+			std::uint32_t clusterPrimitiveOffset = 0u;
+			std::uint32_t clusterGroupOffset = 0u;
+			if (!TryConvertCount(output.meshletPayload.meshletRecords.size(), "virtual geometry cluster meshlet offset", clusterMeshletOffset)
+				|| !TryConvertCount(output.meshletPayload.vertexRemapIndices.size(), "virtual geometry cluster remap offset", clusterRemapOffset)
+				|| !TryConvertCount(output.meshletPayload.primitiveIndices.size(), "virtual geometry cluster primitive offset", clusterPrimitiveOffset)
+				|| !TryConvertCount(output.cullableGroups.size(), "virtual geometry cluster group offset", clusterGroupOffset))
 			{
-				const MeshletBounds& bounds = output.meshletPayload.meshletBounds[globalMeshlet];
-				group.boundsCenter[0] = bounds.center[0];
-				group.boundsCenter[1] = bounds.center[1];
-				group.boundsCenter[2] = bounds.center[2];
-				group.boundsRadius = bounds.radius;
-				group.coneApex[0] = bounds.coneApex[0];
-				group.coneApex[1] = bounds.coneApex[1];
-				group.coneApex[2] = bounds.coneApex[2];
-				group.coneCutoff = bounds.coneCutoff;
-				group.coneAxis[0] = bounds.coneAxis[0];
-				group.coneAxis[1] = bounds.coneAxis[1];
-				group.coneAxis[2] = bounds.coneAxis[2];
-				group.coneApexOffset = bounds.coneApexOffset;
-			}
-			else
-			{
-				// Missing bounds disable aggressive culling for this group. The
-				// loader and task shader interpret this as conservative visibility
-				// rather than letting malformed metadata hide geometry.
-				group.boundsRadius = 1.0f;
-				group.coneCutoff = 2.0f;
+				return false;
 			}
 
-			output.cullableGroups.push_back(group);
+			output.meshletPayload.vertexRemapIndices.insert(
+				output.meshletPayload.vertexRemapIndices.end(),
+				payload.meshlets.vertexRemapIndices.begin(),
+				payload.meshlets.vertexRemapIndices.end());
+			output.meshletPayload.primitiveIndices.insert(
+				output.meshletPayload.primitiveIndices.end(),
+				payload.meshlets.primitiveIndices.begin(),
+				payload.meshlets.primitiveIndices.end());
+
+			for (MeshletRecord record : payload.meshlets.meshletRecords)
+			{
+				record.vertexOffset += clusterRemapOffset;
+				record.primitiveIndexOffset += clusterPrimitiveOffset;
+				output.meshletPayload.meshletRecords.push_back(record);
+			}
+
+			const std::uint32_t boundsOffset = static_cast<std::uint32_t>(output.meshletPayload.meshletBounds.size());
+			output.meshletPayload.meshletBounds.insert(
+				output.meshletPayload.meshletBounds.end(),
+				payload.meshlets.meshletBounds.begin(),
+				payload.meshlets.meshletBounds.end());
+
+			for (std::size_t localMeshlet = 0u; localMeshlet < payload.meshlets.meshletRecords.size(); ++localMeshlet)
+			{
+				const std::size_t globalMeshlet = static_cast<std::size_t>(clusterMeshletOffset) + localMeshlet;
+				const MeshletRecord& record = output.meshletPayload.meshletRecords[globalMeshlet];
+				VirtualGeometryCullableGroupRecord group{};
+				group.groupIndex = static_cast<std::uint32_t>(output.cullableGroups.size());
+				group.lodIndex = lodIndex;
+				group.vertexOffset = record.vertexOffset;
+				group.vertexCount = record.vertexCount;
+				group.primitiveOffset = record.primitiveIndexOffset;
+				group.primitiveCount = record.primitiveIndexCount / 3u;
+				group.sectionId = sectionId;
+				group.pageId = pageIndex;
+
+				const std::size_t localBoundsIndex = static_cast<std::size_t>(boundsOffset) + localMeshlet;
+				if (localBoundsIndex < output.meshletPayload.meshletBounds.size())
+				{
+					const MeshletBounds& bounds = output.meshletPayload.meshletBounds[localBoundsIndex];
+					group.boundsCenter[0] = bounds.center[0];
+					group.boundsCenter[1] = bounds.center[1];
+					group.boundsCenter[2] = bounds.center[2];
+					group.boundsRadius = bounds.radius;
+					group.coneApex[0] = bounds.coneApex[0];
+					group.coneApex[1] = bounds.coneApex[1];
+					group.coneApex[2] = bounds.coneApex[2];
+					group.coneCutoff = bounds.coneCutoff;
+					group.coneAxis[0] = bounds.coneAxis[0];
+					group.coneAxis[1] = bounds.coneAxis[1];
+					group.coneAxis[2] = bounds.coneAxis[2];
+					group.coneApexOffset = bounds.coneApexOffset;
+				}
+				else
+				{
+					group.boundsRadius = 1.0f;
+					group.coneCutoff = 2.0f;
+				}
+
+				output.cullableGroups.push_back(group);
+			}
+
+			VirtualGeometryClusterRecord cluster{};
+			cluster.clusterId = static_cast<std::uint32_t>(output.clusters.size());
+			cluster.parentClusterId = kVirtualGeometryInvalidIndex;
+			cluster.firstChildClusterId = kVirtualGeometryInvalidIndex;
+			cluster.childCount = 0u;
+			cluster.lodIndex = lodIndex;
+			cluster.groupOffset = clusterGroupOffset;
+			cluster.groupCount = static_cast<std::uint32_t>(output.cullableGroups.size()) - clusterGroupOffset;
+			cluster.materialSectionId = sectionId;
+			cluster.pageId = pageIndex;
+			cluster.fallbackClusterId = cluster.clusterId;
+			cluster.geometricError = payload.geometricError;
+			ComputeVirtualGeometryClusterBounds(output.cullableGroups, cluster.groupOffset, cluster.groupCount, cluster.boundsCenter, cluster.boundsRadius);
+			output.clusters.push_back(cluster);
+			output.clusterCoverage.push_back({ payload.firstFineRegion, payload.fineRegionCount });
+
+			VirtualGeometryClusterPageLinkRecord link{};
+			link.clusterId = cluster.clusterId;
+			link.pageId = pageIndex;
+			link.firstGroup = cluster.groupOffset;
+			link.groupCount = cluster.groupCount;
+			link.flags = lodIndex == 0u ? 0x3u : 0x1u;
+			output.clusterPageLinks.push_back(link);
 		}
 
 		VirtualGeometryPageRecord page{};
@@ -1494,16 +2266,255 @@ namespace
 		page.groupOffset = groupOffset;
 		page.groupCount = static_cast<std::uint32_t>(output.cullableGroups.size()) - groupOffset;
 		page.fallbackPageId = 0u;
+		page.clusterPageLinkOffset = clusterLinkOffset;
+		page.clusterPageLinkCount = static_cast<std::uint32_t>(output.clusterPageLinks.size()) - clusterLinkOffset;
 		page.priority = lodIndex == 0u ? 1000u : std::max<std::uint32_t>(1u, 1000u - (lodIndex * 100u));
 		page.byteOffset = static_cast<std::uint64_t>(meshletOffset) * sizeof(MeshletRecord);
 		page.byteSize =
-			static_cast<std::uint64_t>(meshletSection.meshletCount) * (sizeof(MeshletRecord) + sizeof(MeshletBounds))
-			+ static_cast<std::uint64_t>(lod.indices.size()) * sizeof(std::uint8_t)
+			static_cast<std::uint64_t>(totalMeshletCount) * (sizeof(MeshletRecord) + sizeof(MeshletBounds))
+			+ static_cast<std::uint64_t>(totalPrimitiveCount) * 3u * sizeof(std::uint8_t)
 			+ static_cast<std::uint64_t>(vertices.size()) * kMeshletPackedVertexStrideBytes;
 		output.pages.push_back(page);
-
-		(void)sourcePrimitiveCount;
 		return true;
+	}
+
+	bool LinkVirtualGeometryClusterHierarchy(
+		std::vector<VirtualGeometryClusterRecord>& clusters,
+		const std::vector<VirtualGeometryClusterCoverage>& clusterCoverage)
+	{
+		if (clusters.empty() || clusters.size() != clusterCoverage.size())
+		{
+			return false;
+		}
+
+		for (std::size_t index = 0u; index < clusters.size(); ++index)
+		{
+			VirtualGeometryClusterRecord& cluster = clusters[index];
+			cluster.clusterId = static_cast<std::uint32_t>(index);
+			cluster.parentClusterId = kVirtualGeometryInvalidIndex;
+			cluster.firstChildClusterId = kVirtualGeometryInvalidIndex;
+			cluster.childCount = 0u;
+			cluster.fallbackClusterId = cluster.clusterId;
+		}
+
+		std::uint32_t maxLodIndex = 0u;
+		for (const VirtualGeometryClusterRecord& cluster : clusters)
+		{
+			maxLodIndex = std::max(maxLodIndex, cluster.lodIndex);
+		}
+
+		const auto collectLodClusters = [&clusters](std::uint32_t lodIndex) {
+			std::vector<std::uint32_t> indices;
+			for (std::uint32_t index = 0u; index < static_cast<std::uint32_t>(clusters.size()); ++index)
+			{
+				if (clusters[index].lodIndex == lodIndex)
+				{
+					indices.push_back(index);
+				}
+			}
+			return indices;
+		};
+
+		const auto sortedLodClusters = [&clusters, &clusterCoverage, &collectLodClusters](std::uint32_t lodIndex) {
+			std::vector<std::uint32_t> indices = collectLodClusters(lodIndex);
+			std::sort(indices.begin(), indices.end(), [&clusters, &clusterCoverage](std::uint32_t left, std::uint32_t right) {
+				if (clusterCoverage[left].firstFineRegion != clusterCoverage[right].firstFineRegion)
+				{
+					return clusterCoverage[left].firstFineRegion < clusterCoverage[right].firstFineRegion;
+				}
+				if (clusterCoverage[left].fineRegionCount != clusterCoverage[right].fineRegionCount)
+				{
+					return clusterCoverage[left].fineRegionCount < clusterCoverage[right].fineRegionCount;
+				}
+				return clusters[left].clusterId < clusters[right].clusterId;
+			});
+			return indices;
+		};
+
+		for (std::uint32_t parentLod = 1u; parentLod <= maxLodIndex; ++parentLod)
+		{
+			const std::vector<std::uint32_t> parentIndices = sortedLodClusters(parentLod);
+			const std::vector<std::uint32_t> childIndices = sortedLodClusters(parentLod - 1u);
+			if (parentIndices.empty() || childIndices.empty())
+			{
+				continue;
+			}
+
+			for (std::uint32_t parentIndex : parentIndices)
+			{
+				const VirtualGeometryClusterCoverage& parentCoverage = clusterCoverage[parentIndex];
+				const std::uint32_t parentBegin = parentCoverage.firstFineRegion;
+				const std::uint32_t parentEnd = parentCoverage.firstFineRegion + parentCoverage.fineRegionCount;
+				std::uint32_t firstChildId = kVirtualGeometryInvalidIndex;
+				std::uint32_t lastChildId = 0u;
+				std::uint32_t coveredBegin = parentBegin;
+				bool hasChild = false;
+				bool coverageValid = true;
+
+				for (std::uint32_t childIndex : childIndices)
+				{
+					const VirtualGeometryClusterCoverage& childCoverage = clusterCoverage[childIndex];
+					const std::uint32_t childBegin = childCoverage.firstFineRegion;
+					const std::uint32_t childEnd = childCoverage.firstFineRegion + childCoverage.fineRegionCount;
+					if (childEnd <= parentBegin)
+					{
+						continue;
+					}
+					if (childBegin >= parentEnd)
+					{
+						break;
+					}
+					if (childBegin != coveredBegin || childEnd > parentEnd)
+					{
+						coverageValid = false;
+						break;
+					}
+
+					VirtualGeometryClusterRecord& child = clusters[childIndex];
+					VirtualGeometryClusterRecord& parent = clusters[parentIndex];
+					child.parentClusterId = parent.clusterId;
+					child.fallbackClusterId = parent.clusterId;
+					firstChildId = std::min(firstChildId, child.clusterId);
+					lastChildId = std::max(lastChildId, child.clusterId);
+					coveredBegin = childEnd;
+					hasChild = true;
+				}
+
+				if (!hasChild || !coverageValid || coveredBegin != parentEnd)
+				{
+					return false;
+				}
+
+				VirtualGeometryClusterRecord& parent = clusters[parentIndex];
+				parent.firstChildClusterId = firstChildId;
+				parent.childCount = (lastChildId - firstChildId) + 1u;
+			}
+		}
+		return true;
+	}
+
+	bool ValidateVirtualGeometryClusterCoverage(
+		const std::vector<VirtualGeometryClusterRecord>& clusters,
+		const std::vector<VirtualGeometryClusterCoverage>& clusterCoverage)
+	{
+		if (clusters.empty() || clusters.size() != clusterCoverage.size())
+		{
+			return false;
+		}
+
+		std::uint32_t maxLodIndex = 0u;
+		std::uint32_t fineRegionCount = 0u;
+		for (std::size_t index = 0u; index < clusters.size(); ++index)
+		{
+			maxLodIndex = std::max(maxLodIndex, clusters[index].lodIndex);
+			fineRegionCount = std::max(fineRegionCount, clusterCoverage[index].firstFineRegion + clusterCoverage[index].fineRegionCount);
+			if (clusterCoverage[index].fineRegionCount == 0u)
+			{
+				return false;
+			}
+		}
+
+		for (std::uint32_t lodIndex = 0u; lodIndex <= maxLodIndex; ++lodIndex)
+		{
+			std::vector<VirtualGeometryClusterCoverage> lodCoverage;
+			for (std::size_t clusterIndex = 0u; clusterIndex < clusters.size(); ++clusterIndex)
+			{
+				if (clusters[clusterIndex].lodIndex == lodIndex)
+				{
+					lodCoverage.push_back(clusterCoverage[clusterIndex]);
+				}
+			}
+			if (lodCoverage.empty())
+			{
+				return false;
+			}
+			std::sort(lodCoverage.begin(), lodCoverage.end(), [](const VirtualGeometryClusterCoverage& left, const VirtualGeometryClusterCoverage& right) {
+				return left.firstFineRegion < right.firstFineRegion;
+			});
+
+			std::uint32_t cursor = 0u;
+			for (const VirtualGeometryClusterCoverage& coverage : lodCoverage)
+			{
+				if (coverage.firstFineRegion != cursor)
+				{
+					return false;
+				}
+				cursor += coverage.fineRegionCount;
+			}
+			if (cursor != fineRegionCount)
+			{
+				return false;
+			}
+		}
+
+		for (const VirtualGeometryClusterRecord& parent : clusters)
+		{
+			if (parent.childCount == 0u)
+			{
+				continue;
+			}
+			if (parent.firstChildClusterId >= clusters.size()
+				|| (static_cast<std::uint64_t>(parent.firstChildClusterId) + parent.childCount) > clusters.size())
+			{
+				return false;
+			}
+
+			const VirtualGeometryClusterCoverage& parentCoverage = clusterCoverage[parent.clusterId];
+			std::uint32_t cursor = parentCoverage.firstFineRegion;
+			const std::uint32_t parentEnd = parentCoverage.firstFineRegion + parentCoverage.fineRegionCount;
+			for (std::uint32_t childOffset = 0u; childOffset < parent.childCount; ++childOffset)
+			{
+				const VirtualGeometryClusterRecord& child = clusters[parent.firstChildClusterId + childOffset];
+				const VirtualGeometryClusterCoverage& childCoverage = clusterCoverage[child.clusterId];
+				if (child.parentClusterId != parent.clusterId
+					|| childCoverage.firstFineRegion != cursor
+					|| (childCoverage.firstFineRegion + childCoverage.fineRegionCount) > parentEnd)
+				{
+					return false;
+				}
+				cursor += childCoverage.fineRegionCount;
+			}
+			if (cursor != parentEnd)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	void SynchronizeGeneratedLevelReportWithEmittedDetails(
+		MeshCompileReport& report,
+		const std::vector<VirtualGeometryDetailLevelRecord>& emittedDetails)
+	{
+		for (const VirtualGeometryDetailLevelRecord& detail : emittedDetails)
+		{
+			auto generated = std::find_if(
+				report.virtualGeometry.generatedLevels.begin(),
+				report.virtualGeometry.generatedLevels.end(),
+				[&detail](const VirtualGeometryGeneratedLevelCompileReport& candidate) {
+					return candidate.lodIndex == detail.lodIndex
+						&& candidate.requestedTargetIndex == detail.requestedTargetIndex;
+				});
+			if (generated == report.virtualGeometry.generatedLevels.end())
+			{
+				continue;
+			}
+
+			// The simplification stage estimates a candidate LOD before the
+			// coverage-safe regional cook splits and rebuilds meshlets. The
+			// emitted detail record is the renderer's source of truth, so keep
+			// Inspector/package diagnostics aligned with the final TEMF payload.
+			generated->generatedLevelIndex = detail.lodIndex;
+			generated->lodIndex = detail.lodIndex;
+			generated->requestedTargetIndex = detail.requestedTargetIndex;
+			generated->actualRatio = report.virtualGeometry.sourceTriangleCount > 0u
+				? static_cast<float>(detail.primitiveCount) / static_cast<float>(report.virtualGeometry.sourceTriangleCount)
+				: detail.targetRatio;
+			generated->triangleCount = detail.primitiveCount;
+			generated->meshletCount = detail.meshletCount;
+			generated->geometricError = detail.geometricError;
+		}
 	}
 
 	bool BuildVirtualGeometryPayload(
@@ -1516,31 +2527,43 @@ namespace
 		output = {};
 		const std::uint32_t sectionId = 0u;
 		const std::uint32_t sourcePrimitiveCount = lods.empty() ? 0u : static_cast<std::uint32_t>(lods.front().indices.size() / 3u);
+		const std::uint32_t sourceMeshletCount = lods.empty() ? 0u : EstimateMeshletCountForLod(vertices, lods.front().indices, 1u);
+		const std::uint32_t fineRegionCount = ComputeVirtualGeometryFineRegionCount(sourcePrimitiveCount, sourceMeshletCount);
+		const std::vector<VirtualGeometrySourceRegion> fineRegions = BuildVirtualGeometrySourceRegions(
+			vertices,
+			lods.empty() ? std::vector<std::uint32_t>{} : lods.front().indices,
+			fineRegionCount);
+		if (fineRegions.empty())
+		{
+			report.virtualGeometry.status = VirtualGeometryCompileStatus::Failed;
+			report.virtualGeometry.errors.push_back("virtual geometry source coverage partition failed");
+			return false;
+		}
 
 		for (std::size_t lodIndex = 0; lodIndex < lods.size(); ++lodIndex)
 		{
-			MeshletBuildOutput lodMeshlets{};
-			if (!BuildMeshletPayload(vertices, lods[lodIndex].indices, includeBounds, lodMeshlets))
-			{
-				report.virtualGeometry.status = VirtualGeometryCompileStatus::Failed;
-				report.virtualGeometry.errors.push_back("virtual geometry meshlet generation failed for LOD " + std::to_string(lodIndex));
-				return false;
-			}
-
-			if (!AppendLodMeshlets(
-				lodMeshlets,
+			if (!AppendRegionalLodMeshlets(
+				fineRegions,
 				static_cast<std::uint32_t>(lodIndex),
 				sectionId,
-				sourcePrimitiveCount,
 				lods[lodIndex],
 				vertices,
+				includeBounds,
 				output))
 			{
 				report.virtualGeometry.status = VirtualGeometryCompileStatus::Failed;
-				report.virtualGeometry.errors.push_back("virtual geometry meshlet range overflow");
+				report.virtualGeometry.errors.push_back("virtual geometry regional meshlet generation failed for LOD " + std::to_string(lodIndex));
 				return false;
 			}
 		}
+
+		const bool hierarchyLinked = LinkVirtualGeometryClusterHierarchy(output.clusters, output.clusterCoverage);
+		const bool coverageValidated = hierarchyLinked && ValidateVirtualGeometryClusterCoverage(output.clusters, output.clusterCoverage);
+		if (!coverageValidated)
+		{
+			report.virtualGeometry.warnings.push_back("virtual geometry cluster coverage validation failed; renderer will use conservative complete-detail fallback");
+		}
+		SynchronizeGeneratedLevelReportWithEmittedDetails(report, output.detailLevels);
 
 		const std::uint32_t sectionNameOffset = AppendVirtualGeometryString(output, "DefaultSection");
 		VirtualGeometryMaterialSectionRecord section{};
@@ -1552,6 +2575,39 @@ namespace
 		section.sourceNameStringOffset = sectionNameOffset;
 		section.sourceNameStringSize = static_cast<std::uint32_t>(std::string_view("DefaultSection").size());
 		output.materialSections.push_back(section);
+
+		for (const VirtualGeometryRequestedTargetCompileReport& target : report.virtualGeometry.requestedTargets)
+		{
+			VirtualGeometryRequestedTargetRecord record{};
+			record.targetIndex = target.targetIndex;
+			record.status = ParseCompileTargetStatus(target.status);
+			record.desiredTriangleCount = target.desiredTriangleCount;
+			record.desiredMeshletCount = target.desiredMeshletCount;
+			record.requestedRatio = target.requestedRatio;
+			output.requestedTargets.push_back(record);
+		}
+
+		for (const VirtualGeometrySkippedLevelCompileReport& skipped : report.virtualGeometry.skippedLevels)
+		{
+			const std::uint32_t messageOffset = skipped.message.empty()
+				? 0u
+				: AppendVirtualGeometryString(output, skipped.message);
+			VirtualGeometrySkippedDetailRecord record{};
+			record.targetIndex = skipped.targetIndex;
+			record.status = ParseCompileTargetStatus(skipped.status);
+			record.reason = ParseCompileSkippedReason(skipped.reason);
+			record.nearestGeneratedLodIndex = skipped.nearestGeneratedLevelIndex;
+			record.messageStringOffset = messageOffset;
+			record.messageStringSize = static_cast<std::uint32_t>(skipped.message.size());
+			record.candidateTriangleCount = skipped.candidateTriangleCount;
+			record.candidateMeshletCount = skipped.candidateMeshletCount;
+			record.requestedRatio = skipped.requestedRatio;
+			record.actualCandidateRatio = skipped.actualCandidateRatio;
+			record.actualNearestRatio = skipped.nearestGeneratedLevelIndex < output.detailLevels.size()
+				? output.detailLevels[skipped.nearestGeneratedLevelIndex].targetRatio
+				: 1.0f;
+			output.skippedDetails.push_back(record);
+		}
 
 		for (const std::string& warning : report.virtualGeometry.warnings)
 		{
@@ -1566,9 +2622,50 @@ namespace
 			output.diagnostics.push_back(diagnostic);
 		}
 
+		const std::string_view validationMessage = coverageValidated
+			? "fallback coverage, cluster hierarchy, cluster coverage, and page links validated"
+			: "fallback coverage, cluster hierarchy, and page links validated";
+		const std::uint32_t validationMessageOffset = AppendVirtualGeometryString(output, validationMessage);
+		VirtualGeometryValidationFlagRecord validation{};
+		validation.flags = kVirtualGeometryValidationFlagAdaptiveTargetsPresent
+			| kVirtualGeometryValidationFlagFallbackCoverageValidated
+			| kVirtualGeometryValidationFlagClusterHierarchyValidated
+			| kVirtualGeometryValidationFlagPageLinksValidated;
+		if (coverageValidated)
+		{
+			validation.flags |= kVirtualGeometryValidationFlagClusterCoverageValidated;
+		}
+		validation.messageStringOffset = validationMessageOffset;
+		validation.messageStringSize = static_cast<std::uint32_t>(validationMessage.size());
+		output.validationFlags.push_back(validation);
+
 		report.virtualGeometry.detailLevelCount = static_cast<std::uint32_t>(output.detailLevels.size());
 		report.virtualGeometry.cullableGroupCount = static_cast<std::uint32_t>(output.cullableGroups.size());
 		report.virtualGeometry.pageCount = static_cast<std::uint32_t>(output.pages.size());
+		report.virtualGeometry.clusters.clear();
+		for (const VirtualGeometryClusterRecord& cluster : output.clusters)
+		{
+			report.virtualGeometry.clusters.push_back({
+				cluster.clusterId,
+				cluster.parentClusterId,
+				cluster.lodIndex,
+				cluster.groupCount,
+				cluster.pageId,
+				cluster.fallbackClusterId
+			});
+		}
+		report.virtualGeometry.pages.clear();
+		for (const VirtualGeometryPageRecord& page : output.pages)
+		{
+			report.virtualGeometry.pages.push_back({
+				page.pageId,
+				page.firstLodIndex,
+				page.lodCount,
+				page.fallbackPageId,
+				page.byteSize,
+				page.pageId == page.fallbackPageId || page.firstLodIndex == 0u
+			});
+		}
 		return true;
 	}
 
@@ -1598,6 +2695,11 @@ namespace
 			|| !AddTable(output.sectionRanges.size(), sizeof(VirtualGeometrySectionRangeRecord), "section ranges")
 			|| !AddTable(output.cullableGroups.size(), sizeof(VirtualGeometryCullableGroupRecord), "cullable groups")
 			|| !AddTable(output.pages.size(), sizeof(VirtualGeometryPageRecord), "pages")
+			|| !AddTable(output.requestedTargets.size(), sizeof(VirtualGeometryRequestedTargetRecord), "requested targets")
+			|| !AddTable(output.skippedDetails.size(), sizeof(VirtualGeometrySkippedDetailRecord), "skipped details")
+			|| !AddTable(output.clusters.size(), sizeof(VirtualGeometryClusterRecord), "clusters")
+			|| !AddTable(output.clusterPageLinks.size(), sizeof(VirtualGeometryClusterPageLinkRecord), "cluster page links")
+			|| !AddTable(output.validationFlags.size(), sizeof(VirtualGeometryValidationFlagRecord), "validation flags")
 			|| !AddTable(output.diagnostics.size(), sizeof(VirtualGeometryDiagnosticRecord), "diagnostics")
 			|| !AddTable(output.stringTable.size(), sizeof(char), "string table"))
 		{
@@ -1619,8 +2721,19 @@ namespace
 		header.cullableGroupCount = static_cast<std::uint32_t>(output.cullableGroups.size());
 		header.pageCount = static_cast<std::uint32_t>(output.pages.size());
 		header.diagnosticRecordCount = static_cast<std::uint32_t>(output.diagnostics.size());
+		header.requestedTargetCount = static_cast<std::uint32_t>(output.requestedTargets.size());
+		header.skippedDetailCount = static_cast<std::uint32_t>(output.skippedDetails.size());
+		header.clusterCount = static_cast<std::uint32_t>(output.clusters.size());
+		header.clusterPageLinkCount = static_cast<std::uint32_t>(output.clusterPageLinks.size());
+		header.validationFlagCount = static_cast<std::uint32_t>(output.validationFlags.size());
 		header.sourceTriangleCount = output.detailLevels.empty() ? 0u : output.detailLevels.front().primitiveCount;
 		header.sourceVertexCount = output.detailLevels.empty() ? 0u : output.detailLevels.front().vertexCount;
+		header.flags = output.validationFlags.empty()
+			? (kVirtualGeometryValidationFlagAdaptiveTargetsPresent
+				| kVirtualGeometryValidationFlagFallbackCoverageValidated
+				| kVirtualGeometryValidationFlagClusterHierarchyValidated
+				| kVirtualGeometryValidationFlagPageLinksValidated)
+			: output.validationFlags.front().flags;
 
 		std::uint32_t cursor = rootOffset + static_cast<std::uint32_t>(sizeof(VirtualGeometryHeader));
 		const auto AssignTable = [&](std::uint32_t& offset, std::size_t count, std::size_t stride) {
@@ -1634,11 +2747,92 @@ namespace
 		AssignTable(header.sectionRangeTableOffset, output.sectionRanges.size(), sizeof(VirtualGeometrySectionRangeRecord));
 		AssignTable(header.cullableGroupTableOffset, output.cullableGroups.size(), sizeof(VirtualGeometryCullableGroupRecord));
 		AssignTable(header.pageTableOffset, output.pages.size(), sizeof(VirtualGeometryPageRecord));
+		AssignTable(header.requestedTargetTableOffset, output.requestedTargets.size(), sizeof(VirtualGeometryRequestedTargetRecord));
+		AssignTable(header.skippedDetailTableOffset, output.skippedDetails.size(), sizeof(VirtualGeometrySkippedDetailRecord));
+		AssignTable(header.clusterTableOffset, output.clusters.size(), sizeof(VirtualGeometryClusterRecord));
+		AssignTable(header.clusterPageLinkTableOffset, output.clusterPageLinks.size(), sizeof(VirtualGeometryClusterPageLinkRecord));
+		AssignTable(header.validationFlagTableOffset, output.validationFlags.size(), sizeof(VirtualGeometryValidationFlagRecord));
 		AssignTable(header.diagnosticTableOffset, output.diagnostics.size(), sizeof(VirtualGeometryDiagnosticRecord));
 		AssignTable(header.diagnosticStringOffset, output.stringTable.size(), sizeof(char));
 		header.diagnosticStringSize = static_cast<std::uint32_t>(output.stringTable.size());
 		output.header = header;
 	}
+}
+
+VirtualGeometryAdaptiveCompileSettings MakeDefaultVirtualGeometryAdaptiveCompileSettings()
+{
+	VirtualGeometryAdaptiveCompileSettings settings;
+	settings.targetRatios = {
+		1.0f,
+		0.70710677f,
+		0.5f,
+		0.35355338f,
+		0.25f,
+		0.17677669f,
+		0.125f,
+		0.08838835f
+	};
+	settings.minimumSourceTriangles = 512u;
+	settings.minimumGeneratedTriangles = 64u;
+	settings.minimumMeshletsPerGeneratedLevel = 2u;
+	settings.minimumUsefulTriangleReduction = 0.15f;
+	settings.minimumUsefulMeshletReduction = 0.15f;
+	settings.maximumGeometricError = 0.1f;
+	settings.settingsSource = "ProjectDefaults";
+	return settings;
+}
+
+VirtualGeometryAdaptiveCompileSettings SanitizeVirtualGeometryAdaptiveCompileSettings(const VirtualGeometryAdaptiveCompileSettings& settings)
+{
+	VirtualGeometryAdaptiveCompileSettings sanitized = settings;
+	if (sanitized.targetRatios.empty())
+	{
+		sanitized.targetRatios = MakeDefaultVirtualGeometryAdaptiveCompileSettings().targetRatios;
+	}
+
+	std::vector<float> normalizedRatios;
+	normalizedRatios.reserve(sanitized.targetRatios.size());
+	float previousRatio = 2.0f;
+	for (float ratio : sanitized.targetRatios)
+	{
+		if (!std::isfinite(ratio) || ratio <= 0.0f)
+		{
+			continue;
+		}
+		ratio = std::clamp(ratio, 0.01f, 1.0f);
+		if (!normalizedRatios.empty() && ratio >= previousRatio)
+		{
+			continue;
+		}
+		normalizedRatios.push_back(ratio);
+		previousRatio = ratio;
+		if (normalizedRatios.size() >= 8u)
+		{
+			break;
+		}
+	}
+	if (normalizedRatios.empty() || normalizedRatios.front() != 1.0f)
+	{
+		normalizedRatios.insert(normalizedRatios.begin(), 1.0f);
+	}
+	sanitized.targetRatios = std::move(normalizedRatios);
+	sanitized.minimumSourceTriangles = std::max(1u, sanitized.minimumSourceTriangles);
+	sanitized.minimumGeneratedTriangles = std::max(1u, sanitized.minimumGeneratedTriangles);
+	sanitized.minimumMeshletsPerGeneratedLevel = std::max(1u, sanitized.minimumMeshletsPerGeneratedLevel);
+	sanitized.minimumUsefulTriangleReduction = std::isfinite(sanitized.minimumUsefulTriangleReduction)
+		? std::clamp(sanitized.minimumUsefulTriangleReduction, 0.0f, 0.95f)
+		: 0.15f;
+	sanitized.minimumUsefulMeshletReduction = std::isfinite(sanitized.minimumUsefulMeshletReduction)
+		? std::clamp(sanitized.minimumUsefulMeshletReduction, 0.0f, 0.95f)
+		: 0.15f;
+	sanitized.maximumGeometricError = std::isfinite(sanitized.maximumGeometricError)
+		? std::clamp(sanitized.maximumGeometricError, 0.0f, 1000.0f)
+		: 0.1f;
+	if (sanitized.settingsSource.empty())
+	{
+		sanitized.settingsSource = "ProjectDefaults";
+	}
+	return sanitized;
 }
 
 // IsSupportedMeshSourceExtension is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1675,11 +2869,19 @@ bool CompileMesh(
 	bool includeMeshletBounds,
 	MeshCompileReport* outReport,
 	float smoothingAngle,
-	float weldThreshold)
+	float weldThreshold,
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings)
 {
 	MeshCompileReport report{};
 	report.assetPath = input;
 	report.formatVersion = kMeshCurrentVersion;
+	if (adaptiveSettings != nullptr)
+	{
+		// The AssetDatabase/Inspector path resolves project defaults plus a
+		// per-mesh override before cooking. Store that resolved profile on the
+		// report so BuildVirtualGeometryLods uses it instead of the defaults.
+		report.virtualGeometry.adaptiveSettings = *adaptiveSettings;
+	}
 	report.sourceHashHex = ComputeFileHashHex(input);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::exists(input))
@@ -2045,7 +3247,8 @@ bool CompileMeshFromRaw(
 	bool includeMeshletBounds,
 	MeshCompileReport* outReport,
 	float smoothingAngle,
-	float weldThreshold)
+	float weldThreshold,
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings)
 {
 	if (vertices.empty() || indices.empty() || (indices.size() % 3u) != 0u)
 	{
@@ -2120,7 +3323,7 @@ bool CompileMeshFromRaw(
 		}
 	}
 
-	const bool compiled = CompileMesh(stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold);
+	const bool compiled = CompileMesh(stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold, adaptiveSettings);
 	std::error_code removeError;
 	std::filesystem::remove(stagedObj, removeError);
 	if (outReport != nullptr)

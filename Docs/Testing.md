@@ -207,15 +207,51 @@ The CTest labels also expose stable virtual-geometry slices:
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
 ```
 
+Feature `specs/027-adaptive-virtual-geometry` adds focused adaptive slices for
+configurable cook ratios, Inspector-only per-mesh overrides, real page
+streaming, stronger Hi-Z validation, mixed-detail cluster selection, and runtime
+visualization. Use this pass while implementing or reviewing that feature:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.AdaptiveVirtualGeometry|Editor.AdaptiveVirtualGeometry" --output-on-failure -C Debug
+```
+
+The broader virtual-geometry regression set covers renderer, resource,
+editor asset pipeline, automation, export, and debug visualizer behavior:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
+```
+
+When diagnosing just the adaptive path through the harness binaries, use the
+same filters that the CTest entries apply:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="AdaptiveVirtualGeometry;VirtualGeometry.Render;VirtualGeometry.Resource;VirtualGeometry.Diagnostics;VirtualGeometry.HiZ;VirtualGeometry.Stress"
+.\out\build\Debug\TerraEngine-EngineTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+$env:TERRAENGINE_TEST_FILTER="AdaptiveVirtualGeometry;Editor.AssetPipeline.VirtualGeometry;VirtualGeometry.Editor.Inspector;VirtualGeometry.Editor.Automation;VirtualGeometry.Editor.Export;VirtualGeometry.Editor.DebugView"
+.\out\build\Debug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
 Fixture guidance for clean-checkout synthetic meshes, dense-scene thresholds,
 and residency churn invariants lives in
 `Tests/Fixtures/VirtualGeometry/README.md`. The install target copies
 `Docs/Renderer/VirtualGeometry.md`, `Docs/TerraEngineMeshFile.md`,
 `Docs/Testing.md`, and that fixture README into the Debug install tree for QA.
 
-After virtual geometry code changes, always finish with the normal compile,
-CTest, and install verification flow so the installed editor/runtime tree has
-the matching TEMF loader, shaders, diagnostics, and asset pipeline behavior.
+After virtual geometry code changes, always finish with the normal configure,
+compile, CTest, and install verification flow so the installed editor/runtime
+tree has the matching TEMF loader, shaders, diagnostics, and asset pipeline
+behavior:
+
+```powershell
+cmake --preset Debug
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests"
+ctest --test-dir out/build/Debug -R "Engine.AdaptiveVirtualGeometry|Editor.AdaptiveVirtualGeometry|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
+cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install"
+```
 
 The editor MCP bridge checks live under `Tests/Editor/Automation`. They cover
 automation envelopes, capability metadata, local-only transport checks, bridge

@@ -48,6 +48,69 @@ bool RequireEntry(const std::unordered_set<std::string>& entries, std::string_vi
 	return false;
 }
 
+bool ValidateTableRange(
+	const tepak::ByteBuffer& bytes,
+	std::uint32_t offset,
+	std::uint32_t count,
+	std::uint32_t stride,
+	std::string_view label,
+	std::string_view path,
+	std::string& outError)
+{
+	if (offset == 0u || count == 0u) {
+		outError = "Virtual geometry mesh payload is missing required " + std::string(label) + " metadata: " + std::string(path);
+		return false;
+	}
+
+	const std::uint64_t end = static_cast<std::uint64_t>(offset) + static_cast<std::uint64_t>(count) * stride;
+	if (end > bytes.size()) {
+		outError = "Virtual geometry mesh payload " + std::string(label) + " metadata is outside the packed file: " + std::string(path);
+		return false;
+	}
+	return true;
+}
+
+bool ValidateVirtualGeometryManifestBlock(const nlohmann::json& virtualGeometry, std::string& outError)
+{
+	if (!virtualGeometry.contains("requiredMetadata") || !virtualGeometry["requiredMetadata"].is_array()) {
+		outError = "Virtual geometry export manifest is missing requiredMetadata.";
+		return false;
+	}
+
+	std::unordered_set<std::string> requiredMetadata;
+	for (const nlohmann::json& entry : virtualGeometry["requiredMetadata"]) {
+		if (entry.is_string()) {
+			requiredMetadata.insert(entry.get<std::string>());
+		}
+	}
+	static constexpr std::array<std::string_view, 4> kRequiredMetadata = {
+		"adaptiveTargets",
+		"fallbackCoverage",
+		"clusterHierarchy",
+		"pageLinks",
+	};
+	for (std::string_view metadata : kRequiredMetadata) {
+		if (!requiredMetadata.contains(std::string(metadata))) {
+			outError = "Virtual geometry export manifest is missing required metadata declaration: " + std::string(metadata);
+			return false;
+		}
+	}
+
+	static constexpr std::array<std::string_view, 4> kRequiredQualityFields = {
+		"geometryBudgetBytes",
+		"lodErrorScale",
+		"maxLodDrop",
+		"preloadBias",
+	};
+	for (std::string_view field : kRequiredQualityFields) {
+		if (!virtualGeometry.contains(std::string(field))) {
+			outError = "Virtual geometry export manifest is missing quality field: " + std::string(field);
+			return false;
+		}
+	}
+	return true;
+}
+
 bool ValidateVirtualGeometryTemfPayload(const tepak::ByteBuffer& bytes, std::string_view path, std::string& outError)
 {
 	const std::string normalizedPath = NormalizePackagePath(path);
@@ -87,6 +150,48 @@ bool ValidateVirtualGeometryTemfPayload(const tepak::ByteBuffer& bytes, std::str
 		|| virtualHeader.sourceTriangleCount == 0u
 		|| virtualHeader.sourceVertexCount == 0u) {
 		outError = "Virtual geometry mesh payload root metadata is invalid and must be rebuilt: " + normalizedPath;
+		return false;
+	}
+
+	constexpr std::uint32_t requiredFlags = kVirtualGeometryValidationFlagAdaptiveTargetsPresent
+		| kVirtualGeometryValidationFlagFallbackCoverageValidated
+		| kVirtualGeometryValidationFlagClusterHierarchyValidated
+		| kVirtualGeometryValidationFlagPageLinksValidated;
+	if ((virtualHeader.flags & kVirtualGeometryValidationFlagAdaptiveTargetsPresent) == 0u
+		|| virtualHeader.requestedTargetCount == 0u
+		|| virtualHeader.requestedTargetTableOffset == 0u) {
+		outError = "Virtual geometry mesh payload is missing adaptive cook metadata: " + normalizedPath;
+		return false;
+	}
+	if ((virtualHeader.flags & kVirtualGeometryValidationFlagFallbackCoverageValidated) == 0u) {
+		outError = "Virtual geometry mesh payload is missing fallback coverage validation: " + normalizedPath;
+		return false;
+	}
+	if ((virtualHeader.flags & kVirtualGeometryValidationFlagClusterHierarchyValidated) == 0u
+		|| virtualHeader.clusterCount == 0u
+		|| virtualHeader.clusterTableOffset == 0u) {
+		outError = "Virtual geometry mesh payload is missing cluster hierarchy metadata: " + normalizedPath;
+		return false;
+	}
+	if ((virtualHeader.flags & kVirtualGeometryValidationFlagPageLinksValidated) == 0u
+		|| virtualHeader.pageCount == 0u
+		|| virtualHeader.pageTableOffset == 0u
+		|| virtualHeader.clusterPageLinkCount == 0u
+		|| virtualHeader.clusterPageLinkTableOffset == 0u) {
+		outError = "Virtual geometry mesh payload is missing page metadata or cluster-page links: " + normalizedPath;
+		return false;
+	}
+	if ((virtualHeader.flags & requiredFlags) != requiredFlags) {
+		outError = "Virtual geometry mesh payload is missing required adaptive validation flags: " + normalizedPath;
+		return false;
+	}
+
+	if (!ValidateTableRange(bytes, virtualHeader.detailLevelTableOffset, virtualHeader.detailLevelCount, sizeof(VirtualGeometryDetailLevelRecord), "detail", normalizedPath, outError)
+		|| !ValidateTableRange(bytes, virtualHeader.cullableGroupTableOffset, virtualHeader.cullableGroupCount, sizeof(VirtualGeometryCullableGroupRecord), "cullable group", normalizedPath, outError)
+		|| !ValidateTableRange(bytes, virtualHeader.requestedTargetTableOffset, virtualHeader.requestedTargetCount, sizeof(VirtualGeometryRequestedTargetRecord), "adaptive target", normalizedPath, outError)
+		|| !ValidateTableRange(bytes, virtualHeader.clusterTableOffset, virtualHeader.clusterCount, sizeof(VirtualGeometryClusterRecord), "cluster", normalizedPath, outError)
+		|| !ValidateTableRange(bytes, virtualHeader.pageTableOffset, virtualHeader.pageCount, sizeof(VirtualGeometryPageRecord), "page", normalizedPath, outError)
+		|| !ValidateTableRange(bytes, virtualHeader.clusterPageLinkTableOffset, virtualHeader.clusterPageLinkCount, sizeof(VirtualGeometryClusterPageLinkRecord), "cluster-page link", normalizedPath, outError)) {
 		return false;
 	}
 
@@ -152,6 +257,9 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 		const nlohmann::json manifest = nlohmann::json::parse(manifestText);
 
 		if (manifest.contains("virtualGeometry") && manifest["virtualGeometry"].is_object()) {
+			if (!ValidateVirtualGeometryManifestBlock(manifest["virtualGeometry"], outError)) {
+				return false;
+			}
 			static constexpr std::array<std::string_view, 4> kRequiredVirtualGeometryEntries = {
 				"shaders/default.task.tspf",
 				"shaders/default.mesh.tspf",

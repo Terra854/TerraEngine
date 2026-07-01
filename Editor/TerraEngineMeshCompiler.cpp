@@ -237,6 +237,106 @@ namespace
 		json << "]";
 	}
 
+	void AppendFloatArrayJson(std::ostringstream& json, const std::vector<float>& values)
+	{
+		json << "[";
+		for (std::size_t index = 0; index < values.size(); ++index)
+		{
+			if (index != 0u)
+			{
+				json << ",";
+			}
+			json << values[index];
+		}
+		json << "]";
+	}
+
+	void AppendAdaptiveSettingsJson(std::ostringstream& json, const VirtualGeometryAdaptiveCompileSettings& settings)
+	{
+		// Keep every cook input visible in the CLI report so automated import
+		// tests can prove whether a mesh used project defaults or an override.
+		json << "{";
+		json << "\"settingsSource\":\"" << EscapeJson(settings.settingsSource) << "\",";
+		json << "\"targetRatios\":";
+		AppendFloatArrayJson(json, settings.targetRatios);
+		json << ",\"minimumSourceTriangles\":" << settings.minimumSourceTriangles;
+		json << ",\"minimumGeneratedTriangles\":" << settings.minimumGeneratedTriangles;
+		json << ",\"minimumMeshletsPerGeneratedLevel\":" << settings.minimumMeshletsPerGeneratedLevel;
+		json << ",\"minimumUsefulTriangleReduction\":" << settings.minimumUsefulTriangleReduction;
+		json << ",\"minimumUsefulMeshletReduction\":" << settings.minimumUsefulMeshletReduction;
+		json << ",\"maximumGeometricError\":" << settings.maximumGeometricError;
+		json << "}";
+	}
+
+	void AppendRequestedTargetsJson(std::ostringstream& json, const std::vector<VirtualGeometryRequestedTargetCompileReport>& targets)
+	{
+		json << "[";
+		for (std::size_t index = 0; index < targets.size(); ++index)
+		{
+			const VirtualGeometryRequestedTargetCompileReport& target = targets[index];
+			if (index != 0u)
+			{
+				json << ",";
+			}
+			json << "{";
+			json << "\"targetIndex\":" << target.targetIndex << ",";
+			json << "\"requestedRatio\":" << target.requestedRatio << ",";
+			json << "\"desiredTriangleCount\":" << target.desiredTriangleCount << ",";
+			json << "\"desiredMeshletCount\":" << target.desiredMeshletCount << ",";
+			json << "\"status\":\"" << EscapeJson(target.status) << "\"";
+			json << "}";
+		}
+		json << "]";
+	}
+
+	void AppendGeneratedLevelsJson(std::ostringstream& json, const std::vector<VirtualGeometryGeneratedLevelCompileReport>& levels)
+	{
+		json << "[";
+		for (std::size_t index = 0; index < levels.size(); ++index)
+		{
+			const VirtualGeometryGeneratedLevelCompileReport& level = levels[index];
+			if (index != 0u)
+			{
+				json << ",";
+			}
+			json << "{";
+			json << "\"generatedLevelIndex\":" << level.generatedLevelIndex << ",";
+			json << "\"requestedTargetIndex\":" << level.requestedTargetIndex << ",";
+			json << "\"lodIndex\":" << level.lodIndex << ",";
+			json << "\"actualRatio\":" << level.actualRatio << ",";
+			json << "\"triangleCount\":" << level.triangleCount << ",";
+			json << "\"meshletCount\":" << level.meshletCount << ",";
+			json << "\"geometricError\":" << level.geometricError;
+			json << "}";
+		}
+		json << "]";
+	}
+
+	void AppendSkippedLevelsJson(std::ostringstream& json, const std::vector<VirtualGeometrySkippedLevelCompileReport>& levels)
+	{
+		json << "[";
+		for (std::size_t index = 0; index < levels.size(); ++index)
+		{
+			const VirtualGeometrySkippedLevelCompileReport& level = levels[index];
+			if (index != 0u)
+			{
+				json << ",";
+			}
+			json << "{";
+			json << "\"targetIndex\":" << level.targetIndex << ",";
+			json << "\"requestedRatio\":" << level.requestedRatio << ",";
+			json << "\"status\":\"" << EscapeJson(level.status) << "\",";
+			json << "\"reason\":\"" << EscapeJson(level.reason) << "\",";
+			json << "\"candidateTriangleCount\":" << level.candidateTriangleCount << ",";
+			json << "\"candidateMeshletCount\":" << level.candidateMeshletCount << ",";
+			json << "\"actualCandidateRatio\":" << level.actualCandidateRatio << ",";
+			json << "\"nearestGeneratedLevelIndex\":" << level.nearestGeneratedLevelIndex << ",";
+			json << "\"message\":\"" << EscapeJson(level.message) << "\"";
+			json << "}";
+		}
+		json << "]";
+	}
+
 	// BuildReportJson is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string BuildReportJson(const MeshCompileReport& report)
 	{
@@ -265,6 +365,15 @@ namespace
 		json << "\"sourceTriangleCount\":" << report.virtualGeometry.sourceTriangleCount << ",";
 		json << "\"selectedFallbackAvailable\":" << ToBoolText(report.virtualGeometry.selectedFallbackAvailable != 0u) << ",";
 		json << "\"maxGeometricError\":" << report.virtualGeometry.maxGeometricError << ",";
+		json << "\"adaptiveSettings\":";
+		AppendAdaptiveSettingsJson(json, report.virtualGeometry.adaptiveSettings);
+		json << ",\"requestedTargets\":";
+		AppendRequestedTargetsJson(json, report.virtualGeometry.requestedTargets);
+		json << ",\"generatedLevels\":";
+		AppendGeneratedLevelsJson(json, report.virtualGeometry.generatedLevels);
+		json << ",\"skippedLevels\":";
+		AppendSkippedLevelsJson(json, report.virtualGeometry.skippedLevels);
+		json << ",";
 		json << "\"warnings\":";
 		AppendStringArrayJson(json, report.virtualGeometry.warnings);
 		json << ",\"errors\":";
@@ -297,6 +406,10 @@ namespace
 		out << "virtualGeometryDetailLevelCount=" << report.virtualGeometry.detailLevelCount << "\n";
 		out << "virtualGeometryMeshletCount=" << report.virtualGeometry.cullableGroupCount << "\n";
 		out << "virtualGeometrySourceTriangleCount=" << report.virtualGeometry.sourceTriangleCount << "\n";
+		out << "virtualGeometryRequestedTargetCount=" << report.virtualGeometry.requestedTargets.size() << "\n";
+		out << "virtualGeometryGeneratedLevelCount=" << report.virtualGeometry.generatedLevels.size() << "\n";
+		out << "virtualGeometrySkippedLevelCount=" << report.virtualGeometry.skippedLevels.size() << "\n";
+		out << "virtualGeometryAdaptiveTargetCount=" << report.virtualGeometry.adaptiveSettings.targetRatios.size() << "\n";
 		out << "virtualGeometryWarningCount=" << report.virtualGeometry.warnings.size() << "\n";
 	}
 
@@ -399,6 +512,10 @@ namespace
 			<< " virtualGeometryCullableGroups=" << report.virtualGeometry.cullableGroupCount
 			<< " virtualGeometrySourceTriangles=" << report.virtualGeometry.sourceTriangleCount
 			<< " virtualGeometryFallbackAvailable=" << ToBoolText(report.virtualGeometry.selectedFallbackAvailable != 0u)
+			<< " virtualGeometryRequestedTargets=" << report.virtualGeometry.requestedTargets.size()
+			<< " virtualGeometryGeneratedLevels=" << report.virtualGeometry.generatedLevels.size()
+			<< " virtualGeometrySkippedLevels=" << report.virtualGeometry.skippedLevels.size()
+			<< " virtualGeometryAdaptiveTargets=" << report.virtualGeometry.adaptiveSettings.targetRatios.size()
 			<< " virtualGeometryWarnings=" << report.virtualGeometry.warnings.size()
 			<< " cpu-repack-used=false"
 			<< " baselinePass=" << ToBoolText(report.baselinePass)

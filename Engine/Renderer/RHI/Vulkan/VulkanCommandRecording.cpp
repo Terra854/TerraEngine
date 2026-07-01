@@ -68,11 +68,12 @@ namespace TerraEngine::Renderer::Vulkan {
 			plan.stages.push_back(std::move(stage));
 		};
 
-		// Virtual geometry will use the same split as the rest of the renderer:
-		// worker-safe preparation builds immutable LOD choices, page needs,
-		// visibility packets, descriptor/update intents, and upload plans, while
-		// actual Vulkan object mutation, command-buffer submission, and resource
-		// retirement remain owned by the final coordinator boundary below.
+		// Virtual geometry uses the same split as the rest of the renderer:
+		// worker-safe preparation builds immutable LOD choices, selected cluster
+		// ranges, page-need packets, descriptor/update intents, and upload plans.
+		// Actual Vulkan page upload, command-buffer recording ownership, resource
+		// retirement, and resident-page publication remain protected coordinator
+		// work so workers never mutate live Vulkan objects.
 		addStage("prepared-draw-setup", RenderBackendWorkKind::Geometry, capabilities.supportsParallelRecording, false);
 		addStage("shadow-draw-list-build", RenderBackendWorkKind::Shadow, capabilities.supportsParallelShadowRecording, false);
 		addStage("shadow-secondary-recording", RenderBackendWorkKind::Shadow, capabilities.supportsParallelShadowRecording && capabilities.supportsSecondaryRecording, false);

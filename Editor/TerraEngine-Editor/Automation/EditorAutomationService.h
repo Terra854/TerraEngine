@@ -61,6 +61,33 @@ namespace TerraEngine::Editor::Automation
 			std::string message;
 		};
 
+		struct VirtualGeometrySettingsRequest
+		{
+			TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+			bool usePerMeshOverride = false;
+			bool rebuildAfterApply = false;
+			std::vector<float> targetRatios;
+		};
+
+		struct VirtualGeometrySettingsResponse
+		{
+			bool accepted = false;
+			bool meshAsset = false;
+			std::string settingsSource = "ProjectDefaults";
+			std::vector<std::string> validationErrors;
+		};
+
+		struct VirtualGeometryInspectResponse
+		{
+			bool meshAsset = false;
+			std::uint32_t requestedTargets = 0u;
+			std::uint32_t generatedLevels = 0u;
+			std::uint32_t skippedDetails = 0u;
+			std::uint32_t clusters = 0u;
+			std::uint32_t pages = 0u;
+			std::vector<std::string> warnings;
+		};
+
 		[[nodiscard]] ReflectionMutationPreflight PreflightReflectionMutation(const nlohmann::json& arguments) const;
 
 	private:
@@ -79,6 +106,9 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleComponentSetProperty(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleAssetList(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleAssetImport(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleVirtualGeometrySettingsGet(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleVirtualGeometrySettingsSet(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleVirtualGeometrySettingsReset(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleVirtualGeometryRebuild(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleVirtualGeometryInspect(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleAssetPrepareDelete(const nlohmann::json& arguments, const std::string& requestId);

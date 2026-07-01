@@ -204,3 +204,9 @@ set_tests_properties(Engine.VirtualGeometryResource PROPERTIES
 	LABELS "Engine;VirtualGeometry;Resource;Streaming"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Resource,Resource.Residency"
 )
+
+add_test(NAME Engine.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.AdaptiveVirtualGeometry PROPERTIES
+	LABELS "Engine;VirtualGeometry;AdaptiveVirtualGeometry"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=AdaptiveVirtualGeometry;VirtualGeometry.Render;VirtualGeometry.Resource;VirtualGeometry.Diagnostics;VirtualGeometry.HiZ;VirtualGeometry.Stress"
+)

@@ -51,6 +51,127 @@ namespace
 		return std::chrono::duration<float, std::milli>(BackendClock::now() - start).count();
 	}
 
+	std::uint32_t EstimateSelectedPrimitiveCount(
+		const TerraEngine::UUID& meshId,
+		std::uint32_t fallbackPrimitiveCount,
+		std::uint32_t meshletOffset,
+		std::uint32_t meshletCount)
+	{
+		// Render stats are editor diagnostics, not render-critical state. Look
+		// up the CPU meshlet table so the visible triangle counter follows the
+		// selected virtual-geometry range instead of always showing LOD0.
+		const Mesh* cpuMesh = ResourceManager::Instance().GetMesh(meshId);
+		if (cpuMesh == nullptr || cpuMesh->meshletRecords.empty())
+		{
+			return fallbackPrimitiveCount;
+		}
+
+		const std::uint32_t clampedOffset = std::min<std::uint32_t>(meshletOffset, static_cast<std::uint32_t>(cpuMesh->meshletRecords.size()));
+		const std::uint32_t availableCount = static_cast<std::uint32_t>(cpuMesh->meshletRecords.size()) - clampedOffset;
+		const std::uint32_t clampedCount = meshletCount == 0u
+			? availableCount
+			: std::min(meshletCount, availableCount);
+
+		std::uint32_t primitiveCount = 0u;
+		for (std::uint32_t localMeshlet = 0u; localMeshlet < clampedCount; ++localMeshlet)
+		{
+			const MeshletRecord& record = cpuMesh->meshletRecords[static_cast<std::size_t>(clampedOffset) + localMeshlet];
+			primitiveCount += record.primitiveIndexCount / 3u;
+		}
+		return primitiveCount == 0u ? fallbackPrimitiveCount : primitiveCount;
+	}
+
+	void HashVulkanHiZDepthSignatureValue(std::uint64_t& seed, std::uint64_t value)
+	{
+		seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6u) + (seed >> 2u);
+	}
+
+	void HashVulkanHiZDepthSignatureFloat(std::uint64_t& seed, float value)
+	{
+		std::uint32_t bits = 0u;
+		std::memcpy(&bits, &value, sizeof(bits));
+		HashVulkanHiZDepthSignatureValue(seed, bits);
+	}
+
+	void HashVulkanHiZDepthSignatureUuid(std::uint64_t& seed, const TerraEngine::UUID& value)
+	{
+		for (std::uint8_t byte : value)
+		{
+			HashVulkanHiZDepthSignatureValue(seed, byte);
+		}
+	}
+
+	void HashVulkanHiZDepthSignatureMat4(std::uint64_t& seed, const glm::mat4& value)
+	{
+		for (int column = 0; column < 4; ++column)
+		{
+			for (int row = 0; row < 4; ++row)
+			{
+				HashVulkanHiZDepthSignatureFloat(seed, value[column][row]);
+			}
+		}
+	}
+
+	std::uint64_t BuildVulkanHiZDepthSceneSignature(const FrameRenderData& frameData)
+	{
+		std::uint64_t signature = 1469598103934665603ull;
+		HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(frameData.commands.size()));
+
+		for (const DrawCommand& command : frameData.commands)
+		{
+			// Hi-Z is a previous-frame acceleration structure. Record the exact
+			// depth-producing draw identity that created it for diagnostics, but
+			// do not use this signature as a hard gate: interactive movement
+			// must keep Hi-Z active and let the shader fail open per meshlet.
+			HashVulkanHiZDepthSignatureUuid(signature, command.objectId);
+			HashVulkanHiZDepthSignatureUuid(signature, command.meshId);
+			HashVulkanHiZDepthSignatureUuid(signature, command.materialId);
+			HashVulkanHiZDepthSignatureMat4(signature, command.modelMatrix);
+			HashVulkanHiZDepthSignatureValue(signature, command.materialIndex);
+			HashVulkanHiZDepthSignatureValue(signature, command.meshDataIndex);
+			HashVulkanHiZDepthSignatureValue(signature, command.textureIndex);
+			HashVulkanHiZDepthSignatureValue(signature, command.virtualMeshletOffset);
+			HashVulkanHiZDepthSignatureValue(signature, command.virtualMeshletCount);
+			HashVulkanHiZDepthSignatureValue(signature, command.selectedVirtualLod);
+			HashVulkanHiZDepthSignatureValue(signature, command.virtualGeometryFlags);
+			// The selected packet offsets are per-view allocator positions, not
+			// visible geometry. Hash counts and meshlet ranges instead so the
+			// diagnostic signature changes when coverage changes, not when a
+			// transient packet lands at another offset.
+			HashVulkanHiZDepthSignatureValue(signature, command.selectedVirtualClusterCount);
+			HashVulkanHiZDepthSignatureValue(signature, command.selectedVirtualPageNeedCount);
+			HashVulkanHiZDepthSignatureValue(signature, command.taskShaderCullingEnabled ? 1u : 0u);
+
+			const Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
+			if (material == nullptr)
+			{
+				HashVulkanHiZDepthSignatureValue(signature, 0u);
+				continue;
+			}
+
+			HashVulkanHiZDepthSignatureValue(signature, 1u);
+			HashVulkanHiZDepthSignatureValue(signature, material->header.flags);
+			HashVulkanHiZDepthSignatureValue(signature, material->header.shadingModel);
+			HashVulkanHiZDepthSignatureValue(signature, material->header.alphaMode);
+			HashVulkanHiZDepthSignatureUuid(signature, material->header.shaderCollectionId);
+			HashVulkanHiZDepthSignatureFloat(signature, material->header.alphaCutoff);
+			HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(material->shadowBehavior));
+			HashVulkanHiZDepthSignatureValue(signature, material->header.textureCount);
+			for (const TextureBinding& binding : material->textures)
+			{
+				HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(binding.semantic));
+				HashVulkanHiZDepthSignatureUuid(signature, binding.textureUuid);
+				HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(binding.uvSetIndex));
+				HashVulkanHiZDepthSignatureFloat(signature, binding.uvScale[0]);
+				HashVulkanHiZDepthSignatureFloat(signature, binding.uvScale[1]);
+				HashVulkanHiZDepthSignatureFloat(signature, binding.uvOffset[0]);
+				HashVulkanHiZDepthSignatureFloat(signature, binding.uvOffset[1]);
+			}
+		}
+
+		return signature;
+	}
+
 	// struct ScoredCandidate groups related state and operations so callers have one documented contract.
 	struct ScoredCandidate
 	{
@@ -1061,8 +1182,29 @@ void VulkanContext::BeginFrame() {
 		{ TerraEngine::Renderer::BackendFrameCostCategory::FenceWait, TerraEngine::Renderer::BackendSubmitStage::FenceWait, RenderViewType::Game, 0u, impl->editorMode ? "In-flight fence wait" : "Shared attachment frame fence wait", true, false },
 		ElapsedMilliseconds(fenceStart),
 		0.25f);
+	// The fence proves the previous write images for this frame slot are no
+	// longer in flight. Promote each view before descriptors are frozen so Scene
+	// and Game command buffers sample their own stable completed Hi-Z pyramids
+	// while compute writes the other image for the next reuse of this slot.
+	bool promotedHiZ = false;
+	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < VulkanContext::Impl::kHiZViewCount; ++hiZViewIndex)
+	{
+		promotedHiZ = impl->PromoteCompletedHiZWrite(hiZViewIndex, impl->currentFrame) || promotedHiZ;
+	}
+	if (promotedHiZ)
+	{
+		impl->UpdateGlobalHiZ(impl->currentFrame);
+	}
 	// The waited frame slot is now complete, so snapshot its GPU counters for UI stats.
 	impl->PublishCompletedFrameStats(impl->currentFrame);
+	// Freeze the completed Hi-Z metadata for this CPU frame. RenderFrame may
+	// record multiple outputs before the GPU executes any of them; every output
+	// must validate against the pyramid that actually exists at BeginFrame,
+	// not against a write recorded earlier in the same CPU frame.
+	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < VulkanContext::Impl::kHiZViewCount; ++hiZViewIndex)
+	{
+		impl->readableHiZHistoryByViewFrame[hiZViewIndex][impl->currentFrame] = impl->CurrentHiZ(hiZViewIndex).history;
+	}
 	{
 		std::lock_guard<std::mutex> lock(impl->statsMutex);
 		impl->latestRenderSnapshotDiagnostics = impl->pendingRenderSnapshotDiagnostics;
@@ -2418,6 +2560,18 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		return;
 	}
 
+	VkImage activeDepthImage = impl->depthImage;
+	VkImageView activeDepthView = impl->depthImageView;
+	if (impl->editorMode) {
+		auto& activeOffscreenView = (view == ViewType::Scene) ? impl->sceneView : impl->gameView;
+		activeDepthImage = activeOffscreenView.depthImage;
+		activeDepthView = activeOffscreenView.depthView;
+		if (activeDepthImage == VK_NULL_HANDLE || activeDepthView == VK_NULL_HANDLE) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping Vulkan draw submission because the editor view depth attachment is not ready.");
+			return;
+		}
+	}
+
 	const auto PrepareDrawResources = [&](const DrawCommand& command) {
 		Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -3032,40 +3186,57 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	const std::uint32_t hiZTargetWidth = std::max<std::uint32_t>(impl->swapchainExtent.width, 1u);
 	const std::uint32_t hiZTargetHeight = std::max<std::uint32_t>(impl->swapchainExtent.height, 1u);
 	const std::uint64_t hiZProjectionSignature = BuildVulkanHiZProjectionSignature(currentViewProjection);
+	const std::uint64_t hiZDepthSceneSignature = BuildVulkanHiZDepthSceneSignature(frameData);
+	const uint32_t hiZViewIndex = impl->HiZViewIndexForView(view);
+	VulkanHiZ& currentFrameHiZ = impl->CurrentHiZ(hiZViewIndex);
+	VulkanHiZ& writableFrameHiZ = impl->WritableHiZForFrame(hiZViewIndex, impl->currentFrame);
+	const VulkanHiZHistoryMetadata& readableHiZHistory = impl->readableHiZHistoryByViewFrame[hiZViewIndex][impl->currentFrame];
+	const VulkanHiZViewClass hiZViewClass = outputRequest.kind == RenderOutputKind::MainRuntimeView
+		? VulkanHiZViewClass::ExportRuntime
+		: (renderViewType == RenderViewType::Scene ? VulkanHiZViewClass::Scene : VulkanHiZViewClass::Game);
+	const std::uint32_t hiZTargetId = outputRequest.outputId;
 	VulkanHiZHistoryMetadata currentHiZHistory{};
 	currentHiZHistory.viewId = viewIndex;
+	currentHiZHistory.viewClass = hiZViewClass;
+	currentHiZHistory.targetId = hiZTargetId;
 	currentHiZHistory.width = hiZTargetWidth;
 	currentHiZHistory.height = hiZTargetHeight;
 	currentHiZHistory.projectionSignature = hiZProjectionSignature;
+	currentHiZHistory.depthSceneSignature = hiZDepthSceneSignature;
 	currentHiZHistory.frameId = impl->pendingBackendFrameBreakdown.frameId;
 	const bool hiZResourcesReady =
-		impl->hiZ.width == hiZTargetWidth
-		&& impl->hiZ.height == hiZTargetHeight
-		&& impl->hiZ.image != VK_NULL_HANDLE
-		&& impl->hiZ.fullView != VK_NULL_HANDLE
-		&& impl->hiZ.sampler != VK_NULL_HANDLE
-		&& impl->hiZ.mipLevels > 0u
+		currentFrameHiZ.width == hiZTargetWidth
+		&& currentFrameHiZ.height == hiZTargetHeight
+		&& currentFrameHiZ.image != VK_NULL_HANDLE
+		&& currentFrameHiZ.fullView != VK_NULL_HANDLE
+		&& currentFrameHiZ.sampler != VK_NULL_HANDLE
+		&& currentFrameHiZ.mipLevels > 0u
 		&& impl->hiZComputePipeline != VK_NULL_HANDLE
 		&& impl->hiZPipelineLayout != VK_NULL_HANDLE
 		&& impl->hiZDescriptorSetLayout != VK_NULL_HANDLE;
-	const VirtualGeometryQualityProfile virtualGeometryQuality = SanitizeVirtualGeometryQualityProfile(frameData.settings.virtualGeometry);
-	const VulkanHiZValidationInput hiZValidationInput{
-		viewIndex,
-		hiZTargetWidth,
-		hiZTargetHeight,
-		hiZProjectionSignature,
-		hiZResourcesReady,
-		virtualGeometryQuality.hiZOcclusionEnabled,
-		!impl->editorMode && firstPrimaryPassForFrame,
-		virtualGeometryQuality.hiZSelfOcclusionGuardEnabled
-	};
-	const VulkanHiZValidationResult hiZValidation = ValidateVulkanHiZHistory(impl->hiZ.history, hiZValidationInput);
+	VulkanHiZValidationInput hiZValidationInput{};
+	hiZValidationInput.viewId = viewIndex;
+	hiZValidationInput.viewClass = hiZViewClass;
+	hiZValidationInput.targetId = hiZTargetId;
+	hiZValidationInput.width = hiZTargetWidth;
+	hiZValidationInput.height = hiZTargetHeight;
+	hiZValidationInput.projectionSignature = hiZProjectionSignature;
+	hiZValidationInput.depthSceneSignature = hiZDepthSceneSignature;
+	hiZValidationInput.pyramidReady = hiZResourcesReady;
+	hiZValidationInput.viewSupported = true;
+	hiZValidationInput.cameraCut = false;
+	const VulkanHiZValidationResult hiZValidation = ValidateVulkanHiZHistory(readableHiZHistory, hiZValidationInput);
 	const bool hiZOcclusionActive = hiZValidation.occlusionAllowed;
-	impl->hiZ.latestInvalidReason = hiZValidation.invalidReason;
-	impl->hiZ.latestOcclusionAllowed = hiZOcclusionActive;
+	currentFrameHiZ.latestInvalidReason = hiZValidation.invalidReason;
+	currentFrameHiZ.latestValidation = hiZValidation;
+	currentFrameHiZ.latestOcclusionAllowed = hiZOcclusionActive;
+	writableFrameHiZ.latestInvalidReason = hiZValidation.invalidReason;
+	writableFrameHiZ.latestValidation = hiZValidation;
+	writableFrameHiZ.latestOcclusionAllowed = hiZOcclusionActive;
 	if (!hiZValidation.historyValid)
 	{
-		impl->hiZ.history.invalidReason = hiZValidation.invalidReason;
+		currentFrameHiZ.history.invalidReason = hiZValidation.invalidReason;
+		writableFrameHiZ.history.invalidReason = hiZValidation.invalidReason;
 	}
 
 	FrameCullingDataGPU analysisCullingData{};
@@ -3229,7 +3400,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// the shared depth attachment out of the layout expected by vkCmdBeginRenderPass.
 	const bool needsPreSceneDepthCompute = clusteredLightingAvailable;
 	const bool depthPreparedForPreSceneCompute = needsPreSceneDepthCompute
-		&& impl->PrepareDepthForCompute(cmd, impl->depthImageView);
+		&& impl->PrepareDepthForCompute(cmd, activeDepthImage, activeDepthView, true);
 	if (needsPreSceneDepthCompute && !depthPreparedForPreSceneCompute) {
 		// Fail open when the shared depth image cannot be borrowed. The draw
 		// pass must not sample AO or cluster metadata that depends on a depth
@@ -3310,7 +3481,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// Pre-scene AO and cluster building sample the previous frame depth.
 		// The upcoming scene render pass clears and writes depth again, so hand
 		// the shared depth image back to graphics before vkCmdBeginRenderPass.
-		impl->RestoreDepthForAttachment(cmd);
+		impl->RestoreDepthForAttachment(cmd, activeDepthImage);
 	}
 
 	// Prepare draw data.
@@ -3480,6 +3651,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.clusterDataOffset = renderSnapshot.clusterDataOffset;
 		push.lightIndexOffset = renderSnapshot.lightIndexOffset;
 		push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
+		// RenderSystem expands virtual geometry into one command per selected
+		// spatial cluster. Vulkan therefore binds the same mesh buffers but
+		// pushes the cluster's own meshlet range for each sparse dispatch.
 		const uint32_t selectedMeshletOffset = std::min(command.virtualMeshletOffset, mesh.meshletCount);
 		const uint32_t selectedMeshletCount = command.virtualMeshletCount == 0u
 			? (mesh.meshletCount - selectedMeshletOffset)
@@ -3488,6 +3662,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.virtualMeshletCount = selectedMeshletCount;
 		push.selectedVirtualLod = command.selectedVirtualLod;
 		push.virtualGeometryFlags = command.virtualGeometryFlags;
+		push.selectedVirtualClusterOffset = command.selectedVirtualClusterOffset;
+		push.selectedVirtualClusterCount = command.selectedVirtualClusterCount;
+		push.selectedVirtualPageNeedOffset = command.selectedVirtualPageNeedOffset;
+		push.selectedVirtualPageNeedCount = command.selectedVirtualPageNeedCount;
 		push.editorTint = command.editorTint;
 
 		PreparedDraw draw{};
@@ -3543,10 +3721,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					shadowDraw.push.vrsActive = 2u;
 					shadowDraw.push.taskCullingEnabled = 0u;
 					// Shadow visibility is evaluated from the light point of
-					// view. A camera-owned Hi-Z pyramid would be the wrong
-					// occluder history here, so clear the self-occlusion guard
-					// bit before the shadow pass sees this draw.
-					shadowDraw.push.virtualGeometryFlags &= ~4u;
+					// view. Keep the original diagnostic flags intact so shadow
+					// recording cannot become another path that latches camera
+					// Hi-Z off after an editor view or blocker changes.
 					shadowDraw.push.editorTint = glm::vec4(0.0f);
 					
 					VkDrawMeshTasksIndirectCommandEXT shadowIndirectCmd{};
@@ -3562,7 +3739,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		}
 
 		pendingStats.drawCalls += 1u;
-		pendingStats.triangleCount += (mesh.indexCount / 3u);
+		pendingStats.triangleCount += EstimateSelectedPrimitiveCount(
+			command.meshId,
+			mesh.indexCount / 3u,
+			selectedMeshletOffset,
+			selectedMeshletCount);
 		pendingStats.meshletsTotal += selectedMeshletCount;
 		pendingStats.taskCullingActive = pendingStats.taskCullingActive || activeTaskCulling;
 		pendingStats.hiZActive = pendingStats.hiZActive || hiZOcclusionActive;
@@ -3673,7 +3854,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			shadowDraw.push.virtualMeshletOffset = selectedShadowMeshletOffset;
 			shadowDraw.push.virtualMeshletCount = selectedShadowMeshletCount;
 			shadowDraw.push.selectedVirtualLod = command.selectedVirtualLod;
-			shadowDraw.push.virtualGeometryFlags = command.virtualGeometryFlags & ~4u;
+			shadowDraw.push.virtualGeometryFlags = command.virtualGeometryFlags;
+			shadowDraw.push.selectedVirtualClusterOffset = command.selectedVirtualClusterOffset;
+			shadowDraw.push.selectedVirtualClusterCount = command.selectedVirtualClusterCount;
+			shadowDraw.push.selectedVirtualPageNeedOffset = command.selectedVirtualPageNeedOffset;
+			shadowDraw.push.selectedVirtualPageNeedCount = command.selectedVirtualPageNeedCount;
 			shadowDraw.push.editorTint = glm::vec4(0.0f);
 			shadowDraw.materialFlags = materialFlags;
 
@@ -4003,7 +4188,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			PushConstants shadowPush = draw.push;
 			shadowPush.viewProj = lightViewProjection;
 			shadowPush.taskCullingEnabled = 0u;
-			shadowPush.virtualGeometryFlags &= ~4u;
+			// Keep Hi-Z diagnostic bits intact. Shadow depth uses its own view
+			// projection, but clearing these flags here previously acted like a
+			// hidden metadata disable path after editor view changes.
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (draw.pipeline->supportsDefaultPushConstants) {
 				vkCmdPushConstants(cmd, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &shadowPush);
@@ -4345,7 +4532,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		&& firstPrimaryPassForFrame
 		&& frameData.settings.ambientOcclusionStrength > 0.001f
 		&& frameData.settings.ambientOcclusionQuality > 0u) {
-		impl->StoreAmbientOcclusionDepthHistory(cmd, viewIndex, currentViewProjection);
+		impl->StoreAmbientOcclusionDepthHistory(cmd, activeDepthImage, viewIndex, currentViewProjection);
 	}
 	// Hi-Z generation is safe to keep warm even while meshlet occlusion culling
 	// is fail-open: the pyramid is written after the scene depth pass and is not
@@ -4354,7 +4541,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (kEnableHiZMipGeneration) {
 		// Build Hi-Z after the depth attachment contains the final scene depth.
 		// The next frame can then use this stable pyramid for conservative occlusion.
-		impl->GenerateHiZPyramid(cmd, impl->depthImageView, snapshotSlotIndex, currentHiZHistory);
+		if (impl->GenerateHiZPyramid(writableFrameHiZ, cmd, activeDepthImage, activeDepthView, snapshotSlotIndex, currentHiZHistory)) {
+			impl->MarkHiZWritePending(hiZViewIndex, impl->currentFrame);
+		}
 	}
 			
 	vkEndCommandBuffer(cmd);
@@ -4430,26 +4619,26 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 }
 
 // VulkanContext::Impl::PrepareDepthForCompute is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImageView depthView) {
+bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, bool updateGlobalDepthDescriptor) {
 	if (cmd == VK_NULL_HANDLE
-		|| depthImage == VK_NULL_HANDLE
+		|| sourceDepthImage == VK_NULL_HANDLE
 		|| currentFrame >= globalDescriptorSets.size()
-		|| globalDescriptorSets[currentFrame] == VK_NULL_HANDLE
 		|| depthView == VK_NULL_HANDLE) {
 		return false;
 	}
 
-	// Depth-dependent compute passes sample the depth image through the global
-	// descriptor set. The image starts and ends each frame in attachment layout,
-	// so this helper performs the one attachment-to-read transition needed by
-	// clustered lighting, ambient occlusion, and Hi-Z generation.
+	// Depth-dependent compute passes sample the depth image through a descriptor
+	// after graphics has populated it. Vulkan may perform depth writes during
+	// either early or late fragment tests, so the barrier must wait on both
+	// stages; waiting only on late tests lets Hi-Z read the clear value on
+	// drivers that keep simple opaque depth writes in the early path.
 	VkImageMemoryBarrier depthBarrier{};
 	depthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	depthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 	depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 	depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	depthBarrier.image = depthImage;
+	depthBarrier.image = sourceDepthImage;
 	depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 	depthBarrier.subresourceRange.baseMipLevel = 0u;
 	depthBarrier.subresourceRange.levelCount = 1u;
@@ -4459,12 +4648,19 @@ bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImageVie
 	depthBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 	vkCmdPipelineBarrier(
 		cmd,
-		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 		0,
 		0, nullptr,
 		0, nullptr,
 		1, &depthBarrier);
+
+	if (!updateGlobalDepthDescriptor) {
+		return true;
+	}
+	if (globalDescriptorSets[currentFrame] == VK_NULL_HANDLE) {
+		return false;
+	}
 
 	VkDescriptorImageInfo sampledDepthInfo{};
 	sampledDepthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
@@ -4483,8 +4679,8 @@ bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImageVie
 }
 
 // VulkanContext::Impl::RestoreDepthForAttachment is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::RestoreDepthForAttachment(VkCommandBuffer cmd) {
-	if (cmd == VK_NULL_HANDLE || depthImage == VK_NULL_HANDLE) {
+void VulkanContext::Impl::RestoreDepthForAttachment(VkCommandBuffer cmd, VkImage sourceDepthImage) {
+	if (cmd == VK_NULL_HANDLE || sourceDepthImage == VK_NULL_HANDLE) {
 		return;
 	}
 
@@ -4498,7 +4694,7 @@ void VulkanContext::Impl::RestoreDepthForAttachment(VkCommandBuffer cmd) {
 	depthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 	depthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	depthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	depthBarrier.image = depthImage;
+	depthBarrier.image = sourceDepthImage;
 	depthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 	depthBarrier.subresourceRange.baseMipLevel = 0u;
 	depthBarrier.subresourceRange.levelCount = 1u;
@@ -4517,9 +4713,9 @@ void VulkanContext::Impl::RestoreDepthForAttachment(VkCommandBuffer cmd) {
 }
 
 // VulkanContext::Impl::StoreAmbientOcclusionDepthHistory is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, uint32_t viewIndex, const glm::mat4& viewProjection) {
+void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd, VkImage sourceDepthImage, uint32_t viewIndex, const glm::mat4& viewProjection) {
 	if (cmd == VK_NULL_HANDLE
-		|| depthImage == VK_NULL_HANDLE
+		|| sourceDepthImage == VK_NULL_HANDLE
 		|| viewIndex >= depthHistoryByView.size()
 		|| currentFrame >= MAX_FRAMES_IN_FLIGHT
 		|| ambientOcclusionWidth == 0u
@@ -4552,16 +4748,16 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 		vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 	};
 
-	// The scene render pass writes the shared depth attachment. Copy that
+	// The scene render pass writes the active view depth attachment. Copy that
 	// completed depth into an AO-owned history image so next frame's GTAO pass
 	// never samples an attachment that is being cleared or rewritten.
 	TransitionDepthImage(
-		depthImage,
+		sourceDepthImage,
 		VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
 		VK_ACCESS_TRANSFER_READ_BIT,
-		VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 		VK_PIPELINE_STAGE_TRANSFER_BIT);
 	TransitionDepthImage(
 		historyDepth.image,
@@ -4588,7 +4784,7 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 	};
 	vkCmdCopyImage(
 		cmd,
-		depthImage,
+		sourceDepthImage,
 		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		historyDepth.image,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -4604,7 +4800,7 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 		VK_PIPELINE_STAGE_TRANSFER_BIT,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	TransitionDepthImage(
-		depthImage,
+		sourceDepthImage,
 		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 		VK_ACCESS_TRANSFER_READ_BIT,
@@ -4617,9 +4813,9 @@ void VulkanContext::Impl::StoreAmbientOcclusionDepthHistory(VkCommandBuffer cmd,
 }
 
 // VulkanContext::Impl::GenerateHiZPyramid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView depthView, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory) {
+bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd, VkImage sourceDepthImage, VkImageView depthView, uint32_t snapshotSlotIndex, const VulkanHiZHistoryMetadata& completedHistory) {
 	if (cmd == VK_NULL_HANDLE
-		|| depthImage == VK_NULL_HANDLE
+		|| sourceDepthImage == VK_NULL_HANDLE
 		|| depthView == VK_NULL_HANDLE
 		|| hiZ.image == VK_NULL_HANDLE
 		|| hiZ.fullView == VK_NULL_HANDLE
@@ -4630,14 +4826,22 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		|| hiZComputePipeline == VK_NULL_HANDLE
 		|| hiZPipelineLayout == VK_NULL_HANDLE
 		|| hiZDescriptorSetLayout == VK_NULL_HANDLE) {
-		return;
+		hiZ.latestInvalidReason = VulkanHiZInvalidReason::MissingPyramid;
+		hiZ.latestOcclusionAllowed = false;
+		hiZ.latestValidation = {};
+		hiZ.latestValidation.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
+		return false;
 	}
 
 	for (uint32_t mipIndex = 0u; mipIndex < hiZ.mipLevels; ++mipIndex) {
 		// Every dispatch binds a descriptor set that points at one concrete mip.
 		// Missing views mean swapchain recreation is incomplete, so skip safely.
 		if (hiZ.mipViews[mipIndex] == VK_NULL_HANDLE) {
-			return;
+			hiZ.latestInvalidReason = VulkanHiZInvalidReason::MissingPyramid;
+			hiZ.latestOcclusionAllowed = false;
+			hiZ.latestValidation = {};
+			hiZ.latestValidation.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
+			return false;
 		}
 	}
 
@@ -4671,7 +4875,7 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 		if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &hiZDescriptorPool) != VK_SUCCESS) {
 			hiZDescriptorPool = VK_NULL_HANDLE;
 			hiZDescriptorSets.clear();
-			return;
+			return false;
 		}
 
 		std::vector<VkDescriptorSetLayout> layouts(descriptorSetCount, hiZDescriptorSetLayout);
@@ -4685,7 +4889,7 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 			vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
 			hiZDescriptorPool = VK_NULL_HANDLE;
 			hiZDescriptorSets.clear();
-			return;
+			return false;
 		}
 	}
 
@@ -4698,14 +4902,15 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 			+ static_cast<std::size_t>(clampedSnapshotSlot))
 		* static_cast<std::size_t>(hiZ.mipLevels);
 	if (frameDescriptorBase + hiZ.mipLevels > hiZDescriptorSets.size()) {
-		return;
+		return false;
 	}
 
-	// Touch the shared depth image only after every Hi-Z resource is known to be
-	// valid. Any early return before this point leaves depth in the render-pass
-	// layout, while a complete Hi-Z record restores it before the next frame.
-	if (!PrepareDepthForCompute(cmd, depthView)) {
-		return;
+	// Touch the active view depth image only after every Hi-Z resource is known
+	// to be valid. Any early return before this point leaves depth in the
+	// render-pass layout, while a complete Hi-Z record restores it before the
+	// next frame.
+	if (!PrepareDepthForCompute(cmd, sourceDepthImage, depthView, false)) {
+		return false;
 	}
 
 	auto TransitionHiZMip = [&](uint32_t mipIndex,
@@ -4853,16 +5058,16 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	}
 
-	// Restore the main depth image to the layout expected at the start of the
-	// next frame. Keeping this invariant avoids first-frame and export-runtime
-	// layout mismatches while the independent Hi-Z pyramid remains readable.
+	// Restore the active view depth image to the layout expected at the start
+	// of the next frame. Keeping this invariant avoids layout mismatches while
+	// the independent Hi-Z pyramid remains readable.
 	VkImageMemoryBarrier restoreDepthBarrier{};
 	restoreDepthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 	restoreDepthBarrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 	restoreDepthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 	restoreDepthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	restoreDepthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	restoreDepthBarrier.image = depthImage;
+	restoreDepthBarrier.image = sourceDepthImage;
 	restoreDepthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
 	restoreDepthBarrier.subresourceRange.baseMipLevel = 0u;
 	restoreDepthBarrier.subresourceRange.levelCount = 1u;
@@ -4882,6 +5087,7 @@ void VulkanContext::Impl::GenerateHiZPyramid(VkCommandBuffer cmd, VkImageView de
 	hiZ.history = completedHistory;
 	hiZ.history.valid = true;
 	hiZ.history.invalidReason = VulkanHiZInvalidReason::None;
+	return true;
 }
 
 // VulkanContext::Impl::GenerateAmbientOcclusion is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -5212,7 +5418,7 @@ void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colo
 	VkDescriptorImageInfo colorInfo{};
 	colorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	colorInfo.imageView = colorView;
-	colorInfo.sampler = hiZ.sampler;
+	colorInfo.sampler = CurrentHiZ(kHiZGameViewIndex).sampler;
 
 	VkDescriptorImageInfo vrsOutputInfo{};
 	vrsOutputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -5870,11 +6076,18 @@ void VulkanContext::Impl::InitEditorMode() {
 
 // VulkanContext::Impl::CreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
-	if (res.image != VK_NULL_HANDLE) {
-		vmaDestroyImage(allocator, res.image, res.allocation);
-		vkDestroyImageView(device, res.view, nullptr);
-		vkDestroyFramebuffer(device, res.framebuffer, nullptr);
-		vkDestroySampler(device, res.sampler, nullptr);
+	auto DestroyOffscreenResourceSet = [&]() {
+		if (res.sampler != VK_NULL_HANDLE) vkDestroySampler(device, res.sampler, nullptr);
+		if (res.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, res.framebuffer, nullptr);
+		if (res.view != VK_NULL_HANDLE) vkDestroyImageView(device, res.view, nullptr);
+		if (res.depthView != VK_NULL_HANDLE) vkDestroyImageView(device, res.depthView, nullptr);
+		if (res.image != VK_NULL_HANDLE && res.allocation != VK_NULL_HANDLE) vmaDestroyImage(allocator, res.image, res.allocation);
+		if (res.depthImage != VK_NULL_HANDLE && res.depthAllocation != VK_NULL_HANDLE) vmaDestroyImage(allocator, res.depthImage, res.depthAllocation);
+		res = {};
+	};
+
+	if (res.image != VK_NULL_HANDLE || res.depthImage != VK_NULL_HANDLE || res.framebuffer != VK_NULL_HANDLE) {
+		DestroyOffscreenResourceSet();
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -5932,7 +6145,9 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 			depthAttachment.format = FindDepthFormat();
 			depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 			depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			// Hi-Z is generated after the editor render pass, so depth must be
+			// stored even though the presented viewport only shows color.
+			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 			depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -6014,7 +6229,9 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 			depthAttachment.format = FindDepthFormat();
 			depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 			depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			// Hi-Z is generated after the editor render pass, so depth must be
+			// stored even though the presented viewport only shows color.
+			depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 			depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 			depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 			depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -6095,10 +6312,47 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 	// Create View
 	res.view = CreateImageView(res.image, offscreenColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
 
+	// Create a depth attachment owned by this editor view. Scene View and Game
+	// View command buffers are recorded separately and submitted together, so
+	// sharing one depth image lets one view clear/write the depth that another
+	// view later uses for Hi-Z. Keeping depth per view makes the offscreen
+	// framebuffer match the per-view Hi-Z history.
+	const VkFormat offscreenDepthFormat = (depthFormat != VK_FORMAT_UNDEFINED) ? depthFormat : FindDepthFormat();
+	VkImageCreateInfo depthImageInfo{};
+	depthImageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	depthImageInfo.imageType = VK_IMAGE_TYPE_2D;
+	depthImageInfo.extent.width = swapchainExtent.width;
+	depthImageInfo.extent.height = swapchainExtent.height;
+	depthImageInfo.extent.depth = 1u;
+	depthImageInfo.mipLevels = 1u;
+	depthImageInfo.arrayLayers = 1u;
+	depthImageInfo.format = offscreenDepthFormat;
+	depthImageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	depthImageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	depthImageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	depthImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	depthImageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	VmaAllocationCreateInfo depthAllocInfo{};
+	depthAllocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+	if (vmaCreateImage(allocator, &depthImageInfo, &depthAllocInfo, &res.depthImage, &res.depthAllocation, nullptr) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen depth image!");
+		DestroyOffscreenResourceSet();
+		return;
+	}
+	vmaSetAllocationName(allocator, res.depthAllocation, "Editor Offscreen Depth Image");
+	res.depthView = CreateImageView(res.depthImage, offscreenDepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+	if (res.depthView == VK_NULL_HANDLE) {
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen depth view!");
+		DestroyOffscreenResourceSet();
+		return;
+	}
+	TransitionImageLayout(res.depthImage, offscreenDepthFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
 	// Create Framebuffer
 	std::vector<VkImageView> fbAttachments = {
 		res.view,
-		depthImageView
+		res.depthView
 	};
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (UsesVrsAttachment()) {

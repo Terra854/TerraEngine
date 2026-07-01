@@ -38,6 +38,18 @@ namespace
 
 	void RegisterVirtualGeometryQualityTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.Quality.DefaultsRetainLegacyHiZMetadata", [](TestContext& context) {
+			// Hi-Z is now resource-gated by the renderer. These fields remain so
+			// older project settings can round-trip without reintroducing a
+			// runtime occlusion disable switch.
+			const VirtualGeometryQualityProfile profile = MakeDefaultVirtualGeometryQualityProfile();
+
+			context.Expect(profile.hiZOcclusionEnabled, "Default virtual geometry quality should preserve the legacy Hi-Z metadata value.");
+			context.Expect(profile.hiZSelfOcclusionGuardEnabled, "Default virtual geometry quality should preserve legacy self-occlusion metadata.");
+			context.Expect(profile.hiZNearPlaneGuardEnabled, "Default virtual geometry quality should preserve legacy near-plane metadata.");
+			context.Expect(profile.hiZThinGeometryGuardEnabled, "Default virtual geometry quality should preserve legacy thin-geometry metadata.");
+		});
+
 		registry.Add("VirtualGeometry.Quality.SanitizesUnsafeControls", [](TestContext& context) {
 			VirtualGeometryQualityProfile profile = MakeDefaultVirtualGeometryQualityProfile();
 			profile.lodErrorScale = std::numeric_limits<float>::infinity();
@@ -60,9 +72,24 @@ namespace
 
 			profile.lodErrorScale = 0.001f;
 			profile.preloadBias = 128.0f;
+			profile.debugVisualizationMode = static_cast<VirtualGeometryDebugVisualizationMode>(12u);
 			sanitized = SanitizeVirtualGeometryQualityProfile(profile);
 			context.Expect(NearlyEqual(0.05f, sanitized.lodErrorScale), "LOD error scale should clamp to the safe lower bound.");
 			context.Expect(NearlyEqual(16.0f, sanitized.preloadBias), "Preload bias should clamp to the safe upper bound.");
+			context.Expect(sanitized.debugVisualizationMode == VirtualGeometryDebugVisualizationMode::None, "Unknown debug visualization values should sanitize to Off.");
+		});
+
+		registry.Add("VirtualGeometry.Quality.LegacyHiZMetadataDoesNotAffectVisibilitySignature", [](TestContext& context) {
+			VirtualGeometryQualityProfile baseProfile = MakeDefaultVirtualGeometryQualityProfile();
+			const std::uint64_t baseSignature = BuildVirtualGeometryQualityProfileSignature(baseProfile);
+
+			VirtualGeometryQualityProfile legacyChanged = baseProfile;
+			legacyChanged.hiZOcclusionEnabled = false;
+			legacyChanged.hiZSelfOcclusionGuardEnabled = false;
+			legacyChanged.hiZNearPlaneGuardEnabled = false;
+			legacyChanged.hiZThinGeometryGuardEnabled = false;
+
+			context.ExpectEqual(baseSignature, BuildVirtualGeometryQualityProfileSignature(legacyChanged), "Legacy Hi-Z metadata must not rebuild visibility commands as if it were a runtime disable switch.");
 		});
 
 		registry.Add("VirtualGeometry.Quality.SavesProjectRenderSettings", [](TestContext& context) {
@@ -90,8 +117,8 @@ namespace
 			context.Expect(!virtualGeometry.contains("enabled"), "Saved render settings should not include a virtual geometry enable toggle.");
 			context.Expect(NearlyEqual(2.5f, virtualGeometry.value("lodErrorScale", 0.0f)), "Saved render settings should include LOD error scale.");
 			context.ExpectEqual(3u, virtualGeometry.value("maxLodDrop", 0u), "Saved render settings should include max LOD drop.");
-			context.Expect(virtualGeometry.value("hiZOcclusionEnabled", false), "Saved render settings should include the Hi-Z toggle.");
-			context.Expect(!virtualGeometry.value("hiZSelfOcclusionGuardEnabled", true), "Saved render settings should include self-occlusion guard toggle.");
+			context.Expect(virtualGeometry.value("hiZOcclusionEnabled", false), "Saved render settings should preserve legacy Hi-Z metadata.");
+			context.Expect(!virtualGeometry.value("hiZSelfOcclusionGuardEnabled", true), "Saved render settings should preserve legacy self-occlusion metadata.");
 			context.ExpectEqual(
 				static_cast<std::uint32_t>(VirtualGeometryDebugVisualizationMode::HiZ),
 				virtualGeometry.value("debugVisualizationMode", 0u),
@@ -144,14 +171,45 @@ namespace
 			const VirtualGeometryQualityProfile loaded = RenderSystem::Instance().GetVirtualGeometryQualityProfile();
 			context.Expect(NearlyEqual(3.0f, loaded.lodErrorScale), "Loaded render settings should restore LOD error scale.");
 			context.ExpectEqual(2u, loaded.maxLodDrop, "Loaded render settings should restore max LOD drop.");
-			context.Expect(loaded.hiZOcclusionEnabled, "Loaded render settings should restore the Hi-Z toggle.");
-			context.Expect(!loaded.hiZSelfOcclusionGuardEnabled, "Loaded render settings should restore the self-occlusion guard toggle.");
+			context.Expect(loaded.hiZOcclusionEnabled, "Loaded render settings should restore legacy Hi-Z metadata.");
+			context.Expect(!loaded.hiZSelfOcclusionGuardEnabled, "Loaded render settings should restore legacy self-occlusion metadata.");
 			context.ExpectEqual(
 				static_cast<std::uint32_t>(VirtualGeometryDebugVisualizationMode::Error),
 				static_cast<std::uint32_t>(loaded.debugVisualizationMode),
 				"Loaded render settings should restore debug visualization mode.");
 			context.ExpectEqual(987654ull, loaded.geometryBudgetBytes, "Loaded render settings should restore geometry budget.");
 			context.Expect(NearlyEqual(2.0f, loaded.preloadBias), "Loaded render settings should restore preload bias.");
+
+			RestoreRenderSettings(previousAssetRoot, previousSettings);
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Quality.LoadsMissingLegacyHiZMetadataAsDefaultOn", [](TestContext& context) {
+			const std::filesystem::path previousAssetRoot = ResourceManager::Instance().GetAssetRoot();
+			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
+			const std::filesystem::path root = MakeVirtualGeometryQualityTestRoot("TerraEngineVirtualGeometryQualityMissingHiZTests");
+			ResourceManager::Instance().SetAssetRoot(root / "Assets");
+			std::filesystem::create_directories(root / "ProjectSettings");
+
+			// This shape matches an older RenderSettings file that already had
+			// the virtualGeometry block but not the compatibility Hi-Z metadata.
+			nlohmann::json document;
+			document["preset"] = static_cast<std::uint32_t>(QualityPreset::Custom);
+			document["settings"] = {
+				{ "virtualGeometry", {
+					{ "lodErrorScale", 1.0f },
+					{ "maxLodDrop", 0u },
+					{ "debugVisualizationMode", static_cast<std::uint32_t>(VirtualGeometryDebugVisualizationMode::None) }
+				} }
+			};
+			std::ofstream output(root / "ProjectSettings" / "RenderSettings.json");
+			output << document.dump(4);
+			output.close();
+
+			RenderSystem::Instance().LoadSettings();
+			const VirtualGeometryQualityProfile loaded = RenderSystem::Instance().GetVirtualGeometryQualityProfile();
+
+			context.Expect(loaded.hiZOcclusionEnabled, "Missing legacy Hi-Z metadata should inherit the default value.");
 
 			RestoreRenderSettings(previousAssetRoot, previousSettings);
 			std::filesystem::remove_all(root);

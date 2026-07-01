@@ -195,12 +195,67 @@ namespace TerraEngine::AssetPipeline
 		};
 	}
 
+	nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometrySettings& value)
+	{
+		nlohmann::json targetRatios = nlohmann::json::array();
+		for (float ratio : value.targetRatios)
+		{
+			targetRatios.push_back(ratio);
+		}
+
+		return {
+			{ "hasOverride", value.hasOverride },
+			{ "settingsSource", value.settingsSource },
+			{ "targetRatios", targetRatios },
+			{ "minimumSourceTriangles", value.minimumSourceTriangles },
+			{ "minimumGeneratedTriangles", value.minimumGeneratedTriangles },
+			{ "minimumMeshletsPerGeneratedLevel", value.minimumMeshletsPerGeneratedLevel },
+			{ "minimumUsefulTriangleReduction", value.minimumUsefulTriangleReduction },
+			{ "minimumUsefulMeshletReduction", value.minimumUsefulMeshletReduction },
+			{ "maximumGeometricError", value.maximumGeometricError }
+		};
+	}
+
+	nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryTarget& value)
+	{
+		return {
+			{ "targetIndex", value.targetIndex },
+			{ "requestedRatio", value.requestedRatio },
+			{ "status", value.status },
+			{ "reason", value.reason },
+			{ "desiredTriangleCount", value.desiredTriangleCount },
+			{ "desiredMeshletCount", value.desiredMeshletCount },
+			{ "actualRatio", value.actualRatio },
+			{ "actualTriangleCount", value.actualTriangleCount },
+			{ "actualMeshletCount", value.actualMeshletCount },
+			{ "triangleCount", value.triangleCount },
+			{ "meshletCount", value.meshletCount },
+			{ "nearestGeneratedLevelIndex", value.nearestGeneratedLevelIndex },
+			{ "geometricError", value.geometricError },
+			{ "message", value.message }
+		};
+	}
+
+	nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryClusterSummary& value)
+	{
+		return {
+			{ "clusterCount", value.clusterCount },
+			{ "pageLinkCount", value.pageLinkCount },
+			{ "fallbackCoverageValid", value.fallbackCoverageValid }
+		};
+	}
+
 	nlohmann::json ToJson(const GeneratedModelMeshAsset& value)
 	{
 		nlohmann::json virtualGeometryWarnings = nlohmann::json::array();
 		for (const std::string& warning : value.virtualGeometryWarnings)
 		{
 			virtualGeometryWarnings.push_back(warning);
+		}
+		nlohmann::json virtualGeometryTargets = nlohmann::json::array();
+		for (const GeneratedModelMeshVirtualGeometryTarget& target : value.virtualGeometryTargets)
+		{
+			virtualGeometryTargets.push_back(ToJson(target));
 		}
 
 		return {
@@ -224,6 +279,9 @@ namespace TerraEngine::AssetPipeline
 				{ "detailLevels", value.virtualGeometryDetailLevels },
 				{ "meshlets", value.virtualGeometryMeshlets },
 				{ "sourceTriangles", value.virtualGeometrySourceTriangles },
+				{ "settings", ToJson(value.virtualGeometrySettings) },
+				{ "targets", virtualGeometryTargets },
+				{ "clusterSummary", ToJson(value.virtualGeometryClusterSummary) },
 				{ "warnings", virtualGeometryWarnings }
 			} }
 		};
@@ -343,6 +401,10 @@ namespace TerraEngine::AssetPipeline
 		mesh.virtualGeometryStatus = "Cooked";
 		mesh.virtualGeometryDetailLevels = virtualHeader.detailLevelCount;
 		mesh.virtualGeometrySourceTriangles = virtualHeader.sourceTriangleCount;
+		mesh.virtualGeometryClusterSummary.clusterCount = virtualHeader.clusterCount;
+		mesh.virtualGeometryClusterSummary.pageLinkCount = virtualHeader.clusterPageLinkCount;
+		mesh.virtualGeometryClusterSummary.fallbackCoverageValid =
+			(virtualHeader.flags & kVirtualGeometryValidationFlagFallbackCoverageValidated) != 0u;
 		if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u)
 		{
 			mesh.virtualGeometryCooked = false;

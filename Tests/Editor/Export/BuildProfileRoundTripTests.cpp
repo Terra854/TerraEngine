@@ -48,6 +48,10 @@ namespace TerraEngine::EditorTests {
 			profile.virtualGeometryQualityLevel = 3u;
 			profile.virtualGeometryDiagnosticsEnabled = true;
 			profile.virtualGeometryBudgetBytes = 256ull * 1024ull * 1024ull;
+			profile.virtualGeometryLodErrorScale = 1.75f;
+			profile.virtualGeometryMaxLodDrop = 3u;
+			profile.virtualGeometryHiZOcclusionEnabled = true;
+			profile.virtualGeometryPreloadBias = 2.0f;
 			profile.includedScenes = {"Scenes/TestScene.tescene", "Scenes/Secondary.tescene"};
 
 			context.Expect(SaveBuildProfile(profile, profilePath), "Saving a complete build profile should succeed.");
@@ -67,6 +71,10 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(profile.virtualGeometryQualityLevel, loaded.virtualGeometryQualityLevel, "Virtual geometry export quality should round-trip through JSON.");
 			context.ExpectEqual(profile.virtualGeometryDiagnosticsEnabled, loaded.virtualGeometryDiagnosticsEnabled, "Virtual geometry diagnostics should round-trip through JSON.");
 			context.ExpectEqual(profile.virtualGeometryBudgetBytes, loaded.virtualGeometryBudgetBytes, "Virtual geometry geometry budget should round-trip through JSON.");
+			context.ExpectEqual(profile.virtualGeometryLodErrorScale, loaded.virtualGeometryLodErrorScale, "Virtual geometry LOD error scale should round-trip through JSON.");
+			context.ExpectEqual(profile.virtualGeometryMaxLodDrop, loaded.virtualGeometryMaxLodDrop, "Virtual geometry max LOD drop should round-trip through JSON.");
+			context.ExpectEqual(profile.virtualGeometryHiZOcclusionEnabled, loaded.virtualGeometryHiZOcclusionEnabled, "Virtual geometry Hi-Z occlusion toggle should round-trip through JSON.");
+			context.ExpectEqual(profile.virtualGeometryPreloadBias, loaded.virtualGeometryPreloadBias, "Virtual geometry preload bias should round-trip through JSON.");
 			context.ExpectEqual(profile.includedScenes.size(), loaded.includedScenes.size(), "All included scenes should round-trip through JSON.");
 			context.ExpectEqual(profilePath.string(), loaded.filePath.string(), "The loaded profile should remember its source file path.");
 		});
