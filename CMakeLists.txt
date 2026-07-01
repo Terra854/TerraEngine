@@ -689,6 +689,7 @@ target_link_libraries(TerraEngine-Launcher
 add_dependencies(TerraEngine-Launcher
 	TerraEngineMeshCompiler
 	TerraEngineTextureCompiler
+	TerraEngineModelPackageCompiler
 	TerraEngineShaderCompiler
 )
 
@@ -705,6 +706,20 @@ add_executable(TerraEngineMeshCompiler
 add_executable(TerraEngineTextureCompiler
 	Editor/TerraEngineTextureCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
+)
+
+# Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
+add_executable(TerraEngineModelPackageCompiler
+	Editor/TerraEngineModelPackageCompiler.cpp
+	Editor/AssetCompilers/ModelPackageImportTypes.cpp
+	Editor/AssetCompilers/ModelPackageImporter.cpp
+	Editor/AssetCompilers/FbxPackageImporter.cpp
+	Editor/AssetCompilers/GltfImportTypes.cpp
+	Editor/AssetCompilers/GltfPackageImporter.cpp
+	Editor/AssetCompilers/MaterialAssetWriter.cpp
+	Editor/AssetCompilers/MeshCompiler.cpp
+	Editor/AssetCompilers/TextureCompiler.cpp
+	Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
 )
 
 # Target boundary: this declaration defines one buildable unit and its install/runtime behavior.
@@ -741,6 +756,29 @@ target_include_directories(TerraEngineTextureCompiler
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
 target_link_libraries(TerraEngineTextureCompiler
 	PRIVATE
+		basisu
+)
+
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
+target_include_directories(TerraEngineModelPackageCompiler
+	PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Engine
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets
+		${CMAKE_CURRENT_SOURCE_DIR}/External/json/single_include
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/encoder
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/transcoder
+		${CMAKE_CURRENT_SOURCE_DIR}/External/basisu/zstd
+)
+
+# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
+target_link_libraries(TerraEngineModelPackageCompiler
+	PRIVATE
+		assimp::assimp
+		fastgltf::fastgltf
+		meshoptimizer
+		mikktspace
 		basisu
 )
 
@@ -962,6 +1000,8 @@ if(WIN32)
 
 	target_link_libraries(TerraEngine-Editor PRIVATE ws2_32)
 endif()
+
+add_dependencies(TerraEngine-Editor TerraEngineModelPackageCompiler TerraEngineMeshCompiler TerraEngineTextureCompiler TerraEngineShaderCompiler)
 
 if(BUILD_TESTING)
 	# Test targets live under one repository-level Tests tree while preserving
@@ -1464,6 +1504,11 @@ install(TARGETS TerraEngineMeshCompiler
 )
 # Install rule: every code change must keep the install tree reproducible for downstream users.
 install(TARGETS TerraEngineTextureCompiler
+	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+)
+# Install rule: every code change must keep the install tree reproducible for downstream users.
+install(TARGETS TerraEngineModelPackageCompiler
 	RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 )

@@ -188,8 +188,10 @@ private:
 	PendingAction m_PendingAction = PendingAction::None;
 	std::filesystem::path m_PendingScenePath;
 	bool m_ShowSaveConfirmation = false;
+	bool m_ShowImportCloseConfirmation = false;
 	
 	void ExecutePendingAction();
 	void DrawSaveConfirmationModal();
+	void DrawImportCloseConfirmationModal();
 	void DrawScriptCompilationModal();
 };

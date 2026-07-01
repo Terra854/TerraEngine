@@ -1269,7 +1269,7 @@ bool MainEditorSubsystem::RebuildAssetFromInspector(const std::filesystem::path&
 	// Reuse the asset database import boundary so Inspector-triggered rebuilds
 	// follow the same atomic compile, sidecar, ResourceManager, and renderer
 	// reload behavior as Project Browser and file-watcher imports.
-	AssetDatabase::Instance().ImportAsset(absolutePath, true);
+	AssetDatabase::Instance().ImportAssetWithProgress(absolutePath, true);
 	return true;
 }
 
@@ -1521,6 +1521,7 @@ void MainEditorSubsystem::DrawUI() {
 	}
 
 	DrawSaveConfirmationModal();
+	DrawImportCloseConfirmationModal();
 	DrawScriptCompilationModal();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1656,6 +1657,11 @@ void MainEditorSubsystem::RequestOpenScene(const std::filesystem::path& path) {
 
 // MainEditorSubsystem::RequestCloseProject is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::RequestCloseProject() {
+	if (AssetDatabase::Instance().IsCompiling()) {
+		m_PendingAction = PendingAction::CloseProject;
+		m_ShowImportCloseConfirmation = true;
+		return;
+	}
 	if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
 		m_PendingAction = PendingAction::CloseProject;
 		m_ShowSaveConfirmation = true;
@@ -1666,6 +1672,11 @@ void MainEditorSubsystem::RequestCloseProject() {
 
 // MainEditorSubsystem::RequestExit is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::RequestExit() {
+	if (AssetDatabase::Instance().IsCompiling()) {
+		m_PendingAction = PendingAction::Exit;
+		m_ShowImportCloseConfirmation = true;
+		return;
+	}
 	if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
 		m_PendingAction = PendingAction::Exit;
 		m_ShowSaveConfirmation = true;
@@ -1738,6 +1749,37 @@ void MainEditorSubsystem::DrawSaveConfirmationModal() {
 		}
 		ImGui::SameLine();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+			m_PendingAction = PendingAction::None;
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+}
+
+void MainEditorSubsystem::DrawImportCloseConfirmationModal() {
+	if (m_ShowImportCloseConfirmation) {
+		ImGui::OpenPopup("Import In Progress");
+		m_ShowImportCloseConfirmation = false;
+	}
+
+	if (ImGui::BeginPopupModal("Import In Progress", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		const size_t jobCount = AssetDatabase::Instance().GetCompileJobsCount();
+		ImGui::TextWrapped("Asset import is still running (%zu job%s). Closing now will cancel active imports and remove partial imported assets from the project.",
+			jobCount,
+			jobCount == 1u ? "" : "s");
+		ImGui::Separator();
+
+		if (ImGui::Button("Continue Closing", ImVec2(150, 0))) {
+			AssetDatabase::Instance().RequestCancelAllImports(true);
+			ImGui::CloseCurrentPopup();
+			if (SceneManager::Instance().IsActiveSceneDirty() || (m_IsPrefabEditingMode && m_PrefabEditingDirty)) {
+				m_ShowSaveConfirmation = true;
+			} else {
+				ExecutePendingAction();
+			}
+		}
+		ImGui::SameLine();
 		if (ImGui::Button("Cancel", ImVec2(120, 0))) {
 			m_PendingAction = PendingAction::None;
 			ImGui::CloseCurrentPopup();

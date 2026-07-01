@@ -3,6 +3,7 @@
 #include "AssetImportResult.h"
 #include "AssetDatabase.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
+#include "ModelPackageImporter.h"
 #include "Utilities/UUID.h"
 
 #include <cstring>
@@ -10,6 +11,8 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+
+#include <nlohmann/json.hpp>
 
 namespace TerraEngine::EditorTests
 {
@@ -79,6 +82,30 @@ namespace TerraEngine::EditorTests
 			output << "vt 1 0\n";
 			output << "vt 0 1\n";
 			output << "f 1/1 2/2 3/3\n";
+		}
+
+		void WriteAssetMetadata(
+			const std::filesystem::path& assetRoot,
+			const std::filesystem::path& sourcePath,
+			const std::filesystem::path& compiledPath,
+			const TerraEngine::UUID& guid,
+			const std::string& importerName)
+		{
+			const std::filesystem::path fullSourcePath = assetRoot / sourcePath;
+			std::filesystem::create_directories(fullSourcePath.parent_path());
+
+			nlohmann::json metadata;
+			metadata["guid"] = TerraEngine::ToHexString(guid);
+			metadata["importerName"] = importerName;
+			metadata["lastModified"] = std::filesystem::last_write_time(fullSourcePath).time_since_epoch().count();
+			metadata["sourcePath"] = sourcePath.generic_string();
+			metadata["compiledPath"] = compiledPath.generic_string();
+			metadata["settings"] = nlohmann::json::object();
+
+			// Tests write the same metadata shape the editor persists so the
+			// startup scan exercises the public asset-database path.
+			std::ofstream output(fullSourcePath.string() + ".meta", std::ios::trunc);
+			output << metadata.dump(4);
 		}
 	}
 
@@ -294,6 +321,79 @@ namespace TerraEngine::EditorTests
 			VirtualGeometryAdaptiveSettingsMetadata resetSettings;
 			context.Expect(AssetDatabase::Instance().TryGetGeneratedMeshVirtualGeometryAdaptiveSettings(packagePath, mesh.guid, resetSettings), "Generated mesh default settings should load after reset.");
 			context.Expect(!resetSettings.overridePresent, "Generated mesh reset should remove the sidecar override.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.PackageImport.DeleteRemovesGeneratedOutputs", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			const std::filesystem::path assetRoot = root / "Assets";
+			const std::filesystem::path buildRoot = root / "Build" / "Assets";
+			const std::filesystem::path generatedRoot = "package_Generated";
+			const std::filesystem::path packageSource = "package.gltf";
+			const std::filesystem::path packageCompiled = "package.temf";
+			const std::filesystem::path materialSource = generatedRoot / "GeneratedMaterial.tmat";
+			const std::filesystem::path textureSource = generatedRoot / "GeneratedTexture.png";
+			const std::filesystem::path materialCompiled = materialSource;
+			const std::filesystem::path textureCompiled = generatedRoot / "GeneratedTexture.tetf";
+
+			std::filesystem::create_directories(assetRoot / generatedRoot);
+			std::filesystem::create_directories(buildRoot / generatedRoot);
+			std::ofstream(assetRoot / packageSource, std::ios::trunc) << "{}";
+			std::ofstream(buildRoot / packageCompiled, std::ios::binary | std::ios::trunc).put('\0');
+			std::ofstream(assetRoot / materialSource, std::ios::trunc) << "{}";
+			std::ofstream(buildRoot / materialCompiled, std::ios::trunc) << "{}";
+			std::ofstream(assetRoot / textureSource, std::ios::binary | std::ios::trunc).put('\0');
+			std::ofstream(buildRoot / textureCompiled, std::ios::binary | std::ios::trunc).put('\0');
+
+			TerraEngine::AssetPipeline::ModelPackageImportResult result{};
+			result.status = TerraEngine::AssetPipeline::ModelImportStatus::Succeeded;
+			result.packageGuid = TerraEngine::GenerateUUID();
+			result.package.sourcePath = packageSource;
+			result.package.importRoot = generatedRoot;
+
+			TerraEngine::AssetPipeline::GeneratedModelMeshAsset mesh{};
+			mesh.guid = TerraEngine::GenerateUUID();
+			mesh.displayName = "GeneratedMesh";
+			mesh.sourcePath = packageSource;
+			mesh.compiledPath = packageCompiled;
+			result.generatedMeshes.push_back(mesh);
+
+			TerraEngine::AssetPipeline::GeneratedModelMaterialAsset material{};
+			material.guid = TerraEngine::GenerateUUID();
+			material.displayName = "GeneratedMaterial";
+			material.sourcePath = materialSource;
+			material.compiledPath = materialCompiled;
+			result.generatedMaterials.push_back(material);
+
+			TerraEngine::AssetPipeline::GeneratedModelTextureAsset texture{};
+			texture.guid = TerraEngine::GenerateUUID();
+			texture.displayName = "GeneratedTexture";
+			texture.sourcePath = textureSource;
+			texture.compiledPath = textureCompiled;
+			result.generatedTextures.push_back(texture);
+
+			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(assetRoot / packageSource, result), "Fixture package sidecar should save before delete.");
+			WriteAssetMetadata(assetRoot, packageSource, packageCompiled, result.packageGuid, TerraEngine::AssetPipeline::GetModelPackageImporterName(assetRoot / packageSource));
+			WriteAssetMetadata(assetRoot, materialSource, materialCompiled, material.guid, "MaterialImporter");
+			WriteAssetMetadata(assetRoot, textureSource, textureCompiled, texture.guid, "TextureImporter");
+
+			AssetDatabase::Instance().Initialize(root);
+			context.Expect(AssetDatabase::Instance().GetAssets().contains(std::filesystem::absolute(assetRoot / packageSource)), "Package should be registered before delete.");
+			context.Expect(AssetDatabase::Instance().GetAssets().contains(std::filesystem::absolute(assetRoot / materialSource)), "Generated material should be registered before delete.");
+			context.Expect(AssetDatabase::Instance().GetAssets().contains(std::filesystem::absolute(assetRoot / textureSource)), "Generated texture should be registered before delete.");
+
+			AssetDatabase::Instance().DeleteAsset(assetRoot / packageSource);
+
+			context.Expect(!std::filesystem::exists(assetRoot / packageSource), "Deleting the package should remove the source glTF.");
+			context.Expect(!std::filesystem::exists((assetRoot / packageSource).string() + ".meta"), "Deleting the package should remove the package metadata.");
+			context.Expect(!std::filesystem::exists(TerraEngine::AssetPipeline::GetImportResultPath(assetRoot / packageSource)), "Deleting the package should remove the package import sidecar.");
+			context.Expect(!std::filesystem::exists(buildRoot / packageCompiled), "Deleting the package should remove the compiled package mesh.");
+			context.Expect(!std::filesystem::exists(assetRoot / generatedRoot), "Deleting the package should remove generated asset source files.");
+			context.Expect(!std::filesystem::exists(buildRoot / generatedRoot), "Deleting the package should remove generated compiled files.");
+			context.Expect(!AssetDatabase::Instance().GetAssets().contains(std::filesystem::absolute(assetRoot / materialSource)), "Generated material metadata should leave the live database.");
+			context.Expect(!AssetDatabase::Instance().GetAssets().contains(std::filesystem::absolute(assetRoot / textureSource)), "Generated texture metadata should leave the live database.");
 
 			AssetDatabase::Instance().Shutdown();
 			std::filesystem::remove_all(root);

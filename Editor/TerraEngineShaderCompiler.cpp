@@ -19,6 +19,49 @@ namespace
 		std::filesystem::path dxcPathOverride;
 	};
 
+	std::string EscapeJson(const std::string& value)
+	{
+		std::string escaped;
+		escaped.reserve(value.size());
+		for (const char c : value)
+		{
+			switch (c)
+			{
+			case '\\':
+				escaped += "\\\\";
+				break;
+			case '"':
+				escaped += "\\\"";
+				break;
+			case '\n':
+				escaped += "\\n";
+				break;
+			case '\r':
+				escaped += "\\r";
+				break;
+			case '\t':
+				escaped += "\\t";
+				break;
+			default:
+				escaped.push_back(c);
+				break;
+			}
+		}
+
+		return escaped;
+	}
+
+	void EmitProgress(float progress, std::string_view stage, std::string_view message)
+	{
+		// The editor parses these JSON lines to update the per-file import bar.
+		// Plain text diagnostics are still allowed and are logged separately.
+		std::cout
+			<< "{\"type\":\"progress\",\"progress\":" << progress
+			<< ",\"stage\":\"" << EscapeJson(std::string(stage)) << "\""
+			<< ",\"message\":\"" << EscapeJson(std::string(message)) << "\"}"
+			<< std::endl;
+	}
+
 	// ParseCommandLine is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	bool ParseCommandLine(int argc, char** argv, CommandLine& args)
 	{
@@ -99,8 +142,10 @@ int main(int argc, char** argv)
 	const std::filesystem::path dxcPath = args.dxcPathOverride.empty() ? DefaultDxcPath(exePath) : args.dxcPathOverride;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	EmitProgress(0.05f, "Shader Compile", "Compiling shader source with DXC.");
 	if(CompileShader(args.input, args.output, args.stage, args.targetProfile, args.entryPoint, dxcPath))
 	{
+		EmitProgress(0.98f, "Shader Done", "Shader compile output is ready.");
 		std::cout << "Wrote TSPF: " << args.output << "\n";
 		return 0;
 	}

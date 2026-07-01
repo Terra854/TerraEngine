@@ -25,6 +25,7 @@
 #include <vector>
 
 #include <assimp/Importer.hpp>
+#include <assimp/ProgressHandler.hpp>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
@@ -39,11 +40,8 @@ namespace
 	// adaptive cook then applies the user-facing maximumGeometricError gate so
 	// bad candidates are rejected without changing the renderer-facing fallback.
 	constexpr float kSimplificationTargetError = 0.02f;
-	constexpr std::array<std::string_view, 7> kSupportedMeshSourceExtensions = {
+	constexpr std::array<std::string_view, 4> kSupportedMeshSourceExtensions = {
 		".obj",
-		".fbx",
-		".gltf",
-		".glb",
 		".dae",
 		".ply",
 		".stl"};
@@ -524,12 +522,45 @@ namespace
 			v};
 	}
 
+	void ReportMeshProgress(const MeshCompileProgressCallback& callback, float progress, std::string_view stage, std::string_view message)
+	{
+		if (callback)
+		{
+			callback(std::clamp(progress, 0.0f, 1.0f), stage, message);
+		}
+	}
+
+	class MeshAssimpProgressHandler final : public Assimp::ProgressHandler
+	{
+	public:
+		explicit MeshAssimpProgressHandler(const MeshCompileProgressCallback& callback)
+			: m_Callback(callback) {}
+
+		bool Update(float percentage = -1.0f) override
+		{
+			try
+			{
+				const float normalized = percentage >= 0.0f ? std::clamp(percentage, 0.0f, 1.0f) : 0.0f;
+				ReportMeshProgress(m_Callback, 0.05f + (0.18f - 0.05f) * normalized, "Mesh Import", "Reading source mesh geometry.");
+				return true;
+			}
+			catch (...)
+			{
+				return false;
+			}
+		}
+
+	private:
+		const MeshCompileProgressCallback& m_Callback;
+	};
+
 	bool ImportSourceMesh(
 		const std::filesystem::path& input,
 		MeshCompileReport& report,
 		std::vector<VertexRaw>& outRawVertices,
 		std::vector<std::uint32_t>& outRawIndices,
-		bool& outHasUv)
+		bool& outHasUv,
+		const MeshCompileProgressCallback& progressCallback)
 	{
 		outRawVertices.clear();
 		outRawIndices.clear();
@@ -553,6 +584,10 @@ namespace
 			| aiProcess_JoinIdenticalVertices
 			| aiProcess_FindInvalidData;
 
+		// Assimp deletes the handler with the importer. The handler returns
+		// false when cancellation is requested, allowing long source parsing to
+		// unwind before the rest of the mesh compile runs.
+		importer.SetProgressHandler(new MeshAssimpProgressHandler(progressCallback));
 		const aiScene* scene = importer.ReadFile(input.string(), importFlags);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (scene == nullptr || scene->mRootNode == nullptr || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) != 0u)
@@ -2846,7 +2881,7 @@ bool IsSupportedMeshSourceExtension(const std::filesystem::path& filePath)
 }
 
 // GetSupportedMeshSourceExtensionsText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-std::string GetSupportedMeshSourceExtensionsText()
+	std::string GetSupportedMeshSourceExtensionsText()
 {
 	std::string result;
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -2870,7 +2905,8 @@ bool CompileMesh(
 	MeshCompileReport* outReport,
 	float smoothingAngle,
 	float weldThreshold,
-	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings)
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings,
+	MeshCompileProgressCallback progressCallback)
 {
 	MeshCompileReport report{};
 	report.assetPath = input;
@@ -2901,14 +2937,16 @@ bool CompileMesh(
 	std::vector<VertexRaw> rawVertices;
 	std::vector<std::uint32_t> rawIndices;
 	bool hasUv = false;
+	ReportMeshProgress(progressCallback, 0.05f, "Mesh Import", "Reading source mesh geometry.");
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!ImportSourceMesh(input, report, rawVertices, rawIndices, hasUv))
+	if (!ImportSourceMesh(input, report, rawVertices, rawIndices, hasUv, progressCallback))
 	{
 		return FinalizeReport(false);
 	}
 
 	// Phase 2: Foundational Cleanup (Welding & Smoothing)
 	
+	ReportMeshProgress(progressCallback, 0.18f, "Mesh Cleanup", "Smoothing normals and generating tangents.");
 	// 1. Smooth normals (Connectivity-aware) on unindexed vertices
 	SmoothNormals(rawVertices, rawIndices, smoothingAngle, weldThreshold);
 	
@@ -2928,6 +2966,7 @@ bool CompileMesh(
 	std::vector<VertexRaw> vertices(finalVertexCount);
 	std::vector<uint32_t> indices(rawIndices.size());
 
+	ReportMeshProgress(progressCallback, 0.28f, "Mesh Remap", "Building optimized indexed vertex buffers.");
 	meshopt_remapIndexBuffer(indices.data(), rawIndices.data(), rawIndices.size(), finalRemap.data());
 	meshopt_remapVertexBuffer(vertices.data(), rawVertices.data(), rawVertices.size(), sizeof(VertexRaw), finalRemap.data());
 
@@ -2985,6 +3024,7 @@ bool CompileMesh(
 	}
 
 	std::vector<VirtualGeometryLodSource> virtualGeometryLods;
+	ReportMeshProgress(progressCallback, 0.42f, "Virtual Geometry", "Building adaptive virtual geometry LODs.");
 	if (!BuildVirtualGeometryLods(vertices, indices, report, virtualGeometryLods))
 	{
 		report.status = "compile_fail";
@@ -2993,6 +3033,7 @@ bool CompileMesh(
 	}
 
 	VirtualGeometryBuildOutput virtualGeometryPayload{};
+	ReportMeshProgress(progressCallback, 0.58f, "Virtual Geometry", "Building virtual geometry clusters and pages.");
 	if (!BuildVirtualGeometryPayload(vertices, virtualGeometryLods, includeMeshletBounds, report, virtualGeometryPayload))
 	{
 		report.status = "compile_fail";
@@ -3079,6 +3120,7 @@ bool CompileMesh(
 	std::vector<std::uint8_t> vertexData(vertices.size() * static_cast<std::size_t>(header.layout.strideBytes));
 	std::uint8_t* vertexWriteCursor = vertexData.data();
 
+	ReportMeshProgress(progressCallback, 0.74f, "Mesh Pack", "Packing GPU vertex streams.");
 	// Keep packing deterministic so binary assets remain stable across repeated runs.
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const VertexRaw& vertex : vertices)
@@ -3147,6 +3189,7 @@ bool CompileMesh(
 
 	const MeshletRemapEncoding remapEncoding = static_cast<MeshletRemapEncoding>(header.meshletVertexRemapEncoding);
 	std::vector<std::uint8_t> remapData;
+	ReportMeshProgress(progressCallback, 0.82f, "Mesh Remap", "Encoding meshlet vertex remap data.");
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!BuildRemapStream(meshletPayload.vertexRemapIndices, remapEncoding, remapData))
 	{
@@ -3168,6 +3211,7 @@ bool CompileMesh(
 	}
 
 	PayloadLayout payloadLayout{};
+	ReportMeshProgress(progressCallback, 0.88f, "Mesh Layout", "Building TEMF payload layout.");
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!TryBuildPayloadLayout(
 		header,
@@ -3201,6 +3245,7 @@ bool CompileMesh(
 
 	try
 	{
+		ReportMeshProgress(progressCallback, 0.94f, "Mesh Write", "Writing Terra mesh file.");
 		std::filesystem::create_directories(output.parent_path());
 		WriteTemf(
 			output,
@@ -3228,6 +3273,7 @@ bool CompileMesh(
 
 		report.status = "success";
 
+		ReportMeshProgress(progressCallback, 0.99f, "Mesh Done", "Mesh compile output is ready.");
 		return FinalizeReport(true);
 	}
 	catch (const std::exception& exception)
@@ -3248,7 +3294,8 @@ bool CompileMeshFromRaw(
 	MeshCompileReport* outReport,
 	float smoothingAngle,
 	float weldThreshold,
-	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings)
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings,
+	MeshCompileProgressCallback progressCallback)
 {
 	if (vertices.empty() || indices.empty() || (indices.size() % 3u) != 0u)
 	{
@@ -3267,6 +3314,7 @@ bool CompileMeshFromRaw(
 	const std::string stableName = output.filename().replace_extension(".obj").string();
 	const std::filesystem::path stagedObj = tempRoot / stableName;
 
+	ReportMeshProgress(progressCallback, 0.02f, "Mesh Stage", "Staging decoded package geometry for mesh compile.");
 	{
 		std::ofstream out(stagedObj, std::ios::trunc);
 		if (!out)
@@ -3323,7 +3371,7 @@ bool CompileMeshFromRaw(
 		}
 	}
 
-	const bool compiled = CompileMesh(stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold, adaptiveSettings);
+	const bool compiled = CompileMesh(stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold, adaptiveSettings, progressCallback);
 	std::error_code removeError;
 	std::filesystem::remove(stagedObj, removeError);
 	if (outReport != nullptr)

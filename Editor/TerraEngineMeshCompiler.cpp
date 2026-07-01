@@ -6,10 +6,12 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "Editor/AssetCompilers/MeshCompiler.h"
 
@@ -25,6 +27,7 @@ namespace
 		bool showHelp = false;
 		float smoothingAngle = 60.0f;
 		float weldThreshold = 1e-6f;
+		std::optional<VirtualGeometryAdaptiveCompileSettings> adaptiveSettings;
 	};
 
 	// ToBoolText is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -87,6 +90,75 @@ namespace
 		return true;
 	}
 
+	bool TryParseUInt32(std::string_view text, std::uint32_t& outValue)
+	{
+		std::uint64_t value = 0u;
+		if (!TryParseUInt64(text, value) || value > std::numeric_limits<std::uint32_t>::max())
+		{
+			return false;
+		}
+
+		outValue = static_cast<std::uint32_t>(value);
+		return true;
+	}
+
+	bool TryParseFloat(std::string_view text, float& outValue)
+	{
+		try
+		{
+			std::size_t consumed = 0u;
+			const float parsed = std::stof(std::string(text), &consumed);
+			if (consumed != text.size())
+			{
+				return false;
+			}
+
+			outValue = parsed;
+			return true;
+		}
+		catch (const std::exception&)
+		{
+			return false;
+		}
+	}
+
+	VirtualGeometryAdaptiveCompileSettings& EnsureAdaptiveSettings(CommandLine& args)
+	{
+		if (!args.adaptiveSettings.has_value())
+		{
+			// Start from project defaults so CLI callers can override one knob
+			// without accidentally clearing the rest of the adaptive recipe.
+			args.adaptiveSettings = MakeDefaultVirtualGeometryAdaptiveCompileSettings();
+		}
+
+		return *args.adaptiveSettings;
+	}
+
+	bool ParseAdaptiveTargetRatios(std::string_view text, std::vector<float>& outRatios)
+	{
+		outRatios.clear();
+		std::size_t start = 0u;
+		while (start <= text.size())
+		{
+			const std::size_t comma = text.find(',', start);
+			const std::size_t end = comma == std::string_view::npos ? text.size() : comma;
+			const std::string_view token = text.substr(start, end - start);
+			float ratio = 0.0f;
+			if (token.empty() || !TryParseFloat(token, ratio))
+			{
+				return false;
+			}
+			outRatios.push_back(ratio);
+			if (comma == std::string_view::npos)
+			{
+				break;
+			}
+			start = comma + 1u;
+		}
+
+		return !outRatios.empty();
+	}
+
 	// PrintUsage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void PrintUsage()
 	{
@@ -98,6 +170,14 @@ namespace
 		std::cout << "      --omit-bounds                  Skip optional meshlet bounds payload for extra size savings.\n";
 		std::cout << "      --smoothing-angle <deg>        Angle threshold for normal smoothing (default: 60). Edges sharper than this will be split.\n";
 		std::cout << "      --weld-threshold <eps>         Distance threshold for vertex position welding (default: 1e-6).\n";
+		std::cout << "      --adaptive-target-ratios <csv> Override virtual geometry target ratios, for example 0.5,0.25.\n";
+		std::cout << "      --adaptive-min-source-triangles <n> Minimum source triangles before adaptive levels are generated.\n";
+		std::cout << "      --adaptive-min-generated-triangles <n> Minimum triangles allowed in generated adaptive levels.\n";
+		std::cout << "      --adaptive-min-meshlets-per-level <n> Minimum meshlets allowed per generated adaptive level.\n";
+		std::cout << "      --adaptive-min-triangle-reduction <n> Minimum useful triangle reduction ratio.\n";
+		std::cout << "      --adaptive-min-meshlet-reduction <n> Minimum useful meshlet reduction ratio.\n";
+		std::cout << "      --adaptive-max-geometric-error <n> Maximum geometric error accepted for adaptive levels.\n";
+		std::cout << "      --adaptive-settings-source <text> Label recorded in compile reports for diagnostics.\n";
 		std::cout << "  -h, --help                         Show this help message.\n";
 	}
 
@@ -166,6 +246,67 @@ namespace
 			{
 				args.weldThreshold = std::stof(argv[++i]);
 			}
+			else if (flag == "--adaptive-target-ratios" && i + 1 < argc)
+			{
+				auto& adaptiveSettings = EnsureAdaptiveSettings(args);
+				if (!ParseAdaptiveTargetRatios(argv[++i], adaptiveSettings.targetRatios))
+				{
+					std::cerr << "Invalid adaptive target ratio list.\n";
+					return false;
+				}
+			}
+			else if (flag == "--adaptive-min-source-triangles" && i + 1 < argc)
+			{
+				if (!TryParseUInt32(argv[++i], EnsureAdaptiveSettings(args).minimumSourceTriangles))
+				{
+					std::cerr << "Invalid adaptive minimum source triangle count.\n";
+					return false;
+				}
+			}
+			else if (flag == "--adaptive-min-generated-triangles" && i + 1 < argc)
+			{
+				if (!TryParseUInt32(argv[++i], EnsureAdaptiveSettings(args).minimumGeneratedTriangles))
+				{
+					std::cerr << "Invalid adaptive minimum generated triangle count.\n";
+					return false;
+				}
+			}
+			else if (flag == "--adaptive-min-meshlets-per-level" && i + 1 < argc)
+			{
+				if (!TryParseUInt32(argv[++i], EnsureAdaptiveSettings(args).minimumMeshletsPerGeneratedLevel))
+				{
+					std::cerr << "Invalid adaptive minimum meshlets per level.\n";
+					return false;
+				}
+			}
+			else if (flag == "--adaptive-min-triangle-reduction" && i + 1 < argc)
+			{
+				if (!TryParseFloat(argv[++i], EnsureAdaptiveSettings(args).minimumUsefulTriangleReduction))
+				{
+					std::cerr << "Invalid adaptive minimum triangle reduction.\n";
+					return false;
+				}
+			}
+			else if (flag == "--adaptive-min-meshlet-reduction" && i + 1 < argc)
+			{
+				if (!TryParseFloat(argv[++i], EnsureAdaptiveSettings(args).minimumUsefulMeshletReduction))
+				{
+					std::cerr << "Invalid adaptive minimum meshlet reduction.\n";
+					return false;
+				}
+			}
+			else if (flag == "--adaptive-max-geometric-error" && i + 1 < argc)
+			{
+				if (!TryParseFloat(argv[++i], EnsureAdaptiveSettings(args).maximumGeometricError))
+				{
+					std::cerr << "Invalid adaptive maximum geometric error.\n";
+					return false;
+				}
+			}
+			else if (flag == "--adaptive-settings-source" && i + 1 < argc)
+			{
+				EnsureAdaptiveSettings(args).settingsSource = argv[++i];
+			}
 			else
 			{
 				std::cerr << "Unrecognized argument: " << flag << "\n";
@@ -221,6 +362,17 @@ namespace
 		}
 
 		return escaped;
+	}
+
+	void EmitProgress(float progress, std::string_view stage, std::string_view message)
+	{
+		// The editor watches stdout for one JSON object per line. Other human
+		// diagnostics remain plain text and are logged without affecting the bar.
+		std::cout
+			<< "{\"type\":\"progress\",\"progress\":" << progress
+			<< ",\"stage\":\"" << EscapeJson(std::string(stage)) << "\""
+			<< ",\"message\":\"" << EscapeJson(std::string(message)) << "\"}"
+			<< std::endl;
 	}
 
 	void AppendStringArrayJson(std::ostringstream& json, const std::vector<std::string>& values)
@@ -543,7 +695,14 @@ int main(int argc, char** argv)
 	}
 
 	MeshCompileReport report{};
-	const bool compileResult = CompileMesh(args.input, args.output, args.includeMeshletBounds, &report, args.smoothingAngle, args.weldThreshold);
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = args.adaptiveSettings.has_value()
+		? &(*args.adaptiveSettings)
+		: nullptr;
+	const MeshCompileProgressCallback progressCallback = [](float progress, std::string_view stage, std::string_view message)
+	{
+		EmitProgress(progress, stage, message);
+	};
+	const bool compileResult = CompileMesh(args.input, args.output, args.includeMeshletBounds, &report, args.smoothingAngle, args.weldThreshold, adaptiveSettings, progressCallback);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (compileResult || std::filesystem::exists(args.output))

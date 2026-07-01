@@ -16,6 +16,8 @@
 #include <ImGuiFileDialog.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <optional>
@@ -59,6 +61,54 @@ void OpenMarkupAssetInBuilder(MainEditorSubsystem* owner, const std::filesystem:
 	{
 		uiBuilder->OpenMarkupDocument(std::filesystem::absolute(markupPath));
 	}
+}
+
+bool DrawImportProgressOverlay(const AssetImportProgress& job, const ImVec2& tileMin, const ImVec2& tileMax)
+{
+	ImDrawList* drawList = ImGui::GetWindowDrawList();
+	const float clampedProgress = std::clamp(job.progress, 0.0f, 1.0f);
+	const ImU32 backdropColor = IM_COL32(18, 21, 25, 220);
+	const ImU32 fillColor = job.failed ? IM_COL32(210, 70, 70, 235) : IM_COL32(68, 156, 210, 235);
+	const ImU32 borderColor = IM_COL32(235, 240, 245, 150);
+	const float padding = 6.0f;
+	const float barHeight = 16.0f;
+	const ImVec2 barMin(tileMin.x + padding, tileMax.y - padding - barHeight);
+	const ImVec2 barMax(tileMax.x - padding, tileMax.y - padding);
+	const ImVec2 fillMax(barMin.x + (barMax.x - barMin.x) * clampedProgress, barMax.y);
+
+	drawList->AddRectFilled(tileMin, tileMax, IM_COL32(5, 8, 12, 90), 4.0f);
+	drawList->AddRectFilled(barMin, barMax, backdropColor, 3.0f);
+	drawList->AddRectFilled(barMin, fillMax, fillColor, 3.0f);
+	drawList->AddRect(barMin, barMax, borderColor, 3.0f);
+
+	char percentText[32]{};
+	std::snprintf(percentText, sizeof(percentText), "%u%%", static_cast<unsigned int>(std::round(clampedProgress * 100.0f)));
+	const ImVec2 textSize = ImGui::CalcTextSize(percentText);
+	const ImVec2 textPos(
+		barMin.x + std::max(2.0f, ((barMax.x - barMin.x) - textSize.x) * 0.5f),
+		barMin.y + std::max(0.0f, ((barMax.y - barMin.y) - textSize.y) * 0.5f));
+	drawList->AddText(textPos, IM_COL32(255, 255, 255, 245), percentText);
+
+	const float closeSize = 18.0f;
+	const ImVec2 closeMin(tileMax.x - closeSize - 4.0f, tileMin.y + 4.0f);
+	const ImVec2 closeMax(tileMax.x - 4.0f, tileMin.y + 4.0f + closeSize);
+	const ImVec2 previousCursor = ImGui::GetCursorScreenPos();
+	ImGui::SetCursorScreenPos(closeMin);
+	ImGui::InvisibleButton("CancelImport", ImVec2(closeSize, closeSize));
+	const bool closeHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem);
+	const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+	ImGui::SetCursorScreenPos(previousCursor);
+	drawList->AddRectFilled(closeMin, closeMax, closeHovered ? IM_COL32(60, 68, 80, 245) : IM_COL32(24, 28, 34, 235), 3.0f);
+	drawList->AddRect(closeMin, closeMax, IM_COL32(255, 255, 255, 170), 3.0f);
+	const ImVec2 xTextSize = ImGui::CalcTextSize("X");
+	drawList->AddText(
+		ImVec2(closeMin.x + (closeSize - xTextSize.x) * 0.5f, closeMin.y + (closeSize - xTextSize.y) * 0.5f),
+		IM_COL32(255, 255, 255, 245),
+		"X");
+	if (closeHovered) {
+		ImGui::SetTooltip("Cancel import and remove this asset");
+	}
+	return clicked;
 }
 
 bool IsModelPackagePath(const std::filesystem::path& path)
@@ -280,7 +330,6 @@ bool DrawPackageChildTile(const PackageChildTile& child, float thumbnailSize, bo
 	}
 
 	ImGui::TextDisabled("%s", EllipsizeMiddle(child.name, 14u).c_str());
-	ImGui::TextDisabled("Read-only");
 	if (ImGui::IsItemHovered())
 	{
 		ImGui::SetTooltip("%s\n%s", child.name.c_str(), child.sourcePath.c_str());
@@ -664,6 +713,14 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 			ImGui::PushID(filename.c_str());
 			const std::filesystem::path absoluteEntryPath = std::filesystem::absolute(entry.path());
 			const std::string packageGroupKey = absoluteEntryPath.string();
+			if (isPackage && !m_InitializedPackageGroups.contains(packageGroupKey))
+			{
+				// Model packages can expose many virtual children. Start each
+				// package collapsed once per browser session so the asset grid
+				// opens cleanly, then preserve the user's manual foldout choice.
+				m_InitializedPackageGroups.insert(packageGroupKey);
+				m_CollapsedPackageGroups.insert(packageGroupKey);
+			}
 			const bool packageExpanded = !isPackage || !m_CollapsedPackageGroups.contains(packageGroupKey);
 			
 			std::string icon = entry.is_directory() ? "[DIR]" : "[FILE]";
@@ -692,7 +749,10 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 
 			const float packageChildThumbnailSize = std::max(36.0f, m_ThumbnailSize * 0.72f);
 			bool assetIconHovered = false;
-			if (isPackage && !packageChildren.empty())
+			const std::optional<AssetImportProgress> importProgress = !entry.is_directory()
+				? AssetDatabase::Instance().GetImportProgress(absoluteEntryPath)
+				: std::nullopt;
+			if ((isPackage && !packageChildren.empty()) || importProgress.has_value())
 			{
 				ImGui::SetNextItemAllowOverlap();
 			}
@@ -702,7 +762,14 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 					m_Owner->SetSelectedAsset(absoluteEntryPath);
 				}
 			}
+			const ImVec2 tileMin = ImGui::GetItemRectMin();
+			const ImVec2 tileMax = ImGui::GetItemRectMax();
 			assetIconHovered = ImGui::IsItemHovered();
+			if (importProgress.has_value()) {
+				if (DrawImportProgressOverlay(*importProgress, tileMin, tileMax)) {
+					AssetDatabase::Instance().CancelImport(absoluteEntryPath, true);
+				}
+			}
 
 			if (!entry.is_directory() && ImGui::BeginDragDropSource()) {
 				auto& assets = AssetDatabase::Instance().GetAssets();
@@ -819,4 +886,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 // ProjectBrowserWindow::Reset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectBrowserWindow::Reset() {
 	m_CurrentDirectory.clear();
+	m_CollapsedPackageGroups.clear();
+	m_InitializedPackageGroups.clear();
+	m_SelectedPackageChildGuid.clear();
 }

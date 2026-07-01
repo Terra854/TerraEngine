@@ -196,6 +196,67 @@ namespace TerraEngine::AssetPipeline
 			result.diagnostics.push_back({ severity, std::move(code), std::move(source), std::move(message), std::move(fallback) });
 		}
 
+		void ReportProgress(const GltfPackageImportOptions& options, float progress, std::string_view stage, std::string_view message)
+		{
+			if (options.progressCallback)
+			{
+				options.progressCallback(std::clamp(progress, 0.0f, 1.0f), stage, message);
+			}
+		}
+
+		std::string BuildPackageInventoryMessage(std::size_t meshCount, std::size_t textureCount, std::size_t materialCount)
+		{
+			std::ostringstream message;
+			message << "Discovered " << meshCount << " mesh" << (meshCount == 1u ? "" : "es")
+				<< ", " << textureCount << " texture" << (textureCount == 1u ? "" : "s")
+				<< ", and " << materialCount << " material" << (materialCount == 1u ? "" : "s") << ".";
+			return message.str();
+		}
+
+		std::string BuildIndexedStage(std::string_view itemName, std::size_t currentIndex, std::size_t totalCount, std::string_view stage)
+		{
+			std::ostringstream label;
+			label << itemName << " " << currentIndex << "/" << std::max<std::size_t>(totalCount, 1u);
+			if (!stage.empty())
+			{
+				label << " - " << stage;
+			}
+			return label.str();
+		}
+
+		std::string BuildIndexedMessage(std::string_view itemName, std::size_t currentIndex, std::size_t totalCount, std::string_view displayName, std::string_view message)
+		{
+			std::ostringstream text;
+			text << itemName << " " << currentIndex << " of " << std::max<std::size_t>(totalCount, 1u);
+			if (!displayName.empty())
+			{
+				text << " (" << displayName << ")";
+			}
+			if (!message.empty())
+			{
+				text << ": " << message;
+			}
+			return text.str();
+		}
+
+		auto MakeNestedProgress(const GltfPackageImportOptions& options, float start, float end)
+		{
+			return [&options, start, end](float progress, std::string_view stage, std::string_view message) {
+				ReportProgress(options, start + (end - start) * std::clamp(progress, 0.0f, 1.0f), stage, message);
+			};
+		}
+
+		auto MakeIndexedNestedProgress(const GltfPackageImportOptions& options, float start, float end, std::size_t currentIndex, std::size_t totalCount, std::string displayName)
+		{
+			return [&options, start, end, currentIndex, totalCount, displayName = std::move(displayName)](float progress, std::string_view stage, std::string_view message) {
+				ReportProgress(
+					options,
+					start + (end - start) * std::clamp(progress, 0.0f, 1.0f),
+					BuildIndexedStage("Texture", currentIndex, totalCount, stage),
+					BuildIndexedMessage("Texture", currentIndex, totalCount, displayName, message));
+			};
+		}
+
 		void PromoteStatusFromDiagnostics(GltfImportResult& result)
 		{
 			bool hasError = false;
@@ -550,6 +611,7 @@ namespace TerraEngine::AssetPipeline
 		result.package.sourceHashHex = ComputeFileHashHex(options.sourcePath);
 		result.package.importRoot = options.sourceRelativePath.parent_path() / (options.sourcePath.stem().string() + "_Generated");
 
+		ReportProgress(options, 0.04f, "Reading", "Opening glTF source data.");
 		auto gltfFile = fastgltf::GltfDataBuffer::FromPath(options.sourcePath);
 		if (!gltfFile)
 		{
@@ -571,6 +633,7 @@ namespace TerraEngine::AssetPipeline
 			fastgltf::Options::GenerateMeshIndices |
 			fastgltf::Options::DecomposeNodeMatrices;
 
+		ReportProgress(options, 0.10f, "Parsing", "Parsing glTF scene, buffers, and package metadata.");
 		auto parsed = parser.loadGltf(gltfFile.get(), options.sourcePath.parent_path(), parserOptions);
 		if (parsed.error() != fastgltf::Error::None)
 		{
@@ -580,6 +643,11 @@ namespace TerraEngine::AssetPipeline
 		}
 
 		fastgltf::Asset& asset = parsed.get();
+		ReportProgress(
+			options,
+			0.14f,
+			"Inventory",
+			BuildPackageInventoryMessage(asset.meshes.size(), asset.textures.size(), asset.materials.size()));
 		if (!asset.animations.empty())
 		{
 			AddDiagnostic(result, GltfDiagnosticSeverity::Info, "UnsupportedAnimationIgnored", "animations", "Animation data was not imported for this static asset import.", "Static geometry was imported.");
@@ -606,8 +674,15 @@ namespace TerraEngine::AssetPipeline
 		}
 
 		const std::filesystem::path packageFolderRelative = options.sourceRelativePath.parent_path();
+		const float materialStart = 0.18f;
+		const float materialEnd = 0.38f;
 		for (std::size_t materialIndex = 0; materialIndex < asset.materials.size(); ++materialIndex)
 		{
+			const float fraction = asset.materials.empty() ? 1.0f : static_cast<float>(materialIndex) / static_cast<float>(asset.materials.size());
+			ReportProgress(options,
+				materialStart + (materialEnd - materialStart) * fraction,
+				"Materials",
+				"Generating Terra material assets.");
 			const fastgltf::Material& sourceMaterial = asset.materials[materialIndex];
 			const std::string materialName = SanitizeAssetName(std::string(sourceMaterial.name), "Material_" + std::to_string(materialIndex));
 			GeneratedGltfMaterialAsset material{};
@@ -712,12 +787,29 @@ namespace TerraEngine::AssetPipeline
 
 			result.generatedMaterials.push_back(std::move(material));
 		}
+		ReportProgress(options, materialEnd, "Materials", "Generated Terra material assets.");
 
+		const float textureStart = 0.38f;
+		const float textureEnd = 0.56f;
+		const std::size_t textureCount = result.generatedTextures.size();
+		ReportProgress(
+			options,
+			textureStart,
+			"Textures",
+			"Compiling " + std::to_string(textureCount) + " referenced package texture" + (textureCount == 1u ? "." : "s."));
+		std::size_t textureOrdinal = 0u;
 		for (GeneratedGltfTextureAsset& texture : result.generatedTextures)
 		{
+			const float fraction = textureCount == 0u ? 1.0f : static_cast<float>(textureOrdinal) / static_cast<float>(textureCount);
+			const std::size_t currentTextureIndex = textureOrdinal + 1u;
+			ReportProgress(options,
+				textureStart + (textureEnd - textureStart) * fraction,
+				BuildIndexedStage("Texture", currentTextureIndex, textureCount, "Textures"),
+				BuildIndexedMessage("Texture", currentTextureIndex, textureCount, texture.displayName, "Extracting and compiling package texture."));
 			if (!texture.sourceImageIndex.has_value() || *texture.sourceImageIndex >= asset.images.size())
 			{
 				AddDiagnostic(result, GltfDiagnosticSeverity::Warning, "MissingTextureImage", texture.displayName, "Texture does not reference a valid glTF image.", "The generated material keeps scalar PBR factors.");
+				++textureOrdinal;
 				continue;
 			}
 
@@ -726,27 +818,40 @@ namespace TerraEngine::AssetPipeline
 			std::string imageExtension;
 			const bool hasImageBytes = ExtractImageBytes(asset, image, options.sourcePath.parent_path(), imageBytes, imageExtension);
 			const std::filesystem::path textureOutputPath = options.buildRoot / texture.compiledPath;
+			const float nestedStart = textureStart + (textureEnd - textureStart) * fraction;
+			const float nestedEnd = textureStart + (textureEnd - textureStart) * (textureCount == 0u ? 1.0f : static_cast<float>(textureOrdinal + 1u) / static_cast<float>(textureCount));
+			const TextureCompileProgressCallback textureProgress = MakeIndexedNestedProgress(options, nestedStart, nestedEnd, currentTextureIndex, textureCount, texture.displayName);
 			const bool compiled = hasImageBytes
-				? CompileTextureFromBytes(imageBytes, imageExtension, textureOutputPath, ToTextureFileSemantic(texture.usage))
-				: (!texture.sourcePath.empty() && CompileTexture(options.assetRoot / texture.sourcePath, textureOutputPath, ToTextureFileSemantic(texture.usage)));
+				? CompileTextureFromBytes(imageBytes, imageExtension, textureOutputPath, ToTextureFileSemantic(texture.usage), 1, true, TextureFilterType::Lanczos, textureProgress)
+				: (!texture.sourcePath.empty() && CompileTexture(options.assetRoot / texture.sourcePath, textureOutputPath, ToTextureFileSemantic(texture.usage), 1, true, TextureFilterType::Lanczos, textureProgress));
 			if (!compiled)
 			{
 				AddDiagnostic(result, GltfDiagnosticSeverity::Warning, "TextureCompileFailed", texture.displayName, "Failed to compile a package texture.", "The generated material keeps the texture binding for reimport diagnostics.");
 			}
+			++textureOrdinal;
 		}
+		ReportProgress(options, textureEnd, "Textures", "Package texture compilation finished.");
 
 		std::vector<RawMeshVertex> packageVertices;
 		std::vector<std::uint32_t> packageIndices;
+		const float meshStart = 0.56f;
+		const float meshEnd = 0.78f;
 		for (std::size_t meshIndex = 0; meshIndex < asset.meshes.size(); ++meshIndex)
 		{
+			const float fraction = asset.meshes.empty() ? 1.0f : static_cast<float>(meshIndex) / static_cast<float>(asset.meshes.size());
 			const fastgltf::Mesh& sourceMesh = asset.meshes[meshIndex];
+			const std::string meshDisplayName = SanitizeAssetName(std::string(sourceMesh.name), "Mesh_" + std::to_string(meshIndex));
+			ReportProgress(options,
+				meshStart + (meshEnd - meshStart) * fraction,
+				BuildIndexedStage("Mesh", meshIndex + 1u, asset.meshes.size(), "Meshes"),
+				BuildIndexedMessage("Mesh", meshIndex + 1u, asset.meshes.size(), meshDisplayName, "Extracting static mesh geometry."));
 			GeneratedGltfMeshAsset mesh{};
 			mesh.guid = StableChildUuid(options.packageGuid, "gltf-mesh", meshIndex);
 			mesh.sourceMeshIndex = meshIndex;
 			mesh.sourcePath = options.sourceRelativePath;
 			mesh.compiledPath = options.sourceRelativePath;
 			mesh.compiledPath.replace_extension(".temf");
-			mesh.displayName = SanitizeAssetName(std::string(sourceMesh.name), "Mesh_" + std::to_string(meshIndex));
+			mesh.displayName = meshDisplayName;
 			bool boundsInitialized = false;
 
 			for (std::size_t primitiveIndex = 0; primitiveIndex < sourceMesh.primitives.size(); ++primitiveIndex)
@@ -786,6 +891,7 @@ namespace TerraEngine::AssetPipeline
 			}
 			result.generatedMeshes.push_back(mesh);
 		}
+		ReportProgress(options, meshEnd, "Meshes", "Static mesh geometry extracted.");
 
 		if (result.generatedMeshes.empty())
 		{
@@ -802,10 +908,12 @@ namespace TerraEngine::AssetPipeline
 			MeshCompileReport compileReport{};
 			const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileSettings(options.virtualGeometrySettings);
 			const VirtualGeometryAdaptiveCompileSettings* compileSettingsPtr = options.hasVirtualGeometrySettings ? &compileSettings : nullptr;
-			if (!CompileMeshFromRaw(options.sourceRelativePath, options.buildRoot / compiledPackagePath, packageVertices, packageIndices, true, &compileReport, 60.0f, 1e-6f, compileSettingsPtr))
+			ReportProgress(options, 0.80f, "Compiling Mesh", "Building Terra mesh and virtual geometry data.");
+			if (!CompileMeshFromRaw(options.sourceRelativePath, options.buildRoot / compiledPackagePath, packageVertices, packageIndices, true, &compileReport, 60.0f, 1e-6f, compileSettingsPtr, MakeNestedProgress(options, 0.80f, 0.90f)))
 			{
 				AddDiagnostic(result, GltfDiagnosticSeverity::Error, "MeshCompileFailed", compiledPackagePath.generic_string(), "Extracted glTF geometry failed Terra mesh compilation.");
 			}
+			ReportProgress(options, 0.90f, "Mesh Metadata", "Reading compiled mesh metadata.");
 			for (GeneratedGltfMeshAsset& mesh : result.generatedMeshes)
 			{
 				mesh.virtualGeometrySettings = ToGeneratedSettings(compileReport.virtualGeometry.adaptiveSettings, options.hasVirtualGeometrySettings);
@@ -814,6 +922,7 @@ namespace TerraEngine::AssetPipeline
 			}
 		}
 
+		ReportProgress(options, 0.94f, "Diagnostics", "Finalizing package diagnostics.");
 		PromoteStatusFromDiagnostics(result);
 		return result;
 	}

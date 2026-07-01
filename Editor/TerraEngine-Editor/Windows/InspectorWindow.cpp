@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -72,6 +73,75 @@ bool IsGeneratedPackageSubAssetPath(const std::filesystem::path& path)
 		}
 	}
 	return false;
+}
+
+bool TryResolveGeneratedPackageTextureName(const TerraEngine::UUID& textureGuid, std::string& outName)
+{
+	const AssetDatabase& assetDatabase = AssetDatabase::Instance();
+	for (const auto& [sourcePath, metadata] : assetDatabase.GetAssets())
+	{
+		if (!TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
+		{
+			continue;
+		}
+
+		TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+		if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourcePath, importResult))
+		{
+			continue;
+		}
+
+		for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures)
+		{
+			if (texture.guid != textureGuid)
+			{
+				continue;
+			}
+
+			const std::filesystem::path compiledPath = assetDatabase.GetBuildRoot() / texture.compiledPath;
+			const std::filesystem::path sourceTexturePath = assetDatabase.GetAssetRoot() / texture.sourcePath;
+			if (!std::filesystem::exists(compiledPath) && !std::filesystem::exists(sourceTexturePath))
+			{
+				return false;
+			}
+
+			// Generated package textures are virtual children, not normal source
+			// assets. Resolve their sidecar record here so the inspector matches
+			// the renderer, which already binds these GUIDs at runtime.
+			outName = !texture.displayName.empty()
+				? texture.displayName
+				: texture.compiledPath.filename().string();
+			if (outName.empty())
+			{
+				outName = TerraEngine::ToHexString(texture.guid);
+			}
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void DrawAssetImportProgress(const AssetImportProgress& progress)
+{
+	const std::string fileName = progress.sourcePath.empty()
+		? std::string("Asset")
+		: progress.sourcePath.filename().string();
+	char overlay[256]{};
+	std::snprintf(overlay, sizeof(overlay), "%s - %s (%.1fs)",
+		fileName.c_str(),
+		progress.stage.empty() ? "Importing" : progress.stage.c_str(),
+		progress.elapsedSeconds);
+	ImGui::Spacing();
+	ImGui::PushStyleColor(ImGuiCol_PlotHistogram, progress.failed
+		? ImVec4(0.8f, 0.2f, 0.2f, 1.0f)
+		: ImVec4(0.2f, 0.6f, 0.8f, 1.0f));
+	ImGui::ProgressBar(std::clamp(progress.progress, 0.0f, 1.0f), ImVec2(-1.0f, 0.0f), overlay);
+	ImGui::PopStyleColor();
+	if (!progress.message.empty())
+	{
+		ImGui::TextDisabled("%s", progress.message.c_str());
+	}
 }
 
 template <typename ValueType>
@@ -3307,6 +3377,11 @@ void InspectorWindow::DrawModelPackageInspector(const std::filesystem::path& pat
 	ImGui::Text("Model Package: %s", path.filename().string().c_str());
 	ImGui::Separator();
 
+	if (const std::optional<AssetImportProgress> progress = AssetDatabase::Instance().GetImportProgress(absolutePath)) {
+		DrawAssetImportProgress(*progress);
+		return;
+	}
+
 	if (metaIt == assets.end()) {
 		ImGui::TextDisabled("This package is not registered in the asset database yet.");
 		return;
@@ -3943,6 +4018,10 @@ void InspectorWindow::DrawMaterialInspector(const std::filesystem::path& path) {
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!assetExists) {
+				assetExists = TryResolveGeneratedPackageTextureName(currentId, assetName);
+			}
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (!assetExists) {
 				assetName = "(Missing)";
 			}
 		}
@@ -4137,8 +4216,14 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 	ImGui::Text("Mesh Asset: %s", path.filename().string().c_str());
 	ImGui::Separator();
 
+	const std::filesystem::path absolutePath = std::filesystem::absolute(path);
+	if (const std::optional<AssetImportProgress> progress = AssetDatabase::Instance().GetImportProgress(absolutePath)) {
+		DrawAssetImportProgress(*progress);
+		return;
+	}
+
 	auto& assets = AssetDatabase::Instance().GetAssets();
-	auto it = assets.find(std::filesystem::absolute(path));
+	auto it = assets.find(absolutePath);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (it == assets.end()) {
 		ImGui::TextColored(ImVec4(1, 1, 0, 1), "Asset not found in database.");
@@ -4345,8 +4430,14 @@ void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
 	ImGui::Text("Texture Asset: %s", path.filename().string().c_str());
 	ImGui::Separator();
 
+	const std::filesystem::path absolutePath = std::filesystem::absolute(path);
+	if (const std::optional<AssetImportProgress> progress = AssetDatabase::Instance().GetImportProgress(absolutePath)) {
+		DrawAssetImportProgress(*progress);
+		return;
+	}
+
 	auto& assets = AssetDatabase::Instance().GetAssets();
-	auto it = assets.find(std::filesystem::absolute(path));
+	auto it = assets.find(absolutePath);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (it == assets.end()) {
 		ImGui::TextColored(ImVec4(1, 1, 0, 1), "Asset not found in database.");
@@ -4354,7 +4445,7 @@ void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (AssetDatabase::Instance().IsAssetCompiling(std::filesystem::absolute(path))) {
+	if (AssetDatabase::Instance().IsAssetCompiling(absolutePath)) {
 		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.6f, 0.8f, 1.0f));
 		// Use a negative fraction animated by time to show an indeterminate progress bar
@@ -4523,7 +4614,7 @@ void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (settingsChanged) {
 			// Trigger re-import which will call CompileTexture with new settings
-			AssetDatabase::Instance().ImportAsset(std::filesystem::absolute(path), true);
+			AssetDatabase::Instance().ImportAssetWithProgress(absolutePath, true);
 			
 			// Notify the renderer to reload the updated asset from disk
 			RenderSystem::Instance().ReloadTexture(metadata.guid);
@@ -4535,7 +4626,7 @@ void InspectorWindow::DrawTextureInspector(const std::filesystem::path& path) {
 	ImGui::Spacing();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::Button("Reimport", ImVec2(-1, 0))) {
-		AssetDatabase::Instance().ImportAsset(std::filesystem::absolute(path), true);
+		AssetDatabase::Instance().ImportAssetWithProgress(absolutePath, true);
 		RenderSystem::Instance().ReloadTexture(it->second.guid);
 	}
 }

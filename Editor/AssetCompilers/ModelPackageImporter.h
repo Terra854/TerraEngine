@@ -8,6 +8,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <string_view>
 
 #include "ModelPackageImportTypes.h"
@@ -26,6 +27,9 @@ namespace TerraEngine::AssetPipeline
 		GeneratedModelMeshVirtualGeometrySettings virtualGeometrySettings;
 		bool hasVirtualGeometrySettings = false;
 		bool forceReimport = false;
+		// progressCallback may be invoked from a background import worker. The
+		// receiver must copy the values into thread-safe UI state before drawing.
+		std::function<void(float progress, std::string_view stage, std::string_view message)> progressCallback;
 	};
 
 	[[nodiscard]] bool IsModelPackageSourceExtension(const std::filesystem::path& filePath);

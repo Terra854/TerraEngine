@@ -6,9 +6,13 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <array>
 #include <string>
+#include <string_view>
 #include <vector>
+
+using MeshCompileProgressCallback = std::function<void(float progress, std::string_view stage, std::string_view message)>;
 
 enum class VirtualGeometryCompileStatus : std::uint32_t
 {
@@ -159,7 +163,8 @@ bool CompileMesh(
 	MeshCompileReport* outReport = nullptr,
 	float smoothingAngle = 60.0f,
 	float weldThreshold = 1e-6f,
-	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = nullptr);
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = nullptr,
+	MeshCompileProgressCallback progressCallback = {});
 
 // Compiles geometry that has already been extracted from a package importer.
 // Input: stable logical source name for reports plus decoded triangle vertices
@@ -173,4 +178,5 @@ bool CompileMeshFromRaw(
 	MeshCompileReport* outReport = nullptr,
 	float smoothingAngle = 60.0f,
 	float weldThreshold = 1e-6f,
-	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = nullptr);
+	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = nullptr,
+	MeshCompileProgressCallback progressCallback = {});

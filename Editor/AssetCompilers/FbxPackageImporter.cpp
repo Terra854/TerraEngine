@@ -27,6 +27,7 @@
 #include <vector>
 
 #include <assimp/Importer.hpp>
+#include <assimp/ProgressHandler.hpp>
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
@@ -193,6 +194,93 @@ namespace TerraEngine::AssetPipeline
 			result.diagnostics.push_back({ severity, std::move(code), std::move(source), std::move(message), std::move(fallback) });
 		}
 
+		void ReportProgress(const FbxPackageImportOptions& options, float progress, std::string_view stage, std::string_view message)
+		{
+			if (options.progressCallback)
+			{
+				options.progressCallback(std::clamp(progress, 0.0f, 1.0f), stage, message);
+			}
+		}
+
+		std::string BuildPackageInventoryMessage(std::size_t meshCount, std::size_t textureCount, std::size_t materialCount)
+		{
+			std::ostringstream message;
+			message << "Discovered " << meshCount << " mesh" << (meshCount == 1u ? "" : "es")
+				<< ", " << textureCount << " texture reference" << (textureCount == 1u ? "" : "s")
+				<< ", and " << materialCount << " material" << (materialCount == 1u ? "" : "s") << ".";
+			return message.str();
+		}
+
+		std::string BuildIndexedStage(std::string_view itemName, std::size_t currentIndex, std::size_t totalCount, std::string_view stage)
+		{
+			std::ostringstream label;
+			label << itemName << " " << currentIndex << "/" << std::max<std::size_t>(totalCount, 1u);
+			if (!stage.empty())
+			{
+				label << " - " << stage;
+			}
+			return label.str();
+		}
+
+		std::string BuildIndexedMessage(std::string_view itemName, std::size_t currentIndex, std::size_t totalCount, std::string_view displayName, std::string_view message)
+		{
+			std::ostringstream text;
+			text << itemName << " " << currentIndex << " of " << std::max<std::size_t>(totalCount, 1u);
+			if (!displayName.empty())
+			{
+				text << " (" << displayName << ")";
+			}
+			if (!message.empty())
+			{
+				text << ": " << message;
+			}
+			return text.str();
+		}
+
+		class FbxAssimpProgressHandler final : public Assimp::ProgressHandler
+		{
+		public:
+			explicit FbxAssimpProgressHandler(const FbxPackageImportOptions& options)
+				: m_Options(options) {}
+
+			bool Update(float percentage = -1.0f) override
+			{
+				try
+				{
+					const float normalized = percentage >= 0.0f ? std::clamp(percentage, 0.0f, 1.0f) : 0.0f;
+					ReportProgress(m_Options, 0.12f + (0.34f - 0.12f) * normalized, "Parsing", "Parsing FBX scene with Assimp.");
+					return true;
+				}
+				catch (...)
+				{
+					return false;
+				}
+			}
+
+		private:
+			const FbxPackageImportOptions& m_Options;
+		};
+
+		auto MakeNestedProgress(const FbxPackageImportOptions& options, float start, float end)
+		{
+			return [&options, start, end](float progress, std::string_view stage, std::string_view message) {
+				ReportProgress(options, start + (end - start) * std::clamp(progress, 0.0f, 1.0f), stage, message);
+			};
+		}
+
+		TextureCompileProgressCallback MakeIndexedTextureProgress(TextureCompileProgressCallback progressCallback, std::size_t currentIndex, std::size_t totalCount, std::string displayName)
+		{
+			return [progressCallback = std::move(progressCallback), currentIndex, totalCount, displayName = std::move(displayName)](float progress, std::string_view stage, std::string_view message) {
+				if (progressCallback)
+				{
+					progressCallback(
+						progress,
+						BuildIndexedStage("Texture", currentIndex, totalCount, stage),
+						BuildIndexedMessage("Texture", currentIndex, totalCount, displayName, message));
+				}
+			};
+		}
+
 		void PromoteStatusFromDiagnostics(ModelPackageImportResult& result)
 		{
 			bool hasError = false;
@@ -354,6 +442,43 @@ namespace TerraEngine::AssetPipeline
 			return material.GetTextureCount(type) > 0u && material.GetTexture(type, 0u, &outPath) == AI_SUCCESS && outPath.length > 0u;
 		}
 
+		std::array<aiTextureType, 8> ImportedTextureTypes()
+		{
+			return {
+				aiTextureType_BASE_COLOR,
+				aiTextureType_DIFFUSE,
+				aiTextureType_NORMALS,
+				aiTextureType_HEIGHT,
+				aiTextureType_METALNESS,
+				aiTextureType_DIFFUSE_ROUGHNESS,
+				aiTextureType_AMBIENT_OCCLUSION,
+				aiTextureType_EMISSIVE
+			};
+		}
+
+		std::size_t CountMaterialTextureReferences(const aiScene& scene)
+		{
+			std::size_t textureCount = 0u;
+			for (unsigned int materialIndex = 0; materialIndex < scene.mNumMaterials; ++materialIndex)
+			{
+				const aiMaterial* material = scene.mMaterials[materialIndex];
+				if (material == nullptr)
+				{
+					continue;
+				}
+
+				for (const aiTextureType textureType : ImportedTextureTypes())
+				{
+					aiString path;
+					if (TryReadTextureReference(*material, textureType, path))
+					{
+						++textureCount;
+					}
+				}
+			}
+			return textureCount;
+		}
+
 		void AddMaterialTextureBinding(
 			MaterialAssetWriteDesc& desc,
 			GeneratedModelMaterialAsset& material,
@@ -454,7 +579,9 @@ namespace TerraEngine::AssetPipeline
 			const aiMaterial& sourceMaterial,
 			aiTextureType textureType,
 			ModelTextureUsage usage,
-			std::size_t& textureOrdinal)
+			std::size_t& textureOrdinal,
+			std::size_t totalTextureCount,
+			TextureCompileProgressCallback progressCallback)
 		{
 			aiString path;
 			if (!TryReadTextureReference(sourceMaterial, textureType, path))
@@ -462,16 +589,24 @@ namespace TerraEngine::AssetPipeline
 				return;
 			}
 
-			std::optional<TextureImportRecord> record = BuildTextureRecord(options, scene, result, path, usage, textureOrdinal++);
+			const std::size_t currentTextureOrdinal = textureOrdinal++;
+			const std::size_t currentTextureIndex = currentTextureOrdinal + 1u;
+			ReportProgress(
+				options,
+				0.30f + (0.42f - 0.30f) * (totalTextureCount == 0u ? 1.0f : static_cast<float>(currentTextureOrdinal) / static_cast<float>(totalTextureCount)),
+				BuildIndexedStage("Texture", currentTextureIndex, totalTextureCount, "Textures"),
+				BuildIndexedMessage("Texture", currentTextureIndex, totalTextureCount, std::filesystem::path(path.C_Str()).stem().string(), "Preparing FBX texture reference."));
+			std::optional<TextureImportRecord> record = BuildTextureRecord(options, scene, result, path, usage, currentTextureOrdinal);
 			if (!record.has_value())
 			{
 				return;
 			}
 
 			const std::filesystem::path outputPath = options.buildRoot / record->texture.compiledPath;
+			const TextureCompileProgressCallback indexedProgress = MakeIndexedTextureProgress(std::move(progressCallback), currentTextureIndex, totalTextureCount, record->texture.displayName);
 			const bool compiled = record->hasImageBytes
-				? CompileTextureFromBytes(record->imageBytes, record->imageExtension, outputPath, ToTextureFileSemantic(usage))
-				: CompileTexture(record->absoluteSourcePath, outputPath, ToTextureFileSemantic(usage));
+				? CompileTextureFromBytes(record->imageBytes, record->imageExtension, outputPath, ToTextureFileSemantic(usage), 1, true, TextureFilterType::Lanczos, indexedProgress)
+				: CompileTexture(record->absoluteSourcePath, outputPath, ToTextureFileSemantic(usage), 1, true, TextureFilterType::Lanczos, indexedProgress);
 			if (!compiled)
 			{
 				AddDiagnostic(result, ModelDiagnosticSeverity::Warning, "TextureCompileFailed", record->texture.displayName, "Failed to compile an FBX package texture.", "The generated material keeps scalar factors only.");
@@ -494,12 +629,22 @@ namespace TerraEngine::AssetPipeline
 			result.generatedTextures.push_back(std::move(record->texture));
 		}
 
-		void ImportMaterials(const FbxPackageImportOptions& options, const aiScene& scene, ModelPackageImportResult& result)
+		void ImportMaterials(const FbxPackageImportOptions& options, const aiScene& scene, ModelPackageImportResult& result, std::size_t totalTextureCount)
 		{
 			const unsigned int materialCount = std::max(1u, scene.mNumMaterials);
 			std::size_t textureOrdinal = 0u;
+			ReportProgress(
+				options,
+				0.24f,
+				"Materials",
+				"Generating " + std::to_string(materialCount) + " material" + (materialCount == 1u ? "" : "s") + " and compiling " + std::to_string(totalTextureCount) + " texture reference" + (totalTextureCount == 1u ? "." : "s."));
 			for (unsigned int materialIndex = 0; materialIndex < materialCount; ++materialIndex)
 			{
+				const float fraction = static_cast<float>(materialIndex) / static_cast<float>(materialCount);
+				ReportProgress(options,
+					0.24f + (0.30f - 0.24f) * fraction,
+					"Materials",
+					"Generating Terra material and texture assets.");
 				const aiMaterial* sourceMaterial = materialIndex < scene.mNumMaterials ? scene.mMaterials[materialIndex] : nullptr;
 				const std::string fallbackName = "Material_" + std::to_string(materialIndex);
 				std::string materialName = fallbackName;
@@ -575,14 +720,19 @@ namespace TerraEngine::AssetPipeline
 
 				if (sourceMaterial != nullptr)
 				{
-					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_BASE_COLOR, ModelTextureUsage::BaseColor, textureOrdinal);
-					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_DIFFUSE, ModelTextureUsage::BaseColor, textureOrdinal);
-					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_NORMALS, ModelTextureUsage::Normal, textureOrdinal);
-					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_HEIGHT, ModelTextureUsage::Normal, textureOrdinal);
-					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_METALNESS, ModelTextureUsage::MetallicRoughness, textureOrdinal);
-					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_DIFFUSE_ROUGHNESS, ModelTextureUsage::MetallicRoughness, textureOrdinal);
-					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_AMBIENT_OCCLUSION, ModelTextureUsage::Occlusion, textureOrdinal);
-					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_EMISSIVE, ModelTextureUsage::Emissive, textureOrdinal);
+					const auto makeTextureProgress = [&options, &textureOrdinal, totalTextureCount]() {
+						const float textureSliceStart = 0.30f + (0.42f - 0.30f) * (totalTextureCount == 0u ? 1.0f : static_cast<float>(textureOrdinal) / static_cast<float>(totalTextureCount));
+						const float textureSliceEnd = 0.30f + (0.42f - 0.30f) * (totalTextureCount == 0u ? 1.0f : static_cast<float>(textureOrdinal + 1u) / static_cast<float>(totalTextureCount));
+						return MakeNestedProgress(options, textureSliceStart, textureSliceEnd);
+					};
+					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_BASE_COLOR, ModelTextureUsage::BaseColor, textureOrdinal, totalTextureCount, makeTextureProgress());
+					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_DIFFUSE, ModelTextureUsage::BaseColor, textureOrdinal, totalTextureCount, makeTextureProgress());
+					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_NORMALS, ModelTextureUsage::Normal, textureOrdinal, totalTextureCount, makeTextureProgress());
+					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_HEIGHT, ModelTextureUsage::Normal, textureOrdinal, totalTextureCount, makeTextureProgress());
+					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_METALNESS, ModelTextureUsage::MetallicRoughness, textureOrdinal, totalTextureCount, makeTextureProgress());
+					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_DIFFUSE_ROUGHNESS, ModelTextureUsage::MetallicRoughness, textureOrdinal, totalTextureCount, makeTextureProgress());
+					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_AMBIENT_OCCLUSION, ModelTextureUsage::Occlusion, textureOrdinal, totalTextureCount, makeTextureProgress());
+					ImportMaterialTexture(options, scene, result, materialDesc, material, *sourceMaterial, aiTextureType_EMISSIVE, ModelTextureUsage::Emissive, textureOrdinal, totalTextureCount, makeTextureProgress());
 				}
 
 				if (!WriteMaterialAsset(options.assetRoot / material.sourcePath, materialDesc))
@@ -596,6 +746,7 @@ namespace TerraEngine::AssetPipeline
 
 				result.generatedMaterials.push_back(std::move(material));
 			}
+			ReportProgress(options, 0.42f, "Materials", "Generated Terra material and texture assets.");
 		}
 
 		void TraverseMeshes(
@@ -696,6 +847,7 @@ namespace TerraEngine::AssetPipeline
 		result.package.sourceHashHex = ComputeFileHashHex(options.sourcePath);
 		result.package.importRoot = options.sourceRelativePath.parent_path() / (options.sourcePath.stem().string() + "_Generated");
 
+		ReportProgress(options, 0.04f, "Reading", "Opening FBX source data.");
 		if (NormalizeExtension(options.sourcePath) != ".fbx")
 		{
 			AddDiagnostic(result, ModelDiagnosticSeverity::Error, "UnsupportedPackageExtension", options.sourceRelativePath.generic_string(), "FBX importer received a non-FBX source path.");
@@ -713,6 +865,11 @@ namespace TerraEngine::AssetPipeline
 			aiProcess_CalcTangentSpace |
 			aiProcess_ImproveCacheLocality;
 
+		// Assimp owns and deletes custom progress handlers. Returning false
+		// from the handler lets cancel requests abort long FBX parsing instead
+		// of forcing project close to wait for the whole parse to finish.
+		importer.SetProgressHandler(new FbxAssimpProgressHandler(options));
+		ReportProgress(options, 0.12f, "Parsing", "Parsing FBX scene with Assimp.");
 		const aiScene* scene = importer.ReadFile(options.sourcePath.string(), importFlags);
 		if (scene == nullptr)
 		{
@@ -722,7 +879,13 @@ namespace TerraEngine::AssetPipeline
 		}
 
 		AddUnsupportedDiagnostics(*scene, result);
-		ImportMaterials(options, *scene, result);
+		const std::size_t textureReferenceCount = CountMaterialTextureReferences(*scene);
+		ReportProgress(
+			options,
+			0.18f,
+			"Inventory",
+			BuildPackageInventoryMessage(scene->mNumMeshes, textureReferenceCount, scene->mNumMaterials));
+		ImportMaterials(options, *scene, result, textureReferenceCount);
 
 		GeneratedModelMeshAsset packageMesh{};
 		packageMesh.guid = StableChildUuid(options.packageGuid, "fbx-mesh", 0u);
@@ -737,8 +900,14 @@ namespace TerraEngine::AssetPipeline
 		bool boundsInitialized = false;
 		if (scene->mRootNode != nullptr)
 		{
+			ReportProgress(
+				options,
+				0.46f,
+				"Meshes",
+				"Extracting static mesh geometry from " + std::to_string(scene->mNumMeshes) + " source mesh" + (scene->mNumMeshes == 1u ? "." : "es."));
 			TraverseMeshes(*scene, *scene->mRootNode, aiMatrix4x4(), {}, packageMesh, result, vertices, indices, boundsInitialized);
 		}
+		ReportProgress(options, 0.70f, "Meshes", "Static mesh geometry extracted.");
 
 		if (vertices.empty() || indices.empty())
 		{
@@ -750,16 +919,19 @@ namespace TerraEngine::AssetPipeline
 			MeshCompileReport compileReport{};
 			const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileSettings(options.virtualGeometrySettings);
 			const VirtualGeometryAdaptiveCompileSettings* compileSettingsPtr = options.hasVirtualGeometrySettings ? &compileSettings : nullptr;
-			if (!CompileMeshFromRaw(options.sourceRelativePath, compiledMeshPath, vertices, indices, true, &compileReport, 60.0f, 1e-6f, compileSettingsPtr))
+			ReportProgress(options, 0.78f, "Compiling Mesh", "Building Terra mesh and virtual geometry data.");
+			if (!CompileMeshFromRaw(options.sourceRelativePath, compiledMeshPath, vertices, indices, true, &compileReport, 60.0f, 1e-6f, compileSettingsPtr, MakeNestedProgress(options, 0.78f, 0.90f)))
 			{
 				AddDiagnostic(result, ModelDiagnosticSeverity::Error, "MeshCompileFailed", packageMesh.compiledPath.generic_string(), "Extracted FBX geometry failed Terra mesh compilation.");
 			}
+			ReportProgress(options, 0.90f, "Mesh Metadata", "Reading compiled mesh metadata.");
 			packageMesh.virtualGeometrySettings = ToGeneratedSettings(compileReport.virtualGeometry.adaptiveSettings, options.hasVirtualGeometrySettings);
 			PopulateVirtualGeometryTargetDiagnostics(compileReport, packageMesh);
 			PopulateGeneratedMeshVirtualGeometryMetadata(compiledMeshPath, packageMesh, result.diagnostics);
 			result.generatedMeshes.push_back(std::move(packageMesh));
 		}
 
+		ReportProgress(options, 0.94f, "Diagnostics", "Finalizing package diagnostics.");
 		PromoteStatusFromDiagnostics(result);
 		return result;
 	}

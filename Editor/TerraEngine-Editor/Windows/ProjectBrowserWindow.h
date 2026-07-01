@@ -32,6 +32,7 @@ private:
 	std::filesystem::path m_CurrentDirectory;
 	std::string m_SearchFilter;
 	std::unordered_set<std::string> m_CollapsedPackageGroups;
+	std::unordered_set<std::string> m_InitializedPackageGroups;
 	std::string m_SelectedPackageChildGuid;
 	float m_ThumbnailSize = 64.0f;
 	float m_Padding = 16.0f;

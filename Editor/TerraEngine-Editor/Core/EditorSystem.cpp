@@ -405,7 +405,7 @@ void EditorSystem::Initialize() {
 			EditorSystem* self = g_EditorSystems[w];
 			if (self->mainEditor) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (SceneManager::Instance().IsActiveSceneDirty()) {
+				if (SceneManager::Instance().IsActiveSceneDirty() || AssetDatabase::Instance().IsCompiling()) {
 					glfwSetWindowShouldClose(w, GLFW_FALSE); // Stop immediate closure
 					self->mainEditor->RequestExit();
 					return;

@@ -14,6 +14,11 @@
 #include <cstring>
 #include <cstdlib>
 #include <regex>
+#include <stdexcept>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 #include "Editor/AssetCompilers/MeshCompiler.h"
 #include "Editor/AssetCompilers/TextureCompiler.h"
@@ -30,6 +35,15 @@ using json = nlohmann::json;
 
 namespace {
 	constexpr auto kRecentlyRemovedAssetRetention = std::chrono::seconds(5);
+	constexpr const char* kModelPackageCompilerName = "TerraEngineModelPackageCompiler.exe";
+	constexpr const char* kMeshCompilerName = "TerraEngineMeshCompiler.exe";
+	constexpr const char* kTextureCompilerName = "TerraEngineTextureCompiler.exe";
+	constexpr const char* kShaderCompilerName = "TerraEngineShaderCompiler.exe";
+
+	struct AssetImportCancelledException : std::runtime_error {
+		AssetImportCancelledException()
+			: std::runtime_error("asset import cancelled") {}
+	};
 
 	// UuidToString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string UuidToString(const TerraEngine::UUID& uuid) {
@@ -50,6 +64,47 @@ namespace {
 		}
 		return uuid;
 	}
+
+	std::wstring QuoteCommandLineArgument(const std::filesystem::path& value) {
+		std::wstring text = value.wstring();
+		std::wstring quoted = L"\"";
+		for (wchar_t c : text) {
+			if (c == L'"') {
+				quoted += L"\\\"";
+			} else {
+				quoted.push_back(c);
+			}
+		}
+		quoted += L"\"";
+		return quoted;
+	}
+
+	std::wstring QuoteCommandLineArgument(const std::string& value) {
+		return QuoteCommandLineArgument(std::filesystem::path(value));
+	}
+
+	std::wstring QuoteCommandLineArgument(const char* value) {
+		return QuoteCommandLineArgument(std::string(value != nullptr ? value : ""));
+	}
+
+	std::filesystem::path GetEditorExecutableDirectory() {
+#ifdef _WIN32
+		std::wstring buffer(MAX_PATH, L'\0');
+		DWORD copied = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+		while (copied == buffer.size()) {
+			buffer.resize(buffer.size() * 2u, L'\0');
+			copied = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+		}
+		if (copied == 0u) {
+			return std::filesystem::current_path();
+		}
+		buffer.resize(copied);
+		return std::filesystem::path(buffer).parent_path();
+#else
+		return std::filesystem::current_path();
+#endif
+	}
+
 
 	// ReadScriptMetadataString is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string ReadScriptMetadataString(const AssetMetadata& metadata, const char* key) {
@@ -512,6 +567,7 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 
 // AssetDatabase::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Shutdown() {
+	CancelAllImportsAndWait(true);
 	fileWatcher.Stop();
 	assets.clear();
 	deferredImports.clear();
@@ -553,11 +609,18 @@ void AssetDatabase::Update() {
 		if (jobIt->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
 			const std::filesystem::path completedPath = jobIt->absSourcePath;
 			bool compiled = jobIt->future.get();
+			const bool cancelled = jobIt->progressState && jobIt->progressState->cancelRequested.load();
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (!compiled) {
+			if (cancelled) {
+				SetImportProgress(jobIt->progressState, "Cancelled", "Cleaning up cancelled import outputs.", 1.0f, false, true);
+				CleanupCancelledImport(jobIt->metadata, jobIt->absSourcePath, jobIt->progressState->removeAssetAfterCancel.load());
+			} else if (!compiled) {
+				SetImportProgress(jobIt->progressState, "Failed", "Compilation failed; see the log for details.", 1.0f, false, true);
 				TERRAENGINE_LOG(LogLevel::Error, "Asset compilation failed for: " << jobIt->absSourcePath);
 			} else {
+				SetImportProgress(jobIt->progressState, "Registering", "Updating metadata and editor resources on the main thread.", 0.95f, false, false);
 				FinishImport(jobIt->metadata, jobIt->absSourcePath, jobIt->needsImport);
+				SetImportProgress(jobIt->progressState, "Complete", "Import finished.", 1.0f, false, false);
 			}
 			jobIt = asyncJobs.erase(jobIt);
 			if (const auto deferredIt = deferredImports.find(completedPath); deferredIt != deferredImports.end()) {
@@ -570,20 +633,166 @@ void AssetDatabase::Update() {
 	}
 	for (const auto& [path, force] : readyDeferredImports) {
 		if (std::filesystem::exists(path)) {
-			ImportAsset(path, force);
+			ImportAssetWithProgress(path, force);
 		}
 	}
 }
 // AssetDatabase::IsAssetCompiling is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool AssetDatabase::IsAssetCompiling(const std::filesystem::path& absSourcePath) const {
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (const auto& job : asyncJobs) {
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (job.absSourcePath == absSourcePath) {
+bool AssetDatabase::IsCompiling() const {
+	for (const AsyncCompileJob& job : asyncJobs) {
+		if (!job.progressState || !job.progressState->cancelRequested.load()) {
 			return true;
 		}
 	}
 	return false;
+}
+
+bool AssetDatabase::IsAssetCompiling(const std::filesystem::path& absSourcePath) const {
+	const std::filesystem::path normalizedPath = std::filesystem::absolute(absSourcePath);
+	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+	for (const auto& job : asyncJobs) {
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (job.absSourcePath == normalizedPath && (!job.progressState || !job.progressState->cancelRequested.load())) {
+			return true;
+		}
+	}
+	return false;
+}
+
+size_t AssetDatabase::GetCompileJobsCount() const {
+	size_t count = 0u;
+	for (const AsyncCompileJob& job : asyncJobs) {
+		if (!job.progressState || !job.progressState->cancelRequested.load()) {
+			++count;
+		}
+	}
+	return count;
+}
+
+bool AssetDatabase::CancelImport(const std::filesystem::path& absSourcePath, bool removeAssetAfterCancel) {
+	const std::filesystem::path normalizedPath = std::filesystem::absolute(absSourcePath);
+	for (AsyncCompileJob& job : asyncJobs) {
+		if (job.absSourcePath == normalizedPath && job.progressState) {
+			const AssetImportProgress snapshot = SnapshotImportProgress(job.progressState);
+			job.progressState->cancelRequested.store(true);
+			job.progressState->removeAssetAfterCancel.store(removeAssetAfterCancel);
+			TerminateCompilerProcess(job.progressState);
+			SetImportProgress(job.progressState, "Cancelling", "Stopping import and preparing cleanup.", snapshot.progress, false, false);
+			CleanupCancelledImport(job.metadata, job.absSourcePath, removeAssetAfterCancel);
+			return true;
+		}
+	}
+	return false;
+}
+
+void AssetDatabase::RequestCancelAllImports(bool removeAssetsAfterCancel) {
+	for (AsyncCompileJob& job : asyncJobs) {
+		if (job.progressState) {
+			const AssetImportProgress snapshot = SnapshotImportProgress(job.progressState);
+			job.progressState->cancelRequested.store(true);
+			job.progressState->removeAssetAfterCancel.store(removeAssetsAfterCancel);
+			TerminateCompilerProcess(job.progressState);
+			SetImportProgress(job.progressState, "Cancelling", "Stopping import and preparing cleanup.", snapshot.progress, false, false);
+		}
+		CleanupCancelledImport(job.metadata, job.absSourcePath, removeAssetsAfterCancel);
+	}
+	deferredImports.clear();
+}
+
+void AssetDatabase::CancelAllImportsAndWait(bool removeAssetsAfterCancel) {
+	RequestCancelAllImports(removeAssetsAfterCancel);
+
+	for (AsyncCompileJob& job : asyncJobs) {
+		if (job.future.valid()) {
+			job.future.wait();
+			try {
+				(void)job.future.get();
+			} catch (const std::exception& exception) {
+				TERRAENGINE_LOG(LogLevel::Warning, "Asset import worker ended during cancellation: " << exception.what());
+			} catch (...) {
+				TERRAENGINE_LOG(LogLevel::Warning, "Asset import worker ended during cancellation with an unknown error.");
+			}
+		}
+		CleanupCancelledImport(job.metadata, job.absSourcePath, job.progressState && job.progressState->removeAssetAfterCancel.load());
+	}
+	asyncJobs.clear();
+	deferredImports.clear();
+}
+
+std::vector<AssetImportProgress> AssetDatabase::GetImportProgressSnapshot() const {
+	std::vector<AssetImportProgress> snapshot;
+	snapshot.reserve(asyncJobs.size());
+	for (const AsyncCompileJob& job : asyncJobs) {
+		if (job.progressState && job.progressState->cancelRequested.load()) {
+			continue;
+		}
+		snapshot.push_back(SnapshotImportProgress(job.progressState));
+	}
+	return snapshot;
+}
+
+std::optional<AssetImportProgress> AssetDatabase::GetImportProgress(const std::filesystem::path& absSourcePath) const {
+	const std::filesystem::path normalizedPath = std::filesystem::absolute(absSourcePath);
+	for (const AsyncCompileJob& job : asyncJobs) {
+		if (job.absSourcePath == normalizedPath && (!job.progressState || !job.progressState->cancelRequested.load())) {
+			return SnapshotImportProgress(job.progressState);
+		}
+	}
+	return std::nullopt;
+}
+
+bool AssetDatabase::ShouldCompileAssetAsync(const std::string& importerName) const {
+	// Heavy asset compilers run on worker jobs and, on Windows, through child
+	// executables. That lets the UI show per-file progress and cancel the
+	// compiler process while FinishImport still publishes state on the main thread.
+	return importerName == "TextureImporter"
+		|| importerName == "MeshImporter"
+		|| importerName == "ShaderImporter"
+		|| TerraEngine::AssetPipeline::IsModelPackageImporterName(importerName);
+}
+
+void AssetDatabase::SetImportProgress(const std::shared_ptr<AsyncImportProgressState>& progressState, std::string stage, std::string message, float progress, bool indeterminate, bool failed) const {
+	if (!progressState) {
+		return;
+	}
+	if (progressState->cancelRequested.load() && stage != "Cancelling" && stage != "Cancelled") {
+		throw AssetImportCancelledException();
+	}
+
+	std::lock_guard<std::mutex> lock(progressState->mutex);
+	progressState->snapshot.stage = std::move(stage);
+	progressState->snapshot.message = std::move(message);
+	progressState->snapshot.progress = std::clamp(progress, 0.0f, 1.0f);
+	progressState->snapshot.indeterminate = indeterminate;
+	progressState->snapshot.failed = failed;
+	progressState->snapshot.cancelRequested = progressState->cancelRequested.load();
+	progressState->snapshot.elapsedSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - progressState->startedAt).count();
+}
+
+AssetImportProgress AssetDatabase::SnapshotImportProgress(const std::shared_ptr<AsyncImportProgressState>& progressState) const {
+	if (!progressState) {
+		return {};
+	}
+
+	std::lock_guard<std::mutex> lock(progressState->mutex);
+	AssetImportProgress snapshot = progressState->snapshot;
+	snapshot.cancelRequested = progressState->cancelRequested.load();
+	snapshot.elapsedSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - progressState->startedAt).count();
+	return snapshot;
+}
+
+void AssetDatabase::TerminateCompilerProcess(const std::shared_ptr<AsyncImportProgressState>& progressState) const {
+#ifdef _WIN32
+	if (!progressState) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(progressState->processMutex);
+	if (progressState->compilerProcessHandle != nullptr) {
+		TerminateProcess(static_cast<HANDLE>(progressState->compilerProcessHandle), 1u);
+	}
+#else
+	(void)progressState;
+#endif
 }
 
 // AssetDatabase::OnFileEvent is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -604,7 +813,7 @@ void AssetDatabase::OnFileEvent(const std::filesystem::path& path, FileStatus st
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (status == FileStatus::Created || status == FileStatus::Modified) {
 		if (std::filesystem::exists(path)) {
-			ImportAsset(path);
+			ImportAssetWithProgress(path);
 		}
 	} else if (status == FileStatus::Erased) {
 		RemoveAsset(path);
@@ -662,18 +871,25 @@ void AssetDatabase::ScanProject() {
 	}
 }
 
-// AssetDatabase::ImportAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool force) {
+	ImportAssetInternal(sourcePath, force, false);
+}
+
+void AssetDatabase::ImportAssetWithProgress(const std::filesystem::path& sourcePath, bool force) {
+	ImportAssetInternal(sourcePath, force, true);
+}
+
+// AssetDatabase::ImportAssetInternal is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath, bool force, bool allowAsyncCompile) {
 	const auto absSourcePath = std::filesystem::absolute(sourcePath);
 	if (absSourcePath.extension() == ".meta") return;
 	if (IsIgnoredAssetDatabasePath(absSourcePath)) return;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (std::filesystem::is_directory(absSourcePath)) return;
 	if (IsAssetCompiling(absSourcePath)) {
-		// Texture imports are worker jobs. File watcher events and MCP reimport
-		// requests can both target the same source while compression is still in
-		// flight, so coalesce them into one follow-up pass instead of starting
-		// multiple BasisU pools for the same file.
+		// Worker-backed imports can receive repeated file watcher or reimport
+		// requests while the first compile is still running. Coalesce those into
+		// one follow-up pass so large glTF/FBX files do not start duplicate jobs.
 		deferredImports[absSourcePath] = deferredImports[absSourcePath] || force;
 		TERRAENGINE_LOG(LogLevel::Info, "Deferred duplicate asset import while compile is active: " << absSourcePath);
 		return;
@@ -751,11 +967,38 @@ void AssetDatabase::ImportAsset(const std::filesystem::path& sourcePath, bool fo
 			}
 			
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (metadata.importerName == "TextureImporter") {
-				auto future = std::async(std::launch::async, [this, metadata]() {
-					return CompileAsset(metadata);
+			if (allowAsyncCompile && ShouldCompileAssetAsync(metadata.importerName)) {
+				auto progressState = std::make_shared<AsyncImportProgressState>();
+				progressState->snapshot.sourcePath = metadata.sourcePath;
+				progressState->snapshot.importerName = metadata.importerName;
+				SetImportProgress(progressState, "Queued", "Waiting for the asset compiler worker.", 0.05f, true, false);
+				std::optional<VirtualGeometryAdaptiveSettingsMetadata> resolvedMeshSettings;
+				if (metadata.importerName == "MeshImporter") {
+					VirtualGeometryAdaptiveSettingsMetadata settings;
+					TryGetVirtualGeometryAdaptiveSettings(metadata, settings);
+					resolvedMeshSettings = settings;
+				}
+
+				auto future = std::async(std::launch::async, [this, metadata, progressState, resolvedMeshSettings]() {
+					try {
+						SetImportProgress(progressState, "Importing", "Reading source data and writing compiled output.", 0.15f, true, false);
+						const bool compiled = CompileAsset(metadata, progressState, resolvedMeshSettings);
+						SetImportProgress(progressState,
+							compiled ? "Finalizing" : "Failed",
+							compiled ? "Compile output is ready for main-thread registration." : "Compilation failed; see the log for details.",
+							compiled ? 0.90f : 1.0f,
+							false,
+							!compiled);
+						return compiled;
+					} catch (const AssetImportCancelledException&) {
+						progressState->cancelRequested.store(true);
+						return false;
+					} catch (const std::exception& exception) {
+						TERRAENGINE_LOG(LogLevel::Error, "Asset import worker failed: " << exception.what());
+						return false;
+					}
 				});
-				asyncJobs.push_back({metadata, std::move(future), needsImport, absSourcePath});
+				asyncJobs.push_back({metadata, std::move(future), needsImport, absSourcePath, progressState});
 				return; // Defer registration until async job finishes
 			} else {
 				bool compiled = CompileAsset(metadata);
@@ -826,8 +1069,141 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 
 	if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
 	{
+		RegisterGeneratedModelPackageMaterialMetadata(absSourcePath);
 		RegisterGeneratedModelPackageResources(absSourcePath, buildRoot);
 	}
+}
+
+void AssetDatabase::RegisterGeneratedModelPackageMaterialMetadata(const std::filesystem::path& absSourcePath) {
+	TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+	if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(absSourcePath, importResult)) {
+		return;
+	}
+
+	for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials)
+	{
+		const std::filesystem::path materialSourcePath = assetRoot / material.sourcePath;
+		if (!std::filesystem::exists(materialSourcePath))
+		{
+			continue;
+		}
+
+		AssetMetadata materialMetadata;
+		materialMetadata.guid = material.guid;
+		materialMetadata.importerName = "MaterialImporter";
+		materialMetadata.sourcePath = material.sourcePath;
+		materialMetadata.compiledPath = material.compiledPath;
+		materialMetadata.lastModified = std::filesystem::last_write_time(materialSourcePath);
+		materialMetadata.settings = json::object();
+		// Package import already wrote a coherent package sidecar and generated
+		// material files. Register the generated material metadata here on the
+		// main thread so background model import never mutates the live database.
+		FinishImport(materialMetadata, std::filesystem::absolute(materialSourcePath), false);
+	}
+}
+
+void AssetDatabase::CleanupModelPackageGeneratedAssets(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath) {
+	if (!TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) {
+		return;
+	}
+
+	TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+	const bool loadedImportResult = TerraEngine::AssetPipeline::LoadModelPackageImportResult(absSourcePath, importResult);
+	const auto isSafeGeneratedRoot = [](const std::filesystem::path& relativeRoot) {
+		if (relativeRoot.empty() || relativeRoot.is_absolute()) {
+			return false;
+		}
+		for (const std::filesystem::path& part : relativeRoot) {
+			if (part == "..") {
+				return false;
+			}
+		}
+		const std::string folderName = relativeRoot.filename().string();
+		const std::string suffix = "_Generated";
+		return folderName.size() > suffix.size()
+			&& folderName.compare(folderName.size() - suffix.size(), suffix.size(), suffix) == 0;
+	};
+
+	if (loadedImportResult) {
+		for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes) {
+			ResourceManager::Instance().DeleteResource(mesh.guid, AssetType::Mesh);
+		}
+		for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures) {
+			ResourceManager::Instance().DeleteResource(texture.guid, AssetType::Texture);
+		}
+		for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials) {
+			ResourceManager::Instance().DeleteResource(material.guid, AssetType::Material);
+			const std::filesystem::path materialSourcePath = std::filesystem::absolute(assetRoot / material.sourcePath);
+			if (auto materialIt = assets.find(materialSourcePath); materialIt != assets.end()) {
+				assets.erase(materialIt);
+			}
+			std::error_code removeMetaError;
+			std::filesystem::remove(materialSourcePath.string() + ".meta", removeMetaError);
+		}
+	}
+
+	std::filesystem::path generatedRoot = loadedImportResult ? importResult.package.importRoot : std::filesystem::path();
+	if (!isSafeGeneratedRoot(generatedRoot)) {
+		generatedRoot = metadata.sourcePath.parent_path() / (absSourcePath.stem().string() + "_Generated");
+	}
+
+	std::error_code ec;
+	if (isSafeGeneratedRoot(generatedRoot)) {
+		const std::filesystem::path assetGeneratedRoot = std::filesystem::absolute(assetRoot / generatedRoot).lexically_normal();
+		const std::filesystem::path buildGeneratedRoot = std::filesystem::absolute(buildRoot / generatedRoot).lexically_normal();
+
+		for (auto assetIt = assets.begin(); assetIt != assets.end(); ) {
+			const std::filesystem::path candidatePath = std::filesystem::absolute(assetIt->first).lexically_normal();
+			std::error_code relativeError;
+			const std::filesystem::path relativeToGeneratedRoot = std::filesystem::relative(candidatePath, assetGeneratedRoot, relativeError);
+			const bool insideGeneratedRoot = !relativeError
+				&& !relativeToGeneratedRoot.empty()
+				&& *relativeToGeneratedRoot.begin() != "..";
+			if (insideGeneratedRoot) {
+				assetIt = assets.erase(assetIt);
+			} else {
+				++assetIt;
+			}
+		}
+
+		std::filesystem::remove_all(assetGeneratedRoot, ec);
+		ec.clear();
+		std::filesystem::remove_all(buildGeneratedRoot, ec);
+		ec.clear();
+	}
+
+	std::filesystem::remove(TerraEngine::AssetPipeline::GetImportResultPath(absSourcePath), ec);
+	ec.clear();
+	std::filesystem::remove(TerraEngine::AssetPipeline::GetImportResultPath(absSourcePath).string() + ".tmp", ec);
+}
+
+void AssetDatabase::CleanupCancelledImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool removeSourceAsset) {
+	std::error_code ec;
+	if (assets.find(absSourcePath) != assets.end()) {
+		RemoveAsset(absSourcePath);
+	}
+
+	if (!metadata.compiledPath.empty()) {
+		std::filesystem::remove(buildRoot / metadata.compiledPath, ec);
+		ec.clear();
+	}
+
+	const std::filesystem::path metaPath = absSourcePath.string() + ".meta";
+	std::filesystem::remove(metaPath, ec);
+	ec.clear();
+
+	if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) {
+		CleanupModelPackageGeneratedAssets(metadata, absSourcePath);
+	}
+
+	if (removeSourceAsset) {
+		std::filesystem::remove(absSourcePath, ec);
+		ec.clear();
+	}
+
+	pendingEvents.erase(absSourcePath);
+	deferredImports.erase(absSourcePath);
+	TERRAENGINE_LOG(LogLevel::Info, "Cancelled asset import and cleaned partial outputs for: " << absSourcePath);
 }
 
 // AssetDatabase::DeleteAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1038,8 +1414,392 @@ bool AssetDatabase::SaveMetadata(const AssetMetadata& metadata) {
 	} catch (...) { return false; }
 }
 
+bool AssetDatabase::CompileModelPackageWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState) {
+	const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
+	const std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
+
+#ifdef _WIN32
+	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kModelPackageCompilerName;
+	if (!std::filesystem::exists(compilerPath)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Model package compiler executable is missing: " << compilerPath);
+		return false;
+	}
+
+	const std::wstring commandLine = QuoteCommandLineArgument(compilerPath)
+		+ L" --source " + QuoteCommandLineArgument(fullSourcePath)
+		+ L" --asset-root " + QuoteCommandLineArgument(assetRoot)
+		+ L" --build-root " + QuoteCommandLineArgument(buildRoot)
+		+ L" --source-relative " + QuoteCommandLineArgument(metadata.sourcePath)
+		+ L" --package-guid " + QuoteCommandLineArgument(UuidToString(metadata.guid))
+		+ L" --shader-guid " + QuoteCommandLineArgument(UuidToString(ResourceManager::Instance().GetDefaultShaderCollectionID()));
+	return RunCompilerProcess(compilerPath, commandLine, progressState, "Model package compiler", fullCompiledPath);
+#else
+	TerraEngine::AssetPipeline::ModelPackageImportOptions options{};
+	options.sourcePath = fullSourcePath;
+	options.assetRoot = assetRoot;
+	options.buildRoot = buildRoot;
+	options.sourceRelativePath = metadata.sourcePath;
+	options.packageGuid = metadata.guid;
+	options.shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
+	options.forceReimport = true;
+	options.progressCallback = [this, progressState](float progress, std::string_view stage, std::string_view message) {
+		if (progressState) {
+			SetImportProgress(progressState, std::string(stage), std::string(message), progress, false, false);
+		}
+	};
+	TerraEngine::AssetPipeline::ModelPackageImportResult importResult = TerraEngine::AssetPipeline::ImportModelPackage(options);
+	if (!TerraEngine::AssetPipeline::SaveModelPackageImportResult(fullSourcePath, importResult)) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Failed to save model package import result sidecar for " << fullSourcePath);
+	}
+	return importResult.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed && std::filesystem::exists(fullCompiledPath);
+#endif
+}
+
+bool AssetDatabase::RunCompilerProcess(const std::filesystem::path& compilerPath, const std::wstring& commandLine, const std::shared_ptr<AsyncImportProgressState>& progressState, std::string_view logPrefix, const std::filesystem::path& expectedOutputPath) {
+#ifdef _WIN32
+	SECURITY_ATTRIBUTES securityAttributes{};
+	securityAttributes.nLength = sizeof(securityAttributes);
+	securityAttributes.bInheritHandle = TRUE;
+
+	HANDLE readPipe = nullptr;
+	HANDLE writePipe = nullptr;
+	if (!CreatePipe(&readPipe, &writePipe, &securityAttributes, 0u)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to create compiler output pipe for " << compilerPath);
+		return false;
+	}
+	SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0u);
+
+	STARTUPINFOW startupInfo{};
+	startupInfo.cb = sizeof(startupInfo);
+	startupInfo.dwFlags = STARTF_USESTDHANDLES;
+	startupInfo.hStdOutput = writePipe;
+	startupInfo.hStdError = writePipe;
+	startupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+	PROCESS_INFORMATION processInfo{};
+	std::vector<wchar_t> mutableCommandLine(commandLine.begin(), commandLine.end());
+	mutableCommandLine.push_back(L'\0');
+	const std::wstring workingDirectory = compilerPath.parent_path().wstring();
+	const BOOL created = CreateProcessW(
+		compilerPath.wstring().c_str(),
+		mutableCommandLine.data(),
+		nullptr,
+		nullptr,
+		TRUE,
+		CREATE_NO_WINDOW,
+		nullptr,
+		workingDirectory.c_str(),
+		&startupInfo,
+		&processInfo);
+	CloseHandle(writePipe);
+
+	if (!created) {
+		CloseHandle(readPipe);
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to launch compiler: " << compilerPath);
+		return false;
+	}
+
+	if (progressState) {
+		std::lock_guard<std::mutex> lock(progressState->processMutex);
+		progressState->compilerProcessHandle = processInfo.hProcess;
+		if (progressState->cancelRequested.load()) {
+			TerminateProcess(processInfo.hProcess, 1u);
+		}
+	}
+
+	std::string pendingLine;
+	char buffer[4096]{};
+	DWORD bytesRead = 0u;
+	while (ReadFile(readPipe, buffer, static_cast<DWORD>(sizeof(buffer)), &bytesRead, nullptr) && bytesRead > 0u) {
+		if (progressState && progressState->cancelRequested.load()) {
+			TerminateProcess(processInfo.hProcess, 1u);
+		}
+		pendingLine.append(buffer, buffer + bytesRead);
+		std::size_t newline = std::string::npos;
+		while ((newline = pendingLine.find('\n')) != std::string::npos) {
+			std::string line = pendingLine.substr(0u, newline);
+			pendingLine.erase(0u, newline + 1u);
+			if (!line.empty() && line.back() == '\r') {
+				line.pop_back();
+			}
+			if (line.empty()) {
+				continue;
+			}
+			try {
+				const json progressDocument = json::parse(line);
+				if (progressDocument.value("type", std::string()) == "progress") {
+					SetImportProgress(
+						progressState,
+						progressDocument.value("stage", std::string("Importing")),
+						progressDocument.value("message", std::string()),
+						progressDocument.value("progress", 0.0f),
+						false,
+						false);
+				}
+			} catch (const AssetImportCancelledException&) {
+				TerminateProcess(processInfo.hProcess, 1u);
+			} catch (const std::exception&) {
+				TERRAENGINE_LOG(LogLevel::Info, logPrefix << ": " << line);
+			}
+		}
+	}
+	CloseHandle(readPipe);
+
+	WaitForSingleObject(processInfo.hProcess, INFINITE);
+	DWORD exitCode = 1u;
+	GetExitCodeProcess(processInfo.hProcess, &exitCode);
+	if (progressState) {
+		std::lock_guard<std::mutex> lock(progressState->processMutex);
+		if (progressState->compilerProcessHandle == processInfo.hProcess) {
+			progressState->compilerProcessHandle = nullptr;
+		}
+	}
+	CloseHandle(processInfo.hThread);
+	CloseHandle(processInfo.hProcess);
+	return exitCode == 0u && (expectedOutputPath.empty() || std::filesystem::exists(expectedOutputPath));
+#else
+	(void)compilerPath;
+	(void)commandLine;
+	(void)progressState;
+	(void)logPrefix;
+	(void)expectedOutputPath;
+	return false;
+#endif
+}
+
+bool AssetDatabase::CompileMeshWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState, std::optional<VirtualGeometryAdaptiveSettingsMetadata> resolvedMeshSettings) {
+	const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
+	const std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
+	const std::filesystem::path stagedCompiledPath = fullCompiledPath.string() + "." + UuidToString(metadata.guid) + ".tmp";
+	const std::filesystem::path stagedMeshReportPath = stagedCompiledPath.string() + ".meshreport";
+	std::error_code cleanupError;
+	std::filesystem::remove(stagedCompiledPath, cleanupError);
+	std::filesystem::remove(stagedMeshReportPath, cleanupError);
+
+	VirtualGeometryAdaptiveSettingsMetadata resolvedSettings;
+	if (resolvedMeshSettings.has_value()) {
+		resolvedSettings = *resolvedMeshSettings;
+	} else {
+		TryGetVirtualGeometryAdaptiveSettings(metadata, resolvedSettings);
+	}
+	if (!resolvedSettings.valid) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Invalid virtual geometry override for " << fullSourcePath << ": " << JoinValidationErrors(resolvedSettings.validationErrors));
+	}
+	const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileVirtualGeometrySettings(resolvedSettings);
+
+#ifdef _WIN32
+	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kMeshCompilerName;
+	if (!std::filesystem::exists(compilerPath)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Mesh compiler executable is missing: " << compilerPath);
+		return false;
+	}
+
+	std::ostringstream targetRatios;
+	for (std::size_t index = 0u; index < compileSettings.targetRatios.size(); ++index) {
+		if (index != 0u) {
+			targetRatios << ",";
+		}
+		targetRatios << compileSettings.targetRatios[index];
+	}
+
+	const std::wstring commandLine = QuoteCommandLineArgument(compilerPath)
+		+ L" --input " + QuoteCommandLineArgument(fullSourcePath)
+		+ L" --output " + QuoteCommandLineArgument(stagedCompiledPath)
+		+ L" --adaptive-target-ratios " + QuoteCommandLineArgument(targetRatios.str())
+		+ L" --adaptive-min-source-triangles " + QuoteCommandLineArgument(std::to_string(compileSettings.minimumSourceTriangles))
+		+ L" --adaptive-min-generated-triangles " + QuoteCommandLineArgument(std::to_string(compileSettings.minimumGeneratedTriangles))
+		+ L" --adaptive-min-meshlets-per-level " + QuoteCommandLineArgument(std::to_string(compileSettings.minimumMeshletsPerGeneratedLevel))
+		+ L" --adaptive-min-triangle-reduction " + QuoteCommandLineArgument(std::to_string(compileSettings.minimumUsefulTriangleReduction))
+		+ L" --adaptive-min-meshlet-reduction " + QuoteCommandLineArgument(std::to_string(compileSettings.minimumUsefulMeshletReduction))
+		+ L" --adaptive-max-geometric-error " + QuoteCommandLineArgument(std::to_string(compileSettings.maximumGeometricError))
+		+ L" --adaptive-settings-source " + QuoteCommandLineArgument(compileSettings.settingsSource);
+
+	if (!RunCompilerProcess(compilerPath, commandLine, progressState, "Mesh compiler", stagedCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		std::filesystem::remove(stagedMeshReportPath, cleanupError);
+		return false;
+	}
+	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		std::filesystem::remove(stagedMeshReportPath, cleanupError);
+		return false;
+	}
+	std::filesystem::remove(stagedMeshReportPath, cleanupError);
+	return true;
+#else
+	const MeshCompileProgressCallback progressCallback = [this, progressState](float progress, std::string_view stage, std::string_view message) {
+		if (progressState) {
+			SetImportProgress(progressState, std::string(stage), std::string(message), progress, false, false);
+		}
+	};
+	if (!CompileMesh(fullSourcePath, stagedCompiledPath, true, nullptr, 60.0f, 1e-6f, &compileSettings, progressCallback)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		std::filesystem::remove(stagedMeshReportPath, cleanupError);
+		return false;
+	}
+	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		std::filesystem::remove(stagedMeshReportPath, cleanupError);
+		return false;
+	}
+	std::filesystem::remove(stagedMeshReportPath, cleanupError);
+	return true;
+#endif
+}
+
+bool AssetDatabase::CompileTextureWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState) {
+	const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
+	const std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
+	const std::filesystem::path stagedCompiledPath = fullCompiledPath.string() + "." + UuidToString(metadata.guid) + ".tmp";
+	std::error_code cleanupError;
+	std::filesystem::remove(stagedCompiledPath, cleanupError);
+
+	std::string semanticStr = "color";
+	if (metadata.settings.contains("semantic")) semanticStr = metadata.settings["semantic"];
+	TextureFileSemantic semantic = semanticStr == "data" ? TextureFileSemantic::Data : TextureFileSemantic::Color;
+
+	std::uint32_t quality = 1;
+	if (metadata.settings.contains("quality")) {
+		quality = static_cast<std::uint32_t>(metadata.settings["quality"].get<int>());
+	}
+
+	bool generateMipmaps = true;
+	if (metadata.settings.contains("generateMipmaps")) {
+		generateMipmaps = metadata.settings["generateMipmaps"].get<bool>();
+	}
+
+	std::string filterStr = "Lanczos";
+	if (metadata.settings.contains("filterType")) {
+		filterStr = metadata.settings["filterType"].get<std::string>();
+	}
+
+#ifdef _WIN32
+	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kTextureCompilerName;
+	if (!std::filesystem::exists(compilerPath)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Texture compiler executable is missing: " << compilerPath);
+		return false;
+	}
+	const std::wstring commandLine = QuoteCommandLineArgument(compilerPath)
+		+ L" --input " + QuoteCommandLineArgument(fullSourcePath)
+		+ L" --output " + QuoteCommandLineArgument(stagedCompiledPath)
+		+ L" --semantic " + QuoteCommandLineArgument(semantic == TextureFileSemantic::Data ? "data" : "color")
+		+ L" --quality " + QuoteCommandLineArgument(std::to_string(quality))
+		+ (generateMipmaps ? L" --generate-mipmaps" : L" --no-mipmaps")
+		+ L" --filter " + QuoteCommandLineArgument(filterStr);
+
+	if (!RunCompilerProcess(compilerPath, commandLine, progressState, "Texture compiler", stagedCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	return true;
+#else
+	TextureFilterType filter = TextureFilterType::Lanczos;
+	if (filterStr == "Box") filter = TextureFilterType::Box;
+	else if (filterStr == "Triangle") filter = TextureFilterType::Triangle;
+	else if (filterStr == "Kaiser") filter = TextureFilterType::Kaiser;
+	const TextureCompileProgressCallback progressCallback = [this, progressState](float progress, std::string_view stage, std::string_view message) {
+		if (progressState) {
+			SetImportProgress(progressState, std::string(stage), std::string(message), progress, false, false);
+		}
+	};
+	if (!CompileTexture(fullSourcePath, stagedCompiledPath, semantic, quality, generateMipmaps, filter, progressCallback)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	return true;
+#endif
+}
+
+bool AssetDatabase::CompileShaderWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState) {
+	const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
+	const std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
+	const std::filesystem::path stagedCompiledPath = fullCompiledPath.string() + "." + UuidToString(metadata.guid) + ".tmp";
+	const std::filesystem::path stagedShaderBytecodePath = std::filesystem::path(stagedCompiledPath).replace_extension(".spv");
+	std::error_code cleanupError;
+	std::filesystem::remove(stagedCompiledPath, cleanupError);
+	std::filesystem::remove(stagedShaderBytecodePath, cleanupError);
+
+	std::string stage = "vs";
+	if (metadata.settings.contains("stage")) {
+		stage = metadata.settings["stage"];
+	} else {
+		const std::string filename = fullSourcePath.filename().string();
+		if (filename.find("frag") != std::string::npos || filename.find("pixel") != std::string::npos) {
+			stage = "ps";
+		}
+	}
+	std::string target;
+	if (metadata.settings.contains("target")) {
+		target = metadata.settings["target"];
+	}
+	std::string entry = "main";
+	if (metadata.settings.contains("entryPoint")) {
+		entry = metadata.settings["entryPoint"];
+	}
+
+#ifdef _WIN32
+	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kShaderCompilerName;
+	if (!std::filesystem::exists(compilerPath)) {
+		TERRAENGINE_LOG(LogLevel::Error, "Shader compiler executable is missing: " << compilerPath);
+		return false;
+	}
+
+	std::wstring commandLine = QuoteCommandLineArgument(compilerPath)
+		+ L" --input " + QuoteCommandLineArgument(fullSourcePath)
+		+ L" --output " + QuoteCommandLineArgument(stagedCompiledPath)
+		+ L" --stage " + QuoteCommandLineArgument(stage)
+		+ L" --entry " + QuoteCommandLineArgument(entry);
+	if (!target.empty()) {
+		commandLine += L" --target " + QuoteCommandLineArgument(target);
+	}
+
+	if (!RunCompilerProcess(compilerPath, commandLine, progressState, "Shader compiler", stagedCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		std::filesystem::remove(stagedShaderBytecodePath, cleanupError);
+		return false;
+	}
+	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		std::filesystem::remove(stagedShaderBytecodePath, cleanupError);
+		return false;
+	}
+	return true;
+#else
+	std::filesystem::path toolsDir = projectRoot / "out/build/Build/Debug";
+	if (!std::filesystem::exists(toolsDir / "dxc.exe") && !std::filesystem::exists(toolsDir / "dxc")) {
+		toolsDir = std::filesystem::current_path();
+	}
+	if (!std::filesystem::exists(toolsDir / "dxc.exe") && !std::filesystem::exists(toolsDir / "dxc")) {
+		toolsDir = projectRoot / "out/build_vs_18/Build/Editor";
+	}
+
+#if defined(_WIN32)
+	std::filesystem::path dxcPath = toolsDir / "dxc.exe";
+#else
+	std::filesystem::path dxcPath = toolsDir / "dxc";
+#endif
+	if (!CompileShader(fullSourcePath, stagedCompiledPath, stage, target, entry, dxcPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath)) {
+		std::filesystem::remove(stagedCompiledPath, cleanupError);
+		return false;
+	}
+	return true;
+#endif
+}
+
 // AssetDatabase::CompileAsset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
+bool AssetDatabase::CompileAsset(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState, std::optional<VirtualGeometryAdaptiveSettingsMetadata> resolvedMeshSettings) {
 	if (metadata.compiledPath.empty()) return true;
 
 	// Resolve full paths using buildRoot
@@ -1053,170 +1813,18 @@ bool AssetDatabase::CompileAsset(const AssetMetadata& metadata) {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) {
-		TerraEngine::AssetPipeline::ModelPackageImportOptions options{};
-		options.sourcePath = fullSourcePath;
-		options.assetRoot = assetRoot;
-		options.buildRoot = buildRoot;
-		options.sourceRelativePath = metadata.sourcePath;
-		options.packageGuid = metadata.guid;
-		options.shaderCollectionId = ResourceManager::Instance().GetDefaultShaderCollectionID();
-		options.forceReimport = true;
-
-		TerraEngine::AssetPipeline::ModelPackageImportResult previousImportResult;
-		const bool hasPreviousImportResult = TerraEngine::AssetPipeline::LoadModelPackageImportResult(fullSourcePath, previousImportResult);
-		if (hasPreviousImportResult)
-		{
-			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& previousMesh : previousImportResult.generatedMeshes)
-			{
-				if (previousMesh.virtualGeometrySettings.hasOverride)
-				{
-					options.virtualGeometrySettings = previousMesh.virtualGeometrySettings;
-					options.hasVirtualGeometrySettings = true;
-					break;
-				}
-			}
-		}
-
-		TerraEngine::AssetPipeline::ModelPackageImportResult importResult = TerraEngine::AssetPipeline::ImportModelPackage(options);
-		if (hasPreviousImportResult)
-		{
-			for (TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
-			{
-				for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& previousMesh : previousImportResult.generatedMeshes)
-				{
-					if (mesh.guid == previousMesh.guid && previousMesh.virtualGeometrySettings.hasOverride)
-					{
-						mesh.virtualGeometrySettings = previousMesh.virtualGeometrySettings;
-						break;
-					}
-				}
-			}
-		}
-		for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials)
-		{
-			const std::filesystem::path materialSourcePath = assetRoot / material.sourcePath;
-			if (!std::filesystem::exists(materialSourcePath))
-			{
-				continue;
-			}
-
-			AssetMetadata materialMetadata;
-			materialMetadata.guid = material.guid;
-			materialMetadata.importerName = "MaterialImporter";
-			materialMetadata.sourcePath = material.sourcePath;
-			materialMetadata.compiledPath = material.compiledPath;
-			materialMetadata.lastModified = std::filesystem::last_write_time(materialSourcePath);
-			materialMetadata.settings = json::object();
-			// Package import is already publishing a coherent package sidecar and
-			// generated material files. Register the generated material metadata
-			// without forcing a renderer hot-reload for every child material; doing
-			// that during startup/package import can invalidate renderer resources
-			// before editor render passes are ready.
-			FinishImport(materialMetadata, std::filesystem::absolute(materialSourcePath), false);
-		}
-		if (!TerraEngine::AssetPipeline::SaveModelPackageImportResult(fullSourcePath, importResult)) {
-			TERRAENGINE_LOG(LogLevel::Warning, "Failed to save model package import result sidecar for " << fullSourcePath);
-		}
-		if (importResult.status == TerraEngine::AssetPipeline::ModelImportStatus::Failed) {
-			return false;
-		}
-
-		return std::filesystem::exists(fullCompiledPath);
+		return CompileModelPackageWithProcess(metadata, progressState);
 	}
 	else if (metadata.importerName == "MeshImporter") {
-		const std::filesystem::path stagedCompiledPath = fullCompiledPath.string() + "." + UuidToString(metadata.guid) + ".tmp";
-		std::error_code cleanupError;
-		std::filesystem::remove(stagedCompiledPath, cleanupError);
-		VirtualGeometryAdaptiveSettingsMetadata resolvedSettings;
-		TryGetVirtualGeometryAdaptiveSettings(metadata, resolvedSettings);
-		if (!resolvedSettings.valid)
-		{
-			TERRAENGINE_LOG(LogLevel::Warning, "Invalid virtual geometry override for " << fullSourcePath << ": " << JoinValidationErrors(resolvedSettings.validationErrors));
-		}
-		const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileVirtualGeometrySettings(resolvedSettings);
-		// Compile into a sibling file first. The live compiled asset is replaced
-		// only after the compiler reports success, so failed rebuilds never
-		// unregister or corrupt the previous usable mesh.
-		if (!CompileMesh(fullSourcePath, stagedCompiledPath, true, nullptr, 60.0f, 1e-6f, &compileSettings))
-		{
-			std::filesystem::remove(stagedCompiledPath, cleanupError);
-			return false;
-		}
-		if (!PublishCompiledAssetAtomically(stagedCompiledPath, fullCompiledPath))
-		{
-			std::filesystem::remove(stagedCompiledPath, cleanupError);
-			return false;
-		}
-		return true;
+		return CompileMeshWithProcess(metadata, progressState, resolvedMeshSettings);
 	} 
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (metadata.importerName == "TextureImporter") {
-		std::string semanticStr = "color";
-		if (metadata.settings.contains("semantic")) semanticStr = metadata.settings["semantic"];
-		
-		TextureFileSemantic semantic = TextureFileSemantic::Color;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (semanticStr == "data") semantic = TextureFileSemantic::Data;
-
-		std::uint32_t quality = 1; // Balanced
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (metadata.settings.contains("quality")) {
-			quality = static_cast<std::uint32_t>(metadata.settings["quality"].get<int>());
-		}
-
-		bool generateMipmaps = true;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (metadata.settings.contains("generateMipmaps")) {
-			generateMipmaps = metadata.settings["generateMipmaps"].get<bool>();
-		}
-
-		TextureFilterType filter = TextureFilterType::Lanczos;
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (metadata.settings.contains("filterType")) {
-			std::string filterStr = metadata.settings["filterType"];
-			if (filterStr == "Box") filter = TextureFilterType::Box;
-			else if (filterStr == "Triangle") filter = TextureFilterType::Triangle;
-			else if (filterStr == "Lanczos") filter = TextureFilterType::Lanczos;
-			else if (filterStr == "Kaiser") filter = TextureFilterType::Kaiser;
-		}
-		
-		return CompileTexture(fullSourcePath, fullCompiledPath, semantic, quality, generateMipmaps, filter);
+		return CompileTextureWithProcess(metadata, progressState);
 	} 
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (metadata.importerName == "ShaderImporter") {
-		std::string stage = "vs";
-		if (metadata.settings.contains("stage")) stage = metadata.settings["stage"];
-		else { 
-			std::string fn = fullSourcePath.filename().string();
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (fn.find("frag") != std::string::npos || fn.find("pixel") != std::string::npos) stage = "ps";
-		}
-		std::string target = "";
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (metadata.settings.contains("target")) target = metadata.settings["target"];
-		std::string entry = "main";
-		if (metadata.settings.contains("entryPoint")) entry = metadata.settings["entryPoint"];
-
-		// Find DXC
-		std::filesystem::path toolsDir = projectRoot / "out/build/Build/Debug"; 
-		
-		// Try relative to project root
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!std::filesystem::exists(toolsDir / "dxc.exe") && !std::filesystem::exists(toolsDir / "dxc")) {
-			toolsDir = std::filesystem::current_path();
-		}
-		// Try specific VS18 path
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!std::filesystem::exists(toolsDir / "dxc.exe") && !std::filesystem::exists(toolsDir / "dxc")) {
-			toolsDir = projectRoot / "out/build_vs_18/Build/Editor";
-		}
-
-#if defined(_WIN32)
-		std::filesystem::path dxcPath = toolsDir / "dxc.exe";
-#else
-		std::filesystem::path dxcPath = toolsDir / "dxc";
-#endif
-		return CompileShader(fullSourcePath, fullCompiledPath, stage, target, entry, dxcPath);
+		return CompileShaderWithProcess(metadata, progressState);
 	} 
 	else if (metadata.importerName == "MaterialImporter") {
 		std::error_code ec;
@@ -1256,6 +1864,10 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 
 		if (knownResource) {
 			ResourceManager::Instance().DeleteResource(metadata.guid, type);
+		}
+
+		if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) {
+			CleanupModelPackageGeneratedAssets(metadata, absPath);
 		}
 
 		std::error_code ec;

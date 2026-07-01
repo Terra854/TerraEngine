@@ -37,8 +37,7 @@
 #include "basisu_enc.h"
 
 namespace {
-	constexpr std::uint32_t kDefaultTextureCompileWorkers = 2u;
-	constexpr std::uint32_t kMaximumTextureCompileWorkers = 4u;
+	constexpr std::uint32_t kDefaultTextureCompileWorkers = 4u;
 	constexpr std::array<std::string_view, 11> kSupportedTextureSourceExtensions = {
 		".png",
 		".jpg",
@@ -69,20 +68,18 @@ namespace {
 
 	std::uint32_t ResolveTextureCompilerWorkerCount(std::uint32_t hardwareThreads, const char* overrideText) {
 		const std::uint32_t availableThreads = std::max(1u, hardwareThreads);
-		const std::uint32_t maximumWorkers = std::min(availableThreads, kMaximumTextureCompileWorkers);
 		if (overrideText != nullptr && overrideText[0] != '\0') {
 			char* parseEnd = nullptr;
 			const unsigned long requestedWorkers = std::strtoul(overrideText, &parseEnd, 10);
 			if (parseEnd != overrideText && requestedWorkers > 0ul) {
-				const unsigned long boundedRequest = std::min<unsigned long>(requestedWorkers, static_cast<unsigned long>(maximumWorkers));
-				return std::clamp(static_cast<std::uint32_t>(boundedRequest), 1u, maximumWorkers);
+				const unsigned long boundedRequest = std::min<unsigned long>(requestedWorkers, static_cast<unsigned long>(availableThreads));
+				return std::clamp(static_cast<std::uint32_t>(boundedRequest), 1u, availableThreads);
 			}
 		}
 
-		// Package imports can compile several textures while the file watcher is
-		// also responding to source-image changes. Keeping each BasisU pool small
-		// prevents one MCP import from multiplying into many all-core workers.
-		return std::min(kDefaultTextureCompileWorkers, maximumWorkers);
+		// Default to a modest BasisU pool for responsive imports, but let explicit
+		// overrides use the full hardware thread count when a workstation can spare it.
+		return std::min(kDefaultTextureCompileWorkers, availableThreads);
 	}
 
 	// InitializeBasisu is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -91,6 +88,12 @@ namespace {
 		if (!initialized) {
 			basisu::basisu_encoder_init();
 			initialized = true;
+		}
+	}
+
+	void ReportTextureProgress(const TextureCompileProgressCallback& callback, float progress, std::string_view stage, std::string_view message) {
+		if (callback) {
+			callback(std::clamp(progress, 0.0f, 1.0f), stage, message);
 		}
 	}
 
@@ -205,9 +208,10 @@ std::uint32_t ResolveTextureCompilerWorkerCountForTests(std::uint32_t hardwareTh
 }
 
 // CompileTexture is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality, bool generateMipmaps, TextureFilterType filter) {
+bool CompileTexture(const std::filesystem::path& input, const std::filesystem::path& output, TextureFileSemantic semantic, std::uint32_t quality, bool generateMipmaps, TextureFilterType filter, TextureCompileProgressCallback progressCallback) {
 	InitializeBasisu();
 
+	ReportTextureProgress(progressCallback, 0.04f, "Texture Decode", "Loading source image pixels.");
 	int width = 0;
 	int height = 0;
 	int channels = 0;
@@ -220,6 +224,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 
 	const bool isSRGB = (semantic == TextureFileSemantic::Color);
 
+	ReportTextureProgress(progressCallback, 0.16f, "Texture Prepare", "Preparing RGBA image for BasisU.");
 	basisu::image sourceImage(width, height);
 	std::memcpy(sourceImage.get_ptr(), pixels, static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
 	stbi_image_free(pixels);
@@ -265,6 +270,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 		return false;
 	}
 
+	ReportTextureProgress(progressCallback, 0.30f, "Texture Compress", "Compressing texture mips to UASTC.");
 	const basisu::basis_compressor::error_code result = compressor.process();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (result != basisu::basis_compressor::cECSuccess) {
@@ -273,6 +279,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	}
 
 	const basisu::uint8_vec& ktx2Data = compressor.get_output_ktx2_file();
+	ReportTextureProgress(progressCallback, 0.76f, "Texture Container", "Building Terra texture container metadata.");
 
 	// Parse the returned KTX2 container once, then stream only the raw UASTC
 	// mip payloads into the Terra texture file instead of building a second blob.
@@ -361,6 +368,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 		return false;
 	}
 
+	ReportTextureProgress(progressCallback, 0.88f, "Texture Write", "Writing Terra texture file.");
 	std::uint32_t runningCrc = 0xFFFFFFFFu;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!WriteBytesAndUpdateCrc(out, runningCrc, &header, sizeof(header))
@@ -404,6 +412,7 @@ bool CompileTexture(const std::filesystem::path& input, const std::filesystem::p
 	}
 
 	out.write(reinterpret_cast<const char*>(&crc), sizeof(crc));
+	ReportTextureProgress(progressCallback, 0.98f, "Texture Done", "Texture compile output is ready.");
 	return static_cast<bool>(out);
 }
 
@@ -414,7 +423,8 @@ bool CompileTextureFromBytes(
 	TextureFileSemantic semantic,
 	std::uint32_t quality,
 	bool generateMipmaps,
-	TextureFilterType filter) {
+	TextureFilterType filter,
+	TextureCompileProgressCallback progressCallback) {
 	if (bytes.empty()) {
 		std::cerr << "Cannot compile an empty package image payload.\n";
 		return false;
@@ -431,6 +441,7 @@ bool CompileTextureFromBytes(
 	std::filesystem::create_directories(tempRoot);
 	const std::filesystem::path stagedImage = tempRoot / output.filename().replace_extension(sourceExtension);
 
+	ReportTextureProgress(progressCallback, 0.02f, "Texture Stage", "Staging embedded package texture bytes.");
 	{
 		std::ofstream out(stagedImage, std::ios::binary | std::ios::trunc);
 		if (!out) {
@@ -444,7 +455,7 @@ bool CompileTextureFromBytes(
 		}
 	}
 
-	const bool result = CompileTexture(stagedImage, output, semantic, quality, generateMipmaps, filter);
+	const bool result = CompileTexture(stagedImage, output, semantic, quality, generateMipmaps, filter, progressCallback);
 	std::error_code removeError;
 	std::filesystem::remove(stagedImage, removeError);
 	return result;
