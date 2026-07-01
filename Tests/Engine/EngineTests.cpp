@@ -67,6 +67,9 @@ namespace TerraEngine::Tests {
 	void RegisterRenderBackendStageTimingTests(TestRegistry& registry);
 	void RegisterRenderBackendStallDiagnosticsTests(TestRegistry& registry);
 	void RegisterRenderBudgetDiagnosticsTests(TestRegistry& registry);
+	void RegisterRenderCaptureDiagnosticsTests(TestRegistry& registry);
+	void RegisterRenderCaptureEncodingTests(TestRegistry& registry);
+	void RegisterRenderCaptureQueueTests(TestRegistry& registry);
 	void RegisterRenderDeferredRetirementTests(TestRegistry& registry);
 	void RegisterRenderFailureContainmentTests(TestRegistry& registry);
 	void RegisterRenderGraphThreadingContractTests(TestRegistry& registry);
@@ -218,6 +221,9 @@ int main() {
 	TerraEngine::Tests::RegisterRenderBackendStageTimingTests(registry);
 	TerraEngine::Tests::RegisterRenderBackendStallDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterRenderBudgetDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterRenderCaptureDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterRenderCaptureEncodingTests(registry);
+	TerraEngine::Tests::RegisterRenderCaptureQueueTests(registry);
 	TerraEngine::Tests::RegisterRenderPerformanceGateTests(registry);
 	TerraEngine::Tests::RegisterRenderPassValidationStressTests(registry);
 	TerraEngine::Tests::RegisterRenderRandomizedSchedulingTests(registry);

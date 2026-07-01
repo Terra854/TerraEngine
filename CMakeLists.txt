@@ -100,6 +100,7 @@ set(ENGINE_SOURCES
 	Engine/ThreadPool/ThreadPool.cpp
 	Engine/Profiling/Profiler.cpp
 	Engine/Profiling/ProfilerCapture.cpp
+	Engine/Renderer/RenderCaptureEncoding.cpp
 	Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/Graph/RenderDiagnostics.cpp
 	Engine/Renderer/Graph/RenderFrameBreakdown.cpp
@@ -191,6 +192,7 @@ set(ENGINE_HEADERS
 	Engine/Profiling/Profiler.h
 	Engine/Profiling/ProfilerCapture.h
 	Engine/Profiling/ProfilerScope.h
+	Engine/Renderer/RenderCaptureEncoding.h
 	Engine/Renderer/RenderSystem.h
 	Engine/Renderer/RenderTypes.h
 	Engine/Renderer/Graph/RenderDiagnostics.h

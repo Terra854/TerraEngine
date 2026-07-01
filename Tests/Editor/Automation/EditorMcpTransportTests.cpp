@@ -1,9 +1,15 @@
 #include "../TestHarness.h"
 #include "EditorMcpTransport.h"
+#include "Engine/Renderer/RenderSystem.h"
 
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <glm/ext/matrix_clip_space.hpp>
+#include <glm/glm.hpp>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #if defined(_WIN32)
 	#ifndef WIN32_LEAN_AND_MEAN
@@ -147,6 +153,93 @@ namespace TerraEngine::EditorTests
 			context.Expect(canceled["result"].value("canceled", false), "Cancellation notification should cancel the queued request id.");
 			bridge.Update(0.0f);
 			context.Expect(bridge.GetQueuedRequests().empty(), "Canceled queued request should drain without executing.");
+		});
+
+		registry.Add("Editor.MCP.Transport.ToolsCallCanReturnTextAndImageContent", [](TestContext& context) {
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			EditorMcpTransport transport(bridge);
+			context.Expect(transport.AcceptPeer("127.0.0.1", "test"), "Local client should connect before calling tools.");
+
+			std::atomic<bool> stopPump = false;
+			std::thread pump([&]() {
+				while (!stopPump.load())
+				{
+					bridge.Update(0.0f);
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+			});
+
+			const nlohmann::json response = transport.HandleMessage({
+				{"jsonrpc", "2.0"},
+				{"id", 8},
+				{"method", "tools/call"},
+				{"params", {
+					{"name", "camera.capture_custom"},
+					{"arguments", {
+						{"position", nlohmann::json::array({0.0f, 1.0f, 5.0f})},
+						{"target", nlohmann::json::array({0.0f, 0.0f, 0.0f})},
+						{"width", 32u},
+						{"height", 32u}
+					}}
+				}}
+			});
+
+			stopPump = true;
+			pump.join();
+			bridge.Shutdown();
+
+			const nlohmann::json content = response["result"]["content"];
+			context.Expect(content.size() >= 2u, "tools/call should return text plus image content for captures.");
+			context.ExpectEqual(std::string("text"), content[0].value("type", std::string()), "First capture content item should remain the JSON text envelope.");
+			context.ExpectEqual(std::string("image"), content[1].value("type", std::string()), "Second capture content item should be an MCP image.");
+			context.ExpectEqual(std::string("image/png"), content[1].value("mimeType", std::string()), "MCP image content should advertise PNG.");
+			context.Expect(!content[1].value("data", std::string()).empty(), "MCP image content should carry base64 data.");
+		});
+
+		registry.Add("Editor.MCP.Transport.GameViewCaptureReturnsImageContent", [](TestContext& context) {
+			RenderSystem::Instance().Clear();
+			RenderSystem::Instance().SetGameViewTargetSize(glm::uvec2(32u, 32u));
+			RenderSystem::Instance().SetGameViewCamera(
+				glm::mat4(1.0f),
+				glm::perspectiveZO(glm::radians(45.0f), 1.0f, 0.1f, 100.0f),
+				glm::vec3(0.0f, 0.0f, 5.0f));
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			bridge.SetEnabled(true);
+			EditorMcpTransport transport(bridge);
+			context.Expect(transport.AcceptPeer("127.0.0.1", "test"), "Local client should connect before Game View capture.");
+
+			std::atomic<bool> stopPump = false;
+			std::thread pump([&]() {
+				while (!stopPump.load())
+				{
+					bridge.Update(0.0f);
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+			});
+
+			const nlohmann::json response = transport.HandleMessage({
+				{"jsonrpc", "2.0"},
+				{"id", 9},
+				{"method", "tools/call"},
+				{"params", {
+					{"name", "game_view.capture"},
+					{"arguments", {{"width", 32u}, {"height", 32u}}}
+				}}
+			});
+
+			stopPump = true;
+			pump.join();
+			bridge.Shutdown();
+			RenderSystem::Instance().Clear();
+
+			const nlohmann::json content = response["result"]["content"];
+			context.Expect(content.size() >= 2u, "Game View capture should return text plus image content.");
+			context.ExpectEqual(std::string("image"), content[1].value("type", std::string()), "Game View capture should include an MCP image.");
+			context.ExpectEqual(std::string("image/png"), content[1].value("mimeType", std::string()), "Game View capture image should be PNG.");
+			context.Expect(!content[1].value("data", std::string()).empty(), "Game View capture image should include base64 data.");
 		});
 
 		registry.Add("Editor.MCP.Transport.HttpListenerParsesContentLengthWithWhitespace", [](TestContext& context) {

@@ -63,6 +63,7 @@ namespace TerraEngine::Editor::Automation
 		std::vector<ActivityRecord> GetRecentActivity(std::size_t limit = 64) const;
 		nlohmann::json BuildStatusJson() const;
 		nlohmann::json BuildCapabilityListJson() const;
+		nlohmann::json BuildCaptureAvailabilityJson() const;
 
 		ApprovalPrompt CreateApprovalPrompt(std::string requestId, std::string capability, std::string summary, nlohmann::json arguments, std::chrono::system_clock::time_point expiresAt = {});
 		bool ResolveApproval(std::string_view approvalId, bool approved);

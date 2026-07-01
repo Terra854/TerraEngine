@@ -17,6 +17,8 @@
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Object/Component.h"
 #include "Engine/Core/Object/ObjectManager.h"
+#include "Engine/Components/CameraComponent.h"
+#include "Engine/Components/Transform.h"
 #include "Engine/Scene/SceneManager.h"
 #include "Engine/Scene/SceneMutationQueue.h"
 #include "Engine/Scene/RuntimeLayout.h"
@@ -28,13 +30,19 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <fstream>
 #include <sstream>
 #include <chrono>
 #include <unordered_set>
+#include <glm/ext/matrix_clip_space.hpp>
+#include <glm/geometric.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 namespace TerraEngine::Editor::Automation
 {
@@ -71,6 +79,147 @@ namespace TerraEngine::Editor::Automation
 		{
 			std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 			return value;
+		}
+
+		const char* CaptureSourceKindJson(TerraEngine::Renderer::RenderCaptureSourceKind sourceKind)
+		{
+			switch (sourceKind)
+			{
+			case TerraEngine::Renderer::RenderCaptureSourceKind::GameView: return "gameView";
+			case TerraEngine::Renderer::RenderCaptureSourceKind::CameraObject: return "cameraObject";
+			case TerraEngine::Renderer::RenderCaptureSourceKind::CustomCamera: return "customCamera";
+			default: return "unknown";
+			}
+		}
+
+		nlohmann::json ReadUVec2(const nlohmann::json& arguments, std::uint32_t defaultWidth = 1280u, std::uint32_t defaultHeight = 720u)
+		{
+			const std::uint32_t width = arguments.value("width", defaultWidth);
+			const std::uint32_t height = arguments.value("height", defaultHeight);
+			if (width == 0u || height == 0u)
+			{
+				return {{"ok", false}, {"message", "Capture width and height must be positive integers."}};
+			}
+			return {{"ok", true}, {"size", nlohmann::json::array({width, height})}};
+		}
+
+		std::optional<glm::vec3> ReadVec3(const nlohmann::json& value)
+		{
+			if (!value.is_array() || value.size() != 3u)
+			{
+				return std::nullopt;
+			}
+			try
+			{
+				const glm::vec3 result(value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
+				if (!std::isfinite(result.x) || !std::isfinite(result.y) || !std::isfinite(result.z))
+				{
+					return std::nullopt;
+				}
+				return result;
+			}
+			catch (const nlohmann::json::exception&)
+			{
+				return std::nullopt;
+			}
+		}
+
+		nlohmann::json SerializeVec3(const glm::vec3& value)
+		{
+			return nlohmann::json::array({ value.x, value.y, value.z });
+		}
+
+		struct AuthoredCameraCaptureSnapshot
+		{
+			TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+			std::string name;
+			bool objectActive = false;
+			bool cameraComponentActive = false;
+			Transform transform;
+			CameraComponent camera;
+		};
+
+		std::optional<AuthoredCameraCaptureSnapshot> ReadAuthoredCameraCaptureSnapshot(ObjectManager& objectManager, const Object& object)
+		{
+			if (!objectManager.isObjectValid(object))
+			{
+				return std::nullopt;
+			}
+
+			// MCP camera-object capture reads authored editor state directly.
+			// That keeps disabled camera objects available for inspection without
+			// activating them or depending on runtime active-membership queries.
+			const Transform* transform = objectManager.GetComponent<Transform>(object);
+			const CameraComponent* camera = objectManager.GetComponent<CameraComponent>(object);
+			if (transform == nullptr || camera == nullptr)
+			{
+				return std::nullopt;
+			}
+
+			AuthoredCameraCaptureSnapshot snapshot;
+			snapshot.objectId = objectManager.getUUID(object);
+			snapshot.name = objectManager.getObjectName(object);
+			snapshot.objectActive = objectManager.isObjectActive(object);
+			snapshot.cameraComponentActive = camera->active;
+			snapshot.transform = *transform;
+			snapshot.camera = *camera;
+			return snapshot;
+		}
+
+		TerraEngine::Renderer::RenderCaptureRequest BuildCaptureRequestFromCamera(
+			TerraEngine::Renderer::RenderCaptureSourceKind sourceKind,
+			std::string sourceName,
+			const Transform& transform,
+			const CameraComponent& camera,
+			const glm::uvec2& size,
+			bool transparentBackground)
+		{
+			const glm::quat rotation = glm::normalize(transform.rotation);
+			const glm::vec3 forward = rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+			glm::vec3 up = rotation * camera.up;
+			if (glm::length(up) < 0.0001f)
+			{
+				up = glm::vec3(0.0f, 1.0f, 0.0f);
+			}
+
+			TerraEngine::Renderer::RenderCaptureRequest request;
+			request.sourceKind = sourceKind;
+			request.sourceName = std::move(sourceName);
+			request.targetSize = size;
+			request.transparentBackground = transparentBackground;
+			request.cameraWorldPosition = transform.position;
+			request.viewMatrix = glm::lookAt(transform.position, transform.position + forward, glm::normalize(up));
+			request.projectionMatrix = glm::perspectiveZO(glm::radians(camera.verticalFovDegrees), camera.aspectRatio, camera.nearPlane, camera.farPlane);
+			request.projectionMatrix[1][1] *= -1.0f;
+			return request;
+		}
+
+		nlohmann::json BuildCaptureSuccessEnvelope(const EditorAutomationService& service, std::string_view requestId, const TerraEngine::Renderer::RenderCaptureResult& capture)
+		{
+			nlohmann::json source = {
+				{"kind", CaptureSourceKindJson(capture.sourceKind)},
+				{"description", capture.sourceName}
+			};
+			nlohmann::json data = {
+				{"requestId", capture.requestId.empty() ? std::string(requestId) : capture.requestId},
+				{"source", source},
+				{"sourceKind", TerraEngine::Renderer::ToString(capture.sourceKind)},
+				{"sourceName", capture.sourceName},
+				{"mimeType", capture.mimeType},
+				{"width", capture.size.x},
+				{"height", capture.size.y},
+				{"frameId", capture.frameId},
+				{"freshness", capture.freshness},
+				{"overlaysIncluded", capture.overlaysIncluded},
+				{"backendReadback", capture.backendReadback},
+				{"deterministicFallback", capture.deterministicFallback},
+				{"warnings", capture.warnings}
+			};
+			nlohmann::json result = service.BuildSuccess(requestId, capture.message, std::move(data));
+			result["mcpContent"] = nlohmann::json::array({
+				{{"type", "image"}, {"mimeType", capture.mimeType}, {"data", capture.base64Data}}
+			});
+			return result;
 		}
 
 		std::string NormalizeVirtualGeometryStatus(std::string status)
@@ -634,7 +783,11 @@ namespace TerraEngine::Editor::Automation
 			case ErrorCategory::Validation: return "validation";
 			case ErrorCategory::Permission: return "permission";
 			case ErrorCategory::MissingTarget: return "missing_target";
+			case ErrorCategory::InvalidCameraObject: return "invalid_camera_object";
 			case ErrorCategory::UnsupportedCapability: return "unsupported_capability";
+			case ErrorCategory::UnsupportedReadback: return "unsupported_readback";
+			case ErrorCategory::QueueFull: return "queue_full";
+			case ErrorCategory::OverBudget: return "over_budget";
 			case ErrorCategory::Conflict: return "conflict";
 			case ErrorCategory::Transport: return "transport";
 			case ErrorCategory::Internal: return "internal";
@@ -654,6 +807,7 @@ namespace TerraEngine::Editor::Automation
 			case ActivityEventType::Approval: return "approval";
 			case ActivityEventType::Mutation: return "mutation";
 			case ActivityEventType::Diagnostic: return "diagnostic";
+			case ActivityEventType::Capture: return "capture";
 			case ActivityEventType::Export: return "export";
 		}
 		return "request";
@@ -756,6 +910,9 @@ namespace TerraEngine::Editor::Automation
 		add("export.validate", "export", MutationMode::ReadOnly, true, false, false, "profile: string");
 		add("export.start", "export", MutationMode::ExportMutation, true, false, true, "profile: string, confirmOutput?: string");
 		add("export.cancel", "export", MutationMode::ExportMutation, true, false, false, "jobId: string");
+		add("game_view.capture", "capture", MutationMode::ReadOnly, false, false, false, "width?: integer, height?: integer, format?: image/png, freshness?: latestCompleted|nextFrame, includeOverlays?: bool, transparentBackground?: bool");
+		add("camera.capture_object", "capture", MutationMode::ReadOnly, false, true, false, "object|camera|target: uuid|entity|name, includeDisabled?: bool, width?: integer, height?: integer, format?: image/png");
+		add("camera.capture_custom", "capture", MutationMode::ReadOnly, false, false, false, "position: [x,y,z], target?: [x,y,z], forward?: [x,y,z], up?: [x,y,z], projection?: perspective|orthographic, width?: integer, height?: integer");
 		add("diagnostics.get_summary", "diagnostics", MutationMode::ReadOnly, false, false, false, "includeDetails?: bool, surface?: string");
 	}
 
@@ -853,6 +1010,9 @@ namespace TerraEngine::Editor::Automation
 		if (toolName == "export.validate") return HandleExportValidate(arguments, requestId);
 		if (toolName == "export.start") return HandleExportStart(arguments, requestId);
 		if (toolName == "export.cancel") return HandleExportCancel(arguments, requestId);
+		if (toolName == "game_view.capture") return HandleGameViewCapture(arguments, requestId);
+		if (toolName == "camera.capture_object") return HandleCameraObjectCapture(arguments, requestId);
+		if (toolName == "camera.capture_custom") return HandleCustomCameraCapture(arguments, requestId);
 		if (toolName == "diagnostics.get_summary") return HandleDiagnosticsGetSummary(arguments, requestId);
 		return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Capability metadata exists but no handler is registered.");
 	}
@@ -943,6 +1103,23 @@ namespace TerraEngine::Editor::Automation
 		const ::Engine* engine = editorContext != nullptr ? editorContext->engine : nullptr;
 		const nlohmann::json parallelFrame = SerializeParallelFrameDiagnostics(engine);
 		const nlohmann::json mutationDiagnostics = SerializeMutationDiagnostics();
+		const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+		nlohmann::json captureSchedulers = nlohmann::json::array();
+		for (const TerraEngine::Renderer::RenderCaptureSchedulerDiagnostics& capture : renderDiagnostics.captureSchedulers)
+		{
+			captureSchedulers.push_back({
+				{"owningSystem", capture.owningSystem},
+				{"schedulerPhase", capture.schedulerPhase},
+				{"sourceKind", capture.sourceKind},
+				{"reads", capture.readResources},
+				{"writes", capture.writeResources},
+				{"workerSafePreparation", capture.workerSafePreparation},
+				{"protectedBoundary", capture.protectedBoundary},
+				{"visibilityBoundary", capture.visibilityBoundary},
+				{"backendReadback", capture.backendReadback},
+				{"deterministicFallback", capture.deterministicFallback}
+			});
+		}
 		const auto& runtimeMembership = ObjectManager::instance().GetRuntimeActiveMembershipSnapshot();
 		std::size_t activeRuntimeObjects = 0u;
 		for (const TerraEngine::Scene::RuntimeActiveMembership& membership : runtimeMembership)
@@ -957,6 +1134,7 @@ namespace TerraEngine::Editor::Automation
 			{{"surface", "runtimeLayout"}, {"state", "available"}, {"details", nlohmann::json{{"authoredObjectCount", runtimeMembership.size()}, {"activeRuntimeObjectCount", activeRuntimeObjects}, {"membershipRevision", ObjectManager::instance().GetRuntimeActiveMembershipRevision()}}}},
 			{{"surface", "resources"}, {"state", assetJobCount > 0 ? "compiling" : "available"}, {"details", nlohmann::json{{"assetCompileJobs", assetJobCount}}}},
 			{{"surface", "streaming"}, {"state", "available"}, {"details", nlohmann::json::object()}},
+			{{"surface", "capture"}, {"state", "available"}, {"details", nlohmann::json{{"availability", BuildCaptureAvailability()}, {"schedulerDeclarations", includeDetails ? captureSchedulers : nlohmann::json::array()}}}},
 			{{"surface", "scheduler"}, {"state", "available"}, {"details", nlohmann::json{{"workerBoundaries", boundaryFindings}, {"parallelFrame", parallelFrame}, {"mutationDiagnostics", mutationDiagnostics}}}},
 			{{"surface", "scripting"}, {"state", ScriptingSystem::Instance().IsRunning() ? "running" : "idle"}, {"details", nlohmann::json{{"coordinatorState", editorContext ? editorContext->scripting.coordinatorState : "Idle"}}}},
 			{{"surface", "export"}, {"state", exportJobs.empty() ? "idle" : exportJobs.front().state}, {"details", nlohmann::json{{"jobs", exportJobJson}}}}
@@ -966,6 +1144,182 @@ namespace TerraEngine::Editor::Automation
 		data["mutationDiagnostics"] = mutationDiagnostics;
 		data["emptyStateSafe"] = true;
 		return data;
+	}
+
+	nlohmann::json EditorAutomationService::BuildCaptureAvailability() const
+	{
+		const TerraEngine::Renderer::RenderCaptureAvailability availability = RenderSystem::Instance().GetCaptureAvailability();
+		const McpCaptureLimits limits = GetMcpCaptureLimits();
+		return {
+			{"available", availability.available},
+			{"state", availability.state},
+			{"message", availability.message},
+			{"retryable", availability.retryable},
+			{"limits", {
+				{"defaultWidth", limits.defaultWidth},
+				{"defaultHeight", limits.defaultHeight},
+				{"maxConcurrentCaptures", limits.maxConcurrentCaptures},
+				{"maxQueuedCaptures", limits.maxQueuedCaptures},
+				{"defaultTimeoutMs", limits.defaultTimeoutMs}
+			}},
+			{"sources", {
+				{"gameView", true},
+				{"cameraObject", true},
+				{"disabledCameraObject", true},
+				{"customCamera", true}
+			}},
+			{"queue", {
+				{"pending", availability.queueState.pendingCaptureCount},
+				{"active", availability.queueState.activeCaptureCount},
+				{"completed", availability.queueState.completedResultCount},
+				{"full", availability.queueFull}
+			}},
+			{"rendererInitialized", availability.rendererInitialized},
+			{"gameViewAvailable", availability.gameViewAvailable},
+			{"backendReadbackAvailable", availability.backendReadbackAvailable},
+			{"deterministicFallbackAvailable", availability.deterministicFallbackAvailable},
+			{"backendId", availability.backendId},
+			{"protectedBoundary", availability.protectedBoundary},
+			{"supportedSources", availability.supportedSources},
+			{"notes", availability.notes}
+		};
+	}
+
+	McpCaptureLimits EditorAutomationService::GetMcpCaptureLimits() const
+	{
+		const TerraEngine::Renderer::RenderCaptureLimits renderLimits = RenderSystem::Instance().GetCaptureLimits();
+		McpCaptureLimits limits;
+		limits.defaultWidth = renderLimits.defaultWidth;
+		limits.defaultHeight = renderLimits.defaultHeight;
+		limits.maxWidth = renderLimits.maxWidth;
+		limits.maxHeight = renderLimits.maxHeight;
+		limits.maxConcurrentCaptures = renderLimits.maxConcurrentCaptures;
+		limits.maxQueuedCaptures = renderLimits.maxQueuedCaptures;
+		limits.defaultTimeoutMs = renderLimits.defaultTimeoutMs;
+		return limits;
+	}
+
+	nlohmann::json EditorAutomationService::ValidateCaptureArguments(const nlohmann::json& arguments, const std::string& requestId) const
+	{
+		const McpCaptureLimits limits = GetMcpCaptureLimits();
+		auto readPositiveInteger = [&](std::string_view key, std::uint32_t defaultValue) -> std::optional<std::uint32_t> {
+			const std::string field(key);
+			if (!arguments.contains(field))
+			{
+				return defaultValue;
+			}
+			const nlohmann::json& value = arguments[field];
+			try
+			{
+				if (value.is_number_unsigned())
+				{
+					const std::uint64_t raw = value.get<std::uint64_t>();
+					if (raw == 0u || raw > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()))
+					{
+						return std::nullopt;
+					}
+					return static_cast<std::uint32_t>(raw);
+				}
+				if (value.is_number_integer())
+				{
+					const std::int64_t raw = value.get<std::int64_t>();
+					if (raw <= 0 || raw > static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max()))
+					{
+						return std::nullopt;
+					}
+					return static_cast<std::uint32_t>(raw);
+				}
+			}
+			catch (const nlohmann::json::exception&)
+			{
+				return std::nullopt;
+			}
+			return std::nullopt;
+		};
+
+		const std::optional<std::uint32_t> width = readPositiveInteger("width", limits.defaultWidth);
+		const std::optional<std::uint32_t> height = readPositiveInteger("height", limits.defaultHeight);
+		if (!width || !height)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Capture width and height must be positive integers.");
+		}
+		if ((limits.maxWidth && *width > *limits.maxWidth) || (limits.maxHeight && *height > *limits.maxHeight))
+		{
+			return BuildError(requestId, ErrorCategory::OverBudget, "Capture width or height exceeds the configured MCP image limits.");
+		}
+
+		std::string format = "image/png";
+		std::string freshness = "latestCompleted";
+		bool includeOverlays = false;
+		bool transparentBackground = false;
+		bool allowBackendFallback = true;
+		std::uint32_t timeoutMs = limits.defaultTimeoutMs;
+		try
+		{
+			format = arguments.value("format", format);
+			freshness = arguments.value("freshness", freshness);
+			includeOverlays = arguments.value("includeOverlays", includeOverlays);
+			transparentBackground = arguments.value("transparentBackground", transparentBackground);
+			allowBackendFallback = arguments.value("allowBackendFallback", allowBackendFallback);
+			timeoutMs = arguments.value("timeoutMs", timeoutMs);
+		}
+		catch (const nlohmann::json::exception&)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Capture option types are invalid.");
+		}
+		if (format != "image/png")
+		{
+			return BuildError(requestId, ErrorCategory::UnsupportedReadback, "Only image/png capture output is currently supported.");
+		}
+		if (freshness != "latestCompleted" && freshness != "nextFrame")
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Capture freshness must be latestCompleted or nextFrame.");
+		}
+		if (timeoutMs == 0u)
+		{
+			timeoutMs = limits.defaultTimeoutMs;
+		}
+
+		return {
+			{"ok", true},
+			{"width", *width},
+			{"height", *height},
+			{"format", format},
+			{"freshness", freshness},
+			{"includeOverlays", includeOverlays},
+			{"transparentBackground", transparentBackground},
+			{"allowBackendFallback", allowBackendFallback},
+			{"timeoutMs", timeoutMs}
+		};
+	}
+
+	ErrorCategory EditorAutomationService::MapCaptureFailureCategory(std::string_view category) const
+	{
+		if (category == "missing_target")
+		{
+			return ErrorCategory::MissingTarget;
+		}
+		if (category == "invalid_camera_object")
+		{
+			return ErrorCategory::InvalidCameraObject;
+		}
+		if (category == "unsupported_readback")
+		{
+			return ErrorCategory::UnsupportedReadback;
+		}
+		if (category == "queue_full")
+		{
+			return ErrorCategory::QueueFull;
+		}
+		if (category == "over_budget")
+		{
+			return ErrorCategory::OverBudget;
+		}
+		if (category == "timeout")
+		{
+			return ErrorCategory::Canceled;
+		}
+		return ErrorCategory::Internal;
 	}
 
 	nlohmann::json EditorAutomationService::BuildActivityList(const std::vector<ActivityRecord>& records) const
@@ -2040,6 +2394,246 @@ namespace TerraEngine::Editor::Automation
 			}
 		}
 		return BuildError(requestId, ErrorCategory::MissingTarget, "Export job was not found.", jobId);
+	}
+
+	nlohmann::json EditorAutomationService::HandleGameViewCapture(const nlohmann::json& arguments, const std::string& requestId)
+	{
+		const nlohmann::json validation = ValidateCaptureArguments(arguments, requestId);
+		if (!validation.value("ok", false))
+		{
+			return validation;
+		}
+		const glm::uvec2 size(validation["width"].get<std::uint32_t>(), validation["height"].get<std::uint32_t>());
+		TerraEngine::Renderer::RenderCaptureRequest request;
+		request.requestId = requestId;
+		request.sourceKind = TerraEngine::Renderer::RenderCaptureSourceKind::GameView;
+		request.sourceName = "Game View";
+		request.targetSize = size;
+		request.format = validation["format"].get<std::string>();
+		request.freshness = validation["freshness"].get<std::string>();
+		request.includeOverlays = validation["includeOverlays"].get<bool>();
+		request.transparentBackground = validation["transparentBackground"].get<bool>();
+		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
+		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
+
+		const TerraEngine::Renderer::RenderCaptureResult capture = RenderSystem::Instance().CaptureImage(request);
+		if (!capture.ok)
+		{
+			return BuildError(requestId, MapCaptureFailureCategory(capture.errorCategory), capture.message);
+		}
+		return BuildCaptureSuccessEnvelope(*this, requestId, capture);
+	}
+
+	nlohmann::json EditorAutomationService::HandleCameraObjectCapture(const nlohmann::json& arguments, const std::string& requestId)
+	{
+		const nlohmann::json targetValue = arguments.contains("object")
+			? arguments["object"]
+			: (arguments.contains("camera") ? arguments["camera"] : arguments.value("target", nlohmann::json()));
+		if (targetValue.is_string())
+		{
+			const std::string targetName = targetValue.get<std::string>();
+			if (!TerraEngine::ParseUUID(targetName))
+			{
+				std::size_t matchingNameCount = 0u;
+				for (const Object& object : ObjectManager::instance().getObjectsWithComponentsIncludingInactive<Transform>())
+				{
+					if (ObjectManager::instance().getObjectName(object) == targetName)
+					{
+						++matchingNameCount;
+					}
+				}
+				if (matchingNameCount > 1u)
+				{
+					return BuildError(requestId, ErrorCategory::Conflict, "Camera object target name is ambiguous; use a UUID or entity id.", targetName);
+				}
+			}
+		}
+		const EditorTarget target = ResolveTarget(targetValue);
+		if (!target.resolved)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Camera object was not found.", target.input);
+		}
+		const nlohmann::json validation = ValidateCaptureArguments(arguments, requestId);
+		if (!validation.value("ok", false))
+		{
+			return validation;
+		}
+		const glm::uvec2 size(validation["width"].get<std::uint32_t>(), validation["height"].get<std::uint32_t>());
+
+		ObjectManager& objectManager = ObjectManager::instance();
+		const Object object = objectManager.makeObjectHandle(*target.entity);
+		const bool includeDisabled = arguments.value("includeDisabled", true);
+		const std::optional<AuthoredCameraCaptureSnapshot> authoredCamera = ReadAuthoredCameraCaptureSnapshot(objectManager, object);
+		if (!authoredCamera)
+		{
+			return BuildError(requestId, ErrorCategory::InvalidCameraObject, "Target object does not have both Transform and CameraComponent.", target.displayName);
+		}
+		if (!includeDisabled && (!authoredCamera->objectActive || !authoredCamera->cameraComponentActive))
+		{
+			return BuildError(requestId, ErrorCategory::InvalidCameraObject, "Camera object is disabled and includeDisabled is false.", target.displayName);
+		}
+		if (!std::isfinite(authoredCamera->camera.verticalFovDegrees)
+			|| !std::isfinite(authoredCamera->camera.aspectRatio)
+			|| !std::isfinite(authoredCamera->camera.nearPlane)
+			|| !std::isfinite(authoredCamera->camera.farPlane)
+			|| authoredCamera->camera.verticalFovDegrees <= 0.0f
+			|| authoredCamera->camera.verticalFovDegrees >= 179.0f
+			|| authoredCamera->camera.aspectRatio <= 0.0f
+			|| authoredCamera->camera.nearPlane <= 0.0f
+			|| authoredCamera->camera.farPlane <= authoredCamera->camera.nearPlane)
+		{
+			return BuildError(requestId, ErrorCategory::InvalidCameraObject, "Camera object projection values are invalid.", target.displayName);
+		}
+
+		TerraEngine::Renderer::RenderCaptureRequest request = BuildCaptureRequestFromCamera(
+			TerraEngine::Renderer::RenderCaptureSourceKind::CameraObject,
+			authoredCamera->name,
+			authoredCamera->transform,
+			authoredCamera->camera,
+			size,
+			validation["transparentBackground"].get<bool>());
+		request.requestId = requestId;
+		request.format = validation["format"].get<std::string>();
+		request.freshness = validation["freshness"].get<std::string>();
+		request.includeOverlays = validation["includeOverlays"].get<bool>();
+		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
+		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
+		request.sourceObjectId = authoredCamera->objectId;
+		const TerraEngine::Renderer::RenderCaptureResult capture = RenderSystem::Instance().CaptureImage(request);
+		if (!capture.ok)
+		{
+			return BuildError(requestId, MapCaptureFailureCategory(capture.errorCategory), capture.message);
+		}
+		nlohmann::json result = BuildCaptureSuccessEnvelope(*this, requestId, capture);
+		nlohmann::json cameraObject = {
+			{"entity", static_cast<std::uint32_t>(*target.entity)},
+			{"objectId", TerraEngine::ToHexString(authoredCamera->objectId)},
+			{"displayName", authoredCamera->name},
+			{"objectActive", authoredCamera->objectActive},
+			{"cameraComponentActive", authoredCamera->cameraComponentActive},
+			{"includeDisabled", includeDisabled},
+			{"disabled", !authoredCamera->objectActive || !authoredCamera->cameraComponentActive}
+		};
+		result["data"]["source"]["cameraObject"] = cameraObject;
+		result["data"]["source"]["objectId"] = cameraObject["objectId"];
+		result["data"]["source"]["displayName"] = authoredCamera->name;
+		result["data"]["source"]["disabled"] = cameraObject["disabled"];
+		result["data"]["object"] = std::move(cameraObject);
+		return result;
+	}
+
+	nlohmann::json EditorAutomationService::HandleCustomCameraCapture(const nlohmann::json& arguments, const std::string& requestId)
+	{
+		const nlohmann::json validation = ValidateCaptureArguments(arguments, requestId);
+		if (!validation.value("ok", false))
+		{
+			return validation;
+		}
+		const std::optional<glm::vec3> position = ReadVec3(arguments.value("position", nlohmann::json()));
+		if (!position)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "camera.capture_custom requires position: [x, y, z].");
+		}
+
+		glm::vec3 up = ReadVec3(arguments.value("up", nlohmann::json())).value_or(glm::vec3(0.0f, 1.0f, 0.0f));
+		if (glm::length(up) < 0.0001f)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Custom camera up vector must be non-zero.");
+		}
+		glm::vec3 forward(0.0f, 0.0f, -1.0f);
+		if (const std::optional<glm::vec3> targetPoint = ReadVec3(arguments.value("target", nlohmann::json())))
+		{
+			forward = *targetPoint - *position;
+		}
+		else if (const std::optional<glm::vec3> requestedForward = ReadVec3(arguments.value("forward", nlohmann::json())))
+		{
+			forward = *requestedForward;
+		}
+		if (glm::length(forward) < 0.0001f)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Custom camera forward direction must be non-zero.");
+		}
+
+		const glm::uvec2 size(validation["width"].get<std::uint32_t>(), validation["height"].get<std::uint32_t>());
+		std::string projection = "perspective";
+		float fov = 45.0f;
+		float aspect = static_cast<float>(size.x) / static_cast<float>(size.y);
+		float orthographicHeight = 10.0f;
+		float nearPlane = 0.1f;
+		float farPlane = 1000.0f;
+		try
+		{
+			projection = arguments.value("projection", projection);
+			fov = arguments.value("verticalFovDegrees", fov);
+			aspect = arguments.value("aspectRatio", aspect);
+			orthographicHeight = arguments.value("orthographicHeight", orthographicHeight);
+			nearPlane = arguments.value("nearPlane", nearPlane);
+			farPlane = arguments.value("farPlane", farPlane);
+		}
+		catch (const nlohmann::json::exception&)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Custom camera projection option types are invalid.");
+		}
+		if (projection != "perspective" && projection != "orthographic")
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Custom camera projection must be perspective or orthographic.");
+		}
+		if (!std::isfinite(fov) || !std::isfinite(aspect) || !std::isfinite(orthographicHeight) || !std::isfinite(nearPlane) || !std::isfinite(farPlane))
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Custom camera projection values must be finite.");
+		}
+		if (nearPlane <= 0.0f || farPlane <= nearPlane || aspect <= 0.0f)
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Custom camera projection values are invalid.");
+		}
+		if ((projection == "perspective" && (fov <= 0.0f || fov >= 179.0f)) || (projection == "orthographic" && orthographicHeight <= 0.0f))
+		{
+			return BuildError(requestId, ErrorCategory::Validation, "Custom camera projection values are invalid.");
+		}
+
+		TerraEngine::Renderer::RenderCaptureRequest request;
+		request.requestId = requestId;
+		request.sourceKind = TerraEngine::Renderer::RenderCaptureSourceKind::CustomCamera;
+		request.sourceName = arguments.value("name", std::string("Custom Camera"));
+		request.targetSize = size;
+		request.format = validation["format"].get<std::string>();
+		request.freshness = validation["freshness"].get<std::string>();
+		request.includeOverlays = validation["includeOverlays"].get<bool>();
+		request.transparentBackground = validation["transparentBackground"].get<bool>();
+		request.allowBackendFallback = validation["allowBackendFallback"].get<bool>();
+		request.timeoutMs = validation["timeoutMs"].get<std::uint32_t>();
+		request.cameraWorldPosition = *position;
+		request.viewMatrix = glm::lookAt(*position, *position + glm::normalize(forward), glm::normalize(up));
+		if (projection == "orthographic")
+		{
+			const float halfHeight = orthographicHeight * 0.5f;
+			const float halfWidth = halfHeight * aspect;
+			request.projectionMatrix = glm::orthoRH_ZO(-halfWidth, halfWidth, -halfHeight, halfHeight, nearPlane, farPlane);
+		}
+		else
+		{
+			request.projectionMatrix = glm::perspectiveZO(glm::radians(fov), aspect, nearPlane, farPlane);
+		}
+		request.projectionMatrix[1][1] *= -1.0f;
+
+		const TerraEngine::Renderer::RenderCaptureResult capture = RenderSystem::Instance().CaptureImage(request);
+		if (!capture.ok)
+		{
+			return BuildError(requestId, MapCaptureFailureCategory(capture.errorCategory), capture.message);
+		}
+		nlohmann::json result = BuildCaptureSuccessEnvelope(*this, requestId, capture);
+		result["data"]["camera"] = {
+			{"position", SerializeVec3(*position)},
+			{"forward", SerializeVec3(glm::normalize(forward))},
+			{"up", SerializeVec3(glm::normalize(up))},
+			{"projection", projection},
+			{"verticalFovDegrees", fov},
+			{"orthographicHeight", orthographicHeight},
+			{"aspectRatio", aspect},
+			{"nearPlane", nearPlane},
+			{"farPlane", farPlane}
+		};
+		return result;
 	}
 
 	nlohmann::json EditorAutomationService::HandleDiagnosticsGetSummary(const nlohmann::json& arguments, const std::string& requestId)

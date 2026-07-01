@@ -129,6 +129,25 @@ $env:TERRAENGINE_TEST_FILTER="Scripting.Workload;RenderWorkerSafety;Renderer.Dia
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
+MCP camera image coverage lives in the editor automation and MCP bridge tests.
+Use this focused pass when changing `game_view.capture`,
+`camera.capture_object`, `camera.capture_custom`, mixed MCP image content, or
+`terraengine://capture/availability`:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="Capture"
+.\out\build\Debug\TerraEngine-EditorTests.exe
+$env:TERRAENGINE_TEST_FILTER="Editor.MCP.Contract"
+.\out\build\Debug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+The current Vulkan backend advertises native image readback as unavailable, so
+MCP capture tools return a deterministic PNG fallback plus metadata and
+diagnostics. This proves the MCP image transport, disabled-camera resolution,
+custom-camera validation, and protected-boundary diagnostics without claiming
+live GPU pixels until a backend readback implementation lands.
+
 After code changes, rebuild the Visual Studio-compatible targets and run the
 install target so native, managed, editor, launcher, and shader-tool outputs are
 verified together:

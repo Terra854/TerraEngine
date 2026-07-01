@@ -428,7 +428,19 @@ namespace TerraEngine::Editor::Automation
 				return BuildJsonRpcError(id, -32602, "tools/call requires params.name.");
 			}
 			const nlohmann::json arguments = params.value("arguments", nlohmann::json::object());
-			return BuildJsonRpcResult(id, {{"content", nlohmann::json::array({{{"type", "text"}, {"text", bridge.SubmitToolCall(params["name"].get<std::string>(), arguments).dump()}}})}});
+			nlohmann::json toolResult = bridge.SubmitToolCall(params["name"].get<std::string>(), arguments);
+			nlohmann::json content = nlohmann::json::array();
+			nlohmann::json textResult = toolResult;
+			textResult.erase("mcpContent");
+			content.push_back({{"type", "text"}, {"text", textResult.dump()}});
+			if (toolResult.contains("mcpContent") && toolResult["mcpContent"].is_array())
+			{
+				for (const nlohmann::json& item : toolResult["mcpContent"])
+				{
+					content.push_back(item);
+				}
+			}
+			return BuildJsonRpcResult(id, {{"content", std::move(content)}});
 		}
 		if (method == "notifications/cancelled")
 		{

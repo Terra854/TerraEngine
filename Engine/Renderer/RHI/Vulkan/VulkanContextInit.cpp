@@ -205,6 +205,7 @@ void VulkanContext::Impl::Cleanup() {
 
 	DestroyOffscreenResources(sceneView);
 	DestroyOffscreenResources(gameView);
+	DestroyOffscreenResources(captureView);
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device && offscreenRenderPass != VK_NULL_HANDLE) {

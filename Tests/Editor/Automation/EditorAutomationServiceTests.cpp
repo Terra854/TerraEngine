@@ -5,6 +5,7 @@
 #include "Components/SkyComponent.h"
 #include "EditorContext.h"
 #include "AssetDatabase.h"
+#include "Components/CameraComponent.h"
 #include "Engine/Core/MainEngine.h"
 #include "Engine/Core/Object/ObjectManager.h"
 #include "Engine/Scene/SceneManager.h"
@@ -14,6 +15,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <unordered_set>
 
@@ -101,6 +103,9 @@ namespace TerraEngine::EditorTests
 			context.Expect(service.FindCapability("scene.list_objects") != nullptr, "Scene listing should be registered.");
 			context.Expect(service.FindCapability("diagnostics.get_summary") != nullptr, "Diagnostics should be registered.");
 			context.Expect(service.FindCapability("export.start") != nullptr, "Export start should be registered.");
+			context.Expect(service.FindCapability("game_view.capture") != nullptr, "Game View capture should be registered.");
+			context.Expect(service.FindCapability("camera.capture_object") != nullptr, "Camera object capture should be registered.");
+			context.Expect(service.FindCapability("camera.capture_custom") != nullptr, "Custom camera capture should be registered.");
 		});
 
 		registry.Add("Editor.Automation.Service.ReadOnlySceneListingWorksWithoutProject", [](TestContext& context) {
@@ -212,8 +217,89 @@ namespace TerraEngine::EditorTests
 			context.Expect(detailed["data"]["parallelFrame"]["runtimeLayout"].contains("metadataScanFallbackCount"), "Runtime layout diagnostics should expose metadata scan fallback count.");
 			context.Expect(detailed["data"]["parallelFrame"]["runtimeLayout"].contains("staleObjectHandleCount"), "Runtime layout diagnostics should expose stale compact reference count.");
 			context.Expect(!detailed["data"]["hardBoundaries"].empty(), "Hard-boundary classifications should be serialized.");
-			context.Expect(detailed["data"]["surfaces"][4]["details"].contains("parallelFrame"), "Scheduler surface should mirror parallel-frame diagnostics.");
-			context.Expect(detailed["data"]["surfaces"][4]["details"].contains("mutationDiagnostics"), "Scheduler surface should mirror mutation diagnostics.");
+			bool sawSchedulerSurface = false;
+			for (const auto& surface : detailed["data"]["surfaces"])
+			{
+				if (surface.value("surface", std::string()) == "scheduler")
+				{
+					sawSchedulerSurface = surface["details"].contains("parallelFrame") && surface["details"].contains("mutationDiagnostics");
+				}
+			}
+			context.Expect(sawSchedulerSurface, "Scheduler surface should mirror parallel-frame and mutation diagnostics.");
+		});
+
+		registry.Add("Editor.Automation.Service.CustomCameraCaptureReturnsMcpImageContent", [](TestContext& context) {
+			EditorAutomationService service;
+			const nlohmann::json result = service.HandleTool(
+				"camera.capture_custom",
+				{{"position", nlohmann::json::array({0.0f, 1.0f, 5.0f})}, {"target", nlohmann::json::array({0.0f, 0.0f, 0.0f})}, {"width", 320u}, {"height", 180u}},
+				WriteMode::ReadOnly,
+				"capture-custom");
+			context.Expect(result.value("ok", false), "Custom camera capture should succeed without mutating scene state.");
+			context.ExpectEqual(std::string("custom_camera"), result["data"].value("sourceKind", std::string()), "Custom camera capture should report its source kind.");
+			context.Expect(result.contains("mcpContent"), "Capture result should include MCP content.");
+			context.ExpectEqual(std::string("image"), result["mcpContent"][0].value("type", std::string()), "Capture content should include an image item.");
+			context.ExpectEqual(std::string("image/png"), result["mcpContent"][0].value("mimeType", std::string()), "Capture image should be PNG.");
+			context.Expect(!result["mcpContent"][0].value("data", std::string()).empty(), "Capture image should include base64 data.");
+			const nlohmann::json diagnostics = service.HandleTool("diagnostics.get_summary", {{"includeDetails", true}}, WriteMode::ReadOnly, "capture-diag");
+			bool sawCaptureScheduler = false;
+			for (const auto& surface : diagnostics["data"]["surfaces"])
+			{
+				if (surface.value("surface", std::string()) == "capture")
+				{
+					sawCaptureScheduler = !surface["details"]["schedulerDeclarations"].empty();
+				}
+			}
+			context.Expect(sawCaptureScheduler, "Capture diagnostics should expose scheduler declaration details after a capture.");
+		});
+
+		registry.Add("Editor.Automation.Service.CameraObjectCaptureIncludesDisabledAuthoredCameras", [](TestContext& context) {
+			ObjectManager::instance().clear();
+			EditorAutomationService service;
+			Object cameraObject = ObjectManager::instance().createObject("Disabled Capture Camera");
+			CameraComponent* camera = ObjectManager::instance().AddComponent<CameraComponent>(cameraObject);
+			context.Expect(camera != nullptr, "Fixture should add a camera component.");
+			camera->active = false;
+			ObjectManager::instance().setObjectActive(cameraObject, false);
+
+			const nlohmann::json result = service.HandleTool(
+				"camera.capture_object",
+				{{"object", "Disabled Capture Camera"}, {"includeDisabled", true}, {"width", 64u}, {"height", 64u}},
+				WriteMode::ReadOnly,
+				"capture-object");
+			context.Expect(result.value("ok", false), "Camera object capture should include disabled authored cameras by default.");
+			context.ExpectEqual(std::string("camera_object"), result["data"].value("sourceKind", std::string()), "Camera object capture should report its source kind.");
+			context.Expect(!result["data"]["object"].value("objectActive", true), "Capture metadata should report inactive authored object state.");
+			context.Expect(!result["data"]["object"].value("cameraComponentActive", true), "Capture metadata should report disabled camera component state.");
+			context.ExpectEqual(std::string("image"), result["mcpContent"][0].value("type", std::string()), "Disabled camera capture should still return an image item.");
+
+			const nlohmann::json excluded = service.HandleTool(
+				"camera.capture_object",
+				{{"object", "Disabled Capture Camera"}, {"includeDisabled", false}, {"width", 64u}, {"height", 64u}},
+				WriteMode::ReadOnly,
+				"capture-object-disabled");
+			context.Expect(!excluded.value("ok", true), "includeDisabled false should reject disabled authored cameras.");
+			context.ExpectEqual(std::string("invalid_camera_object"), excluded["error"].value("category", std::string()), "Disabled camera rejection should use the invalid-camera category.");
+			ObjectManager::instance().clear();
+		});
+
+		registry.Add("Editor.Automation.Service.CaptureValidationRejectsInvalidDimensions", [](TestContext& context) {
+			EditorAutomationService service;
+			const nlohmann::json result = service.HandleTool(
+				"camera.capture_custom",
+				{{"position", nlohmann::json::array({0.0f, 0.0f, 1.0f})}, {"width", 0u}, {"height", 64u}},
+				WriteMode::ReadOnly,
+				"capture-invalid");
+			context.Expect(!result.value("ok", true), "Capture requests should reject zero-sized targets.");
+			context.ExpectEqual(std::string("validation"), result["error"].value("category", std::string()), "Invalid capture dimensions should use validation errors.");
+
+			const nlohmann::json overflow = service.HandleTool(
+				"camera.capture_custom",
+				{{"position", nlohmann::json::array({0.0f, 0.0f, 1.0f})}, {"width", std::numeric_limits<std::uint64_t>::max()}, {"height", 64u}},
+				WriteMode::ReadOnly,
+				"capture-overflow");
+			context.Expect(!overflow.value("ok", true), "Capture requests should reject dimensions that cannot fit the renderer contract.");
+			context.ExpectEqual(std::string("validation"), overflow["error"].value("category", std::string()), "Overflow dimensions should use validation errors.");
 		});
 
 		registry.Add("Editor.Automation.Service.ActiveToggleUndoRestoresAuthoredState", [](TestContext& context) {

@@ -29,6 +29,7 @@ public:
 	void SetGlobalTaskShaderCullingEnabled(bool enabled) override;
 	TerraEngine::Renderer::BackendCapabilityProfile GetBackendCapabilityProfile() const override;
 	bool ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::RenderSubmissionPlan& plan) override;
+	TerraEngine::Renderer::RenderCaptureResult ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request) override;
 	TerraEngine::Renderer::BackendFrameBreakdown GetLatestBackendFrameBreakdown() const override;
 	bool IsTaskShaderSupported() const override;
 	bool SupportsVirtualGeometryMeshShaderRoute() const override;

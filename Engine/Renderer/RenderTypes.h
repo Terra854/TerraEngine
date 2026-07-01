@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <optional>
 #include <vector>
 #include <cmath>
 #include <glm/glm.hpp>
@@ -35,6 +36,111 @@ inline const char* ToString(RenderViewType viewType)
 	case RenderViewType::ExportRuntime: return "Export Runtime";
 	default: return "Unknown";
 	}
+}
+
+namespace TerraEngine::Renderer {
+
+	// RenderCaptureSourceKind identifies the camera source that an editor or
+	// MCP request wants to sample. The renderer keeps this typed so diagnostics
+	// can distinguish Game View, authored camera objects, and one-off cameras
+	// without parsing tool-specific JSON.
+	enum class RenderCaptureSourceKind : std::uint8_t
+	{
+		GameView = 0,
+		CameraObject = 1,
+		CustomCamera = 2
+	};
+
+	inline const char* ToString(RenderCaptureSourceKind value)
+	{
+		switch (value)
+		{
+		case RenderCaptureSourceKind::GameView: return "game_view";
+		case RenderCaptureSourceKind::CameraObject: return "camera_object";
+		case RenderCaptureSourceKind::CustomCamera: return "custom_camera";
+		default: return "unknown";
+		}
+	}
+
+	struct RenderCaptureRequest
+	{
+		std::string requestId;
+		RenderCaptureSourceKind sourceKind = RenderCaptureSourceKind::GameView;
+		RenderViewType viewType = RenderViewType::Game;
+		std::string sourceName;
+		TerraEngine::UUID sourceObjectId = TerraEngine::EMPTY_UUID;
+		glm::mat4 viewMatrix = glm::mat4(1.0f);
+		glm::mat4 projectionMatrix = glm::mat4(1.0f);
+		glm::vec3 cameraWorldPosition = glm::vec3(0.0f);
+		glm::uvec2 targetSize = glm::uvec2(1280u, 720u);
+		std::string format = "image/png";
+		std::string freshness = "latestCompleted";
+		bool includeOverlays = false;
+		bool transparentBackground = false;
+		bool allowBackendFallback = true;
+		std::uint32_t timeoutMs = 2000u;
+	};
+
+	struct RenderCaptureResult
+	{
+		std::string requestId;
+		bool ok = false;
+		std::string message;
+		std::string errorCategory = "internal";
+		std::string mimeType = "image/png";
+		std::string base64Data;
+		glm::uvec2 size = glm::uvec2(0u);
+		RenderCaptureSourceKind sourceKind = RenderCaptureSourceKind::GameView;
+		std::string sourceName;
+		std::uint64_t frameId = 0u;
+		std::string freshness = "latestCompleted";
+		bool overlaysIncluded = false;
+		bool backendReadback = false;
+		bool deterministicFallback = false;
+		std::vector<std::string> warnings;
+	};
+
+	struct RenderCaptureLimits
+	{
+		std::uint32_t defaultWidth = 1280u;
+		std::uint32_t defaultHeight = 720u;
+		// A missing maximum means captures are not capped by an engine policy.
+		// Callers still pass positive 32-bit dimensions, and backends may fail a
+		// request locally if a specific allocation cannot be represented.
+		std::optional<std::uint32_t> maxWidth;
+		std::optional<std::uint32_t> maxHeight;
+		std::uint32_t maxConcurrentCaptures = 1u;
+		std::uint32_t maxQueuedCaptures = 4u;
+		std::uint32_t defaultTimeoutMs = 2000u;
+	};
+
+	struct RenderCaptureQueueState
+	{
+		std::uint32_t pendingCaptureCount = 0u;
+		std::uint32_t activeCaptureCount = 0u;
+		std::uint32_t completedResultCount = 0u;
+	};
+
+	struct RenderCaptureAvailability
+	{
+		bool available = true;
+		bool rendererInitialized = false;
+		bool gameViewAvailable = false;
+		bool backendReadbackAvailable = false;
+		bool deterministicFallbackAvailable = true;
+		bool queueFull = false;
+		bool overBudget = false;
+		bool retryable = true;
+		std::string state = "ready";
+		std::string message = "Capture is ready.";
+		std::string backendId = "none";
+		std::string protectedBoundary = "LiveGpuSubmission";
+		RenderCaptureLimits limits;
+		RenderCaptureQueueState queueState;
+		std::vector<std::string> supportedSources = { "game_view", "camera_object", "custom_camera" };
+		std::vector<std::string> notes;
+	};
+
 }
 
 // RenderOutputKind names the supported states explicitly so serialization and switches stay readable.

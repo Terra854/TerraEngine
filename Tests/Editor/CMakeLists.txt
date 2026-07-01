@@ -32,6 +32,8 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorReflectionWorkerBoundaryTests.cpp
 	Automation/EditorMcpBridgeContractTests.cpp
 	Automation/EditorMcpBridgeSafetyTests.cpp
+	Automation/EditorMcpCameraImageContractTests.cpp
+	Automation/EditorMcpCameraImageSafetyTests.cpp
 	Automation/EditorMcpTransportTests.cpp
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp

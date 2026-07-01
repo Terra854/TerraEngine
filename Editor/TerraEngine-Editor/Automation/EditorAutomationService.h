@@ -49,6 +49,8 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json BuildProjectState() const;
 		nlohmann::json BuildSceneSummary() const;
 		nlohmann::json BuildDiagnosticsSummary(bool includeDetails) const;
+		nlohmann::json BuildCaptureAvailability() const;
+		McpCaptureLimits GetMcpCaptureLimits() const;
 		nlohmann::json BuildActivityList(const std::vector<ActivityRecord>& records) const;
 		std::vector<ExportJob> GetExportJobs() const;
 
@@ -115,7 +117,12 @@ namespace TerraEngine::Editor::Automation
 		nlohmann::json HandleExportValidate(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleExportStart(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleExportCancel(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleGameViewCapture(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleCameraObjectCapture(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json HandleCustomCameraCapture(const nlohmann::json& arguments, const std::string& requestId);
 		nlohmann::json HandleDiagnosticsGetSummary(const nlohmann::json& arguments, const std::string& requestId);
+		nlohmann::json ValidateCaptureArguments(const nlohmann::json& arguments, const std::string& requestId) const;
+		ErrorCategory MapCaptureFailureCategory(std::string_view category) const;
 		nlohmann::json ValidateProjectRelativePath(const nlohmann::json& arguments, std::string_view key, const std::string& requestId) const;
 		nlohmann::json ValidateAssetPath(const nlohmann::json& arguments, const std::string& requestId) const;
 		void MarkSceneMutated(ActivityEventType type, const std::string& requestId, const std::string& capability, const std::string& message) const;

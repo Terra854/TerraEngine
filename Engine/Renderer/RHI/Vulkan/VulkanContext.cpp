@@ -21,6 +21,7 @@
 #include "VulkanCommonIncludes.h"
 #include "VulkanContextImpl.h"
 #include "VulkanFrameDiagnostics.h"
+#include "Renderer/RenderCaptureEncoding.h"
 #include "ThreadPool/ThreadPool.h"
 #include <algorithm>
 #include <array>
@@ -45,6 +46,167 @@ namespace
 	constexpr float kDepthHistoryMatrixEpsilon = 0.0005f;
 	constexpr std::uint64_t kTemporalStateHistoryFrames = 240u;
 	constexpr std::size_t kVulkanParallelRecordingThreshold = 64u;
+
+	std::uint32_t GetVulkanCaptureBytesPerPixel(VkFormat format)
+	{
+		switch (format)
+		{
+		case VK_FORMAT_R8G8B8A8_UNORM:
+		case VK_FORMAT_R8G8B8A8_SRGB:
+			return 4u;
+		case VK_FORMAT_R16G16B16A16_SFLOAT:
+			return 8u;
+		default:
+			return 0u;
+		}
+	}
+
+	float HalfFloatToFloat(std::uint16_t value)
+	{
+		const std::uint32_t sign = (static_cast<std::uint32_t>(value) & 0x8000u) << 16u;
+		const std::uint32_t exponent = (static_cast<std::uint32_t>(value) >> 10u) & 0x1fu;
+		std::uint32_t mantissa = static_cast<std::uint32_t>(value) & 0x03ffu;
+		std::uint32_t bits = sign;
+
+		if (exponent == 0u)
+		{
+			if (mantissa != 0u)
+			{
+				int adjustedExponent = -14;
+				while ((mantissa & 0x0400u) == 0u)
+				{
+					mantissa <<= 1u;
+					--adjustedExponent;
+				}
+				mantissa &= 0x03ffu;
+				bits = sign
+					| (static_cast<std::uint32_t>(adjustedExponent + 127) << 23u)
+					| (mantissa << 13u);
+			}
+		}
+		else if (exponent == 0x1fu)
+		{
+			bits = sign | 0x7f800000u | (mantissa << 13u);
+		}
+		else
+		{
+			bits = sign
+				| ((exponent + 112u) << 23u)
+				| (mantissa << 13u);
+		}
+
+		float decoded = 0.0f;
+		std::memcpy(&decoded, &bits, sizeof(decoded));
+		return decoded;
+	}
+
+	std::uint8_t LinearFloatToDisplayByte(float value)
+	{
+		if (!std::isfinite(value))
+		{
+			return 0u;
+		}
+
+		const float clamped = std::clamp(value, 0.0f, 1.0f);
+		const float gammaEncoded = std::pow(clamped, 1.0f / 2.2f);
+		return static_cast<std::uint8_t>(std::clamp(gammaEncoded * 255.0f + 0.5f, 0.0f, 255.0f));
+	}
+
+	std::uint8_t LinearAlphaToByte(float value)
+	{
+		if (!std::isfinite(value))
+		{
+			return 255u;
+		}
+
+		const float clamped = std::clamp(value, 0.0f, 1.0f);
+		return static_cast<std::uint8_t>(std::clamp(clamped * 255.0f + 0.5f, 0.0f, 255.0f));
+	}
+
+	std::vector<std::uint8_t> ConvertVulkanReadbackToRgba8(
+		const std::vector<std::uint8_t>& readbackBytes,
+		std::uint32_t width,
+		std::uint32_t height,
+		VkFormat format)
+	{
+		const std::uint64_t pixelCount64 = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
+		const std::size_t pixelCount = static_cast<std::size_t>(pixelCount64);
+		std::vector<std::uint8_t> rgba(pixelCount * 4u);
+
+		if (format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB)
+		{
+			rgba = readbackBytes;
+			return rgba;
+		}
+
+		if (format == VK_FORMAT_R16G16B16A16_SFLOAT)
+		{
+			for (std::size_t pixelIndex = 0u; pixelIndex < pixelCount; ++pixelIndex)
+			{
+				const std::size_t sourceOffset = pixelIndex * 8u;
+				const std::size_t targetOffset = pixelIndex * 4u;
+				const auto readHalf = [&](std::size_t byteOffset) {
+					return static_cast<std::uint16_t>(
+						static_cast<std::uint16_t>(readbackBytes[sourceOffset + byteOffset])
+						| (static_cast<std::uint16_t>(readbackBytes[sourceOffset + byteOffset + 1u]) << 8u));
+				};
+
+				rgba[targetOffset + 0u] = LinearFloatToDisplayByte(HalfFloatToFloat(readHalf(0u)));
+				rgba[targetOffset + 1u] = LinearFloatToDisplayByte(HalfFloatToFloat(readHalf(2u)));
+				rgba[targetOffset + 2u] = LinearFloatToDisplayByte(HalfFloatToFloat(readHalf(4u)));
+				rgba[targetOffset + 3u] = LinearAlphaToByte(HalfFloatToFloat(readHalf(6u)));
+			}
+		}
+
+		return rgba;
+	}
+
+	void RecordCaptureImageBarrier(
+		VkCommandBuffer commandBuffer,
+		VkImage image,
+		VkImageLayout oldLayout,
+		VkImageLayout newLayout)
+	{
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = 0u;
+		barrier.subresourceRange.levelCount = 1u;
+		barrier.subresourceRange.baseArrayLayer = 0u;
+		barrier.subresourceRange.layerCount = 1u;
+
+		VkPipelineStageFlags sourceStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
+		VkPipelineStageFlags destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+		{
+			barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		}
+		else
+		{
+			barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+			destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
+		}
+
+		vkCmdPipelineBarrier(
+			commandBuffer,
+			sourceStage,
+			destinationStage,
+			0,
+			0,
+			nullptr,
+			0,
+			nullptr,
+			1,
+			&barrier);
+	}
 
 	float ElapsedMilliseconds(BackendClock::time_point start)
 	{
@@ -1505,7 +1667,7 @@ void VulkanContext::Impl::CreateSceneViewGridPipeline(VkRenderPass renderPass) {
 }
 
 // VulkanContext::Impl::RenderSceneViewGrid is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData) {
+void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData, VkExtent2D renderExtent) {
 	if (sceneViewGridPipeline == VK_NULL_HANDLE) return;
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneViewGridPipeline);
@@ -1513,15 +1675,15 @@ void VulkanContext::Impl::RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRe
 	VkViewport viewport{};
 	viewport.x = 0.0f;
 	viewport.y = 0.0f;
-	viewport.width = (float)swapchainExtent.width;
-	viewport.height = (float)swapchainExtent.height;
+	viewport.width = static_cast<float>(renderExtent.width);
+	viewport.height = static_cast<float>(renderExtent.height);
 	viewport.minDepth = 0.0f;
 	viewport.maxDepth = 1.0f;
 	vkCmdSetViewport(cmd, 0, 1, &viewport);
 
 	VkRect2D scissor{};
 	scissor.offset = {0, 0};
-	scissor.extent = swapchainExtent;
+	scissor.extent = renderExtent;
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 
 	GridPushConstants push{};
@@ -1735,7 +1897,7 @@ void VulkanContext::Impl::CreateSkyBackgroundPipeline(VkRenderPass renderPass)
 }
 
 // VulkanContext::Impl::RenderSkyBackground is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRenderData& frameData)
+void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRenderData& frameData, VkExtent2D renderExtent)
 {
 	if (!frameData.sky.renderBackground || skyBackgroundPipeline == VK_NULL_HANDLE || skyBackgroundPipelineLayout == VK_NULL_HANDLE)
 	{
@@ -1748,15 +1910,15 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRe
 	VkViewport viewport{};
 	viewport.x = 0.0f;
 	viewport.y = 0.0f;
-	viewport.width = static_cast<float>(swapchainExtent.width);
-	viewport.height = static_cast<float>(swapchainExtent.height);
+	viewport.width = static_cast<float>(renderExtent.width);
+	viewport.height = static_cast<float>(renderExtent.height);
 	viewport.minDepth = 0.0f;
 	viewport.maxDepth = 1.0f;
 	vkCmdSetViewport(cmd, 0, 1, &viewport);
 
 	VkRect2D scissor{};
 	scissor.offset = {0, 0};
-	scissor.extent = swapchainExtent;
+	scissor.extent = renderExtent;
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 
 	const glm::mat4 inverseViewMatrix = glm::inverse(frameData.viewMatrix);
@@ -2531,6 +2693,22 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		return;
 	}
 
+	const bool renderingDedicatedCaptureTarget = impl->editorMode
+		&& outputRequest.kind == RenderOutputKind::OffscreenTexture;
+	VkExtent2D requestedCaptureExtent = impl->swapchainExtent;
+	if (renderingDedicatedCaptureTarget)
+	{
+		// MCP object/custom captures are not editor viewport snapshots. Allocate
+		// their private render target at the requested dimensions so projection,
+		// culling, rasterization, and readback all agree on the same pixel grid.
+		requestedCaptureExtent.width = outputRequest.targetSize.x > 0u
+			? outputRequest.targetSize.x
+			: std::max<std::uint32_t>(impl->swapchainExtent.width, 1u);
+		requestedCaptureExtent.height = outputRequest.targetSize.y > 0u
+			? outputRequest.targetSize.y
+			: std::max<std::uint32_t>(impl->swapchainExtent.height, 1u);
+	}
+
 	// Handle Editor Mode resizing (lazy).
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (impl->editorMode) {
@@ -2544,6 +2722,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (impl->gameView.framebuffer == VK_NULL_HANDLE) {
 			impl->CreateOffscreenResources(impl->gameView);
+		}
+		if (renderingDedicatedCaptureTarget
+			&& (impl->captureView.framebuffer == VK_NULL_HANDLE
+				|| impl->captureView.extent.width != requestedCaptureExtent.width
+				|| impl->captureView.extent.height != requestedCaptureExtent.height)) {
+			impl->CreateOffscreenResources(impl->captureView, requestedCaptureExtent);
 		}
 	}
 
@@ -2562,10 +2746,21 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	VkImage activeDepthImage = impl->depthImage;
 	VkImageView activeDepthView = impl->depthImageView;
+	VkExtent2D activeRenderExtent = impl->swapchainExtent;
 	if (impl->editorMode) {
-		auto& activeOffscreenView = (view == ViewType::Scene) ? impl->sceneView : impl->gameView;
-		activeDepthImage = activeOffscreenView.depthImage;
-		activeDepthView = activeOffscreenView.depthView;
+		const VulkanContext::Impl::OffscreenResources* activeOffscreenView = renderingDedicatedCaptureTarget
+			? &impl->captureView
+			: ((view == ViewType::Scene) ? &impl->sceneView : &impl->gameView);
+		activeDepthImage = activeOffscreenView->depthImage;
+		activeDepthView = activeOffscreenView->depthView;
+		activeRenderExtent = activeOffscreenView->extent;
+		if (activeOffscreenView->image == VK_NULL_HANDLE
+			|| activeOffscreenView->framebuffer == VK_NULL_HANDLE
+			|| activeRenderExtent.width == 0u
+			|| activeRenderExtent.height == 0u) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping Vulkan draw submission because the editor offscreen color target is not ready.");
+			return;
+		}
 		if (activeDepthImage == VK_NULL_HANDLE || activeDepthView == VK_NULL_HANDLE) {
 			TERRAENGINE_LOG(LogLevel::Warning, "Skipping Vulkan draw submission because the editor view depth attachment is not ready.");
 			return;
@@ -2687,11 +2882,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	} else {
 		// Editor mode renders into per-view offscreen targets.
 		renderPassInfo.renderPass = impl->offscreenRenderPass;
-		renderPassInfo.framebuffer = (view == ViewType::Scene) ? impl->sceneView.framebuffer : impl->gameView.framebuffer;
+		renderPassInfo.framebuffer = renderingDedicatedCaptureTarget
+			? impl->captureView.framebuffer
+			: ((view == ViewType::Scene) ? impl->sceneView.framebuffer : impl->gameView.framebuffer);
 	}
 
 	renderPassInfo.renderArea.offset = {0, 0};
-	renderPassInfo.renderArea.extent = impl->swapchainExtent;
+	renderPassInfo.renderArea.extent = activeRenderExtent;
 
 	std::array<VkClearValue, 3> clearValues{};
 	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
@@ -3183,8 +3380,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	VkImageView aoDepthHistoryView = aoDepthHistoryMatchesView
 		? depthHistory.ambientOcclusionDepthByFrame[impl->currentFrame].view
 		: VK_NULL_HANDLE;
-	const std::uint32_t hiZTargetWidth = std::max<std::uint32_t>(impl->swapchainExtent.width, 1u);
-	const std::uint32_t hiZTargetHeight = std::max<std::uint32_t>(impl->swapchainExtent.height, 1u);
+	const std::uint32_t hiZTargetWidth = std::max<std::uint32_t>(renderPassInfo.renderArea.extent.width, 1u);
+	const std::uint32_t hiZTargetHeight = std::max<std::uint32_t>(renderPassInfo.renderArea.extent.height, 1u);
 	const std::uint64_t hiZProjectionSignature = BuildVulkanHiZProjectionSignature(currentViewProjection);
 	const std::uint64_t hiZDepthSceneSignature = BuildVulkanHiZDepthSceneSignature(frameData);
 	const uint32_t hiZViewIndex = impl->HiZViewIndexForView(view);
@@ -3250,8 +3447,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	analysisCullingData.clusterDepthAndViewport = glm::vec4(
 		0.1f,
 		100.0f,
-		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.width, 1u)),
-		static_cast<float>(std::max<uint32_t>(impl->swapchainExtent.height, 1u)));
+		static_cast<float>(hiZTargetWidth),
+		static_cast<float>(hiZTargetHeight));
 	analysisCullingData.viewMatrix = frameData.viewMatrix;
 	analysisCullingData.invProjection = glm::inverse(frameData.projectionMatrix);
 	analysisCullingData.renderSettings0 = glm::uvec4(
@@ -4442,7 +4639,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			begin.pInheritanceInfo = &inherit;
 
 			vkBeginCommandBuffer(skyCmd, &begin);
-			impl->RenderSkyBackground(skyCmd, frameData);
+			impl->RenderSkyBackground(skyCmd, frameData, renderPassInfo.renderArea.extent);
 			vkEndCommandBuffer(skyCmd);
 			secondaryBuffers.insert(secondaryBuffers.begin(), skyCmd);
 		}
@@ -4474,7 +4671,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			begin.pInheritanceInfo = &inherit;
 
 			vkBeginCommandBuffer(gridCmd, &begin);
-			impl->RenderSceneViewGrid(gridCmd, frameData);
+			impl->RenderSceneViewGrid(gridCmd, frameData, renderPassInfo.renderArea.extent);
 			vkEndCommandBuffer(gridCmd);
 			secondaryBuffers.push_back(gridCmd);
 		}
@@ -4525,7 +4722,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// VRS Generation for next frame
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (impl->UsesVrsAttachment()) {
-		impl->GenerateVRSImage(cmd, (view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);
+		const VkImageView vrsColorView = (outputRequest.kind == RenderOutputKind::OffscreenTexture)
+			? impl->captureView.view
+			: ((view == ViewType::Scene) ? impl->sceneView.view : impl->gameView.view);
+		impl->GenerateVRSImage(cmd, vrsColorView);
 	}
 	if (kEnableRuntimeScreenSpaceAo
 		&& !impl->editorMode
@@ -5776,6 +5976,7 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 	profile.supportsRenderWorkBudgets = true;
 	profile.supportsMultiQueueReadiness = true;
 	profile.supportsWorkerOwnedPreparation = true;
+	profile.supportsImageReadback = true;
 	profile.maxRecordingWorkers = static_cast<std::uint32_t>(std::max<std::size_t>(1u, std::thread::hardware_concurrency()));
 	profile.workerSchedulingThreshold = 128u;
 	profile.maxPreparedFrames = 2u;
@@ -5786,7 +5987,7 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 		{ "graphics", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, "Graphics final submission stays on the coordinator." },
 		{ "presentation", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, "Presentation stays on the coordinator." }
 	};
-	profile.diagnosticCapabilities = { "packet-counts", "serialized-reasons", "pass-labels", "resource-warnings", "backend-fallbacks", "backend-frame-breakdown", "worker-recording-batches", "queue-readiness", "work-budgets", "performance-gates" };
+	profile.diagnosticCapabilities = { "packet-counts", "serialized-reasons", "pass-labels", "resource-warnings", "backend-fallbacks", "backend-frame-breakdown", "worker-recording-batches", "queue-readiness", "work-budgets", "performance-gates", "capture-fallbacks", "capture-readback" };
 	profile.diagnosticCapabilities.push_back(SupportsVirtualGeometryMeshShaderRoute()
 		? "virtual-geometry-mesh-shader-route"
 		: "virtual-geometry-unsupported-missing-mesh-shader");
@@ -5800,6 +6001,172 @@ bool VulkanContext::ConsumeRenderSubmissionPlan(const TerraEngine::Renderer::Ren
 	// future backends a stable contract without moving presentation ownership
 	// out of EndFrame.
 	return plan.valid;
+}
+
+TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request)
+{
+	TerraEngine::Renderer::RenderCaptureResult result;
+	result.requestId = request.requestId;
+	result.sourceKind = request.sourceKind;
+	result.sourceName = request.sourceName;
+	result.size = request.targetSize;
+	result.frameId = 0u;
+	result.freshness = request.freshness;
+	result.overlaysIncluded = false;
+	result.errorCategory = "backend_readback_unavailable";
+	if (!impl || impl->device == VK_NULL_HANDLE || impl->allocator == VK_NULL_HANDLE)
+	{
+		result.message = "Vulkan capture readback cannot run before the backend is initialized.";
+		return result;
+	}
+
+	if (!impl->editorMode)
+	{
+		result.message = "Vulkan capture readback currently targets editor offscreen render targets.";
+		return result;
+	}
+
+	const bool captureSceneView = request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+		&& request.viewType == RenderViewType::Scene;
+	const bool captureDedicatedView = request.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView;
+	const Impl::OffscreenResources& target = captureDedicatedView
+		? impl->captureView
+		: (captureSceneView ? impl->sceneView : impl->gameView);
+	if (target.image == VK_NULL_HANDLE || target.framebuffer == VK_NULL_HANDLE)
+	{
+		result.message = captureDedicatedView
+			? "Dedicated capture render target is not ready for Vulkan readback."
+			: (captureSceneView
+			? "Scene View render target is not ready for Vulkan readback."
+			: "Game View render target is not ready for Vulkan readback.");
+		return result;
+	}
+
+	const std::uint32_t sourceWidth = target.extent.width;
+	const std::uint32_t sourceHeight = target.extent.height;
+	if (sourceWidth == 0u || sourceHeight == 0u)
+	{
+		result.message = "Vulkan readback skipped because the source render target has zero size.";
+		return result;
+	}
+
+	const std::uint32_t bytesPerPixel = GetVulkanCaptureBytesPerPixel(impl->offscreenColorFormat);
+	if (bytesPerPixel == 0u)
+	{
+		result.errorCategory = "unsupported_readback";
+		result.message = "Vulkan readback cannot encode the active render target format.";
+		return result;
+	}
+
+	const std::uint64_t copyBytes64 = static_cast<std::uint64_t>(sourceWidth) * static_cast<std::uint64_t>(sourceHeight) * bytesPerPixel;
+	if (copyBytes64 > std::numeric_limits<VkDeviceSize>::max() || copyBytes64 > std::numeric_limits<std::size_t>::max())
+	{
+		result.message = "Vulkan readback skipped because the source render target is too large to stage.";
+		return result;
+	}
+
+	VulkanBuffer stagingBuffer{};
+	try
+	{
+		stagingBuffer = impl->CreateBuffer(
+			static_cast<VkDeviceSize>(copyBytes64),
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VMA_MEMORY_USAGE_GPU_TO_CPU,
+			"Capture Readback Staging Buffer");
+	}
+	catch (const std::exception& exception)
+	{
+		result.message = std::string("Vulkan capture readback could not allocate staging memory: ") + exception.what();
+		return result;
+	}
+
+	auto destroyStagingBuffer = [&]() {
+		if (stagingBuffer.buffer != VK_NULL_HANDLE && stagingBuffer.allocation != VK_NULL_HANDLE)
+		{
+			impl->DestroyBufferImmediate(stagingBuffer);
+		}
+	};
+
+	VkCommandBuffer commandBuffer = impl->BeginSingleTimeCommands();
+	RecordCaptureImageBarrier(commandBuffer, target.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	VkBufferImageCopy copyRegion{};
+	copyRegion.bufferOffset = 0u;
+	copyRegion.bufferRowLength = 0u;
+	copyRegion.bufferImageHeight = 0u;
+	copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	copyRegion.imageSubresource.mipLevel = 0u;
+	copyRegion.imageSubresource.baseArrayLayer = 0u;
+	copyRegion.imageSubresource.layerCount = 1u;
+	copyRegion.imageOffset = { 0, 0, 0 };
+	copyRegion.imageExtent = { sourceWidth, sourceHeight, 1u };
+	vkCmdCopyImageToBuffer(
+		commandBuffer,
+		target.image,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		stagingBuffer.buffer,
+		1u,
+		&copyRegion);
+	RecordCaptureImageBarrier(commandBuffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	impl->EndSingleTimeCommands(commandBuffer);
+
+	std::vector<std::uint8_t> readbackBytes(static_cast<std::size_t>(copyBytes64));
+	void* mapped = nullptr;
+	if (vmaMapMemory(impl->allocator, stagingBuffer.allocation, &mapped) != VK_SUCCESS || mapped == nullptr)
+	{
+		destroyStagingBuffer();
+		result.message = "Vulkan capture readback could not map staging memory.";
+		return result;
+	}
+	vmaInvalidateAllocation(impl->allocator, stagingBuffer.allocation, 0u, static_cast<VkDeviceSize>(copyBytes64));
+	std::memcpy(readbackBytes.data(), mapped, readbackBytes.size());
+	vmaUnmapMemory(impl->allocator, stagingBuffer.allocation);
+	destroyStagingBuffer();
+
+	try
+	{
+		std::vector<std::uint8_t> rgbaPixels = ConvertVulkanReadbackToRgba8(readbackBytes, sourceWidth, sourceHeight, impl->offscreenColorFormat);
+		const std::uint32_t outputWidth = sourceWidth;
+		const std::uint32_t outputHeight = sourceHeight;
+		if (request.targetSize.x > 0u
+			&& request.targetSize.y > 0u
+			&& (request.targetSize.x != sourceWidth || request.targetSize.y != sourceHeight))
+		{
+			result.warnings.push_back("Capture returned the native Vulkan render target dimensions without post-readback resizing.");
+		}
+		if (impl->offscreenColorFormat == VK_FORMAT_R16G16B16A16_SFLOAT)
+		{
+			result.warnings.push_back("HDR render target pixels were tone-clamped and gamma encoded into an 8-bit PNG.");
+		}
+		if (request.includeOverlays)
+		{
+			result.warnings.push_back("Vulkan render-target readback captures the renderer color target before editor overlay composition.");
+		}
+
+		const std::vector<std::uint8_t> pngBytes = TerraEngine::Renderer::EncodeRgba8ToPng(rgbaPixels, outputWidth, outputHeight);
+		result.base64Data = TerraEngine::Renderer::EncodeBase64(pngBytes);
+		result.size = glm::uvec2(outputWidth, outputHeight);
+		result.ok = true;
+		result.errorCategory.clear();
+		result.mimeType = "image/png";
+		result.backendReadback = true;
+		result.deterministicFallback = false;
+		// Report the actual backing target so MCP clients can distinguish normal
+		// viewport readback from ad-hoc/object camera captures rendered offscreen.
+		result.message = captureDedicatedView
+			? "Captured live Vulkan dedicated capture render target."
+			: (captureSceneView
+			? "Captured live Vulkan Scene View render target."
+			: "Captured live Vulkan Game View render target.");
+	}
+	catch (const std::exception& exception)
+	{
+		result.ok = false;
+		result.errorCategory = "backend_readback_unavailable";
+		result.base64Data.clear();
+		result.message = std::string("Vulkan capture readback failed while encoding PNG data: ") + exception.what();
+	}
+
+	return result;
 }
 
 TerraEngine::Renderer::BackendFrameBreakdown VulkanContext::GetLatestBackendFrameBreakdown() const
@@ -6075,7 +6442,7 @@ void VulkanContext::Impl::InitEditorMode() {
 }
 
 // VulkanContext::Impl::CreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
+void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent) {
 	auto DestroyOffscreenResourceSet = [&]() {
 		if (res.sampler != VK_NULL_HANDLE) vkDestroySampler(device, res.sampler, nullptr);
 		if (res.framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device, res.framebuffer, nullptr);
@@ -6090,13 +6457,28 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 		DestroyOffscreenResourceSet();
 	}
 
+	VkExtent2D targetExtent = requestedExtent;
+	if (targetExtent.width == 0u)
+	{
+		targetExtent.width = swapchainExtent.width;
+	}
+	if (targetExtent.height == 0u)
+	{
+		targetExtent.height = swapchainExtent.height;
+	}
+	if (targetExtent.width == 0u || targetExtent.height == 0u)
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Skipping editor offscreen resource creation because the target extent is zero.");
+		return;
+	}
+
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (offscreenColorFormat == VK_FORMAT_UNDEFINED) {
-		// Scene and game views are sampled by the editor after rendering, so the
-		// format must support both color attachment writes and shader sampling.
-		// The float format preserves smooth HDR/linear-light gradients; SRGB is
-		// the best 8-bit fallback because it allocates more precision to shadows.
-		const VkFormatFeatureFlags requiredFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+			// Scene and game views are sampled by the editor after rendering and may
+			// be copied into MCP capture staging buffers. The selected format must
+			// support all three operations or readback would rely on undefined driver
+			// behavior.
+			const VkFormatFeatureFlags requiredFeatures = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
 		const std::array<VkFormat, 3> candidates = {
 			VK_FORMAT_R16G16B16A16_SFLOAT,
 			VK_FORMAT_R8G8B8A8_SRGB,
@@ -6116,9 +6498,9 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (offscreenColorFormat == VK_FORMAT_UNDEFINED) {
-			TERRAENGINE_LOG(LogLevel::Warning, "No sampled color-attachment format reported for editor offscreen rendering; falling back to R8G8B8A8_UNORM.");
-			offscreenColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
-		}
+				TERRAENGINE_LOG(LogLevel::Warning, "No sampled, copyable color-attachment format reported for editor offscreen rendering; falling back to R8G8B8A8_UNORM.");
+				offscreenColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+			}
 	}
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -6286,22 +6668,26 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	imageInfo.imageType = VK_IMAGE_TYPE_2D;
-	imageInfo.extent.width = swapchainExtent.width;
-	imageInfo.extent.height = swapchainExtent.height;
+	imageInfo.extent.width = targetExtent.width;
+	imageInfo.extent.height = targetExtent.height;
 	imageInfo.extent.depth = 1;
 	imageInfo.mipLevels = 1;
 	imageInfo.arrayLayers = 1;
 	imageInfo.format = offscreenColorFormat;
 	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
 	VmaAllocationCreateInfo allocInfo{};
 	allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-	vmaCreateImage(allocator, &imageInfo, &allocInfo, &res.image, &res.allocation, nullptr);
+	if (vmaCreateImage(allocator, &imageInfo, &allocInfo, &res.image, &res.allocation, nullptr) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen color image!");
+		DestroyOffscreenResourceSet();
+		return;
+	}
 	vmaSetAllocationName(allocator, res.allocation, "Offscreen Render Target Image");
 	// Editor scene/game views are registered with ImGui as shader-readable
 	// textures immediately after creation. Transition the image up front so a
@@ -6311,6 +6697,11 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 
 	// Create View
 	res.view = CreateImageView(res.image, offscreenColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+	if (res.view == VK_NULL_HANDLE) {
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen color view!");
+		DestroyOffscreenResourceSet();
+		return;
+	}
 
 	// Create a depth attachment owned by this editor view. Scene View and Game
 	// View command buffers are recorded separately and submitted together, so
@@ -6321,8 +6712,8 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 	VkImageCreateInfo depthImageInfo{};
 	depthImageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	depthImageInfo.imageType = VK_IMAGE_TYPE_2D;
-	depthImageInfo.extent.width = swapchainExtent.width;
-	depthImageInfo.extent.height = swapchainExtent.height;
+	depthImageInfo.extent.width = targetExtent.width;
+	depthImageInfo.extent.height = targetExtent.height;
 	depthImageInfo.extent.depth = 1u;
 	depthImageInfo.mipLevels = 1u;
 	depthImageInfo.arrayLayers = 1u;
@@ -6364,11 +6755,15 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 	framebufferInfo.renderPass = offscreenRenderPass;
 	framebufferInfo.attachmentCount = static_cast<uint32_t>(fbAttachments.size());
 	framebufferInfo.pAttachments = fbAttachments.data();
-	framebufferInfo.width = swapchainExtent.width;
-	framebufferInfo.height = swapchainExtent.height;
+	framebufferInfo.width = targetExtent.width;
+	framebufferInfo.height = targetExtent.height;
 	framebufferInfo.layers = 1;
 
-	vkCreateFramebuffer(device, &framebufferInfo, nullptr, &res.framebuffer);
+	if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &res.framebuffer) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen framebuffer!");
+		DestroyOffscreenResourceSet();
+		return;
+	}
 
 	// Create Sampler
 	VkSamplerCreateInfo samplerInfo{};
@@ -6386,7 +6781,12 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res) {
 	samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
 
-	vkCreateSampler(device, &samplerInfo, nullptr, &res.sampler);
+	if (vkCreateSampler(device, &samplerInfo, nullptr, &res.sampler) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create editor offscreen sampler!");
+		DestroyOffscreenResourceSet();
+		return;
+	}
+	res.extent = targetExtent;
 }
 
 // VulkanContext::Impl::RecreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -6394,6 +6794,12 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 	vkDeviceWaitIdle(device);
 	CreateOffscreenResources(sceneView);
 	CreateOffscreenResources(gameView);
+	if (captureView.image != VK_NULL_HANDLE || captureView.framebuffer != VK_NULL_HANDLE)
+	{
+		// Keep the dedicated MCP capture target at its requested extent across
+		// editor resizes instead of snapping it back to the swapchain extent.
+		CreateOffscreenResources(captureView, captureView.extent);
+	}
 }
 
 // VulkanContext::Impl::ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

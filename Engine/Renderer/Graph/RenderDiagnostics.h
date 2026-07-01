@@ -155,6 +155,20 @@ namespace TerraEngine::Renderer {
 		std::string visibilityBoundary;
 	};
 
+	struct RenderCaptureSchedulerDiagnostics
+	{
+		std::string owningSystem;
+		std::string schedulerPhase;
+		std::string sourceKind;
+		std::vector<std::string> readResources;
+		std::vector<std::string> writeResources;
+		std::string workerSafePreparation;
+		std::string protectedBoundary;
+		std::string visibilityBoundary;
+		bool backendReadback = false;
+		bool deterministicFallback = false;
+	};
+
 	struct VirtualGeometryHiZDiagnosticsInput
 	{
 		RenderViewType viewType = RenderViewType::Game;
@@ -192,6 +206,7 @@ namespace TerraEngine::Renderer {
 		std::vector<VirtualGeometryViewDiagnosticsSnapshot> virtualGeometryViews;
 		std::vector<VirtualGeometryBudgetContributor> virtualGeometryBudgetContributors;
 		std::vector<VirtualGeometrySchedulerDiagnostics> virtualGeometrySchedulers;
+		std::vector<RenderCaptureSchedulerDiagnostics> captureSchedulers;
 		std::size_t runtimeLayoutRenderRecordCount = 0u;
 		std::size_t runtimeLayoutRejectedRecordCount = 0u;
 		std::vector<std::string> runtimeLayoutRejectionReasons;
@@ -224,6 +239,7 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API void AddVirtualGeometryFailOpenDiagnostic(RenderDiagnosticsSummary& summary, const TerraEngine::UUID& meshId, const VirtualGeometryDrawRange& range);
 	TERRAENGINE_API VirtualGeometrySchedulerDiagnostics BuildVirtualGeometrySchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::vector<std::string> readResources, std::vector<std::string> writeResources, std::string workerSafePreparation, std::string protectedBoundary, std::string visibilityBoundary);
 	TERRAENGINE_API void ApplyVirtualGeometryDiagnostics(RenderDiagnosticsSummary& summary, std::vector<VirtualGeometryViewDiagnosticsSnapshot> viewSnapshots, std::vector<VirtualGeometrySchedulerDiagnostics> schedulerSnapshots);
+	TERRAENGINE_API RenderCaptureSchedulerDiagnostics BuildRenderCaptureSchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::string sourceKind, bool backendReadback, bool deterministicFallback);
 	TERRAENGINE_API void ApplyBackendBreakdownToRenderDiagnostics(RenderDiagnosticsSummary& summary, const BackendFrameBreakdown& breakdown);
 	TERRAENGINE_API bool RenderDiagnosticsRequested();
 	TERRAENGINE_API void SetRenderDiagnosticsRequested(bool requested);

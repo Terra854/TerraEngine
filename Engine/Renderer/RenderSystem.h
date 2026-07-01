@@ -10,8 +10,10 @@
 #include "RHI/RHIContext.h"
 #include "Core/Object/ObjectManager.h"
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -62,6 +64,13 @@ public:
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const;
 	TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const;
+	TerraEngine::Renderer::RenderCaptureAvailability GetCaptureAvailability() const;
+	TerraEngine::Renderer::RenderCaptureLimits GetCaptureLimits() const;
+	TerraEngine::Renderer::RenderCaptureQueueState GetCaptureQueueState() const;
+	std::string QueueCaptureRequest(TerraEngine::Renderer::RenderCaptureRequest request, std::string& errorMessage);
+	std::optional<TerraEngine::Renderer::RenderCaptureResult> PollCaptureResult(std::string_view requestId);
+	void ProcessQueuedCaptureRequests();
+	TerraEngine::Renderer::RenderCaptureResult CaptureImage(const TerraEngine::Renderer::RenderCaptureRequest& request);
 	void SetRenderGraphDiagnosticsRequested(bool requested);
 	[[nodiscard]] TerraEngine::Scheduling::HardBoundary GetLiveGpuSubmissionBoundary() const;
 	std::vector<TerraEngine::Scene::RenderRuntimeRecord> BuildCompactRenderRuntimeRecords();
@@ -110,10 +119,20 @@ public:
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
 	// SetGameViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
-		gameViewCameras.push_back({view, proj, pos});
+		OverrideCameraData camera{view, proj, pos};
+		gameViewCameras.push_back(camera);
+		// Store a descriptor copy for MCP capture requests. This is read-only
+		// metadata, not gameplay camera ownership, so capture can inspect the
+		// most recent Game View without promoting or mutating scene cameras.
+		latestGameViewCamera = camera;
+		hasLatestGameViewCamera = true;
 	}
 	void SetGameViewTargetSize(const glm::uvec2& size) {
 		gameViewTargetSize = size;
+		if (size.x > 0u && size.y > 0u)
+		{
+			latestGameViewTargetSize = size;
+		}
 	}
 	// Isolated prefab asset editing does not have an active game scene, so the
 	// editor can suppress Game View submission for that frame and leave GPU time
@@ -141,6 +160,10 @@ private:
 	bool hasSceneViewCamera = false;
 	OverrideCameraData sceneViewCamera;
 	std::vector<OverrideCameraData> gameViewCameras;
+	bool hasLatestGameViewCamera = false;
+	OverrideCameraData latestGameViewCamera{};
+	glm::uvec2 latestGameViewTargetSize = glm::uvec2(0u);
+	std::uint64_t latestGameViewFrameId = 0u;
 	glm::uvec2 sceneViewTargetSize = glm::uvec2(0u);
 	glm::uvec2 gameViewTargetSize = glm::uvec2(0u);
 	bool gameViewSuppressed = false;
@@ -185,11 +208,17 @@ private:
 	RenderSnapshotDiagnosticsSnapshot latestRenderSnapshotDiagnostics{};
 	TerraEngine::Renderer::RenderDiagnosticsSummary latestRenderGraphDiagnostics{};
 	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
+	TerraEngine::Renderer::RenderCaptureLimits captureLimits{};
+	TerraEngine::Renderer::RenderCaptureQueueState captureQueueState{};
+	std::deque<TerraEngine::Renderer::RenderCaptureRequest> pendingCaptureRequests;
+	std::deque<TerraEngine::Renderer::RenderCaptureRequest> submittedCaptureReadbackRequests;
+	std::deque<TerraEngine::Renderer::RenderCaptureResult> completedCaptureResults;
 	SkyRuntimeState latestSkyRuntimeState{};
 	bool skyStateDirty = true;
 	std::string lastLoggedSkyIssueKey;
 	std::uint64_t nextRenderFrameId = 1u;
 	std::uint64_t activeRenderFrameId = 0u;
+	std::uint64_t nextCaptureRequestSequence = 1u;
 
 	QualityPreset currentPreset = QualityPreset::High;
 	RenderSettings currentSettings;

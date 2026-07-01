@@ -14,9 +14,18 @@ namespace TerraEngine::EditorTests
 			bridge.SetEnabled(true);
 			const nlohmann::json capabilities = bridge.BuildCapabilityListJson();
 			const nlohmann::json resources = bridge.ListResources();
-			context.Expect(capabilities["count"].get<std::size_t>() >= 19u, "Bridge should expose the planned tool surface.");
+			context.Expect(capabilities["count"].get<std::size_t>() >= 22u, "Bridge should expose the planned tool surface.");
 			context.Expect(!resources.empty(), "Bridge should expose resources.");
 			context.ExpectEqual(resources[0].value("uri", std::string()), std::string("terraengine://bridge/status"), "Status should be listed first.");
+			bool sawCaptureAvailability = false;
+			for (const auto& resource : resources)
+			{
+				if (resource.value("uri", std::string()) == "terraengine://capture/availability")
+				{
+					sawCaptureAvailability = true;
+				}
+			}
+			context.Expect(sawCaptureAvailability, "Bridge should list capture availability.");
 		});
 
 		registry.Add("Editor.MCP.Contract.StatusAndActivityResources", [](TestContext& context) {
@@ -37,6 +46,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(bridge.ReadResource("terraengine://project/state").contains("hasProject"), "Project state should have an empty-state response.");
 			context.Expect(bridge.ReadResource("terraengine://scene/summary").contains("roots"), "Scene summary should have an empty-state response.");
 			context.Expect(bridge.ReadResource("terraengine://diagnostics/summary").contains("surfaces"), "Diagnostics summary should have an empty-state response.");
+			context.Expect(bridge.ReadResource("terraengine://capture/availability").contains("supportedSources"), "Capture availability should have an empty-state response.");
 		});
 
 		registry.Add("Editor.MCP.Contract.AssetExportToolsAdvertiseSafetyMetadata", [](TestContext& context) {

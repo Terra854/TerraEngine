@@ -408,6 +408,38 @@ namespace TerraEngine::Renderer {
 		}
 	}
 
+	RenderCaptureSchedulerDiagnostics BuildRenderCaptureSchedulerDiagnostics(
+		std::string owningSystem,
+		std::string schedulerPhase,
+		std::string sourceKind,
+		bool backendReadback,
+		bool deterministicFallback)
+	{
+		RenderCaptureSchedulerDiagnostics diagnostics;
+		diagnostics.owningSystem = std::move(owningSystem);
+		diagnostics.schedulerPhase = std::move(schedulerPhase);
+		diagnostics.sourceKind = std::move(sourceKind);
+		diagnostics.readResources = {
+			"CaptureQueue",
+			"GameViewCameraData",
+			"ResolvedCameraDescriptor",
+			"RenderSettings",
+			"RenderOutputState",
+			"ResourceReadinessSnapshots"
+		};
+		diagnostics.writeResources = { "CaptureResultQueue", "CaptureDiagnostics" };
+		// Capture requests can validate JSON, resolve camera descriptors, and
+		// prepare immutable matrices before the protected GPU handoff. Actual
+		// readback remains coordinator-owned because color targets and staging
+		// resources are tied to live backend frame ownership.
+		diagnostics.workerSafePreparation = "Validate capture request, resolve camera descriptors, clamp target size, and prepare immutable view/projection data.";
+		diagnostics.protectedBoundary = "LiveGpuSubmission";
+		diagnostics.visibilityBoundary = "Capture response becomes visible only after the protected readback or deterministic fallback completes.";
+		diagnostics.backendReadback = backendReadback;
+		diagnostics.deterministicFallback = deterministicFallback;
+		return diagnostics;
+	}
+
 	void ApplyBackendBreakdownToRenderDiagnostics(RenderDiagnosticsSummary& summary, const BackendFrameBreakdown& breakdown)
 	{
 		summary.backendFrameBreakdown = breakdown;

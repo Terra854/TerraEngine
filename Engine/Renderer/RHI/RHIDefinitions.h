@@ -71,6 +71,7 @@ namespace TerraEngine::Renderer {
 		bool supportsRenderWorkBudgets = false;
 		bool supportsMultiQueueReadiness = false;
 		bool supportsWorkerOwnedPreparation = false;
+		bool supportsImageReadback = false;
 		std::uint32_t maxRecordingWorkers = 1u;
 		std::uint32_t workerSchedulingThreshold = 128u;
 		std::uint32_t maxPreparedFrames = 1u;

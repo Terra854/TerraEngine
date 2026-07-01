@@ -662,9 +662,14 @@ struct VulkanContext::Impl {
 	VmaAllocation depthAllocation = VK_NULL_HANDLE;
 	VkImageView depthView = VK_NULL_HANDLE;
 	VkFramebuffer framebuffer = VK_NULL_HANDLE;
+	// Each offscreen target owns its real framebuffer extent. MCP capture
+	// targets can differ from the editor swapchain, so readback must consult
+	// this field instead of assuming every target is swapchain-sized.
+	VkExtent2D extent{0u, 0u};
 	};
 	OffscreenResources sceneView;
 	OffscreenResources gameView;
+	OffscreenResources captureView;
 
 	VkDescriptorSet offscreenDescriptorSet = VK_NULL_HANDLE;
 	VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
@@ -698,7 +703,7 @@ struct VulkanContext::Impl {
 	void Cleanup();
 
 	void InitEditorMode();
-	void CreateOffscreenResources(OffscreenResources& res);
+	void CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent = {});
 	void RecreateOffscreenResources(); // Handle resize
 	void ClearResources();
 
@@ -717,9 +722,9 @@ struct VulkanContext::Impl {
 	};
 
 	void CreateSceneViewGridPipeline(VkRenderPass renderPass);
-	void RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData);
+	void RenderSceneViewGrid(VkCommandBuffer cmd, const FrameRenderData& frameData, VkExtent2D renderExtent);
 	void CreateSkyBackgroundPipeline(VkRenderPass renderPass);
-	void RenderSkyBackground(VkCommandBuffer cmd, const FrameRenderData& frameData);
+	void RenderSkyBackground(VkCommandBuffer cmd, const FrameRenderData& frameData, VkExtent2D renderExtent);
 
 	// UI Rendering
 	VkPipeline staticUiPipeline = VK_NULL_HANDLE;

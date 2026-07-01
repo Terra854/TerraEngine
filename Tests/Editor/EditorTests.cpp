@@ -35,6 +35,8 @@ namespace TerraEngine::EditorTests {
 	void RegisterEditorReflectionWorkerBoundaryTests(TestRegistry& registry);
 	void RegisterEditorMcpBridgeContractTests(TestRegistry& registry);
 	void RegisterEditorMcpBridgeSafetyTests(TestRegistry& registry);
+	void RegisterEditorMcpCameraImageContractTests(TestRegistry& registry);
+	void RegisterEditorMcpCameraImageSafetyTests(TestRegistry& registry);
 	void RegisterEditorMcpTransportTests(TestRegistry& registry);
 	void RegisterEditorMcpAssetImportTests(TestRegistry& registry);
 	void RegisterEditorMcpAssetImportSafetyTests(TestRegistry& registry);
@@ -107,6 +109,8 @@ int main() {
 	TerraEngine::EditorTests::RegisterEditorReflectionWorkerBoundaryTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpBridgeContractTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpBridgeSafetyTests(registry);
+	TerraEngine::EditorTests::RegisterEditorMcpCameraImageContractTests(registry);
+	TerraEngine::EditorTests::RegisterEditorMcpCameraImageSafetyTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpTransportTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpAssetImportTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpAssetImportSafetyTests(registry);

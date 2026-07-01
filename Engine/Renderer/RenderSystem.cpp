@@ -63,6 +63,7 @@ namespace
 	constexpr std::size_t kRenderParallelThreshold = 64u;
 	constexpr std::uint64_t kRenderHashOffset = 1469598103934665603ull;
 	constexpr std::uint64_t kRenderHashPrime = 1099511628211ull;
+	constexpr const char* kDeterministicCapturePngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
 	struct CachedDrawCommandRecord
 	{
@@ -1277,11 +1278,29 @@ void RenderSystem::Update(float deltaTime)
 	const TerraEngine::Renderer::BackendCapabilityProfile backendCapabilities = rhi
 		? rhi->GetBackendCapabilityProfile()
 		: TerraEngine::Renderer::BackendCapabilityProfile{};
+	bool hasPendingDedicatedCaptureRender = false;
+	glm::uvec2 pendingDedicatedCaptureTargetSize = captureLimits.defaultWidth > 0u && captureLimits.defaultHeight > 0u
+		? glm::uvec2(captureLimits.defaultWidth, captureLimits.defaultHeight)
+		: glm::uvec2(1280u, 720u);
+	if (backendCapabilities.supportsImageReadback)
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		for (const TerraEngine::Renderer::RenderCaptureRequest& captureRequest : pendingCaptureRequests)
+		{
+			if (captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+				&& captureRequest.format == "image/png")
+			{
+				hasPendingDedicatedCaptureRender = true;
+				pendingDedicatedCaptureTargetSize = captureRequest.targetSize;
+				break;
+			}
+		}
+	}
 	TerraEngine::Renderer::RenderFrameSnapshot renderFrameSnapshot;
 	renderFrameSnapshot.frameId = activeRenderFrameId;
 	renderFrameSnapshot.renderSettings = SanitizeRenderSettings(currentSettings);
 	renderFrameSnapshot.sceneRevision = objManager.GetSpatialRevision();
-	renderFrameSnapshot.viewRequests.reserve(2u + gameViewCameras.size() + cameras.size());
+	renderFrameSnapshot.viewRequests.reserve(3u + gameViewCameras.size() + cameras.size());
 	if (hasSceneViewCamera && (!editorModeEnabled || (sceneViewTargetSize.x > 0u && sceneViewTargetSize.y > 0u)))
 	{
 		renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::SceneView, RenderViewType::Scene, sceneViewTargetSize, 1u });
@@ -1296,6 +1315,10 @@ void RenderSystem::Update(float deltaTime)
 		{
 			renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::MainRuntimeView, RenderViewType::Game, gameViewTargetSize, 2u });
 		}
+	}
+	if (hasPendingDedicatedCaptureRender)
+	{
+		renderFrameSnapshot.viewRequests.push_back({ RenderOutputKind::OffscreenTexture, RenderViewType::Game, pendingDedicatedCaptureTargetSize, 9000u });
 	}
 	if (renderFrameSnapshot.viewRequests.empty())
 	{
@@ -1316,6 +1339,7 @@ void RenderSystem::Update(float deltaTime)
 		// have to age out. Without this cleanup pass, assets that were visible
 		// on a previous Scene/Game View frame stay marked as active-view after
 		// the user hides those views or disables every camera.
+		ProcessQueuedCaptureRequests();
 		ResourceManager::Instance().RunResidencyCleanup(activeRenderFrameId);
 		ClearOverrideCameras();
 		return;
@@ -2333,6 +2357,7 @@ void RenderSystem::Update(float deltaTime)
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
+			latestGameViewFrameId = activeRenderFrameId;
 		}
 	}
 	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -2354,6 +2379,7 @@ void RenderSystem::Update(float deltaTime)
 			blankData.commands.clear();
 			blankData.shadowDrawLists.clear();
 			rhi->RenderFrame(blankData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
+			latestGameViewFrameId = activeRenderFrameId;
 	}
 	else if (!gameViewSuppressed && gameViewTargetReady)
 	{
@@ -2397,6 +2423,7 @@ void RenderSystem::Update(float deltaTime)
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 
 			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u));
+			latestGameViewFrameId = activeRenderFrameId;
 		}
 	}
 	else if (TerraEngine::Renderer::RenderDiagnosticsRequested() && gameViewSuppressed)
@@ -2406,6 +2433,61 @@ void RenderSystem::Update(float deltaTime)
 	else if (TerraEngine::Renderer::RenderDiagnosticsRequested() && !gameViewTargetReady)
 	{
 		renderGraphDiagnostics.delayedWork.push_back("Game View skipped because its render target is not ready.");
+	}
+
+	std::deque<TerraEngine::Renderer::RenderCaptureRequest> captureRequestsForReadback;
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		while (!pendingCaptureRequests.empty() && captureQueueState.activeCaptureCount < captureLimits.maxConcurrentCaptures)
+		{
+			captureRequestsForReadback.push_back(std::move(pendingCaptureRequests.front()));
+			pendingCaptureRequests.pop_front();
+			++captureQueueState.activeCaptureCount;
+		}
+		captureQueueState.pendingCaptureCount = static_cast<std::uint32_t>(pendingCaptureRequests.size());
+	}
+	for (const TerraEngine::Renderer::RenderCaptureRequest& captureRequest : captureRequestsForReadback)
+	{
+		const bool needsDedicatedCaptureRender = captureRequest.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+			&& captureRequest.format == "image/png"
+			&& rhi
+			&& rhi->GetBackendCapabilityProfile().supportsImageReadback;
+		if (!needsDedicatedCaptureRender)
+		{
+			continue;
+		}
+
+		// Camera-object and custom MCP requests already carry immutable camera
+		// matrices prepared by editor automation. Submit them as a dedicated
+		// offscreen render target so readback sees live GPU pixels without
+		// activating disabled authored cameras or changing the visible Game View.
+		FrameRenderData captureFrameData = frameData;
+		captureFrameData.viewMatrix = captureRequest.viewMatrix;
+		captureFrameData.projectionMatrix = captureRequest.projectionMatrix;
+		captureFrameData.cameraWorldPosition = captureRequest.cameraWorldPosition;
+		captureFrameData.editorContextTint = glm::vec4(0.0f);
+		captureFrameData.uiBatch = {};
+		const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(
+			captureFrameData.projectionMatrix * captureFrameData.viewMatrix,
+			captureRequest.targetSize,
+			RenderOutputKind::OffscreenTexture,
+			RenderViewType::Game,
+			9000u,
+			captureFrameData.cameraWorldPosition);
+		captureFrameData.commands = visibleCommands.commands;
+		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.cameraWorldPosition);
+
+		RenderOutputRequest captureOutputRequest = makeOutputRequest(RenderOutputKind::OffscreenTexture, RenderViewType::Game, 9000u);
+		captureOutputRequest.targetSize = captureRequest.targetSize;
+		rhi->RenderFrame(captureFrameData, captureOutputRequest);
+	}
+	if (!captureRequestsForReadback.empty())
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		for (TerraEngine::Renderer::RenderCaptureRequest& captureRequest : captureRequestsForReadback)
+		{
+			submittedCaptureReadbackRequests.push_back(std::move(captureRequest));
+		}
 	}
 	if (TerraEngine::Renderer::RenderDiagnosticsRequested())
 	{
@@ -2558,6 +2640,7 @@ void RenderSystem::Update(float deltaTime)
 	skyStateDirty = false;
 
 	ResourceManager::Instance().RunResidencyCleanup(activeRenderFrameId);
+	ProcessQueuedCaptureRequests();
 
 	ClearOverrideCameras();
 }
@@ -3181,7 +3264,15 @@ void RenderSystem::Clear()
 		latestGameLightingDiagnostics.viewType = RenderViewType::Game;
 		latestSceneLightingDiagnostics.viewType = RenderViewType::Scene;
 		latestSkyRuntimeState = {};
+		captureQueueState = {};
+		pendingCaptureRequests.clear();
+		submittedCaptureReadbackRequests.clear();
+		completedCaptureResults.clear();
 	}
+	hasLatestGameViewCamera = false;
+	latestGameViewCamera = {};
+	latestGameViewTargetSize = glm::uvec2(0u);
+	latestGameViewFrameId = 0u;
 	skyStateDirty = true;
 	lastLoggedSkyIssueKey.clear();
 	ClearOverrideCameras();
@@ -3257,6 +3348,283 @@ TerraEngine::Renderer::RenderDiagnosticsSummary RenderSystem::GetLatestRenderGra
 {
 	std::lock_guard<std::mutex> lock(statsMutex);
 	return latestRenderGraphDiagnostics;
+}
+
+TerraEngine::Renderer::RenderCaptureLimits RenderSystem::GetCaptureLimits() const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return captureLimits;
+}
+
+TerraEngine::Renderer::RenderCaptureQueueState RenderSystem::GetCaptureQueueState() const
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	return captureQueueState;
+}
+
+TerraEngine::Renderer::RenderCaptureAvailability RenderSystem::GetCaptureAvailability() const
+{
+	TerraEngine::Renderer::RenderCaptureAvailability availability;
+	availability.rendererInitialized = initialized && rhi != nullptr;
+	if (rhi)
+	{
+		const TerraEngine::Renderer::BackendCapabilityProfile profile = rhi->GetBackendCapabilityProfile();
+		availability.backendId = profile.backendId;
+		availability.backendReadbackAvailable = profile.supportsImageReadback;
+	}
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		for (const TerraEngine::Renderer::RenderFrameViewRequest& request : latestRenderFrameSnapshot.viewRequests)
+		{
+			if (request.viewType == RenderViewType::Game)
+			{
+				availability.gameViewAvailable = true;
+				break;
+			}
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		availability.limits = captureLimits;
+		availability.queueState = captureQueueState;
+		availability.queueFull = captureQueueState.pendingCaptureCount >= captureLimits.maxQueuedCaptures;
+		availability.overBudget = false;
+		if (hasLatestGameViewCamera)
+		{
+			availability.gameViewAvailable = true;
+		}
+	}
+	if (availability.queueFull)
+	{
+		availability.available = false;
+		availability.state = "queueFull";
+		availability.message = "Capture queue is full.";
+		availability.retryable = true;
+	}
+	else if (!availability.rendererInitialized && !availability.deterministicFallbackAvailable)
+	{
+		availability.available = false;
+		availability.state = "rendererUnavailable";
+		availability.message = "Renderer is not initialized and no deterministic capture fallback is available.";
+		availability.retryable = true;
+	}
+	if (!availability.backendReadbackAvailable)
+	{
+		availability.notes.push_back("Backend image readback is unavailable; captures use the deterministic PNG fallback.");
+	}
+	if (!availability.gameViewAvailable)
+	{
+		availability.notes.push_back("No completed Game View frame is currently published.");
+	}
+	return availability;
+}
+
+std::string RenderSystem::QueueCaptureRequest(TerraEngine::Renderer::RenderCaptureRequest request, std::string& errorMessage)
+{
+	if (request.targetSize.x == 0u || request.targetSize.y == 0u)
+	{
+		errorMessage = "Capture target size must be greater than zero.";
+		return {};
+	}
+	std::lock_guard<std::mutex> lock(statsMutex);
+	if ((captureLimits.maxWidth && request.targetSize.x > *captureLimits.maxWidth)
+		|| (captureLimits.maxHeight && request.targetSize.y > *captureLimits.maxHeight))
+	{
+		errorMessage = "Capture target size exceeds configured limits.";
+		return {};
+	}
+	if (pendingCaptureRequests.size() >= captureLimits.maxQueuedCaptures)
+	{
+		errorMessage = "Capture queue is full.";
+		return {};
+	}
+	if (request.requestId.empty())
+	{
+		request.requestId = "render-capture-" + std::to_string(nextCaptureRequestSequence++);
+	}
+	if (request.timeoutMs == 0u)
+	{
+		request.timeoutMs = captureLimits.defaultTimeoutMs;
+	}
+	pendingCaptureRequests.push_back(std::move(request));
+	captureQueueState.pendingCaptureCount = static_cast<std::uint32_t>(pendingCaptureRequests.size());
+	errorMessage.clear();
+	return pendingCaptureRequests.back().requestId;
+}
+
+std::optional<TerraEngine::Renderer::RenderCaptureResult> RenderSystem::PollCaptureResult(std::string_view requestId)
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	for (auto it = completedCaptureResults.begin(); it != completedCaptureResults.end(); ++it)
+	{
+		if (it->requestId == requestId)
+		{
+			TerraEngine::Renderer::RenderCaptureResult result = std::move(*it);
+			completedCaptureResults.erase(it);
+			captureQueueState.completedResultCount = static_cast<std::uint32_t>(completedCaptureResults.size());
+			return result;
+		}
+	}
+	return std::nullopt;
+}
+
+void RenderSystem::ProcessQueuedCaptureRequests()
+{
+	std::deque<TerraEngine::Renderer::RenderCaptureRequest> requests;
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		while (!submittedCaptureReadbackRequests.empty())
+		{
+			requests.push_back(std::move(submittedCaptureReadbackRequests.front()));
+			submittedCaptureReadbackRequests.pop_front();
+		}
+		captureQueueState.pendingCaptureCount = static_cast<std::uint32_t>(pendingCaptureRequests.size());
+	}
+
+	if (requests.empty())
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		while (!pendingCaptureRequests.empty() && captureQueueState.activeCaptureCount < captureLimits.maxConcurrentCaptures)
+		{
+			requests.push_back(std::move(pendingCaptureRequests.front()));
+			pendingCaptureRequests.pop_front();
+			++captureQueueState.activeCaptureCount;
+		}
+		captureQueueState.pendingCaptureCount = static_cast<std::uint32_t>(pendingCaptureRequests.size());
+	}
+
+	for (const TerraEngine::Renderer::RenderCaptureRequest& request : requests)
+	{
+		TerraEngine::Renderer::RenderCaptureResult result;
+		result.requestId = request.requestId;
+		result.sourceKind = request.sourceKind;
+			result.sourceName = request.sourceName;
+			result.size = request.targetSize;
+			// Game View captures report the last frame that actually submitted a
+			// Game/runtime view; custom offscreen captures report the frame boundary
+			// that drained the queue. Both values are read-only diagnostics.
+			const std::uint64_t captureFrameId = request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView && latestGameViewFrameId != 0u
+				? latestGameViewFrameId
+				: activeRenderFrameId;
+			result.frameId = captureFrameId;
+			result.freshness = request.freshness;
+			result.overlaysIncluded = request.includeOverlays;
+
+		if (request.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView && !hasLatestGameViewCamera)
+		{
+			result.message = "No active Game View camera is available.";
+			result.errorCategory = "missing_target";
+		}
+		else if (request.format != "image/png")
+		{
+			result.message = "Only image/png capture output is currently supported.";
+			result.errorCategory = "unsupported_readback";
+		}
+			else if (rhi && rhi->GetBackendCapabilityProfile().supportsImageReadback)
+			{
+				result = rhi->ReadbackCapture(request);
+				result.requestId = request.requestId;
+				result.sourceKind = request.sourceKind;
+				result.sourceName = request.sourceName;
+				if (result.size.x == 0u || result.size.y == 0u)
+				{
+					result.size = request.targetSize;
+				}
+				if (result.frameId == 0u)
+				{
+					result.frameId = captureFrameId;
+				}
+				result.freshness = request.freshness;
+			}
+
+		if (!result.ok && result.errorCategory != "missing_target" && result.errorCategory != "unsupported_readback" && request.allowBackendFallback)
+		{
+			result.ok = true;
+			result.message = "Captured deterministic fallback image because backend readback is not available.";
+			result.errorCategory.clear();
+			result.mimeType = "image/png";
+			result.base64Data = kDeterministicCapturePngBase64;
+			result.size = request.targetSize;
+			result.requestId = request.requestId;
+			result.sourceKind = request.sourceKind;
+			result.sourceName = request.sourceName;
+				result.frameId = captureFrameId;
+			result.freshness = request.freshness;
+			result.overlaysIncluded = request.includeOverlays;
+			result.backendReadback = false;
+			result.deterministicFallback = true;
+			result.warnings.push_back("Deterministic fallback image does not contain live GPU pixels.");
+		}
+
+		std::lock_guard<std::mutex> lock(statsMutex);
+		completedCaptureResults.push_back(result);
+		while (completedCaptureResults.size() > captureLimits.maxQueuedCaptures)
+		{
+			completedCaptureResults.pop_front();
+		}
+		if (captureQueueState.activeCaptureCount > 0u)
+		{
+			--captureQueueState.activeCaptureCount;
+		}
+		captureQueueState.completedResultCount = static_cast<std::uint32_t>(completedCaptureResults.size());
+		latestRenderGraphDiagnostics.captureSchedulers.push_back(
+			TerraEngine::Renderer::BuildRenderCaptureSchedulerDiagnostics(
+				"RenderSystem",
+				"Render",
+				TerraEngine::Renderer::ToString(request.sourceKind),
+				result.backendReadback,
+				result.deterministicFallback));
+		if (latestRenderGraphDiagnostics.captureSchedulers.size() > 16u)
+		{
+			latestRenderGraphDiagnostics.captureSchedulers.erase(latestRenderGraphDiagnostics.captureSchedulers.begin());
+		}
+	}
+}
+
+TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const TerraEngine::Renderer::RenderCaptureRequest& request)
+{
+	std::string errorMessage;
+	std::string requestId = QueueCaptureRequest(request, errorMessage);
+	if (requestId.empty())
+	{
+		TerraEngine::Renderer::RenderCaptureResult result;
+		result.requestId = request.requestId;
+		result.sourceKind = request.sourceKind;
+		result.sourceName = request.sourceName;
+		result.size = request.targetSize;
+		result.message = errorMessage;
+		result.errorCategory = errorMessage.find("queue") != std::string::npos ? "queue_full" : "over_budget";
+		return result;
+	}
+	const bool shouldRenderDedicatedCaptureImmediately = request.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+		&& initialized
+		&& rhi
+		&& rhi->GetBackendCapabilityProfile().supportsImageReadback
+		&& request.format == "image/png";
+	if (shouldRenderDedicatedCaptureImmediately)
+	{
+		// MCP tool calls are synchronous. Running one render update here lets
+		// object/custom captures submit their dedicated offscreen pass and then
+		// publish the readback before the tool response is serialized.
+		Update(0.0f);
+	}
+	else
+	{
+		ProcessQueuedCaptureRequests();
+	}
+	if (std::optional<TerraEngine::Renderer::RenderCaptureResult> result = PollCaptureResult(requestId))
+	{
+		return *result;
+	}
+
+	TerraEngine::Renderer::RenderCaptureResult result;
+	result.requestId = requestId;
+	result.sourceKind = request.sourceKind;
+	result.sourceName = request.sourceName;
+	result.size = request.targetSize;
+	result.message = "Capture request did not complete before polling.";
+	result.errorCategory = "timeout";
+	return result;
 }
 
 void RenderSystem::SetRenderGraphDiagnosticsRequested(bool requested)

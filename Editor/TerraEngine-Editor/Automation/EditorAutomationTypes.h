@@ -60,7 +60,11 @@ namespace TerraEngine::Editor::Automation
 		Validation,
 		Permission,
 		MissingTarget,
+		InvalidCameraObject,
 		UnsupportedCapability,
+		UnsupportedReadback,
+		QueueFull,
+		OverBudget,
 		Conflict,
 		Transport,
 		Internal,
@@ -76,7 +80,94 @@ namespace TerraEngine::Editor::Automation
 		Approval,
 		Mutation,
 		Diagnostic,
+		Capture,
 		Export
+	};
+
+	enum class McpCaptureSourceKind
+	{
+		GameView,
+		CameraObject,
+		CustomCamera
+	};
+
+	// Limits are mirrored into MCP availability and validation responses so
+	// agents can size captures before spending a tool call on an invalid image.
+	struct McpCaptureLimits
+	{
+		std::uint32_t defaultWidth = 1280u;
+		std::uint32_t defaultHeight = 720u;
+		// Null maxima tell MCP clients there is no fixed resolution policy. The
+		// renderer still rejects malformed dimensions and reports backend errors
+		// if a requested output cannot be allocated or encoded.
+		std::optional<std::uint32_t> maxWidth;
+		std::optional<std::uint32_t> maxHeight;
+		std::uint32_t maxConcurrentCaptures = 1u;
+		std::uint32_t maxQueuedCaptures = 4u;
+		std::uint32_t defaultTimeoutMs = 2000u;
+	};
+
+	// Camera-object captures keep object identity and active-state facts beside
+	// the request because disabled cameras are valid authored targets when
+	// includeDisabled is true.
+	struct McpCameraObjectReference
+	{
+		std::string target;
+		std::string displayName;
+		std::string objectId;
+		std::optional<entt::entity> entity;
+		bool objectActive = true;
+		bool cameraComponentActive = true;
+		bool includeDisabled = true;
+	};
+
+	// Custom cameras are ad-hoc view definitions supplied entirely by the MCP
+	// caller. They do not create scene objects or mutate existing cameras.
+	struct McpCustomCameraDefinition
+	{
+		std::vector<float> position;
+		std::vector<float> lookAt;
+		std::vector<float> forward;
+		std::vector<float> up;
+		std::string projection = "perspective";
+		float verticalFovDegrees = 45.0f;
+		float orthographicHeight = 10.0f;
+		float nearPlane = 0.1f;
+		float farPlane = 1000.0f;
+	};
+
+	// Normalized capture request used by the service before converting to the
+	// renderer's typed queue request. Keeping this value object separate from
+	// raw JSON makes validation testable without invoking the transport.
+	struct McpCaptureRequest
+	{
+		std::string requestId;
+		McpCaptureSourceKind sourceKind = McpCaptureSourceKind::GameView;
+		McpCaptureLimits limits;
+		std::uint32_t width = 1280u;
+		std::uint32_t height = 720u;
+		std::string format = "image/png";
+		std::string freshness = "latestCompleted";
+		bool includeOverlays = false;
+		std::uint32_t timeoutMs = 2000u;
+		McpCameraObjectReference cameraObject;
+		McpCustomCameraDefinition customCamera;
+	};
+
+	// Result metadata paired with MCP image content. The binary image itself is
+	// returned as an MCP image content item rather than embedded in this struct.
+	struct McpCapturedImageResult
+	{
+		std::string requestId;
+		bool ok = false;
+		std::string mimeType = "image/png";
+		std::uint32_t width = 0u;
+		std::uint32_t height = 0u;
+		std::string sourceKind;
+		std::string sourceName;
+		std::string base64Data;
+		std::string errorCategory;
+		std::string message;
 	};
 
 	struct BridgeSession

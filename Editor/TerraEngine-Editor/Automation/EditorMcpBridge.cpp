@@ -17,6 +17,14 @@
 
 namespace TerraEngine::Editor::Automation
 {
+	namespace
+	{
+		bool IsCaptureTool(std::string_view name)
+		{
+			return name == "game_view.capture" || name == "camera.capture_object" || name == "camera.capture_custom";
+		}
+	}
+
 	EditorMcpBridge::EditorMcpBridge()
 	{
 		session.state = BridgeState::Disabled;
@@ -241,12 +249,24 @@ namespace TerraEngine::Editor::Automation
 			return BuildApprovalResponse(*capability, arguments, requestId);
 		}
 
+		const bool captureTool = IsCaptureTool(name);
+		if (captureTool)
+		{
+			RecordActivity(ActivityEventType::Capture, requestId, std::string(name), "Accepted capture request.", "accepted");
+		}
 		if (name == "diagnostics.get_summary")
 		{
 			lastDiagnosticRequest = arguments.dump();
 		}
 		nlohmann::json result = service.HandleTool(name, arguments, writeMode, requestId);
-		RecordActivity(result.value("ok", false) ? ActivityEventType::Request : ActivityEventType::Rejection, requestId, std::string(name), result.value("message", ""), result.value("status", "completed"));
+		if (captureTool)
+		{
+			RecordActivity(ActivityEventType::Capture, requestId, std::string(name), result.value("message", ""), result.value("ok", false) ? "completed" : "rejected");
+		}
+		else
+		{
+			RecordActivity(result.value("ok", false) ? ActivityEventType::Request : ActivityEventType::Rejection, requestId, std::string(name), result.value("message", ""), result.value("status", "completed"));
+		}
 		return result;
 	}
 
@@ -266,7 +286,12 @@ namespace TerraEngine::Editor::Automation
 		});
 		if (!completed)
 		{
-			return service.BuildError(NextRequestId(), ErrorCategory::Canceled, "Timed out waiting for the editor update to process the request.");
+			const std::string requestId = NextRequestId();
+			if (IsCaptureTool(call->name))
+			{
+				RecordActivity(ActivityEventType::Capture, requestId, call->name, "Timed out waiting for the editor update to process the capture request.", "canceled");
+			}
+			return service.BuildError(requestId, ErrorCategory::Canceled, "Timed out waiting for the editor update to process the request.");
 		}
 		return call->result;
 	}
@@ -279,6 +304,7 @@ namespace TerraEngine::Editor::Automation
 		if (resource == "terraengine://project/state") return service.BuildProjectState();
 		if (resource == "terraengine://scene/summary") return service.BuildSceneSummary();
 		if (resource == "terraengine://diagnostics/summary") return service.BuildDiagnosticsSummary(false);
+		if (resource == "terraengine://capture/availability") return BuildCaptureAvailabilityJson();
 		if (resource == "terraengine://activity/recent") return service.BuildActivityList(GetRecentActivity());
 		return {{"ok", false}, {"error", {{"category", ToString(ErrorCategory::UnsupportedCapability)}, {"details", "Unknown resource URI."}}}};
 	}
@@ -291,6 +317,7 @@ namespace TerraEngine::Editor::Automation
 			{{"uri", "terraengine://project/state"}, {"name", "Project State"}},
 			{{"uri", "terraengine://scene/summary"}, {"name", "Scene Summary"}},
 			{{"uri", "terraengine://diagnostics/summary"}, {"name", "Diagnostics Summary"}},
+			{{"uri", "terraengine://capture/availability"}, {"name", "Capture Availability"}},
 			{{"uri", "terraengine://activity/recent"}, {"name", "Recent Activity"}}
 		});
 	}
@@ -354,6 +381,11 @@ namespace TerraEngine::Editor::Automation
 	nlohmann::json EditorMcpBridge::BuildCapabilityListJson() const
 	{
 		return service.BuildCapabilityList();
+	}
+
+	nlohmann::json EditorMcpBridge::BuildCaptureAvailabilityJson() const
+	{
+		return service.BuildCaptureAvailability();
 	}
 
 	ApprovalPrompt EditorMcpBridge::CreateApprovalPrompt(std::string requestId, std::string capability, std::string summary, nlohmann::json arguments, std::chrono::system_clock::time_point expiresAt)

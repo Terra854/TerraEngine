@@ -60,6 +60,21 @@ public:
 	{
 		return plan.valid;
 	}
+	// Capture readback is a protected GPU-boundary operation. Backends that can
+	// copy rendered color targets into CPU-visible memory override this method;
+	// the base implementation reports a portable unsupported result so editor
+	// automation can fall back without guessing about backend internals.
+	virtual TerraEngine::Renderer::RenderCaptureResult ReadbackCapture(const TerraEngine::Renderer::RenderCaptureRequest& request)
+	{
+		TerraEngine::Renderer::RenderCaptureResult result;
+		result.requestId = request.requestId;
+		result.sourceKind = request.sourceKind;
+		result.sourceName = request.sourceName;
+		result.size = request.targetSize;
+		result.errorCategory = "unsupported_readback";
+		result.message = "The active RHI backend does not expose image readback.";
+		return result;
+	}
 	// IsTaskShaderSupported is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual bool IsTaskShaderSupported() const { return false; }
 	// Virtual geometry can still render through TerraEngine's mesh-only shader
