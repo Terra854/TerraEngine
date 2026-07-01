@@ -231,18 +231,32 @@ void SceneViewWindow::OnGui() {
 
 	void* texID = m_Owner->GetSceneTextureID();
 
-	VirtualGeometryQualityProfile virtualGeometryProfile = RenderSystem::Instance().GetVirtualGeometryQualityProfile();
-	const VirtualGeometryDebugVisualizationMode normalizedDebugMode = NormalizeVirtualGeometryDebugVisualizationMode(virtualGeometryProfile.debugVisualizationMode);
-	if (normalizedDebugMode != virtualGeometryProfile.debugVisualizationMode)
+	constexpr std::uint32_t kSceneViewVirtualGeometryOutputId = 1u;
+	if (!m_VirtualGeometryDebugModeInitialized)
 	{
-		// Collapse legacy/internal visualizer modes before the combo draws so
-		// the toolbar cannot get stuck on a hidden duplicate entry.
-		virtualGeometryProfile.debugVisualizationMode = normalizedDebugMode;
-		RenderSystem::Instance().SetVirtualGeometryQualityProfile(virtualGeometryProfile);
+		m_VirtualGeometryDebugMode = RenderSystem::Instance().GetVirtualGeometryDebugVisualizationMode(RenderViewType::Scene, kSceneViewVirtualGeometryOutputId);
+		m_VirtualGeometryDebugModeInitialized = true;
 	}
-	int virtualGeometryDebugMode = static_cast<int>(virtualGeometryProfile.debugVisualizationMode);
+	const VirtualGeometryDebugVisualizationMode normalizedDebugMode = NormalizeVirtualGeometryDebugVisualizationMode(m_VirtualGeometryDebugMode);
+	if (normalizedDebugMode != m_VirtualGeometryDebugMode)
+	{
+		m_VirtualGeometryDebugMode = normalizedDebugMode;
+		RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Scene, kSceneViewVirtualGeometryOutputId, m_VirtualGeometryDebugMode);
+	}
+	int virtualGeometryDebugMode = static_cast<int>(m_VirtualGeometryDebugMode);
 	ImGui::SetNextItemWidth(115.0f);
-	if (ImGui::BeginCombo("VG", ToString(static_cast<VirtualGeometryDebugVisualizationMode>(virtualGeometryDebugMode))))
+	const VirtualGeometryDebugVisualizationMode currentVirtualGeometryDebugMode =
+		static_cast<VirtualGeometryDebugVisualizationMode>(virtualGeometryDebugMode);
+	const bool virtualGeometryComboOpen = ImGui::BeginCombo("VG", ToString(currentVirtualGeometryDebugMode));
+	if (ImGui::IsItemHovered())
+	{
+		// Scene View uses the same compact toolbar as Game View; the hover text
+		// carries the user-facing color contract for the selected mode.
+		ImGui::SetTooltip(
+			"Virtual Geometry Visualizer\n%s",
+			GetVirtualGeometryDebugVisualizationLegend(currentVirtualGeometryDebugMode));
+	}
+	if (virtualGeometryComboOpen)
 	{
 		for (const VirtualGeometryDebugVisualizationMode mode : GetVirtualGeometryDebugVisualizationModes())
 		{
@@ -251,8 +265,12 @@ void SceneViewWindow::OnGui() {
 			if (ImGui::Selectable(ToString(mode), selected))
 			{
 				virtualGeometryDebugMode = modeIndex;
-				virtualGeometryProfile.debugVisualizationMode = mode;
-				RenderSystem::Instance().SetVirtualGeometryQualityProfile(virtualGeometryProfile);
+				m_VirtualGeometryDebugMode = mode;
+				RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Scene, kSceneViewVirtualGeometryOutputId, m_VirtualGeometryDebugMode);
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s\n%s", ToString(mode), GetVirtualGeometryDebugVisualizationLegend(mode));
 			}
 			if (selected)
 			{

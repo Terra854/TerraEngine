@@ -7,8 +7,10 @@
 
 #include "File Formats/TerraEngineMeshFile.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <vector>
 
 namespace TerraEngine::AssetPipeline
 {
@@ -28,6 +30,41 @@ namespace TerraEngine::AssetPipeline
 		nlohmann::json OptionalIndexToJson(const std::optional<std::size_t>& value)
 		{
 			return value.has_value() ? nlohmann::json(*value) : nlohmann::json(nullptr);
+		}
+
+		template <typename T>
+		bool ReadVirtualGeometryTable(std::ifstream& input, std::uint64_t offset, std::uint32_t count, std::vector<T>& outRecords)
+		{
+			outRecords.clear();
+			if (count == 0u)
+			{
+				return true;
+			}
+			if (offset == 0u)
+			{
+				return false;
+			}
+
+			outRecords.resize(count);
+			input.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+			input.read(
+				reinterpret_cast<char*>(outRecords.data()),
+				static_cast<std::streamsize>(outRecords.size() * sizeof(T)));
+			return static_cast<bool>(input);
+		}
+
+		std::uint32_t CountClusterMaterialSections(const std::vector<VirtualGeometryClusterRecord>& clusters)
+		{
+			std::vector<std::uint32_t> sectionIds;
+			sectionIds.reserve(clusters.size());
+			for (const VirtualGeometryClusterRecord& cluster : clusters)
+			{
+				if (std::find(sectionIds.begin(), sectionIds.end(), cluster.materialSectionId) == sectionIds.end())
+				{
+					sectionIds.push_back(cluster.materialSectionId);
+				}
+			}
+			return static_cast<std::uint32_t>(sectionIds.size());
 		}
 	}
 
@@ -241,12 +278,21 @@ namespace TerraEngine::AssetPipeline
 		return {
 			{ "clusterCount", value.clusterCount },
 			{ "pageLinkCount", value.pageLinkCount },
-			{ "fallbackCoverageValid", value.fallbackCoverageValid }
+			{ "sourceMaterialAssignmentCount", value.sourceMaterialAssignmentCount },
+			{ "materialSectionCount", value.materialSectionCount },
+			{ "clusterMaterialSectionCount", value.clusterMaterialSectionCount },
+			{ "fallbackCoverageValid", value.fallbackCoverageValid },
+			{ "materialCoverageValid", value.materialCoverageValid }
 		};
 	}
 
 	nlohmann::json ToJson(const GeneratedModelMeshAsset& value)
 	{
+		nlohmann::json virtualGeometryCoverageTags = nlohmann::json::array();
+		for (const std::string& tag : value.virtualGeometryCoverageTags)
+		{
+			virtualGeometryCoverageTags.push_back(tag);
+		}
 		nlohmann::json virtualGeometryWarnings = nlohmann::json::array();
 		for (const std::string& warning : value.virtualGeometryWarnings)
 		{
@@ -282,6 +328,7 @@ namespace TerraEngine::AssetPipeline
 				{ "settings", ToJson(value.virtualGeometrySettings) },
 				{ "targets", virtualGeometryTargets },
 				{ "clusterSummary", ToJson(value.virtualGeometryClusterSummary) },
+				{ "coverageTags", virtualGeometryCoverageTags },
 				{ "warnings", virtualGeometryWarnings }
 			} }
 		};
@@ -403,8 +450,28 @@ namespace TerraEngine::AssetPipeline
 		mesh.virtualGeometrySourceTriangles = virtualHeader.sourceTriangleCount;
 		mesh.virtualGeometryClusterSummary.clusterCount = virtualHeader.clusterCount;
 		mesh.virtualGeometryClusterSummary.pageLinkCount = virtualHeader.clusterPageLinkCount;
+		mesh.virtualGeometryClusterSummary.materialSectionCount = virtualHeader.materialSectionCount;
 		mesh.virtualGeometryClusterSummary.fallbackCoverageValid =
 			(virtualHeader.flags & kVirtualGeometryValidationFlagFallbackCoverageValidated) != 0u;
+		mesh.virtualGeometryClusterSummary.materialCoverageValid =
+			mesh.virtualGeometryClusterSummary.fallbackCoverageValid
+			&& virtualHeader.materialSectionCount > 0u;
+		std::vector<VirtualGeometryClusterRecord> clusters;
+		if (ReadVirtualGeometryTable(input, virtualHeader.clusterTableOffset, virtualHeader.clusterCount, clusters))
+		{
+			// Count the material ids referenced by clusters instead of trusting a
+			// header count alone. This keeps package diagnostics useful when a
+			// future cooker emits multiple material sections under TEMF v1.
+			mesh.virtualGeometryClusterSummary.clusterMaterialSectionCount = CountClusterMaterialSections(clusters);
+			mesh.virtualGeometryClusterSummary.materialCoverageValid =
+				mesh.virtualGeometryClusterSummary.materialCoverageValid
+				&& (mesh.virtualGeometryClusterSummary.clusterMaterialSectionCount <= virtualHeader.materialSectionCount);
+		}
+		else
+		{
+			mesh.virtualGeometryClusterSummary.materialCoverageValid = false;
+			mesh.virtualGeometryWarnings.push_back("Virtual geometry cluster material diagnostics could not be read.");
+		}
 		if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u)
 		{
 			mesh.virtualGeometryCooked = false;

@@ -143,7 +143,11 @@ namespace TerraEngine::AssetPipeline
 	{
 		std::uint32_t clusterCount = 0u;
 		std::uint32_t pageLinkCount = 0u;
+		std::uint32_t sourceMaterialAssignmentCount = 0u;
+		std::uint32_t materialSectionCount = 0u;
+		std::uint32_t clusterMaterialSectionCount = 0u;
 		bool fallbackCoverageValid = false;
+		bool materialCoverageValid = false;
 	};
 
 	struct GeneratedModelMeshAsset
@@ -166,6 +170,11 @@ namespace TerraEngine::AssetPipeline
 		GeneratedModelMeshVirtualGeometrySettings virtualGeometrySettings;
 		std::vector<GeneratedModelMeshVirtualGeometryTarget> virtualGeometryTargets;
 		GeneratedModelMeshVirtualGeometryClusterSummary virtualGeometryClusterSummary;
+		// Coverage tags are intentionally plain strings because they are
+		// developer-facing diagnostics, not runtime behavior. Importers use them
+		// to say which hardening fixture categories a generated package mesh can
+		// exercise in clean-checkout tests.
+		std::vector<std::string> virtualGeometryCoverageTags;
 		std::vector<std::string> virtualGeometryWarnings;
 	};
 

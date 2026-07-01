@@ -259,7 +259,14 @@ namespace TerraEngine::Resource
 	{
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
 		std::uint64_t residentBytes = 0u;
+		std::uint64_t requestedBytes = 0u;
 		std::uint64_t reclaimableBytes = 0u;
+		std::uint64_t pinnedFallbackBytes = 0u;
+		std::uint64_t pendingIoBytes = 0u;
+		std::uint64_t pendingUploadBytes = 0u;
+		std::uint64_t failedBytes = 0u;
+		std::uint64_t evictingBytes = 0u;
+		std::uint64_t evictedBytes = 0u;
 		std::uint32_t residentPages = 0u;
 		std::uint32_t requestedPages = 0u;
 		std::uint32_t missingPages = 0u;
@@ -272,7 +279,16 @@ namespace TerraEngine::Resource
 	{
 		std::uint64_t budgetBytes = 0u;
 		std::uint64_t residentBytes = 0u;
+		std::uint64_t requestedBytes = 0u;
+		std::uint64_t reclaimableBytes = 0u;
+		std::uint64_t pinnedFallbackBytes = 0u;
+		std::uint64_t pendingIoBytes = 0u;
+		std::uint64_t pendingUploadBytes = 0u;
+		std::uint64_t failedBytes = 0u;
+		std::uint64_t evictingBytes = 0u;
+		std::uint64_t evictedBytes = 0u;
 		std::uint64_t overBudgetBytes = 0u;
+		std::uint64_t pressureBytes = 0u;
 		std::uint32_t residentPages = 0u;
 		std::uint32_t requestedPages = 0u;
 		std::uint32_t missingPages = 0u;

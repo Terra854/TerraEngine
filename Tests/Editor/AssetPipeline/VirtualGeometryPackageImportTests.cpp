@@ -1,11 +1,14 @@
 #include "TestHarness.h"
 
 #include "AssetImportResult.h"
+#include "FbxTestHelpers.h"
 #include "ModelPackageImporter.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -73,10 +76,63 @@ namespace TerraEngine::EditorTests
 			std::ifstream input(path);
 			return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 		}
+
+		nlohmann::json LoadHardeningFixtureManifest()
+		{
+			const std::filesystem::path sourceRoot = std::filesystem::path(TERRAENGINE_SOURCE_DIR);
+			std::ifstream input(sourceRoot / "Tests/Fixtures/VirtualGeometry/hardening-fixtures.json");
+			return nlohmann::json::parse(input);
+		}
+
+		bool HasCoverageTag(const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh, std::string_view expectedTag)
+		{
+			return std::find(mesh.virtualGeometryCoverageTags.begin(), mesh.virtualGeometryCoverageTags.end(), std::string(expectedTag)) != mesh.virtualGeometryCoverageTags.end();
+		}
 	}
 
 	void RegisterVirtualGeometryPackageImportTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.Editor.PackageImport.HardeningFixtureManifestCoversRequiredCategories", [](TestContext& context) {
+			const nlohmann::json manifest = LoadHardeningFixtureManifest();
+			context.ExpectEqual(1, manifest.value("schemaVersion", 0), "Hardening fixture manifest should use schema version 1.");
+
+			std::set<std::string> categories;
+			std::set<std::string> packageFormats;
+			for (const nlohmann::json& format : manifest.value("packageFormats", nlohmann::json::array()))
+			{
+				packageFormats.insert(format.get<std::string>());
+			}
+			for (const nlohmann::json& entry : manifest.value("requiredCategories", nlohmann::json::array()))
+			{
+				context.Expect(entry.contains("id") && entry["id"].is_string(), "Every hardening fixture entry should have a stable id.");
+				context.Expect(entry.contains("category") && entry["category"].is_string(), "Every hardening fixture entry should have a category.");
+				context.Expect(entry.value("requiredForCleanCheckout", false), "Required hardening fixtures should be clean-checkout safe.");
+				context.Expect(!entry.value("expectedDiagnostics", nlohmann::json::array()).empty(), "Each hardening fixture should name expected diagnostics.");
+				context.Expect(!entry.value("expectedRenderOutcomes", nlohmann::json::array()).empty(), "Each hardening fixture should name expected render outcomes.");
+				context.Expect(!entry.value("coverageTags", nlohmann::json::array()).empty(), "Each hardening fixture should name coverage tags consumed by import/export diagnostics.");
+				categories.insert(entry["category"].get<std::string>());
+			}
+
+			const std::vector<std::string> requiredCategories = {
+				"tiny",
+				"dense",
+				"thin",
+				"curved",
+				"hard-surface",
+				"multi-material-package",
+				"streaming-pressure",
+				"multi-view",
+				"export"
+			};
+			for (const std::string& category : requiredCategories)
+			{
+				context.Expect(categories.contains(category), "The hardening fixture manifest should cover every broad virtual geometry validation category.");
+			}
+			context.Expect(packageFormats.contains("gltf"), "Package coverage should include text glTF fixtures.");
+			context.Expect(packageFormats.contains("glb"), "Package coverage should include binary GLB fixtures.");
+			context.Expect(packageFormats.contains("fbx"), "Package coverage should include FBX fixtures.");
+		});
+
 		registry.Add("VirtualGeometry.Editor.PackageImport.CooksMultipleGeneratedMeshOutputs", [](TestContext& context) {
 			const std::filesystem::path tempRoot = MakeVirtualGeometryPackageTempRoot("MultipleMeshes");
 			nlohmann::json document = LoadBaseGltfFixture();
@@ -153,6 +209,48 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(TerraEngine::ToHexString(first.generatedMaterials.front().guid), TerraEngine::ToHexString(second.generatedMaterials.front().guid), "Generated material GUID should remain stable across reimport.");
 			context.ExpectEqual(TerraEngine::ToHexString(first.materialAssignments.front().meshGuid), TerraEngine::ToHexString(second.materialAssignments.front().meshGuid), "Material slot mesh reference should remain stable across reimport.");
 			context.Expect(TerraEngine::ToHexString(first.generatedMeshes.front().guid) != TerraEngine::ToHexString(packageGuid), "Generated mesh should keep a package-child ID instead of being overwritten by the package GUID.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.PackageImport.ReportsMultiMaterialClusterCoverage", [](TestContext& context) {
+			const std::filesystem::path tempRoot = MakeVirtualGeometryPackageTempRoot("MultiMaterialCoverage");
+			nlohmann::json document = LoadBaseGltfFixture();
+			nlohmann::json secondMaterial = document["materials"][0];
+			secondMaterial["name"] = "Mat_Blue";
+			secondMaterial["pbrMetallicRoughness"]["baseColorFactor"] = nlohmann::json::array({ 0.05f, 0.15f, 0.9f, 1.0f });
+			document["materials"].push_back(secondMaterial);
+			nlohmann::json secondPrimitive = document["meshes"][0]["primitives"][0];
+			secondPrimitive["material"] = 1;
+			document["meshes"][0]["primitives"].push_back(secondPrimitive);
+
+			const std::filesystem::path fixturePath = WriteGltfFixture(tempRoot, "multi-material.gltf", document);
+			const TerraEngine::UUID packageGuid = TerraEngine::GenerateUUID();
+			const auto options = BuildPackageOptions(tempRoot, fixturePath, "Models/multi-material.gltf", packageGuid);
+			const auto result = TerraEngine::AssetPipeline::ImportModelPackage(options);
+
+			context.Expect(result.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed, "Multi-material package import should still produce static geometry.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), result.generatedMeshes.size(), "One source mesh should produce one generated mesh record.");
+			context.ExpectEqual(static_cast<std::size_t>(2u), result.materialAssignments.size(), "Both authored primitives should produce material assignments.");
+			const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh = result.generatedMeshes.front();
+			context.Expect(mesh.virtualGeometryCooked, "Multi-material fixture should still cook virtual geometry.");
+			context.ExpectEqual(2u, mesh.virtualGeometryClusterSummary.sourceMaterialAssignmentCount, "Cluster summary should remember the authored material assignment count.");
+			context.Expect(mesh.virtualGeometryClusterSummary.materialSectionCount >= 1u, "Cluster summary should report cooked virtual geometry material sections.");
+			context.Expect(mesh.virtualGeometryClusterSummary.clusterMaterialSectionCount >= 1u, "Cluster summary should report cluster material ownership diagnostics.");
+			context.Expect(!mesh.virtualGeometryClusterSummary.materialCoverageValid, "Current TEMF v1 package cook should flag multi-material cluster coverage for review instead of silently claiming full section coverage.");
+			context.Expect(std::any_of(mesh.virtualGeometryWarnings.begin(), mesh.virtualGeometryWarnings.end(), [](const std::string& warning) {
+				return warning.find("material coverage") != std::string::npos;
+			}), "Multi-material package diagnostics should explain material coverage review.");
+
+			const nlohmann::json sidecar = TerraEngine::AssetPipeline::ToJson(result);
+			const nlohmann::json clusterSummary = sidecar["generatedMeshes"][0]["virtualGeometry"]["clusterSummary"];
+			context.ExpectEqual(2u, clusterSummary.value("sourceMaterialAssignmentCount", 0u), "Sidecar JSON should persist source material assignment counts.");
+			context.Expect(!clusterSummary.value("materialCoverageValid", true), "Sidecar JSON should persist material coverage review state.");
+
+			const std::filesystem::path sourceAssetPath = tempRoot / "Assets/Models/multi-material.gltf";
+			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(sourceAssetPath, result), "Multi-material package sidecar should save.");
+			TerraEngine::AssetPipeline::ModelPackageImportResult loaded;
+			context.Expect(TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourceAssetPath, loaded), "Multi-material package sidecar should reload.");
+			context.ExpectEqual(2u, loaded.generatedMeshes.front().virtualGeometryClusterSummary.sourceMaterialAssignmentCount, "Material assignment count should round-trip through the sidecar loader.");
+			context.Expect(!loaded.generatedMeshes.front().virtualGeometryClusterSummary.materialCoverageValid, "Material coverage state should round-trip through the sidecar loader.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.PackageImport.PreservesGeneratedMeshOverrideSettings", [](TestContext& context) {
@@ -241,6 +339,53 @@ namespace TerraEngine::EditorTests
 			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(sourceAssetPath, result), "Atomic writer should recover from a corrupt sidecar by publishing a complete replacement.");
 			context.ExpectEqual(goodSidecar, ReadTextFile(sidecarPath), "Recovered sidecar should match the last complete import result.");
 			context.Expect(!std::filesystem::exists(sidecarPath.string() + ".tmp"), "Atomic sidecar writer should not leave staged files after success.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.PackageImport.PublishesCoverageTagsForGltfAndFbxPackages", [](TestContext& context) {
+			const std::filesystem::path tempRoot = MakeVirtualGeometryPackageTempRoot("CoverageTags");
+			nlohmann::json document = LoadBaseGltfFixture();
+			nlohmann::json secondMaterial = document["materials"][0];
+			secondMaterial["name"] = "Coverage_Mat_B";
+			document["materials"].push_back(secondMaterial);
+			nlohmann::json secondPrimitive = document["meshes"][0]["primitives"][0];
+			secondPrimitive["material"] = 1;
+			document["meshes"][0]["primitives"].push_back(secondPrimitive);
+
+			const std::filesystem::path fixturePath = WriteGltfFixture(tempRoot, "coverage-tags.gltf", document);
+			const TerraEngine::UUID gltfPackageGuid = TerraEngine::GenerateUUID();
+			const auto gltfOptions = BuildPackageOptions(tempRoot, fixturePath, "Models/coverage-tags.gltf", gltfPackageGuid);
+			const auto gltfResult = TerraEngine::AssetPipeline::ImportModelPackage(gltfOptions);
+			context.Expect(gltfResult.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed, "Coverage-tag glTF package import should succeed.");
+			context.Expect(!gltfResult.generatedMeshes.empty(), "Coverage-tag glTF package import should produce a generated mesh.");
+			const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& gltfMesh = gltfResult.generatedMeshes.front();
+			context.Expect(HasCoverageTag(gltfMesh, "package-gltf"), "glTF package meshes should publish the package-gltf coverage tag.");
+			context.Expect(HasCoverageTag(gltfMesh, "package-static-geometry"), "Package meshes should publish the static geometry coverage tag.");
+			context.Expect(HasCoverageTag(gltfMesh, "multi-material-package"), "Multi-material package meshes should publish the multi-material coverage tag.");
+			context.Expect(HasCoverageTag(gltfMesh, "adaptive-targets"), "Cooked package meshes should publish adaptive target coverage.");
+			context.Expect(HasCoverageTag(gltfMesh, "fallback-coverage"), "Cooked package meshes should publish fallback coverage.");
+			context.Expect(HasCoverageTag(gltfMesh, "page-links"), "Cooked package meshes should publish page-link coverage.");
+
+			const nlohmann::json sidecar = TerraEngine::AssetPipeline::ToJson(gltfResult);
+			const nlohmann::json tags = sidecar["generatedMeshes"][0]["virtualGeometry"].value("coverageTags", nlohmann::json::array());
+			bool sidecarHasMultiMaterialTag = false;
+			for (const nlohmann::json& tag : tags)
+			{
+				sidecarHasMultiMaterialTag = sidecarHasMultiMaterialTag || (tag.is_string() && tag.get<std::string>() == "multi-material-package");
+			}
+			context.Expect(sidecarHasMultiMaterialTag, "Coverage tags should persist into generated package sidecar JSON.");
+
+			const std::filesystem::path sourceAssetPath = tempRoot / "Assets/Models/coverage-tags.gltf";
+			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(sourceAssetPath, gltfResult), "Coverage-tag glTF package sidecar should save.");
+			TerraEngine::AssetPipeline::ModelPackageImportResult loadedGltf;
+			context.Expect(TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourceAssetPath, loadedGltf), "Coverage-tag glTF package sidecar should reload.");
+			context.Expect(HasCoverageTag(loadedGltf.generatedMeshes.front(), "package-gltf"), "Coverage tags should round-trip through the package sidecar loader.");
+
+			const auto fbxResult = ImportFbxFixture("box.fbx");
+			context.Expect(fbxResult.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed, "Coverage-tag FBX package import should succeed.");
+			context.Expect(!fbxResult.generatedMeshes.empty(), "Coverage-tag FBX package import should produce a generated mesh.");
+			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "package-fbx"), "FBX package meshes should publish the package-fbx coverage tag.");
+			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "package-static-geometry"), "FBX package meshes should publish the static geometry coverage tag.");
+			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "adaptive-targets"), "FBX package meshes should publish adaptive target coverage.");
 		});
 	}
 }

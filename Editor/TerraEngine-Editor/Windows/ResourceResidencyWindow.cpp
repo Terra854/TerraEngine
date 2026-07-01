@@ -799,7 +799,7 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 		return;
 	}
 
-	if (ImGui::BeginTable("ResourceVirtualGeometrySummary", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	if (ImGui::BeginTable("ResourceVirtualGeometrySummary", 12, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("View");
 		ImGui::TableSetupColumn("State");
@@ -810,6 +810,7 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 		ImGui::TableSetupColumn("Failed");
 		ImGui::TableSetupColumn("Evict/Evicted");
 		ImGui::TableSetupColumn("Pinned");
+		ImGui::TableSetupColumn("Pinned Bytes");
 		ImGui::TableSetupColumn("Budget/Pressure");
 		ImGui::TableSetupColumn("Bytes");
 		ImGui::TableHeadersRow();
@@ -835,10 +836,12 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 			ImGui::TableSetColumnIndex(8);
 			ImGui::Text("%u", snapshot.pinnedFallbackPages);
 			ImGui::TableSetColumnIndex(9);
+			ImGui::Text("%llu", static_cast<unsigned long long>(snapshot.pageResidency.pinnedFallbackBytes));
+			ImGui::TableSetColumnIndex(10);
 			ImGui::Text("%llu/%llu",
 				static_cast<unsigned long long>(snapshot.geometryBudgetBytes),
 				static_cast<unsigned long long>(snapshot.budgetPressureBytes));
-			ImGui::TableSetColumnIndex(10);
+			ImGui::TableSetColumnIndex(11);
 			ImGui::Text("%llu", static_cast<unsigned long long>(snapshot.estimatedGeometryBytes));
 		}
 		ImGui::EndTable();
@@ -862,12 +865,13 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 	});
 
 	if (!contributors.empty()
-		&& ImGui::BeginTable("ResourceVirtualGeometryPressureAssets", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	&& ImGui::BeginTable("ResourceVirtualGeometryPressureAssets", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("View");
 		ImGui::TableSetupColumn("Asset");
 		ImGui::TableSetupColumn("Resident Bytes");
 		ImGui::TableSetupColumn("Reclaimable Bytes");
+		ImGui::TableSetupColumn("Pinned Bytes");
 		ImGui::TableSetupColumn("Resident Pages");
 		ImGui::TableSetupColumn("Pinned");
 		ImGui::TableSetupColumn("Missing");
@@ -884,10 +888,12 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 			ImGui::TableSetColumnIndex(3);
 			ImGui::Text("%llu", static_cast<unsigned long long>(contributor.reclaimableBytes));
 			ImGui::TableSetColumnIndex(4);
-			ImGui::Text("%u", contributor.residentPages);
+			ImGui::Text("%llu", static_cast<unsigned long long>(contributor.pinnedFallbackBytes));
 			ImGui::TableSetColumnIndex(5);
-			ImGui::Text("%u", contributor.pinnedFallbackPages);
+			ImGui::Text("%u", contributor.residentPages);
 			ImGui::TableSetColumnIndex(6);
+			ImGui::Text("%u", contributor.pinnedFallbackPages);
+			ImGui::TableSetColumnIndex(7);
 			ImGui::Text("%u", contributor.missingPages);
 		}
 		ImGui::EndTable();

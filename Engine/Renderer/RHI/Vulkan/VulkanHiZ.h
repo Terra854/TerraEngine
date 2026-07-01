@@ -7,9 +7,13 @@
 #pragma once
 
 #include "VulkanCommonIncludes.h"
+#include <algorithm>
+#include <cmath>
 #include <glm/glm.hpp>
+#include <glm/common.hpp>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 enum class VulkanHiZViewClass : std::uint32_t
@@ -37,7 +41,8 @@ enum class VulkanHiZInvalidReason : std::uint32_t
 	ShadowView = 11u,
 	NearPlaneRisk = 12u,
 	ThinGeometryRisk = 13u,
-	DepthSceneChanged = 14u
+	DepthSceneChanged = 14u,
+	ProjectedBoundsRisk = 15u
 };
 
 struct VulkanHiZHistoryMetadata
@@ -61,6 +66,7 @@ struct VulkanHiZHistoryMetadata
 	// sampled depth cannot conservatively prove the meshlet is hidden.
 	std::uint64_t depthSceneSignature = 0u;
 	std::uint64_t frameId = 0u;
+	uint32_t warmupFrames = 0u;
 	bool valid = false;
 	VulkanHiZInvalidReason invalidReason = VulkanHiZInvalidReason::FirstFrame;
 };
@@ -89,11 +95,38 @@ struct VulkanHiZValidationResult
 	bool occlusionAllowed = false;
 	VulkanHiZInvalidReason invalidReason = VulkanHiZInvalidReason::FirstFrame;
 	VulkanHiZViewClass ownerViewClass = VulkanHiZViewClass::Unknown;
+	uint32_t viewId = 0u;
+	uint32_t targetId = 0u;
+	uint32_t width = 0u;
+	uint32_t height = 0u;
+	uint32_t warmupFrames = 0u;
+	bool pyramidReady = false;
 	bool sameViewHistory = false;
 	bool sameTargetHistory = false;
 	bool projectionMatches = false;
 	bool depthSceneMatches = false;
 	bool failOpen = true;
+};
+
+struct VulkanHiZProjectedBoundsInput
+{
+	// The task shader must make the same conservative decisions as this helper:
+	// sample only when the current view has a pyramid and the meshlet sphere is
+	// fully represented by a finite screen-space rectangle.
+	bool pyramidReady = false;
+	float clipW = 0.0f;
+	glm::vec2 uvCenter = glm::vec2(0.0f);
+	glm::vec2 uvRadius = glm::vec2(0.0f);
+	glm::uvec2 viewportSize = glm::uvec2(0u);
+};
+
+struct VulkanHiZProjectedBoundsResult
+{
+	bool sampleAllowed = false;
+	bool failOpen = true;
+	VulkanHiZInvalidReason invalidReason = VulkanHiZInvalidReason::FirstFrame;
+	glm::vec2 uvMin = glm::vec2(0.0f);
+	glm::vec2 uvMax = glm::vec2(0.0f);
 };
 
 inline const char* ToString(VulkanHiZInvalidReason reason)
@@ -115,6 +148,7 @@ inline const char* ToString(VulkanHiZInvalidReason reason)
 	case VulkanHiZInvalidReason::NearPlaneRisk: return "near-plane-risk";
 	case VulkanHiZInvalidReason::ThinGeometryRisk: return "thin-geometry-risk";
 	case VulkanHiZInvalidReason::DepthSceneChanged: return "depth-scene-changed";
+	case VulkanHiZInvalidReason::ProjectedBoundsRisk: return "projected-bounds-risk";
 	default: return "unknown";
 	}
 }
@@ -144,6 +178,11 @@ inline VulkanHiZValidationResult ValidateVulkanHiZHistory(const VulkanHiZHistory
 {
 	VulkanHiZValidationResult result{};
 	result.ownerViewClass = history.viewClass;
+	result.viewId = input.viewId;
+	result.targetId = input.targetId;
+	result.width = input.width;
+	result.height = input.height;
+	result.pyramidReady = input.pyramidReady;
 	result.sameViewHistory = history.viewId == input.viewId && history.viewClass == input.viewClass;
 	result.sameTargetHistory = history.targetId == input.targetId;
 	result.projectionMatches = history.projectionSignature == input.projectionSignature;
@@ -163,7 +202,69 @@ inline VulkanHiZValidationResult ValidateVulkanHiZHistory(const VulkanHiZHistory
 	result.historyValid = true;
 	result.occlusionAllowed = true;
 	result.invalidReason = VulkanHiZInvalidReason::None;
+	const bool sameCurrentPyramid =
+		history.valid
+		&& result.sameViewHistory
+		&& result.sameTargetHistory
+		&& history.width == input.width
+		&& history.height == input.height;
+	result.warmupFrames = sameCurrentPyramid
+		? (history.warmupFrames == std::numeric_limits<uint32_t>::max() ? history.warmupFrames : history.warmupFrames + 1u)
+		: 1u;
 	result.failOpen = false;
+	return result;
+}
+
+inline VulkanHiZProjectedBoundsResult ValidateVulkanHiZProjectedBounds(const VulkanHiZProjectedBoundsInput& input)
+{
+	VulkanHiZProjectedBoundsResult result{};
+	if (!input.pyramidReady)
+	{
+		result.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
+		return result;
+	}
+
+	if (!std::isfinite(input.clipW) || input.clipW <= 0.0f)
+	{
+		result.invalidReason = VulkanHiZInvalidReason::NearPlaneRisk;
+		return result;
+	}
+
+	const bool finiteCenter =
+		std::isfinite(input.uvCenter.x)
+		&& std::isfinite(input.uvCenter.y);
+	const bool finiteRadius =
+		std::isfinite(input.uvRadius.x)
+		&& std::isfinite(input.uvRadius.y);
+	if (!finiteCenter || !finiteRadius || input.uvRadius.x < 0.0f || input.uvRadius.y < 0.0f)
+	{
+		result.invalidReason = VulkanHiZInvalidReason::ProjectedBoundsRisk;
+		return result;
+	}
+
+	const glm::vec2 rawMin = input.uvCenter - input.uvRadius;
+	const glm::vec2 rawMax = input.uvCenter + input.uvRadius;
+	if (rawMin.x < 0.0f || rawMin.y < 0.0f || rawMax.x > 1.0f || rawMax.y > 1.0f)
+	{
+		result.invalidReason = VulkanHiZInvalidReason::ProjectedBoundsRisk;
+		return result;
+	}
+
+	const glm::vec2 viewportSize(
+		static_cast<float>(std::max(input.viewportSize.x, 1u)),
+		static_cast<float>(std::max(input.viewportSize.y, 1u)));
+	const glm::vec2 uvPadding = glm::vec2(2.0f) / viewportSize;
+	result.uvMin = glm::max(rawMin - uvPadding, glm::vec2(0.0f));
+	result.uvMax = glm::min(rawMax + uvPadding, glm::vec2(1.0f));
+	if (result.uvMax.x < result.uvMin.x || result.uvMax.y < result.uvMin.y)
+	{
+		result.invalidReason = VulkanHiZInvalidReason::ProjectedBoundsRisk;
+		return result;
+	}
+
+	result.sampleAllowed = true;
+	result.failOpen = false;
+	result.invalidReason = VulkanHiZInvalidReason::None;
 	return result;
 }
 

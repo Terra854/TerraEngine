@@ -235,12 +235,30 @@ visualization. Use this pass while implementing or reviewing that feature:
 ctest --test-dir out/build/Debug -R "Engine.AdaptiveVirtualGeometry|Editor.AdaptiveVirtualGeometry" --output-on-failure -C Debug
 ```
 
+Feature `specs/029-virtual-geometry-hardening` adds the staged hardening pass
+for Hi-Z correctness, explainable Hi-Z diagnostics, real page streaming,
+counter source truth, transition stability, multi-view independence, visualizer
+cleanup, and broad asset coverage:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryHardening|Editor.VirtualGeometryHardening" --output-on-failure -C Debug
+```
+
 The broader virtual-geometry regression set covers renderer, resource,
 editor asset pipeline, automation, export, and debug visualizer behavior:
 
 ```powershell
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
 ```
+
+US9 broad asset coverage is represented by
+`Tests/Fixtures/VirtualGeometry/hardening-fixtures.json`. The clean-checkout
+tests validate tiny, dense, thin, curved, hard-surface, multi-material package,
+streaming-pressure, multi-view, and export categories through procedural data,
+small glTF fixtures, vendored FBX fixtures, and synthetic TEPAK/TEMF packages.
+Generated package sidecars expose `virtualGeometry.coverageTags`; export
+manifests expose `virtualGeometry.coverage` with the fixture manifest and
+covered categories.
 
 When diagnosing just the adaptive path through the harness binaries, use the
 same filters that the CTest entries apply:
@@ -271,6 +289,20 @@ cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -h
 ctest --test-dir out/build/Debug -R "Engine.AdaptiveVirtualGeometry|Editor.AdaptiveVirtualGeometry|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
 cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install"
 ```
+
+During feature `029`, run the hardening slice after each phase or user story,
+then run the broader virtual-geometry regression set before the install target.
+The hardening fixture manifest lives at
+`Tests/Fixtures/VirtualGeometry/hardening-fixtures.json`.
+
+Optional manual large-asset stress is intentionally outside the CTest path. Use
+a local scratch project with one dense scan mesh, one hard-surface
+multi-material mesh, and one thin occlusion-heavy mesh. Rebuild virtual
+geometry, inspect the generated mesh sidecar coverage tags, then validate LOD,
+Cluster, Residency, Hi-Z, and Error visualizer modes while watching selected
+meshlets, dispatched meshlets, pinned fallback bytes, requested pages, missing
+pages, and budget pressure. Keep downloaded or licensed stress assets out of
+the repository unless a later feature explicitly approves them.
 
 The editor MCP bridge checks live under `Tests/Editor/Automation`. They cover
 automation envelopes, capability metadata, local-only transport checks, bridge

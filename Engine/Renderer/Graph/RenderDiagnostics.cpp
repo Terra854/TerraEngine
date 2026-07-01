@@ -1,7 +1,9 @@
 #include "RenderDiagnostics.h"
+#include "RenderFrameSnapshot.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <utility>
 
@@ -104,6 +106,8 @@ namespace TerraEngine::Renderer {
 		snapshot.hiZValidation.ownerViewType = viewType;
 		snapshot.hiZActive = true;
 		snapshot.hiZHistoryValid = true;
+		snapshot.counterSource = VirtualGeometryCounterSource::Prepared;
+		snapshot.hiZState = VirtualGeometryHiZState::Active;
 		// This configuration-only snapshot is not tied to a concrete pyramid
 		// resource. Leave inactive state empty so default diagnostics cannot
 		// masquerade as a runtime Hi-Z disable path.
@@ -141,10 +145,15 @@ namespace TerraEngine::Renderer {
 		snapshot.viewType = viewType;
 		snapshot.frameId = frameId;
 		snapshot.active = true;
+		snapshot.debugVisualizationMode = quality.debugVisualizationMode;
 		snapshot.effectiveLodErrorScale = quality.lodErrorScale;
 		snapshot.configuredMaxLodDrop = quality.maxLodDrop;
+		snapshot.lodTransitionHysteresisPixels = quality.lodTransitionHysteresisPixels;
+		snapshot.lodTransitionStableFrames = quality.lodTransitionStableFrames;
 		snapshot.geometryBudgetBytes = quality.geometryBudgetBytes;
 		snapshot.cookOutput = BuildVirtualGeometryCookOutputDiagnostics(assets);
+		snapshot.counterSource = VirtualGeometryCounterSource::Prepared;
+		snapshot.hiZState = VirtualGeometryHiZState::Active;
 
 		for (const VirtualGeometryAssetRuntime& asset : assets)
 		{
@@ -172,6 +181,8 @@ namespace TerraEngine::Renderer {
 						++snapshot.pinnedFallbackPages;
 						++snapshot.pageResidency.pinnedFallbackPages;
 						++contributor.pinnedFallbackPages;
+						snapshot.pageResidency.pinnedFallbackBytes += page.byteSize;
+						contributor.pinnedFallbackBytes += page.byteSize;
 					}
 					if (!page.fallbackPage && !page.pinnedFallback && page.state != GeometryPageState::Pinned)
 					{
@@ -181,20 +192,29 @@ namespace TerraEngine::Renderer {
 				case GeometryPageState::Requested:
 				case GeometryPageState::Loading:
 					++snapshot.requestedPages;
+					snapshot.pageResidency.requestedBytes += page.byteSize;
+					contributor.requestedBytes += page.byteSize;
 					break;
 				case GeometryPageState::PendingIO:
 					++snapshot.requestedPages;
 					++snapshot.pageResidency.pendingIoPages;
+					snapshot.pageResidency.requestedBytes += page.byteSize;
+					snapshot.pageResidency.pendingIoBytes += page.byteSize;
+					contributor.requestedBytes += page.byteSize;
 					break;
 				case GeometryPageState::PendingUpload:
 					++snapshot.requestedPages;
 					++snapshot.pageResidency.pendingUploadPages;
+					snapshot.pageResidency.requestedBytes += page.byteSize;
+					snapshot.pageResidency.pendingUploadBytes += page.byteSize;
+					contributor.requestedBytes += page.byteSize;
 					break;
 				case GeometryPageState::Evicting:
 					++snapshot.evictingPages;
 					++snapshot.pageResidency.evictingPages;
 					++snapshot.missingPages;
 					++contributor.missingPages;
+					snapshot.pageResidency.evictingBytes += page.byteSize;
 					break;
 				case GeometryPageState::NotResident:
 					++snapshot.missingPages;
@@ -203,6 +223,7 @@ namespace TerraEngine::Renderer {
 				case GeometryPageState::Failed:
 					++snapshot.failedPages;
 					++snapshot.missingPages;
+					snapshot.pageResidency.failedBytes += page.byteSize;
 					if (!page.failureReason.empty())
 					{
 						++snapshot.pageResidency.failedPageReasons;
@@ -212,6 +233,7 @@ namespace TerraEngine::Renderer {
 				case GeometryPageState::Evicted:
 					++snapshot.evictedPages;
 					++snapshot.missingPages;
+					snapshot.pageResidency.evictedBytes += page.byteSize;
 					++contributor.missingPages;
 					break;
 				}
@@ -300,6 +322,104 @@ namespace TerraEngine::Renderer {
 		return snapshot;
 	}
 
+	VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(const VirtualGeometryViewVisibilitySnapshot& visibility)
+	{
+		VirtualGeometryViewDiagnosticsSnapshot snapshot;
+		snapshot.viewType = visibility.viewType;
+		snapshot.frameId = visibility.frameId;
+		snapshot.active = visibility.valid;
+		snapshot.debugVisualizationMode = NormalizeVirtualGeometryDebugVisualizationMode(visibility.debugVisualizationMode);
+		snapshot.counterSource = visibility.source;
+		snapshot.counterPreparedFrameId = visibility.counters.preparedFrameId;
+		snapshot.counterReadbackFrameId = visibility.counters.readbackFrameId;
+		snapshot.counterReadbackLatencyFrames = visibility.counters.readbackLatencyFrames;
+		snapshot.counterUnavailableReason = visibility.counters.unavailableReason;
+		snapshot.counterToleranceMeshlets = visibility.counters.toleranceMeshlets;
+		snapshot.counterTolerancePercent = visibility.counters.tolerancePercent;
+		snapshot.countersAuthoritative = visibility.counters.authoritative;
+		snapshot.sourceMeshlets = visibility.counters.sourceMeshlets;
+		snapshot.selectedMeshlets = visibility.counters.selectedMeshlets;
+		snapshot.dispatchedMeshlets = visibility.counters.dispatchedMeshlets;
+		snapshot.culledMeshlets = visibility.counters.culledMeshlets;
+		snapshot.culledByFrustum = visibility.counters.culledByFrustum;
+		snapshot.culledByCone = visibility.counters.culledByCone;
+		snapshot.culledByHiZ = visibility.counters.culledByHiZ;
+		snapshot.requestedPages = visibility.counters.requestedPages;
+		snapshot.missingPages = visibility.counters.missingPages;
+		snapshot.clusterSelection.selectedClusters = static_cast<std::uint32_t>(visibility.selectedClusters.size());
+		snapshot.clusterSelection.fallbackClusters = visibility.counters.fallbackSubstitutions;
+		snapshot.lodTransitionStates = static_cast<std::uint32_t>(visibility.lodTransitionStates.size());
+		for (const VirtualGeometryLODTransitionState& transitionState : visibility.lodTransitionStates)
+		{
+			if (transitionState.heldPreviousSelection)
+			{
+				++snapshot.lodTransitionHeldSelections;
+			}
+			if (!transitionState.heldPreviousSelection && transitionState.valid)
+			{
+				++snapshot.lodTransitionAcceptedSelections;
+			}
+			if (transitionState.resetThisFrame)
+			{
+				++snapshot.lodTransitionResets;
+			}
+			snapshot.lodTransitionHysteresisPixels = transitionState.hysteresisBandPixels;
+		}
+		snapshot.hiZState = visibility.hiZValidationState.state;
+		snapshot.hiZPyramidSize = visibility.hiZValidationState.pyramidSize;
+		snapshot.hiZRenderSize = visibility.hiZValidationState.renderSize;
+		snapshot.hiZCameraSignature = visibility.hiZValidationState.cameraSignature;
+		snapshot.hiZDepthSceneSignature = visibility.hiZValidationState.depthSceneSignature;
+		snapshot.hiZWarmupFrames = visibility.hiZValidationState.warmupFrames;
+		snapshot.hiZActive = visibility.hiZValidationState.state == VirtualGeometryHiZState::Active;
+		snapshot.hiZHistoryValid = snapshot.hiZActive && visibility.hiZValidationState.warmupFrames > 0u;
+		snapshot.hiZInvalidReason = snapshot.hiZActive ? std::string() : visibility.hiZValidationState.reason;
+		snapshot.hiZValidation.ownerViewType = visibility.viewType;
+		snapshot.hiZValidation.sameViewHistory = snapshot.hiZActive;
+		snapshot.hiZValidation.sameTargetHistory = snapshot.hiZActive
+			&& visibility.hiZValidationState.pyramidSize == visibility.hiZValidationState.renderSize;
+		snapshot.hiZValidation.projectionMatches = snapshot.hiZActive && visibility.hiZValidationState.cameraSignature != 0u;
+		snapshot.hiZValidation.failOpen = visibility.hiZValidationState.failOpen
+			|| visibility.hiZValidationState.state != VirtualGeometryHiZState::Active;
+		snapshot.hiZValidation.inactiveReason = snapshot.hiZInvalidReason;
+		if (snapshot.hiZValidation.failOpen && !snapshot.hiZInvalidReason.empty())
+		{
+			++snapshot.hiZInactiveFrames;
+			snapshot.warnings.push_back("Virtual geometry Hi-Z is " + std::string(ToString(snapshot.hiZState)) + ": " + snapshot.hiZInvalidReason);
+		}
+		if (visibility.source == VirtualGeometryCounterSource::DelayedGPUReadback
+			|| visibility.source == VirtualGeometryCounterSource::Unavailable)
+		{
+			const std::string reason = visibility.counters.unavailableReason.empty()
+				? std::string("no reason was recorded")
+				: visibility.counters.unavailableReason;
+			snapshot.warnings.push_back("Virtual geometry counters are not authoritative GPU readback for this frame: " + reason);
+		}
+		if (visibility.source == VirtualGeometryCounterSource::Unsupported)
+		{
+			const std::string reason = visibility.counters.unavailableReason.empty()
+				? std::string("counter readback unsupported")
+				: visibility.counters.unavailableReason;
+			snapshot.warnings.push_back("Virtual geometry counters are unsupported: " + reason);
+		}
+		const std::size_t debugSampleCount = std::min<std::size_t>(
+			visibility.occlusionDebugSamples.size(),
+			kVirtualGeometryOcclusionDebugSampleCapacity);
+		snapshot.occlusionDebugSamples.insert(
+			snapshot.occlusionDebugSamples.end(),
+			visibility.occlusionDebugSamples.begin(),
+			visibility.occlusionDebugSamples.begin() + static_cast<std::ptrdiff_t>(debugSampleCount));
+		for (const VirtualGeometrySelectedClusterRecord& cluster : visibility.selectedClusters)
+		{
+			if (snapshot.selectedLodHistogram.size() <= cluster.lodIndex)
+			{
+				snapshot.selectedLodHistogram.resize(static_cast<std::size_t>(cluster.lodIndex) + 1u, 0u);
+			}
+			++snapshot.selectedLodHistogram[cluster.lodIndex];
+		}
+		return snapshot;
+	}
+
 	VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryHiZDiagnostics(const VirtualGeometryHiZDiagnosticsInput& input)
 	{
 		VirtualGeometryViewDiagnosticsSnapshot snapshot;
@@ -310,6 +430,8 @@ namespace TerraEngine::Renderer {
 		snapshot.hiZActive = input.hiZActive;
 		snapshot.hiZHistoryValid = input.historyValid;
 		snapshot.hiZInvalidReason = hiZInactive ? input.invalidReason : std::string();
+		snapshot.counterSource = VirtualGeometryCounterSource::Prepared;
+		snapshot.hiZState = hiZInactive ? VirtualGeometryHiZState::FailOpen : VirtualGeometryHiZState::Active;
 		snapshot.hiZValidation.ownerViewType = input.ownerViewType;
 		snapshot.hiZValidation.sameViewHistory = input.sameViewHistory;
 		snapshot.hiZValidation.sameTargetHistory = input.sameTargetHistory;

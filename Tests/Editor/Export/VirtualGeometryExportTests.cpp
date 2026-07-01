@@ -243,11 +243,19 @@ namespace TerraEngine::EditorTests
 			return bytes;
 		}
 
-		void WriteVirtualGeometryManifest(const TempVirtualGeometryExportWorkspace& workspace)
+		void WriteVirtualGeometryManifest(const TempVirtualGeometryExportWorkspace& workspace, bool includeCoverage = true)
 		{
-			workspace.WriteText(
-				"game.json",
-				"{\n"
+			// Export validation now requires the runtime package to declare which
+			// hardening fixture categories it covers. Keep the manifest assembled
+			// as a string so tests can omit the coverage block for one negative case.
+			const std::string coverageBlock = includeCoverage
+				? "\t\t\"coverage\": {\n"
+					"\t\t\t\"fixtureManifest\": \"Tests/Fixtures/VirtualGeometry/hardening-fixtures.json\",\n"
+					"\t\t\t\"requiredCategories\": [\"export\", \"streaming-pressure\", \"multi-view\"]\n"
+					"\t\t},\n"
+				: "";
+			const std::string manifest =
+				std::string("{\n") +
 				"\t\"name\": \"Virtual Geometry Export Test\",\n"
 				"\t\"virtualGeometry\": {\n"
 				"\t\t\"quality\": \"medium\",\n"
@@ -257,6 +265,7 @@ namespace TerraEngine::EditorTests
 				"\t\t\"maxLodDrop\": 0,\n"
 				"\t\t\"hiZOcclusionEnabled\": true,\n"
 				"\t\t\"preloadBias\": 1.0,\n"
+				+ coverageBlock +
 				"\t\t\"requiredMetadata\": [\"adaptiveTargets\", \"fallbackCoverage\", \"clusterHierarchy\", \"pageLinks\"],\n"
 				"\t\t\"requiredShaders\": [\n"
 				"\t\t\t\"Shaders/Default.task.tspf\",\n"
@@ -268,7 +277,8 @@ namespace TerraEngine::EditorTests
 				"\t\"assets\": [\n"
 				"\t\t{ \"guid\": \"00000000000000000000000000000002\", \"path\": \"Meshes/Rock.temf\", \"type\": 0, \"virtualGeometry\": { \"required\": true } }\n"
 				"\t]\n"
-				"}\n");
+				"}\n";
+			workspace.WriteText("game.json", manifest);
 		}
 	}
 
@@ -286,6 +296,20 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(valid, error.empty() ? "Virtual geometry export package should validate." : error);
 			context.Expect(error.empty(), "Successful virtual geometry export validation should not leave an error string.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.Export.RequiresHardeningCoverageDeclaration", [](TestContext& context) {
+			TempVirtualGeometryExportWorkspace workspace;
+			WriteRequiredRuntimeEntries(workspace);
+			WriteVirtualGeometryManifest(workspace, false);
+			workspace.WriteBytes("Meshes/Rock.temf", MakeVirtualGeometryTemf(VirtualGeometryTemfVariant::Valid));
+			workspace.CreatePack();
+
+			std::string error;
+			const bool valid = ValidateExportPackage(workspace.PackPath(), ExportPlatform::Windows, error);
+
+			context.Expect(!valid, "Virtual geometry export validation should require broad hardening coverage metadata.");
+			context.Expect(error.find("coverage") != std::string::npos, "The validation error should name the missing coverage declaration.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.Export.RejectsStaleTemfPayloads", [](TestContext& context) {

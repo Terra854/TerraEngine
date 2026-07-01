@@ -5,6 +5,7 @@
 
 #pragma once
 #include "../Framework/EditorWindow.h"
+#include "Engine/Renderer/RenderTypes.h"
 #include "Engine/Utilities/UUID.h"
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -47,6 +48,10 @@ private:
 	glm::vec3 m_GizmoStartPos;
 	glm::quat m_GizmoStartRot;
 	glm::vec3 m_GizmoStartScale;
+	// Scene View keeps its debug mode separate from Game View so artists can
+	// inspect editor-only culling while gameplay preview stays in another mode.
+	VirtualGeometryDebugVisualizationMode m_VirtualGeometryDebugMode = VirtualGeometryDebugVisualizationMode::None;
+	bool m_VirtualGeometryDebugModeInitialized = false;
 
 	void HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 };

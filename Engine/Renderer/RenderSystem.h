@@ -10,6 +10,7 @@
 #include "RHI/RHIContext.h"
 #include "Core/Object/ObjectManager.h"
 #include <cstdint>
+#include <cstddef>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -63,6 +64,7 @@ public:
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const;
+	std::vector<TerraEngine::Renderer::OcclusionDebugSample> GetLatestVirtualGeometryOcclusionDebugSamples(RenderViewType viewType, std::size_t maxCount = TerraEngine::Renderer::kVirtualGeometryOcclusionDebugSampleCapacity) const;
 	TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const;
 	TerraEngine::Renderer::RenderCaptureAvailability GetCaptureAvailability() const;
 	TerraEngine::Renderer::RenderCaptureLimits GetCaptureLimits() const;
@@ -80,6 +82,7 @@ public:
 	static TerraEngine::Renderer::VirtualGeometryDrawRange SelectVirtualGeometryShadowLodRange(const VirtualGeometryAssetRuntime& asset, const VirtualGeometryQualityProfile& quality, bool boundsValid);
 	static TerraEngine::Renderer::VirtualGeometryClusterSelectionResult SelectVirtualGeometryClusterCut(const VirtualGeometryAssetRuntime& asset, const TerraEngine::UUID& meshId, const TerraEngine::UUID& objectId, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, bool taskShaderCullingEnabled, bool boundsValid);
 	static TerraEngine::Renderer::VirtualGeometryClusterSelectionResult SelectVirtualGeometryClusterCut(const VirtualGeometryAssetRuntime& asset, const TerraEngine::UUID& meshId, const TerraEngine::UUID& objectId, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, const glm::mat4& modelMatrix, const glm::vec3& cameraPosition, const glm::uvec2& targetSize, bool taskShaderCullingEnabled, bool boundsValid);
+	static TerraEngine::Renderer::VirtualGeometryClusterSelectionResult SelectVirtualGeometryStableClusterCut(const VirtualGeometryAssetRuntime& asset, const TerraEngine::UUID& meshId, const TerraEngine::UUID& objectId, const VirtualGeometryQualityProfile& quality, float projectedRadiusPixels, const glm::mat4& modelMatrix, const glm::vec3& cameraPosition, const glm::uvec2& targetSize, bool taskShaderCullingEnabled, bool boundsValid, const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult* previousStableSelection, RenderViewType viewType, std::uint32_t outputId);
 
 	void SetQualityPreset(QualityPreset preset);
 	// GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -88,6 +91,9 @@ public:
 	const RenderSettings& GetRenderSettings() const { return currentSettings; }
 	void SetVirtualGeometryQualityProfile(const VirtualGeometryQualityProfile& profile);
 	VirtualGeometryQualityProfile GetVirtualGeometryQualityProfile() const;
+	void SetVirtualGeometryDebugVisualizationMode(RenderViewType viewType, std::uint32_t outputId, VirtualGeometryDebugVisualizationMode mode);
+	VirtualGeometryDebugVisualizationMode GetVirtualGeometryDebugVisualizationMode(RenderViewType viewType, std::uint32_t outputId) const;
+	void ClearVirtualGeometryDebugVisualizationModes();
 	VirtualGeometryInactiveReason GetVirtualGeometryInactiveReason() const;
 	SkyRuntimeState GetLatestSkyRuntimeState() const;
 	void MarkSkyStateDirty();
@@ -210,6 +216,14 @@ private:
 	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
 	TerraEngine::Renderer::RenderCaptureLimits captureLimits{};
 	TerraEngine::Renderer::RenderCaptureQueueState captureQueueState{};
+	// LOD transition history is private renderer state keyed by view/object/mesh.
+	// Workers only receive immutable snapshots of the resulting state, so Scene
+	// View, Game View, and future render targets cannot share mutable decisions.
+	std::unordered_map<std::uint64_t, TerraEngine::Renderer::VirtualGeometryClusterSelectionResult> virtualGeometryTransitionCache;
+	// Visualizer modes are view-local runtime preferences. Project settings keep
+	// only the default, while each editor view can request a different mode for
+	// the next prepared frame without mutating global quality state.
+	std::unordered_map<std::uint64_t, VirtualGeometryDebugVisualizationMode> virtualGeometryDebugModes;
 	std::deque<TerraEngine::Renderer::RenderCaptureRequest> pendingCaptureRequests;
 	std::deque<TerraEngine::Renderer::RenderCaptureRequest> submittedCaptureReadbackRequests;
 	std::deque<TerraEngine::Renderer::RenderCaptureResult> completedCaptureResults;

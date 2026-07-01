@@ -3513,12 +3513,16 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 				drawRowU32("Detail Levels", mesh.virtualGeometryDetailLevels);
 				drawRowU32("Meshlets", mesh.virtualGeometryMeshlets);
 				drawRowU32("Source Triangles", mesh.virtualGeometrySourceTriangles);
+				drawRowU32("Clusters", mesh.virtualGeometryClusterSummary.clusterCount);
+				drawRowU32("Material Sections", mesh.virtualGeometryClusterSummary.materialSectionCount);
+				drawRowU32("Source Material Slots", mesh.virtualGeometryClusterSummary.sourceMaterialAssignmentCount);
+				drawRow("Material Coverage", mesh.virtualGeometryClusterSummary.materialCoverageValid ? "Valid" : "Needs Review");
 			});
 
 			for (const std::string& warning : mesh.virtualGeometryWarnings) {
 				ImGui::TextWrapped("%s", warning.c_str());
 			}
-			if (!mesh.virtualGeometryTargets.empty() && ImGui::BeginTable("GeneratedMeshVirtualGeometryTargets", 8, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+			if (!mesh.virtualGeometryTargets.empty() && ImGui::BeginTable("GeneratedMeshVirtualGeometryTargets", 9, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
 				ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 60.0f);
 				ImGui::TableSetupColumn("Ratio", ImGuiTableColumnFlags_WidthFixed, 70.0f);
 				ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 90.0f);
@@ -3527,6 +3531,7 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 				ImGui::TableSetupColumn("Actual T/M", ImGuiTableColumnFlags_WidthFixed, 95.0f);
 				ImGui::TableSetupColumn("Nearest LOD", ImGuiTableColumnFlags_WidthFixed, 85.0f);
 				ImGui::TableSetupColumn("Error", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+				ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch);
 				ImGui::TableHeadersRow();
 				for (const TerraEngine::AssetPipeline::GeneratedModelMeshVirtualGeometryTarget& target : mesh.virtualGeometryTargets) {
 					ImGui::TableNextRow();
@@ -3559,6 +3564,8 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 					else {
 						ImGui::TextUnformatted("-");
 					}
+					ImGui::TableSetColumnIndex(8);
+					ImGui::TextWrapped("%s", target.message.empty() ? "-" : target.message.c_str());
 				}
 				ImGui::EndTable();
 			}
@@ -4325,6 +4332,7 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 				drawInfoRowU32("Detail Levels", virtualGeometryMetadata.detailLevelCount);
 				drawInfoRowU32("Source Triangles", virtualGeometryMetadata.sourceTriangleCount);
 				drawInfoRowU32("Resident Meshlets", virtualGeometryMetadata.meshletCount);
+				drawInfoRowU32("Material Sections", virtualGeometryMetadata.materialSectionCount);
 
 				ImGui::EndTable();
 			}
@@ -4345,7 +4353,7 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 	{
 		ImGui::Spacing();
 		if (ImGui::CollapsingHeader("Virtual Geometry Cook Diagnostics", ImGuiTreeNodeFlags_DefaultOpen)
-			&& ImGui::BeginTable("VirtualGeometryCookDiagnostics", 7, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp))
+			&& ImGui::BeginTable("VirtualGeometryCookDiagnostics", 8, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp))
 		{
 			ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 60.0f);
 			ImGui::TableSetupColumn("Ratio", ImGuiTableColumnFlags_WidthFixed, 70.0f);
@@ -4354,6 +4362,7 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 			ImGui::TableSetupColumn("Desired T/M", ImGuiTableColumnFlags_WidthFixed, 95.0f);
 			ImGui::TableSetupColumn("Actual T/M", ImGuiTableColumnFlags_WidthFixed, 95.0f);
 			ImGui::TableSetupColumn("Nearest LOD", ImGuiTableColumnFlags_WidthFixed, 85.0f);
+			ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch);
 			ImGui::TableHeadersRow();
 			for (const VirtualGeometryDetailDiagnosticMetadata& diagnostic : detailDiagnostics)
 			{
@@ -4379,6 +4388,8 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 				}
 				ImGui::TableSetColumnIndex(6);
 				ImGui::Text("%u", diagnostic.nearestGeneratedLevelIndex);
+				ImGui::TableSetColumnIndex(7);
+				ImGui::TextWrapped("%s", diagnostic.message.empty() ? "-" : diagnostic.message.c_str());
 			}
 			ImGui::EndTable();
 		}

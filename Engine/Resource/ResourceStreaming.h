@@ -184,6 +184,28 @@ namespace TerraEngine::Resource
 		std::string reason;
 	};
 
+	struct VirtualGeometryPageRequestFailureRecord
+	{
+		StreamableAssetId assetId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::string viewId;
+		std::uint32_t pageId = 0xffffffffu;
+		std::uint32_t fallbackPageId = 0xffffffffu;
+		std::uint32_t clusterId = 0u;
+		std::uint32_t desiredLodIndex = 0u;
+		bool fallbackAvailable = false;
+		bool fallbackResident = false;
+		std::string reason;
+	};
+
+	struct VirtualGeometryPageRequestPlan
+	{
+		std::vector<VirtualGeometryPageRequestPacket> packets;
+		std::vector<VirtualGeometryPageRequestFailureRecord> failures;
+		std::uint32_t missingDesiredPages = 0u;
+		std::uint32_t unavailableFallbackPages = 0u;
+	};
+
 	struct VirtualGeometryPageCatalogEntry
 	{
 		StreamableAssetId assetId = TerraEngine::EMPTY_UUID;
@@ -312,6 +334,7 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::vector<StreamingNeed> EvaluatePreloadRules(const std::vector<PreloadRule>& rules, double nowSeconds = 0.0);
 	TERRAENGINE_API std::vector<VirtualGeometryPageNeedInput> BuildVirtualGeometryPageNeedInputsFromSelectionStates(const std::vector<TerraEngine::Renderer::VirtualGeometryViewSelectionState>& states, const std::vector<VirtualGeometryPageCatalogEntry>& catalogs, float preloadBias = 1.0f);
 	TERRAENGINE_API std::vector<StreamingNeed> BuildVirtualGeometryPageStreamingNeeds(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy, double nowSeconds = 0.0);
+	TERRAENGINE_API VirtualGeometryPageRequestPlan BuildVirtualGeometryPageRequestPlan(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy);
 	TERRAENGINE_API std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy);
 	TERRAENGINE_API std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds = 0.0);
 	// This declaration describes the worker-safe planning phase. The actual

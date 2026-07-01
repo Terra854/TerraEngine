@@ -85,6 +85,7 @@ namespace TerraEngine::Renderer {
 		VirtualGeometryDrawRange range;
 		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
+		VirtualGeometryLODTransitionState transitionState;
 		std::uint32_t invalidSelectionReasons = 0u;
 	};
 
@@ -117,6 +118,7 @@ namespace TerraEngine::Renderer {
 		RenderViewType viewType = RenderViewType::Game;
 		glm::uvec2 targetSize = glm::uvec2(0u);
 		std::uint32_t outputId = 0u;
+		VirtualGeometryDebugVisualizationMode debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
 		bool shadowPass = false;
 		bool exportRuntime = false;
 		bool hiZOcclusionAllowed = true;
@@ -124,9 +126,38 @@ namespace TerraEngine::Renderer {
 		bool hiZNearPlaneGuardPassed = true;
 		bool hiZThinGeometryGuardPassed = true;
 		std::string hiZInactiveReason;
+		// Backends can publish the exact current-view Hi-Z resource state after
+		// validating pyramid ownership and warm-up. When this is false, snapshot
+		// builders synthesize a conservative default from target size and flags.
+		bool hasHiZValidationState = false;
+		VirtualGeometryHiZValidationState hiZValidationState;
 		std::vector<VirtualGeometryViewDrawRecord> draws;
 		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
+		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
+	};
+
+	struct VirtualGeometryViewVisibilitySnapshot
+	{
+		// Hardening diagnostics publish one immutable record per rendered view.
+		// The record contains only copied IDs, counters, and state labels so
+		// tooling can inspect it without touching live Vulkan or scene objects.
+		RenderOutputKind outputKind = RenderOutputKind::GameView;
+		RenderViewType viewType = RenderViewType::Game;
+		std::uint64_t frameId = 0u;
+		glm::uvec2 renderSize = glm::uvec2(0u);
+		std::uint32_t outputId = 0u;
+		std::uint64_t cameraSignature = 0u;
+		VirtualGeometryDebugVisualizationMode debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
+		VirtualGeometryCounterSnapshot counters;
+		VirtualGeometryHiZValidationState hiZValidationState;
+		std::vector<VirtualGeometryViewDrawRecord> drawRanges;
+		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
+		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
+		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
+		std::vector<OcclusionDebugSample> occlusionDebugSamples;
+		VirtualGeometryCounterSource source = VirtualGeometryCounterSource::Prepared;
+		bool valid = false;
 	};
 
 	struct RenderFrameLightRecord
@@ -161,6 +192,7 @@ namespace TerraEngine::Renderer {
 		std::vector<RenderFrameResourceRecord> meshes;
 		std::vector<RenderFrameResourceRecord> textures;
 		std::vector<VirtualGeometryViewSelectionState> virtualGeometryViewSelections;
+		std::vector<VirtualGeometryViewVisibilitySnapshot> virtualGeometryVisibilitySnapshots;
 		RenderSettings renderSettings;
 		std::uint64_t resourceRevision = 0u;
 		std::uint64_t sceneRevision = 0u;
@@ -182,5 +214,9 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API std::uint64_t EstimateSnapshotWorkload(const RenderFrameSnapshot& snapshot);
 	TERRAENGINE_API VirtualGeometryViewSelectionState BuildVirtualGeometryViewSelectionState(const RenderFrameViewRequest& view, const std::vector<RenderFrameRenderableRecord>& renderables);
 	TERRAENGINE_API std::vector<VirtualGeometryViewSelectionState> BuildVirtualGeometryViewSelectionStates(const RenderFrameSnapshot& snapshot);
+	TERRAENGINE_API VirtualGeometryCounterSnapshot BuildVirtualGeometryCounterSnapshot(const VirtualGeometryViewSelectionState& state, VirtualGeometryCounterSource source);
+	TERRAENGINE_API VirtualGeometryHiZValidationState BuildDefaultVirtualGeometryHiZValidationState(const VirtualGeometryViewSelectionState& state, std::uint64_t cameraSignature);
+	TERRAENGINE_API VirtualGeometryViewVisibilitySnapshot BuildVirtualGeometryViewVisibilitySnapshot(const RenderFrameSnapshot& snapshot, const VirtualGeometryViewSelectionState& state, VirtualGeometryCounterSource source);
+	TERRAENGINE_API std::vector<VirtualGeometryViewVisibilitySnapshot> BuildVirtualGeometryViewVisibilitySnapshots(const RenderFrameSnapshot& snapshot);
 
 }

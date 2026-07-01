@@ -106,6 +106,26 @@ namespace TerraEngine::EditorTests
 			context.Expect(service.FindCapability("game_view.capture") != nullptr, "Game View capture should be registered.");
 			context.Expect(service.FindCapability("camera.capture_object") != nullptr, "Camera object capture should be registered.");
 			context.Expect(service.FindCapability("camera.capture_custom") != nullptr, "Custom camera capture should be registered.");
+			context.Expect(service.FindCapability("renderer.virtualGeometry.stats") != nullptr, "Virtual geometry renderer stats should be registered.");
+		});
+
+		registry.Add("Editor.Automation.Service.VirtualGeometryStatsEndpointValidatesContract", [](TestContext& context) {
+			EditorAutomationService service;
+			const nlohmann::json invalidView = service.HandleTool(
+				"renderer.virtualGeometry.stats",
+				{{"viewType", "Shadow"}},
+				WriteMode::ReadOnly,
+				"vg-stats-invalid-view");
+			context.Expect(!invalidView.value("ok", true), "Virtual geometry stats should reject unsupported view types.");
+			context.ExpectEqual(invalidView["error"].value("category", std::string()), std::string("validation"), "Unsupported view type should be a validation error.");
+
+			const nlohmann::json missingRenderer = service.HandleTool(
+				"renderer.virtualGeometry.stats",
+				{{"viewType", "Game"}},
+				WriteMode::ReadOnly,
+				"vg-stats-missing-renderer");
+			context.Expect(!missingRenderer.value("ok", true), "Virtual geometry stats should fail clearly without a renderer.");
+			context.ExpectEqual(missingRenderer["error"].value("category", std::string()), std::string("missing_target"), "Missing renderer should use the missing-target error category.");
 		});
 
 		registry.Add("Editor.Automation.Service.ReadOnlySceneListingWorksWithoutProject", [](TestContext& context) {

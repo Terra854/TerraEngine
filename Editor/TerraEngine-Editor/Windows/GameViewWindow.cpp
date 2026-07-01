@@ -71,18 +71,32 @@ void GameViewWindow::OnGui() {
 	ImGui::SameLine();
 	ImGui::Checkbox("Gizmos", &m_Gizmos);
 	ImGui::SameLine();
-	VirtualGeometryQualityProfile virtualGeometryProfile = RenderSystem::Instance().GetVirtualGeometryQualityProfile();
-	const VirtualGeometryDebugVisualizationMode normalizedDebugMode = NormalizeVirtualGeometryDebugVisualizationMode(virtualGeometryProfile.debugVisualizationMode);
-	if (normalizedDebugMode != virtualGeometryProfile.debugVisualizationMode)
+	constexpr std::uint32_t kGameViewVirtualGeometryOutputId = 2u;
+	if (!m_VirtualGeometryDebugModeInitialized)
 	{
-		// Collapse legacy/internal visualizer modes before the combo draws so
-		// the toolbar cannot get stuck on a hidden duplicate entry.
-		virtualGeometryProfile.debugVisualizationMode = normalizedDebugMode;
-		RenderSystem::Instance().SetVirtualGeometryQualityProfile(virtualGeometryProfile);
+		m_VirtualGeometryDebugMode = RenderSystem::Instance().GetVirtualGeometryDebugVisualizationMode(RenderViewType::Game, kGameViewVirtualGeometryOutputId);
+		m_VirtualGeometryDebugModeInitialized = true;
 	}
-	int virtualGeometryDebugMode = static_cast<int>(virtualGeometryProfile.debugVisualizationMode);
+	const VirtualGeometryDebugVisualizationMode normalizedDebugMode = NormalizeVirtualGeometryDebugVisualizationMode(m_VirtualGeometryDebugMode);
+	if (normalizedDebugMode != m_VirtualGeometryDebugMode)
+	{
+		m_VirtualGeometryDebugMode = normalizedDebugMode;
+		RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Game, kGameViewVirtualGeometryOutputId, m_VirtualGeometryDebugMode);
+	}
+	int virtualGeometryDebugMode = static_cast<int>(m_VirtualGeometryDebugMode);
 	ImGui::SetNextItemWidth(115.0f);
-	if (ImGui::BeginCombo("VG", ToString(static_cast<VirtualGeometryDebugVisualizationMode>(virtualGeometryDebugMode))))
+	const VirtualGeometryDebugVisualizationMode currentVirtualGeometryDebugMode =
+		static_cast<VirtualGeometryDebugVisualizationMode>(virtualGeometryDebugMode);
+	const bool virtualGeometryComboOpen = ImGui::BeginCombo("VG", ToString(currentVirtualGeometryDebugMode));
+	if (ImGui::IsItemHovered())
+	{
+		// Keep the toolbar compact, but reveal the color legend on hover so
+		// developers can understand a mode without opening external docs.
+		ImGui::SetTooltip(
+			"Virtual Geometry Visualizer\n%s",
+			GetVirtualGeometryDebugVisualizationLegend(currentVirtualGeometryDebugMode));
+	}
+	if (virtualGeometryComboOpen)
 	{
 		for (const VirtualGeometryDebugVisualizationMode mode : GetVirtualGeometryDebugVisualizationModes())
 		{
@@ -91,8 +105,12 @@ void GameViewWindow::OnGui() {
 			if (ImGui::Selectable(ToString(mode), selected))
 			{
 				virtualGeometryDebugMode = modeIndex;
-				virtualGeometryProfile.debugVisualizationMode = mode;
-				RenderSystem::Instance().SetVirtualGeometryQualityProfile(virtualGeometryProfile);
+				m_VirtualGeometryDebugMode = mode;
+				RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Game, kGameViewVirtualGeometryOutputId, m_VirtualGeometryDebugMode);
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s\n%s", ToString(mode), GetVirtualGeometryDebugVisualizationLegend(mode));
 			}
 			if (selected)
 			{
@@ -273,12 +291,12 @@ void GameViewWindow::OnGui() {
 		char line1[96];
 		char line2[96];
 		char line3[96];
-		char line4[96];
-		char line5[96];
-		char line6[96];
-		char line7[96];
+		char line4[192];
+		char line5[192];
+		char line6[192];
+		char line7[192];
 		char line8[96];
-		char line9[96];
+		char line9[192];
 		char line10[96];
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -290,23 +308,47 @@ void GameViewWindow::OnGui() {
 			std::snprintf(line1, sizeof(line1), "Frame: %.2f ms", stats.frameTimeMs);
 			std::snprintf(line2, sizeof(line2), "Draw Calls: %u", stats.drawCalls);
 			std::snprintf(line3, sizeof(line3), "Triangles: %u", stats.triangleCount);
-			std::snprintf(line4, sizeof(line4), "Meshlets Selected: %u", stats.meshletsTotal);
+			const std::string selectedMeshletText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+				"Meshlets Selected",
+				stats.meshletsTotal,
+				stats.meshletCounterSource,
+				stats.meshletCounterReason);
+			std::snprintf(line4, sizeof(line4), "%s", selectedMeshletText.c_str());
 			// Task-culling debug overlays can intentionally keep culled meshlets
 			// visible so users can inspect them. When the selected and dispatched
 			// counts match, printing both rows looks like duplicated/conflicting
 			// data, so show the dispatch row only when it adds information.
 			if (displayedDispatched != stats.meshletsTotal)
 			{
-				std::snprintf(line5, sizeof(line5), "Meshlets Dispatched: %u", displayedDispatched);
+				const std::string dispatchedMeshletText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+					"Meshlets Dispatched",
+					displayedDispatched,
+					stats.meshletCounterSource,
+					stats.meshletCounterReason);
+				std::snprintf(line5, sizeof(line5), "%s", dispatchedMeshletText.c_str());
 			}
 			else
 			{
 				line5[0] = '\0';
 			}
-			std::snprintf(line6, sizeof(line6), "Meshlets Culled: %u", displayedCulled);
-			std::snprintf(line7, sizeof(line7), "  - Culled by Hi-Z: %u", stats.meshletsCulledHiZ);
+			const std::string culledMeshletText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+				"Meshlets Culled",
+				displayedCulled,
+				stats.meshletCounterSource,
+				stats.meshletCounterReason);
+			std::snprintf(line6, sizeof(line6), "%s", culledMeshletText.c_str());
+			const std::string hiZCulledText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+				"  - Culled by Hi-Z",
+				stats.meshletsCulledHiZ,
+				stats.meshletCounterSource,
+				stats.meshletCounterReason);
+			std::snprintf(line7, sizeof(line7), "%s", hiZCulledText.c_str());
 			std::snprintf(line8, sizeof(line8), "Task Culling: %s", stats.taskCullingActive ? "On" : "Off");
-			std::snprintf(line9, sizeof(line9), "Hi-Z Occlusion: %s", stats.hiZActive ? "Active" : "Off");
+			const std::string hiZStatusText = TerraEngine::Renderer::FormatVirtualGeometryHiZOverlayStatus(
+				stats.hiZState,
+				stats.hiZActive,
+				stats.hiZStatusReason);
+			std::snprintf(line9, sizeof(line9), "Hi-Z Occlusion: %s", hiZStatusText.c_str());
 			std::snprintf(line10, sizeof(line10), "Variable Rate Shading: %s", stats.vrsActive ? "Active" : "Off");
 		} else {
 			std::snprintf(line0, sizeof(line0), "Stats unavailable");

@@ -1,0 +1,196 @@
+{
+	"schemaVersion": 1,
+	"feature": "029-virtual-geometry-hardening",
+	"description": "Clean-checkout virtual geometry hardening fixture manifest. Entries use deterministic generated data or small committed fixtures; large meshes stay optional manual stress coverage.",
+	"packageFormats": [
+		"gltf",
+		"glb",
+		"fbx"
+	],
+	"requiredCategories": [
+		{
+			"id": "tiny-mesh-skip",
+			"category": "tiny",
+			"fixtureRecipe": "Two-triangle procedural mesh compiled with default adaptive settings.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Skipped",
+			"coverageTags": [
+				"tiny-mesh-skip",
+				"fallback-coverage"
+			],
+			"expectedDiagnostics": [
+				"MeshTooSmall",
+				"RenderableFallback"
+			],
+			"expectedRenderOutcomes": [
+				"fallback-visible",
+				"no-extra-lods"
+			]
+		},
+		{
+			"id": "dense-cluster-selection",
+			"category": "dense",
+			"fixtureRecipe": "Procedural 36x36 displaced grid with enough regions to build parent/child cluster cuts.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"dense-cluster-selection",
+				"cluster-hierarchy",
+				"page-links"
+			],
+			"expectedDiagnostics": [
+				"ClusterHierarchyValidated",
+				"ClusterCoverageValidated"
+			],
+			"expectedRenderOutcomes": [
+				"mixed-detail-selection",
+				"non-overlapping-cluster-cut"
+			]
+		},
+		{
+			"id": "thin-hiz-occluder",
+			"category": "thin",
+			"fixtureRecipe": "Thin blocker and partially visible target meshlets in a deterministic Hi-Z validation scene.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"hiz-validation",
+				"thin-geometry",
+				"fail-open"
+			],
+			"expectedDiagnostics": [
+				"HiZFailOpenWhenUncertain"
+			],
+			"expectedRenderOutcomes": [
+				"zero-false-occlusion",
+				"visible-partial-meshlets"
+			]
+		},
+		{
+			"id": "curved-error-profile",
+			"category": "curved",
+			"fixtureRecipe": "Procedural curved ribbon or sphere patch used to validate finite geometric error and transition hysteresis.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"curved-error-profile",
+				"transition-stability"
+			],
+			"expectedDiagnostics": [
+				"FiniteGeometricError"
+			],
+			"expectedRenderOutcomes": [
+				"bounded-lod-transition",
+				"stable-silhouette"
+			]
+		},
+		{
+			"id": "hard-surface-material-bands",
+			"category": "hard-surface",
+			"fixtureRecipe": "Procedural hard-edged mesh with deterministic material bands and cluster-boundary-friendly normals.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"hard-surface",
+				"material-sections",
+				"cluster-hierarchy"
+			],
+			"expectedDiagnostics": [
+				"MaterialSectionsPresent"
+			],
+			"expectedRenderOutcomes": [
+				"material-identity-preserved",
+				"cluster-boundaries-visible-in-debug"
+			]
+		},
+		{
+			"id": "multi-material-package",
+			"category": "multi-material-package",
+			"fixtureRecipe": "Small glTF package with two primitives/material slots plus a vendored FBX static box import.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"package-gltf",
+				"package-glb",
+				"package-fbx",
+				"multi-material-package"
+			],
+			"expectedDiagnostics": [
+				"StableGeneratedMeshIds",
+				"PackageStaticGeometrySupported"
+			],
+			"expectedRenderOutcomes": [
+				"package-submesh-assignable",
+				"material-slots-stable"
+			]
+		},
+		{
+			"id": "streaming-pressure",
+			"category": "streaming-pressure",
+			"fixtureRecipe": "Synthetic virtual geometry page table whose high-detail pages exceed a deliberately tiny budget.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"streaming-pressure",
+				"pinned-fallback",
+				"budget-pressure"
+			],
+			"expectedDiagnostics": [
+				"PinnedFallbackPage",
+				"BudgetPressure"
+			],
+			"expectedRenderOutcomes": [
+				"fallback-visible-under-pressure",
+				"high-detail-pages-evictable"
+			]
+		},
+		{
+			"id": "multi-view-independence",
+			"category": "multi-view",
+			"fixtureRecipe": "Two view snapshots over one object with independent target size, visualizer, counter, and Hi-Z state.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"multi-view",
+				"scene-view",
+				"game-view"
+			],
+			"expectedDiagnostics": [
+				"SceneViewSnapshot",
+				"GameViewSnapshot"
+			],
+			"expectedRenderOutcomes": [
+				"independent-visualizer-modes",
+				"independent-counters"
+			]
+		},
+		{
+			"id": "export-runtime-metadata",
+			"category": "export",
+			"fixtureRecipe": "Synthetic TEMF packed into TEPAK with required VG manifest coverage and metadata validation flags.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"export-runtime-metadata",
+				"adaptive-targets",
+				"fallback-coverage",
+				"page-links"
+			],
+			"expectedDiagnostics": [
+				"RequiredVirtualGeometryMetadata"
+			],
+			"expectedRenderOutcomes": [
+				"export-validation-passes",
+				"fallback-metadata-present"
+			]
+		}
+	],
+	"optionalManualStress": [
+		{
+			"id": "large-scan-asset",
+			"category": "dense-manual",
+			"requiredForCleanCheckout": false,
+			"notes": "Use locally downloaded dense meshes only for manual profiling and visual inspection. Do not require them for CTest."
+		}
+	]
+}

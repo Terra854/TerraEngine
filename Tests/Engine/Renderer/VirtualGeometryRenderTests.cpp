@@ -598,6 +598,22 @@ namespace TerraEngine::Tests
 			context.Expect(result.pageNeeds.front().fallbackRequired, "Page need should mark that fallback is currently preserving visibility.");
 		});
 
+		registry.Add("VirtualGeometry.Render.ClusterSelection.UsesFallbackAncestorWhileChildPageIsEvicting", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
+			asset.pages[1].state = GeometryPageState::Evicting;
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(asset, meshId, objectId, MakeDefaultVirtualGeometryQualityProfile(), 512.0f, true, true);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), result.selectedClusters.size(), "Evicting detail pages should be treated as unavailable during render preparation.");
+			context.Expect(SelectionContainsCluster(result, 0u), "Resident fallback ancestor should keep the object visible while high-detail page retirement is pending.");
+			context.Expect(result.selectedClusters.front().usingFallback, "Fallback substitution should be visible to diagnostics while the child page is evicting.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), result.pageNeeds.size(), "Evicting desired page should publish a page need so streaming can reload detail later.");
+			context.ExpectEqual(1u, result.pageNeeds.front().pageId, "Reload request should target the evicting high-detail child page.");
+		});
+
 		registry.Add("VirtualGeometry.Render.Diagnostics.CountsResidencyPageStates", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset{};
 			asset.detailLevels = {
@@ -677,6 +693,10 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(std::string("Render"), declaration.phase, "RenderSystem should declare its scheduler phase.");
 			context.Expect(contains(declaration.reads, "VirtualGeometryQualityProfile"), "RenderSystem should declare virtual geometry quality reads.");
 			context.Expect(contains(declaration.reads, "VirtualGeometryResidencySnapshots"), "RenderSystem should declare virtual geometry residency snapshot reads.");
+			context.Expect(contains(declaration.reads, "VirtualGeometryHiZValidationState"), "RenderSystem should declare virtual geometry Hi-Z validation reads.");
+			context.Expect(contains(declaration.writes, "VirtualGeometryPageNeedPackets"), "RenderSystem should declare virtual geometry page-need packet writes.");
+			context.Expect(contains(declaration.writes, "VirtualGeometryVisibilitySnapshots"), "RenderSystem should declare virtual geometry visibility snapshot writes.");
+			context.Expect(contains(declaration.writes, "VirtualGeometryCounterSnapshots"), "RenderSystem should declare virtual geometry counter snapshot writes.");
 			context.Expect(contains(declaration.writes, "VirtualGeometryDiagnostics"), "RenderSystem should declare virtual geometry diagnostic writes.");
 			context.Expect(declaration.phaseKind == TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare, "Virtual geometry render preparation should be classified as worker preparation.");
 			context.Expect(declaration.boundaryClassification == TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe, "RenderSystem should expose the protected GPU and diagnostic boundary.");

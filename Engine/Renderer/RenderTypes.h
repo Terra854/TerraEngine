@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <optional>
 #include <vector>
 #include <cmath>
@@ -202,8 +203,10 @@ enum class QualityPreset : std::uint32_t
 	Custom = 4
 };
 
-// VirtualGeometryDebugVisualizationMode names the editor visualizer modes that
-// can be selected without changing material authoring or scene state.
+// VirtualGeometryDebugVisualizationMode names only the public editor
+// visualizer modes that can be selected without changing material authoring or
+// scene state. Keep internal experiments out of this enum; stale numeric values
+// are normalized to Off before they reach UI or shader push constants.
 enum class VirtualGeometryDebugVisualizationMode : std::uint32_t
 {
 	None = 0u,
@@ -284,7 +287,7 @@ inline constexpr std::array<VirtualGeometryDebugVisualizationLegendEntry, 9u> kV
 	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::MeshletId, "Stable false color per rendered meshlet id so density and selected triangle groups are easy to read." },
 	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Bounds, "Blue to yellow shows small to large meshlet bounds; magenta means bounds data is unavailable." },
 	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Culling, "Green means drawn, red means frustum, cyan means drawn with trusted Hi-Z, magenta means missing culling data; cone culling is disabled until imported mesh sidedness is validated." },
-	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::HiZ, "Cyan means Hi-Z history is trusted for this view; gray means Hi-Z is inactive or invalid for culling." },
+	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::HiZ, "Cyan means Hi-Z is active for this view; red means fail-open or uncertain projected bounds; gray means the pyramid resource is missing." },
 	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Residency, "Green means resident/active virtual geometry; orange means requested or missing pages; brown means inactive fallback." },
 	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Error, "Cyan means no error pressure; red means fail-open, and orange means missing-page pressure." },
 	VirtualGeometryDebugVisualizationLegendEntry{ VirtualGeometryDebugVisualizationMode::Cluster, "Stable false color per selected cluster packet so adaptive cluster identity changes are visible." }
@@ -354,6 +357,54 @@ enum class VirtualGeometryCullOutcome : std::uint32_t
 	FailOpen = 4u
 };
 
+// VirtualGeometryCounterSource labels where per-view counters came from. This
+// prevents editor overlays and tests from treating an unavailable GPU readback
+// as a trustworthy zero.
+enum class VirtualGeometryCounterSource : std::uint32_t
+{
+	Prepared = 0u,
+	GPUReadback = 1u,
+	DelayedGPUReadback = 2u,
+	Unsupported = 3u,
+	Unavailable = 4u
+};
+
+inline const char* ToString(VirtualGeometryCounterSource source)
+{
+	switch (source)
+	{
+	case VirtualGeometryCounterSource::Prepared: return "Prepared";
+	case VirtualGeometryCounterSource::GPUReadback: return "GPU Readback";
+	case VirtualGeometryCounterSource::DelayedGPUReadback: return "Delayed GPU Readback";
+	case VirtualGeometryCounterSource::Unsupported: return "Unsupported";
+	case VirtualGeometryCounterSource::Unavailable: return "Unavailable";
+	default: return "Unknown";
+	}
+}
+
+// VirtualGeometryHiZState is the view-local Hi-Z resource contract. The state
+// is diagnostic and conservative: anything outside Active must fail open rather
+// than hide visible geometry.
+enum class VirtualGeometryHiZState : std::uint32_t
+{
+	MissingPyramid = 0u,
+	Active = 1u,
+	FailOpen = 2u,
+	Unsupported = 3u
+};
+
+inline const char* ToString(VirtualGeometryHiZState state)
+{
+	switch (state)
+	{
+	case VirtualGeometryHiZState::MissingPyramid: return "Missing Pyramid";
+	case VirtualGeometryHiZState::Active: return "Active";
+	case VirtualGeometryHiZState::FailOpen: return "Fail Open";
+	case VirtualGeometryHiZState::Unsupported: return "Unsupported";
+	default: return "Unknown";
+	}
+}
+
 enum class GeometryPageState : std::uint32_t
 {
 	NotResident = 0u,
@@ -367,6 +418,157 @@ enum class GeometryPageState : std::uint32_t
 	PendingUpload = 8u,
 	Pinned = 9u
 };
+
+// VirtualGeometryCounterSnapshot is copied into immutable frame snapshots and
+// published diagnostics. It deliberately keeps source labels beside counts so
+// tools can explain prepared CPU estimates versus delayed GPU readback values.
+struct VirtualGeometryCounterSnapshot
+{
+	VirtualGeometryCounterSource source = VirtualGeometryCounterSource::Prepared;
+	std::uint64_t preparedFrameId = 0u;
+	std::uint64_t readbackFrameId = 0u;
+	std::uint32_t readbackLatencyFrames = 0u;
+	std::string unavailableReason;
+	std::uint32_t toleranceMeshlets = 1u;
+	float tolerancePercent = 1.0f;
+	std::uint32_t sourceMeshlets = 0u;
+	std::uint32_t selectedMeshlets = 0u;
+	std::uint32_t dispatchedMeshlets = 0u;
+	std::uint32_t culledMeshlets = 0u;
+	std::uint32_t culledByFrustum = 0u;
+	std::uint32_t culledByCone = 0u;
+	std::uint32_t culledByHiZ = 0u;
+	std::uint32_t fallbackMeshlets = 0u;
+	std::uint32_t residentPages = 0u;
+	std::uint32_t requestedPages = 0u;
+	std::uint32_t missingPages = 0u;
+	std::uint32_t fallbackSubstitutions = 0u;
+	bool authoritative = false;
+};
+
+inline bool VirtualGeometryCounterWithinTolerance(
+	std::uint32_t expected,
+	std::uint32_t actual,
+	const VirtualGeometryCounterSnapshot& counters)
+{
+	const std::uint32_t difference = expected > actual ? expected - actual : actual - expected;
+	const float percentAllowance = static_cast<float>(expected) * std::max(counters.tolerancePercent, 0.0f) * 0.01f;
+	const std::uint32_t allowedDifference = std::max(
+		counters.toleranceMeshlets,
+		static_cast<std::uint32_t>(std::ceil(percentAllowance)));
+	return difference <= allowedDifference;
+}
+
+inline std::string FormatVirtualGeometryCounterOverlayValue(
+	std::string_view label,
+	std::uint32_t value,
+	VirtualGeometryCounterSource source,
+	const std::string& reason)
+{
+	std::string text(label);
+	if ((source == VirtualGeometryCounterSource::Unsupported
+		|| source == VirtualGeometryCounterSource::Unavailable)
+		&& value == 0u)
+	{
+		text += ": unavailable";
+		if (!reason.empty())
+		{
+			text += " (";
+			text += reason;
+			text += ")";
+		}
+		return text;
+	}
+
+	text += " [";
+	text += ToString(source);
+	text += "]: ";
+	text += std::to_string(value);
+	if (source == VirtualGeometryCounterSource::DelayedGPUReadback && !reason.empty())
+	{
+		text += " (";
+		text += reason;
+		text += ")";
+	}
+	return text;
+}
+
+// VirtualGeometryHiZValidationState travels with one view snapshot. Keeping it
+// as plain data lets Scene View, Game View, runtime, and export diagnostics own
+// separate Hi-Z explanations without sharing backend objects.
+struct VirtualGeometryHiZValidationState
+{
+	VirtualGeometryHiZState state = VirtualGeometryHiZState::MissingPyramid;
+	std::string reason;
+	glm::uvec2 pyramidSize = glm::uvec2(0u);
+	glm::uvec2 renderSize = glm::uvec2(0u);
+	std::uint64_t cameraSignature = 0u;
+	std::uint64_t depthSceneSignature = 0u;
+	std::uint32_t warmupFrames = 0u;
+	bool pyramidReady = false;
+	bool failOpen = true;
+};
+
+namespace TerraEngine::Renderer {
+
+	inline constexpr std::uint32_t kVirtualGeometryOcclusionDebugSampleCapacity = 64u;
+
+	inline bool VirtualGeometryCounterWithinTolerance(
+		std::uint32_t expected,
+		std::uint32_t actual,
+		const ::VirtualGeometryCounterSnapshot& counters)
+	{
+		return ::VirtualGeometryCounterWithinTolerance(expected, actual, counters);
+	}
+
+	inline std::string FormatVirtualGeometryCounterOverlayValue(
+		std::string_view label,
+		std::uint32_t value,
+		::VirtualGeometryCounterSource source,
+		const std::string& reason)
+	{
+		return ::FormatVirtualGeometryCounterOverlayValue(label, value, source, reason);
+	}
+
+	// OcclusionDebugSample is a compact, user-facing explanation record. It is
+	// intentionally bounded per view so diagnostics can stay enabled in the
+	// editor without trying to mirror every meshlet decision from the GPU.
+	struct OcclusionDebugSample
+	{
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		std::uint32_t clusterId = 0xffffffffu;
+		std::uint32_t meshletId = 0xffffffffu;
+		glm::vec4 projectedBounds = glm::vec4(0.0f);
+		std::uint32_t sampledMip = 0u;
+		VirtualGeometryCullOutcome outcome = VirtualGeometryCullOutcome::Visible;
+		std::string reason;
+	};
+
+	inline std::string FormatVirtualGeometryHiZOverlayStatus(
+		VirtualGeometryHiZState state,
+		bool hiZActive,
+		const std::string& reason)
+	{
+		if (hiZActive && state == VirtualGeometryHiZState::Active)
+		{
+			return "Active";
+		}
+
+		std::string label = ToString(state);
+		if (label == "Unknown")
+		{
+			label = hiZActive ? "Active" : "Off";
+		}
+		if (!reason.empty())
+		{
+			label += ": ";
+			label += reason;
+		}
+		return label;
+	}
+
+}
 
 // Adaptive virtual geometry settings can come from project defaults, a sparse
 // per-mesh Inspector override, or a temporary debug override. Keeping the source
@@ -581,6 +783,12 @@ struct VirtualGeometryQualityProfile
 	VirtualGeometryDebugVisualizationMode debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
 	std::uint64_t geometryBudgetBytes = 0u;
 	float preloadBias = 1.0f;
+	// Transition stability is a runtime selection aid, not a cook setting. The
+	// pixel band keeps tiny camera jitter from swapping cluster cuts every
+	// frame, while stableFrameCount bounds how long a near-threshold candidate
+	// must persist before it replaces the current cut.
+	float lodTransitionHysteresisPixels = 0.35f;
+	std::uint32_t lodTransitionStableFrames = 3u;
 };
 
 inline VirtualGeometryQualityProfile MakeDefaultVirtualGeometryQualityProfile()
@@ -595,6 +803,8 @@ inline VirtualGeometryQualityProfile MakeDefaultVirtualGeometryQualityProfile()
 	profile.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
 	profile.geometryBudgetBytes = 0u;
 	profile.preloadBias = 1.0f;
+	profile.lodTransitionHysteresisPixels = 0.35f;
+	profile.lodTransitionStableFrames = 3u;
 	return profile;
 }
 
@@ -607,6 +817,10 @@ inline VirtualGeometryQualityProfile SanitizeVirtualGeometryQualityProfile(const
 	sanitized.preloadBias = std::isfinite(sanitized.preloadBias)
 		? glm::clamp(sanitized.preloadBias, 0.0f, 16.0f)
 		: 1.0f;
+	sanitized.lodTransitionHysteresisPixels = std::isfinite(sanitized.lodTransitionHysteresisPixels)
+		? glm::clamp(sanitized.lodTransitionHysteresisPixels, 0.0f, 8.0f)
+		: 0.35f;
+	sanitized.lodTransitionStableFrames = glm::clamp(sanitized.lodTransitionStableFrames, 1u, 16u);
 	sanitized.debugVisualizationMode = NormalizeVirtualGeometryDebugVisualizationMode(sanitized.debugVisualizationMode);
 	return sanitized;
 }
@@ -637,6 +851,8 @@ inline std::uint64_t BuildVirtualGeometryQualityProfileSignature(const VirtualGe
 	HashVirtualGeometryQualityValue(seed, static_cast<std::uint64_t>(static_cast<std::uint32_t>(sanitized.debugVisualizationMode)));
 	HashVirtualGeometryQualityValue(seed, sanitized.geometryBudgetBytes);
 	HashVirtualGeometryQualityValue(seed, HashVirtualGeometryQualityFloat(sanitized.preloadBias));
+	HashVirtualGeometryQualityValue(seed, HashVirtualGeometryQualityFloat(sanitized.lodTransitionHysteresisPixels));
+	HashVirtualGeometryQualityValue(seed, sanitized.lodTransitionStableFrames);
 	return seed;
 }
 
@@ -730,6 +946,31 @@ struct VirtualGeometryClusterRuntime
 	float geometricError = 0.0f;
 	glm::vec3 boundsCenter = glm::vec3(0.0f);
 	float boundsRadius = 0.0f;
+};
+
+// VirtualGeometryLODTransitionState is the small public record that snapshots,
+// diagnostics, and tests can inspect. RenderSystem keeps the actual previous
+// cluster cut privately; this record only describes why the cut was accepted,
+// held, or reset for one view/object pair.
+struct VirtualGeometryLODTransitionState
+{
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint32_t outputId = 0u;
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	std::uint64_t viewStateKey = 0u;
+	std::uint64_t lastStableSelectionSignature = 0u;
+	std::uint64_t candidateSelectionSignature = 0u;
+	std::uint32_t stableFrameCount = 0u;
+	std::uint32_t heldFrameCount = 0u;
+	std::uint32_t acceptedFrameCount = 0u;
+	float hysteresisBandPixels = 0.35f;
+	float transitionMarginPixels = 0.0f;
+	float candidateMaxErrorPixels = 0.0f;
+	VirtualGeometryDebugVisualizationMode debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
+	bool heldPreviousSelection = false;
+	bool resetThisFrame = false;
+	bool valid = false;
 };
 
 struct GeometryPageRuntime
@@ -1460,8 +1701,16 @@ struct alignas(16) MeshletCullingCountersGPU
 	std::uint32_t meshletsDispatched = 0u;
 	std::uint32_t meshletsCulled = 0u;
 	std::uint32_t meshletsCulledHiZ = 0u;
+	std::uint32_t hiZTests = 0u;
+	std::uint32_t hiZProjectionFailed = 0u;
+	std::uint32_t hiZFullRectCulled = 0u;
+	std::uint32_t hiZRectCoverageCulled = 0u;
+	std::uint32_t hiZCenterCulled = 0u;
+	std::uint32_t hiZVertexCoverageCulled = 0u;
+	std::uint32_t hiZNoOcclusionProof = 0u;
+	std::uint32_t hiZReserved = 0u;
 };
-static_assert(sizeof(MeshletCullingCountersGPU) == 16, "Meshlet counter payload must keep a stable 16-byte layout.");
+static_assert(sizeof(MeshletCullingCountersGPU) == 48, "Meshlet counter payload must keep a stable 16-byte aligned layout.");
 
 // UI-facing immutable snapshot returned by the renderer. The renderer owns
 // writes while editor windows read copies, so no caller mutates shared state.
@@ -1476,6 +1725,17 @@ struct RenderStatsSnapshot
 	std::uint32_t meshletsDispatched = 0u;
 	std::uint32_t meshletsCulled = 0u;
 	std::uint32_t meshletsCulledHiZ = 0u;
+	std::uint32_t hiZTests = 0u;
+	std::uint32_t hiZProjectionFailed = 0u;
+	std::uint32_t hiZFullRectCulled = 0u;
+	std::uint32_t hiZRectCoverageCulled = 0u;
+	std::uint32_t hiZCenterCulled = 0u;
+	std::uint32_t hiZVertexCoverageCulled = 0u;
+	std::uint32_t hiZNoOcclusionProof = 0u;
+	VirtualGeometryCounterSource meshletCounterSource = VirtualGeometryCounterSource::Prepared;
+	std::uint64_t meshletCounterFrameId = 0u;
+	std::uint32_t meshletCounterLatencyFrames = 0u;
+	std::string meshletCounterReason;
 	std::uint32_t spatialIndexedObjectCount = 0u;
 	std::uint32_t spatialVisibleCandidateCount = 0u;
 	std::uint32_t spatialRejectedObjectCount = 0u;
@@ -1491,6 +1751,9 @@ struct RenderStatsSnapshot
 	std::uint32_t boundsRecomputedObjectCount = 0u;
 	bool taskCullingActive = false;
 	bool hiZActive = false;
+	VirtualGeometryHiZState hiZState = VirtualGeometryHiZState::MissingPyramid;
+	std::string hiZStatusReason;
+	std::uint32_t hiZWarmupFrames = 0u;
 	bool vrsActive = false;
 	bool valid = false;
 };

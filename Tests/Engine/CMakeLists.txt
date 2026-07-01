@@ -53,6 +53,7 @@ add_executable(TerraEngine-EngineTests
 	Resource/ResourceStreamingPolicyTests.cpp
 	Resource/ResourceStreamingPreloadTests.cpp
 	Resource/ResourceStreamingResidencyIntegrationTests.cpp
+	Resource/VirtualGeometryPageStreamingHardeningTests.cpp
 	Resource/VirtualGeometryResourceTests.cpp
 	Resource/VirtualGeometryResidencyTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/MockRenderBackendTests.cpp
@@ -86,6 +87,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSnapshotContractTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionOwnershipTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryDiagnosticsTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHardeningTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHiZTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMultiViewTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryQualityTests.cpp
@@ -174,6 +176,7 @@ target_compile_definitions(TerraEngine-EngineTests
 	PRIVATE
 		XXH_STATIC_LINKING_ONLY
 		ZSTD_STATIC_LINKING_ONLY
+		TERRAENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
 if(WIN32)
@@ -194,6 +197,12 @@ add_test(NAME Engine.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine
 set_tests_properties(Engine.VirtualGeometryFoundation PROPERTIES
 	LABELS "Engine;VirtualGeometry"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry,RenderTypes,Renderer.Diagnostics,Resource.Residency"
+)
+
+add_test(NAME Engine.VirtualGeometryHardening COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryHardening PROPERTIES
+	LABELS "Engine;VirtualGeometry;Hardening"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Hardening"
 )
 
 add_test(NAME Engine.VirtualGeometryRenderer COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

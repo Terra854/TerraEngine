@@ -76,6 +76,10 @@ struct VirtualGeometryClusterCompileReport
 	std::uint32_t parentClusterId = 0xffffffffu;
 	std::uint32_t lodIndex = 0u;
 	std::uint32_t groupCount = 0u;
+	// Material section ownership is part of the cook report so package
+	// diagnostics can prove mixed-detail cluster cuts did not lose section
+	// identity while still keeping TEMF v1 free to evolve.
+	std::uint32_t materialSectionId = 0u;
 	std::uint32_t pageId = 0u;
 	std::uint32_t fallbackClusterId = 0xffffffffu;
 };

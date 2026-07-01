@@ -105,6 +105,15 @@ namespace TerraEngine::Tests {
 			return std::find(values.begin(), values.end(), expected) != values.end();
 		}
 
+		bool ContainsSchedulerResource(
+			const std::vector<TerraEngine::Scheduling::SchedulerResourceDefinition>& resources,
+			const std::string& expected)
+		{
+			return std::any_of(resources.begin(), resources.end(), [&expected](const TerraEngine::Scheduling::SchedulerResourceDefinition& resource) {
+				return resource.name == expected;
+			});
+		}
+
 		bool HasDiagnostic(const TerraEngine::Scheduling::ScheduleSummary& summary, TerraEngine::Scheduling::DiagnosticCategory category)
 		{
 			return std::any_of(summary.diagnostics.begin(), summary.diagnostics.end(), [category](const TerraEngine::Scheduling::ScheduleDiagnostic& diagnostic) {
@@ -345,9 +354,25 @@ namespace TerraEngine::Tests {
 		registry.Add("Engine.SystemScheduler.DefaultResourcesAcceptVirtualGeometryRenderDeclaration", [](TestContext& context) {
 			TerraEngine::Scheduling::SystemScheduler scheduler;
 			RenderSystem& renderSystem = RenderSystem::Instance();
-			scheduler.RegisterSystem(renderSystem, renderSystem.SchedulerDeclaration());
+			const TerraEngine::Scheduling::SystemDeclaration declaration = renderSystem.SchedulerDeclaration();
+			scheduler.RegisterSystem(renderSystem, declaration);
 
 			const TerraEngine::Scheduling::ScheduleSummary& summary = scheduler.BuildSchedule();
+			const std::vector<TerraEngine::Scheduling::SchedulerResourceDefinition> resources =
+				TerraEngine::Scheduling::DefaultSchedulerResources();
+
+			// RenderSystem is registered during engine startup before any frame
+			// work can run. Every declared virtual geometry handoff must have a
+			// default scheduler resource definition, otherwise MainEngine rejects
+			// startup with an invalid scheduler summary.
+			for (const std::string& resourceName : declaration.reads)
+			{
+				context.Expect(ContainsSchedulerResource(resources, resourceName), "Default scheduler resources should define RenderSystem read resource: " + resourceName);
+			}
+			for (const std::string& resourceName : declaration.writes)
+			{
+				context.Expect(ContainsSchedulerResource(resources, resourceName), "Default scheduler resources should define RenderSystem write resource: " + resourceName);
+			}
 
 			context.Expect(summary.valid, "Default scheduler resources should accept RenderSystem's virtual geometry read/write declarations.");
 			context.Expect(!HasDiagnostic(summary, TerraEngine::Scheduling::DiagnosticCategory::Resource), "Virtual geometry scheduler resources should not produce unknown-resource diagnostics.");

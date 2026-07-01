@@ -172,6 +172,9 @@ namespace
 			context.Expect(mesh->virtualGeometryClusters.size() >= mesh->virtualGeometryPages.size(), "Cooked cluster table should publish spatial clusters for every page.");
 			context.ExpectEqual(mesh->virtualGeometryClusters.size(), mesh->virtualGeometryClusterPageLinks.size(), "Every cooked spatial cluster should carry explicit cluster-page coverage.");
 			context.Expect((mesh->virtualGeometryHeader.flags & kVirtualGeometryValidationFlagClusterCoverageValidated) != 0u, "Regional virtual geometry cooks should prove cluster coverage before enabling sparse mixed-detail cuts.");
+			context.Expect(std::all_of(report.virtualGeometry.clusters.begin(), report.virtualGeometry.clusters.end(), [](const VirtualGeometryClusterCompileReport& cluster) {
+				return cluster.materialSectionId == 0u;
+			}), "Current raw mesh compiler diagnostics should preserve the default material section on every cluster.");
 			context.Expect(std::any_of(mesh->virtualGeometryValidationFlags.begin(), mesh->virtualGeometryValidationFlags.end(), [](const VirtualGeometryValidationFlagRecord& flag) {
 				return (flag.flags & kVirtualGeometryValidationFlagClusterCoverageValidated) != 0u;
 			}), "Validation records should mirror the cluster coverage proof bit.");
@@ -210,6 +213,8 @@ namespace
 			context.Expect(HasWarningContaining(report.virtualGeometry, "skipped"), "Small mesh cook report should explain that simplification was skipped.");
 			context.Expect(!report.virtualGeometry.skippedLevels.empty(), "Small mesh cook report should record skipped adaptive target reasons.");
 			context.Expect(report.virtualGeometry.skippedLevels.front().reason == "MeshTooSmall", "Small mesh skip reason should be explicit.");
+			context.Expect(report.virtualGeometry.skippedLevels.front().message.find("2 triangles") != std::string::npos, "Small mesh skip message should include the actual source triangle count.");
+			context.Expect(report.virtualGeometry.skippedLevels.front().message.find("minimum source threshold") != std::string::npos, "Small mesh skip message should name the threshold that prevented extra LODs.");
 
 			Mesh* mesh = LoadCompiledMeshForInspection(output);
 			context.Expect(mesh != nullptr, "Skipped virtual geometry TEMF should still load.");
@@ -269,6 +274,7 @@ namespace
 					context.Expect(skipped.candidateTriangleCount > 0u, "Merged adaptive targets should report the actual candidate triangle count.");
 					context.Expect(skipped.candidateMeshletCount > 0u, "Merged adaptive targets should report the actual candidate meshlet count.");
 					context.Expect(skipped.actualCandidateRatio > 0.0f, "Merged adaptive targets should report the candidate ratio.");
+					context.Expect(skipped.message.find("useful threshold") != std::string::npos, "Merged adaptive targets should explain the useful-reduction threshold.");
 				}
 			}
 

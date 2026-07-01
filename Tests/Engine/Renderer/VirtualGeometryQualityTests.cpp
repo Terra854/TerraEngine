@@ -1,8 +1,10 @@
 #include "TestHarness.h"
 
+#include "File Formats/TerraEngineMeshFile.h"
 #include "Renderer/RenderSystem.h"
 #include "Resource/ResourceManager.h"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +26,126 @@ namespace
 	bool NearlyEqual(float lhs, float rhs)
 	{
 		return std::abs(lhs - rhs) <= 0.0001f;
+	}
+
+	VirtualGeometryAssetRuntime MakeMixedDistanceQualityAsset()
+	{
+		VirtualGeometryAssetRuntime asset{};
+		asset.assetId = TerraEngine::GenerateUUID();
+		asset.clusterCoverageValidated = true;
+		asset.detailLevels = {
+			{ 0u, 0u, 8u, 512u, 0.0f, 1.0f, glm::vec3(-2.0f), glm::vec3(2.0f) },
+			{ 1u, 8u, 8u, 256u, 0.04f, 0.5f, glm::vec3(-2.0f), glm::vec3(2.0f) }
+		};
+		asset.cullableGroups.resize(16u);
+
+		GeometryPageRuntime residentPage{};
+		residentPage.pageId = 0u;
+		residentPage.firstLodIndex = 0u;
+		residentPage.lodCount = 2u;
+		residentPage.groupOffset = 0u;
+		residentPage.groupCount = 16u;
+		residentPage.state = GeometryPageState::Resident;
+		residentPage.fallbackPageId = 0u;
+		residentPage.fallbackPage = true;
+		asset.pages = { residentPage };
+
+		VirtualGeometryClusterRuntime nearRoot{};
+		nearRoot.clusterId = 0u;
+		nearRoot.parentClusterId = kVirtualGeometryInvalidIndex;
+		nearRoot.firstChildClusterId = 2u;
+		nearRoot.childCount = 1u;
+		nearRoot.lodIndex = 1u;
+		nearRoot.firstGroupIndex = 8u;
+		nearRoot.groupCount = 4u;
+		nearRoot.pageId = 0u;
+		nearRoot.fallbackClusterId = 0u;
+		nearRoot.geometricError = 0.04f;
+		nearRoot.boundsCenter = glm::vec3(-1.0f, 0.0f, -5.0f);
+		nearRoot.boundsRadius = 1.0f;
+
+		VirtualGeometryClusterRuntime farRoot = nearRoot;
+		farRoot.clusterId = 1u;
+		farRoot.firstChildClusterId = 3u;
+		farRoot.firstGroupIndex = 12u;
+		farRoot.boundsCenter = glm::vec3(1.0f, 0.0f, -120.0f);
+
+		VirtualGeometryClusterRuntime nearChild{};
+		nearChild.clusterId = 2u;
+		nearChild.parentClusterId = 0u;
+		nearChild.firstChildClusterId = kVirtualGeometryInvalidIndex;
+		nearChild.childCount = 0u;
+		nearChild.lodIndex = 0u;
+		nearChild.firstGroupIndex = 0u;
+		nearChild.groupCount = 4u;
+		nearChild.materialSectionId = 0u;
+		nearChild.pageId = 0u;
+		nearChild.fallbackClusterId = 0u;
+		nearChild.boundsCenter = nearRoot.boundsCenter;
+		nearChild.boundsRadius = 1.0f;
+
+		VirtualGeometryClusterRuntime farChild = nearChild;
+		farChild.clusterId = 3u;
+		farChild.parentClusterId = 1u;
+		farChild.firstGroupIndex = 4u;
+		farChild.boundsCenter = farRoot.boundsCenter;
+
+		asset.clusters = { nearRoot, farRoot, nearChild, farChild };
+		return asset;
+	}
+
+	VirtualGeometryAssetRuntime MakeThresholdTransitionAsset()
+	{
+		VirtualGeometryAssetRuntime asset{};
+		asset.assetId = TerraEngine::GenerateUUID();
+		asset.clusterCoverageValidated = true;
+		asset.detailLevels = {
+			{ 0u, 0u, 4u, 256u, 0.0f, 1.0f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+			{ 1u, 4u, 4u, 128u, 0.015f, 0.5f, glm::vec3(-1.0f), glm::vec3(1.0f) }
+		};
+		asset.cullableGroups.resize(8u);
+
+		GeometryPageRuntime page{};
+		page.pageId = 0u;
+		page.firstLodIndex = 0u;
+		page.lodCount = 2u;
+		page.groupCount = 8u;
+		page.state = GeometryPageState::Resident;
+		page.fallbackPageId = 0u;
+		page.fallbackPage = true;
+		asset.pages = { page };
+
+		VirtualGeometryClusterRuntime root{};
+		root.clusterId = 0u;
+		root.parentClusterId = kVirtualGeometryInvalidIndex;
+		root.firstChildClusterId = 1u;
+		root.childCount = 1u;
+		root.lodIndex = 1u;
+		root.firstGroupIndex = 4u;
+		root.groupCount = 4u;
+		root.pageId = 0u;
+		root.fallbackClusterId = 0u;
+		root.geometricError = 0.01f;
+		root.boundsRadius = 1.0f;
+
+		VirtualGeometryClusterRuntime child{};
+		child.clusterId = 1u;
+		child.parentClusterId = 0u;
+		child.lodIndex = 0u;
+		child.firstGroupIndex = 0u;
+		child.groupCount = 4u;
+		child.pageId = 0u;
+		child.fallbackClusterId = 0u;
+		child.boundsRadius = 1.0f;
+		asset.clusters = { root, child };
+		return asset;
+	}
+
+	bool SelectionContainsCluster(const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult& result, std::uint32_t clusterId)
+	{
+		return std::any_of(result.selectedClusters.begin(), result.selectedClusters.end(), [clusterId](const TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord& record) {
+			return record.clusterId == clusterId;
+		});
 	}
 
 	void RestoreRenderSettings(const std::filesystem::path& previousAssetRoot, const RenderSettings& previousSettings)
@@ -58,6 +180,8 @@ namespace
 			profile.hiZOcclusionEnabled = true;
 			profile.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::Residency;
 			profile.geometryBudgetBytes = 64ull * 1024ull * 1024ull;
+			profile.lodTransitionHysteresisPixels = std::numeric_limits<float>::quiet_NaN();
+			profile.lodTransitionStableFrames = 0u;
 
 			VirtualGeometryQualityProfile sanitized = SanitizeVirtualGeometryQualityProfile(profile);
 			context.Expect(NearlyEqual(1.0f, sanitized.lodErrorScale), "Non-finite LOD error scale should fall back to a safe default.");
@@ -69,13 +193,19 @@ namespace
 				static_cast<std::uint32_t>(sanitized.debugVisualizationMode),
 				"Sanitizing should preserve debug visualization mode.");
 			context.ExpectEqual(64ull * 1024ull * 1024ull, sanitized.geometryBudgetBytes, "Sanitizing should preserve the geometry budget.");
+			context.Expect(NearlyEqual(0.35f, sanitized.lodTransitionHysteresisPixels), "Non-finite transition hysteresis should fall back to the safe default.");
+			context.ExpectEqual(1u, sanitized.lodTransitionStableFrames, "Transition stable-frame count should clamp to at least one frame.");
 
 			profile.lodErrorScale = 0.001f;
 			profile.preloadBias = 128.0f;
+			profile.lodTransitionHysteresisPixels = 64.0f;
+			profile.lodTransitionStableFrames = 128u;
 			profile.debugVisualizationMode = static_cast<VirtualGeometryDebugVisualizationMode>(12u);
 			sanitized = SanitizeVirtualGeometryQualityProfile(profile);
 			context.Expect(NearlyEqual(0.05f, sanitized.lodErrorScale), "LOD error scale should clamp to the safe lower bound.");
 			context.Expect(NearlyEqual(16.0f, sanitized.preloadBias), "Preload bias should clamp to the safe upper bound.");
+			context.Expect(NearlyEqual(8.0f, sanitized.lodTransitionHysteresisPixels), "Transition hysteresis should clamp to the safe upper bound.");
+			context.ExpectEqual(16u, sanitized.lodTransitionStableFrames, "Transition stable-frame count should clamp to the safe upper bound.");
 			context.Expect(sanitized.debugVisualizationMode == VirtualGeometryDebugVisualizationMode::None, "Unknown debug visualization values should sanitize to Off.");
 		});
 
@@ -106,6 +236,8 @@ namespace
 			profile.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::HiZ;
 			profile.geometryBudgetBytes = 123456u;
 			profile.preloadBias = 4.0f;
+			profile.lodTransitionHysteresisPixels = 0.5f;
+			profile.lodTransitionStableFrames = 4u;
 			RenderSystem::Instance().SetVirtualGeometryQualityProfile(profile);
 
 			std::ifstream input(root / "ProjectSettings" / "RenderSettings.json");
@@ -125,6 +257,8 @@ namespace
 				"Saved render settings should include debug visualization mode.");
 			context.ExpectEqual(123456ull, virtualGeometry.value("geometryBudgetBytes", 0ull), "Saved render settings should include geometry budget.");
 			context.Expect(NearlyEqual(4.0f, virtualGeometry.value("preloadBias", 0.0f)), "Saved render settings should include preload bias.");
+			context.Expect(NearlyEqual(0.5f, virtualGeometry.value("lodTransitionHysteresisPixels", 0.0f)), "Saved render settings should include transition hysteresis.");
+			context.ExpectEqual(4u, virtualGeometry.value("lodTransitionStableFrames", 0u), "Saved render settings should include transition stable frames.");
 
 			RestoreRenderSettings(previousAssetRoot, previousSettings);
 			std::filesystem::remove_all(root);
@@ -160,7 +294,9 @@ namespace
 					{ "hiZSelfOcclusionGuardEnabled", false },
 					{ "debugVisualizationMode", static_cast<std::uint32_t>(VirtualGeometryDebugVisualizationMode::Error) },
 					{ "geometryBudgetBytes", 987654ull },
-					{ "preloadBias", 2.0f }
+					{ "preloadBias", 2.0f },
+					{ "lodTransitionHysteresisPixels", 0.65f },
+					{ "lodTransitionStableFrames", 5u }
 				} }
 			};
 			std::ofstream output(root / "ProjectSettings" / "RenderSettings.json");
@@ -179,6 +315,8 @@ namespace
 				"Loaded render settings should restore debug visualization mode.");
 			context.ExpectEqual(987654ull, loaded.geometryBudgetBytes, "Loaded render settings should restore geometry budget.");
 			context.Expect(NearlyEqual(2.0f, loaded.preloadBias), "Loaded render settings should restore preload bias.");
+			context.Expect(NearlyEqual(0.65f, loaded.lodTransitionHysteresisPixels), "Loaded render settings should restore transition hysteresis.");
+			context.ExpectEqual(5u, loaded.lodTransitionStableFrames, "Loaded render settings should restore transition stable frames.");
 
 			RestoreRenderSettings(previousAssetRoot, previousSettings);
 			std::filesystem::remove_all(root);
@@ -213,6 +351,94 @@ namespace
 
 			RestoreRenderSettings(previousAssetRoot, previousSettings);
 			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Quality.SelectsMixedDetailForNearAndFarClusters", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeMixedDistanceQualityAsset();
+			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
+			quality.lodErrorScale = 1.0f;
+
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(
+					asset,
+					TerraEngine::GenerateUUID(),
+					TerraEngine::GenerateUUID(),
+					quality,
+					512.0f,
+					glm::mat4(1.0f),
+					glm::vec3(0.0f),
+					glm::uvec2(1000u, 1000u),
+					true,
+					true);
+
+			context.ExpectEqual(static_cast<std::size_t>(2u), result.selectedClusters.size(), "Mixed-distance fixture should select one cluster for each source region.");
+			context.Expect(SelectionContainsCluster(result, 2u), "Nearby region should refine to the higher-detail child cluster.");
+			context.Expect(SelectionContainsCluster(result, 1u), "Farther region should remain on its coarser root cluster.");
+			context.Expect(!SelectionContainsCluster(result, 0u), "Refined near region should not also dispatch the overlapping parent cluster.");
+			context.Expect(!SelectionContainsCluster(result, 3u), "Far region should avoid an unnecessary high-detail child when its screen error is below the refinement threshold.");
+		});
+
+		registry.Add("VirtualGeometry.Quality.HoldsStableCutNearStationaryThreshold", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeThresholdTransitionAsset();
+			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
+			quality.lodTransitionHysteresisPixels = 0.35f;
+			quality.lodTransitionStableFrames = 3u;
+
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			TerraEngine::Renderer::VirtualGeometryClusterSelectionResult previous =
+				RenderSystem::SelectVirtualGeometryStableClusterCut(
+					asset,
+					meshId,
+					objectId,
+					quality,
+					146.0f,
+					glm::mat4(1.0f),
+					glm::vec3(0.0f),
+					glm::uvec2(0u),
+					true,
+					true,
+					nullptr,
+					RenderViewType::Game,
+					2u);
+
+			std::uint32_t selectionSwitches = 0u;
+			std::uint32_t heldFrames = 0u;
+			std::uint32_t previousClusterId = previous.selectedClusters.empty() ? 0xffffffffu : previous.selectedClusters.front().clusterId;
+			for (std::uint32_t frame = 0u; frame < 300u; ++frame)
+			{
+				const float projectedRadius = (frame % 2u) == 0u ? 154.0f : 146.0f;
+				TerraEngine::Renderer::VirtualGeometryClusterSelectionResult current =
+					RenderSystem::SelectVirtualGeometryStableClusterCut(
+						asset,
+						meshId,
+						objectId,
+						quality,
+						projectedRadius,
+						glm::mat4(1.0f),
+						glm::vec3(0.0f),
+						glm::uvec2(0u),
+						true,
+						true,
+						&previous,
+						RenderViewType::Game,
+						2u);
+				const std::uint32_t currentClusterId = current.selectedClusters.empty() ? 0xffffffffu : current.selectedClusters.front().clusterId;
+				if (currentClusterId != previousClusterId)
+				{
+					++selectionSwitches;
+				}
+				if (current.transitionState.heldPreviousSelection)
+				{
+					++heldFrames;
+				}
+				previousClusterId = currentClusterId;
+				previous = current;
+			}
+
+			context.ExpectEqual(0u, selectionSwitches, "Alternating threshold jitter should not flip selected cluster cuts while inside the hysteresis band.");
+			context.Expect(heldFrames > 0u, "Near-threshold candidates should report held transition frames for diagnostics.");
+			context.ExpectEqual(0u, previousClusterId, "The coarse root should remain the stable cut during repeated threshold jitter.");
 		});
 	}
 }

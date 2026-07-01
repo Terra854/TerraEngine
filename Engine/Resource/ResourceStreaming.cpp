@@ -112,6 +112,77 @@ namespace TerraEngine::Resource
 			needs.push_back(std::move(need));
 		}
 
+		void AppendVirtualGeometryPageRequestPacket(
+			std::vector<VirtualGeometryPageRequestPacket>& packets,
+			const VirtualGeometryPageNeedInput& input,
+			const VirtualGeometryStreamingPage& page,
+			bool fallbackRequest,
+			std::int32_t priority,
+			std::string reason)
+		{
+			VirtualGeometryPageRequestPacket packet;
+			packet.assetId = input.assetId;
+			packet.objectId = input.objectId;
+			packet.viewId = input.viewId;
+			packet.pageId = page.pageId;
+			packet.clusterId = input.desiredClusterId;
+			packet.desiredLodIndex = fallbackRequest ? page.firstLodIndex : input.desiredLodIndex;
+			packet.priority = priority;
+			packet.fallbackRequest = fallbackRequest;
+			packet.reason = std::move(reason);
+			packets.push_back(std::move(packet));
+		}
+
+		void AppendVirtualGeometryPageRequestFailure(
+			VirtualGeometryPageRequestPlan& plan,
+			const VirtualGeometryPageNeedInput& input,
+			std::uint32_t pageId,
+			std::uint32_t fallbackPageId,
+			const VirtualGeometryStreamingPage* fallbackPage,
+			std::string reason,
+			bool fallbackFailure)
+		{
+			VirtualGeometryPageRequestFailureRecord failure;
+			failure.assetId = input.assetId;
+			failure.objectId = input.objectId;
+			failure.viewId = input.viewId;
+			failure.pageId = pageId;
+			failure.fallbackPageId = fallbackPageId;
+			failure.clusterId = input.desiredClusterId;
+			failure.desiredLodIndex = input.desiredLodIndex;
+			failure.fallbackAvailable = fallbackPage != nullptr && !fallbackPage->failed;
+			failure.fallbackResident = fallbackPage != nullptr && fallbackPage->resident && !fallbackPage->failed;
+			failure.reason = std::move(reason);
+			if (fallbackFailure)
+			{
+				++plan.unavailableFallbackPages;
+			}
+			else
+			{
+				++plan.missingDesiredPages;
+			}
+			plan.failures.push_back(std::move(failure));
+		}
+
+		void SortVirtualGeometryPageRequestPackets(std::vector<VirtualGeometryPageRequestPacket>& packets)
+		{
+			std::sort(packets.begin(), packets.end(), [](const VirtualGeometryPageRequestPacket& left, const VirtualGeometryPageRequestPacket& right) {
+				if (left.priority != right.priority)
+				{
+					return left.priority > right.priority;
+				}
+				if (left.assetId != right.assetId)
+				{
+					return UuidLess(left.assetId, right.assetId);
+				}
+				if (left.pageId != right.pageId)
+				{
+					return left.pageId < right.pageId;
+				}
+				return left.fallbackRequest && !right.fallbackRequest;
+			});
+		}
+
 		std::int32_t ScoreVirtualGeometryPagePriority(
 			const VirtualGeometryPageNeedInput& input,
 			const VirtualGeometryStreamingPage& page,
@@ -446,12 +517,12 @@ namespace TerraEngine::Resource
 					break;
 				}
 			}
-			if (desiredPage == nullptr || desiredPage->failed)
+			if (desiredPage == nullptr)
 			{
 				continue;
 			}
 
-			if (!desiredPage->resident)
+			if (!desiredPage->resident && !desiredPage->failed)
 			{
 				AppendVirtualGeometryPageNeed(
 					needs,
@@ -483,19 +554,31 @@ namespace TerraEngine::Resource
 		return MergeStreamingNeeds(std::move(needs), nowSeconds);
 	}
 
-	std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy)
+	VirtualGeometryPageRequestPlan BuildVirtualGeometryPageRequestPlan(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy)
 	{
 		const StreamingPolicy sanitized = SanitizeStreamingPolicy(policy);
+		VirtualGeometryPageRequestPlan plan;
 		if (!sanitized.enabled)
 		{
-			return {};
+			return plan;
 		}
 
-		std::vector<VirtualGeometryPageRequestPacket> packets;
 		for (const VirtualGeometryPageNeedInput& input : inputs)
 		{
-			if (input.assetId == TerraEngine::EMPTY_UUID || input.pages.empty())
+			if (input.assetId == TerraEngine::EMPTY_UUID)
 			{
+				continue;
+			}
+			if (input.pages.empty())
+			{
+				AppendVirtualGeometryPageRequestFailure(
+					plan,
+					input,
+					0xffffffffu,
+					0xffffffffu,
+					nullptr,
+					"virtual geometry page catalog is empty",
+					false);
 				continue;
 			}
 
@@ -508,59 +591,93 @@ namespace TerraEngine::Resource
 					break;
 				}
 			}
-			if (desiredPage == nullptr || desiredPage->resident || desiredPage->failed)
+			if (desiredPage == nullptr)
 			{
+				AppendVirtualGeometryPageRequestFailure(
+					plan,
+					input,
+					0xffffffffu,
+					0xffffffffu,
+					nullptr,
+					"desired virtual geometry LOD has no streamable page",
+					false);
 				continue;
 			}
-
-			VirtualGeometryPageRequestPacket desiredPacket;
-			desiredPacket.assetId = input.assetId;
-			desiredPacket.objectId = input.objectId;
-			desiredPacket.viewId = input.viewId;
-			desiredPacket.pageId = desiredPage->pageId;
-			desiredPacket.clusterId = input.desiredClusterId;
-			desiredPacket.desiredLodIndex = input.desiredLodIndex;
-			desiredPacket.priority = ScoreVirtualGeometryPagePriority(input, *desiredPage, StreamingPriorityClass::Important);
-			desiredPacket.fallbackRequest = false;
-			desiredPacket.reason = "virtual geometry desired page async IO request";
-			packets.push_back(std::move(desiredPacket));
 
 			// Request packets are immutable handoff records. The worker-safe
 			// planner can build them in bulk, while ResourceManager and the RHI
 			// remain responsible for protected cache mutation and GPU upload.
 			const VirtualGeometryStreamingPage* fallbackPage = FindPageById(input.pages, desiredPage->fallbackPageId);
-			if (input.fallbackRequired && fallbackPage != nullptr && !fallbackPage->resident && !fallbackPage->failed)
+			if (desiredPage->failed)
 			{
-				VirtualGeometryPageRequestPacket fallbackPacket;
-				fallbackPacket.assetId = input.assetId;
-				fallbackPacket.objectId = input.objectId;
-				fallbackPacket.viewId = input.viewId;
-				fallbackPacket.pageId = fallbackPage->pageId;
-				fallbackPacket.clusterId = input.desiredClusterId;
-				fallbackPacket.desiredLodIndex = fallbackPage->firstLodIndex;
-				fallbackPacket.priority = ScoreVirtualGeometryPagePriority(input, *fallbackPage, StreamingPriorityClass::Critical);
-				fallbackPacket.fallbackRequest = true;
-				fallbackPacket.reason = "virtual geometry fallback page async IO request";
-				packets.push_back(std::move(fallbackPacket));
+				AppendVirtualGeometryPageRequestFailure(
+					plan,
+					input,
+					desiredPage->pageId,
+					desiredPage->fallbackPageId,
+					fallbackPage,
+					"desired virtual geometry page failed; fallback must preserve visibility",
+					false);
+			}
+			else if (!desiredPage->resident)
+			{
+				AppendVirtualGeometryPageRequestPacket(
+					plan.packets,
+					input,
+					*desiredPage,
+					false,
+					ScoreVirtualGeometryPagePriority(input, *desiredPage, StreamingPriorityClass::Important),
+					"virtual geometry desired page async IO request");
+			}
+
+			if (!input.fallbackRequired)
+			{
+				continue;
+			}
+
+			if (fallbackPage == nullptr)
+			{
+				AppendVirtualGeometryPageRequestFailure(
+					plan,
+					input,
+					desiredPage->pageId,
+					desiredPage->fallbackPageId,
+					nullptr,
+					"virtual geometry fallback page is missing from the catalog",
+					true);
+				continue;
+			}
+			if (fallbackPage->failed)
+			{
+				AppendVirtualGeometryPageRequestFailure(
+					plan,
+					input,
+					fallbackPage->pageId,
+					desiredPage->fallbackPageId,
+					fallbackPage,
+					"virtual geometry fallback page failed",
+					true);
+				continue;
+			}
+			if (!fallbackPage->resident)
+			{
+				AppendVirtualGeometryPageRequestPacket(
+					plan.packets,
+					input,
+					*fallbackPage,
+					true,
+					ScoreVirtualGeometryPagePriority(input, *fallbackPage, StreamingPriorityClass::Critical),
+					"virtual geometry fallback page async IO request");
 			}
 		}
 
-		std::sort(packets.begin(), packets.end(), [](const VirtualGeometryPageRequestPacket& left, const VirtualGeometryPageRequestPacket& right) {
-			if (left.priority != right.priority)
-			{
-				return left.priority > right.priority;
-			}
-			if (left.assetId != right.assetId)
-			{
-				return UuidLess(left.assetId, right.assetId);
-			}
-			if (left.pageId != right.pageId)
-			{
-				return left.pageId < right.pageId;
-			}
-			return left.fallbackRequest && !right.fallbackRequest;
-		});
-		return packets;
+		SortVirtualGeometryPageRequestPackets(plan.packets);
+		return plan;
+	}
+
+	std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy)
+	{
+		return BuildVirtualGeometryPageRequestPlan(inputs, policy).packets;
 	}
 
 	std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds)

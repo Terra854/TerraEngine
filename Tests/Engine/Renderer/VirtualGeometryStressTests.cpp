@@ -80,6 +80,86 @@ namespace TerraEngine::Tests
 			return asset;
 		}
 
+		VirtualGeometryAssetRuntime MakeTransitionStressAsset()
+		{
+			VirtualGeometryAssetRuntime asset{};
+			asset.assetId = TerraEngine::GenerateUUID();
+			asset.clusterCoverageValidated = true;
+			asset.detailLevels = {
+				{ 0u, 0u, 8u, 512u, 0.0f, 1.0f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 1u, 8u, 4u, 256u, 0.015f, 0.5f, glm::vec3(-1.0f), glm::vec3(1.0f) }
+			};
+			asset.cullableGroups.resize(12u);
+			GeometryPageRuntime page{};
+			page.pageId = 0u;
+			page.firstLodIndex = 0u;
+			page.lodCount = 2u;
+			page.groupCount = 12u;
+			page.state = GeometryPageState::Resident;
+			page.fallbackPage = true;
+			asset.pages = { page };
+
+			VirtualGeometryClusterRuntime root{};
+			root.clusterId = 0u;
+			root.parentClusterId = kVirtualGeometryInvalidIndex;
+			root.firstChildClusterId = 1u;
+			root.childCount = 1u;
+			root.lodIndex = 1u;
+			root.firstGroupIndex = 8u;
+			root.groupCount = 4u;
+			root.pageId = 0u;
+			root.fallbackClusterId = 0u;
+			root.geometricError = 0.01f;
+			root.boundsRadius = 1.0f;
+
+			VirtualGeometryClusterRuntime child{};
+			child.clusterId = 1u;
+			child.parentClusterId = 0u;
+			child.lodIndex = 0u;
+			child.firstGroupIndex = 0u;
+			child.groupCount = 8u;
+			child.pageId = 0u;
+			child.fallbackClusterId = 0u;
+			child.boundsRadius = 1.0f;
+			asset.clusters = { root, child };
+			return asset;
+		}
+
+		VirtualGeometryAssetRuntime MakeTinyFallbackAsset()
+		{
+			VirtualGeometryAssetRuntime asset{};
+			asset.assetId = TerraEngine::GenerateUUID();
+			asset.cookStatus = VirtualGeometryCookStatus::Skipped;
+			asset.sourceTriangleCount = 2u;
+			asset.sourceVertexCount = 4u;
+			asset.detailLevels = {
+				{ 0u, 0u, 1u, 2u, 0.0f, 1.0f, glm::vec3(-0.25f), glm::vec3(0.25f) }
+			};
+			asset.cullableGroups.resize(1u);
+			GeometryPageRuntime fallback{};
+			fallback.pageId = 0u;
+			fallback.state = GeometryPageState::Pinned;
+			fallback.byteSize = 128u;
+			fallback.fallbackPage = true;
+			fallback.pinnedFallback = true;
+			asset.pages = { fallback };
+			return asset;
+		}
+
+		VirtualGeometryAssetRuntime MakeStreamingPressureAsset()
+		{
+			VirtualGeometryAssetRuntime asset = MakeDenseVirtualGeometryAsset(220u, 96u);
+			asset.assetId = TerraEngine::GenerateUUID();
+			asset.pages[0].state = GeometryPageState::Pinned;
+			asset.pages[0].pinnedFallback = true;
+			asset.pages[0].byteSize = 1024u;
+			asset.pages[1].state = GeometryPageState::PendingIO;
+			asset.pages[1].byteSize = 4u * 1024u * 1024u;
+			asset.pages[2].state = GeometryPageState::Evicting;
+			asset.pages[2].byteSize = 6u * 1024u * 1024u;
+			return asset;
+		}
+
 		float ProjectedRadiusForFrame(std::uint32_t frameIndex, std::uint32_t objectIndex)
 		{
 			const std::uint32_t phase = (frameIndex + objectIndex) % 4u;
@@ -174,6 +254,85 @@ namespace TerraEngine::Tests
 
 			context.Expect(selectedClusters > assets.size(), "Mixed-detail stress should refine some objects into child cluster cuts.");
 			context.ExpectEqual(static_cast<std::uint64_t>(0u), pageNeeds, "Fully resident mixed-detail stress fixtures should not request fallback pages.");
+		});
+
+		registry.Add("VirtualGeometry.Stress.MovingCameraTransitionsStayBounded", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeTransitionStressAsset();
+			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
+			quality.lodTransitionHysteresisPixels = 0.35f;
+			quality.lodTransitionStableFrames = 3u;
+
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			TerraEngine::Renderer::VirtualGeometryClusterSelectionResult previous;
+			bool hasPrevious = false;
+			std::uint32_t selectedSwitches = 0u;
+			std::uint32_t heldFrames = 0u;
+			std::uint32_t previousClusterId = 0xffffffffu;
+			for (std::uint32_t frame = 0u; frame < 96u; ++frame)
+			{
+				const float projectedRadius = 120.0f + static_cast<float>(frame) * 1.25f;
+				TerraEngine::Renderer::VirtualGeometryClusterSelectionResult current =
+					RenderSystem::SelectVirtualGeometryStableClusterCut(
+						asset,
+						meshId,
+						objectId,
+						quality,
+						projectedRadius,
+						glm::mat4(1.0f),
+						glm::vec3(0.0f),
+						glm::uvec2(0u),
+						true,
+						true,
+						hasPrevious ? &previous : nullptr,
+						RenderViewType::Game,
+						2u);
+				const std::uint32_t currentClusterId = current.selectedClusters.empty() ? 0xffffffffu : current.selectedClusters.front().clusterId;
+				if (hasPrevious && currentClusterId != previousClusterId)
+				{
+					++selectedSwitches;
+				}
+				if (current.transitionState.heldPreviousSelection)
+				{
+					++heldFrames;
+				}
+				previousClusterId = currentClusterId;
+				previous = current;
+				hasPrevious = true;
+			}
+
+			context.Expect(selectedSwitches <= 1u, "Smooth camera motion should make at most one stable cluster transition across the threshold.");
+			context.Expect(heldFrames > 0u, "Moving camera should hold near-threshold frames before accepting a new cut.");
+			context.ExpectEqual(1u, previousClusterId, "Decisive near-camera frames should eventually accept the high-detail child cluster.");
+		});
+
+		registry.Add("VirtualGeometry.Stress.BroadHardeningMatrixPublishesExpectedRuntimeDomains", [](TestContext& context) {
+			std::vector<VirtualGeometryAssetRuntime> assets;
+			assets.push_back(MakeTinyFallbackAsset());
+			assets.push_back(MakeDenseClusterAsset(221u));
+			assets.push_back(MakeStreamingPressureAsset());
+
+			// Mark one cluster with a second material section to keep hard-surface
+			// and material-band coverage visible to diagnostics without needing a
+			// heavyweight authored asset in the headless stress pass.
+			assets[1].clusters.back().materialSectionId = 1u;
+
+			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
+			quality.geometryBudgetBytes = 2048u;
+			quality.maxLodDrop = 2u;
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryLodQualityDiagnostics(RenderViewType::Game, 990u, assets, quality);
+
+			context.Expect(diagnostics.active, "Broad hardening matrix should publish active virtual geometry diagnostics.");
+			context.Expect(diagnostics.sourceMeshlets >= 1u + 48u + 96u, "Broad hardening matrix should include tiny, dense, and streaming-pressure source meshlets.");
+			context.Expect(diagnostics.selectedMeshlets > 0u, "Broad hardening matrix should keep renderable fallback detail selected.");
+			context.Expect(diagnostics.clusterSelection.selectedClusters >= assets[1].clusters.size(), "Dense hardening fixture should publish cluster coverage diagnostics.");
+			context.Expect(diagnostics.pinnedFallbackPages >= 2u, "Tiny and streaming-pressure fixtures should keep fallback pages pinned.");
+			context.Expect(diagnostics.requestedPages >= 1u, "Streaming-pressure fixture should expose pending page work.");
+			context.Expect(diagnostics.missingPages >= 1u, "Streaming-pressure fixture should expose evicting or missing high-detail pages.");
+			context.Expect(diagnostics.budgetPressureBytes > 0u, "Broad hardening matrix should exceed the deliberately tiny geometry budget.");
+			context.Expect(!diagnostics.budgetContributors.empty(), "Broad hardening matrix should identify budget contributors.");
 		});
 	}
 }

@@ -520,6 +520,16 @@ namespace {
 		return "Unknown";
 	}
 
+	std::string ReadVirtualGeometryString(const std::string& stringTable, std::uint32_t offset, std::uint32_t size)
+	{
+		if (size == 0u || offset >= stringTable.size())
+		{
+			return {};
+		}
+		const std::size_t readableSize = std::min<std::size_t>(size, stringTable.size() - offset);
+		return std::string(stringTable.data() + offset, readableSize);
+	}
+
 	template <typename RecordType>
 	bool ReadVirtualGeometryRecordTable(std::ifstream& input, std::uint32_t offset, std::uint32_t count, std::vector<RecordType>& outRecords)
 	{
@@ -1955,6 +1965,7 @@ bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata,
 	outMetadata.requestedTargetCount = virtualHeader.requestedTargetCount;
 	outMetadata.skippedDetailCount = virtualHeader.skippedDetailCount;
 	outMetadata.clusterCount = virtualHeader.clusterCount;
+	outMetadata.materialSectionCount = virtualHeader.materialSectionCount;
 	outMetadata.pageCount = virtualHeader.pageCount;
 	if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u) {
 		outMetadata.needsRebuild = true;
@@ -2245,6 +2256,17 @@ bool AssetDatabase::TryGetVirtualGeometryDetailDiagnostics(const AssetMetadata& 
 		|| !ReadVirtualGeometryRecordTable(input, virtualHeader.skippedDetailTableOffset, virtualHeader.skippedDetailCount, skippedDetails)) {
 		return true;
 	}
+	std::string diagnosticStrings;
+	if (virtualHeader.diagnosticStringOffset != 0u && virtualHeader.diagnosticStringSize != 0u)
+	{
+		diagnosticStrings.resize(virtualHeader.diagnosticStringSize);
+		input.seekg(static_cast<std::streamoff>(virtualHeader.diagnosticStringOffset), std::ios::beg);
+		input.read(diagnosticStrings.data(), static_cast<std::streamsize>(diagnosticStrings.size()));
+		if (!input)
+		{
+			diagnosticStrings.clear();
+		}
+	}
 
 	for (const VirtualGeometryRequestedTargetRecord& target : requestedTargets) {
 		VirtualGeometryDetailDiagnosticMetadata diagnostic;
@@ -2274,6 +2296,10 @@ bool AssetDatabase::TryGetVirtualGeometryDetailDiagnostics(const AssetMetadata& 
 				diagnostic.actualTriangleCount = skipped.candidateTriangleCount;
 				diagnostic.actualMeshletCount = skipped.candidateMeshletCount;
 				diagnostic.nearestGeneratedLevelIndex = skipped.nearestGeneratedLodIndex;
+				diagnostic.message = ReadVirtualGeometryString(
+					diagnosticStrings,
+					skipped.messageStringOffset,
+					skipped.messageStringSize);
 				diagnostic.triangleCount = diagnostic.actualTriangleCount > 0u ? diagnostic.actualTriangleCount : diagnostic.triangleCount;
 				diagnostic.meshletCount = diagnostic.actualMeshletCount > 0u ? diagnostic.actualMeshletCount : diagnostic.meshletCount;
 				break;
@@ -2307,7 +2333,10 @@ bool AssetDatabase::TryGetVirtualGeometryClusterSummary(const AssetMetadata& met
 		return true;
 	}
 	outSummary.clusterCount = meshMetadata.clusterCount;
+	outSummary.materialSectionCount = meshMetadata.materialSectionCount;
+	outSummary.clusterMaterialSectionCount = meshMetadata.clusterCount == 0u ? 0u : outSummary.materialSectionCount;
 	outSummary.fallbackCoverageValid = meshMetadata.clusterCount == 0u || !meshMetadata.needsRebuild;
+	outSummary.materialCoverageValid = outSummary.fallbackCoverageValid && outSummary.materialSectionCount > 0u;
 	return true;
 }
 

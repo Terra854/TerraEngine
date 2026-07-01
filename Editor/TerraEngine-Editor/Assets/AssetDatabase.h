@@ -40,6 +40,7 @@ struct VirtualGeometryAssetMetadata {
 	std::uint32_t requestedTargetCount = 0u;
 	std::uint32_t skippedDetailCount = 0u;
 	std::uint32_t clusterCount = 0u;
+	std::uint32_t materialSectionCount = 0u;
 	std::uint32_t pageCount = 0u;
 	std::string rebuildGuidance;
 	std::vector<std::string> warnings;
@@ -71,13 +72,17 @@ struct VirtualGeometryDetailDiagnosticMetadata {
 	std::uint32_t nearestGeneratedLevelIndex = 0u;
 	std::uint32_t triangleCount = 0u;
 	std::uint32_t meshletCount = 0u;
+	std::string message;
 };
 
 struct VirtualGeometryClusterSummaryMetadata {
 	std::uint32_t clusterCount = 0u;
 	std::uint32_t selectedClusterCount = 0u;
 	std::uint32_t fallbackClusterCount = 0u;
+	std::uint32_t materialSectionCount = 0u;
+	std::uint32_t clusterMaterialSectionCount = 0u;
 	bool fallbackCoverageValid = false;
+	bool materialCoverageValid = false;
 };
 
 struct VirtualGeometryPageSummaryMetadata {

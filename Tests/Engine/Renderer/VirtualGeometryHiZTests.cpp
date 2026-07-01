@@ -174,5 +174,65 @@ namespace TerraEngine::Tests
 			context.Expect(shadowView.occlusionAllowed, "Shadow-view metadata should not latch the shared Hi-Z validation state off.");
 			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::None), static_cast<std::uint32_t>(shadowView.invalidReason), "Shadow-view metadata should stay diagnostic-only in validation.");
 		});
+
+		registry.Add("VirtualGeometry.HiZ.Validation.ReportsWarmCurrentPyramidAcrossResizeAndCameraCut", [](TestContext& context) {
+			const glm::mat4 viewProjection(1.0f);
+			VulkanHiZHistoryMetadata history = MakeValidHistory(15u, 1280u, 720u, viewProjection);
+			history.warmupFrames = 2u;
+
+			VulkanHiZValidationInput resizedInput = MakeValidationInput(15u, 1920u, 1080u, viewProjection);
+			const VulkanHiZValidationResult resized = ValidateVulkanHiZHistory(history, resizedInput);
+			context.Expect(resized.occlusionAllowed, "A resized view with a ready current pyramid should continue sampling Hi-Z.");
+			context.ExpectEqual(1920u, resized.width, "Validation should publish the current pyramid width, not stale history width.");
+			context.ExpectEqual(1080u, resized.height, "Validation should publish the current pyramid height, not stale history height.");
+			context.Expect(resized.warmupFrames >= 1u, "A ready resized pyramid should publish at least one warm-up frame.");
+
+			VulkanHiZValidationInput cameraCutInput = resizedInput;
+			cameraCutInput.cameraCut = true;
+			cameraCutInput.projectionSignature += 1u;
+			const VulkanHiZValidationResult cameraCut = ValidateVulkanHiZHistory(history, cameraCutInput);
+			context.Expect(cameraCut.occlusionAllowed, "Camera cuts should not hard-disable a ready current pyramid.");
+			context.Expect(!cameraCut.projectionMatches, "Camera-cut diagnostics should retain projection mismatch information.");
+			context.Expect(cameraCut.warmupFrames >= 1u, "Camera cuts should keep the current pyramid warm instead of reporting unavailable state.");
+		});
+
+		registry.Add("VirtualGeometry.HiZ.Validation.ProjectedBoundsFailOpenWhenUncertain", [](TestContext& context) {
+			VulkanHiZProjectedBoundsInput missing{};
+			missing.pyramidReady = false;
+			missing.clipW = 2.0f;
+			missing.uvCenter = glm::vec2(0.5f, 0.5f);
+			missing.uvRadius = glm::vec2(0.1f, 0.1f);
+			missing.viewportSize = glm::uvec2(1920u, 1080u);
+			const VulkanHiZProjectedBoundsResult missingResult = ValidateVulkanHiZProjectedBounds(missing);
+			context.Expect(!missingResult.sampleAllowed, "Missing pyramid resources should prevent task-shader Hi-Z samples.");
+			context.Expect(missingResult.failOpen, "Missing pyramid resources should fail open per meshlet.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::MissingPyramid), static_cast<std::uint32_t>(missingResult.invalidReason), "Missing projected-bound resources should explain the fail-open reason.");
+
+			VulkanHiZProjectedBoundsInput nearPlane = missing;
+			nearPlane.pyramidReady = true;
+			nearPlane.clipW = 0.0f;
+			const VulkanHiZProjectedBoundsResult nearPlaneResult = ValidateVulkanHiZProjectedBounds(nearPlane);
+			context.Expect(!nearPlaneResult.sampleAllowed, "Near-plane-crossing bounds should not sample Hi-Z.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::NearPlaneRisk), static_cast<std::uint32_t>(nearPlaneResult.invalidReason), "Near-plane fail-open should remain explainable.");
+
+			VulkanHiZProjectedBoundsInput partial = missing;
+			partial.pyramidReady = true;
+			partial.clipW = 3.0f;
+			partial.uvCenter = glm::vec2(0.98f, 0.5f);
+			partial.uvRadius = glm::vec2(0.05f, 0.05f);
+			const VulkanHiZProjectedBoundsResult partialResult = ValidateVulkanHiZProjectedBounds(partial);
+			context.Expect(!partialResult.sampleAllowed, "A meshlet whose projected sphere crosses the view edge should fail open rather than cull from a clipped Hi-Z rectangle.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VulkanHiZInvalidReason::ProjectedBoundsRisk), static_cast<std::uint32_t>(partialResult.invalidReason), "Partial screen coverage should use the conservative projected-bounds fail-open reason.");
+
+			VulkanHiZProjectedBoundsInput valid = missing;
+			valid.pyramidReady = true;
+			valid.clipW = 5.0f;
+			valid.uvCenter = glm::vec2(0.5f, 0.5f);
+			valid.uvRadius = glm::vec2(0.02f, 0.03f);
+			const VulkanHiZProjectedBoundsResult validResult = ValidateVulkanHiZProjectedBounds(valid);
+			context.Expect(validResult.sampleAllowed, "Fully projected meshlet bounds inside the view should be eligible for conservative Hi-Z sampling.");
+			context.Expect(!validResult.failOpen, "Valid projected bounds should not report fail-open.");
+			context.Expect(validResult.uvMin.x < valid.uvCenter.x && validResult.uvMax.x > valid.uvCenter.x, "Valid projected bounds should publish a padded sampling rectangle.");
+		});
 	}
 }

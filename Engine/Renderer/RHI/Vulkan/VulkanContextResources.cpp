@@ -607,11 +607,16 @@ void VulkanContext::Impl::InitializeHiZPyramidToFarDepth(VulkanHiZ& hiZ)
 	hiZ.history.valid = true;
 	hiZ.history.width = hiZ.width;
 	hiZ.history.height = hiZ.height;
+	hiZ.history.warmupFrames = 1u;
 	hiZ.history.invalidReason = VulkanHiZInvalidReason::None;
 	hiZ.latestInvalidReason = VulkanHiZInvalidReason::None;
 	hiZ.latestValidation = {};
 	hiZ.latestValidation.historyValid = true;
 	hiZ.latestValidation.occlusionAllowed = true;
+	hiZ.latestValidation.width = hiZ.width;
+	hiZ.latestValidation.height = hiZ.height;
+	hiZ.latestValidation.warmupFrames = 1u;
+	hiZ.latestValidation.pyramidReady = true;
 	hiZ.latestValidation.invalidReason = VulkanHiZInvalidReason::None;
 	hiZ.latestValidation.failOpen = false;
 	hiZ.latestOcclusionAllowed = true;
@@ -3766,6 +3771,27 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			gameSnapshot.meshletsDispatched = gameCounters.meshletsDispatched;
 			gameSnapshot.meshletsCulled = gameCounters.meshletsCulled;
 			gameSnapshot.meshletsCulledHiZ = gameCounters.meshletsCulledHiZ;
+			gameSnapshot.hiZTests = gameCounters.hiZTests;
+			gameSnapshot.hiZProjectionFailed = gameCounters.hiZProjectionFailed;
+			gameSnapshot.hiZFullRectCulled = gameCounters.hiZFullRectCulled;
+			gameSnapshot.hiZRectCoverageCulled = gameCounters.hiZRectCoverageCulled;
+			gameSnapshot.hiZCenterCulled = gameCounters.hiZCenterCulled;
+			gameSnapshot.hiZVertexCoverageCulled = gameCounters.hiZVertexCoverageCulled;
+			gameSnapshot.hiZNoOcclusionProof = gameCounters.hiZNoOcclusionProof;
+			gameSnapshot.meshletCounterSource = VirtualGeometryCounterSource::GPUReadback;
+			gameSnapshot.meshletCounterFrameId = frameIndex;
+			gameSnapshot.meshletCounterLatencyFrames = 0u;
+			gameSnapshot.meshletCounterReason.clear();
+		} else if (gameSnapshot.taskCullingActive) {
+			gameSnapshot.meshletCounterSource = VirtualGeometryCounterSource::DelayedGPUReadback;
+			gameSnapshot.meshletCounterFrameId = frameIndex > 0u ? frameIndex - 1u : frameIndex;
+			gameSnapshot.meshletCounterLatencyFrames = frameIndex > 0u ? 1u : 0u;
+			gameSnapshot.meshletCounterReason = "GPU meshlet counter readback is delayed; showing prepared counts.";
+		} else {
+			gameSnapshot.meshletCounterSource = VirtualGeometryCounterSource::Prepared;
+			gameSnapshot.meshletCounterFrameId = frameIndex;
+			gameSnapshot.meshletCounterLatencyFrames = 0u;
+			gameSnapshot.meshletCounterReason = "Task culling is inactive; counts are prepared CPU estimates.";
 		}
 		gameSnapshot.hiZActive = gameSnapshot.hiZActive && HiZForFrame(kHiZGameViewIndex, frameIndex).image != VK_NULL_HANDLE;
 		gameSnapshot.vrsActive = gameSnapshot.vrsActive && UsesVrsAttachment();
@@ -3781,6 +3807,27 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			sceneSnapshot.meshletsDispatched = sceneCounters.meshletsDispatched;
 			sceneSnapshot.meshletsCulled = sceneCounters.meshletsCulled;
 			sceneSnapshot.meshletsCulledHiZ = sceneCounters.meshletsCulledHiZ;
+			sceneSnapshot.hiZTests = sceneCounters.hiZTests;
+			sceneSnapshot.hiZProjectionFailed = sceneCounters.hiZProjectionFailed;
+			sceneSnapshot.hiZFullRectCulled = sceneCounters.hiZFullRectCulled;
+			sceneSnapshot.hiZRectCoverageCulled = sceneCounters.hiZRectCoverageCulled;
+			sceneSnapshot.hiZCenterCulled = sceneCounters.hiZCenterCulled;
+			sceneSnapshot.hiZVertexCoverageCulled = sceneCounters.hiZVertexCoverageCulled;
+			sceneSnapshot.hiZNoOcclusionProof = sceneCounters.hiZNoOcclusionProof;
+			sceneSnapshot.meshletCounterSource = VirtualGeometryCounterSource::GPUReadback;
+			sceneSnapshot.meshletCounterFrameId = frameIndex;
+			sceneSnapshot.meshletCounterLatencyFrames = 0u;
+			sceneSnapshot.meshletCounterReason.clear();
+		} else if (sceneSnapshot.taskCullingActive) {
+			sceneSnapshot.meshletCounterSource = VirtualGeometryCounterSource::DelayedGPUReadback;
+			sceneSnapshot.meshletCounterFrameId = frameIndex > 0u ? frameIndex - 1u : frameIndex;
+			sceneSnapshot.meshletCounterLatencyFrames = frameIndex > 0u ? 1u : 0u;
+			sceneSnapshot.meshletCounterReason = "GPU meshlet counter readback is delayed; showing prepared counts.";
+		} else {
+			sceneSnapshot.meshletCounterSource = VirtualGeometryCounterSource::Prepared;
+			sceneSnapshot.meshletCounterFrameId = frameIndex;
+			sceneSnapshot.meshletCounterLatencyFrames = 0u;
+			sceneSnapshot.meshletCounterReason = "Task culling is inactive; counts are prepared CPU estimates.";
 		}
 		sceneSnapshot.hiZActive = sceneSnapshot.hiZActive && HiZForFrame(kHiZSceneViewIndex, frameIndex).image != VK_NULL_HANDLE;
 		sceneSnapshot.vrsActive = sceneSnapshot.vrsActive && UsesVrsAttachment();

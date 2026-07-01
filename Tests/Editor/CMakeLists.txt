@@ -58,6 +58,7 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
 	AssetPipeline/VirtualGeometryPackageImportTests.cpp
 	Renderer/VirtualGeometryDebugViewTests.cpp
+	Renderer/VirtualGeometryHardeningDebugViewTests.cpp
 	# Virtual geometry asset-pipeline, automation, and export tests will be
 	# registered here when their story-specific test files are added.
 	Scene/ArchitectureHardeningPlayModeTests.cpp
@@ -179,6 +180,12 @@ add_test(NAME Editor.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine
 set_tests_properties(Editor.VirtualGeometryFoundation PROPERTIES
 	LABELS "Editor;VirtualGeometry"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry,Editor.AssetPipeline.ModelPackage,Editor.Automation"
+)
+
+add_test(NAME Editor.VirtualGeometryHardening COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.VirtualGeometryHardening PROPERTIES
+	LABELS "Editor;VirtualGeometry;Hardening"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Hardening"
 )
 
 add_test(NAME Editor.VirtualGeometryAssetPipeline COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

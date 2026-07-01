@@ -734,33 +734,61 @@ namespace TerraEngine::Resource
 				{
 					++summary.pinnedFallbackPages;
 					++contributor.pinnedFallbackPages;
+					summary.pinnedFallbackBytes = AddSaturated(summary.pinnedFallbackBytes, page.byteSize);
+					contributor.pinnedFallbackBytes = AddSaturated(contributor.pinnedFallbackBytes, page.byteSize);
 				}
 				if (!IsVirtualGeometryPagePinnedFallback(page))
 				{
+					summary.reclaimableBytes = AddSaturated(summary.reclaimableBytes, page.byteSize);
 					contributor.reclaimableBytes = AddSaturated(contributor.reclaimableBytes, page.byteSize);
 				}
 				break;
 			case VirtualGeometryPageResidencyState::Requested:
 			case VirtualGeometryPageResidencyState::Loading:
+				++summary.requestedPages;
+				++contributor.requestedPages;
+				summary.requestedBytes = AddSaturated(summary.requestedBytes, page.byteSize);
+				contributor.requestedBytes = AddSaturated(contributor.requestedBytes, page.byteSize);
+				break;
 			case VirtualGeometryPageResidencyState::PendingIO:
+				++summary.requestedPages;
+				++contributor.requestedPages;
+				summary.requestedBytes = AddSaturated(summary.requestedBytes, page.byteSize);
+				contributor.requestedBytes = AddSaturated(contributor.requestedBytes, page.byteSize);
+				summary.pendingIoBytes = AddSaturated(summary.pendingIoBytes, page.byteSize);
+				contributor.pendingIoBytes = AddSaturated(contributor.pendingIoBytes, page.byteSize);
+				break;
 			case VirtualGeometryPageResidencyState::PendingUpload:
 				++summary.requestedPages;
 				++contributor.requestedPages;
+				summary.requestedBytes = AddSaturated(summary.requestedBytes, page.byteSize);
+				contributor.requestedBytes = AddSaturated(contributor.requestedBytes, page.byteSize);
+				summary.pendingUploadBytes = AddSaturated(summary.pendingUploadBytes, page.byteSize);
+				contributor.pendingUploadBytes = AddSaturated(contributor.pendingUploadBytes, page.byteSize);
 				break;
 			case VirtualGeometryPageResidencyState::Failed:
 				++summary.failedPages;
 				++summary.missingPages;
 				++contributor.failedPages;
 				++contributor.missingPages;
+				summary.failedBytes = AddSaturated(summary.failedBytes, page.byteSize);
+				contributor.failedBytes = AddSaturated(contributor.failedBytes, page.byteSize);
 				break;
 			case VirtualGeometryPageResidencyState::Evicted:
 				++summary.evictedPages;
 				++summary.missingPages;
 				++contributor.evictedPages;
 				++contributor.missingPages;
+				summary.evictedBytes = AddSaturated(summary.evictedBytes, page.byteSize);
+				contributor.evictedBytes = AddSaturated(contributor.evictedBytes, page.byteSize);
+				break;
+			case VirtualGeometryPageResidencyState::Evicting:
+				++summary.missingPages;
+				++contributor.missingPages;
+				summary.evictingBytes = AddSaturated(summary.evictingBytes, page.byteSize);
+				contributor.evictingBytes = AddSaturated(contributor.evictingBytes, page.byteSize);
 				break;
 			case VirtualGeometryPageResidencyState::NotResident:
-			case VirtualGeometryPageResidencyState::Evicting:
 				++summary.missingPages;
 				++contributor.missingPages;
 				break;
@@ -770,6 +798,9 @@ namespace TerraEngine::Resource
 		if (summary.budgetBytes > 0u && summary.residentBytes > summary.budgetBytes)
 		{
 			summary.overBudgetBytes = summary.residentBytes - summary.budgetBytes;
+			// Keep both names: pressureBytes matches the public streaming
+			// contract, while overBudgetBytes preserves the older C++ API.
+			summary.pressureBytes = summary.overBudgetBytes;
 		}
 
 		std::sort(summary.contributors.begin(), summary.contributors.end(), [](const VirtualGeometryPageBudgetPressureContributor& lhs, const VirtualGeometryPageBudgetPressureContributor& rhs) {

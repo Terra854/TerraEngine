@@ -47,6 +47,37 @@ Final acceptance still requires the full compile, focused CTest, regression,
 and install flow so the installed editor/runtime tree contains matching docs,
 shaders, binaries, and generated metadata.
 
+## Virtual Geometry Hardening Roadmap
+
+Feature `specs/029-virtual-geometry-hardening` turns the current adaptive
+baseline into a validation-ready system. The hardening order is deliberately
+correctness-first:
+
+1. Make Hi-Z occlusion conservative enough that visible meshlets fail open
+   instead of disappearing, while fully hidden meshlets still cull after the
+   depth pyramid is warm.
+2. Publish per-view Hi-Z explanations so developers can tell whether a meshlet
+   was visible, occluded, unsupported, or kept by a fail-open rule.
+3. Stream real high-detail geometry pages through the resource residency path,
+   with fallback pages pinned so missing detail never becomes missing geometry.
+4. Label runtime counter sources so prepared, delayed GPU-readback, and
+   unavailable data are not confused with authoritative zero values.
+5. Tune cluster and LOD quality across tiny, dense, thin, curved, hard-surface,
+   and multi-material fixtures.
+6. Stabilize detail transitions with view-local state so stationary cameras do
+   not flicker near thresholds.
+7. Keep Scene View and Game View visualizer, Hi-Z, counter, residency, and LOD
+   state independent.
+8. Keep the user-facing virtual geometry visualizer inventory compact and
+   documented.
+9. Validate all of the above with deterministic fixture coverage and optional
+   large-asset manual stress passes.
+
+Each hardening story must be independently testable before the next story
+starts. The default focused pass is `Engine.VirtualGeometryHardening` and
+`Editor.VirtualGeometryHardening`, followed by the broader virtual geometry
+regression tests and the install target.
+
 ## Asset Rebuild Expectations
 
 The current plan breaks older compiled mesh payloads in place. Users must
@@ -109,7 +140,11 @@ default, meshes below `512` source triangles skip simplification with
 `MeshTooSmall`; generated candidates below `64` triangles, below `2` meshlets,
 or below the `15%` useful triangle/meshlet reduction threshold are skipped or
 merged. Candidates with non-finite error or geometric error above `0.1` are
-rejected, and the nearest valid generated detail remains the fallback.
+rejected, and the nearest valid generated detail remains the fallback. Skipped
+and merged rows include the actual source or candidate counts plus the threshold
+that made the level non-useful, so a row such as `InsufficientTriangleReduction`
+means the candidate did not reduce triangles enough compared with the previous
+generated level.
 
 ### Inspector Per-Mesh Overrides
 
@@ -164,6 +199,10 @@ section-aware import metadata:
 - The current compiler emits one default material section per LOD; package
   importers can expand this once source primitive/material slots are threaded
   through the raw mesh handoff.
+- Package-generated mesh sidecars compare authored material assignments with
+  cooked virtual-geometry material sections. A multi-material package whose
+  cooked TEMF still exposes only the default section is marked `Needs Review`
+  in the Inspector instead of silently claiming section-safe cluster coverage.
 - Detail bounds must remain conservative. The cooker stores source-position bounds
   on every detail so renderer-side LOD choice cannot shrink object culling
   below the authored mesh extent.
@@ -191,9 +230,16 @@ expands it into one mesh-shader draw range per selected cluster.
   a safer detail level.
 - `maxLodDrop` limits how many adaptive detail levels a single selection step may skip.
   Use small values while tuning camera-motion popping.
+- `lodTransitionHysteresisPixels` defaults to `0.35` pixels. When a cluster
+  split/merge candidate is within this projected-error band, the renderer keeps
+  the last stable cut instead of flipping every frame.
+- `lodTransitionStableFrames` defaults to `3` frames. A near-threshold candidate
+  must persist for this many rendered frames before it replaces the current
+  stable cut; decisive movement outside the hysteresis band can switch
+  immediately.
 - Render-preparation cache signatures include the selected detail index,
-  cluster packet, and meshlet range, so camera-distance changes cannot reuse
-  stale immutable draw packets.
+  cluster packet, meshlet range, and view-local transition state, so
+  camera-distance or mode changes cannot reuse stale immutable draw packets.
 - Fail-open diagnostics record the mesh identifier and the reason visibility was
   preserved through fallback rendering. Current reasons include disabled quality
   settings, disabled task culling, invalid bounds, and missing detail metadata.
@@ -220,11 +266,13 @@ dispatching a sparse mixed-detail cut that could create holes.
 At render preparation time, the selector starts from each root cluster. If the
 projected screen error is small, the parent cluster is selected. If the screen
 error is large enough, the selector refines into child clusters and publishes
-those children instead. Screen error is evaluated from each cluster's own
-conservative bounds when camera data is available, so a nearby region can refine
-while a far region of the same object stays coarse. A selected set may contain
-siblings, but it must not contain a parent beside any child that covers the same
-surface.
+those children instead. Cluster refinement requires a slightly stronger signal
+than one pixel of error so flat, tiny, or hard-surface regions do not split on
+barely-visible numerical noise. Screen error is evaluated from each cluster's
+own conservative bounds when camera data is available, so a nearby region can
+refine while a far region of the same object stays coarse. A selected set may
+contain siblings, but it must not contain a parent beside any child that covers
+the same surface.
 
 When a desired child cluster page is missing, failed, evicting, or evicted, the
 selector records a page need and substitutes the first resident fallback cluster
@@ -257,6 +305,10 @@ under `settings.virtualGeometry`. The current fields are:
 - `lodErrorScale`: clamps to `[0.05, 64.0]` and scales cooked geometric error
   before a lower detail level is accepted.
 - `maxLodDrop`: limits how far selection may move away from the highest detail.
+- `lodTransitionHysteresisPixels`: clamps to `[0.0, 8.0]` and defines the
+  projected-error band used to hold the last stable cluster cut.
+- `lodTransitionStableFrames`: clamps to `[1, 16]` and defines how many frames a
+  near-threshold candidate must remain stable before it is accepted.
 - `hiZOcclusionEnabled`: retained for settings compatibility, but the runtime
   Hi-Z path is always active once the pyramid resource exists.
 - `hiZSelfOcclusionGuardEnabled`, `hiZNearPlaneGuardEnabled`, and
@@ -308,6 +360,23 @@ whenever the frame culling payload says the pyramid exists. If sampled depth is
 invalid or cannot conservatively prove occlusion for a meshlet's projected
 bounds, that meshlet stays visible and records no Hi-Z cull.
 
+US1 hardening adds explicit per-view Hi-Z validation state to immutable
+visibility snapshots. Each view reports whether a current pyramid is ready, the
+sampled pyramid size, render size, camera/depth-scene signatures, fail-open
+reason, and warm-up frame count. A moving opaque blocker must cull only meshlets
+that are fully hidden, reveal them again within two rendered frames after the
+blocker moves away, and resume culling when the blocker returns. Meshlets whose
+projected sphere crosses the near plane or screen edge fail open instead of
+sampling a clipped Hi-Z rectangle.
+
+US2 adds bounded `OcclusionDebugSample` records to the same per-view snapshots.
+Each sample identifies a representative object, mesh, cluster, meshlet, cull
+outcome, sampled mip category, projected bounds placeholder, and explanation
+string. The current renderer synthesizes these records from selected draw
+ranges and fail-open paths; future GPU readback can fill the same structure
+without changing editor consumers. Diagnostics keep at most 64 samples per view
+so the visualizer and automation remain predictable.
+
 ## Scheduler And Mutation Boundaries
 
 Virtual geometry rendering must use immutable render snapshots and prepared
@@ -321,7 +390,10 @@ diagnostics.
 
 The Scene View and Game View `VG` selector expose the same compact mode
 inventory. Both views read `GetVirtualGeometryDebugVisualizationModes()`, so
-the editor cannot drift into different menus per viewport.
+the editor cannot drift into different menus per viewport. Hover the `VG`
+control or any menu row to show the same color legend that is documented below.
+Obsolete or internal-only numeric mode values are normalized to `Off` instead
+of appearing as user-facing menu entries.
 
 | Mode | Color meaning |
 | --- | --- |
@@ -332,7 +404,7 @@ the editor cannot drift into different menus per viewport.
 | `Bounds` | Blue to yellow maps small to large bounds. Magenta means bounds or culling metadata is unavailable. |
 | `Culling` | Green means drawn, red means frustum, cyan means drawn while a Hi-Z pyramid is available, and magenta means culling data is missing. Cone culling is disabled until imported mesh sidedness is validated. |
 | `Residency` | Green means resident/active virtual geometry, orange means requested or missing page pressure, and brown means inactive fallback. |
-| `Hi-Z` | Cyan means the current view has a sampled Hi-Z pyramid. Gray means the pyramid resource is missing. |
+| `Hi-Z` | Cyan means the current view has a sampled Hi-Z pyramid, red means fail-open or uncertain projected bounds, and gray means the pyramid resource is missing. |
 | `Error` | Cyan means no error pressure, orange means missing-page pressure, and red means fail-open. |
 
 Mode changes are part of the virtual geometry quality-profile signature used by
@@ -343,6 +415,26 @@ count, page-need count, and fallback pressure through a compact payload word.
 Future page-backed GPU buffers can replace that packed word with richer
 per-cluster records without changing authored materials.
 
+### Multi-View State Isolation
+
+Scene View and Game View store their active visualizer mode as separate
+view-local runtime preferences. The project quality profile keeps only the
+default mode; changing one toolbar must not rewrite project render settings or
+force the other view into the same diagnostic mode.
+
+Every rendered view owns its virtual geometry state independently:
+
+- Scene View and Game View keep separate visualizer modes, target sizes, camera
+  signatures, transition histories, selected cluster cuts, page requests,
+  counter sources, and Hi-Z validation records.
+- A hidden or zero-sized view publishes an explicit missing-pyramid/fail-open
+  state instead of borrowing the other view's Hi-Z pyramid or counters.
+- Visible-command cache signatures include the view id, target size,
+  visualizer mode, and LOD transition state so a cached packet from one view
+  cannot be replayed into another view.
+- Shadow views remain conservative and do not expose a user-facing visualizer
+  mode; their state is reported separately as `Shadow`.
+
 ## Editor Inspection And Visualizer Workflow
 
 Mesh assets expose a read-only Virtual Geometry inspector section when their
@@ -350,9 +442,9 @@ compiled TEMF can be read. The section reports cook status, payload generation,
 detail count, source triangle count, resident meshlets, and rebuild guidance for
 missing or stale payload metadata.
 
-Game View owns the first visualizer control. The `VG` mode selector writes the
-runtime virtual geometry debug mode into `RenderSystem` quality settings, and
-the default fragment shader produces false-color output for LOD, meshlet
+Game View owns the first visualizer control. The `VG` mode selector writes a
+view-local virtual geometry debug mode into `RenderSystem`, and the default
+fragment shader produces false-color output for LOD, meshlet
 identity approximation, bounds, culled/fail-open state, Hi-Z state, residency,
 and error modes. A compact overlay reads immutable virtual geometry diagnostics
 snapshots so the selected mode is paired with current meshlet and Hi-Z state.
@@ -372,6 +464,9 @@ record in the package `.import.json` sidecar carries:
 - Compiled TEMF path.
 - `virtualGeometry.requested`, `cooked`, and `status`.
 - Detail level, meshlet, and source triangle counts.
+- `virtualGeometry.coverageTags` such as `package-gltf`, `package-glb`,
+  `package-fbx`, `adaptive-targets`, `fallback-coverage`, `page-links`, and
+  `multi-material-package`.
 - Non-fatal cook warnings.
 
 Supported status values are `Cooked`, `Skipped`, `Failed`, and `NeedsRebuild`.
@@ -493,6 +588,13 @@ snapshots are converted into page need inputs and async request packets for
 desired and fallback pages, while ResourceManager cache mutation, GPU upload
 scheduling, and residency publication remain protected boundaries.
 
+The worker-safe page request plan now publishes both request packets and failure
+records. If a desired high-detail page has failed, the planner records the
+failed page, fallback availability, fallback residency, and reason, then still
+requests the fallback page when it is not resident. This keeps load failures
+visible to tooling without letting a failed detail page remove renderable
+fallback coverage.
+
 Render preparation selects the desired sparse cluster cut first, then checks
 page residency for every desired cluster. If a desired page is missing, failed,
 evicting, or evicted, the selector records a page need and substitutes the best
@@ -523,8 +625,26 @@ Current CPU-side counters mean:
 - `failedPages`, `evictingPages`, and `evictedPages`: subsets of
   `missingPages` with stronger failure, upload-retirement, or budget meaning.
 - `pinnedFallbackPages`: resident fallback pages protected from eviction.
+- `requestedBytes`, `pendingIoBytes`, `pendingUploadBytes`, `failedBytes`,
+  `evictingBytes`, `evictedBytes`, and `pinnedFallbackBytes`: byte-level page
+  pressure buckets used by resource tooling.
 - `estimatedGeometryBytes`: metadata plus page byte estimates for the view.
 - `budgetPressureBytes`: estimated bytes above the configured geometry budget.
+
+Every counter snapshot carries a source label:
+
+- `Prepared`: CPU-side render preparation estimate for the current frame.
+- `GPU Readback`: completed GPU meshlet counter readback for the frame.
+- `Delayed GPU Readback`: GPU counters are one frame behind, so the overlay is
+  showing prepared estimates with the delay reason.
+- `Unsupported` or `Unavailable`: no trustworthy counter value exists for the
+  current view; UI rows must show unavailable text instead of authoritative
+  zeroes.
+
+Deterministic validation accepts a counter when it is within one meshlet or
+within 1 percent of the expected fixture value, whichever is larger. The
+tolerance is stored with the counter snapshot so editor overlays, automation,
+and tests all report the same rule.
 
 Inactive states use explicit reasons instead of zero-only counters. Common
 examples are `Disabled By Settings`, `Missing Mesh Shader Route`, `Invalid Asset
@@ -535,8 +655,9 @@ pages, budget pressure, risky LOD transitions, and Hi-Z fail-open history.
 The Game View visualizer overlay shows selected/dispatched/source meshlets,
 page residency, cull reason totals, and a compact LOD histogram. The Resource
 Residency window shows the latest per-view resident/requested/pending/missing
-page counters, pinned fallback pages, budget pressure, byte totals, and top
-pressure assets beside the existing RAM/VRAM streaming tables. Budget
+page counters, pinned fallback pages, pinned fallback bytes, budget pressure,
+byte totals, and top pressure assets beside the existing RAM/VRAM streaming
+tables. Budget
 contributor data is sorted by reclaimable high-detail bytes so developers can
 identify which virtual geometry assets create the most pressure.
 
@@ -557,6 +678,11 @@ switches, required mesh shader resources, diagnostics toggle, and optional page
 budget. The block also serializes the adaptive quality controls used by export:
 `geometryBudgetBytes`, `lodErrorScale`, `maxLodDrop`, `preloadBias`, and the required metadata list
 `adaptiveTargets`, `fallbackCoverage`, `clusterHierarchy`, and `pageLinks`.
+Feature `029` export validation also requires a `coverage` object that names
+`Tests/Fixtures/VirtualGeometry/hardening-fixtures.json` and includes the
+`export` category in `requiredCategories`. That coverage block is diagnostic
+metadata for QA; TEMF headers and validation flags remain the runtime source of
+truth.
 Mesh entries that reference `.temf` payloads can mark
 `virtualGeometry.required = true`; package validation then checks that the
 compiled mesh payload carries the current in-place TEMF virtual geometry header,
@@ -639,17 +765,31 @@ Current virtual geometry content support is intentionally narrow:
   support reports `Missing Mesh Shader Route` and keeps visible fallback
   rendering.
 - Camera-owned Hi-Z occlusion is resource-gated only. It samples as soon as a
-  same-size pyramid exists; self-occlusion, near-plane, thin-geometry, view,
-  target, projection, and depth-scene metadata remain diagnostics only during
-  interactive editor rendering.
+  current-view pyramid exists; self-occlusion, near-plane, thin-geometry, view,
+  target, projection, resize, camera-cut, and depth-scene metadata remain
+  diagnostics only during interactive editor rendering.
 - The Hi-Z history also stores a depth-scene signature built from the visible
   draw list, transforms, materials, and selected virtual-geometry cluster
   ranges. Moving or editing an occluder reports the diagnostic change while
   keeping Hi-Z active; individual meshlets still fail open when the sampled
   pyramid cannot prove occlusion.
+- The moving-wall Hi-Z fixture must cover fully blocked, partially visible,
+  unblocked, blocker-restored, resized-view, camera-cut, and near-plane cases.
+  Fully blocked meshlets may cull; partially visible or uncertain meshlets must
+  remain visible.
 
 Validation scenes should include a deterministic grid/high-curvature static
 mesh, a small simplification-skip mesh, a multi-material or material-band mesh,
 thin/self-occluding Hi-Z cases, a dense camera-motion stress scene, and a
 streaming-pressure scene whose high-detail pages exceed a small geometry
 budget while page `0` fallback remains resident.
+
+Feature `029` expands that fixture set with the manifest in
+`Tests/Fixtures/VirtualGeometry/hardening-fixtures.json`. The committed manifest
+describes required deterministic categories, importer/export coverage tags,
+package formats, expected diagnostics, and whether a fixture is clean-checkout
+required or optional manual stress coverage. The clean-checkout categories are
+tiny, dense, thin, curved, hard-surface, multi-material package,
+streaming-pressure, multi-view, and export-runtime metadata. Optional manual
+stress should use local dense scan, hard-surface multi-material, and thin
+occlusion-heavy assets while keeping those large files out of the repository.

@@ -19,9 +19,13 @@ void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenW
 	history = {};
 	history.width = width;
 	history.height = height;
+	history.warmupFrames = 0u;
 	history.invalidReason = VulkanHiZInvalidReason::Resize;
 	latestInvalidReason = VulkanHiZInvalidReason::Resize;
 	latestValidation = {};
+	latestValidation.width = width;
+	latestValidation.height = height;
+	latestValidation.pyramidReady = false;
 	latestValidation.invalidReason = VulkanHiZInvalidReason::Resize;
 	latestOcclusionAllowed = false;
 
@@ -127,9 +131,11 @@ void VulkanHiZ::Destroy(VkDevice device, VmaAllocator allocator) {
 		image = VK_NULL_HANDLE;
 	}
 	history = {};
+	history.warmupFrames = 0u;
 	history.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
 	latestInvalidReason = VulkanHiZInvalidReason::MissingPyramid;
 	latestValidation = {};
+	latestValidation.pyramidReady = false;
 	latestValidation.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
 	latestOcclusionAllowed = false;
 }

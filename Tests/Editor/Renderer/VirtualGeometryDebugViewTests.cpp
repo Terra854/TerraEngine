@@ -28,8 +28,28 @@ namespace TerraEngine::EditorTests
 	void RegisterVirtualGeometryDebugViewTests(TestRegistry& registry)
 	{
 		registry.Add("VirtualGeometry.Editor.DebugView.ExposesExpectedVisualizerModes", [](TestContext& context) {
-			context.ExpectEqual(static_cast<std::size_t>(9u), GetVirtualGeometryDebugVisualizationModes().size(), "The VG toolbar should expose only the nine public visualizer modes.");
-			for (const VirtualGeometryDebugVisualizationMode mode : GetVirtualGeometryDebugVisualizationModes())
+			const auto& modes = GetVirtualGeometryDebugVisualizationModes();
+			const std::array<VirtualGeometryDebugVisualizationMode, 9u> expectedOrder = {
+				VirtualGeometryDebugVisualizationMode::None,
+				VirtualGeometryDebugVisualizationMode::LOD,
+				VirtualGeometryDebugVisualizationMode::Cluster,
+				VirtualGeometryDebugVisualizationMode::MeshletId,
+				VirtualGeometryDebugVisualizationMode::Bounds,
+				VirtualGeometryDebugVisualizationMode::Culling,
+				VirtualGeometryDebugVisualizationMode::Residency,
+				VirtualGeometryDebugVisualizationMode::HiZ,
+				VirtualGeometryDebugVisualizationMode::Error
+			};
+
+			context.ExpectEqual(expectedOrder.size(), modes.size(), "The VG toolbar should expose only the nine public visualizer modes.");
+			for (std::size_t index = 0u; index < expectedOrder.size(); ++index)
+			{
+				context.Expect(
+					modes[index] == expectedOrder[index],
+					"The VG toolbar should keep a predictable order: Off, adaptive detail, identity, culling/residency, Hi-Z, then error.");
+			}
+
+			for (const VirtualGeometryDebugVisualizationMode mode : modes)
 			{
 				const std::string label = ToString(mode);
 				context.Expect(!label.empty(), "Every virtual geometry visualizer mode should have a Game View label.");

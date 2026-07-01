@@ -1517,6 +1517,39 @@ namespace
 		report.virtualGeometry.skippedLevels.push_back(skipped);
 	}
 
+	std::string BuildSmallMeshSkipMessage(std::uint32_t sourceTriangleCount, std::uint32_t minimumSourceTriangles)
+	{
+		std::ostringstream message;
+		message << "source mesh has " << sourceTriangleCount
+			<< " triangles, below the minimum source threshold of " << minimumSourceTriangles
+			<< "; extra adaptive detail levels would add switches without useful reduction";
+		return message.str();
+	}
+
+	std::string BuildMinimumGeneratedTriangleMessage(std::uint32_t desiredTriangleCount, std::uint32_t minimumGeneratedTriangles)
+	{
+		std::ostringstream message;
+		message << "target requested " << desiredTriangleCount
+			<< " triangles, below the minimum generated detail threshold of " << minimumGeneratedTriangles;
+		return message.str();
+	}
+
+	std::string BuildUsefulReductionMessage(
+		std::string_view domain,
+		float reduction,
+		float threshold,
+		std::uint32_t previousCount,
+		std::uint32_t candidateCount)
+	{
+		std::ostringstream message;
+		message << "candidate " << domain << " reduction is "
+			<< std::fixed << std::setprecision(1) << (std::max(reduction, 0.0f) * 100.0f)
+			<< "% from " << previousCount << " to " << candidateCount
+			<< ", below the useful threshold of " << (threshold * 100.0f)
+			<< "%; target was merged into the nearest generated detail";
+		return message.str();
+	}
+
 	bool BuildVirtualGeometryLods(
 		const std::vector<VertexRaw>& vertices,
 		const std::vector<std::uint32_t>& sourceIndices,
@@ -1571,7 +1604,7 @@ namespace
 					VirtualGeometryDetailTargetRecordStatus::Skipped,
 					VirtualGeometrySkippedDetailRecordReason::MeshTooSmall,
 					0u,
-					"source mesh is too small for useful adaptive LOD generation");
+					BuildSmallMeshSkipMessage(sourceTriangleCount, settings.minimumSourceTriangles));
 			}
 			return true;
 		}
@@ -1602,7 +1635,7 @@ namespace
 					VirtualGeometryDetailTargetRecordStatus::Skipped,
 					VirtualGeometrySkippedDetailRecordReason::TooFewTriangles,
 					static_cast<std::uint32_t>(outLods.size() - 1u),
-					"target triangle count is below the minimum generated detail threshold");
+					BuildMinimumGeneratedTriangleMessage(desiredTriangleCount, settings.minimumGeneratedTriangles));
 				continue;
 			}
 
@@ -1711,7 +1744,12 @@ namespace
 					VirtualGeometryDetailTargetRecordStatus::Merged,
 					VirtualGeometrySkippedDetailRecordReason::InsufficientTriangleReduction,
 					static_cast<std::uint32_t>(outLods.size() - 1u),
-					"candidate triangle reduction is too small to justify another detail level",
+					BuildUsefulReductionMessage(
+						"triangle",
+						triangleReduction,
+						settings.minimumUsefulTriangleReduction,
+						previousTriangleCount,
+						candidateTriangleCount),
 					candidateTriangleCount,
 					candidateMeshletCount,
 					actualCandidateRatio);
@@ -1727,7 +1765,12 @@ namespace
 					VirtualGeometryDetailTargetRecordStatus::Merged,
 					VirtualGeometrySkippedDetailRecordReason::InsufficientMeshletReduction,
 					static_cast<std::uint32_t>(outLods.size() - 1u),
-					"candidate meshlet reduction is too small to justify another detail level",
+					BuildUsefulReductionMessage(
+						"meshlet",
+						meshletReduction,
+						settings.minimumUsefulMeshletReduction,
+						previousMeshletCount,
+						candidateMeshletCount),
 					candidateTriangleCount,
 					candidateMeshletCount,
 					actualCandidateRatio);
@@ -2685,6 +2728,7 @@ namespace
 				cluster.parentClusterId,
 				cluster.lodIndex,
 				cluster.groupCount,
+				cluster.materialSectionId,
 				cluster.pageId,
 				cluster.fallbackClusterId
 			});

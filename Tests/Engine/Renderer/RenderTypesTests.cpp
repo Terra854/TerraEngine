@@ -34,7 +34,7 @@ namespace TerraEngine::Tests {
 	static_assert(sizeof(GPULightAnalysisRecord) == 16, "GPU light analysis records should stay compact for readback buffers.");
 	static_assert(sizeof(ClusterData) == 48, "Cluster data should stay aligned with clustered-lighting shader reads.");
 	static_assert(sizeof(FrameCullingDataGPU) == 336, "Frame culling data should stay tightly packed for GPU uploads.");
-	static_assert(sizeof(MeshletCullingCountersGPU) == 16, "Meshlet culling counters should preserve their 16-byte GPU layout.");
+	static_assert(sizeof(MeshletCullingCountersGPU) == 48, "Meshlet culling counters should preserve their 48-byte diagnostic GPU layout.");
 
 	void RegisterRenderTypesTests(TestRegistry& registry) {
 		registry.Add("Engine.RenderTypes.ClampSkyTintClampsEveryChannel", [](TestContext& context) {

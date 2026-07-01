@@ -41,7 +41,7 @@ struct FrameCullingData
 	column_major float4x4 invProjection;
 	uint4 renderSettings0; // x: shadowRes, y: shadowFilter, z: retainedLightBudget, w: enableLTC
 	uint4 renderSettings1; // x: enableIBL, y: aniso, z: shadowLightBudget, w: uploadedLightBudget
-	float4 renderSettings2; // x: indirectStrength, y: aoStrength, z: aoQuality, w: hiZHistoryValid
+	float4 renderSettings2; // x: indirectStrength, y: aoStrength, z: aoQuality, w: hiZPyramidAvailable
 	uint globalTaskCullingEnabled;
 	uint taskShaderSupported;
 	uint clusteredLightingValid;
@@ -713,10 +713,12 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 	const bool hiZTrusted = frame.renderSettings2.w > 0.5f;
 	if (debugMode == kVirtualGeometryDebugModeLOD)
 	{
+		// LOD mode: every selected detail level receives a stable hash color.
 		return BuildVirtualGeometryHashColor(selectedLod + 17u);
 	}
 	if (debugMode == kVirtualGeometryDebugModeMeshletId)
 	{
+		// Meshlet Id mode: dense patches show up as rapid per-meshlet color changes.
 		return BuildVirtualGeometryHashColor(input.meshletIndex + 31u);
 	}
 	if (debugMode == kVirtualGeometryDebugModeBounds)
@@ -725,6 +727,7 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 		{
 			return float3(1.0f, 0.0f, 1.0f);
 		}
+		// Bounds mode: blue means small projected groups, yellow means large groups.
 		const float radiusBand = saturate(log2(max(input.meshletBoundsRadius, 1e-5f) * 64.0f + 1.0f) / 8.0f);
 		return lerp(float3(0.05f, 0.25f, 1.0f), float3(1.0f, 0.9f, 0.05f), radiusBand);
 	}
@@ -742,10 +745,16 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 		{
 			return float3(1.0f, 0.55f, 0.05f);
 		}
+		// Culling mode: visible meshlets are green, or cyan when Hi-Z is trusted.
 		return hiZTrusted ? float3(0.05f, 0.8f, 1.0f) : float3(0.1f, 0.85f, 0.25f);
 	}
 	if (debugMode == kVirtualGeometryDebugModeHiZ)
 	{
+		if (failOpen != 0u)
+		{
+			return float3(1.0f, 0.0f, 0.15f);
+		}
+		// Hi-Z mode: cyan means the current-view pyramid is available; gray means missing.
 		return hiZTrusted ? float3(0.05f, 0.8f, 1.0f) : float3(0.35f, 0.35f, 0.35f);
 	}
 	if (debugMode == kVirtualGeometryDebugModeResidency)
@@ -754,6 +763,7 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 		{
 			return float3(0.55f, 0.35f, 0.1f);
 		}
+		// Residency mode: orange highlights requested or missing high-detail pages.
 		return missingPageCount > 0u ? float3(1.0f, 0.55f, 0.05f) : float3(0.0f, 0.75f, 0.45f);
 	}
 	if (debugMode == kVirtualGeometryDebugModeError)
@@ -762,10 +772,12 @@ float3 BuildVirtualGeometryDebugColor(uint debugMode, PSIn input, FrameCullingDa
 		{
 			return float3(1.0f, 0.0f, 0.15f);
 		}
+		// Error mode: clean selections are cyan, while page pressure turns orange.
 		return missingPageCount > 0u ? float3(1.0f, 0.55f, 0.05f) : float3(0.2f, 0.9f, 0.9f);
 	}
 	if (debugMode == kVirtualGeometryDebugModeCluster)
 	{
+		// Cluster mode: selected cluster identity drives a stable hash color.
 		const uint clusterSeed = clusterHashSeed + selectedClusterCount * 101u + input.meshletIndex;
 		return BuildVirtualGeometryHashColor(clusterSeed + 73u);
 	}

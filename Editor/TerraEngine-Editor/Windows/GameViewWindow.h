@@ -4,6 +4,7 @@
 
 #pragma once
 #include "../Framework/EditorWindow.h"
+#include "Engine/Renderer/RenderTypes.h"
 #include <vector>
 #include <string>
 #include <imgui.h>
@@ -37,6 +38,10 @@ private:
 	bool m_MuteAudio = false;
 	bool m_Stats = false;
 	bool m_Gizmos = false;
+	// Game View owns its visualizer preference so Scene View can inspect a
+	// different mode at the same time without changing project render settings.
+	VirtualGeometryDebugVisualizationMode m_VirtualGeometryDebugMode = VirtualGeometryDebugVisualizationMode::None;
+	bool m_VirtualGeometryDebugModeInitialized = false;
 	ImVec4 m_StatsToggleInactiveBg = ImVec4(0.26f, 0.26f, 0.26f, 0.35f);
 	ImVec4 m_StatsToggleHoverBg = ImVec4(0.36f, 0.36f, 0.36f, 0.65f);
 	ImVec4 m_StatsToggleActiveBg = ImVec4(0.41f, 0.41f, 0.41f, 0.95f);

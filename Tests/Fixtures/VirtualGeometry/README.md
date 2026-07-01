@@ -24,6 +24,25 @@ clear source attribution instead of committed as heavy binary files.
   budget while preserving visible fallback detail.
 - Mixed-distance cluster scene: one large object spanning near and far view
   regions so hierarchical cluster selection can refine only nearby regions.
+- Hardening manifest: `hardening-fixtures.json` lists the clean-checkout
+  categories required by feature `029`, expected diagnostics for each category,
+  importer/export coverage tags, package formats, and which larger assets are
+  optional manual stress coverage.
+
+## Coverage Tags
+
+Generated package meshes can publish `virtualGeometry.coverageTags` in their
+`.import.json` sidecar. These tags are diagnostics for tests and tools; they do
+not enable rendering behavior. Current tags include:
+
+- `package-gltf`, `package-glb`, and `package-fbx` for package-format coverage.
+- `package-static-geometry` and `package-imported` for generated static meshes.
+- `adaptive-targets`, `cluster-hierarchy`, `fallback-coverage`, and
+  `page-links` for required virtual geometry metadata.
+- `tiny-mesh-skip`, `dense-cluster-selection`, `multi-material-package`, and
+  `material-coverage-review` for broad asset categories.
+- `streaming-pressure`, `pinned-fallback`, and `budget-pressure` for residency
+  and eviction stress coverage.
 
 ## Visual Correctness Stress Notes
 
@@ -71,6 +90,28 @@ meshes. Recreate the compiler stress shape with this deterministic recipe:
 - Compile with virtual geometry enabled and meshlet bounds enabled. Expected
   invariants: status `Cooked`, at least three detail levels, one MVP page per
   detail level, non-zero cullable groups, and a resident fallback detail.
+
+## Feature 029 Hardening Quickstart
+
+Use `specs/029-virtual-geometry-hardening/quickstart.md` for the staged
+hardening workflow. The clean-checkout pass should use the manifest in this
+directory and the focused CTest slice:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryHardening|Editor.VirtualGeometryHardening" --output-on-failure -C Debug
+```
+
+Manual stress assets may be downloaded or generated locally, but they are not
+required for the default fixture pass. Keep those optional assets outside the
+critical clean-checkout path unless a later feature explicitly approves them.
+
+For manual large-asset passes, import one dense scan-style mesh, one
+hard-surface multi-material mesh, and one thin/foliage-like occlusion mesh into
+a local scratch project. Rebuild virtual geometry, enable the Game View stats
+overlay, then check LOD, Cluster, Residency, Hi-Z, and Error modes while moving
+the camera from close-up to far distance. Record meshlet selected/dispatched
+counts, pinned fallback page bytes, requested/missing page counts, and whether
+the object stays visible when high-detail pages are missing.
 
 ## Stress Counter Thresholds
 

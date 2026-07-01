@@ -151,6 +151,93 @@ namespace TerraEngine::AssetPipeline
 			}
 		}
 
+		std::uint32_t CountMaterialAssignmentsForMesh(const ModelPackageImportResult& result, const TerraEngine::UUID& meshGuid)
+		{
+			return static_cast<std::uint32_t>(std::count_if(
+				result.materialAssignments.begin(),
+				result.materialAssignments.end(),
+				[&meshGuid](const ModelMaterialAssignment& assignment) {
+					return assignment.meshGuid == meshGuid;
+				}));
+		}
+
+		void PopulatePackageMaterialCoverageDiagnostics(GeneratedModelMeshAsset& mesh, std::uint32_t sourceMaterialAssignmentCount)
+		{
+			mesh.virtualGeometryClusterSummary.sourceMaterialAssignmentCount = sourceMaterialAssignmentCount;
+			if (sourceMaterialAssignmentCount == 0u || mesh.virtualGeometryClusterSummary.materialSectionCount == 0u)
+			{
+				mesh.virtualGeometryClusterSummary.materialCoverageValid = sourceMaterialAssignmentCount <= 1u;
+				return;
+			}
+
+			const bool sectionCountCanRepresentAssignments =
+				mesh.virtualGeometryClusterSummary.materialSectionCount >= sourceMaterialAssignmentCount
+				&& mesh.virtualGeometryClusterSummary.clusterMaterialSectionCount >= sourceMaterialAssignmentCount;
+			mesh.virtualGeometryClusterSummary.materialCoverageValid =
+				mesh.virtualGeometryClusterSummary.materialCoverageValid
+				&& sectionCountCanRepresentAssignments;
+			if (!mesh.virtualGeometryClusterSummary.materialCoverageValid)
+			{
+				mesh.virtualGeometryWarnings.push_back(
+					"Virtual geometry material coverage is diagnostic-only for this package mesh: authored material assignments exceed cooked VG material sections.");
+			}
+		}
+
+		void AddCoverageTag(GeneratedModelMeshAsset& mesh, std::string_view tag)
+		{
+			const std::string tagText(tag);
+			if (std::find(mesh.virtualGeometryCoverageTags.begin(), mesh.virtualGeometryCoverageTags.end(), tagText) == mesh.virtualGeometryCoverageTags.end())
+			{
+				mesh.virtualGeometryCoverageTags.push_back(tagText);
+			}
+		}
+
+		void PopulateVirtualGeometryCoverageTags(GeneratedModelMeshAsset& mesh, std::uint32_t sourceMaterialAssignmentCount)
+		{
+			// Keep broad asset-coverage metadata with the generated mesh so the
+			// package sidecar can prove FBX import coverage without loading a
+			// large manual stress asset in every test run.
+			mesh.virtualGeometryCoverageTags.clear();
+			AddCoverageTag(mesh, "package-static-geometry");
+			AddCoverageTag(mesh, "package-fbx");
+			if (!mesh.virtualGeometryTargets.empty())
+			{
+				AddCoverageTag(mesh, "adaptive-targets");
+			}
+			if (mesh.virtualGeometryStatus == "Skipped")
+			{
+				AddCoverageTag(mesh, "tiny-mesh-skip");
+			}
+			if (mesh.virtualGeometryCooked)
+			{
+				AddCoverageTag(mesh, "package-imported");
+			}
+			if (mesh.virtualGeometryDetailLevels >= 3u || mesh.virtualGeometrySourceTriangles >= 512u)
+			{
+				AddCoverageTag(mesh, "dense-cluster-selection");
+			}
+			if (mesh.virtualGeometryClusterSummary.clusterCount > 0u)
+			{
+				AddCoverageTag(mesh, "cluster-hierarchy");
+			}
+			if (mesh.virtualGeometryClusterSummary.fallbackCoverageValid)
+			{
+				AddCoverageTag(mesh, "fallback-coverage");
+			}
+			if (mesh.virtualGeometryClusterSummary.pageLinkCount > 0u)
+			{
+				AddCoverageTag(mesh, "page-links");
+			}
+			if (sourceMaterialAssignmentCount > 1u)
+			{
+				AddCoverageTag(mesh, "multi-material-package");
+			}
+			if (sourceMaterialAssignmentCount > 1u && !mesh.virtualGeometryClusterSummary.materialCoverageValid)
+			{
+				AddCoverageTag(mesh, "material-coverage-review");
+			}
+		}
+
 		std::string ComputeFileHashHex(const std::filesystem::path& filePath)
 		{
 			std::ifstream in(filePath, std::ios::binary);
@@ -928,6 +1015,9 @@ namespace TerraEngine::AssetPipeline
 			packageMesh.virtualGeometrySettings = ToGeneratedSettings(compileReport.virtualGeometry.adaptiveSettings, options.hasVirtualGeometrySettings);
 			PopulateVirtualGeometryTargetDiagnostics(compileReport, packageMesh);
 			PopulateGeneratedMeshVirtualGeometryMetadata(compiledMeshPath, packageMesh, result.diagnostics);
+			const std::uint32_t materialAssignmentCount = CountMaterialAssignmentsForMesh(result, packageMesh.guid);
+			PopulatePackageMaterialCoverageDiagnostics(packageMesh, materialAssignmentCount);
+			PopulateVirtualGeometryCoverageTags(packageMesh, materialAssignmentCount);
 			result.generatedMeshes.push_back(std::move(packageMesh));
 		}
 

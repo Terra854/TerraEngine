@@ -61,6 +61,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterVirtualGeometryMeshCompilerTests(TestRegistry& registry);
 	void RegisterVirtualGeometryPackageImportTests(TestRegistry& registry);
 	void RegisterVirtualGeometryDebugViewTests(TestRegistry& registry);
+	void RegisterVirtualGeometryHardeningDebugViewTests(TestRegistry& registry);
 	void RegisterArchitectureHardeningPlayModeTests(TestRegistry& registry);
 	void RegisterFullParallelFrameDiagnosticsTests(TestRegistry& registry);
 	void RegisterRuntimeLayoutDiagnosticsTests(TestRegistry& registry);
@@ -135,6 +136,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterVirtualGeometryMeshCompilerTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryPackageImportTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryDebugViewTests(registry);
+	TerraEngine::EditorTests::RegisterVirtualGeometryHardeningDebugViewTests(registry);
 	TerraEngine::EditorTests::RegisterArchitectureHardeningPlayModeTests(registry);
 	TerraEngine::EditorTests::RegisterFullParallelFrameDiagnosticsTests(registry);
 	TerraEngine::EditorTests::RegisterRuntimeLayoutDiagnosticsTests(registry);

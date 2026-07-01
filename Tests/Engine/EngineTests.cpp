@@ -45,6 +45,7 @@ namespace TerraEngine::Tests {
 	void RegisterResourceStreamingPolicyTests(TestRegistry& registry);
 	void RegisterResourceStreamingPreloadTests(TestRegistry& registry);
 	void RegisterResourceStreamingResidencyIntegrationTests(TestRegistry& registry);
+	void RegisterVirtualGeometryPageStreamingHardeningTests(TestRegistry& registry);
 	void RegisterVirtualGeometryResourceTests(TestRegistry& registry);
 	void RegisterVirtualGeometryResidencyTests(TestRegistry& registry);
 	void RegisterRenderTypesTests(TestRegistry& registry);
@@ -86,6 +87,7 @@ namespace TerraEngine::Tests {
 	void RegisterRenderSnapshotContractTests(TestRegistry& registry);
 	void RegisterRenderSubmissionOwnershipTests(TestRegistry& registry);
 	void RegisterVirtualGeometryDiagnosticsTests(TestRegistry& registry);
+	void RegisterVirtualGeometryHardeningTests(TestRegistry& registry);
 	void RegisterVirtualGeometryHiZTests(TestRegistry& registry);
 	void RegisterVirtualGeometryMultiViewTests(TestRegistry& registry);
 	void RegisterVirtualGeometryQualityTests(TestRegistry& registry);
@@ -187,6 +189,7 @@ int main() {
 	TerraEngine::Tests::RegisterResourceStreamingPolicyTests(registry);
 	TerraEngine::Tests::RegisterResourceStreamingPreloadTests(registry);
 	TerraEngine::Tests::RegisterResourceStreamingResidencyIntegrationTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryPageStreamingHardeningTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryResourceTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryResidencyTests(registry);
 	TerraEngine::Tests::RegisterRenderTypesTests(registry);
@@ -203,6 +206,7 @@ int main() {
 	TerraEngine::Tests::RegisterRenderSmallSceneOverheadTests(registry);
 	TerraEngine::Tests::RegisterRenderShadowParallelParityTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryHardeningTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryHiZTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryMultiViewTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryQualityTests(registry);

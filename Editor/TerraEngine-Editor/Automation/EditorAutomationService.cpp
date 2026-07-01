@@ -365,7 +365,8 @@ namespace TerraEngine::Editor::Automation
 					{"actualMeshletCount", diagnostic.actualMeshletCount},
 					{"nearestGeneratedLevelIndex", diagnostic.nearestGeneratedLevelIndex},
 					{"triangleCount", diagnostic.triangleCount},
-					{"meshletCount", diagnostic.meshletCount}
+					{"meshletCount", diagnostic.meshletCount},
+					{"message", diagnostic.message}
 				});
 			}
 
@@ -531,7 +532,10 @@ namespace TerraEngine::Editor::Automation
 				{"clusterCount", summary.clusterCount},
 				{"selectedClusterCount", summary.selectedClusterCount},
 				{"fallbackClusterCount", summary.fallbackClusterCount},
-				{"fallbackCoverageValid", summary.fallbackCoverageValid}
+				{"materialSectionCount", summary.materialSectionCount},
+				{"clusterMaterialSectionCount", summary.clusterMaterialSectionCount},
+				{"fallbackCoverageValid", summary.fallbackCoverageValid},
+				{"materialCoverageValid", summary.materialCoverageValid}
 			};
 		}
 
@@ -913,6 +917,7 @@ namespace TerraEngine::Editor::Automation
 		add("game_view.capture", "capture", MutationMode::ReadOnly, false, false, false, "width?: integer, height?: integer, format?: image/png, freshness?: latestCompleted|nextFrame, includeOverlays?: bool, transparentBackground?: bool");
 		add("camera.capture_object", "capture", MutationMode::ReadOnly, false, true, false, "object|camera|target: uuid|entity|name, includeDisabled?: bool, width?: integer, height?: integer, format?: image/png");
 		add("camera.capture_custom", "capture", MutationMode::ReadOnly, false, false, false, "position: [x,y,z], target?: [x,y,z], forward?: [x,y,z], up?: [x,y,z], projection?: perspective|orthographic, width?: integer, height?: integer");
+		add("renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene");
 		add("diagnostics.get_summary", "diagnostics", MutationMode::ReadOnly, false, false, false, "includeDetails?: bool, surface?: string");
 	}
 
@@ -1013,6 +1018,7 @@ namespace TerraEngine::Editor::Automation
 		if (toolName == "game_view.capture") return HandleGameViewCapture(arguments, requestId);
 		if (toolName == "camera.capture_object") return HandleCameraObjectCapture(arguments, requestId);
 		if (toolName == "camera.capture_custom") return HandleCustomCameraCapture(arguments, requestId);
+		if (toolName == "renderer.virtualGeometry.stats") return HandleRendererVirtualGeometryStats(arguments, requestId);
 		if (toolName == "diagnostics.get_summary") return HandleDiagnosticsGetSummary(arguments, requestId);
 		return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Capability metadata exists but no handler is registered.");
 	}
@@ -2634,6 +2640,82 @@ namespace TerraEngine::Editor::Automation
 			{"farPlane", farPlane}
 		};
 		return result;
+	}
+
+	nlohmann::json EditorAutomationService::HandleRendererVirtualGeometryStats(const nlohmann::json& arguments, const std::string& requestId)
+	{
+		// The optional view selector lets MCP clients compare Game and Scene
+		// surfaces without reading editor overlay text. A missing value uses the
+		// Game View because that is the authored camera path used for runtime
+		// validation and recent Hi-Z debugging.
+		RenderViewType viewType = RenderViewType::Game;
+		if (arguments.contains("viewType"))
+		{
+			const std::optional<RenderViewType> parsedViewType = ParseAutomationRenderViewType(arguments["viewType"]);
+			if (!parsedViewType)
+			{
+				return BuildError(requestId, ErrorCategory::Validation, "viewType must be Game or Scene.");
+			}
+			if (*parsedViewType != RenderViewType::Game && *parsedViewType != RenderViewType::Scene)
+			{
+				return BuildError(requestId, ErrorCategory::Validation, "Virtual geometry stats are only exposed for Game and Scene views.");
+			}
+			viewType = *parsedViewType;
+		}
+
+		if (editorContext == nullptr || editorContext->engine == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "Renderer is not available.");
+		}
+
+		RenderSystem* renderSystem = editorContext->engine->GetSystem<RenderSystem>();
+		if (renderSystem == nullptr)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "RenderSystem is not registered.");
+		}
+
+		const RenderStatsSnapshot stats = renderSystem->GetLatestRenderStats(viewType);
+		if (!stats.valid)
+		{
+			return BuildError(requestId, ErrorCategory::MissingTarget, "No render stats have been produced for the requested view.", ToString(viewType));
+		}
+
+		// Return both the raw meshlet counters and their provenance. The same
+		// numbers may come from prepared CPU counts during warmup or true GPU
+		// readback after the task shader has completed, so automation must not
+		// guess which path it is observing.
+		nlohmann::json data = {
+			{"viewType", ToString(stats.viewType)},
+			{"valid", stats.valid},
+			{"frameTimeMs", stats.frameTimeMs},
+			{"fps", stats.fps},
+			{"drawCalls", stats.drawCalls},
+			{"triangles", stats.triangleCount},
+			{"meshletsSelected", stats.meshletsTotal},
+			{"meshletsDispatched", stats.meshletsDispatched},
+			{"meshletsCulled", stats.meshletsCulled},
+			{"meshletsCulledHiZ", stats.meshletsCulledHiZ},
+			{"counterSource", ToString(stats.meshletCounterSource)},
+			{"counterFrameId", stats.meshletCounterFrameId},
+			{"counterLatencyFrames", stats.meshletCounterLatencyFrames},
+			{"counterReason", stats.meshletCounterReason},
+			{"taskCullingActive", stats.taskCullingActive},
+			{"hiZActive", stats.hiZActive},
+			{"hiZState", ToString(stats.hiZState)},
+			{"hiZStatusReason", stats.hiZStatusReason},
+			{"hiZWarmupFrames", stats.hiZWarmupFrames},
+			{"hiZDebugCounters", {
+				{"tests", stats.hiZTests},
+				{"projectionFailed", stats.hiZProjectionFailed},
+				{"fullRectCulled", stats.hiZFullRectCulled},
+				{"rectCoverageCulled", stats.hiZRectCoverageCulled},
+				{"centerCulled", stats.hiZCenterCulled},
+				{"vertexCoverageCulled", stats.hiZVertexCoverageCulled},
+				{"noOcclusionProof", stats.hiZNoOcclusionProof}
+			}},
+			{"vrsActive", stats.vrsActive}
+		};
+		return BuildSuccess(requestId, "Read virtual geometry culling stats.", std::move(data));
 	}
 
 	nlohmann::json EditorAutomationService::HandleDiagnosticsGetSummary(const nlohmann::json& arguments, const std::string& requestId)

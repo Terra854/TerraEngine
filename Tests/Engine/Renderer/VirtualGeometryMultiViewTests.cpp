@@ -1,12 +1,62 @@
 #include "TestHarness.h"
 
+#include "File Formats/TerraEngineMeshFile.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/RenderSystem.h"
 
 #include <algorithm>
 
 namespace TerraEngine::Tests
 {
+	namespace
+	{
+		VirtualGeometryAssetRuntime MakeModeSwitchTransitionAsset()
+		{
+			VirtualGeometryAssetRuntime asset{};
+			asset.assetId = TerraEngine::GenerateUUID();
+			asset.clusterCoverageValidated = true;
+			asset.detailLevels = {
+				{ 0u, 0u, 4u, 256u, 0.0f, 1.0f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 1u, 4u, 4u, 128u, 0.015f, 0.5f, glm::vec3(-1.0f), glm::vec3(1.0f) }
+			};
+			asset.cullableGroups.resize(8u);
+			GeometryPageRuntime page{};
+			page.pageId = 0u;
+			page.firstLodIndex = 0u;
+			page.lodCount = 2u;
+			page.groupCount = 8u;
+			page.state = GeometryPageState::Resident;
+			page.fallbackPage = true;
+			asset.pages = { page };
+
+			VirtualGeometryClusterRuntime root{};
+			root.clusterId = 0u;
+			root.parentClusterId = kVirtualGeometryInvalidIndex;
+			root.firstChildClusterId = 1u;
+			root.childCount = 1u;
+			root.lodIndex = 1u;
+			root.firstGroupIndex = 4u;
+			root.groupCount = 4u;
+			root.pageId = 0u;
+			root.fallbackClusterId = 0u;
+			root.geometricError = 0.01f;
+			root.boundsRadius = 1.0f;
+
+			VirtualGeometryClusterRuntime child{};
+			child.clusterId = 1u;
+			child.parentClusterId = 0u;
+			child.lodIndex = 0u;
+			child.firstGroupIndex = 0u;
+			child.groupCount = 4u;
+			child.pageId = 0u;
+			child.fallbackClusterId = 0u;
+			child.boundsRadius = 1.0f;
+			asset.clusters = { root, child };
+			return asset;
+		}
+	}
+
 	void RegisterVirtualGeometryMultiViewTests(TestRegistry& registry)
 	{
 		registry.Add("VirtualGeometry.Render.MultiView.KeepsSelectionStateIsolatedPerView", [](TestContext& context) {
@@ -74,6 +124,135 @@ namespace TerraEngine::Tests
 			context.Expect(diagnostics.front().viewType == RenderViewType::ExportRuntime, "Main runtime output should be reported separately from editor Game View.");
 			context.ExpectEqual(6u, diagnostics.front().selectedMeshlets, "Export runtime diagnostics should use the runtime view's selected range.");
 			context.Expect(!diagnostics.front().warnings.empty(), "Export runtime diagnostics should explain that the state is isolated from editor views.");
+		});
+
+		registry.Add("VirtualGeometry.Render.MultiView.KeepsCounterSourcesPerView", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 888u;
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState gameState;
+			gameState.outputKind = RenderOutputKind::GameView;
+			gameState.viewType = RenderViewType::Game;
+			gameState.outputId = 4u;
+			gameState.targetSize = glm::uvec2(1920u, 1080u);
+			gameState.draws.push_back({ TerraEngine::GenerateUUID(), TerraEngine::GenerateUUID(), { 0u, 0u, 12u, true, false, {}, true }, true });
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState sceneState = gameState;
+			sceneState.outputKind = RenderOutputKind::SceneView;
+			sceneState.viewType = RenderViewType::Scene;
+			sceneState.outputId = 5u;
+			sceneState.draws.front().range.meshletCount = 3u;
+
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, gameState, VirtualGeometryCounterSource::DelayedGPUReadback));
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, sceneState, VirtualGeometryCounterSource::GPUReadback));
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+					snapshot,
+					MakeDefaultVirtualGeometryQualityProfile(),
+					VirtualGeometryInactiveReason::None);
+
+			const auto gameIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& snapshot) {
+				return snapshot.viewType == RenderViewType::Game;
+			});
+			const auto sceneIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& snapshot) {
+				return snapshot.viewType == RenderViewType::Scene;
+			});
+
+			context.Expect(gameIt != diagnostics.end(), "Game view diagnostics should be present.");
+			context.Expect(sceneIt != diagnostics.end(), "Scene view diagnostics should be present.");
+			context.Expect(gameIt->counterSource == VirtualGeometryCounterSource::DelayedGPUReadback, "Game view should keep its delayed counter source.");
+			context.Expect(sceneIt->counterSource == VirtualGeometryCounterSource::GPUReadback, "Scene view should keep its GPU readback counter source.");
+			context.ExpectEqual(12u, gameIt->selectedMeshlets, "Game view counter values should stay tied to its draw range.");
+			context.ExpectEqual(3u, sceneIt->selectedMeshlets, "Scene view counter values should stay tied to its draw range.");
+			context.Expect(!gameIt->countersAuthoritative, "Delayed Game View counters should not be authoritative.");
+			context.Expect(sceneIt->countersAuthoritative, "GPU Scene View counters should be authoritative.");
+		});
+
+		registry.Add("VirtualGeometry.Render.MultiView.KeepsDebugModesPerView", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 889u;
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState gameState;
+			gameState.outputKind = RenderOutputKind::GameView;
+			gameState.viewType = RenderViewType::Game;
+			gameState.outputId = 2u;
+			gameState.targetSize = glm::uvec2(1920u, 1080u);
+			gameState.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::HiZ;
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState sceneState = gameState;
+			sceneState.outputKind = RenderOutputKind::SceneView;
+			sceneState.viewType = RenderViewType::Scene;
+			sceneState.outputId = 1u;
+			sceneState.targetSize = glm::uvec2(1280u, 720u);
+			sceneState.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::Cluster;
+
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, gameState, VirtualGeometryCounterSource::Prepared));
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, sceneState, VirtualGeometryCounterSource::Prepared));
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot> visibility =
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshots(snapshot);
+			const auto gameIt = std::find_if(visibility.begin(), visibility.end(), [](const auto& state) {
+				return state.viewType == RenderViewType::Game;
+			});
+			const auto sceneIt = std::find_if(visibility.begin(), visibility.end(), [](const auto& state) {
+				return state.viewType == RenderViewType::Scene;
+			});
+
+			context.Expect(gameIt != visibility.end(), "Game view visibility should be present.");
+			context.Expect(sceneIt != visibility.end(), "Scene view visibility should be present.");
+			context.Expect(gameIt->debugVisualizationMode == VirtualGeometryDebugVisualizationMode::HiZ, "Game View should preserve its own VG visualizer mode.");
+			context.Expect(sceneIt->debugVisualizationMode == VirtualGeometryDebugVisualizationMode::Cluster, "Scene View should preserve its own VG visualizer mode.");
+			context.Expect(gameIt->cameraSignature != sceneIt->cameraSignature, "Different debug modes should still remain tied to separate view snapshots.");
+		});
+
+		registry.Add("VirtualGeometry.Render.MultiView.ModeSwitchResetsLodTransitionState", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeModeSwitchTransitionAsset();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
+			quality.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::LOD;
+			TerraEngine::Renderer::VirtualGeometryClusterSelectionResult previous =
+				RenderSystem::SelectVirtualGeometryStableClusterCut(
+					asset,
+					meshId,
+					objectId,
+					quality,
+					220.0f,
+					glm::mat4(1.0f),
+					glm::vec3(0.0f),
+					glm::uvec2(0u),
+					true,
+					true,
+					nullptr,
+					RenderViewType::Game,
+					2u);
+			context.ExpectEqual(1u, previous.selectedClusters.front().clusterId, "Setup should begin from the high-detail child cut.");
+
+			quality.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::HiZ;
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult current =
+				RenderSystem::SelectVirtualGeometryStableClusterCut(
+					asset,
+					meshId,
+					objectId,
+					quality,
+					146.0f,
+					glm::mat4(1.0f),
+					glm::vec3(0.0f),
+					glm::uvec2(0u),
+					true,
+					true,
+					&previous,
+					RenderViewType::Game,
+					2u);
+
+			context.Expect(current.transitionState.resetThisFrame, "Changing visualizer modes should reset transition history for the target view.");
+			context.Expect(!current.transitionState.heldPreviousSelection, "Mode reset should not hold the previous high-detail cut.");
+			context.ExpectEqual(0u, current.selectedClusters.front().clusterId, "After reset, the current camera threshold should select the coarse root.");
 		});
 	}
 }

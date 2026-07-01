@@ -3424,12 +3424,15 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	hiZValidationInput.cameraCut = false;
 	const VulkanHiZValidationResult hiZValidation = ValidateVulkanHiZHistory(readableHiZHistory, hiZValidationInput);
 	const bool hiZOcclusionActive = hiZValidation.occlusionAllowed;
+	currentHiZHistory.warmupFrames = hiZValidation.warmupFrames;
 	currentFrameHiZ.latestInvalidReason = hiZValidation.invalidReason;
 	currentFrameHiZ.latestValidation = hiZValidation;
 	currentFrameHiZ.latestOcclusionAllowed = hiZOcclusionActive;
 	writableFrameHiZ.latestInvalidReason = hiZValidation.invalidReason;
 	writableFrameHiZ.latestValidation = hiZValidation;
 	writableFrameHiZ.latestOcclusionAllowed = hiZOcclusionActive;
+	currentFrameHiZ.history.warmupFrames = hiZValidation.warmupFrames;
+	writableFrameHiZ.history.warmupFrames = hiZValidation.warmupFrames;
 	if (!hiZValidation.historyValid)
 	{
 		currentFrameHiZ.history.invalidReason = hiZValidation.invalidReason;
@@ -5029,6 +5032,9 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 		hiZ.latestInvalidReason = VulkanHiZInvalidReason::MissingPyramid;
 		hiZ.latestOcclusionAllowed = false;
 		hiZ.latestValidation = {};
+		hiZ.latestValidation.width = hiZ.width;
+		hiZ.latestValidation.height = hiZ.height;
+		hiZ.latestValidation.pyramidReady = false;
 		hiZ.latestValidation.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
 		return false;
 	}
@@ -5040,6 +5046,9 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 			hiZ.latestInvalidReason = VulkanHiZInvalidReason::MissingPyramid;
 			hiZ.latestOcclusionAllowed = false;
 			hiZ.latestValidation = {};
+			hiZ.latestValidation.width = hiZ.width;
+			hiZ.latestValidation.height = hiZ.height;
+			hiZ.latestValidation.pyramidReady = false;
 			hiZ.latestValidation.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
 			return false;
 		}
@@ -5286,6 +5295,7 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 
 	hiZ.history = completedHistory;
 	hiZ.history.valid = true;
+	hiZ.history.warmupFrames = std::max(hiZ.history.warmupFrames, 1u);
 	hiZ.history.invalidReason = VulkanHiZInvalidReason::None;
 	return true;
 }

@@ -219,6 +219,69 @@ namespace TerraEngine::Tests
 			context.Expect(summary.contributors.front().reclaimableBytes > summary.contributors.back().reclaimableBytes, "Contributors should be ordered by reclaimable pressure.");
 		});
 
+		registry.Add("VirtualGeometry.Resource.Residency.BudgetPressureReportsPageStateBytes", [](TestContext& context) {
+			std::vector<Resource::VirtualGeometryResidentPage> pages = {
+				MakeResidentPage(4u, 0u, 128u, 1000, 100u, true),
+				MakeResidentPage(4u, 1u, 4096u, 10, 30u, false)
+			};
+			pages[0].pinnedFallback = true;
+
+			Resource::VirtualGeometryResidentPage requested;
+			requested.assetId = MakePageAssetId(4u);
+			requested.pageId = 2u;
+			requested.state = Resource::VirtualGeometryPageResidencyState::Requested;
+			requested.byteSize = 512u;
+			pages.push_back(requested);
+
+			Resource::VirtualGeometryResidentPage pendingIo = requested;
+			pendingIo.pageId = 3u;
+			pendingIo.state = Resource::VirtualGeometryPageResidencyState::PendingIO;
+			pendingIo.byteSize = 256u;
+			pages.push_back(pendingIo);
+
+			Resource::VirtualGeometryResidentPage pendingUpload = requested;
+			pendingUpload.pageId = 4u;
+			pendingUpload.state = Resource::VirtualGeometryPageResidencyState::PendingUpload;
+			pendingUpload.byteSize = 1024u;
+			pages.push_back(pendingUpload);
+
+			Resource::VirtualGeometryResidentPage failed = requested;
+			failed.pageId = 5u;
+			failed.state = Resource::VirtualGeometryPageResidencyState::Failed;
+			failed.byteSize = 2048u;
+			pages.push_back(failed);
+
+			Resource::VirtualGeometryResidentPage evicting = requested;
+			evicting.pageId = 6u;
+			evicting.state = Resource::VirtualGeometryPageResidencyState::Evicting;
+			evicting.byteSize = 8192u;
+			pages.push_back(evicting);
+
+			Resource::VirtualGeometryResidentPage evicted = requested;
+			evicted.pageId = 7u;
+			evicted.state = Resource::VirtualGeometryPageResidencyState::Evicted;
+			evicted.byteSize = 64u;
+			pages.push_back(evicted);
+
+			Resource::VirtualGeometryPageBudget budget;
+			budget.memoryBudgetBytes = 1024u;
+			const Resource::VirtualGeometryPageBudgetPressureSummary summary =
+				Resource::BuildVirtualGeometryPageBudgetPressureSummary(pages, budget);
+
+			context.ExpectEqual(4224ull, summary.residentBytes, "Resident bytes should include fallback and high-detail resident pages.");
+			context.ExpectEqual(4096ull, summary.reclaimableBytes, "Only nonfallback resident pages should be reclaimable.");
+			context.ExpectEqual(128ull, summary.pinnedFallbackBytes, "Pinned fallback bytes should be protected from eviction.");
+			context.ExpectEqual(1792ull, summary.requestedBytes, "Requested bytes should include Requested, PendingIO, and PendingUpload pages.");
+			context.ExpectEqual(256ull, summary.pendingIoBytes, "Pending IO bytes should be reported separately from upload work.");
+			context.ExpectEqual(1024ull, summary.pendingUploadBytes, "Pending upload bytes should be reported separately from disk IO.");
+			context.ExpectEqual(2048ull, summary.failedBytes, "Failed page bytes should be visible for streaming pressure diagnostics.");
+			context.ExpectEqual(8192ull, summary.evictingBytes, "Evicting bytes should remain visible until protected retirement completes.");
+			context.ExpectEqual(64ull, summary.evictedBytes, "Evicted bytes should identify recently retired page pressure.");
+			context.ExpectEqual(summary.overBudgetBytes, summary.pressureBytes, "Pressure bytes should mirror the older over-budget field.");
+			context.Expect(!summary.contributors.empty(), "Byte accounting should still publish per-asset contributors.");
+			context.ExpectEqual(summary.pinnedFallbackBytes, summary.contributors.front().pinnedFallbackBytes, "Contributor should carry pinned fallback bytes.");
+		});
+
 		registry.Add("VirtualGeometry.Resource.Residency.StreamingPressureChurnPreservesFallbackAndStableRequests", [](TestContext& context) {
 			std::vector<Resource::VirtualGeometryResidentPage> residentPages;
 			std::vector<Resource::VirtualGeometryPageNeedInput> needInputs;

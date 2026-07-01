@@ -16,6 +16,10 @@
 
 namespace TerraEngine::Renderer {
 
+	struct RenderFrameSnapshot;
+	struct VirtualGeometryDrawRange;
+	struct VirtualGeometryViewVisibilitySnapshot;
+
 	struct RenderPassTiming
 	{
 		std::string passId;
@@ -46,7 +50,9 @@ namespace TerraEngine::Renderer {
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
 		RenderViewType viewType = RenderViewType::Game;
 		std::uint64_t residentBytes = 0u;
+		std::uint64_t requestedBytes = 0u;
 		std::uint64_t reclaimableBytes = 0u;
+		std::uint64_t pinnedFallbackBytes = 0u;
 		std::uint32_t residentPages = 0u;
 		std::uint32_t pinnedFallbackPages = 0u;
 		std::uint32_t missingPages = 0u;
@@ -84,6 +90,13 @@ namespace TerraEngine::Renderer {
 
 	struct VirtualGeometryPageResidencyDiagnostics
 	{
+		std::uint64_t requestedBytes = 0u;
+		std::uint64_t pinnedFallbackBytes = 0u;
+		std::uint64_t pendingIoBytes = 0u;
+		std::uint64_t pendingUploadBytes = 0u;
+		std::uint64_t failedBytes = 0u;
+		std::uint64_t evictingBytes = 0u;
+		std::uint64_t evictedBytes = 0u;
 		std::uint32_t pendingIoPages = 0u;
 		std::uint32_t pendingUploadPages = 0u;
 		std::uint32_t evictingPages = 0u;
@@ -106,6 +119,10 @@ namespace TerraEngine::Renderer {
 		RenderViewType viewType = RenderViewType::Game;
 		std::uint64_t frameId = 0u;
 		bool active = false;
+		// The editor toolbar chooses a view-local false-color mode. Publishing
+		// it here lets diagnostics and tests prove that mode changes reached the
+		// next immutable frame snapshot instead of reading stale UI state.
+		VirtualGeometryDebugVisualizationMode debugVisualizationMode = VirtualGeometryDebugVisualizationMode::None;
 		VirtualGeometryInactiveReason inactiveReason = VirtualGeometryInactiveReason::None;
 		std::uint32_t sourceMeshlets = 0u;
 		std::uint32_t selectedMeshlets = 0u;
@@ -126,10 +143,30 @@ namespace TerraEngine::Renderer {
 		std::uint32_t evictingPages = 0u;
 		std::uint32_t evictedPages = 0u;
 		std::uint32_t pinnedFallbackPages = 0u;
+		VirtualGeometryCounterSource counterSource = VirtualGeometryCounterSource::Prepared;
+		std::uint64_t counterPreparedFrameId = 0u;
+		std::uint64_t counterReadbackFrameId = 0u;
+		std::uint32_t counterReadbackLatencyFrames = 0u;
+		std::string counterUnavailableReason;
+		std::uint32_t counterToleranceMeshlets = 1u;
+		float counterTolerancePercent = 1.0f;
+		bool countersAuthoritative = false;
+		VirtualGeometryHiZState hiZState = VirtualGeometryHiZState::MissingPyramid;
+		glm::uvec2 hiZPyramidSize = glm::uvec2(0u);
+		glm::uvec2 hiZRenderSize = glm::uvec2(0u);
+		std::uint64_t hiZCameraSignature = 0u;
+		std::uint64_t hiZDepthSceneSignature = 0u;
+		std::uint32_t hiZWarmupFrames = 0u;
 		std::uint32_t lodTransitionCandidates = 0u;
+		std::uint32_t lodTransitionStates = 0u;
+		std::uint32_t lodTransitionHeldSelections = 0u;
+		std::uint32_t lodTransitionAcceptedSelections = 0u;
+		std::uint32_t lodTransitionResets = 0u;
 		std::uint32_t poppingRiskWarnings = 0u;
 		float maxGeometricError = 0.0f;
 		float effectiveLodErrorScale = 1.0f;
+		float lodTransitionHysteresisPixels = 0.35f;
+		std::uint32_t lodTransitionStableFrames = 3u;
 		std::uint32_t configuredMaxLodDrop = 0u;
 		std::uint64_t geometryBudgetBytes = 0u;
 		std::uint64_t budgetPressureBytes = 0u;
@@ -139,6 +176,7 @@ namespace TerraEngine::Renderer {
 		VirtualGeometryClusterSelectionDiagnostics clusterSelection;
 		VirtualGeometryPageResidencyDiagnostics pageResidency;
 		VirtualGeometryHiZValidationDiagnostics hiZValidation;
+		std::vector<OcclusionDebugSample> occlusionDebugSamples;
 		std::vector<std::uint32_t> selectedLodHistogram;
 		std::vector<VirtualGeometryBudgetContributor> budgetContributors;
 		std::vector<std::string> warnings;
@@ -234,6 +272,7 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildDefaultAdaptiveVirtualGeometryDiagnostics(RenderViewType viewType, std::uint64_t frameId, const AdaptiveVirtualGeometryCookProfile& profile);
 	TERRAENGINE_API void ApplyVirtualGeometryAdaptiveDiagnostics(VirtualGeometryViewDiagnosticsSnapshot& snapshot, VirtualGeometryAdaptiveSettingsDiagnostics settings, VirtualGeometryCookOutputDiagnostics cookOutput, VirtualGeometryClusterSelectionDiagnostics clusterSelection, VirtualGeometryPageResidencyDiagnostics pageResidency, VirtualGeometryHiZValidationDiagnostics hiZValidation);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryLodQualityDiagnostics(RenderViewType viewType, std::uint64_t frameId, const std::vector<VirtualGeometryAssetRuntime>& assets, const VirtualGeometryQualityProfile& qualityProfile);
+	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(const VirtualGeometryViewVisibilitySnapshot& visibility);
 	TERRAENGINE_API std::vector<VirtualGeometryViewDiagnosticsSnapshot> BuildVirtualGeometryViewDiagnosticsFromSnapshot(const RenderFrameSnapshot& snapshot, const VirtualGeometryQualityProfile& qualityProfile, VirtualGeometryInactiveReason inactiveReason);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildVirtualGeometryHiZDiagnostics(const VirtualGeometryHiZDiagnosticsInput& input);
 	TERRAENGINE_API void AddVirtualGeometryFailOpenDiagnostic(RenderDiagnosticsSummary& summary, const TerraEngine::UUID& meshId, const VirtualGeometryDrawRange& range);

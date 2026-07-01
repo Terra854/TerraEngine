@@ -108,6 +108,30 @@ bool ValidateVirtualGeometryManifestBlock(const nlohmann::json& virtualGeometry,
 			return false;
 		}
 	}
+
+	if (!virtualGeometry.contains("coverage") || !virtualGeometry["coverage"].is_object()) {
+		outError = "Virtual geometry export manifest is missing coverage declaration.";
+		return false;
+	}
+	const nlohmann::json& coverage = virtualGeometry["coverage"];
+	if (!coverage.contains("fixtureManifest") || !coverage["fixtureManifest"].is_string() || coverage["fixtureManifest"].get<std::string>().empty()) {
+		outError = "Virtual geometry export manifest coverage is missing fixtureManifest.";
+		return false;
+	}
+	if (!coverage.contains("requiredCategories") || !coverage["requiredCategories"].is_array()) {
+		outError = "Virtual geometry export manifest coverage is missing requiredCategories.";
+		return false;
+	}
+	bool exportsRuntimeMetadata = false;
+	for (const nlohmann::json& category : coverage["requiredCategories"]) {
+		if (category.is_string() && category.get<std::string>() == "export") {
+			exportsRuntimeMetadata = true;
+		}
+	}
+	if (!exportsRuntimeMetadata) {
+		outError = "Virtual geometry export manifest coverage must include the export category.";
+		return false;
+	}
 	return true;
 }
 

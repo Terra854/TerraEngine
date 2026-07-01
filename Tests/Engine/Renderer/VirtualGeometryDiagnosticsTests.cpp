@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "Renderer/Graph/RenderDiagnostics.h"
+#include "Renderer/Graph/RenderFrameSnapshot.h"
 
 #include <string>
 
@@ -74,6 +75,35 @@ namespace TerraEngine::Tests
 			context.Expect(snapshot.hiZValidation.inactiveReason.empty(), "Inactive reason should stay empty while Hi-Z remains active.");
 		});
 
+		registry.Add("VirtualGeometry.Diagnostics.CarriesBoundedHiZExplanationSamples", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.frameId = 930u;
+			visibility.valid = true;
+			visibility.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			visibility.hiZValidationState.pyramidReady = true;
+			visibility.hiZValidationState.warmupFrames = 3u;
+			visibility.hiZValidationState.pyramidSize = glm::uvec2(1280u, 720u);
+			visibility.hiZValidationState.renderSize = glm::uvec2(1280u, 720u);
+
+			for (std::uint32_t index = 0u; index < TerraEngine::Renderer::kVirtualGeometryOcclusionDebugSampleCapacity + 8u; ++index)
+			{
+				TerraEngine::Renderer::OcclusionDebugSample sample{};
+				sample.meshletId = index;
+				sample.clusterId = index / 2u;
+				sample.outcome = index == 0u ? VirtualGeometryCullOutcome::HiZCulled : VirtualGeometryCullOutcome::Visible;
+				sample.reason = index == 0u ? "Hi-Z rectangle proved full occlusion." : "Visible or fail-open sample.";
+				visibility.occlusionDebugSamples.push_back(sample);
+			}
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot snapshot =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(TerraEngine::Renderer::kVirtualGeometryOcclusionDebugSampleCapacity, static_cast<std::uint32_t>(snapshot.occlusionDebugSamples.size()), "Diagnostics should keep a bounded representative Hi-Z explanation list.");
+			context.Expect(snapshot.occlusionDebugSamples.front().outcome == VirtualGeometryCullOutcome::HiZCulled, "The first representative Hi-Z sample should preserve its outcome.");
+			context.Expect(!snapshot.occlusionDebugSamples.front().reason.empty(), "Representative Hi-Z samples should carry user-facing explanation text.");
+		});
+
 		registry.Add("VirtualGeometry.Diagnostics.KeepsSelectionDispatchAndResidencyCountersConsistent", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset{};
 			asset.assetId = TerraEngine::GenerateUUID();
@@ -115,6 +145,34 @@ namespace TerraEngine::Tests
 			context.Expect(snapshot.inactiveReason == VirtualGeometryInactiveReason::UnsupportedView, "Inactive diagnostics should preserve the exact reason.");
 			context.Expect(std::string(ToString(snapshot.inactiveReason)).find("Unsupported") != std::string::npos, "Inactive reason should have a user-facing label.");
 			context.Expect(!snapshot.warnings.empty(), "Inactive diagnostics should include a warning explaining fallback rendering.");
+		});
+
+		registry.Add("VirtualGeometry.Diagnostics.VisualizerModeChangesPublishNextFrame", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot previousFrame{};
+			previousFrame.viewType = RenderViewType::Game;
+			previousFrame.frameId = 401u;
+			previousFrame.valid = true;
+			previousFrame.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::LOD;
+
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot nextFrame = previousFrame;
+			nextFrame.frameId = 402u;
+			nextFrame.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::HiZ;
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot previousDiagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(previousFrame);
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot nextDiagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(nextFrame);
+
+			context.Expect(previousDiagnostics.debugVisualizationMode == VirtualGeometryDebugVisualizationMode::LOD, "The previous diagnostics snapshot should preserve its published visualizer mode.");
+			context.Expect(nextDiagnostics.debugVisualizationMode == VirtualGeometryDebugVisualizationMode::HiZ, "The next diagnostics snapshot should publish the changed visualizer mode without waiting for camera movement.");
+
+			VirtualGeometryQualityProfile previousProfile = MakeDefaultVirtualGeometryQualityProfile();
+			previousProfile.debugVisualizationMode = previousDiagnostics.debugVisualizationMode;
+			VirtualGeometryQualityProfile nextProfile = MakeDefaultVirtualGeometryQualityProfile();
+			nextProfile.debugVisualizationMode = nextDiagnostics.debugVisualizationMode;
+			context.Expect(
+				BuildVirtualGeometryQualityProfileSignature(previousProfile) != BuildVirtualGeometryQualityProfileSignature(nextProfile),
+				"Changing the visualizer mode should also change the visible-command cache signature for the next rendered frame.");
 		});
 
 		registry.Add("VirtualGeometry.Diagnostics.PublishesSchedulerBoundaryMetadata", [](TestContext& context) {

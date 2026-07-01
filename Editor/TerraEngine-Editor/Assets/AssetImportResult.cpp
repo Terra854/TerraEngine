@@ -245,6 +245,13 @@ namespace TerraEngine::AssetPipeline
 				record.virtualGeometrySettings.minimumUsefulTriangleReduction = settings.value("minimumUsefulTriangleReduction", record.virtualGeometrySettings.minimumUsefulTriangleReduction);
 				record.virtualGeometrySettings.minimumUsefulMeshletReduction = settings.value("minimumUsefulMeshletReduction", record.virtualGeometrySettings.minimumUsefulMeshletReduction);
 				record.virtualGeometrySettings.maximumGeometricError = settings.value("maximumGeometricError", record.virtualGeometrySettings.maximumGeometricError);
+				for (const nlohmann::json& tag : virtualGeometry.value("coverageTags", nlohmann::json::array()))
+				{
+					if (tag.is_string())
+					{
+						record.virtualGeometryCoverageTags.push_back(tag.get<std::string>());
+					}
+				}
 				for (const nlohmann::json& warning : virtualGeometry.value("warnings", nlohmann::json::array()))
 				{
 					record.virtualGeometryWarnings.push_back(warning.get<std::string>());
@@ -271,7 +278,11 @@ namespace TerraEngine::AssetPipeline
 				const nlohmann::json clusterSummary = virtualGeometry.value("clusterSummary", nlohmann::json::object());
 				record.virtualGeometryClusterSummary.clusterCount = clusterSummary.value("clusterCount", record.virtualGeometryClusterSummary.clusterCount);
 				record.virtualGeometryClusterSummary.pageLinkCount = clusterSummary.value("pageLinkCount", record.virtualGeometryClusterSummary.pageLinkCount);
+				record.virtualGeometryClusterSummary.sourceMaterialAssignmentCount = clusterSummary.value("sourceMaterialAssignmentCount", record.virtualGeometryClusterSummary.sourceMaterialAssignmentCount);
+				record.virtualGeometryClusterSummary.materialSectionCount = clusterSummary.value("materialSectionCount", record.virtualGeometryClusterSummary.materialSectionCount);
+				record.virtualGeometryClusterSummary.clusterMaterialSectionCount = clusterSummary.value("clusterMaterialSectionCount", record.virtualGeometryClusterSummary.clusterMaterialSectionCount);
 				record.virtualGeometryClusterSummary.fallbackCoverageValid = clusterSummary.value("fallbackCoverageValid", record.virtualGeometryClusterSummary.fallbackCoverageValid);
+				record.virtualGeometryClusterSummary.materialCoverageValid = clusterSummary.value("materialCoverageValid", record.virtualGeometryClusterSummary.materialCoverageValid);
 				result.generatedMeshes.push_back(std::move(record));
 			}
 
