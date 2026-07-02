@@ -6,6 +6,14 @@
 
 #include "Debug.h"
 #include "Core/Logger/Logger.h"
+#include "Profiling/ProfilerScope.h"
+
+namespace
+{
+	constexpr const char* kWindowPollingClassification = "protected";
+	constexpr const char* kWindowPollingProtectedReason = "Platform event polling, close/resize callbacks, cursor state, and swap-buffer calls remain owned by the coordinator thread.";
+	constexpr const char* kWindowPollingWorkerSafeSubwork = "Workers may consume immutable input/window snapshots after polling.";
+}
 
 WindowSystem& WindowSystem::Instance()
 {
@@ -26,11 +34,15 @@ void WindowSystem::Configure(std::unique_ptr<IWindowBackend> backendInstance, Wi
 	configured = true;
 	initialized = false;
 	pollingDiagnostics = {};
+	pollingDiagnostics.classification = kWindowPollingClassification;
+	pollingDiagnostics.protectedReason = kWindowPollingProtectedReason;
+	pollingDiagnostics.workerSafeSubwork = kWindowPollingWorkerSafeSubwork;
 	latestWorkerSnapshot = {};
 	latestWorkerSnapshot.width = windowConfig.width;
 	latestWorkerSnapshot.height = windowConfig.height;
 	latestWorkerSnapshot.resizable = windowConfig.resizable;
 	latestWorkerSnapshot.title = windowConfig.title;
+	latestWorkerSnapshot.boundarySummary = pollingDiagnostics.workerSafeSubwork;
 	// Debug log makes backend selection visible before initialization runs.
 	TERRAENGINE_LOG(LogLevel::Debug, "WindowSystem configured with backend " << (backend ? backend->BackendName() : "null"));
 }
@@ -86,25 +98,26 @@ void WindowSystem::Update(float deltaTime)
 		return;
 	}
 
-	backend->PollEvents();
-	// Platform polling and buffer swaps remain protected because they execute
-	// backend callbacks and OS-facing side effects. Window-derived scene changes
-	// should be expressed as transactions by the owning system after this
-	// immutable snapshot is published.
-	pollingDiagnostics.pollRevision += 1;
-	pollingDiagnostics.classification = "protected";
-	pollingDiagnostics.protectedReason = "Platform event polling, close/resize callbacks, cursor state, and swap-buffer calls remain owned by the coordinator thread.";
-	pollingDiagnostics.workerSafeSubwork = "Workers may consume immutable input/window snapshots after polling.";
-	pollingDiagnostics.lastPollRan = true;
-	const bool closeRequested = backend->ShouldClose();
-	latestWorkerSnapshot.frameRevision = pollingDiagnostics.pollRevision;
-	latestWorkerSnapshot.width = windowConfig.width;
-	latestWorkerSnapshot.height = windowConfig.height;
-	latestWorkerSnapshot.resizable = windowConfig.resizable;
-	latestWorkerSnapshot.shouldClose = closeRequested;
-	latestWorkerSnapshot.workerReadable = true;
-	latestWorkerSnapshot.title = windowConfig.title;
-	latestWorkerSnapshot.boundarySummary = pollingDiagnostics.workerSafeSubwork;
+	{
+		TERRAENGINE_PROFILE_SCOPE("WindowSystem: Poll Events", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		backend->PollEvents();
+	}
+	bool closeRequested = false;
+	{
+		TERRAENGINE_PROFILE_SCOPE("WindowSystem: Publish Worker Snapshot", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		// Platform polling and buffer swaps remain protected because they execute
+		// backend callbacks and OS-facing side effects. The descriptive strings
+		// are initialized during Configure so steady frames do not allocate.
+		pollingDiagnostics.pollRevision += 1;
+		pollingDiagnostics.lastPollRan = true;
+		closeRequested = backend->ShouldClose();
+		latestWorkerSnapshot.frameRevision = pollingDiagnostics.pollRevision;
+		latestWorkerSnapshot.width = windowConfig.width;
+		latestWorkerSnapshot.height = windowConfig.height;
+		latestWorkerSnapshot.resizable = windowConfig.resizable;
+		latestWorkerSnapshot.shouldClose = closeRequested;
+		latestWorkerSnapshot.workerReadable = true;
+	}
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (closeRequested) {
@@ -116,7 +129,10 @@ void WindowSystem::Update(float deltaTime)
 		}
 	}
 	
-	backend->SwapBuffers();
+	{
+		TERRAENGINE_PROFILE_SCOPE("WindowSystem: Swap Buffers", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		backend->SwapBuffers();
+	}
 	pollingDiagnostics.lastSwapRan = true;
 }
 

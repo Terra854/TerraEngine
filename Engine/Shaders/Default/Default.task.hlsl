@@ -70,6 +70,24 @@ struct MeshletCullingCounters
 	uint hiZReserved;
 };
 
+MeshletCullingCounters MakeEmptyMeshletCullingCounters()
+{
+	MeshletCullingCounters counters;
+	counters.meshletsTotal = 0u;
+	counters.meshletsDispatched = 0u;
+	counters.meshletsCulled = 0u;
+	counters.meshletsCulledHiZ = 0u;
+	counters.hiZTests = 0u;
+	counters.hiZProjectionFailed = 0u;
+	counters.hiZFullRectCulled = 0u;
+	counters.hiZRectCoverageCulled = 0u;
+	counters.hiZCenterCulled = 0u;
+	counters.hiZVertexCoverageCulled = 0u;
+	counters.hiZNoOcclusionProof = 0u;
+	counters.hiZReserved = 0u;
+	return counters;
+}
+
 // Task stage compacts visible meshlets for each task-group chunk.
 static const uint kTaskBatchSize = 32u;
 static const uint kMaxMeshletVertices = 64u;
@@ -97,6 +115,25 @@ struct TaskPayload
 [[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
 [[vk::binding(10, 0)]] Texture2D<float> hiZPyramids[2];
 [[vk::binding(11, 0)]] SamplerState hiZSampler;
+
+void FlushMeshletCullingCounters(const uint statsIndex, const MeshletCullingCounters counters)
+{
+	uint ignored = 0u;
+	// Task groups inspect up to 32 meshlets. Accumulating locally avoids several
+	// global atomics per meshlet while preserving the exact diagnostic totals.
+	if (counters.meshletsTotal != 0u) InterlockedAdd(meshletCounters[statsIndex].meshletsTotal, counters.meshletsTotal, ignored);
+	if (counters.meshletsDispatched != 0u) InterlockedAdd(meshletCounters[statsIndex].meshletsDispatched, counters.meshletsDispatched, ignored);
+	if (counters.meshletsCulled != 0u) InterlockedAdd(meshletCounters[statsIndex].meshletsCulled, counters.meshletsCulled, ignored);
+	if (counters.meshletsCulledHiZ != 0u) InterlockedAdd(meshletCounters[statsIndex].meshletsCulledHiZ, counters.meshletsCulledHiZ, ignored);
+	if (counters.hiZTests != 0u) InterlockedAdd(meshletCounters[statsIndex].hiZTests, counters.hiZTests, ignored);
+	if (counters.hiZProjectionFailed != 0u) InterlockedAdd(meshletCounters[statsIndex].hiZProjectionFailed, counters.hiZProjectionFailed, ignored);
+	if (counters.hiZFullRectCulled != 0u) InterlockedAdd(meshletCounters[statsIndex].hiZFullRectCulled, counters.hiZFullRectCulled, ignored);
+	if (counters.hiZRectCoverageCulled != 0u) InterlockedAdd(meshletCounters[statsIndex].hiZRectCoverageCulled, counters.hiZRectCoverageCulled, ignored);
+	if (counters.hiZCenterCulled != 0u) InterlockedAdd(meshletCounters[statsIndex].hiZCenterCulled, counters.hiZCenterCulled, ignored);
+	if (counters.hiZVertexCoverageCulled != 0u) InterlockedAdd(meshletCounters[statsIndex].hiZVertexCoverageCulled, counters.hiZVertexCoverageCulled, ignored);
+	if (counters.hiZNoOcclusionProof != 0u) InterlockedAdd(meshletCounters[statsIndex].hiZNoOcclusionProof, counters.hiZNoOcclusionProof, ignored);
+	if (counters.hiZReserved != 0u) InterlockedAdd(meshletCounters[statsIndex].hiZReserved, counters.hiZReserved, ignored);
+}
 
 groupshared TaskPayload gTaskPayload;
 
@@ -587,18 +624,17 @@ bool IsSmallMeshletCenterOccluded(
 	return meshletClosestDepth > (sampledDepth + occlusionBias);
 }
 
-bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, const uint hiZViewIndex, const uint statsIndex, const float epsilon)
+bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, const uint hiZViewIndex, inout MeshletCullingCounters counters, const float epsilon)
 {
-	uint ignored = 0u;
 	float2 uvMin = float2(0.0f, 0.0f);
 	float2 uvMax = float2(0.0f, 0.0f);
 	float meshletClosestDepth = 1.0f;
 	if (!TryBuildProjectedMeshletRect(meshletIndex, meshletCount, decode, frameData, uvMin, uvMax, meshletClosestDepth))
 	{
-		InterlockedAdd(meshletCounters[statsIndex].hiZProjectionFailed, 1u, ignored);
+		counters.hiZProjectionFailed += 1u;
 		return false;
 	}
-	InterlockedAdd(meshletCounters[statsIndex].hiZTests, 1u, ignored);
+	counters.hiZTests += 1u;
 
 	const float2 viewportSize = max(frameData.clusterDepthAndViewport.zw, float2(1.0f, 1.0f));
 	float2 rectPixels = max((uvMax - uvMin) * viewportSize, float2(1.0f, 1.0f));
@@ -612,12 +648,12 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 	// the finest mip whose covered texel range fits in a bounded loop. Because
 	// the pyramid stores max depth, sampling extra/coarser texels is conservative:
 	// background or holes inside/near the rect increase furthestDepth and keep
-	// the meshlet visible instead of producing a false occlusion. Keep the total
-	// texel budget matches the full per-axis cap so solid occluders do not get
-	// collapsed into overly coarse mips during common wall-in-front tests. That
-	// keeps a farther/smaller wall useful as an occluder while still proving
-	// occlusion with the whole projected meshlet sphere, not a risky center tap.
-	static const uint kMaxHiZRectAxisSamples = 64u;
+	// the meshlet visible instead of producing a false occlusion. Keep the cap
+	// explicit so Hi-Z cannot turn a large projected meshlet into thousands of
+	// task-shader texture loads; when the cap forces a coarser mip, the culler
+	// may reject fewer meshlets, but it still fails open instead of cutting
+	// visible geometry.
+	static const uint kMaxHiZRectAxisSamples = 32u;
 	static const uint kMaxHiZRectTexelSamples = kMaxHiZRectAxisSamples * kMaxHiZRectAxisSamples;
 	uint baseWidth = 1u;
 	uint baseHeight = 1u;
@@ -717,7 +753,7 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 	// front of the nearest projected meshlet vertex.
 	if (meshletClosestDepth > (furthestDepth + occlusionBias))
 	{
-		InterlockedAdd(meshletCounters[statsIndex].hiZFullRectCulled, 1u, ignored);
+		counters.hiZFullRectCulled += 1u;
 		return true;
 	}
 
@@ -726,7 +762,7 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 	// eat visible wall-edge silhouettes. Until the shader has a stronger
 	// per-triangle coverage proof, only the full expanded rectangle may cull and
 	// every partial/uncertain case fails open.
-	InterlockedAdd(meshletCounters[statsIndex].hiZNoOcclusionProof, 1u, ignored);
+	counters.hiZNoOcclusionProof += 1u;
 	return false;
 }
 
@@ -751,7 +787,7 @@ void main(uint3 groupId : SV_GroupID)
 
 	const uint meshletBase = selectedMeshletOffset + groupId.x * kTaskBatchSize;
 	uint visibleCount = 0u;
-	uint ignored = 0u;
+	MeshletCullingCounters localCounters = MakeEmptyMeshletCullingCounters();
 
 	const bool cullingEnabled = (SceneUniforms.taskCullingEnabled != 0u)
 		&& (frameData.globalTaskCullingEnabled != 0u)
@@ -766,7 +802,7 @@ void main(uint3 groupId : SV_GroupID)
 			break;
 		}
 
-		InterlockedAdd(meshletCounters[statsIndex].meshletsTotal, 1u, ignored);
+		localCounters.meshletsTotal += 1u;
 
 		bool culled = false;
 		if (cullingEnabled)
@@ -798,9 +834,9 @@ void main(uint3 groupId : SV_GroupID)
 			// camera Hi-Z cannot answer light visibility.
 			if (!culled && hiZPyramidAvailable)
 			{
-				if (IsOccluded(meshletIndex, meshletCount, decode, frameData, hiZViewIndex, statsIndex, epsilon))
+				if (IsOccluded(meshletIndex, meshletCount, decode, frameData, hiZViewIndex, localCounters, epsilon))
 				{
-					InterlockedAdd(meshletCounters[statsIndex].meshletsCulledHiZ, 1u, ignored);
+					localCounters.meshletsCulledHiZ += 1u;
 					culled = true;
 				}
 			}
@@ -808,7 +844,7 @@ void main(uint3 groupId : SV_GroupID)
 
 		if (culled && !debugCulledMeshlets)
 		{
-			InterlockedAdd(meshletCounters[statsIndex].meshletsCulled, 1u, ignored);
+			localCounters.meshletsCulled += 1u;
 			continue;
 		}
 		if (culled)
@@ -816,13 +852,14 @@ void main(uint3 groupId : SV_GroupID)
 			// Culled debug mode deliberately keeps rejected meshlets in the
 			// payload so the mesh/fragment stages can color them by the rejection
 			// reason. Normal rendering still drops them above.
-			InterlockedAdd(meshletCounters[statsIndex].meshletsCulled, 1u, ignored);
+			localCounters.meshletsCulled += 1u;
 		}
 
 		gTaskPayload.meshletIndices[visibleCount] = meshletIndex;
 		visibleCount++;
-		InterlockedAdd(meshletCounters[statsIndex].meshletsDispatched, 1u, ignored);
+		localCounters.meshletsDispatched += 1u;
 	}
 
+	FlushMeshletCullingCounters(statsIndex, localCounters);
 	DispatchMesh(visibleCount, 1u, 1u, gTaskPayload);
 }

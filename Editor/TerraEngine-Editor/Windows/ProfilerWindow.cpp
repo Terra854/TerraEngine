@@ -14,11 +14,15 @@
 #include "Engine/Scripting/ScriptingSystem.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <imgui.h>
+#include <limits>
+#include <numeric>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 using TerraEngine::Profiling::Profiler;
 using TerraEngine::Profiling::ProfilerFrameListItem;
@@ -34,6 +38,7 @@ struct SampleTreeNode
 {
 	std::size_t sampleIndex = 0u;
 	std::vector<std::size_t> childIndices;
+	double selfDurationMs = 0.0;
 };
 
 // struct SampleTree groups related state and operations so callers have one documented contract.
@@ -43,6 +48,146 @@ struct SampleTree
 	std::vector<SampleTreeNode> nodes;
 	std::vector<std::size_t> rootIndices;
 };
+
+// struct HotSampleRow groups the columns needed for the sorted "what cost the frame" table.
+struct HotSampleRow
+{
+	std::string name;
+	std::string threadLabel;
+	std::string taskLabel;
+	double inclusiveMs = 0.0;
+	double selfMs = 0.0;
+	std::uint32_t depth = 0u;
+};
+
+// struct FrameDurationStats keeps capture-level timing answers close to the UI
+// code that presents them, without changing the profiler capture file format.
+struct FrameDurationStats
+{
+	std::size_t frameCount = 0u;
+	std::size_t partialFrameCount = 0u;
+	double latestMs = 0.0;
+	double minMs = 0.0;
+	double maxMs = 0.0;
+	double meanMs = 0.0;
+	double medianMs = 0.0;
+	double p90Ms = 0.0;
+	double p95Ms = 0.0;
+	double p99Ms = 0.0;
+	double stdDevMs = 0.0;
+};
+
+// FindModuleSummary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+const TerraEngine::Profiling::ProfilerModuleSummary* FindModuleSummary(const ProfilerFrameRecord& frame, ProfilerModuleId moduleId)
+{
+	const auto found = std::find_if(frame.moduleSummaries.begin(), frame.moduleSummaries.end(), [moduleId](const auto& module) {
+		return module.moduleId == moduleId;
+	});
+	return found == frame.moduleSummaries.end() ? nullptr : &(*found);
+}
+
+// Frames are easiest to compare when the color tells whether the frame is
+// comfortably below an editor budget, getting expensive, or already over a
+// common 60 FPS frame budget.
+ImVec4 FrameDurationColor(double durationMs)
+{
+	if (durationMs >= 16.67)
+	{
+		return ImVec4(1.0f, 0.35f, 0.25f, 1.0f);
+	}
+	if (durationMs >= 8.33)
+	{
+		return ImVec4(1.0f, 0.80f, 0.25f, 1.0f);
+	}
+	return ImVec4(0.45f, 0.90f, 0.55f, 1.0f);
+}
+
+double SafePercent(double value, double total)
+{
+	if (total <= 0.0 || !std::isfinite(total) || !std::isfinite(value))
+	{
+		return 0.0;
+	}
+	return (value / total) * 100.0;
+}
+
+// DrawTimeBar renders a compact horizontal bar next to a numeric timing so
+// spikes are visible without mentally comparing every row in the table.
+void DrawTimeBar(double valueMs, double basisMs)
+{
+	float fraction = 0.0f;
+	if (basisMs > 0.0 && std::isfinite(valueMs) && std::isfinite(basisMs))
+	{
+		fraction = static_cast<float>(std::clamp(valueMs / basisMs, 0.0, 1.0));
+	}
+	ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), "");
+}
+
+double PercentileFromSorted(const std::vector<double>& sortedValues, double percentile)
+{
+	if (sortedValues.empty())
+	{
+		return 0.0;
+	}
+	if (sortedValues.size() == 1u)
+	{
+		return sortedValues.front();
+	}
+	const double clampedPercentile = std::clamp(percentile, 0.0, 1.0);
+	const double scaledIndex = clampedPercentile * static_cast<double>(sortedValues.size() - 1u);
+	const std::size_t lowerIndex = static_cast<std::size_t>(std::floor(scaledIndex));
+	const std::size_t upperIndex = std::min(lowerIndex + 1u, sortedValues.size() - 1u);
+	const double blend = scaledIndex - static_cast<double>(lowerIndex);
+	return sortedValues[lowerIndex] + (sortedValues[upperIndex] - sortedValues[lowerIndex]) * blend;
+}
+
+FrameDurationStats BuildFrameDurationStats(const std::vector<ProfilerFrameListItem>& frames)
+{
+	FrameDurationStats stats;
+	std::vector<double> values;
+	values.reserve(frames.size());
+	for (const ProfilerFrameListItem& frame : frames)
+	{
+		if (!frame.complete)
+		{
+			++stats.partialFrameCount;
+		}
+		if (std::isfinite(frame.durationMs) && frame.durationMs >= 0.0)
+		{
+			values.push_back(frame.durationMs);
+			stats.latestMs = frame.durationMs;
+		}
+	}
+	stats.frameCount = values.size();
+	if (values.empty())
+	{
+		return stats;
+	}
+	const double sum = std::accumulate(values.begin(), values.end(), 0.0);
+	stats.meanMs = sum / static_cast<double>(values.size());
+	double varianceSum = 0.0;
+	for (double value : values)
+	{
+		const double delta = value - stats.meanMs;
+		varianceSum += delta * delta;
+	}
+	stats.stdDevMs = std::sqrt(varianceSum / static_cast<double>(values.size()));
+	std::sort(values.begin(), values.end());
+	stats.minMs = values.front();
+	stats.maxMs = values.back();
+	stats.medianMs = PercentileFromSorted(values, 0.50);
+	stats.p90Ms = PercentileFromSorted(values, 0.90);
+	stats.p95Ms = PercentileFromSorted(values, 0.95);
+	stats.p99Ms = PercentileFromSorted(values, 0.99);
+	return stats;
+}
+
+void DrawMetricCell(const char* label, double valueMs, const ImVec4& valueColor)
+{
+	ImGui::TableNextColumn();
+	ImGui::TextDisabled("%s", label);
+	ImGui::TextColored(valueColor, "%.3f ms", valueMs);
+}
 
 // BuildSampleTree is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 SampleTree BuildSampleTree(const ProfilerFrameRecord& frame, ProfilerModuleId selectedModule)
@@ -93,7 +238,48 @@ SampleTree BuildSampleTree(const ProfilerFrameRecord& frame, ProfilerModuleId se
 			tree.rootIndices.push_back(index);
 		}
 	}
+
+	for (SampleTreeNode& node : tree.nodes)
+	{
+		double childDurationMs = 0.0;
+		for (const std::size_t childIndex : node.childIndices)
+		{
+			childDurationMs += tree.samples[tree.nodes[childIndex].sampleIndex].durationMs;
+		}
+		const double inclusiveMs = tree.samples[node.sampleIndex].durationMs;
+		node.selfDurationMs = std::max(0.0, inclusiveMs - childDurationMs);
+	}
 	return tree;
+}
+
+std::vector<HotSampleRow> BuildHotSampleRows(const SampleTree& tree)
+{
+	std::vector<HotSampleRow> rows;
+	rows.reserve(tree.samples.size());
+	for (const SampleTreeNode& node : tree.nodes)
+	{
+		const ProfilerSample& sample = tree.samples[node.sampleIndex];
+		if (sample.durationMs <= 0.0)
+		{
+			continue;
+		}
+		rows.push_back({
+			sample.name,
+			sample.threadLabel,
+			sample.taskLabel,
+			sample.durationMs,
+			node.selfDurationMs,
+			sample.depth
+		});
+	}
+	std::sort(rows.begin(), rows.end(), [](const HotSampleRow& left, const HotSampleRow& right) {
+		if (left.selfMs == right.selfMs)
+		{
+			return left.inclusiveMs > right.inclusiveMs;
+		}
+		return left.selfMs > right.selfMs;
+	});
+	return rows;
 }
 
 // DrawDisclosureControl is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -142,7 +328,7 @@ bool DrawDisclosureControl(bool hasChildren, bool isOpen)
 }
 
 // DrawSampleTreeRow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void DrawSampleTreeRow(const SampleTree& tree, std::size_t nodeIndex, std::uint64_t frameIndex)
+void DrawSampleTreeRow(const SampleTree& tree, std::size_t nodeIndex, std::uint64_t frameIndex, double frameDurationMs)
 {
 	const SampleTreeNode& node = tree.nodes[nodeIndex];
 	const ProfilerSample& sample = tree.samples[node.sampleIndex];
@@ -179,8 +365,14 @@ void DrawSampleTreeRow(const SampleTree& tree, std::size_t nodeIndex, std::uint6
 	ImGui::TableSetColumnIndex(1);
 	ImGui::Text("%.3f", sample.durationMs);
 	ImGui::TableSetColumnIndex(2);
-	ImGui::TextUnformatted(sample.threadLabel.c_str());
+	ImGui::Text("%.3f", node.selfDurationMs);
 	ImGui::TableSetColumnIndex(3);
+	ImGui::Text("%.1f%%", SafePercent(sample.durationMs, frameDurationMs));
+	ImGui::TableSetColumnIndex(4);
+	DrawTimeBar(sample.durationMs, frameDurationMs);
+	ImGui::TableSetColumnIndex(5);
+	ImGui::TextUnformatted(sample.threadLabel.c_str());
+	ImGui::TableSetColumnIndex(6);
 	ImGui::TextUnformatted(sample.taskLabel.c_str());
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -188,7 +380,7 @@ void DrawSampleTreeRow(const SampleTree& tree, std::size_t nodeIndex, std::uint6
 	{
 		for (const std::size_t childIndex : node.childIndices)
 		{
-			DrawSampleTreeRow(tree, childIndex, frameIndex);
+			DrawSampleTreeRow(tree, childIndex, frameIndex, frameDurationMs);
 		}
 	}
 	ImGui::PopID();
@@ -231,18 +423,17 @@ void ProfilerWindow::OnGui()
 
 	constexpr ImGuiTableFlags layoutFlags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Resizable | ImGuiTableFlags_NoSavedSettings;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::BeginTable("ProfilerLayout", 3, layoutFlags, ImGui::GetContentRegionAvail()))
+	if (ImGui::BeginTable("ProfilerLayout", 2, layoutFlags, ImGui::GetContentRegionAvail()))
 	{
-		ImGui::TableSetupColumn("Captures", ImGuiTableColumnFlags_WidthStretch, 0.9f);
-		ImGui::TableSetupColumn("Frames", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-		ImGui::TableSetupColumn("Details", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+		ImGui::TableSetupColumn("Capture Navigation", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+		ImGui::TableSetupColumn("Frame Analysis", ImGuiTableColumnFlags_WidthStretch, 2.7f);
 		ImGui::TableNextRow();
 
 		ImGui::TableSetColumnIndex(0);
 		DrawCaptureList();
-		ImGui::TableSetColumnIndex(1);
+		ImGui::Separator();
 		DrawFrameList();
-		ImGui::TableSetColumnIndex(2);
+		ImGui::TableSetColumnIndex(1);
 		DrawFrameDetails();
 
 		ImGui::EndTable();
@@ -308,7 +499,8 @@ void ProfilerWindow::DrawCaptureList()
 	}
 
 	ImGui::TextUnformatted("Project Captures");
-	ImGui::BeginChild("ProfilerCaptures", ImVec2(0, 0), true);
+	const float capturesHeight = std::max(120.0f, ImGui::GetContentRegionAvail().y * 0.30f);
+	ImGui::BeginChild("ProfilerCaptures", ImVec2(0, capturesHeight), true);
 	const auto captures = service->GetCaptureList();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (captures.empty())
@@ -342,27 +534,75 @@ void ProfilerWindow::DrawFrameList()
 	{
 		ImGui::TextDisabled("No frames captured.");
 	}
-	// The rolling capture can hold thousands of frames. Clip visible rows so
-	// opening the profiler does not spend every editor frame formatting labels
-	// that are outside the scroll viewport.
-	ImGuiListClipper clipper;
-	clipper.Begin(static_cast<int>(frames.size()));
-	while (clipper.Step())
+	const FrameDurationStats stats = BuildFrameDurationStats(frames);
+	if (!frames.empty())
 	{
-		for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
+		ImGui::TextDisabled("%zu frames  mean %.2f ms  p95 %.2f ms", stats.frameCount, stats.meanMs, stats.p95Ms);
+	}
+	std::vector<ProfilerFrameListItem> sortedFrames = frames;
+	if (ImGui::BeginTable("ProfilerFrameRows", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable | ImGuiTableFlags_Resizable))
+	{
+		ImGui::TableSetupColumn("Frame", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_PreferSortDescending | ImGuiTableColumnFlags_WidthFixed, 80.0f);
+		ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_PreferSortDescending | ImGuiTableColumnFlags_WidthFixed, 82.0f);
+		ImGui::TableSetupColumn("Load", ImGuiTableColumnFlags_PreferSortDescending | ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableHeadersRow();
+		if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs(); sortSpecs && sortSpecs->SpecsCount > 0)
 		{
-			const ProfilerFrameListItem& frame = frames[static_cast<std::size_t>(rowIndex)];
-			char label[128];
-			std::snprintf(label, sizeof(label), "#%llu  %.2f ms%s",
-				static_cast<unsigned long long>(frame.frameIndex),
-				frame.durationMs,
-				frame.complete ? "" : " (partial)");
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (ImGui::Selectable(label))
+			const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
+			const bool ascending = spec.SortDirection == ImGuiSortDirection_Ascending;
+			std::sort(sortedFrames.begin(), sortedFrames.end(), [&](const ProfilerFrameListItem& left, const ProfilerFrameListItem& right) {
+				int result = 0;
+				switch (spec.ColumnIndex)
+				{
+				case 0:
+					result = left.frameIndex < right.frameIndex ? -1 : (left.frameIndex > right.frameIndex ? 1 : 0);
+					break;
+				case 1:
+				case 2:
+					result = left.durationMs < right.durationMs ? -1 : (left.durationMs > right.durationMs ? 1 : 0);
+					break;
+				default:
+					result = left.frameIndex < right.frameIndex ? -1 : (left.frameIndex > right.frameIndex ? 1 : 0);
+					break;
+				}
+				if (result == 0)
+				{
+					// Stable tie-breaks keep rows from jumping when two frames
+					// have nearly identical timings.
+					result = left.frameIndex < right.frameIndex ? -1 : (left.frameIndex > right.frameIndex ? 1 : 0);
+				}
+				return ascending ? result < 0 : result > 0;
+			});
+			sortSpecs->SpecsDirty = false;
+		}
+		// The rolling capture can hold thousands of frames. Clip visible rows so
+		// opening the profiler does not spend every editor frame formatting labels
+		// that are outside the scroll viewport.
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(sortedFrames.size()));
+		while (clipper.Step())
+		{
+			for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
 			{
-				Profiler::Instance().SelectFrame(frame.frameIndex);
+				const ProfilerFrameListItem& frame = sortedFrames[static_cast<std::size_t>(rowIndex)];
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				char label[64];
+				std::snprintf(label, sizeof(label), "#%llu%s",
+					static_cast<unsigned long long>(frame.frameIndex),
+					frame.complete ? "" : "*");
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (ImGui::Selectable(label, false, ImGuiSelectableFlags_SpanAllColumns))
+				{
+					Profiler::Instance().SelectFrame(frame.frameIndex);
+				}
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextColored(FrameDurationColor(frame.durationMs), "%.2f", frame.durationMs);
+				ImGui::TableSetColumnIndex(2);
+				DrawTimeBar(frame.durationMs, std::max(stats.p99Ms, 1.0));
 			}
 		}
+		ImGui::EndTable();
 	}
 	ImGui::EndChild();
 }
@@ -378,8 +618,8 @@ void ProfilerWindow::DrawFrameDetails()
 		return;
 	}
 
-	ImGui::Text("Frame %llu", static_cast<unsigned long long>(selectedFrame->frameIndex));
-	ImGui::Text("Duration: %.3f ms", selectedFrame->durationMs);
+	DrawFrameOverview(*selectedFrame);
+
 	const ScriptingSystem::ScriptingFrameResult& scriptingResult = ScriptingSystem::Instance().GetLatestScriptingFrameResult();
 	if (scriptingResult.frameId != 0 && ImGui::TreeNode("Scripting Dispatch Counters"))
 	{
@@ -415,12 +655,6 @@ void ProfilerWindow::DrawFrameDetails()
 		ImGui::TreePop();
 	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!selectedFrame->complete)
-	{
-		ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "Partial frame");
-	}
-
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginTabBar("ProfilerModules"))
 	{
 		for (ProfilerModuleId moduleId : {ProfilerModuleId::CpuEngine, ProfilerModuleId::TaskExecution})
@@ -430,6 +664,7 @@ void ProfilerWindow::DrawFrameDetails()
 			{
 				selectedModule = moduleId;
 				DrawModuleSummary(*selectedFrame);
+				DrawHotSamples(*selectedFrame);
 				DrawSamples(*selectedFrame);
 				ImGui::EndTabItem();
 			}
@@ -438,20 +673,66 @@ void ProfilerWindow::DrawFrameDetails()
 	}
 }
 
+// ProfilerWindow::DrawFrameOverview is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
+{
+	const std::vector<ProfilerFrameListItem> frames = Profiler::Instance().GetFrameListSnapshot();
+	const FrameDurationStats stats = BuildFrameDurationStats(frames);
+
+	ImGui::SeparatorText("Frame Overview");
+	ImGui::Text("Frame %llu", static_cast<unsigned long long>(frame.frameIndex));
+	ImGui::SameLine();
+	ImGui::TextColored(FrameDurationColor(frame.durationMs), "%.3f ms", frame.durationMs);
+	if (!frame.complete)
+	{
+		ImGui::SameLine();
+		ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "partial");
+	}
+
+	if (stats.frameCount == 0u)
+	{
+		ImGui::TextDisabled("No complete timing window is available yet.");
+		return;
+	}
+
+	if (ImGui::BeginTable("ProfilerFrameStats", 5, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV))
+	{
+		DrawMetricCell("Mean", stats.meanMs, FrameDurationColor(stats.meanMs));
+		DrawMetricCell("Median", stats.medianMs, FrameDurationColor(stats.medianMs));
+		DrawMetricCell("P90", stats.p90Ms, FrameDurationColor(stats.p90Ms));
+		DrawMetricCell("P95", stats.p95Ms, FrameDurationColor(stats.p95Ms));
+		DrawMetricCell("P99", stats.p99Ms, FrameDurationColor(stats.p99Ms));
+		ImGui::EndTable();
+	}
+	if (ImGui::BeginTable("ProfilerFrameStatsSecondary", 5, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV))
+	{
+		DrawMetricCell("Min", stats.minMs, FrameDurationColor(stats.minMs));
+		DrawMetricCell("Max", stats.maxMs, FrameDurationColor(stats.maxMs));
+		DrawMetricCell("Std Dev", stats.stdDevMs, FrameDurationColor(stats.stdDevMs));
+		ImGui::TableNextColumn();
+		ImGui::TextDisabled("Frames");
+		ImGui::Text("%zu", stats.frameCount);
+		ImGui::TableNextColumn();
+		ImGui::TextDisabled("Partial");
+		ImGui::Text("%zu", stats.partialFrameCount);
+		ImGui::EndTable();
+	}
+
+	ImGui::TextDisabled("Selected frame vs p95");
+	DrawTimeBar(frame.durationMs, std::max(stats.p95Ms, 1.0));
+}
+
 // ProfilerWindow::DrawModuleSummary is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProfilerWindow::DrawModuleSummary(const ProfilerFrameRecord& frame)
 {
-	auto moduleIt = std::find_if(frame.moduleSummaries.begin(), frame.moduleSummaries.end(), [this](const auto& module) {
-		return module.moduleId == selectedModule;
-	});
+	const TerraEngine::Profiling::ProfilerModuleSummary* moduleSummary = FindModuleSummary(frame, selectedModule);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (moduleIt == frame.moduleSummaries.end() || !moduleIt->available)
+	if (moduleSummary == nullptr || !moduleSummary->available)
 	{
 		ImGui::TextDisabled("No data recorded for this module.");
 		return;
 	}
 
-	ImGui::Text("Module total: %.3f ms", moduleIt->totalMs);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ImGui::BeginTable("ProfilerModuleMetrics", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
 	{
@@ -460,7 +741,7 @@ void ProfilerWindow::DrawModuleSummary(const ProfilerFrameRecord& frame)
 		ImGui::TableSetupColumn("Unit");
 		ImGui::TableHeadersRow();
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const auto& metric : moduleIt->metrics)
+		for (const auto& metric : moduleSummary->metrics)
 		{
 			ImGui::TableNextRow();
 			ImGui::TableSetColumnIndex(0);
@@ -469,6 +750,49 @@ void ProfilerWindow::DrawModuleSummary(const ProfilerFrameRecord& frame)
 			ImGui::Text("%.3f", metric.value);
 			ImGui::TableSetColumnIndex(2);
 			ImGui::TextUnformatted(metric.unit.c_str());
+		}
+		ImGui::EndTable();
+	}
+}
+
+// ProfilerWindow::DrawHotSamples is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void ProfilerWindow::DrawHotSamples(const ProfilerFrameRecord& frame)
+{
+	ImGui::SeparatorText("Top Offenders");
+	const SampleTree tree = BuildSampleTree(frame, selectedModule);
+	std::vector<HotSampleRow> rows = BuildHotSampleRows(tree);
+	if (rows.empty())
+	{
+		ImGui::TextDisabled("No hot samples for this module.");
+		return;
+	}
+
+	const std::size_t rowLimit = std::min<std::size_t>(rows.size(), 12u);
+	if (ImGui::BeginTable("ProfilerHotSamples", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Scope", ImGuiTableColumnFlags_WidthStretch, 2.5f);
+		ImGui::TableSetupColumn("Self");
+		ImGui::TableSetupColumn("Incl.");
+		ImGui::TableSetupColumn("% Frame");
+		ImGui::TableSetupColumn("Load", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+		ImGui::TableSetupColumn("Thread");
+		ImGui::TableHeadersRow();
+		for (std::size_t rowIndex = 0u; rowIndex < rowLimit; ++rowIndex)
+		{
+			const HotSampleRow& row = rows[rowIndex];
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(row.name.c_str());
+			ImGui::TableSetColumnIndex(1);
+			ImGui::Text("%.3f", row.selfMs);
+			ImGui::TableSetColumnIndex(2);
+			ImGui::Text("%.3f", row.inclusiveMs);
+			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%.1f%%", SafePercent(row.inclusiveMs, frame.durationMs));
+			ImGui::TableSetColumnIndex(4);
+			DrawTimeBar(row.selfMs, std::max(frame.durationMs, 1.0));
+			ImGui::TableSetColumnIndex(5);
+			ImGui::TextUnformatted(row.threadLabel.c_str());
 		}
 		ImGui::EndTable();
 	}
@@ -489,17 +813,20 @@ void ProfilerWindow::DrawSamples(const ProfilerFrameRecord& frame)
 	const ImVec2 originalCellPadding = ImGui::GetStyle().CellPadding;
 	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(1.0f, originalCellPadding.y));
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::BeginTable("ProfilerSamples", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	if (ImGui::BeginTable("ProfilerSamples", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
-		ImGui::TableSetupColumn("Name");
-		ImGui::TableSetupColumn("Duration");
+		ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.5f);
+		ImGui::TableSetupColumn("Incl.");
+		ImGui::TableSetupColumn("Self");
+		ImGui::TableSetupColumn("% Frame");
+		ImGui::TableSetupColumn("Load", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 		ImGui::TableSetupColumn("Thread");
 		ImGui::TableSetupColumn("Task");
 		ImGui::TableHeadersRow();
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const std::size_t rootIndex : tree.rootIndices)
 		{
-			DrawSampleTreeRow(tree, rootIndex, frame.frameIndex);
+			DrawSampleTreeRow(tree, rootIndex, frame.frameIndex, frame.durationMs);
 		}
 		ImGui::EndTable();
 	}

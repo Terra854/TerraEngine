@@ -1011,8 +1011,76 @@ namespace TerraEngine::Renderer {
 			viewDiagnostics.lodTransitionStableFrames = quality.lodTransitionStableFrames;
 			viewDiagnostics.geometryBudgetBytes = quality.geometryBudgetBytes;
 			viewDiagnostics.clusterSelection.selectedClusters = static_cast<std::uint32_t>(state.selectedClusters.size());
-			viewDiagnostics.requestedPages = static_cast<std::uint32_t>(state.pageNeeds.size());
-			viewDiagnostics.missingPages = static_cast<std::uint32_t>(state.pageNeeds.size());
+			viewDiagnostics.clusterPacketCount = static_cast<std::uint32_t>(state.clusterPackets.size());
+			// Lightweight frame stats must expose the same packet and batch
+			// counters as full diagnostics, but without scanning every cooked
+			// asset or generating performance-gate strings on normal frames.
+			for (const ClusterWorkBatch& batch : state.clusterBatches)
+			{
+				++viewDiagnostics.submittedBatchCount;
+				viewDiagnostics.submittedMeshlets += batch.submittedMeshlets;
+				if (batch.fallbackMode == VirtualGeometryBatchFallbackMode::LegacyClusterDraw)
+				{
+					++viewDiagnostics.legacyFallbackBatchCount;
+				}
+			}
+			for (const CompactedVisibilitySet& compaction : state.compactionResults)
+			{
+				viewDiagnostics.candidateClusterCount += compaction.candidatePackets;
+				viewDiagnostics.compactedClusterCount += compaction.visiblePackets;
+				viewDiagnostics.rejectedClusterCount += compaction.rejectedByFrustum
+					+ compaction.rejectedByHiZ
+					+ compaction.rejectedByResidency
+					+ compaction.rejectedByCone;
+				viewDiagnostics.failOpenClusterCount += compaction.failOpenPackets;
+				viewDiagnostics.culledByFrustum += compaction.rejectedByFrustum;
+				viewDiagnostics.culledByHiZ += compaction.rejectedByHiZ;
+				viewDiagnostics.culledByCone += compaction.rejectedByCone;
+				viewDiagnostics.culledByResidency += compaction.rejectedByResidency;
+				viewDiagnostics.submittedBatchCount = std::max(viewDiagnostics.submittedBatchCount, compaction.submittedBatches);
+			}
+			if (!state.pageResidency.empty())
+			{
+				for (const PageResidencyRecord& page : state.pageResidency)
+				{
+					switch (page.state)
+					{
+					case GeometryPageState::Resident:
+						++viewDiagnostics.residentPages;
+						break;
+					case GeometryPageState::Pinned:
+						++viewDiagnostics.residentPages;
+						++viewDiagnostics.pinnedFallbackPages;
+						break;
+					case GeometryPageState::Requested:
+					case GeometryPageState::Loading:
+					case GeometryPageState::PendingIO:
+					case GeometryPageState::PendingUpload:
+						++viewDiagnostics.requestedPages;
+						break;
+					case GeometryPageState::Failed:
+						++viewDiagnostics.failedPages;
+						++viewDiagnostics.missingPages;
+						break;
+					case GeometryPageState::Evicting:
+						++viewDiagnostics.evictingPages;
+						++viewDiagnostics.missingPages;
+						break;
+					case GeometryPageState::Evicted:
+						++viewDiagnostics.evictedPages;
+						++viewDiagnostics.missingPages;
+						break;
+					case GeometryPageState::NotResident:
+						++viewDiagnostics.missingPages;
+						break;
+					}
+				}
+			}
+			else
+			{
+				viewDiagnostics.requestedPages = static_cast<std::uint32_t>(state.pageNeeds.size());
+				viewDiagnostics.missingPages = static_cast<std::uint32_t>(state.pageNeeds.size());
+			}
 			viewDiagnostics.lodTransitionStates = static_cast<std::uint32_t>(state.lodTransitionStates.size());
 			for (const VirtualGeometryLODTransitionState& transitionState : state.lodTransitionStates)
 			{

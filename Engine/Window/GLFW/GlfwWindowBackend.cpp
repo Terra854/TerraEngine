@@ -57,9 +57,10 @@ void GlfwWindowBackend::PollEvents()
 // GlfwWindowBackend::SwapBuffers is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void GlfwWindowBackend::SwapBuffers()
 {
-	if (windowHandle) {
-		glfwSwapBuffers(windowHandle);
-	}
+	// TerraEngine creates GLFW windows with GLFW_NO_API so Vulkan owns the
+	// swapchain and presentation. Calling glfwSwapBuffers without an OpenGL
+	// context can trigger GLFW/driver validation work without presenting
+	// anything, so this backend hook intentionally stays empty.
 }
 
 // GlfwWindowBackend::ShouldClose is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

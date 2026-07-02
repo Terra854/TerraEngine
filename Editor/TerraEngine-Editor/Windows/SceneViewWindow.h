@@ -52,6 +52,9 @@ private:
 	// inspect editor-only culling while gameplay preview stays in another mode.
 	VirtualGeometryDebugVisualizationMode m_VirtualGeometryDebugMode = VirtualGeometryDebugVisualizationMode::None;
 	bool m_VirtualGeometryDebugModeInitialized = false;
+	// Keep the temporary virtual-geometry counter panel opt-in until Scene View
+	// gets a fuller diagnostics toolbar that can present this data cleanly.
+	bool m_ShowVirtualGeometryDiagnostics = false;
 
 	void HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 };

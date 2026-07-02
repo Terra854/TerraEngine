@@ -22,6 +22,7 @@
 #include "VulkanContextImpl.h"
 #include "VulkanFrameDiagnostics.h"
 #include "Renderer/RenderCaptureEncoding.h"
+#include "Profiling/ProfilerScope.h"
 #include "ThreadPool/ThreadPool.h"
 #include <algorithm>
 #include <array>
@@ -1326,18 +1327,21 @@ void VulkanContext::BeginFrame() {
 	}
 
 	const auto fenceStart = BackendClock::now();
-	if (!impl->editorMode && !impl->inFlightFences.empty()) {
-		// Runtime rendering still shares several GPU images across frame slots
-		// (depth, shadows, Hi-Z, and AO). Until those resources are per-frame,
-		// the backend must not overlap GPU frames in standalone runtime.
-		vkWaitForFences(
-			impl->device,
-			static_cast<std::uint32_t>(impl->inFlightFences.size()),
-			impl->inFlightFences.data(),
-			VK_TRUE,
-			UINT64_MAX);
-	} else {
-		vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Wait Frame Fence", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		if (!impl->editorMode && !impl->inFlightFences.empty()) {
+			// Runtime rendering still shares several GPU images across frame slots
+			// (depth, shadows, Hi-Z, and AO). Until those resources are per-frame,
+			// the backend must not overlap GPU frames in standalone runtime.
+			vkWaitForFences(
+				impl->device,
+				static_cast<std::uint32_t>(impl->inFlightFences.size()),
+				impl->inFlightFences.data(),
+				VK_TRUE,
+				UINT64_MAX);
+		} else {
+			vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+		}
 	}
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 		impl->pendingBackendFrameBreakdown,
@@ -1357,8 +1361,11 @@ void VulkanContext::BeginFrame() {
 	{
 		impl->UpdateGlobalHiZ(impl->currentFrame);
 	}
-	// The waited frame slot is now complete, so snapshot its GPU counters for UI stats.
-	impl->PublishCompletedFrameStats(impl->currentFrame);
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Publish Completed Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		// The waited frame slot is now complete, so snapshot its GPU counters for UI stats.
+		impl->PublishCompletedFrameStats(impl->currentFrame);
+	}
 	// Freeze the completed Hi-Z metadata for this CPU frame. RenderFrame may
 	// record multiple outputs before the GPU executes any of them; every output
 	// must validate against the pyramid that actually exists at BeginFrame,
@@ -1380,58 +1387,64 @@ void VulkanContext::BeginFrame() {
 		impl->latestRenderSnapshotDiagnostics.completedSnapshotCount = static_cast<std::uint32_t>(impl->latestRenderSnapshotDiagnostics.ownerSummaries.size());
 	}
 
-	// Release any extra primary command buffers used for prior camera passes
-	// now that the fence guarantees they are idle.
-	if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
-		auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
-		if (!extras.empty()) {
-			const auto commandLifetimeStart = BackendClock::now();
-			vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], static_cast<uint32_t>(extras.size()), extras.data());
-			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
-				impl->pendingBackendFrameBreakdown,
-				{ TerraEngine::Renderer::BackendFrameCostCategory::QueueIdleWait, TerraEngine::Renderer::BackendSubmitStage::CommandBufferLifetime, RenderViewType::Game, 0u, "Free extra primary command buffers", false, false },
-				ElapsedMilliseconds(commandLifetimeStart),
-				0.25f);
-			extras.clear();
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Retire GPU Resources", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		// Release any extra primary command buffers used for prior camera passes
+		// now that the fence guarantees they are idle.
+		if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
+			auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
+			if (!extras.empty()) {
+				const auto commandLifetimeStart = BackendClock::now();
+				vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], static_cast<uint32_t>(extras.size()), extras.data());
+				TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
+					impl->pendingBackendFrameBreakdown,
+					{ TerraEngine::Renderer::BackendFrameCostCategory::QueueIdleWait, TerraEngine::Renderer::BackendSubmitStage::CommandBufferLifetime, RenderViewType::Game, 0u, "Free extra primary command buffers", false, false },
+					ElapsedMilliseconds(commandLifetimeStart),
+					0.25f);
+				extras.clear();
+			}
 		}
-	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
-		impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
-	}
-	impl->activeRenderSnapshot = {};
-	impl->pendingRenderSnapshotDiagnostics = {};
-	impl->pendingRenderSnapshotDiagnostics.valid = true;
-	impl->pendingRenderSnapshotDiagnostics.maxSnapshotsPerFrame = VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (impl->currentFrame < impl->retiredBuffersByFrame.size()) {
-		auto& retiredBuffers = impl->retiredBuffersByFrame[impl->currentFrame];
-		for (VulkanBuffer& retiredBuffer : retiredBuffers) {
-			impl->DestroyBufferImmediate(retiredBuffer);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 		}
-		retiredBuffers.clear();
+		impl->activeRenderSnapshot = {};
+		impl->pendingRenderSnapshotDiagnostics = {};
+		impl->pendingRenderSnapshotDiagnostics.valid = true;
+		impl->pendingRenderSnapshotDiagnostics.maxSnapshotsPerFrame = VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (impl->currentFrame < impl->retiredBuffersByFrame.size()) {
+			auto& retiredBuffers = impl->retiredBuffersByFrame[impl->currentFrame];
+			for (VulkanBuffer& retiredBuffer : retiredBuffers) {
+				impl->DestroyBufferImmediate(retiredBuffer);
+			}
+			retiredBuffers.clear();
+		}
 	}
 
 	// Reset command pool so the main command buffer and any newly allocated
 	// per-camera buffers start from a clean state each frame.
-	const auto resetStart = BackendClock::now();
-	vkResetCommandPool(impl->device, impl->commandPools[impl->currentFrame], 0);
-	TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
-		impl->pendingBackendFrameBreakdown,
-		{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, RenderViewType::Game, 0u, "Reset primary command pool", true, false },
-		ElapsedMilliseconds(resetStart));
-	// Reset worker pools for this frame once so secondary buffers can be rerecorded safely.
-	if (impl->currentFrame < impl->workerCommandPools.size()) {
-		auto& framePools = impl->workerCommandPools[impl->currentFrame];
-		for (VkCommandPool pool : framePools) {
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (pool != VK_NULL_HANDLE) {
-				const auto workerResetStart = BackendClock::now();
-				vkResetCommandPool(impl->device, pool, 0);
-				TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
-					impl->pendingBackendFrameBreakdown,
-					{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, RenderViewType::Game, 0u, "Reset worker command pool", true, false },
-					ElapsedMilliseconds(workerResetStart));
+	{
+		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Reset Command Pools", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+		const auto resetStart = BackendClock::now();
+		vkResetCommandPool(impl->device, impl->commandPools[impl->currentFrame], 0);
+		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
+			impl->pendingBackendFrameBreakdown,
+			{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, RenderViewType::Game, 0u, "Reset primary command pool", true, false },
+			ElapsedMilliseconds(resetStart));
+		// Reset worker pools for this frame once so secondary buffers can be rerecorded safely.
+		if (impl->currentFrame < impl->workerCommandPools.size()) {
+			auto& framePools = impl->workerCommandPools[impl->currentFrame];
+			for (VkCommandPool pool : framePools) {
+				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+				if (pool != VK_NULL_HANDLE) {
+					const auto workerResetStart = BackendClock::now();
+					vkResetCommandPool(impl->device, pool, 0);
+					TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(
+						impl->pendingBackendFrameBreakdown,
+						{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::CommandBufferReset, RenderViewType::Game, 0u, "Reset worker command pool", true, false },
+						ElapsedMilliseconds(workerResetStart));
+				}
 			}
 		}
 	}
@@ -1451,7 +1464,11 @@ void VulkanContext::BeginFrame() {
 	// render to the same back buffer and present only on the final camera.
 	if (!impl->editorMode) {
 		const auto acquireStart = BackendClock::now();
-		VkResult result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX, impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &impl->acquiredImageIndex);
+		VkResult result = VK_SUCCESS;
+		{
+			TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Acquire Swapchain Image", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			result = vkAcquireNextImageKHR(impl->device, impl->swapchain, UINT64_MAX, impl->imageAvailableSemaphores[impl->currentFrame], VK_NULL_HANDLE, &impl->acquiredImageIndex);
+		}
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::FenceWait, TerraEngine::Renderer::BackendSubmitStage::ImageAcquire, RenderViewType::Game, 0u, "Swapchain image acquire", true, false },

@@ -2524,11 +2524,25 @@ void RenderSystem::Update(float deltaTime)
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			++visibleCommandCache.hitCount;
 			existing->second.lastTouchedFrameId = activeRenderFrameId;
-			collectVirtualGeometryDiagnosticsAssets(existing->second.commands, viewType);
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Diagnostics", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				collectVirtualGeometryDiagnosticsAssets(existing->second.commands, viewType);
+			}
 			const RenderViewType diagnosticsViewType = outputKind == RenderOutputKind::MainRuntimeView ? RenderViewType::ExportRuntime : viewType;
-			recordVirtualGeometryViewSelection(existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.clusterPackets, existing->second.clusterBatches, existing->second.compactionResults, existing->second.fallbackCoverage, existing->second.lodTransitionStates, viewVirtualGeometryQuality.debugVisualizationMode, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView);
-			publishVisibleStreamingNeeds(existing->second.commands, viewType, cameraPosition);
-			return VisibleCommandBuildResult{ existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.clusterPackets, existing->second.clusterBatches, existing->second.compactionResults, existing->second.fallbackCoverage, existing->second.lodTransitionStates, existing->second.diagnostics, true };
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible VG Selection Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				recordVirtualGeometryViewSelection(existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.clusterPackets, existing->second.clusterBatches, existing->second.compactionResults, existing->second.fallbackCoverage, existing->second.lodTransitionStates, viewVirtualGeometryQuality.debugVisualizationMode, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView);
+			}
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Streaming Touches", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				publishVisibleStreamingNeeds(existing->second.commands, viewType, cameraPosition);
+			}
+			VisibleCommandBuildResult cachedResult;
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Copy Cached Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				cachedResult = VisibleCommandBuildResult{ existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.clusterPackets, existing->second.clusterBatches, existing->second.compactionResults, existing->second.fallbackCoverage, existing->second.lodTransitionStates, existing->second.diagnostics, true };
+			}
+			return cachedResult;
 		}
 
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Rebuild Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -2723,7 +2737,12 @@ void RenderSystem::Update(float deltaTime)
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			++shadowDrawListCache.hitCount;
 			existing->second.lastTouchedFrameId = activeRenderFrameId;
-			std::vector<ShadowDrawList> cachedShadowDrawLists = existing->second.shadowDrawLists;
+			std::vector<ShadowDrawList> cachedShadowDrawLists;
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Copy Cached Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				cachedShadowDrawLists = existing->second.shadowDrawLists;
+			}
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Shadow VG Selection Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			for (std::size_t shadowIndex = 0u; shadowIndex < cachedShadowDrawLists.size(); ++shadowIndex)
 			{
 				collectVirtualGeometryDiagnosticsAssets(cachedShadowDrawLists[shadowIndex].commands, RenderViewType::Shadow);
@@ -3022,12 +3041,22 @@ void RenderSystem::Update(float deltaTime)
 		frameData.viewMatrix = sceneViewCamera.view;
 		frameData.projectionMatrix = sceneViewCamera.proj;
 		frameData.cameraWorldPosition = sceneViewCamera.pos;
-		const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, sceneViewTargetSize, RenderOutputKind::SceneView, RenderViewType::Scene, 1u, frameData.cameraWorldPosition);
+		VisibleCommandBuildResult visibleCommands;
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, sceneViewTargetSize, RenderOutputKind::SceneView, RenderViewType::Scene, 1u, frameData.cameraWorldPosition);
+		}
 		frameData.commands = visibleCommands.commands;
 		sceneSpatialDiagnostics = visibleCommands.diagnostics;
 		applySceneViewContextTint();
-		frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
-		rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::SceneView, RenderViewType::Scene, 1u));
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View RHI RenderFrame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::SceneView, RenderViewType::Scene, 1u));
+		}
 	}
 	else if (TerraEngine::Renderer::RenderDiagnosticsRequested())
 	{
@@ -3050,11 +3079,21 @@ void RenderSystem::Update(float deltaTime)
 			frameData.viewMatrix = cam.view;
 			frameData.projectionMatrix = cam.proj;
 			frameData.cameraWorldPosition = cam.pos;
-			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::GameView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
+			VisibleCommandBuildResult visibleCommands;
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::GameView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
+			}
 			frameData.commands = visibleCommands.commands;
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
-			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
-			rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
+			}
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View RHI RenderFrame", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				rhi->RenderFrame(frameData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
+			}
 			latestGameViewFrameId = activeRenderFrameId;
 		}
 	}
@@ -3214,124 +3253,139 @@ void RenderSystem::Update(float deltaTime)
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Publish Render Stats", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> virtualGeometryViewSnapshots;
 		const VirtualGeometryQualityProfile virtualGeometryQuality = renderFrameSnapshot.renderSettings.virtualGeometry;
-		virtualGeometryViewSnapshots.push_back(TerraEngine::Renderer::BuildVirtualGeometryLodQualityDiagnostics(RenderViewType::Game, activeRenderFrameId, gameVirtualGeometryDiagnosticsAssets, virtualGeometryQuality));
-		virtualGeometryViewSnapshots.push_back(TerraEngine::Renderer::BuildVirtualGeometryLodQualityDiagnostics(RenderViewType::Scene, activeRenderFrameId, sceneVirtualGeometryDiagnosticsAssets, virtualGeometryQuality));
-		bool shadowDiagnosticsPublished = false;
-		{
-			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot shadowSnapshot =
-				TerraEngine::Renderer::BuildVirtualGeometryLodQualityDiagnostics(RenderViewType::Shadow, activeRenderFrameId, shadowVirtualGeometryDiagnosticsAssets, virtualGeometryQuality);
-			shadowSnapshot.hiZActive = true;
-			shadowSnapshot.hiZHistoryValid = true;
-			shadowSnapshot.hiZInvalidReason.clear();
-			shadowSnapshot.warnings.push_back("Shadow virtual geometry uses conservative visibility; camera Hi-Z ownership is diagnostic-only.");
-			virtualGeometryViewSnapshots.push_back(std::move(shadowSnapshot));
-			shadowDiagnosticsPublished = true;
-		}
-		std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> selectionSnapshots =
+		const bool detailedRenderDiagnosticsRequested = TerraEngine::Renderer::RenderDiagnosticsRequested();
+		// The stats overlay only needs live frame-selection counters. Full asset
+		// inventory diagnostics scan every cooked VG asset and allocate warning
+		// strings, so keep that work behind the explicit diagnostics request.
+		virtualGeometryViewSnapshots =
 			TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(renderFrameSnapshot, virtualGeometryQuality, GetVirtualGeometryInactiveReason());
-		const auto mergeSelectionDiagnostics = [](
-			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& target,
-			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& selection) {
-			// The quality snapshot describes cooked assets and residency. The
-			// selection snapshot describes what this frame actually dispatched.
-			// Merge the live fields into the inventory view so editor overlays
-			// do not stop on a stale zero-count Game/Scene snapshot.
-			target.active = target.active || selection.active;
-			target.inactiveReason = selection.inactiveReason;
-			target.selectedMeshlets = selection.selectedMeshlets;
-			target.dispatchedMeshlets = selection.dispatchedMeshlets;
-			target.culledMeshlets = selection.culledMeshlets;
-			target.culledByFrustum = selection.culledByFrustum;
-			target.culledByCone = selection.culledByCone;
-			target.culledByHiZ = selection.culledByHiZ;
-			target.clusterPacketCount = selection.clusterPacketCount;
-			target.candidateClusterCount = selection.candidateClusterCount;
-			target.compactedClusterCount = selection.compactedClusterCount;
-			target.rejectedClusterCount = selection.rejectedClusterCount;
-			target.failOpenClusterCount = selection.failOpenClusterCount;
-			target.submittedBatchCount = selection.submittedBatchCount;
-			target.legacyFallbackBatchCount = selection.legacyFallbackBatchCount;
-			target.hiZActive = selection.hiZActive;
-			target.hiZHistoryValid = selection.hiZHistoryValid;
-			target.hiZInvalidReason = selection.hiZInvalidReason;
-			target.hiZState = selection.hiZState;
-			target.hiZPyramidSize = selection.hiZPyramidSize;
-			target.hiZRenderSize = selection.hiZRenderSize;
-			target.hiZCameraSignature = selection.hiZCameraSignature;
-			target.hiZDepthSceneSignature = selection.hiZDepthSceneSignature;
-			target.hiZWarmupFrames = selection.hiZWarmupFrames;
-			target.hiZBaselineMatched = target.hiZBaselineMatched && selection.hiZBaselineMatched;
-			target.hiZFalseOcclusionRiskWarnings += selection.hiZFalseOcclusionRiskWarnings;
-			target.clusterSelection = selection.clusterSelection;
-			target.hiZValidation = selection.hiZValidation;
-			target.virtualGeometryPerformanceGates.insert(
-				target.virtualGeometryPerformanceGates.end(),
-				selection.virtualGeometryPerformanceGates.begin(),
-				selection.virtualGeometryPerformanceGates.end());
-			target.selectedLodHistogram = selection.selectedLodHistogram;
-			target.occlusionDebugSamples = selection.occlusionDebugSamples;
-			if (selection.sourceMeshlets > 0u)
-			{
-				target.sourceMeshlets = std::max(target.sourceMeshlets, selection.sourceMeshlets);
-			}
-			if (selection.requestedPages > 0u || selection.missingPages > 0u)
-			{
-				target.requestedPages = std::max(target.requestedPages, selection.requestedPages);
-				target.missingPages = std::max(target.missingPages, selection.missingPages);
-			}
-			target.warnings.insert(target.warnings.end(), selection.warnings.begin(), selection.warnings.end());
-		};
-		for (TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& selectionSnapshot : selectionSnapshots)
+		if (detailedRenderDiagnosticsRequested)
 		{
-			auto existingSnapshot = std::find_if(
-				virtualGeometryViewSnapshots.begin(),
-				virtualGeometryViewSnapshots.end(),
-				[viewType = selectionSnapshot.viewType](const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot) {
-					return snapshot.viewType == viewType;
-				});
-			if (existingSnapshot != virtualGeometryViewSnapshots.end())
+			std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> detailedVirtualGeometryViewSnapshots;
+			detailedVirtualGeometryViewSnapshots.push_back(TerraEngine::Renderer::BuildVirtualGeometryLodQualityDiagnostics(RenderViewType::Game, activeRenderFrameId, gameVirtualGeometryDiagnosticsAssets, virtualGeometryQuality));
+			detailedVirtualGeometryViewSnapshots.push_back(TerraEngine::Renderer::BuildVirtualGeometryLodQualityDiagnostics(RenderViewType::Scene, activeRenderFrameId, sceneVirtualGeometryDiagnosticsAssets, virtualGeometryQuality));
+			bool shadowDiagnosticsPublished = false;
 			{
-				mergeSelectionDiagnostics(*existingSnapshot, selectionSnapshot);
+				TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot shadowSnapshot =
+					TerraEngine::Renderer::BuildVirtualGeometryLodQualityDiagnostics(RenderViewType::Shadow, activeRenderFrameId, shadowVirtualGeometryDiagnosticsAssets, virtualGeometryQuality);
+				shadowSnapshot.hiZActive = true;
+				shadowSnapshot.hiZHistoryValid = true;
+				shadowSnapshot.hiZInvalidReason.clear();
+				shadowSnapshot.warnings.push_back("Shadow virtual geometry uses conservative visibility; camera Hi-Z ownership is diagnostic-only.");
+				detailedVirtualGeometryViewSnapshots.push_back(std::move(shadowSnapshot));
+				shadowDiagnosticsPublished = true;
 			}
-			else if (selectionSnapshot.viewType == RenderViewType::ExportRuntime
-				|| (selectionSnapshot.viewType == RenderViewType::Shadow && !shadowDiagnosticsPublished))
-			{
-				virtualGeometryViewSnapshots.push_back(std::move(selectionSnapshot));
-			}
-		}
-		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot : virtualGeometryViewSnapshots)
-		{
-			for (const PerformanceGateResult& gate : snapshot.virtualGeometryPerformanceGates)
-			{
-				if (gate.status != VirtualGeometryPerformanceGateStatus::Fail)
+			const auto mergeSelectionDiagnostics = [](
+				TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& target,
+				const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& selection) {
+				// The quality snapshot describes cooked assets and residency. The
+				// selection snapshot describes what this frame actually dispatched.
+				// Merge the live fields into the inventory view so editor overlays
+				// do not stop on a stale zero-count Game/Scene snapshot.
+				target.active = target.active || selection.active;
+				target.inactiveReason = selection.inactiveReason;
+				target.selectedMeshlets = selection.selectedMeshlets;
+				target.dispatchedMeshlets = selection.dispatchedMeshlets;
+				target.culledMeshlets = selection.culledMeshlets;
+				target.culledByFrustum = selection.culledByFrustum;
+				target.culledByCone = selection.culledByCone;
+				target.culledByHiZ = selection.culledByHiZ;
+				target.clusterPacketCount = selection.clusterPacketCount;
+				target.candidateClusterCount = selection.candidateClusterCount;
+				target.compactedClusterCount = selection.compactedClusterCount;
+				target.rejectedClusterCount = selection.rejectedClusterCount;
+				target.failOpenClusterCount = selection.failOpenClusterCount;
+				target.submittedBatchCount = selection.submittedBatchCount;
+				target.legacyFallbackBatchCount = selection.legacyFallbackBatchCount;
+				target.hiZActive = selection.hiZActive;
+				target.hiZHistoryValid = selection.hiZHistoryValid;
+				target.hiZInvalidReason = selection.hiZInvalidReason;
+				target.hiZState = selection.hiZState;
+				target.hiZPyramidSize = selection.hiZPyramidSize;
+				target.hiZRenderSize = selection.hiZRenderSize;
+				target.hiZCameraSignature = selection.hiZCameraSignature;
+				target.hiZDepthSceneSignature = selection.hiZDepthSceneSignature;
+				target.hiZWarmupFrames = selection.hiZWarmupFrames;
+				target.hiZBaselineMatched = target.hiZBaselineMatched && selection.hiZBaselineMatched;
+				target.hiZFalseOcclusionRiskWarnings += selection.hiZFalseOcclusionRiskWarnings;
+				target.clusterSelection = selection.clusterSelection;
+				target.hiZValidation = selection.hiZValidation;
+				target.virtualGeometryPerformanceGates.insert(
+					target.virtualGeometryPerformanceGates.end(),
+					selection.virtualGeometryPerformanceGates.begin(),
+					selection.virtualGeometryPerformanceGates.end());
+				target.selectedLodHistogram = selection.selectedLodHistogram;
+				target.occlusionDebugSamples = selection.occlusionDebugSamples;
+				if (selection.sourceMeshlets > 0u)
 				{
-					continue;
+					target.sourceMeshlets = std::max(target.sourceMeshlets, selection.sourceMeshlets);
 				}
-				renderGraphDiagnostics.backendFallbacks.push_back(
-					"Virtual geometry gate failed for "
-					+ gate.fixtureId
-					+ "/"
-					+ gate.metricName
-					+ ": expected "
-					+ std::to_string(gate.threshold)
-					+ ", actual "
-					+ std::to_string(gate.actual));
+				if (selection.requestedPages > 0u || selection.missingPages > 0u)
+				{
+					target.requestedPages = std::max(target.requestedPages, selection.requestedPages);
+					target.missingPages = std::max(target.missingPages, selection.missingPages);
+				}
+				target.warnings.insert(target.warnings.end(), selection.warnings.begin(), selection.warnings.end());
+			};
+			for (TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& selectionSnapshot : virtualGeometryViewSnapshots)
+			{
+				auto existingSnapshot = std::find_if(
+					detailedVirtualGeometryViewSnapshots.begin(),
+					detailedVirtualGeometryViewSnapshots.end(),
+					[viewType = selectionSnapshot.viewType](const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot) {
+						return snapshot.viewType == viewType;
+					});
+				if (existingSnapshot != detailedVirtualGeometryViewSnapshots.end())
+				{
+					mergeSelectionDiagnostics(*existingSnapshot, selectionSnapshot);
+				}
+				else if (selectionSnapshot.viewType == RenderViewType::ExportRuntime
+					|| (selectionSnapshot.viewType == RenderViewType::Shadow && !shadowDiagnosticsPublished))
+				{
+					detailedVirtualGeometryViewSnapshots.push_back(std::move(selectionSnapshot));
+				}
 			}
+			virtualGeometryViewSnapshots = std::move(detailedVirtualGeometryViewSnapshots);
+			for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot : virtualGeometryViewSnapshots)
+			{
+				for (const PerformanceGateResult& gate : snapshot.virtualGeometryPerformanceGates)
+				{
+					if (gate.status != VirtualGeometryPerformanceGateStatus::Fail)
+					{
+						continue;
+					}
+					renderGraphDiagnostics.backendFallbacks.push_back(
+						"Virtual geometry gate failed for "
+						+ gate.fixtureId
+						+ "/"
+						+ gate.metricName
+						+ ": expected "
+						+ std::to_string(gate.threshold)
+						+ ", actual "
+						+ std::to_string(gate.actual));
+				}
+			}
+			const TerraEngine::Scheduling::SystemDeclaration schedulerDeclaration = SchedulerDeclaration();
+			std::vector<TerraEngine::Renderer::VirtualGeometrySchedulerDiagnostics> virtualGeometrySchedulerSnapshots;
+			virtualGeometrySchedulerSnapshots.push_back(TerraEngine::Renderer::BuildVirtualGeometrySchedulerDiagnostics(
+				schedulerDeclaration.name,
+				schedulerDeclaration.phase,
+				schedulerDeclaration.reads,
+				schedulerDeclaration.writes,
+				schedulerDeclaration.safeSubwork,
+				schedulerDeclaration.protectedCommit,
+				schedulerDeclaration.requiresFlushedSceneMutations
+					? "SceneMutationQueue flush before render snapshot reads; virtual geometry diagnostics publish after protected RHI work."
+					: "Virtual geometry diagnostics publish after protected RHI work."));
+			TerraEngine::Renderer::ApplyVirtualGeometryDiagnostics(renderGraphDiagnostics, std::move(virtualGeometryViewSnapshots), std::move(virtualGeometrySchedulerSnapshots));
+			TerraEngine::Renderer::PublishRenderDiagnostics(renderGraphDiagnostics);
 		}
-		const TerraEngine::Scheduling::SystemDeclaration schedulerDeclaration = SchedulerDeclaration();
-		std::vector<TerraEngine::Renderer::VirtualGeometrySchedulerDiagnostics> virtualGeometrySchedulerSnapshots;
-		virtualGeometrySchedulerSnapshots.push_back(TerraEngine::Renderer::BuildVirtualGeometrySchedulerDiagnostics(
-			schedulerDeclaration.name,
-			schedulerDeclaration.phase,
-			schedulerDeclaration.reads,
-			schedulerDeclaration.writes,
-			schedulerDeclaration.safeSubwork,
-			schedulerDeclaration.protectedCommit,
-			schedulerDeclaration.requiresFlushedSceneMutations
-				? "SceneMutationQueue flush before render snapshot reads; virtual geometry diagnostics publish after protected RHI work."
-				: "Virtual geometry diagnostics publish after protected RHI work."));
-		TerraEngine::Renderer::ApplyVirtualGeometryDiagnostics(renderGraphDiagnostics, std::move(virtualGeometryViewSnapshots), std::move(virtualGeometrySchedulerSnapshots));
-		TerraEngine::Renderer::PublishRenderDiagnostics(renderGraphDiagnostics);
+		else
+		{
+			// Keep latestRenderGraphDiagnostics useful for overlays and MCP stats,
+			// but avoid publishing or enriching detailed diagnostics while closed.
+			renderGraphDiagnostics.virtualGeometryViews = std::move(virtualGeometryViewSnapshots);
+		}
 		std::lock_guard<std::mutex> lock(statsMutex);
 		latestGameStats = rhi->GetLatestRenderStats(RenderViewType::Game);
 		latestSceneStats = rhi->GetLatestRenderStats(RenderViewType::Scene);

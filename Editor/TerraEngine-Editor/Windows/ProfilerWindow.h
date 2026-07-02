@@ -25,7 +25,9 @@ private:
 	void DrawCaptureList();
 	void DrawFrameList();
 	void DrawFrameDetails();
+	void DrawFrameOverview(const TerraEngine::Profiling::ProfilerFrameRecord& frame);
 	void DrawModuleSummary(const TerraEngine::Profiling::ProfilerFrameRecord& frame);
+	void DrawHotSamples(const TerraEngine::Profiling::ProfilerFrameRecord& frame);
 	void DrawSamples(const TerraEngine::Profiling::ProfilerFrameRecord& frame);
 
 	MainEditorSubsystem* owner = nullptr;

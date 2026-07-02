@@ -280,6 +280,12 @@ void SceneViewWindow::OnGui() {
 		}
 		ImGui::EndCombo();
 	}
+	ImGui::SameLine();
+	ImGui::Checkbox("VG Stats", &m_ShowVirtualGeometryDiagnostics);
+	if (ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("Show virtual-geometry packet and Hi-Z baseline diagnostics in the Scene View.");
+	}
 	
 	// We draw the image filling the content region
 	ImVec2 contentSize = ImGui::GetContentRegionAvail();
@@ -299,7 +305,7 @@ void SceneViewWindow::OnGui() {
 		ImGui::Text("Scene rendering not available.");
 	}
 	RenderStatsSnapshot sceneStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Scene);
-	if (sceneStats.valid && (sceneStats.virtualGeometryClusterPackets > 0u || sceneStats.virtualGeometrySubmittedBatches > 0u))
+	if (m_ShowVirtualGeometryDiagnostics && sceneStats.valid && (sceneStats.virtualGeometryClusterPackets > 0u || sceneStats.virtualGeometrySubmittedBatches > 0u))
 	{
 		const std::string packetText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
 			"VG Cluster Packets",

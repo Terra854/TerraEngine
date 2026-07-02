@@ -104,12 +104,22 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::size_t>(336u), sizeof(FrameCullingDataGPU), "Adding Hi-Z validation state should not change the task-shader frame-culling upload size.");
 		});
 
-		registry.Add("VirtualGeometry.ShaderLayout.HiZUsesFullRectSampleBudget", [](TestContext& context) {
+		registry.Add("VirtualGeometry.ShaderLayout.HiZUsesBoundedRectSampleBudget", [](TestContext& context) {
 			const std::string shader = ReadDefaultTaskShader();
 			context.Expect(!shader.empty(), "The default task shader should be readable for Hi-Z sampler contract validation.");
-			context.Expect(ShaderContains(shader, "static const uint kMaxHiZRectAxisSamples = 64u;"), "The Hi-Z rectangle sampler should keep its bounded per-axis loop limit explicit.");
-			context.Expect(ShaderContains(shader, "static const uint kMaxHiZRectTexelSamples = kMaxHiZRectAxisSamples * kMaxHiZRectAxisSamples;"), "The Hi-Z rectangle sampler should use the full axis budget so it can choose finer mips for normal wall occlusion cases.");
-			context.Expect(!ShaderContains(shader, "static const uint kMaxHiZRectTexelSamples = 1024u;"), "The previous 1024-sample cap forced overly coarse Hi-Z mips for wider projected meshlet bounds.");
+			context.Expect(ShaderContains(shader, "static const uint kMaxHiZRectAxisSamples = 32u;"), "The Hi-Z rectangle sampler should keep its bounded per-axis loop limit explicit and affordable for task shaders.");
+			context.Expect(ShaderContains(shader, "static const uint kMaxHiZRectTexelSamples = kMaxHiZRectAxisSamples * kMaxHiZRectAxisSamples;"), "The Hi-Z rectangle sampler should derive the total budget from the axis cap so the loop bound and mip picker stay in sync.");
+			context.Expect(ShaderContains(shader, "when the cap forces a coarser mip"), "The shader should document that coarse-mip fallback is conservative and may cull fewer meshlets rather than hiding visible geometry.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.TaskShaderAggregatesCountersPerTaskGroup", [](TestContext& context) {
+			const std::string shader = ReadDefaultTaskShader();
+			context.Expect(!shader.empty(), "The default task shader should be readable for counter aggregation contract validation.");
+			context.Expect(ShaderContains(shader, "MeshletCullingCounters localCounters = MakeEmptyMeshletCullingCounters();"), "Task groups should accumulate meshlet counters locally before touching the global counter buffer.");
+			context.Expect(ShaderContains(shader, "FlushMeshletCullingCounters(statsIndex, localCounters);"), "Task groups should flush one aggregated counter packet before dispatching mesh work.");
+			context.Expect(!ShaderContains(shader, "InterlockedAdd(meshletCounters[statsIndex].meshletsTotal, 1u"), "Per-meshlet total-count atomics should stay removed from the hot loop.");
+			context.Expect(!ShaderContains(shader, "InterlockedAdd(meshletCounters[statsIndex].meshletsDispatched, 1u"), "Per-meshlet dispatch-count atomics should stay removed from the hot loop.");
+			context.Expect(!ShaderContains(shader, "InterlockedAdd(meshletCounters[statsIndex].hiZTests, 1u"), "Per-meshlet Hi-Z-test atomics should stay removed from the hot loop.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.HiZProjectsActualMeshletVertices", [](TestContext& context) {

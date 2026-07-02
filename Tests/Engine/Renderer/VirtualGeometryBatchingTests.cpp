@@ -134,6 +134,27 @@ namespace {
 			context.ExpectEqual(8u, diagnostics.submittedMeshlets, "Diagnostics should report submitted meshlets from the batch.");
 		});
 
+		registry.Add("VirtualGeometry.Batching.Foundation.LightweightViewDiagnosticsExposePacketCounts", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 3004u;
+			snapshot.renderSettings.virtualGeometry = MakeDefaultVirtualGeometryQualityProfile();
+			snapshot.virtualGeometryViewSelections.push_back(MakeBatchedSelectionState());
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+					snapshot,
+					snapshot.renderSettings.virtualGeometry,
+					VirtualGeometryInactiveReason::None);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), diagnostics.size(), "One explicit selection state should produce one lightweight diagnostics snapshot.");
+			context.ExpectEqual(1u, diagnostics.front().clusterPacketCount, "Lightweight diagnostics should expose cluster packet counts without requiring a visibility snapshot.");
+			context.ExpectEqual(1u, diagnostics.front().submittedBatchCount, "Lightweight diagnostics should expose batch counts without running full asset inventory diagnostics.");
+			context.ExpectEqual(1u, diagnostics.front().candidateClusterCount, "Lightweight diagnostics should expose candidate packet counts for overlays.");
+			context.ExpectEqual(1u, diagnostics.front().compactedClusterCount, "Lightweight diagnostics should expose compacted packet counts for overlays.");
+			context.ExpectEqual(8u, diagnostics.front().submittedMeshlets, "Lightweight diagnostics should preserve submitted meshlet counts from the batch table.");
+			context.Expect(diagnostics.front().virtualGeometryPerformanceGates.empty(), "Lightweight diagnostics should not allocate performance-gate strings for normal overlay stats.");
+		});
+
 		registry.Add("VirtualGeometry.Batching.Foundation.HashChangesWhenPacketTableChanges", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot first;
 			first.frameId = 3002u;
