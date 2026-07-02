@@ -238,6 +238,16 @@ namespace
 		clusterPageLink.groupCount = 1u;
 		clusterPageLink.flags = 0x3u;
 
+		VirtualGeometryConeSafetyRecord coneSafety{};
+		coneSafety.clusterId = 0u;
+		coneSafety.groupOffset = 0u;
+		coneSafety.groupCount = 1u;
+		coneSafety.materialSidedness = 0u;
+		coneSafety.windingState = 0u;
+		coneSafety.alphaRisk = 0u;
+		coneSafety.thinShellRisk = 0u;
+		coneSafety.flags = kVirtualGeometryConeSafetyFlagConeValid | kVirtualGeometryConeSafetyFlagEligible;
+
 		const VirtualGeometryRequestedTargetRecord requestedTargets[2] = {
 			{ 0u, static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Generated), 1u, 1u, 1.0f },
 			{ 1u, static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Skipped), 1u, 1u, 0.5f }
@@ -260,7 +270,8 @@ namespace
 		validation.flags = kVirtualGeometryValidationFlagAdaptiveTargetsPresent
 			| kVirtualGeometryValidationFlagFallbackCoverageValidated
 			| kVirtualGeometryValidationFlagClusterHierarchyValidated
-			| kVirtualGeometryValidationFlagPageLinksValidated;
+			| kVirtualGeometryValidationFlagPageLinksValidated
+			| kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
 		validation.messageStringOffset = validationMessageOffset;
 		validation.messageStringSize = static_cast<std::uint32_t>(std::string_view("fallback coverage validated").size());
 
@@ -291,6 +302,7 @@ namespace
 		virtualHeader.skippedDetailCount = 1u;
 		virtualHeader.clusterCount = 1u;
 		virtualHeader.clusterPageLinkCount = 1u;
+		virtualHeader.coneSafetyCount = 1u;
 		virtualHeader.validationFlagCount = 1u;
 		virtualHeader.flags = validation.flags;
 		virtualHeader.sourceTriangleCount = 1u;
@@ -311,6 +323,7 @@ namespace
 		assignTable(virtualHeader.skippedDetailTableOffset, 1u, sizeof(skipped));
 		assignTable(virtualHeader.clusterTableOffset, 1u, sizeof(cluster));
 		assignTable(virtualHeader.clusterPageLinkTableOffset, 1u, sizeof(clusterPageLink));
+		assignTable(virtualHeader.coneSafetyTableOffset, 1u, sizeof(coneSafety));
 		assignTable(virtualHeader.validationFlagTableOffset, 1u, sizeof(validation));
 		assignTable(virtualHeader.diagnosticStringOffset, static_cast<std::uint32_t>(strings.size()), sizeof(char));
 		virtualHeader.diagnosticStringSize = static_cast<std::uint32_t>(strings.size());
@@ -343,6 +356,7 @@ namespace
 		WriteValue(bytes, virtualHeader.skippedDetailTableOffset, skipped);
 		WriteValue(bytes, virtualHeader.clusterTableOffset, cluster);
 		WriteValue(bytes, virtualHeader.clusterPageLinkTableOffset, clusterPageLink);
+		WriteValue(bytes, virtualHeader.coneSafetyTableOffset, coneSafety);
 		WriteValue(bytes, virtualHeader.validationFlagTableOffset, validation);
 		std::copy(strings.begin(), strings.end(), bytes.begin() + virtualHeader.diagnosticStringOffset);
 

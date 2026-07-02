@@ -215,6 +215,18 @@ namespace TerraEngine::AssetPipeline
 			{
 				AddCoverageTag(mesh, "page-links");
 			}
+			if (mesh.virtualGeometryConeSafetySummary.metadataValid)
+			{
+				AddCoverageTag(mesh, "cone-safety-metadata");
+			}
+			if (mesh.virtualGeometryConeSafetySummary.disabledClusterCount > 0u)
+			{
+				AddCoverageTag(mesh, "cone-culling-disabled");
+			}
+			if (mesh.virtualGeometryConeSafetySummary.eligibleClusterCount > 0u)
+			{
+				AddCoverageTag(mesh, "cone-culling-eligible");
+			}
 			if (sourceMaterialAssignmentCount > 1u)
 			{
 				AddCoverageTag(mesh, "multi-material-package");
@@ -995,8 +1007,11 @@ namespace TerraEngine::AssetPipeline
 			MeshCompileReport compileReport{};
 			const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileSettings(options.virtualGeometrySettings);
 			const VirtualGeometryAdaptiveCompileSettings* compileSettingsPtr = options.hasVirtualGeometrySettings ? &compileSettings : nullptr;
+			VirtualGeometryConeSafetyCookSettings coneSafetySettings{};
+			coneSafetySettings.proveOneSidedOpaqueClusters = false;
+			coneSafetySettings.disabledReason = "glTF package meshes currently merge primitive material safety, so cone culling waits for per-cluster material proof.";
 			ReportProgress(options, 0.80f, "Compiling Mesh", "Building Terra mesh and virtual geometry data.");
-			if (!CompileMeshFromRaw(options.sourceRelativePath, options.buildRoot / compiledPackagePath, packageVertices, packageIndices, true, &compileReport, 60.0f, 1e-6f, compileSettingsPtr, MakeNestedProgress(options, 0.80f, 0.90f)))
+			if (!CompileMeshFromRaw(options.sourceRelativePath, options.buildRoot / compiledPackagePath, packageVertices, packageIndices, true, &compileReport, 60.0f, 1e-6f, compileSettingsPtr, MakeNestedProgress(options, 0.80f, 0.90f), &coneSafetySettings))
 			{
 				AddDiagnostic(result, GltfDiagnosticSeverity::Error, "MeshCompileFailed", compiledPackagePath.generic_string(), "Extracted glTF geometry failed Terra mesh compilation.");
 			}

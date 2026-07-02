@@ -3517,10 +3517,17 @@ void InspectorWindow::DrawModelPackageChildInspector(const std::filesystem::path
 				drawRowU32("Material Sections", mesh.virtualGeometryClusterSummary.materialSectionCount);
 				drawRowU32("Source Material Slots", mesh.virtualGeometryClusterSummary.sourceMaterialAssignmentCount);
 				drawRow("Material Coverage", mesh.virtualGeometryClusterSummary.materialCoverageValid ? "Valid" : "Needs Review");
+				drawRow("Cone Safety", mesh.virtualGeometryConeSafetySummary.metadataValid ? "Valid" : "Missing");
+				drawRowU32("Cone Records", mesh.virtualGeometryConeSafetySummary.recordCount);
+				drawRowU32("Cone Eligible", mesh.virtualGeometryConeSafetySummary.eligibleClusterCount);
+				drawRowU32("Cone Disabled", mesh.virtualGeometryConeSafetySummary.disabledClusterCount);
 			});
 
 			for (const std::string& warning : mesh.virtualGeometryWarnings) {
 				ImGui::TextWrapped("%s", warning.c_str());
+			}
+			for (const std::string& reason : mesh.virtualGeometryConeSafetySummary.disabledReasons) {
+				ImGui::TextWrapped("%s", reason.c_str());
 			}
 			if (!mesh.virtualGeometryTargets.empty() && ImGui::BeginTable("GeneratedMeshVirtualGeometryTargets", 9, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
 				ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthFixed, 60.0f);
@@ -4333,6 +4340,10 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 				drawInfoRowU32("Source Triangles", virtualGeometryMetadata.sourceTriangleCount);
 				drawInfoRowU32("Resident Meshlets", virtualGeometryMetadata.meshletCount);
 				drawInfoRowU32("Material Sections", virtualGeometryMetadata.materialSectionCount);
+				drawInfoRow("Cone Safety", virtualGeometryMetadata.coneSafetyMetadataValid ? "Valid" : "Missing");
+				drawInfoRowU32("Cone Records", virtualGeometryMetadata.coneSafetyRecordCount);
+				drawInfoRowU32("Cone Eligible", virtualGeometryMetadata.coneEligibleClusterCount);
+				drawInfoRowU32("Cone Disabled", virtualGeometryMetadata.coneDisabledClusterCount);
 
 				ImGui::EndTable();
 			}
@@ -4344,6 +4355,10 @@ void InspectorWindow::DrawMeshInspector(const std::filesystem::path& path) {
 			if (!virtualGeometryMetadata.rebuildGuidance.empty())
 			{
 				ImGui::TextWrapped("%s", virtualGeometryMetadata.rebuildGuidance.c_str());
+			}
+			for (const std::string& reason : virtualGeometryMetadata.coneDisabledReasons)
+			{
+				ImGui::TextWrapped("%s", reason.c_str());
 			}
 		}
 	}

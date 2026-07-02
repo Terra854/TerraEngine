@@ -119,7 +119,8 @@ namespace TerraEngine::EditorTests
 			StaleGeneration,
 			MissingAdaptiveTargets,
 			MissingFallbackCoverage,
-			MissingPageData
+			MissingPageData,
+			MissingConeSafety
 		};
 
 		template <typename RecordType>
@@ -157,10 +158,12 @@ namespace TerraEngine::EditorTests
 			virtualHeader.clusterCount = 1u;
 			virtualHeader.clusterPageLinkCount = variant == VirtualGeometryTemfVariant::MissingPageData ? 0u : 1u;
 			virtualHeader.validationFlagCount = 1u;
+			virtualHeader.coneSafetyCount = variant == VirtualGeometryTemfVariant::MissingConeSafety ? 0u : 1u;
 			virtualHeader.flags = kVirtualGeometryValidationFlagAdaptiveTargetsPresent
 				| kVirtualGeometryValidationFlagFallbackCoverageValidated
 				| kVirtualGeometryValidationFlagClusterHierarchyValidated
-				| kVirtualGeometryValidationFlagPageLinksValidated;
+				| kVirtualGeometryValidationFlagPageLinksValidated
+				| kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
 			if (variant == VirtualGeometryTemfVariant::MissingAdaptiveTargets)
 			{
 				virtualHeader.flags &= ~kVirtualGeometryValidationFlagAdaptiveTargetsPresent;
@@ -168,6 +171,10 @@ namespace TerraEngine::EditorTests
 			if (variant == VirtualGeometryTemfVariant::MissingFallbackCoverage)
 			{
 				virtualHeader.flags &= ~kVirtualGeometryValidationFlagFallbackCoverageValidated;
+			}
+			if (variant == VirtualGeometryTemfVariant::MissingConeSafety)
+			{
+				virtualHeader.flags &= ~kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
 			}
 			virtualHeader.sourceTriangleCount = 12u;
 			virtualHeader.sourceVertexCount = 8u;
@@ -223,6 +230,18 @@ namespace TerraEngine::EditorTests
 				virtualHeader.clusterPageLinkTableOffset = linkOffset;
 			}
 
+			if (variant != VirtualGeometryTemfVariant::MissingConeSafety)
+			{
+				VirtualGeometryConeSafetyRecord cone{};
+				cone.groupCount = 1u;
+				cone.materialSidedness = 0u;
+				cone.windingState = 0u;
+				cone.alphaRisk = 0u;
+				cone.thinShellRisk = 0u;
+				cone.flags = kVirtualGeometryConeSafetyFlagConeValid | kVirtualGeometryConeSafetyFlagEligible;
+				virtualHeader.coneSafetyTableOffset = AppendRecord(bytes, cone);
+			}
+
 			VirtualGeometryValidationFlagRecord validation{};
 			validation.flags = virtualHeader.flags;
 			virtualHeader.validationFlagTableOffset = AppendRecord(bytes, validation);
@@ -266,7 +285,7 @@ namespace TerraEngine::EditorTests
 				"\t\t\"hiZOcclusionEnabled\": true,\n"
 				"\t\t\"preloadBias\": 1.0,\n"
 				+ coverageBlock +
-				"\t\t\"requiredMetadata\": [\"adaptiveTargets\", \"fallbackCoverage\", \"clusterHierarchy\", \"pageLinks\"],\n"
+				"\t\t\"requiredMetadata\": [\"adaptiveTargets\", \"fallbackCoverage\", \"clusterHierarchy\", \"pageLinks\", \"coneSafety\"],\n"
 				"\t\t\"requiredShaders\": [\n"
 				"\t\t\t\"Shaders/Default.task.tspf\",\n"
 				"\t\t\t\"Shaders/Default.mesh.tspf\",\n"
@@ -381,6 +400,20 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(!valid, "Export validation should reject virtual geometry payloads without page metadata.");
 			context.Expect(error.find("page") != std::string::npos, "The validation error should explain the missing page metadata.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.Export.US6.RejectsMissingConeSafetyMetadata", [](TestContext& context) {
+			TempVirtualGeometryExportWorkspace workspace;
+			WriteRequiredRuntimeEntries(workspace);
+			WriteVirtualGeometryManifest(workspace);
+			workspace.WriteBytes("Meshes/Rock.temf", MakeVirtualGeometryTemf(VirtualGeometryTemfVariant::MissingConeSafety));
+			workspace.CreatePack();
+
+			std::string error;
+			const bool valid = ValidateExportPackage(workspace.PackPath(), ExportPlatform::Windows, error);
+
+			context.Expect(!valid, "Export validation should reject virtual geometry payloads without cone safety metadata.");
+			context.Expect(error.find("cone") != std::string::npos, "The validation error should explain the missing cone safety metadata.");
 		});
 	}
 }

@@ -460,6 +460,7 @@ namespace
 		std::vector<VirtualGeometryClusterRecord> clusters;
 		std::vector<VirtualGeometryClusterCoverage> clusterCoverage;
 		std::vector<VirtualGeometryClusterPageLinkRecord> clusterPageLinks;
+		std::vector<VirtualGeometryConeSafetyRecord> coneSafety;
 		std::vector<VirtualGeometryValidationFlagRecord> validationFlags;
 		std::vector<VirtualGeometryDiagnosticRecord> diagnostics;
 		std::string stringTable;
@@ -1158,6 +1159,11 @@ namespace
 				WritePadding(out, virtualGeometry->header.clusterPageLinkTableOffset);
 				out.write(reinterpret_cast<const char*>(virtualGeometry->clusterPageLinks.data()), static_cast<std::streamsize>(virtualGeometry->clusterPageLinks.size() * sizeof(VirtualGeometryClusterPageLinkRecord)));
 			}
+			if (!virtualGeometry->coneSafety.empty())
+			{
+				WritePadding(out, virtualGeometry->header.coneSafetyTableOffset);
+				out.write(reinterpret_cast<const char*>(virtualGeometry->coneSafety.data()), static_cast<std::streamsize>(virtualGeometry->coneSafety.size() * sizeof(VirtualGeometryConeSafetyRecord)));
+			}
 			if (!virtualGeometry->validationFlags.empty())
 			{
 				WritePadding(out, virtualGeometry->header.validationFlagTableOffset);
@@ -1348,6 +1354,105 @@ namespace
 		output.stringTable.append(value.data(), value.size());
 		output.stringTable.push_back('\0');
 		return offset;
+	}
+
+	bool HasValidVirtualGeometryConeBounds(
+		const std::vector<VirtualGeometryCullableGroupRecord>& groups,
+		std::uint32_t groupOffset,
+		std::uint32_t groupCount)
+	{
+		if (groupCount == 0u || groupOffset >= groups.size())
+		{
+			return false;
+		}
+
+		const std::uint32_t end = std::min<std::uint32_t>(
+			static_cast<std::uint32_t>(groups.size()),
+			groupOffset + groupCount);
+		for (std::uint32_t groupIndex = groupOffset; groupIndex < end; ++groupIndex)
+		{
+			const VirtualGeometryCullableGroupRecord& group = groups[groupIndex];
+			const float axisLengthSq =
+				group.coneAxis[0] * group.coneAxis[0]
+				+ group.coneAxis[1] * group.coneAxis[1]
+				+ group.coneAxis[2] * group.coneAxis[2];
+			const bool finiteCone =
+				std::isfinite(group.coneApex[0])
+				&& std::isfinite(group.coneApex[1])
+				&& std::isfinite(group.coneApex[2])
+				&& std::isfinite(group.coneAxis[0])
+				&& std::isfinite(group.coneAxis[1])
+				&& std::isfinite(group.coneAxis[2])
+				&& std::isfinite(group.coneCutoff)
+				&& std::isfinite(group.coneApexOffset);
+			if (!finiteCone
+				|| axisLengthSq < 1e-6f
+				|| group.coneCutoff < -1.0f
+				|| group.coneCutoff > 1.0f)
+			{
+				return false;
+			}
+		}
+		return end == groupOffset + groupCount;
+	}
+
+	VirtualGeometryConeSafetyRecord BuildVirtualGeometryConeSafetyRecord(
+		VirtualGeometryBuildOutput& output,
+		const VirtualGeometryClusterRecord& cluster,
+		const VirtualGeometryConeSafetyCookSettings& settings)
+	{
+		// Keep these values numerically aligned with RenderTypes.h without
+		// including renderer headers in the offline asset compiler.
+		constexpr std::uint32_t kConeMaterialOneSided = 0u;
+		constexpr std::uint32_t kConeMaterialUnknown = 2u;
+		constexpr std::uint32_t kConeWindingConsistent = 0u;
+		constexpr std::uint32_t kConeWindingUnknown = 2u;
+		constexpr std::uint32_t kConeAlphaOpaque = 0u;
+		constexpr std::uint32_t kConeAlphaUnknown = 3u;
+		constexpr std::uint32_t kConeThinShellLow = 0u;
+		constexpr std::uint32_t kConeThinShellUnknown = 2u;
+
+		VirtualGeometryConeSafetyRecord record{};
+		record.clusterId = cluster.clusterId;
+		record.groupOffset = cluster.groupOffset;
+		record.groupCount = cluster.groupCount;
+		record.materialSidedness = kConeMaterialUnknown;
+		record.windingState = kConeWindingUnknown;
+		record.alphaRisk = kConeAlphaUnknown;
+		record.thinShellRisk = kConeThinShellUnknown;
+
+		const bool coneBoundsValid = HasValidVirtualGeometryConeBounds(output.cullableGroups, cluster.groupOffset, cluster.groupCount);
+		if (coneBoundsValid)
+		{
+			record.flags |= kVirtualGeometryConeSafetyFlagConeValid;
+		}
+
+		std::string disabledReason;
+		if (!coneBoundsValid)
+		{
+			disabledReason = "Cone bounds are missing or invalid.";
+		}
+		else if (settings.proveOneSidedOpaqueClusters)
+		{
+			record.materialSidedness = kConeMaterialOneSided;
+			record.windingState = kConeWindingConsistent;
+			record.alphaRisk = kConeAlphaOpaque;
+			record.thinShellRisk = kConeThinShellLow;
+			record.flags |= kVirtualGeometryConeSafetyFlagEligible;
+		}
+		else
+		{
+			disabledReason = settings.disabledReason.empty()
+				? "Cone culling disabled until imported material safety metadata is proven."
+				: settings.disabledReason;
+		}
+
+		if (!disabledReason.empty())
+		{
+			record.disabledReasonStringOffset = AppendVirtualGeometryString(output, disabledReason);
+			record.disabledReasonStringSize = static_cast<std::uint32_t>(disabledReason.size());
+		}
+		return record;
 	}
 
 	void BuildPositionBounds(
@@ -2599,6 +2704,7 @@ namespace
 		const std::vector<VertexRaw>& vertices,
 		const std::vector<VirtualGeometryLodSource>& lods,
 		bool includeBounds,
+		const VirtualGeometryConeSafetyCookSettings& coneSafetySettings,
 		MeshCompileReport& report,
 		VirtualGeometryBuildOutput& output)
 	{
@@ -2642,6 +2748,12 @@ namespace
 			report.virtualGeometry.warnings.push_back("virtual geometry cluster coverage validation failed; renderer will use conservative complete-detail fallback");
 		}
 		SynchronizeGeneratedLevelReportWithEmittedDetails(report, output.detailLevels);
+
+		output.coneSafety.reserve(output.clusters.size());
+		for (const VirtualGeometryClusterRecord& cluster : output.clusters)
+		{
+			output.coneSafety.push_back(BuildVirtualGeometryConeSafetyRecord(output, cluster, coneSafetySettings));
+		}
 
 		const std::uint32_t sectionNameOffset = AppendVirtualGeometryString(output, "DefaultSection");
 		VirtualGeometryMaterialSectionRecord section{};
@@ -2708,7 +2820,8 @@ namespace
 		validation.flags = kVirtualGeometryValidationFlagAdaptiveTargetsPresent
 			| kVirtualGeometryValidationFlagFallbackCoverageValidated
 			| kVirtualGeometryValidationFlagClusterHierarchyValidated
-			| kVirtualGeometryValidationFlagPageLinksValidated;
+			| kVirtualGeometryValidationFlagPageLinksValidated
+			| kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
 		if (coverageValidated)
 		{
 			validation.flags |= kVirtualGeometryValidationFlagClusterCoverageValidated;
@@ -2720,6 +2833,13 @@ namespace
 		report.virtualGeometry.detailLevelCount = static_cast<std::uint32_t>(output.detailLevels.size());
 		report.virtualGeometry.cullableGroupCount = static_cast<std::uint32_t>(output.cullableGroups.size());
 		report.virtualGeometry.pageCount = static_cast<std::uint32_t>(output.pages.size());
+		report.virtualGeometry.coneSafetyRecordCount = static_cast<std::uint32_t>(output.coneSafety.size());
+		report.virtualGeometry.coneEligibleClusterCount = static_cast<std::uint32_t>(std::count_if(
+			output.coneSafety.begin(),
+			output.coneSafety.end(),
+			[](const VirtualGeometryConeSafetyRecord& record) {
+				return (record.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u;
+			}));
 		report.virtualGeometry.clusters.clear();
 		for (const VirtualGeometryClusterRecord& cluster : output.clusters)
 		{
@@ -2778,6 +2898,7 @@ namespace
 			|| !AddTable(output.skippedDetails.size(), sizeof(VirtualGeometrySkippedDetailRecord), "skipped details")
 			|| !AddTable(output.clusters.size(), sizeof(VirtualGeometryClusterRecord), "clusters")
 			|| !AddTable(output.clusterPageLinks.size(), sizeof(VirtualGeometryClusterPageLinkRecord), "cluster page links")
+			|| !AddTable(output.coneSafety.size(), sizeof(VirtualGeometryConeSafetyRecord), "cone safety")
 			|| !AddTable(output.validationFlags.size(), sizeof(VirtualGeometryValidationFlagRecord), "validation flags")
 			|| !AddTable(output.diagnostics.size(), sizeof(VirtualGeometryDiagnosticRecord), "diagnostics")
 			|| !AddTable(output.stringTable.size(), sizeof(char), "string table"))
@@ -2805,13 +2926,15 @@ namespace
 		header.clusterCount = static_cast<std::uint32_t>(output.clusters.size());
 		header.clusterPageLinkCount = static_cast<std::uint32_t>(output.clusterPageLinks.size());
 		header.validationFlagCount = static_cast<std::uint32_t>(output.validationFlags.size());
+		header.coneSafetyCount = static_cast<std::uint32_t>(output.coneSafety.size());
 		header.sourceTriangleCount = output.detailLevels.empty() ? 0u : output.detailLevels.front().primitiveCount;
 		header.sourceVertexCount = output.detailLevels.empty() ? 0u : output.detailLevels.front().vertexCount;
 		header.flags = output.validationFlags.empty()
 			? (kVirtualGeometryValidationFlagAdaptiveTargetsPresent
 				| kVirtualGeometryValidationFlagFallbackCoverageValidated
 				| kVirtualGeometryValidationFlagClusterHierarchyValidated
-				| kVirtualGeometryValidationFlagPageLinksValidated)
+				| kVirtualGeometryValidationFlagPageLinksValidated
+				| kVirtualGeometryValidationFlagConeSafetyMetadataValidated)
 			: output.validationFlags.front().flags;
 
 		std::uint32_t cursor = rootOffset + static_cast<std::uint32_t>(sizeof(VirtualGeometryHeader));
@@ -2830,6 +2953,7 @@ namespace
 		AssignTable(header.skippedDetailTableOffset, output.skippedDetails.size(), sizeof(VirtualGeometrySkippedDetailRecord));
 		AssignTable(header.clusterTableOffset, output.clusters.size(), sizeof(VirtualGeometryClusterRecord));
 		AssignTable(header.clusterPageLinkTableOffset, output.clusterPageLinks.size(), sizeof(VirtualGeometryClusterPageLinkRecord));
+		AssignTable(header.coneSafetyTableOffset, output.coneSafety.size(), sizeof(VirtualGeometryConeSafetyRecord));
 		AssignTable(header.validationFlagTableOffset, output.validationFlags.size(), sizeof(VirtualGeometryValidationFlagRecord));
 		AssignTable(header.diagnosticTableOffset, output.diagnostics.size(), sizeof(VirtualGeometryDiagnosticRecord));
 		AssignTable(header.diagnosticStringOffset, output.stringTable.size(), sizeof(char));
@@ -2950,7 +3074,8 @@ bool CompileMesh(
 	float smoothingAngle,
 	float weldThreshold,
 	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings,
-	MeshCompileProgressCallback progressCallback)
+	MeshCompileProgressCallback progressCallback,
+	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings)
 {
 	MeshCompileReport report{};
 	report.assetPath = input;
@@ -3077,8 +3202,10 @@ bool CompileMesh(
 	}
 
 	VirtualGeometryBuildOutput virtualGeometryPayload{};
+	const VirtualGeometryConeSafetyCookSettings resolvedConeSafetySettings =
+		coneSafetySettings != nullptr ? *coneSafetySettings : VirtualGeometryConeSafetyCookSettings{};
 	ReportMeshProgress(progressCallback, 0.58f, "Virtual Geometry", "Building virtual geometry clusters and pages.");
-	if (!BuildVirtualGeometryPayload(vertices, virtualGeometryLods, includeMeshletBounds, report, virtualGeometryPayload))
+	if (!BuildVirtualGeometryPayload(vertices, virtualGeometryLods, includeMeshletBounds, resolvedConeSafetySettings, report, virtualGeometryPayload))
 	{
 		report.status = "compile_fail";
 		report.failureReason = "virtual-geometry-payload-build-failed";
@@ -3339,7 +3466,8 @@ bool CompileMeshFromRaw(
 	float smoothingAngle,
 	float weldThreshold,
 	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings,
-	MeshCompileProgressCallback progressCallback)
+	MeshCompileProgressCallback progressCallback,
+	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings)
 {
 	if (vertices.empty() || indices.empty() || (indices.size() % 3u) != 0u)
 	{
@@ -3415,7 +3543,7 @@ bool CompileMeshFromRaw(
 		}
 	}
 
-	const bool compiled = CompileMesh(stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold, adaptiveSettings, progressCallback);
+	const bool compiled = CompileMesh(stagedObj, output, includeMeshletBounds, outReport, smoothingAngle, weldThreshold, adaptiveSettings, progressCallback, coneSafetySettings);
 	std::error_code removeError;
 	std::filesystem::remove(stagedObj, removeError);
 	if (outReport != nullptr)

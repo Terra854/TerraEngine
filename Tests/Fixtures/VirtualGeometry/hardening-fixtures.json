@@ -1,7 +1,8 @@
 {
 	"schemaVersion": 1,
 	"feature": "029-virtual-geometry-hardening",
-	"description": "Clean-checkout virtual geometry hardening fixture manifest. Entries use deterministic generated data or small committed fixtures; large meshes stay optional manual stress coverage.",
+	"description": "Clean-checkout virtual geometry hardening and scaling fixture manifest. Entries use deterministic generated data or small committed fixtures; large meshes stay optional manual stress coverage.",
+	"scalingFeature": "030-vg-gpu-driven-batching",
 	"packageFormats": [
 		"gltf",
 		"glb",
@@ -183,6 +184,104 @@
 				"export-validation-passes",
 				"fallback-metadata-present"
 			]
+		},
+		{
+			"id": "dense-cluster-batching",
+			"category": "cluster-batching",
+			"fixtureRecipe": "Procedural dense virtual geometry mesh whose selected cluster cut reaches at least 500 cluster packets.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"cluster-packet-batching",
+				"bounded-batches",
+				"performance-gate"
+			],
+			"expectedDiagnostics": [
+				"ClusterPacketsPublished",
+				"SubmittedBatchesWithinTenPercent"
+			],
+			"expectedRenderOutcomes": [
+				"material-identity-preserved",
+				"coverage-matches-correctness-reference"
+			],
+			"thresholds": {
+				"minimumSelectedClusters": 500,
+				"maxSubmittedBatchRatio": 0.1
+			}
+		},
+		{
+			"id": "runtime-packet-compaction",
+			"category": "runtime-compaction",
+			"fixtureRecipe": "Camera path with visible, frustum-rejected, Hi-Z-rejected, residency-substituted, and fail-open virtual geometry packets.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"runtime-compaction",
+				"frustum-culling",
+				"hiz-baseline-preservation",
+				"fallback-coverage"
+			],
+			"expectedDiagnostics": [
+				"CandidatePackets",
+				"CompactedPackets",
+				"RejectedPackets",
+				"FailOpenPackets"
+			],
+			"expectedRenderOutcomes": [
+				"visible-packets-submitted",
+				"rejected-packets-not-submitted"
+			],
+			"thresholds": {
+				"maxDispatchedToSelectedRatio": 1.0,
+				"maxFalseOcclusionRiskWarnings": 0,
+				"minCompactedPacketRatio": 0.5
+			}
+		},
+		{
+			"id": "shadow-view-virtual-geometry",
+			"category": "shadow-view",
+			"fixtureRecipe": "Light-view scene with one camera-hidden caster still visible to the light and one caster outside the light frustum.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"shadow-view-selection",
+				"light-frustum-culling",
+				"independent-shadow-diagnostics"
+			],
+			"expectedDiagnostics": [
+				"ShadowViewSnapshot",
+				"NoCameraHiZReuse"
+			],
+			"expectedRenderOutcomes": [
+				"camera-hidden-caster-contributes",
+				"light-frustum-rejected-caster-excluded"
+			],
+			"thresholds": {
+				"minShadowMeshletReductionRatio": 0.4
+			}
+		},
+		{
+			"id": "cone-safety-metadata",
+			"category": "cone-safety",
+			"fixtureRecipe": "Generated clusters covering one-sided opaque, double-sided, mixed-winding, alpha-risk, and thin-shell cases.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"cone-safety",
+				"one-sided-opaque",
+				"conservative-risky-content"
+			],
+			"expectedDiagnostics": [
+				"ConeEligibleOnlyWhenSafe",
+				"ConeDisabledReason"
+			],
+			"expectedRenderOutcomes": [
+				"safe-clusters-can-cone-cull",
+				"risky-clusters-remain-visible"
+			],
+			"thresholds": {
+				"maxConeFalseCullCount": 0
+			}
 		}
 	],
 	"optionalManualStress": [

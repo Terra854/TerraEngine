@@ -127,6 +127,10 @@ namespace TerraEngine::Resource
 			packet.pageId = page.pageId;
 			packet.clusterId = input.desiredClusterId;
 			packet.desiredLodIndex = fallbackRequest ? page.firstLodIndex : input.desiredLodIndex;
+			packet.packetId = input.packetId;
+			packet.batchId = input.batchId;
+			packet.packetOffset = input.packetOffset;
+			packet.packetCount = input.packetCount;
 			packet.priority = priority;
 			packet.fallbackRequest = fallbackRequest;
 			packet.reason = std::move(reason);
@@ -473,6 +477,10 @@ namespace TerraEngine::Resource
 				input.viewId = viewId;
 				input.desiredLodIndex = need.desiredLodIndex;
 				input.desiredClusterId = need.clusterId;
+				input.packetId = need.packetId;
+				input.batchId = need.batchId;
+				input.packetOffset = need.packetOffset;
+				input.packetCount = need.packetCount;
 				input.screenImportance = std::isfinite(need.screenImportance)
 					? std::clamp(need.screenImportance, 0.0f, 1.0f)
 					: 0.0f;
@@ -678,6 +686,54 @@ namespace TerraEngine::Resource
 	std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy)
 	{
 		return BuildVirtualGeometryPageRequestPlan(inputs, policy).packets;
+	}
+
+	VirtualGeometryPageRequestQueuePlan BuildVirtualGeometryPageRequestQueuePlan(
+		const VirtualGeometryPageRequestPlan& requestPlan,
+		const std::vector<VirtualGeometryQueuedPageRequest>& previousQueue,
+		const VirtualGeometryPageRetryPolicy& retryPolicy,
+		std::uint64_t frameId)
+	{
+		VirtualGeometryPageRequestQueuePlan queuePlan;
+		const std::uint32_t maxRetryCount = std::max(1u, retryPolicy.maxRetryCount);
+		const std::uint64_t retryDelayFrames = std::max<std::uint64_t>(1u, retryPolicy.retryDelayFrames);
+		auto pushReady = [&](VirtualGeometryQueuedPageRequest queued, bool retry) {
+			queued.nextRetryFrame = frameId + retryDelayFrames;
+			queuePlan.readyPackets.push_back(queued.packet);
+			queuePlan.queuedRequests.push_back(std::move(queued));
+			queuePlan.retriedPackets += retry ? 1u : 0u;
+		};
+
+		for (const VirtualGeometryQueuedPageRequest& previous : previousQueue)
+		{
+			if (previous.retryCount >= maxRetryCount)
+			{
+				queuePlan.droppedRequests.push_back(previous);
+				continue;
+			}
+			if (previous.nextRetryFrame > frameId)
+			{
+				queuePlan.queuedRequests.push_back(previous);
+				continue;
+			}
+			VirtualGeometryQueuedPageRequest retry = previous;
+			++retry.retryCount;
+			pushReady(std::move(retry), true);
+		}
+
+		for (const VirtualGeometryPageRequestPacket& packet : requestPlan.packets)
+		{
+			VirtualGeometryQueuedPageRequest queued;
+			queued.packet = packet;
+			queued.retryCount = 0u;
+			queued.nextRetryFrame = frameId + retryDelayFrames;
+			queuePlan.readyPackets.push_back(packet);
+			queuePlan.queuedRequests.push_back(std::move(queued));
+			queuePlan.fallbackPackets += packet.fallbackRequest ? 1u : 0u;
+		}
+
+		SortVirtualGeometryPageRequestPackets(queuePlan.readyPackets);
+		return queuePlan;
 	}
 
 	std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds)

@@ -244,11 +244,37 @@ cleanup, and broad asset coverage:
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryHardening|Editor.VirtualGeometryHardening" --output-on-failure -C Debug
 ```
 
+Feature `specs/030-vg-gpu-driven-batching` adds the staged virtual geometry
+scaling pass for cluster packet batching, runtime compaction, real page
+residency, performance gates, shadow-view selection, cone-safety metadata, and
+Hi-Z baseline preservation:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
+```
+
+When implementing `030`, run each phase or user-story slice before advancing to
+the next one. The Hi-Z slice is a preservation pass: it must prove the current
+moving-wall, camera-cut, resize, thin-geometry, and multi-view behavior still
+matches the accepted baseline rather than adding new Hi-Z runtime tiers.
+
+The performance-gate slice publishes typed virtual-geometry gate records with
+fixture id, metric name, threshold, actual value, source, status, and diagnostic
+text. Dense fixtures fail when submitted batches exceed `10%` of selected
+cluster packets, when estimated prepared work exceeds `5 ms`, when dispatched
+meshlets exceed selected meshlets, when page pressure exceeds the configured
+budget, or when the Hi-Z false-occlusion warning count is non-zero. Missing
+fixture prerequisites are reported as `Unsupported`, not as passing zeroes. The
+cone-culling slice is conservative by default: it validates the required
+`coneSafety` TEMF metadata and proves shader cone culling only arms when every
+selected cluster is one-sided, opaque, consistent-winding, low thin-shell risk,
+and cone-valid.
+
 The broader virtual-geometry regression set covers renderer, resource,
 editor asset pipeline, automation, export, and debug visualizer behavior:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
 ```
 
 US9 broad asset coverage is represented by
@@ -285,15 +311,22 @@ behavior:
 
 ```powershell
 cmake --preset Debug
-cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests"
-ctest --test-dir out/build/Debug -R "Engine.AdaptiveVirtualGeometry|Editor.AdaptiveVirtualGeometry|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport" --output-on-failure -C Debug
-cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install"
+cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine TerraEngine-Editor TerraEngineMeshCompiler TerraEngineModelPackageCompiler TerraEngineShaderCompiler TerraEngine-EngineTests TerraEngine-EditorTests'
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
+cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install'
 ```
 
 During feature `029`, run the hardening slice after each phase or user story,
 then run the broader virtual-geometry regression set before the install target.
 The hardening fixture manifest lives at
 `Tests/Fixtures/VirtualGeometry/hardening-fixtures.json`.
+
+During feature `030`, rebuild the compiler tools before CTest whenever
+`MeshCompiler.cpp`, package importers, TEMF virtual geometry structs, or sidecar
+metadata changes. Several editor tests launch `TerraEngineMeshCompiler.exe` or
+`TerraEngineModelPackageCompiler.exe`, so stale tool binaries can make newly
+linked tests cook old payload contracts.
 
 Optional manual large-asset stress is intentionally outside the CTest path. Use
 a local scratch project with one dense scan mesh, one hard-surface

@@ -1967,6 +1967,58 @@ bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata,
 	outMetadata.clusterCount = virtualHeader.clusterCount;
 	outMetadata.materialSectionCount = virtualHeader.materialSectionCount;
 	outMetadata.pageCount = virtualHeader.pageCount;
+	outMetadata.coneSafetyRecordCount = virtualHeader.coneSafetyCount;
+	outMetadata.coneSafetyMetadataValid =
+		(virtualHeader.flags & kVirtualGeometryValidationFlagConeSafetyMetadataValidated) != 0u
+		&& virtualHeader.coneSafetyCount == virtualHeader.clusterCount
+		&& virtualHeader.coneSafetyTableOffset != 0u;
+	if (outMetadata.coneSafetyMetadataValid)
+	{
+		std::string stringTable;
+		if (virtualHeader.diagnosticStringOffset != 0u && virtualHeader.diagnosticStringSize != 0u)
+		{
+			stringTable.resize(virtualHeader.diagnosticStringSize);
+			input.seekg(static_cast<std::streamoff>(virtualHeader.diagnosticStringOffset), std::ios::beg);
+			input.read(stringTable.data(), static_cast<std::streamsize>(stringTable.size()));
+		}
+
+		std::vector<VirtualGeometryConeSafetyRecord> coneSafetyRecords(virtualHeader.coneSafetyCount);
+		input.seekg(static_cast<std::streamoff>(virtualHeader.coneSafetyTableOffset), std::ios::beg);
+		input.read(
+			reinterpret_cast<char*>(coneSafetyRecords.data()),
+			static_cast<std::streamsize>(coneSafetyRecords.size() * sizeof(VirtualGeometryConeSafetyRecord)));
+		if (input)
+		{
+			for (const VirtualGeometryConeSafetyRecord& record : coneSafetyRecords)
+			{
+				if ((record.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u)
+				{
+					++outMetadata.coneEligibleClusterCount;
+					continue;
+				}
+				++outMetadata.coneDisabledClusterCount;
+				if (record.disabledReasonStringSize == 0u
+					|| record.disabledReasonStringOffset + record.disabledReasonStringSize > stringTable.size())
+				{
+					continue;
+				}
+				const std::string reason = stringTable.substr(record.disabledReasonStringOffset, record.disabledReasonStringSize);
+				if (std::find(outMetadata.coneDisabledReasons.begin(), outMetadata.coneDisabledReasons.end(), reason) == outMetadata.coneDisabledReasons.end())
+				{
+					outMetadata.coneDisabledReasons.push_back(reason);
+				}
+			}
+		}
+		else
+		{
+			outMetadata.coneSafetyMetadataValid = false;
+			outMetadata.warnings.push_back("Virtual geometry cone safety records could not be read.");
+		}
+	}
+	else if (outMetadata.hasVirtualGeometry)
+	{
+		outMetadata.warnings.push_back("Virtual geometry cone safety metadata is missing; rebuild this mesh before enabling cone culling.");
+	}
 	if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u) {
 		outMetadata.needsRebuild = true;
 		outMetadata.warnings.push_back("Virtual geometry contains no renderable detail levels or cullable groups.");

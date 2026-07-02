@@ -58,8 +58,25 @@ namespace TerraEngine::EditorTests
 				virtualHeader.headerSize = sizeof(VirtualGeometryHeader);
 				virtualHeader.detailLevelCount = 3u;
 				virtualHeader.cullableGroupCount = 12u;
+				virtualHeader.clusterCount = 12u;
+				virtualHeader.coneSafetyCount = 12u;
+				virtualHeader.coneSafetyTableOffset = sizeof(MeshHeader) + sizeof(VirtualGeometryHeader);
+				virtualHeader.flags = kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
 				virtualHeader.sourceTriangleCount = 2048u;
 				output.write(reinterpret_cast<const char*>(&virtualHeader), sizeof(virtualHeader));
+				for (std::uint32_t clusterIndex = 0u; clusterIndex < virtualHeader.coneSafetyCount; ++clusterIndex)
+				{
+					VirtualGeometryConeSafetyRecord coneSafety{};
+					coneSafety.clusterId = clusterIndex;
+					coneSafety.groupOffset = clusterIndex;
+					coneSafety.groupCount = 1u;
+					coneSafety.materialSidedness = 0u;
+					coneSafety.windingState = 0u;
+					coneSafety.alphaRisk = 0u;
+					coneSafety.thinShellRisk = 0u;
+					coneSafety.flags = kVirtualGeometryConeSafetyFlagConeValid | kVirtualGeometryConeSafetyFlagEligible;
+					output.write(reinterpret_cast<const char*>(&coneSafety), sizeof(coneSafety));
+				}
 			}
 		}
 

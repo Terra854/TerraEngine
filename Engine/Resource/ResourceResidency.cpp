@@ -532,6 +532,7 @@ namespace TerraEngine::Resource
 		const auto apply = [&](VirtualGeometryPageResidencyState state, std::string text) {
 			page.state = state;
 			page.lastUsedFrame = frameId;
+			page.lastStateChangeFrame = frameId;
 			result.applied = true;
 			result.newState = state;
 			result.reason = std::move(text);
@@ -545,6 +546,8 @@ namespace TerraEngine::Resource
 				|| page.state == VirtualGeometryPageResidencyState::Failed)
 			{
 				page.failureReason.clear();
+				page.lastRequestedFrame = frameId;
+				++page.requestCount;
 				apply(VirtualGeometryPageResidencyState::Requested, "page requested");
 			}
 			break;
@@ -576,6 +579,7 @@ namespace TerraEngine::Resource
 				|| page.state == VirtualGeometryPageResidencyState::Pinned)
 			{
 				page.failureReason.clear();
+				page.lastResidentFrame = frameId;
 				apply(IsVirtualGeometryPagePinnedFallback(page) ? VirtualGeometryPageResidencyState::Pinned : VirtualGeometryPageResidencyState::Resident, "page became resident");
 			}
 			break;

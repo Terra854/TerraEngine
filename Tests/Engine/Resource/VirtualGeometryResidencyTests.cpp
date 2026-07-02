@@ -42,12 +42,16 @@ namespace TerraEngine::Tests
 
 			auto result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::Request, 10u);
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Requested, "A missing page should move to Requested when visibility asks for it.");
+			context.ExpectEqual(10ull, page.lastRequestedFrame, "Request transitions should record the request frame.");
+			context.ExpectEqual(1u, page.requestCount, "Request transitions should increment retry/accounting count.");
 			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginIO, 11u);
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::PendingIO, "Requested page should enter PendingIO when async disk work starts.");
 			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginUpload, 12u);
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::PendingUpload, "Validated IO output should enter PendingUpload before GPU publication.");
 			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::MarkResident, 13u);
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Resident, "Uploaded page should become Resident only at the protected publication step.");
+			context.ExpectEqual(13ull, page.lastResidentFrame, "Resident publication should record the protected publish frame.");
+			context.ExpectEqual(13ull, page.lastStateChangeFrame, "Transition helper should record the latest state change frame.");
 			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::BeginEvict, 14u);
 			context.Expect(result.applied && page.state == Resource::VirtualGeometryPageResidencyState::Evicting, "Resident non-fallback page should enter Evicting under budget pressure.");
 			result = Resource::ApplyVirtualGeometryPageTransition(page, Resource::VirtualGeometryPageResidencyEvent::MarkEvicted, 15u);
@@ -167,15 +171,19 @@ namespace TerraEngine::Tests
 			TerraEngine::Renderer::VirtualGeometryViewSelectionState state;
 			state.viewType = RenderViewType::Game;
 			state.outputId = 2u;
-			state.pageNeeds.push_back({
-				MakePageAssetId(30u),
-				MakePageAssetId(31u),
-				3u,
-				9u,
-				3u,
-				0.75f,
-				true
-			});
+			TerraEngine::Renderer::VirtualGeometryPageNeedRecord need;
+			need.meshId = MakePageAssetId(30u);
+			need.objectId = MakePageAssetId(31u);
+			need.pageId = 3u;
+			need.clusterId = 9u;
+			need.desiredLodIndex = 3u;
+			need.screenImportance = 0.75f;
+			need.fallbackRequired = true;
+			need.packetId = 44u;
+			need.batchId = 5u;
+			need.packetOffset = 40u;
+			need.packetCount = 8u;
+			state.pageNeeds.push_back(need);
 
 			Resource::VirtualGeometryPageCatalogEntry catalog;
 			catalog.assetId = MakePageAssetId(30u);
@@ -197,6 +205,45 @@ namespace TerraEngine::Tests
 			context.Expect(packets.front().fallbackRequest, "Fallback request should sort first because it protects visibility.");
 			context.ExpectEqual(0u, packets.front().pageId, "Fallback packet should target the fallback page.");
 			context.ExpectEqual(3u, packets.back().pageId, "Desired packet should target the requested high-detail page.");
+			context.ExpectEqual(44u, packets.back().packetId, "Desired page packet should preserve the selected cluster packet id.");
+			context.ExpectEqual(5u, packets.back().batchId, "Desired page packet should preserve the selected batch id.");
+			context.ExpectEqual(40u, packets.back().packetOffset, "Desired page packet should preserve the batch packet offset.");
+			context.ExpectEqual(8u, packets.back().packetCount, "Desired page packet should preserve the batch packet count.");
+		});
+
+		registry.Add("VirtualGeometry.Resource.Streaming.PageRequestQueueRetriesAndDropsExpiredPackets", [](TestContext& context) {
+			Resource::VirtualGeometryPageRequestPlan plan;
+			Resource::VirtualGeometryPageRequestPacket fallback;
+			fallback.assetId = MakePageAssetId(40u);
+			fallback.objectId = MakePageAssetId(41u);
+			fallback.viewId = "Game:2";
+			fallback.pageId = 0u;
+			fallback.priority = 1000;
+			fallback.fallbackRequest = true;
+			plan.packets.push_back(fallback);
+
+			Resource::VirtualGeometryQueuedPageRequest retry;
+			retry.packet = fallback;
+			retry.packet.pageId = 5u;
+			retry.packet.fallbackRequest = false;
+			retry.retryCount = 1u;
+			retry.nextRetryFrame = 12u;
+			Resource::VirtualGeometryQueuedPageRequest dropped = retry;
+			dropped.packet.pageId = 6u;
+			dropped.retryCount = 3u;
+
+			Resource::VirtualGeometryPageRetryPolicy retryPolicy;
+			retryPolicy.maxRetryCount = 3u;
+			retryPolicy.retryDelayFrames = 4u;
+			const Resource::VirtualGeometryPageRequestQueuePlan queuePlan =
+				Resource::BuildVirtualGeometryPageRequestQueuePlan(plan, { retry, dropped }, retryPolicy, 12u);
+
+			context.ExpectEqual(static_cast<std::size_t>(2u), queuePlan.readyPackets.size(), "New packets and due retries should both be ready for protected IO handoff.");
+			context.ExpectEqual(static_cast<std::size_t>(2u), queuePlan.queuedRequests.size(), "Ready packets should stay queued until IO/upload publishes a terminal state.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), queuePlan.droppedRequests.size(), "Packets at the retry limit should be dropped for diagnostics.");
+			context.ExpectEqual(1u, queuePlan.retriedPackets, "Due previous packets should increment retry counters.");
+			context.ExpectEqual(1u, queuePlan.fallbackPackets, "Fallback-critical requests should stay counted separately.");
+			context.ExpectEqual(16ull, queuePlan.queuedRequests.front().nextRetryFrame, "Queued retries should be delayed by the retry policy.");
 		});
 
 		registry.Add("VirtualGeometry.Resource.Residency.BudgetPressureReportsTopContributors", [](TestContext& context) {

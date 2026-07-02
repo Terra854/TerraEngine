@@ -310,6 +310,7 @@ inline constexpr std::uint32_t kVirtualGeometryFlagFailOpen = 1u << 1u;
 inline constexpr std::uint32_t kVirtualGeometryFlagHiZSelfOcclusionGuard = 1u << 2u;
 inline constexpr std::uint32_t kVirtualGeometryFlagHiZNearPlaneGuard = 1u << 3u;
 inline constexpr std::uint32_t kVirtualGeometryFlagHiZThinGeometryGuard = 1u << 4u;
+inline constexpr std::uint32_t kVirtualGeometryFlagConeCullingSafe = 1u << 5u;
 inline constexpr std::uint32_t kVirtualGeometryDebugModeShift = 8u;
 inline constexpr std::uint32_t kVirtualGeometryDebugModeMask = 0xFFu;
 
@@ -507,6 +508,274 @@ struct VirtualGeometryHiZValidationState
 	std::uint32_t warmupFrames = 0u;
 	bool pyramidReady = false;
 	bool failOpen = true;
+};
+
+enum class VirtualGeometryBatchFallbackMode : std::uint32_t
+{
+	None = 0u,
+	LegacyClusterDraw = 1u,
+	UnsupportedBackend = 2u,
+	MissingResource = 3u,
+	ValidationFallback = 4u
+};
+
+enum class VirtualGeometryFallbackCoverageStatus : std::uint32_t
+{
+	Complete = 0u,
+	Partial = 1u,
+	Missing = 2u,
+	Invalid = 3u
+};
+
+enum class VirtualGeometryConeMaterialSidedness : std::uint32_t
+{
+	OneSided = 0u,
+	DoubleSided = 1u,
+	Unknown = 2u,
+	Mixed = 3u
+};
+
+enum class VirtualGeometryConeWindingState : std::uint32_t
+{
+	Consistent = 0u,
+	Mixed = 1u,
+	Unknown = 2u,
+	Invalid = 3u
+};
+
+enum class VirtualGeometryConeAlphaRisk : std::uint32_t
+{
+	Opaque = 0u,
+	AlphaCutoutRisk = 1u,
+	AlphaBlendRisk = 2u,
+	Unknown = 3u
+};
+
+enum class VirtualGeometryConeThinShellRisk : std::uint32_t
+{
+	Low = 0u,
+	High = 1u,
+	Unknown = 2u
+};
+
+enum class VirtualGeometryPerformanceGateStatus : std::uint32_t
+{
+	Pass = 0u,
+	Fail = 1u,
+	Warning = 2u,
+	Unsupported = 3u
+};
+
+enum class VirtualGeometryPerformanceGateSource : std::uint32_t
+{
+	Prepared = 0u,
+	GPUReadback = 1u,
+	DelayedGPUReadback = 2u,
+	Manual = 3u
+};
+
+// VirtualGeometryClusterPacket is the renderer-neutral work atom produced from
+// a selected cluster cut. Later GPU-driven stages can upload the same table to
+// an SSBO, while current CPU tests can inspect the copied values directly.
+struct VirtualGeometryClusterPacket
+{
+	std::uint32_t packetId = 0u;
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+	std::uint32_t selectedLod = 0u;
+	std::uint32_t clusterId = 0u;
+	std::uint32_t meshletOffset = 0u;
+	std::uint32_t meshletCount = 0u;
+	glm::vec3 boundsMin = glm::vec3(0.0f);
+	glm::vec3 boundsMax = glm::vec3(0.0f);
+	glm::vec4 projectedBounds = glm::vec4(0.0f);
+	std::uint32_t pageId = 0u;
+	std::uint32_t fallbackPageId = 0u;
+	std::uint32_t debugIdentity = 0u;
+	bool fallbackPacket = false;
+};
+
+// ClusterWorkBatch groups compatible packet ranges into fewer submitted work
+// items. It carries fallback details so tests can distinguish intentional
+// correctness fallback from accidentally exploding into one draw per cluster.
+struct ClusterWorkBatch
+{
+	std::uint32_t batchId = 0u;
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+	std::uint32_t packetOffset = 0u;
+	std::uint32_t packetCount = 0u;
+	std::uint32_t selectedMeshlets = 0u;
+	std::uint32_t submittedMeshlets = 0u;
+	std::string batchReason;
+	VirtualGeometryBatchFallbackMode fallbackMode = VirtualGeometryBatchFallbackMode::None;
+	std::string fallbackReason;
+};
+
+// CompactedVisibilitySet summarizes the packet table after rejection and
+// fail-open decisions. The counters are deliberately packet-oriented; exact
+// meshlet counts still come from task-shader/GPU readback snapshots.
+struct CompactedVisibilitySet
+{
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint32_t candidatePackets = 0u;
+	std::uint32_t visiblePackets = 0u;
+	std::uint32_t rejectedByFrustum = 0u;
+	std::uint32_t rejectedByHiZ = 0u;
+	std::uint32_t rejectedByResidency = 0u;
+	std::uint32_t rejectedByCone = 0u;
+	std::uint32_t failOpenPackets = 0u;
+	std::uint32_t submittedBatches = 0u;
+	VirtualGeometryCounterSource source = VirtualGeometryCounterSource::Prepared;
+};
+
+// PageResidencyRecord mirrors the page state needed by virtual geometry
+// selection without exposing live ResourceManager containers to worker jobs.
+struct PageResidencyRecord
+{
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	std::uint32_t pageId = 0u;
+	std::uint32_t coveredClusterOffset = 0u;
+	std::uint32_t coveredClusterCount = 0u;
+	std::vector<std::uint32_t> coveredClusters;
+	std::uint64_t byteCost = 0u;
+	GeometryPageState state = GeometryPageState::NotResident;
+	std::uint32_t fallbackPageId = 0u;
+	bool isFallback = false;
+	std::uint64_t lastRequestedFrame = 0u;
+	std::uint64_t lastUsedFrame = 0u;
+	std::int32_t priority = 0;
+	std::string failureReason;
+};
+
+// FallbackCoverageChain records how a missing desired cluster remains covered
+// by resident fallback geometry, which is the rule that prevents holes while
+// real page streaming catches up.
+struct FallbackCoverageChain
+{
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	std::uint32_t desiredClusterId = 0u;
+	std::uint32_t fallbackClusterId = 0xffffffffu;
+	std::uint32_t fallbackPageId = 0u;
+	VirtualGeometryFallbackCoverageStatus coverageStatus = VirtualGeometryFallbackCoverageStatus::Complete;
+	std::uint32_t substitutedMeshlets = 0u;
+	std::string reason;
+};
+
+// HiZRegressionSnapshot preserves the currently accepted Hi-Z behavior. Feature
+// 030 intentionally does not add quality tiers; new batching work must match
+// this baseline or fail open.
+struct HiZRegressionSnapshot
+{
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint64_t frameIndex = 0u;
+	VirtualGeometryHiZState state = VirtualGeometryHiZState::MissingPyramid;
+	std::string reason;
+	std::uint32_t testedMeshlets = 0u;
+	std::uint32_t occludedMeshlets = 0u;
+	std::uint32_t visibleMeshlets = 0u;
+	std::uint32_t failOpenMeshlets = 0u;
+	std::uint32_t invalidDepthSamples = 0u;
+	std::uint32_t recoveryFrames = 0u;
+	bool baselineMatched = true;
+};
+
+// ConeSafetyMetadata is conservative by default. Unknown imported sidedness,
+// winding, alpha, or thin-shell risk disables cone culling for that cluster.
+struct ConeSafetyMetadata
+{
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	std::uint32_t clusterId = 0u;
+	VirtualGeometryConeMaterialSidedness materialSidedness = VirtualGeometryConeMaterialSidedness::Unknown;
+	VirtualGeometryConeWindingState windingState = VirtualGeometryConeWindingState::Unknown;
+	VirtualGeometryConeAlphaRisk alphaRisk = VirtualGeometryConeAlphaRisk::Unknown;
+	VirtualGeometryConeThinShellRisk thinShellRisk = VirtualGeometryConeThinShellRisk::Unknown;
+	bool coneValid = false;
+	bool eligible = false;
+	std::string disabledReason = "Cone safety metadata is unavailable.";
+};
+
+inline std::string BuildVirtualGeometryConeDisabledReason(const ConeSafetyMetadata& metadata)
+{
+	if (!metadata.coneValid)
+	{
+		return "Cone bounds are missing or invalid.";
+	}
+	if (metadata.materialSidedness != VirtualGeometryConeMaterialSidedness::OneSided)
+	{
+		return "Material sidedness is not proven one-sided.";
+	}
+	if (metadata.windingState != VirtualGeometryConeWindingState::Consistent)
+	{
+		return "Triangle winding is not proven consistent.";
+	}
+	if (metadata.alphaRisk != VirtualGeometryConeAlphaRisk::Opaque)
+	{
+		return "Material alpha risk is not proven opaque.";
+	}
+	if (metadata.thinShellRisk != VirtualGeometryConeThinShellRisk::Low)
+	{
+		return "Thin-shell risk is not proven low.";
+	}
+	return {};
+}
+
+inline bool IsVirtualGeometryConeCullingEligible(const ConeSafetyMetadata& metadata)
+{
+	return BuildVirtualGeometryConeDisabledReason(metadata).empty();
+}
+
+inline ConeSafetyMetadata NormalizeVirtualGeometryConeSafetyMetadata(ConeSafetyMetadata metadata)
+{
+	// Every caller uses this one rule so imported unknowns, double-sided
+	// materials, mixed winding, alpha cutouts, and thin shells all fail open in
+	// the same visible way instead of quietly arming shader cone culling.
+	metadata.disabledReason = BuildVirtualGeometryConeDisabledReason(metadata);
+	metadata.eligible = metadata.disabledReason.empty();
+	if (metadata.eligible)
+	{
+		metadata.disabledReason.clear();
+	}
+	return metadata;
+}
+
+// ShadowVisibilitySelection belongs to a light or cascade view. It never
+// reuses camera Hi-Z because shadow visibility answers a different question.
+struct ShadowVisibilitySelection
+{
+	std::uint32_t shadowViewId = 0u;
+	TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
+	std::uint64_t frameIndex = 0u;
+	std::uint32_t candidatePackets = 0u;
+	std::uint32_t selectedPackets = 0u;
+	std::uint32_t rejectedByLightFrustum = 0u;
+	std::uint32_t selectedMeshlets = 0u;
+	std::uint32_t dispatchedMeshlets = 0u;
+	std::vector<std::string> fallbackReasons;
+	bool reusedCameraHiZ = false;
+};
+
+// PerformanceGateResult is the virtual-geometry-specific gate record used by
+// scalability tests and editor diagnostics. It complements the generic render
+// performance gate by naming the fixture, metric, and source explicitly.
+struct PerformanceGateResult
+{
+	std::string gateId;
+	std::string fixtureId;
+	std::string metricName;
+	float threshold = 0.0f;
+	float actual = 0.0f;
+	std::string unit;
+	VirtualGeometryPerformanceGateStatus status = VirtualGeometryPerformanceGateStatus::Pass;
+	VirtualGeometryPerformanceGateSource source = VirtualGeometryPerformanceGateSource::Prepared;
+	std::string diagnostic;
 };
 
 namespace TerraEngine::Renderer {
@@ -1010,6 +1279,7 @@ struct VirtualGeometryAssetRuntime
 	std::vector<VirtualGeometryDetailRuntime> detailLevels;
 	std::vector<VirtualGeometryCullableGroupRuntime> cullableGroups;
 	std::vector<VirtualGeometryClusterRuntime> clusters;
+	std::vector<ConeSafetyMetadata> coneSafety;
 	std::vector<GeometryPageRuntime> pages;
 	std::vector<std::string> warnings;
 };
@@ -1237,8 +1507,8 @@ struct DrawCommand
 	std::uint32_t selectedVirtualLod = 0u;
 	std::uint32_t virtualGeometryFlags = 0u;
 	// These offsets/counts point at the immutable per-view selection packet.
-	// Visible virtual geometry expands one draw per selected cluster, so each
-	// command normally references a single sparse cluster record.
+	// Visible virtual geometry can now batch compatible contiguous packet
+	// ranges, so a command may reference one cluster or a small packet run.
 	std::uint32_t selectedVirtualClusterOffset = 0u;
 	std::uint32_t selectedVirtualClusterCount = 0u;
 	std::uint32_t selectedVirtualPageNeedOffset = 0u;
@@ -1725,6 +1995,19 @@ struct RenderStatsSnapshot
 	std::uint32_t meshletsDispatched = 0u;
 	std::uint32_t meshletsCulled = 0u;
 	std::uint32_t meshletsCulledHiZ = 0u;
+	std::uint32_t virtualGeometryClusterPackets = 0u;
+	std::uint32_t virtualGeometrySubmittedBatches = 0u;
+	std::uint32_t virtualGeometryLegacyFallbackBatches = 0u;
+	std::uint32_t virtualGeometryCandidatePackets = 0u;
+	std::uint32_t virtualGeometryCompactedPackets = 0u;
+	std::uint32_t virtualGeometryRejectedPackets = 0u;
+	std::uint32_t virtualGeometryFailOpenPackets = 0u;
+	std::uint32_t virtualGeometryResidentPages = 0u;
+	std::uint32_t virtualGeometryRequestedPages = 0u;
+	std::uint32_t virtualGeometryMissingPages = 0u;
+	std::uint32_t virtualGeometryFailedPages = 0u;
+	std::uint32_t virtualGeometryEvictedPages = 0u;
+	std::uint32_t virtualGeometryPinnedFallbackPages = 0u;
 	std::uint32_t hiZTests = 0u;
 	std::uint32_t hiZProjectionFailed = 0u;
 	std::uint32_t hiZFullRectCulled = 0u;
@@ -1754,6 +2037,8 @@ struct RenderStatsSnapshot
 	VirtualGeometryHiZState hiZState = VirtualGeometryHiZState::MissingPyramid;
 	std::string hiZStatusReason;
 	std::uint32_t hiZWarmupFrames = 0u;
+	bool hiZBaselineMatched = true;
+	std::uint32_t hiZFalseOcclusionRiskWarnings = 0u;
 	bool vrsActive = false;
 	bool valid = false;
 };

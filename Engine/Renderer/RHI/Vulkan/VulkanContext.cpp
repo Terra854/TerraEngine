@@ -2810,6 +2810,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	for (const ShadowDrawList& shadowDrawList : frameData.shadowDrawLists) {
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (const DrawCommand& command : shadowDrawList.commands) {
+			// Shadow virtual geometry arrives as light-view draw commands with
+			// virtualMeshletOffset/Count already selected by RenderSystem. The
+			// backend prepares the same mesh-shader resources as the camera path,
+			// but shadow visibility never reuses camera Hi-Z decisions.
 			PrepareDrawResources(command);
 		}
 	}
@@ -3879,6 +3883,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		draw.push = push;
 		draw.materialFlags = materialFlags;
 		
+		// RenderSystem has already collapsed compatible contiguous virtual
+		// geometry cluster packets into this selected meshlet range. Vulkan
+		// submits that prepared packet batch as one indirect task draw instead
+		// of exploding back into one command per cluster.
 		const uint32_t kTaskBatchSize = 32u;
 		const uint32_t taskGroupCount = pipeline->hasTaskStage
 			? ((selectedMeshletCount + (kTaskBatchSize - 1u)) / kTaskBatchSize)

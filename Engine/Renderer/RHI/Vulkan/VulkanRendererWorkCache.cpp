@@ -53,6 +53,61 @@ namespace {
 		return signature;
 	}
 
+	template<typename State>
+	void HashVirtualGeometryPacketTables(std::uint64_t& signature, const State& state)
+	{
+		for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
+		{
+			HashCombine(signature, packet.packetId);
+			HashCombine(signature, packet.viewId);
+			HashCombine(signature, static_cast<std::uint64_t>(packet.viewType));
+			HashCombine(signature, HashUuid(packet.objectId));
+			HashCombine(signature, HashUuid(packet.meshId));
+			HashCombine(signature, HashUuid(packet.materialId));
+			HashCombine(signature, packet.selectedLod);
+			HashCombine(signature, packet.clusterId);
+			HashCombine(signature, packet.meshletOffset);
+			HashCombine(signature, packet.meshletCount);
+			HashCombine(signature, packet.pageId);
+			HashCombine(signature, packet.fallbackPageId);
+			HashCombine(signature, packet.debugIdentity);
+		}
+		for (const ClusterWorkBatch& batch : state.clusterBatches)
+		{
+			HashCombine(signature, batch.batchId);
+			HashCombine(signature, batch.viewId);
+			HashCombine(signature, HashUuid(batch.meshId));
+			HashCombine(signature, HashUuid(batch.materialId));
+			HashCombine(signature, batch.packetOffset);
+			HashCombine(signature, batch.packetCount);
+			HashCombine(signature, batch.selectedMeshlets);
+			HashCombine(signature, batch.submittedMeshlets);
+			HashCombine(signature, static_cast<std::uint64_t>(batch.fallbackMode));
+		}
+		for (const CompactedVisibilitySet& compaction : state.compactionResults)
+		{
+			HashCombine(signature, compaction.viewId);
+			HashCombine(signature, compaction.candidatePackets);
+			HashCombine(signature, compaction.visiblePackets);
+			HashCombine(signature, compaction.submittedBatches);
+			HashCombine(signature, static_cast<std::uint64_t>(compaction.source));
+		}
+	}
+
+	std::uint64_t HashVirtualGeometryBatchPacketSignature(const RenderFrameSnapshot& snapshot)
+	{
+		std::uint64_t signature = snapshot.frameId ^ snapshot.resourceRevision;
+		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
+		{
+			HashVirtualGeometryPacketTables(signature, state);
+		}
+		for (const VirtualGeometryViewVisibilitySnapshot& state : snapshot.virtualGeometryVisibilitySnapshots)
+		{
+			HashVirtualGeometryPacketTables(signature, state);
+		}
+		return signature;
+	}
+
 	std::uint64_t HashRenderableRecords(const std::vector<RenderFrameRenderableRecord>& records)
 	{
 		std::uint64_t signature = 1099511628211ull;
@@ -312,6 +367,19 @@ namespace {
 		IndirectDrawPreparationPlan plan;
 		plan.drawCount = snapshot.renderables.size();
 		plan.instancePayloadCount = snapshot.renderables.size();
+		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
+		{
+			plan.virtualGeometryClusterPacketCount += state.clusterPackets.size();
+			plan.virtualGeometryBatchCount += state.clusterBatches.size();
+			plan.virtualGeometryCompactionResultCount += state.compactionResults.size();
+		}
+		for (const VirtualGeometryViewVisibilitySnapshot& state : snapshot.virtualGeometryVisibilitySnapshots)
+		{
+			plan.virtualGeometryClusterPacketCount += state.clusterPackets.size();
+			plan.virtualGeometryBatchCount += state.clusterBatches.size();
+			plan.virtualGeometryCompactionResultCount += state.compactionResults.size();
+		}
+		plan.virtualGeometryBatchPacketSignature = HashVirtualGeometryBatchPacketSignature(snapshot);
 		plan.gpuDrivenEligible = capabilities.supportsParallelRecording && !snapshot.renderables.empty();
 		return plan;
 	}

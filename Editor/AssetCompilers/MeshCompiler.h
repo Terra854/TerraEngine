@@ -35,6 +35,15 @@ struct VirtualGeometryAdaptiveCompileSettings
 	std::string settingsSource = "ProjectDefaults";
 };
 
+struct VirtualGeometryConeSafetyCookSettings
+{
+	// Direct raw/static mesh cooks can opt into one-sided opaque proof when the
+	// importer has no material ambiguity. Package importers set this false until
+	// they can map material sidedness and alpha risk per emitted cluster.
+	bool proveOneSidedOpaqueClusters = true;
+	std::string disabledReason = "Imported package material safety metadata is not precise enough for cone culling yet.";
+};
+
 struct VirtualGeometryRequestedTargetCompileReport
 {
 	std::uint32_t targetIndex = 0u;
@@ -104,6 +113,8 @@ struct VirtualGeometryCompileReport
 	std::uint32_t pageCount = 0u;
 	std::uint32_t sourceTriangleCount = 0u;
 	std::uint32_t selectedFallbackAvailable = 0u;
+	std::uint32_t coneSafetyRecordCount = 0u;
+	std::uint32_t coneEligibleClusterCount = 0u;
 	float maxGeometricError = 0.0f;
 	VirtualGeometryAdaptiveCompileSettings adaptiveSettings;
 	std::vector<VirtualGeometryRequestedTargetCompileReport> requestedTargets;
@@ -168,7 +179,8 @@ bool CompileMesh(
 	float smoothingAngle = 60.0f,
 	float weldThreshold = 1e-6f,
 	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = nullptr,
-	MeshCompileProgressCallback progressCallback = {});
+	MeshCompileProgressCallback progressCallback = {},
+	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings = nullptr);
 
 // Compiles geometry that has already been extracted from a package importer.
 // Input: stable logical source name for reports plus decoded triangle vertices
@@ -183,4 +195,5 @@ bool CompileMeshFromRaw(
 	float smoothingAngle = 60.0f,
 	float weldThreshold = 1e-6f,
 	const VirtualGeometryAdaptiveCompileSettings* adaptiveSettings = nullptr,
-	MeshCompileProgressCallback progressCallback = {});
+	MeshCompileProgressCallback progressCallback = {},
+	const VirtualGeometryConeSafetyCookSettings* coneSafetySettings = nullptr);

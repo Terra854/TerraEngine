@@ -20,6 +20,7 @@ add_executable(TerraEngine-EditorTests
 	Export/ResidencyPolicyExportTests.cpp
 	Export/StreamingPolicyExportTests.cpp
 	Export/VirtualGeometryExportTests.cpp
+	Export/VirtualGeometryScalingExportTests.cpp
 	Profiling/ProfilerCaptureStoreTests.cpp
 	Project/LinuxScriptCompilationTests.cpp
 	Project/LinuxScriptEditorLaunchTests.cpp
@@ -38,6 +39,7 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp
 	Automation/VirtualGeometryAutomationTests.cpp
+	Automation/VirtualGeometryScalingAutomationTests.cpp
 	AssetPipeline/ModelPackageImportResultTests.cpp
 	AssetPipeline/FbxPackageImporterTests.cpp
 	AssetPipeline/FbxReimportTests.cpp
@@ -55,10 +57,12 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/GltfImportFailureTests.cpp
 	AssetPipeline/GltfReimportTests.cpp
 	AssetPipeline/VirtualGeometryInspectorTests.cpp
+	AssetPipeline/VirtualGeometryScalingAssetPipelineTests.cpp
 	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
 	AssetPipeline/VirtualGeometryPackageImportTests.cpp
 	Renderer/VirtualGeometryDebugViewTests.cpp
 	Renderer/VirtualGeometryHardeningDebugViewTests.cpp
+	Renderer/VirtualGeometryScalingDebugViewTests.cpp
 	# Virtual geometry asset-pipeline, automation, and export tests will be
 	# registered here when their story-specific test files are added.
 	Scene/ArchitectureHardeningPlayModeTests.cpp
@@ -204,6 +208,12 @@ add_test(NAME Editor.VirtualGeometryExport COMMAND $<TARGET_FILE:TerraEngine-Edi
 set_tests_properties(Editor.VirtualGeometryExport PROPERTIES
 	LABELS "Editor;VirtualGeometry;Export"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Export,VirtualGeometry.Editor.DebugView"
+)
+
+add_test(NAME Editor.VirtualGeometryDiagnostics COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.VirtualGeometryDiagnostics PROPERTIES
+	LABELS "Editor;VirtualGeometry;Diagnostics"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics"
 )
 
 add_test(NAME Editor.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

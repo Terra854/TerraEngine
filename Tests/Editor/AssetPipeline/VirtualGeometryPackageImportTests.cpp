@@ -165,6 +165,8 @@ namespace TerraEngine::EditorTests
 				context.Expect(mesh.virtualGeometryDetailLevels > 0u, "Cooked package mesh should expose a detail count.");
 				context.Expect(mesh.virtualGeometryMeshlets > 0u, "Cooked package mesh should expose a meshlet count.");
 				context.Expect(mesh.virtualGeometrySourceTriangles > 0u, "Cooked package mesh should expose source triangle count.");
+				context.Expect(mesh.virtualGeometryConeSafetySummary.metadataValid, "Package mesh should preserve cone safety metadata from the compiled TEMF.");
+				context.Expect(mesh.virtualGeometryConeSafetySummary.disabledClusterCount > 0u, "Merged package mesh cone culling should stay disabled until per-cluster material proof exists.");
 			}
 
 			const nlohmann::json sidecar = TerraEngine::AssetPipeline::ToJson(result);
@@ -174,6 +176,10 @@ namespace TerraEngine::EditorTests
 			context.Expect(!targets.empty(), "Sidecar JSON should persist requested-target diagnostics for generated meshes.");
 			context.Expect(targets.front().contains("desiredTriangleCount"), "Sidecar requested-target diagnostics should include desired triangle counts.");
 			context.Expect(targets.front().contains("actualTriangleCount"), "Sidecar requested-target diagnostics should include actual generated or candidate triangle counts.");
+			const nlohmann::json coneSafety = sidecar["generatedMeshes"][0]["virtualGeometry"].value("coneSafety", nlohmann::json::object());
+			context.Expect(coneSafety.value("metadataValid", false), "Sidecar JSON should persist cone safety validity.");
+			context.Expect(coneSafety.value("disabledClusterCount", 0u) > 0u, "Sidecar JSON should persist cone safety disabled counts.");
+			context.Expect(!coneSafety.value("disabledReasons", nlohmann::json::array()).empty(), "Sidecar JSON should persist cone safety disabled reasons.");
 
 			const std::filesystem::path sourceAssetPath = tempRoot / "Assets/Models/virtual-multi-mesh.gltf";
 			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(sourceAssetPath, result), "Virtual geometry package sidecar should save.");
@@ -185,6 +191,8 @@ namespace TerraEngine::EditorTests
 			context.Expect(!loaded.generatedMeshes.front().virtualGeometryTargets.empty(), "Requested-target diagnostics should round-trip through the sidecar loader.");
 			context.Expect(loaded.generatedMeshes.front().virtualGeometryTargets.front().desiredTriangleCount > 0u, "Desired target counts should round-trip through the sidecar loader.");
 			context.Expect(loaded.generatedMeshes.front().virtualGeometryTargets.front().actualTriangleCount > 0u, "Actual target counts should round-trip through the sidecar loader.");
+			context.Expect(loaded.generatedMeshes.front().virtualGeometryConeSafetySummary.metadataValid, "Cone safety metadata validity should round-trip through the sidecar loader.");
+			context.Expect(loaded.generatedMeshes.front().virtualGeometryConeSafetySummary.disabledClusterCount > 0u, "Cone safety disabled counts should round-trip through the sidecar loader.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.PackageImport.PreservesStableGeneratedIdentifiers", [](TestContext& context) {
@@ -364,6 +372,8 @@ namespace TerraEngine::EditorTests
 			context.Expect(HasCoverageTag(gltfMesh, "adaptive-targets"), "Cooked package meshes should publish adaptive target coverage.");
 			context.Expect(HasCoverageTag(gltfMesh, "fallback-coverage"), "Cooked package meshes should publish fallback coverage.");
 			context.Expect(HasCoverageTag(gltfMesh, "page-links"), "Cooked package meshes should publish page-link coverage.");
+			context.Expect(HasCoverageTag(gltfMesh, "cone-safety-metadata"), "glTF package meshes should publish cone safety metadata coverage.");
+			context.Expect(HasCoverageTag(gltfMesh, "cone-culling-disabled"), "glTF package meshes should state that cone culling remains disabled without per-cluster material proof.");
 
 			const nlohmann::json sidecar = TerraEngine::AssetPipeline::ToJson(gltfResult);
 			const nlohmann::json tags = sidecar["generatedMeshes"][0]["virtualGeometry"].value("coverageTags", nlohmann::json::array());
@@ -386,6 +396,8 @@ namespace TerraEngine::EditorTests
 			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "package-fbx"), "FBX package meshes should publish the package-fbx coverage tag.");
 			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "package-static-geometry"), "FBX package meshes should publish the static geometry coverage tag.");
 			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "adaptive-targets"), "FBX package meshes should publish adaptive target coverage.");
+			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "cone-safety-metadata"), "FBX package meshes should publish cone safety metadata coverage.");
+			context.Expect(HasCoverageTag(fbxResult.generatedMeshes.front(), "cone-culling-disabled"), "FBX package meshes should keep cone culling disabled until per-cluster material proof exists.");
 		});
 	}
 }

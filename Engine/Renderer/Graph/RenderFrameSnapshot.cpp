@@ -114,6 +114,256 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, state.valid ? 1u : 0u);
 		}
 
+		void HashVirtualGeometryClusterPacket(std::uint64_t& hash, const VirtualGeometryClusterPacket& packet)
+		{
+			HashCombine(hash, packet.packetId);
+			HashCombine(hash, packet.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(packet.viewType));
+			HashCombine(hash, HashUuid(packet.objectId));
+			HashCombine(hash, HashUuid(packet.meshId));
+			HashCombine(hash, HashUuid(packet.materialId));
+			HashCombine(hash, packet.selectedLod);
+			HashCombine(hash, packet.clusterId);
+			HashCombine(hash, packet.meshletOffset);
+			HashCombine(hash, packet.meshletCount);
+			HashCombine(hash, packet.pageId);
+			HashCombine(hash, packet.fallbackPageId);
+			HashCombine(hash, packet.debugIdentity);
+			HashCombine(hash, packet.fallbackPacket ? 1u : 0u);
+		}
+
+		void HashClusterWorkBatch(std::uint64_t& hash, const ClusterWorkBatch& batch)
+		{
+			HashCombine(hash, batch.batchId);
+			HashCombine(hash, batch.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(batch.viewType));
+			HashCombine(hash, HashUuid(batch.meshId));
+			HashCombine(hash, HashUuid(batch.materialId));
+			HashCombine(hash, batch.packetOffset);
+			HashCombine(hash, batch.packetCount);
+			HashCombine(hash, batch.selectedMeshlets);
+			HashCombine(hash, batch.submittedMeshlets);
+			HashCombine(hash, static_cast<std::uint64_t>(batch.fallbackMode));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(batch.batchReason)));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(batch.fallbackReason)));
+		}
+
+		void HashCompactedVisibilitySet(std::uint64_t& hash, const CompactedVisibilitySet& compaction)
+		{
+			HashCombine(hash, compaction.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(compaction.viewType));
+			HashCombine(hash, compaction.candidatePackets);
+			HashCombine(hash, compaction.visiblePackets);
+			HashCombine(hash, compaction.rejectedByFrustum);
+			HashCombine(hash, compaction.rejectedByHiZ);
+			HashCombine(hash, compaction.rejectedByResidency);
+			HashCombine(hash, compaction.rejectedByCone);
+			HashCombine(hash, compaction.failOpenPackets);
+			HashCombine(hash, compaction.submittedBatches);
+			HashCombine(hash, static_cast<std::uint64_t>(compaction.source));
+		}
+
+		void HashPageResidencyRecord(std::uint64_t& hash, const PageResidencyRecord& page)
+		{
+			HashCombine(hash, HashUuid(page.meshId));
+			HashCombine(hash, page.pageId);
+			HashCombine(hash, page.coveredClusterOffset);
+			HashCombine(hash, page.coveredClusterCount);
+			HashCombine(hash, page.byteCost);
+			HashCombine(hash, static_cast<std::uint64_t>(page.state));
+			HashCombine(hash, page.fallbackPageId);
+			HashCombine(hash, page.isFallback ? 1u : 0u);
+			HashCombine(hash, page.lastRequestedFrame);
+			HashCombine(hash, page.lastUsedFrame);
+			HashCombine(hash, static_cast<std::uint64_t>(page.priority));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(page.failureReason)));
+			for (const std::uint32_t clusterId : page.coveredClusters)
+			{
+				HashCombine(hash, clusterId);
+			}
+		}
+
+		void HashFallbackCoverageChain(std::uint64_t& hash, const FallbackCoverageChain& chain)
+		{
+			HashCombine(hash, HashUuid(chain.meshId));
+			HashCombine(hash, chain.desiredClusterId);
+			HashCombine(hash, chain.fallbackClusterId);
+			HashCombine(hash, chain.fallbackPageId);
+			HashCombine(hash, static_cast<std::uint64_t>(chain.coverageStatus));
+			HashCombine(hash, chain.substitutedMeshlets);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(chain.reason)));
+		}
+
+		void HashHiZRegressionSnapshot(std::uint64_t& hash, const HiZRegressionSnapshot& snapshot)
+		{
+			HashCombine(hash, snapshot.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(snapshot.viewType));
+			HashCombine(hash, snapshot.frameIndex);
+			HashCombine(hash, static_cast<std::uint64_t>(snapshot.state));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(snapshot.reason)));
+			HashCombine(hash, snapshot.testedMeshlets);
+			HashCombine(hash, snapshot.occludedMeshlets);
+			HashCombine(hash, snapshot.visibleMeshlets);
+			HashCombine(hash, snapshot.failOpenMeshlets);
+			HashCombine(hash, snapshot.invalidDepthSamples);
+			HashCombine(hash, snapshot.recoveryFrames);
+			HashCombine(hash, snapshot.baselineMatched ? 1u : 0u);
+		}
+
+		void HashConeSafetyMetadata(std::uint64_t& hash, const ConeSafetyMetadata& cone)
+		{
+			HashCombine(hash, HashUuid(cone.meshId));
+			HashCombine(hash, cone.clusterId);
+			HashCombine(hash, static_cast<std::uint64_t>(cone.materialSidedness));
+			HashCombine(hash, static_cast<std::uint64_t>(cone.windingState));
+			HashCombine(hash, static_cast<std::uint64_t>(cone.alphaRisk));
+			HashCombine(hash, static_cast<std::uint64_t>(cone.thinShellRisk));
+			HashCombine(hash, cone.coneValid ? 1u : 0u);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(cone.disabledReason)));
+		}
+
+		void HashShadowVisibilitySelection(std::uint64_t& hash, const ShadowVisibilitySelection& selection)
+		{
+			HashCombine(hash, selection.shadowViewId);
+			HashCombine(hash, HashUuid(selection.lightId));
+			HashCombine(hash, selection.frameIndex);
+			HashCombine(hash, selection.candidatePackets);
+			HashCombine(hash, selection.selectedPackets);
+			HashCombine(hash, selection.rejectedByLightFrustum);
+			HashCombine(hash, selection.selectedMeshlets);
+			HashCombine(hash, selection.dispatchedMeshlets);
+			HashCombine(hash, selection.reusedCameraHiZ ? 1u : 0u);
+			for (const std::string& reason : selection.fallbackReasons)
+			{
+				HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(reason)));
+			}
+		}
+
+		void HashPerformanceGateResult(std::uint64_t& hash, const PerformanceGateResult& gate)
+		{
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(gate.gateId)));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(gate.fixtureId)));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(gate.metricName)));
+			HashCombine(hash, static_cast<std::uint32_t>(std::round(gate.threshold * 1000.0f)));
+			HashCombine(hash, static_cast<std::uint32_t>(std::round(gate.actual * 1000.0f)));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(gate.unit)));
+			HashCombine(hash, static_cast<std::uint64_t>(gate.status));
+			HashCombine(hash, static_cast<std::uint64_t>(gate.source));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(gate.diagnostic)));
+		}
+
+		template<typename State>
+		void SortVirtualGeometryScalingRecords(State& state)
+		{
+			// These records can be produced by worker jobs in arbitrary order.
+			// Sorting by stable ids keeps snapshot hashes, diagnostics, and tests
+			// deterministic without forcing workers to serialize their output.
+			std::sort(state.clusterPackets.begin(), state.clusterPackets.end(), [](const VirtualGeometryClusterPacket& left, const VirtualGeometryClusterPacket& right) {
+				if (left.packetId != right.packetId)
+				{
+					return left.packetId < right.packetId;
+				}
+				return left.clusterId < right.clusterId;
+			});
+			std::sort(state.clusterBatches.begin(), state.clusterBatches.end(), [](const ClusterWorkBatch& left, const ClusterWorkBatch& right) {
+				if (left.batchId != right.batchId)
+				{
+					return left.batchId < right.batchId;
+				}
+				return left.packetOffset < right.packetOffset;
+			});
+			std::sort(state.compactionResults.begin(), state.compactionResults.end(), [](const CompactedVisibilitySet& left, const CompactedVisibilitySet& right) {
+				if (left.viewId != right.viewId)
+				{
+					return left.viewId < right.viewId;
+				}
+				return static_cast<std::uint8_t>(left.viewType) < static_cast<std::uint8_t>(right.viewType);
+			});
+			std::sort(state.pageResidency.begin(), state.pageResidency.end(), [](const PageResidencyRecord& left, const PageResidencyRecord& right) {
+				if (left.pageId != right.pageId)
+				{
+					return left.pageId < right.pageId;
+				}
+				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+			});
+			std::sort(state.fallbackCoverage.begin(), state.fallbackCoverage.end(), [](const FallbackCoverageChain& left, const FallbackCoverageChain& right) {
+				if (left.desiredClusterId != right.desiredClusterId)
+				{
+					return left.desiredClusterId < right.desiredClusterId;
+				}
+				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+			});
+			std::sort(state.hiZRegressionSnapshots.begin(), state.hiZRegressionSnapshots.end(), [](const HiZRegressionSnapshot& left, const HiZRegressionSnapshot& right) {
+				if (left.viewId != right.viewId)
+				{
+					return left.viewId < right.viewId;
+				}
+				return left.frameIndex < right.frameIndex;
+			});
+			std::sort(state.coneSafetyMetadata.begin(), state.coneSafetyMetadata.end(), [](const ConeSafetyMetadata& left, const ConeSafetyMetadata& right) {
+				if (left.clusterId != right.clusterId)
+				{
+					return left.clusterId < right.clusterId;
+				}
+				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+			});
+			std::sort(state.shadowVisibilitySelections.begin(), state.shadowVisibilitySelections.end(), [](const ShadowVisibilitySelection& left, const ShadowVisibilitySelection& right) {
+				if (left.shadowViewId != right.shadowViewId)
+				{
+					return left.shadowViewId < right.shadowViewId;
+				}
+				return TerraEngine::ToHexString(left.lightId) < TerraEngine::ToHexString(right.lightId);
+			});
+			std::sort(state.performanceGates.begin(), state.performanceGates.end(), [](const PerformanceGateResult& left, const PerformanceGateResult& right) {
+				if (left.gateId != right.gateId)
+				{
+					return left.gateId < right.gateId;
+				}
+				return left.fixtureId < right.fixtureId;
+			});
+		}
+
+		template<typename State>
+		void HashVirtualGeometryScalingRecords(std::uint64_t& hash, const State& state)
+		{
+			for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
+			{
+				HashVirtualGeometryClusterPacket(hash, packet);
+			}
+			for (const ClusterWorkBatch& batch : state.clusterBatches)
+			{
+				HashClusterWorkBatch(hash, batch);
+			}
+			for (const CompactedVisibilitySet& compaction : state.compactionResults)
+			{
+				HashCompactedVisibilitySet(hash, compaction);
+			}
+			for (const PageResidencyRecord& page : state.pageResidency)
+			{
+				HashPageResidencyRecord(hash, page);
+			}
+			for (const FallbackCoverageChain& chain : state.fallbackCoverage)
+			{
+				HashFallbackCoverageChain(hash, chain);
+			}
+			for (const HiZRegressionSnapshot& hiZ : state.hiZRegressionSnapshots)
+			{
+				HashHiZRegressionSnapshot(hash, hiZ);
+			}
+			for (const ConeSafetyMetadata& cone : state.coneSafetyMetadata)
+			{
+				HashConeSafetyMetadata(hash, cone);
+			}
+			for (const ShadowVisibilitySelection& shadow : state.shadowVisibilitySelections)
+			{
+				HashShadowVisibilitySelection(hash, shadow);
+			}
+			for (const PerformanceGateResult& gate : state.performanceGates)
+			{
+				HashPerformanceGateResult(hash, gate);
+			}
+		}
+
 		std::uint64_t BuildVirtualGeometryCameraSignature(const RenderFrameSnapshot& snapshot, const VirtualGeometryViewSelectionState& state)
 		{
 			// The foundation stage has no live camera object in this value layer.
@@ -166,6 +416,7 @@ namespace TerraEngine::Renderer {
 				}
 				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
 			});
+			SortVirtualGeometryScalingRecords(state);
 			std::sort(state.pageNeeds.begin(), state.pageNeeds.end(), [](const VirtualGeometryPageNeedRecord& left, const VirtualGeometryPageNeedRecord& right) {
 				if (left.pageId != right.pageId)
 				{
@@ -200,6 +451,7 @@ namespace TerraEngine::Renderer {
 				}
 				return TerraEngine::ToHexString(left.objectId) < TerraEngine::ToHexString(right.objectId);
 			});
+			SortVirtualGeometryScalingRecords(state);
 			std::sort(state.pageNeeds.begin(), state.pageNeeds.end(), [](const VirtualGeometryPageNeedRecord& left, const VirtualGeometryPageNeedRecord& right) {
 				if (left.pageId != right.pageId)
 				{
@@ -296,6 +548,7 @@ namespace TerraEngine::Renderer {
 				HashCombine(hash, cluster.fallbackClusterId);
 				HashCombine(hash, cluster.usingFallback ? 1u : 0u);
 			}
+			HashVirtualGeometryScalingRecords(hash, state);
 			for (const VirtualGeometryPageNeedRecord& need : state.pageNeeds)
 			{
 				HashCombine(hash, HashUuid(need.objectId));
@@ -304,6 +557,10 @@ namespace TerraEngine::Renderer {
 				HashCombine(hash, need.clusterId);
 				HashCombine(hash, need.desiredLodIndex);
 				HashCombine(hash, need.fallbackRequired ? 1u : 0u);
+				HashCombine(hash, need.packetId);
+				HashCombine(hash, need.batchId);
+				HashCombine(hash, need.packetOffset);
+				HashCombine(hash, need.packetCount);
 			}
 			for (const VirtualGeometryLODTransitionState& transitionState : state.lodTransitionStates)
 			{
@@ -324,6 +581,7 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, state.valid ? 1u : 0u);
 			HashVirtualGeometryCounters(hash, state.counters);
 			HashVirtualGeometryHiZState(hash, state.hiZValidationState);
+			HashVirtualGeometryScalingRecords(hash, state);
 			for (const OcclusionDebugSample& sample : state.occlusionDebugSamples)
 			{
 				HashVirtualGeometryOcclusionSample(hash, sample);
@@ -338,6 +596,29 @@ namespace TerraEngine::Renderer {
 				HashCombine(hash, HashUuid(draw.meshId));
 				HashVirtualGeometryRange(hash, draw.range);
 				HashCombine(hash, draw.taskShaderCullingEnabled ? 1u : 0u);
+			}
+			for (const VirtualGeometrySelectedClusterRecord& cluster : state.selectedClusters)
+			{
+				HashCombine(hash, HashUuid(cluster.objectId));
+				HashCombine(hash, HashUuid(cluster.meshId));
+				HashCombine(hash, cluster.clusterId);
+				HashCombine(hash, cluster.lodIndex);
+				HashCombine(hash, cluster.pageId);
+				HashCombine(hash, cluster.fallbackClusterId);
+				HashCombine(hash, cluster.usingFallback ? 1u : 0u);
+			}
+			for (const VirtualGeometryPageNeedRecord& need : state.pageNeeds)
+			{
+				HashCombine(hash, HashUuid(need.objectId));
+				HashCombine(hash, HashUuid(need.meshId));
+				HashCombine(hash, need.pageId);
+				HashCombine(hash, need.clusterId);
+				HashCombine(hash, need.desiredLodIndex);
+				HashCombine(hash, need.fallbackRequired ? 1u : 0u);
+				HashCombine(hash, need.packetId);
+				HashCombine(hash, need.batchId);
+				HashCombine(hash, need.packetOffset);
+				HashCombine(hash, need.packetCount);
 			}
 		}
 		for (const RenderFrameLightRecord& light : snapshot.lights)
@@ -356,11 +637,36 @@ namespace TerraEngine::Renderer {
 		std::uint64_t virtualGeometryClusterWork = 0u;
 		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
 		{
-			virtualGeometryClusterWork += static_cast<std::uint64_t>(state.selectedClusters.size() + state.pageNeeds.size() + state.lodTransitionStates.size());
+			virtualGeometryClusterWork += static_cast<std::uint64_t>(
+				state.selectedClusters.size()
+				+ state.clusterPackets.size()
+				+ state.clusterBatches.size()
+				+ state.compactionResults.size()
+				+ state.pageNeeds.size()
+				+ state.pageResidency.size()
+				+ state.fallbackCoverage.size()
+				+ state.hiZRegressionSnapshots.size()
+				+ state.coneSafetyMetadata.size()
+				+ state.shadowVisibilitySelections.size()
+				+ state.performanceGates.size()
+				+ state.lodTransitionStates.size());
 		}
 		for (const VirtualGeometryViewVisibilitySnapshot& state : snapshot.virtualGeometryVisibilitySnapshots)
 		{
-			virtualGeometryClusterWork += static_cast<std::uint64_t>(state.drawRanges.size() + state.selectedClusters.size() + state.pageNeeds.size() + state.lodTransitionStates.size());
+			virtualGeometryClusterWork += static_cast<std::uint64_t>(
+				state.drawRanges.size()
+				+ state.selectedClusters.size()
+				+ state.clusterPackets.size()
+				+ state.clusterBatches.size()
+				+ state.compactionResults.size()
+				+ state.pageNeeds.size()
+				+ state.pageResidency.size()
+				+ state.fallbackCoverage.size()
+				+ state.hiZRegressionSnapshots.size()
+				+ state.coneSafetyMetadata.size()
+				+ state.shadowVisibilitySelections.size()
+				+ state.performanceGates.size()
+				+ state.lodTransitionStates.size());
 		}
 		return static_cast<std::uint64_t>(snapshot.renderables.size())
 			+ static_cast<std::uint64_t>(snapshot.lights.size())
@@ -443,14 +749,38 @@ namespace TerraEngine::Renderer {
 			counters.unavailableReason = "virtual geometry counters are unavailable for this view";
 			break;
 		}
-		for (const VirtualGeometryViewDrawRecord& draw : state.draws)
+		if (!state.clusterPackets.empty())
 		{
-			counters.sourceMeshlets += draw.range.meshletCount;
-			counters.selectedMeshlets += draw.range.meshletCount;
-			counters.dispatchedMeshlets += draw.range.meshletCount;
-			if (draw.range.failOpen)
+			for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
 			{
-				counters.fallbackMeshlets += draw.range.meshletCount;
+				counters.sourceMeshlets += packet.meshletCount;
+				counters.selectedMeshlets += packet.meshletCount;
+				counters.dispatchedMeshlets += packet.meshletCount;
+				if (packet.fallbackPacket)
+				{
+					counters.fallbackMeshlets += packet.meshletCount;
+					++counters.fallbackSubstitutions;
+				}
+			}
+		}
+		else
+		{
+			for (const VirtualGeometryViewDrawRecord& draw : state.draws)
+			{
+				counters.sourceMeshlets += draw.range.meshletCount;
+				counters.selectedMeshlets += draw.range.meshletCount;
+				counters.dispatchedMeshlets += draw.range.meshletCount;
+				if (draw.range.failOpen)
+				{
+					counters.fallbackMeshlets += draw.range.meshletCount;
+				}
+			}
+		}
+		for (const PageResidencyRecord& page : state.pageResidency)
+		{
+			if (page.state == GeometryPageState::Resident || page.state == GeometryPageState::Pinned)
+			{
+				++counters.residentPages;
 			}
 		}
 		for (const VirtualGeometrySelectedClusterRecord& cluster : state.selectedClusters)
@@ -579,7 +909,16 @@ namespace TerraEngine::Renderer {
 		}
 		visibility.drawRanges = state.draws;
 		visibility.selectedClusters = state.selectedClusters;
+		visibility.clusterPackets = state.clusterPackets;
+		visibility.clusterBatches = state.clusterBatches;
+		visibility.compactionResults = state.compactionResults;
 		visibility.pageNeeds = state.pageNeeds;
+		visibility.pageResidency = state.pageResidency;
+		visibility.fallbackCoverage = state.fallbackCoverage;
+		visibility.hiZRegressionSnapshots = state.hiZRegressionSnapshots;
+		visibility.coneSafetyMetadata = state.coneSafetyMetadata;
+		visibility.shadowVisibilitySelections = state.shadowVisibilitySelections;
+		visibility.performanceGates = state.performanceGates;
 		visibility.lodTransitionStates = state.lodTransitionStates;
 		visibility.occlusionDebugSamples = BuildVirtualGeometryOcclusionDebugSamples(state);
 		visibility.source = source;

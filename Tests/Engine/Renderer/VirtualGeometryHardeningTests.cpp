@@ -172,6 +172,76 @@ namespace TerraEngine::Tests
 			context.Expect(blockedAgain.warmupFrames >= unblocked.warmupFrames, "Repeated blocker moves should not reset the current-pyramid warm-up counter.");
 		});
 
+		registry.Add("VirtualGeometry.Hardening.US7.BatchedMovingWallRecoveryKeepsBaselineMatched", [](TestContext& context) {
+			VulkanHiZHistoryMetadata history{};
+			history.viewId = 17u;
+			history.viewClass = VulkanHiZViewClass::Game;
+			history.targetId = 5u;
+			history.width = 1280u;
+			history.height = 720u;
+			history.projectionSignature = 0x5151u;
+			history.depthSceneSignature = 0x6161u;
+			history.frameId = 41u;
+			history.warmupFrames = 2u;
+			history.valid = true;
+
+			VulkanHiZValidationInput input{};
+			input.viewId = history.viewId;
+			input.viewClass = history.viewClass;
+			input.targetId = history.targetId;
+			input.width = history.width;
+			input.height = history.height;
+			input.projectionSignature = history.projectionSignature;
+			input.depthSceneSignature = history.depthSceneSignature + 1u;
+			input.pyramidReady = true;
+			const VulkanHiZValidationResult validation = ValidateVulkanHiZHistory(history, input);
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState state{};
+			state.viewType = RenderViewType::Game;
+			state.outputKind = RenderOutputKind::GameView;
+			state.outputId = input.targetId;
+			state.targetSize = glm::uvec2(input.width, input.height);
+			state.hasHiZValidationState = true;
+			state.hiZValidationState.state = validation.occlusionAllowed ? VirtualGeometryHiZState::Active : VirtualGeometryHiZState::FailOpen;
+			state.hiZValidationState.pyramidReady = validation.pyramidReady;
+			state.hiZValidationState.pyramidSize = state.targetSize;
+			state.hiZValidationState.renderSize = state.targetSize;
+			state.hiZValidationState.warmupFrames = validation.warmupFrames;
+			state.hiZValidationState.failOpen = validation.failOpen;
+
+			ClusterWorkBatch batch{};
+			batch.batchId = 9u;
+			batch.viewId = state.outputId;
+			batch.viewType = state.viewType;
+			batch.packetCount = 4u;
+			batch.selectedMeshlets = 64u;
+			batch.submittedMeshlets = 64u;
+			state.clusterBatches.push_back(batch);
+
+			HiZRegressionSnapshot baseline{};
+			baseline.viewId = state.outputId;
+			baseline.viewType = state.viewType;
+			baseline.frameIndex = 42u;
+			baseline.state = state.hiZValidationState.state;
+			baseline.testedMeshlets = 64u;
+			baseline.visibleMeshlets = 64u;
+			baseline.recoveryFrames = validation.warmupFrames;
+			baseline.baselineMatched = validation.occlusionAllowed;
+			state.hiZRegressionSnapshots.push_back(baseline);
+
+			TerraEngine::Renderer::RenderFrameSnapshot frame{};
+			frame.frameId = 42u;
+			const TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility =
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(frame, state, VirtualGeometryCounterSource::Prepared);
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.Expect(validation.occlusionAllowed, "Moving the blocker in a batched fixture should keep Hi-Z active with the current pyramid.");
+			context.Expect(diagnostics.hiZBaselineMatched, "Batched moving-wall diagnostics should keep the accepted Hi-Z baseline matched.");
+			context.ExpectEqual(1u, diagnostics.submittedBatchCount, "Moving-wall recovery should not discard the batched cluster work record.");
+			context.ExpectEqual(validation.warmupFrames, diagnostics.hiZWarmupFrames, "Diagnostics should preserve the backend warm-up/recovery counter.");
+		});
+
 		registry.Add("VirtualGeometry.Hardening.ExplicitHiZStateTravelsWithVisibilitySnapshot", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot{};
 			snapshot.frameId = 2904u;

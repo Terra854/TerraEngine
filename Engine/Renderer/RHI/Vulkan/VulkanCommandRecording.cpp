@@ -70,7 +70,8 @@ namespace TerraEngine::Renderer::Vulkan {
 
 		// Virtual geometry uses the same split as the rest of the renderer:
 		// worker-safe preparation builds immutable LOD choices, selected cluster
-		// ranges, page-need packets, descriptor/update intents, and upload plans.
+		// ranges, cluster packet batches, page-need packets, descriptor/update
+		// intents, and upload plans.
 		// Actual Vulkan page upload, command-buffer recording ownership, resource
 		// retirement, and resident-page publication remain protected coordinator
 		// work so workers never mutate live Vulkan objects.

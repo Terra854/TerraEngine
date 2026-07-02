@@ -353,9 +353,9 @@ void EmitMeshlet(
 		outVertex.meshletIndex = meshletIndex;
 		outVertex.meshletBoundsRadius = meshletBoundsRadius;
 		outVertex.meshletCullFlags = meshletCullFlags;
-		// Pack the per-draw adaptive state into a single interpolator. Visible
-		// virtual geometry now draws one selected cluster range at a time, so the
-		// fragment visualizer sees the same sparse cut that the GPU dispatched.
+		// Pack the per-draw adaptive state into a single interpolator. Batched
+		// virtual geometry draws keep the selected packet count and offset here
+		// so fragment visualizers can identify packet-run ownership.
 		outVertex.virtualGeometryDebugData =
 			(SceneUniforms.selectedVirtualLod & 0xFFu) |
 			((SceneUniforms.selectedVirtualClusterCount & 0xFFu) << 8u) |

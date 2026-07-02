@@ -64,6 +64,10 @@ namespace TerraEngine::Renderer::Vulkan {
 	{
 		std::size_t drawCount = 0u;
 		std::size_t instancePayloadCount = 0u;
+		std::size_t virtualGeometryClusterPacketCount = 0u;
+		std::size_t virtualGeometryBatchCount = 0u;
+		std::size_t virtualGeometryCompactionResultCount = 0u;
+		std::uint64_t virtualGeometryBatchPacketSignature = 0u;
 		bool gpuDrivenEligible = false;
 	};
 

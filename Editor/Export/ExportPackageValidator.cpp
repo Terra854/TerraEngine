@@ -83,11 +83,12 @@ bool ValidateVirtualGeometryManifestBlock(const nlohmann::json& virtualGeometry,
 			requiredMetadata.insert(entry.get<std::string>());
 		}
 	}
-	static constexpr std::array<std::string_view, 4> kRequiredMetadata = {
+	static constexpr std::array<std::string_view, 5> kRequiredMetadata = {
 		"adaptiveTargets",
 		"fallbackCoverage",
 		"clusterHierarchy",
 		"pageLinks",
+		"coneSafety",
 	};
 	for (std::string_view metadata : kRequiredMetadata) {
 		if (!requiredMetadata.contains(std::string(metadata))) {
@@ -180,7 +181,8 @@ bool ValidateVirtualGeometryTemfPayload(const tepak::ByteBuffer& bytes, std::str
 	constexpr std::uint32_t requiredFlags = kVirtualGeometryValidationFlagAdaptiveTargetsPresent
 		| kVirtualGeometryValidationFlagFallbackCoverageValidated
 		| kVirtualGeometryValidationFlagClusterHierarchyValidated
-		| kVirtualGeometryValidationFlagPageLinksValidated;
+		| kVirtualGeometryValidationFlagPageLinksValidated
+		| kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
 	if ((virtualHeader.flags & kVirtualGeometryValidationFlagAdaptiveTargetsPresent) == 0u
 		|| virtualHeader.requestedTargetCount == 0u
 		|| virtualHeader.requestedTargetTableOffset == 0u) {
@@ -205,6 +207,12 @@ bool ValidateVirtualGeometryTemfPayload(const tepak::ByteBuffer& bytes, std::str
 		outError = "Virtual geometry mesh payload is missing page metadata or cluster-page links: " + normalizedPath;
 		return false;
 	}
+	if ((virtualHeader.flags & kVirtualGeometryValidationFlagConeSafetyMetadataValidated) == 0u
+		|| virtualHeader.coneSafetyCount != virtualHeader.clusterCount
+		|| virtualHeader.coneSafetyTableOffset == 0u) {
+		outError = "Virtual geometry mesh payload is missing cone safety metadata: " + normalizedPath;
+		return false;
+	}
 	if ((virtualHeader.flags & requiredFlags) != requiredFlags) {
 		outError = "Virtual geometry mesh payload is missing required adaptive validation flags: " + normalizedPath;
 		return false;
@@ -215,7 +223,8 @@ bool ValidateVirtualGeometryTemfPayload(const tepak::ByteBuffer& bytes, std::str
 		|| !ValidateTableRange(bytes, virtualHeader.requestedTargetTableOffset, virtualHeader.requestedTargetCount, sizeof(VirtualGeometryRequestedTargetRecord), "adaptive target", normalizedPath, outError)
 		|| !ValidateTableRange(bytes, virtualHeader.clusterTableOffset, virtualHeader.clusterCount, sizeof(VirtualGeometryClusterRecord), "cluster", normalizedPath, outError)
 		|| !ValidateTableRange(bytes, virtualHeader.pageTableOffset, virtualHeader.pageCount, sizeof(VirtualGeometryPageRecord), "page", normalizedPath, outError)
-		|| !ValidateTableRange(bytes, virtualHeader.clusterPageLinkTableOffset, virtualHeader.clusterPageLinkCount, sizeof(VirtualGeometryClusterPageLinkRecord), "cluster-page link", normalizedPath, outError)) {
+		|| !ValidateTableRange(bytes, virtualHeader.clusterPageLinkTableOffset, virtualHeader.clusterPageLinkCount, sizeof(VirtualGeometryClusterPageLinkRecord), "cluster-page link", normalizedPath, outError)
+		|| !ValidateTableRange(bytes, virtualHeader.coneSafetyTableOffset, virtualHeader.coneSafetyCount, sizeof(VirtualGeometryConeSafetyRecord), "cone safety", normalizedPath, outError)) {
 		return false;
 	}
 

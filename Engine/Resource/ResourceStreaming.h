@@ -162,6 +162,10 @@ namespace TerraEngine::Resource
 		std::string viewId;
 		std::uint32_t desiredLodIndex = 0u;
 		std::uint32_t desiredClusterId = 0u;
+		std::uint32_t packetId = 0u;
+		std::uint32_t batchId = 0u;
+		std::uint32_t packetOffset = 0u;
+		std::uint32_t packetCount = 0u;
 		double retentionSeconds = 0.0;
 		float screenImportance = 0.0f;
 		float predictedNeed = 0.0f;
@@ -179,6 +183,10 @@ namespace TerraEngine::Resource
 		std::uint32_t pageId = 0u;
 		std::uint32_t clusterId = 0u;
 		std::uint32_t desiredLodIndex = 0u;
+		std::uint32_t packetId = 0u;
+		std::uint32_t batchId = 0u;
+		std::uint32_t packetOffset = 0u;
+		std::uint32_t packetCount = 0u;
 		std::int32_t priority = 0;
 		bool fallbackRequest = false;
 		std::string reason;
@@ -204,6 +212,29 @@ namespace TerraEngine::Resource
 		std::vector<VirtualGeometryPageRequestFailureRecord> failures;
 		std::uint32_t missingDesiredPages = 0u;
 		std::uint32_t unavailableFallbackPages = 0u;
+	};
+
+	struct VirtualGeometryPageRetryPolicy
+	{
+		std::uint32_t maxRetryCount = 3u;
+		std::uint64_t retryDelayFrames = 2u;
+	};
+
+	struct VirtualGeometryQueuedPageRequest
+	{
+		VirtualGeometryPageRequestPacket packet;
+		std::uint32_t retryCount = 0u;
+		std::uint64_t nextRetryFrame = 0u;
+		std::string lastFailureReason;
+	};
+
+	struct VirtualGeometryPageRequestQueuePlan
+	{
+		std::vector<VirtualGeometryQueuedPageRequest> queuedRequests;
+		std::vector<VirtualGeometryPageRequestPacket> readyPackets;
+		std::vector<VirtualGeometryQueuedPageRequest> droppedRequests;
+		std::uint32_t retriedPackets = 0u;
+		std::uint32_t fallbackPackets = 0u;
 	};
 
 	struct VirtualGeometryPageCatalogEntry
@@ -336,6 +367,7 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::vector<StreamingNeed> BuildVirtualGeometryPageStreamingNeeds(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy, double nowSeconds = 0.0);
 	TERRAENGINE_API VirtualGeometryPageRequestPlan BuildVirtualGeometryPageRequestPlan(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy);
 	TERRAENGINE_API std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy);
+	TERRAENGINE_API VirtualGeometryPageRequestQueuePlan BuildVirtualGeometryPageRequestQueuePlan(const VirtualGeometryPageRequestPlan& requestPlan, const std::vector<VirtualGeometryQueuedPageRequest>& previousQueue, const VirtualGeometryPageRetryPolicy& retryPolicy, std::uint64_t frameId);
 	TERRAENGINE_API std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds = 0.0);
 	// This declaration describes the worker-safe planning phase. The actual
 	// ResourceManager registration and load/upload mutation still happens later

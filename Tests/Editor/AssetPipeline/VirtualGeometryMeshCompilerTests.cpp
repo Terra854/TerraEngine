@@ -331,6 +331,56 @@ namespace
 			}
 		});
 
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.US6.CooksConeSafetyRecordsForClusters", [](TestContext& context) {
+			const RawMeshFixture fixture = MakeGridMesh(20u);
+			const std::filesystem::path output = MakeTempOutputPath("ConeSafetyGrid");
+			MeshCompileReport report{};
+
+			context.Expect(CompileMeshFromRaw("VirtualGeometry/ConeSafetyGrid.obj", output, fixture.vertices, fixture.indices, true, &report), "Cone safety fixture should compile.");
+			context.Expect(report.virtualGeometry.coneSafetyRecordCount > 0u, "Cook report should count cone safety records.");
+			context.ExpectEqual(report.virtualGeometry.coneSafetyRecordCount, report.virtualGeometry.clusters.size(), "Cooker should emit one cone safety record per cluster.");
+			context.ExpectEqual(report.virtualGeometry.coneSafetyRecordCount, report.virtualGeometry.coneEligibleClusterCount, "Direct raw one-sided opaque fixtures should be eligible for cone culling.");
+
+			Mesh* mesh = LoadCompiledMeshForInspection(output);
+			context.Expect(mesh != nullptr, "Cone safety fixture should load for TEMF inspection.");
+			context.Expect(mesh != nullptr && mesh->virtualGeometryConeSafety.size() == mesh->virtualGeometryClusters.size(), "Loaded TEMF should preserve one cone safety record per cluster.");
+			context.Expect(mesh != nullptr && (mesh->virtualGeometryHeader.flags & kVirtualGeometryValidationFlagConeSafetyMetadataValidated) != 0u, "TEMF header should publish the cone safety validation flag.");
+			if (mesh != nullptr)
+			{
+				context.Expect(std::all_of(mesh->virtualGeometryConeSafety.begin(), mesh->virtualGeometryConeSafety.end(), [](const VirtualGeometryConeSafetyRecord& record) {
+					return (record.flags & kVirtualGeometryConeSafetyFlagConeValid) != 0u
+						&& (record.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u
+						&& record.materialSidedness == 0u
+						&& record.windingState == 0u
+						&& record.alphaRisk == 0u
+						&& record.thinShellRisk == 0u;
+				}), "Raw mesh cone safety records should prove one-sided opaque low-risk culling.");
+			}
+		});
+
+		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.US6.ConservativeCookDisablesConeSafety", [](TestContext& context) {
+			const RawMeshFixture fixture = MakeGridMesh(20u);
+			const std::filesystem::path output = MakeTempOutputPath("ConeSafetyConservativeGrid");
+			MeshCompileReport report{};
+			VirtualGeometryConeSafetyCookSettings coneSettings;
+			coneSettings.proveOneSidedOpaqueClusters = false;
+			coneSettings.disabledReason = "test importer has not proven material sidedness";
+
+			context.Expect(CompileMeshFromRaw("VirtualGeometry/ConeSafetyConservativeGrid.obj", output, fixture.vertices, fixture.indices, true, &report, 60.0f, 1e-6f, nullptr, {}, &coneSettings), "Conservative cone safety fixture should compile.");
+			context.Expect(report.virtualGeometry.coneSafetyRecordCount > 0u, "Conservative cook should still emit cone safety records for diagnostics.");
+			context.ExpectEqual(0u, report.virtualGeometry.coneEligibleClusterCount, "Conservative metadata should not arm cone culling.");
+
+			Mesh* mesh = LoadCompiledMeshForInspection(output);
+			context.Expect(mesh != nullptr, "Conservative cone fixture should load.");
+			if (mesh != nullptr)
+			{
+				context.Expect(std::all_of(mesh->virtualGeometryConeSafety.begin(), mesh->virtualGeometryConeSafety.end(), [](const VirtualGeometryConeSafetyRecord& record) {
+					return (record.flags & kVirtualGeometryConeSafetyFlagEligible) == 0u
+						&& record.disabledReasonStringSize > 0u;
+				}), "Disabled cone safety records should keep visible disabled reasons.");
+			}
+		});
+
 		registry.Add("Editor.AssetPipeline.VirtualGeometry.MeshCompiler.SectionRangesRemainContinuousAcrossLods", [](TestContext& context) {
 			const RawMeshFixture fixture = MakeGridMesh(22u);
 			const std::filesystem::path output = MakeTempOutputPath("SectionContinuityGrid");

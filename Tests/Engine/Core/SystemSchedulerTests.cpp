@@ -360,11 +360,31 @@ namespace TerraEngine::Tests {
 			const TerraEngine::Scheduling::ScheduleSummary& summary = scheduler.BuildSchedule();
 			const std::vector<TerraEngine::Scheduling::SchedulerResourceDefinition> resources =
 				TerraEngine::Scheduling::DefaultSchedulerResources();
+			const std::vector<std::string> requiredVirtualGeometryResources = {
+				TerraEngine::Scheduling::kResourceVirtualGeometryQualityProfile,
+				TerraEngine::Scheduling::kResourceVirtualGeometryResidencySnapshots,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageResidencySnapshots,
+				TerraEngine::Scheduling::kResourceVirtualGeometryHiZValidationState,
+				TerraEngine::Scheduling::kResourceVirtualGeometryClusterPackets,
+				TerraEngine::Scheduling::kResourceVirtualGeometryBatchPlans,
+				TerraEngine::Scheduling::kResourceVirtualGeometryCompactionResults,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageNeedPackets,
+				TerraEngine::Scheduling::kResourceVirtualGeometryVisibilitySnapshots,
+				TerraEngine::Scheduling::kResourceVirtualGeometryCounterSnapshots,
+				TerraEngine::Scheduling::kResourceVirtualGeometryCullingDiagnostics,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPerformanceCounters,
+				TerraEngine::Scheduling::kResourceVirtualGeometryShadowVisibilitySnapshots,
+				TerraEngine::Scheduling::kResourceVirtualGeometryDiagnostics
+			};
 
 			// RenderSystem is registered during engine startup before any frame
 			// work can run. Every declared virtual geometry handoff must have a
 			// default scheduler resource definition, otherwise MainEngine rejects
 			// startup with an invalid scheduler summary.
+			for (const std::string& resourceName : requiredVirtualGeometryResources)
+			{
+				context.Expect(ContainsSchedulerResource(resources, resourceName), "Default scheduler resources should define virtual geometry resource: " + resourceName);
+			}
 			for (const std::string& resourceName : declaration.reads)
 			{
 				context.Expect(ContainsSchedulerResource(resources, resourceName), "Default scheduler resources should define RenderSystem read resource: " + resourceName);

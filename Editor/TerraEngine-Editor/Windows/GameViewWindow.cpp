@@ -298,6 +298,16 @@ void GameViewWindow::OnGui() {
 		char line8[96];
 		char line9[192];
 		char line10[96];
+		char line11[160];
+		char line12[160];
+		char line13[160];
+		char line14[160];
+		char line15[160];
+		char line16[160];
+		char line17[160];
+		char line18[192];
+		char line19[192];
+		char line20[160];
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (statsReady) {
@@ -350,6 +360,34 @@ void GameViewWindow::OnGui() {
 				stats.hiZStatusReason);
 			std::snprintf(line9, sizeof(line9), "Hi-Z Occlusion: %s", hiZStatusText.c_str());
 			std::snprintf(line10, sizeof(line10), "Variable Rate Shading: %s", stats.vrsActive ? "Active" : "Off");
+			const std::string packetText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+				"VG Cluster Packets",
+				stats.virtualGeometryClusterPackets,
+				stats.meshletCounterSource,
+				stats.meshletCounterReason);
+			std::snprintf(line11, sizeof(line11), "%s", packetText.c_str());
+			const std::string batchText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+				"VG Submitted Batches",
+				stats.virtualGeometrySubmittedBatches,
+				stats.meshletCounterSource,
+				stats.meshletCounterReason);
+			std::snprintf(line12, sizeof(line12), "%s", batchText.c_str());
+			std::snprintf(line13, sizeof(line13), "VG Legacy Fallback Batches: %u", stats.virtualGeometryLegacyFallbackBatches);
+			std::snprintf(line14, sizeof(line14), "VG Candidate Packets: %u", stats.virtualGeometryCandidatePackets);
+			std::snprintf(line15, sizeof(line15), "VG Compacted Packets: %u", stats.virtualGeometryCompactedPackets);
+			std::snprintf(line16, sizeof(line16), "VG Rejected Packets: %u", stats.virtualGeometryRejectedPackets);
+			std::snprintf(line17, sizeof(line17), "VG Fail-Open Packets: %u", stats.virtualGeometryFailOpenPackets);
+			std::snprintf(line18, sizeof(line18), "VG Pages R/Q/M/F: %u/%u/%u/%u",
+				stats.virtualGeometryResidentPages,
+				stats.virtualGeometryRequestedPages,
+				stats.virtualGeometryMissingPages,
+				stats.virtualGeometryFailedPages);
+			std::snprintf(line19, sizeof(line19), "VG Evicted/Pinned Fallback: %u/%u",
+				stats.virtualGeometryEvictedPages,
+				stats.virtualGeometryPinnedFallbackPages);
+			std::snprintf(line20, sizeof(line20), "Hi-Z Baseline: %s, risks %u",
+				stats.hiZBaselineMatched ? "Matched" : "Mismatch",
+				stats.hiZFalseOcclusionRiskWarnings);
 		} else {
 			std::snprintf(line0, sizeof(line0), "Stats unavailable");
 			std::snprintf(line1, sizeof(line1), "No active camera/render stats");
@@ -362,9 +400,19 @@ void GameViewWindow::OnGui() {
 			line8[0] = '\0';
 			line9[0] = '\0';
 			line10[0] = '\0';
+			line11[0] = '\0';
+			line12[0] = '\0';
+			line13[0] = '\0';
+			line14[0] = '\0';
+			line15[0] = '\0';
+			line16[0] = '\0';
+			line17[0] = '\0';
+			line18[0] = '\0';
+			line19[0] = '\0';
+			line20[0] = '\0';
 		}
 
-		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7, line8, line9, line10};
+		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7, line11, line12, line13, line14, line15, line16, line17, line18, line19, line20, line8, line9, line10};
 		float textWidth = 0.0f;
 		int lineCount = 0;
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.

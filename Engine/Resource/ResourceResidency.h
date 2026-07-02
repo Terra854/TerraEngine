@@ -225,6 +225,10 @@ namespace TerraEngine::Resource
 		std::uint64_t byteSize = 0u;
 		std::int32_t priority = 0;
 		std::uint64_t lastUsedFrame = 0u;
+		std::uint64_t lastRequestedFrame = 0u;
+		std::uint64_t lastResidentFrame = 0u;
+		std::uint64_t lastStateChangeFrame = 0u;
+		std::uint32_t requestCount = 0u;
 		bool fallbackPage = false;
 		bool pinnedFallback = false;
 		float screenImportance = 0.0f;

@@ -286,6 +286,23 @@ namespace TerraEngine::AssetPipeline
 		};
 	}
 
+	nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryConeSafetySummary& value)
+	{
+		nlohmann::json disabledReasons = nlohmann::json::array();
+		for (const std::string& reason : value.disabledReasons)
+		{
+			disabledReasons.push_back(reason);
+		}
+
+		return {
+			{ "recordCount", value.recordCount },
+			{ "eligibleClusterCount", value.eligibleClusterCount },
+			{ "disabledClusterCount", value.disabledClusterCount },
+			{ "metadataValid", value.metadataValid },
+			{ "disabledReasons", disabledReasons }
+		};
+	}
+
 	nlohmann::json ToJson(const GeneratedModelMeshAsset& value)
 	{
 		nlohmann::json virtualGeometryCoverageTags = nlohmann::json::array();
@@ -328,6 +345,7 @@ namespace TerraEngine::AssetPipeline
 				{ "settings", ToJson(value.virtualGeometrySettings) },
 				{ "targets", virtualGeometryTargets },
 				{ "clusterSummary", ToJson(value.virtualGeometryClusterSummary) },
+				{ "coneSafety", ToJson(value.virtualGeometryConeSafetySummary) },
 				{ "coverageTags", virtualGeometryCoverageTags },
 				{ "warnings", virtualGeometryWarnings }
 			} }
@@ -471,6 +489,50 @@ namespace TerraEngine::AssetPipeline
 		{
 			mesh.virtualGeometryClusterSummary.materialCoverageValid = false;
 			mesh.virtualGeometryWarnings.push_back("Virtual geometry cluster material diagnostics could not be read.");
+		}
+
+		mesh.virtualGeometryConeSafetySummary = {};
+		mesh.virtualGeometryConeSafetySummary.recordCount = virtualHeader.coneSafetyCount;
+		mesh.virtualGeometryConeSafetySummary.metadataValid =
+			(virtualHeader.flags & kVirtualGeometryValidationFlagConeSafetyMetadataValidated) != 0u
+			&& virtualHeader.coneSafetyCount == virtualHeader.clusterCount
+			&& virtualHeader.coneSafetyTableOffset != 0u;
+		std::string stringTable;
+		if (virtualHeader.diagnosticStringOffset != 0u && virtualHeader.diagnosticStringSize != 0u)
+		{
+			stringTable.resize(virtualHeader.diagnosticStringSize);
+			input.seekg(static_cast<std::streamoff>(virtualHeader.diagnosticStringOffset), std::ios::beg);
+			input.read(stringTable.data(), static_cast<std::streamsize>(stringTable.size()));
+		}
+		std::vector<VirtualGeometryConeSafetyRecord> coneSafety;
+		if (mesh.virtualGeometryConeSafetySummary.metadataValid
+			&& ReadVirtualGeometryTable(input, virtualHeader.coneSafetyTableOffset, virtualHeader.coneSafetyCount, coneSafety))
+		{
+			for (const VirtualGeometryConeSafetyRecord& cone : coneSafety)
+			{
+				if ((cone.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u)
+				{
+					++mesh.virtualGeometryConeSafetySummary.eligibleClusterCount;
+					continue;
+				}
+				++mesh.virtualGeometryConeSafetySummary.disabledClusterCount;
+				if (cone.disabledReasonStringSize == 0u
+					|| cone.disabledReasonStringOffset + cone.disabledReasonStringSize > stringTable.size())
+				{
+					continue;
+				}
+				const std::string reason = stringTable.substr(cone.disabledReasonStringOffset, cone.disabledReasonStringSize);
+				if (std::find(mesh.virtualGeometryConeSafetySummary.disabledReasons.begin(), mesh.virtualGeometryConeSafetySummary.disabledReasons.end(), reason)
+					== mesh.virtualGeometryConeSafetySummary.disabledReasons.end())
+				{
+					mesh.virtualGeometryConeSafetySummary.disabledReasons.push_back(reason);
+				}
+			}
+		}
+		else
+		{
+			mesh.virtualGeometryConeSafetySummary.metadataValid = false;
+			mesh.virtualGeometryWarnings.push_back("Virtual geometry cone safety metadata could not be read.");
 		}
 		if (virtualHeader.detailLevelCount == 0u || virtualHeader.cullableGroupCount == 0u)
 		{

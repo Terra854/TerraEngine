@@ -570,6 +570,84 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.front().selectedLodHistogram[1], "Sparse draw diagnostics should count the coarse cluster draw.");
 		});
 
+		registry.Add("VirtualGeometry.Render.US1.MultiMaterialPacketsRemainSeparateBatches", [](TestContext& context) {
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialA = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialB = TerraEngine::GenerateUUID();
+			std::vector<VirtualGeometryClusterPacket> packets;
+			for (std::uint32_t index = 0u; index < 4u; ++index)
+			{
+				VirtualGeometryClusterPacket packet;
+				packet.packetId = index;
+				packet.meshId = meshId;
+				packet.materialId = index < 2u ? materialA : materialB;
+				packet.selectedLod = 0u;
+				packet.clusterId = index;
+				packet.meshletOffset = index * 6u;
+				packet.meshletCount = 6u;
+				packets.push_back(packet);
+			}
+
+			const std::vector<ClusterWorkBatch> batches = RenderSystem::BuildVirtualGeometryClusterBatches(packets);
+
+			context.ExpectEqual(static_cast<std::size_t>(2u), batches.size(), "Batching must split contiguous packets when material bindings differ.");
+			context.ExpectEqual(2u, batches[0].packetCount, "First material should keep its contiguous packet run.");
+			context.ExpectEqual(2u, batches[1].packetCount, "Second material should keep its contiguous packet run.");
+			context.Expect(batches[0].materialId != batches[1].materialId, "Submitted batches should retain separate material ownership.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US2.CompactionRejectsOffscreenButFailsOpenMissingResources", [](TestContext& context) {
+			VirtualGeometryClusterPacket offscreen;
+			offscreen.packetId = 0u;
+			offscreen.clusterId = 7u;
+			offscreen.meshletOffset = 0u;
+			offscreen.meshletCount = 4u;
+			offscreen.projectedBounds = glm::vec4(-0.4f, 0.1f, -0.1f, 0.3f);
+			std::vector<VirtualGeometryClusterPacket> compacted;
+			const CompactedVisibilitySet offscreenResult =
+				RenderSystem::CompactVirtualGeometryClusterPackets({ offscreen }, compacted, RenderViewType::Game, 2u);
+
+			context.ExpectEqual(0u, offscreenResult.visiblePackets, "Fully offscreen packets should be rejected before submission.");
+			context.ExpectEqual(1u, offscreenResult.rejectedByFrustum, "Offscreen packet rejection should be classified as frustum culling.");
+			context.Expect(compacted.empty(), "Frustum-rejected packets should not be submitted.");
+
+			VirtualGeometryClusterPacket missingResource = offscreen;
+			missingResource.packetId = 1u;
+			missingResource.projectedBounds = glm::vec4(0.1f, 0.1f, 0.2f, 0.2f);
+			missingResource.meshletCount = 0u;
+			const CompactedVisibilitySet failOpenResult =
+				RenderSystem::CompactVirtualGeometryClusterPackets({ missingResource }, compacted, RenderViewType::Game, 2u);
+
+			context.ExpectEqual(1u, failOpenResult.visiblePackets, "Missing-resource-only packets should fail open to avoid missing geometry.");
+			context.ExpectEqual(1u, failOpenResult.failOpenPackets, "Fail-open packet count should explain the restored submission.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), compacted.size(), "Fail-open packets should be submitted after restoration.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US3.FallbackCoverageChainsPublishThroughSnapshots", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot{};
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState state{};
+			state.viewType = RenderViewType::Game;
+			state.outputId = 5u;
+			FallbackCoverageChain chain;
+			chain.meshId = TerraEngine::GenerateUUID();
+			chain.desiredClusterId = 8u;
+			chain.fallbackClusterId = 2u;
+			chain.fallbackPageId = 0u;
+			chain.coverageStatus = VirtualGeometryFallbackCoverageStatus::Complete;
+			chain.substitutedMeshlets = 6u;
+			chain.reason = "fixture fallback coverage";
+			state.fallbackCoverage.push_back(chain);
+			snapshot.virtualGeometryViewSelections.push_back(state);
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot> visibility =
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshots(snapshot);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), visibility.size(), "Fallback coverage selection should publish one visibility snapshot.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), visibility.front().fallbackCoverage.size(), "Fallback coverage chains should survive immutable snapshot copy.");
+			context.ExpectEqual(8u, visibility.front().fallbackCoverage.front().desiredClusterId, "Fallback coverage should identify the missing desired cluster.");
+			context.ExpectEqual(6u, visibility.front().fallbackCoverage.front().substitutedMeshlets, "Fallback coverage should report substituted meshlets.");
+		});
+
 		registry.Add("VirtualGeometry.Render.ClusterSelection.EnforcesParentChildExclusivity", [](TestContext& context) {
 			const VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
 			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult farResult =
@@ -691,13 +769,20 @@ namespace TerraEngine::Tests
 			// Any live scene/object/component mutation must stay outside this
 			// worker-safe region and pass through protected mutation boundaries.
 			context.ExpectEqual(std::string("Render"), declaration.phase, "RenderSystem should declare its scheduler phase.");
-			context.Expect(contains(declaration.reads, "VirtualGeometryQualityProfile"), "RenderSystem should declare virtual geometry quality reads.");
-			context.Expect(contains(declaration.reads, "VirtualGeometryResidencySnapshots"), "RenderSystem should declare virtual geometry residency snapshot reads.");
-			context.Expect(contains(declaration.reads, "VirtualGeometryHiZValidationState"), "RenderSystem should declare virtual geometry Hi-Z validation reads.");
-			context.Expect(contains(declaration.writes, "VirtualGeometryPageNeedPackets"), "RenderSystem should declare virtual geometry page-need packet writes.");
-			context.Expect(contains(declaration.writes, "VirtualGeometryVisibilitySnapshots"), "RenderSystem should declare virtual geometry visibility snapshot writes.");
-			context.Expect(contains(declaration.writes, "VirtualGeometryCounterSnapshots"), "RenderSystem should declare virtual geometry counter snapshot writes.");
-			context.Expect(contains(declaration.writes, "VirtualGeometryDiagnostics"), "RenderSystem should declare virtual geometry diagnostic writes.");
+			context.Expect(contains(declaration.reads, TerraEngine::Scheduling::kResourceVirtualGeometryQualityProfile), "RenderSystem should declare virtual geometry quality reads.");
+			context.Expect(contains(declaration.reads, TerraEngine::Scheduling::kResourceVirtualGeometryResidencySnapshots), "RenderSystem should keep the compatibility residency snapshot read.");
+			context.Expect(contains(declaration.reads, TerraEngine::Scheduling::kResourceVirtualGeometryPageResidencySnapshots), "RenderSystem should declare explicit virtual geometry page residency reads.");
+			context.Expect(contains(declaration.reads, TerraEngine::Scheduling::kResourceVirtualGeometryHiZValidationState), "RenderSystem should declare virtual geometry Hi-Z validation reads.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryClusterPackets), "RenderSystem should declare virtual geometry cluster packet writes.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryBatchPlans), "RenderSystem should declare virtual geometry batch plan writes.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryCompactionResults), "RenderSystem should declare virtual geometry compaction result writes.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryPageNeedPackets), "RenderSystem should declare virtual geometry page-need packet writes.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryVisibilitySnapshots), "RenderSystem should declare virtual geometry visibility snapshot writes.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryCounterSnapshots), "RenderSystem should declare virtual geometry counter snapshot writes.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryCullingDiagnostics), "RenderSystem should declare virtual geometry culling diagnostic writes.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryPerformanceCounters), "RenderSystem should declare virtual geometry performance counter writes.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryShadowVisibilitySnapshots), "RenderSystem should declare virtual geometry shadow visibility writes.");
+			context.Expect(contains(declaration.writes, TerraEngine::Scheduling::kResourceVirtualGeometryDiagnostics), "RenderSystem should declare virtual geometry diagnostic writes.");
 			context.Expect(declaration.phaseKind == TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare, "Virtual geometry render preparation should be classified as worker preparation.");
 			context.Expect(declaration.boundaryClassification == TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe, "RenderSystem should expose the protected GPU and diagnostic boundary.");
 			context.Expect(declaration.safeSubwork.find("snapshots") != std::string::npos, "Worker-safe render preparation should name immutable snapshot inputs.");

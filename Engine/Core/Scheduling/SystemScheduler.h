@@ -52,6 +52,25 @@ namespace TerraEngine::Scheduling {
 		ResourceAccessMode mode = ResourceAccessMode::Read;
 	};
 
+	// Virtual geometry resource names are centralized here so RenderSystem,
+	// tests, and diagnostics all describe the same scheduler handoff. The names
+	// are plain strings because the scheduler validates declarations before any
+	// renderer-specific type system is available during startup.
+	inline constexpr const char kResourceVirtualGeometryQualityProfile[] = "VirtualGeometryQualityProfile";
+	inline constexpr const char kResourceVirtualGeometryResidencySnapshots[] = "VirtualGeometryResidencySnapshots";
+	inline constexpr const char kResourceVirtualGeometryPageResidencySnapshots[] = "VirtualGeometryPageResidencySnapshots";
+	inline constexpr const char kResourceVirtualGeometryHiZValidationState[] = "VirtualGeometryHiZValidationState";
+	inline constexpr const char kResourceVirtualGeometryClusterPackets[] = "VirtualGeometryClusterPackets";
+	inline constexpr const char kResourceVirtualGeometryBatchPlans[] = "VirtualGeometryBatchPlans";
+	inline constexpr const char kResourceVirtualGeometryCompactionResults[] = "VirtualGeometryCompactionResults";
+	inline constexpr const char kResourceVirtualGeometryPageNeedPackets[] = "VirtualGeometryPageNeedPackets";
+	inline constexpr const char kResourceVirtualGeometryVisibilitySnapshots[] = "VirtualGeometryVisibilitySnapshots";
+	inline constexpr const char kResourceVirtualGeometryCounterSnapshots[] = "VirtualGeometryCounterSnapshots";
+	inline constexpr const char kResourceVirtualGeometryCullingDiagnostics[] = "VirtualGeometryCullingDiagnostics";
+	inline constexpr const char kResourceVirtualGeometryPerformanceCounters[] = "VirtualGeometryPerformanceCounters";
+	inline constexpr const char kResourceVirtualGeometryShadowVisibilitySnapshots[] = "VirtualGeometryShadowVisibilitySnapshots";
+	inline constexpr const char kResourceVirtualGeometryDiagnostics[] = "VirtualGeometryDiagnostics";
+
 	struct SystemDeclaration {
 		std::string name;
 		std::string phase = "PostFrame";

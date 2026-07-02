@@ -1,5 +1,7 @@
 #include "TestHarness.h"
 
+#include "Renderer/Graph/RenderDiagnostics.h"
+#include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RHI/Vulkan/VulkanHiZ.h"
 
 #include <glm/glm.hpp>
@@ -48,6 +50,57 @@ namespace TerraEngine::Tests
 
 	void RegisterVirtualGeometryHiZTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.HiZ.US7.BatchedPathPublishesBaselineMatch", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 2u;
+			visibility.frameId = 7001u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::Prepared;
+			visibility.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			visibility.hiZValidationState.pyramidReady = true;
+			visibility.hiZValidationState.pyramidSize = glm::uvec2(1920u, 1080u);
+			visibility.hiZValidationState.renderSize = glm::uvec2(1920u, 1080u);
+			visibility.hiZValidationState.warmupFrames = 3u;
+			visibility.hiZValidationState.failOpen = false;
+
+			VirtualGeometryClusterPacket packet{};
+			packet.packetId = 0u;
+			packet.viewId = visibility.outputId;
+			packet.viewType = visibility.viewType;
+			packet.meshletCount = 32u;
+			visibility.clusterPackets.push_back(packet);
+
+			ClusterWorkBatch batch{};
+			batch.batchId = 0u;
+			batch.viewId = visibility.outputId;
+			batch.viewType = visibility.viewType;
+			batch.packetCount = 1u;
+			batch.selectedMeshlets = 32u;
+			batch.submittedMeshlets = 32u;
+			batch.batchReason = "batched Hi-Z baseline fixture";
+			visibility.clusterBatches.push_back(batch);
+
+			HiZRegressionSnapshot baseline{};
+			baseline.viewId = visibility.outputId;
+			baseline.viewType = visibility.viewType;
+			baseline.frameIndex = visibility.frameId;
+			baseline.state = VirtualGeometryHiZState::Active;
+			baseline.testedMeshlets = 32u;
+			baseline.visibleMeshlets = 32u;
+			baseline.recoveryFrames = 3u;
+			baseline.baselineMatched = true;
+			visibility.hiZRegressionSnapshots.push_back(baseline);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.Expect(diagnostics.hiZBaselineMatched, "Batched virtual geometry should publish the accepted Hi-Z baseline as matched.");
+			context.ExpectEqual(0u, diagnostics.hiZFalseOcclusionRiskWarnings, "Matched Hi-Z baselines should not raise false-occlusion risks.");
+			context.ExpectEqual(1u, diagnostics.submittedBatchCount, "The Hi-Z baseline fixture should still carry batched packet diagnostics.");
+			context.Expect(diagnostics.hiZActive, "Active validation state should keep Hi-Z active for the batched diagnostics path.");
+		});
+
 		registry.Add("VirtualGeometry.HiZ.Validation.KeepsOcclusionActiveAcrossCameraAndDepthSceneMotion", [](TestContext& context) {
 			glm::mat4 viewProjection(1.0f);
 			VulkanHiZValidationInput input = MakeValidationInput(1u, 1920u, 1080u, viewProjection);

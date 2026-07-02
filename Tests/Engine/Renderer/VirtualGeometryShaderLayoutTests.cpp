@@ -42,6 +42,19 @@ namespace TerraEngine::Tests
 			return buffer.str();
 		}
 
+		std::string ReadDefaultMeshShader()
+		{
+			// Mesh shader debug propagation is also a source-level contract; the
+			// packet/batch counters are packed into interpolators before the
+			// fragment visualizer can color selected virtual geometry.
+			const std::filesystem::path shaderPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Shaders/Default/Default.mesh.hlsl";
+			std::ifstream input(shaderPath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
 		bool ShaderContains(const std::string& shader, const std::string& token)
 		{
 			return shader.find(token) != std::string::npos;
@@ -74,6 +87,16 @@ namespace TerraEngine::Tests
 			context.Expect(offsetof(VirtualGeometrySelectedClusterRecord, usingFallback) > offsetof(VirtualGeometrySelectedClusterRecord, fallbackClusterId), "Fallback state should travel with each sparse cluster record.");
 		});
 
+		registry.Add("VirtualGeometry.ShaderLayout.US1.PacketBatchMetadataStaysVisible", [](TestContext& context) {
+			const std::string taskShader = ReadDefaultTaskShader();
+			const std::string meshShader = ReadDefaultMeshShader();
+
+			context.Expect(ShaderContains(taskShader, "selectedVirtualClusterCount; // Number of selected clusters in this packet batch draw."), "Task shader push constants should document that cluster count can describe a packet batch.");
+			context.Expect(ShaderContains(taskShader, "this draw references one record or a packet run"), "Task shader should preserve the packet-run contract without changing meshlet output.");
+			context.Expect(ShaderContains(meshShader, "packet-run ownership"), "Mesh shader debug propagation should name packet-run ownership.");
+			context.Expect(ShaderContains(meshShader, "SceneUniforms.selectedVirtualClusterCount"), "Mesh shader should continue packing the selected packet count into debug data.");
+		});
+
 		registry.Add("VirtualGeometry.ShaderLayout.FrameCullingDataCarriesHiZAvailabilityGate", [](TestContext& context) {
 			context.ExpectEqual(offsetof(FrameCullingDataGPU, renderSettings1) + sizeof(glm::uvec4), offsetof(FrameCullingDataGPU, renderSettings2), "renderSettings2 should remain directly after renderSettings1 for the task shader payload.");
 			context.ExpectEqual(sizeof(static_cast<FrameCullingDataGPU*>(nullptr)->renderSettings2), sizeof(glm::vec4), "renderSettings2 should remain a float4 so .w can gate Hi-Z without changing the shader layout.");
@@ -103,12 +126,15 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(shader, "static const float kMaxTriangleCoverageRectExtentPixels = 512.0f;"), "Triangle coverage votes should stay bounded to medium projected meshlets.");
 			context.Expect(ShaderContains(shader, "static const float kMaxRectCoverageRectExtentPixels = 320.0f;"), "Coarse rectangle coverage votes should stay bounded to modest projected meshlets.");
 			context.Expect(ShaderContains(shader, "static const float kMaxCenterCoverageRectExtentPixels = 128.0f;"), "Center-tap fallback should stay limited to small projected meshlets.");
-			context.Expect(ShaderContains(shader, "static const uint kRequiredRectCoverageSamples = 22u;"), "Coarse rectangle coverage should require most samples to be hidden before culling.");
-			context.Expect(ShaderContains(shader, "IsMeshletTriangleCoverageOccluded"), "Hi-Z should include a real triangle coverage fallback instead of depending only on projected rectangles.");
-			context.Expect(ShaderContains(shader, "IsMeshletRectCoverageMostlyOccluded"), "Hi-Z should include a coarse rectangle coverage fallback for meshlets with small background gaps in their projected bounds.");
-			context.Expect(ShaderContains(shader, "IsSmallMeshletCenterOccluded"), "Hi-Z should include a small-meshlet center fallback for far clusters after higher-confidence coverage tests fail.");
-			context.Expect(ShaderContains(shader, "const uint requiredOccludedVertices = max(3u, (vertexCount * 92u + 99u) / 100u);"), "Mostly hidden meshlets should require a high vertex-occlusion vote before the vertex fallback can cull them.");
-			context.Expect(ShaderContains(shader, "const uint requiredOccludedTriangles = max(1u, (sampledTriangleCount * 92u + 99u) / 100u);"), "Triangle centroid sampling should keep a high coverage threshold to avoid silhouette popping.");
+			context.Expect(ShaderContains(shader, "const float2 uvPadding = 8.0f / viewportSize;"), "Hi-Z should pad projected meshlet rectangles enough that wall-edge silhouettes fail open.");
+			context.Expect(ShaderContains(shader, "static const uint kRequiredRectCoverageSamples = kRectCoverageSampleCount;"), "Coarse rectangle coverage should require every coarse sample to be hidden before culling.");
+			context.Expect(ShaderContains(shader, "Coverage-vote fallbacks are intentionally diagnostic-only for now."), "Hi-Z coverage-vote fallbacks should fail open until they have a stronger silhouette-safe proof.");
+			context.Expect(!ShaderContains(shader, "if (IsMeshletRectCoverageMostlyOccluded"), "Coarse rectangle votes should not actively cull wall-edge silhouettes.");
+			context.Expect(!ShaderContains(shader, "if (IsMeshletTriangleCoverageOccluded"), "Triangle centroid votes should not actively cull wall-edge silhouettes.");
+			context.Expect(!ShaderContains(shader, "if (IsMeshletVertexCoverageOccluded"), "Vertex votes should not actively cull wall-edge silhouettes.");
+			context.Expect(!ShaderContains(shader, "IsSmallMeshletCenterOccluded(hiZViewIndex"), "A single center tap should not cull visible wall-edge silhouettes.");
+			context.Expect(ShaderContains(shader, "const uint requiredOccludedVertices = vertexCount;"), "Vertex fallback should require every projected vertex to be hidden before culling.");
+			context.Expect(ShaderContains(shader, "const uint requiredOccludedTriangles = sampledTriangleCount;"), "Triangle centroid sampling should require every sampled triangle to be hidden before culling.");
 			context.Expect(ShaderContains(shader, "static const float kMaxVertexCoverageRectExtentPixels = 160.0f;"), "The all-vertex fallback should stay limited to modest projected meshlets to avoid silhouette popping.");
 			context.Expect(!ShaderContains(shader, "TryGetHiZProjectionScale"), "The old sphere-projection scale path should stay removed from task-shader Hi-Z culling.");
 		});

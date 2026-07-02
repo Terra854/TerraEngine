@@ -500,8 +500,67 @@ namespace TerraEngine::Editor::Automation
 			return std::nullopt;
 		}
 
+		const char* ToAutomationString(VirtualGeometryPerformanceGateStatus status)
+		{
+			switch (status)
+			{
+			case VirtualGeometryPerformanceGateStatus::Pass: return "pass";
+			case VirtualGeometryPerformanceGateStatus::Fail: return "fail";
+			case VirtualGeometryPerformanceGateStatus::Warning: return "warning";
+			case VirtualGeometryPerformanceGateStatus::Unsupported: return "unsupported";
+			default: return "unknown";
+			}
+		}
+
+		const char* ToAutomationString(VirtualGeometryPerformanceGateSource source)
+		{
+			switch (source)
+			{
+			case VirtualGeometryPerformanceGateSource::Prepared: return "prepared";
+			case VirtualGeometryPerformanceGateSource::GPUReadback: return "gpu-readback";
+			case VirtualGeometryPerformanceGateSource::DelayedGPUReadback: return "delayed-gpu-readback";
+			case VirtualGeometryPerformanceGateSource::Manual: return "manual";
+			default: return "unknown";
+			}
+		}
+
+		nlohmann::json SerializeVirtualGeometryPerformanceGate(const PerformanceGateResult& gate)
+		{
+			return {
+				{"gateId", gate.gateId},
+				{"fixtureId", gate.fixtureId},
+				{"metricName", gate.metricName},
+				{"threshold", gate.threshold},
+				{"actual", gate.actual},
+				{"unit", gate.unit},
+				{"status", ToAutomationString(gate.status)},
+				{"source", ToAutomationString(gate.source)},
+				{"diagnostic", gate.diagnostic}
+			};
+		}
+
 		nlohmann::json SerializeVirtualGeometryRuntimeView(const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view)
 		{
+			nlohmann::json performanceGates = nlohmann::json::array();
+			for (const PerformanceGateResult& gate : view.virtualGeometryPerformanceGates)
+			{
+				performanceGates.push_back(SerializeVirtualGeometryPerformanceGate(gate));
+			}
+			nlohmann::json shadowSelections = nlohmann::json::array();
+			for (const ShadowVisibilitySelection& shadow : view.shadowVisibilitySelections)
+			{
+				shadowSelections.push_back({
+					{"shadowViewId", shadow.shadowViewId},
+					{"lightId", TerraEngine::ToHexString(shadow.lightId)},
+					{"frameIndex", shadow.frameIndex},
+					{"candidatePackets", shadow.candidatePackets},
+					{"selectedPackets", shadow.selectedPackets},
+					{"rejectedByLightFrustum", shadow.rejectedByLightFrustum},
+					{"selectedMeshlets", shadow.selectedMeshlets},
+					{"dispatchedMeshlets", shadow.dispatchedMeshlets},
+					{"fallbackReasons", shadow.fallbackReasons}
+				});
+			}
 			return {
 				{"viewType", ToString(view.viewType)},
 				{"frameId", view.frameId},
@@ -522,6 +581,8 @@ namespace TerraEngine::Editor::Automation
 				{"fallbackSelections", view.clusterSelection.fallbackClusters},
 				{"geometryBudgetBytes", view.geometryBudgetBytes},
 				{"budgetPressureBytes", view.budgetPressureBytes},
+				{"performanceGates", std::move(performanceGates)},
+				{"shadowVisibilitySelections", std::move(shadowSelections)},
 				{"warnings", view.warnings}
 			};
 		}
@@ -1110,6 +1171,26 @@ namespace TerraEngine::Editor::Automation
 		const nlohmann::json parallelFrame = SerializeParallelFrameDiagnostics(engine);
 		const nlohmann::json mutationDiagnostics = SerializeMutationDiagnostics();
 		const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+		nlohmann::json virtualGeometryGateJson = nlohmann::json::array();
+		std::uint32_t virtualGeometryGateFailures = 0u;
+		std::uint32_t virtualGeometryGateUnsupported = 0u;
+		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : renderDiagnostics.virtualGeometryViews)
+		{
+			for (const PerformanceGateResult& gate : view.virtualGeometryPerformanceGates)
+			{
+				nlohmann::json gateJson = SerializeVirtualGeometryPerformanceGate(gate);
+				gateJson["viewType"] = ToString(view.viewType);
+				virtualGeometryGateJson.push_back(std::move(gateJson));
+				if (gate.status == VirtualGeometryPerformanceGateStatus::Fail)
+				{
+					++virtualGeometryGateFailures;
+				}
+				else if (gate.status == VirtualGeometryPerformanceGateStatus::Unsupported)
+				{
+					++virtualGeometryGateUnsupported;
+				}
+			}
+		}
 		nlohmann::json captureSchedulers = nlohmann::json::array();
 		for (const TerraEngine::Renderer::RenderCaptureSchedulerDiagnostics& capture : renderDiagnostics.captureSchedulers)
 		{
@@ -1136,7 +1217,7 @@ namespace TerraEngine::Editor::Automation
 			}
 		}
 		data["surfaces"] = nlohmann::json::array({
-			{{"surface", "render"}, {"state", "available"}, {"details", includeDetails ? nlohmann::json{{"note", "Render diagnostics are available through the profiler/resource windows."}} : nlohmann::json::object()}},
+			{{"surface", "render"}, {"state", "available"}, {"details", includeDetails ? nlohmann::json{{"note", "Render diagnostics are available through the profiler/resource windows."}, {"virtualGeometryPerformanceGates", virtualGeometryGateJson}, {"virtualGeometryGateFailures", virtualGeometryGateFailures}, {"virtualGeometryUnsupportedGates", virtualGeometryGateUnsupported}} : nlohmann::json::object()}},
 			{{"surface", "runtimeLayout"}, {"state", "available"}, {"details", nlohmann::json{{"authoredObjectCount", runtimeMembership.size()}, {"activeRuntimeObjectCount", activeRuntimeObjects}, {"membershipRevision", ObjectManager::instance().GetRuntimeActiveMembershipRevision()}}}},
 			{{"surface", "resources"}, {"state", assetJobCount > 0 ? "compiling" : "available"}, {"details", nlohmann::json{{"assetCompileJobs", assetJobCount}}}},
 			{{"surface", "streaming"}, {"state", "available"}, {"details", nlohmann::json::object()}},
@@ -1148,6 +1229,9 @@ namespace TerraEngine::Editor::Automation
 		data["parallelFrame"] = parallelFrame;
 		data["hardBoundaries"] = boundaryFindings;
 		data["mutationDiagnostics"] = mutationDiagnostics;
+		data["virtualGeometryPerformanceGates"] = includeDetails ? virtualGeometryGateJson : nlohmann::json::array();
+		data["virtualGeometryGateFailures"] = virtualGeometryGateFailures;
+		data["virtualGeometryUnsupportedGates"] = virtualGeometryGateUnsupported;
 		data["emptyStateSafe"] = true;
 		return data;
 	}
@@ -2684,6 +2768,20 @@ namespace TerraEngine::Editor::Automation
 		// numbers may come from prepared CPU counts during warmup or true GPU
 		// readback after the task shader has completed, so automation must not
 		// guess which path it is observing.
+		nlohmann::json performanceGates = nlohmann::json::array();
+		const TerraEngine::Renderer::RenderDiagnosticsSummary diagnostics = renderSystem->GetLatestRenderGraphDiagnostics();
+		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : diagnostics.virtualGeometryViews)
+		{
+			if (view.viewType != viewType)
+			{
+				continue;
+			}
+			for (const PerformanceGateResult& gate : view.virtualGeometryPerformanceGates)
+			{
+				performanceGates.push_back(SerializeVirtualGeometryPerformanceGate(gate));
+			}
+			break;
+		}
 		nlohmann::json data = {
 			{"viewType", ToString(stats.viewType)},
 			{"valid", stats.valid},
@@ -2695,6 +2793,19 @@ namespace TerraEngine::Editor::Automation
 			{"meshletsDispatched", stats.meshletsDispatched},
 			{"meshletsCulled", stats.meshletsCulled},
 			{"meshletsCulledHiZ", stats.meshletsCulledHiZ},
+			{"clusterPackets", stats.virtualGeometryClusterPackets},
+			{"submittedBatches", stats.virtualGeometrySubmittedBatches},
+			{"legacyFallbackBatches", stats.virtualGeometryLegacyFallbackBatches},
+			{"candidatePackets", stats.virtualGeometryCandidatePackets},
+			{"compactedPackets", stats.virtualGeometryCompactedPackets},
+			{"rejectedPackets", stats.virtualGeometryRejectedPackets},
+			{"failOpenPackets", stats.virtualGeometryFailOpenPackets},
+			{"residentPages", stats.virtualGeometryResidentPages},
+			{"requestedPages", stats.virtualGeometryRequestedPages},
+			{"missingPages", stats.virtualGeometryMissingPages},
+			{"failedPages", stats.virtualGeometryFailedPages},
+			{"evictedPages", stats.virtualGeometryEvictedPages},
+			{"pinnedFallbackPages", stats.virtualGeometryPinnedFallbackPages},
 			{"counterSource", ToString(stats.meshletCounterSource)},
 			{"counterFrameId", stats.meshletCounterFrameId},
 			{"counterLatencyFrames", stats.meshletCounterLatencyFrames},
@@ -2704,6 +2815,8 @@ namespace TerraEngine::Editor::Automation
 			{"hiZState", ToString(stats.hiZState)},
 			{"hiZStatusReason", stats.hiZStatusReason},
 			{"hiZWarmupFrames", stats.hiZWarmupFrames},
+			{"hiZBaselineMatched", stats.hiZBaselineMatched},
+			{"hiZFalseOcclusionRiskWarnings", stats.hiZFalseOcclusionRiskWarnings},
 			{"hiZDebugCounters", {
 				{"tests", stats.hiZTests},
 				{"projectionFailed", stats.hiZProjectionFailed},
@@ -2713,6 +2826,7 @@ namespace TerraEngine::Editor::Automation
 				{"vertexCoverageCulled", stats.hiZVertexCoverageCulled},
 				{"noOcclusionProof", stats.hiZNoOcclusionProof}
 			}},
+			{"performanceGates", std::move(performanceGates)},
 			{"vrsActive", stats.vrsActive}
 		};
 		return BuildSuccess(requestId, "Read virtual geometry culling stats.", std::move(data));

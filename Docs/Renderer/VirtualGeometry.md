@@ -78,6 +78,57 @@ starts. The default focused pass is `Engine.VirtualGeometryHardening` and
 `Editor.VirtualGeometryHardening`, followed by the broader virtual geometry
 regression tests and the install target.
 
+## GPU-Driven Batching And Streaming Scaling Roadmap
+
+Feature `specs/030-vg-gpu-driven-batching` moves the hardening baseline toward
+a scalable virtual geometry renderer. The goal is not to change the working
+Hi-Z behavior; it is to reduce command pressure, make residency more explicit,
+and add gates that keep the renderer from regressing while future GPU-driven
+work lands.
+
+The scaling order is:
+
+1. Convert the selected sparse cluster cut into cluster packets, then group
+   compatible packets into bounded batches. The current one-cluster-draw path
+   remains a correctness fallback while the batched path is validated.
+2. Compact candidate packets into view-visible work before submission. Frustum,
+   Hi-Z, residency, future cone safety, and fail-open decisions must publish
+   source-labeled counters instead of silently dropping work.
+3. Treat high-detail virtual geometry pages as real residency records with
+   requested, pending IO, pending upload, resident, failed, evicting, evicted,
+   and pinned fallback states. Missing detail must substitute resident fallback
+   coverage instead of creating holes.
+4. Preserve the current working Hi-Z baseline. This milestone adds regression
+   checks and source-labeled diagnostics, not new Hi-Z quality tiers or a new
+   rejection policy.
+5. Add virtual geometry performance gates for submitted batch count, CPU render
+   preparation cost, selected/compacted/dispatched meshlet ratios, page pressure,
+   false occlusion, shadow work reduction, and multi-view isolation.
+6. Give shadow views their own virtual geometry selection and culling state.
+   Shadow visibility must be evaluated from the light view, not borrowed from
+   the camera view or camera Hi-Z pyramid.
+7. Enable cone culling only for clusters whose imported and cooked metadata
+   proves one-sided opaque safety, consistent winding, low thin-shell risk, and
+   valid cone data. Unknown or risky clusters stay conservative.
+
+The Hi-Z preservation story is deliberately narrow. The renderer publishes a
+per-view `HiZRegressionSnapshot` copied from the current validation state and
+meshlet counters so Game View, Scene View, automation, and tests can prove that
+batching, compaction, and page residency did not change the accepted behavior.
+If a current pyramid is unavailable the path fails open; if a current pyramid
+exists, camera motion, target ownership, quality metadata, and guard metadata
+remain diagnostic-only. There are no user-facing or shader-facing Hi-Z quality
+tier controls in this milestone.
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
+```
+
+Implementation must complete and test one phase or user story before the next
+one starts. Final acceptance still requires the broader virtual geometry
+regression pass, affected target build, and install target so the installed
+editor/runtime tree contains matching shaders, binaries, docs, and metadata.
+
 ## Asset Rebuild Expectations
 
 The current plan breaks older compiled mesh payloads in place. Users must
@@ -280,14 +331,16 @@ in the cluster fallback chain. If that fallback is an ancestor of the desired
 child, the ancestor suppresses sibling child selections for that subtree so the
 frame keeps coverage without cracks or double-drawn parent/child regions.
 
-The visible renderer expands the selected cluster cut into one draw command per
-selected cluster. Each command pushes that cluster's meshlet offset/count and a
-single selected-cluster packet record, so the task and mesh shaders dispatch the
-actual sparse cluster set instead of a whole-object min/max envelope. Arbitrary
-per-meshlet LOD mixing is still avoided because independent meshlets from
-unrelated LODs do not prove shared coverage, material ownership, or fallback
-ancestry, and can therefore create holes, duplicate surfaces, or unstable debug
-output.
+The current hardening renderer can expand the selected cluster cut into one
+draw command per selected cluster. Feature `030` replaces that scaling shape
+with cluster packets grouped into bounded batches while preserving the old path
+as a correctness fallback. Each packet still describes the selected cluster's
+meshlet offset/count and selected-cluster metadata, so the task and mesh shaders
+dispatch the actual sparse cluster set instead of a whole-object min/max
+envelope. Arbitrary per-meshlet LOD mixing is still avoided because independent
+meshlets from unrelated LODs do not prove shared coverage, material ownership,
+or fallback ancestry, and can therefore create holes, duplicate surfaces, or
+unstable debug output.
 
 `ClusterHierarchyValidated` means ids, ranges, parent links, fallback links, and
 page links are structurally valid. `ClusterCoverageValidated` is the stronger
@@ -402,7 +455,7 @@ of appearing as user-facing menu entries.
 | `Cluster` | Stable false color from the selected cluster packet. This helps spot when adaptive cluster identity changes. |
 | `Meshlet Id` | Stable false color per rendered meshlet id. This is the easiest way to inspect selected meshlet density. |
 | `Bounds` | Blue to yellow maps small to large bounds. Magenta means bounds or culling metadata is unavailable. |
-| `Culling` | Green means drawn, red means frustum, cyan means drawn while a Hi-Z pyramid is available, and magenta means culling data is missing. Cone culling is disabled until imported mesh sidedness is validated. |
+| `Culling` | Green means drawn, red means frustum, cyan means drawn while a Hi-Z pyramid is available, and magenta means culling data is missing. Cone culling contributes only when every selected cluster has proven one-sided opaque safety metadata. |
 | `Residency` | Green means resident/active virtual geometry, orange means requested or missing page pressure, and brown means inactive fallback. |
 | `Hi-Z` | Cyan means the current view has a sampled Hi-Z pyramid, red means fail-open or uncertain projected bounds, and gray means the pyramid resource is missing. |
 | `Error` | Cyan means no error pressure, orange means missing-page pressure, and red means fail-open. |
@@ -439,8 +492,9 @@ Every rendered view owns its virtual geometry state independently:
 
 Mesh assets expose a read-only Virtual Geometry inspector section when their
 compiled TEMF can be read. The section reports cook status, payload generation,
-detail count, source triangle count, resident meshlets, and rebuild guidance for
-missing or stale payload metadata.
+detail count, source triangle count, resident meshlets, cone-safety record
+counts, eligible cone-culling clusters, disabled cone-culling reasons, and
+rebuild guidance for missing or stale payload metadata.
 
 Game View owns the first visualizer control. The `VG` mode selector writes a
 view-local virtual geometry debug mode into `RenderSystem`, and the default
@@ -669,15 +723,19 @@ range records in the render snapshot. A view can select a different LOD for the
 same object without mutating another view's decision, and diagnostics are built
 from those immutable per-view records.
 
-Shadow passes use conservative visibility. They select the highest resident
-fallback detail and keep task culling disabled for the shadow depth pass. This
-preserves silhouettes until a light-space virtual geometry culling path exists.
+Shadow passes own separate virtual geometry selection. They build shadow packet
+ranges from the light frustum, cull light-frustum-rejected clusters, and publish
+shadow-selected, shadow-dispatched, shadow-rejected, and fallback counters
+without reusing camera visibility or the camera Hi-Z pyramid. Shadow culling
+remains conservative for occlusion: there is no camera-Hi-Z shortcut in the
+shadow path.
 
 Export manifests include a `virtualGeometry` block with the export profile
 switches, required mesh shader resources, diagnostics toggle, and optional page
 budget. The block also serializes the adaptive quality controls used by export:
 `geometryBudgetBytes`, `lodErrorScale`, `maxLodDrop`, `preloadBias`, and the required metadata list
-`adaptiveTargets`, `fallbackCoverage`, `clusterHierarchy`, and `pageLinks`.
+`adaptiveTargets`, `fallbackCoverage`, `clusterHierarchy`, `pageLinks`, and
+`coneSafety`.
 Feature `029` export validation also requires a `coverage` object that names
 `Tests/Fixtures/VirtualGeometry/hardening-fixtures.json` and includes the
 `export` category in `requiredCategories`. That coverage block is diagnostic
@@ -687,7 +745,7 @@ Mesh entries that reference `.temf` payloads can mark
 `virtualGeometry.required = true`; package validation then checks that the
 compiled mesh payload carries the current in-place TEMF virtual geometry header,
 requested-target metadata, cluster hierarchy, page table, cluster-page links,
-and fallback coverage flag before the build is accepted.
+fallback coverage flag, and cone-safety metadata before the build is accepted.
 
 Validation blocks packaging when required adaptive cook data, fallback coverage,
 or page metadata is missing. Missing optional high-detail data can only become a
@@ -713,13 +771,19 @@ Build the affected runtime/editor targets from a Visual Studio developer
 environment:
 
 ```powershell
-cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine TerraEngine-Editor TerraEngine-EngineTests TerraEngine-EditorTests"
+cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine TerraEngine-Editor TerraEngineMeshCompiler TerraEngineModelPackageCompiler TerraEngineShaderCompiler TerraEngine-EngineTests TerraEngine-EditorTests'
 ```
 
-Run the focused virtual geometry CTest entries:
+Run the focused feature-030 virtual geometry CTest entries:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometry(Renderer|Resource|Foundation)|Editor.VirtualGeometry(AssetPipeline|Automation|Export|Foundation)" --output-on-failure -C Debug
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
+```
+
+Then run the broader renderer and virtual geometry regression pass:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometry|Editor.VirtualGeometry|Engine.Renderer|Engine.Resource|Editor.AssetPipeline.VirtualGeometry|Editor.Automation|Editor.Export" --output-on-failure -C Debug
 ```
 
 The named CTest entries cover:
@@ -729,6 +793,11 @@ The named CTest entries cover:
   scene stress.
 - `Engine.VirtualGeometryResource`: TEMF loading, page residency, streaming
   needs, eviction ordering, and budget-pressure churn.
+- `Engine.VirtualGeometryBatching`, `Engine.VirtualGeometryCompaction`,
+  `Engine.VirtualGeometryPerformanceGate`, `Engine.VirtualGeometryShadow`, and
+  `Engine.VirtualGeometryCulling`: bounded batch submission, compacted packet
+  work, performance gate records, light-view shadow selection, and safe cone
+  eligibility.
 - `Editor.VirtualGeometryAssetPipeline`: clean-checkout synthetic cooking,
   inspector rebuild guidance, package import metadata, and rejected sidecar
   reads.
@@ -740,12 +809,13 @@ The named CTest entries cover:
 Finish with install verification:
 
 ```powershell
-cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install"
+cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install'
 ```
 
 Expected installed files include `Editor/Shaders/Default.task.tspf`,
 `Editor/Shaders/Default.mesh.tspf`,
-`Editor/Shaders/PostProcess/HiZGenerate.comp.spv`, `Docs/VirtualGeometry.md`,
+`Editor/Shaders/PostProcess/HiZGenerate.comp.spv`, source
+`Docs/Renderer/VirtualGeometry.md` installed as `Docs/VirtualGeometry.md`,
 `Docs/TerraEngineMeshFile.md`, and
 `Tests/Fixtures/VirtualGeometry/README.md`.
 

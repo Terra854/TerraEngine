@@ -75,6 +75,10 @@ namespace TerraEngine::Renderer {
 		std::uint32_t desiredLodIndex = 0u;
 		float screenImportance = 0.0f;
 		bool fallbackRequired = false;
+		std::uint32_t packetId = 0u;
+		std::uint32_t batchId = 0u;
+		std::uint32_t packetOffset = 0u;
+		std::uint32_t packetCount = 0u;
 	};
 
 	struct VirtualGeometryClusterSelectionResult
@@ -133,7 +137,16 @@ namespace TerraEngine::Renderer {
 		VirtualGeometryHiZValidationState hiZValidationState;
 		std::vector<VirtualGeometryViewDrawRecord> draws;
 		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
+		std::vector<VirtualGeometryClusterPacket> clusterPackets;
+		std::vector<ClusterWorkBatch> clusterBatches;
+		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
+		std::vector<PageResidencyRecord> pageResidency;
+		std::vector<FallbackCoverageChain> fallbackCoverage;
+		std::vector<HiZRegressionSnapshot> hiZRegressionSnapshots;
+		std::vector<ConeSafetyMetadata> coneSafetyMetadata;
+		std::vector<ShadowVisibilitySelection> shadowVisibilitySelections;
+		std::vector<PerformanceGateResult> performanceGates;
 		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
 	};
 
@@ -153,7 +166,16 @@ namespace TerraEngine::Renderer {
 		VirtualGeometryHiZValidationState hiZValidationState;
 		std::vector<VirtualGeometryViewDrawRecord> drawRanges;
 		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
+		std::vector<VirtualGeometryClusterPacket> clusterPackets;
+		std::vector<ClusterWorkBatch> clusterBatches;
+		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
+		std::vector<PageResidencyRecord> pageResidency;
+		std::vector<FallbackCoverageChain> fallbackCoverage;
+		std::vector<HiZRegressionSnapshot> hiZRegressionSnapshots;
+		std::vector<ConeSafetyMetadata> coneSafetyMetadata;
+		std::vector<ShadowVisibilitySelection> shadowVisibilitySelections;
+		std::vector<PerformanceGateResult> performanceGates;
 		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
 		std::vector<OcclusionDebugSample> occlusionDebugSamples;
 		VirtualGeometryCounterSource source = VirtualGeometryCounterSource::Prepared;

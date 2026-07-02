@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <string>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -296,6 +297,46 @@ void SceneViewWindow::OnGui() {
 		ImGui::Image((ImTextureID)texID, contentSize);
 	} else {
 		ImGui::Text("Scene rendering not available.");
+	}
+	RenderStatsSnapshot sceneStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Scene);
+	if (sceneStats.valid && (sceneStats.virtualGeometryClusterPackets > 0u || sceneStats.virtualGeometrySubmittedBatches > 0u))
+	{
+		const std::string packetText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+			"VG Cluster Packets",
+			sceneStats.virtualGeometryClusterPackets,
+			sceneStats.meshletCounterSource,
+			sceneStats.meshletCounterReason);
+		const std::string batchText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
+			"VG Submitted Batches",
+			sceneStats.virtualGeometrySubmittedBatches,
+			sceneStats.meshletCounterSource,
+			sceneStats.meshletCounterReason);
+		const std::string compactText = "VG Compacted Packets: " + std::to_string(sceneStats.virtualGeometryCompactedPackets);
+		const std::string rejectedText = "VG Rejected Packets: " + std::to_string(sceneStats.virtualGeometryRejectedPackets);
+		const std::string fallbackText = "VG Legacy Fallback Batches: " + std::to_string(sceneStats.virtualGeometryLegacyFallbackBatches);
+		const std::string hiZBaselineText = "Hi-Z Baseline: "
+			+ std::string(sceneStats.hiZBaselineMatched ? "Matched" : "Mismatch")
+			+ ", risks "
+			+ std::to_string(sceneStats.hiZFalseOcclusionRiskWarnings);
+		const char* lines[] = { packetText.c_str(), batchText.c_str(), compactText.c_str(), rejectedText.c_str(), fallbackText.c_str(), hiZBaselineText.c_str() };
+		float textWidth = 0.0f;
+		for (const char* line : lines)
+		{
+			textWidth = std::max(textWidth, ImGui::CalcTextSize(line).x);
+		}
+
+		const float panelPadding = 8.0f;
+		const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+		const ImVec2 panelMin(cursorPos.x + 12.0f, cursorPos.y + 12.0f);
+		const ImVec2 panelMax(panelMin.x + textWidth + panelPadding * 2.0f, panelMin.y + lineHeight * 6.0f + panelPadding * 2.0f);
+		ImDrawList* drawList = ImGui::GetWindowDrawList();
+		drawList->AddRectFilled(panelMin, panelMax, IM_COL32(34, 40, 46, 190), 4.0f);
+		ImVec2 textPos(panelMin.x + panelPadding, panelMin.y + panelPadding);
+		for (const char* line : lines)
+		{
+			drawList->AddText(textPos, IM_COL32(235, 241, 246, 255), line);
+			textPos.y += lineHeight;
+		}
 	}
 
 	// Prepare for Gizmos

@@ -150,6 +150,15 @@ namespace TerraEngine::AssetPipeline
 		bool materialCoverageValid = false;
 	};
 
+	struct GeneratedModelMeshVirtualGeometryConeSafetySummary
+	{
+		std::uint32_t recordCount = 0u;
+		std::uint32_t eligibleClusterCount = 0u;
+		std::uint32_t disabledClusterCount = 0u;
+		bool metadataValid = false;
+		std::vector<std::string> disabledReasons;
+	};
+
 	struct GeneratedModelMeshAsset
 	{
 		TerraEngine::UUID guid = TerraEngine::EMPTY_UUID;
@@ -170,6 +179,7 @@ namespace TerraEngine::AssetPipeline
 		GeneratedModelMeshVirtualGeometrySettings virtualGeometrySettings;
 		std::vector<GeneratedModelMeshVirtualGeometryTarget> virtualGeometryTargets;
 		GeneratedModelMeshVirtualGeometryClusterSummary virtualGeometryClusterSummary;
+		GeneratedModelMeshVirtualGeometryConeSafetySummary virtualGeometryConeSafetySummary;
 		// Coverage tags are intentionally plain strings because they are
 		// developer-facing diagnostics, not runtime behavior. Importers use them
 		// to say which hardening fixture categories a generated package mesh can
@@ -213,6 +223,7 @@ namespace TerraEngine::AssetPipeline
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometrySettings& value);
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryTarget& value);
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryClusterSummary& value);
+	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryConeSafetySummary& value);
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshAsset& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelMaterialAssignment& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelPackageImportResult& value);

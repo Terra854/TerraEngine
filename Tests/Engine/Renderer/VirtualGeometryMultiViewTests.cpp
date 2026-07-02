@@ -210,6 +210,66 @@ namespace TerraEngine::Tests
 			context.Expect(gameIt->cameraSignature != sceneIt->cameraSignature, "Different debug modes should still remain tied to separate view snapshots.");
 		});
 
+		registry.Add("VirtualGeometry.Render.MultiView.US7.KeepsHiZBaselineDiagnosticsPerView", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 890u;
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState gameState;
+			gameState.outputKind = RenderOutputKind::GameView;
+			gameState.viewType = RenderViewType::Game;
+			gameState.outputId = 2u;
+			gameState.targetSize = glm::uvec2(1920u, 1080u);
+			gameState.hasHiZValidationState = true;
+			gameState.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			gameState.hiZValidationState.pyramidReady = true;
+			gameState.hiZValidationState.pyramidSize = gameState.targetSize;
+			gameState.hiZValidationState.renderSize = gameState.targetSize;
+			gameState.hiZValidationState.warmupFrames = 3u;
+			gameState.hiZValidationState.failOpen = false;
+			HiZRegressionSnapshot gameBaseline{};
+			gameBaseline.viewId = gameState.outputId;
+			gameBaseline.viewType = gameState.viewType;
+			gameBaseline.frameIndex = snapshot.frameId;
+			gameBaseline.state = VirtualGeometryHiZState::Active;
+			gameBaseline.baselineMatched = true;
+			gameState.hiZRegressionSnapshots.push_back(gameBaseline);
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState sceneState = gameState;
+			sceneState.outputKind = RenderOutputKind::SceneView;
+			sceneState.viewType = RenderViewType::Scene;
+			sceneState.outputId = 1u;
+			sceneState.hiZRegressionSnapshots.clear();
+			HiZRegressionSnapshot sceneBaseline = gameBaseline;
+			sceneBaseline.viewId = sceneState.outputId;
+			sceneBaseline.viewType = sceneState.viewType;
+			sceneBaseline.baselineMatched = false;
+			sceneState.hiZRegressionSnapshots.push_back(sceneBaseline);
+
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, gameState, VirtualGeometryCounterSource::Prepared));
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, sceneState, VirtualGeometryCounterSource::Prepared));
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+					snapshot,
+					MakeDefaultVirtualGeometryQualityProfile(),
+					VirtualGeometryInactiveReason::None);
+			const auto gameIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Game;
+			});
+			const auto sceneIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Scene;
+			});
+
+			context.Expect(gameIt != diagnostics.end(), "Game view Hi-Z diagnostics should be present.");
+			context.Expect(sceneIt != diagnostics.end(), "Scene view Hi-Z diagnostics should be present.");
+			context.Expect(gameIt->hiZBaselineMatched, "Game View should keep its own matched baseline state.");
+			context.Expect(!sceneIt->hiZBaselineMatched, "Scene View should keep its own baseline mismatch state.");
+			context.ExpectEqual(0u, gameIt->hiZFalseOcclusionRiskWarnings, "Game View should not inherit Scene View false-occlusion risk warnings.");
+			context.ExpectEqual(1u, sceneIt->hiZFalseOcclusionRiskWarnings, "Scene View should report only its own baseline risk warning.");
+		});
+
 		registry.Add("VirtualGeometry.Render.MultiView.ModeSwitchResetsLodTransitionState", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset = MakeModeSwitchTransitionAsset();
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();

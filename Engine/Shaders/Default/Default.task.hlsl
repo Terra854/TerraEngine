@@ -120,10 +120,11 @@ struct PushConstants
 	uint selectedVirtualLod; // CPU-selected LOD index for diagnostics and debug visualization.
 	uint virtualGeometryFlags; // Debug/diagnostic bits authored by RenderSystem.
 	// Cluster/page fields mirror the CPU's sparse adaptive selection packet.
-	// RenderSystem expands one draw per selected cluster, so this draw normally
-	// references one record and one page-backed meshlet range.
+	// RenderSystem may submit a compatible contiguous cluster packet batch, so
+	// this draw references one record or a packet run without changing meshlet
+	// output semantics.
 	uint selectedVirtualClusterOffset; // First selected cluster record in the per-view packet.
-	uint selectedVirtualClusterCount; // Number of selected clusters for this draw; normally one for sparse VG dispatch.
+	uint selectedVirtualClusterCount; // Number of selected clusters in this packet batch draw.
 	uint selectedVirtualPageNeedOffset; // First missing-page request record for this draw.
 	uint selectedVirtualPageNeedCount; // Number of desired pages that fell back to resident coverage.
 	float4 editorTint;
@@ -133,6 +134,7 @@ struct PushConstants
 
 static const uint kMaxStatsSlots = 16u;
 static const uint kHiZViewCount = 2u;
+static const uint kVirtualGeometryFlagConeCullingSafe = 0x20u;
 static const uint kVirtualGeometryDebugModeShift = 8u;
 static const uint kVirtualGeometryDebugModeMask = 0xFFu;
 
@@ -323,7 +325,10 @@ bool TryBuildProjectedMeshletRect(const uint meshletIndex, const uint meshletCou
 	}
 
 	float2 viewportSize = max(frameData.clusterDepthAndViewport.zw, float2(1.0f, 1.0f));
-	const float2 uvPadding = 2.0f / viewportSize;
+	// Give wall/object silhouettes a small screen-space escape hatch. Hi-Z is
+	// only allowed to cull when the expanded projected meshlet footprint is
+	// hidden, so peeking edges stay visible instead of disappearing early.
+	const float2 uvPadding = 8.0f / viewportSize;
 	uvMin = max(uvMin - uvPadding, 0.0f);
 	uvMax = min(uvMax + uvPadding, 1.0f);
 	if (any(uvMax < uvMin))
@@ -404,12 +409,7 @@ bool IsMeshletVertexCoverageOccluded(
 		}
 	}
 
-	if (occludedVertexCount == vertexCount)
-	{
-		return true;
-	}
-
-	const uint requiredOccludedVertices = max(3u, (vertexCount * 92u + 99u) / 100u);
+	const uint requiredOccludedVertices = vertexCount;
 	return occludedVertexCount >= requiredOccludedVertices;
 }
 
@@ -500,7 +500,7 @@ bool IsMeshletTriangleCoverageOccluded(
 		return false;
 	}
 
-	const uint requiredOccludedTriangles = max(1u, (sampledTriangleCount * 92u + 99u) / 100u);
+	const uint requiredOccludedTriangles = sampledTriangleCount;
 	return occludedTriangleCount >= requiredOccludedTriangles;
 }
 
@@ -521,16 +521,17 @@ bool IsMeshletRectCoverageMostlyOccluded(
 
 	static const uint kRectCoverageGridSize = 5u;
 	static const uint kRectCoverageSampleCount = kRectCoverageGridSize * kRectCoverageGridSize;
-	static const uint kRequiredRectCoverageSamples = 22u;
+	static const uint kRequiredRectCoverageSamples = kRectCoverageSampleCount;
 	uint occludedSamples = 0u;
 	bool centerOccluded = false;
 
 	// The full-rectangle path samples every texel and is maximally
 	// conservative, but it fails open when a projected meshlet rectangle
 	// includes a few background texels around real triangle coverage. This
-	// coarse vote accepts occlusion only when nearly the whole rectangle and the
-	// center tap are behind Hi-Z, which improves wall coverage while preserving
-	// a visible-margin escape hatch.
+	// coarse vote accepts occlusion only when the whole sample grid and the
+	// center tap are behind Hi-Z. This is intentionally stricter than the older
+	// "mostly covered" vote because small visible silhouettes near wall edges
+	// must fail open.
 	[loop]
 	for (uint sampleY = 0u; sampleY < kRectCoverageGridSize; ++sampleY)
 	{
@@ -720,33 +721,11 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 		return true;
 	}
 
-	if (IsMeshletRectCoverageMostlyOccluded(hiZViewIndex, baseWidth, baseHeight, uvMin, uvMax, meshletClosestDepth, rectExtentPixels, occlusionBias))
-	{
-		InterlockedAdd(meshletCounters[statsIndex].hiZRectCoverageCulled, 1u, ignored);
-		return true;
-	}
-
-	if (IsSmallMeshletCenterOccluded(hiZViewIndex, baseWidth, baseHeight, uvMin, uvMax, meshletClosestDepth, rectExtentPixels, occlusionBias))
-	{
-		InterlockedAdd(meshletCounters[statsIndex].hiZCenterCulled, 1u, ignored);
-		return true;
-	}
-
-	if (IsMeshletTriangleCoverageOccluded(meshletIndex, meshletCount, decode, hiZViewIndex, baseWidth, baseHeight, rectExtentPixels, occlusionBias))
-	{
-		InterlockedAdd(meshletCounters[statsIndex].hiZVertexCoverageCulled, 1u, ignored);
-		return true;
-	}
-
-	if (IsMeshletVertexCoverageOccluded(meshletIndex, meshletCount, decode, hiZViewIndex, baseWidth, baseHeight, rectExtentPixels, occlusionBias))
-	{
-		InterlockedAdd(meshletCounters[statsIndex].hiZVertexCoverageCulled, 1u, ignored);
-		return true;
-	}
-
-	// Larger meshlets still fail open here. A meshlet can have its center behind
-	// a wall while a visible edge or silhouette remains outside the occluder, so
-	// the center fallback above is capped to small projected rectangles only.
+	// Coverage-vote fallbacks are intentionally diagnostic-only for now. They
+	// helped cull far meshlets with small background gaps, but they could still
+	// eat visible wall-edge silhouettes. Until the shader has a stronger
+	// per-triangle coverage proof, only the full expanded rectangle may cull and
+	// every partial/uncertain case fails open.
 	InterlockedAdd(meshletCounters[statsIndex].hiZNoOcclusionProof, 1u, ignored);
 	return false;
 }
@@ -767,6 +746,7 @@ void main(uint3 groupId : SV_GroupID)
 	const bool hiZPyramidAvailable = frameData.renderSettings2.w > 0.5f;
 	const uint virtualGeometryDebugMode = (SceneUniforms.virtualGeometryFlags >> kVirtualGeometryDebugModeShift) & kVirtualGeometryDebugModeMask;
 	const bool debugCulledMeshlets = virtualGeometryDebugMode == 4u;
+	const bool coneCullingSafe = (SceneUniforms.virtualGeometryFlags & kVirtualGeometryFlagConeCullingSafe) != 0u;
 	const uint hiZViewIndex = HiZViewIndexFromStatsSlot(statsIndex);
 
 	const uint meshletBase = selectedMeshletOffset + groupId.x * kTaskBatchSize;
@@ -800,12 +780,22 @@ void main(uint3 groupId : SV_GroupID)
 			const float worldRadius = bounds.radius * max(maxScale, 1e-6f);
 
 			culled = IsFrustumCulled(worldCenter, worldRadius, frameData, epsilon);
-			// Cone backface culling is intentionally disabled for the always-on
-			// virtual-geometry path until material sidedness, thin-shell hints,
-			// and imported winding validation are available in this shader. A
-			// valid meshoptimizer cone can still be unsafe for GLB/FBX content
-			// that expects two-sided or mixed-winding visibility, so frustum and
-			// Hi-Z remain the only meshlet rejection paths here.
+			// Cone backface culling is only armed by RenderSystem when every
+			// selected cluster has cooked proof for one-sided opaque materials,
+			// consistent winding, low thin-shell risk, and valid cone bounds.
+			// Imported GLB/FBX package meshes currently leave this bit off until
+			// per-cluster material proof exists, so risky content still fails open.
+			if (!culled && coneCullingSafe)
+			{
+				const float3 worldConeApex = mul(SceneUniforms.model, float4(bounds.coneApex, 1.0f)).xyz;
+				const float3 worldConeAxis = mul((float3x3)SceneUniforms.model, bounds.coneAxis);
+				culled = IsConeBackfacing(worldConeApex, worldConeAxis, bounds.coneCutoff, worldRadius, cameraPosition, epsilon);
+			}
+			// Feature 030 preserves this single current-pyramid decision path:
+			// no shader quality tiers are introduced while cluster batches are
+			// being validated against the accepted Hi-Z baseline. Shadow passes
+			// consume their light-view meshlet ranges with this gate off, because
+			// camera Hi-Z cannot answer light visibility.
 			if (!culled && hiZPyramidAvailable)
 			{
 				if (IsOccluded(meshletIndex, meshletCount, decode, frameData, hiZViewIndex, statsIndex, epsilon))

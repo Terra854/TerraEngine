@@ -86,10 +86,14 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSmallSceneOverheadTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSnapshotContractTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderSubmissionOwnershipTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryBatchingTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryCompactionTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryCullingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHardeningTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHiZTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMultiViewTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryPerformanceGateTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryQualityTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryRenderTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryShaderLayoutTests.cpp
@@ -209,6 +213,36 @@ add_test(NAME Engine.VirtualGeometryRenderer COMMAND $<TARGET_FILE:TerraEngine-E
 set_tests_properties(Engine.VirtualGeometryRenderer PROPERTIES
 	LABELS "Engine;VirtualGeometry;Renderer;Stress"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Render,VirtualGeometry.Diagnostics,VirtualGeometry.HiZ,VirtualGeometry.ShaderLayout,VirtualGeometry.Quality,VirtualGeometry.Stress"
+)
+
+add_test(NAME Engine.VirtualGeometryBatching COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryBatching PROPERTIES
+	LABELS "Engine;VirtualGeometry;Batching"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Batching"
+)
+
+add_test(NAME Engine.VirtualGeometryCompaction COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryCompaction PROPERTIES
+	LABELS "Engine;VirtualGeometry;Compaction"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Compaction"
+)
+
+add_test(NAME Engine.VirtualGeometryCulling COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryCulling PROPERTIES
+	LABELS "Engine;VirtualGeometry;Culling"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Culling"
+)
+
+add_test(NAME Engine.VirtualGeometryPerformanceGate COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryPerformanceGate PROPERTIES
+	LABELS "Engine;VirtualGeometry;Performance"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.PerformanceGate"
+)
+
+add_test(NAME Engine.VirtualGeometryShadow COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryShadow PROPERTIES
+	LABELS "Engine;VirtualGeometry;Shadow"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.Shadow,VirtualGeometry.Diagnostics.US5"
 )
 
 add_test(NAME Engine.VirtualGeometryResource COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

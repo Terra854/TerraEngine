@@ -42,8 +42,13 @@ struct VirtualGeometryAssetMetadata {
 	std::uint32_t clusterCount = 0u;
 	std::uint32_t materialSectionCount = 0u;
 	std::uint32_t pageCount = 0u;
+	std::uint32_t coneSafetyRecordCount = 0u;
+	std::uint32_t coneEligibleClusterCount = 0u;
+	std::uint32_t coneDisabledClusterCount = 0u;
+	bool coneSafetyMetadataValid = false;
 	std::string rebuildGuidance;
 	std::vector<std::string> warnings;
+	std::vector<std::string> coneDisabledReasons;
 };
 
 struct VirtualGeometryAdaptiveSettingsMetadata {

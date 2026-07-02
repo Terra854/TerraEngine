@@ -45,6 +45,64 @@ namespace TerraEngine::Tests
 			context.Expect(snapshot.hiZValidation.inactiveReason.empty(), "Validation diagnostics should only carry inactive reasons for true missing-resource failures.");
 		});
 
+		registry.Add("VirtualGeometry.Diagnostics.US2.PublishesCompactionSourceCounters", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 3u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::Prepared;
+			CompactedVisibilitySet compaction;
+			compaction.viewType = RenderViewType::Game;
+			compaction.viewId = 3u;
+			compaction.candidatePackets = 12u;
+			compaction.visiblePackets = 7u;
+			compaction.rejectedByFrustum = 2u;
+			compaction.rejectedByResidency = 1u;
+			compaction.rejectedByCone = 1u;
+			compaction.failOpenPackets = 2u;
+			compaction.submittedBatches = 3u;
+			visibility.compactionResults.push_back(compaction);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(12u, diagnostics.candidateClusterCount, "Diagnostics should expose prepared candidate packet count.");
+			context.ExpectEqual(7u, diagnostics.compactedClusterCount, "Diagnostics should expose prepared compacted packet count.");
+			context.ExpectEqual(4u, diagnostics.rejectedClusterCount, "Diagnostics should aggregate all prepared rejection domains.");
+			context.ExpectEqual(2u, diagnostics.failOpenClusterCount, "Diagnostics should expose prepared fail-open packet count.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryCounterSource::Prepared), static_cast<std::uint32_t>(diagnostics.counterSource), "Compaction counters should keep their prepared-source label.");
+		});
+
+		registry.Add("VirtualGeometry.Diagnostics.US5.PublishesPerShadowViewCountersSeparately", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Shadow;
+			visibility.outputId = 1002u;
+			visibility.frameId = 9305u;
+			visibility.valid = true;
+			visibility.hiZValidationState.state = VirtualGeometryHiZState::Unsupported;
+			visibility.hiZValidationState.reason = "shadow view does not sample camera Hi-Z";
+
+			ShadowVisibilitySelection shadow{};
+			shadow.shadowViewId = visibility.outputId;
+			shadow.frameIndex = visibility.frameId;
+			shadow.candidatePackets = 6u;
+			shadow.selectedPackets = 4u;
+			shadow.rejectedByLightFrustum = 2u;
+			shadow.selectedMeshlets = 120u;
+			shadow.dispatchedMeshlets = 72u;
+			shadow.fallbackReasons.push_back("shadow light-frustum fixture");
+			visibility.shadowVisibilitySelections.push_back(shadow);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(1u, diagnostics.shadowViewCount, "Shadow diagnostics should count per-shadow selections.");
+			context.ExpectEqual(4u, diagnostics.shadowVisibilitySelections.front().selectedPackets, "Shadow diagnostics should expose selected packets.");
+			context.ExpectEqual(2u, diagnostics.shadowVisibilitySelections.front().rejectedByLightFrustum, "Shadow diagnostics should expose light-frustum rejections.");
+			context.ExpectEqual(72u, diagnostics.shadowVisibilitySelections.front().dispatchedMeshlets, "Shadow diagnostics should expose shadow-dispatched meshlets.");
+			context.Expect(diagnostics.hiZState == VirtualGeometryHiZState::Unsupported, "Shadow diagnostics should keep camera Hi-Z separate from light-view visibility.");
+		});
+
 		registry.Add("VirtualGeometry.Diagnostics.PublishesHiZInactiveReasonAndFailOpenState", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryHiZDiagnosticsInput input{};
 			input.viewType = RenderViewType::Scene;

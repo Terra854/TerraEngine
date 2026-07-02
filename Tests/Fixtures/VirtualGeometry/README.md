@@ -24,6 +24,16 @@ clear source attribution instead of committed as heavy binary files.
   budget while preserving visible fallback detail.
 - Mixed-distance cluster scene: one large object spanning near and far view
   regions so hierarchical cluster selection can refine only nearby regions.
+- Cluster batching scene: dense selected clusters that must collapse into
+  bounded virtual geometry batch work instead of one draw per selected cluster.
+- Runtime compaction scene: visible, frustum-rejected, Hi-Z-rejected,
+  residency-substituted, and fail-open cluster packets in one deterministic
+  camera path.
+- Shadow-view scene: one camera-hidden caster that is visible to a light plus
+  one light-frustum-rejected caster, so shadow selection proves it does not
+  reuse camera visibility.
+- Cone-safety scene: one-sided opaque, double-sided, mixed-winding, thin-shell,
+  and alpha-risk clusters used to validate conservative cone eligibility.
 - Hardening manifest: `hardening-fixtures.json` lists the clean-checkout
   categories required by feature `029`, expected diagnostics for each category,
   importer/export coverage tags, package formats, and which larger assets are
@@ -39,10 +49,17 @@ not enable rendering behavior. Current tags include:
 - `package-static-geometry` and `package-imported` for generated static meshes.
 - `adaptive-targets`, `cluster-hierarchy`, `fallback-coverage`, and
   `page-links` for required virtual geometry metadata.
+- `cone-safety-metadata`, `cone-culling-eligible`, and
+  `cone-culling-disabled` for the required cone-safety table and its current
+  conservative eligibility state.
 - `tiny-mesh-skip`, `dense-cluster-selection`, `multi-material-package`, and
   `material-coverage-review` for broad asset categories.
 - `streaming-pressure`, `pinned-fallback`, and `budget-pressure` for residency
   and eviction stress coverage.
+- `cluster-packet-batching`, `runtime-compaction`, `bounded-batches`, and
+  `performance-gate` for feature `030` scaling coverage.
+- `shadow-view-selection`, `light-frustum-culling`, `cone-safety`, and
+  `hiz-baseline-preservation` for feature `030` culling coverage.
 
 ## Visual Correctness Stress Notes
 
@@ -105,13 +122,31 @@ Manual stress assets may be downloaded or generated locally, but they are not
 required for the default fixture pass. Keep those optional assets outside the
 critical clean-checkout path unless a later feature explicitly approves them.
 
+## Feature 030 Scaling Quickstart
+
+Use `specs/030-vg-gpu-driven-batching/quickstart.md` for the staged scaling
+workflow. The clean-checkout pass should use this manifest and the focused CTest
+slice:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
+```
+
+The dense batching fixture must select at least 500 clusters while submitted
+virtual geometry batches remain no more than 10 percent of selected clusters.
+The compaction fixture must expose candidate, compacted, rejected, fail-open,
+and submitted packet counts. The Hi-Z fixture protects the current working
+behavior; it must not introduce or require new quality tiers.
+
 For manual large-asset passes, import one dense scan-style mesh, one
-hard-surface multi-material mesh, and one thin/foliage-like occlusion mesh into
-a local scratch project. Rebuild virtual geometry, enable the Game View stats
-overlay, then check LOD, Cluster, Residency, Hi-Z, and Error modes while moving
-the camera from close-up to far distance. Record meshlet selected/dispatched
-counts, pinned fallback page bytes, requested/missing page counts, and whether
-the object stays visible when high-detail pages are missing.
+hard-surface multi-material mesh, one one-sided opaque cone-safe mesh, and one
+thin/foliage-like or double-sided occlusion mesh into a local scratch project.
+Rebuild virtual geometry, enable the Game View stats overlay, then check LOD,
+Cluster, Residency, Hi-Z, and Error modes while moving the camera from close-up
+to far distance. Record meshlet selected/dispatched counts, pinned fallback page
+bytes, requested/missing page counts, cone eligible/disabled counts, disabled
+reasons, and whether the object stays visible when high-detail pages are
+missing.
 
 ## Stress Counter Thresholds
 
@@ -128,3 +163,13 @@ GPU benchmark; it verifies deterministic counter relationships:
   pressure and sorted budget contributors.
 - Residency pressure tests may evict high-detail pages, but page `0` fallback
   records must never appear in eviction candidates.
+- Feature `030` dense batching tests must keep submitted virtual geometry
+  batches at or below `10%` of selected clusters for the dense clean-checkout
+  fixture.
+- Feature `030` shadow-view tests must reduce dispatched shadow meshlets by at
+  least `40%` against the conservative all-selected baseline while preserving
+  the expected silhouette.
+- Feature `030` cone-safety tests must reject missing, double-sided,
+  mixed-winding, alpha-risk, and high thin-shell-risk metadata by failing open.
+  Only clusters with valid cone data and proven one-sided opaque low-risk
+  metadata may set the shader cone-culling flag.

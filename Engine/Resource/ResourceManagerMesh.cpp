@@ -427,6 +427,40 @@ namespace
 			}
 		}
 
+		if (mesh.virtualGeometryConeSafety.size() != mesh.virtualGeometryClusters.size())
+		{
+			outReason = AdaptiveVirtualMeshRejectionReason::ClusterHierarchyOutOfRange;
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry cone safety table must publish one record per cluster in " << resolvedPath);
+			return false;
+		}
+		for (std::size_t recordIndex = 0u; recordIndex < mesh.virtualGeometryConeSafety.size(); ++recordIndex)
+		{
+			const VirtualGeometryConeSafetyRecord& cone = mesh.virtualGeometryConeSafety[recordIndex];
+			const bool clusterValid = cone.clusterId < mesh.virtualGeometryClusters.size()
+				&& cone.clusterId == static_cast<std::uint32_t>(recordIndex);
+			const bool groupRangeValid = ValidateVirtualGeometryAddRange(cone.groupOffset, cone.groupCount, static_cast<std::uint32_t>(mesh.virtualGeometryCullableGroups.size()), resolvedPath, "cone safety group range");
+			const bool reasonValid = ValidateVirtualGeometryStringRange(cone.disabledReasonStringOffset, cone.disabledReasonStringSize, mesh.virtualGeometryDiagnosticStrings.size(), resolvedPath, "cone safety reason");
+			const bool enumValid =
+				cone.materialSidedness <= 3u
+				&& cone.windingState <= 3u
+				&& cone.alphaRisk <= 3u
+				&& cone.thinShellRisk <= 2u;
+			const bool eligible = (cone.flags & kVirtualGeometryConeSafetyFlagEligible) != 0u;
+			const bool eligibleProved =
+				!eligible
+				|| ((cone.flags & kVirtualGeometryConeSafetyFlagConeValid) != 0u
+					&& cone.materialSidedness == 0u
+					&& cone.windingState == 0u
+					&& cone.alphaRisk == 0u
+					&& cone.thinShellRisk == 0u);
+			if (!clusterValid || !groupRangeValid || !reasonValid || !enumValid || !eligibleProved)
+			{
+				outReason = AdaptiveVirtualMeshRejectionReason::ClusterHierarchyOutOfRange;
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF adaptive virtual geometry cone safety metadata is invalid in " << resolvedPath);
+				return false;
+			}
+		}
+
 		for (const VirtualGeometryValidationFlagRecord& flag : mesh.virtualGeometryValidationFlags)
 		{
 			if (!ValidateVirtualGeometryStringRange(flag.messageStringOffset, flag.messageStringSize, mesh.virtualGeometryDiagnosticStrings.size(), resolvedPath, "validation flag message"))
@@ -672,7 +706,8 @@ namespace
 		constexpr std::uint32_t kRequiredVirtualGeometryValidationFlags =
 			kVirtualGeometryValidationFlagFallbackCoverageValidated
 			| kVirtualGeometryValidationFlagClusterHierarchyValidated
-			| kVirtualGeometryValidationFlagPageLinksValidated;
+			| kVirtualGeometryValidationFlagPageLinksValidated
+			| kVirtualGeometryValidationFlagConeSafetyMetadataValidated;
 		if ((virtualHeader.flags & kRequiredVirtualGeometryValidationFlags) != kRequiredVirtualGeometryValidationFlags)
 		{
 			TERRAENGINE_LOG(LogLevel::Error,
@@ -690,6 +725,7 @@ namespace
 		std::vector<VirtualGeometrySkippedDetailRecord> skippedDetails;
 		std::vector<VirtualGeometryClusterRecord> clusters;
 		std::vector<VirtualGeometryClusterPageLinkRecord> clusterPageLinks;
+		std::vector<VirtualGeometryConeSafetyRecord> coneSafety;
 		std::vector<VirtualGeometryValidationFlagRecord> validationFlags;
 		std::vector<VirtualGeometryDiagnosticRecord> diagnostics;
 
@@ -702,6 +738,7 @@ namespace
 			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.skippedDetailTableOffset, virtualHeader.skippedDetailCount, resolvedPath, "virtual geometry skipped detail table", skippedDetails)
 			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.clusterTableOffset, virtualHeader.clusterCount, resolvedPath, "virtual geometry cluster table", clusters)
 			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.clusterPageLinkTableOffset, virtualHeader.clusterPageLinkCount, resolvedPath, "virtual geometry cluster page link table", clusterPageLinks)
+			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.coneSafetyTableOffset, virtualHeader.coneSafetyCount, resolvedPath, "virtual geometry cone safety table", coneSafety)
 			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.validationFlagTableOffset, virtualHeader.validationFlagCount, resolvedPath, "virtual geometry validation flag table", validationFlags)
 			|| !ReadVirtualGeometryTable(header, payload, payloadSize, virtualHeader.diagnosticTableOffset, virtualHeader.diagnosticRecordCount, resolvedPath, "virtual geometry diagnostic table", diagnostics))
 		{
@@ -731,6 +768,7 @@ namespace
 		mesh.virtualGeometrySkippedDetails = std::move(skippedDetails);
 		mesh.virtualGeometryClusters = std::move(clusters);
 		mesh.virtualGeometryClusterPageLinks = std::move(clusterPageLinks);
+		mesh.virtualGeometryConeSafety = std::move(coneSafety);
 		mesh.virtualGeometryValidationFlags = std::move(validationFlags);
 		mesh.virtualGeometryDiagnostics = std::move(diagnostics);
 		mesh.virtualGeometryDiagnosticStrings = std::move(stringTable);

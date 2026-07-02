@@ -1,11 +1,62 @@
 #include "TestHarness.h"
 
+#include "Renderer/Graph/RenderDiagnostics.h"
+#include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RenderSystem.h"
 
 namespace TerraEngine::Tests
 {
 	void RegisterVirtualGeometryShadowTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.Render.Shadow.US5.PublishesLightViewPacketSelectionWithoutCameraHiZ", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot frame{};
+			frame.frameId = 8101u;
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState shadowState{};
+			shadowState.outputKind = RenderOutputKind::OffscreenTexture;
+			shadowState.viewType = RenderViewType::Shadow;
+			shadowState.outputId = 1001u;
+			shadowState.targetSize = glm::uvec2(1024u, 1024u);
+			shadowState.shadowPass = true;
+
+			TerraEngine::Renderer::VirtualGeometryViewDrawRecord draw{};
+			draw.objectId = TerraEngine::GenerateUUID();
+			draw.meshId = TerraEngine::GenerateUUID();
+			draw.range.virtualGeometryActive = true;
+			draw.range.selectedLodIndex = 0u;
+			draw.range.meshletOffset = 0u;
+			draw.range.meshletCount = 48u;
+			shadowState.draws.push_back(draw);
+
+			VirtualGeometryClusterPacket packet{};
+			packet.packetId = 0u;
+			packet.viewId = shadowState.outputId;
+			packet.viewType = RenderViewType::Shadow;
+			packet.objectId = draw.objectId;
+			packet.meshId = draw.meshId;
+			packet.meshletCount = draw.range.meshletCount;
+			shadowState.clusterPackets.push_back(packet);
+
+			ShadowVisibilitySelection selection{};
+			selection.shadowViewId = shadowState.outputId;
+			selection.frameIndex = frame.frameId;
+			selection.candidatePackets = 1u;
+			selection.selectedPackets = 1u;
+			selection.selectedMeshlets = 48u;
+			selection.dispatchedMeshlets = 48u;
+			shadowState.shadowVisibilitySelections.push_back(selection);
+
+			const TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility =
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(frame, shadowState, VirtualGeometryCounterSource::Prepared);
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.Expect(diagnostics.hiZState == VirtualGeometryHiZState::Unsupported, "Shadow virtual geometry must not reuse camera Hi-Z.");
+			context.ExpectEqual(1u, diagnostics.shadowViewCount, "Shadow diagnostics should publish one light-view selection record.");
+			context.ExpectEqual(1u, diagnostics.shadowVisibilitySelections.front().selectedPackets, "Shadow view should report selected packet work.");
+			context.ExpectEqual(48u, diagnostics.shadowVisibilitySelections.front().selectedMeshlets, "Shadow view should report selected meshlets.");
+		});
+
 		registry.Add("VirtualGeometry.Render.Shadow.UsesConservativeLodWithoutHiZ", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset{};
 			asset.detailLevels = {

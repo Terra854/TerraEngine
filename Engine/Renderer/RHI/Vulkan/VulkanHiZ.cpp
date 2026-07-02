@@ -27,6 +27,11 @@ void VulkanHiZ::Create(VkDevice device, VmaAllocator allocator, uint32_t screenW
 	latestValidation.height = height;
 	latestValidation.pyramidReady = false;
 	latestValidation.invalidReason = VulkanHiZInvalidReason::Resize;
+	// Creation starts with a diagnostic fail-open state until the current frame
+	// builds a ready pyramid. This preserves the accepted Hi-Z baseline: only a
+	// missing pyramid disables occlusion, and all other metadata remains
+	// diagnostic once a current pyramid exists.
+	latestValidation.failOpen = true;
 	latestOcclusionAllowed = false;
 
 	VkImageCreateInfo imageInfo{};
@@ -137,5 +142,9 @@ void VulkanHiZ::Destroy(VkDevice device, VmaAllocator allocator) {
 	latestValidation = {};
 	latestValidation.pyramidReady = false;
 	latestValidation.invalidReason = VulkanHiZInvalidReason::MissingPyramid;
+	// Destroying the pyramid must never leave a stale "active" result behind.
+	// Consumers see an explicit missing-pyramid fail-open state and keep
+	// geometry visible until a fresh pyramid is published.
+	latestValidation.failOpen = true;
 	latestOcclusionAllowed = false;
 }

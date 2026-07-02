@@ -33,6 +33,9 @@ constexpr std::uint32_t kVirtualGeometryValidationFlagFallbackCoverageValidated 
 constexpr std::uint32_t kVirtualGeometryValidationFlagClusterHierarchyValidated = 1u << 2u;
 constexpr std::uint32_t kVirtualGeometryValidationFlagPageLinksValidated = 1u << 3u;
 constexpr std::uint32_t kVirtualGeometryValidationFlagClusterCoverageValidated = 1u << 4u;
+constexpr std::uint32_t kVirtualGeometryValidationFlagConeSafetyMetadataValidated = 1u << 5u;
+constexpr std::uint32_t kVirtualGeometryConeSafetyFlagConeValid = 1u << 0u;
+constexpr std::uint32_t kVirtualGeometryConeSafetyFlagEligible = 1u << 1u;
 
 // Detail target status mirrors the renderer diagnostics. Records store integer
 // values so the unstable TEMF v1 payload can be read by simple tools without
@@ -179,6 +182,7 @@ struct VirtualGeometryHeader
 	std::uint32_t clusterCount;
 	std::uint32_t clusterPageLinkCount;
 	std::uint32_t validationFlagCount;
+	std::uint32_t coneSafetyCount;
 	std::uint32_t detailLevelTableOffset;
 	std::uint32_t materialSectionTableOffset;
 	std::uint32_t sectionRangeTableOffset;
@@ -190,6 +194,7 @@ struct VirtualGeometryHeader
 	std::uint32_t clusterTableOffset;
 	std::uint32_t clusterPageLinkTableOffset;
 	std::uint32_t validationFlagTableOffset;
+	std::uint32_t coneSafetyTableOffset;
 	std::uint32_t diagnosticStringOffset;
 	std::uint32_t diagnosticStringSize;
 };
@@ -293,9 +298,9 @@ struct VirtualGeometryCullableGroupRecord
 	float coneApexOffset;
 };
 
-// Page records are optional in the MVP. A renderable asset must keep fallback
-// detail visible even when no page records are present or higher-detail pages
-// fail to stream.
+// TEMF v1 keeps page records in the virtual-geometry payload while the engine
+// is still allowed to break asset compatibility. Fallback coverage must remain
+// visible even when higher-detail pages fail to stream.
 struct VirtualGeometryPageRecord
 {
 	std::uint32_t pageId;
@@ -340,6 +345,23 @@ struct VirtualGeometryClusterPageLinkRecord
 	std::uint32_t firstGroup;  // First cullable group supplied by the page.
 	std::uint32_t groupCount;  // Number of groups supplied by the page.
 	std::uint32_t flags;       // Reserved for fallback/primary/streaming role bits.
+};
+
+// Cone safety records are separate from meshoptimizer cone bounds. A cone bound
+// says what might be culled; this record says whether imported material,
+// winding, alpha, and thin-shell checks proved that culling is safe.
+struct VirtualGeometryConeSafetyRecord
+{
+	std::uint32_t clusterId;
+	std::uint32_t groupOffset;
+	std::uint32_t groupCount;
+	std::uint32_t materialSidedness;      // Mirrors VirtualGeometryConeMaterialSidedness values.
+	std::uint32_t windingState;           // Mirrors VirtualGeometryConeWindingState values.
+	std::uint32_t alphaRisk;              // Mirrors VirtualGeometryConeAlphaRisk values.
+	std::uint32_t thinShellRisk;          // Mirrors VirtualGeometryConeThinShellRisk values.
+	std::uint32_t flags;                  // kVirtualGeometryConeSafetyFlag* bit mask.
+	std::uint32_t disabledReasonStringOffset;
+	std::uint32_t disabledReasonStringSize;
 };
 
 // Validation flags record which expensive cook/load checks were run. Tools can
@@ -425,6 +447,7 @@ struct Mesh
 	std::vector<VirtualGeometrySkippedDetailRecord> virtualGeometrySkippedDetails;
 	std::vector<VirtualGeometryClusterRecord> virtualGeometryClusters;
 	std::vector<VirtualGeometryClusterPageLinkRecord> virtualGeometryClusterPageLinks;
+	std::vector<VirtualGeometryConeSafetyRecord> virtualGeometryConeSafety;
 	std::vector<VirtualGeometryValidationFlagRecord> virtualGeometryValidationFlags;
 	std::vector<VirtualGeometryDiagnosticRecord> virtualGeometryDiagnostics;
 	std::string virtualGeometryDiagnosticStrings;

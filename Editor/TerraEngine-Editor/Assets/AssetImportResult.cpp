@@ -283,6 +283,18 @@ namespace TerraEngine::AssetPipeline
 				record.virtualGeometryClusterSummary.clusterMaterialSectionCount = clusterSummary.value("clusterMaterialSectionCount", record.virtualGeometryClusterSummary.clusterMaterialSectionCount);
 				record.virtualGeometryClusterSummary.fallbackCoverageValid = clusterSummary.value("fallbackCoverageValid", record.virtualGeometryClusterSummary.fallbackCoverageValid);
 				record.virtualGeometryClusterSummary.materialCoverageValid = clusterSummary.value("materialCoverageValid", record.virtualGeometryClusterSummary.materialCoverageValid);
+				const nlohmann::json coneSafety = virtualGeometry.value("coneSafety", nlohmann::json::object());
+				record.virtualGeometryConeSafetySummary.recordCount = coneSafety.value("recordCount", record.virtualGeometryConeSafetySummary.recordCount);
+				record.virtualGeometryConeSafetySummary.eligibleClusterCount = coneSafety.value("eligibleClusterCount", record.virtualGeometryConeSafetySummary.eligibleClusterCount);
+				record.virtualGeometryConeSafetySummary.disabledClusterCount = coneSafety.value("disabledClusterCount", record.virtualGeometryConeSafetySummary.disabledClusterCount);
+				record.virtualGeometryConeSafetySummary.metadataValid = coneSafety.value("metadataValid", record.virtualGeometryConeSafetySummary.metadataValid);
+				for (const nlohmann::json& reason : coneSafety.value("disabledReasons", nlohmann::json::array()))
+				{
+					if (reason.is_string())
+					{
+						record.virtualGeometryConeSafetySummary.disabledReasons.push_back(reason.get<std::string>());
+					}
+				}
 				result.generatedMeshes.push_back(std::move(record));
 			}
 

@@ -87,9 +87,13 @@ namespace TerraEngine::Tests {
 	void RegisterRenderSnapshotContractTests(TestRegistry& registry);
 	void RegisterRenderSubmissionOwnershipTests(TestRegistry& registry);
 	void RegisterVirtualGeometryDiagnosticsTests(TestRegistry& registry);
+	void RegisterVirtualGeometryBatchingTests(TestRegistry& registry);
+	void RegisterVirtualGeometryCompactionTests(TestRegistry& registry);
+	void RegisterVirtualGeometryCullingTests(TestRegistry& registry);
 	void RegisterVirtualGeometryHardeningTests(TestRegistry& registry);
 	void RegisterVirtualGeometryHiZTests(TestRegistry& registry);
 	void RegisterVirtualGeometryMultiViewTests(TestRegistry& registry);
+	void RegisterVirtualGeometryPerformanceGateTests(TestRegistry& registry);
 	void RegisterVirtualGeometryQualityTests(TestRegistry& registry);
 	void RegisterVirtualGeometryRenderTests(TestRegistry& registry);
 	void RegisterVirtualGeometryShaderLayoutTests(TestRegistry& registry);
@@ -206,9 +210,13 @@ int main() {
 	TerraEngine::Tests::RegisterRenderSmallSceneOverheadTests(registry);
 	TerraEngine::Tests::RegisterRenderShadowParallelParityTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryBatchingTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryCompactionTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryCullingTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryHardeningTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryHiZTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryMultiViewTests(registry);
+	TerraEngine::Tests::RegisterVirtualGeometryPerformanceGateTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryQualityTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryRenderTests(registry);
 	TerraEngine::Tests::RegisterVirtualGeometryShaderLayoutTests(registry);
