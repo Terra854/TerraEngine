@@ -256,6 +256,44 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::uint64_t>(0u), pageNeeds, "Fully resident mixed-detail stress fixtures should not request fallback pages.");
 		});
 
+		registry.Add("VirtualGeometry.Stress.US2.MixedDetailGpuPacketsPreservePerClusterRanges", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeDenseClusterAsset(77u);
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult selection =
+				RenderSystem::SelectVirtualGeometryClusterCut(
+					asset,
+					meshId,
+					objectId,
+					MakeDefaultVirtualGeometryQualityProfile(),
+					512.0f,
+					true,
+					true);
+
+			std::vector<VirtualGeometryClusterPacket> cpuPackets =
+				RenderSystem::BuildVirtualGeometryClusterPackets(asset, selection.selectedClusters, materialId, RenderViewType::Game, 27u);
+			std::vector<GpuVirtualGeometryPacketRecord> gpuPackets =
+				RenderSystem::BuildGpuVirtualGeometryPacketRecords(cpuPackets, 9100u, VirtualGeometryDebugVisualizationMode::Cluster);
+
+			context.Expect(selection.selectedClusters.size() > 1u, "High projected radius should refine the dense fixture into multiple child clusters.");
+			context.ExpectEqual(selection.selectedClusters.size(), cpuPackets.size(), "One GPU candidate packet should mirror each CPU-selected child cluster.");
+			context.Expect(
+				RenderSystem::ValidateGpuVirtualGeometryPacketRecords(cpuPackets, selection.selectedClusters, gpuPackets, 9100u, VirtualGeometryDebugVisualizationMode::Cluster),
+				"Mixed-detail GPU packet records should preserve every selected child cluster identity.");
+
+			bool sawHighDetailRange = false;
+			bool sawCoarseDetailRange = false;
+			for (const GpuVirtualGeometryPacketRecord& packet : gpuPackets)
+			{
+				sawHighDetailRange = sawHighDetailRange || packet.selectedLod == 0u;
+				sawCoarseDetailRange = sawCoarseDetailRange || packet.selectedLod == 2u;
+				context.Expect(packet.meshletCount <= 6u, "GPU packets should keep per-cluster meshlet ranges instead of expanding to a whole-object envelope.");
+			}
+			context.Expect(sawHighDetailRange, "Mixed-detail GPU packet stress should keep nearby high-detail child clusters.");
+			context.Expect(sawCoarseDetailRange, "Mixed-detail GPU packet stress should keep far/small coarse child clusters.");
+		});
+
 		registry.Add("VirtualGeometry.Stress.MovingCameraTransitionsStayBounded", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset = MakeTransitionStressAsset();
 			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();

@@ -59,6 +59,7 @@ struct TaskPayload
 [[vk::binding(3, 1)]] ByteAddressBuffer meshletVertexRemap;
 [[vk::binding(4, 1)]] StructuredBuffer<MeshDecodeInfo> meshDecodeInfo;
 [[vk::binding(5, 1)]] StructuredBuffer<MeshletBounds> meshletBounds;
+[[vk::binding(9, 0)]] StructuredBuffer<uint> globalBuffers[];
 
 struct PushConstants
 {
@@ -83,6 +84,8 @@ struct PushConstants
 	uint selectedVirtualClusterCount;
 	uint selectedVirtualPageNeedOffset;
 	uint selectedVirtualPageNeedCount;
+	uint virtualGeometryPacketBufferIndex;
+	uint virtualGeometryBatchBufferIndex;
 	float4 editorTint;
 };
 
@@ -107,6 +110,34 @@ static const uint kMaxStatsSlots = 16u;
 static const uint kMeshletCullFlagFrustum = 1u;
 static const uint kMeshletCullFlagCone = 2u;
 static const uint kMeshletCullFlagUnavailable = 4u;
+static const uint kInvalidVirtualGeometryBufferIndex = 0xFFFFFFFFu;
+
+uint LoadVirtualGeometryBufferWord(uint bufferIndex, uint wordOffset, uint fallbackValue)
+{
+	if (bufferIndex == kInvalidVirtualGeometryBufferIndex)
+	{
+		return fallbackValue;
+	}
+
+	// The mesh shader consumes packet-run metadata only for visualizer identity
+	// in this milestone. Geometry emission continues to come from the task
+	// payload/push-constant meshlet range so packet-table availability cannot
+	// change coverage.
+	return globalBuffers[NonUniformResourceIndex(bufferIndex)][wordOffset];
+}
+
+uint ResolveVirtualGeometryPacketRunDebugId()
+{
+	const uint packetSeed = LoadVirtualGeometryBufferWord(
+		SceneUniforms.virtualGeometryPacketBufferIndex,
+		0u,
+		SceneUniforms.selectedVirtualClusterOffset);
+	const uint batchSeed = LoadVirtualGeometryBufferWord(
+		SceneUniforms.virtualGeometryBatchBufferIndex,
+		0u,
+		SceneUniforms.selectedVirtualClusterCount);
+	return packetSeed ^ (batchSeed << 1u);
+}
 
 bool IsFrustumCulled(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const float epsilon)
 {
@@ -356,11 +387,12 @@ void EmitMeshlet(
 		// Pack the per-draw adaptive state into a single interpolator. Batched
 		// virtual geometry draws keep the selected packet count and offset here
 		// so fragment visualizers can identify packet-run ownership.
+		const uint packetRunDebugId = ResolveVirtualGeometryPacketRunDebugId();
 		outVertex.virtualGeometryDebugData =
 			(SceneUniforms.selectedVirtualLod & 0xFFu) |
 			((SceneUniforms.selectedVirtualClusterCount & 0xFFu) << 8u) |
 			((SceneUniforms.selectedVirtualPageNeedCount & 0xFFu) << 16u) |
-			((SceneUniforms.selectedVirtualClusterOffset & 0xFFu) << 24u);
+			((packetRunDebugId & 0xFFu) << 24u);
 		outputVertices[vertexIndex] = outVertex;
 	}
 

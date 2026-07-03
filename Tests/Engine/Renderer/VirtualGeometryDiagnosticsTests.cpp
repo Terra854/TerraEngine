@@ -3,6 +3,7 @@
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 
+#include <algorithm>
 #include <string>
 
 namespace TerraEngine::Tests
@@ -71,6 +72,117 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(4u, diagnostics.rejectedClusterCount, "Diagnostics should aggregate all prepared rejection domains.");
 			context.ExpectEqual(2u, diagnostics.failOpenClusterCount, "Diagnostics should expose prepared fail-open packet count.");
 			context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryCounterSource::Prepared), static_cast<std::uint32_t>(diagnostics.counterSource), "Compaction counters should keep their prepared-source label.");
+		});
+
+		registry.Add("VirtualGeometry.Diagnostics.US6.PublishesGpuPacketCompactionAndGeneratedCounters", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 4u;
+			visibility.frameId = 9606u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::GPUReadback;
+
+			GpuVirtualGeometryPacketRecord packet{};
+			packet.packetId = 0u;
+			packet.viewId = visibility.outputId;
+			packet.viewType = visibility.viewType;
+			packet.frameId = visibility.frameId;
+			packet.meshletCount = 18u;
+			visibility.gpuPacketRecords.push_back(packet);
+
+			GpuVirtualGeometryBatchDescriptor batch{};
+			batch.batchId = 0u;
+			batch.viewId = visibility.outputId;
+			batch.viewType = visibility.viewType;
+			batch.frameId = visibility.frameId;
+			batch.packetCount = 1u;
+			batch.submittedMeshlets = 18u;
+			visibility.gpuBatchDescriptors.push_back(batch);
+
+			GpuVirtualGeometryPacketFrameSet frameSet{};
+			frameSet.viewId = visibility.outputId;
+			frameSet.viewType = visibility.viewType;
+			frameSet.frameId = visibility.frameId;
+			frameSet.packetCount = 1u;
+			frameSet.batchCount = 1u;
+			frameSet.validity = VirtualGeometryGpuFrameSetValidity::Valid;
+			visibility.gpuPacketFrameSets.push_back(frameSet);
+
+			GpuPacketCompactionDispatch dispatch{};
+			dispatch.dispatchId = 0u;
+			dispatch.viewId = visibility.outputId;
+			dispatch.viewType = visibility.viewType;
+			dispatch.frameId = visibility.frameId;
+			dispatch.candidatePacketCount = 2u;
+			dispatch.outputCapacity = 4u;
+			visibility.gpuCompactionDispatches.push_back(dispatch);
+
+			GeneratedVirtualGeometrySubmissionRecord submission{};
+			submission.recordId = 0u;
+			submission.viewId = visibility.outputId;
+			submission.viewType = visibility.viewType;
+			submission.frameId = visibility.frameId;
+			submission.packetCount = 1u;
+			submission.validationState = VirtualGeometryGeneratedSubmissionValidationState::Valid;
+			visibility.generatedSubmissions.push_back(submission);
+
+			VirtualGeometryCounterReadbackRecord readback{};
+			readback.viewId = visibility.outputId;
+			readback.viewType = visibility.viewType;
+			readback.frameId = visibility.frameId;
+			readback.source = VirtualGeometryCounterSource::GPUReadback;
+			readback.latencyFrames = 1u;
+			readback.candidatePackets = 2u;
+			readback.compactedPackets = 1u;
+			visibility.gpuCounterReadbacks.push_back(readback);
+
+			VirtualGeometryGpuFallbackRecord fallback{};
+			fallback.viewId = visibility.outputId;
+			fallback.viewType = visibility.viewType;
+			fallback.frameId = visibility.frameId;
+			fallback.reason = "generated validation fallback";
+			fallback.affectedPackets = 2u;
+			fallback.affectedBatches = 1u;
+			visibility.gpuFallbackRecords.push_back(fallback);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(1u, diagnostics.gpuPacketRecordCount, "Diagnostics should expose GPU packet record count.");
+			context.ExpectEqual(1u, diagnostics.gpuBatchDescriptorCount, "Diagnostics should expose GPU batch descriptor count.");
+			context.ExpectEqual(1u, diagnostics.gpuValidFrameSetCount, "Diagnostics should count valid GPU packet frame sets.");
+			context.ExpectEqual(1u, diagnostics.gpuCompactionDispatchCount, "Diagnostics should expose compaction dispatch count.");
+			context.ExpectEqual(1u, diagnostics.validGeneratedSubmissionCount, "Diagnostics should count valid generated submissions.");
+			context.ExpectEqual(1u, diagnostics.gpuCounterReadbackCount, "Diagnostics should expose counter readback records.");
+			context.ExpectEqual(1u, diagnostics.gpuCounterReadbackLatencyFrames, "Diagnostics should preserve GPU counter latency.");
+			context.ExpectEqual(2u, diagnostics.gpuFallbackAffectedPackets, "Diagnostics should expose fallback affected packet count.");
+			context.Expect(diagnostics.gpuFallbackReason.find("fallback") != std::string::npos, "Diagnostics should preserve source-labeled fallback reasons.");
+		});
+
+		registry.Add("VirtualGeometry.Diagnostics.US7.UnsupportedCounterSourceGatesDoNotPassSilently", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 2u;
+			visibility.frameId = 9707u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::Unavailable;
+			visibility.counters.source = visibility.source;
+			visibility.counters.unavailableReason = "readback unavailable in fixture";
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+			const auto sourceGate = std::find_if(
+				diagnostics.virtualGeometryPerformanceGates.begin(),
+				diagnostics.virtualGeometryPerformanceGates.end(),
+				[](const PerformanceGateResult& gate) {
+					return gate.gateId == "virtual-geometry-counter-source-available";
+				});
+
+			context.Expect(sourceGate != diagnostics.virtualGeometryPerformanceGates.end(), "Unavailable counter sources should publish an explicit performance gate.");
+			context.Expect(sourceGate->status == VirtualGeometryPerformanceGateStatus::Unsupported, "Unavailable counter sources should be unsupported, not pass.");
+			context.Expect(sourceGate->source == VirtualGeometryPerformanceGateSource::Unsupported, "Unavailable counter sources should map to the unsupported performance-gate source.");
+			context.ExpectEqual(2u, sourceGate->viewId, "Unsupported counter-source gates should carry the producing view id.");
+			context.Expect(sourceGate->diagnostic.find("readback unavailable") != std::string::npos, "Unsupported counter-source gates should carry the unavailable reason.");
 		});
 
 		registry.Add("VirtualGeometry.Diagnostics.US5.PublishesPerShadowViewCountersSeparately", [](TestContext& context) {

@@ -55,6 +55,18 @@ namespace TerraEngine::Tests
 			return buffer.str();
 		}
 
+		std::string ReadVirtualGeometryPacketCompactionShader()
+		{
+			// The compaction shader is a separate source-level contract because
+			// it will become the GPU authority for candidate packet filtering.
+			const std::filesystem::path shaderPath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Shaders/VirtualGeometry/VirtualGeometryPacketCompaction.comp.hlsl";
+			std::ifstream input(shaderPath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
 		bool ShaderContains(const std::string& shader, const std::string& token)
 		{
 			return shader.find(token) != std::string::npos;
@@ -79,6 +91,13 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::size_t>(48u), sizeof(MeshletCullingCountersGPU), "Meshlet GPU counters should include the Hi-Z diagnostic breakdown while remaining 16-byte aligned.");
 		});
 
+		registry.Add("VirtualGeometry.ShaderLayout.US1.GpuPacketAndBatchRecordsStayUploadable", [](TestContext& context) {
+			context.Expect(std::is_copy_constructible_v<GpuVirtualGeometryPacketRecord>, "GPU virtual geometry packet records should remain value-copyable for immutable frame snapshots.");
+			context.Expect(std::is_copy_constructible_v<GpuVirtualGeometryBatchDescriptor>, "GPU virtual geometry batch descriptors should remain value-copyable for immutable frame snapshots.");
+			context.Expect(sizeof(GpuVirtualGeometryPacketRecord) <= 224u, "GPU packet mirrors should stay compact enough for dense per-view packet buffers.");
+			context.Expect(sizeof(GpuVirtualGeometryBatchDescriptor) <= 160u, "GPU batch descriptors should stay compact enough for bounded packet batches.");
+		});
+
 		registry.Add("VirtualGeometry.ShaderLayout.SelectedClusterRecordsCarrySparseIdentity", [](TestContext& context) {
 			using TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord;
 			context.Expect(std::is_standard_layout_v<VirtualGeometrySelectedClusterRecord>, "Selected cluster records should stay standard-layout for future GPU upload buffers.");
@@ -93,8 +112,43 @@ namespace TerraEngine::Tests
 
 			context.Expect(ShaderContains(taskShader, "selectedVirtualClusterCount; // Number of selected clusters in this packet batch draw."), "Task shader push constants should document that cluster count can describe a packet batch.");
 			context.Expect(ShaderContains(taskShader, "this draw references one record or a packet run"), "Task shader should preserve the packet-run contract without changing meshlet output.");
+			context.Expect(ShaderContains(taskShader, "virtualGeometryPacketBufferIndex"), "Task shader push constants should carry the uploaded GPU packet table binding.");
+			context.Expect(ShaderContains(taskShader, "virtualGeometryBatchBufferIndex"), "Task shader push constants should carry the uploaded GPU batch descriptor binding.");
+			context.Expect(ShaderContains(taskShader, "LoadVirtualGeometryPacketRunSeed"), "Task shader should read packet-run metadata from the bindless packet table when it is available.");
 			context.Expect(ShaderContains(meshShader, "packet-run ownership"), "Mesh shader debug propagation should name packet-run ownership.");
+			context.Expect(ShaderContains(meshShader, "ResolveVirtualGeometryPacketRunDebugId"), "Mesh shader should derive debug identity from uploaded packet metadata when packet buffers are available.");
+			context.Expect(ShaderContains(meshShader, "globalBuffers[NonUniformResourceIndex(bufferIndex)]"), "Mesh shader should use the global bindless buffer table for packet debug metadata.");
 			context.Expect(ShaderContains(meshShader, "SceneUniforms.selectedVirtualClusterCount"), "Mesh shader should continue packing the selected packet count into debug data.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.US3.PacketCompactionComputeShaderKeepsFailOpenContract", [](TestContext& context) {
+			const std::string shader = ReadVirtualGeometryPacketCompactionShader();
+
+			context.Expect(!shader.empty(), "Virtual geometry packet compaction shader should be present in Engine/Shaders/VirtualGeometry.");
+			context.Expect(ShaderContains(shader, "StructuredBuffer<GpuVirtualGeometryPacketRecord> candidatePackets"), "Compaction shader should read candidate packet records.");
+			context.Expect(ShaderContains(shader, "RWStructuredBuffer<GpuVirtualGeometryPacketRecord> compactedPackets"), "Compaction shader should write compacted packet records.");
+			context.Expect(ShaderContains(shader, "RWStructuredBuffer<uint4> generatedSubmissions"), "Compaction shader should publish generated submission metadata.");
+			context.Expect(ShaderContains(shader, "RWStructuredBuffer<GpuPacketCompactionCounters> compactionCounters"), "Compaction shader should publish candidate, compacted, rejected, and fail-open counters.");
+			context.Expect(ShaderContains(shader, "Compaction.failOpenOnInvalid"), "Compaction shader should preserve fail-open coverage for invalid or missing-resource packets.");
+			context.Expect(ShaderContains(shader, "ProjectedBoundsOutsideView"), "Compaction shader should own frustum-style projected-bounds rejection.");
+			context.Expect(ShaderContains(shader, "compactedIndex >= Compaction.outputCapacity"), "Compaction shader should guard output overflow instead of writing past compacted capacity.");
+			context.Expect(ShaderContains(shader, "[numthreads(64, 1, 1)]"), "Compaction shader should use an explicit, bounded thread-group size.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.US5.NoSelectableHiZQualityTierWasIntroduced", [](TestContext& context) {
+			const std::string taskShader = ReadDefaultTaskShader();
+			const std::string compactionShader = ReadVirtualGeometryPacketCompactionShader();
+
+			context.Expect(!taskShader.empty(), "The task shader should remain readable for Hi-Z preservation checks.");
+			context.Expect(ShaderContains(taskShader, "LoadVirtualGeometryPacketRunSeed"), "Packet-buffer consumption should coexist with the existing task-shader Hi-Z path.");
+			context.Expect(ShaderContains(taskShader, "Feature 030 preserves this single current-pyramid decision path"), "The shader should document that packet batching keeps the accepted Hi-Z path.");
+			context.Expect(ShaderContains(taskShader, "if (!culled && hiZPyramidAvailable)"), "Task-shader Hi-Z should still be gated only by the current pyramid availability flag.");
+			context.Expect(!ShaderContains(taskShader, "HiZQuality"), "Task shader should not expose a selectable Hi-Z quality tier.");
+			context.Expect(!ShaderContains(taskShader, "hiZQuality"), "Task shader should not add a lower-case Hi-Z quality control.");
+			context.Expect(!ShaderContains(taskShader, "VirtualGeometryHiZQuality"), "Task shader should not mirror a C++ Hi-Z quality enum.");
+			context.Expect(!ShaderContains(taskShader, "kHiZQuality"), "Task shader should not branch on quality-tier constants.");
+			context.Expect(!ShaderContains(compactionShader, "HiZQuality"), "Compaction shader should not introduce independent Hi-Z quality tiers either.");
+			context.Expect(!ShaderContains(compactionShader, "qualityTier"), "Compaction shader should keep Hi-Z baseline metadata as a label, not a selectable tier.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.FrameCullingDataCarriesHiZAvailabilityGate", [](TestContext& context) {

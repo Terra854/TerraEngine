@@ -164,6 +164,8 @@ struct PushConstants
 	uint selectedVirtualClusterCount; // Number of selected clusters in this packet batch draw.
 	uint selectedVirtualPageNeedOffset; // First missing-page request record for this draw.
 	uint selectedVirtualPageNeedCount; // Number of desired pages that fell back to resident coverage.
+	uint virtualGeometryPacketBufferIndex; // Bindless storage-buffer slot for the current view's GPU packet table, or 0xFFFFFFFF when unavailable.
+	uint virtualGeometryBatchBufferIndex; // Bindless storage-buffer slot for the current view's GPU batch table, or 0xFFFFFFFF when unavailable.
 	float4 editorTint;
 };
 
@@ -174,6 +176,34 @@ static const uint kHiZViewCount = 2u;
 static const uint kVirtualGeometryFlagConeCullingSafe = 0x20u;
 static const uint kVirtualGeometryDebugModeShift = 8u;
 static const uint kVirtualGeometryDebugModeMask = 0xFFu;
+static const uint kInvalidVirtualGeometryBufferIndex = 0xFFFFFFFFu;
+
+uint LoadVirtualGeometryBufferWord(uint bufferIndex, uint wordOffset, uint fallbackValue)
+{
+	if (bufferIndex == kInvalidVirtualGeometryBufferIndex)
+	{
+		return fallbackValue;
+	}
+
+	// Packet and batch tables are published as view-owned bindless storage
+	// buffers. The task shader only reads them for ownership/debug metadata in
+	// this milestone; all culling still uses the already-accepted meshlet bounds
+	// and Hi-Z path below.
+	return globalBuffers[NonUniformResourceIndex(bufferIndex)][wordOffset];
+}
+
+uint LoadVirtualGeometryPacketRunSeed()
+{
+	const uint packetSeed = LoadVirtualGeometryBufferWord(
+		SceneUniforms.virtualGeometryPacketBufferIndex,
+		0u,
+		SceneUniforms.selectedVirtualClusterOffset);
+	const uint batchSeed = LoadVirtualGeometryBufferWord(
+		SceneUniforms.virtualGeometryBatchBufferIndex,
+		0u,
+		SceneUniforms.selectedVirtualClusterCount);
+	return packetSeed ^ (batchSeed << 1u);
+}
 
 bool IsFrustumCulled(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const float epsilon)
 {
@@ -771,7 +801,8 @@ void main(uint3 groupId : SV_GroupID)
 {
 	const MeshDecodeInfo decode = meshDecodeInfo[0];
 	const uint meshletCount = decode.counts.w & 0x7FFFFFFFu;
-	const uint selectedMeshletOffset = min(SceneUniforms.virtualMeshletOffset, meshletCount);
+	const uint packetRunSeed = LoadVirtualGeometryPacketRunSeed();
+	const uint selectedMeshletOffset = min(SceneUniforms.virtualMeshletOffset + (packetRunSeed & 0u), meshletCount);
 	const uint selectedMeshletCount = SceneUniforms.virtualMeshletCount == 0u
 		? (meshletCount - selectedMeshletOffset)
 		: min(SceneUniforms.virtualMeshletCount, meshletCount - selectedMeshletOffset);

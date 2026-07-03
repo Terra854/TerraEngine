@@ -169,6 +169,144 @@ namespace TerraEngine::Tests
 
 	void RegisterVirtualGeometryRenderTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.Render.US1.GpuPacketDescriptorsPreserveMaterialAndFallbackRuns", [](TestContext& context) {
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialA = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialB = TerraEngine::GenerateUUID();
+			std::vector<VirtualGeometryClusterPacket> cpuPackets;
+			for (std::uint32_t index = 0u; index < 6u; ++index)
+			{
+				VirtualGeometryClusterPacket packet;
+				packet.packetId = index;
+				packet.viewId = 1u;
+				packet.viewType = RenderViewType::Game;
+				packet.objectId = TerraEngine::GenerateUUID();
+				packet.meshId = meshId;
+				packet.materialId = index < 2u ? materialA : materialB;
+				packet.selectedLod = 1u;
+				packet.clusterId = index;
+				packet.meshletOffset = index * 8u;
+				packet.meshletCount = 8u;
+				packet.pageId = index == 5u ? 99u : 4u;
+				packet.fallbackPageId = index == 5u ? 4u : 0u;
+				packet.fallbackPacket = index == 5u;
+				cpuPackets.push_back(packet);
+			}
+
+			const std::vector<GpuVirtualGeometryPacketRecord> gpuPackets =
+				RenderSystem::BuildGpuVirtualGeometryPacketRecords(
+					cpuPackets,
+					9000u,
+					VirtualGeometryDebugVisualizationMode::Residency);
+			const std::vector<GpuVirtualGeometryBatchDescriptor> batches =
+				RenderSystem::BuildGpuVirtualGeometryBatchDescriptors(
+					gpuPackets,
+					9000u,
+					VirtualGeometryDebugVisualizationMode::Residency);
+
+			context.ExpectEqual(static_cast<std::size_t>(3u), batches.size(), "Multi-material GPU packet descriptors should split into material A, material B, and fallback runs.");
+			context.ExpectEqual(2u, batches[0].packetCount, "Material A packets should remain one contiguous run.");
+			context.ExpectEqual(3u, batches[1].packetCount, "Material B resident packets should remain one contiguous run.");
+			context.ExpectEqual(1u, batches[2].packetCount, "Fallback packet coverage should split from resident packets even with the same material.");
+			context.Expect(materialA == batches[0].materialId, "First GPU batch should keep material A.");
+			context.Expect(materialB == batches[1].materialId, "Second GPU batch should keep material B.");
+			context.Expect((batches[2].flags & 1u) != 0u, "Fallback GPU batch should carry fail-open packet flags.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US2.GpuPacketsValidateAgainstCpuClusterOracle", [](TestContext& context) {
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord> selectedClusters;
+			std::vector<VirtualGeometryClusterPacket> cpuPackets;
+			for (std::uint32_t index = 0u; index < 3u; ++index)
+			{
+				TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord selected;
+				selected.objectId = objectId;
+				selected.meshId = meshId;
+				selected.clusterId = 10u + index;
+				selected.lodIndex = index % 2u;
+				selected.pageId = index + 1u;
+				selected.fallbackClusterId = 0u;
+				selected.usingFallback = index == 2u;
+				selectedClusters.push_back(selected);
+
+				VirtualGeometryClusterPacket packet;
+				packet.packetId = index;
+				packet.viewId = 4u;
+				packet.viewType = RenderViewType::Game;
+				packet.objectId = objectId;
+				packet.meshId = meshId;
+				packet.materialId = materialId;
+				packet.selectedLod = selected.lodIndex;
+				packet.clusterId = selected.clusterId;
+				packet.meshletOffset = index * 12u;
+				packet.meshletCount = 12u;
+				packet.pageId = selected.pageId;
+				packet.fallbackPageId = selected.usingFallback ? 1u : 0u;
+				packet.fallbackPacket = selected.usingFallback;
+				packet.debugIdentity = 900u + index;
+				cpuPackets.push_back(packet);
+			}
+
+			std::vector<GpuVirtualGeometryPacketRecord> gpuPackets =
+				RenderSystem::BuildGpuVirtualGeometryPacketRecords(cpuPackets, 8800u, VirtualGeometryDebugVisualizationMode::Cluster);
+			std::string validationReason;
+			context.Expect(
+				RenderSystem::ValidateGpuVirtualGeometryPacketRecords(cpuPackets, selectedClusters, gpuPackets, 8800u, VirtualGeometryDebugVisualizationMode::Cluster, &validationReason),
+				"GPU packet mirrors should validate when every record maps back to the CPU-selected cluster oracle.");
+			context.Expect(validationReason.empty(), "Successful GPU packet validation should not leave a stale reason string.");
+
+			gpuPackets[1].clusterId += 100u;
+			context.Expect(
+				!RenderSystem::ValidateGpuVirtualGeometryPacketRecords(cpuPackets, selectedClusters, gpuPackets, 8800u, VirtualGeometryDebugVisualizationMode::Cluster, &validationReason),
+				"Changing GPU packet cluster identity should fail validation before Vulkan publication.");
+			context.Expect(validationReason.find("cluster") != std::string::npos, "Validation failure should explain that cluster identity drifted.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US2.SnapshotPreservesGpuPacketMaterialFallbackAndRangeIdentity", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 8801u;
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState state;
+			state.viewType = RenderViewType::Game;
+			state.outputId = 12u;
+			state.targetSize = glm::uvec2(1920u, 1080u);
+			state.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::Residency;
+
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID objectId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			VirtualGeometryClusterPacket packet;
+			packet.packetId = 0u;
+			packet.viewId = state.outputId;
+			packet.viewType = state.viewType;
+			packet.objectId = objectId;
+			packet.meshId = meshId;
+			packet.materialId = materialId;
+			packet.selectedLod = 2u;
+			packet.clusterId = 77u;
+			packet.meshletOffset = 144u;
+			packet.meshletCount = 9u;
+			packet.pageId = 5u;
+			packet.fallbackPageId = 1u;
+			packet.fallbackPacket = true;
+			state.clusterPackets.push_back(packet);
+			state.gpuPacketRecords = RenderSystem::BuildGpuVirtualGeometryPacketRecords(state.clusterPackets, snapshot.frameId, state.debugVisualizationMode);
+			state.gpuBatchDescriptors = RenderSystem::BuildGpuVirtualGeometryBatchDescriptors(state.gpuPacketRecords, snapshot.frameId, state.debugVisualizationMode);
+			state.gpuPacketFrameSets.push_back(RenderSystem::BuildGpuVirtualGeometryPacketFrameSet(state.viewType, state.outputId, snapshot.frameId, state.targetSize, state.debugVisualizationMode, 0u, 1u, 0u, 1u));
+			snapshot.virtualGeometryViewSelections.push_back(state);
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot> visibility =
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshots(snapshot);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), visibility.front().gpuPacketRecords.size(), "Visibility snapshot should preserve one GPU packet record.");
+			context.Expect(materialId == visibility.front().gpuPacketRecords.front().materialId, "GPU packet snapshot should preserve material identity.");
+			context.ExpectEqual(144u, visibility.front().gpuPacketRecords.front().meshletOffset, "GPU packet snapshot should preserve meshlet offset.");
+			context.ExpectEqual(9u, visibility.front().gpuPacketRecords.front().meshletCount, "GPU packet snapshot should preserve meshlet count.");
+			context.Expect((visibility.front().gpuPacketRecords.front().flags & 1u) != 0u, "GPU packet snapshot should preserve fallback substitution state.");
+			context.ExpectEqual(2u, visibility.front().gpuPacketRecords.front().selectedLod, "GPU packet snapshot should preserve selected LOD.");
+		});
+
 		registry.Add("VirtualGeometry.Render.Diagnostics.ReportsLodTransitionPoppingRisk", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset{};
 			asset.sourceTriangleCount = 1024u;
@@ -646,6 +784,20 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::size_t>(1u), visibility.front().fallbackCoverage.size(), "Fallback coverage chains should survive immutable snapshot copy.");
 			context.ExpectEqual(8u, visibility.front().fallbackCoverage.front().desiredClusterId, "Fallback coverage should identify the missing desired cluster.");
 			context.ExpectEqual(6u, visibility.front().fallbackCoverage.front().substitutedMeshlets, "Fallback coverage should report substituted meshlets.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US4.ZeroSurvivorGeneratedSubmissionsRemainValidZeroWork", [](TestContext& context) {
+			const std::vector<GpuVirtualGeometryBatchDescriptor> batches;
+			const std::vector<GpuVirtualGeometryPacketRecord> packets;
+			const std::vector<GeneratedVirtualGeometrySubmissionRecord> submissions =
+				RenderSystem::BuildGeneratedVirtualGeometrySubmissionRecords(batches, packets, 10002u);
+
+			std::string validationReason;
+			context.Expect(submissions.empty(), "Zero-survivor compaction should produce no generated submission records.");
+			context.Expect(
+				RenderSystem::ValidateGeneratedVirtualGeometrySubmissionRecords(submissions, batches, 10002u, RenderViewType::Game, 2u, 0u, &validationReason),
+				"Zero-survivor generated submissions should validate as explicit zero work when packet capacity is also zero.");
+			context.Expect(validationReason.empty(), "Valid zero-work generated submissions should not publish a fallback reason.");
 		});
 
 		registry.Add("VirtualGeometry.Render.ClusterSelection.EnforcesParentChildExclusivity", [](TestContext& context) {

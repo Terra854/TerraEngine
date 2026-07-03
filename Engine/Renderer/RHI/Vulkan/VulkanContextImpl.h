@@ -27,6 +27,7 @@
 #include <array>
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <optional>
 #include <map>
 #include <unordered_map>
@@ -238,6 +239,7 @@ struct VulkanContext::Impl {
 	static constexpr uint32_t MAX_BINDLESS_TEXTURES = 1024;
 	static constexpr uint32_t MAX_BINDLESS_BUFFERS = 1024;
 	static constexpr uint32_t MAX_BINDLESS_MATERIALS = 1024;
+	static constexpr uint32_t INVALID_BINDLESS_BUFFER_INDEX = std::numeric_limits<std::uint32_t>::max();
 	static constexpr uint32_t MAX_BINDLESS_DRAWS = 4096;
 	static constexpr uint32_t MAX_GLOBAL_LIGHTS = 1024;
 	static constexpr uint32_t MAX_LIGHT_CLUSTERS = kLightingClusterDimX * kLightingClusterDimY * kLightingClusterDimZ;
@@ -341,6 +343,43 @@ struct VulkanContext::Impl {
 		std::vector<VulkanBuffer> clusterDepthSSBOs;
 	std::vector<VulkanBuffer> lightAnalysisSSBOs;
 				std::vector<VulkanBuffer> indirectDrawBuffers;
+				// GPU virtual geometry packet buffers are owned per frame slot
+				// and per view. The public frame snapshot stores value records;
+				// this private resource record owns the Vulkan handles and the
+				// capacities needed to decide whether a later frame can reuse or
+				// must retire an allocation.
+				struct VirtualGeometryGpuPacketFrameResources
+				{
+					std::uint64_t resourceSerial = 0u;
+					std::uint64_t frameId = 0u;
+					std::uint32_t viewId = 0u;
+					RenderViewType viewType = RenderViewType::Game;
+					VulkanBuffer packetBuffer{};
+					VulkanBuffer batchBuffer{};
+					VulkanBuffer compactedPacketBuffer{};
+					VulkanBuffer generatedSubmissionBuffer{};
+					VulkanBuffer counterReadbackBuffer{};
+					std::uint32_t packetBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+					std::uint32_t batchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+					std::uint32_t compactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+					std::uint32_t generatedSubmissionBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+					std::uint32_t counterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+					std::size_t packetCapacity = 0u;
+					std::size_t batchCapacity = 0u;
+					std::size_t compactedPacketCapacity = 0u;
+					std::size_t generatedSubmissionCapacity = 0u;
+					std::size_t counterReadbackCapacity = 0u;
+					std::uint64_t retireAfterFrameId = 0u;
+					bool live = false;
+				};
+				std::array<std::vector<VirtualGeometryGpuPacketFrameResources>, MAX_FRAMES_IN_FLIGHT> virtualGeometryGpuPacketResourcesByFrame{};
+				std::deque<VirtualGeometryGpuPacketFrameResources> retiredVirtualGeometryGpuPacketResources{};
+				std::uint64_t nextVirtualGeometryGpuPacketResourceSerial = 1u;
+				std::uint32_t activeVirtualGeometryPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+				std::uint32_t activeVirtualGeometryBatchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+				std::uint32_t activeVirtualGeometryCompactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+				std::uint32_t activeVirtualGeometryGeneratedSubmissionBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+				std::uint32_t activeVirtualGeometryCounterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				static constexpr uint32_t kHiZViewCount = 2u;
 				static constexpr uint32_t kHiZGameViewIndex = 0u;
 				static constexpr uint32_t kHiZSceneViewIndex = 1u;
@@ -585,6 +624,8 @@ struct VulkanContext::Impl {
 			bool GenerateAmbientOcclusion(VkCommandBuffer cmd, const FrameCullingDataGPU& frameData, uint32_t snapshotSlotIndex, VkImageView sampledDepthView);
 		void GenerateVRSImage(VkCommandBuffer cmd, VkImageView colorView);
 	
+		void PublishVirtualGeometryGpuPacketResources(const FrameRenderData& frameData, RenderViewType viewType, std::uint32_t viewId, std::uint64_t frameId);
+		void DestroyVirtualGeometryGpuPacketResources(VirtualGeometryGpuPacketFrameResources& resources);
 		void ResetMeshletCounters(uint32_t statsSlotIndex);
 	
 	// GetSnapshotLightDataOffset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -618,6 +659,7 @@ struct VulkanContext::Impl {
 
 	uint32_t AllocateBufferIndex();
 	void UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
+	void UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range);
 	void UpdateGlobalHiZ(uint32_t frameIndex);
 	void WaitForDescriptorMutationIdle();
 
@@ -647,6 +689,8 @@ struct VulkanContext::Impl {
 		uint32_t selectedVirtualClusterCount;
 		uint32_t selectedVirtualPageNeedOffset;
 		uint32_t selectedVirtualPageNeedCount;
+		uint32_t virtualGeometryPacketBufferIndex;
+		uint32_t virtualGeometryBatchBufferIndex;
 		// Editor-only tint is part of the default mesh push-constant contract so
 		// every default shader stage observes the same byte layout.
 		alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);

@@ -48,11 +48,15 @@ namespace TerraEngine::Renderer {
 		float actual,
 		std::string unit,
 		bool lowerIsBetter,
-		VirtualGeometryPerformanceGateSource source)
+		VirtualGeometryPerformanceGateSource source,
+		RenderViewType viewType,
+		std::uint32_t viewId)
 	{
 		PerformanceGateResult result;
 		result.gateId = std::move(gateId);
 		result.fixtureId = std::move(fixtureId);
+		result.viewType = viewType;
+		result.viewId = viewId;
 		result.metricName = std::move(metricName);
 		result.threshold = threshold;
 		result.actual = actual;
@@ -82,11 +86,16 @@ namespace TerraEngine::Renderer {
 				? VirtualGeometryPerformanceGateSource::GPUReadback
 				: (snapshot.counterSource == VirtualGeometryCounterSource::DelayedGPUReadback
 					? VirtualGeometryPerformanceGateSource::DelayedGPUReadback
-					: VirtualGeometryPerformanceGateSource::Prepared);
+					: ((snapshot.counterSource == VirtualGeometryCounterSource::Unsupported
+						|| snapshot.counterSource == VirtualGeometryCounterSource::Unavailable)
+						? VirtualGeometryPerformanceGateSource::Unsupported
+						: VirtualGeometryPerformanceGateSource::Prepared));
 		const auto addUnsupported = [&](std::string gateId, std::string fixtureId, std::string metricName, std::string unit, std::string reason) {
 			PerformanceGateResult gate;
 			gate.gateId = std::move(gateId);
 			gate.fixtureId = std::move(fixtureId);
+			gate.viewType = snapshot.viewType;
+			gate.viewId = snapshot.viewId;
 			gate.metricName = std::move(metricName);
 			gate.unit = std::move(unit);
 			gate.status = VirtualGeometryPerformanceGateStatus::Unsupported;
@@ -94,21 +103,54 @@ namespace TerraEngine::Renderer {
 			gate.diagnostic = std::move(reason);
 			gates.push_back(std::move(gate));
 		};
+		const auto addGate = [&](
+			std::string gateId,
+			std::string fixtureId,
+			std::string metricName,
+			float threshold,
+			float actual,
+			std::string unit,
+			bool lowerIsBetter) {
+			gates.push_back(EvaluateVirtualGeometryPerformanceGate(
+				std::move(gateId),
+				std::move(fixtureId),
+				std::move(metricName),
+				threshold,
+				actual,
+				std::move(unit),
+				lowerIsBetter,
+				source,
+				snapshot.viewType,
+				snapshot.viewId));
+		};
+
+		if (snapshot.counterSource == VirtualGeometryCounterSource::Unsupported
+			|| snapshot.counterSource == VirtualGeometryCounterSource::Unavailable)
+		{
+			const std::string reason = snapshot.counterUnavailableReason.empty()
+				? std::string("counter source is ") + ToString(snapshot.counterSource)
+				: snapshot.counterUnavailableReason;
+			addUnsupported(
+				"virtual-geometry-counter-source-available",
+				"gpu-packet-compaction-generated-submit",
+				"counterSource",
+				"state",
+				"Performance gates require source-labeled counters; " + reason);
+		}
 
 		if (snapshot.clusterPacketCount >= 500u)
 		{
 			const float batchRatio = snapshot.clusterPacketCount == 0u
 				? 0.0f
 				: static_cast<float>(snapshot.submittedBatchCount) / static_cast<float>(snapshot.clusterPacketCount);
-			gates.push_back(EvaluateVirtualGeometryPerformanceGate(
+			addGate(
 				"dense-cluster-batch-ratio",
 				"virtual-geometry-dense-batching",
 				"submittedBatchRatio",
 				0.1f,
 				batchRatio,
 				"ratio",
-				true,
-				source));
+				true);
 		}
 		else
 		{
@@ -124,27 +166,47 @@ namespace TerraEngine::Renderer {
 			static_cast<float>(snapshot.clusterPacketCount) * 0.001f
 			+ static_cast<float>(snapshot.submittedBatchCount) * 0.01f
 			+ static_cast<float>(snapshot.requestedPages) * 0.002f;
-		gates.push_back(EvaluateVirtualGeometryPerformanceGate(
+		addGate(
 			"virtual-geometry-prep-cost",
 			"virtual-geometry-dense-batching",
 			"estimatedPreparedMilliseconds",
 			5.0f,
 			estimatedPrepMs,
 			"ms",
-			true,
-			source));
+			true);
+
+		if (snapshot.gpuPacketRecordCount >= 500u)
+		{
+			const float gpuBatchRatio = static_cast<float>(snapshot.gpuBatchDescriptorCount) / static_cast<float>(snapshot.gpuPacketRecordCount);
+			addGate(
+				"gpu-packet-batch-ratio",
+				"gpu-packet-buffer-batching",
+				"gpuBatchDescriptorRatio",
+				0.1f,
+				gpuBatchRatio,
+				"ratio",
+				true);
+		}
+		else
+		{
+			addUnsupported(
+				"gpu-packet-batch-ratio",
+				"gpu-packet-buffer-batching",
+				"gpuBatchDescriptorRatio",
+				"ratio",
+				"GPU packet batch-ratio gate requires at least 500 GPU packet records.");
+		}
 
 		if (snapshot.geometryBudgetBytes > 0u)
 		{
-			gates.push_back(EvaluateVirtualGeometryPerformanceGate(
+			addGate(
 				"virtual-geometry-page-pressure",
 				"streaming-pressure",
 				"budgetPressureBytes",
 				static_cast<float>(snapshot.geometryBudgetBytes),
 				static_cast<float>(snapshot.budgetPressureBytes),
 				"bytes",
-				true,
-				source));
+				true);
 		}
 		else
 		{
@@ -159,15 +221,14 @@ namespace TerraEngine::Renderer {
 		if (snapshot.selectedMeshlets > 0u)
 		{
 			const float dispatchRatio = static_cast<float>(snapshot.dispatchedMeshlets) / static_cast<float>(snapshot.selectedMeshlets);
-			gates.push_back(EvaluateVirtualGeometryPerformanceGate(
+			addGate(
 				"virtual-geometry-selected-dispatched-ratio",
 				"runtime-packet-compaction",
 				"dispatchedToSelectedRatio",
 				1.0f,
 				dispatchRatio,
 				"ratio",
-				true,
-				source));
+				true);
 		}
 		else
 		{
@@ -179,15 +240,86 @@ namespace TerraEngine::Renderer {
 				"Selected-to-dispatched ratio gate requires selected meshlet counters.");
 		}
 
-		gates.push_back(EvaluateVirtualGeometryPerformanceGate(
+		if (snapshot.candidateClusterCount > 0u)
+		{
+			const std::uint32_t accountedPackets = snapshot.compactedClusterCount + snapshot.rejectedClusterCount;
+			addGate(
+				"gpu-compaction-accounted-packets",
+				"gpu-packet-compaction-generated-submit",
+				"accountedPackets",
+				static_cast<float>(snapshot.candidateClusterCount),
+				static_cast<float>(accountedPackets),
+				"packets",
+				false);
+			addGate(
+				"gpu-compaction-overflow-packets",
+				"gpu-packet-compaction-generated-submit",
+				"accountedMinusCandidate",
+				0.0f,
+				accountedPackets > snapshot.candidateClusterCount
+					? static_cast<float>(accountedPackets - snapshot.candidateClusterCount)
+					: 0.0f,
+				"packets",
+				true);
+		}
+		else
+		{
+			addUnsupported(
+				"gpu-compaction-accounted-packets",
+				"gpu-packet-compaction-generated-submit",
+				"accountedPackets",
+				"packets",
+				"Compaction truth gate requires candidate packet counters.");
+		}
+
+		if (snapshot.generatedSubmissionCount > 0u)
+		{
+			addGate(
+				"generated-submission-invalid-count",
+				"gpu-packet-compaction-generated-submit",
+				"invalidGeneratedSubmissions",
+				0.0f,
+				static_cast<float>(snapshot.invalidGeneratedSubmissionCount),
+				"submissions",
+				true);
+			if (snapshot.compactedClusterCount > 0u)
+			{
+				addGate(
+					"generated-submission-packet-coverage",
+					"gpu-packet-compaction-generated-submit",
+					"generatedSubmissionsVsCompactedPackets",
+					static_cast<float>(snapshot.compactedClusterCount),
+					static_cast<float>(snapshot.validGeneratedSubmissionCount),
+					"submissions",
+					true);
+			}
+		}
+		else if (snapshot.gpuPacketRecordCount > 0u)
+		{
+			addUnsupported(
+				"generated-submission-invalid-count",
+				"gpu-packet-compaction-generated-submit",
+				"invalidGeneratedSubmissions",
+				"submissions",
+				"Generated submission validity gate requires generated submission records.");
+		}
+
+		addGate(
+			"virtual-geometry-hiz-baseline-match",
+			"thin-hiz-occluder",
+			"hizBaselineMatched",
+			1.0f,
+			snapshot.hiZBaselineMatched ? 1.0f : 0.0f,
+			"bool",
+			false);
+		addGate(
 			"virtual-geometry-hiz-false-occlusion",
 			"thin-hiz-occluder",
 			"falseOcclusionRiskWarnings",
 			0.0f,
 			static_cast<float>(snapshot.hiZFalseOcclusionRiskWarnings),
 			"warnings",
-			true,
-			source));
+			true);
 		return gates;
 	}
 
@@ -195,6 +327,7 @@ namespace TerraEngine::Renderer {
 	{
 		VirtualGeometryViewDiagnosticsSnapshot snapshot;
 		snapshot.viewType = viewType;
+		snapshot.viewId = 0u;
 		snapshot.frameId = frameId;
 		snapshot.active = false;
 		snapshot.inactiveReason = reason;
@@ -248,6 +381,7 @@ namespace TerraEngine::Renderer {
 	{
 		VirtualGeometryViewDiagnosticsSnapshot snapshot;
 		snapshot.viewType = viewType;
+		snapshot.viewId = 0u;
 		snapshot.frameId = frameId;
 		snapshot.active = true;
 		snapshot.adaptiveSettings = BuildVirtualGeometryAdaptiveSettingsDiagnostics(profile);
@@ -295,6 +429,7 @@ namespace TerraEngine::Renderer {
 		const VirtualGeometryQualityProfile quality = SanitizeVirtualGeometryQualityProfile(qualityProfile);
 		VirtualGeometryViewDiagnosticsSnapshot snapshot;
 		snapshot.viewType = viewType;
+		snapshot.viewId = 0u;
 		snapshot.frameId = frameId;
 		snapshot.active = true;
 		snapshot.debugVisualizationMode = quality.debugVisualizationMode;
@@ -478,6 +613,7 @@ namespace TerraEngine::Renderer {
 	{
 		VirtualGeometryViewDiagnosticsSnapshot snapshot;
 		snapshot.viewType = visibility.viewType;
+		snapshot.viewId = visibility.outputId;
 		snapshot.frameId = visibility.frameId;
 		snapshot.active = visibility.valid;
 		snapshot.debugVisualizationMode = NormalizeVirtualGeometryDebugVisualizationMode(visibility.debugVisualizationMode);
@@ -526,6 +662,83 @@ namespace TerraEngine::Renderer {
 			snapshot.culledByCone += compaction.rejectedByCone;
 			snapshot.culledByResidency += compaction.rejectedByResidency;
 			snapshot.submittedBatchCount = std::max(snapshot.submittedBatchCount, compaction.submittedBatches);
+		}
+		snapshot.gpuPacketRecordCount = static_cast<std::uint32_t>(visibility.gpuPacketRecords.size());
+		snapshot.gpuBatchDescriptorCount = static_cast<std::uint32_t>(visibility.gpuBatchDescriptors.size());
+		snapshot.gpuPacketFrameSetCount = static_cast<std::uint32_t>(visibility.gpuPacketFrameSets.size());
+		snapshot.gpuCompactionDispatchCount = static_cast<std::uint32_t>(visibility.gpuCompactionDispatches.size());
+		snapshot.generatedSubmissionCount = static_cast<std::uint32_t>(visibility.generatedSubmissions.size());
+		snapshot.gpuCounterReadbackCount = static_cast<std::uint32_t>(visibility.gpuCounterReadbacks.size());
+		snapshot.gpuFallbackRecordCount = static_cast<std::uint32_t>(visibility.gpuFallbackRecords.size());
+		for (const GpuVirtualGeometryPacketFrameSet& frameSet : visibility.gpuPacketFrameSets)
+		{
+			switch (frameSet.validity)
+			{
+			case VirtualGeometryGpuFrameSetValidity::Valid:
+				++snapshot.gpuValidFrameSetCount;
+				break;
+			case VirtualGeometryGpuFrameSetValidity::Delayed:
+				++snapshot.gpuDelayedFrameSetCount;
+				break;
+			case VirtualGeometryGpuFrameSetValidity::Invalid:
+			case VirtualGeometryGpuFrameSetValidity::Unsupported:
+				++snapshot.gpuInvalidFrameSetCount;
+				break;
+			case VirtualGeometryGpuFrameSetValidity::FailOpen:
+				++snapshot.gpuFailOpenFrameSetCount;
+				break;
+			}
+			if (!frameSet.fallbackReason.empty() && snapshot.gpuFallbackReason.empty())
+			{
+				snapshot.gpuFallbackReason = frameSet.fallbackReason;
+			}
+		}
+		for (const GeneratedVirtualGeometrySubmissionRecord& submission : visibility.generatedSubmissions)
+		{
+			switch (submission.validationState)
+			{
+			case VirtualGeometryGeneratedSubmissionValidationState::Valid:
+				++snapshot.validGeneratedSubmissionCount;
+				break;
+			case VirtualGeometryGeneratedSubmissionValidationState::Delayed:
+			case VirtualGeometryGeneratedSubmissionValidationState::Mismatch:
+			case VirtualGeometryGeneratedSubmissionValidationState::Overflow:
+			case VirtualGeometryGeneratedSubmissionValidationState::Unsupported:
+				++snapshot.invalidGeneratedSubmissionCount;
+				break;
+			case VirtualGeometryGeneratedSubmissionValidationState::FailOpen:
+				++snapshot.fallbackGeneratedSubmissionCount;
+				break;
+			}
+			if (!submission.fallbackReason.empty() && snapshot.gpuFallbackReason.empty())
+			{
+				snapshot.gpuFallbackReason = submission.fallbackReason;
+			}
+		}
+		for (const VirtualGeometryCounterReadbackRecord& readback : visibility.gpuCounterReadbacks)
+		{
+			snapshot.gpuCounterReadbackLatencyFrames = std::max(snapshot.gpuCounterReadbackLatencyFrames, readback.latencyFrames);
+			if (!readback.unavailableReason.empty() && snapshot.counterUnavailableReason.empty())
+			{
+				snapshot.counterUnavailableReason = readback.unavailableReason;
+			}
+		}
+		for (const VirtualGeometryGpuFallbackRecord& fallback : visibility.gpuFallbackRecords)
+		{
+			snapshot.gpuFallbackAffectedPackets += fallback.affectedPackets;
+			snapshot.gpuFallbackAffectedBatches += fallback.affectedBatches;
+			if (!fallback.reason.empty() && snapshot.gpuFallbackReason.empty())
+			{
+				snapshot.gpuFallbackReason = fallback.reason;
+			}
+			if (!fallback.diagnostic.empty())
+			{
+				snapshot.warnings.push_back(fallback.diagnostic);
+			}
+		}
+		if (!snapshot.gpuFallbackReason.empty())
+		{
+			snapshot.warnings.push_back("Virtual geometry GPU packet path used fallback: " + snapshot.gpuFallbackReason);
 		}
 		for (const PageResidencyRecord& page : visibility.pageResidency)
 		{
@@ -597,8 +810,18 @@ namespace TerraEngine::Renderer {
 		snapshot.hiZState = visibility.hiZValidationState.state;
 		for (const HiZRegressionSnapshot& hiZRegression : visibility.hiZRegressionSnapshots)
 		{
+			// Hi-Z baseline records are copied from the current view snapshot.
+			// A mismatch is a diagnostics problem for tests and tools; it must
+			// not become a hidden quality tier or a render-state mutation.
 			snapshot.hiZBaselineMatched = snapshot.hiZBaselineMatched && hiZRegression.baselineMatched;
 			snapshot.hiZFalseOcclusionRiskWarnings += hiZRegression.baselineMatched ? 0u : 1u;
+			if (!hiZRegression.baselineMatched)
+			{
+				const std::string reason = hiZRegression.reason.empty()
+					? std::string("current view Hi-Z baseline mismatch")
+					: hiZRegression.reason;
+				snapshot.warnings.push_back("Virtual geometry Hi-Z baseline mismatch: " + reason);
+			}
 		}
 		snapshot.hiZPyramidSize = visibility.hiZValidationState.pyramidSize;
 		snapshot.hiZRenderSize = visibility.hiZValidationState.renderSize;
@@ -696,6 +919,7 @@ namespace TerraEngine::Renderer {
 		VirtualGeometryViewDiagnosticsSnapshot snapshot;
 		const bool hiZInactive = !input.hiZActive;
 		snapshot.viewType = input.viewType;
+		snapshot.viewId = 0u;
 		snapshot.frameId = input.frameId;
 		snapshot.active = input.qualityRequested;
 		snapshot.hiZActive = input.hiZActive;
@@ -805,6 +1029,10 @@ namespace TerraEngine::Renderer {
 					summary.resourceWarnings.push_back(
 						"Virtual geometry performance gate failed: "
 						+ gate.fixtureId
+						+ " view "
+						+ ToString(gate.viewType)
+						+ "#"
+						+ std::to_string(gate.viewId)
 						+ " "
 						+ gate.metricName
 						+ " expected "

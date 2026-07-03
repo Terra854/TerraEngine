@@ -2939,6 +2939,33 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	renderSnapshot.state = RenderSnapshotState::Acquired;
 	renderSnapshot.valid = true;
 	impl->activeRenderSnapshot = renderSnapshot;
+	// Publish immutable per-view packet mirrors at the protected Vulkan
+	// boundary. RenderSystem owns the value records; Vulkan owns the backing
+	// buffers and may reuse them only when the frame slot and view identity match.
+	impl->PublishVirtualGeometryGpuPacketResources(frameData, renderViewType, diagnosticViewId, impl->backendFrameSerial);
+	const std::uint64_t generatedSubmissionFrameId = frameData.virtualGeometryGpuPackets.empty()
+		? impl->backendFrameSerial
+		: frameData.virtualGeometryGpuPackets.front().frameId;
+	bool generatedVirtualGeometrySubmissionsUsable = !frameData.virtualGeometryGeneratedSubmissions.empty();
+	for (const GeneratedVirtualGeometrySubmissionRecord& submission : frameData.virtualGeometryGeneratedSubmissions)
+	{
+		const bool rangeValid = submission.packetCount > 0u
+			&& submission.packetOffset <= frameData.virtualGeometryGpuPackets.size()
+			&& static_cast<std::size_t>(submission.packetOffset) + static_cast<std::size_t>(submission.packetCount) <= frameData.virtualGeometryGpuPackets.size();
+		generatedVirtualGeometrySubmissionsUsable = generatedVirtualGeometrySubmissionsUsable
+			&& submission.frameId == generatedSubmissionFrameId
+			&& submission.viewType == renderViewType
+			&& submission.viewId == diagnosticViewId
+			&& submission.validationState == VirtualGeometryGeneratedSubmissionValidationState::Valid
+			&& rangeValid;
+	}
+	if (!generatedVirtualGeometrySubmissionsUsable)
+	{
+		// Generated submissions are an optimization authority, not the coverage
+		// authority. If they are missing, delayed, or stale, command recording
+		// continues with the already expanded CPU-selected draw commands below.
+		impl->activeVirtualGeometryGeneratedSubmissionBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+	}
 	impl->pendingRenderSnapshotDiagnostics.valid = true;
 	impl->pendingRenderSnapshotDiagnostics.maxSnapshotsPerFrame = VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
 	impl->pendingRenderSnapshotDiagnostics.activeSnapshotCount += 1u;
@@ -3887,6 +3914,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.selectedVirtualClusterCount = command.selectedVirtualClusterCount;
 		push.selectedVirtualPageNeedOffset = command.selectedVirtualPageNeedOffset;
 		push.selectedVirtualPageNeedCount = command.selectedVirtualPageNeedCount;
+		push.virtualGeometryPacketBufferIndex = impl->activeVirtualGeometryPacketBufferIndex;
+		push.virtualGeometryBatchBufferIndex = impl->activeVirtualGeometryBatchBufferIndex;
 		push.editorTint = command.editorTint;
 
 		PreparedDraw draw{};
@@ -3949,6 +3978,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					// view. Keep the original diagnostic flags intact so shadow
 					// recording cannot become another path that latches camera
 					// Hi-Z off after an editor view or blocker changes.
+					shadowDraw.push.virtualGeometryPacketBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+					shadowDraw.push.virtualGeometryBatchBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 					shadowDraw.push.editorTint = glm::vec4(0.0f);
 					
 					VkDrawMeshTasksIndirectCommandEXT shadowIndirectCmd{};
@@ -4084,6 +4115,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			shadowDraw.push.selectedVirtualClusterCount = command.selectedVirtualClusterCount;
 			shadowDraw.push.selectedVirtualPageNeedOffset = command.selectedVirtualPageNeedOffset;
 			shadowDraw.push.selectedVirtualPageNeedCount = command.selectedVirtualPageNeedCount;
+			shadowDraw.push.virtualGeometryPacketBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+			shadowDraw.push.virtualGeometryBatchBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 			shadowDraw.push.editorTint = glm::vec4(0.0f);
 			shadowDraw.materialFlags = materialFlags;
 
@@ -6012,6 +6045,11 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 	profile.supportsMultiQueueReadiness = true;
 	profile.supportsWorkerOwnedPreparation = true;
 	profile.supportsImageReadback = true;
+	const bool virtualGeometryMeshShaderReady = SupportsVirtualGeometryMeshShaderRoute();
+	profile.supportsVirtualGeometryGpuPacketBuffers = virtualGeometryMeshShaderReady;
+	profile.supportsVirtualGeometryGpuCompaction = virtualGeometryMeshShaderReady;
+	profile.supportsVirtualGeometryGeneratedSubmissions = virtualGeometryMeshShaderReady;
+	profile.supportsVirtualGeometryCounterReadback = virtualGeometryMeshShaderReady && profile.supportsImageReadback;
 	profile.maxRecordingWorkers = static_cast<std::uint32_t>(std::max<std::size_t>(1u, std::thread::hardware_concurrency()));
 	profile.workerSchedulingThreshold = 128u;
 	profile.maxPreparedFrames = 2u;
@@ -6022,8 +6060,8 @@ TerraEngine::Renderer::BackendCapabilityProfile VulkanContext::GetBackendCapabil
 		{ "graphics", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, "Graphics final submission stays on the coordinator." },
 		{ "presentation", TerraEngine::Renderer::RenderBackendQueueMode::Serial, false, "Presentation stays on the coordinator." }
 	};
-	profile.diagnosticCapabilities = { "packet-counts", "serialized-reasons", "pass-labels", "resource-warnings", "backend-fallbacks", "backend-frame-breakdown", "worker-recording-batches", "queue-readiness", "work-budgets", "performance-gates", "capture-fallbacks", "capture-readback" };
-	profile.diagnosticCapabilities.push_back(SupportsVirtualGeometryMeshShaderRoute()
+	profile.diagnosticCapabilities = { "packet-counts", "serialized-reasons", "pass-labels", "resource-warnings", "backend-fallbacks", "backend-frame-breakdown", "worker-recording-batches", "queue-readiness", "work-budgets", "performance-gates", "capture-fallbacks", "capture-readback", "virtual-geometry-gpu-packet-capabilities" };
+	profile.diagnosticCapabilities.push_back(virtualGeometryMeshShaderReady
 		? "virtual-geometry-mesh-shader-route"
 		: "virtual-geometry-unsupported-missing-mesh-shader");
 	return profile;
@@ -6873,6 +6911,21 @@ void VulkanContext::Impl::ClearResources() {
 		vmaDestroyBuffer(allocator, mesh.meshletBoundsBuffer.buffer, mesh.meshletBoundsBuffer.allocation);
 	}
 	meshCache.clear();
+
+	// View-owned virtual geometry packet buffers are renderer-side scratch
+	// resources. Clear them while the device is idle so old packet, batch,
+	// compacted, generated-submission, and counter buffers cannot survive a
+	// swapchain/device resource rebuild.
+	for (std::vector<VirtualGeometryGpuPacketFrameResources>& frameResources : virtualGeometryGpuPacketResourcesByFrame) {
+		for (VirtualGeometryGpuPacketFrameResources& resources : frameResources) {
+			DestroyVirtualGeometryGpuPacketResources(resources);
+		}
+		frameResources.clear();
+	}
+	for (VirtualGeometryGpuPacketFrameResources& resources : retiredVirtualGeometryGpuPacketResources) {
+		DestroyVirtualGeometryGpuPacketResources(resources);
+	}
+	retiredVirtualGeometryGpuPacketResources.clear();
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& [id, tex] : textureCache) {

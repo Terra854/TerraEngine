@@ -13,7 +13,13 @@
 		"virtualGeometryMinShadowMeshletReductionPercent": 40,
 		"virtualGeometryMaxFalseOcclusionCount": 0,
 		"virtualGeometryMaxEstimatedPrepMilliseconds": 5,
-		"virtualGeometryMaxDispatchToSelectedRatio": 1.0
+		"virtualGeometryMaxDispatchToSelectedRatio": 1.0,
+		"virtualGeometryGpuPacketMinPrepImprovementPercent": 20,
+		"virtualGeometryGpuPacketMaxBatchDescriptorRatio": 0.1,
+		"virtualGeometryGpuPacketMaxCounterTruthErrorPercent": 1,
+		"virtualGeometryGpuPacketMaxCounterTruthErrorPackets": 1,
+		"virtualGeometryGpuPacketMaxCompactionOverflowPackets": 0,
+		"virtualGeometryGpuPacketMaxInvalidGeneratedSubmissions": 0
 	},
 	"gateNotes": [
 		"Run each workload three times on the same backend and compare the median visible-frame cost.",
@@ -34,6 +40,7 @@
 		{ "name": "scene-game-submit", "renderables": 1000, "materials": 20, "lights": 10, "ui": true, "streamingResources": 0, "views": ["scene", "game"], "backendStages": true, "backendStageGate": "backendStageAttributionMinPercent", "stallThreshold": "backendStallWarningMilliseconds" },
 		{ "name": "randomized-stress", "renderables": 1000, "materials": 20, "lights": 10, "ui": true, "streamingResources": 100 },
 		{ "name": "virtual-geometry-dense-batching", "renderables": 1, "materials": 8, "lights": 2, "ui": true, "streamingResources": 64, "virtualGeometry": true, "minimumSelectedClusters": 500, "maxSubmittedBatchRatio": "virtualGeometryMaxSubmittedBatchRatio", "maxEstimatedPrepMilliseconds": "virtualGeometryMaxEstimatedPrepMilliseconds", "maxDispatchToSelectedRatio": "virtualGeometryMaxDispatchToSelectedRatio", "maxFalseOcclusionCount": "virtualGeometryMaxFalseOcclusionCount" },
+		{ "name": "virtual-geometry-gpu-packet-compaction", "renderables": 1, "materials": 8, "lights": 2, "ui": true, "streamingResources": 64, "virtualGeometry": true, "gpuPacketBuffers": true, "gpuCompaction": true, "generatedSubmission": true, "minimumSelectedClusters": 500, "maxSubmittedBatchRatio": "virtualGeometryMaxSubmittedBatchRatio", "maxGpuBatchDescriptorRatio": "virtualGeometryGpuPacketMaxBatchDescriptorRatio", "minPrepImprovementPercent": "virtualGeometryGpuPacketMinPrepImprovementPercent", "maxCounterTruthErrorPercent": "virtualGeometryGpuPacketMaxCounterTruthErrorPercent", "maxCounterTruthErrorPackets": "virtualGeometryGpuPacketMaxCounterTruthErrorPackets", "maxCompactionOverflowPackets": "virtualGeometryGpuPacketMaxCompactionOverflowPackets", "maxInvalidGeneratedSubmissions": "virtualGeometryGpuPacketMaxInvalidGeneratedSubmissions", "maxFalseOcclusionCount": "virtualGeometryMaxFalseOcclusionCount" },
 		{ "name": "virtual-geometry-shadow-heavy", "renderables": 250, "materials": 16, "lights": 8, "ui": false, "streamingResources": 64, "virtualGeometry": true, "shadowViews": true, "minShadowMeshletReductionPercent": "virtualGeometryMinShadowMeshletReductionPercent" }
 	]
 }

@@ -163,6 +163,129 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, static_cast<std::uint64_t>(compaction.source));
 		}
 
+		void HashGpuVirtualGeometryPacketRecord(std::uint64_t& hash, const GpuVirtualGeometryPacketRecord& packet)
+		{
+			// GPU packet records are immutable mirrors of what the backend may
+			// upload. Hashing every compatibility field makes command reuse
+			// invalidate when a packet would point at different geometry.
+			HashCombine(hash, packet.packetId);
+			HashCombine(hash, packet.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(packet.viewType));
+			HashCombine(hash, packet.frameId);
+			HashCombine(hash, HashUuid(packet.objectId));
+			HashCombine(hash, HashUuid(packet.meshId));
+			HashCombine(hash, HashUuid(packet.materialId));
+			HashCombine(hash, packet.selectedLod);
+			HashCombine(hash, packet.clusterId);
+			HashCombine(hash, packet.meshletOffset);
+			HashCombine(hash, packet.meshletCount);
+			HashCombine(hash, packet.pageId);
+			HashCombine(hash, packet.fallbackPageId);
+			HashCombine(hash, packet.debugIdentity);
+			HashCombine(hash, packet.flags);
+		}
+
+		void HashGpuVirtualGeometryBatchDescriptor(std::uint64_t& hash, const GpuVirtualGeometryBatchDescriptor& batch)
+		{
+			HashCombine(hash, batch.batchId);
+			HashCombine(hash, batch.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(batch.viewType));
+			HashCombine(hash, batch.frameId);
+			HashCombine(hash, batch.packetOffset);
+			HashCombine(hash, batch.packetCount);
+			HashCombine(hash, HashUuid(batch.meshId));
+			HashCombine(hash, HashUuid(batch.materialId));
+			HashCombine(hash, batch.selectedMeshlets);
+			HashCombine(hash, batch.submittedMeshlets);
+			HashCombine(hash, static_cast<std::uint64_t>(batch.debugMode));
+			HashCombine(hash, static_cast<std::uint64_t>(batch.fallbackMode));
+			HashCombine(hash, batch.flags);
+		}
+
+		void HashGpuVirtualGeometryPacketFrameSet(std::uint64_t& hash, const GpuVirtualGeometryPacketFrameSet& frameSet)
+		{
+			HashCombine(hash, frameSet.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(frameSet.viewType));
+			HashCombine(hash, frameSet.frameId);
+			HashCombine(hash, frameSet.targetSize.x);
+			HashCombine(hash, frameSet.targetSize.y);
+			HashCombine(hash, static_cast<std::uint64_t>(frameSet.debugMode));
+			HashCombine(hash, frameSet.packetOffset);
+			HashCombine(hash, frameSet.packetCount);
+			HashCombine(hash, frameSet.batchOffset);
+			HashCombine(hash, frameSet.batchCount);
+			HashCombine(hash, frameSet.compactedPacketOffset);
+			HashCombine(hash, frameSet.compactedPacketCount);
+			HashCombine(hash, frameSet.generatedSubmissionOffset);
+			HashCombine(hash, frameSet.generatedSubmissionCount);
+			HashCombine(hash, static_cast<std::uint64_t>(frameSet.validity));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(frameSet.fallbackReason)));
+		}
+
+		void HashGpuPacketCompactionDispatch(std::uint64_t& hash, const GpuPacketCompactionDispatch& dispatch)
+		{
+			HashCombine(hash, dispatch.dispatchId);
+			HashCombine(hash, dispatch.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(dispatch.viewType));
+			HashCombine(hash, dispatch.frameId);
+			HashCombine(hash, dispatch.candidatePacketCount);
+			HashCombine(hash, dispatch.candidateBatchCount);
+			HashCombine(hash, dispatch.outputCapacity);
+			HashCombine(hash, static_cast<std::uint64_t>(dispatch.hiZBaselineState));
+			HashCombine(hash, static_cast<std::uint64_t>(dispatch.debugMode));
+			HashCombine(hash, dispatch.failOpenOnInvalid ? 1u : 0u);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(dispatch.fallbackReason)));
+		}
+
+		void HashGeneratedVirtualGeometrySubmissionRecord(std::uint64_t& hash, const GeneratedVirtualGeometrySubmissionRecord& submission)
+		{
+			HashCombine(hash, submission.recordId);
+			HashCombine(hash, submission.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(submission.viewType));
+			HashCombine(hash, submission.frameId);
+			HashCombine(hash, submission.batchId);
+			HashCombine(hash, submission.packetOffset);
+			HashCombine(hash, submission.packetCount);
+			HashCombine(hash, submission.indirectTaskCount);
+			HashCombine(hash, HashUuid(submission.materialId));
+			HashCombine(hash, HashUuid(submission.meshId));
+			HashCombine(hash, submission.counterOffset);
+			HashCombine(hash, static_cast<std::uint64_t>(submission.source));
+			HashCombine(hash, static_cast<std::uint64_t>(submission.validationState));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(submission.fallbackReason)));
+		}
+
+		void HashVirtualGeometryCounterReadbackRecord(std::uint64_t& hash, const VirtualGeometryCounterReadbackRecord& readback)
+		{
+			HashCombine(hash, readback.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(readback.viewType));
+			HashCombine(hash, readback.frameId);
+			HashCombine(hash, static_cast<std::uint64_t>(readback.source));
+			HashCombine(hash, readback.latencyFrames);
+			HashCombine(hash, readback.candidatePackets);
+			HashCombine(hash, readback.compactedPackets);
+			HashCombine(hash, readback.submittedBatches);
+			HashCombine(hash, readback.rejectedPackets);
+			HashCombine(hash, readback.failOpenPackets);
+			HashCombine(hash, readback.selectedMeshlets);
+			HashCombine(hash, readback.dispatchedMeshlets);
+			HashCombine(hash, readback.culledMeshlets);
+			HashCombine(hash, readback.culledByHiZ);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(readback.unavailableReason)));
+		}
+
+		void HashVirtualGeometryGpuFallbackRecord(std::uint64_t& hash, const VirtualGeometryGpuFallbackRecord& fallback)
+		{
+			HashCombine(hash, fallback.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(fallback.viewType));
+			HashCombine(hash, fallback.frameId);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(fallback.reason)));
+			HashCombine(hash, fallback.affectedPackets);
+			HashCombine(hash, fallback.affectedBatches);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(fallback.coveragePolicy)));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(fallback.diagnostic)));
+		}
+
 		void HashPageResidencyRecord(std::uint64_t& hash, const PageResidencyRecord& page)
 		{
 			HashCombine(hash, HashUuid(page.meshId));
@@ -279,6 +402,55 @@ namespace TerraEngine::Renderer {
 				}
 				return static_cast<std::uint8_t>(left.viewType) < static_cast<std::uint8_t>(right.viewType);
 			});
+			std::sort(state.gpuPacketRecords.begin(), state.gpuPacketRecords.end(), [](const GpuVirtualGeometryPacketRecord& left, const GpuVirtualGeometryPacketRecord& right) {
+				if (left.packetId != right.packetId)
+				{
+					return left.packetId < right.packetId;
+				}
+				return left.clusterId < right.clusterId;
+			});
+			std::sort(state.gpuBatchDescriptors.begin(), state.gpuBatchDescriptors.end(), [](const GpuVirtualGeometryBatchDescriptor& left, const GpuVirtualGeometryBatchDescriptor& right) {
+				if (left.batchId != right.batchId)
+				{
+					return left.batchId < right.batchId;
+				}
+				return left.packetOffset < right.packetOffset;
+			});
+			std::sort(state.gpuPacketFrameSets.begin(), state.gpuPacketFrameSets.end(), [](const GpuVirtualGeometryPacketFrameSet& left, const GpuVirtualGeometryPacketFrameSet& right) {
+				if (left.viewId != right.viewId)
+				{
+					return left.viewId < right.viewId;
+				}
+				return left.frameId < right.frameId;
+			});
+			std::sort(state.gpuCompactionDispatches.begin(), state.gpuCompactionDispatches.end(), [](const GpuPacketCompactionDispatch& left, const GpuPacketCompactionDispatch& right) {
+				if (left.dispatchId != right.dispatchId)
+				{
+					return left.dispatchId < right.dispatchId;
+				}
+				return left.frameId < right.frameId;
+			});
+			std::sort(state.generatedSubmissions.begin(), state.generatedSubmissions.end(), [](const GeneratedVirtualGeometrySubmissionRecord& left, const GeneratedVirtualGeometrySubmissionRecord& right) {
+				if (left.recordId != right.recordId)
+				{
+					return left.recordId < right.recordId;
+				}
+				return left.batchId < right.batchId;
+			});
+			std::sort(state.gpuCounterReadbacks.begin(), state.gpuCounterReadbacks.end(), [](const VirtualGeometryCounterReadbackRecord& left, const VirtualGeometryCounterReadbackRecord& right) {
+				if (left.viewId != right.viewId)
+				{
+					return left.viewId < right.viewId;
+				}
+				return left.frameId < right.frameId;
+			});
+			std::sort(state.gpuFallbackRecords.begin(), state.gpuFallbackRecords.end(), [](const VirtualGeometryGpuFallbackRecord& left, const VirtualGeometryGpuFallbackRecord& right) {
+				if (left.viewId != right.viewId)
+				{
+					return left.viewId < right.viewId;
+				}
+				return left.reason < right.reason;
+			});
 			std::sort(state.pageResidency.begin(), state.pageResidency.end(), [](const PageResidencyRecord& left, const PageResidencyRecord& right) {
 				if (left.pageId != right.pageId)
 				{
@@ -337,6 +509,34 @@ namespace TerraEngine::Renderer {
 			for (const CompactedVisibilitySet& compaction : state.compactionResults)
 			{
 				HashCompactedVisibilitySet(hash, compaction);
+			}
+			for (const GpuVirtualGeometryPacketRecord& packet : state.gpuPacketRecords)
+			{
+				HashGpuVirtualGeometryPacketRecord(hash, packet);
+			}
+			for (const GpuVirtualGeometryBatchDescriptor& batch : state.gpuBatchDescriptors)
+			{
+				HashGpuVirtualGeometryBatchDescriptor(hash, batch);
+			}
+			for (const GpuVirtualGeometryPacketFrameSet& frameSet : state.gpuPacketFrameSets)
+			{
+				HashGpuVirtualGeometryPacketFrameSet(hash, frameSet);
+			}
+			for (const GpuPacketCompactionDispatch& dispatch : state.gpuCompactionDispatches)
+			{
+				HashGpuPacketCompactionDispatch(hash, dispatch);
+			}
+			for (const GeneratedVirtualGeometrySubmissionRecord& submission : state.generatedSubmissions)
+			{
+				HashGeneratedVirtualGeometrySubmissionRecord(hash, submission);
+			}
+			for (const VirtualGeometryCounterReadbackRecord& readback : state.gpuCounterReadbacks)
+			{
+				HashVirtualGeometryCounterReadbackRecord(hash, readback);
+			}
+			for (const VirtualGeometryGpuFallbackRecord& fallback : state.gpuFallbackRecords)
+			{
+				HashVirtualGeometryGpuFallbackRecord(hash, fallback);
 			}
 			for (const PageResidencyRecord& page : state.pageResidency)
 			{
@@ -641,6 +841,13 @@ namespace TerraEngine::Renderer {
 				state.selectedClusters.size()
 				+ state.clusterPackets.size()
 				+ state.clusterBatches.size()
+				+ state.gpuPacketRecords.size()
+				+ state.gpuBatchDescriptors.size()
+				+ state.gpuPacketFrameSets.size()
+				+ state.gpuCompactionDispatches.size()
+				+ state.generatedSubmissions.size()
+				+ state.gpuCounterReadbacks.size()
+				+ state.gpuFallbackRecords.size()
 				+ state.compactionResults.size()
 				+ state.pageNeeds.size()
 				+ state.pageResidency.size()
@@ -658,6 +865,13 @@ namespace TerraEngine::Renderer {
 				+ state.selectedClusters.size()
 				+ state.clusterPackets.size()
 				+ state.clusterBatches.size()
+				+ state.gpuPacketRecords.size()
+				+ state.gpuBatchDescriptors.size()
+				+ state.gpuPacketFrameSets.size()
+				+ state.gpuCompactionDispatches.size()
+				+ state.generatedSubmissions.size()
+				+ state.gpuCounterReadbacks.size()
+				+ state.gpuFallbackRecords.size()
 				+ state.compactionResults.size()
 				+ state.pageNeeds.size()
 				+ state.pageResidency.size()
@@ -749,7 +963,36 @@ namespace TerraEngine::Renderer {
 			counters.unavailableReason = "virtual geometry counters are unavailable for this view";
 			break;
 		}
-		if (!state.clusterPackets.empty())
+		if (!state.gpuCounterReadbacks.empty())
+		{
+			// Backend readback packets are already copied into the immutable
+			// frame snapshot. Aggregating them here gives lightweight stats a
+			// truthful source label without touching live GPU buffers.
+			counters.source = state.gpuCounterReadbacks.front().source;
+			counters.authoritative = false;
+			counters.unavailableReason.clear();
+			for (const VirtualGeometryCounterReadbackRecord& readback : state.gpuCounterReadbacks)
+			{
+				counters.authoritative = counters.authoritative || readback.source == VirtualGeometryCounterSource::GPUReadback;
+				counters.readbackFrameId = std::max(counters.readbackFrameId, readback.frameId);
+				counters.readbackLatencyFrames = std::max(counters.readbackLatencyFrames, readback.latencyFrames);
+				counters.sourceMeshlets += readback.selectedMeshlets;
+				counters.selectedMeshlets += readback.selectedMeshlets;
+				counters.dispatchedMeshlets += readback.dispatchedMeshlets;
+				counters.culledMeshlets += readback.culledMeshlets;
+				counters.culledByHiZ += readback.culledByHiZ;
+				counters.fallbackSubstitutions += readback.failOpenPackets;
+				if (!readback.unavailableReason.empty() && counters.unavailableReason.empty())
+				{
+					counters.unavailableReason = readback.unavailableReason;
+				}
+			}
+			if (counters.source != VirtualGeometryCounterSource::GPUReadback && counters.unavailableReason.empty())
+			{
+				counters.unavailableReason = "GPU virtual geometry counter readback is not authoritative for this frame";
+			}
+		}
+		else if (!state.clusterPackets.empty())
 		{
 			for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
 			{
@@ -911,6 +1154,13 @@ namespace TerraEngine::Renderer {
 		visibility.selectedClusters = state.selectedClusters;
 		visibility.clusterPackets = state.clusterPackets;
 		visibility.clusterBatches = state.clusterBatches;
+		visibility.gpuPacketRecords = state.gpuPacketRecords;
+		visibility.gpuBatchDescriptors = state.gpuBatchDescriptors;
+		visibility.gpuPacketFrameSets = state.gpuPacketFrameSets;
+		visibility.gpuCompactionDispatches = state.gpuCompactionDispatches;
+		visibility.generatedSubmissions = state.generatedSubmissions;
+		visibility.gpuCounterReadbacks = state.gpuCounterReadbacks;
+		visibility.gpuFallbackRecords = state.gpuFallbackRecords;
 		visibility.compactionResults = state.compactionResults;
 		visibility.pageNeeds = state.pageNeeds;
 		visibility.pageResidency = state.pageResidency;
@@ -1038,6 +1288,83 @@ namespace TerraEngine::Renderer {
 				viewDiagnostics.culledByCone += compaction.rejectedByCone;
 				viewDiagnostics.culledByResidency += compaction.rejectedByResidency;
 				viewDiagnostics.submittedBatchCount = std::max(viewDiagnostics.submittedBatchCount, compaction.submittedBatches);
+			}
+			viewDiagnostics.gpuPacketRecordCount = static_cast<std::uint32_t>(state.gpuPacketRecords.size());
+			viewDiagnostics.gpuBatchDescriptorCount = static_cast<std::uint32_t>(state.gpuBatchDescriptors.size());
+			viewDiagnostics.gpuPacketFrameSetCount = static_cast<std::uint32_t>(state.gpuPacketFrameSets.size());
+			viewDiagnostics.gpuCompactionDispatchCount = static_cast<std::uint32_t>(state.gpuCompactionDispatches.size());
+			viewDiagnostics.generatedSubmissionCount = static_cast<std::uint32_t>(state.generatedSubmissions.size());
+			viewDiagnostics.gpuCounterReadbackCount = static_cast<std::uint32_t>(state.gpuCounterReadbacks.size());
+			viewDiagnostics.gpuFallbackRecordCount = static_cast<std::uint32_t>(state.gpuFallbackRecords.size());
+			for (const GpuVirtualGeometryPacketFrameSet& frameSet : state.gpuPacketFrameSets)
+			{
+				switch (frameSet.validity)
+				{
+				case VirtualGeometryGpuFrameSetValidity::Valid:
+					++viewDiagnostics.gpuValidFrameSetCount;
+					break;
+				case VirtualGeometryGpuFrameSetValidity::Delayed:
+					++viewDiagnostics.gpuDelayedFrameSetCount;
+					break;
+				case VirtualGeometryGpuFrameSetValidity::Invalid:
+				case VirtualGeometryGpuFrameSetValidity::Unsupported:
+					++viewDiagnostics.gpuInvalidFrameSetCount;
+					break;
+				case VirtualGeometryGpuFrameSetValidity::FailOpen:
+					++viewDiagnostics.gpuFailOpenFrameSetCount;
+					break;
+				}
+				if (!frameSet.fallbackReason.empty() && viewDiagnostics.gpuFallbackReason.empty())
+				{
+					viewDiagnostics.gpuFallbackReason = frameSet.fallbackReason;
+				}
+			}
+			for (const GeneratedVirtualGeometrySubmissionRecord& submission : state.generatedSubmissions)
+			{
+				switch (submission.validationState)
+				{
+				case VirtualGeometryGeneratedSubmissionValidationState::Valid:
+					++viewDiagnostics.validGeneratedSubmissionCount;
+					break;
+				case VirtualGeometryGeneratedSubmissionValidationState::Delayed:
+				case VirtualGeometryGeneratedSubmissionValidationState::Mismatch:
+				case VirtualGeometryGeneratedSubmissionValidationState::Overflow:
+				case VirtualGeometryGeneratedSubmissionValidationState::Unsupported:
+					++viewDiagnostics.invalidGeneratedSubmissionCount;
+					break;
+				case VirtualGeometryGeneratedSubmissionValidationState::FailOpen:
+					++viewDiagnostics.fallbackGeneratedSubmissionCount;
+					break;
+				}
+				if (!submission.fallbackReason.empty() && viewDiagnostics.gpuFallbackReason.empty())
+				{
+					viewDiagnostics.gpuFallbackReason = submission.fallbackReason;
+				}
+			}
+			for (const VirtualGeometryCounterReadbackRecord& readback : state.gpuCounterReadbacks)
+			{
+				viewDiagnostics.gpuCounterReadbackLatencyFrames = std::max(viewDiagnostics.gpuCounterReadbackLatencyFrames, readback.latencyFrames);
+				if (!readback.unavailableReason.empty() && viewDiagnostics.counterUnavailableReason.empty())
+				{
+					viewDiagnostics.counterUnavailableReason = readback.unavailableReason;
+				}
+			}
+			for (const VirtualGeometryGpuFallbackRecord& fallback : state.gpuFallbackRecords)
+			{
+				viewDiagnostics.gpuFallbackAffectedPackets += fallback.affectedPackets;
+				viewDiagnostics.gpuFallbackAffectedBatches += fallback.affectedBatches;
+				if (!fallback.reason.empty() && viewDiagnostics.gpuFallbackReason.empty())
+				{
+					viewDiagnostics.gpuFallbackReason = fallback.reason;
+				}
+				if (!fallback.diagnostic.empty())
+				{
+					viewDiagnostics.warnings.push_back(fallback.diagnostic);
+				}
+			}
+			if (!viewDiagnostics.gpuFallbackReason.empty())
+			{
+				viewDiagnostics.warnings.push_back("Virtual geometry GPU packet path used fallback: " + viewDiagnostics.gpuFallbackReason);
 			}
 			if (!state.pageResidency.empty())
 			{

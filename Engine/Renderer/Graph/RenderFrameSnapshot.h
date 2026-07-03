@@ -139,6 +139,13 @@ namespace TerraEngine::Renderer {
 		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
 		std::vector<VirtualGeometryClusterPacket> clusterPackets;
 		std::vector<ClusterWorkBatch> clusterBatches;
+		std::vector<GpuVirtualGeometryPacketRecord> gpuPacketRecords;
+		std::vector<GpuVirtualGeometryBatchDescriptor> gpuBatchDescriptors;
+		std::vector<GpuVirtualGeometryPacketFrameSet> gpuPacketFrameSets;
+		std::vector<GpuPacketCompactionDispatch> gpuCompactionDispatches;
+		std::vector<GeneratedVirtualGeometrySubmissionRecord> generatedSubmissions;
+		std::vector<VirtualGeometryCounterReadbackRecord> gpuCounterReadbacks;
+		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
 		std::vector<PageResidencyRecord> pageResidency;
@@ -168,6 +175,13 @@ namespace TerraEngine::Renderer {
 		std::vector<VirtualGeometrySelectedClusterRecord> selectedClusters;
 		std::vector<VirtualGeometryClusterPacket> clusterPackets;
 		std::vector<ClusterWorkBatch> clusterBatches;
+		std::vector<GpuVirtualGeometryPacketRecord> gpuPacketRecords;
+		std::vector<GpuVirtualGeometryBatchDescriptor> gpuBatchDescriptors;
+		std::vector<GpuVirtualGeometryPacketFrameSet> gpuPacketFrameSets;
+		std::vector<GpuPacketCompactionDispatch> gpuCompactionDispatches;
+		std::vector<GeneratedVirtualGeometrySubmissionRecord> generatedSubmissions;
+		std::vector<VirtualGeometryCounterReadbackRecord> gpuCounterReadbacks;
+		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
 		std::vector<PageResidencyRecord> pageResidency;

@@ -109,6 +109,8 @@ struct PushConstants
 	uint selectedVirtualClusterCount;
 	uint selectedVirtualPageNeedOffset;
 	uint selectedVirtualPageNeedCount;
+	uint virtualGeometryPacketBufferIndex;
+	uint virtualGeometryBatchBufferIndex;
 	float4 editorTint;
 };
 

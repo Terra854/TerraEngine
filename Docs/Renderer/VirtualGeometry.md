@@ -120,6 +120,14 @@ exists, camera motion, target ownership, quality metadata, and guard metadata
 remain diagnostic-only. There are no user-facing or shader-facing Hi-Z quality
 tier controls in this milestone.
 
+GPU packet buffers, packet compaction, and generated submission records carry
+the current view's Hi-Z state as ownership and diagnostics metadata only. They
+do not select a lower, medium, high, or debug Hi-Z path, and they do not change
+the task shader's current-pyramid rejection test. If generated packet work is
+stale, unsupported, or mismatched, TerraEngine keeps the accepted fail-open
+coverage path and reports the fallback reason instead of publishing a
+new occlusion policy.
+
 ```powershell
 ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
 ```
@@ -128,6 +136,70 @@ Implementation must complete and test one phase or user story before the next
 one starts. Final acceptance still requires the broader virtual geometry
 regression pass, affected target build, and install target so the installed
 editor/runtime tree contains matching shaders, binaries, docs, and metadata.
+
+## GPU Packet Compaction Roadmap
+
+Feature `specs/031-vg-gpu-compaction` takes the packet and batching foundation
+from feature `030` and moves the hot submission path toward GPU-consumed packet
+buffers and GPU-generated compacted submission records. The current
+CPU-selected cluster cut remains the correctness oracle while this migration is
+validated. This keeps coverage, LOD selection, material ownership, residency
+fallbacks, and debug visualizer identity diagnosable while reducing CPU command
+pressure.
+
+The implementation order is:
+
+1. Register explicit scheduler resources for per-view GPU packet frame sets,
+   compaction dispatches, generated submission records, and counter readbacks.
+2. Convert existing selected cluster packets and compatible cluster batches into
+   GPU-visible packet and batch buffers owned by one view and one frame.
+3. Validate GPU packet buffers against the CPU-selected cluster cut before they
+   can become the shader-visible submission source.
+4. Compact candidate packets on the GPU into visible, rejected, fallback, and
+   fail-open work while preserving page-need and fallback coverage metadata.
+5. Generate submission records from compacted packets and use them only when
+   frame ownership, view ownership, layout, capacity, and counter checks pass.
+6. Preserve the current task-shader Hi-Z behavior exactly. This milestone does
+   not add quality tiers, new user controls, or a retuned rejection policy.
+7. Publish per-view diagnostics, automation, MCP, overlay, and profiler
+   snapshots with `Prepared`, `GPU Readback`, `Delayed GPU Readback`,
+   `Unsupported`, or `Unavailable` source labels instead of placeholder zeroes.
+8. Gate dense batch ratio, CPU preparation cost, compaction truth, generated
+   submission validity, multi-view isolation, and Hi-Z baseline preservation.
+
+Uncertain generated work fails open to the current correct path. Fallback is
+not silent: diagnostics must name unsupported backends, invalid layouts, stale
+views, counter mismatches, compaction overflow, readback unavailability, or
+validation fallback. Scene View, Game View, runtime views, and future offscreen
+views own separate packet buffers and counter records so camera, target size,
+debug mode, and Hi-Z state cannot leak across views.
+
+The generated path publishes three diagnostic layers:
+
+- GPU packet records and batch descriptors describe the selected cluster cut in
+  a shader-readable table, including view ownership and material compatibility.
+- Compaction dispatch records describe candidate, compacted, rejected,
+  fail-open, and fallback packet work before final submission.
+- Generated submission records describe the packet ranges that may drive
+  mesh-shader submission after frame id, view id, packet capacity, batch
+  compatibility, and counter sanity all validate.
+
+If any layer is unsupported, stale, delayed, or mismatched, TerraEngine keeps
+the conservative visible fallback path and records the reason. The renderer also
+publishes compact stats for performance gates: total gates, failed gates,
+unsupported gates, and the first failed gate label. Detailed diagnostics and
+automation responses include each gate's fixture id, view type, view id,
+metric, threshold, actual value, source, status, and diagnostic text.
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
+```
+
+Implementation must complete and test one phase or user story before the next
+one starts. Final acceptance also requires the broader virtual geometry
+regression pass, affected target build, and install target so the installed
+editor/runtime tree contains matching shader assets, binaries, docs, and
+diagnostics.
 
 ## Asset Rebuild Expectations
 
@@ -268,7 +340,9 @@ section-aware import metadata:
 The first renderer path is intentionally mesh-shader-only. A cooked virtual mesh
 is still submitted through the existing task and mesh shaders; render
 preparation selects a non-overlapping sparse cluster cut per visible object and
-expands it into one mesh-shader draw range per selected cluster.
+publishes that cut as cluster packets. Valid GPU packet and generated
+submission records can drive the submitted mesh-shader work; invalid or
+unsupported generated records fail open to the older visible draw-range path.
 
 - All imported mesh assets are treated as virtual geometry candidates. Render
   preparation still fails open to the best resident fallback detail when a mesh
@@ -684,6 +758,18 @@ Current CPU-side counters mean:
   pressure buckets used by resource tooling.
 - `estimatedGeometryBytes`: metadata plus page byte estimates for the view.
 - `budgetPressureBytes`: estimated bytes above the configured geometry budget.
+- `gpuPacketRecordCount` and `gpuBatchDescriptorCount`: shader-readable packet
+  and compatible-batch records produced for the view.
+- `gpuCompactionDispatchCount`: planned compaction dispatch records for packet
+  frame sets.
+- `generatedSubmissionCount`, `validGeneratedSubmissionCount`, and
+  `invalidGeneratedSubmissionCount`: generated submission records and their
+  validation status.
+- `gpuFallbackRecordCount` and `gpuFallbackReason`: fail-open records explaining
+  why generated work was not trusted.
+- `virtualGeometryPerformanceGates`: pass/fail/unsupported gate records for
+  dense batching, CPU prep cost, compaction truth, generated submission
+  validity, Hi-Z baseline preservation, and source availability.
 
 Every counter snapshot carries a source label:
 
@@ -774,10 +860,12 @@ environment:
 cmd.exe /s /c '"C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target TerraEngine TerraEngine-Editor TerraEngineMeshCompiler TerraEngineModelPackageCompiler TerraEngineShaderCompiler TerraEngine-EngineTests TerraEngine-EditorTests'
 ```
 
-Run the focused feature-030 virtual geometry CTest entries:
+Run the focused virtual geometry CTest entries for the GPU packet and
+compaction path:
 
 ```powershell
-ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryShadow|Engine.VirtualGeometryCulling|Engine.VirtualGeometryRenderer|Engine.VirtualGeometryResource|Editor.VirtualGeometryAssetPipeline|Editor.VirtualGeometryAutomation|Editor.VirtualGeometryExport|Editor.VirtualGeometryDiagnostics" --output-on-failure -C Debug
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
+ctest --test-dir out/build/Debug -R "Editor.VirtualGeometryDiagnostics|Editor.VirtualGeometryAutomation|Editor.Automation|Editor.Renderer" --output-on-failure -C Debug
 ```
 
 Then run the broader renderer and virtual geometry regression pass:

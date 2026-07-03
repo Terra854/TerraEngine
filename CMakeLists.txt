@@ -1070,14 +1070,17 @@ set(out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders\")
 set(editor_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Editor\")
 set(lighting_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Lighting\")
 set(postprocess_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/PostProcess\")
+set(virtualgeometry_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/VirtualGeometry\")
 set(ui_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/UI\")
 set(sky_out_dir \"\${SHADER_INSTALL_ROOT}/Editor/Shaders/Sky\")
 set(lighting_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/Lighting\")
 set(postprocess_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/PostProcess\")
+set(virtualgeometry_src_dir \"${CMAKE_SOURCE_DIR}/Engine/Shaders/VirtualGeometry\")
 file(MAKE_DIRECTORY \"\${out_dir}\")
 file(MAKE_DIRECTORY \"\${editor_out_dir}\")
 file(MAKE_DIRECTORY \"\${lighting_out_dir}\")
 file(MAKE_DIRECTORY \"\${postprocess_out_dir}\")
+file(MAKE_DIRECTORY \"\${virtualgeometry_out_dir}\")
 file(MAKE_DIRECTORY \"\${ui_out_dir}\")
 file(MAKE_DIRECTORY \"\${sky_out_dir}\")
 file(REMOVE
@@ -1094,6 +1097,7 @@ file(REMOVE
 	\"\${postprocess_out_dir}/VRSGenerate.comp.tspf\"
 	\"\${postprocess_out_dir}/GTAO.comp.spv\"
 	\"\${postprocess_out_dir}/GTAOBlur.comp.spv\"
+	\"\${virtualgeometry_out_dir}/VirtualGeometryPacketCompaction.comp.spv\"
 	\"\${ui_out_dir}/UI_Static.vert.spv\"
 	\"\${ui_out_dir}/UI_Static.frag.spv\"
 	\"\${ui_out_dir}/UI_Instanced.vert.spv\"
@@ -1223,6 +1227,15 @@ execute_process(
 # Configure-time guard: select platform or option behavior before generating build files.
 if(NOT compile_gtao_blur EQUAL 0)
     message(FATAL_ERROR \"Failed to compile GTAOBlur.comp.hlsl during install\")
+endif()
+
+execute_process(
+    COMMAND \"\${DXC_PATH}\" -T cs_6_0 -E main -Fo \"\${virtualgeometry_out_dir}/VirtualGeometryPacketCompaction.comp.spv\" -spirv \"\${virtualgeometry_src_dir}/VirtualGeometryPacketCompaction.comp.hlsl\"
+    RESULT_VARIABLE compile_vg_packet_compaction
+)
+# Configure-time guard: select platform or option behavior before generating build files.
+if(NOT compile_vg_packet_compaction EQUAL 0)
+    message(FATAL_ERROR \"Failed to compile VirtualGeometryPacketCompaction.comp.hlsl during install\")
 endif()
 
 execute_process(

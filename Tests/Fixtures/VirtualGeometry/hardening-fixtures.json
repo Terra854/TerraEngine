@@ -3,6 +3,7 @@
 	"feature": "029-virtual-geometry-hardening",
 	"description": "Clean-checkout virtual geometry hardening and scaling fixture manifest. Entries use deterministic generated data or small committed fixtures; large meshes stay optional manual stress coverage.",
 	"scalingFeature": "030-vg-gpu-driven-batching",
+	"gpuCompactionFeature": "031-vg-gpu-compaction",
 	"packageFormats": [
 		"gltf",
 		"glb",
@@ -235,6 +236,65 @@
 				"maxDispatchedToSelectedRatio": 1.0,
 				"maxFalseOcclusionRiskWarnings": 0,
 				"minCompactedPacketRatio": 0.5
+			}
+		},
+		{
+			"id": "gpu-packet-buffer-batching",
+			"category": "gpu-packet-buffer",
+			"fixtureRecipe": "Procedural dense virtual geometry mesh whose CPU-selected cluster cut is uploaded as per-view GPU packet and batch buffers.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"gpu-packet-buffer",
+				"bounded-batches",
+				"cpu-oracle-selection"
+			],
+			"expectedDiagnostics": [
+				"GpuPacketBuffersPublished",
+				"CpuClusterCutPreserved",
+				"SubmittedBatchesWithinTenPercent"
+			],
+			"expectedRenderOutcomes": [
+				"coverage-matches-correctness-reference",
+				"material-identity-preserved"
+			],
+			"thresholds": {
+				"minimumSelectedPackets": 500,
+				"maxSubmittedBatchRatio": 0.1,
+				"maxGpuBatchDescriptorRatio": 0.1,
+				"maxFalseOcclusionRiskWarnings": 0
+			}
+		},
+		{
+			"id": "gpu-packet-compaction-generated-submit",
+			"category": "gpu-compaction",
+			"fixtureRecipe": "Candidate packet table with visible, frustum-rejected, fallback, fail-open, overflow, and generated-submission validation paths.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"gpu-compaction",
+				"generated-submission",
+				"counter-readback",
+				"gpu-fail-open"
+			],
+			"expectedDiagnostics": [
+				"CandidatePackets",
+				"CompactedPackets",
+				"GeneratedSubmissions",
+				"SourceLabeledCounterReadback",
+				"ConservativeFallbackReason"
+			],
+			"expectedRenderOutcomes": [
+				"visible-packets-submitted",
+				"invalid-generated-work-fails-open",
+				"hiz-baseline-preserved"
+			],
+			"thresholds": {
+				"maxCounterTruthErrorPercent": 1.0,
+				"maxCounterTruthErrorPackets": 1,
+				"maxCompactionOverflowPackets": 0,
+				"maxInvalidGeneratedSubmissions": 0,
+				"maxFalseOcclusionRiskWarnings": 0
 			}
 		},
 		{

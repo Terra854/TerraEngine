@@ -67,8 +67,18 @@ namespace TerraEngine::Renderer::Vulkan {
 		std::size_t virtualGeometryClusterPacketCount = 0u;
 		std::size_t virtualGeometryBatchCount = 0u;
 		std::size_t virtualGeometryCompactionResultCount = 0u;
+		std::size_t virtualGeometryGpuPacketRecordCount = 0u;
+		std::size_t virtualGeometryGpuBatchDescriptorCount = 0u;
+		std::size_t virtualGeometryGpuPacketFrameSetCount = 0u;
+		std::size_t virtualGeometryGpuCompactionDispatchCount = 0u;
+		std::size_t virtualGeometryGeneratedSubmissionCount = 0u;
+		std::size_t virtualGeometryCounterReadbackCount = 0u;
 		std::uint64_t virtualGeometryBatchPacketSignature = 0u;
 		bool gpuDrivenEligible = false;
+		bool gpuPacketBuffersEligible = false;
+		bool gpuCompactionEligible = false;
+		bool generatedSubmissionEligible = false;
+		bool counterReadbackEligible = false;
 	};
 
 	struct ShadowRecordingPreparationPlan

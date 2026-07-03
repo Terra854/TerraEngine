@@ -103,6 +103,13 @@ namespace
 		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
 		std::vector<VirtualGeometryClusterPacket> clusterPackets;
 		std::vector<ClusterWorkBatch> clusterBatches;
+		std::vector<GpuVirtualGeometryPacketRecord> gpuPacketRecords;
+		std::vector<GpuVirtualGeometryBatchDescriptor> gpuBatchDescriptors;
+		std::vector<GpuVirtualGeometryPacketFrameSet> gpuPacketFrameSets;
+		std::vector<GpuPacketCompactionDispatch> gpuCompactionDispatches;
+		std::vector<GeneratedVirtualGeometrySubmissionRecord> generatedSubmissions;
+		std::vector<VirtualGeometryCounterReadbackRecord> gpuCounterReadbacks;
+		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<FallbackCoverageChain> fallbackCoverage;
 		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
@@ -137,6 +144,13 @@ namespace
 		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
 		std::vector<VirtualGeometryClusterPacket> clusterPackets;
 		std::vector<ClusterWorkBatch> clusterBatches;
+		std::vector<GpuVirtualGeometryPacketRecord> gpuPacketRecords;
+		std::vector<GpuVirtualGeometryBatchDescriptor> gpuBatchDescriptors;
+		std::vector<GpuVirtualGeometryPacketFrameSet> gpuPacketFrameSets;
+		std::vector<GpuPacketCompactionDispatch> gpuCompactionDispatches;
+		std::vector<GeneratedVirtualGeometrySubmissionRecord> generatedSubmissions;
+		std::vector<VirtualGeometryCounterReadbackRecord> gpuCounterReadbacks;
+		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<FallbackCoverageChain> fallbackCoverage;
 		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
@@ -153,6 +167,13 @@ namespace
 		std::vector<TerraEngine::Renderer::VirtualGeometryPageNeedRecord> pageNeeds;
 		std::vector<VirtualGeometryClusterPacket> clusterPackets;
 		std::vector<ClusterWorkBatch> clusterBatches;
+		std::vector<GpuVirtualGeometryPacketRecord> gpuPacketRecords;
+		std::vector<GpuVirtualGeometryBatchDescriptor> gpuBatchDescriptors;
+		std::vector<GpuVirtualGeometryPacketFrameSet> gpuPacketFrameSets;
+		std::vector<GpuPacketCompactionDispatch> gpuCompactionDispatches;
+		std::vector<GeneratedVirtualGeometrySubmissionRecord> generatedSubmissions;
+		std::vector<VirtualGeometryCounterReadbackRecord> gpuCounterReadbacks;
+		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<FallbackCoverageChain> fallbackCoverage;
 		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
@@ -1319,6 +1340,427 @@ std::vector<ClusterWorkBatch> RenderSystem::BuildVirtualGeometryClusterBatches(
 	return batches;
 }
 
+std::vector<GpuVirtualGeometryPacketRecord> RenderSystem::BuildGpuVirtualGeometryPacketRecords(
+	const std::vector<VirtualGeometryClusterPacket>& packets,
+	std::uint64_t frameId,
+	VirtualGeometryDebugVisualizationMode debugMode,
+	std::uint32_t packetIdBase)
+{
+	std::vector<GpuVirtualGeometryPacketRecord> records;
+	records.reserve(packets.size());
+	for (const VirtualGeometryClusterPacket& packet : packets)
+	{
+		GpuVirtualGeometryPacketRecord record;
+		record.packetId = packetIdBase + static_cast<std::uint32_t>(records.size());
+		record.viewId = packet.viewId;
+		record.viewType = packet.viewType;
+		record.frameId = frameId;
+		record.objectId = packet.objectId;
+		record.meshId = packet.meshId;
+		record.materialId = packet.materialId;
+		record.selectedLod = packet.selectedLod;
+		record.clusterId = packet.clusterId;
+		record.meshletOffset = packet.meshletOffset;
+		record.meshletCount = packet.meshletCount;
+		record.boundsMin = packet.boundsMin;
+		record.boundsMax = packet.boundsMax;
+		record.projectedBounds = packet.projectedBounds;
+		record.pageId = packet.pageId;
+		record.fallbackPageId = packet.fallbackPageId;
+		record.debugIdentity = packet.debugIdentity;
+		// Bit 0 marks fail-open coverage; higher bits mirror the active debug
+		// mode so generated submissions can reject stale visualizer ownership.
+		record.flags = (packet.fallbackPacket ? 1u : 0u)
+			| (static_cast<std::uint32_t>(NormalizeVirtualGeometryDebugVisualizationMode(debugMode)) << 8u);
+		records.push_back(record);
+	}
+	return records;
+}
+
+std::vector<GpuVirtualGeometryBatchDescriptor> RenderSystem::BuildGpuVirtualGeometryBatchDescriptors(
+	const std::vector<GpuVirtualGeometryPacketRecord>& packets,
+	std::uint64_t frameId,
+	VirtualGeometryDebugVisualizationMode debugMode,
+	std::uint32_t batchIdBase)
+{
+	std::vector<GpuVirtualGeometryBatchDescriptor> batches;
+	if (packets.empty())
+	{
+		return batches;
+	}
+
+	auto canMergePacket = [](const GpuVirtualGeometryPacketRecord& previous, const GpuVirtualGeometryPacketRecord& next) {
+		return previous.viewId == next.viewId
+			&& previous.viewType == next.viewType
+			&& previous.meshId == next.meshId
+			&& previous.materialId == next.materialId
+			&& previous.selectedLod == next.selectedLod
+			&& previous.pageId == next.pageId
+			&& previous.fallbackPageId == next.fallbackPageId
+			&& previous.flags == next.flags
+			&& previous.packetId + 1u == next.packetId
+			&& previous.meshletOffset + previous.meshletCount == next.meshletOffset;
+	};
+
+	auto startBatch = [&](std::size_t packetIndex) {
+		const GpuVirtualGeometryPacketRecord& packet = packets[packetIndex];
+		GpuVirtualGeometryBatchDescriptor batch;
+		batch.batchId = batchIdBase + static_cast<std::uint32_t>(batches.size());
+		batch.viewId = packet.viewId;
+		batch.viewType = packet.viewType;
+		batch.frameId = frameId;
+		batch.packetOffset = static_cast<std::uint32_t>(packetIndex);
+		batch.packetCount = 1u;
+		batch.meshId = packet.meshId;
+		batch.materialId = packet.materialId;
+		batch.selectedMeshlets = packet.meshletCount;
+		batch.submittedMeshlets = packet.meshletCount;
+		batch.debugMode = NormalizeVirtualGeometryDebugVisualizationMode(debugMode);
+		batch.flags = packet.flags;
+		return batch;
+	};
+
+	batches.push_back(startBatch(0u));
+	for (std::size_t packetIndex = 1u; packetIndex < packets.size(); ++packetIndex)
+	{
+		GpuVirtualGeometryBatchDescriptor& currentBatch = batches.back();
+		if (canMergePacket(packets[packetIndex - 1u], packets[packetIndex]))
+		{
+			++currentBatch.packetCount;
+			currentBatch.selectedMeshlets += packets[packetIndex].meshletCount;
+			currentBatch.submittedMeshlets += packets[packetIndex].meshletCount;
+			continue;
+		}
+		batches.push_back(startBatch(packetIndex));
+	}
+
+	for (GpuVirtualGeometryBatchDescriptor& batch : batches)
+	{
+		if (batch.packetCount == 1u)
+		{
+			batch.fallbackMode = VirtualGeometryBatchFallbackMode::LegacyClusterDraw;
+		}
+	}
+	return batches;
+}
+
+GpuVirtualGeometryPacketFrameSet RenderSystem::BuildGpuVirtualGeometryPacketFrameSet(
+	RenderViewType viewType,
+	std::uint32_t viewId,
+	std::uint64_t frameId,
+	const glm::uvec2& targetSize,
+	VirtualGeometryDebugVisualizationMode debugMode,
+	std::uint32_t packetOffset,
+	std::uint32_t packetCount,
+	std::uint32_t batchOffset,
+	std::uint32_t batchCount)
+{
+	GpuVirtualGeometryPacketFrameSet frameSet;
+	frameSet.viewType = viewType;
+	frameSet.viewId = viewId;
+	frameSet.frameId = frameId;
+	frameSet.targetSize = targetSize;
+	frameSet.debugMode = NormalizeVirtualGeometryDebugVisualizationMode(debugMode);
+	frameSet.packetOffset = packetOffset;
+	frameSet.packetCount = packetCount;
+	frameSet.batchOffset = batchOffset;
+	frameSet.batchCount = batchCount;
+	frameSet.compactedPacketOffset = packetOffset;
+	frameSet.compactedPacketCount = packetCount;
+	frameSet.generatedSubmissionOffset = batchOffset;
+	frameSet.generatedSubmissionCount = batchCount;
+	frameSet.validity = packetCount == 0u
+		? VirtualGeometryGpuFrameSetValidity::Delayed
+		: VirtualGeometryGpuFrameSetValidity::Valid;
+	frameSet.fallbackReason = packetCount == 0u ? "No virtual geometry packets were available for this view." : std::string();
+	return frameSet;
+}
+
+bool RenderSystem::ValidateGpuVirtualGeometryPacketRecords(
+	const std::vector<VirtualGeometryClusterPacket>& cpuPackets,
+	const std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord>& selectedClusters,
+	const std::vector<GpuVirtualGeometryPacketRecord>& gpuPackets,
+	std::uint64_t frameId,
+	VirtualGeometryDebugVisualizationMode debugMode,
+	std::string* outReason)
+{
+	auto reject = [outReason](std::string reason) {
+		if (outReason != nullptr)
+		{
+			*outReason = std::move(reason);
+		}
+		return false;
+	};
+
+	if (cpuPackets.size() != gpuPackets.size())
+	{
+		return reject("GPU packet mirror count does not match the CPU-selected cluster packet count.");
+	}
+	const std::uint32_t expectedDebugBits =
+		static_cast<std::uint32_t>(NormalizeVirtualGeometryDebugVisualizationMode(debugMode)) << 8u;
+	for (std::size_t index = 0u; index < cpuPackets.size(); ++index)
+	{
+		const VirtualGeometryClusterPacket& cpu = cpuPackets[index];
+		const GpuVirtualGeometryPacketRecord& gpu = gpuPackets[index];
+		if (gpu.frameId != frameId)
+		{
+			return reject("GPU packet frame ownership does not match the frame being published.");
+		}
+		if (gpu.viewId != cpu.viewId || gpu.viewType != cpu.viewType)
+		{
+			return reject("GPU packet view ownership does not match the CPU cluster packet.");
+		}
+		if (gpu.objectId != cpu.objectId || gpu.meshId != cpu.meshId || gpu.materialId != cpu.materialId)
+		{
+			return reject("GPU packet object, mesh, or material ownership does not match the CPU packet.");
+		}
+		if (gpu.selectedLod != cpu.selectedLod || gpu.clusterId != cpu.clusterId)
+		{
+			return reject("GPU packet selected LOD or cluster identity does not match the CPU packet.");
+		}
+		if (gpu.meshletOffset != cpu.meshletOffset || gpu.meshletCount != cpu.meshletCount)
+		{
+			return reject("GPU packet meshlet range does not match the CPU packet range.");
+		}
+		if (gpu.pageId != cpu.pageId || gpu.fallbackPageId != cpu.fallbackPageId)
+		{
+			return reject("GPU packet page or fallback-page identity does not match the CPU packet.");
+		}
+		const bool expectedFallback = cpu.fallbackPacket;
+		const bool gpuFallback = (gpu.flags & 1u) != 0u;
+		if (gpuFallback != expectedFallback)
+		{
+			return reject("GPU packet fallback flag does not match the CPU packet fallback state.");
+		}
+		if ((gpu.flags & (kVirtualGeometryDebugModeMask << kVirtualGeometryDebugModeShift)) != expectedDebugBits)
+		{
+			return reject("GPU packet debug-mode ownership is stale for the current view.");
+		}
+		if (!selectedClusters.empty())
+		{
+			const auto selectedIt = std::find_if(
+				selectedClusters.begin(),
+				selectedClusters.end(),
+				[&cpu](const TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord& selected) {
+					return selected.objectId == cpu.objectId
+						&& selected.meshId == cpu.meshId
+						&& selected.clusterId == cpu.clusterId;
+				});
+			if (selectedIt == selectedClusters.end())
+			{
+				return reject("GPU packet does not preserve the CPU-selected cluster cut identity.");
+			}
+			if (selectedIt->lodIndex != cpu.selectedLod || selectedIt->pageId != cpu.pageId)
+			{
+				return reject("GPU packet does not preserve selected cluster LOD or page ownership.");
+			}
+			if (selectedIt->usingFallback != expectedFallback)
+			{
+				return reject("GPU packet fallback state does not match selected cluster fallback coverage.");
+			}
+		}
+	}
+
+	if (outReason != nullptr)
+	{
+		outReason->clear();
+	}
+	return true;
+}
+
+std::vector<GpuPacketCompactionDispatch> RenderSystem::BuildGpuPacketCompactionDispatches(
+	const std::vector<GpuVirtualGeometryPacketFrameSet>& frameSets,
+	const VirtualGeometryHiZValidationState& hiZState,
+	VirtualGeometryDebugVisualizationMode debugMode,
+	std::uint32_t dispatchIdBase)
+{
+	std::vector<GpuPacketCompactionDispatch> dispatches;
+	dispatches.reserve(frameSets.size());
+	for (const GpuVirtualGeometryPacketFrameSet& frameSet : frameSets)
+	{
+		GpuPacketCompactionDispatch dispatch;
+		dispatch.dispatchId = dispatchIdBase + static_cast<std::uint32_t>(dispatches.size());
+		dispatch.viewId = frameSet.viewId;
+		dispatch.viewType = frameSet.viewType;
+		dispatch.frameId = frameSet.frameId;
+		dispatch.candidatePacketCount = frameSet.packetCount;
+		dispatch.candidateBatchCount = frameSet.batchCount;
+		dispatch.outputCapacity = frameSet.packetCount;
+		dispatch.hiZBaselineState = hiZState.state;
+		dispatch.debugMode = NormalizeVirtualGeometryDebugVisualizationMode(debugMode);
+		dispatch.failOpenOnInvalid = true;
+		if (frameSet.validity != VirtualGeometryGpuFrameSetValidity::Valid)
+		{
+			dispatch.fallbackReason = frameSet.fallbackReason.empty()
+				? "GPU packet frame set is not valid, so compaction must fail open to CPU-selected coverage."
+				: frameSet.fallbackReason;
+		}
+		dispatches.push_back(std::move(dispatch));
+	}
+	return dispatches;
+}
+
+std::vector<GeneratedVirtualGeometrySubmissionRecord> RenderSystem::BuildGeneratedVirtualGeometrySubmissionRecords(
+	const std::vector<GpuVirtualGeometryBatchDescriptor>& batches,
+	const std::vector<GpuVirtualGeometryPacketRecord>& packets,
+	std::uint64_t frameId,
+	std::uint32_t recordIdBase)
+{
+	std::vector<GeneratedVirtualGeometrySubmissionRecord> submissions;
+	submissions.reserve(batches.size());
+	for (const GpuVirtualGeometryBatchDescriptor& batch : batches)
+	{
+		GeneratedVirtualGeometrySubmissionRecord submission;
+		submission.recordId = recordIdBase + static_cast<std::uint32_t>(submissions.size());
+		submission.viewId = batch.viewId;
+		submission.viewType = batch.viewType;
+		submission.frameId = frameId;
+		submission.batchId = batch.batchId;
+		submission.packetOffset = batch.packetOffset;
+		submission.packetCount = batch.packetCount;
+		submission.indirectTaskCount = batch.submittedMeshlets == 0u ? 0u : std::max(1u, (batch.submittedMeshlets + 127u) / 128u);
+		submission.materialId = batch.materialId;
+		submission.meshId = batch.meshId;
+		submission.counterOffset = submission.recordId;
+		submission.source = VirtualGeometryCounterSource::Prepared;
+
+		const bool rangeValid = batch.packetCount > 0u
+			&& batch.packetOffset <= packets.size()
+			&& static_cast<std::size_t>(batch.packetOffset) + static_cast<std::size_t>(batch.packetCount) <= packets.size();
+		if (!rangeValid)
+		{
+			submission.validationState = VirtualGeometryGeneratedSubmissionValidationState::FailOpen;
+			submission.fallbackReason = "Generated submission batch references packets outside the compacted packet table.";
+		}
+		submissions.push_back(std::move(submission));
+	}
+	return submissions;
+}
+
+bool RenderSystem::ValidateGeneratedVirtualGeometrySubmissionRecords(
+	const std::vector<GeneratedVirtualGeometrySubmissionRecord>& submissions,
+	const std::vector<GpuVirtualGeometryBatchDescriptor>& batches,
+	std::uint64_t frameId,
+	RenderViewType viewType,
+	std::uint32_t viewId,
+	std::uint32_t packetCapacity,
+	std::string* outReason)
+{
+	auto reject = [outReason](std::string reason) {
+		if (outReason != nullptr)
+		{
+			*outReason = std::move(reason);
+		}
+		return false;
+	};
+
+	if (submissions.empty())
+	{
+		if (packetCapacity == 0u)
+		{
+			if (outReason != nullptr)
+			{
+				outReason->clear();
+			}
+			return true;
+		}
+		return reject("No generated submissions were available for non-empty packet work.");
+	}
+	if (submissions.size() > batches.size())
+	{
+		return reject("Generated submissions outnumber compatible batch descriptors.");
+	}
+
+	for (const GeneratedVirtualGeometrySubmissionRecord& submission : submissions)
+	{
+		if (submission.frameId != frameId || submission.viewType != viewType || submission.viewId != viewId)
+		{
+			return reject("Generated submission frame or view ownership is stale.");
+		}
+		if (submission.validationState != VirtualGeometryGeneratedSubmissionValidationState::Valid)
+		{
+			return reject(submission.fallbackReason.empty()
+				? "Generated submission was already marked invalid."
+				: submission.fallbackReason);
+		}
+		if (submission.packetCount == 0u || submission.indirectTaskCount == 0u)
+		{
+			return reject("Generated submission contains no packet or task work.");
+		}
+		if (submission.packetOffset > packetCapacity
+			|| submission.packetOffset + submission.packetCount > packetCapacity)
+		{
+			return reject("Generated submission packet range exceeds compacted packet capacity.");
+		}
+		const auto batchIt = std::find_if(
+			batches.begin(),
+			batches.end(),
+			[&submission](const GpuVirtualGeometryBatchDescriptor& batch) {
+				return batch.batchId == submission.batchId
+					&& batch.packetOffset == submission.packetOffset
+					&& batch.packetCount == submission.packetCount
+					&& batch.meshId == submission.meshId
+					&& batch.materialId == submission.materialId;
+			});
+		if (batchIt == batches.end())
+		{
+			return reject("Generated submission no longer matches a compatible GPU batch descriptor.");
+		}
+	}
+
+	if (outReason != nullptr)
+	{
+		outReason->clear();
+	}
+	return true;
+}
+
+VirtualGeometryCounterReadbackRecord RenderSystem::BuildVirtualGeometryCounterReadbackRecord(
+	const CompactedVisibilitySet& compaction,
+	std::uint64_t frameId,
+	VirtualGeometryCounterSource source,
+	std::uint32_t latencyFrames,
+	std::string unavailableReason)
+{
+	VirtualGeometryCounterReadbackRecord readback;
+	readback.viewId = compaction.viewId;
+	readback.viewType = compaction.viewType;
+	readback.frameId = frameId;
+	readback.source = source;
+	readback.latencyFrames = latencyFrames;
+	readback.candidatePackets = compaction.candidatePackets;
+	readback.compactedPackets = compaction.visiblePackets;
+	readback.submittedBatches = compaction.submittedBatches;
+	readback.rejectedPackets = compaction.rejectedByFrustum
+		+ compaction.rejectedByHiZ
+		+ compaction.rejectedByResidency
+		+ compaction.rejectedByCone;
+	readback.failOpenPackets = compaction.failOpenPackets;
+	readback.unavailableReason = std::move(unavailableReason);
+	return readback;
+}
+
+VirtualGeometryGpuFallbackRecord RenderSystem::BuildVirtualGeometryGpuFallbackRecord(
+	RenderViewType viewType,
+	std::uint32_t viewId,
+	std::uint64_t frameId,
+	std::string reason,
+	std::uint32_t affectedPackets,
+	std::uint32_t affectedBatches,
+	std::string diagnostic)
+{
+	VirtualGeometryGpuFallbackRecord fallback;
+	fallback.viewType = viewType;
+	fallback.viewId = viewId;
+	fallback.frameId = frameId;
+	fallback.reason = std::move(reason);
+	fallback.affectedPackets = affectedPackets;
+	fallback.affectedBatches = affectedBatches;
+	fallback.coveragePolicy = "FailOpenCoverage";
+	fallback.diagnostic = std::move(diagnostic);
+	return fallback;
+}
+
 bool RenderSystem::AreVirtualGeometryClustersConeCullingEligible(
 	const VirtualGeometryAssetRuntime& asset,
 	const std::vector<TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord>& selectedClusters,
@@ -2163,6 +2605,107 @@ void RenderSystem::Update(float deltaTime)
 			}
 			state.clusterBatches = BuildVirtualGeometryClusterBatches(state.clusterPackets);
 		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Packet Upload Planning", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			state.gpuPacketRecords = BuildGpuVirtualGeometryPacketRecords(
+				state.clusterPackets,
+				activeRenderFrameId,
+				state.debugVisualizationMode);
+			state.gpuBatchDescriptors = BuildGpuVirtualGeometryBatchDescriptors(
+				state.gpuPacketRecords,
+				activeRenderFrameId,
+				state.debugVisualizationMode);
+		}
+		std::string gpuPacketValidationReason;
+		const bool gpuPacketRecordsValid = ValidateGpuVirtualGeometryPacketRecords(
+			state.clusterPackets,
+			state.selectedClusters,
+			state.gpuPacketRecords,
+			activeRenderFrameId,
+			state.debugVisualizationMode,
+			&gpuPacketValidationReason);
+		if (!state.clusterPackets.empty() || !state.gpuBatchDescriptors.empty())
+		{
+			GpuVirtualGeometryPacketFrameSet frameSet = BuildGpuVirtualGeometryPacketFrameSet(
+				state.viewType,
+				state.outputId,
+				activeRenderFrameId,
+				state.targetSize,
+				state.debugVisualizationMode,
+				0u,
+				static_cast<std::uint32_t>(state.gpuPacketRecords.size()),
+				0u,
+				static_cast<std::uint32_t>(state.gpuBatchDescriptors.size()));
+			if (!gpuPacketRecordsValid)
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Fallback Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				frameSet.validity = VirtualGeometryGpuFrameSetValidity::FailOpen;
+				frameSet.packetCount = 0u;
+				frameSet.batchCount = 0u;
+				frameSet.compactedPacketCount = 0u;
+				frameSet.generatedSubmissionCount = 0u;
+				frameSet.fallbackReason = gpuPacketValidationReason;
+				state.gpuFallbackRecords.push_back(BuildVirtualGeometryGpuFallbackRecord(
+					state.viewType,
+					state.outputId,
+					activeRenderFrameId,
+					gpuPacketValidationReason,
+					static_cast<std::uint32_t>(state.gpuPacketRecords.size()),
+					static_cast<std::uint32_t>(state.gpuBatchDescriptors.size()),
+					"GPU packet records failed CPU-oracle validation; existing CPU-selected draw coverage remains authoritative."));
+				state.gpuPacketRecords.clear();
+				state.gpuBatchDescriptors.clear();
+			}
+			state.gpuPacketFrameSets.push_back(std::move(frameSet));
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Generated Submission Validation", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			state.generatedSubmissions = BuildGeneratedVirtualGeometrySubmissionRecords(
+				state.gpuBatchDescriptors,
+				state.gpuPacketRecords,
+				activeRenderFrameId);
+			std::string generatedSubmissionValidationReason;
+			if (!ValidateGeneratedVirtualGeometrySubmissionRecords(
+				state.generatedSubmissions,
+				state.gpuBatchDescriptors,
+				activeRenderFrameId,
+				state.viewType,
+				state.outputId,
+				static_cast<std::uint32_t>(state.gpuPacketRecords.size()),
+				&generatedSubmissionValidationReason))
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Fallback Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				state.gpuFallbackRecords.push_back(BuildVirtualGeometryGpuFallbackRecord(
+					state.viewType,
+					state.outputId,
+					activeRenderFrameId,
+					generatedSubmissionValidationReason,
+					static_cast<std::uint32_t>(state.gpuPacketRecords.size()),
+					static_cast<std::uint32_t>(state.gpuBatchDescriptors.size()),
+					"Generated virtual geometry submissions failed validation; CPU-expanded packet batches remain authoritative."));
+				for (GeneratedVirtualGeometrySubmissionRecord& submission : state.generatedSubmissions)
+				{
+					submission.validationState = VirtualGeometryGeneratedSubmissionValidationState::FailOpen;
+					submission.fallbackReason = generatedSubmissionValidationReason;
+				}
+			}
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Compaction Dispatch Planning", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			state.gpuCompactionDispatches = BuildGpuPacketCompactionDispatches(
+				state.gpuPacketFrameSets,
+				state.hiZValidationState,
+				state.debugVisualizationMode);
+			for (const CompactedVisibilitySet& compaction : state.compactionResults)
+			{
+				state.gpuCounterReadbacks.push_back(BuildVirtualGeometryCounterReadbackRecord(
+					compaction,
+					activeRenderFrameId,
+					VirtualGeometryCounterSource::Prepared,
+					0u,
+					"Prepared CPU compaction counters are available; GPU readback is populated after backend support is active."));
+			}
+		}
 		if (shadowPass || viewType == RenderViewType::Shadow)
 		{
 			ShadowVisibilitySelection shadowSelection{};
@@ -2445,6 +2988,107 @@ void RenderSystem::Update(float deltaTime)
 			packet.selectedClusters.insert(packet.selectedClusters.end(), selection.selectedClusters.begin(), selection.selectedClusters.end());
 			packet.pageNeeds.insert(packet.pageNeeds.end(), annotatedPageNeeds.begin(), annotatedPageNeeds.end());
 		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Packet Upload Planning", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			packet.gpuPacketRecords = BuildGpuVirtualGeometryPacketRecords(
+				packet.clusterPackets,
+				activeRenderFrameId,
+				viewVirtualGeometryQuality.debugVisualizationMode);
+			packet.gpuBatchDescriptors = BuildGpuVirtualGeometryBatchDescriptors(
+				packet.gpuPacketRecords,
+				activeRenderFrameId,
+				viewVirtualGeometryQuality.debugVisualizationMode);
+		}
+		std::string gpuPacketValidationReason;
+		const bool gpuPacketRecordsValid = ValidateGpuVirtualGeometryPacketRecords(
+			packet.clusterPackets,
+			packet.selectedClusters,
+			packet.gpuPacketRecords,
+			activeRenderFrameId,
+			viewVirtualGeometryQuality.debugVisualizationMode,
+			&gpuPacketValidationReason);
+		if (!packet.gpuPacketRecords.empty() || !packet.gpuBatchDescriptors.empty())
+		{
+			GpuVirtualGeometryPacketFrameSet frameSet = BuildGpuVirtualGeometryPacketFrameSet(
+				viewType,
+				outputId,
+				activeRenderFrameId,
+				targetSize,
+				viewVirtualGeometryQuality.debugVisualizationMode,
+				0u,
+				static_cast<std::uint32_t>(packet.gpuPacketRecords.size()),
+				0u,
+				static_cast<std::uint32_t>(packet.gpuBatchDescriptors.size()));
+			if (!gpuPacketRecordsValid)
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Fallback Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				frameSet.validity = VirtualGeometryGpuFrameSetValidity::FailOpen;
+				frameSet.packetCount = 0u;
+				frameSet.batchCount = 0u;
+				frameSet.compactedPacketCount = 0u;
+				frameSet.generatedSubmissionCount = 0u;
+				frameSet.fallbackReason = gpuPacketValidationReason;
+				packet.gpuPacketRecords.clear();
+				packet.gpuBatchDescriptors.clear();
+			}
+			packet.gpuPacketFrameSets.push_back(std::move(frameSet));
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Generated Submission Validation", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			packet.generatedSubmissions = BuildGeneratedVirtualGeometrySubmissionRecords(
+				packet.gpuBatchDescriptors,
+				packet.gpuPacketRecords,
+				activeRenderFrameId);
+			std::string generatedSubmissionValidationReason;
+			if (!ValidateGeneratedVirtualGeometrySubmissionRecords(
+				packet.generatedSubmissions,
+				packet.gpuBatchDescriptors,
+				activeRenderFrameId,
+				viewType,
+				outputId,
+				static_cast<std::uint32_t>(packet.gpuPacketRecords.size()),
+				&generatedSubmissionValidationReason))
+			{
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Fallback Submission", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				packet.gpuFallbackRecords.push_back(BuildVirtualGeometryGpuFallbackRecord(
+					viewType,
+					outputId,
+					activeRenderFrameId,
+					generatedSubmissionValidationReason,
+					static_cast<std::uint32_t>(packet.gpuPacketRecords.size()),
+					static_cast<std::uint32_t>(packet.gpuBatchDescriptors.size()),
+					"Generated virtual geometry submissions failed validation; CPU-expanded packet batches remain authoritative."));
+				for (GeneratedVirtualGeometrySubmissionRecord& submission : packet.generatedSubmissions)
+				{
+					submission.validationState = VirtualGeometryGeneratedSubmissionValidationState::FailOpen;
+					submission.fallbackReason = generatedSubmissionValidationReason;
+				}
+			}
+		}
+		VirtualGeometryHiZValidationState packetHiZState;
+		packetHiZState.state = targetSize.x == 0u || targetSize.y == 0u
+			? VirtualGeometryHiZState::MissingPyramid
+			: VirtualGeometryHiZState::Active;
+		packetHiZState.renderSize = targetSize;
+		packetHiZState.pyramidSize = targetSize;
+		packetHiZState.pyramidReady = packetHiZState.state == VirtualGeometryHiZState::Active;
+		packetHiZState.failOpen = packetHiZState.state != VirtualGeometryHiZState::Active;
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: VG Compaction Dispatch Planning", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			packet.gpuCompactionDispatches = BuildGpuPacketCompactionDispatches(
+				packet.gpuPacketFrameSets,
+				packetHiZState,
+				viewVirtualGeometryQuality.debugVisualizationMode);
+			for (const CompactedVisibilitySet& compaction : packet.compactionResults)
+			{
+				packet.gpuCounterReadbacks.push_back(BuildVirtualGeometryCounterReadbackRecord(
+					compaction,
+					activeRenderFrameId,
+					VirtualGeometryCounterSource::Prepared,
+					0u,
+					"Prepared CPU compaction counters are available; GPU readback is populated after backend support is active."));
+			}
+		}
 		commands = std::move(expandedCommands);
 		collectVirtualGeometryDiagnosticsAssets(commands, viewType);
 		return packet;
@@ -2540,7 +3184,23 @@ void RenderSystem::Update(float deltaTime)
 			VisibleCommandBuildResult cachedResult;
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Copy Cached Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				cachedResult = VisibleCommandBuildResult{ existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.clusterPackets, existing->second.clusterBatches, existing->second.compactionResults, existing->second.fallbackCoverage, existing->second.lodTransitionStates, existing->second.diagnostics, true };
+				cachedResult.commands = existing->second.commands;
+				cachedResult.selectedClusters = existing->second.selectedClusters;
+				cachedResult.pageNeeds = existing->second.pageNeeds;
+				cachedResult.clusterPackets = existing->second.clusterPackets;
+				cachedResult.clusterBatches = existing->second.clusterBatches;
+				cachedResult.gpuPacketRecords = existing->second.gpuPacketRecords;
+				cachedResult.gpuBatchDescriptors = existing->second.gpuBatchDescriptors;
+				cachedResult.gpuPacketFrameSets = existing->second.gpuPacketFrameSets;
+				cachedResult.gpuCompactionDispatches = existing->second.gpuCompactionDispatches;
+				cachedResult.generatedSubmissions = existing->second.generatedSubmissions;
+				cachedResult.gpuCounterReadbacks = existing->second.gpuCounterReadbacks;
+				cachedResult.gpuFallbackRecords = existing->second.gpuFallbackRecords;
+				cachedResult.compactionResults = existing->second.compactionResults;
+				cachedResult.fallbackCoverage = existing->second.fallbackCoverage;
+				cachedResult.lodTransitionStates = existing->second.lodTransitionStates;
+				cachedResult.diagnostics = existing->second.diagnostics;
+				cachedResult.cacheHit = true;
 			}
 			return cachedResult;
 		}
@@ -2558,6 +3218,13 @@ void RenderSystem::Update(float deltaTime)
 		result.pageNeeds = std::move(selectionPacket.pageNeeds);
 		result.clusterPackets = std::move(selectionPacket.clusterPackets);
 		result.clusterBatches = std::move(selectionPacket.clusterBatches);
+		result.gpuPacketRecords = std::move(selectionPacket.gpuPacketRecords);
+		result.gpuBatchDescriptors = std::move(selectionPacket.gpuBatchDescriptors);
+		result.gpuPacketFrameSets = std::move(selectionPacket.gpuPacketFrameSets);
+		result.gpuCompactionDispatches = std::move(selectionPacket.gpuCompactionDispatches);
+		result.generatedSubmissions = std::move(selectionPacket.generatedSubmissions);
+		result.gpuCounterReadbacks = std::move(selectionPacket.gpuCounterReadbacks);
+		result.gpuFallbackRecords = std::move(selectionPacket.gpuFallbackRecords);
 		result.compactionResults = std::move(selectionPacket.compactionResults);
 		result.fallbackCoverage = std::move(selectionPacket.fallbackCoverage);
 		result.lodTransitionStates = std::move(selectionPacket.lodTransitionStates);
@@ -2578,6 +3245,13 @@ void RenderSystem::Update(float deltaTime)
 		record.pageNeeds = result.pageNeeds;
 		record.clusterPackets = result.clusterPackets;
 		record.clusterBatches = result.clusterBatches;
+		record.gpuPacketRecords = result.gpuPacketRecords;
+		record.gpuBatchDescriptors = result.gpuBatchDescriptors;
+		record.gpuPacketFrameSets = result.gpuPacketFrameSets;
+		record.gpuCompactionDispatches = result.gpuCompactionDispatches;
+		record.generatedSubmissions = result.generatedSubmissions;
+		record.gpuCounterReadbacks = result.gpuCounterReadbacks;
+		record.gpuFallbackRecords = result.gpuFallbackRecords;
 		record.compactionResults = result.compactionResults;
 		record.fallbackCoverage = result.fallbackCoverage;
 		record.lodTransitionStates = result.lodTransitionStates;
@@ -3013,6 +3687,15 @@ void RenderSystem::Update(float deltaTime)
 		request.outputId = outputId;
 		return request;
 	};
+	auto copyVirtualGeometryFramePayload = [](FrameRenderData& target, const VisibleCommandBuildResult& source) {
+		target.virtualGeometryGpuPackets = source.gpuPacketRecords;
+		target.virtualGeometryGpuBatches = source.gpuBatchDescriptors;
+		target.virtualGeometryGpuFrameSets = source.gpuPacketFrameSets;
+		target.virtualGeometryGpuCompactionDispatches = source.gpuCompactionDispatches;
+		target.virtualGeometryGeneratedSubmissions = source.generatedSubmissions;
+		target.virtualGeometryCounterReadbacks = source.gpuCounterReadbacks;
+		target.virtualGeometryGpuFallbackRecords = source.gpuFallbackRecords;
+	};
 	auto applySceneViewContextTint = [&]() {
 		if (!sceneViewContextTintEnabled || sceneViewContextFocusedObjectIds.empty())
 		{
@@ -3047,6 +3730,7 @@ void RenderSystem::Update(float deltaTime)
 			visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, sceneViewTargetSize, RenderOutputKind::SceneView, RenderViewType::Scene, 1u, frameData.cameraWorldPosition);
 		}
 		frameData.commands = visibleCommands.commands;
+		copyVirtualGeometryFramePayload(frameData, visibleCommands);
 		sceneSpatialDiagnostics = visibleCommands.diagnostics;
 		applySceneViewContextTint();
 		{
@@ -3085,6 +3769,7 @@ void RenderSystem::Update(float deltaTime)
 				visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::GameView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
 			}
 			frameData.commands = visibleCommands.commands;
+			copyVirtualGeometryFramePayload(frameData, visibleCommands);
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -3114,6 +3799,13 @@ void RenderSystem::Update(float deltaTime)
 			blankData.sky = frameData.sky;
 			blankData.editorContextTint = glm::vec4(0.0f);
 			blankData.commands.clear();
+			blankData.virtualGeometryGpuPackets.clear();
+			blankData.virtualGeometryGpuBatches.clear();
+			blankData.virtualGeometryGpuFrameSets.clear();
+			blankData.virtualGeometryGpuCompactionDispatches.clear();
+			blankData.virtualGeometryGeneratedSubmissions.clear();
+			blankData.virtualGeometryCounterReadbacks.clear();
+			blankData.virtualGeometryGpuFallbackRecords.clear();
 			blankData.shadowDrawLists.clear();
 			rhi->RenderFrame(blankData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
 			latestGameViewFrameId = activeRenderFrameId;
@@ -3156,6 +3848,7 @@ void RenderSystem::Update(float deltaTime)
 			frameData.editorContextTint = glm::vec4(0.0f);
 			const VisibleCommandBuildResult visibleCommands = buildVisibleDrawCommands(frameData.projectionMatrix * frameData.viewMatrix, gameViewTargetSize, RenderOutputKind::MainRuntimeView, RenderViewType::Game, 2u, frameData.cameraWorldPosition);
 			frameData.commands = visibleCommands.commands;
+			copyVirtualGeometryFramePayload(frameData, visibleCommands);
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
 			frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
 
@@ -3210,8 +3903,9 @@ void RenderSystem::Update(float deltaTime)
 			RenderOutputKind::OffscreenTexture,
 			RenderViewType::Game,
 			9000u,
-			captureFrameData.cameraWorldPosition);
+		captureFrameData.cameraWorldPosition);
 		captureFrameData.commands = visibleCommands.commands;
+		copyVirtualGeometryFramePayload(captureFrameData, visibleCommands);
 		captureFrameData.shadowDrawLists = buildShadowDrawLists(captureFrameData.cameraWorldPosition);
 
 		RenderOutputRequest captureOutputRequest = makeOutputRequest(RenderOutputKind::OffscreenTexture, RenderViewType::Game, 9000u);
@@ -3357,6 +4051,10 @@ void RenderSystem::Update(float deltaTime)
 					renderGraphDiagnostics.backendFallbacks.push_back(
 						"Virtual geometry gate failed for "
 						+ gate.fixtureId
+						+ " "
+						+ ToString(gate.viewType)
+						+ "#"
+						+ std::to_string(gate.viewId)
 						+ "/"
 						+ gate.metricName
 						+ ": expected "
@@ -3420,6 +4118,42 @@ void RenderSystem::Update(float deltaTime)
 				stats.virtualGeometryFailedPages = view.failedPages;
 				stats.virtualGeometryEvictedPages = view.evictedPages;
 				stats.virtualGeometryPinnedFallbackPages = view.pinnedFallbackPages;
+				stats.virtualGeometryGpuPacketRecords = view.gpuPacketRecordCount;
+				stats.virtualGeometryGpuBatchDescriptors = view.gpuBatchDescriptorCount;
+				stats.virtualGeometryGpuPacketFrameSets = view.gpuPacketFrameSetCount;
+				stats.virtualGeometryGpuValidFrameSets = view.gpuValidFrameSetCount;
+				stats.virtualGeometryGpuInvalidFrameSets = view.gpuInvalidFrameSetCount;
+				stats.virtualGeometryGpuCompactionDispatches = view.gpuCompactionDispatchCount;
+				stats.virtualGeometryGeneratedSubmissions = view.generatedSubmissionCount;
+				stats.virtualGeometryValidGeneratedSubmissions = view.validGeneratedSubmissionCount;
+				stats.virtualGeometryInvalidGeneratedSubmissions = view.invalidGeneratedSubmissionCount;
+				stats.virtualGeometryFallbackGeneratedSubmissions = view.fallbackGeneratedSubmissionCount;
+				stats.virtualGeometryGpuCounterReadbacks = view.gpuCounterReadbackCount;
+				stats.virtualGeometryGpuCounterLatencyFrames = view.gpuCounterReadbackLatencyFrames;
+				stats.virtualGeometryGpuFallbackRecords = view.gpuFallbackRecordCount;
+				stats.virtualGeometryGpuFallbackAffectedPackets = view.gpuFallbackAffectedPackets;
+				stats.virtualGeometryGpuFallbackAffectedBatches = view.gpuFallbackAffectedBatches;
+				stats.virtualGeometryGpuFallbackReason = view.gpuFallbackReason;
+				stats.virtualGeometryPerformanceGateCount = static_cast<std::uint32_t>(view.virtualGeometryPerformanceGates.size());
+				stats.virtualGeometryPerformanceGateFailures = 0u;
+				stats.virtualGeometryPerformanceGateUnsupported = 0u;
+				stats.virtualGeometryFirstFailedPerformanceGate.clear();
+				for (const PerformanceGateResult& gate : view.virtualGeometryPerformanceGates)
+				{
+					if (gate.status == VirtualGeometryPerformanceGateStatus::Fail)
+					{
+						++stats.virtualGeometryPerformanceGateFailures;
+						if (stats.virtualGeometryFirstFailedPerformanceGate.empty())
+						{
+							stats.virtualGeometryFirstFailedPerformanceGate =
+								gate.fixtureId + "/" + gate.metricName;
+						}
+					}
+					else if (gate.status == VirtualGeometryPerformanceGateStatus::Unsupported)
+					{
+						++stats.virtualGeometryPerformanceGateUnsupported;
+					}
+				}
 				if (stats.meshletCounterReason.empty() && stats.meshletCounterSource == VirtualGeometryCounterSource::Prepared)
 				{
 					stats.meshletCounterSource = view.counterSource;
@@ -3510,16 +4244,24 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVirtualGeometryQualityProfile,
 		TerraEngine::Scheduling::kResourceVirtualGeometryResidencySnapshots,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPageResidencySnapshots,
-		TerraEngine::Scheduling::kResourceVirtualGeometryHiZValidationState
+		TerraEngine::Scheduling::kResourceVirtualGeometryHiZValidationState,
+		TerraEngine::Scheduling::kResourceVirtualGeometryGpuPacketFrameSets,
+		TerraEngine::Scheduling::kResourceVirtualGeometryGpuCompactionDispatches,
+		TerraEngine::Scheduling::kResourceVirtualGeometryGeneratedSubmissions,
+		TerraEngine::Scheduling::kResourceVirtualGeometryCounterReadbacks
 	};
 	declaration.writes = {
 		"Renderer",
 		TerraEngine::Scheduling::kResourceVirtualGeometryClusterPackets,
 		TerraEngine::Scheduling::kResourceVirtualGeometryBatchPlans,
+		TerraEngine::Scheduling::kResourceVirtualGeometryGpuPacketFrameSets,
+		TerraEngine::Scheduling::kResourceVirtualGeometryGpuCompactionDispatches,
 		TerraEngine::Scheduling::kResourceVirtualGeometryCompactionResults,
+		TerraEngine::Scheduling::kResourceVirtualGeometryGeneratedSubmissions,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPageNeedPackets,
 		TerraEngine::Scheduling::kResourceVirtualGeometryVisibilitySnapshots,
 		TerraEngine::Scheduling::kResourceVirtualGeometryCounterSnapshots,
+		TerraEngine::Scheduling::kResourceVirtualGeometryCounterReadbacks,
 		TerraEngine::Scheduling::kResourceVirtualGeometryCullingDiagnostics,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPerformanceCounters,
 		TerraEngine::Scheduling::kResourceVirtualGeometryShadowVisibilitySnapshots,
@@ -3536,8 +4278,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Render snapshots, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, per-view Hi-Z validation labels, page need packets, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, virtual geometry visibility/counter snapshot publication, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, editor present, and recovery.";
+	declaration.safeSubwork = "Render snapshots, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, GPU packet frame set planning, GPU compaction dispatch planning, generated-submission validation labels, per-view Hi-Z validation labels, page need packets, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, virtual geometry GPU packet buffer publication, generated submission publication, visibility/counter snapshot publication, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, editor present, and recovery.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;

@@ -629,6 +629,44 @@ void ProfilerWindow::DrawFrameDetails()
 		ImGui::TreePop();
 	}
 	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+	if (!renderDiagnostics.virtualGeometryViews.empty() && ImGui::TreeNode("Virtual Geometry Packet Diagnostics"))
+	{
+		if (ImGui::BeginTable("ProfilerVirtualGeometryPacketRows", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("View");
+			ImGui::TableSetupColumn("Source");
+			ImGui::TableSetupColumn("GPU Packets");
+			ImGui::TableSetupColumn("Generated");
+			ImGui::TableSetupColumn("Compaction");
+			ImGui::TableSetupColumn("Fallback");
+			ImGui::TableHeadersRow();
+			for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : renderDiagnostics.virtualGeometryViews)
+			{
+				// The profiler reads immutable diagnostics rows here. It never
+				// queries live Vulkan buffers, so inspecting packet state cannot
+				// perturb the renderer while a capture is open.
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(ToString(view.viewType));
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextUnformatted(ToString(view.counterSource));
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%u packets / %u batches", view.gpuPacketRecordCount, view.gpuBatchDescriptorCount);
+				ImGui::TableSetColumnIndex(3);
+				ImGui::Text("%u total, %u valid", view.generatedSubmissionCount, view.validGeneratedSubmissionCount);
+				ImGui::TableSetColumnIndex(4);
+				ImGui::Text("%u dispatches, %u readbacks", view.gpuCompactionDispatchCount, view.gpuCounterReadbackCount);
+				ImGui::TableSetColumnIndex(5);
+				ImGui::Text("%u records", view.gpuFallbackRecordCount);
+				if (!view.gpuFallbackReason.empty() && ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip("%s", view.gpuFallbackReason.c_str());
+				}
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
 	if (!renderDiagnostics.backendFrameBreakdown.stageTimings.empty() && ImGui::TreeNode("Backend Submit Path"))
 	{
 		if (ImGui::BeginTable("ProfilerBackendSubmitStages", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))

@@ -117,6 +117,7 @@ namespace TerraEngine::Renderer {
 	struct VirtualGeometryViewDiagnosticsSnapshot
 	{
 		RenderViewType viewType = RenderViewType::Game;
+		std::uint32_t viewId = 0u;
 		std::uint64_t frameId = 0u;
 		bool active = false;
 		// The editor toolbar chooses a view-local false-color mode. Publishing
@@ -182,6 +183,27 @@ namespace TerraEngine::Renderer {
 		std::uint32_t failOpenClusterCount = 0u;
 		std::uint32_t submittedBatchCount = 0u;
 		std::uint32_t legacyFallbackBatchCount = 0u;
+		// GPU packet fields are copied from immutable frame snapshots. They let
+		// tooling explain whether a frame used prepared CPU estimates, delayed
+		// readback, generated submissions, or a fail-open fallback.
+		std::uint32_t gpuPacketRecordCount = 0u;
+		std::uint32_t gpuBatchDescriptorCount = 0u;
+		std::uint32_t gpuPacketFrameSetCount = 0u;
+		std::uint32_t gpuValidFrameSetCount = 0u;
+		std::uint32_t gpuDelayedFrameSetCount = 0u;
+		std::uint32_t gpuInvalidFrameSetCount = 0u;
+		std::uint32_t gpuFailOpenFrameSetCount = 0u;
+		std::uint32_t gpuCompactionDispatchCount = 0u;
+		std::uint32_t generatedSubmissionCount = 0u;
+		std::uint32_t validGeneratedSubmissionCount = 0u;
+		std::uint32_t invalidGeneratedSubmissionCount = 0u;
+		std::uint32_t fallbackGeneratedSubmissionCount = 0u;
+		std::uint32_t gpuCounterReadbackCount = 0u;
+		std::uint32_t gpuCounterReadbackLatencyFrames = 0u;
+		std::uint32_t gpuFallbackRecordCount = 0u;
+		std::uint32_t gpuFallbackAffectedPackets = 0u;
+		std::uint32_t gpuFallbackAffectedBatches = 0u;
+		std::string gpuFallbackReason;
 		std::uint32_t shadowViewCount = 0u;
 		VirtualGeometryAdaptiveSettingsDiagnostics adaptiveSettings;
 		VirtualGeometryCookOutputDiagnostics cookOutput;
@@ -280,7 +302,7 @@ namespace TerraEngine::Renderer {
 
 	TERRAENGINE_API RenderBudgetDiagnostic BuildRenderBudgetDiagnostic(const RenderWorkBudget& budget);
 	TERRAENGINE_API RenderPerformanceGateResult EvaluateRenderPerformanceGate(std::string workloadName, float baselineValue, float latestValue, float thresholdPercent);
-	TERRAENGINE_API PerformanceGateResult EvaluateVirtualGeometryPerformanceGate(std::string gateId, std::string fixtureId, std::string metricName, float threshold, float actual, std::string unit, bool lowerIsBetter, VirtualGeometryPerformanceGateSource source = VirtualGeometryPerformanceGateSource::Prepared);
+	TERRAENGINE_API PerformanceGateResult EvaluateVirtualGeometryPerformanceGate(std::string gateId, std::string fixtureId, std::string metricName, float threshold, float actual, std::string unit, bool lowerIsBetter, VirtualGeometryPerformanceGateSource source = VirtualGeometryPerformanceGateSource::Prepared, RenderViewType viewType = RenderViewType::Game, std::uint32_t viewId = 0u);
 	TERRAENGINE_API std::vector<PerformanceGateResult> BuildVirtualGeometryPerformanceGates(const VirtualGeometryViewDiagnosticsSnapshot& snapshot);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildInactiveVirtualGeometryDiagnostics(RenderViewType viewType, std::uint64_t frameId, VirtualGeometryInactiveReason reason);
 	TERRAENGINE_API VirtualGeometryAdaptiveSettingsDiagnostics BuildVirtualGeometryAdaptiveSettingsDiagnostics(const AdaptiveVirtualGeometryCookProfile& profile);

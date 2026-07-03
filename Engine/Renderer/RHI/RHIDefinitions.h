@@ -72,6 +72,13 @@ namespace TerraEngine::Renderer {
 		bool supportsMultiQueueReadiness = false;
 		bool supportsWorkerOwnedPreparation = false;
 		bool supportsImageReadback = false;
+		// Virtual geometry GPU packet support is split into explicit promises so
+		// RenderSystem can fail open one stage without disabling the whole mesh
+		// shader route. These are capability flags, not user-facing toggles.
+		bool supportsVirtualGeometryGpuPacketBuffers = false;
+		bool supportsVirtualGeometryGpuCompaction = false;
+		bool supportsVirtualGeometryGeneratedSubmissions = false;
+		bool supportsVirtualGeometryCounterReadback = false;
 		std::uint32_t maxRecordingWorkers = 1u;
 		std::uint32_t workerSchedulingThreshold = 128u;
 		std::uint32_t maxPreparedFrames = 1u;

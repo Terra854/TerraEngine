@@ -3,6 +3,7 @@
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RHI/Vulkan/VulkanHiZ.h"
+#include "Renderer/RenderSystem.h"
 
 #include <algorithm>
 #include <string>
@@ -240,6 +241,166 @@ namespace TerraEngine::Tests
 			context.Expect(diagnostics.hiZBaselineMatched, "Batched moving-wall diagnostics should keep the accepted Hi-Z baseline matched.");
 			context.ExpectEqual(1u, diagnostics.submittedBatchCount, "Moving-wall recovery should not discard the batched cluster work record.");
 			context.ExpectEqual(validation.warmupFrames, diagnostics.hiZWarmupFrames, "Diagnostics should preserve the backend warm-up/recovery counter.");
+		});
+
+		registry.Add("VirtualGeometry.Hardening.US5.GpuCompactionMovingWallRecoveryKeepsHiZActive", [](TestContext& context) {
+			VulkanHiZHistoryMetadata history{};
+			history.viewId = 21u;
+			history.viewClass = VulkanHiZViewClass::Game;
+			history.targetId = 8u;
+			history.width = 1600u;
+			history.height = 900u;
+			history.projectionSignature = 0x71050010u;
+			history.depthSceneSignature = 0x71050020u;
+			history.frameId = 80u;
+			history.warmupFrames = 3u;
+			history.valid = true;
+			history.invalidReason = VulkanHiZInvalidReason::None;
+
+			VulkanHiZValidationInput input{};
+			input.viewId = history.viewId;
+			input.viewClass = history.viewClass;
+			input.targetId = history.targetId;
+			input.width = history.width;
+			input.height = history.height;
+			input.projectionSignature = history.projectionSignature;
+			input.depthSceneSignature = history.depthSceneSignature + 1u;
+			input.pyramidReady = true;
+			const VulkanHiZValidationResult unblocked = ValidateVulkanHiZHistory(history, input);
+
+			history.depthSceneSignature = input.depthSceneSignature;
+			history.warmupFrames = unblocked.warmupFrames;
+			input.depthSceneSignature += 1u;
+			const VulkanHiZValidationResult blockedAgain = ValidateVulkanHiZHistory(history, input);
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState state{};
+			state.outputKind = RenderOutputKind::GameView;
+			state.viewType = RenderViewType::Game;
+			state.outputId = history.targetId;
+			state.targetSize = glm::uvec2(history.width, history.height);
+			state.hasHiZValidationState = true;
+			state.hiZValidationState.state = blockedAgain.occlusionAllowed ? VirtualGeometryHiZState::Active : VirtualGeometryHiZState::FailOpen;
+			state.hiZValidationState.pyramidReady = blockedAgain.pyramidReady;
+			state.hiZValidationState.pyramidSize = state.targetSize;
+			state.hiZValidationState.renderSize = state.targetSize;
+			state.hiZValidationState.depthSceneSignature = input.depthSceneSignature;
+			state.hiZValidationState.warmupFrames = blockedAgain.warmupFrames;
+			state.hiZValidationState.failOpen = blockedAgain.failOpen;
+
+			GpuVirtualGeometryPacketRecord packet{};
+			packet.packetId = 0u;
+			packet.viewId = state.outputId;
+			packet.viewType = state.viewType;
+			packet.frameId = history.frameId + 2u;
+			packet.meshId = TerraEngine::GenerateUUID();
+			packet.materialId = TerraEngine::GenerateUUID();
+			packet.clusterId = 44u;
+			packet.meshletCount = 40u;
+			state.gpuPacketRecords.push_back(packet);
+
+			GpuVirtualGeometryPacketFrameSet frameSet{};
+			frameSet.viewId = state.outputId;
+			frameSet.viewType = state.viewType;
+			frameSet.frameId = packet.frameId;
+			frameSet.targetSize = state.targetSize;
+			frameSet.packetCount = 1u;
+			frameSet.batchCount = 1u;
+			frameSet.compactedPacketCount = 1u;
+			frameSet.generatedSubmissionCount = 1u;
+			frameSet.validity = VirtualGeometryGpuFrameSetValidity::Valid;
+			state.gpuPacketFrameSets.push_back(frameSet);
+
+			GpuPacketCompactionDispatch dispatch{};
+			dispatch.dispatchId = 3u;
+			dispatch.viewId = state.outputId;
+			dispatch.viewType = state.viewType;
+			dispatch.frameId = packet.frameId;
+			dispatch.candidatePacketCount = 1u;
+			dispatch.candidateBatchCount = 1u;
+			dispatch.outputCapacity = 1u;
+			dispatch.hiZBaselineState = state.hiZValidationState.state;
+			state.gpuCompactionDispatches.push_back(dispatch);
+
+			GeneratedVirtualGeometrySubmissionRecord submission{};
+			submission.recordId = 2u;
+			submission.viewId = state.outputId;
+			submission.viewType = state.viewType;
+			submission.frameId = packet.frameId;
+			submission.packetCount = 1u;
+			submission.indirectTaskCount = 1u;
+			submission.materialId = packet.materialId;
+			submission.meshId = packet.meshId;
+			submission.source = VirtualGeometryCounterSource::GPUReadback;
+			submission.validationState = VirtualGeometryGeneratedSubmissionValidationState::Valid;
+			state.generatedSubmissions.push_back(submission);
+
+			CompactedVisibilitySet compaction{};
+			compaction.viewId = state.outputId;
+			compaction.viewType = state.viewType;
+			compaction.candidatePackets = 1u;
+			compaction.visiblePackets = 1u;
+			compaction.submittedBatches = 1u;
+			compaction.source = VirtualGeometryCounterSource::GPUReadback;
+			state.compactionResults.push_back(compaction);
+
+			HiZRegressionSnapshot baseline{};
+			baseline.viewId = state.outputId;
+			baseline.viewType = state.viewType;
+			baseline.frameIndex = packet.frameId;
+			baseline.state = state.hiZValidationState.state;
+			baseline.testedMeshlets = packet.meshletCount;
+			baseline.visibleMeshlets = packet.meshletCount;
+			baseline.recoveryFrames = blockedAgain.warmupFrames;
+			baseline.baselineMatched = blockedAgain.occlusionAllowed;
+			state.hiZRegressionSnapshots.push_back(baseline);
+
+			TerraEngine::Renderer::RenderFrameSnapshot frame{};
+			frame.frameId = packet.frameId;
+			const TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility =
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(frame, state, VirtualGeometryCounterSource::GPUReadback);
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.Expect(unblocked.occlusionAllowed, "Moving the wall away should keep Hi-Z active while GPU packet compaction is enabled.");
+			context.Expect(blockedAgain.occlusionAllowed, "Moving the wall back should resume occlusion without restarting the editor.");
+			context.Expect(diagnostics.hiZBaselineMatched, "GPU compaction diagnostics should preserve the accepted moving-wall Hi-Z baseline.");
+			context.ExpectEqual(1u, diagnostics.gpuCompactionDispatchCount, "The moving-wall fixture should exercise the GPU compaction diagnostics path.");
+			context.ExpectEqual(1u, diagnostics.validGeneratedSubmissionCount, "Valid generated submission work should survive the Hi-Z recovery cycle.");
+		});
+
+		registry.Add("VirtualGeometry.Hardening.US4.InvalidGeneratedSubmissionPublishesFallbackDiagnostics", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility;
+			visibility.valid = true;
+			visibility.frameId = 10003u;
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 2u;
+
+			GeneratedVirtualGeometrySubmissionRecord submission;
+			submission.recordId = 1u;
+			submission.viewId = visibility.outputId;
+			submission.viewType = visibility.viewType;
+			submission.frameId = visibility.frameId;
+			submission.packetOffset = 16u;
+			submission.packetCount = 4u;
+			submission.indirectTaskCount = 1u;
+			submission.validationState = VirtualGeometryGeneratedSubmissionValidationState::Mismatch;
+			submission.fallbackReason = "generated submission range mismatch";
+			visibility.generatedSubmissions.push_back(submission);
+			visibility.gpuFallbackRecords.push_back(RenderSystem::BuildVirtualGeometryGpuFallbackRecord(
+				visibility.viewType,
+				visibility.outputId,
+				visibility.frameId,
+				submission.fallbackReason,
+				submission.packetCount,
+				1u,
+				"CPU-expanded packet batches remain authoritative."));
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(1u, diagnostics.invalidGeneratedSubmissionCount, "Invalid generated submissions should be counted separately from valid generated work.");
+			context.ExpectEqual(1u, diagnostics.gpuFallbackRecordCount, "Invalid generated submissions should publish a fallback record.");
+			context.Expect(diagnostics.gpuFallbackReason.find("mismatch") != std::string::npos, "Fallback diagnostics should preserve the generated submission validation reason.");
 		});
 
 		registry.Add("VirtualGeometry.Hardening.ExplicitHiZStateTravelsWithVisibilitySnapshot", [](TestContext& context) {

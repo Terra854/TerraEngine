@@ -92,6 +92,87 @@ namespace {
 			HashCombine(signature, compaction.submittedBatches);
 			HashCombine(signature, static_cast<std::uint64_t>(compaction.source));
 		}
+		for (const GpuVirtualGeometryPacketRecord& packet : state.gpuPacketRecords)
+		{
+			HashCombine(signature, packet.packetId);
+			HashCombine(signature, packet.viewId);
+			HashCombine(signature, static_cast<std::uint64_t>(packet.viewType));
+			HashCombine(signature, packet.frameId);
+			HashCombine(signature, HashUuid(packet.objectId));
+			HashCombine(signature, HashUuid(packet.meshId));
+			HashCombine(signature, HashUuid(packet.materialId));
+			HashCombine(signature, packet.selectedLod);
+			HashCombine(signature, packet.clusterId);
+			HashCombine(signature, packet.meshletOffset);
+			HashCombine(signature, packet.meshletCount);
+			HashCombine(signature, packet.pageId);
+			HashCombine(signature, packet.fallbackPageId);
+			HashCombine(signature, packet.debugIdentity);
+			HashCombine(signature, packet.flags);
+		}
+		for (const GpuVirtualGeometryBatchDescriptor& batch : state.gpuBatchDescriptors)
+		{
+			HashCombine(signature, batch.batchId);
+			HashCombine(signature, batch.viewId);
+			HashCombine(signature, batch.frameId);
+			HashCombine(signature, batch.packetOffset);
+			HashCombine(signature, batch.packetCount);
+			HashCombine(signature, HashUuid(batch.meshId));
+			HashCombine(signature, HashUuid(batch.materialId));
+			HashCombine(signature, batch.selectedMeshlets);
+			HashCombine(signature, batch.submittedMeshlets);
+			HashCombine(signature, static_cast<std::uint64_t>(batch.debugMode));
+			HashCombine(signature, static_cast<std::uint64_t>(batch.fallbackMode));
+			HashCombine(signature, batch.flags);
+		}
+		for (const GpuVirtualGeometryPacketFrameSet& frameSet : state.gpuPacketFrameSets)
+		{
+			HashCombine(signature, frameSet.viewId);
+			HashCombine(signature, frameSet.frameId);
+			HashCombine(signature, frameSet.packetOffset);
+			HashCombine(signature, frameSet.packetCount);
+			HashCombine(signature, frameSet.batchOffset);
+			HashCombine(signature, frameSet.batchCount);
+			HashCombine(signature, frameSet.generatedSubmissionOffset);
+			HashCombine(signature, frameSet.generatedSubmissionCount);
+			HashCombine(signature, static_cast<std::uint64_t>(frameSet.validity));
+		}
+		for (const GpuPacketCompactionDispatch& dispatch : state.gpuCompactionDispatches)
+		{
+			HashCombine(signature, dispatch.dispatchId);
+			HashCombine(signature, dispatch.viewId);
+			HashCombine(signature, dispatch.frameId);
+			HashCombine(signature, dispatch.candidatePacketCount);
+			HashCombine(signature, dispatch.candidateBatchCount);
+			HashCombine(signature, dispatch.outputCapacity);
+			HashCombine(signature, static_cast<std::uint64_t>(dispatch.hiZBaselineState));
+			HashCombine(signature, dispatch.failOpenOnInvalid ? 1u : 0u);
+		}
+		for (const GeneratedVirtualGeometrySubmissionRecord& submission : state.generatedSubmissions)
+		{
+			HashCombine(signature, submission.recordId);
+			HashCombine(signature, submission.viewId);
+			HashCombine(signature, submission.frameId);
+			HashCombine(signature, submission.batchId);
+			HashCombine(signature, submission.packetOffset);
+			HashCombine(signature, submission.packetCount);
+			HashCombine(signature, submission.indirectTaskCount);
+			HashCombine(signature, HashUuid(submission.materialId));
+			HashCombine(signature, HashUuid(submission.meshId));
+			HashCombine(signature, submission.counterOffset);
+			HashCombine(signature, static_cast<std::uint64_t>(submission.source));
+			HashCombine(signature, static_cast<std::uint64_t>(submission.validationState));
+		}
+		for (const VirtualGeometryCounterReadbackRecord& readback : state.gpuCounterReadbacks)
+		{
+			HashCombine(signature, readback.viewId);
+			HashCombine(signature, readback.frameId);
+			HashCombine(signature, static_cast<std::uint64_t>(readback.source));
+			HashCombine(signature, readback.latencyFrames);
+			HashCombine(signature, readback.candidatePackets);
+			HashCombine(signature, readback.compactedPackets);
+			HashCombine(signature, readback.submittedBatches);
+		}
 	}
 
 	std::uint64_t HashVirtualGeometryBatchPacketSignature(const RenderFrameSnapshot& snapshot)
@@ -372,15 +453,35 @@ namespace {
 			plan.virtualGeometryClusterPacketCount += state.clusterPackets.size();
 			plan.virtualGeometryBatchCount += state.clusterBatches.size();
 			plan.virtualGeometryCompactionResultCount += state.compactionResults.size();
+			plan.virtualGeometryGpuPacketRecordCount += state.gpuPacketRecords.size();
+			plan.virtualGeometryGpuBatchDescriptorCount += state.gpuBatchDescriptors.size();
+			plan.virtualGeometryGpuPacketFrameSetCount += state.gpuPacketFrameSets.size();
+			plan.virtualGeometryGpuCompactionDispatchCount += state.gpuCompactionDispatches.size();
+			plan.virtualGeometryGeneratedSubmissionCount += state.generatedSubmissions.size();
+			plan.virtualGeometryCounterReadbackCount += state.gpuCounterReadbacks.size();
 		}
 		for (const VirtualGeometryViewVisibilitySnapshot& state : snapshot.virtualGeometryVisibilitySnapshots)
 		{
 			plan.virtualGeometryClusterPacketCount += state.clusterPackets.size();
 			plan.virtualGeometryBatchCount += state.clusterBatches.size();
 			plan.virtualGeometryCompactionResultCount += state.compactionResults.size();
+			plan.virtualGeometryGpuPacketRecordCount += state.gpuPacketRecords.size();
+			plan.virtualGeometryGpuBatchDescriptorCount += state.gpuBatchDescriptors.size();
+			plan.virtualGeometryGpuPacketFrameSetCount += state.gpuPacketFrameSets.size();
+			plan.virtualGeometryGpuCompactionDispatchCount += state.gpuCompactionDispatches.size();
+			plan.virtualGeometryGeneratedSubmissionCount += state.generatedSubmissions.size();
+			plan.virtualGeometryCounterReadbackCount += state.gpuCounterReadbacks.size();
 		}
 		plan.virtualGeometryBatchPacketSignature = HashVirtualGeometryBatchPacketSignature(snapshot);
 		plan.gpuDrivenEligible = capabilities.supportsParallelRecording && !snapshot.renderables.empty();
+		plan.gpuPacketBuffersEligible = capabilities.supportsVirtualGeometryGpuPacketBuffers
+			&& plan.virtualGeometryClusterPacketCount > 0u;
+		plan.gpuCompactionEligible = capabilities.supportsVirtualGeometryGpuCompaction
+			&& plan.gpuPacketBuffersEligible;
+		plan.generatedSubmissionEligible = capabilities.supportsVirtualGeometryGeneratedSubmissions
+			&& plan.gpuCompactionEligible;
+		plan.counterReadbackEligible = capabilities.supportsVirtualGeometryCounterReadback
+			&& (plan.virtualGeometryGpuPacketRecordCount > 0u || plan.virtualGeometryClusterPacketCount > 0u);
 		return plan;
 	}
 

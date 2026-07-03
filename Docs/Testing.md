@@ -270,6 +270,34 @@ cone-culling slice is conservative by default: it validates the required
 selected cluster is one-sided, opaque, consistent-winding, low thin-shell risk,
 and cone-valid.
 
+Feature `specs/031-vg-gpu-compaction` advances the already-selected virtual
+geometry cluster cut into GPU-visible packet buffers, GPU packet compaction,
+generated submission records, and source-labeled per-view counter readbacks.
+The current CPU-selected cluster cut remains the correctness oracle, and the
+current Hi-Z behavior remains locked as the accepted baseline:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
+```
+
+When implementing `031`, run each phase or user-story slice before advancing to
+the next one. The GPU packet buffer slice must validate packet and batch layout
+before shader consumption is enabled. The compaction slice must validate
+candidate, compacted, rejected, fail-open, generated submission, and overflow
+counters. The Hi-Z slice is preservation-only: it must prove the existing
+moving-wall, camera-cut, resize, thin-geometry, and multi-view behavior still
+matches the accepted baseline without adding quality tiers or retuning
+occlusion.
+
+The feature `031` performance gates fail when dense selected packet work does
+not collapse to submitted batches at or below `10%`, when CPU visible-command
+preparation regresses beyond the configured budget, when compaction counters
+miss fixture truth by more than `1%` or one packet, when generated submissions
+do not match frame/view ownership, when Scene View and Game View share state
+across 300 frames, or when the Hi-Z false-occlusion count is non-zero.
+Unsupported prerequisites are reported as `Unsupported`, not as passing
+zero-valued metrics.
+
 The broader virtual-geometry regression set covers renderer, resource,
 editor asset pipeline, automation, export, and debug visualizer behavior:
 

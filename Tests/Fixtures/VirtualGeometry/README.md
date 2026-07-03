@@ -26,9 +26,15 @@ clear source attribution instead of committed as heavy binary files.
   regions so hierarchical cluster selection can refine only nearby regions.
 - Cluster batching scene: dense selected clusters that must collapse into
   bounded virtual geometry batch work instead of one draw per selected cluster.
+- GPU packet buffer scene: dense selected clusters represented as per-view
+  GPU-visible packet and batch buffers while preserving the CPU-selected
+  cluster cut.
 - Runtime compaction scene: visible, frustum-rejected, Hi-Z-rejected,
   residency-substituted, and fail-open cluster packets in one deterministic
   camera path.
+- Generated submission scene: compacted packet output that drives submitted
+  mesh-shader work only after frame, view, layout, capacity, and counter
+  validation succeeds.
 - Shadow-view scene: one camera-hidden caster that is visible to a light plus
   one light-frustum-rejected caster, so shadow selection proves it does not
   reuse camera visibility.
@@ -58,6 +64,9 @@ not enable rendering behavior. Current tags include:
   and eviction stress coverage.
 - `cluster-packet-batching`, `runtime-compaction`, `bounded-batches`, and
   `performance-gate` for feature `030` scaling coverage.
+- `gpu-packet-buffer`, `gpu-compaction`, `generated-submission`,
+  `counter-readback`, and `gpu-fail-open` for feature `031` GPU packet
+  compaction coverage.
 - `shadow-view-selection`, `light-frustum-culling`, `cone-safety`, and
   `hiz-baseline-preservation` for feature `030` culling coverage.
 
@@ -137,6 +146,33 @@ virtual geometry batches remain no more than 10 percent of selected clusters.
 The compaction fixture must expose candidate, compacted, rejected, fail-open,
 and submitted packet counts. The Hi-Z fixture protects the current working
 behavior; it must not introduce or require new quality tiers.
+
+## Feature 031 GPU Packet Compaction Quickstart
+
+Use `specs/031-vg-gpu-compaction/quickstart.md` for the staged GPU packet
+workflow. The clean-checkout pass should use this manifest and the focused CTest
+slice:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.VirtualGeometryBatching|Engine.VirtualGeometryCompaction|Engine.VirtualGeometryPerformanceGate|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryRenderer|Engine.Renderer|Engine.SystemScheduler" --output-on-failure -C Debug
+```
+
+The dense GPU packet fixture must select at least 500 virtual geometry packets
+while submitted batches remain no more than 10 percent of selected packets. The
+GPU compaction fixture must expose candidate, compacted, rejected, fail-open,
+generated submission, and fallback counters. Performance gates must report the
+fixture id, view id, threshold, actual value, source, status, and diagnostic
+text. Counter rows must label `Prepared`, `GPU Readback`,
+`Delayed GPU Readback`, `Unsupported`, or `Unavailable`; placeholder zeroes are
+not valid readback data. The Hi-Z fixture remains preservation-only and must not
+add or require quality tiers.
+
+Feature `031` gate thresholds are encoded in `hardening-fixtures.json` and
+`Tests/Fixtures/RendererPerformanceBaseline/workloads.json`. Dense packet
+fixtures use `maxGpuBatchDescriptorRatio <= 0.1`; generated submission fixtures
+use `maxInvalidGeneratedSubmissions == 0` and
+`maxCompactionOverflowPackets == 0`. Unsupported or unavailable counter sources
+must publish unsupported gates instead of passing as zero-valued metrics.
 
 For manual large-asset passes, import one dense scan-style mesh, one
 hard-surface multi-material mesh, one one-sided opaque cone-safe mesh, and one

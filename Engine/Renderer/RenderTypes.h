@@ -571,7 +571,8 @@ enum class VirtualGeometryPerformanceGateSource : std::uint32_t
 	Prepared = 0u,
 	GPUReadback = 1u,
 	DelayedGPUReadback = 2u,
-	Manual = 3u
+	Unsupported = 3u,
+	Manual = 4u
 };
 
 // VirtualGeometryClusterPacket is the renderer-neutral work atom produced from
@@ -633,6 +634,155 @@ struct CompactedVisibilitySet
 	std::uint32_t failOpenPackets = 0u;
 	std::uint32_t submittedBatches = 0u;
 	VirtualGeometryCounterSource source = VirtualGeometryCounterSource::Prepared;
+};
+
+enum class VirtualGeometryGpuFrameSetValidity : std::uint32_t
+{
+	Valid = 0u,
+	Delayed = 1u,
+	Invalid = 2u,
+	Unsupported = 3u,
+	FailOpen = 4u
+};
+
+enum class VirtualGeometryGeneratedSubmissionValidationState : std::uint32_t
+{
+	Valid = 0u,
+	Delayed = 1u,
+	Mismatch = 2u,
+	Overflow = 3u,
+	Unsupported = 4u,
+	FailOpen = 5u
+};
+
+// GpuVirtualGeometryPacketRecord is the stable CPU mirror of the packet layout
+// that the Vulkan path may upload for task/mesh shader consumption. Keeping a
+// mirror in RenderTypes lets tests validate ownership and fallback decisions
+// without reading live GPU buffers.
+struct GpuVirtualGeometryPacketRecord
+{
+	std::uint32_t packetId = 0u;
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint64_t frameId = 0u;
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+	std::uint32_t selectedLod = 0u;
+	std::uint32_t clusterId = 0u;
+	std::uint32_t meshletOffset = 0u;
+	std::uint32_t meshletCount = 0u;
+	glm::vec3 boundsMin = glm::vec3(0.0f);
+	glm::vec3 boundsMax = glm::vec3(0.0f);
+	glm::vec4 projectedBounds = glm::vec4(0.0f);
+	std::uint32_t pageId = 0u;
+	std::uint32_t fallbackPageId = 0u;
+	std::uint32_t debugIdentity = 0u;
+	std::uint32_t flags = 0u;
+};
+
+// GpuVirtualGeometryBatchDescriptor mirrors a compatible packet run that can be
+// consumed by GPU-driven submission. It deliberately repeats the compatibility
+// keys so stale generated submissions can be rejected without touching live
+// renderer state.
+struct GpuVirtualGeometryBatchDescriptor
+{
+	std::uint32_t batchId = 0u;
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint64_t frameId = 0u;
+	std::uint32_t packetOffset = 0u;
+	std::uint32_t packetCount = 0u;
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+	std::uint32_t selectedMeshlets = 0u;
+	std::uint32_t submittedMeshlets = 0u;
+	VirtualGeometryDebugVisualizationMode debugMode = VirtualGeometryDebugVisualizationMode::None;
+	VirtualGeometryBatchFallbackMode fallbackMode = VirtualGeometryBatchFallbackMode::None;
+	std::uint32_t flags = 0u;
+};
+
+struct GpuVirtualGeometryPacketFrameSet
+{
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint64_t frameId = 0u;
+	glm::uvec2 targetSize = glm::uvec2(0u);
+	VirtualGeometryDebugVisualizationMode debugMode = VirtualGeometryDebugVisualizationMode::None;
+	std::uint32_t packetOffset = 0u;
+	std::uint32_t packetCount = 0u;
+	std::uint32_t batchOffset = 0u;
+	std::uint32_t batchCount = 0u;
+	std::uint32_t compactedPacketOffset = 0u;
+	std::uint32_t compactedPacketCount = 0u;
+	std::uint32_t generatedSubmissionOffset = 0u;
+	std::uint32_t generatedSubmissionCount = 0u;
+	VirtualGeometryGpuFrameSetValidity validity = VirtualGeometryGpuFrameSetValidity::Valid;
+	std::string fallbackReason;
+};
+
+struct GpuPacketCompactionDispatch
+{
+	std::uint32_t dispatchId = 0u;
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint64_t frameId = 0u;
+	std::uint32_t candidatePacketCount = 0u;
+	std::uint32_t candidateBatchCount = 0u;
+	std::uint32_t outputCapacity = 0u;
+	VirtualGeometryHiZState hiZBaselineState = VirtualGeometryHiZState::MissingPyramid;
+	VirtualGeometryDebugVisualizationMode debugMode = VirtualGeometryDebugVisualizationMode::None;
+	bool failOpenOnInvalid = true;
+	std::string fallbackReason;
+};
+
+struct GeneratedVirtualGeometrySubmissionRecord
+{
+	std::uint32_t recordId = 0u;
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint64_t frameId = 0u;
+	std::uint32_t batchId = 0u;
+	std::uint32_t packetOffset = 0u;
+	std::uint32_t packetCount = 0u;
+	std::uint32_t indirectTaskCount = 0u;
+	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	std::uint32_t counterOffset = 0u;
+	VirtualGeometryCounterSource source = VirtualGeometryCounterSource::Prepared;
+	VirtualGeometryGeneratedSubmissionValidationState validationState = VirtualGeometryGeneratedSubmissionValidationState::Valid;
+	std::string fallbackReason;
+};
+
+struct VirtualGeometryCounterReadbackRecord
+{
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint64_t frameId = 0u;
+	VirtualGeometryCounterSource source = VirtualGeometryCounterSource::Prepared;
+	std::uint32_t latencyFrames = 0u;
+	std::uint32_t candidatePackets = 0u;
+	std::uint32_t compactedPackets = 0u;
+	std::uint32_t submittedBatches = 0u;
+	std::uint32_t rejectedPackets = 0u;
+	std::uint32_t failOpenPackets = 0u;
+	std::uint32_t selectedMeshlets = 0u;
+	std::uint32_t dispatchedMeshlets = 0u;
+	std::uint32_t culledMeshlets = 0u;
+	std::uint32_t culledByHiZ = 0u;
+	std::string unavailableReason;
+};
+
+struct VirtualGeometryGpuFallbackRecord
+{
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint64_t frameId = 0u;
+	std::string reason;
+	std::uint32_t affectedPackets = 0u;
+	std::uint32_t affectedBatches = 0u;
+	std::string coveragePolicy = "FailOpenCoverage";
+	std::string diagnostic;
 };
 
 // PageResidencyRecord mirrors the page state needed by virtual geometry
@@ -769,6 +919,8 @@ struct PerformanceGateResult
 {
 	std::string gateId;
 	std::string fixtureId;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint32_t viewId = 0u;
 	std::string metricName;
 	float threshold = 0.0f;
 	float actual = 0.0f;
@@ -1550,6 +1702,11 @@ struct PushConstants
 	std::uint32_t selectedVirtualClusterCount = 0u;
 	std::uint32_t selectedVirtualPageNeedOffset = 0u;
 	std::uint32_t selectedVirtualPageNeedCount = 0u;
+	// Bindless storage-buffer indices for the current view's GPU packet and
+	// batch descriptor tables. 0xFFFFFFFF means the shader must keep using the
+	// push-constant range as the conservative fail-open source of truth.
+	std::uint32_t virtualGeometryPacketBufferIndex = 0xFFFFFFFFu;
+	std::uint32_t virtualGeometryBatchBufferIndex = 0xFFFFFFFFu;
 	// rgb is the tint target color and a is blend strength. Runtime draws leave
 	// this at zero so authoring cues never leak into exported/game rendering.
 	alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);
@@ -1845,6 +2002,16 @@ struct FrameRenderData
 	FrameSkyData sky;
 	std::vector<FrameLightCandidate> lightCandidates;
 	std::vector<DrawCommand> commands;
+	// These vectors are immutable per-view mirrors of selected virtual geometry
+	// work. Vulkan may upload them into GPU packet buffers during the protected
+	// render boundary; it must not reach back into RenderSystem caches.
+	std::vector<GpuVirtualGeometryPacketRecord> virtualGeometryGpuPackets;
+	std::vector<GpuVirtualGeometryBatchDescriptor> virtualGeometryGpuBatches;
+	std::vector<GpuVirtualGeometryPacketFrameSet> virtualGeometryGpuFrameSets;
+	std::vector<GpuPacketCompactionDispatch> virtualGeometryGpuCompactionDispatches;
+	std::vector<GeneratedVirtualGeometrySubmissionRecord> virtualGeometryGeneratedSubmissions;
+	std::vector<VirtualGeometryCounterReadbackRecord> virtualGeometryCounterReadbacks;
+	std::vector<VirtualGeometryGpuFallbackRecord> virtualGeometryGpuFallbackRecords;
 	// Scene View can request a whole-view authoring tint for non-mesh passes
 	// such as sky and grid while individual DrawCommand tint preserves the
 	// focused prefab branch at normal color.
@@ -2008,6 +2175,32 @@ struct RenderStatsSnapshot
 	std::uint32_t virtualGeometryFailedPages = 0u;
 	std::uint32_t virtualGeometryEvictedPages = 0u;
 	std::uint32_t virtualGeometryPinnedFallbackPages = 0u;
+	// GPU packet diagnostics are copied from the immutable render graph
+	// snapshot. Editor windows and automation read these fields without
+	// touching live RenderSystem or Vulkan state.
+	std::uint32_t virtualGeometryGpuPacketRecords = 0u;
+	std::uint32_t virtualGeometryGpuBatchDescriptors = 0u;
+	std::uint32_t virtualGeometryGpuPacketFrameSets = 0u;
+	std::uint32_t virtualGeometryGpuValidFrameSets = 0u;
+	std::uint32_t virtualGeometryGpuInvalidFrameSets = 0u;
+	std::uint32_t virtualGeometryGpuCompactionDispatches = 0u;
+	std::uint32_t virtualGeometryGeneratedSubmissions = 0u;
+	std::uint32_t virtualGeometryValidGeneratedSubmissions = 0u;
+	std::uint32_t virtualGeometryInvalidGeneratedSubmissions = 0u;
+	std::uint32_t virtualGeometryFallbackGeneratedSubmissions = 0u;
+	std::uint32_t virtualGeometryGpuCounterReadbacks = 0u;
+	std::uint32_t virtualGeometryGpuCounterLatencyFrames = 0u;
+	std::uint32_t virtualGeometryGpuFallbackRecords = 0u;
+	std::uint32_t virtualGeometryGpuFallbackAffectedPackets = 0u;
+	std::uint32_t virtualGeometryGpuFallbackAffectedBatches = 0u;
+	std::string virtualGeometryGpuFallbackReason;
+	// Performance gate summaries stay compact in the stats path. Full gate
+	// records remain in RenderDiagnosticsSummary for profiler and automation
+	// details, while these counts let lightweight readers detect regressions.
+	std::uint32_t virtualGeometryPerformanceGateCount = 0u;
+	std::uint32_t virtualGeometryPerformanceGateFailures = 0u;
+	std::uint32_t virtualGeometryPerformanceGateUnsupported = 0u;
+	std::string virtualGeometryFirstFailedPerformanceGate;
 	std::uint32_t hiZTests = 0u;
 	std::uint32_t hiZProjectionFailed = 0u;
 	std::uint32_t hiZFullRectCulled = 0u;

@@ -4,6 +4,7 @@
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RHI/Vulkan/VulkanHiZ.h"
 
+#include <algorithm>
 #include <glm/glm.hpp>
 
 namespace TerraEngine::Tests
@@ -50,6 +51,81 @@ namespace TerraEngine::Tests
 
 	void RegisterVirtualGeometryHiZTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.HiZ.US5.GpuPacketsAndGeneratedSubmissionsPreserveBaselineMatch", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 6u;
+			visibility.frameId = 7105u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::GPUReadback;
+			visibility.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			visibility.hiZValidationState.pyramidReady = true;
+			visibility.hiZValidationState.pyramidSize = glm::uvec2(1920u, 1080u);
+			visibility.hiZValidationState.renderSize = glm::uvec2(1920u, 1080u);
+			visibility.hiZValidationState.cameraSignature = 0x70050011u;
+			visibility.hiZValidationState.depthSceneSignature = 0x70050022u;
+			visibility.hiZValidationState.warmupFrames = 4u;
+			visibility.hiZValidationState.failOpen = false;
+
+			GpuVirtualGeometryPacketRecord packet{};
+			packet.packetId = 0u;
+			packet.viewId = visibility.outputId;
+			packet.viewType = visibility.viewType;
+			packet.frameId = visibility.frameId;
+			packet.objectId = TerraEngine::GenerateUUID();
+			packet.meshId = TerraEngine::GenerateUUID();
+			packet.materialId = TerraEngine::GenerateUUID();
+			packet.clusterId = 12u;
+			packet.meshletOffset = 48u;
+			packet.meshletCount = 24u;
+			visibility.gpuPacketRecords.push_back(packet);
+
+			GpuVirtualGeometryPacketFrameSet frameSet{};
+			frameSet.viewId = visibility.outputId;
+			frameSet.viewType = visibility.viewType;
+			frameSet.frameId = visibility.frameId;
+			frameSet.targetSize = visibility.hiZValidationState.renderSize;
+			frameSet.packetCount = 1u;
+			frameSet.batchCount = 1u;
+			frameSet.generatedSubmissionCount = 1u;
+			frameSet.validity = VirtualGeometryGpuFrameSetValidity::Valid;
+			visibility.gpuPacketFrameSets.push_back(frameSet);
+
+			GeneratedVirtualGeometrySubmissionRecord submission{};
+			submission.recordId = 0u;
+			submission.viewId = visibility.outputId;
+			submission.viewType = visibility.viewType;
+			submission.frameId = visibility.frameId;
+			submission.packetCount = 1u;
+			submission.indirectTaskCount = 1u;
+			submission.materialId = packet.materialId;
+			submission.meshId = packet.meshId;
+			submission.source = VirtualGeometryCounterSource::GPUReadback;
+			submission.validationState = VirtualGeometryGeneratedSubmissionValidationState::Valid;
+			visibility.generatedSubmissions.push_back(submission);
+
+			HiZRegressionSnapshot baseline{};
+			baseline.viewId = visibility.outputId;
+			baseline.viewType = visibility.viewType;
+			baseline.frameIndex = visibility.frameId;
+			baseline.state = VirtualGeometryHiZState::Active;
+			baseline.testedMeshlets = packet.meshletCount;
+			baseline.occludedMeshlets = 8u;
+			baseline.visibleMeshlets = 16u;
+			baseline.recoveryFrames = visibility.hiZValidationState.warmupFrames;
+			baseline.baselineMatched = true;
+			visibility.hiZRegressionSnapshots.push_back(baseline);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.Expect(diagnostics.hiZBaselineMatched, "GPU packet and generated-submission diagnostics should preserve the accepted Hi-Z baseline.");
+			context.Expect(diagnostics.hiZActive, "The GPU packet path should not turn an active current pyramid into a fail-open state.");
+			context.ExpectEqual(1u, diagnostics.gpuPacketRecordCount, "The diagnostics snapshot should still expose the GPU packet table while checking Hi-Z.");
+			context.ExpectEqual(1u, diagnostics.validGeneratedSubmissionCount, "Generated submissions should remain valid while Hi-Z baseline records are matched.");
+			context.ExpectEqual(0u, diagnostics.hiZFalseOcclusionRiskWarnings, "Matched GPU packet Hi-Z baselines should not publish false-occlusion risk warnings.");
+		});
+
 		registry.Add("VirtualGeometry.HiZ.US7.BatchedPathPublishesBaselineMatch", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
@@ -99,6 +175,44 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(0u, diagnostics.hiZFalseOcclusionRiskWarnings, "Matched Hi-Z baselines should not raise false-occlusion risks.");
 			context.ExpectEqual(1u, diagnostics.submittedBatchCount, "The Hi-Z baseline fixture should still carry batched packet diagnostics.");
 			context.Expect(diagnostics.hiZActive, "Active validation state should keep Hi-Z active for the batched diagnostics path.");
+		});
+
+		registry.Add("VirtualGeometry.HiZ.US7.BaselineMismatchFailsPerformanceGate", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 2u;
+			visibility.frameId = 7107u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::GPUReadback;
+			visibility.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			visibility.hiZValidationState.pyramidReady = true;
+			visibility.hiZValidationState.failOpen = false;
+
+			HiZRegressionSnapshot baseline{};
+			baseline.viewId = visibility.outputId;
+			baseline.viewType = visibility.viewType;
+			baseline.frameIndex = visibility.frameId;
+			baseline.state = VirtualGeometryHiZState::Active;
+			baseline.testedMeshlets = 64u;
+			baseline.visibleMeshlets = 64u;
+			baseline.baselineMatched = false;
+			baseline.reason = "accepted baseline changed";
+			visibility.hiZRegressionSnapshots.push_back(baseline);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+			const auto gate = std::find_if(
+				diagnostics.virtualGeometryPerformanceGates.begin(),
+				diagnostics.virtualGeometryPerformanceGates.end(),
+				[](const PerformanceGateResult& candidate) {
+					return candidate.gateId == "virtual-geometry-hiz-baseline-match";
+				});
+
+			context.Expect(!diagnostics.hiZBaselineMatched, "A mismatched Hi-Z baseline should remain visible in diagnostics.");
+			context.ExpectEqual(1u, diagnostics.hiZFalseOcclusionRiskWarnings, "A mismatched Hi-Z baseline should increment the false-occlusion risk counter.");
+			context.Expect(gate != diagnostics.virtualGeometryPerformanceGates.end(), "Hi-Z baseline gate should be generated for visibility diagnostics.");
+			context.Expect(gate->status == VirtualGeometryPerformanceGateStatus::Fail, "Hi-Z baseline gate should fail when accepted behavior changes.");
+			context.ExpectEqual(2u, gate->viewId, "Hi-Z baseline gate should carry the producing Game View id.");
 		});
 
 		registry.Add("VirtualGeometry.HiZ.Validation.KeepsOcclusionActiveAcrossCameraAndDepthSceneMotion", [](TestContext& context) {

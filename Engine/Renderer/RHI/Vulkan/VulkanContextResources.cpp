@@ -446,6 +446,175 @@ void VulkanContext::Impl::RetireBuffer(VulkanBuffer& buffer)
 	buffer = {};
 }
 
+void VulkanContext::Impl::DestroyVirtualGeometryGpuPacketResources(VirtualGeometryGpuPacketFrameResources& resources)
+{
+	DestroyBufferImmediate(resources.packetBuffer);
+	DestroyBufferImmediate(resources.batchBuffer);
+	DestroyBufferImmediate(resources.compactedPacketBuffer);
+	DestroyBufferImmediate(resources.generatedSubmissionBuffer);
+	DestroyBufferImmediate(resources.counterReadbackBuffer);
+	if (resources.packetBufferIndex != INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		freeBufferIndices.push_back(resources.packetBufferIndex);
+	}
+	if (resources.batchBufferIndex != INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		freeBufferIndices.push_back(resources.batchBufferIndex);
+	}
+	if (resources.compactedPacketBufferIndex != INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		freeBufferIndices.push_back(resources.compactedPacketBufferIndex);
+	}
+	if (resources.generatedSubmissionBufferIndex != INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		freeBufferIndices.push_back(resources.generatedSubmissionBufferIndex);
+	}
+	if (resources.counterReadbackBufferIndex != INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		freeBufferIndices.push_back(resources.counterReadbackBufferIndex);
+	}
+	resources = {};
+}
+
+void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
+	const FrameRenderData& frameData,
+	RenderViewType viewType,
+	std::uint32_t viewId,
+	std::uint64_t frameId)
+{
+	activeVirtualGeometryPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeVirtualGeometryBatchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeVirtualGeometryCompactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeVirtualGeometryGeneratedSubmissionBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeVirtualGeometryCounterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	if (currentFrame >= virtualGeometryGpuPacketResourcesByFrame.size())
+	{
+		return;
+	}
+
+	std::vector<VirtualGeometryGpuPacketFrameResources>& frameResources = virtualGeometryGpuPacketResourcesByFrame[currentFrame];
+	auto resourceIt = std::find_if(
+		frameResources.begin(),
+		frameResources.end(),
+		[viewType, viewId](const VirtualGeometryGpuPacketFrameResources& resources) {
+			return resources.viewType == viewType && resources.viewId == viewId;
+		});
+	if (resourceIt == frameResources.end())
+	{
+		VirtualGeometryGpuPacketFrameResources resources;
+		resources.resourceSerial = nextVirtualGeometryGpuPacketResourceSerial++;
+		resources.viewType = viewType;
+		resources.viewId = viewId;
+		frameResources.push_back(std::move(resources));
+		resourceIt = frameResources.end();
+		--resourceIt;
+	}
+
+	VirtualGeometryGpuPacketFrameResources& resources = *resourceIt;
+	resources.frameId = frameId;
+	resources.viewType = viewType;
+	resources.viewId = viewId;
+	resources.live = !frameData.virtualGeometryGpuPackets.empty() || !frameData.virtualGeometryGpuBatches.empty();
+	resources.retireAfterFrameId = frameId + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
+	if (!resources.live)
+	{
+		return;
+	}
+
+	auto ensureAndWriteBuffer = [&](VulkanBuffer& buffer, std::size_t& capacity, std::size_t elementCount, std::size_t elementSize, const void* source, const char* name) {
+		if (elementCount == 0u || source == nullptr)
+		{
+			return;
+		}
+
+		const VkDeviceSize requiredBytes = static_cast<VkDeviceSize>(elementCount * elementSize);
+		if (buffer.buffer == VK_NULL_HANDLE || capacity < elementCount || buffer.size < requiredBytes)
+		{
+			RetireBuffer(buffer);
+			buffer = CreateBuffer(requiredBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, name);
+			capacity = elementCount;
+		}
+		WriteMappedBuffer(allocator, buffer, source, requiredBytes);
+	};
+
+	ensureAndWriteBuffer(
+		resources.packetBuffer,
+		resources.packetCapacity,
+		frameData.virtualGeometryGpuPackets.size(),
+		sizeof(GpuVirtualGeometryPacketRecord),
+		frameData.virtualGeometryGpuPackets.data(),
+		"Virtual Geometry GPU Packet Buffer");
+	ensureAndWriteBuffer(
+		resources.batchBuffer,
+		resources.batchCapacity,
+		frameData.virtualGeometryGpuBatches.size(),
+		sizeof(GpuVirtualGeometryBatchDescriptor),
+		frameData.virtualGeometryGpuBatches.data(),
+		"Virtual Geometry GPU Batch Descriptor Buffer");
+	ensureAndWriteBuffer(
+		resources.compactedPacketBuffer,
+		resources.compactedPacketCapacity,
+		frameData.virtualGeometryGpuPackets.size(),
+		sizeof(GpuVirtualGeometryPacketRecord),
+		frameData.virtualGeometryGpuPackets.data(),
+		"Virtual Geometry GPU Compacted Packet Buffer");
+	std::vector<std::uint32_t> generatedSubmissionWords;
+	generatedSubmissionWords.reserve(frameData.virtualGeometryGeneratedSubmissions.size() * 4u);
+	for (const GeneratedVirtualGeometrySubmissionRecord& submission : frameData.virtualGeometryGeneratedSubmissions)
+	{
+		generatedSubmissionWords.push_back(submission.recordId);
+		generatedSubmissionWords.push_back(submission.viewId);
+		generatedSubmissionWords.push_back(submission.packetCount);
+		generatedSubmissionWords.push_back(submission.indirectTaskCount);
+	}
+	std::vector<std::uint32_t> counterReadbackWords;
+	counterReadbackWords.reserve(frameData.virtualGeometryCounterReadbacks.size() * 4u);
+	for (const VirtualGeometryCounterReadbackRecord& readback : frameData.virtualGeometryCounterReadbacks)
+	{
+		counterReadbackWords.push_back(readback.candidatePackets);
+		counterReadbackWords.push_back(readback.compactedPackets);
+		counterReadbackWords.push_back(readback.rejectedPackets);
+		counterReadbackWords.push_back(readback.failOpenPackets);
+	}
+	ensureAndWriteBuffer(
+		resources.generatedSubmissionBuffer,
+		resources.generatedSubmissionCapacity,
+		generatedSubmissionWords.size(),
+		sizeof(std::uint32_t),
+		generatedSubmissionWords.data(),
+		"Virtual Geometry Generated Submission Buffer");
+	ensureAndWriteBuffer(
+		resources.counterReadbackBuffer,
+		resources.counterReadbackCapacity,
+		counterReadbackWords.size(),
+		sizeof(std::uint32_t),
+		counterReadbackWords.data(),
+		"Virtual Geometry Counter Readback Buffer");
+
+	auto publishBindlessBufferForCurrentFrame = [&](std::uint32_t& bindlessIndex, const VulkanBuffer& buffer) -> std::uint32_t {
+		if (buffer.buffer == VK_NULL_HANDLE || buffer.size == 0u)
+		{
+			return INVALID_BINDLESS_BUFFER_INDEX;
+		}
+		if (bindlessIndex == INVALID_BINDLESS_BUFFER_INDEX)
+		{
+			bindlessIndex = AllocateBufferIndex();
+		}
+		UpdateGlobalBufferForFrame(currentFrame, bindlessIndex, buffer.buffer, 0u, buffer.size);
+		return bindlessIndex;
+	};
+	activeVirtualGeometryPacketBufferIndex = publishBindlessBufferForCurrentFrame(resources.packetBufferIndex, resources.packetBuffer);
+	activeVirtualGeometryBatchBufferIndex = publishBindlessBufferForCurrentFrame(resources.batchBufferIndex, resources.batchBuffer);
+	activeVirtualGeometryCompactedPacketBufferIndex = publishBindlessBufferForCurrentFrame(resources.compactedPacketBufferIndex, resources.compactedPacketBuffer);
+	activeVirtualGeometryGeneratedSubmissionBufferIndex = publishBindlessBufferForCurrentFrame(resources.generatedSubmissionBufferIndex, resources.generatedSubmissionBuffer);
+	activeVirtualGeometryCounterReadbackBufferIndex = publishBindlessBufferForCurrentFrame(resources.counterReadbackBufferIndex, resources.counterReadbackBuffer);
+
+	// The compaction compute path writes into the compacted/generated/counter
+	// buffers once a backend pipeline is available. Until then these buffers
+	// hold prepared mirrors so diagnostics are truthful and the current CPU
+	// coverage path remains the fail-open authority.
+}
+
 // VulkanContext::Impl::CopyBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
@@ -4454,6 +4623,37 @@ void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, Vk
 
 		vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 	}
+}
+
+void VulkanContext::Impl::UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range)
+{
+	if (frameIndex >= globalDescriptorSets.size()
+		|| index >= MAX_BINDLESS_BUFFERS
+		|| globalDescriptorSets[frameIndex] == VK_NULL_HANDLE
+		|| buffer == VK_NULL_HANDLE
+		|| range == 0u)
+	{
+		return;
+	}
+
+	VkDescriptorBufferInfo bufferInfo{};
+	bufferInfo.buffer = buffer;
+	bufferInfo.offset = offset;
+	bufferInfo.range = range;
+
+	VkWriteDescriptorSet descriptorWrite{};
+	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrite.dstSet = globalDescriptorSets[frameIndex];
+	descriptorWrite.dstBinding = 9;
+	descriptorWrite.dstArrayElement = index;
+	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	descriptorWrite.descriptorCount = 1;
+	descriptorWrite.pBufferInfo = &bufferInfo;
+
+	// The current frame slot has already passed its fence wait in BeginFrame, so
+	// this view-local packet descriptor update does not need the heavyweight
+	// queue idle used by persistent asset descriptor mutations.
+	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 }
 
 // VulkanContext::Impl::UpdateGlobalHiZ is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

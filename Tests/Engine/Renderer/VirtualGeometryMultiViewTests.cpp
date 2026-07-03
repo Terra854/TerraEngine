@@ -270,6 +270,259 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, sceneIt->hiZFalseOcclusionRiskWarnings, "Scene View should report only its own baseline risk warning.");
 		});
 
+		registry.Add("VirtualGeometry.Render.MultiView.US5.GpuPacketsKeepHiZStatePerView", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 891u;
+
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState gameState;
+			gameState.outputKind = RenderOutputKind::GameView;
+			gameState.viewType = RenderViewType::Game;
+			gameState.outputId = 2u;
+			gameState.targetSize = glm::uvec2(1920u, 1080u);
+			gameState.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::HiZ;
+			gameState.hasHiZValidationState = true;
+			gameState.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			gameState.hiZValidationState.pyramidReady = true;
+			gameState.hiZValidationState.pyramidSize = gameState.targetSize;
+			gameState.hiZValidationState.renderSize = gameState.targetSize;
+			gameState.hiZValidationState.cameraSignature = 0x89120001u;
+			gameState.hiZValidationState.depthSceneSignature = 0x89120002u;
+			gameState.hiZValidationState.warmupFrames = 5u;
+
+			GpuVirtualGeometryPacketRecord gamePacket{};
+			gamePacket.packetId = 0u;
+			gamePacket.viewId = gameState.outputId;
+			gamePacket.viewType = gameState.viewType;
+			gamePacket.frameId = snapshot.frameId;
+			gamePacket.meshId = meshId;
+			gamePacket.materialId = materialId;
+			gamePacket.clusterId = 10u;
+			gamePacket.meshletOffset = 0u;
+			gamePacket.meshletCount = 32u;
+			gameState.gpuPacketRecords.push_back(gamePacket);
+
+			GpuVirtualGeometryPacketFrameSet gameFrameSet{};
+			gameFrameSet.viewId = gameState.outputId;
+			gameFrameSet.viewType = gameState.viewType;
+			gameFrameSet.frameId = snapshot.frameId;
+			gameFrameSet.targetSize = gameState.targetSize;
+			gameFrameSet.packetCount = 1u;
+			gameFrameSet.batchCount = 1u;
+			gameFrameSet.validity = VirtualGeometryGpuFrameSetValidity::Valid;
+			gameState.gpuPacketFrameSets.push_back(gameFrameSet);
+
+			HiZRegressionSnapshot gameBaseline{};
+			gameBaseline.viewId = gameState.outputId;
+			gameBaseline.viewType = gameState.viewType;
+			gameBaseline.frameIndex = snapshot.frameId;
+			gameBaseline.state = VirtualGeometryHiZState::Active;
+			gameBaseline.baselineMatched = true;
+			gameState.hiZRegressionSnapshots.push_back(gameBaseline);
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState sceneState = gameState;
+			sceneState.outputKind = RenderOutputKind::SceneView;
+			sceneState.viewType = RenderViewType::Scene;
+			sceneState.outputId = 1u;
+			sceneState.targetSize = glm::uvec2(1280u, 720u);
+			sceneState.debugVisualizationMode = VirtualGeometryDebugVisualizationMode::Cluster;
+			sceneState.hiZValidationState.pyramidSize = sceneState.targetSize;
+			sceneState.hiZValidationState.renderSize = sceneState.targetSize;
+			sceneState.hiZValidationState.cameraSignature = 0x89110001u;
+			sceneState.hiZValidationState.depthSceneSignature = 0x89110002u;
+			sceneState.gpuPacketRecords.clear();
+			GpuVirtualGeometryPacketRecord scenePacket = gamePacket;
+			scenePacket.packetId = 0u;
+			scenePacket.viewId = sceneState.outputId;
+			scenePacket.viewType = sceneState.viewType;
+			scenePacket.clusterId = 22u;
+			scenePacket.meshletOffset = 64u;
+			scenePacket.meshletCount = 12u;
+			sceneState.gpuPacketRecords.push_back(scenePacket);
+			sceneState.gpuPacketFrameSets.clear();
+			GpuVirtualGeometryPacketFrameSet sceneFrameSet = gameFrameSet;
+			sceneFrameSet.viewId = sceneState.outputId;
+			sceneFrameSet.viewType = sceneState.viewType;
+			sceneFrameSet.targetSize = sceneState.targetSize;
+			sceneState.gpuPacketFrameSets.push_back(sceneFrameSet);
+			sceneState.hiZRegressionSnapshots.clear();
+			HiZRegressionSnapshot sceneBaseline = gameBaseline;
+			sceneBaseline.viewId = sceneState.outputId;
+			sceneBaseline.viewType = sceneState.viewType;
+			sceneBaseline.baselineMatched = true;
+			sceneState.hiZRegressionSnapshots.push_back(sceneBaseline);
+
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, gameState, VirtualGeometryCounterSource::Prepared));
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, sceneState, VirtualGeometryCounterSource::Prepared));
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+					snapshot,
+					MakeDefaultVirtualGeometryQualityProfile(),
+					VirtualGeometryInactiveReason::None);
+			const auto gameIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Game;
+			});
+			const auto sceneIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Scene;
+			});
+
+			context.Expect(gameIt != diagnostics.end(), "Game View GPU packet diagnostics should be present.");
+			context.Expect(sceneIt != diagnostics.end(), "Scene View GPU packet diagnostics should be present.");
+			context.Expect(gameIt->hiZBaselineMatched, "Game View should keep its own matched Hi-Z baseline.");
+			context.Expect(sceneIt->hiZBaselineMatched, "Scene View should keep its own matched Hi-Z baseline.");
+			context.Expect(gameIt->hiZCameraSignature != sceneIt->hiZCameraSignature, "Scene View and Game View should not share Hi-Z camera signatures.");
+			context.ExpectEqual(1u, gameIt->gpuPacketRecordCount, "Game View should report only its own GPU packet table.");
+			context.ExpectEqual(1u, sceneIt->gpuPacketRecordCount, "Scene View should report only its own GPU packet table.");
+			context.ExpectEqual(1920u, gameIt->hiZPyramidSize.x, "Game View should keep its own Hi-Z pyramid width.");
+			context.ExpectEqual(1080u, gameIt->hiZPyramidSize.y, "Game View should keep its own Hi-Z pyramid height.");
+			context.ExpectEqual(1280u, sceneIt->hiZPyramidSize.x, "Scene View should keep its own Hi-Z pyramid width.");
+			context.ExpectEqual(720u, sceneIt->hiZPyramidSize.y, "Scene View should keep its own Hi-Z pyramid height.");
+		});
+
+		registry.Add("VirtualGeometry.Render.MultiView.US6.KeepsGpuPacketCountersPerView", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 892u;
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState gameState;
+			gameState.outputKind = RenderOutputKind::GameView;
+			gameState.viewType = RenderViewType::Game;
+			gameState.outputId = 2u;
+			gameState.targetSize = glm::uvec2(1920u, 1080u);
+			for (std::uint32_t index = 0u; index < 3u; ++index)
+			{
+				GpuVirtualGeometryPacketRecord packet{};
+				packet.packetId = index;
+				packet.viewId = gameState.outputId;
+				packet.viewType = gameState.viewType;
+				packet.frameId = snapshot.frameId;
+				packet.meshletCount = 8u;
+				gameState.gpuPacketRecords.push_back(packet);
+			}
+			GpuPacketCompactionDispatch gameDispatch{};
+			gameDispatch.viewId = gameState.outputId;
+			gameDispatch.viewType = gameState.viewType;
+			gameDispatch.frameId = snapshot.frameId;
+			gameDispatch.candidatePacketCount = 3u;
+			gameDispatch.outputCapacity = 3u;
+			gameState.gpuCompactionDispatches.push_back(gameDispatch);
+			GeneratedVirtualGeometrySubmissionRecord gameSubmission{};
+			gameSubmission.viewId = gameState.outputId;
+			gameSubmission.viewType = gameState.viewType;
+			gameSubmission.frameId = snapshot.frameId;
+			gameSubmission.packetCount = 3u;
+			gameSubmission.validationState = VirtualGeometryGeneratedSubmissionValidationState::Valid;
+			gameState.generatedSubmissions.push_back(gameSubmission);
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState sceneState = gameState;
+			sceneState.outputKind = RenderOutputKind::SceneView;
+			sceneState.viewType = RenderViewType::Scene;
+			sceneState.outputId = 1u;
+			sceneState.targetSize = glm::uvec2(1280u, 720u);
+			sceneState.gpuPacketRecords.resize(1u);
+			sceneState.gpuPacketRecords.front().viewId = sceneState.outputId;
+			sceneState.gpuPacketRecords.front().viewType = sceneState.viewType;
+			sceneState.gpuCompactionDispatches.front().viewId = sceneState.outputId;
+			sceneState.gpuCompactionDispatches.front().viewType = sceneState.viewType;
+			sceneState.gpuCompactionDispatches.front().candidatePacketCount = 1u;
+			sceneState.generatedSubmissions.front().viewId = sceneState.outputId;
+			sceneState.generatedSubmissions.front().viewType = sceneState.viewType;
+			sceneState.generatedSubmissions.front().packetCount = 1u;
+
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, gameState, VirtualGeometryCounterSource::GPUReadback));
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, sceneState, VirtualGeometryCounterSource::DelayedGPUReadback));
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+					snapshot,
+					MakeDefaultVirtualGeometryQualityProfile(),
+					VirtualGeometryInactiveReason::None);
+			const auto gameIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Game;
+			});
+			const auto sceneIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Scene;
+			});
+
+			context.Expect(gameIt != diagnostics.end(), "Game View diagnostics should be present.");
+			context.Expect(sceneIt != diagnostics.end(), "Scene View diagnostics should be present.");
+			context.ExpectEqual(3u, gameIt->gpuPacketRecordCount, "Game View should keep its own GPU packet count.");
+			context.ExpectEqual(1u, sceneIt->gpuPacketRecordCount, "Scene View should keep its own GPU packet count.");
+			context.ExpectEqual(1u, gameIt->gpuCompactionDispatchCount, "Game View should report its own GPU compaction dispatch.");
+			context.ExpectEqual(1u, sceneIt->gpuCompactionDispatchCount, "Scene View should report its own GPU compaction dispatch.");
+			context.Expect(gameIt->counterSource == VirtualGeometryCounterSource::GPUReadback, "Game View should keep its GPU readback source.");
+			context.Expect(sceneIt->counterSource == VirtualGeometryCounterSource::DelayedGPUReadback, "Scene View should keep its delayed source.");
+			context.ExpectEqual(1u, gameIt->validGeneratedSubmissionCount, "Game View should report its generated submission independently.");
+			context.ExpectEqual(1u, sceneIt->validGeneratedSubmissionCount, "Scene View should report its generated submission independently.");
+		});
+
+		registry.Add("VirtualGeometry.Render.MultiView.US7.KeepsPerformanceGateViewIdentityFor300Frames", [](TestContext& context) {
+			std::uint32_t checkedGatePairs = 0u;
+			for (std::uint64_t frame = 0u; frame < 300u; ++frame)
+			{
+				TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot gameVisibility{};
+				gameVisibility.viewType = RenderViewType::Game;
+				gameVisibility.outputId = 2u;
+				gameVisibility.frameId = 9000u + frame;
+				gameVisibility.valid = true;
+				gameVisibility.source = VirtualGeometryCounterSource::GPUReadback;
+				gameVisibility.counters.source = gameVisibility.source;
+				gameVisibility.counters.preparedFrameId = gameVisibility.frameId;
+				gameVisibility.counters.readbackFrameId = gameVisibility.frameId;
+				gameVisibility.clusterPackets.resize(600u);
+				gameVisibility.gpuPacketRecords.resize(600u);
+				gameVisibility.gpuBatchDescriptors.resize(30u);
+				CompactedVisibilitySet gameCompaction{};
+				gameCompaction.viewId = gameVisibility.outputId;
+				gameCompaction.viewType = gameVisibility.viewType;
+				gameCompaction.candidatePackets = 600u;
+				gameCompaction.visiblePackets = 420u;
+				gameCompaction.rejectedByHiZ = 180u;
+				gameCompaction.submittedBatches = 30u;
+				gameVisibility.compactionResults.push_back(gameCompaction);
+
+				TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot sceneVisibility = gameVisibility;
+				sceneVisibility.viewType = RenderViewType::Scene;
+				sceneVisibility.outputId = 1u;
+				sceneVisibility.source = VirtualGeometryCounterSource::DelayedGPUReadback;
+				sceneVisibility.counters.source = sceneVisibility.source;
+				sceneVisibility.counters.unavailableReason = "delayed scene readback";
+
+				const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot gameDiagnostics =
+					TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(gameVisibility);
+				const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot sceneDiagnostics =
+					TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(sceneVisibility);
+				const auto gameGate = std::find_if(
+					gameDiagnostics.virtualGeometryPerformanceGates.begin(),
+					gameDiagnostics.virtualGeometryPerformanceGates.end(),
+					[](const PerformanceGateResult& gate) {
+						return gate.gateId == "gpu-packet-batch-ratio";
+					});
+				const auto sceneGate = std::find_if(
+					sceneDiagnostics.virtualGeometryPerformanceGates.begin(),
+					sceneDiagnostics.virtualGeometryPerformanceGates.end(),
+					[](const PerformanceGateResult& gate) {
+						return gate.gateId == "gpu-packet-batch-ratio";
+					});
+
+				context.Expect(gameGate != gameDiagnostics.virtualGeometryPerformanceGates.end(), "Game View should publish a GPU packet performance gate each frame.");
+				context.Expect(sceneGate != sceneDiagnostics.virtualGeometryPerformanceGates.end(), "Scene View should publish a GPU packet performance gate each frame.");
+				context.ExpectEqual(2u, gameGate->viewId, "Game View performance gates should keep the Game output id.");
+				context.ExpectEqual(1u, sceneGate->viewId, "Scene View performance gates should keep the Scene output id.");
+				context.Expect(gameGate->source == VirtualGeometryPerformanceGateSource::GPUReadback, "Game View gate source should remain GPU readback.");
+				context.Expect(sceneGate->source == VirtualGeometryPerformanceGateSource::DelayedGPUReadback, "Scene View gate source should remain delayed GPU readback.");
+				++checkedGatePairs;
+			}
+
+			context.ExpectEqual(300u, checkedGatePairs, "The multi-view gate fixture should exercise 300 independent frames.");
+		});
+
 		registry.Add("VirtualGeometry.Render.MultiView.ModeSwitchResetsLodTransitionState", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset = MakeModeSwitchTransitionAsset();
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();

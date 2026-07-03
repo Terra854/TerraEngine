@@ -519,6 +519,7 @@ namespace TerraEngine::Editor::Automation
 			case VirtualGeometryPerformanceGateSource::Prepared: return "prepared";
 			case VirtualGeometryPerformanceGateSource::GPUReadback: return "gpu-readback";
 			case VirtualGeometryPerformanceGateSource::DelayedGPUReadback: return "delayed-gpu-readback";
+			case VirtualGeometryPerformanceGateSource::Unsupported: return "unsupported";
 			case VirtualGeometryPerformanceGateSource::Manual: return "manual";
 			default: return "unknown";
 			}
@@ -529,6 +530,8 @@ namespace TerraEngine::Editor::Automation
 			return {
 				{"gateId", gate.gateId},
 				{"fixtureId", gate.fixtureId},
+				{"viewType", ToString(gate.viewType)},
+				{"viewId", gate.viewId},
 				{"metricName", gate.metricName},
 				{"threshold", gate.threshold},
 				{"actual", gate.actual},
@@ -563,6 +566,7 @@ namespace TerraEngine::Editor::Automation
 			}
 			return {
 				{"viewType", ToString(view.viewType)},
+				{"viewId", view.viewId},
 				{"frameId", view.frameId},
 				{"active", view.active},
 				{"inactiveReason", ToString(view.inactiveReason)},
@@ -572,6 +576,17 @@ namespace TerraEngine::Editor::Automation
 				{"culledMeshlets", view.culledMeshlets},
 				{"hiZActive", view.hiZActive},
 				{"hiZHistoryValid", view.hiZHistoryValid},
+				{"counterSource", ToString(view.counterSource)},
+				{"gpuPacketRecords", view.gpuPacketRecordCount},
+				{"gpuBatchDescriptors", view.gpuBatchDescriptorCount},
+				{"gpuPacketFrameSets", view.gpuPacketFrameSetCount},
+				{"gpuCompactionDispatches", view.gpuCompactionDispatchCount},
+				{"generatedSubmissions", view.generatedSubmissionCount},
+				{"validGeneratedSubmissions", view.validGeneratedSubmissionCount},
+				{"invalidGeneratedSubmissions", view.invalidGeneratedSubmissionCount},
+				{"gpuCounterReadbacks", view.gpuCounterReadbackCount},
+				{"gpuFallbackRecords", view.gpuFallbackRecordCount},
+				{"gpuFallbackReason", view.gpuFallbackReason},
 				{"residentPages", view.residentPages},
 				{"requestedPages", view.requestedPages},
 				{"missingPages", view.missingPages},
@@ -2800,6 +2815,26 @@ namespace TerraEngine::Editor::Automation
 			{"compactedPackets", stats.virtualGeometryCompactedPackets},
 			{"rejectedPackets", stats.virtualGeometryRejectedPackets},
 			{"failOpenPackets", stats.virtualGeometryFailOpenPackets},
+			{"gpuPacketRecords", stats.virtualGeometryGpuPacketRecords},
+			{"gpuBatchDescriptors", stats.virtualGeometryGpuBatchDescriptors},
+			{"gpuPacketFrameSets", stats.virtualGeometryGpuPacketFrameSets},
+			{"gpuValidFrameSets", stats.virtualGeometryGpuValidFrameSets},
+			{"gpuInvalidFrameSets", stats.virtualGeometryGpuInvalidFrameSets},
+			{"gpuCompactionDispatches", stats.virtualGeometryGpuCompactionDispatches},
+			{"generatedSubmissions", stats.virtualGeometryGeneratedSubmissions},
+			{"validGeneratedSubmissions", stats.virtualGeometryValidGeneratedSubmissions},
+			{"invalidGeneratedSubmissions", stats.virtualGeometryInvalidGeneratedSubmissions},
+			{"fallbackGeneratedSubmissions", stats.virtualGeometryFallbackGeneratedSubmissions},
+			{"gpuCounterReadbacks", stats.virtualGeometryGpuCounterReadbacks},
+			{"gpuCounterLatencyFrames", stats.virtualGeometryGpuCounterLatencyFrames},
+			{"gpuFallbackRecords", stats.virtualGeometryGpuFallbackRecords},
+			{"gpuFallbackAffectedPackets", stats.virtualGeometryGpuFallbackAffectedPackets},
+			{"gpuFallbackAffectedBatches", stats.virtualGeometryGpuFallbackAffectedBatches},
+			{"gpuFallbackReason", stats.virtualGeometryGpuFallbackReason},
+			{"performanceGateCount", stats.virtualGeometryPerformanceGateCount},
+			{"performanceGateFailures", stats.virtualGeometryPerformanceGateFailures},
+			{"performanceGateUnsupported", stats.virtualGeometryPerformanceGateUnsupported},
+			{"firstFailedPerformanceGate", stats.virtualGeometryFirstFailedPerformanceGate},
 			{"residentPages", stats.virtualGeometryResidentPages},
 			{"requestedPages", stats.virtualGeometryRequestedPages},
 			{"missingPages", stats.virtualGeometryMissingPages},
