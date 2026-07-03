@@ -134,6 +134,10 @@ namespace {
 		return IsImportSidecarPath(path);
 	}
 
+	bool IsTrackedSourceAssetPath(const std::filesystem::path& path) {
+		return path.extension() != ".meta" && !IsIgnoredAssetDatabasePath(path);
+	}
+
 	bool PublishCompiledAssetAtomically(const std::filesystem::path& stagedPath, const std::filesystem::path& finalPath)
 	{
 		std::error_code ec;
@@ -559,17 +563,33 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	this->projectRoot = std::filesystem::absolute(projectRootPath);
 	this->assetRoot = this->projectRoot / "Assets";
 	this->buildRoot = this->projectRoot / "Build" / "Assets";
+	this->assetIndexPath = this->projectRoot / "Library" / "AssetIndex.json";
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(assetRoot)) std::filesystem::create_directories(assetRoot);
 	if (!std::filesystem::exists(buildRoot)) std::filesystem::create_directories(buildRoot);
+	if (!std::filesystem::exists(assetIndexPath.parent_path())) std::filesystem::create_directories(assetIndexPath.parent_path());
 
 	assets.clear();
 	recentlyRemovedAssets.clear();
+	pendingReconcileImports.clear();
+	pendingReconcileOrphanedMetas.clear();
+	if (projectReconcileFuture.valid()) {
+		projectReconcileFuture.wait();
+		(void)projectReconcileFuture.get();
+	}
 	TERRAENGINE_LOG(LogLevel::Info, "AssetDatabase initialized. Watching: " << assetRoot);
 	
-	// Initial Scan
-	ScanProject();
+	// Load the last known asset table first so large projects can open with
+	// usable browser/resource state before the slower filesystem reconciliation
+	// walks every source file. First-time projects still use the legacy full scan
+	// so metadata and compiled outputs are created immediately.
+	if (LoadAssetIndex()) {
+		StartBackgroundProjectReconcile();
+	} else {
+		ScanProject();
+		SaveAssetIndex();
+	}
 	
 	// Start Watcher
 	fileWatcher.Start(assetRoot);
@@ -578,15 +598,23 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 // AssetDatabase::Shutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Shutdown() {
 	CancelAllImportsAndWait(true);
+	if (projectReconcileFuture.valid()) {
+		projectReconcileFuture.wait();
+		(void)projectReconcileFuture.get();
+	}
 	fileWatcher.Stop();
 	assets.clear();
 	deferredImports.clear();
+	pendingReconcileImports.clear();
+	pendingReconcileOrphanedMetas.clear();
 	recentlyRemovedAssets.clear();
 }
 
 // AssetDatabase::Update is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void AssetDatabase::Update() {
 	PruneRecentlyRemovedAssets();
+	PublishBackgroundProjectReconcile();
+	ProcessPendingProjectReconcile();
 
 	// Process Watcher Events
 	auto events = fileWatcher.PopEvents();
@@ -1027,7 +1055,11 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport) {
 	// Always save metadata
 	SaveMetadata(metadata);
+	RegisterImportedAsset(metadata, absSourcePath, needsImport);
+	SaveAssetIndex();
+}
 
+void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport) {
 	// Asset GUIDs must stay one-to-one with their live source path. Rename
 	// operations can briefly surface the same GUID under both the old and new
 	// path, and keeping the stale entry makes GUID lookups return outdated
@@ -1081,6 +1113,192 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 	{
 		RegisterGeneratedModelPackageMaterialMetadata(absSourcePath);
 		RegisterGeneratedModelPackageResources(absSourcePath, buildRoot);
+	}
+}
+
+bool AssetDatabase::LoadAssetIndex() {
+	if (!std::filesystem::exists(assetIndexPath)) {
+		return false;
+	}
+
+	std::ifstream file(assetIndexPath);
+	if (!file.is_open()) {
+		return false;
+	}
+
+	json index;
+	try {
+		file >> index;
+	} catch (const json::exception& exception) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Asset index is malformed and will be rebuilt: " << assetIndexPath << " (" << exception.what() << ")");
+		return false;
+	}
+
+	if (index.value("version", 0) != 1 || !index.contains("assets") || !index["assets"].is_array()) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Asset index version is unsupported and will be rebuilt: " << assetIndexPath);
+		return false;
+	}
+
+	std::size_t loadedCount = 0u;
+	for (const json& entry : index["assets"]) {
+		try {
+			AssetMetadata metadata;
+			metadata.guid = StringToUuid(entry.at("guid").get<std::string>());
+			metadata.importerName = entry.at("importerName").get<std::string>();
+			using FileDuration = std::filesystem::file_time_type::duration;
+			metadata.lastModified = std::filesystem::file_time_type(FileDuration(entry.at("lastModified").get<FileDuration::rep>()));
+			metadata.sourcePath = entry.at("sourcePath").get<std::string>();
+			metadata.compiledPath = entry.value("compiledPath", std::string());
+			metadata.settings = entry.value("settings", json::object());
+
+			const std::filesystem::path absSourcePath = std::filesystem::absolute(assetRoot / metadata.sourcePath);
+			if (!std::filesystem::exists(absSourcePath)) {
+				continue;
+			}
+			if (!metadata.compiledPath.empty() && !std::filesystem::exists(buildRoot / metadata.compiledPath)) {
+				continue;
+			}
+
+			RegisterImportedAsset(metadata, absSourcePath, false);
+			++loadedCount;
+		} catch (const std::exception& exception) {
+			TERRAENGINE_LOG(LogLevel::Warning, "Skipping invalid asset index entry in " << assetIndexPath << ": " << exception.what());
+		}
+	}
+
+	TERRAENGINE_LOG(LogLevel::Info, "Loaded " << loadedCount << " assets from startup asset index: " << assetIndexPath);
+	return loadedCount > 0u || std::filesystem::exists(assetIndexPath);
+}
+
+bool AssetDatabase::SaveAssetIndex() const {
+	if (assetIndexPath.empty()) {
+		return false;
+	}
+
+	std::error_code ec;
+	std::filesystem::create_directories(assetIndexPath.parent_path(), ec);
+	if (ec) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Failed to create asset index directory " << assetIndexPath.parent_path() << ": " << ec.message());
+		return false;
+	}
+
+	json index;
+	index["version"] = 1;
+	index["assets"] = json::array();
+	for (const auto& [absPath, metadata] : assets) {
+		if (!std::filesystem::exists(absPath)) {
+			continue;
+		}
+
+		json entry;
+		entry["guid"] = UuidToString(metadata.guid);
+		entry["importerName"] = metadata.importerName;
+		entry["lastModified"] = metadata.lastModified.time_since_epoch().count();
+		entry["sourcePath"] = metadata.sourcePath.generic_string();
+		entry["compiledPath"] = metadata.compiledPath.generic_string();
+		entry["settings"] = metadata.settings;
+		index["assets"].push_back(std::move(entry));
+	}
+
+	const std::filesystem::path tempPath = assetIndexPath.string() + ".tmp";
+	{
+		std::ofstream output(tempPath, std::ios::trunc);
+		if (!output.is_open()) {
+			return false;
+		}
+		output << std::setw(4) << index << '\n';
+	}
+
+	std::filesystem::rename(tempPath, assetIndexPath, ec);
+	if (ec) {
+		std::filesystem::remove(assetIndexPath, ec);
+		ec.clear();
+		std::filesystem::rename(tempPath, assetIndexPath, ec);
+	}
+	if (ec) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Failed to publish asset index " << assetIndexPath << ": " << ec.message());
+		return false;
+	}
+	return true;
+}
+
+void AssetDatabase::StartBackgroundProjectReconcile() {
+	if (projectReconcileFuture.valid()) {
+		return;
+	}
+
+	const std::filesystem::path scanRoot = assetRoot;
+	projectReconcileFuture = std::async(std::launch::async, [scanRoot]() {
+		ProjectReconcileSnapshot snapshot;
+		if (!std::filesystem::exists(scanRoot)) {
+			return snapshot;
+		}
+
+		for (const auto& entry : std::filesystem::recursive_directory_iterator(scanRoot)) {
+			const std::filesystem::path path = entry.path();
+			if (entry.is_regular_file() && path.extension() == ".meta") {
+				std::filesystem::path sourcePath = path;
+				sourcePath.replace_extension("");
+				if (IsIgnoredAssetDatabasePath(sourcePath) || !std::filesystem::exists(sourcePath)) {
+					snapshot.orphanedMetaFiles.push_back(path);
+				}
+				continue;
+			}
+
+			if (entry.is_regular_file() && IsTrackedSourceAssetPath(path)) {
+				snapshot.sourceFiles.push_back(std::filesystem::absolute(path));
+			}
+		}
+		return snapshot;
+	});
+}
+
+void AssetDatabase::PublishBackgroundProjectReconcile() {
+	if (!projectReconcileFuture.valid()) {
+		return;
+	}
+	if (projectReconcileFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+		return;
+	}
+
+	ProjectReconcileSnapshot snapshot = projectReconcileFuture.get();
+	for (const std::filesystem::path& metaPath : snapshot.orphanedMetaFiles) {
+		pendingReconcileOrphanedMetas.push_back(metaPath);
+	}
+	for (const std::filesystem::path& sourcePath : snapshot.sourceFiles) {
+		pendingReconcileImports.push_back(sourcePath);
+	}
+	TERRAENGINE_LOG(LogLevel::Info,
+		"Queued asset database reconcile: sources=" << pendingReconcileImports.size()
+		<< " orphanedMetas=" << pendingReconcileOrphanedMetas.size());
+}
+
+void AssetDatabase::ProcessPendingProjectReconcile() {
+	if (!pendingReconcileOrphanedMetas.empty()) {
+		for (const std::filesystem::path& metaPath : pendingReconcileOrphanedMetas) {
+			AssetMetadata tempMeta;
+			std::filesystem::path sourcePath = metaPath;
+			sourcePath.replace_extension("");
+			if (LoadMetadata(metaPath, tempMeta) && !tempMeta.compiledPath.empty()) {
+				std::error_code removeCompiledError;
+				std::filesystem::remove(buildRoot / tempMeta.compiledPath, removeCompiledError);
+			}
+			std::error_code removeMetaError;
+			std::filesystem::remove(metaPath, removeMetaError);
+		}
+		pendingReconcileOrphanedMetas.clear();
+		SaveAssetIndex();
+	}
+
+	constexpr std::size_t kMaxReconcileImportsPerFrame = 16u;
+	std::size_t processedCount = 0u;
+	while (!pendingReconcileImports.empty() && processedCount < kMaxReconcileImportsPerFrame) {
+		const std::filesystem::path sourcePath = pendingReconcileImports.front();
+		pendingReconcileImports.pop_front();
+		if (std::filesystem::exists(sourcePath)) {
+			ImportAsset(sourcePath);
+		}
+		++processedCount;
 	}
 }
 
@@ -1891,6 +2109,7 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(meta)) std::filesystem::remove(meta, ec);
 		assets.erase(it);
+		SaveAssetIndex();
 	}
 }
 
@@ -2104,6 +2323,7 @@ bool AssetDatabase::SaveVirtualGeometryPerMeshOverride(const TerraEngine::UUID& 
 			}
 			return false;
 		}
+		SaveAssetIndex();
 		return true;
 	}
 
@@ -2133,6 +2353,7 @@ bool AssetDatabase::ClearVirtualGeometryPerMeshOverride(const TerraEngine::UUID&
 			}
 			return false;
 		}
+		SaveAssetIndex();
 		return true;
 	}
 

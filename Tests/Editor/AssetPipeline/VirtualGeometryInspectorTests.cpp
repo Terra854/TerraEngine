@@ -7,10 +7,12 @@
 #include "Utilities/UUID.h"
 
 #include <cstring>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -101,6 +103,17 @@ namespace TerraEngine::EditorTests
 			output << "f 1/1 2/2 3/3\n";
 		}
 
+		void WriteMaterialAsset(const std::filesystem::path& path, std::string_view name)
+		{
+			std::filesystem::create_directories(path.parent_path());
+			nlohmann::json material;
+			material["name"] = std::string(name);
+			material["shader"] = "";
+			material["textures"] = nlohmann::json::object();
+			std::ofstream output(path, std::ios::trunc);
+			output << material.dump(4);
+		}
+
 		void WriteAssetMetadata(
 			const std::filesystem::path& assetRoot,
 			const std::filesystem::path& sourcePath,
@@ -128,6 +141,69 @@ namespace TerraEngine::EditorTests
 
 	void RegisterVirtualGeometryInspectorTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.Editor.AssetDatabase.ReloadsFromStartupIndexWithoutMetaScan", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			const std::filesystem::path assetRoot = root / "Assets";
+			const std::filesystem::path buildRoot = root / "Build" / "Assets";
+			const std::filesystem::path sourcePath = assetRoot / "CachedMaterial.tmat";
+			const std::filesystem::path compiledPath = buildRoot / "CachedMaterial.tmat";
+			const TerraEngine::UUID guid = TerraEngine::GenerateUUID();
+
+			WriteMaterialAsset(sourcePath, "CachedMaterial");
+			WriteMaterialAsset(compiledPath, "CachedMaterialCompiled");
+			WriteAssetMetadata(assetRoot, "CachedMaterial.tmat", "CachedMaterial.tmat", guid, "MaterialImporter");
+
+			AssetDatabase::Instance().Initialize(root);
+			context.Expect(std::filesystem::exists(root / "Library" / "AssetIndex.json"), "Initial scan should persist a startup asset index.");
+			AssetDatabase::Instance().Shutdown();
+
+			std::filesystem::remove(sourcePath.string() + ".meta");
+			AssetDatabase::Instance().Initialize(root);
+			const AssetMetadata* indexedMetadata = AssetDatabase::Instance().FindAssetByGuid(guid);
+			context.Expect(indexedMetadata != nullptr, "Startup should restore known assets from AssetIndex.json before the reconcile scan runs.");
+			context.ExpectEqual(std::filesystem::path("CachedMaterial.tmat"), indexedMetadata->sourcePath, "Indexed metadata should preserve the original source path.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.AssetDatabase.BackgroundReconcileFindsNewFilesAfterIndexedStartup", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			const std::filesystem::path assetRoot = root / "Assets";
+			const std::filesystem::path buildRoot = root / "Build" / "Assets";
+			const TerraEngine::UUID indexedGuid = TerraEngine::GenerateUUID();
+
+			WriteMaterialAsset(assetRoot / "Indexed.tmat", "Indexed");
+			WriteMaterialAsset(buildRoot / "Indexed.tmat", "IndexedCompiled");
+			WriteAssetMetadata(assetRoot, "Indexed.tmat", "Indexed.tmat", indexedGuid, "MaterialImporter");
+			AssetDatabase::Instance().Initialize(root);
+			AssetDatabase::Instance().Shutdown();
+
+			WriteMaterialAsset(assetRoot / "DiscoveredLater.tmat", "DiscoveredLater");
+			context.Expect(std::filesystem::exists(assetRoot / "DiscoveredLater.tmat"), "New material source should exist before indexed startup reconcile.");
+			AssetDatabase::Instance().Initialize(root);
+
+			bool discovered = false;
+			for (int attempt = 0; attempt < 80 && !discovered; ++attempt) {
+				AssetDatabase::Instance().Update();
+				for (const auto& [path, metadata] : AssetDatabase::Instance().GetAssets()) {
+					if (metadata.sourcePath == std::filesystem::path("DiscoveredLater.tmat")) {
+						discovered = true;
+						break;
+					}
+				}
+				if (!discovered) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				}
+			}
+
+			context.Expect(discovered, "Background reconcile should import new files that were not present in the startup index.");
+			context.Expect(AssetDatabase::Instance().FindAssetByGuid(indexedGuid) != nullptr, "Indexed assets should remain registered while reconcile catches up.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
 		registry.Add("VirtualGeometry.Editor.Inspector.ReadsCookedMetadata", [](TestContext& context) {
 			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
 			AssetDatabase::Instance().Initialize(root);

@@ -19,6 +19,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string_view>
+#include <deque>
 
 struct AssetMetadata {
 	TerraEngine::UUID guid;
@@ -196,10 +197,16 @@ private:
 	bool CompileShaderWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState);
 	bool RunCompilerProcess(const std::filesystem::path& compilerPath, const std::wstring& commandLine, const std::shared_ptr<AsyncImportProgressState>& progressState, std::string_view logPrefix, const std::filesystem::path& expectedOutputPath);
 	void FinishImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport);
+	void RegisterImportedAsset(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport);
 	void RegisterGeneratedModelPackageMaterialMetadata(const std::filesystem::path& absSourcePath);
 	void CleanupModelPackageGeneratedAssets(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath);
 	void CleanupCancelledImport(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool removeSourceAsset);
 	void RemoveAsset(const std::filesystem::path& sourcePath);
+	bool LoadAssetIndex();
+	bool SaveAssetIndex() const;
+	void StartBackgroundProjectReconcile();
+	void PublishBackgroundProjectReconcile();
+	void ProcessPendingProjectReconcile();
 	void SetImportProgress(const std::shared_ptr<AsyncImportProgressState>& progressState, std::string stage, std::string message, float progress, bool indeterminate, bool failed) const;
 	void TerminateCompilerProcess(const std::shared_ptr<AsyncImportProgressState>& progressState) const;
 	AssetImportProgress SnapshotImportProgress(const std::shared_ptr<AsyncImportProgressState>& progressState) const;
@@ -209,6 +216,7 @@ private:
 	std::filesystem::path buildRoot; 
 
 	std::map<std::filesystem::path, AssetMetadata> assets;
+	std::filesystem::path assetIndexPath;
 	
 	// File Watcher
 	FileWatcher fileWatcher;
@@ -221,6 +229,14 @@ private:
 	};
 	std::map<std::filesystem::path, PendingEvent> pendingEvents;
 	std::map<std::filesystem::path, bool> deferredImports;
+
+	struct ProjectReconcileSnapshot {
+		std::vector<std::filesystem::path> sourceFiles;
+		std::vector<std::filesystem::path> orphanedMetaFiles;
+	};
+	std::future<ProjectReconcileSnapshot> projectReconcileFuture;
+	std::deque<std::filesystem::path> pendingReconcileImports;
+	std::vector<std::filesystem::path> pendingReconcileOrphanedMetas;
 
 	// struct AsyncCompileJob groups related state and operations so callers have one documented contract.
 	struct AsyncImportProgressState {

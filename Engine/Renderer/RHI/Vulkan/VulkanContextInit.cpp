@@ -168,6 +168,27 @@ void VulkanContext::Impl::Cleanup() {
 	}
 	meshCache.clear();
 
+	// Virtual geometry packet resources are per-view, per-frame scratch buffers
+	// published through the bindless table. They are not owned by meshCache, so
+	// shutdown must drain them explicitly after the device is idle and before
+	// VMA is destroyed; otherwise the final frame's packet, batch, compaction,
+	// generated-submission, and counter-readback buffers survive teardown.
+	for (std::vector<VirtualGeometryGpuPacketFrameResources>& frameResources : virtualGeometryGpuPacketResourcesByFrame) {
+		for (VirtualGeometryGpuPacketFrameResources& resources : frameResources) {
+			DestroyVirtualGeometryGpuPacketResources(resources);
+		}
+		frameResources.clear();
+	}
+	for (VirtualGeometryGpuPacketFrameResources& resources : retiredVirtualGeometryGpuPacketResources) {
+		DestroyVirtualGeometryGpuPacketResources(resources);
+	}
+	retiredVirtualGeometryGpuPacketResources.clear();
+	activeVirtualGeometryPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeVirtualGeometryBatchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeVirtualGeometryCompactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeVirtualGeometryGeneratedSubmissionBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeVirtualGeometryCounterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& retiredBuffers : retiredBuffersByFrame) {
 		for (VulkanBuffer& retiredBuffer : retiredBuffers) {
