@@ -304,6 +304,7 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API RenderPerformanceGateResult EvaluateRenderPerformanceGate(std::string workloadName, float baselineValue, float latestValue, float thresholdPercent);
 	TERRAENGINE_API PerformanceGateResult EvaluateVirtualGeometryPerformanceGate(std::string gateId, std::string fixtureId, std::string metricName, float threshold, float actual, std::string unit, bool lowerIsBetter, VirtualGeometryPerformanceGateSource source = VirtualGeometryPerformanceGateSource::Prepared, RenderViewType viewType = RenderViewType::Game, std::uint32_t viewId = 0u);
 	TERRAENGINE_API std::vector<PerformanceGateResult> BuildVirtualGeometryPerformanceGates(const VirtualGeometryViewDiagnosticsSnapshot& snapshot);
+	TERRAENGINE_API std::vector<PerformanceGateResult> BuildVisibleCommandReusePerformanceGates(const RenderStatsSnapshot& stats);
 	TERRAENGINE_API VirtualGeometryViewDiagnosticsSnapshot BuildInactiveVirtualGeometryDiagnostics(RenderViewType viewType, std::uint64_t frameId, VirtualGeometryInactiveReason reason);
 	TERRAENGINE_API VirtualGeometryAdaptiveSettingsDiagnostics BuildVirtualGeometryAdaptiveSettingsDiagnostics(const AdaptiveVirtualGeometryCookProfile& profile);
 	TERRAENGINE_API VirtualGeometryCookOutputDiagnostics BuildVirtualGeometryCookOutputDiagnostics(const std::vector<VirtualGeometryAssetRuntime>& assets);

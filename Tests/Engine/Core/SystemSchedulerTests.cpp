@@ -378,7 +378,9 @@ namespace TerraEngine::Tests {
 				TerraEngine::Scheduling::kResourceVirtualGeometryCullingDiagnostics,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPerformanceCounters,
 				TerraEngine::Scheduling::kResourceVirtualGeometryShadowVisibilitySnapshots,
-				TerraEngine::Scheduling::kResourceVirtualGeometryDiagnostics
+				TerraEngine::Scheduling::kResourceVirtualGeometryDiagnostics,
+				TerraEngine::Scheduling::kResourceVisibleCommandReuseDiagnostics,
+				TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets
 			};
 
 			// RenderSystem is registered during engine startup before any frame

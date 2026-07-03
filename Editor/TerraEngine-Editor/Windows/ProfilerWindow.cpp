@@ -667,6 +667,43 @@ void ProfilerWindow::DrawFrameDetails()
 		}
 		ImGui::TreePop();
 	}
+	if (ImGui::TreeNode("Visible Command Reuse"))
+	{
+		const RenderStatsSnapshot gameStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Game);
+		const RenderStatsSnapshot sceneStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Scene);
+		if (ImGui::BeginTable("ProfilerVisibleCommandReuseRows", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("View");
+			ImGui::TableSetupColumn("Cache");
+			ImGui::TableSetupColumn("Commands");
+			ImGui::TableSetupColumn("Copied");
+			ImGui::TableSetupColumn("Unique Touches");
+			ImGui::TableSetupColumn("Deduped");
+			ImGui::TableSetupColumn("Diagnostics");
+			ImGui::TableHeadersRow();
+			const auto drawStatsRow = [](const RenderStatsSnapshot& stats) {
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(ToString(stats.viewType));
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextUnformatted(stats.visibleCommandCacheHit ? "hit" : "miss");
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%u", stats.visibleCommandCount);
+				ImGui::TableSetColumnIndex(3);
+				ImGui::Text("%u", stats.visibleCommandCopiedCount);
+				ImGui::TableSetColumnIndex(4);
+				ImGui::Text("%u", stats.visibleStreamingUniqueMeshes + stats.visibleStreamingUniqueMaterials + stats.visibleStreamingUniqueTextures);
+				ImGui::TableSetColumnIndex(5);
+				ImGui::Text("%u", stats.visibleStreamingDuplicateTouchesEliminated);
+				ImGui::TableSetColumnIndex(6);
+				ImGui::TextUnformatted(stats.detailedRenderDiagnosticsRequested ? "detailed" : "compact");
+			};
+			drawStatsRow(gameStats);
+			drawStatsRow(sceneStats);
+			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
 	if (!renderDiagnostics.backendFrameBreakdown.stageTimings.empty() && ImGui::TreeNode("Backend Submit Path"))
 	{
 		if (ImGui::BeginTable("ProfilerBackendSubmitStages", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))

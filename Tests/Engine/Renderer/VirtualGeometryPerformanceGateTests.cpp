@@ -41,6 +41,43 @@ namespace TerraEngine::Tests {
 			context.Expect(!gate.diagnostic.empty(), "Failing gates should carry human-readable detail.");
 		});
 
+		registry.Add("Renderer.VisibleCommandReuse.US1.CopyCountGateUsesCompletedStats", [](TestContext& context) {
+			RenderStatsSnapshot stats;
+			stats.viewType = RenderViewType::Game;
+			stats.valid = true;
+			stats.visibleCommandCacheHit = true;
+			stats.visibleCommandCount = 48u;
+			stats.visibleCommandCopiedCount = 48u;
+			stats.visibleStreamingUniqueMeshes = 1u;
+			stats.visibleStreamingUniqueMaterials = 2u;
+			stats.visibleStreamingUniqueTextures = 3u;
+			stats.visibleStreamingDuplicateTouchesEliminated = 144u;
+
+			const std::vector<PerformanceGateResult> gates = TerraEngine::Renderer::BuildVisibleCommandReusePerformanceGates(stats);
+			const auto copyGate = FindGate(gates, "visible-command-copy-count");
+
+			context.Expect(copyGate != gates.end(), "Visible-command reuse should publish a copy-count gate.");
+			context.Expect(copyGate->status == VirtualGeometryPerformanceGateStatus::Pass, "Copying no more than the completed command count should pass.");
+			context.ExpectEqual(std::string("visible-command-reuse-static"), copyGate->fixtureId, "Gate should identify the visible-command reuse fixture.");
+		});
+
+		registry.Add("Renderer.VisibleCommandReuse.US6.ConservativeRefreshPublishesWarningGate", [](TestContext& context) {
+			RenderStatsSnapshot stats;
+			stats.viewType = RenderViewType::Scene;
+			stats.valid = true;
+			stats.visibleCommandCount = 8u;
+			stats.visibleCommandCopiedCount = 8u;
+			stats.visibleCommandConservativeRefresh = true;
+			stats.visibleCommandReuseFallbackReason = "cached visible streaming touch set was unavailable";
+
+			const std::vector<PerformanceGateResult> gates = TerraEngine::Renderer::BuildVisibleCommandReusePerformanceGates(stats);
+			const auto warningGate = FindGate(gates, "visible-command-conservative-refresh");
+
+			context.Expect(warningGate != gates.end(), "Conservative refresh should be visible to performance diagnostics.");
+			context.Expect(warningGate->status == VirtualGeometryPerformanceGateStatus::Warning, "Conservative refresh should warn instead of pretending the optimized path ran.");
+			context.Expect(warningGate->diagnostic.find("touch set") != std::string::npos, "Warning should explain the fallback reason.");
+		});
+
 		registry.Add("VirtualGeometry.PerformanceGate.US4.BuildsDenseAndHiZGatesFromViewDiagnostics", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
 			diagnostics.viewType = RenderViewType::Game;

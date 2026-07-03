@@ -212,6 +212,8 @@ namespace TerraEngine::Scheduling {
 			{ kResourceVirtualGeometryPerformanceCounters, "Virtual geometry scalability gate counters for packet counts, submitted batches, meshlets, page pressure, and timing.", "Written by render diagnostics and read by tests, automation, and performance-gate reporting." },
 			{ kResourceVirtualGeometryShadowVisibilitySnapshots, "Per-light or per-cascade virtual geometry shadow visibility selections.", "Written by shadow render preparation without reusing camera Hi-Z state." },
 			{ kResourceVirtualGeometryDiagnostics, "Per-view virtual geometry counters, scheduler boundary metadata, and fail-open warnings.", "Written after protected render/RHI work so editor diagnostics and automation read a stable snapshot." },
+			{ kResourceVisibleCommandReuseDiagnostics, "Per-view visible-command cache hit, conservative refresh, copy, and diagnostic demand telemetry.", "Written by render preparation and read by profiler, overlays, automation, and performance gates." },
+			{ kResourceVisibleStreamingTouchSets, "Deduplicated visible mesh, material, and texture touch sets derived from cached visible commands.", "Written by render preparation and published through protected ResourceManager streaming boundaries." },
 			{ "Resources", "Runtime asset and content mount state.", "" },
 			{ "Profiler", "CPU/GPU profiling capture state.", "" },
 			{ "Editor", "Editor-only systems and tooling state.", "" }

@@ -74,6 +74,8 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceVirtualGeometryPerformanceCounters[] = "VirtualGeometryPerformanceCounters";
 	inline constexpr const char kResourceVirtualGeometryShadowVisibilitySnapshots[] = "VirtualGeometryShadowVisibilitySnapshots";
 	inline constexpr const char kResourceVirtualGeometryDiagnostics[] = "VirtualGeometryDiagnostics";
+	inline constexpr const char kResourceVisibleCommandReuseDiagnostics[] = "VisibleCommandReuseDiagnostics";
+	inline constexpr const char kResourceVisibleStreamingTouchSets[] = "VisibleStreamingTouchSets";
 
 	struct SystemDeclaration {
 		std::string name;

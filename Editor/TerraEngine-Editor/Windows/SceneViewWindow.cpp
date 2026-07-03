@@ -343,7 +343,13 @@ void SceneViewWindow::OnGui() {
 			+ std::string(sceneStats.hiZBaselineMatched ? "Matched" : "Mismatch")
 			+ ", risks "
 			+ std::to_string(sceneStats.hiZFalseOcclusionRiskWarnings);
-		const char* lines[] = { packetText.c_str(), batchText.c_str(), gpuPacketText.c_str(), generatedText.c_str(), dispatchText.c_str(), gpuFallbackText.c_str(), compactText.c_str(), rejectedText.c_str(), fallbackText.c_str(), hiZBaselineText.c_str() };
+		const std::string reuseText = "Visible Cache: "
+			+ std::string(sceneStats.visibleCommandCacheHit ? "hit" : "miss")
+			+ ", unique touches "
+			+ std::to_string(sceneStats.visibleStreamingUniqueMeshes + sceneStats.visibleStreamingUniqueMaterials + sceneStats.visibleStreamingUniqueTextures)
+			+ ", deduped "
+			+ std::to_string(sceneStats.visibleStreamingDuplicateTouchesEliminated);
+		const char* lines[] = { packetText.c_str(), batchText.c_str(), gpuPacketText.c_str(), generatedText.c_str(), dispatchText.c_str(), gpuFallbackText.c_str(), compactText.c_str(), rejectedText.c_str(), fallbackText.c_str(), reuseText.c_str(), hiZBaselineText.c_str() };
 		float textWidth = 0.0f;
 		for (const char* line : lines)
 		{

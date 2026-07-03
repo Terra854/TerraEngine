@@ -120,6 +120,32 @@ exists, camera motion, target ownership, quality metadata, and guard metadata
 remain diagnostic-only. There are no user-facing or shader-facing Hi-Z quality
 tier controls in this milestone.
 
+## Visible Command Reuse Optimization
+
+Feature `specs/032-visible-command-reuse` keeps the existing virtual geometry
+selection and Hi-Z behavior unchanged while reducing static-frame reuse cost.
+When a visible-command cache record is rebuilt, the renderer now derives a
+deduplicated touch set for visible meshes, materials, and textures. Cache-hit
+frames publish that compact set through ResourceManager instead of walking every
+cached draw command and material binding again.
+
+The optimization is intentionally fail-open:
+
+1. If the visible-command signature changes, the renderer rebuilds the command
+   list and virtual geometry payload.
+2. If a cached streaming touch set is missing or untrusted, the renderer falls
+   back to the older per-command refresh path and reports a conservative-refresh
+   warning.
+3. Compact virtual geometry counters stay available every frame, while full
+   asset/runtime diagnostics remain behind explicit diagnostics demand.
+4. Scene View, Game View, runtime, offscreen, and shadow ownership stay separated
+   by the existing cache signature and output id.
+
+Profiler and automation surfaces expose cache hit state, copied command count,
+unique visible touches, duplicate touches eliminated, conservative-refresh
+reason, and compact-versus-detailed diagnostic demand. This makes the reuse path
+measurable without re-enabling noisy always-on overlays.
+
 GPU packet buffers, packet compaction, and generated submission records carry
 the current view's Hi-Z state as ownership and diagnostics metadata only. They
 do not select a lower, medium, high, or debug Hi-Z path, and they do not change

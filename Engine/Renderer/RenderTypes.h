@@ -575,6 +575,75 @@ enum class VirtualGeometryPerformanceGateSource : std::uint32_t
 	Manual = 4u
 };
 
+enum class VisibleStreamingResourceKind : std::uint32_t
+{
+	Mesh = 0u,
+	Material = 1u,
+	Texture = 2u
+};
+
+namespace TerraEngine::Renderer {
+
+	// VisibleResourceTouch is the compact resource identity published from a
+	// cached visible-command result. It lets the renderer say "this unique mesh
+	// or material is still visible" once per view instead of repeating the same
+	// ResourceManager calls for every draw command that references it.
+	struct VisibleResourceTouch
+	{
+		TerraEngine::UUID resourceId = TerraEngine::EMPTY_UUID;
+		::VisibleStreamingResourceKind kind = ::VisibleStreamingResourceKind::Mesh;
+		std::int32_t priority = 100;
+	};
+
+	// Texture touches also carry the nearest visible distance observed while the
+	// visible-command record was rebuilt. Texture streaming uses the nearest
+	// distance so cache-hit frames keep the highest needed mip quality.
+	struct VisibleTextureTouch
+	{
+		TerraEngine::UUID textureId = TerraEngine::EMPTY_UUID;
+		double nearestViewDistance = 0.0;
+		std::int32_t priority = 90;
+	};
+
+	struct VisibleStreamingTouchSet
+	{
+		RenderViewType viewType = RenderViewType::Game;
+		std::uint32_t outputId = 0u;
+		std::uint32_t sourceCommandCount = 0u;
+		std::uint32_t duplicateEliminationCount = 0u;
+		std::vector<VisibleResourceTouch> meshes;
+		std::vector<VisibleResourceTouch> materials;
+		std::vector<VisibleTextureTouch> textures;
+		bool valid = false;
+	};
+
+	struct DiagnosticDemandState
+	{
+		RenderViewType viewType = RenderViewType::Game;
+		std::uint32_t outputId = 0u;
+		bool compactRequired = true;
+		bool detailedRequired = false;
+		std::vector<std::string> reasons;
+	};
+
+	struct VisibleCommandReuseTelemetry
+	{
+		RenderViewType viewType = RenderViewType::Game;
+		std::uint32_t outputId = 0u;
+		bool cacheHit = false;
+		bool conservativeRefresh = false;
+		bool detailedDiagnosticsRequested = false;
+		std::uint32_t commandCount = 0u;
+		std::uint32_t copiedCommandCount = 0u;
+		std::uint32_t uniqueMeshTouches = 0u;
+		std::uint32_t uniqueMaterialTouches = 0u;
+		std::uint32_t uniqueTextureTouches = 0u;
+		std::uint32_t duplicateResourceTouchesEliminated = 0u;
+		std::string fallbackReason;
+	};
+
+}
+
 // VirtualGeometryClusterPacket is the renderer-neutral work atom produced from
 // a selected cluster cut. Later GPU-driven stages can upload the same table to
 // an SSBO, while current CPU tests can inspect the copied values directly.
@@ -2201,6 +2270,16 @@ struct RenderStatsSnapshot
 	std::uint32_t virtualGeometryPerformanceGateFailures = 0u;
 	std::uint32_t virtualGeometryPerformanceGateUnsupported = 0u;
 	std::string virtualGeometryFirstFailedPerformanceGate;
+	bool visibleCommandCacheHit = false;
+	bool visibleCommandConservativeRefresh = false;
+	bool detailedRenderDiagnosticsRequested = false;
+	std::uint32_t visibleCommandCount = 0u;
+	std::uint32_t visibleCommandCopiedCount = 0u;
+	std::uint32_t visibleStreamingUniqueMeshes = 0u;
+	std::uint32_t visibleStreamingUniqueMaterials = 0u;
+	std::uint32_t visibleStreamingUniqueTextures = 0u;
+	std::uint32_t visibleStreamingDuplicateTouchesEliminated = 0u;
+	std::string visibleCommandReuseFallbackReason;
 	std::uint32_t hiZTests = 0u;
 	std::uint32_t hiZProjectionFailed = 0u;
 	std::uint32_t hiZFullRectCulled = 0u;

@@ -113,6 +113,8 @@ namespace
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<FallbackCoverageChain> fallbackCoverage;
 		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
+		TerraEngine::Renderer::VisibleStreamingTouchSet streamingTouchSet;
+		TerraEngine::Renderer::VisibleCommandReuseTelemetry reuseTelemetry;
 		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
 	};
 
@@ -154,6 +156,8 @@ namespace
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<FallbackCoverageChain> fallbackCoverage;
 		std::vector<VirtualGeometryLODTransitionState> lodTransitionStates;
+		TerraEngine::Renderer::VisibleStreamingTouchSet streamingTouchSet;
+		TerraEngine::Renderer::VisibleCommandReuseTelemetry reuseTelemetry;
 		TerraEngine::Scene::SpatialDiagnosticsSnapshot diagnostics;
 		bool cacheHit = false;
 	};
@@ -3147,6 +3151,95 @@ void RenderSystem::Update(float deltaTime)
 		}
 	};
 
+	auto buildVisibleStreamingTouchSet = [&](const std::vector<DrawCommand>& commands, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition) {
+		TerraEngine::Renderer::VisibleStreamingTouchSet touchSet;
+		touchSet.viewType = viewType;
+		touchSet.outputId = outputId;
+		touchSet.sourceCommandCount = static_cast<std::uint32_t>(std::min<std::size_t>(commands.size(), std::numeric_limits<std::uint32_t>::max()));
+		touchSet.valid = true;
+
+		std::unordered_set<TerraEngine::UUID> uniqueMeshes;
+		std::unordered_set<TerraEngine::UUID> uniqueMaterials;
+		std::unordered_map<TerraEngine::UUID, std::size_t> textureTouchIndices;
+		uniqueMeshes.reserve(commands.size());
+		uniqueMaterials.reserve(commands.size());
+		textureTouchIndices.reserve(commands.size());
+
+		std::uint32_t sourceTouchCount = 0u;
+		for (const DrawCommand& command : commands)
+		{
+			if (command.meshId != TerraEngine::EMPTY_UUID)
+			{
+				++sourceTouchCount;
+				if (uniqueMeshes.insert(command.meshId).second)
+				{
+					touchSet.meshes.push_back({ command.meshId, ::VisibleStreamingResourceKind::Mesh, 100 });
+				}
+			}
+			if (command.materialId != TerraEngine::EMPTY_UUID)
+			{
+				++sourceTouchCount;
+				if (uniqueMaterials.insert(command.materialId).second)
+				{
+					touchSet.materials.push_back({ command.materialId, ::VisibleStreamingResourceKind::Material, 100 });
+				}
+			}
+
+			Material* material = ResourceManager::Instance().GetMaterial(command.materialId);
+			if (material == nullptr)
+			{
+				continue;
+			}
+			const glm::vec3 objectPosition = glm::vec3(command.modelMatrix[3]);
+			const double viewDistance = static_cast<double>(glm::length(objectPosition - cameraPosition));
+			for (const TextureBinding& binding : material->textures)
+			{
+				if (binding.textureUuid == TerraEngine::EMPTY_UUID)
+				{
+					continue;
+				}
+				++sourceTouchCount;
+				auto [existingTexture, inserted] = textureTouchIndices.emplace(binding.textureUuid, touchSet.textures.size());
+				if (inserted)
+				{
+					touchSet.textures.push_back({ binding.textureUuid, viewDistance, 90 });
+				}
+				else
+				{
+					TerraEngine::Renderer::VisibleTextureTouch& touch = touchSet.textures[existingTexture->second];
+					touch.nearestViewDistance = std::min(touch.nearestViewDistance, viewDistance);
+				}
+			}
+		}
+
+		const std::uint32_t uniqueTouchCount =
+			static_cast<std::uint32_t>(std::min<std::size_t>(
+				touchSet.meshes.size() + touchSet.materials.size() + touchSet.textures.size(),
+				std::numeric_limits<std::uint32_t>::max()));
+		touchSet.duplicateEliminationCount = sourceTouchCount > uniqueTouchCount ? sourceTouchCount - uniqueTouchCount : 0u;
+		return touchSet;
+	};
+
+	auto publishVisibleStreamingTouchSet = [&](const TerraEngine::Renderer::VisibleStreamingTouchSet& touchSet, RenderViewType viewType) {
+		const char* viewReason = viewType == RenderViewType::Scene ? "visible scene view renderable" : "visible game view renderable";
+		ResourceManager::Instance().PublishVisibleStreamingTouches(touchSet, activeRenderFrameId, viewReason);
+	};
+
+	auto buildVisibleCommandReuseTelemetry = [&](RenderViewType viewType, std::uint32_t outputId, bool cacheHit, bool copiedCommands, const TerraEngine::Renderer::VisibleStreamingTouchSet& touchSet) {
+		TerraEngine::Renderer::VisibleCommandReuseTelemetry telemetry;
+		telemetry.viewType = viewType;
+		telemetry.outputId = outputId;
+		telemetry.cacheHit = cacheHit;
+		telemetry.commandCount = touchSet.sourceCommandCount;
+		telemetry.copiedCommandCount = copiedCommands ? touchSet.sourceCommandCount : 0u;
+		telemetry.uniqueMeshTouches = static_cast<std::uint32_t>(std::min<std::size_t>(touchSet.meshes.size(), std::numeric_limits<std::uint32_t>::max()));
+		telemetry.uniqueMaterialTouches = static_cast<std::uint32_t>(std::min<std::size_t>(touchSet.materials.size(), std::numeric_limits<std::uint32_t>::max()));
+		telemetry.uniqueTextureTouches = static_cast<std::uint32_t>(std::min<std::size_t>(touchSet.textures.size(), std::numeric_limits<std::uint32_t>::max()));
+		telemetry.duplicateResourceTouchesEliminated = touchSet.duplicateEliminationCount;
+		telemetry.detailedDiagnosticsRequested = TerraEngine::Renderer::RenderDiagnosticsRequested();
+		return telemetry;
+	};
+
 	auto buildVisibleDrawCommands = [&](const glm::mat4& viewProjection, const glm::uvec2& targetSize, RenderOutputKind outputKind, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition) {
 		TERRAENGINE_PROFILE_SCOPE("RenderSystem: Visible Draw Commands Cache Lookup", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		VirtualGeometryQualityProfile viewVirtualGeometryQuality = renderFrameSnapshot.renderSettings.virtualGeometry;
@@ -3168,6 +3261,7 @@ void RenderSystem::Update(float deltaTime)
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Draw Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 			++visibleCommandCache.hitCount;
 			existing->second.lastTouchedFrameId = activeRenderFrameId;
+			if (TerraEngine::Renderer::RenderDiagnosticsRequested())
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Diagnostics", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				collectVirtualGeometryDiagnosticsAssets(existing->second.commands, viewType);
@@ -3178,8 +3272,17 @@ void RenderSystem::Update(float deltaTime)
 				recordVirtualGeometryViewSelection(existing->second.commands, existing->second.selectedClusters, existing->second.pageNeeds, existing->second.clusterPackets, existing->second.clusterBatches, existing->second.compactionResults, existing->second.fallbackCoverage, existing->second.lodTransitionStates, viewVirtualGeometryQuality.debugVisualizationMode, outputKind, diagnosticsViewType, targetSize, outputId, false, outputKind == RenderOutputKind::MainRuntimeView);
 			}
 			{
-				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Streaming Touches", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
-				publishVisibleStreamingNeeds(existing->second.commands, viewType, cameraPosition);
+				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Reuse Visible Streaming Touch Set", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+				if (existing->second.streamingTouchSet.valid)
+				{
+					publishVisibleStreamingTouchSet(existing->second.streamingTouchSet, viewType);
+				}
+				else
+				{
+					existing->second.reuseTelemetry.conservativeRefresh = true;
+					existing->second.reuseTelemetry.fallbackReason = "cached visible streaming touch set was unavailable";
+					publishVisibleStreamingNeeds(existing->second.commands, viewType, cameraPosition);
+				}
 			}
 			VisibleCommandBuildResult cachedResult;
 			{
@@ -3199,6 +3302,13 @@ void RenderSystem::Update(float deltaTime)
 				cachedResult.compactionResults = existing->second.compactionResults;
 				cachedResult.fallbackCoverage = existing->second.fallbackCoverage;
 				cachedResult.lodTransitionStates = existing->second.lodTransitionStates;
+				cachedResult.streamingTouchSet = existing->second.streamingTouchSet;
+				cachedResult.reuseTelemetry = buildVisibleCommandReuseTelemetry(viewType, outputId, true, true, existing->second.streamingTouchSet);
+				if (existing->second.reuseTelemetry.conservativeRefresh)
+				{
+					cachedResult.reuseTelemetry.conservativeRefresh = true;
+					cachedResult.reuseTelemetry.fallbackReason = existing->second.reuseTelemetry.fallbackReason;
+				}
 				cachedResult.diagnostics = existing->second.diagnostics;
 				cachedResult.cacheHit = true;
 			}
@@ -3236,7 +3346,15 @@ void RenderSystem::Update(float deltaTime)
 		result.diagnostics.rejectedObjectCount = queryDiagnostics.rejectedObjectCount;
 		result.diagnostics.fallbackObjectCount = queryDiagnostics.fallbackObjectCount;
 		result.diagnostics.lastQueryDurationMs = queryDiagnostics.lastQueryDurationMs;
-		publishVisibleStreamingNeeds(result.commands, viewType, cameraPosition);
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Build Visible Streaming Touch Set", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			result.streamingTouchSet = buildVisibleStreamingTouchSet(result.commands, viewType, outputId, cameraPosition);
+			result.reuseTelemetry = buildVisibleCommandReuseTelemetry(viewType, outputId, false, false, result.streamingTouchSet);
+		}
+		{
+			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Publish Visible Streaming Touch Set", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+			publishVisibleStreamingTouchSet(result.streamingTouchSet, viewType);
+		}
 		VisibleCommandCacheRecord record;
 		record.signature = signature;
 		record.lastTouchedFrameId = activeRenderFrameId;
@@ -3255,6 +3373,8 @@ void RenderSystem::Update(float deltaTime)
 		record.compactionResults = result.compactionResults;
 		record.fallbackCoverage = result.fallbackCoverage;
 		record.lodTransitionStates = result.lodTransitionStates;
+		record.streamingTouchSet = result.streamingTouchSet;
+		record.reuseTelemetry = result.reuseTelemetry;
 		record.diagnostics = result.diagnostics;
 		visibleCommandCache.recordsBySignature[signature] = std::move(record);
 		TrimSignatureCache(visibleCommandCache, 32u);
@@ -3666,6 +3786,8 @@ void RenderSystem::Update(float deltaTime)
 
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot sceneSpatialDiagnostics{};
 	TerraEngine::Scene::SpatialDiagnosticsSnapshot gameSpatialDiagnostics{};
+	TerraEngine::Renderer::VisibleCommandReuseTelemetry sceneVisibleCommandTelemetry{};
+	TerraEngine::Renderer::VisibleCommandReuseTelemetry gameVisibleCommandTelemetry{};
 	// Convert each camera submission into an explicit output owner so the RHI
 	// can give Scene, Game, and future offscreen cameras independent snapshot
 	// ranges instead of inferring ownership from call order alone.
@@ -3732,6 +3854,7 @@ void RenderSystem::Update(float deltaTime)
 		frameData.commands = visibleCommands.commands;
 		copyVirtualGeometryFramePayload(frameData, visibleCommands);
 		sceneSpatialDiagnostics = visibleCommands.diagnostics;
+		sceneVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
 		applySceneViewContextTint();
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
@@ -3771,6 +3894,8 @@ void RenderSystem::Update(float deltaTime)
 			frameData.commands = visibleCommands.commands;
 			copyVirtualGeometryFramePayload(frameData, visibleCommands);
 			gameSpatialDiagnostics = visibleCommands.diagnostics;
+			gameVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
+			gameVisibleCommandTelemetry = visibleCommands.reuseTelemetry;
 			{
 				TERRAENGINE_PROFILE_SCOPE("RenderSystem: Game View Shadow Draw Lists", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 				frameData.shadowDrawLists = buildShadowDrawLists(frameData.cameraWorldPosition);
@@ -4181,6 +4306,16 @@ void RenderSystem::Update(float deltaTime)
 		latestGameStats.transformDirtyRootCount = gameSpatialDiagnostics.transformDirtyRootCount;
 		latestGameStats.transformProcessedObjectCount = gameSpatialDiagnostics.transformProcessedObjectCount;
 		latestGameStats.boundsRecomputedObjectCount = gameSpatialDiagnostics.boundsRecomputedObjectCount;
+		latestGameStats.visibleCommandCacheHit = gameVisibleCommandTelemetry.cacheHit;
+		latestGameStats.visibleCommandConservativeRefresh = gameVisibleCommandTelemetry.conservativeRefresh;
+		latestGameStats.detailedRenderDiagnosticsRequested = gameVisibleCommandTelemetry.detailedDiagnosticsRequested;
+		latestGameStats.visibleCommandCount = gameVisibleCommandTelemetry.commandCount;
+		latestGameStats.visibleCommandCopiedCount = gameVisibleCommandTelemetry.copiedCommandCount;
+		latestGameStats.visibleStreamingUniqueMeshes = gameVisibleCommandTelemetry.uniqueMeshTouches;
+		latestGameStats.visibleStreamingUniqueMaterials = gameVisibleCommandTelemetry.uniqueMaterialTouches;
+		latestGameStats.visibleStreamingUniqueTextures = gameVisibleCommandTelemetry.uniqueTextureTouches;
+		latestGameStats.visibleStreamingDuplicateTouchesEliminated = gameVisibleCommandTelemetry.duplicateResourceTouchesEliminated;
+		latestGameStats.visibleCommandReuseFallbackReason = gameVisibleCommandTelemetry.fallbackReason;
 		latestSceneStats.spatialIndexedObjectCount = sceneSpatialDiagnostics.indexedObjectCount;
 		latestSceneStats.spatialVisibleCandidateCount = sceneSpatialDiagnostics.visibleCandidateCount;
 		latestSceneStats.spatialRejectedObjectCount = sceneSpatialDiagnostics.rejectedObjectCount;
@@ -4194,6 +4329,16 @@ void RenderSystem::Update(float deltaTime)
 		latestSceneStats.transformDirtyRootCount = sceneSpatialDiagnostics.transformDirtyRootCount;
 		latestSceneStats.transformProcessedObjectCount = sceneSpatialDiagnostics.transformProcessedObjectCount;
 		latestSceneStats.boundsRecomputedObjectCount = sceneSpatialDiagnostics.boundsRecomputedObjectCount;
+		latestSceneStats.visibleCommandCacheHit = sceneVisibleCommandTelemetry.cacheHit;
+		latestSceneStats.visibleCommandConservativeRefresh = sceneVisibleCommandTelemetry.conservativeRefresh;
+		latestSceneStats.detailedRenderDiagnosticsRequested = sceneVisibleCommandTelemetry.detailedDiagnosticsRequested;
+		latestSceneStats.visibleCommandCount = sceneVisibleCommandTelemetry.commandCount;
+		latestSceneStats.visibleCommandCopiedCount = sceneVisibleCommandTelemetry.copiedCommandCount;
+		latestSceneStats.visibleStreamingUniqueMeshes = sceneVisibleCommandTelemetry.uniqueMeshTouches;
+		latestSceneStats.visibleStreamingUniqueMaterials = sceneVisibleCommandTelemetry.uniqueMaterialTouches;
+		latestSceneStats.visibleStreamingUniqueTextures = sceneVisibleCommandTelemetry.uniqueTextureTouches;
+		latestSceneStats.visibleStreamingDuplicateTouchesEliminated = sceneVisibleCommandTelemetry.duplicateResourceTouchesEliminated;
+		latestSceneStats.visibleCommandReuseFallbackReason = sceneVisibleCommandTelemetry.fallbackReason;
 		latestGameSpatialDiagnostics = gameSpatialDiagnostics;
 		latestSceneSpatialDiagnostics = sceneSpatialDiagnostics;
 		latestGameBudgetDiagnostics = rhi->GetLatestFrameBudgetDiagnostics(RenderViewType::Game);
@@ -4248,7 +4393,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVirtualGeometryGpuPacketFrameSets,
 		TerraEngine::Scheduling::kResourceVirtualGeometryGpuCompactionDispatches,
 		TerraEngine::Scheduling::kResourceVirtualGeometryGeneratedSubmissions,
-		TerraEngine::Scheduling::kResourceVirtualGeometryCounterReadbacks
+		TerraEngine::Scheduling::kResourceVirtualGeometryCounterReadbacks,
+		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets
 	};
 	declaration.writes = {
 		"Renderer",
@@ -4265,7 +4411,9 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVirtualGeometryCullingDiagnostics,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPerformanceCounters,
 		TerraEngine::Scheduling::kResourceVirtualGeometryShadowVisibilitySnapshots,
-		TerraEngine::Scheduling::kResourceVirtualGeometryDiagnostics
+		TerraEngine::Scheduling::kResourceVirtualGeometryDiagnostics,
+		TerraEngine::Scheduling::kResourceVisibleCommandReuseDiagnostics,
+		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets
 	};
 	// Live ECS collection still runs protected inside RenderSystem, while draw,
 	// light, upload, adaptive virtual geometry LOD/cluster/page intent, and
@@ -4278,8 +4426,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Render snapshots, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, GPU packet frame set planning, GPU compaction dispatch planning, generated-submission validation labels, per-view Hi-Z validation labels, page need packets, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, virtual geometry GPU packet buffer publication, generated submission publication, visibility/counter snapshot publication, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, editor present, and recovery.";
+	declaration.safeSubwork = "Render snapshots, visible-command cache lookup, deduplicated visible streaming touch-set preparation, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, GPU packet frame set planning, GPU compaction dispatch planning, generated-submission validation labels, per-view Hi-Z validation labels, page need packets, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, ResourceManager visible streaming touch publication, virtual geometry GPU packet buffer publication, generated submission publication, visibility/counter snapshot publication, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, editor present, and recovery.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;

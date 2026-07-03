@@ -178,6 +178,25 @@ mock-backend portability, opt-in render diagnostics, backend frame breakdown
 categories, render worker task group planning, Vulkan recording-batch planning,
 thread-local recording context ownership, and stale backend batch rejection. The
 complete renderer-threading checks also cover worker-owned render preparation,
+
+Visible-command reuse coverage validates static-view cache-hit telemetry,
+deduplicated streaming touch publication, scheduler resource declarations,
+automation stats, profiler rows, and repeated-resource performance gates. Use
+this focused pass while iterating on `specs/032-visible-command-reuse`:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="Renderer.VisibleCommandReuse;Renderer.VisibleStreamingTouches;Engine.SystemScheduler.DefaultResourcesAcceptVirtualGeometryRenderDeclaration"
+.\out\build\Debug\TerraEngine-EngineTests.exe
+.\out\build\Debug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
+For CTest-based validation, run:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Engine.Renderer|Engine.VirtualGeometry|Engine.Resource|Engine.SystemScheduler" --output-on-failure -C Debug
+ctest --test-dir out/build/Debug -R "Editor.VirtualGeometry|Editor.Automation|Editor.Renderer" --output-on-failure -C Debug
+```
 small-scene inline fallbacks, resource readiness fallbacks, upload budgets,
 deferred retirement safety, multi-queue readiness reports, non-fatal failure
 containment, randomized pass validation, and visible-frame versus queued

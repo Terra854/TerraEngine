@@ -2797,6 +2797,10 @@ namespace TerraEngine::Editor::Automation
 			}
 			break;
 		}
+		for (const PerformanceGateResult& gate : TerraEngine::Renderer::BuildVisibleCommandReusePerformanceGates(stats))
+		{
+			performanceGates.push_back(SerializeVirtualGeometryPerformanceGate(gate));
+		}
 		nlohmann::json data = {
 			{"viewType", ToString(stats.viewType)},
 			{"valid", stats.valid},
@@ -2835,6 +2839,16 @@ namespace TerraEngine::Editor::Automation
 			{"performanceGateFailures", stats.virtualGeometryPerformanceGateFailures},
 			{"performanceGateUnsupported", stats.virtualGeometryPerformanceGateUnsupported},
 			{"firstFailedPerformanceGate", stats.virtualGeometryFirstFailedPerformanceGate},
+			{"visibleCommandCacheHit", stats.visibleCommandCacheHit},
+			{"visibleCommandConservativeRefresh", stats.visibleCommandConservativeRefresh},
+			{"detailedRenderDiagnosticsRequested", stats.detailedRenderDiagnosticsRequested},
+			{"visibleCommandCount", stats.visibleCommandCount},
+			{"visibleCommandCopiedCount", stats.visibleCommandCopiedCount},
+			{"visibleStreamingUniqueMeshes", stats.visibleStreamingUniqueMeshes},
+			{"visibleStreamingUniqueMaterials", stats.visibleStreamingUniqueMaterials},
+			{"visibleStreamingUniqueTextures", stats.visibleStreamingUniqueTextures},
+			{"visibleStreamingDuplicateTouchesEliminated", stats.visibleStreamingDuplicateTouchesEliminated},
+			{"visibleCommandReuseFallbackReason", stats.visibleCommandReuseFallbackReason},
 			{"residentPages", stats.virtualGeometryResidentPages},
 			{"requestedPages", stats.virtualGeometryRequestedPages},
 			{"missingPages", stats.virtualGeometryMissingPages},

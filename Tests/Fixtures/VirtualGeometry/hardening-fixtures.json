@@ -167,6 +167,28 @@
 			]
 		},
 		{
+			"id": "visible-command-reuse-repeated-resources",
+			"category": "visible-command-reuse",
+			"fixtureRecipe": "Repeated objects share a small set of meshes, materials, and textures while the Scene/Game cameras stay stationary for 300 frames.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"visible-command-cache-hit",
+				"streaming-touch-deduplication",
+				"compact-diagnostics"
+			],
+			"expectedDiagnostics": [
+				"VisibleCommandCacheHit",
+				"UniqueStreamingTouchSet",
+				"CompactDiagnosticsOnly"
+			],
+			"expectedRenderOutcomes": [
+				"unchanged-visual-output",
+				"streaming-retention-preserved",
+				"repeated-resource-growth-bounded"
+			]
+		},
+		{
 			"id": "export-runtime-metadata",
 			"category": "export",
 			"fixtureRecipe": "Synthetic TEMF packed into TEPAK with required VG manifest coverage and metadata validation flags.",

@@ -1848,6 +1848,64 @@ void ResourceManager::MarkStreamingNeed(
 	TouchResource(id, type, frameId, residencyReason, reason);
 }
 
+void ResourceManager::PublishVisibleStreamingTouches(
+	const TerraEngine::Renderer::VisibleStreamingTouchSet& touchSet,
+	std::uint64_t frameId,
+	std::string_view reason)
+{
+	if (!touchSet.valid)
+	{
+		return;
+	}
+
+	const std::string detail = reason.empty()
+		? std::string("visible command cache touch set")
+		: std::string(reason);
+	const auto publishResource = [&](const TerraEngine::Renderer::VisibleResourceTouch& touch) {
+		if (touch.resourceId == TerraEngine::EMPTY_UUID)
+		{
+			return;
+		}
+		const AssetType type = touch.kind == ::VisibleStreamingResourceKind::Material
+			? AssetType::Material
+			: AssetType::Mesh;
+		// The touch set has already removed duplicate draw-command references.
+		// Reusing the existing single-resource path here preserves retention,
+		// priority bias, residency mirroring, and diagnostics semantics.
+		MarkStreamingNeed(
+			touch.resourceId,
+			type,
+			TerraEngine::Resource::StreamingNeedType::Visible,
+			frameId,
+			detail,
+			touch.priority);
+	};
+
+	for (const TerraEngine::Renderer::VisibleResourceTouch& touch : touchSet.meshes)
+	{
+		publishResource(touch);
+	}
+	for (const TerraEngine::Renderer::VisibleResourceTouch& touch : touchSet.materials)
+	{
+		publishResource(touch);
+	}
+	for (const TerraEngine::Renderer::VisibleTextureTouch& touch : touchSet.textures)
+	{
+		if (touch.textureId == TerraEngine::EMPTY_UUID)
+		{
+			continue;
+		}
+		MarkStreamingNeed(
+			touch.textureId,
+			AssetType::Texture,
+			TerraEngine::Resource::StreamingNeedType::Visible,
+			frameId,
+			detail,
+			touch.priority);
+		MarkTextureStreamingDistance(touch.textureId, touch.nearestViewDistance, frameId, detail);
+	}
+}
+
 std::shared_future<TerraEngine::UUID> ResourceManager::RequestStreamableLoad(
 	const TerraEngine::UUID& id,
 	AssetType type,

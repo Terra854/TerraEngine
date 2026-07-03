@@ -323,6 +323,46 @@ namespace TerraEngine::Renderer {
 		return gates;
 	}
 
+	std::vector<PerformanceGateResult> BuildVisibleCommandReusePerformanceGates(const RenderStatsSnapshot& stats)
+	{
+		std::vector<PerformanceGateResult> gates;
+		const float copiedCommands = static_cast<float>(stats.visibleCommandCopiedCount);
+		const float visibleCommands = static_cast<float>(stats.visibleCommandCount);
+		// Cache-hit reuse should never copy more commands than the completed
+		// view owns. This is a count gate rather than a timing gate so it can run
+		// in deterministic unit tests and still catch accidental payload churn.
+		gates.push_back(EvaluateVirtualGeometryPerformanceGate(
+			"visible-command-copy-count",
+			"visible-command-reuse-static",
+			"copiedCommands",
+			visibleCommands,
+			copiedCommands,
+			"commands",
+			true,
+			VirtualGeometryPerformanceGateSource::Prepared,
+			stats.viewType,
+			stats.viewType == RenderViewType::Scene ? 1u : 2u));
+		if (stats.visibleCommandConservativeRefresh)
+		{
+			PerformanceGateResult gate;
+			gate.gateId = "visible-command-conservative-refresh";
+			gate.fixtureId = "visible-command-reuse-static";
+			gate.viewType = stats.viewType;
+			gate.viewId = stats.viewType == RenderViewType::Scene ? 1u : 2u;
+			gate.metricName = "conservativeRefresh";
+			gate.threshold = 0.0f;
+			gate.actual = 1.0f;
+			gate.unit = "state";
+			gate.status = VirtualGeometryPerformanceGateStatus::Warning;
+			gate.source = VirtualGeometryPerformanceGateSource::Prepared;
+			gate.diagnostic = stats.visibleCommandReuseFallbackReason.empty()
+				? "Visible-command reuse fell back to conservative refresh."
+				: stats.visibleCommandReuseFallbackReason;
+			gates.push_back(std::move(gate));
+		}
+		return gates;
+	}
+
 	VirtualGeometryViewDiagnosticsSnapshot BuildInactiveVirtualGeometryDiagnostics(RenderViewType viewType, std::uint64_t frameId, VirtualGeometryInactiveReason reason)
 	{
 		VirtualGeometryViewDiagnosticsSnapshot snapshot;

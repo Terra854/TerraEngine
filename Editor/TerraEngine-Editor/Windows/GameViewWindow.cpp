@@ -312,6 +312,7 @@ void GameViewWindow::OnGui() {
 		char line22[192];
 		char line23[192];
 		char line24[192];
+		char line25[192];
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (statsReady) {
@@ -407,6 +408,10 @@ void GameViewWindow::OnGui() {
 			std::snprintf(line24, sizeof(line24), "VG GPU Fallbacks: %u packets, %u batches",
 				stats.virtualGeometryGpuFallbackAffectedPackets,
 				stats.virtualGeometryGpuFallbackAffectedBatches);
+			std::snprintf(line25, sizeof(line25), "Visible Cache: %s, unique touches %u, deduped %u",
+				stats.visibleCommandCacheHit ? "hit" : "miss",
+				stats.visibleStreamingUniqueMeshes + stats.visibleStreamingUniqueMaterials + stats.visibleStreamingUniqueTextures,
+				stats.visibleStreamingDuplicateTouchesEliminated);
 		} else {
 			std::snprintf(line0, sizeof(line0), "Stats unavailable");
 			std::snprintf(line1, sizeof(line1), "No active camera/render stats");
@@ -433,9 +438,10 @@ void GameViewWindow::OnGui() {
 			line22[0] = '\0';
 			line23[0] = '\0';
 			line24[0] = '\0';
+			line25[0] = '\0';
 		}
 
-		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7, line11, line12, line21, line22, line23, line24, line13, line14, line15, line16, line17, line18, line19, line20, line8, line9, line10};
+		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7, line11, line12, line21, line22, line23, line24, line13, line14, line15, line16, line17, line18, line19, line25, line20, line8, line9, line10};
 		float textWidth = 0.0f;
 		int lineCount = 0;
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.

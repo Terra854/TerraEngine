@@ -238,6 +238,10 @@ public:
 		std::uint64_t frameId,
 		std::string_view reason = {},
 		std::int32_t priority = 0);
+	void PublishVisibleStreamingTouches(
+		const TerraEngine::Renderer::VisibleStreamingTouchSet& touchSet,
+		std::uint64_t frameId,
+		std::string_view reason = {});
 	std::shared_future<TerraEngine::UUID> RequestStreamableLoad(
 		const TerraEngine::UUID& id,
 		AssetType type,
