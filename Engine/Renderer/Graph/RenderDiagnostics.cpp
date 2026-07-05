@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <iterator>
 #include <limits>
+#include <unordered_map>
 #include <utility>
 
 namespace TerraEngine::Renderer {
@@ -14,6 +15,17 @@ namespace TerraEngine::Renderer {
 		std::atomic<bool> g_renderDiagnosticsRequested = false;
 		std::mutex g_renderDiagnosticsMutex;
 		RenderDiagnosticsSummary g_latestRenderDiagnostics;
+		std::mutex g_backendResourceResidencyMutex;
+		BackendResourceResidencySnapshot g_latestBackendResourceResidency;
+
+		std::uint64_t ResolvePageResidencyBytes(const PageResidencyRecord& page)
+		{
+			// Older and test-built page records may carry only a payload size,
+			// while residency-budget records carry an explicit byte cost. Treat
+			// the payload size as the conservative renderable-byte fallback so
+			// editor residency tools do not show visible VG pages as zero-byte.
+			return page.byteCost != 0u ? page.byteCost : page.payloadByteSize;
+		}
 	}
 
 	RenderBudgetDiagnostic BuildRenderBudgetDiagnostic(const RenderWorkBudget& budget)
@@ -123,6 +135,32 @@ namespace TerraEngine::Renderer {
 				snapshot.viewType,
 				snapshot.viewId));
 		};
+		const auto attachPageStreamingScope = [&]() {
+			const TerraEngine::UUID scopedAssetId = snapshot.budgetContributors.empty()
+				? TerraEngine::EMPTY_UUID
+				: snapshot.budgetContributors.front().assetId;
+			const bool hasPageScope =
+				snapshot.pageSources.residentPayloads > 0u
+				|| snapshot.pageSources.highDetailPayloads > 0u
+				|| snapshot.pageSources.fallbackPayloads > 0u
+				|| snapshot.pageSources.embeddedFallbackPayloads > 0u
+				|| snapshot.pageSources.emittedHighDetailSources > 0u
+				|| snapshot.pageSources.emittedFallbackSources > 0u
+				|| snapshot.pageSources.emittedEmbeddedFallbackSources > 0u
+				|| snapshot.pageSources.missingSources > 0u;
+			for (PerformanceGateResult& gate : gates)
+			{
+				if (gate.fixtureId != "virtual-geometry-page-streaming-resident")
+				{
+					continue;
+				}
+				gate.assetId = scopedAssetId;
+				if (hasPageScope)
+				{
+					gate.pageId = 0u;
+				}
+			}
+		};
 
 		if (snapshot.counterSource == VirtualGeometryCounterSource::Unsupported
 			|| snapshot.counterSource == VirtualGeometryCounterSource::Unavailable)
@@ -217,6 +255,75 @@ namespace TerraEngine::Renderer {
 				"bytes",
 				"Page-pressure gate requires a configured virtual geometry byte budget.");
 		}
+
+		if (snapshot.geometryBudgetBytes > 0u && snapshot.pageSources.residentPayloadBytes > 0u)
+		{
+			const float residentBudgetRatio =
+				static_cast<float>(snapshot.pageSources.residentPayloadBytes)
+				/ static_cast<float>(snapshot.geometryBudgetBytes);
+			addGate(
+				"virtual-geometry-resident-page-budget-ratio",
+				"virtual-geometry-page-streaming-resident",
+				"residentPayloadBudgetRatio",
+				1.0f,
+				residentBudgetRatio,
+				"ratio",
+				true);
+		}
+		else
+		{
+			addUnsupported(
+				"virtual-geometry-resident-page-budget-ratio",
+				"virtual-geometry-page-streaming-resident",
+				"residentPayloadBudgetRatio",
+				"ratio",
+				"Resident page-budget gate requires resident payload bytes and a configured page budget.");
+		}
+
+		if (snapshot.estimatedGeometryBytes > 0u && snapshot.pageSources.residentPayloadBytes > 0u)
+		{
+			const float owningMeshResidencyRatio =
+				static_cast<float>(snapshot.pageSources.residentPayloadBytes)
+				/ static_cast<float>(snapshot.estimatedGeometryBytes);
+			addGate(
+				"virtual-geometry-full-owning-mesh-residency",
+				"virtual-geometry-page-streaming-resident",
+				"residentPayloadVsFullMeshRatio",
+				0.95f,
+				owningMeshResidencyRatio,
+				"ratio",
+				true);
+		}
+		else
+		{
+			addUnsupported(
+				"virtual-geometry-full-owning-mesh-residency",
+				"virtual-geometry-page-streaming-resident",
+				"residentPayloadVsFullMeshRatio",
+				"ratio",
+				"Full-owning-mesh regression gate requires estimated full geometry bytes and resident payload bytes.");
+		}
+
+		// True page streaming must not hide holes or the legacy embedded mesh
+		// path behind normal-looking counters. These gates intentionally read
+		// emitted page-source diagnostics rather than visual output.
+		addGate(
+			"virtual-geometry-missing-page-coverage",
+			"virtual-geometry-page-streaming-resident",
+			"missingPageSources",
+			0.0f,
+			static_cast<float>(snapshot.pageSources.missingSources),
+			"sources",
+			true);
+		addGate(
+			"virtual-geometry-embedded-fallback-uses",
+			"virtual-geometry-page-streaming-resident",
+			"embeddedFallbackSources",
+			0.0f,
+			static_cast<float>(snapshot.pageSources.emittedEmbeddedFallbackSources),
+			"sources",
+			true);
+		attachPageStreamingScope();
 
 		if (snapshot.selectedMeshlets > 0u)
 		{
@@ -500,6 +607,7 @@ namespace TerraEngine::Renderer {
 				{
 				case GeometryPageState::Resident:
 				case GeometryPageState::Pinned:
+				case GeometryPageState::PendingRetirement:
 					++snapshot.residentPages;
 					++contributor.residentPages;
 					contributor.residentBytes += page.byteSize;
@@ -558,6 +666,7 @@ namespace TerraEngine::Renderer {
 					++contributor.missingPages;
 					break;
 				case GeometryPageState::Evicted:
+				case GeometryPageState::Retired:
 					++snapshot.evictedPages;
 					++snapshot.missingPages;
 					snapshot.pageResidency.evictedBytes += page.byteSize;
@@ -710,6 +819,10 @@ namespace TerraEngine::Renderer {
 		snapshot.generatedSubmissionCount = static_cast<std::uint32_t>(visibility.generatedSubmissions.size());
 		snapshot.gpuCounterReadbackCount = static_cast<std::uint32_t>(visibility.gpuCounterReadbacks.size());
 		snapshot.gpuFallbackRecordCount = static_cast<std::uint32_t>(visibility.gpuFallbackRecords.size());
+		snapshot.residentPagePayloadCount = static_cast<std::uint32_t>(visibility.residentPagePayloads.size());
+		snapshot.emittedPageSourceCount = static_cast<std::uint32_t>(visibility.emittedPageSources.size());
+		snapshot.pageRequestCount = static_cast<std::uint32_t>(visibility.pageRequests.size());
+		snapshot.pageRetirementCount = static_cast<std::uint32_t>(visibility.pageRetirements.size());
 		for (const GpuVirtualGeometryPacketFrameSet& frameSet : visibility.gpuPacketFrameSets)
 		{
 			switch (frameSet.validity)
@@ -780,56 +893,268 @@ namespace TerraEngine::Renderer {
 		{
 			snapshot.warnings.push_back("Virtual geometry GPU packet path used fallback: " + snapshot.gpuFallbackReason);
 		}
+		for (const VirtualGeometryPagePayloadRecord& payload : visibility.residentPagePayloads)
+		{
+			if (payload.source == VirtualGeometryPagePayloadSource::ResidentPagePayload)
+			{
+				++snapshot.pageSources.highDetailPayloads;
+			}
+			if (payload.source == VirtualGeometryPagePayloadSource::ResidentFallbackPayload || payload.pinnedFallback)
+			{
+				++snapshot.pageSources.fallbackPayloads;
+				snapshot.pageSources.fallbackPayloadBytes += payload.payloadByteSize;
+			}
+			if (payload.source == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback)
+			{
+				++snapshot.pageSources.embeddedFallbackPayloads;
+				++snapshot.embeddedFallbackPayloadCount;
+				snapshot.pageSources.embeddedFallbackBytes += payload.payloadByteSize;
+			}
+			if (payload.resident || payload.source == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback)
+			{
+				++snapshot.pageSources.residentPayloads;
+				snapshot.pageSources.residentPayloadBytes += payload.payloadByteSize;
+			}
+		}
+		std::vector<std::pair<std::uint32_t, TerraEngine::UUID>> emittedMaterialPagePairs;
+		std::vector<std::uint32_t> emittedPagesWithMultipleMaterials;
+		const auto containsPage = [](const std::vector<std::uint32_t>& pages, std::uint32_t pageId) {
+			return std::find(pages.begin(), pages.end(), pageId) != pages.end();
+		};
+		const auto containsMaterialPagePair = [](const std::vector<std::pair<std::uint32_t, TerraEngine::UUID>>& pairs, std::uint32_t pageId, const TerraEngine::UUID& materialId) {
+			return std::any_of(pairs.begin(), pairs.end(), [pageId, &materialId](const std::pair<std::uint32_t, TerraEngine::UUID>& pair) {
+				return pair.first == pageId && pair.second == materialId;
+			});
+		};
+		for (const VirtualGeometryEmittedPageSourceRecord& emitted : visibility.emittedPageSources)
+		{
+			if (!containsMaterialPagePair(emittedMaterialPagePairs, emitted.pageId, emitted.materialId))
+			{
+				const bool pageAlreadyHadAnotherMaterial = std::any_of(
+					emittedMaterialPagePairs.begin(),
+					emittedMaterialPagePairs.end(),
+					[pageId = emitted.pageId, &materialId = emitted.materialId](const std::pair<std::uint32_t, TerraEngine::UUID>& pair) {
+						return pair.first == pageId && pair.second != materialId;
+					});
+				emittedMaterialPagePairs.emplace_back(emitted.pageId, emitted.materialId);
+				if (pageAlreadyHadAnotherMaterial && !containsPage(emittedPagesWithMultipleMaterials, emitted.pageId))
+				{
+					emittedPagesWithMultipleMaterials.push_back(emitted.pageId);
+				}
+			}
+			switch (emitted.emittedSource)
+			{
+			case VirtualGeometryEmittedPageSource::HighDetailPage:
+				++snapshot.pageSources.emittedHighDetailSources;
+				break;
+			case VirtualGeometryEmittedPageSource::FallbackPage:
+				++snapshot.pageSources.emittedFallbackSources;
+				if (!emitted.reason.empty())
+				{
+					snapshot.warnings.push_back("Virtual geometry emitted fallback page coverage: " + emitted.reason);
+				}
+				break;
+			case VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback:
+				++snapshot.pageSources.emittedEmbeddedFallbackSources;
+				break;
+			case VirtualGeometryEmittedPageSource::NoSubmittedWork:
+			case VirtualGeometryEmittedPageSource::Invalid:
+				++snapshot.pageSources.missingSources;
+				break;
+			case VirtualGeometryEmittedPageSource::None:
+				break;
+			}
+			if ((emitted.conservativeEmbeddedFallback || emitted.emittedSource == VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback) && !emitted.reason.empty())
+			{
+				snapshot.warnings.push_back("Virtual geometry emitted conservative embedded fallback: " + emitted.reason);
+			}
+		}
+		snapshot.pageSources.emittedMaterialPagePairs = static_cast<std::uint32_t>(emittedMaterialPagePairs.size());
+		snapshot.pageSources.emittedMultiMaterialPages = static_cast<std::uint32_t>(emittedPagesWithMultipleMaterials.size());
+		snapshot.pageSources.pageRequests = snapshot.pageRequestCount;
+		snapshot.pageSources.pageRetirements = snapshot.pageRetirementCount;
+		std::unordered_map<TerraEngine::UUID, std::size_t> budgetContributorIndex;
+		const auto contributorForAsset = [&](const TerraEngine::UUID& meshId) -> VirtualGeometryBudgetContributor* {
+			if (meshId == TerraEngine::EMPTY_UUID)
+			{
+				return nullptr;
+			}
+
+			const auto found = budgetContributorIndex.find(meshId);
+			if (found != budgetContributorIndex.end())
+			{
+				return &snapshot.budgetContributors[found->second];
+			}
+
+			// Page residency records are already view-local immutable data, so
+			// folding them into a per-mesh contributor here keeps editor tools
+			// from having to inspect live renderer resources.
+			const std::size_t contributorIndex = snapshot.budgetContributors.size();
+			VirtualGeometryBudgetContributor contributor;
+			contributor.assetId = meshId;
+			contributor.viewType = visibility.viewType;
+			snapshot.budgetContributors.push_back(contributor);
+			budgetContributorIndex.emplace(meshId, contributorIndex);
+			return &snapshot.budgetContributors[contributorIndex];
+		};
+
+		if (visibility.pageResidency.empty())
+		{
+			for (const VirtualGeometryPagePayloadRecord& payload : visibility.residentPagePayloads)
+			{
+				if (!payload.resident && payload.source != VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback)
+				{
+					continue;
+				}
+
+				VirtualGeometryBudgetContributor* contributor = contributorForAsset(payload.meshId);
+				if (contributor == nullptr)
+				{
+					continue;
+				}
+
+				const std::uint64_t payloadBytes = payload.payloadByteSize;
+				++snapshot.residentPages;
+				++contributor->residentPages;
+				contributor->residentBytes += payloadBytes;
+				if (payload.pinnedFallback || payload.source == VirtualGeometryPagePayloadSource::ResidentFallbackPayload)
+				{
+					++snapshot.pinnedFallbackPages;
+					++snapshot.pageResidency.pinnedFallbackPages;
+					snapshot.pageResidency.pinnedFallbackBytes += payloadBytes;
+					++contributor->pinnedFallbackPages;
+					contributor->pinnedFallbackBytes += payloadBytes;
+				}
+				else
+				{
+					contributor->reclaimableBytes += payloadBytes;
+				}
+			}
+		}
+
 		for (const PageResidencyRecord& page : visibility.pageResidency)
 		{
+			VirtualGeometryBudgetContributor* contributor = contributorForAsset(page.meshId);
+			const std::uint64_t pageBytes = ResolvePageResidencyBytes(page);
 			switch (page.state)
 			{
 			case GeometryPageState::Resident:
 				++snapshot.residentPages;
+				if (contributor != nullptr)
+				{
+					++contributor->residentPages;
+					contributor->residentBytes += pageBytes;
+					if (page.isFallback || page.protectedFallback)
+					{
+						++contributor->pinnedFallbackPages;
+						contributor->pinnedFallbackBytes += pageBytes;
+					}
+					else
+					{
+						contributor->reclaimableBytes += pageBytes;
+					}
+				}
 				break;
 			case GeometryPageState::Pinned:
 				++snapshot.residentPages;
 				++snapshot.pinnedFallbackPages;
 				++snapshot.pageResidency.pinnedFallbackPages;
-				snapshot.pageResidency.pinnedFallbackBytes += page.byteCost;
+				snapshot.pageResidency.pinnedFallbackBytes += pageBytes;
+				if (contributor != nullptr)
+				{
+					++contributor->residentPages;
+					++contributor->pinnedFallbackPages;
+					contributor->residentBytes += pageBytes;
+					contributor->pinnedFallbackBytes += pageBytes;
+				}
+				break;
+			case GeometryPageState::PendingRetirement:
+				++snapshot.residentPages;
+				if (contributor != nullptr)
+				{
+					++contributor->residentPages;
+					contributor->residentBytes += pageBytes;
+					contributor->reclaimableBytes += pageBytes;
+				}
 				break;
 			case GeometryPageState::Requested:
 			case GeometryPageState::Loading:
 				++snapshot.requestedPages;
-				snapshot.pageResidency.requestedBytes += page.byteCost;
+				snapshot.pageResidency.requestedBytes += pageBytes;
+				if (contributor != nullptr)
+				{
+					contributor->requestedBytes += pageBytes;
+				}
 				break;
 			case GeometryPageState::PendingIO:
 				++snapshot.requestedPages;
 				++snapshot.pageResidency.pendingIoPages;
-				snapshot.pageResidency.pendingIoBytes += page.byteCost;
+				snapshot.pageResidency.pendingIoBytes += pageBytes;
+				if (contributor != nullptr)
+				{
+					contributor->requestedBytes += pageBytes;
+				}
 				break;
 			case GeometryPageState::PendingUpload:
 				++snapshot.requestedPages;
 				++snapshot.pageResidency.pendingUploadPages;
-				snapshot.pageResidency.pendingUploadBytes += page.byteCost;
+				snapshot.pageResidency.pendingUploadBytes += pageBytes;
+				if (contributor != nullptr)
+				{
+					contributor->requestedBytes += pageBytes;
+				}
 				break;
 			case GeometryPageState::Failed:
 				++snapshot.failedPages;
-				snapshot.pageResidency.failedBytes += page.byteCost;
+				snapshot.pageResidency.failedBytes += pageBytes;
+				if (contributor != nullptr)
+				{
+					++contributor->missingPages;
+				}
 				if (!page.failureReason.empty())
 				{
 					++snapshot.pageResidency.failedPageReasons;
+					snapshot.warnings.push_back("Virtual geometry page failed and requires fallback coverage: " + page.failureReason);
 				}
 				break;
 			case GeometryPageState::Evicting:
 				++snapshot.evictingPages;
 				++snapshot.pageResidency.evictingPages;
-				snapshot.pageResidency.evictingBytes += page.byteCost;
+				snapshot.pageResidency.evictingBytes += pageBytes;
+				if (contributor != nullptr)
+				{
+					++contributor->missingPages;
+				}
 				break;
 			case GeometryPageState::Evicted:
+			case GeometryPageState::Retired:
 				++snapshot.evictedPages;
-				snapshot.pageResidency.evictedBytes += page.byteCost;
+				snapshot.pageResidency.evictedBytes += pageBytes;
+				if (contributor != nullptr)
+				{
+					++contributor->missingPages;
+				}
 				break;
 			case GeometryPageState::NotResident:
 				++snapshot.missingPages;
+				if (contributor != nullptr)
+				{
+					++contributor->missingPages;
+				}
 				break;
 			}
 		}
+		std::sort(snapshot.budgetContributors.begin(), snapshot.budgetContributors.end(), [](const VirtualGeometryBudgetContributor& lhs, const VirtualGeometryBudgetContributor& rhs) {
+			if (lhs.reclaimableBytes != rhs.reclaimableBytes)
+			{
+				return lhs.reclaimableBytes > rhs.reclaimableBytes;
+			}
+			if (lhs.residentBytes != rhs.residentBytes)
+			{
+				return lhs.residentBytes > rhs.residentBytes;
+			}
+			return TerraEngine::ToHexString(lhs.assetId) < TerraEngine::ToHexString(rhs.assetId);
+		});
 		snapshot.lodTransitionStates = static_cast<std::uint32_t>(visibility.lodTransitionStates.size());
 		for (const VirtualGeometryLODTransitionState& transitionState : visibility.lodTransitionStates)
 		{
@@ -883,6 +1208,18 @@ namespace TerraEngine::Renderer {
 		{
 			++snapshot.hiZInactiveFrames;
 			snapshot.warnings.push_back("Virtual geometry Hi-Z is " + std::string(ToString(snapshot.hiZState)) + ": " + snapshot.hiZInvalidReason);
+			const bool pageSourceDiagnosticsPresent =
+				snapshot.residentPagePayloadCount > 0u
+				|| snapshot.emittedPageSourceCount > 0u
+				|| snapshot.pageRequestCount > 0u
+				|| snapshot.pageSources.missingSources > 0u;
+			if (pageSourceDiagnosticsPresent)
+			{
+				// Keep the combined warning textual so existing tools can show
+				// it without a schema migration, while still exposing the typed
+				// counters above for automation and tests.
+				snapshot.warnings.push_back("Virtual geometry page-source diagnostics observed while Hi-Z failed open: " + snapshot.hiZInvalidReason);
+			}
 		}
 		if (visibility.source == VirtualGeometryCounterSource::DelayedGPUReadback
 			|| visibility.source == VirtualGeometryCounterSource::Unavailable)
@@ -1073,6 +1410,8 @@ namespace TerraEngine::Renderer {
 						+ ToString(gate.viewType)
 						+ "#"
 						+ std::to_string(gate.viewId)
+						+ " source "
+						+ ToString(gate.source)
 						+ " "
 						+ gate.metricName
 						+ " expected "
@@ -1205,6 +1544,18 @@ namespace TerraEngine::Renderer {
 	{
 		std::lock_guard<std::mutex> lock(g_renderDiagnosticsMutex);
 		return g_latestRenderDiagnostics.virtualGeometryViews;
+	}
+
+	void PublishBackendResourceResidencySnapshot(BackendResourceResidencySnapshot snapshot)
+	{
+		std::lock_guard<std::mutex> lock(g_backendResourceResidencyMutex);
+		g_latestBackendResourceResidency = std::move(snapshot);
+	}
+
+	BackendResourceResidencySnapshot LatestBackendResourceResidencySnapshot()
+	{
+		std::lock_guard<std::mutex> lock(g_backendResourceResidencyMutex);
+		return g_latestBackendResourceResidency;
 	}
 
 	RenderDiagnosticsSummary BuildRenderDiagnosticsSummary(

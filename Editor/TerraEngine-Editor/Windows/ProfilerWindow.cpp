@@ -667,6 +667,40 @@ void ProfilerWindow::DrawFrameDetails()
 		}
 		ImGui::TreePop();
 	}
+	if (!renderDiagnostics.virtualGeometryViews.empty() && ImGui::TreeNode("Virtual Geometry Page Source Diagnostics"))
+	{
+		if (ImGui::BeginTable("ProfilerVirtualGeometryPageSourceRows", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("View");
+			ImGui::TableSetupColumn("Source");
+			ImGui::TableSetupColumn("VG Page Requests");
+			ImGui::TableSetupColumn("VG Resident Payload Bytes");
+			ImGui::TableSetupColumn("VG Emitted Fallback Pages");
+			ImGui::TableSetupColumn("VG Embedded Fallback Uses");
+			ImGui::TableHeadersRow();
+			for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : renderDiagnostics.virtualGeometryViews)
+			{
+				// Page-source diagnostics come from the same immutable per-view
+				// snapshot as packet diagnostics. Keeping this table read-only
+				// lets users inspect streaming behavior without poking residency.
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted(ToString(view.viewType));
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextUnformatted(ToString(view.counterSource));
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%u", view.pageSources.pageRequests);
+				ImGui::TableSetColumnIndex(3);
+				ImGui::Text("%llu", static_cast<unsigned long long>(view.pageSources.residentPayloadBytes));
+				ImGui::TableSetColumnIndex(4);
+				ImGui::Text("%u", view.pageSources.emittedFallbackSources);
+				ImGui::TableSetColumnIndex(5);
+				ImGui::Text("%u", view.pageSources.emittedEmbeddedFallbackSources);
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
 	if (ImGui::TreeNode("Visible Command Reuse"))
 	{
 		const RenderStatsSnapshot gameStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Game);

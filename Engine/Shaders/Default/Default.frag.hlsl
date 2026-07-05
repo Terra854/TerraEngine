@@ -111,6 +111,11 @@ struct PushConstants
 	uint selectedVirtualPageNeedCount;
 	uint virtualGeometryPacketBufferIndex;
 	uint virtualGeometryBatchBufferIndex;
+	uint virtualGeometryPagePayloadBufferIndex; // Mirrors C++ PushConstants even though fragment shading currently only needs common material/debug fields.
+	uint virtualGeometryPayloadSource;
+	uint virtualGeometryEmittedSource;
+	uint virtualGeometryPagePayloadByteOffset;
+	uint virtualGeometryPagePayloadByteSize;
 	float4 editorTint;
 };
 

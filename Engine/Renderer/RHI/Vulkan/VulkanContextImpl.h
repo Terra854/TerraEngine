@@ -10,6 +10,7 @@
 #include "VulkanCommonIncludes.h"
 #include "VulkanHiZ.h"
 #include "VulkanVRS.h"
+#include "VulkanUploadPlanning.h"
 
 #include "Core/Logger/Logger.h"
 #include "Window/WindowSystem.h"
@@ -359,27 +360,32 @@ struct VulkanContext::Impl {
 					VulkanBuffer compactedPacketBuffer{};
 					VulkanBuffer generatedSubmissionBuffer{};
 					VulkanBuffer counterReadbackBuffer{};
+					VulkanBuffer pagePayloadBuffer{};
 					std::uint32_t packetBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::uint32_t batchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::uint32_t compactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::uint32_t generatedSubmissionBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::uint32_t counterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+					std::uint32_t pagePayloadBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::size_t packetCapacity = 0u;
 					std::size_t batchCapacity = 0u;
 					std::size_t compactedPacketCapacity = 0u;
 					std::size_t generatedSubmissionCapacity = 0u;
 					std::size_t counterReadbackCapacity = 0u;
+					std::size_t pagePayloadCapacity = 0u;
 					std::uint64_t retireAfterFrameId = 0u;
 					bool live = false;
 				};
-				std::array<std::vector<VirtualGeometryGpuPacketFrameResources>, MAX_FRAMES_IN_FLIGHT> virtualGeometryGpuPacketResourcesByFrame{};
-				std::deque<VirtualGeometryGpuPacketFrameResources> retiredVirtualGeometryGpuPacketResources{};
-				std::uint64_t nextVirtualGeometryGpuPacketResourceSerial = 1u;
+					std::array<std::vector<VirtualGeometryGpuPacketFrameResources>, MAX_FRAMES_IN_FLIGHT> virtualGeometryGpuPacketResourcesByFrame{};
+					std::deque<VirtualGeometryGpuPacketFrameResources> retiredVirtualGeometryGpuPacketResources{};
+					std::array<std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan>, MAX_FRAMES_IN_FLIGHT> pendingVirtualGeometryPageRetirementsByFrame{};
+					std::uint64_t nextVirtualGeometryGpuPacketResourceSerial = 1u;
 				std::uint32_t activeVirtualGeometryPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				std::uint32_t activeVirtualGeometryBatchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				std::uint32_t activeVirtualGeometryCompactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				std::uint32_t activeVirtualGeometryGeneratedSubmissionBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				std::uint32_t activeVirtualGeometryCounterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+				std::uint32_t activeVirtualGeometryPagePayloadBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 				static constexpr uint32_t kHiZViewCount = 2u;
 				static constexpr uint32_t kHiZGameViewIndex = 0u;
 				static constexpr uint32_t kHiZSceneViewIndex = 1u;
@@ -391,6 +397,11 @@ struct VulkanContext::Impl {
 				std::array<std::array<std::array<VulkanHiZ, 2>, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> hiZByViewFrame{};
 				std::array<std::array<uint32_t, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> hiZReadIndexByViewFrame{};
 				std::array<std::array<bool, MAX_FRAMES_IN_FLIGHT>, kHiZViewCount> hiZWritePendingSwapByViewFrame{};
+				// RenderFrame discovers the true Scene/Game target sizes, but
+				// Vulkan objects may only be recreated at a frame-slot fence
+				// boundary. BeginFrame consumes these desired extents before any
+				// command buffer binds the global Hi-Z descriptors.
+				std::array<glm::uvec2, kHiZViewCount> desiredHiZExtentByView{};
 				// Validation reads this frozen copy for the whole CPU frame.
 				// GenerateHiZPyramid updates the write history while recording,
 				// so using a per-view snapshot avoids same-frame scene/game
@@ -691,10 +702,19 @@ struct VulkanContext::Impl {
 		uint32_t selectedVirtualPageNeedCount;
 		uint32_t virtualGeometryPacketBufferIndex;
 		uint32_t virtualGeometryBatchBufferIndex;
+		// Page payload identity is carried in push constants so task, mesh, and
+		// fragment stages all agree which virtual-geometry page source produced
+		// the currently emitted meshlets.
+		uint32_t virtualGeometryPagePayloadBufferIndex;
+		uint32_t virtualGeometryPayloadSource;
+		uint32_t virtualGeometryEmittedSource;
+		uint32_t virtualGeometryPagePayloadByteOffset;
+		uint32_t virtualGeometryPagePayloadByteSize;
 		// Editor-only tint is part of the default mesh push-constant contract so
 		// every default shader stage observes the same byte layout.
 		alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);
 	};
+	static_assert(sizeof(PushConstants) == 256u, "Default mesh push constants must stay byte-compatible with Default.task/mesh/frag.hlsl.");
 
 	// struct OffscreenResources groups related state and operations so callers have one documented contract.
 	struct OffscreenResources {

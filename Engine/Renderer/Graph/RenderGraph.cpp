@@ -184,6 +184,12 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, range.selectedClusterCount);
 			HashCombine(hash, range.pageNeedOffset);
 			HashCombine(hash, range.pageNeedCount);
+			HashCombine(hash, range.pageId);
+			HashCombine(hash, range.fallbackPageId);
+			HashCombine(hash, static_cast<std::uint64_t>(range.payloadSource));
+			HashCombine(hash, static_cast<std::uint64_t>(range.emittedSource));
+			HashCombine(hash, range.pagePayloadByteOffset);
+			HashCombine(hash, range.pagePayloadByteSize);
 			return hash;
 		}
 	}

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <optional>
@@ -417,8 +418,67 @@ enum class GeometryPageState : std::uint32_t
 	Evicted = 6u,
 	PendingIO = 7u,
 	PendingUpload = 8u,
-	Pinned = 9u
+	Pinned = 9u,
+	PendingRetirement = 10u,
+	Retired = 11u
 };
+
+// VirtualGeometryPagePayloadSource names where a page payload physically lives
+// before the shader consumes it. Keeping this separate from residency state
+// lets diagnostics prove that normal rendering used streamed page payloads
+// instead of silently reading the fully resident owning mesh buffer.
+enum class VirtualGeometryPagePayloadSource : std::uint32_t
+{
+	Unknown = 0u,
+	ResidentPagePayload = 1u,
+	ResidentFallbackPayload = 2u,
+	EmbeddedMeshPayload = 3u,
+	ConservativeEmbeddedFallback = 4u,
+	Missing = 5u,
+	Invalid = 6u
+};
+
+inline const char* ToString(VirtualGeometryPagePayloadSource source)
+{
+	switch (source)
+	{
+	case VirtualGeometryPagePayloadSource::ResidentPagePayload: return "Resident Page Payload";
+	case VirtualGeometryPagePayloadSource::ResidentFallbackPayload: return "Resident Fallback Payload";
+	case VirtualGeometryPagePayloadSource::EmbeddedMeshPayload: return "Embedded Mesh Payload";
+	case VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback: return "Conservative Embedded Fallback";
+	case VirtualGeometryPagePayloadSource::Missing: return "Missing";
+	case VirtualGeometryPagePayloadSource::Invalid: return "Invalid";
+	case VirtualGeometryPagePayloadSource::Unknown:
+	default: return "Unknown";
+	}
+}
+
+// VirtualGeometryEmittedPageSource is the renderer-visible answer for a
+// selected cluster. It describes what actually reached the draw path after
+// fallback substitution and validation, which can differ from the desired page.
+enum class VirtualGeometryEmittedPageSource : std::uint32_t
+{
+	None = 0u,
+	HighDetailPage = 1u,
+	FallbackPage = 2u,
+	ConservativeEmbeddedFallback = 3u,
+	NoSubmittedWork = 4u,
+	Invalid = 5u
+};
+
+inline const char* ToString(VirtualGeometryEmittedPageSource source)
+{
+	switch (source)
+	{
+	case VirtualGeometryEmittedPageSource::HighDetailPage: return "High Detail Page";
+	case VirtualGeometryEmittedPageSource::FallbackPage: return "Fallback Page";
+	case VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback: return "Conservative Embedded Fallback";
+	case VirtualGeometryEmittedPageSource::NoSubmittedWork: return "No Submitted Work";
+	case VirtualGeometryEmittedPageSource::Invalid: return "Invalid";
+	case VirtualGeometryEmittedPageSource::None:
+	default: return "None";
+	}
+}
 
 // VirtualGeometryCounterSnapshot is copied into immutable frame snapshots and
 // published diagnostics. It deliberately keeps source labels beside counts so
@@ -444,6 +504,10 @@ struct VirtualGeometryCounterSnapshot
 	std::uint32_t requestedPages = 0u;
 	std::uint32_t missingPages = 0u;
 	std::uint32_t fallbackSubstitutions = 0u;
+	std::uint32_t residentPagePayloads = 0u;
+	std::uint32_t fallbackPagePayloads = 0u;
+	std::uint32_t embeddedFallbackPayloads = 0u;
+	std::uint32_t emittedPageSources = 0u;
 	bool authoritative = false;
 };
 
@@ -575,6 +639,19 @@ enum class VirtualGeometryPerformanceGateSource : std::uint32_t
 	Manual = 4u
 };
 
+inline const char* ToString(VirtualGeometryPerformanceGateSource source)
+{
+	switch (source)
+	{
+	case VirtualGeometryPerformanceGateSource::Prepared: return "Prepared";
+	case VirtualGeometryPerformanceGateSource::GPUReadback: return "GPU Readback";
+	case VirtualGeometryPerformanceGateSource::DelayedGPUReadback: return "Delayed GPU Readback";
+	case VirtualGeometryPerformanceGateSource::Unsupported: return "Unsupported";
+	case VirtualGeometryPerformanceGateSource::Manual: return "Manual";
+	default: return "Unknown";
+	}
+}
+
 enum class VisibleStreamingResourceKind : std::uint32_t
 {
 	Mesh = 0u,
@@ -664,6 +741,10 @@ struct VirtualGeometryClusterPacket
 	glm::vec4 projectedBounds = glm::vec4(0.0f);
 	std::uint32_t pageId = 0u;
 	std::uint32_t fallbackPageId = 0u;
+	VirtualGeometryPagePayloadSource payloadSource = VirtualGeometryPagePayloadSource::Unknown;
+	VirtualGeometryEmittedPageSource emittedSource = VirtualGeometryEmittedPageSource::None;
+	std::uint64_t pagePayloadByteOffset = 0u;
+	std::uint64_t pagePayloadByteSize = 0u;
 	std::uint32_t debugIdentity = 0u;
 	bool fallbackPacket = false;
 };
@@ -746,6 +827,10 @@ struct GpuVirtualGeometryPacketRecord
 	glm::vec4 projectedBounds = glm::vec4(0.0f);
 	std::uint32_t pageId = 0u;
 	std::uint32_t fallbackPageId = 0u;
+	VirtualGeometryPagePayloadSource payloadSource = VirtualGeometryPagePayloadSource::Unknown;
+	VirtualGeometryEmittedPageSource emittedSource = VirtualGeometryEmittedPageSource::None;
+	std::uint64_t pagePayloadByteOffset = 0u;
+	std::uint64_t pagePayloadByteSize = 0u;
 	std::uint32_t debugIdentity = 0u;
 	std::uint32_t flags = 0u;
 };
@@ -864,13 +949,86 @@ struct PageResidencyRecord
 	std::uint32_t coveredClusterCount = 0u;
 	std::vector<std::uint32_t> coveredClusters;
 	std::uint64_t byteCost = 0u;
+	std::uint64_t payloadByteOffset = 0u;
+	std::uint64_t payloadByteSize = 0u;
 	GeometryPageState state = GeometryPageState::NotResident;
+	VirtualGeometryPagePayloadSource payloadSource = VirtualGeometryPagePayloadSource::Unknown;
 	std::uint32_t fallbackPageId = 0u;
 	bool isFallback = false;
+	bool protectedFallback = false;
 	std::uint64_t lastRequestedFrame = 0u;
 	std::uint64_t lastUsedFrame = 0u;
+	std::uint64_t retirementFrame = 0u;
 	std::int32_t priority = 0;
 	std::string failureReason;
+};
+
+// VirtualGeometryPagePayloadRecord is the immutable payload address table that
+// render preparation, upload planning, diagnostics, and tests can share. It
+// intentionally stores page-local offsets and counts, not pointers to live
+// mesh or backend allocations.
+struct VirtualGeometryPagePayloadRecord
+{
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	std::uint32_t pageId = 0u;
+	std::uint32_t fallbackPageId = 0xffffffffu;
+	VirtualGeometryPagePayloadSource source = VirtualGeometryPagePayloadSource::Unknown;
+	std::uint32_t selectedLod = 0u;
+	std::uint32_t clusterOffset = 0u;
+	std::uint32_t clusterCount = 0u;
+	std::uint32_t meshletOffset = 0u;
+	std::uint32_t meshletCount = 0u;
+	std::uint32_t vertexOffset = 0u;
+	std::uint32_t vertexCount = 0u;
+	std::uint32_t primitiveOffset = 0u;
+	std::uint32_t primitiveCount = 0u;
+	std::uint32_t materialSectionId = 0u;
+	std::uint64_t payloadByteOffset = 0u;
+	std::uint64_t payloadByteSize = 0u;
+	bool resident = false;
+	bool pinnedFallback = false;
+	bool valid = false;
+	std::string diagnostic;
+};
+
+// VirtualGeometryPageRetirementRecord is a value-only handoff from residency
+// planning to backend lifetime management. It carries page ids and byte costs;
+// actual Vulkan allocations still retire through protected frame-slot cleanup.
+struct VirtualGeometryPageRetirementRecord
+{
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	std::uint32_t pageId = 0u;
+	std::uint64_t frameId = 0u;
+	std::uint64_t byteSize = 0u;
+	bool protectedFallback = false;
+	bool retired = false;
+	std::string reason;
+};
+
+// VirtualGeometryEmittedPageSourceRecord answers "what did this selected
+// cluster draw from?" for one view. Tests use it to reject accidental normal
+// use of the owning mesh buffer, while diagnostics use it to explain fallback.
+struct VirtualGeometryEmittedPageSourceRecord
+{
+	std::uint32_t viewId = 0u;
+	RenderViewType viewType = RenderViewType::Game;
+	std::uint64_t frameId = 0u;
+	TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+	TerraEngine::UUID materialId = TerraEngine::EMPTY_UUID;
+	std::uint32_t clusterId = 0u;
+	std::uint32_t selectedLod = 0u;
+	std::uint32_t pageId = 0u;
+	std::uint32_t fallbackPageId = 0xffffffffu;
+	VirtualGeometryPagePayloadSource payloadSource = VirtualGeometryPagePayloadSource::Unknown;
+	VirtualGeometryEmittedPageSource emittedSource = VirtualGeometryEmittedPageSource::None;
+	std::uint32_t meshletOffset = 0u;
+	std::uint32_t meshletCount = 0u;
+	std::uint64_t payloadByteOffset = 0u;
+	std::uint64_t payloadByteSize = 0u;
+	bool fallbackSubstitution = false;
+	bool conservativeEmbeddedFallback = false;
+	std::string reason;
 };
 
 // FallbackCoverageChain records how a missing desired cluster remains covered
@@ -990,6 +1148,11 @@ struct PerformanceGateResult
 	std::string fixtureId;
 	RenderViewType viewType = RenderViewType::Game;
 	std::uint32_t viewId = 0u;
+	// Asset/page scope is optional because some gates cover an aggregate view
+	// or an old CPU-prepared estimate. When present, automation can point a
+	// failing page-streaming gate at the asset/page family that caused it.
+	TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+	std::uint32_t pageId = std::numeric_limits<std::uint32_t>::max();
 	std::string metricName;
 	float threshold = 0.0f;
 	float actual = 0.0f;
@@ -1473,12 +1636,15 @@ struct GeometryPageRuntime
 	GeometryPageState state = GeometryPageState::NotResident;
 	std::uint64_t byteSize = 0u;
 	float priority = 0.0f;
-	std::uint32_t fallbackPageId = 0u;
-	std::uint64_t lastUsedFrame = 0u;
-	bool fallbackPage = false;
-	bool pinnedFallback = false;
-	std::uint32_t clusterOffset = 0u;
+		std::uint32_t fallbackPageId = 0u;
+		std::uint64_t lastUsedFrame = 0u;
+		bool fallbackPage = false;
+		bool pinnedFallback = false;
+		bool protectedFallback = false;
+		std::uint32_t clusterOffset = 0u;
 	std::uint32_t clusterCount = 0u;
+	std::uint64_t payloadByteOffset = 0u;
+	std::uint64_t payloadByteSize = 0u;
 	float screenImportance = 0.0f;
 	std::string failureReason;
 };
@@ -1734,6 +1900,12 @@ struct DrawCommand
 	std::uint32_t selectedVirtualClusterCount = 0u;
 	std::uint32_t selectedVirtualPageNeedOffset = 0u;
 	std::uint32_t selectedVirtualPageNeedCount = 0u;
+	std::uint32_t virtualGeometryPageId = 0u;
+	std::uint32_t virtualGeometryFallbackPageId = 0xffffffffu;
+	VirtualGeometryPagePayloadSource virtualGeometryPayloadSource = VirtualGeometryPagePayloadSource::Unknown;
+	VirtualGeometryEmittedPageSource virtualGeometryEmittedSource = VirtualGeometryEmittedPageSource::None;
+	std::uint64_t virtualGeometryPagePayloadByteOffset = 0u;
+	std::uint64_t virtualGeometryPagePayloadByteSize = 0u;
 	bool taskShaderCullingEnabled = true;
 };
 
@@ -1776,6 +1948,14 @@ struct PushConstants
 	// push-constant range as the conservative fail-open source of truth.
 	std::uint32_t virtualGeometryPacketBufferIndex = 0xFFFFFFFFu;
 	std::uint32_t virtualGeometryBatchBufferIndex = 0xFFFFFFFFu;
+	std::uint32_t virtualGeometryPagePayloadBufferIndex = 0xFFFFFFFFu;
+	// Page-source metadata labels the payload that this draw intends to use.
+	// The byte range is deliberately truncated to low 32-bit words here because
+	// shader-visible payload buffers are still bounded by per-view uploads.
+	std::uint32_t virtualGeometryPayloadSource = 0u;
+	std::uint32_t virtualGeometryEmittedSource = 0u;
+	std::uint32_t virtualGeometryPagePayloadByteOffset = 0u;
+	std::uint32_t virtualGeometryPagePayloadByteSize = 0u;
 	// rgb is the tint target color and a is blend strength. Runtime draws leave
 	// this at zero so authoring cues never leak into exported/game rendering.
 	alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);
@@ -2078,10 +2258,11 @@ struct FrameRenderData
 	std::vector<GpuVirtualGeometryBatchDescriptor> virtualGeometryGpuBatches;
 	std::vector<GpuVirtualGeometryPacketFrameSet> virtualGeometryGpuFrameSets;
 	std::vector<GpuPacketCompactionDispatch> virtualGeometryGpuCompactionDispatches;
-	std::vector<GeneratedVirtualGeometrySubmissionRecord> virtualGeometryGeneratedSubmissions;
-	std::vector<VirtualGeometryCounterReadbackRecord> virtualGeometryCounterReadbacks;
-	std::vector<VirtualGeometryGpuFallbackRecord> virtualGeometryGpuFallbackRecords;
-	// Scene View can request a whole-view authoring tint for non-mesh passes
+		std::vector<GeneratedVirtualGeometrySubmissionRecord> virtualGeometryGeneratedSubmissions;
+		std::vector<VirtualGeometryCounterReadbackRecord> virtualGeometryCounterReadbacks;
+		std::vector<VirtualGeometryGpuFallbackRecord> virtualGeometryGpuFallbackRecords;
+		std::vector<VirtualGeometryPageRetirementRecord> virtualGeometryPageRetirements;
+		// Scene View can request a whole-view authoring tint for non-mesh passes
 	// such as sky and grid while individual DrawCommand tint preserves the
 	// focused prefab branch at normal color.
 	glm::vec4 editorContextTint = glm::vec4(0.0f);
@@ -2223,6 +2404,10 @@ static_assert(sizeof(MeshletCullingCountersGPU) == 48, "Meshlet counter payload 
 struct RenderStatsSnapshot
 {
 	RenderViewType viewType = RenderViewType::Game;
+	// Completed view size lets lightweight UI stats validate backend-owned
+	// resources, such as Hi-Z pyramids, without reaching back into live Vulkan
+	// render targets.
+	glm::uvec2 renderSize = glm::uvec2(0u);
 	float frameTimeMs = 0.0f;
 	float fps = 0.0f;
 	std::uint32_t drawCalls = 0u;
@@ -2244,6 +2429,22 @@ struct RenderStatsSnapshot
 	std::uint32_t virtualGeometryFailedPages = 0u;
 	std::uint32_t virtualGeometryEvictedPages = 0u;
 	std::uint32_t virtualGeometryPinnedFallbackPages = 0u;
+	// Page-source counters summarize which independently resident payloads a
+	// completed view actually used. They are copied from immutable diagnostics
+	// so lightweight editor surfaces do not walk live residency tables.
+	std::uint32_t virtualGeometryResidentPagePayloads = 0u;
+	std::uint32_t virtualGeometryHighDetailPagePayloads = 0u;
+	std::uint32_t virtualGeometryFallbackPagePayloads = 0u;
+	std::uint32_t virtualGeometryEmbeddedFallbackPagePayloads = 0u;
+	std::uint32_t virtualGeometryEmittedHighDetailPages = 0u;
+	std::uint32_t virtualGeometryEmittedFallbackPages = 0u;
+	std::uint32_t virtualGeometryEmittedEmbeddedFallbackPages = 0u;
+	std::uint32_t virtualGeometryMissingPageSources = 0u;
+	std::uint32_t virtualGeometryPageSourceRequests = 0u;
+	std::uint32_t virtualGeometryPageSourceRetirements = 0u;
+	std::uint64_t virtualGeometryResidentPagePayloadBytes = 0u;
+	std::uint64_t virtualGeometryFallbackPagePayloadBytes = 0u;
+	std::uint64_t virtualGeometryEmbeddedFallbackBytes = 0u;
 	// GPU packet diagnostics are copied from the immutable render graph
 	// snapshot. Editor windows and automation read these fields without
 	// touching live RenderSystem or Vulkan state.

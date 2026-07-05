@@ -6,6 +6,7 @@
 #include "Renderer/RenderSystem.h"
 
 #include <algorithm>
+#include <string_view>
 
 namespace TerraEngine::Tests
 {
@@ -384,6 +385,120 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(720u, sceneIt->hiZPyramidSize.y, "Scene View should keep its own Hi-Z pyramid height.");
 		});
 
+		registry.Add("VirtualGeometry.Render.MultiView.US5.PageResidencyAndHiZSignaturesStayPerView", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 893u;
+
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState gameState;
+			gameState.outputKind = RenderOutputKind::GameView;
+			gameState.viewType = RenderViewType::Game;
+			gameState.outputId = 2u;
+			gameState.targetSize = glm::uvec2(1920u, 1080u);
+			gameState.hasHiZValidationState = true;
+			gameState.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			gameState.hiZValidationState.pyramidReady = true;
+			gameState.hiZValidationState.pyramidSize = gameState.targetSize;
+			gameState.hiZValidationState.renderSize = gameState.targetSize;
+			gameState.hiZValidationState.cameraSignature = 0x89320001u;
+			gameState.hiZValidationState.depthSceneSignature = 0x89320002u;
+			gameState.hiZValidationState.warmupFrames = 3u;
+
+			VirtualGeometryPagePayloadRecord gamePayload{};
+			gamePayload.meshId = meshId;
+			gamePayload.pageId = 8u;
+			gamePayload.fallbackPageId = 1u;
+			gamePayload.source = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			gamePayload.payloadByteOffset = 4096u;
+			gamePayload.payloadByteSize = 2048u;
+			gamePayload.resident = true;
+			gamePayload.valid = true;
+			gameState.residentPagePayloads.push_back(gamePayload);
+
+			VirtualGeometryEmittedPageSourceRecord gameEmission{};
+			gameEmission.viewId = gameState.outputId;
+			gameEmission.viewType = gameState.viewType;
+			gameEmission.frameId = snapshot.frameId;
+			gameEmission.meshId = meshId;
+			gameEmission.materialId = materialId;
+			gameEmission.pageId = gamePayload.pageId;
+			gameEmission.fallbackPageId = gamePayload.fallbackPageId;
+			gameEmission.payloadSource = gamePayload.source;
+			gameEmission.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			gameState.emittedPageSources.push_back(gameEmission);
+
+			HiZRegressionSnapshot gameBaseline{};
+			gameBaseline.viewId = gameState.outputId;
+			gameBaseline.viewType = gameState.viewType;
+			gameBaseline.frameIndex = snapshot.frameId;
+			gameBaseline.state = VirtualGeometryHiZState::Active;
+			gameBaseline.baselineMatched = true;
+			gameState.hiZRegressionSnapshots.push_back(gameBaseline);
+
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState sceneState = gameState;
+			sceneState.outputKind = RenderOutputKind::SceneView;
+			sceneState.viewType = RenderViewType::Scene;
+			sceneState.outputId = 1u;
+			sceneState.targetSize = glm::uvec2(1280u, 720u);
+			sceneState.hiZValidationState.pyramidSize = sceneState.targetSize;
+			sceneState.hiZValidationState.renderSize = sceneState.targetSize;
+			sceneState.hiZValidationState.cameraSignature = 0x89310001u;
+			sceneState.hiZValidationState.depthSceneSignature = 0x89310002u;
+			sceneState.residentPagePayloads.clear();
+			VirtualGeometryPagePayloadRecord scenePayload = gamePayload;
+			scenePayload.pageId = 1u;
+			scenePayload.fallbackPageId = 1u;
+			scenePayload.source = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			scenePayload.payloadByteOffset = 0u;
+			scenePayload.payloadByteSize = 1024u;
+			scenePayload.pinnedFallback = true;
+			sceneState.residentPagePayloads.push_back(scenePayload);
+			sceneState.emittedPageSources.clear();
+			VirtualGeometryEmittedPageSourceRecord sceneEmission = gameEmission;
+			sceneEmission.viewId = sceneState.outputId;
+			sceneEmission.viewType = sceneState.viewType;
+			sceneEmission.pageId = scenePayload.pageId;
+			sceneEmission.fallbackPageId = scenePayload.fallbackPageId;
+			sceneEmission.payloadSource = scenePayload.source;
+			sceneEmission.emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
+			sceneEmission.fallbackSubstitution = true;
+			sceneEmission.reason = "Scene View kept resident fallback page while Game View saw high detail.";
+			sceneState.emittedPageSources.push_back(sceneEmission);
+			sceneState.hiZRegressionSnapshots.clear();
+			HiZRegressionSnapshot sceneBaseline = gameBaseline;
+			sceneBaseline.viewId = sceneState.outputId;
+			sceneBaseline.viewType = sceneState.viewType;
+			sceneState.hiZRegressionSnapshots.push_back(sceneBaseline);
+
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, gameState, VirtualGeometryCounterSource::GPUReadback));
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(
+				TerraEngine::Renderer::BuildVirtualGeometryViewVisibilitySnapshot(snapshot, sceneState, VirtualGeometryCounterSource::GPUReadback));
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+					snapshot,
+					MakeDefaultVirtualGeometryQualityProfile(),
+					VirtualGeometryInactiveReason::None);
+			const auto gameIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Game;
+			});
+			const auto sceneIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Scene;
+			});
+
+			context.Expect(gameIt != diagnostics.end(), "Game View page diagnostics should be present.");
+			context.Expect(sceneIt != diagnostics.end(), "Scene View page diagnostics should be present.");
+			context.Expect(gameIt->hiZActive && sceneIt->hiZActive, "Both views should keep active Hi-Z validation with ready pyramids.");
+			context.Expect(gameIt->hiZDepthSceneSignature != sceneIt->hiZDepthSceneSignature, "Scene and Game page-source transitions should keep separate Hi-Z depth signatures.");
+			context.ExpectEqual(1u, gameIt->pageSources.emittedHighDetailSources, "Game View should report its high-detail page source.");
+			context.ExpectEqual(0u, gameIt->pageSources.emittedFallbackSources, "Game View should not inherit Scene View fallback emission.");
+			context.ExpectEqual(0u, sceneIt->pageSources.emittedHighDetailSources, "Scene View should not inherit Game View high-detail emission.");
+			context.ExpectEqual(1u, sceneIt->pageSources.emittedFallbackSources, "Scene View should report its fallback page source.");
+		});
+
 		registry.Add("VirtualGeometry.Render.MultiView.US6.KeepsGpuPacketCountersPerView", [](TestContext& context) {
 			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
 			snapshot.frameId = 892u;
@@ -521,6 +636,72 @@ namespace TerraEngine::Tests
 			}
 
 			context.ExpectEqual(300u, checkedGatePairs, "The multi-view gate fixture should exercise 300 independent frames.");
+		});
+
+		registry.Add("VirtualGeometry.Render.MultiView.US8.KeepsPageSourcePerformanceGatesPerView", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot gameDiagnostics;
+			gameDiagnostics.viewType = RenderViewType::Game;
+			gameDiagnostics.viewId = 2u;
+			gameDiagnostics.counterSource = VirtualGeometryCounterSource::GPUReadback;
+			gameDiagnostics.geometryBudgetBytes = 4u * 1024u * 1024u;
+			gameDiagnostics.estimatedGeometryBytes = 16u * 1024u * 1024u;
+			gameDiagnostics.pageSources.residentPayloads = 3u;
+			gameDiagnostics.pageSources.residentPayloadBytes = 2u * 1024u * 1024u;
+			gameDiagnostics.pageSources.emittedHighDetailSources = 3u;
+			TerraEngine::Renderer::VirtualGeometryBudgetContributor gameContributor;
+			gameContributor.assetId = TerraEngine::GenerateUUID();
+			gameDiagnostics.budgetContributors.push_back(gameContributor);
+
+			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot sceneDiagnostics = gameDiagnostics;
+			sceneDiagnostics.viewType = RenderViewType::Scene;
+			sceneDiagnostics.viewId = 1u;
+			sceneDiagnostics.counterSource = VirtualGeometryCounterSource::DelayedGPUReadback;
+			sceneDiagnostics.pageSources.residentPayloadBytes = 1024u * 1024u;
+			sceneDiagnostics.pageSources.emittedHighDetailSources = 0u;
+			sceneDiagnostics.pageSources.emittedFallbackSources = 2u;
+			sceneDiagnostics.budgetContributors.clear();
+			TerraEngine::Renderer::VirtualGeometryBudgetContributor sceneContributor;
+			sceneContributor.assetId = TerraEngine::GenerateUUID();
+			sceneDiagnostics.budgetContributors.push_back(sceneContributor);
+
+			const std::vector<PerformanceGateResult> gameGates =
+				TerraEngine::Renderer::BuildVirtualGeometryPerformanceGates(gameDiagnostics);
+			const std::vector<PerformanceGateResult> sceneGates =
+				TerraEngine::Renderer::BuildVirtualGeometryPerformanceGates(sceneDiagnostics);
+			const auto findGate = [](const std::vector<PerformanceGateResult>& gates, std::string_view gateId) {
+				return std::find_if(gates.begin(), gates.end(), [gateId](const PerformanceGateResult& gate) {
+					return gate.gateId == gateId;
+				});
+			};
+			const auto gameBudgetGate = findGate(gameGates, "virtual-geometry-resident-page-budget-ratio");
+			const auto sceneBudgetGate = findGate(sceneGates, "virtual-geometry-resident-page-budget-ratio");
+			const auto gameEmbeddedGate = findGate(gameGates, "virtual-geometry-embedded-fallback-uses");
+			const auto sceneEmbeddedGate = findGate(sceneGates, "virtual-geometry-embedded-fallback-uses");
+
+			context.Expect(gameBudgetGate != gameGates.end(), "Game View should publish page-budget gates.");
+			context.Expect(sceneBudgetGate != sceneGates.end(), "Scene View should publish page-budget gates.");
+			context.Expect(gameEmbeddedGate != gameGates.end(), "Game View should publish embedded fallback gates.");
+			context.Expect(sceneEmbeddedGate != sceneGates.end(), "Scene View should publish embedded fallback gates.");
+			if (gameBudgetGate != gameGates.end() && sceneBudgetGate != sceneGates.end())
+			{
+				context.ExpectEqual(2u, gameBudgetGate->viewId, "Game page-budget gate should keep the Game View id.");
+				context.ExpectEqual(1u, sceneBudgetGate->viewId, "Scene page-budget gate should keep the Scene View id.");
+				context.Expect(gameBudgetGate->viewType == RenderViewType::Game, "Game page-budget gate should keep the Game View type.");
+				context.Expect(sceneBudgetGate->viewType == RenderViewType::Scene, "Scene page-budget gate should keep the Scene View type.");
+				context.Expect(gameBudgetGate->source == VirtualGeometryPerformanceGateSource::GPUReadback, "Game page-budget gate should keep GPU readback source.");
+				context.Expect(sceneBudgetGate->source == VirtualGeometryPerformanceGateSource::DelayedGPUReadback, "Scene page-budget gate should keep delayed GPU readback source.");
+				context.Expect(gameBudgetGate->assetId == gameContributor.assetId, "Game page-budget gate should keep the Game asset scope.");
+				context.Expect(sceneBudgetGate->assetId == sceneContributor.assetId, "Scene page-budget gate should keep the Scene asset scope.");
+				context.Expect(gameBudgetGate->actual > sceneBudgetGate->actual, "Independent page-source gates should keep their own resident byte ratios.");
+			}
+			if (gameEmbeddedGate != gameGates.end())
+			{
+				context.Expect(gameEmbeddedGate->status == VirtualGeometryPerformanceGateStatus::Pass, "Game View has no embedded fallback sources.");
+			}
+			if (sceneEmbeddedGate != sceneGates.end())
+			{
+				context.Expect(sceneEmbeddedGate->status == VirtualGeometryPerformanceGateStatus::Pass, "Scene View has fallback pages but no embedded full-mesh source.");
+			}
 		});
 
 		registry.Add("VirtualGeometry.Render.MultiView.ModeSwitchResetsLodTransitionState", [](TestContext& context) {

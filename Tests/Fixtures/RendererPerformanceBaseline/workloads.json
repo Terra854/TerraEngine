@@ -20,6 +20,12 @@
 		"virtualGeometryGpuPacketMaxCounterTruthErrorPackets": 1,
 		"virtualGeometryGpuPacketMaxCompactionOverflowPackets": 0,
 		"virtualGeometryGpuPacketMaxInvalidGeneratedSubmissions": 0,
+		"virtualGeometryPageBudgetBytes": 4194304,
+		"virtualGeometryMaxResidentPageBudgetRatio": 1.0,
+		"virtualGeometryMaxFullOwningMeshResidencyRatio": 0.95,
+		"virtualGeometryMaxEmbeddedFallbackUses": 0,
+		"virtualGeometryMaxMissingPageCoverage": 0,
+		"virtualGeometryMinPageRequestFulfillmentPercent": 95,
 		"visibleCommandReuseMinStaticImprovementPercent": 40,
 		"visibleCommandReuseMaxDuplicateGrowthPercent": 10,
 		"visibleCommandReuseMaxConservativeRefreshes": 0
@@ -30,6 +36,7 @@
 		"Large stable scenes should show prepared-packet reuse; improvement below largeSceneMinImprovementPercent should be investigated before accepting the change.",
 		"Diagnostics-closed captures must not include detailed graph collection overhead above diagnosticsClosedMaxOverheadPercent.",
 		"Streaming and stress workloads may delay queued background work, but visible-frame work should stay bounded and report the delay reason.",
+		"Virtual geometry page-streaming workloads must stay within the page budget while reporting resident, fallback, missing, and embedded-fallback sources explicitly.",
 		"Backend submit-path captures should attribute at least backendStageAttributionMinPercent of broad RHI begin, view submit, and RHI end time to named backend stages.",
 		"Backend waits at or above backendStallWarningMilliseconds should publish a stall classification and recommended action while diagnostics are open."
 		,
@@ -46,6 +53,8 @@
 		{ "name": "randomized-stress", "renderables": 1000, "materials": 20, "lights": 10, "ui": true, "streamingResources": 100 },
 		{ "name": "virtual-geometry-dense-batching", "renderables": 1, "materials": 8, "lights": 2, "ui": true, "streamingResources": 64, "virtualGeometry": true, "minimumSelectedClusters": 500, "maxSubmittedBatchRatio": "virtualGeometryMaxSubmittedBatchRatio", "maxEstimatedPrepMilliseconds": "virtualGeometryMaxEstimatedPrepMilliseconds", "maxDispatchToSelectedRatio": "virtualGeometryMaxDispatchToSelectedRatio", "maxFalseOcclusionCount": "virtualGeometryMaxFalseOcclusionCount" },
 		{ "name": "virtual-geometry-gpu-packet-compaction", "renderables": 1, "materials": 8, "lights": 2, "ui": true, "streamingResources": 64, "virtualGeometry": true, "gpuPacketBuffers": true, "gpuCompaction": true, "generatedSubmission": true, "minimumSelectedClusters": 500, "maxSubmittedBatchRatio": "virtualGeometryMaxSubmittedBatchRatio", "maxGpuBatchDescriptorRatio": "virtualGeometryGpuPacketMaxBatchDescriptorRatio", "minPrepImprovementPercent": "virtualGeometryGpuPacketMinPrepImprovementPercent", "maxCounterTruthErrorPercent": "virtualGeometryGpuPacketMaxCounterTruthErrorPercent", "maxCounterTruthErrorPackets": "virtualGeometryGpuPacketMaxCounterTruthErrorPackets", "maxCompactionOverflowPackets": "virtualGeometryGpuPacketMaxCompactionOverflowPackets", "maxInvalidGeneratedSubmissions": "virtualGeometryGpuPacketMaxInvalidGeneratedSubmissions", "maxFalseOcclusionCount": "virtualGeometryMaxFalseOcclusionCount" },
+		{ "name": "virtual-geometry-page-streaming-resident", "renderables": 1, "materials": 8, "lights": 2, "ui": true, "streamingResources": 128, "virtualGeometry": true, "pageStreaming": true, "pageBudgetBytes": "virtualGeometryPageBudgetBytes", "maxResidentPageBudgetRatio": "virtualGeometryMaxResidentPageBudgetRatio", "maxFullOwningMeshResidencyRatio": "virtualGeometryMaxFullOwningMeshResidencyRatio", "maxEmbeddedFallbackUses": "virtualGeometryMaxEmbeddedFallbackUses", "maxMissingPageCoverage": "virtualGeometryMaxMissingPageCoverage", "minRequestFulfillmentPercent": "virtualGeometryMinPageRequestFulfillmentPercent", "maxFalseOcclusionCount": "virtualGeometryMaxFalseOcclusionCount" },
+		{ "name": "virtual-geometry-page-streaming-fallback-only", "renderables": 1, "materials": 8, "lights": 2, "ui": true, "streamingResources": 128, "virtualGeometry": true, "pageStreaming": true, "fallbackOnly": true, "pageBudgetBytes": "virtualGeometryPageBudgetBytes", "maxMissingPageCoverage": "virtualGeometryMaxMissingPageCoverage", "maxFalseOcclusionCount": "virtualGeometryMaxFalseOcclusionCount" },
 		{ "name": "virtual-geometry-shadow-heavy", "renderables": 250, "materials": 16, "lights": 8, "ui": false, "streamingResources": 64, "virtualGeometry": true, "shadowViews": true, "minShadowMeshletReductionPercent": "virtualGeometryMinShadowMeshletReductionPercent" },
 		{ "name": "visible-command-reuse-static", "renderables": 750, "materials": 12, "lights": 2, "ui": true, "streamingResources": 96, "virtualGeometry": true, "repeatedResourceGroups": 12, "stationaryFrames": 300, "minStaticImprovementPercent": "visibleCommandReuseMinStaticImprovementPercent", "maxConservativeRefreshes": "visibleCommandReuseMaxConservativeRefreshes" },
 		{ "name": "visible-command-reuse-repeated-resources", "renderables": 1500, "materials": 12, "lights": 2, "ui": true, "streamingResources": 96, "virtualGeometry": true, "repeatedResourceGroups": 12, "stationaryFrames": 300, "maxDuplicateGrowthPercent": "visibleCommandReuseMaxDuplicateGrowthPercent" }

@@ -26,6 +26,10 @@ namespace TerraEngine::Tests {
 			PerformanceGateResult gate;
 			gate.gateId = "dense-cluster-batch-ratio";
 			gate.fixtureId = "virtual-geometry-dense-batching";
+			gate.viewType = RenderViewType::Game;
+			gate.viewId = 3u;
+			gate.assetId = TerraEngine::GenerateUUID();
+			gate.pageId = 7u;
 			gate.metricName = "submittedBatchRatio";
 			gate.threshold = 0.1f;
 			gate.actual = 0.22f;
@@ -39,6 +43,10 @@ namespace TerraEngine::Tests {
 			context.Expect(gate.actual > gate.threshold, "Fixture should represent a failing dense batching gate.");
 			context.Expect(gate.status == VirtualGeometryPerformanceGateStatus::Fail, "Failing gates should not pass silently.");
 			context.Expect(!gate.diagnostic.empty(), "Failing gates should carry human-readable detail.");
+			context.ExpectEqual(3u, gate.viewId, "Failure reports should carry the view id.");
+			context.Expect(gate.assetId != TerraEngine::EMPTY_UUID, "Failure reports should carry the scoped asset id when known.");
+			context.ExpectEqual(7u, gate.pageId, "Failure reports should carry the scoped page id when known.");
+			context.Expect(gate.source == VirtualGeometryPerformanceGateSource::Prepared, "Failure reports should carry the counter source.");
 		});
 
 		registry.Add("Renderer.VisibleCommandReuse.US1.CopyCountGateUsesCompletedStats", [](TestContext& context) {
@@ -209,6 +217,83 @@ namespace TerraEngine::Tests {
 			context.Expect(failingGeneratedGate != failingGates.end(), "Failing generated submission gate should still be reported.");
 			context.Expect(failingGeneratedGate->status == VirtualGeometryPerformanceGateStatus::Fail, "Invalid generated submissions should fail the generated-submission gate.");
 			context.ExpectEqual(1u, failingGeneratedGate->viewId, "Failing generated submission gates should keep the Scene View id.");
+		});
+
+		registry.Add("VirtualGeometry.PerformanceGate.US8.DensePageBudgetGatesResidentBytesAndCoverage", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
+			diagnostics.viewType = RenderViewType::Game;
+			diagnostics.viewId = 3u;
+			diagnostics.counterSource = VirtualGeometryCounterSource::GPUReadback;
+			diagnostics.geometryBudgetBytes = 4u * 1024u * 1024u;
+			diagnostics.estimatedGeometryBytes = 16u * 1024u * 1024u;
+			diagnostics.pageSources.residentPayloadBytes = 3u * 1024u * 1024u;
+			diagnostics.pageSources.emittedHighDetailSources = 5u;
+			diagnostics.pageSources.emittedFallbackSources = 1u;
+			diagnostics.pageSources.missingSources = 0u;
+			diagnostics.pageSources.emittedEmbeddedFallbackSources = 0u;
+			TerraEngine::Renderer::VirtualGeometryBudgetContributor contributor;
+			contributor.assetId = TerraEngine::GenerateUUID();
+			diagnostics.budgetContributors.push_back(contributor);
+
+			const std::vector<PerformanceGateResult> gates = TerraEngine::Renderer::BuildVirtualGeometryPerformanceGates(diagnostics);
+			const auto budgetGate = FindGate(gates, "virtual-geometry-resident-page-budget-ratio");
+			const auto fullMeshGate = FindGate(gates, "virtual-geometry-full-owning-mesh-residency");
+			const auto missingGate = FindGate(gates, "virtual-geometry-missing-page-coverage");
+			const auto embeddedGate = FindGate(gates, "virtual-geometry-embedded-fallback-uses");
+
+			context.Expect(budgetGate != gates.end(), "Dense page-budget gate should be generated from resident payload bytes.");
+			context.Expect(fullMeshGate != gates.end(), "Full-owning-mesh residency gate should be generated from resident/full byte estimates.");
+			context.Expect(missingGate != gates.end(), "Missing coverage gate should be generated from page-source diagnostics.");
+			context.Expect(embeddedGate != gates.end(), "Embedded fallback gate should be generated from page-source diagnostics.");
+			context.Expect(budgetGate->status == VirtualGeometryPerformanceGateStatus::Pass, "Resident bytes below the page budget should pass.");
+			context.Expect(fullMeshGate->status == VirtualGeometryPerformanceGateStatus::Pass, "Resident bytes far below full mesh size should pass.");
+			context.Expect(missingGate->status == VirtualGeometryPerformanceGateStatus::Pass, "No missing page sources should pass coverage gates.");
+			context.Expect(embeddedGate->status == VirtualGeometryPerformanceGateStatus::Pass, "No embedded fallback sources should pass page-source gates.");
+			context.Expect(budgetGate->assetId == contributor.assetId, "Page-budget gate should identify the asset family that contributed resident bytes.");
+			context.ExpectEqual(0u, budgetGate->pageId, "Aggregate page-source gates should carry a page-scope marker when page data exists.");
+			context.Expect(budgetGate->source == VirtualGeometryPerformanceGateSource::GPUReadback, "Page-budget gate should preserve the counter source.");
+
+			diagnostics.pageSources.residentPayloadBytes = 5u * 1024u * 1024u;
+			diagnostics.pageSources.missingSources = 1u;
+			diagnostics.pageSources.emittedEmbeddedFallbackSources = 1u;
+			const std::vector<PerformanceGateResult> failingGates = TerraEngine::Renderer::BuildVirtualGeometryPerformanceGates(diagnostics);
+			const auto failingBudgetGate = FindGate(failingGates, "virtual-geometry-resident-page-budget-ratio");
+			const auto failingMissingGate = FindGate(failingGates, "virtual-geometry-missing-page-coverage");
+			const auto failingEmbeddedGate = FindGate(failingGates, "virtual-geometry-embedded-fallback-uses");
+			context.Expect(failingBudgetGate != failingGates.end(), "Failing resident page-budget gate should still be reported.");
+			context.Expect(failingMissingGate != failingGates.end(), "Failing missing coverage gate should still be reported.");
+			context.Expect(failingEmbeddedGate != failingGates.end(), "Failing embedded fallback gate should still be reported.");
+			if (failingBudgetGate != failingGates.end())
+			{
+				context.Expect(failingBudgetGate->status == VirtualGeometryPerformanceGateStatus::Fail, "Resident bytes above budget should fail.");
+			}
+			if (failingMissingGate != failingGates.end())
+			{
+				context.Expect(failingMissingGate->status == VirtualGeometryPerformanceGateStatus::Fail, "Missing page-source coverage should fail.");
+			}
+			if (failingEmbeddedGate != failingGates.end())
+			{
+				context.Expect(failingEmbeddedGate->status == VirtualGeometryPerformanceGateStatus::Fail, "Embedded fallback use should fail the page-streaming gate.");
+			}
+		});
+
+		registry.Add("VirtualGeometry.PerformanceGate.US8.FailsFullOwningMeshResidencyRegression", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
+			diagnostics.viewType = RenderViewType::Game;
+			diagnostics.viewId = 4u;
+			diagnostics.counterSource = VirtualGeometryCounterSource::GPUReadback;
+			diagnostics.geometryBudgetBytes = 4u * 1024u * 1024u;
+			diagnostics.estimatedGeometryBytes = 12u * 1024u * 1024u;
+			diagnostics.pageSources.residentPayloadBytes = 12u * 1024u * 1024u;
+			diagnostics.pageSources.residentPayloads = 4u;
+
+			const std::vector<PerformanceGateResult> gates = TerraEngine::Renderer::BuildVirtualGeometryPerformanceGates(diagnostics);
+			const auto fullMeshGate = FindGate(gates, "virtual-geometry-full-owning-mesh-residency");
+
+			context.Expect(fullMeshGate != gates.end(), "Full-owning-mesh regression gate should be generated for dense page-streamed assets.");
+			context.Expect(fullMeshGate->status == VirtualGeometryPerformanceGateStatus::Fail, "Resident bytes equal to full mesh bytes should fail the page-streaming gate.");
+			context.ExpectEqual(4u, fullMeshGate->viewId, "Full-owning-mesh gate should identify the failing view.");
+			context.Expect(fullMeshGate->diagnostic.find("actual") != std::string::npos, "Full-owning-mesh gate should include actual metric detail.");
 		});
 	}
 }

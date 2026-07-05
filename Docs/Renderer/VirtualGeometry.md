@@ -227,6 +227,78 @@ regression pass, affected target build, and install target so the installed
 editor/runtime tree contains matching shader assets, binaries, docs, and
 diagnostics.
 
+## Page-Sourced Geometry Streaming Roadmap
+
+Feature `specs/033-vg-page-streaming` changes the virtual geometry payload
+contract from selected meshlet ranges inside the fully resident owning mesh to
+selected clusters resolving to resident streamed page payloads. The current
+cluster selection, GPU packet batching, generated submission validation, and
+Hi-Z policy stay as the correctness baseline; this milestone changes geometry
+source and residency ownership.
+
+The implementation order is:
+
+1. Define typed page payload records, resident page sets, page requests,
+   retirement records, and scheduler resources before renderer behavior
+   changes.
+2. Render fallback-only and mixed-resident assets from resident page payloads,
+   with the old embedded owning-mesh path reported only as a conservative
+   fallback source.
+3. Keep fallback pages pinned through pending, failed, and evicted high-detail
+   page transitions so missing detail never becomes missing geometry.
+4. Request, upload, evict, and re-request high-detail pages under a configured
+   virtual geometry page budget while keeping fallback coverage visible.
+5. Preserve per-cluster mixed detail by resolving each selected cluster to a
+   compatible resident page payload instead of falling back to whole-object LOD.
+6. Protect the accepted Hi-Z behavior exactly. Page payload bounds and source
+   signatures may be tracked, but no Hi-Z quality tiers or retuned rejection
+   policy are introduced.
+7. Publish per-view diagnostics for resident bytes, requested pages, emitted
+   source, fallback substitution, embedded fallback use, missing coverage, and
+   source-labeled counters.
+8. Validate cooked assets before rendering by checking page payload bytes,
+   fallback links, cluster links, material ranges, bounds, byte costs, and
+   small-mesh skipped-streaming reasons.
+
+Use the page-streaming fixture slice while implementing this feature:
+
+```powershell
+ctest --test-dir out/build/Debug -R "VirtualGeometryPageStreaming|VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
+```
+
+US4 page-local mixed-detail validation uses the registered
+`Engine.VirtualGeometryRenderer` CTest target. The literal
+`VirtualGeometry.Render` regex currently matches no top-level CTest entry, so
+the renderer target is the canonical checkpoint for sparse cluster cuts,
+material/page boundary diagnostics, page-payload cache invalidation, and shader
+packet source identity.
+
+Each phase or user story must run its focused CTest slice before the next one
+starts. Final acceptance still requires the broader virtual geometry and
+resource labels plus the install target so the installed editor/runtime tree
+contains matching shaders, diagnostics, docs, and page payload metadata.
+
+## Page-Sourced Render Flow
+
+At runtime, virtual geometry follows one view-local immutable path:
+
+1. Render preparation selects the sparse cluster cut for each object.
+2. Each selected cluster resolves to a resident high-detail page payload, a
+   resident fallback page payload, or a labeled conservative embedded fallback.
+3. The renderer records page needs for missing high-detail pages before
+   fallback substitution, so streaming can request detail without creating
+   visible holes.
+4. Vulkan upload planning publishes page-local payload metadata, packet buffers,
+   batch descriptors, generated submissions, and counter readbacks only after
+   protected resource publication has completed.
+5. The task/mesh shader path consumes the selected page-local meshlet ranges and
+   labels the emitted source. Normal frames should report resident page payloads
+   or resident fallback payloads; embedded owning-mesh fallback is a diagnostic
+   fail-open path, not the scalable path.
+6. Editor overlays, automation, the profiler, and performance gates read the
+   immutable per-view page-source diagnostics instead of inferring residency
+   from draw counts.
+
 ## Asset Rebuild Expectations
 
 The current plan breaks older compiled mesh payloads in place. Users must
@@ -753,9 +825,10 @@ Render preparation selects the desired sparse cluster cut first, then checks
 page residency for every desired cluster. If a desired page is missing, failed,
 evicting, or evicted, the selector records a page need and substitutes the best
 resident fallback cluster or ancestor for that region. Current Vulkan upload
-still mirrors page data through the owning mesh buffers; page-level upload and
-retirement policy is exposed through testable planning hooks before separate
-GPU page allocations are introduced.
+publishes page-local payload records and page-source labels for the backend.
+The owning mesh buffer is retained only as a conservative embedded fallback and
+must be visible in diagnostics when used, so performance gates can catch any
+regression back to full high-detail owning-mesh residency.
 
 ## Runtime Counter Domains
 

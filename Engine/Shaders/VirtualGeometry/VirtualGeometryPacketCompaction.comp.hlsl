@@ -26,6 +26,10 @@ struct GpuVirtualGeometryPacketRecord
 	float4 projectedBounds;
 	uint pageId;
 	uint fallbackPageId;
+	uint payloadSource;
+	uint emittedSource;
+	uint2 pagePayloadByteOffset;
+	uint2 pagePayloadByteSize;
 	uint debugIdentity;
 	uint flags;
 };

@@ -133,6 +133,14 @@ namespace TerraEngine::Resource
 			packet.packetCount = input.packetCount;
 			packet.priority = priority;
 			packet.fallbackRequest = fallbackRequest;
+			packet.payloadSource = page.payloadSource != ::VirtualGeometryPagePayloadSource::Unknown
+				? page.payloadSource
+				: (fallbackRequest ? input.fallbackPayloadSource : input.desiredPayloadSource);
+			packet.expectedEmission = fallbackRequest
+				? ::VirtualGeometryEmittedPageSource::FallbackPage
+				: ::VirtualGeometryEmittedPageSource::HighDetailPage;
+			packet.payloadByteOffset = page.payloadByteOffset;
+			packet.payloadByteSize = page.payloadByteSize == 0u ? page.byteSize : page.payloadByteSize;
 			packet.reason = std::move(reason);
 			packets.push_back(std::move(packet));
 		}
@@ -168,11 +176,11 @@ namespace TerraEngine::Resource
 			plan.failures.push_back(std::move(failure));
 		}
 
-		void SortVirtualGeometryPageRequestPackets(std::vector<VirtualGeometryPageRequestPacket>& packets)
-		{
-			std::sort(packets.begin(), packets.end(), [](const VirtualGeometryPageRequestPacket& left, const VirtualGeometryPageRequestPacket& right) {
-				if (left.priority != right.priority)
-				{
+			void SortVirtualGeometryPageRequestPackets(std::vector<VirtualGeometryPageRequestPacket>& packets)
+			{
+				std::sort(packets.begin(), packets.end(), [](const VirtualGeometryPageRequestPacket& left, const VirtualGeometryPageRequestPacket& right) {
+					if (left.priority != right.priority)
+					{
 					return left.priority > right.priority;
 				}
 				if (left.assetId != right.assetId)
@@ -183,9 +191,50 @@ namespace TerraEngine::Resource
 				{
 					return left.pageId < right.pageId;
 				}
-				return left.fallbackRequest && !right.fallbackRequest;
-			});
-		}
+					return left.fallbackRequest && !right.fallbackRequest;
+				});
+			}
+
+			bool PageRequestEquivalent(const VirtualGeometryPageRequestPacket& left, const VirtualGeometryPageRequestPacket& right)
+			{
+				return left.assetId == right.assetId
+					&& left.objectId == right.objectId
+					&& left.viewId == right.viewId
+					&& left.pageId == right.pageId
+					&& left.fallbackRequest == right.fallbackRequest;
+			}
+
+			void CoalesceVirtualGeometryPageRequestPackets(std::vector<VirtualGeometryPageRequestPacket>& packets)
+			{
+				std::vector<VirtualGeometryPageRequestPacket> merged;
+				merged.reserve(packets.size());
+				for (VirtualGeometryPageRequestPacket packet : packets)
+				{
+					auto existing = std::find_if(merged.begin(), merged.end(), [&](const VirtualGeometryPageRequestPacket& candidate) {
+						return PageRequestEquivalent(candidate, packet);
+					});
+					if (existing == merged.end())
+					{
+						merged.push_back(std::move(packet));
+						continue;
+					}
+
+					// Multiple visible clusters can ask for the same page in one
+					// frame. Keep the strongest priority and widest packet range so
+					// the protected ResourceManager handoff performs one IO request
+					// without losing diagnostics about the visible work that needed it.
+					existing->priority = std::max(existing->priority, packet.priority);
+					existing->packetOffset = std::min(existing->packetOffset, packet.packetOffset);
+					existing->packetCount = std::max(existing->packetCount, packet.packetCount);
+					existing->payloadByteSize = std::max(existing->payloadByteSize, packet.payloadByteSize);
+					if (existing->reason.find(packet.reason) == std::string::npos)
+					{
+						existing->reason += "; " + packet.reason;
+					}
+				}
+				packets = std::move(merged);
+				SortVirtualGeometryPageRequestPackets(packets);
+			}
 
 		std::int32_t ScoreVirtualGeometryPagePriority(
 			const VirtualGeometryPageNeedInput& input,
@@ -231,10 +280,13 @@ namespace TerraEngine::Resource
 		policy.visibleRetentionSeconds = kDefaultVisibleRetentionSeconds;
 		policy.neededRetentionSeconds = kDefaultNeededRetentionSeconds;
 		policy.maxLoadsPerUpdate = 0u;
-		policy.textureMipStreamingEnabled = false;
-		policy.textureMinStreamMip = 0u;
-		policy.textureMaxStreamMip = 0u;
-		policy.memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
+			policy.textureMipStreamingEnabled = false;
+			policy.textureMinStreamMip = 0u;
+			policy.textureMaxStreamMip = 0u;
+			policy.virtualGeometryPageMemoryBudgetBytes = 0u;
+			policy.virtualGeometryPageUploadBudgetBytes = 0u;
+			policy.virtualGeometryPageRetirementBudgetBytes = 0u;
+			policy.memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
 		policy.diagnosticsEnabled = false;
 		policy.protectedNeedTypes = {
 			StreamingNeedType::Visible,
@@ -491,6 +543,8 @@ namespace TerraEngine::Resource
 				input.assetPriority = catalog->assetPriority;
 				input.budgetPressureBytes = catalog->budgetPressureBytes;
 				input.fallbackRequired = need.fallbackRequired;
+				input.desiredPayloadSource = need.desiredPayloadSource;
+				input.fallbackPayloadSource = need.fallbackPayloadSource;
 				input.pages = catalog->pages;
 				inputs.push_back(std::move(input));
 			}
@@ -679,9 +733,9 @@ namespace TerraEngine::Resource
 			}
 		}
 
-		SortVirtualGeometryPageRequestPackets(plan.packets);
-		return plan;
-	}
+			CoalesceVirtualGeometryPageRequestPackets(plan.packets);
+			return plan;
+		}
 
 	std::vector<VirtualGeometryPageRequestPacket> BuildVirtualGeometryPageRequestPackets(const std::vector<VirtualGeometryPageNeedInput>& inputs, const StreamingPolicy& policy)
 	{
@@ -697,12 +751,17 @@ namespace TerraEngine::Resource
 		VirtualGeometryPageRequestQueuePlan queuePlan;
 		const std::uint32_t maxRetryCount = std::max(1u, retryPolicy.maxRetryCount);
 		const std::uint64_t retryDelayFrames = std::max<std::uint64_t>(1u, retryPolicy.retryDelayFrames);
-		auto pushReady = [&](VirtualGeometryQueuedPageRequest queued, bool retry) {
-			queued.nextRetryFrame = frameId + retryDelayFrames;
-			queuePlan.readyPackets.push_back(queued.packet);
-			queuePlan.queuedRequests.push_back(std::move(queued));
-			queuePlan.retriedPackets += retry ? 1u : 0u;
-		};
+			auto findQueued = [&](const VirtualGeometryPageRequestPacket& packet) {
+				return std::find_if(queuePlan.queuedRequests.begin(), queuePlan.queuedRequests.end(), [&](const VirtualGeometryQueuedPageRequest& candidate) {
+					return PageRequestEquivalent(candidate.packet, packet);
+				});
+			};
+			auto pushReady = [&](VirtualGeometryQueuedPageRequest queued, bool retry) {
+				queued.nextRetryFrame = frameId + retryDelayFrames;
+				queuePlan.readyPackets.push_back(queued.packet);
+				queuePlan.queuedRequests.push_back(std::move(queued));
+				queuePlan.retriedPackets += retry ? 1u : 0u;
+			};
 
 		for (const VirtualGeometryQueuedPageRequest& previous : previousQueue)
 		{
@@ -721,20 +780,26 @@ namespace TerraEngine::Resource
 			pushReady(std::move(retry), true);
 		}
 
-		for (const VirtualGeometryPageRequestPacket& packet : requestPlan.packets)
-		{
-			VirtualGeometryQueuedPageRequest queued;
-			queued.packet = packet;
-			queued.retryCount = 0u;
-			queued.nextRetryFrame = frameId + retryDelayFrames;
-			queuePlan.readyPackets.push_back(packet);
+			for (const VirtualGeometryPageRequestPacket& packet : requestPlan.packets)
+			{
+				if (auto existing = findQueued(packet); existing != queuePlan.queuedRequests.end())
+				{
+					existing->packet.priority = std::max(existing->packet.priority, packet.priority);
+					existing->packet.reason += "; coalesced visible request";
+					continue;
+				}
+				VirtualGeometryQueuedPageRequest queued;
+				queued.packet = packet;
+				queued.retryCount = 0u;
+				queued.nextRetryFrame = frameId + retryDelayFrames;
+				queuePlan.readyPackets.push_back(packet);
 			queuePlan.queuedRequests.push_back(std::move(queued));
 			queuePlan.fallbackPackets += packet.fallbackRequest ? 1u : 0u;
 		}
 
-		SortVirtualGeometryPageRequestPackets(queuePlan.readyPackets);
-		return queuePlan;
-	}
+			CoalesceVirtualGeometryPageRequestPackets(queuePlan.readyPackets);
+			return queuePlan;
+		}
 
 	std::vector<StreamingNeed> MergeStreamingNeeds(std::vector<StreamingNeed> needs, double nowSeconds)
 	{

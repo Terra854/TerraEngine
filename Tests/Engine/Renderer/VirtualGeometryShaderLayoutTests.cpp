@@ -67,6 +67,45 @@ namespace TerraEngine::Tests
 			return buffer.str();
 		}
 
+		std::string ReadVulkanContextSource()
+		{
+			// The Vulkan draw path owns the final push-constant submission.
+			// Hi-Z culling depends on the task shader receiving its reflected
+			// byte range even when another stage has a smaller legacy range.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RHI/Vulkan/VulkanContext.cpp";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
+		std::string ReadVulkanContextImplSource()
+		{
+			// The implementation header owns backend lifetime state. Reading it
+			// here lets the regression tests verify that resize intent is stored
+			// until BeginFrame can safely recreate Vulkan objects.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RHI/Vulkan/VulkanContextImpl.h";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
+		std::string ReadVulkanContextResourcesSource()
+		{
+			// Hi-Z descriptor publication is also a source-level contract for
+			// editor multi-view rendering: one missing view must not block the
+			// other view from sampling its current pyramid.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
 		bool ShaderContains(const std::string& shader, const std::string& token)
 		{
 			return shader.find(token) != std::string::npos;
@@ -135,6 +174,27 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(shader, "[numthreads(64, 1, 1)]"), "Compaction shader should use an explicit, bounded thread-group size.");
 		});
 
+		registry.Add("VirtualGeometry.ShaderLayout.US4.PageLocalPacketsPreserveMaterialAndPayloadIdentity", [](TestContext& context) {
+			const std::string shader = ReadVirtualGeometryPacketCompactionShader();
+			const std::string fragmentShader = ReadDefaultFragmentShader();
+
+			context.Expect(offsetof(GpuVirtualGeometryPacketRecord, materialId) < offsetof(GpuVirtualGeometryPacketRecord, pageId), "GPU packet records should carry material identity before page-local payload metadata.");
+			context.Expect(offsetof(GpuVirtualGeometryPacketRecord, pageId) < offsetof(GpuVirtualGeometryPacketRecord, payloadSource), "Page id should stay adjacent to payload source metadata.");
+			context.Expect(offsetof(GpuVirtualGeometryPacketRecord, payloadSource) < offsetof(GpuVirtualGeometryPacketRecord, pagePayloadByteOffset), "Payload source should be hashed and uploaded before the page-local byte range.");
+			context.Expect(ShaderContains(shader, "uint4 materialIdWords;"), "Compaction shader packets should keep material identity for page-local batch boundaries.");
+			context.Expect(ShaderContains(shader, "uint pageId;"), "Compaction shader packets should carry the requested page id.");
+			context.Expect(ShaderContains(shader, "uint fallbackPageId;"), "Compaction shader packets should carry fallback page identity.");
+			context.Expect(ShaderContains(shader, "uint payloadSource;"), "Compaction shader packets should label the resident payload source.");
+			context.Expect(ShaderContains(shader, "uint emittedSource;"), "Compaction shader packets should label whether high detail or fallback coverage is emitted.");
+			context.Expect(ShaderContains(shader, "uint2 pagePayloadByteOffset;"), "Compaction shader packets should keep page-local payload byte offsets.");
+			context.Expect(ShaderContains(shader, "compactedPackets[compactedIndex] = packet;"), "Compaction shader should preserve material/page/payload identity when copying surviving packets.");
+			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPagePayloadBufferIndex;"), "Fragment push constants should keep the page payload buffer field so all default stages share the same range.");
+			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPayloadSource;"), "Fragment push constants should keep payload source identity even when fragment shading only reads common material/debug fields.");
+			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryEmittedSource;"), "Fragment push constants should keep emitted source identity so the default push range stays byte-compatible across stages.");
+			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPagePayloadByteOffset;"), "Fragment push constants should keep page-local payload byte offsets to preserve the default Vulkan push range.");
+			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPagePayloadByteSize;"), "Fragment push constants should keep page-local payload byte sizes to preserve the default Vulkan push range.");
+		});
+
 		registry.Add("VirtualGeometry.ShaderLayout.US5.NoSelectableHiZQualityTierWasIntroduced", [](TestContext& context) {
 			const std::string taskShader = ReadDefaultTaskShader();
 			const std::string compactionShader = ReadVirtualGeometryPacketCompactionShader();
@@ -149,6 +209,49 @@ namespace TerraEngine::Tests
 			context.Expect(!ShaderContains(taskShader, "kHiZQuality"), "Task shader should not branch on quality-tier constants.");
 			context.Expect(!ShaderContains(compactionShader, "HiZQuality"), "Compaction shader should not introduce independent Hi-Z quality tiers either.");
 			context.Expect(!ShaderContains(compactionShader, "qualityTier"), "Compaction shader should keep Hi-Z baseline metadata as a label, not a selectable tier.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.DefaultDrawsPushReflectedRangesForHiZ", [](TestContext& context) {
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			context.Expect(ShaderContains(vulkanSource, "bool PushDefaultMeshConstants"), "Vulkan draw submission should centralize default mesh push-constant emission.");
+			context.Expect(ShaderContains(vulkanSource, "for (const VkPushConstantRange& range : pipeline.pushConstants)"), "Default mesh submission should iterate reflected push-constant ranges.");
+			context.Expect(ShaderContains(vulkanSource, "range.stageFlags"), "Default mesh submission should preserve each reflected stage mask.");
+			context.Expect(ShaderContains(vulkanSource, "pushBytes + range.offset"), "Default mesh submission should push the byte slice requested by each reflected range.");
+			context.Expect(ShaderContains(vulkanSource, "PushDefaultMeshConstants(secondary, *draw.pipeline, draw.push);"), "Main visible draws should push reflected ranges so task-stage Hi-Z constants are never skipped.");
+			context.Expect(ShaderContains(vulkanSource, "PushDefaultMeshConstants(cmd, *draw.pipeline, shadowPush);"), "Shadow draws should share the reflected push path without inventing a second contract.");
+			context.Expect(!ShaderContains(vulkanSource, "vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants)"), "Visible draws must not return to a single all-stage full-struct push; stale fragment ranges can make that skip task-stage Hi-Z constants.");
+			context.Expect(!ShaderContains(vulkanSource, "vkCmdPushConstants(cmd, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants)"), "Shadow draws must not return to the stale defaultPushConstantStages full-struct path.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.GlobalHiZDescriptorsPublishValidViewWhenPeerMissing", [](TestContext& context) {
+			const std::string vulkanResourcesSource = ReadVulkanContextResourcesSource();
+
+			context.Expect(ShaderContains(vulkanResourcesSource, "const VulkanHiZ* fallbackHiZ = nullptr;"), "Global Hi-Z descriptor publication should find a valid per-view fallback.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "const VulkanHiZ& readableHiZ = isReadableHiZ(hiZ) ? hiZ : *fallbackHiZ;"), "A missing Scene/Game pyramid should not block the other view's descriptor update.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "samplerInfo.sampler = fallbackHiZ->sampler;"), "The global Hi-Z sampler should come from the same valid fallback image owner.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 11: Hi-Z sampler"), "The global Hi-Z sampler binding should be update-after-bind so descriptor republish cannot invalidate already-recorded Scene/Game command buffers.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 8: Point-shadow sampler"), "The point-shadow sampler binding should be update-after-bind because shadow resource rebuilds can republish it between editor views.");
+			context.Expect(!ShaderContains(vulkanResourcesSource, "if (hiZ.fullView == VK_NULL_HANDLE || hiZ.sampler == VK_NULL_HANDLE) return;"), "Global Hi-Z descriptor publication must not return early just because one editor view is missing.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.HiZPyramidTracksEditorRenderTargetSize", [](TestContext& context) {
+			const std::string vulkanSource = ReadVulkanContextSource();
+			const std::string vulkanImplSource = ReadVulkanContextImplSource();
+			const std::string vulkanResourcesSource = ReadVulkanContextResourcesSource();
+
+			context.Expect(!ShaderContains(vulkanSource, "EnsureCurrentFrameHiZMatchesRenderTarget"), "RenderFrame must not recreate Hi-Z resources after a view command buffer may have bound the global descriptor set.");
+			context.Expect(ShaderContains(vulkanSource, "impl->desiredHiZExtentByView[hiZViewIndex] = glm::uvec2(hiZTargetWidth, hiZTargetHeight);"), "RenderFrame should record the actual Scene/Game render target size without destroying Vulkan objects mid-frame.");
+			context.Expect(ShaderContains(vulkanImplSource, "std::array<glm::uvec2, kHiZViewCount> desiredHiZExtentByView{}"), "Per-view desired Hi-Z sizes should live with the backend state so BeginFrame can consume them at a fence-safe boundary.");
+			context.Expect(ShaderContains(vulkanSource, "doing this inside"), "The fence-safe resize path should document why RenderFrame is not allowed to rebuild the sampler-backed Hi-Z resources.");
+			context.Expect(ShaderContains(vulkanSource, "impl->UpdateGlobalHiZ(impl->currentFrame);"), "After a fence-safe Hi-Z resize, the global descriptors should be republished before new command buffers bind them.");
+			context.Expect(ShaderContains(vulkanSource, "currentFrameHiZ.width == hiZTargetWidth"), "Hi-Z readiness should compare against the current render target width, not just the swapchain width.");
+			context.Expect(ShaderContains(vulkanSource, "currentFrameHiZ.height == hiZTargetHeight"), "Hi-Z readiness should compare against the current render target height, not just the swapchain height.");
+			context.Expect(ShaderContains(vulkanSource, "hiZ.Create(impl->device, impl->allocator, desiredExtent.x, desiredExtent.y"), "Recreated Hi-Z pyramids should use the queued view render area extent.");
+			context.Expect(ShaderContains(vulkanSource, "impl->InitializeHiZPyramidToFarDepth(hiZ);"), "Freshly resized Hi-Z pyramids should start with far depth so the first frame fails open instead of producing false occlusion.");
+			context.Expect(ShaderContains(vulkanSource, "impl->readableHiZHistoryByViewFrame[hiZViewIndex][impl->currentFrame] = impl->CurrentHiZ(hiZViewIndex).history;"), "Readable Hi-Z history should be refreshed after resize before the validation gate is evaluated.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "const auto hasReadableCompletedHiZ"), "Completed stats should verify the readable Hi-Z resource, not only a raw image handle.");
+			context.Expect(ShaderContains(vulkanResourcesSource, "hiZ.width == stats.renderSize.x && hiZ.height == stats.renderSize.y"), "Completed stats should mark Hi-Z active only when the backend pyramid matches the completed view size.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.FrameCullingDataCarriesHiZAvailabilityGate", [](TestContext& context) {

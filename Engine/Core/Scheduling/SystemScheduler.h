@@ -67,7 +67,12 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceVirtualGeometryGeneratedSubmissions[] = "VirtualGeometryGeneratedSubmissions";
 	inline constexpr const char kResourceVirtualGeometryCounterReadbacks[] = "VirtualGeometryCounterReadbacks";
 	inline constexpr const char kResourceVirtualGeometryCompactionResults[] = "VirtualGeometryCompactionResults";
+	inline constexpr const char kResourceVirtualGeometryPagePayloads[] = "VirtualGeometryPagePayloads";
+	inline constexpr const char kResourceVirtualGeometryPageRequests[] = "VirtualGeometryPageRequests";
 	inline constexpr const char kResourceVirtualGeometryPageNeedPackets[] = "VirtualGeometryPageNeedPackets";
+	inline constexpr const char kResourceVirtualGeometryPagePublications[] = "VirtualGeometryPagePublications";
+	inline constexpr const char kResourceVirtualGeometryPageRetirements[] = "VirtualGeometryPageRetirements";
+	inline constexpr const char kResourceVirtualGeometryPageDiagnostics[] = "VirtualGeometryPageDiagnostics";
 	inline constexpr const char kResourceVirtualGeometryVisibilitySnapshots[] = "VirtualGeometryVisibilitySnapshots";
 	inline constexpr const char kResourceVirtualGeometryCounterSnapshots[] = "VirtualGeometryCounterSnapshots";
 	inline constexpr const char kResourceVirtualGeometryCullingDiagnostics[] = "VirtualGeometryCullingDiagnostics";

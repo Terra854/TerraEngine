@@ -297,6 +297,16 @@ namespace
 			HashVulkanHiZDepthSignatureValue(signature, command.virtualMeshletCount);
 			HashVulkanHiZDepthSignatureValue(signature, command.selectedVirtualLod);
 			HashVulkanHiZDepthSignatureValue(signature, command.virtualGeometryFlags);
+			// Page streaming changes which resident payload backs the same
+			// meshlet span. Include the page/source byte identity in the
+			// diagnostic depth signature so tooling can see that transition,
+			// while validation still keeps ready current pyramids active.
+			HashVulkanHiZDepthSignatureValue(signature, command.virtualGeometryPageId);
+			HashVulkanHiZDepthSignatureValue(signature, command.virtualGeometryFallbackPageId);
+			HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(command.virtualGeometryPayloadSource));
+			HashVulkanHiZDepthSignatureValue(signature, static_cast<std::uint64_t>(command.virtualGeometryEmittedSource));
+			HashVulkanHiZDepthSignatureValue(signature, command.virtualGeometryPagePayloadByteOffset);
+			HashVulkanHiZDepthSignatureValue(signature, command.virtualGeometryPagePayloadByteSize);
 			// The selected packet offsets are per-view allocator positions, not
 			// visible geometry. Hash counts and meshlet ranges instead so the
 			// diagnostic signature changes when coverage changes, not when a
@@ -333,6 +343,43 @@ namespace
 		}
 
 		return signature;
+	}
+
+	bool PushDefaultMeshConstants(VkCommandBuffer commandBuffer, const VulkanPipeline& pipeline, const PushConstants& push)
+	{
+		if (commandBuffer == VK_NULL_HANDLE || pipeline.layout == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+
+		const auto* pushBytes = reinterpret_cast<const std::uint8_t*>(&push);
+		bool pushedAnyRange = false;
+		for (const VkPushConstantRange& range : pipeline.pushConstants)
+		{
+			if (range.stageFlags == 0u || range.size == 0u)
+			{
+				continue;
+			}
+			if (range.offset >= sizeof(PushConstants) || range.size > sizeof(PushConstants) - range.offset)
+			{
+				continue;
+			}
+
+			// Reflected shader collections can legally expose different
+			// push-constant byte ranges per stage while sharing one pipeline
+			// layout. Push each declared range separately so the task shader
+			// keeps receiving Hi-Z/culling constants even if another stage has a
+			// smaller legacy range.
+			vkCmdPushConstants(
+				commandBuffer,
+				pipeline.layout,
+				range.stageFlags,
+				range.offset,
+				range.size,
+				pushBytes + range.offset);
+			pushedAnyRange = true;
+		}
+		return pushedAnyRange;
 	}
 
 	// struct ScoredCandidate groups related state and operations so callers have one documented contract.
@@ -1366,6 +1413,48 @@ void VulkanContext::BeginFrame() {
 		// The waited frame slot is now complete, so snapshot its GPU counters for UI stats.
 		impl->PublishCompletedFrameStats(impl->currentFrame);
 	}
+	bool resizedHiZ = false;
+	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < VulkanContext::Impl::kHiZViewCount; ++hiZViewIndex)
+	{
+		const glm::uvec2 desiredExtent = impl->desiredHiZExtentByView[hiZViewIndex];
+		if (desiredExtent.x == 0u || desiredExtent.y == 0u)
+		{
+			continue;
+		}
+
+		std::array<VulkanHiZ, 2>& frameHiZPair = impl->hiZByViewFrame[hiZViewIndex][impl->currentFrame];
+		const auto hiZMatchesDesiredExtent = [&](const VulkanHiZ& hiZ) {
+			return hiZ.image != VK_NULL_HANDLE
+				&& hiZ.fullView != VK_NULL_HANDLE
+				&& hiZ.sampler != VK_NULL_HANDLE
+				&& hiZ.mipLevels > 0u
+				&& hiZ.width == desiredExtent.x
+				&& hiZ.height == desiredExtent.y;
+		};
+		if (hiZMatchesDesiredExtent(frameHiZPair[0]) && hiZMatchesDesiredExtent(frameHiZPair[1]))
+		{
+			continue;
+		}
+
+		// Scene and Game views resize independently from the swapchain. Rebuild
+		// this frame slot only after its fence has completed; doing this inside
+		// RenderFrame can destroy a sampler that an earlier view command buffer
+		// already bound for the same editor frame.
+		const VkFormat depthFmt = impl->FindDepthFormat();
+		for (VulkanHiZ& hiZ : frameHiZPair)
+		{
+			hiZ.Destroy(impl->device, impl->allocator);
+			hiZ.Create(impl->device, impl->allocator, desiredExtent.x, desiredExtent.y, depthFmt);
+			impl->InitializeHiZPyramidToFarDepth(hiZ);
+		}
+		impl->hiZReadIndexByViewFrame[hiZViewIndex][impl->currentFrame] = 0u;
+		impl->hiZWritePendingSwapByViewFrame[hiZViewIndex][impl->currentFrame] = false;
+		resizedHiZ = true;
+	}
+	if (resizedHiZ)
+	{
+		impl->UpdateGlobalHiZ(impl->currentFrame);
+	}
 	// Freeze the completed Hi-Z metadata for this CPU frame. RenderFrame may
 	// record multiple outputs before the GPU executes any of them; every output
 	// must validate against the pyramid that actually exists at BeginFrame,
@@ -1413,14 +1502,21 @@ void VulkanContext::BeginFrame() {
 		impl->pendingRenderSnapshotDiagnostics.valid = true;
 		impl->pendingRenderSnapshotDiagnostics.maxSnapshotsPerFrame = VulkanContext::Impl::MAX_RENDER_SNAPSHOTS_PER_FRAME;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (impl->currentFrame < impl->retiredBuffersByFrame.size()) {
-			auto& retiredBuffers = impl->retiredBuffersByFrame[impl->currentFrame];
-			for (VulkanBuffer& retiredBuffer : retiredBuffers) {
-				impl->DestroyBufferImmediate(retiredBuffer);
+			if (impl->currentFrame < impl->retiredBuffersByFrame.size()) {
+				auto& retiredBuffers = impl->retiredBuffersByFrame[impl->currentFrame];
+				for (VulkanBuffer& retiredBuffer : retiredBuffers) {
+					impl->DestroyBufferImmediate(retiredBuffer);
+				}
+				retiredBuffers.clear();
 			}
-			retiredBuffers.clear();
+			if (impl->currentFrame < impl->pendingVirtualGeometryPageRetirementsByFrame.size()) {
+				// Page-retirement plans are keyed by frame slot, matching buffer
+				// retirement. Once this slot's fence is complete, command buffers
+				// that referenced those page payloads are idle and the value plans
+				// can be drained before new work records into the same slot.
+				impl->pendingVirtualGeometryPageRetirementsByFrame[impl->currentFrame].clear();
+			}
 		}
-	}
 
 	// Reset command pool so the main command buffer and any newly allocated
 	// per-camera buffers start from a clean state each frame.
@@ -2725,20 +2821,50 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			? outputRequest.targetSize.y
 			: std::max<std::uint32_t>(impl->swapchainExtent.height, 1u);
 	}
+	const auto ResolveRequestedEditorExtent = [&]() {
+		VkExtent2D extent = impl->swapchainExtent;
+		extent.width = outputRequest.targetSize.x > 0u
+			? outputRequest.targetSize.x
+			: std::max<std::uint32_t>(impl->swapchainExtent.width, 1u);
+		extent.height = outputRequest.targetSize.y > 0u
+			? outputRequest.targetSize.y
+			: std::max<std::uint32_t>(impl->swapchainExtent.height, 1u);
+		return extent;
+	};
+	const VkExtent2D requestedEditorExtent = ResolveRequestedEditorExtent();
 
 	// Handle Editor Mode resizing (lazy).
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (impl->editorMode) {
-		if (impl->sceneView.image == VK_NULL_HANDLE) {
-			impl->InitEditorMode();
-		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (impl->sceneView.framebuffer == VK_NULL_HANDLE) {
-			impl->CreateOffscreenResources(impl->sceneView);
-		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (impl->gameView.framebuffer == VK_NULL_HANDLE) {
-			impl->CreateOffscreenResources(impl->gameView);
+		const auto ensureOffscreenResources = [&](VulkanContext::Impl::OffscreenResources& resources, VkExtent2D targetExtent) {
+			const bool hasResources = resources.image != VK_NULL_HANDLE
+				|| resources.depthImage != VK_NULL_HANDLE
+				|| resources.framebuffer != VK_NULL_HANDLE;
+			const bool extentMismatch = resources.extent.width != targetExtent.width
+				|| resources.extent.height != targetExtent.height;
+			if (resources.framebuffer == VK_NULL_HANDLE || extentMismatch)
+			{
+				// Editor viewport images are sampled by ImGui on the same GPU
+				// timeline. On panel-size changes, wait before destroying the old
+				// target so a resize cannot leave ImGui sampling stale regions from
+				// an image that was still referenced by the previous frame.
+				if (hasResources && extentMismatch)
+				{
+					vkDeviceWaitIdle(impl->device);
+				}
+				impl->CreateOffscreenResources(resources, targetExtent);
+			}
+		};
+		if (!renderingDedicatedCaptureTarget)
+		{
+			if (view == ViewType::Scene)
+			{
+				ensureOffscreenResources(impl->sceneView, requestedEditorExtent);
+			}
+			else
+			{
+				ensureOffscreenResources(impl->gameView, requestedEditorExtent);
+			}
 		}
 		if (renderingDedicatedCaptureTarget
 			&& (impl->captureView.framebuffer == VK_NULL_HANDLE
@@ -3430,9 +3556,16 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		: VK_NULL_HANDLE;
 	const std::uint32_t hiZTargetWidth = std::max<std::uint32_t>(renderPassInfo.renderArea.extent.width, 1u);
 	const std::uint32_t hiZTargetHeight = std::max<std::uint32_t>(renderPassInfo.renderArea.extent.height, 1u);
+	const uint32_t hiZViewIndex = impl->HiZViewIndexForView(view);
+	if (hiZViewIndex < VulkanContext::Impl::kHiZViewCount)
+	{
+		// Record the true per-view render target size. BeginFrame consumes this
+		// at a fence-safe boundary before any new command buffer can bind the
+		// global Hi-Z descriptors for the current frame slot.
+		impl->desiredHiZExtentByView[hiZViewIndex] = glm::uvec2(hiZTargetWidth, hiZTargetHeight);
+	}
 	const std::uint64_t hiZProjectionSignature = BuildVulkanHiZProjectionSignature(currentViewProjection);
 	const std::uint64_t hiZDepthSceneSignature = BuildVulkanHiZDepthSceneSignature(frameData);
-	const uint32_t hiZViewIndex = impl->HiZViewIndexForView(view);
 	VulkanHiZ& currentFrameHiZ = impl->CurrentHiZ(hiZViewIndex);
 	VulkanHiZ& writableFrameHiZ = impl->WritableHiZForFrame(hiZViewIndex, impl->currentFrame);
 	const VulkanHiZHistoryMetadata& readableHiZHistory = impl->readableHiZHistoryByViewFrame[hiZViewIndex][impl->currentFrame];
@@ -3758,6 +3891,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	RenderStatsSnapshot pendingStats{};
 	pendingStats.viewType = (view == ViewType::Scene) ? RenderViewType::Scene : RenderViewType::Game;
+	pendingStats.renderSize = glm::uvec2(hiZTargetWidth, hiZTargetHeight);
 	pendingStats.frameTimeMs = SafeFrameTimeMs(frameData.deltaTimeSeconds);
 	pendingStats.fps = pendingStats.frameTimeMs > 0.0f ? (1000.0f / pendingStats.frameTimeMs) : 0.0f;
 	pendingStats.valid = true;
@@ -3916,6 +4050,11 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.selectedVirtualPageNeedCount = command.selectedVirtualPageNeedCount;
 		push.virtualGeometryPacketBufferIndex = impl->activeVirtualGeometryPacketBufferIndex;
 		push.virtualGeometryBatchBufferIndex = impl->activeVirtualGeometryBatchBufferIndex;
+		push.virtualGeometryPagePayloadBufferIndex = impl->activeVirtualGeometryPagePayloadBufferIndex;
+		push.virtualGeometryPayloadSource = static_cast<std::uint32_t>(command.virtualGeometryPayloadSource);
+		push.virtualGeometryEmittedSource = static_cast<std::uint32_t>(command.virtualGeometryEmittedSource);
+		push.virtualGeometryPagePayloadByteOffset = static_cast<std::uint32_t>(command.virtualGeometryPagePayloadByteOffset & 0xffffffffull);
+		push.virtualGeometryPagePayloadByteSize = static_cast<std::uint32_t>(command.virtualGeometryPagePayloadByteSize & 0xffffffffull);
 		push.editorTint = command.editorTint;
 
 		PreparedDraw draw{};
@@ -4449,10 +4588,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			// Keep Hi-Z diagnostic bits intact. Shadow depth uses its own view
 			// projection, but clearing these flags here previously acted like a
 			// hidden metadata disable path after editor view changes.
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (draw.pipeline->supportsDefaultPushConstants) {
-				vkCmdPushConstants(cmd, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &shadowPush);
-			}
+			PushDefaultMeshConstants(cmd, *draw.pipeline, shadowPush);
 
 			VkDeviceSize offset = static_cast<VkDeviceSize>(draw.push.indirectDrawOffset + draw.indirectBufferIndex) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
 			vkCmdDrawMeshTasksIndirectEXT(cmd, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));
@@ -4629,10 +4765,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 				vkCmdBindPipeline(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->pipeline);
 				vkCmdBindDescriptorSets(secondary, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline->layout, 0, static_cast<uint32_t>(draw.descriptorSets.size()), draw.descriptorSets.data(), 0, nullptr);
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (draw.pipeline->supportsDefaultPushConstants) {
-					vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants), &draw.push);
-				}
+				PushDefaultMeshConstants(secondary, *draw.pipeline, draw.push);
 
 				VkDeviceSize offset = static_cast<VkDeviceSize>(draw.push.indirectDrawOffset + draw.indirectBufferIndex) * sizeof(VkDrawMeshTasksIndirectCommandEXT);
 				vkCmdDrawMeshTasksIndirectEXT(secondary, impl->indirectDrawBuffers[impl->currentFrame].buffer, offset, 1, sizeof(VkDrawMeshTasksIndirectCommandEXT));

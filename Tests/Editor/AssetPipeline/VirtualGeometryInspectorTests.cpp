@@ -6,6 +6,7 @@
 #include "ModelPackageImporter.h"
 #include "Utilities/UUID.h"
 
+#include <algorithm>
 #include <cstring>
 #include <chrono>
 #include <filesystem>
@@ -13,6 +14,7 @@
 #include <iterator>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -80,6 +82,44 @@ namespace TerraEngine::EditorTests
 					output.write(reinterpret_cast<const char*>(&coneSafety), sizeof(coneSafety));
 				}
 			}
+		}
+
+		void WriteSmallMeshSkippedHeader(const std::filesystem::path& path)
+		{
+			MeshHeader header{};
+			std::memcpy(header.magic, "TEMF", 4);
+			header.version = kMeshCurrentVersion;
+			header.headerSize = sizeof(MeshHeader);
+			header.meshletCount = 1u;
+			header.meshletFlags = kMeshletHeaderFlagHasVirtualGeometry;
+			header.virtualGeometryHeaderOffset = sizeof(MeshHeader);
+			header.virtualGeometryHeaderSize = sizeof(VirtualGeometryHeader);
+			header.virtualGeometryPayloadGeneration = kVirtualGeometryPayloadGeneration;
+
+			const std::string message = "Mesh is too small for useful page streaming.";
+			VirtualGeometryHeader virtualHeader{};
+			virtualHeader.payloadGeneration = kVirtualGeometryPayloadGeneration;
+			virtualHeader.headerSize = sizeof(VirtualGeometryHeader);
+			virtualHeader.detailLevelCount = 1u;
+			virtualHeader.cullableGroupCount = 1u;
+			virtualHeader.clusterCount = 1u;
+			virtualHeader.sourceTriangleCount = 1u;
+			virtualHeader.skippedDetailCount = 1u;
+			virtualHeader.skippedDetailTableOffset = sizeof(MeshHeader) + sizeof(VirtualGeometryHeader);
+			virtualHeader.diagnosticStringOffset = virtualHeader.skippedDetailTableOffset + sizeof(VirtualGeometrySkippedDetailRecord);
+			virtualHeader.diagnosticStringSize = static_cast<std::uint32_t>(message.size());
+
+			VirtualGeometrySkippedDetailRecord skipped{};
+			skipped.targetIndex = 1u;
+			skipped.status = static_cast<std::uint32_t>(VirtualGeometryDetailTargetRecordStatus::Skipped);
+			skipped.reason = static_cast<std::uint32_t>(VirtualGeometrySkippedDetailRecordReason::MeshTooSmall);
+			skipped.messageStringSize = static_cast<std::uint32_t>(message.size());
+
+			std::ofstream output(path, std::ios::binary);
+			output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+			output.write(reinterpret_cast<const char*>(&virtualHeader), sizeof(virtualHeader));
+			output.write(reinterpret_cast<const char*>(&skipped), sizeof(skipped));
+			output.write(message.data(), static_cast<std::streamsize>(message.size()));
 		}
 
 		std::string ReadBinaryFile(const std::filesystem::path& path)
@@ -222,6 +262,35 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(3u, virtualGeometry.detailLevelCount, "Inspector metadata should expose the cooked detail count.");
 			context.ExpectEqual(2048u, virtualGeometry.sourceTriangleCount, "Inspector metadata should expose source triangle count.");
 			context.Expect(virtualGeometry.warnings.empty(), "Current cooked metadata should not surface warning rows.");
+			context.Expect(!virtualGeometry.pageStreamingReady, "Cooked metadata without page tables should not be reported as page-streaming ready.");
+			context.Expect(!virtualGeometry.pageIntegrityErrors.empty(), "Inspector metadata should expose page integrity issues without turning them into rebuild warnings.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.Inspector.US7.ReportsSmallMeshSkippedStreamingReason", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			AssetDatabase::Instance().Initialize(root);
+
+			const std::filesystem::path compiledPath = AssetDatabase::Instance().GetBuildRoot() / "tiny.temf";
+			WriteSmallMeshSkippedHeader(compiledPath);
+
+			AssetMetadata metadata{};
+			metadata.importerName = "MeshImporter";
+			metadata.compiledPath = "tiny.temf";
+			VirtualGeometryAssetMetadata virtualGeometry{};
+			const bool readable = AssetDatabase::Instance().TryGetVirtualGeometryMetadata(metadata, virtualGeometry);
+			VirtualGeometryPageSummaryMetadata pageSummary{};
+			const bool pageSummaryReadable = AssetDatabase::Instance().TryGetVirtualGeometryPageSummary(metadata, pageSummary);
+
+			context.Expect(readable, "Tiny cooked mesh metadata should remain readable.");
+			context.Expect(virtualGeometry.smallMeshStreamingSkipped, "Tiny meshes should explicitly report that page streaming was skipped.");
+			context.Expect(!virtualGeometry.pageStreamingReady, "Tiny skipped meshes should not claim page streaming readiness.");
+			context.Expect(virtualGeometry.skippedStreamingReason.find("too small") != std::string::npos, "Tiny skipped meshes should carry the cook explanation.");
+			context.Expect(pageSummaryReadable, "Mesh page summaries should be readable for tiny meshes.");
+			context.Expect(pageSummary.smallMeshStreamingSkipped, "Page summaries should carry the tiny-mesh skipped flag.");
+			context.Expect(pageSummary.integrityErrors.empty(), "Intentional tiny-mesh skips should not look like corrupt page metadata.");
 
 			AssetDatabase::Instance().Shutdown();
 			std::filesystem::remove_all(root);
@@ -414,6 +483,115 @@ namespace TerraEngine::EditorTests
 			VirtualGeometryAdaptiveSettingsMetadata resetSettings;
 			context.Expect(AssetDatabase::Instance().TryGetGeneratedMeshVirtualGeometryAdaptiveSettings(packagePath, mesh.guid, resetSettings), "Generated mesh default settings should load after reset.");
 			context.Expect(!resetSettings.overridePresent, "Generated mesh reset should remove the sidecar override.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.AssetDatabase.GeneratedPackageChildNamesResolveFromSidecar", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			const std::filesystem::path assetRoot = root / "Assets";
+			const std::filesystem::path buildRoot = root / "Build" / "Assets";
+			const std::filesystem::path packageSource = "camera.glb";
+			const std::filesystem::path packageCompiled = "camera.temf";
+			const TerraEngine::UUID packageGuid = TerraEngine::GenerateUUID();
+
+			std::ofstream(assetRoot / packageSource, std::ios::binary | std::ios::trunc).put('\0');
+			WriteMeshHeader(buildRoot / packageCompiled, false);
+			WriteAssetMetadata(
+				assetRoot,
+				packageSource,
+				packageCompiled,
+				packageGuid,
+				TerraEngine::AssetPipeline::GetModelPackageImporterName(assetRoot / packageSource));
+
+			TerraEngine::AssetPipeline::ModelPackageImportResult result{};
+			result.status = TerraEngine::AssetPipeline::ModelImportStatus::Succeeded;
+			result.packageGuid = packageGuid;
+			result.package.sourcePath = packageSource;
+			result.package.importRoot = "camera_Generated";
+
+			TerraEngine::AssetPipeline::GeneratedModelMeshAsset namedMesh{};
+			namedMesh.guid = TerraEngine::GenerateUUID();
+			namedMesh.displayName = "camera_uv";
+			namedMesh.sourceNodePath = "Scene/Camera/camera_uv";
+			namedMesh.sourcePath = packageSource;
+			namedMesh.compiledPath = packageCompiled;
+			result.generatedMeshes.push_back(namedMesh);
+
+			TerraEngine::AssetPipeline::GeneratedModelMeshAsset fallbackMesh{};
+			fallbackMesh.guid = TerraEngine::GenerateUUID();
+			fallbackMesh.sourceNodePath = "Scene/Tripod/tripod_head";
+			fallbackMesh.sourcePath = packageSource;
+			fallbackMesh.compiledPath = packageCompiled;
+			result.generatedMeshes.push_back(fallbackMesh);
+
+			TerraEngine::AssetPipeline::GeneratedModelMaterialAsset material{};
+			material.guid = TerraEngine::GenerateUUID();
+			material.displayName = "brass_trim";
+			material.sourcePath = "camera_Generated/brass_trim.tmat";
+			material.compiledPath = material.sourcePath;
+			result.generatedMaterials.push_back(material);
+
+			TerraEngine::AssetPipeline::GeneratedModelTextureAsset texture{};
+			texture.guid = TerraEngine::GenerateUUID();
+			texture.displayName = "lens_baseColor";
+			texture.sourcePath = "camera_Generated/lens_baseColor.png";
+			texture.compiledPath = "camera_Generated/lens_baseColor.tetf";
+			result.generatedTextures.push_back(texture);
+
+			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(assetRoot / packageSource, result), "Fixture package sidecar should save child display names.");
+
+			AssetDatabase::Instance().Initialize(root);
+
+			std::string resolvedName;
+			context.Expect(AssetDatabase::Instance().TryGetGeneratedModelPackageChildDisplayName(namedMesh.guid, GeneratedModelPackageChildKind::Mesh, resolvedName), "Generated mesh child should resolve from the package sidecar.");
+			context.ExpectEqual(std::string("camera_uv"), resolvedName, "Generated mesh component labels should use the imported child mesh name, not the package parent name.");
+
+			resolvedName.clear();
+			context.Expect(AssetDatabase::Instance().TryGetGeneratedModelPackageChildDisplayName(fallbackMesh.guid, GeneratedModelPackageChildKind::Mesh, resolvedName), "Generated mesh child should still resolve when the importer only supplied a node path.");
+			context.ExpectEqual(std::string("tripod_head"), resolvedName, "Generated mesh fallback labels should use the source node leaf.");
+
+			resolvedName.clear();
+			context.Expect(AssetDatabase::Instance().TryGetGeneratedModelPackageChildDisplayName(material.guid, GeneratedModelPackageChildKind::Material, resolvedName), "Generated material child should resolve from the package sidecar.");
+			context.ExpectEqual(std::string("brass_trim"), resolvedName, "Generated material component labels should use the child material name.");
+
+			resolvedName.clear();
+			context.Expect(AssetDatabase::Instance().TryGetGeneratedModelPackageChildDisplayName(texture.guid, GeneratedModelPackageChildKind::Texture, resolvedName), "Generated texture child should resolve from the package sidecar.");
+			context.ExpectEqual(std::string("lens_baseColor"), resolvedName, "Generated texture component labels should use the child texture name.");
+
+			resolvedName.clear();
+			context.Expect(!AssetDatabase::Instance().TryGetGeneratedModelPackageChildDisplayName(namedMesh.guid, GeneratedModelPackageChildKind::Texture, resolvedName), "A mesh GUID should not resolve through the texture child lookup.");
+
+			std::vector<TerraEngine::UUID> childIds;
+			context.Expect(AssetDatabase::Instance().TryGetGeneratedModelPackageChildIds(packageGuid, GeneratedModelPackageChildKind::Mesh, childIds), "Generated mesh child IDs should resolve from the package parent GUID.");
+			context.ExpectEqual(static_cast<std::size_t>(2u), childIds.size(), "Package parent rows should be able to enumerate all generated child meshes.");
+			context.Expect(std::find(childIds.begin(), childIds.end(), namedMesh.guid) != childIds.end(), "Package child ID lookup should include the named mesh child.");
+			context.Expect(std::find(childIds.begin(), childIds.end(), fallbackMesh.guid) != childIds.end(), "Package child ID lookup should include the fallback-named mesh child.");
+
+			childIds.clear();
+			context.Expect(AssetDatabase::Instance().TryGetGeneratedModelPackageChildIds(packageGuid, GeneratedModelPackageChildKind::Texture, childIds), "Generated texture child IDs should resolve from the package parent GUID.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), childIds.size(), "Package texture child lookup should return the generated texture record.");
+			context.ExpectEqual(TerraEngine::ToHexString(texture.guid), TerraEngine::ToHexString(childIds.front()), "Package texture child lookup should return the sidecar texture GUID.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.Inspector.US7.HidesPageStreamingReadinessForNonMeshAssets", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			AssetDatabase::Instance().Initialize(root);
+
+			AssetMetadata textureMetadata{};
+			textureMetadata.importerName = "TextureImporter";
+			textureMetadata.compiledPath = "texture.tetf";
+			VirtualGeometryPageSummaryMetadata pageSummary{};
+			VirtualGeometryAdaptiveSettingsMetadata settings{};
+
+			context.Expect(!AssetDatabase::Instance().IsMeshAsset(textureMetadata), "Texture assets should not be treated as mesh assets.");
+			context.Expect(!AssetDatabase::Instance().CanEditVirtualGeometryPerMeshOverride(textureMetadata), "Non-mesh assets should not expose VG override controls.");
+			context.Expect(!AssetDatabase::Instance().TryGetVirtualGeometryAdaptiveSettings(textureMetadata, settings), "Non-mesh assets should not expose VG settings controls.");
+			context.Expect(!AssetDatabase::Instance().TryGetVirtualGeometryPageSummary(textureMetadata, pageSummary), "Non-mesh assets should not expose page-streaming readiness summaries.");
 
 			AssetDatabase::Instance().Shutdown();
 			std::filesystem::remove_all(root);

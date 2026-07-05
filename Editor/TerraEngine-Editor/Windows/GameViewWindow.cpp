@@ -313,6 +313,9 @@ void GameViewWindow::OnGui() {
 		char line23[192];
 		char line24[192];
 		char line25[192];
+		char line26[192];
+		char line27[192];
+		char line28[192];
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (statsReady) {
@@ -412,6 +415,18 @@ void GameViewWindow::OnGui() {
 				stats.visibleCommandCacheHit ? "hit" : "miss",
 				stats.visibleStreamingUniqueMeshes + stats.visibleStreamingUniqueMaterials + stats.visibleStreamingUniqueTextures,
 				stats.visibleStreamingDuplicateTouchesEliminated);
+			std::snprintf(line26, sizeof(line26), "VG Page Sources H/F/E/M: %u/%u/%u/%u",
+				stats.virtualGeometryEmittedHighDetailPages,
+				stats.virtualGeometryEmittedFallbackPages,
+				stats.virtualGeometryEmittedEmbeddedFallbackPages,
+				stats.virtualGeometryMissingPageSources);
+			std::snprintf(line27, sizeof(line27), "VG Page Payload Bytes R/F/E: %llu/%llu/%llu",
+				static_cast<unsigned long long>(stats.virtualGeometryResidentPagePayloadBytes),
+				static_cast<unsigned long long>(stats.virtualGeometryFallbackPagePayloadBytes),
+				static_cast<unsigned long long>(stats.virtualGeometryEmbeddedFallbackBytes));
+			std::snprintf(line28, sizeof(line28), "VG Page Requests/Retires: %u/%u",
+				stats.virtualGeometryPageSourceRequests,
+				stats.virtualGeometryPageSourceRetirements);
 		} else {
 			std::snprintf(line0, sizeof(line0), "Stats unavailable");
 			std::snprintf(line1, sizeof(line1), "No active camera/render stats");
@@ -439,9 +454,12 @@ void GameViewWindow::OnGui() {
 			line23[0] = '\0';
 			line24[0] = '\0';
 			line25[0] = '\0';
+			line26[0] = '\0';
+			line27[0] = '\0';
+			line28[0] = '\0';
 		}
 
-		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7, line11, line12, line21, line22, line23, line24, line13, line14, line15, line16, line17, line18, line19, line25, line20, line8, line9, line10};
+		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7, line11, line12, line21, line22, line23, line24, line13, line14, line15, line16, line17, line18, line19, line26, line27, line28, line25, line20, line8, line9, line10};
 		float textWidth = 0.0f;
 		int lineCount = 0;
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.

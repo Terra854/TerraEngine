@@ -147,6 +147,134 @@
 			]
 		},
 		{
+			"id": "page-sourced-resident-payload",
+			"category": "page-streaming",
+			"fixtureRecipe": "Synthetic virtual geometry asset whose selected clusters resolve to resident page-local payload ranges instead of the owning meshlet stream.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"page-sourced-rendering",
+				"resident-page-payload",
+				"no-owning-mesh-normal-path"
+			],
+			"expectedDiagnostics": [
+				"ResidentPagePayloadEmitted",
+				"EmbeddedFullMeshFallbackUnused"
+			],
+			"expectedRenderOutcomes": [
+				"page-local-meshlets-render",
+				"owning-mesh-residency-not-required"
+			],
+			"thresholds": {
+				"maxEmbeddedFallbackUses": 0,
+				"maxMissingPageCoverage": 0
+			}
+		},
+		{
+			"id": "page-fallback-only-coverage",
+			"category": "page-streaming-fallback",
+			"fixtureRecipe": "Dense virtual geometry asset with only pinned fallback pages resident and all high-detail pages pending, failed, or evicted.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"page-sourced-rendering",
+				"fallback-page-pinned",
+				"missing-detail-substitution"
+			],
+			"expectedDiagnostics": [
+				"PinnedFallbackPage",
+				"FallbackPageSubstitution",
+				"NoMissingCoverage"
+			],
+			"expectedRenderOutcomes": [
+				"fallback-visible-under-pressure",
+				"no-holes-while-detail-missing"
+			],
+			"thresholds": {
+				"minPinnedFallbackPages": 1,
+				"maxMissingPageCoverage": 0
+			}
+		},
+		{
+			"id": "page-budget-churn",
+			"category": "page-budget",
+			"fixtureRecipe": "Camera path that requests, uploads, evicts, and re-requests high-detail virtual geometry pages under a small geometry budget.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"page-budget",
+				"page-rerequest",
+				"resident-byte-gate"
+			],
+			"expectedDiagnostics": [
+				"PageRequested",
+				"PageResident",
+				"PageEvicted",
+				"PageRerequested"
+			],
+			"expectedRenderOutcomes": [
+				"resident-bytes-within-budget",
+				"fallback-visible-during-churn"
+			],
+			"thresholds": {
+				"maxResidentPageBudgetRatio": 1.0,
+				"minRequestFulfillmentPercent": 95
+			}
+		},
+		{
+			"id": "dense-page-budget-streaming-gate",
+			"category": "page-streaming-performance",
+			"fixtureRecipe": "Dense virtual geometry page table where visible detail exceeds a 4 MiB resident-page budget unless true page streaming and fallback substitution are active.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"dense-page-budget",
+				"resident-payload-budget",
+				"no-full-owning-mesh-residency",
+				"page-source-gates"
+			],
+			"expectedDiagnostics": [
+				"ResidentPayloadBytesWithinBudget",
+				"ResidentPayloadBelowFullOwningMeshBytes",
+				"NoMissingPageSources",
+				"NoEmbeddedFullMeshFallback"
+			],
+			"expectedRenderOutcomes": [
+				"resident-pages-within-budget",
+				"fallback-visible-without-holes",
+				"page-source-counters-labeled-per-view"
+			],
+			"thresholds": {
+				"pageBudgetBytes": 4194304,
+				"maxResidentPageBudgetRatio": 1.0,
+				"maxFullOwningMeshResidencyRatio": 0.95,
+				"maxEmbeddedFallbackUses": 0,
+				"maxMissingPageCoverage": 0,
+				"maxFalseOcclusionRiskWarnings": 0
+			}
+		},
+		{
+			"id": "page-integrity-malformed",
+			"category": "page-integrity",
+			"fixtureRecipe": "Synthetic TEMF page table with corrupt payload byte ranges, missing fallback links, invalid material spans, and one valid fallback page.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Rejected",
+			"coverageTags": [
+				"page-integrity",
+				"fallback-link-validation",
+				"material-range-validation"
+			],
+			"expectedDiagnostics": [
+				"InvalidPagePayloadRange",
+				"InvalidFallbackLink",
+				"InvalidMaterialRange"
+			],
+			"expectedRenderOutcomes": [
+				"invalid-pages-rejected",
+				"valid-fallback-remains-renderable"
+			]
+		},
+		{
 			"id": "multi-view-independence",
 			"category": "multi-view",
 			"fixtureRecipe": "Two view snapshots over one object with independent target size, visualizer, counter, and Hi-Z state.",

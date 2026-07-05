@@ -121,6 +121,33 @@ namespace TerraEngine::EditorTests {
 			context.Expect(diagnostics.gpuFallbackReason.find("fallback") != std::string::npos, "Automation diagnostics should carry fallback explanations.");
 		});
 
+		registry.Add("VirtualGeometry.Editor.Automation.US6.CullingStatsExposePageSourceCounters", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics;
+			diagnostics.pageSources.residentPayloads = 3u;
+			diagnostics.pageSources.emittedHighDetailSources = 1u;
+			diagnostics.pageSources.emittedFallbackSources = 1u;
+			diagnostics.pageSources.emittedEmbeddedFallbackSources = 1u;
+			diagnostics.pageSources.pageRequests = 2u;
+			diagnostics.pageSources.residentPayloadBytes = 4096u;
+			diagnostics.pageSources.embeddedFallbackBytes = 512u;
+
+			const std::string source = ReadAutomationServiceSource();
+			context.Expect(source.find("\"pageSources\"") != std::string::npos, "Automation runtime diagnostics should group page-source counters.");
+			context.Expect(source.find("\"residentPagePayloads\"") != std::string::npos, "Automation stats should expose resident page payload counts.");
+			context.Expect(source.find("\"highDetailPagePayloads\"") != std::string::npos, "Automation stats should expose high-detail page payload counts.");
+			context.Expect(source.find("\"fallbackPagePayloads\"") != std::string::npos, "Automation stats should expose fallback page payload counts.");
+			context.Expect(source.find("\"embeddedFallbackPagePayloads\"") != std::string::npos, "Automation stats should expose embedded fallback payload counts.");
+			context.Expect(source.find("\"emittedHighDetailPages\"") != std::string::npos, "Automation stats should expose emitted high-detail page counts.");
+			context.Expect(source.find("\"emittedFallbackPages\"") != std::string::npos, "Automation stats should expose emitted fallback page counts.");
+			context.Expect(source.find("\"emittedEmbeddedFallbackPages\"") != std::string::npos, "Automation stats should expose emitted embedded fallback counts.");
+			context.Expect(source.find("\"missingPageSources\"") != std::string::npos, "Automation stats should expose missing page-source counts.");
+			context.Expect(source.find("\"pageSourceRequests\"") != std::string::npos, "Automation culling stats should expose compact page-source request counts.");
+			context.Expect(source.find("\"residentPayloadBytes\"") != std::string::npos, "Automation stats should expose resident payload bytes.");
+			context.Expect(source.find("\"embeddedFallbackBytes\"") != std::string::npos, "Automation stats should expose embedded fallback bytes.");
+			context.ExpectEqual(3u, diagnostics.pageSources.residentPayloads, "Automation diagnostics should carry resident payload counts.");
+			context.ExpectEqual(static_cast<std::uint64_t>(4096u), diagnostics.pageSources.residentPayloadBytes, "Automation diagnostics should carry resident payload byte counts.");
+		});
+
 		registry.Add("VirtualGeometry.Editor.Automation.US7.CullingStatsExposePerformanceGateSummaries", [](TestContext& context) {
 			PerformanceGateResult gate;
 			gate.gateId = "gpu-packet-batch-ratio";
@@ -141,6 +168,16 @@ namespace TerraEngine::EditorTests {
 			context.Expect(source.find("\"firstFailedPerformanceGate\"") != std::string::npos, "Automation stats should expose the first failed gate label.");
 			context.ExpectEqual(2u, gate.viewId, "Automation gate fixtures should be able to carry the producing view id.");
 			context.Expect(gate.source == VirtualGeometryPerformanceGateSource::GPUReadback, "Automation gate fixtures should preserve GPU readback gate sources.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.Automation.US7.AssetDetailsExposePageIntegrityAndSkippedStreaming", [](TestContext& context) {
+			const std::string source = ReadAutomationServiceSource();
+
+			context.Expect(source.find("\"pageStreamingReady\"") != std::string::npos, "Automation asset details should expose page-streaming readiness.");
+			context.Expect(source.find("\"smallMeshStreamingSkipped\"") != std::string::npos, "Automation asset details should expose intentional tiny-mesh skips.");
+			context.Expect(source.find("\"skippedStreamingReason\"") != std::string::npos, "Automation asset details should expose the skipped-streaming reason.");
+			context.Expect(source.find("\"pageIntegrityErrors\"") != std::string::npos, "Automation asset details should expose cook/runtime page integrity errors.");
+			context.Expect(source.find("\"integrityErrors\"") != std::string::npos, "Automation page summaries should expose compact integrity errors.");
 		});
 	}
 }

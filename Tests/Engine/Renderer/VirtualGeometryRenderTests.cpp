@@ -307,6 +307,80 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(2u, visibility.front().gpuPacketRecords.front().selectedLod, "GPU packet snapshot should preserve selected LOD.");
 		});
 
+		registry.Add("VirtualGeometry.Render.US1.HighDetailResidentPagesBecomeEmittedSources", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+
+			VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
+			for (std::uint32_t index = 0u; index < static_cast<std::uint32_t>(asset.cullableGroups.size()); ++index)
+			{
+				asset.cullableGroups[index].meshletIndex = index;
+			}
+			asset.pages[1].payloadByteOffset = 4096u;
+			asset.pages[1].payloadByteSize = 2048u;
+			asset.pages[1].byteSize = 2048u;
+
+			VirtualGeometrySelectedClusterRecord selected;
+			selected.objectId = TerraEngine::GenerateUUID();
+			selected.meshId = asset.assetId;
+			selected.clusterId = 1u;
+			selected.lodIndex = 0u;
+			selected.pageId = 1u;
+			selected.fallbackClusterId = 0u;
+			selected.usingFallback = false;
+
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			const std::vector<VirtualGeometryClusterPacket> packets =
+				RenderSystem::BuildVirtualGeometryClusterPackets(asset, { selected }, materialId, RenderViewType::Game, 5u);
+			context.ExpectEqual(static_cast<std::size_t>(1u), packets.size(), "A resident high-detail selected cluster should produce one packet.");
+			context.Expect(packets.front().payloadSource == VirtualGeometryPagePayloadSource::ResidentPagePayload, "High-detail resident pages should be labeled as resident page payloads.");
+			context.Expect(packets.front().emittedSource == VirtualGeometryEmittedPageSource::HighDetailPage, "High-detail resident pages should emit high-detail source records.");
+			context.ExpectEqual(4096ull, packets.front().pagePayloadByteOffset, "High-detail packet should preserve page-local byte offset.");
+			context.ExpectEqual(2048ull, packets.front().pagePayloadByteSize, "High-detail packet should preserve page-local byte size.");
+
+			RenderFrameSnapshot snapshot;
+			snapshot.frameId = 8802u;
+			VirtualGeometryViewSelectionState state;
+			state.viewType = RenderViewType::Game;
+			state.outputId = 5u;
+			state.clusterPackets = packets;
+			state.gpuPacketRecords = RenderSystem::BuildGpuVirtualGeometryPacketRecords(packets, snapshot.frameId, VirtualGeometryDebugVisualizationMode::Residency);
+			VirtualGeometryPagePayloadRecord payload;
+			payload.meshId = asset.assetId;
+			payload.pageId = packets.front().pageId;
+			payload.fallbackPageId = packets.front().fallbackPageId;
+			payload.source = packets.front().payloadSource;
+			payload.payloadByteOffset = packets.front().pagePayloadByteOffset;
+			payload.payloadByteSize = packets.front().pagePayloadByteSize;
+			payload.resident = true;
+			payload.valid = true;
+			state.residentPagePayloads.push_back(payload);
+			VirtualGeometryEmittedPageSourceRecord emitted;
+			emitted.viewType = state.viewType;
+			emitted.viewId = state.outputId;
+			emitted.frameId = snapshot.frameId;
+			emitted.objectId = selected.objectId;
+			emitted.meshId = asset.assetId;
+			emitted.materialId = materialId;
+			emitted.clusterId = selected.clusterId;
+			emitted.selectedLod = selected.lodIndex;
+			emitted.pageId = packets.front().pageId;
+			emitted.fallbackPageId = packets.front().fallbackPageId;
+			emitted.payloadSource = packets.front().payloadSource;
+			emitted.emittedSource = packets.front().emittedSource;
+			emitted.payloadByteOffset = packets.front().pagePayloadByteOffset;
+			emitted.payloadByteSize = packets.front().pagePayloadByteSize;
+			state.emittedPageSources.push_back(emitted);
+			snapshot.virtualGeometryViewSelections.push_back(state);
+
+			const VirtualGeometryViewVisibilitySnapshot visibility = BuildVirtualGeometryViewVisibilitySnapshot(snapshot,
+				snapshot.virtualGeometryViewSelections.front(),
+				VirtualGeometryCounterSource::Prepared);
+			const VirtualGeometryViewDiagnosticsSnapshot diagnostics = BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+			context.ExpectEqual(1u, diagnostics.pageSources.highDetailPayloads, "Diagnostics should count the resident high-detail page payload.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedHighDetailSources, "Diagnostics should report high-detail page emission.");
+			context.ExpectEqual(0u, diagnostics.embeddedFallbackPayloadCount, "High-detail page emission should not be reported as conservative embedded fallback.");
+		});
+
 		registry.Add("VirtualGeometry.Render.Diagnostics.ReportsLodTransitionPoppingRisk", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset{};
 			asset.sourceTriangleCount = 1024u;
@@ -784,6 +858,95 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::size_t>(1u), visibility.front().fallbackCoverage.size(), "Fallback coverage chains should survive immutable snapshot copy.");
 			context.ExpectEqual(8u, visibility.front().fallbackCoverage.front().desiredClusterId, "Fallback coverage should identify the missing desired cluster.");
 			context.ExpectEqual(6u, visibility.front().fallbackCoverage.front().substitutedMeshlets, "Fallback coverage should report substituted meshlets.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US4.MixedDetailClusterCutBuildsPageLocalPackets", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeTwoRegionClusterAsset();
+			asset.pages[0].payloadByteOffset = 4096u;
+			asset.pages[0].byteSize = 1536u;
+			asset.pages[1].payloadByteOffset = 16384u;
+			asset.pages[1].byteSize = 2048u;
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(
+					asset,
+					asset.assetId,
+					TerraEngine::GenerateUUID(),
+					MakeDefaultVirtualGeometryQualityProfile(),
+					512.0f,
+					glm::mat4(1.0f),
+					glm::vec3(0.0f),
+					glm::uvec2(1000u, 1000u),
+					true,
+					true);
+			const std::vector<VirtualGeometryClusterPacket> packets =
+				RenderSystem::BuildVirtualGeometryClusterPackets(asset, result.selectedClusters, materialId, RenderViewType::Game, 2u);
+
+			const auto findPacket = [&packets](std::uint32_t clusterId) {
+				return std::find_if(packets.begin(), packets.end(), [clusterId](const VirtualGeometryClusterPacket& packet) {
+					return packet.clusterId == clusterId;
+				});
+			};
+			const auto nearPacket = findPacket(2u);
+			const auto farPacket = findPacket(1u);
+
+			context.ExpectEqual(static_cast<std::size_t>(2u), result.selectedClusters.size(), "Mixed-detail selection should keep one sparse cluster per visible region.");
+			context.Expect(nearPacket != packets.end(), "Nearby region should emit its high-detail child packet.");
+			context.Expect(farPacket != packets.end(), "Distant region should emit its lower-detail root packet.");
+			context.Expect(nearPacket != packets.end() && farPacket != packets.end() && nearPacket->selectedLod != farPacket->selectedLod, "Packets should preserve per-cluster detail selection instead of substituting one whole-object LOD.");
+			context.Expect(nearPacket != packets.end() && farPacket != packets.end() && nearPacket->pageId != farPacket->pageId, "Packets should keep page-local identity for each selected cluster.");
+			context.Expect(nearPacket != packets.end() && nearPacket->pagePayloadByteOffset == 4096u, "High-detail packet should point at the resident high-detail page byte range.");
+			context.Expect(farPacket != packets.end() && farPacket->pagePayloadByteOffset == 16384u, "Coarse packet should point at its own resident page byte range.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US4.PagePayloadIdentityInvalidatesPreparedSignatures", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameRenderableRecord record{};
+			record.objectId = TerraEngine::GenerateUUID();
+			record.meshId = TerraEngine::GenerateUUID();
+			record.materialId = TerraEngine::GenerateUUID();
+			record.virtualGeometry.selectedLodIndex = 0u;
+			record.virtualGeometry.meshletOffset = 0u;
+			record.virtualGeometry.meshletCount = 8u;
+			record.virtualGeometry.virtualGeometryActive = true;
+			record.virtualGeometry.pageId = 1u;
+			record.virtualGeometry.fallbackPageId = 0u;
+			record.virtualGeometry.payloadSource = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			record.virtualGeometry.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			record.virtualGeometry.pagePayloadByteOffset = 2048u;
+			record.virtualGeometry.pagePayloadByteSize = 1024u;
+
+			const std::uint64_t highDetailHash = TerraEngine::Renderer::HashPreparedDrawPacketSignature(
+				TerraEngine::Renderer::BuildPreparedDrawPacketSignature(record));
+			record.virtualGeometry.payloadSource = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			record.virtualGeometry.emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
+			record.virtualGeometry.pageId = 0u;
+			record.virtualGeometry.pagePayloadByteOffset = 8192u;
+			const std::uint64_t fallbackHash = TerraEngine::Renderer::HashPreparedDrawPacketSignature(
+				TerraEngine::Renderer::BuildPreparedDrawPacketSignature(record));
+
+			context.Expect(highDetailHash != fallbackHash, "Prepared visible-command signatures should change when a draw swaps resident page payload identity.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US4.DiagnosticsCountMaterialPageBoundaries", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.valid = true;
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 2u;
+			visibility.frameId = 333u;
+			VirtualGeometryEmittedPageSourceRecord materialA{};
+			materialA.materialId = TerraEngine::GenerateUUID();
+			materialA.pageId = 4u;
+			materialA.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			VirtualGeometryEmittedPageSourceRecord materialB = materialA;
+			materialB.materialId = TerraEngine::GenerateUUID();
+			visibility.emittedPageSources = { materialA, materialB };
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(2u, diagnostics.pageSources.emittedMaterialPagePairs, "Diagnostics should preserve both material/page pairs for page-local clusters.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedMultiMaterialPages, "Diagnostics should identify a page that emitted multiple material sections.");
 		});
 
 		registry.Add("VirtualGeometry.Render.US4.ZeroSurvivorGeneratedSubmissionsRemainValidZeroWork", [](TestContext& context) {

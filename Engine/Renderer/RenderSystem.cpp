@@ -329,8 +329,11 @@ namespace
 			record.fallbackPage = page.pageId == page.fallbackPageId || page.firstLodIndex == 0u;
 			record.clusterOffset = page.clusterPageLinkOffset;
 			record.clusterCount = page.clusterPageLinkCount;
-			record.pinnedFallback = record.fallbackPage;
-			// TEMF v1 keeps the cooked virtual-geometry pages inside the loaded
+				record.payloadByteOffset = page.byteOffset;
+				record.payloadByteSize = page.byteSize;
+				record.pinnedFallback = record.fallbackPage;
+				record.protectedFallback = record.fallbackPage || record.pinnedFallback;
+				// TEMF v1 keeps the cooked virtual-geometry pages inside the loaded
 			// mesh payload. Until page streaming starts replacing these embedded
 			// ranges with demand-loaded storage, every published page is resident
 			// and can participate in LOD selection immediately.
@@ -353,7 +356,9 @@ namespace
 
 	bool GeometryPageIsResident(const GeometryPageRuntime& page)
 	{
-		return page.state == GeometryPageState::Resident || page.state == GeometryPageState::Pinned;
+		return page.state == GeometryPageState::Resident
+			|| page.state == GeometryPageState::Pinned
+			|| page.state == GeometryPageState::PendingRetirement;
 	}
 
 	const GeometryPageRuntime* FindGeometryPageForLod(const VirtualGeometryAssetRuntime& asset, std::uint32_t lodIndex)
@@ -402,12 +407,216 @@ namespace
 		return page != nullptr && GeometryPageIsResident(*page);
 	}
 
+	VirtualGeometryPagePayloadSource ResolveVirtualGeometryPayloadSource(const GeometryPageRuntime* page, bool fallbackPacket)
+	{
+		if (page == nullptr)
+		{
+			return VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
+		}
+		if (!GeometryPageIsResident(*page))
+		{
+			return VirtualGeometryPagePayloadSource::Missing;
+		}
+			if (fallbackPacket || page->fallbackPage || page->pinnedFallback || page->protectedFallback
+				|| page->state == GeometryPageState::Pinned)
+		{
+			return VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+		}
+		return VirtualGeometryPagePayloadSource::ResidentPagePayload;
+	}
+
+	VirtualGeometryEmittedPageSource ResolveVirtualGeometryEmittedSource(VirtualGeometryPagePayloadSource source)
+	{
+		switch (source)
+		{
+		case VirtualGeometryPagePayloadSource::ResidentPagePayload:
+			return VirtualGeometryEmittedPageSource::HighDetailPage;
+		case VirtualGeometryPagePayloadSource::ResidentFallbackPayload:
+			return VirtualGeometryEmittedPageSource::FallbackPage;
+		case VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback:
+		case VirtualGeometryPagePayloadSource::EmbeddedMeshPayload:
+			return VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback;
+		case VirtualGeometryPagePayloadSource::Missing:
+		case VirtualGeometryPagePayloadSource::Invalid:
+			return VirtualGeometryEmittedPageSource::Invalid;
+		case VirtualGeometryPagePayloadSource::Unknown:
+			break;
+		}
+		return VirtualGeometryEmittedPageSource::None;
+	}
+
 	struct VirtualGeometryClusterMeshletRange
 	{
 		std::uint32_t meshletOffset = 0u;
 		std::uint32_t meshletCount = 0u;
 		bool valid = false;
 	};
+
+	std::uint64_t ResolveVirtualGeometryPayloadBytes(const GeometryPageRuntime* page, const VirtualGeometryClusterMeshletRange& meshlets)
+	{
+		if (page != nullptr)
+		{
+			return page->payloadByteSize == 0u ? page->byteSize : page->payloadByteSize;
+		}
+		return static_cast<std::uint64_t>(meshlets.meshletCount);
+	}
+
+	std::pair<glm::vec3, glm::vec3> ResolveVirtualGeometryHiZPacketBounds(const VirtualGeometryClusterRuntime& cluster)
+	{
+		// Page streaming changes payload residency, not the conservative shape
+		// tested by Hi-Z. Keep packet bounds tied to the selected cluster so a
+		// broad fallback page cannot make the culler believe hidden coverage is
+		// larger or smaller than the meshlet range being submitted.
+		const glm::vec3 radius(cluster.boundsRadius);
+		return {
+			cluster.boundsCenter - radius,
+			cluster.boundsCenter + radius
+		};
+	}
+
+	void HashVirtualGeometryPageSourceKey(std::uint64_t& key, std::uint64_t value)
+	{
+		key ^= value;
+		key *= kRenderHashPrime;
+	}
+
+	void PopulateVirtualGeometryPageSourceRecords(TerraEngine::Renderer::VirtualGeometryViewSelectionState& state, std::uint64_t frameId)
+	{
+		// Page payload records describe the resident source that the shader may
+		// read. Emitted source records describe the visible result after fallback
+		// substitution. Keeping both lets streaming request missing detail while
+		// diagnostics still explain why the current frame remained visible.
+		std::unordered_set<std::uint64_t> seenPayloads;
+		seenPayloads.reserve(state.clusterPackets.size());
+		for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
+		{
+			if (packet.payloadSource == VirtualGeometryPagePayloadSource::Missing
+				|| packet.payloadSource == VirtualGeometryPagePayloadSource::Invalid
+				|| packet.payloadSource == VirtualGeometryPagePayloadSource::Unknown)
+			{
+				continue;
+			}
+			std::uint64_t key = kRenderHashOffset;
+			HashVirtualGeometryPageSourceKey(key, static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(packet.meshId)));
+			HashVirtualGeometryPageSourceKey(key, packet.pageId);
+			HashVirtualGeometryPageSourceKey(key, static_cast<std::uint64_t>(packet.payloadSource));
+			HashVirtualGeometryPageSourceKey(key, packet.pagePayloadByteOffset);
+			HashVirtualGeometryPageSourceKey(key, packet.pagePayloadByteSize);
+			if (seenPayloads.insert(key).second)
+			{
+				VirtualGeometryPagePayloadRecord payload;
+				payload.meshId = packet.meshId;
+				payload.pageId = packet.pageId;
+				payload.fallbackPageId = packet.fallbackPageId;
+				payload.source = packet.payloadSource;
+				payload.selectedLod = packet.selectedLod;
+				payload.meshletOffset = packet.meshletOffset;
+				payload.meshletCount = packet.meshletCount;
+				payload.payloadByteOffset = packet.pagePayloadByteOffset;
+				payload.payloadByteSize = packet.pagePayloadByteSize;
+				payload.resident = packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentPagePayload
+					|| packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+				payload.pinnedFallback = packet.fallbackPacket || packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+				payload.valid = true;
+				payload.diagnostic = packet.payloadSource == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback
+					? "Virtual geometry emitted conservative embedded mesh payload instead of a resident streamed page."
+					: std::string();
+				state.residentPagePayloads.push_back(std::move(payload));
+			}
+
+			VirtualGeometryEmittedPageSourceRecord emitted;
+			emitted.viewId = state.outputId;
+			emitted.viewType = state.viewType;
+			emitted.frameId = frameId;
+			emitted.objectId = packet.objectId;
+			emitted.meshId = packet.meshId;
+			emitted.materialId = packet.materialId;
+			emitted.clusterId = packet.clusterId;
+			emitted.selectedLod = packet.selectedLod;
+			emitted.pageId = packet.pageId;
+			emitted.fallbackPageId = packet.fallbackPageId;
+			emitted.payloadSource = packet.payloadSource;
+			emitted.emittedSource = packet.emittedSource;
+			emitted.meshletOffset = packet.meshletOffset;
+			emitted.meshletCount = packet.meshletCount;
+			emitted.payloadByteOffset = packet.pagePayloadByteOffset;
+			emitted.payloadByteSize = packet.pagePayloadByteSize;
+			emitted.fallbackSubstitution = packet.fallbackPacket;
+			emitted.conservativeEmbeddedFallback = packet.payloadSource == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
+			emitted.reason = ToString(packet.emittedSource);
+			state.emittedPageSources.push_back(std::move(emitted));
+		}
+	}
+
+	void PopulateVirtualGeometryPageRequestRecords(TerraEngine::Renderer::VirtualGeometryViewSelectionState& state)
+	{
+		// Requests are deduplicated per view/object/page before crossing into
+		// ResourceStreaming. The renderer never mutates residency here; it only
+		// publishes immutable need packets that protected resource code consumes.
+		for (const TerraEngine::Renderer::VirtualGeometryPageNeedRecord& need : state.pageNeeds)
+		{
+			if (need.meshId == TerraEngine::EMPTY_UUID)
+			{
+				continue;
+			}
+
+			const auto appendRequest = [&](std::uint32_t pageId, bool fallbackRequest, VirtualGeometryPagePayloadSource source, VirtualGeometryEmittedPageSource emission, std::string reason) {
+				if (pageId == std::numeric_limits<std::uint32_t>::max())
+				{
+					return;
+				}
+				const auto duplicate = std::find_if(state.pageRequests.begin(), state.pageRequests.end(), [&](const TerraEngine::Renderer::VirtualGeometryPageRequestRecord& existing) {
+					return existing.meshId == need.meshId
+						&& existing.objectId == need.objectId
+						&& existing.pageId == pageId
+						&& existing.fallbackRequest == fallbackRequest;
+				});
+				if (duplicate != state.pageRequests.end())
+				{
+					duplicate->priority = std::max(duplicate->priority, static_cast<std::int32_t>(need.screenImportance));
+					return;
+				}
+
+				TerraEngine::Renderer::VirtualGeometryPageRequestRecord request;
+				request.meshId = need.meshId;
+				request.objectId = need.objectId;
+				request.pageId = pageId;
+				request.fallbackPageId = need.fallbackPageId;
+				request.clusterId = need.clusterId;
+				request.desiredLodIndex = need.desiredLodIndex;
+				request.priority = static_cast<std::int32_t>(std::clamp(need.screenImportance, 0.0f, 100000.0f));
+				request.screenImportance = need.screenImportance;
+				request.fallbackRequired = need.fallbackRequired;
+				request.fallbackRequest = fallbackRequest;
+				request.payloadSource = source;
+				request.expectedEmission = emission;
+				request.reason = std::move(reason);
+				state.pageRequests.push_back(std::move(request));
+			};
+
+			if (need.desiredPayloadSource == VirtualGeometryPagePayloadSource::Missing
+				|| need.desiredPayloadSource == VirtualGeometryPagePayloadSource::Unknown)
+			{
+				appendRequest(
+					need.pageId,
+					false,
+					need.desiredPayloadSource,
+					VirtualGeometryEmittedPageSource::HighDetailPage,
+					"visible virtual geometry cluster requested a non-resident high-detail page");
+			}
+			if (need.fallbackRequired
+				&& (need.fallbackPayloadSource == VirtualGeometryPagePayloadSource::Missing
+					|| need.fallbackPayloadSource == VirtualGeometryPagePayloadSource::Unknown))
+			{
+				appendRequest(
+					need.fallbackPageId,
+					true,
+					need.fallbackPayloadSource,
+					VirtualGeometryEmittedPageSource::FallbackPage,
+					"visible virtual geometry cluster requested fallback coverage");
+			}
+		}
+	}
 
 	VirtualGeometryClusterMeshletRange ResolveVirtualGeometryClusterMeshletRange(
 		const VirtualGeometryAssetRuntime& asset,
@@ -773,6 +982,12 @@ namespace
 		HashCombine(seed, selection.range.meshletCount);
 		HashCombine(seed, selection.range.virtualGeometryActive ? 1u : 0u);
 		HashCombine(seed, selection.range.failOpen ? 1u : 0u);
+		HashCombine(seed, selection.range.pageId);
+		HashCombine(seed, selection.range.fallbackPageId);
+		HashCombine(seed, static_cast<std::uint64_t>(selection.range.payloadSource));
+		HashCombine(seed, static_cast<std::uint64_t>(selection.range.emittedSource));
+		HashCombine(seed, selection.range.pagePayloadByteOffset);
+		HashCombine(seed, selection.range.pagePayloadByteSize);
 		HashCombine(seed, selection.invalidSelectionReasons);
 		HashCombine(seed, static_cast<std::uint64_t>(selection.selectedClusters.size()));
 		for (const TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord& cluster : selection.selectedClusters)
@@ -1252,11 +1467,17 @@ std::vector<VirtualGeometryClusterPacket> RenderSystem::BuildVirtualGeometryClus
 		packet.clusterId = cluster->clusterId;
 		packet.meshletOffset = meshlets.meshletOffset;
 		packet.meshletCount = meshlets.meshletCount;
-		packet.boundsMin = cluster->boundsCenter - glm::vec3(cluster->boundsRadius);
-		packet.boundsMax = cluster->boundsCenter + glm::vec3(cluster->boundsRadius);
+		const auto [boundsMin, boundsMax] = ResolveVirtualGeometryHiZPacketBounds(*cluster);
+		packet.boundsMin = boundsMin;
+		packet.boundsMax = boundsMax;
 		packet.pageId = selectedCluster.pageId;
-		packet.fallbackPageId = selectedCluster.usingFallback ? cluster->pageId : 0u;
 		packet.fallbackPacket = selectedCluster.usingFallback;
+		const GeometryPageRuntime* page = FindGeometryPageById(asset, cluster->pageId);
+		packet.fallbackPageId = page != nullptr ? page->fallbackPageId : (selectedCluster.usingFallback ? cluster->pageId : 0u);
+		packet.payloadSource = ResolveVirtualGeometryPayloadSource(page, packet.fallbackPacket);
+		packet.emittedSource = ResolveVirtualGeometryEmittedSource(packet.payloadSource);
+		packet.pagePayloadByteOffset = page != nullptr ? page->payloadByteOffset : 0u;
+		packet.pagePayloadByteSize = ResolveVirtualGeometryPayloadBytes(page, meshlets);
 
 		// The debug identity is deliberately stable and source-data based. It
 		// lets visualizers distinguish packet/batch ownership without depending
@@ -1294,6 +1515,10 @@ std::vector<ClusterWorkBatch> RenderSystem::BuildVirtualGeometryClusterBatches(
 			&& previous.selectedLod == next.selectedLod
 			&& previous.pageId == next.pageId
 			&& previous.fallbackPageId == next.fallbackPageId
+			&& previous.payloadSource == next.payloadSource
+			&& previous.emittedSource == next.emittedSource
+			&& previous.pagePayloadByteOffset == next.pagePayloadByteOffset
+			&& previous.pagePayloadByteSize == next.pagePayloadByteSize
 			&& previous.fallbackPacket == next.fallbackPacket
 			&& previous.packetId + 1u == next.packetId;
 		const bool contiguousMeshlets = previous.meshletOffset + previous.meshletCount == next.meshletOffset;
@@ -1371,6 +1596,10 @@ std::vector<GpuVirtualGeometryPacketRecord> RenderSystem::BuildGpuVirtualGeometr
 		record.projectedBounds = packet.projectedBounds;
 		record.pageId = packet.pageId;
 		record.fallbackPageId = packet.fallbackPageId;
+		record.payloadSource = packet.payloadSource;
+		record.emittedSource = packet.emittedSource;
+		record.pagePayloadByteOffset = packet.pagePayloadByteOffset;
+		record.pagePayloadByteSize = packet.pagePayloadByteSize;
 		record.debugIdentity = packet.debugIdentity;
 		// Bit 0 marks fail-open coverage; higher bits mirror the active debug
 		// mode so generated submissions can reject stale visualizer ownership.
@@ -1401,6 +1630,10 @@ std::vector<GpuVirtualGeometryBatchDescriptor> RenderSystem::BuildGpuVirtualGeom
 			&& previous.selectedLod == next.selectedLod
 			&& previous.pageId == next.pageId
 			&& previous.fallbackPageId == next.fallbackPageId
+			&& previous.payloadSource == next.payloadSource
+			&& previous.emittedSource == next.emittedSource
+			&& previous.pagePayloadByteOffset == next.pagePayloadByteOffset
+			&& previous.pagePayloadByteSize == next.pagePayloadByteSize
 			&& previous.flags == next.flags
 			&& previous.packetId + 1u == next.packetId
 			&& previous.meshletOffset + previous.meshletCount == next.meshletOffset;
@@ -1529,6 +1762,14 @@ bool RenderSystem::ValidateGpuVirtualGeometryPacketRecords(
 		if (gpu.pageId != cpu.pageId || gpu.fallbackPageId != cpu.fallbackPageId)
 		{
 			return reject("GPU packet page or fallback-page identity does not match the CPU packet.");
+		}
+		if (gpu.payloadSource != cpu.payloadSource || gpu.emittedSource != cpu.emittedSource)
+		{
+			return reject("GPU packet page source labels do not match the CPU packet.");
+		}
+		if (gpu.pagePayloadByteOffset != cpu.pagePayloadByteOffset || gpu.pagePayloadByteSize != cpu.pagePayloadByteSize)
+		{
+			return reject("GPU packet page-local payload byte range does not match the CPU packet.");
 		}
 		const bool expectedFallback = cpu.fallbackPacket;
 		const bool gpuFallback = (gpu.flags & 1u) != 0u;
@@ -2527,6 +2768,12 @@ void RenderSystem::Update(float deltaTime)
 			range.selectedClusterCount = command.selectedVirtualClusterCount;
 			range.pageNeedOffset = command.selectedVirtualPageNeedOffset;
 			range.pageNeedCount = command.selectedVirtualPageNeedCount;
+			range.pageId = command.virtualGeometryPageId;
+			range.fallbackPageId = command.virtualGeometryFallbackPageId;
+			range.payloadSource = command.virtualGeometryPayloadSource;
+			range.emittedSource = command.virtualGeometryEmittedSource;
+			range.pagePayloadByteOffset = command.virtualGeometryPagePayloadByteOffset;
+			range.pagePayloadByteSize = command.virtualGeometryPagePayloadByteSize;
 			state.hiZSelfOcclusionGuardPassed = state.hiZSelfOcclusionGuardPassed && range.hiZSelfOcclusionGuardPassed;
 			state.hiZNearPlaneGuardPassed = state.hiZNearPlaneGuardPassed && range.hiZNearPlaneGuardPassed;
 			state.hiZThinGeometryGuardPassed = state.hiZThinGeometryGuardPassed && range.hiZThinGeometryGuardPassed;
@@ -2604,6 +2851,11 @@ void RenderSystem::Update(float deltaTime)
 				packet.meshletOffset = draw.range.meshletOffset;
 				packet.meshletCount = draw.range.meshletCount;
 				packet.fallbackPacket = draw.range.failOpen;
+				packet.payloadSource = draw.range.failOpen
+					? VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback
+					: VirtualGeometryPagePayloadSource::EmbeddedMeshPayload;
+				packet.emittedSource = ResolveVirtualGeometryEmittedSource(packet.payloadSource);
+				packet.pagePayloadByteSize = static_cast<std::uint64_t>(packet.meshletCount);
 				packet.debugIdentity = packet.packetId ^ 0x5a5a0000u;
 				state.clusterPackets.push_back(packet);
 			}
@@ -2762,13 +3014,15 @@ void RenderSystem::Update(float deltaTime)
 				hiZRegression.testedMeshlets += draw.range.meshletCount;
 			}
 		}
-		hiZRegression.baselineMatched =
-			state.hiZValidationState.state == VirtualGeometryHiZState::Active
-			|| state.hiZValidationState.state == VirtualGeometryHiZState::Unsupported
-			|| state.hiZValidationState.failOpen;
-		state.hiZRegressionSnapshots.push_back(std::move(hiZRegression));
-		renderFrameSnapshot.virtualGeometryViewSelections.push_back(std::move(state));
-	};
+			hiZRegression.baselineMatched =
+				state.hiZValidationState.state == VirtualGeometryHiZState::Active
+				|| state.hiZValidationState.state == VirtualGeometryHiZState::Unsupported
+				|| state.hiZValidationState.failOpen;
+			state.hiZRegressionSnapshots.push_back(std::move(hiZRegression));
+			PopulateVirtualGeometryPageRequestRecords(state);
+			PopulateVirtualGeometryPageSourceRecords(state, activeRenderFrameId);
+			renderFrameSnapshot.virtualGeometryViewSelections.push_back(std::move(state));
+		};
 
 	auto applyVirtualGeometrySelection = [&](std::vector<DrawCommand>& commands, RenderOutputKind outputKind, RenderViewType viewType, std::uint32_t outputId, const glm::vec3& cameraPosition, const glm::uvec2& targetSize, const VirtualGeometryQualityProfile& viewVirtualGeometryQuality) {
 		VirtualGeometryViewSelectionPacket packet;
@@ -2844,6 +3098,12 @@ void RenderSystem::Update(float deltaTime)
 				command.selectedVirtualClusterCount = range.selectedClusterCount;
 				command.selectedVirtualPageNeedOffset = range.pageNeedOffset;
 				command.selectedVirtualPageNeedCount = range.pageNeedCount;
+				command.virtualGeometryPageId = range.pageId;
+				command.virtualGeometryFallbackPageId = range.fallbackPageId;
+				command.virtualGeometryPayloadSource = range.failOpen
+					? VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback
+					: VirtualGeometryPagePayloadSource::Unknown;
+				command.virtualGeometryEmittedSource = ResolveVirtualGeometryEmittedSource(command.virtualGeometryPayloadSource);
 				command.virtualGeometryFlags = virtualGeometryFlags;
 				expandedCommands.push_back(command);
 				packet.selectedClusters.insert(packet.selectedClusters.end(), selection.selectedClusters.begin(), selection.selectedClusters.end());
@@ -2961,6 +3221,12 @@ void RenderSystem::Update(float deltaTime)
 					batchCommand.selectedVirtualClusterCount = batch.packetCount;
 					batchCommand.selectedVirtualPageNeedOffset = range.pageNeedOffset;
 					batchCommand.selectedVirtualPageNeedCount = 0u;
+					batchCommand.virtualGeometryPageId = firstPacket.pageId;
+					batchCommand.virtualGeometryFallbackPageId = firstPacket.fallbackPageId;
+					batchCommand.virtualGeometryPayloadSource = firstPacket.payloadSource;
+					batchCommand.virtualGeometryEmittedSource = firstPacket.emittedSource;
+					batchCommand.virtualGeometryPagePayloadByteOffset = firstPacket.pagePayloadByteOffset;
+					batchCommand.virtualGeometryPagePayloadByteSize = firstPacket.pagePayloadByteSize;
 					for (std::uint32_t packetIndex = localPacketOffset; packetIndex < localPacketOffset + batch.packetCount; ++packetIndex)
 					{
 						if (compactedPackets[packetIndex].fallbackPacket)
@@ -2986,6 +3252,10 @@ void RenderSystem::Update(float deltaTime)
 				command.selectedVirtualClusterCount = range.selectedClusterCount;
 				command.selectedVirtualPageNeedOffset = range.pageNeedOffset;
 				command.selectedVirtualPageNeedCount = range.pageNeedCount;
+				command.virtualGeometryPageId = range.pageId;
+				command.virtualGeometryFallbackPageId = range.fallbackPageId;
+				command.virtualGeometryPayloadSource = VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
+				command.virtualGeometryEmittedSource = VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback;
 				command.virtualGeometryFlags = virtualGeometryFlags | kVirtualGeometryFlagFailOpen;
 				expandedCommands.push_back(command);
 			}
@@ -3802,7 +4072,7 @@ void RenderSystem::Update(float deltaTime)
 		{
 			request.targetSize = sceneViewTargetSize;
 		}
-		else if (kind == RenderOutputKind::GameView)
+		else if (kind == RenderOutputKind::GameView || kind == RenderOutputKind::MainRuntimeView)
 		{
 			request.targetSize = gameViewTargetSize;
 		}
@@ -3928,10 +4198,11 @@ void RenderSystem::Update(float deltaTime)
 			blankData.virtualGeometryGpuBatches.clear();
 			blankData.virtualGeometryGpuFrameSets.clear();
 			blankData.virtualGeometryGpuCompactionDispatches.clear();
-			blankData.virtualGeometryGeneratedSubmissions.clear();
-			blankData.virtualGeometryCounterReadbacks.clear();
-			blankData.virtualGeometryGpuFallbackRecords.clear();
-			blankData.shadowDrawLists.clear();
+				blankData.virtualGeometryGeneratedSubmissions.clear();
+				blankData.virtualGeometryCounterReadbacks.clear();
+				blankData.virtualGeometryGpuFallbackRecords.clear();
+				blankData.virtualGeometryPageRetirements.clear();
+				blankData.shadowDrawLists.clear();
 			rhi->RenderFrame(blankData, makeOutputRequest(RenderOutputKind::GameView, RenderViewType::Game, 2u));
 			latestGameViewFrameId = activeRenderFrameId;
 	}
@@ -4243,6 +4514,22 @@ void RenderSystem::Update(float deltaTime)
 				stats.virtualGeometryFailedPages = view.failedPages;
 				stats.virtualGeometryEvictedPages = view.evictedPages;
 				stats.virtualGeometryPinnedFallbackPages = view.pinnedFallbackPages;
+				// Copy the compact page-source summary into the stats snapshot so
+				// UI, automation, and MCP readers can explain page-streamed geometry
+				// without dereferencing the heavier render diagnostics graph.
+				stats.virtualGeometryResidentPagePayloads = view.pageSources.residentPayloads;
+				stats.virtualGeometryHighDetailPagePayloads = view.pageSources.highDetailPayloads;
+				stats.virtualGeometryFallbackPagePayloads = view.pageSources.fallbackPayloads;
+				stats.virtualGeometryEmbeddedFallbackPagePayloads = view.pageSources.embeddedFallbackPayloads;
+				stats.virtualGeometryEmittedHighDetailPages = view.pageSources.emittedHighDetailSources;
+				stats.virtualGeometryEmittedFallbackPages = view.pageSources.emittedFallbackSources;
+				stats.virtualGeometryEmittedEmbeddedFallbackPages = view.pageSources.emittedEmbeddedFallbackSources;
+				stats.virtualGeometryMissingPageSources = view.pageSources.missingSources;
+				stats.virtualGeometryPageSourceRequests = view.pageSources.pageRequests;
+				stats.virtualGeometryPageSourceRetirements = view.pageSources.pageRetirements;
+				stats.virtualGeometryResidentPagePayloadBytes = view.pageSources.residentPayloadBytes;
+				stats.virtualGeometryFallbackPagePayloadBytes = view.pageSources.fallbackPayloadBytes;
+				stats.virtualGeometryEmbeddedFallbackBytes = view.pageSources.embeddedFallbackBytes;
 				stats.virtualGeometryGpuPacketRecords = view.gpuPacketRecordCount;
 				stats.virtualGeometryGpuBatchDescriptors = view.gpuBatchDescriptorCount;
 				stats.virtualGeometryGpuPacketFrameSets = view.gpuPacketFrameSetCount;
@@ -4394,6 +4681,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVirtualGeometryGpuCompactionDispatches,
 		TerraEngine::Scheduling::kResourceVirtualGeometryGeneratedSubmissions,
 		TerraEngine::Scheduling::kResourceVirtualGeometryCounterReadbacks,
+		TerraEngine::Scheduling::kResourceVirtualGeometryPagePayloads,
+		TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications,
 		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets
 	};
 	declaration.writes = {
@@ -4404,7 +4693,12 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVirtualGeometryGpuCompactionDispatches,
 		TerraEngine::Scheduling::kResourceVirtualGeometryCompactionResults,
 		TerraEngine::Scheduling::kResourceVirtualGeometryGeneratedSubmissions,
+		TerraEngine::Scheduling::kResourceVirtualGeometryPagePayloads,
+		TerraEngine::Scheduling::kResourceVirtualGeometryPageRequests,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPageNeedPackets,
+		TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications,
+		TerraEngine::Scheduling::kResourceVirtualGeometryPageRetirements,
+		TerraEngine::Scheduling::kResourceVirtualGeometryPageDiagnostics,
 		TerraEngine::Scheduling::kResourceVirtualGeometryVisibilitySnapshots,
 		TerraEngine::Scheduling::kResourceVirtualGeometryCounterSnapshots,
 		TerraEngine::Scheduling::kResourceVirtualGeometryCounterReadbacks,
@@ -4426,8 +4720,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Render snapshots, visible-command cache lookup, deduplicated visible streaming touch-set preparation, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, GPU packet frame set planning, GPU compaction dispatch planning, generated-submission validation labels, per-view Hi-Z validation labels, page need packets, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, ResourceManager visible streaming touch publication, virtual geometry GPU packet buffer publication, generated submission publication, visibility/counter snapshot publication, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, editor present, and recovery.";
+	declaration.safeSubwork = "Render snapshots, visible-command cache lookup, deduplicated visible streaming touch-set preparation, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, page payload source planning, page request planning, GPU packet frame set planning, GPU compaction dispatch planning, generated-submission validation labels, per-view Hi-Z validation labels, page need packets, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU packet buffer publication, generated submission publication, visibility/counter snapshot publication, virtual geometry page diagnostics publication, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, editor present, and recovery.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -4726,11 +5020,17 @@ TerraEngine::Renderer::VirtualGeometryClusterSelectionResult RenderSystem::Selec
 		need.meshId = meshId;
 		need.objectId = objectId;
 		need.pageId = desiredCluster.pageId;
+		if (const VirtualGeometryClusterRuntime* fallbackCluster = FindVirtualGeometryClusterById(asset, desiredCluster.fallbackClusterId); fallbackCluster != nullptr)
+		{
+			need.fallbackPageId = fallbackCluster->pageId;
+		}
 		need.clusterId = desiredCluster.clusterId;
 		need.desiredLodIndex = desiredCluster.lodIndex;
 		need.screenImportance = EstimateProjectedClusterRadiusPixels(desiredCluster, modelMatrix, cameraPosition, targetSize, finiteProjectedRadiusPixels)
 			* std::max(desiredCluster.geometricError, 0.001f);
 		need.fallbackRequired = true;
+		need.desiredPayloadSource = VirtualGeometryPagePayloadSource::Missing;
+		need.fallbackPayloadSource = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
 		result.pageNeeds.push_back(need);
 	};
 

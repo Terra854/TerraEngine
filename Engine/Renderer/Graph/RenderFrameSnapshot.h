@@ -53,6 +53,15 @@ namespace TerraEngine::Renderer {
 		std::uint32_t selectedClusterCount = 0u;
 		std::uint32_t pageNeedOffset = 0u;
 		std::uint32_t pageNeedCount = 0u;
+		// Page identity is part of the draw range because visible-command reuse
+		// must invalidate when the same meshlet span starts reading a different
+		// resident page, fallback page, or page-local byte slice.
+		std::uint32_t pageId = 0u;
+		std::uint32_t fallbackPageId = 0xffffffffu;
+		VirtualGeometryPagePayloadSource payloadSource = VirtualGeometryPagePayloadSource::Unknown;
+		VirtualGeometryEmittedPageSource emittedSource = VirtualGeometryEmittedPageSource::None;
+		std::uint64_t pagePayloadByteOffset = 0u;
+		std::uint64_t pagePayloadByteSize = 0u;
 	};
 
 	struct VirtualGeometrySelectedClusterRecord
@@ -71,14 +80,45 @@ namespace TerraEngine::Renderer {
 		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
 		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
 		std::uint32_t pageId = 0u;
+		std::uint32_t fallbackPageId = 0xffffffffu;
 		std::uint32_t clusterId = 0u;
 		std::uint32_t desiredLodIndex = 0u;
 		float screenImportance = 0.0f;
 		bool fallbackRequired = false;
+		VirtualGeometryPagePayloadSource desiredPayloadSource = VirtualGeometryPagePayloadSource::Unknown;
+		VirtualGeometryPagePayloadSource fallbackPayloadSource = VirtualGeometryPagePayloadSource::Unknown;
 		std::uint32_t packetId = 0u;
 		std::uint32_t batchId = 0u;
 		std::uint32_t packetOffset = 0u;
 		std::uint32_t packetCount = 0u;
+	};
+
+	struct VirtualGeometryPageRequestRecord
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		TerraEngine::UUID objectId = TerraEngine::EMPTY_UUID;
+		std::uint32_t pageId = 0u;
+		std::uint32_t fallbackPageId = 0xffffffffu;
+		std::uint32_t clusterId = 0u;
+		std::uint32_t desiredLodIndex = 0u;
+		std::int32_t priority = 0;
+		float screenImportance = 0.0f;
+		bool fallbackRequired = false;
+		bool fallbackRequest = false;
+		VirtualGeometryPagePayloadSource payloadSource = VirtualGeometryPagePayloadSource::Unknown;
+		VirtualGeometryEmittedPageSource expectedEmission = VirtualGeometryEmittedPageSource::None;
+		std::string reason;
+	};
+
+	struct VirtualGeometryResidentPageSetRecord
+	{
+		TerraEngine::UUID meshId = TerraEngine::EMPTY_UUID;
+		std::uint64_t residentBytes = 0u;
+		std::uint64_t pinnedFallbackBytes = 0u;
+		std::uint32_t residentPageCount = 0u;
+		std::uint32_t pinnedFallbackPageCount = 0u;
+		std::vector<std::uint32_t> residentPageIds;
+		std::vector<std::uint32_t> fallbackPageIds;
 	};
 
 	struct VirtualGeometryClusterSelectionResult
@@ -148,6 +188,11 @@ namespace TerraEngine::Renderer {
 		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
+		std::vector<VirtualGeometryPageRequestRecord> pageRequests;
+		std::vector<VirtualGeometryResidentPageSetRecord> residentPageSets;
+		std::vector<VirtualGeometryPagePayloadRecord> residentPagePayloads;
+		std::vector<VirtualGeometryEmittedPageSourceRecord> emittedPageSources;
+		std::vector<VirtualGeometryPageRetirementRecord> pageRetirements;
 		std::vector<PageResidencyRecord> pageResidency;
 		std::vector<FallbackCoverageChain> fallbackCoverage;
 		std::vector<HiZRegressionSnapshot> hiZRegressionSnapshots;
@@ -184,6 +229,11 @@ namespace TerraEngine::Renderer {
 		std::vector<VirtualGeometryGpuFallbackRecord> gpuFallbackRecords;
 		std::vector<CompactedVisibilitySet> compactionResults;
 		std::vector<VirtualGeometryPageNeedRecord> pageNeeds;
+		std::vector<VirtualGeometryPageRequestRecord> pageRequests;
+		std::vector<VirtualGeometryResidentPageSetRecord> residentPageSets;
+		std::vector<VirtualGeometryPagePayloadRecord> residentPagePayloads;
+		std::vector<VirtualGeometryEmittedPageSourceRecord> emittedPageSources;
+		std::vector<VirtualGeometryPageRetirementRecord> pageRetirements;
 		std::vector<PageResidencyRecord> pageResidency;
 		std::vector<FallbackCoverageChain> fallbackCoverage;
 		std::vector<HiZRegressionSnapshot> hiZRegressionSnapshots;

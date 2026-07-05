@@ -305,7 +305,7 @@ void SceneViewWindow::OnGui() {
 		ImGui::Text("Scene rendering not available.");
 	}
 	RenderStatsSnapshot sceneStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Scene);
-	if (m_ShowVirtualGeometryDiagnostics && sceneStats.valid && (sceneStats.virtualGeometryClusterPackets > 0u || sceneStats.virtualGeometrySubmittedBatches > 0u))
+	if (m_ShowVirtualGeometryDiagnostics && sceneStats.valid && (sceneStats.virtualGeometryClusterPackets > 0u || sceneStats.virtualGeometrySubmittedBatches > 0u || sceneStats.virtualGeometryResidentPagePayloads > 0u || sceneStats.virtualGeometryEmittedHighDetailPages > 0u || sceneStats.virtualGeometryEmittedFallbackPages > 0u))
 	{
 		const std::string packetText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
 			"VG Cluster Packets",
@@ -349,7 +349,25 @@ void SceneViewWindow::OnGui() {
 			+ std::to_string(sceneStats.visibleStreamingUniqueMeshes + sceneStats.visibleStreamingUniqueMaterials + sceneStats.visibleStreamingUniqueTextures)
 			+ ", deduped "
 			+ std::to_string(sceneStats.visibleStreamingDuplicateTouchesEliminated);
-		const char* lines[] = { packetText.c_str(), batchText.c_str(), gpuPacketText.c_str(), generatedText.c_str(), dispatchText.c_str(), gpuFallbackText.c_str(), compactText.c_str(), rejectedText.c_str(), fallbackText.c_str(), reuseText.c_str(), hiZBaselineText.c_str() };
+		const std::string pageSourceText = "VG Page Sources H/F/E/M: "
+			+ std::to_string(sceneStats.virtualGeometryEmittedHighDetailPages)
+			+ "/"
+			+ std::to_string(sceneStats.virtualGeometryEmittedFallbackPages)
+			+ "/"
+			+ std::to_string(sceneStats.virtualGeometryEmittedEmbeddedFallbackPages)
+			+ "/"
+			+ std::to_string(sceneStats.virtualGeometryMissingPageSources);
+		const std::string pagePayloadText = "VG Page Payload Bytes R/F/E: "
+			+ std::to_string(sceneStats.virtualGeometryResidentPagePayloadBytes)
+			+ "/"
+			+ std::to_string(sceneStats.virtualGeometryFallbackPagePayloadBytes)
+			+ "/"
+			+ std::to_string(sceneStats.virtualGeometryEmbeddedFallbackBytes);
+		const std::string pageRequestText = "VG Page Requests/Retires: "
+			+ std::to_string(sceneStats.virtualGeometryPageSourceRequests)
+			+ "/"
+			+ std::to_string(sceneStats.virtualGeometryPageSourceRetirements);
+		const char* lines[] = { packetText.c_str(), batchText.c_str(), gpuPacketText.c_str(), generatedText.c_str(), dispatchText.c_str(), gpuFallbackText.c_str(), compactText.c_str(), rejectedText.c_str(), fallbackText.c_str(), pageSourceText.c_str(), pagePayloadText.c_str(), pageRequestText.c_str(), reuseText.c_str(), hiZBaselineText.c_str() };
 		float textWidth = 0.0f;
 		for (const char* line : lines)
 		{

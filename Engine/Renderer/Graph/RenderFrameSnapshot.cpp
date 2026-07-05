@@ -41,6 +41,12 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, range.selectedClusterCount);
 			HashCombine(hash, range.pageNeedOffset);
 			HashCombine(hash, range.pageNeedCount);
+			HashCombine(hash, range.pageId);
+			HashCombine(hash, range.fallbackPageId);
+			HashCombine(hash, static_cast<std::uint64_t>(range.payloadSource));
+			HashCombine(hash, static_cast<std::uint64_t>(range.emittedSource));
+			HashCombine(hash, range.pagePayloadByteOffset);
+			HashCombine(hash, range.pagePayloadByteSize);
 		}
 
 		void HashVirtualGeometryCounters(std::uint64_t& hash, const VirtualGeometryCounterSnapshot& counters)
@@ -64,6 +70,10 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, counters.requestedPages);
 			HashCombine(hash, counters.missingPages);
 			HashCombine(hash, counters.fallbackSubstitutions);
+			HashCombine(hash, counters.residentPagePayloads);
+			HashCombine(hash, counters.fallbackPagePayloads);
+			HashCombine(hash, counters.embeddedFallbackPayloads);
+			HashCombine(hash, counters.emittedPageSources);
 			HashCombine(hash, counters.authoritative ? 1u : 0u);
 		}
 
@@ -128,6 +138,10 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, packet.meshletCount);
 			HashCombine(hash, packet.pageId);
 			HashCombine(hash, packet.fallbackPageId);
+			HashCombine(hash, static_cast<std::uint64_t>(packet.payloadSource));
+			HashCombine(hash, static_cast<std::uint64_t>(packet.emittedSource));
+			HashCombine(hash, packet.pagePayloadByteOffset);
+			HashCombine(hash, packet.pagePayloadByteSize);
 			HashCombine(hash, packet.debugIdentity);
 			HashCombine(hash, packet.fallbackPacket ? 1u : 0u);
 		}
@@ -181,6 +195,10 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, packet.meshletCount);
 			HashCombine(hash, packet.pageId);
 			HashCombine(hash, packet.fallbackPageId);
+			HashCombine(hash, static_cast<std::uint64_t>(packet.payloadSource));
+			HashCombine(hash, static_cast<std::uint64_t>(packet.emittedSource));
+			HashCombine(hash, packet.pagePayloadByteOffset);
+			HashCombine(hash, packet.pagePayloadByteSize);
 			HashCombine(hash, packet.debugIdentity);
 			HashCombine(hash, packet.flags);
 		}
@@ -293,17 +311,114 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, page.coveredClusterOffset);
 			HashCombine(hash, page.coveredClusterCount);
 			HashCombine(hash, page.byteCost);
+			HashCombine(hash, page.payloadByteOffset);
+			HashCombine(hash, page.payloadByteSize);
 			HashCombine(hash, static_cast<std::uint64_t>(page.state));
+			HashCombine(hash, static_cast<std::uint64_t>(page.payloadSource));
 			HashCombine(hash, page.fallbackPageId);
 			HashCombine(hash, page.isFallback ? 1u : 0u);
+			HashCombine(hash, page.protectedFallback ? 1u : 0u);
 			HashCombine(hash, page.lastRequestedFrame);
 			HashCombine(hash, page.lastUsedFrame);
+			HashCombine(hash, page.retirementFrame);
 			HashCombine(hash, static_cast<std::uint64_t>(page.priority));
 			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(page.failureReason)));
 			for (const std::uint32_t clusterId : page.coveredClusters)
 			{
 				HashCombine(hash, clusterId);
 			}
+		}
+
+		void HashVirtualGeometryPageRequestRecord(std::uint64_t& hash, const VirtualGeometryPageRequestRecord& request)
+		{
+			HashCombine(hash, HashUuid(request.meshId));
+			HashCombine(hash, HashUuid(request.objectId));
+			HashCombine(hash, request.pageId);
+			HashCombine(hash, request.fallbackPageId);
+			HashCombine(hash, request.clusterId);
+			HashCombine(hash, request.desiredLodIndex);
+			HashCombine(hash, static_cast<std::uint64_t>(request.priority));
+			HashCombine(hash, static_cast<std::uint32_t>(std::round(request.screenImportance * 1000.0f)));
+			HashCombine(hash, request.fallbackRequired ? 1u : 0u);
+			HashCombine(hash, request.fallbackRequest ? 1u : 0u);
+			HashCombine(hash, static_cast<std::uint64_t>(request.payloadSource));
+			HashCombine(hash, static_cast<std::uint64_t>(request.expectedEmission));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(request.reason)));
+		}
+
+		void HashVirtualGeometryResidentPageSetRecord(std::uint64_t& hash, const VirtualGeometryResidentPageSetRecord& set)
+		{
+			HashCombine(hash, HashUuid(set.meshId));
+			HashCombine(hash, set.residentBytes);
+			HashCombine(hash, set.pinnedFallbackBytes);
+			HashCombine(hash, set.residentPageCount);
+			HashCombine(hash, set.pinnedFallbackPageCount);
+			for (const std::uint32_t pageId : set.residentPageIds)
+			{
+				HashCombine(hash, pageId);
+			}
+			for (const std::uint32_t pageId : set.fallbackPageIds)
+			{
+				HashCombine(hash, pageId);
+			}
+		}
+
+		void HashVirtualGeometryPagePayloadRecord(std::uint64_t& hash, const VirtualGeometryPagePayloadRecord& payload)
+		{
+			HashCombine(hash, HashUuid(payload.meshId));
+			HashCombine(hash, payload.pageId);
+			HashCombine(hash, payload.fallbackPageId);
+			HashCombine(hash, static_cast<std::uint64_t>(payload.source));
+			HashCombine(hash, payload.selectedLod);
+			HashCombine(hash, payload.clusterOffset);
+			HashCombine(hash, payload.clusterCount);
+			HashCombine(hash, payload.meshletOffset);
+			HashCombine(hash, payload.meshletCount);
+			HashCombine(hash, payload.vertexOffset);
+			HashCombine(hash, payload.vertexCount);
+			HashCombine(hash, payload.primitiveOffset);
+			HashCombine(hash, payload.primitiveCount);
+			HashCombine(hash, payload.materialSectionId);
+			HashCombine(hash, payload.payloadByteOffset);
+			HashCombine(hash, payload.payloadByteSize);
+			HashCombine(hash, payload.resident ? 1u : 0u);
+			HashCombine(hash, payload.pinnedFallback ? 1u : 0u);
+			HashCombine(hash, payload.valid ? 1u : 0u);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(payload.diagnostic)));
+		}
+
+		void HashVirtualGeometryEmittedPageSourceRecord(std::uint64_t& hash, const VirtualGeometryEmittedPageSourceRecord& emitted)
+		{
+			HashCombine(hash, emitted.viewId);
+			HashCombine(hash, static_cast<std::uint64_t>(emitted.viewType));
+			HashCombine(hash, emitted.frameId);
+			HashCombine(hash, HashUuid(emitted.objectId));
+			HashCombine(hash, HashUuid(emitted.meshId));
+			HashCombine(hash, HashUuid(emitted.materialId));
+			HashCombine(hash, emitted.clusterId);
+			HashCombine(hash, emitted.selectedLod);
+			HashCombine(hash, emitted.pageId);
+			HashCombine(hash, emitted.fallbackPageId);
+			HashCombine(hash, static_cast<std::uint64_t>(emitted.payloadSource));
+			HashCombine(hash, static_cast<std::uint64_t>(emitted.emittedSource));
+			HashCombine(hash, emitted.meshletOffset);
+			HashCombine(hash, emitted.meshletCount);
+			HashCombine(hash, emitted.payloadByteOffset);
+			HashCombine(hash, emitted.payloadByteSize);
+			HashCombine(hash, emitted.fallbackSubstitution ? 1u : 0u);
+			HashCombine(hash, emitted.conservativeEmbeddedFallback ? 1u : 0u);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(emitted.reason)));
+		}
+
+		void HashVirtualGeometryPageRetirementRecord(std::uint64_t& hash, const VirtualGeometryPageRetirementRecord& retirement)
+		{
+			HashCombine(hash, HashUuid(retirement.meshId));
+			HashCombine(hash, retirement.pageId);
+			HashCombine(hash, retirement.frameId);
+			HashCombine(hash, retirement.byteSize);
+			HashCombine(hash, retirement.protectedFallback ? 1u : 0u);
+			HashCombine(hash, retirement.retired ? 1u : 0u);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(retirement.reason)));
 		}
 
 		void HashFallbackCoverageChain(std::uint64_t& hash, const FallbackCoverageChain& chain)
@@ -366,6 +481,8 @@ namespace TerraEngine::Renderer {
 		{
 			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(gate.gateId)));
 			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(gate.fixtureId)));
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(TerraEngine::ToHexString(gate.assetId))));
+			HashCombine(hash, gate.pageId);
 			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(gate.metricName)));
 			HashCombine(hash, static_cast<std::uint32_t>(std::round(gate.threshold * 1000.0f)));
 			HashCombine(hash, static_cast<std::uint32_t>(std::round(gate.actual * 1000.0f)));
@@ -450,6 +567,54 @@ namespace TerraEngine::Renderer {
 					return left.viewId < right.viewId;
 				}
 				return left.reason < right.reason;
+			});
+			std::sort(state.pageRequests.begin(), state.pageRequests.end(), [](const VirtualGeometryPageRequestRecord& left, const VirtualGeometryPageRequestRecord& right) {
+				if (left.priority != right.priority)
+				{
+					return left.priority > right.priority;
+				}
+				if (left.pageId != right.pageId)
+				{
+					return left.pageId < right.pageId;
+				}
+				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+			});
+			std::sort(state.residentPageSets.begin(), state.residentPageSets.end(), [](const VirtualGeometryResidentPageSetRecord& left, const VirtualGeometryResidentPageSetRecord& right) {
+				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+			});
+			for (VirtualGeometryResidentPageSetRecord& set : state.residentPageSets)
+			{
+				std::sort(set.residentPageIds.begin(), set.residentPageIds.end());
+				std::sort(set.fallbackPageIds.begin(), set.fallbackPageIds.end());
+			}
+			std::sort(state.residentPagePayloads.begin(), state.residentPagePayloads.end(), [](const VirtualGeometryPagePayloadRecord& left, const VirtualGeometryPagePayloadRecord& right) {
+				if (left.pageId != right.pageId)
+				{
+					return left.pageId < right.pageId;
+				}
+				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+			});
+			std::sort(state.emittedPageSources.begin(), state.emittedPageSources.end(), [](const VirtualGeometryEmittedPageSourceRecord& left, const VirtualGeometryEmittedPageSourceRecord& right) {
+				if (left.viewId != right.viewId)
+				{
+					return left.viewId < right.viewId;
+				}
+				if (left.clusterId != right.clusterId)
+				{
+					return left.clusterId < right.clusterId;
+				}
+				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
+			});
+			std::sort(state.pageRetirements.begin(), state.pageRetirements.end(), [](const VirtualGeometryPageRetirementRecord& left, const VirtualGeometryPageRetirementRecord& right) {
+				if (left.frameId != right.frameId)
+				{
+					return left.frameId < right.frameId;
+				}
+				if (left.pageId != right.pageId)
+				{
+					return left.pageId < right.pageId;
+				}
+				return TerraEngine::ToHexString(left.meshId) < TerraEngine::ToHexString(right.meshId);
 			});
 			std::sort(state.pageResidency.begin(), state.pageResidency.end(), [](const PageResidencyRecord& left, const PageResidencyRecord& right) {
 				if (left.pageId != right.pageId)
@@ -537,6 +702,26 @@ namespace TerraEngine::Renderer {
 			for (const VirtualGeometryGpuFallbackRecord& fallback : state.gpuFallbackRecords)
 			{
 				HashVirtualGeometryGpuFallbackRecord(hash, fallback);
+			}
+			for (const VirtualGeometryPageRequestRecord& request : state.pageRequests)
+			{
+				HashVirtualGeometryPageRequestRecord(hash, request);
+			}
+			for (const VirtualGeometryResidentPageSetRecord& set : state.residentPageSets)
+			{
+				HashVirtualGeometryResidentPageSetRecord(hash, set);
+			}
+			for (const VirtualGeometryPagePayloadRecord& payload : state.residentPagePayloads)
+			{
+				HashVirtualGeometryPagePayloadRecord(hash, payload);
+			}
+			for (const VirtualGeometryEmittedPageSourceRecord& emitted : state.emittedPageSources)
+			{
+				HashVirtualGeometryEmittedPageSourceRecord(hash, emitted);
+			}
+			for (const VirtualGeometryPageRetirementRecord& retirement : state.pageRetirements)
+			{
+				HashVirtualGeometryPageRetirementRecord(hash, retirement);
 			}
 			for (const PageResidencyRecord& page : state.pageResidency)
 			{
@@ -754,9 +939,13 @@ namespace TerraEngine::Renderer {
 				HashCombine(hash, HashUuid(need.objectId));
 				HashCombine(hash, HashUuid(need.meshId));
 				HashCombine(hash, need.pageId);
+				HashCombine(hash, need.fallbackPageId);
 				HashCombine(hash, need.clusterId);
 				HashCombine(hash, need.desiredLodIndex);
+				HashCombine(hash, static_cast<std::uint32_t>(std::round(need.screenImportance * 1000.0f)));
 				HashCombine(hash, need.fallbackRequired ? 1u : 0u);
+				HashCombine(hash, static_cast<std::uint64_t>(need.desiredPayloadSource));
+				HashCombine(hash, static_cast<std::uint64_t>(need.fallbackPayloadSource));
 				HashCombine(hash, need.packetId);
 				HashCombine(hash, need.batchId);
 				HashCombine(hash, need.packetOffset);
@@ -812,9 +1001,13 @@ namespace TerraEngine::Renderer {
 				HashCombine(hash, HashUuid(need.objectId));
 				HashCombine(hash, HashUuid(need.meshId));
 				HashCombine(hash, need.pageId);
+				HashCombine(hash, need.fallbackPageId);
 				HashCombine(hash, need.clusterId);
 				HashCombine(hash, need.desiredLodIndex);
+				HashCombine(hash, static_cast<std::uint32_t>(std::round(need.screenImportance * 1000.0f)));
 				HashCombine(hash, need.fallbackRequired ? 1u : 0u);
+				HashCombine(hash, static_cast<std::uint64_t>(need.desiredPayloadSource));
+				HashCombine(hash, static_cast<std::uint64_t>(need.fallbackPayloadSource));
 				HashCombine(hash, need.packetId);
 				HashCombine(hash, need.batchId);
 				HashCombine(hash, need.packetOffset);
@@ -850,6 +1043,11 @@ namespace TerraEngine::Renderer {
 				+ state.gpuFallbackRecords.size()
 				+ state.compactionResults.size()
 				+ state.pageNeeds.size()
+				+ state.pageRequests.size()
+				+ state.residentPageSets.size()
+				+ state.residentPagePayloads.size()
+				+ state.emittedPageSources.size()
+				+ state.pageRetirements.size()
 				+ state.pageResidency.size()
 				+ state.fallbackCoverage.size()
 				+ state.hiZRegressionSnapshots.size()
@@ -874,6 +1072,11 @@ namespace TerraEngine::Renderer {
 				+ state.gpuFallbackRecords.size()
 				+ state.compactionResults.size()
 				+ state.pageNeeds.size()
+				+ state.pageRequests.size()
+				+ state.residentPageSets.size()
+				+ state.residentPagePayloads.size()
+				+ state.emittedPageSources.size()
+				+ state.pageRetirements.size()
 				+ state.pageResidency.size()
 				+ state.fallbackCoverage.size()
 				+ state.hiZRegressionSnapshots.size()
@@ -1021,9 +1224,39 @@ namespace TerraEngine::Renderer {
 		}
 		for (const PageResidencyRecord& page : state.pageResidency)
 		{
-			if (page.state == GeometryPageState::Resident || page.state == GeometryPageState::Pinned)
+			if (page.state == GeometryPageState::Resident
+				|| page.state == GeometryPageState::Pinned
+				|| page.state == GeometryPageState::PendingRetirement)
 			{
 				++counters.residentPages;
+			}
+		}
+		for (const VirtualGeometryPagePayloadRecord& payload : state.residentPagePayloads)
+		{
+			if (!payload.resident && payload.source != VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback)
+			{
+				continue;
+			}
+			++counters.residentPagePayloads;
+			if (payload.source == VirtualGeometryPagePayloadSource::ResidentFallbackPayload || payload.pinnedFallback)
+			{
+				++counters.fallbackPagePayloads;
+			}
+			if (payload.source == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback)
+			{
+				++counters.embeddedFallbackPayloads;
+			}
+		}
+		for (const VirtualGeometryEmittedPageSourceRecord& emitted : state.emittedPageSources)
+		{
+			++counters.emittedPageSources;
+			if (emitted.emittedSource == VirtualGeometryEmittedPageSource::FallbackPage || emitted.fallbackSubstitution)
+			{
+				++counters.fallbackSubstitutions;
+			}
+			if (emitted.emittedSource == VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback || emitted.conservativeEmbeddedFallback)
+			{
+				++counters.embeddedFallbackPayloads;
 			}
 		}
 		for (const VirtualGeometrySelectedClusterRecord& cluster : state.selectedClusters)
@@ -1163,6 +1396,11 @@ namespace TerraEngine::Renderer {
 		visibility.gpuFallbackRecords = state.gpuFallbackRecords;
 		visibility.compactionResults = state.compactionResults;
 		visibility.pageNeeds = state.pageNeeds;
+		visibility.pageRequests = state.pageRequests;
+		visibility.residentPageSets = state.residentPageSets;
+		visibility.residentPagePayloads = state.residentPagePayloads;
+		visibility.emittedPageSources = state.emittedPageSources;
+		visibility.pageRetirements = state.pageRetirements;
 		visibility.pageResidency = state.pageResidency;
 		visibility.fallbackCoverage = state.fallbackCoverage;
 		visibility.hiZRegressionSnapshots = state.hiZRegressionSnapshots;
@@ -1379,6 +1617,9 @@ namespace TerraEngine::Renderer {
 						++viewDiagnostics.residentPages;
 						++viewDiagnostics.pinnedFallbackPages;
 						break;
+					case GeometryPageState::PendingRetirement:
+						++viewDiagnostics.residentPages;
+						break;
 					case GeometryPageState::Requested:
 					case GeometryPageState::Loading:
 					case GeometryPageState::PendingIO:
@@ -1394,6 +1635,7 @@ namespace TerraEngine::Renderer {
 						++viewDiagnostics.missingPages;
 						break;
 					case GeometryPageState::Evicted:
+					case GeometryPageState::Retired:
 						++viewDiagnostics.evictedPages;
 						++viewDiagnostics.missingPages;
 						break;

@@ -70,6 +70,10 @@ namespace {
 			HashCombine(signature, packet.meshletCount);
 			HashCombine(signature, packet.pageId);
 			HashCombine(signature, packet.fallbackPageId);
+			HashCombine(signature, static_cast<std::uint64_t>(packet.payloadSource));
+			HashCombine(signature, static_cast<std::uint64_t>(packet.emittedSource));
+			HashCombine(signature, packet.pagePayloadByteOffset);
+			HashCombine(signature, packet.pagePayloadByteSize);
 			HashCombine(signature, packet.debugIdentity);
 		}
 		for (const ClusterWorkBatch& batch : state.clusterBatches)
@@ -107,6 +111,10 @@ namespace {
 			HashCombine(signature, packet.meshletCount);
 			HashCombine(signature, packet.pageId);
 			HashCombine(signature, packet.fallbackPageId);
+			HashCombine(signature, static_cast<std::uint64_t>(packet.payloadSource));
+			HashCombine(signature, static_cast<std::uint64_t>(packet.emittedSource));
+			HashCombine(signature, packet.pagePayloadByteOffset);
+			HashCombine(signature, packet.pagePayloadByteSize);
 			HashCombine(signature, packet.debugIdentity);
 			HashCombine(signature, packet.flags);
 		}

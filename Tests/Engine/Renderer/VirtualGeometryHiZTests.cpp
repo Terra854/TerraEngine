@@ -3,9 +3,14 @@
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RHI/Vulkan/VulkanHiZ.h"
+#include "Renderer/RenderSystem.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <glm/glm.hpp>
+#include <sstream>
+#include <string>
 
 namespace TerraEngine::Tests
 {
@@ -46,6 +51,23 @@ namespace TerraEngine::Tests
 			input.nearPlaneGuardPassed = true;
 			input.thinGeometryGuardPassed = true;
 			return input;
+		}
+
+		std::string ReadSourceFile(const std::filesystem::path& relativePath)
+		{
+			// The Hi-Z page-transition tests inspect shader/backend source
+			// contracts so they can run on CI machines without a Vulkan device.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath;
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
+		bool ContainsText(const std::string& text, const std::string& token)
+		{
+			return text.find(token) != std::string::npos;
 		}
 	}
 
@@ -124,6 +146,167 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.gpuPacketRecordCount, "The diagnostics snapshot should still expose the GPU packet table while checking Hi-Z.");
 			context.ExpectEqual(1u, diagnostics.validGeneratedSubmissionCount, "Generated submissions should remain valid while Hi-Z baseline records are matched.");
 			context.ExpectEqual(0u, diagnostics.hiZFalseOcclusionRiskWarnings, "Matched GPU packet Hi-Z baselines should not publish false-occlusion risk warnings.");
+		});
+
+		registry.Add("VirtualGeometry.HiZ.US5.PageSourceTransitionsStayDiagnosticOnly", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 9u;
+			visibility.frameId = 7106u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::GPUReadback;
+			visibility.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			visibility.hiZValidationState.pyramidReady = true;
+			visibility.hiZValidationState.pyramidSize = glm::uvec2(1920u, 1080u);
+			visibility.hiZValidationState.renderSize = glm::uvec2(1920u, 1080u);
+			visibility.hiZValidationState.cameraSignature = 0x71060010u;
+			visibility.hiZValidationState.depthSceneSignature = 0x71060020u;
+			visibility.hiZValidationState.warmupFrames = 5u;
+			visibility.hiZValidationState.failOpen = false;
+
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			VirtualGeometryPagePayloadRecord highDetailPayload{};
+			highDetailPayload.meshId = meshId;
+			highDetailPayload.pageId = 5u;
+			highDetailPayload.fallbackPageId = 1u;
+			highDetailPayload.source = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			highDetailPayload.payloadByteOffset = 4096u;
+			highDetailPayload.payloadByteSize = 2048u;
+			highDetailPayload.resident = true;
+			highDetailPayload.valid = true;
+			visibility.residentPagePayloads.push_back(highDetailPayload);
+
+			VirtualGeometryPagePayloadRecord fallbackPayload = highDetailPayload;
+			fallbackPayload.pageId = 1u;
+			fallbackPayload.fallbackPageId = 1u;
+			fallbackPayload.source = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			fallbackPayload.payloadByteOffset = 0u;
+			fallbackPayload.payloadByteSize = 1024u;
+			fallbackPayload.pinnedFallback = true;
+			visibility.residentPagePayloads.push_back(fallbackPayload);
+
+			VirtualGeometryEmittedPageSourceRecord highDetailEmission{};
+			highDetailEmission.viewId = visibility.outputId;
+			highDetailEmission.viewType = visibility.viewType;
+			highDetailEmission.frameId = visibility.frameId;
+			highDetailEmission.meshId = meshId;
+			highDetailEmission.materialId = materialId;
+			highDetailEmission.pageId = highDetailPayload.pageId;
+			highDetailEmission.fallbackPageId = highDetailPayload.fallbackPageId;
+			highDetailEmission.payloadSource = highDetailPayload.source;
+			highDetailEmission.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			highDetailEmission.payloadByteOffset = highDetailPayload.payloadByteOffset;
+			highDetailEmission.payloadByteSize = highDetailPayload.payloadByteSize;
+			visibility.emittedPageSources.push_back(highDetailEmission);
+
+			VirtualGeometryEmittedPageSourceRecord fallbackEmission = highDetailEmission;
+			fallbackEmission.pageId = fallbackPayload.pageId;
+			fallbackEmission.fallbackPageId = fallbackPayload.fallbackPageId;
+			fallbackEmission.payloadSource = fallbackPayload.source;
+			fallbackEmission.emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
+			fallbackEmission.fallbackSubstitution = true;
+			fallbackEmission.payloadByteOffset = fallbackPayload.payloadByteOffset;
+			fallbackEmission.payloadByteSize = fallbackPayload.payloadByteSize;
+			fallbackEmission.reason = "resident fallback substituted while detail page streams";
+			visibility.emittedPageSources.push_back(fallbackEmission);
+
+			HiZRegressionSnapshot baseline{};
+			baseline.viewId = visibility.outputId;
+			baseline.viewType = visibility.viewType;
+			baseline.frameIndex = visibility.frameId;
+			baseline.state = VirtualGeometryHiZState::Active;
+			baseline.testedMeshlets = 48u;
+			baseline.visibleMeshlets = 48u;
+			baseline.recoveryFrames = visibility.hiZValidationState.warmupFrames;
+			baseline.baselineMatched = true;
+			visibility.hiZRegressionSnapshots.push_back(baseline);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.Expect(diagnostics.hiZActive, "Resident/fallback page-source transitions should not disable an active current Hi-Z pyramid.");
+			context.Expect(diagnostics.hiZBaselineMatched, "Page-source transitions should preserve the accepted Hi-Z baseline.");
+			context.ExpectEqual(0u, diagnostics.hiZFalseOcclusionRiskWarnings, "Matched page-source transitions should not raise false-occlusion risk warnings.");
+			context.ExpectEqual(1u, diagnostics.pageSources.highDetailPayloads, "The high-detail resident payload should remain visible to diagnostics.");
+			context.ExpectEqual(1u, diagnostics.pageSources.fallbackPayloads, "The fallback resident payload should remain visible to diagnostics.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedHighDetailSources, "High-detail emission should be counted independently of fallback emission.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedFallbackSources, "Fallback emission should be counted independently of high-detail emission.");
+		});
+
+		registry.Add("VirtualGeometry.HiZ.US5.PageIdentityIsHashedButTaskPathHasNoQualityTier", [](TestContext& context) {
+			const std::string vulkanSource = ReadSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContext.cpp");
+			const std::string taskShader = ReadSourceFile("Engine/Shaders/Default/Default.task.hlsl");
+
+			context.Expect(ContainsText(vulkanSource, "command.virtualGeometryPageId"), "Vulkan Hi-Z depth signatures should include the resident page id.");
+			context.Expect(ContainsText(vulkanSource, "command.virtualGeometryFallbackPageId"), "Vulkan Hi-Z depth signatures should include fallback page identity.");
+			context.Expect(ContainsText(vulkanSource, "command.virtualGeometryPayloadSource"), "Vulkan Hi-Z depth signatures should include payload source identity.");
+			context.Expect(ContainsText(vulkanSource, "command.virtualGeometryEmittedSource"), "Vulkan Hi-Z depth signatures should include emitted source identity.");
+			context.Expect(ContainsText(vulkanSource, "command.virtualGeometryPagePayloadByteOffset"), "Vulkan Hi-Z depth signatures should include page-local payload byte offsets.");
+			context.Expect(ContainsText(vulkanSource, "command.virtualGeometryPagePayloadByteSize"), "Vulkan Hi-Z depth signatures should include page-local payload byte sizes.");
+			context.Expect(ContainsText(taskShader, "pagePayloadSeed"), "Task shader packet metadata should still read page payload source identity.");
+			context.Expect(ContainsText(taskShader, "does not alter the Hi-Z projection"), "Task shader comments should state that page payload identity does not change Hi-Z projection.");
+			context.Expect(!ContainsText(taskShader, "HiZQuality"), "Task shader should still avoid selectable Hi-Z quality tiers.");
+		});
+
+		registry.Add("VirtualGeometry.HiZ.US5.PagePayloadSizeDoesNotBroadenClusterPacketBounds", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset{};
+			asset.assetId = TerraEngine::GenerateUUID();
+			asset.cullableGroups.resize(4u);
+			for (std::uint32_t groupIndex = 0u; groupIndex < 4u; ++groupIndex)
+			{
+				asset.cullableGroups[groupIndex].groupIndex = groupIndex;
+				asset.cullableGroups[groupIndex].lodIndex = 0u;
+				asset.cullableGroups[groupIndex].meshletIndex = 20u + groupIndex;
+				asset.cullableGroups[groupIndex].pageId = 3u;
+			}
+
+			GeometryPageRuntime page{};
+			page.pageId = 3u;
+			page.firstLodIndex = 0u;
+			page.lodCount = 1u;
+			page.groupOffset = 0u;
+			page.groupCount = 4u;
+			page.state = GeometryPageState::Resident;
+			page.byteSize = 2048u;
+			page.payloadByteOffset = 512u;
+			page.payloadByteSize = 2048u;
+			page.fallbackPageId = 0u;
+			asset.pages.push_back(page);
+
+			VirtualGeometryClusterRuntime cluster{};
+			cluster.clusterId = 11u;
+			cluster.lodIndex = 0u;
+			cluster.firstGroupIndex = 0u;
+			cluster.groupCount = 4u;
+			cluster.pageId = page.pageId;
+			cluster.boundsCenter = glm::vec3(2.0f, -1.0f, 5.0f);
+			cluster.boundsRadius = 0.75f;
+			asset.clusters.push_back(cluster);
+
+			TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord selected{};
+			selected.meshId = TerraEngine::GenerateUUID();
+			selected.objectId = TerraEngine::GenerateUUID();
+			selected.clusterId = cluster.clusterId;
+			selected.lodIndex = cluster.lodIndex;
+			selected.pageId = page.pageId;
+
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			const std::vector<VirtualGeometryClusterPacket> firstPackets =
+				RenderSystem::BuildVirtualGeometryClusterPackets(asset, { selected }, materialId, RenderViewType::Game, 2u);
+			asset.pages.front().payloadByteSize = 8192u;
+			asset.pages.front().byteSize = 8192u;
+			const std::vector<VirtualGeometryClusterPacket> republishedPackets =
+				RenderSystem::BuildVirtualGeometryClusterPackets(asset, { selected }, materialId, RenderViewType::Game, 2u);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), firstPackets.size(), "The test cluster should build one Hi-Z-compatible packet.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), republishedPackets.size(), "Republishing the page payload should still build one packet.");
+			context.ExpectEqual(2048ull, firstPackets.front().pagePayloadByteSize, "The first packet should expose the first resident page byte size.");
+			context.ExpectEqual(8192ull, republishedPackets.front().pagePayloadByteSize, "The republished packet should expose the changed resident page byte size.");
+			context.Expect(firstPackets.front().boundsMin == republishedPackets.front().boundsMin, "Page payload byte-size changes should not broaden packet minimum bounds.");
+			context.Expect(firstPackets.front().boundsMax == republishedPackets.front().boundsMax, "Page payload byte-size changes should not broaden packet maximum bounds.");
+			context.Expect(firstPackets.front().boundsMin == cluster.boundsCenter - glm::vec3(cluster.boundsRadius), "Packet minimum bounds should come from the selected cluster.");
+			context.Expect(firstPackets.front().boundsMax == cluster.boundsCenter + glm::vec3(cluster.boundsRadius), "Packet maximum bounds should come from the selected cluster.");
 		});
 
 		registry.Add("VirtualGeometry.HiZ.US7.BatchedPathPublishesBaselineMatch", [](TestContext& context) {

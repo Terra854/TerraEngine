@@ -109,8 +109,8 @@ namespace {
 			context.Expect(texturePolicy.residencyTier == Resource::StreamingResidencyTier::Streamed, "Textures should remain streamable by default because they usually dominate memory.");
 		});
 
-		registry.Add("Resource.Streaming.Policy.TextureMipResidencyUsesSourceMipIndexRange", [](TestContext& context) {
-			Resource::StreamingPolicy policy = Resource::MakeDefaultStreamingPolicy();
+			registry.Add("Resource.Streaming.Policy.TextureMipResidencyUsesSourceMipIndexRange", [](TestContext& context) {
+				Resource::StreamingPolicy policy = Resource::MakeDefaultStreamingPolicy();
 			Resource::TextureMipResidency full = Resource::ResolveTextureMipResidency(policy, 8u);
 
 			context.ExpectEqual(std::uint32_t{0u}, full.sourceMipOffset, "Mip streaming disabled should keep the original base mip.");
@@ -125,7 +125,20 @@ namespace {
 			context.ExpectEqual(std::uint32_t{2u}, partial.sourceMipOffset, "Partial residency should start at the configured minimum stream mip index.");
 			context.ExpectEqual(std::uint32_t{6u}, partial.residentMipCount, "Resident mip count should include the selected source mip and every lower-detail tail mip.");
 			context.ExpectEqual(std::uint32_t{8u}, partial.sourceMipCount, "Diagnostics should retain the authored mip count.");
-			context.Expect(partial.partial, "Capped texture residency should be marked as partial.");
-		});
+				context.Expect(partial.partial, "Capped texture residency should be marked as partial.");
+			});
+
+			registry.Add("Resource.Streaming.Policy.VirtualGeometryPageBudgetsDefaultToExplicitOptIn", [](TestContext& context) {
+				Resource::StreamingPolicy policy = Resource::MakeDefaultStreamingPolicy();
+				policy.virtualGeometryPageMemoryBudgetBytes = 64ull * 1024ull * 1024ull;
+				policy.virtualGeometryPageUploadBudgetBytes = 8ull * 1024ull * 1024ull;
+				policy.virtualGeometryPageRetirementBudgetBytes = 16ull * 1024ull * 1024ull;
+
+				const Resource::StreamingPolicy sanitized = Resource::SanitizeStreamingPolicy(policy);
+
+				context.ExpectEqual(64ull * 1024ull * 1024ull, sanitized.virtualGeometryPageMemoryBudgetBytes, "VG page memory budgets should remain explicit streaming policy data.");
+				context.ExpectEqual(8ull * 1024ull * 1024ull, sanitized.virtualGeometryPageUploadBudgetBytes, "VG page upload budgets should survive policy sanitization.");
+				context.ExpectEqual(16ull * 1024ull * 1024ull, sanitized.virtualGeometryPageRetirementBudgetBytes, "VG page retirement budgets should survive policy sanitization.");
+			});
+		}
 	}
-}

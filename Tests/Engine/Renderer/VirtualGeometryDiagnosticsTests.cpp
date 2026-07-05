@@ -159,6 +159,100 @@ namespace TerraEngine::Tests
 			context.Expect(diagnostics.gpuFallbackReason.find("fallback") != std::string::npos, "Diagnostics should preserve source-labeled fallback reasons.");
 		});
 
+		registry.Add("VirtualGeometry.Diagnostics.US6.PublishesPageSourcePayloadAndEmissionCounters", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Scene;
+			visibility.outputId = 8u;
+			visibility.frameId = 9607u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::GPUReadback;
+
+			VirtualGeometryPagePayloadRecord highDetail{};
+			highDetail.meshId = TerraEngine::GenerateUUID();
+			highDetail.pageId = 12u;
+			highDetail.source = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			highDetail.payloadByteSize = 4096u;
+			highDetail.resident = true;
+			visibility.residentPagePayloads.push_back(highDetail);
+
+			VirtualGeometryPagePayloadRecord fallback{};
+			fallback.meshId = highDetail.meshId;
+			fallback.pageId = 2u;
+			fallback.source = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			fallback.payloadByteSize = 1024u;
+			fallback.resident = true;
+			fallback.pinnedFallback = true;
+			visibility.residentPagePayloads.push_back(fallback);
+
+			VirtualGeometryPagePayloadRecord embedded{};
+			embedded.meshId = highDetail.meshId;
+			embedded.pageId = 0u;
+			embedded.source = VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
+			embedded.payloadByteSize = 512u;
+			embedded.resident = true;
+			visibility.residentPagePayloads.push_back(embedded);
+
+			VirtualGeometryEmittedPageSourceRecord emittedHigh{};
+			emittedHigh.viewId = visibility.outputId;
+			emittedHigh.viewType = visibility.viewType;
+			emittedHigh.frameId = visibility.frameId;
+			emittedHigh.meshId = highDetail.meshId;
+			emittedHigh.materialId = TerraEngine::GenerateUUID();
+			emittedHigh.pageId = highDetail.pageId;
+			emittedHigh.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			visibility.emittedPageSources.push_back(emittedHigh);
+
+			VirtualGeometryEmittedPageSourceRecord emittedFallback = emittedHigh;
+			emittedFallback.pageId = fallback.pageId;
+			emittedFallback.fallbackPageId = fallback.pageId;
+			emittedFallback.emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
+			emittedFallback.fallbackSubstitution = true;
+			visibility.emittedPageSources.push_back(emittedFallback);
+
+			VirtualGeometryEmittedPageSourceRecord emittedEmbedded = emittedHigh;
+			emittedEmbedded.pageId = embedded.pageId;
+			emittedEmbedded.emittedSource = VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback;
+			emittedEmbedded.conservativeEmbeddedFallback = true;
+			emittedEmbedded.reason = "legacy embedded fallback used";
+			visibility.emittedPageSources.push_back(emittedEmbedded);
+
+			VirtualGeometryEmittedPageSourceRecord emittedMissing = emittedHigh;
+			emittedMissing.pageId = 99u;
+			emittedMissing.emittedSource = VirtualGeometryEmittedPageSource::NoSubmittedWork;
+			visibility.emittedPageSources.push_back(emittedMissing);
+
+			TerraEngine::Renderer::VirtualGeometryPageRequestRecord pageRequest{};
+			pageRequest.meshId = highDetail.meshId;
+			pageRequest.pageId = 13u;
+			pageRequest.fallbackPageId = fallback.pageId;
+			pageRequest.reason = "detail page needed";
+			visibility.pageRequests.push_back(pageRequest);
+
+			VirtualGeometryPageRetirementRecord pageRetirement{};
+			pageRetirement.meshId = highDetail.meshId;
+			pageRetirement.pageId = 14u;
+			pageRetirement.byteSize = 2048u;
+			visibility.pageRetirements.push_back(pageRetirement);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(3u, diagnostics.pageSources.residentPayloads, "Diagnostics should count resident page payload records per view.");
+			context.ExpectEqual(1u, diagnostics.pageSources.highDetailPayloads, "Diagnostics should count resident high-detail payloads separately.");
+			context.ExpectEqual(1u, diagnostics.pageSources.fallbackPayloads, "Diagnostics should count resident fallback payloads separately.");
+			context.ExpectEqual(1u, diagnostics.pageSources.embeddedFallbackPayloads, "Diagnostics should count conservative embedded fallback payloads separately.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedHighDetailSources, "Diagnostics should count emitted high-detail page sources.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedFallbackSources, "Diagnostics should count emitted fallback page sources.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedEmbeddedFallbackSources, "Diagnostics should count emitted embedded fallback sources.");
+			context.ExpectEqual(1u, diagnostics.pageSources.missingSources, "Diagnostics should count no-work/invalid page-source records.");
+			context.ExpectEqual(1u, diagnostics.pageSources.pageRequests, "Diagnostics should publish page request count.");
+			context.ExpectEqual(1u, diagnostics.pageSources.pageRetirements, "Diagnostics should publish page retirement count.");
+			context.ExpectEqual(static_cast<std::uint64_t>(5632u), diagnostics.pageSources.residentPayloadBytes, "Diagnostics should sum resident page-source bytes.");
+			context.ExpectEqual(static_cast<std::uint64_t>(1024u), diagnostics.pageSources.fallbackPayloadBytes, "Diagnostics should sum fallback payload bytes.");
+			context.ExpectEqual(static_cast<std::uint64_t>(512u), diagnostics.pageSources.embeddedFallbackBytes, "Diagnostics should sum embedded fallback bytes.");
+			context.Expect(!diagnostics.warnings.empty(), "Embedded fallback source use should leave a visible diagnostic warning.");
+		});
+
 		registry.Add("VirtualGeometry.Diagnostics.US7.UnsupportedCounterSourceGatesDoNotPassSilently", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
 			visibility.viewType = RenderViewType::Game;
@@ -305,6 +399,112 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, snapshot.requestedPages, "Residency diagnostics should count loading/requested high-detail pages.");
 			context.Expect(snapshot.budgetPressureBytes > 0u, "Budget pressure should be visible when estimated bytes exceed the geometry budget.");
 			context.Expect(!snapshot.budgetContributors.empty(), "Diagnostics should include top budget contributors.");
+		});
+
+		registry.Add("VirtualGeometry.Diagnostics.VisibilityResidencyPublishesPerAssetContributors", [](TestContext& context) {
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 44u;
+			visibility.frameId = 8801u;
+			visibility.valid = true;
+
+			PageResidencyRecord resident{};
+			resident.meshId = meshId;
+			resident.pageId = 1u;
+			resident.state = GeometryPageState::Resident;
+			resident.byteCost = 1024u;
+			visibility.pageResidency.push_back(resident);
+
+			PageResidencyRecord pinnedFallback{};
+			pinnedFallback.meshId = meshId;
+			pinnedFallback.pageId = 0u;
+			pinnedFallback.state = GeometryPageState::Pinned;
+			pinnedFallback.isFallback = true;
+			pinnedFallback.protectedFallback = true;
+			pinnedFallback.byteCost = 256u;
+			visibility.pageResidency.push_back(pinnedFallback);
+
+			PageResidencyRecord pendingUpload{};
+			pendingUpload.meshId = meshId;
+			pendingUpload.pageId = 2u;
+			pendingUpload.state = GeometryPageState::PendingUpload;
+			pendingUpload.byteCost = 512u;
+			visibility.pageResidency.push_back(pendingUpload);
+
+			PageResidencyRecord missing{};
+			missing.meshId = meshId;
+			missing.pageId = 3u;
+			missing.state = GeometryPageState::NotResident;
+			missing.byteCost = 128u;
+			visibility.pageResidency.push_back(missing);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot snapshot =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			const auto contributor = std::find_if(
+				snapshot.budgetContributors.begin(),
+				snapshot.budgetContributors.end(),
+				[&meshId](const TerraEngine::Renderer::VirtualGeometryBudgetContributor& value) {
+					return value.assetId == meshId;
+				});
+
+			context.Expect(contributor != snapshot.budgetContributors.end(), "Visibility diagnostics should publish a per-asset contributor for virtual geometry page residency.");
+			if (contributor != snapshot.budgetContributors.end())
+			{
+				context.ExpectEqual(2u, contributor->residentPages, "Resident and pinned fallback pages should both be renderable for the asset.");
+				context.ExpectEqual(1280ull, contributor->residentBytes, "Renderable page bytes should include resident and pinned fallback pages.");
+				context.ExpectEqual(1u, contributor->pinnedFallbackPages, "Pinned fallback pages should stay visible in per-asset diagnostics.");
+				context.ExpectEqual(256ull, contributor->pinnedFallbackBytes, "Pinned fallback bytes should be attributed to the mesh asset.");
+				context.ExpectEqual(512ull, contributor->requestedBytes, "Pending upload pages should be reported as requested per-asset work.");
+				context.ExpectEqual(1u, contributor->missingPages, "Missing pages should be attributed to the mesh asset so editor diagnostics can explain fallback rendering.");
+			}
+		});
+
+		registry.Add("VirtualGeometry.Diagnostics.ResidentPayloadsPublishPerAssetBytesWithoutPageRecords", [](TestContext& context) {
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 45u;
+			visibility.frameId = 8802u;
+			visibility.valid = true;
+
+			VirtualGeometryPagePayloadRecord highDetail{};
+			highDetail.meshId = meshId;
+			highDetail.pageId = 4u;
+			highDetail.source = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			highDetail.payloadByteSize = 4096u;
+			highDetail.resident = true;
+			visibility.residentPagePayloads.push_back(highDetail);
+
+			VirtualGeometryPagePayloadRecord fallback{};
+			fallback.meshId = meshId;
+			fallback.pageId = 0u;
+			fallback.source = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			fallback.payloadByteSize = 1024u;
+			fallback.resident = true;
+			fallback.pinnedFallback = true;
+			visibility.residentPagePayloads.push_back(fallback);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot snapshot =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			const auto contributor = std::find_if(
+				snapshot.budgetContributors.begin(),
+				snapshot.budgetContributors.end(),
+				[&meshId](const TerraEngine::Renderer::VirtualGeometryBudgetContributor& value) {
+					return value.assetId == meshId;
+				});
+
+			context.Expect(contributor != snapshot.budgetContributors.end(), "Renderable VG payloads should publish per-asset bytes even when no explicit page residency records were captured.");
+			if (contributor != snapshot.budgetContributors.end())
+			{
+				context.ExpectEqual(2u, contributor->residentPages, "High-detail and fallback payloads should both count as renderable resident payloads.");
+				context.ExpectEqual(5120ull, contributor->residentBytes, "Per-asset resident bytes should fall back to payload byte sizes from live render records.");
+				context.ExpectEqual(4096ull, contributor->reclaimableBytes, "High-detail page payloads should be reported as reclaimable page memory.");
+				context.ExpectEqual(1u, contributor->pinnedFallbackPages, "Fallback payloads should remain visible as pinned fallback coverage.");
+				context.ExpectEqual(1024ull, contributor->pinnedFallbackBytes, "Pinned fallback bytes should use the payload byte size.");
+			}
 		});
 
 		registry.Add("VirtualGeometry.Diagnostics.InactiveReasonsRemainExplicit", [](TestContext& context) {

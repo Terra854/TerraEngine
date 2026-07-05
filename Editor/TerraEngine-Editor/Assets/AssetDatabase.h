@@ -46,9 +46,13 @@ struct VirtualGeometryAssetMetadata {
 	std::uint32_t coneSafetyRecordCount = 0u;
 	std::uint32_t coneEligibleClusterCount = 0u;
 	std::uint32_t coneDisabledClusterCount = 0u;
+	bool pageStreamingReady = false;
+	bool smallMeshStreamingSkipped = false;
 	bool coneSafetyMetadataValid = false;
+	std::string skippedStreamingReason;
 	std::string rebuildGuidance;
 	std::vector<std::string> warnings;
+	std::vector<std::string> pageIntegrityErrors;
 	std::vector<std::string> coneDisabledReasons;
 };
 
@@ -96,6 +100,10 @@ struct VirtualGeometryPageSummaryMetadata {
 	std::uint32_t residentPageCount = 0u;
 	std::uint32_t pinnedFallbackPageCount = 0u;
 	std::uint64_t estimatedBytes = 0u;
+	bool pageStreamingReady = false;
+	bool smallMeshStreamingSkipped = false;
+	std::string skippedStreamingReason;
+	std::vector<std::string> integrityErrors;
 };
 
 // AssetImportProgress is a copyable UI snapshot for one background import.
@@ -111,6 +119,12 @@ struct AssetImportProgress {
 	bool failed = false;
 	bool cancelRequested = false;
 	double elapsedSeconds = 0.0;
+};
+
+enum class GeneratedModelPackageChildKind {
+	Mesh,
+	Material,
+	Texture
 };
 
 // class AssetDatabase groups related state and operations so callers have one documented contract.
@@ -141,6 +155,8 @@ public:
 	std::filesystem::path GetAssetRoot() const { return assetRoot; }
 	std::filesystem::path GetBuildRoot() const { return buildRoot; }
 	const AssetMetadata* FindAssetByGuid(const TerraEngine::UUID& guid) const;
+	bool TryGetGeneratedModelPackageChildDisplayName(const TerraEngine::UUID& guid, GeneratedModelPackageChildKind kind, std::string& outName) const;
+	bool TryGetGeneratedModelPackageChildIds(const TerraEngine::UUID& packageGuid, GeneratedModelPackageChildKind kind, std::vector<TerraEngine::UUID>& outChildIds) const;
 	bool IsMeshAsset(const AssetMetadata& metadata) const;
 	bool TryGetVirtualGeometryMetadata(const AssetMetadata& metadata, VirtualGeometryAssetMetadata& outMetadata) const;
 	VirtualGeometryAdaptiveSettingsMetadata GetDefaultVirtualGeometryAdaptiveSettings() const;

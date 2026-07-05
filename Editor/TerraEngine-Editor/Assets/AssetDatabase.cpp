@@ -286,6 +286,45 @@ namespace {
 		return true;
 	}
 
+	std::string GeneratedChildNameFallback(
+		const std::string& displayName,
+		const std::filesystem::path& sourceNodePath,
+		const std::filesystem::path& sourcePath,
+		const std::filesystem::path& compiledPath,
+		const TerraEngine::UUID& guid)
+	{
+		if (!displayName.empty())
+		{
+			return displayName;
+		}
+		if (!sourceNodePath.empty())
+		{
+			const std::filesystem::path nodeName = sourceNodePath.filename();
+			if (!nodeName.empty())
+			{
+				return nodeName.string();
+			}
+			return sourceNodePath.string();
+		}
+		if (!sourcePath.empty())
+		{
+			const std::filesystem::path sourceName = sourcePath.stem();
+			if (!sourceName.empty())
+			{
+				return sourceName.string();
+			}
+		}
+		if (!compiledPath.empty())
+		{
+			const std::filesystem::path compiledName = compiledPath.stem();
+			if (!compiledName.empty())
+			{
+				return compiledName.string();
+			}
+		}
+		return TerraEngine::ToHexString(guid);
+	}
+
 	std::vector<std::string> ValidateVirtualGeometryAdaptiveSettings(const VirtualGeometryAdaptiveSettingsMetadata& settings)
 	{
 		std::vector<std::string> errors;
@@ -2124,6 +2163,131 @@ const AssetMetadata* AssetDatabase::FindAssetByGuid(const TerraEngine::UUID& gui
 	return nullptr;
 }
 
+bool AssetDatabase::TryGetGeneratedModelPackageChildDisplayName(
+	const TerraEngine::UUID& guid,
+	GeneratedModelPackageChildKind kind,
+	std::string& outName) const
+{
+	for (const auto& [sourcePath, metadata] : assets)
+	{
+		if (!TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
+		{
+			continue;
+		}
+
+		TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+		if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourcePath, importResult))
+		{
+			continue;
+		}
+
+		switch (kind)
+		{
+		case GeneratedModelPackageChildKind::Mesh:
+			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
+			{
+				if (mesh.guid != guid)
+				{
+					continue;
+				}
+				// Mesh children can share the parent package's compiled TEMF.
+				// The sidecar name is therefore the only editor-facing child
+				// identity that distinguishes component assignments correctly.
+				outName = GeneratedChildNameFallback(mesh.displayName, mesh.sourceNodePath, mesh.sourcePath, mesh.compiledPath, mesh.guid);
+				return true;
+			}
+			break;
+		case GeneratedModelPackageChildKind::Material:
+			for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials)
+			{
+				if (material.guid != guid)
+				{
+					continue;
+				}
+				outName = GeneratedChildNameFallback(material.displayName, {}, material.sourcePath, material.compiledPath, material.guid);
+				return true;
+			}
+			break;
+		case GeneratedModelPackageChildKind::Texture:
+			for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures)
+			{
+				if (texture.guid != guid)
+				{
+					continue;
+				}
+				outName = GeneratedChildNameFallback(texture.displayName, {}, texture.sourcePath, texture.compiledPath, texture.guid);
+				return true;
+			}
+			break;
+		}
+	}
+
+	return false;
+}
+
+bool AssetDatabase::TryGetGeneratedModelPackageChildIds(
+	const TerraEngine::UUID& packageGuid,
+	GeneratedModelPackageChildKind kind,
+	std::vector<TerraEngine::UUID>& outChildIds) const
+{
+	outChildIds.clear();
+	for (const auto& [sourcePath, metadata] : assets)
+	{
+		if (!TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
+		{
+			continue;
+		}
+
+		TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+		if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourcePath, importResult))
+		{
+			continue;
+		}
+
+		if (metadata.guid != packageGuid && importResult.packageGuid != packageGuid)
+		{
+			continue;
+		}
+
+		// Generated children are stable package-owned assets. Editor diagnostics
+		// need these child IDs so package wrapper rows can report the GPU memory
+		// uploaded for the actual generated mesh/material/texture that renders.
+		switch (kind)
+		{
+		case GeneratedModelPackageChildKind::Mesh:
+			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
+			{
+				if (mesh.guid != TerraEngine::EMPTY_UUID)
+				{
+					outChildIds.push_back(mesh.guid);
+				}
+			}
+			break;
+		case GeneratedModelPackageChildKind::Material:
+			for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials)
+			{
+				if (material.guid != TerraEngine::EMPTY_UUID)
+				{
+					outChildIds.push_back(material.guid);
+				}
+			}
+			break;
+		case GeneratedModelPackageChildKind::Texture:
+			for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures)
+			{
+				if (texture.guid != TerraEngine::EMPTY_UUID)
+				{
+					outChildIds.push_back(texture.guid);
+				}
+			}
+			break;
+		}
+		return !outChildIds.empty();
+	}
+
+	return false;
+}
+
 bool AssetDatabase::IsMeshAsset(const AssetMetadata& metadata) const {
 	return metadata.importerName == "MeshImporter"
 		|| TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName);
@@ -2186,6 +2350,91 @@ bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata,
 	outMetadata.clusterCount = virtualHeader.clusterCount;
 	outMetadata.materialSectionCount = virtualHeader.materialSectionCount;
 	outMetadata.pageCount = virtualHeader.pageCount;
+	constexpr std::uint32_t kRequiredPageStreamingValidationFlags =
+		kVirtualGeometryValidationFlagFallbackCoverageValidated
+		| kVirtualGeometryValidationFlagClusterHierarchyValidated
+		| kVirtualGeometryValidationFlagPageLinksValidated;
+	const bool pageTablesPresent =
+		virtualHeader.pageCount > 0u
+		&& virtualHeader.pageTableOffset != 0u
+		&& virtualHeader.clusterPageLinkCount > 0u
+		&& virtualHeader.clusterPageLinkTableOffset != 0u;
+	const bool pageValidationPresent =
+		(virtualHeader.flags & kRequiredPageStreamingValidationFlags) == kRequiredPageStreamingValidationFlags;
+	std::string diagnosticStringTable;
+	if (virtualHeader.diagnosticStringOffset != 0u && virtualHeader.diagnosticStringSize != 0u)
+	{
+		diagnosticStringTable.resize(virtualHeader.diagnosticStringSize);
+		input.seekg(static_cast<std::streamoff>(virtualHeader.diagnosticStringOffset), std::ios::beg);
+		input.read(diagnosticStringTable.data(), static_cast<std::streamsize>(diagnosticStringTable.size()));
+		if (!input)
+		{
+			diagnosticStringTable.clear();
+			input.clear();
+		}
+	}
+	if (virtualHeader.skippedDetailCount != 0u && virtualHeader.skippedDetailTableOffset != 0u)
+	{
+		std::vector<VirtualGeometrySkippedDetailRecord> skippedDetails;
+		if (ReadVirtualGeometryRecordTable(input, virtualHeader.skippedDetailTableOffset, virtualHeader.skippedDetailCount, skippedDetails))
+		{
+			for (const VirtualGeometrySkippedDetailRecord& skipped : skippedDetails)
+			{
+				const auto status = static_cast<VirtualGeometryDetailTargetRecordStatus>(skipped.status);
+				const auto reason = static_cast<VirtualGeometrySkippedDetailRecordReason>(skipped.reason);
+				const bool smallMeshReason =
+					reason == VirtualGeometrySkippedDetailRecordReason::MeshTooSmall
+					|| reason == VirtualGeometrySkippedDetailRecordReason::TooFewTriangles
+					|| reason == VirtualGeometrySkippedDetailRecordReason::TooFewMeshlets;
+				if (status != VirtualGeometryDetailTargetRecordStatus::Skipped || !smallMeshReason)
+				{
+					continue;
+				}
+				outMetadata.smallMeshStreamingSkipped = true;
+				outMetadata.skippedStreamingReason = ReadVirtualGeometryString(
+					diagnosticStringTable,
+					skipped.messageStringOffset,
+					skipped.messageStringSize);
+				if (outMetadata.skippedStreamingReason.empty())
+				{
+					outMetadata.skippedStreamingReason = ToVirtualGeometrySkippedReasonText(skipped.reason);
+				}
+				break;
+			}
+		}
+		else
+		{
+			input.clear();
+			outMetadata.pageIntegrityErrors.push_back("Skipped-detail metadata could not be read.");
+		}
+	}
+	if (!outMetadata.smallMeshStreamingSkipped)
+	{
+		if (!pageTablesPresent)
+		{
+			outMetadata.pageIntegrityErrors.push_back("Streamable page tables or cluster-page links are missing.");
+		}
+		if (!pageValidationPresent)
+		{
+			outMetadata.pageIntegrityErrors.push_back("Fallback, hierarchy, or page-link validation flags are missing.");
+		}
+		if (virtualHeader.materialSectionCount == 0u)
+		{
+			outMetadata.pageIntegrityErrors.push_back("Material section metadata is missing.");
+		}
+		if (virtualHeader.clusterCount == 0u)
+		{
+			outMetadata.pageIntegrityErrors.push_back("Cluster metadata is missing.");
+		}
+	}
+	outMetadata.pageStreamingReady =
+		!outMetadata.needsRebuild
+		&& outMetadata.hasVirtualGeometry
+		&& !outMetadata.smallMeshStreamingSkipped
+		&& pageTablesPresent
+		&& pageValidationPresent
+		&& virtualHeader.materialSectionCount > 0u
+		&& virtualHeader.clusterCount > 0u;
 	outMetadata.coneSafetyRecordCount = virtualHeader.coneSafetyCount;
 	outMetadata.coneSafetyMetadataValid =
 		(virtualHeader.flags & kVirtualGeometryValidationFlagConeSafetyMetadataValidated) != 0u
@@ -2193,14 +2442,6 @@ bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata,
 		&& virtualHeader.coneSafetyTableOffset != 0u;
 	if (outMetadata.coneSafetyMetadataValid)
 	{
-		std::string stringTable;
-		if (virtualHeader.diagnosticStringOffset != 0u && virtualHeader.diagnosticStringSize != 0u)
-		{
-			stringTable.resize(virtualHeader.diagnosticStringSize);
-			input.seekg(static_cast<std::streamoff>(virtualHeader.diagnosticStringOffset), std::ios::beg);
-			input.read(stringTable.data(), static_cast<std::streamsize>(stringTable.size()));
-		}
-
 		std::vector<VirtualGeometryConeSafetyRecord> coneSafetyRecords(virtualHeader.coneSafetyCount);
 		input.seekg(static_cast<std::streamoff>(virtualHeader.coneSafetyTableOffset), std::ios::beg);
 		input.read(
@@ -2217,11 +2458,11 @@ bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata,
 				}
 				++outMetadata.coneDisabledClusterCount;
 				if (record.disabledReasonStringSize == 0u
-					|| record.disabledReasonStringOffset + record.disabledReasonStringSize > stringTable.size())
+					|| record.disabledReasonStringOffset + record.disabledReasonStringSize > diagnosticStringTable.size())
 				{
 					continue;
 				}
-				const std::string reason = stringTable.substr(record.disabledReasonStringOffset, record.disabledReasonStringSize);
+				const std::string reason = diagnosticStringTable.substr(record.disabledReasonStringOffset, record.disabledReasonStringSize);
 				if (std::find(outMetadata.coneDisabledReasons.begin(), outMetadata.coneDisabledReasons.end(), reason) == outMetadata.coneDisabledReasons.end())
 				{
 					outMetadata.coneDisabledReasons.push_back(reason);
@@ -2626,6 +2867,10 @@ bool AssetDatabase::TryGetVirtualGeometryPageSummary(const AssetMetadata& metada
 	outSummary.pageCount = meshMetadata.pageCount;
 	outSummary.residentPageCount = meshMetadata.pageCount;
 	outSummary.pinnedFallbackPageCount = meshMetadata.pageCount > 0u ? 1u : 0u;
+	outSummary.pageStreamingReady = meshMetadata.pageStreamingReady;
+	outSummary.smallMeshStreamingSkipped = meshMetadata.smallMeshStreamingSkipped;
+	outSummary.skippedStreamingReason = meshMetadata.skippedStreamingReason;
+	outSummary.integrityErrors = meshMetadata.pageIntegrityErrors;
 	return true;
 }
 

@@ -105,7 +105,9 @@ namespace TerraEngine::Resource
 		Evicted,
 		PendingIO,
 		PendingUpload,
-		Pinned
+		Pinned,
+		PendingRetirement,
+		Retired
 	};
 
 	enum class VirtualGeometryPageResidencyEvent : std::uint8_t
@@ -119,7 +121,9 @@ namespace TerraEngine::Resource
 		BeginEvict,
 		MarkEvicted,
 		PinFallback,
-		UnpinFallback
+		UnpinFallback,
+		BeginRetire,
+		MarkRetired
 	};
 
 	struct ResidencyMemoryPolicy
@@ -233,6 +237,10 @@ namespace TerraEngine::Resource
 		bool pinnedFallback = false;
 		float screenImportance = 0.0f;
 		float predictedNeed = 0.0f;
+		std::uint64_t payloadByteOffset = 0u;
+		std::uint64_t payloadByteSize = 0u;
+		std::uint64_t retirementFrame = 0u;
+		bool protectedFallback = false;
 		std::string requestReason;
 		std::string failureReason;
 	};
@@ -257,6 +265,8 @@ namespace TerraEngine::Resource
 	struct VirtualGeometryPageBudget
 	{
 		std::uint64_t memoryBudgetBytes = 0u;
+		std::uint64_t uploadBudgetBytes = 0u;
+		std::uint64_t retirementBudgetBytes = 0u;
 	};
 
 	struct VirtualGeometryPageBudgetPressureContributor
@@ -266,6 +276,9 @@ namespace TerraEngine::Resource
 		std::uint64_t requestedBytes = 0u;
 		std::uint64_t reclaimableBytes = 0u;
 		std::uint64_t pinnedFallbackBytes = 0u;
+		std::uint64_t residentHighDetailBytes = 0u;
+		std::uint64_t embeddedFallbackBytes = 0u;
+		std::uint64_t retiringBytes = 0u;
 		std::uint64_t pendingIoBytes = 0u;
 		std::uint64_t pendingUploadBytes = 0u;
 		std::uint64_t failedBytes = 0u;
@@ -277,6 +290,8 @@ namespace TerraEngine::Resource
 		std::uint32_t failedPages = 0u;
 		std::uint32_t evictedPages = 0u;
 		std::uint32_t pinnedFallbackPages = 0u;
+		std::uint32_t residentHighDetailPages = 0u;
+		std::uint32_t retiringPages = 0u;
 	};
 
 	struct VirtualGeometryPageBudgetPressureSummary
@@ -286,6 +301,9 @@ namespace TerraEngine::Resource
 		std::uint64_t requestedBytes = 0u;
 		std::uint64_t reclaimableBytes = 0u;
 		std::uint64_t pinnedFallbackBytes = 0u;
+		std::uint64_t residentHighDetailBytes = 0u;
+		std::uint64_t embeddedFallbackBytes = 0u;
+		std::uint64_t retiringBytes = 0u;
 		std::uint64_t pendingIoBytes = 0u;
 		std::uint64_t pendingUploadBytes = 0u;
 		std::uint64_t failedBytes = 0u;
@@ -299,6 +317,8 @@ namespace TerraEngine::Resource
 		std::uint32_t failedPages = 0u;
 		std::uint32_t evictedPages = 0u;
 		std::uint32_t pinnedFallbackPages = 0u;
+		std::uint32_t residentHighDetailPages = 0u;
+		std::uint32_t retiringPages = 0u;
 		std::vector<VirtualGeometryPageBudgetPressureContributor> contributors;
 	};
 
@@ -320,6 +340,7 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::vector<ReleaseCandidate> BuildReleaseCandidates(const ResidencySnapshot& snapshot);
 	TERRAENGINE_API ResidencyDiagnosticsSummary BuildResidencyDiagnostics(const ResidencySnapshot& snapshot, const std::vector<ReleaseRecord>& records, bool includeCandidates);
 	TERRAENGINE_API VirtualGeometryPageTransitionResult ApplyVirtualGeometryPageTransition(VirtualGeometryResidentPage& page, VirtualGeometryPageResidencyEvent event, std::uint64_t frameId, std::string_view reason = {});
+	TERRAENGINE_API std::uint32_t ProtectVirtualGeometryFallbackPages(std::vector<VirtualGeometryResidentPage>& pages, std::uint64_t frameId, std::string_view reason = {});
 	TERRAENGINE_API std::vector<VirtualGeometryPageEvictionCandidate> BuildVirtualGeometryPageEvictionCandidates(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget);
 	TERRAENGINE_API VirtualGeometryPageBudgetPressureSummary BuildVirtualGeometryPageBudgetPressureSummary(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget);
 }

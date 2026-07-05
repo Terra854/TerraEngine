@@ -1,5 +1,30 @@
 #include "VulkanUploadPlanning.h"
 
+#include <utility>
+
+namespace
+{
+	VirtualGeometryEmittedPageSource ResolveUploadPlanningEmittedSource(VirtualGeometryPagePayloadSource source)
+	{
+		switch (source)
+		{
+		case VirtualGeometryPagePayloadSource::ResidentPagePayload:
+			return VirtualGeometryEmittedPageSource::HighDetailPage;
+		case VirtualGeometryPagePayloadSource::ResidentFallbackPayload:
+			return VirtualGeometryEmittedPageSource::FallbackPage;
+		case VirtualGeometryPagePayloadSource::EmbeddedMeshPayload:
+		case VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback:
+			return VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback;
+		case VirtualGeometryPagePayloadSource::Missing:
+		case VirtualGeometryPagePayloadSource::Invalid:
+			return VirtualGeometryEmittedPageSource::Invalid;
+		case VirtualGeometryPagePayloadSource::Unknown:
+		default:
+			return VirtualGeometryEmittedPageSource::None;
+		}
+	}
+}
+
 namespace TerraEngine::Renderer::Vulkan {
 
 	UploadPreparationPlan BuildUploadPreparationPlan(const RenderFrameSnapshot& snapshot, std::size_t payloadBudget)
@@ -36,7 +61,9 @@ namespace TerraEngine::Renderer::Vulkan {
 	{
 		VirtualGeometryPageUploadPublication publication;
 		publication.pageId = page.pageId;
-		if (page.state == GeometryPageState::Resident || page.state == GeometryPageState::Pinned)
+		if (page.state == GeometryPageState::Resident
+			|| page.state == GeometryPageState::Pinned
+			|| page.state == GeometryPageState::PendingRetirement)
 		{
 			publication.accepted = true;
 			publication.publishedState = page.state;
@@ -71,7 +98,10 @@ namespace TerraEngine::Renderer::Vulkan {
 	{
 		VirtualGeometryPageRetirementPlan plan;
 		plan.pageId = page.pageId;
-		if (page.fallbackPage || page.pinnedFallback || page.state == GeometryPageState::Pinned)
+		if (page.fallbackPage
+			|| page.pinnedFallback
+			|| page.protectedFallback
+			|| page.state == GeometryPageState::Pinned)
 		{
 			plan.reason = "virtual geometry fallback page is protected from retirement";
 			return plan;
@@ -88,6 +118,97 @@ namespace TerraEngine::Renderer::Vulkan {
 		plan.retireAfterFrameId = frameId + safeFrameLag;
 		plan.reason = "virtual geometry page queued for deferred retirement";
 		return plan;
+	}
+
+	std::vector<VirtualGeometryPagePayloadUploadRecord> BuildVirtualGeometryPagePayloadUploadPlan(
+		const RenderFrameSnapshot& snapshot,
+		RenderViewType viewType,
+		std::uint32_t viewId)
+	{
+		std::vector<VirtualGeometryPagePayloadUploadRecord> records;
+		for (const VirtualGeometryViewSelectionState& state : snapshot.virtualGeometryViewSelections)
+		{
+			if (state.viewType != viewType)
+			{
+				continue;
+			}
+			if (viewId != std::numeric_limits<std::uint32_t>::max() && state.outputId != viewId)
+			{
+				continue;
+			}
+
+			auto appendRecord = [&](const VirtualGeometryPagePayloadRecord& payload) {
+				VirtualGeometryPagePayloadUploadRecord record;
+				record.meshId = payload.meshId;
+				record.viewId = state.outputId;
+				record.viewType = state.viewType;
+				record.pageId = payload.pageId;
+				record.fallbackPageId = payload.fallbackPageId;
+				record.payloadSource = payload.source;
+				record.emittedSource = ResolveUploadPlanningEmittedSource(record.payloadSource);
+				record.payloadByteOffset = payload.payloadByteOffset;
+				record.payloadByteSize = payload.payloadByteSize;
+				record.pinnedFallback = payload.pinnedFallback;
+				switch (payload.source)
+				{
+				case VirtualGeometryPagePayloadSource::ResidentPagePayload:
+					record.accepted = payload.resident && payload.valid && payload.payloadByteSize > 0u;
+					record.reason = record.accepted
+						? "resident high-detail virtual geometry page payload is ready for upload publication"
+						: "resident high-detail page payload is missing byte metadata";
+					break;
+				case VirtualGeometryPagePayloadSource::ResidentFallbackPayload:
+					record.accepted = payload.resident && payload.valid && payload.payloadByteSize > 0u;
+					record.reason = record.accepted
+						? "resident fallback virtual geometry page payload is ready and protected"
+						: "resident fallback page payload is missing byte metadata";
+					break;
+				case VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback:
+					record.accepted = payload.valid;
+					record.reason = "conservative embedded fallback is labeled for diagnostics instead of reported as streamed page geometry";
+					break;
+				default:
+					record.reason = "virtual geometry page payload source is not publishable";
+					break;
+				}
+				records.push_back(std::move(record));
+			};
+
+			for (const VirtualGeometryPagePayloadRecord& payload : state.residentPagePayloads)
+			{
+				appendRecord(payload);
+			}
+			if (!state.residentPagePayloads.empty())
+			{
+				continue;
+			}
+
+			// Older tests and conservative migration paths may only populate
+			// packet records. Convert those packet labels into the same upload
+			// contract so backend planning never has to infer source identity
+			// from draw commands or live mesh state.
+			for (const VirtualGeometryClusterPacket& packet : state.clusterPackets)
+			{
+				VirtualGeometryPagePayloadRecord payload;
+				payload.meshId = packet.meshId;
+				payload.pageId = packet.pageId;
+				payload.fallbackPageId = packet.fallbackPageId;
+				payload.source = packet.payloadSource;
+				payload.selectedLod = packet.selectedLod;
+				payload.meshletOffset = packet.meshletOffset;
+				payload.meshletCount = packet.meshletCount;
+				payload.payloadByteOffset = packet.pagePayloadByteOffset;
+				payload.payloadByteSize = packet.pagePayloadByteSize;
+				payload.resident = packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentPagePayload
+					|| packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+				payload.pinnedFallback = packet.fallbackPacket || packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+				payload.valid = packet.payloadSource != VirtualGeometryPagePayloadSource::Unknown
+					&& packet.payloadSource != VirtualGeometryPagePayloadSource::Missing
+					&& packet.payloadSource != VirtualGeometryPagePayloadSource::Invalid;
+				appendRecord(payload);
+			}
+		}
+		return records;
 	}
 
 }

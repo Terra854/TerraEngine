@@ -378,6 +378,41 @@ namespace
 			context.Expect(!SelectionContainsCluster(result, 3u), "Far region should avoid an unnecessary high-detail child when its screen error is below the refinement threshold.");
 		});
 
+		registry.Add("VirtualGeometry.Quality.US4.DoesNotSubstituteWholeObjectLodForMixedClusterCut", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset = MakeMixedDistanceQualityAsset();
+			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();
+			quality.lodErrorScale = 1.0f;
+
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(
+					asset,
+					TerraEngine::GenerateUUID(),
+					TerraEngine::GenerateUUID(),
+					quality,
+					512.0f,
+					glm::mat4(1.0f),
+					glm::vec3(0.0f),
+					glm::uvec2(1000u, 1000u),
+					true,
+					true);
+
+			bool sawHighDetailCluster = false;
+			bool sawCoarseCluster = false;
+			for (const TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord& cluster : result.selectedClusters)
+			{
+				sawHighDetailCluster = sawHighDetailCluster || cluster.lodIndex == 0u;
+				sawCoarseCluster = sawCoarseCluster || cluster.lodIndex == 1u;
+			}
+
+			context.ExpectEqual(static_cast<std::size_t>(2u), result.selectedClusters.size(), "Mixed-detail quality selection should remain sparse instead of collapsing to one whole-object range.");
+			context.Expect(sawHighDetailCluster && sawCoarseCluster, "The selected cut should contain both near high-detail and far coarse clusters.");
+			context.Expect(result.range.selectedClusterCount == 2u, "Draw range metadata should point at the sparse selected-cluster payload.");
+			context.Expect(SelectionContainsCluster(result, 2u), "Sparse dispatch should include the nearby high-detail cluster.");
+			context.Expect(SelectionContainsCluster(result, 1u), "Sparse dispatch should include the far coarse cluster.");
+			context.Expect(!SelectionContainsCluster(result, 0u), "Sparse dispatch should not also include the whole nearby parent cluster.");
+			context.Expect(!SelectionContainsCluster(result, 3u), "Sparse dispatch should not force the far region into its high-detail child.");
+		});
+
 		registry.Add("VirtualGeometry.Quality.HoldsStableCutNearStationaryThreshold", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset = MakeThresholdTransitionAsset();
 			VirtualGeometryQualityProfile quality = MakeDefaultVirtualGeometryQualityProfile();

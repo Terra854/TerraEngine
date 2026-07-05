@@ -42,6 +42,7 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <sstream>
 
 using ReflectionProperty = TerraEngine::Reflection::Property;
@@ -77,48 +78,53 @@ bool IsGeneratedPackageSubAssetPath(const std::filesystem::path& path)
 
 bool TryResolveGeneratedPackageTextureName(const TerraEngine::UUID& textureGuid, std::string& outName)
 {
-	const AssetDatabase& assetDatabase = AssetDatabase::Instance();
-	for (const auto& [sourcePath, metadata] : assetDatabase.GetAssets())
+	return AssetDatabase::Instance().TryGetGeneratedModelPackageChildDisplayName(
+		textureGuid,
+		GeneratedModelPackageChildKind::Texture,
+		outName);
+}
+
+std::optional<GeneratedModelPackageChildKind> GeneratedChildKindForUuidProperty(std::string_view propertyName)
+{
+	if (propertyName == "meshId")
 	{
-		if (!TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
+		return GeneratedModelPackageChildKind::Mesh;
+	}
+	if (propertyName == "materialId")
+	{
+		return GeneratedModelPackageChildKind::Material;
+	}
+	if (propertyName.find("Texture") != std::string_view::npos
+		|| propertyName.find("texture") != std::string_view::npos)
+	{
+		return GeneratedModelPackageChildKind::Texture;
+	}
+	return std::nullopt;
+}
+
+bool TryResolveGeneratedPackageChildNameForProperty(
+	const TerraEngine::UUID& assetGuid,
+	std::string_view propertyName,
+	std::string& outName)
+{
+	const std::optional<GeneratedModelPackageChildKind> kind = GeneratedChildKindForUuidProperty(propertyName);
+	if (kind.has_value())
+	{
+		return AssetDatabase::Instance().TryGetGeneratedModelPackageChildDisplayName(assetGuid, *kind, outName);
+	}
+
+	const GeneratedModelPackageChildKind candidateKinds[] = {
+		GeneratedModelPackageChildKind::Mesh,
+		GeneratedModelPackageChildKind::Material,
+		GeneratedModelPackageChildKind::Texture
+	};
+	for (GeneratedModelPackageChildKind candidateKind : candidateKinds)
+	{
+		if (AssetDatabase::Instance().TryGetGeneratedModelPackageChildDisplayName(assetGuid, candidateKind, outName))
 		{
-			continue;
-		}
-
-		TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
-		if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourcePath, importResult))
-		{
-			continue;
-		}
-
-		for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures)
-		{
-			if (texture.guid != textureGuid)
-			{
-				continue;
-			}
-
-			const std::filesystem::path compiledPath = assetDatabase.GetBuildRoot() / texture.compiledPath;
-			const std::filesystem::path sourceTexturePath = assetDatabase.GetAssetRoot() / texture.sourcePath;
-			if (!std::filesystem::exists(compiledPath) && !std::filesystem::exists(sourceTexturePath))
-			{
-				return false;
-			}
-
-			// Generated package textures are virtual children, not normal source
-			// assets. Resolve their sidecar record here so the inspector matches
-			// the renderer, which already binds these GUIDs at runtime.
-			outName = !texture.displayName.empty()
-				? texture.displayName
-				: texture.compiledPath.filename().string();
-			if (outName.empty())
-			{
-				outName = TerraEngine::ToHexString(texture.guid);
-			}
 			return true;
 		}
 	}
-
 	return false;
 }
 
@@ -1393,13 +1399,24 @@ void InspectorWindow::DrawProperty(const std::string& compName, ReflectionProper
 		bool found = false;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (val != TerraEngine::EMPTY_UUID) {
-			const auto& assets = AssetDatabase::Instance().GetAssets();
-			for (const auto& [path, meta] : assets) {
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (meta.guid == val) {
-					label = path.stem().string();
-					found = true;
-					break;
+			// Generated GLB/FBX children can share the package parent's
+			// compiled file, so resolve their sidecar child name before falling
+			// back to source/compiled paths. This makes component fields display
+			// the actual assigned child mesh/material/texture identity.
+			if (TryResolveGeneratedPackageChildNameForProperty(val, name, label))
+			{
+				found = true;
+			}
+
+			if (!found) {
+				const auto& assets = AssetDatabase::Instance().GetAssets();
+				for (const auto& [path, meta] : assets) {
+					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+					if (meta.guid == val) {
+						label = path.stem().string();
+						found = true;
+						break;
+					}
 				}
 			}
 

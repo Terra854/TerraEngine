@@ -304,18 +304,25 @@ namespace TerraEngine::Resource
 		case VirtualGeometryPageResidencyState::PendingIO: return "pending-io";
 		case VirtualGeometryPageResidencyState::PendingUpload: return "pending-upload";
 		case VirtualGeometryPageResidencyState::Pinned: return "pinned";
+		case VirtualGeometryPageResidencyState::PendingRetirement: return "pending-retirement";
+		case VirtualGeometryPageResidencyState::Retired: return "retired";
 		}
 		return "not-resident";
 	}
 
 	bool IsVirtualGeometryPagePinnedFallback(const VirtualGeometryResidentPage& page)
 	{
-		return page.fallbackPage || page.pinnedFallback || page.state == VirtualGeometryPageResidencyState::Pinned;
+		return page.fallbackPage
+			|| page.pinnedFallback
+			|| page.protectedFallback
+			|| page.state == VirtualGeometryPageResidencyState::Pinned;
 	}
 
 	bool IsVirtualGeometryPageResidentForRendering(const VirtualGeometryResidentPage& page)
 	{
-		return page.state == VirtualGeometryPageResidencyState::Resident || page.state == VirtualGeometryPageResidencyState::Pinned;
+		return page.state == VirtualGeometryPageResidencyState::Resident
+			|| page.state == VirtualGeometryPageResidencyState::Pinned
+			|| page.state == VirtualGeometryPageResidencyState::PendingRetirement;
 	}
 
 	std::uint64_t EstimateResidentBytes(const ResidentAsset& asset)
@@ -630,9 +637,68 @@ namespace TerraEngine::Resource
 				apply(VirtualGeometryPageResidencyState::Resident, reason.empty() ? "fallback page unpinned" : std::string(reason));
 			}
 			break;
+		case VirtualGeometryPageResidencyEvent::BeginRetire:
+			if (IsVirtualGeometryPagePinnedFallback(page))
+			{
+				result.reason = "fallback page preserved";
+				break;
+			}
+			if (page.state == VirtualGeometryPageResidencyState::Resident)
+			{
+				page.retirementFrame = frameId;
+				apply(VirtualGeometryPageResidencyState::PendingRetirement, reason.empty() ? "page retirement queued" : std::string(reason));
+			}
+			break;
+		case VirtualGeometryPageResidencyEvent::MarkRetired:
+			if (page.state == VirtualGeometryPageResidencyState::PendingRetirement)
+			{
+				page.retirementFrame = frameId;
+				apply(VirtualGeometryPageResidencyState::Retired, reason.empty() ? "page retirement completed" : std::string(reason));
+			}
+			break;
 		}
 
 		return result;
+	}
+
+	std::uint32_t ProtectVirtualGeometryFallbackPages(std::vector<VirtualGeometryResidentPage>& pages, std::uint64_t frameId, std::string_view reason)
+	{
+		std::uint32_t protectedCount = 0u;
+		for (VirtualGeometryResidentPage& page : pages)
+		{
+			const bool fallbackIdentity = page.fallbackPage
+				|| page.pinnedFallback
+				|| page.protectedFallback
+				|| page.pageId == page.fallbackPageId;
+			if (!fallbackIdentity)
+			{
+				continue;
+			}
+
+			// Fallback pages are the visibility safety net for page streaming.
+			// If budget or retirement work touched one earlier in the frame,
+			// restore the protected renderable state before eviction candidates
+			// are built so missing detail never becomes missing coverage.
+			page.fallbackPage = true;
+			page.pinnedFallback = true;
+			page.protectedFallback = true;
+			page.lastUsedFrame = frameId;
+			page.lastStateChangeFrame = frameId;
+			if (!reason.empty())
+			{
+				page.requestReason = std::string(reason);
+			}
+			if (page.state == VirtualGeometryPageResidencyState::Resident
+				|| page.state == VirtualGeometryPageResidencyState::Pinned
+				|| page.state == VirtualGeometryPageResidencyState::Evicting
+				|| page.state == VirtualGeometryPageResidencyState::Evicted
+				|| page.state == VirtualGeometryPageResidencyState::PendingRetirement)
+			{
+				page.state = VirtualGeometryPageResidencyState::Pinned;
+			}
+			++protectedCount;
+		}
+		return protectedCount;
 	}
 
 	std::vector<VirtualGeometryPageEvictionCandidate> BuildVirtualGeometryPageEvictionCandidates(const std::vector<VirtualGeometryResidentPage>& pages, const VirtualGeometryPageBudget& budget)
@@ -659,7 +725,10 @@ namespace TerraEngine::Resource
 		std::vector<VirtualGeometryPageEvictionCandidate> candidates;
 		for (const VirtualGeometryResidentPage& page : pages)
 		{
-			if (!IsVirtualGeometryPageResidentForRendering(page) || IsVirtualGeometryPagePinnedFallback(page) || page.byteSize == 0u)
+			if (!IsVirtualGeometryPageResidentForRendering(page)
+				|| page.state == VirtualGeometryPageResidencyState::PendingRetirement
+				|| IsVirtualGeometryPagePinnedFallback(page)
+				|| page.byteSize == 0u)
 			{
 				continue;
 			}
@@ -740,9 +809,15 @@ namespace TerraEngine::Resource
 					++contributor.pinnedFallbackPages;
 					summary.pinnedFallbackBytes = AddSaturated(summary.pinnedFallbackBytes, page.byteSize);
 					contributor.pinnedFallbackBytes = AddSaturated(contributor.pinnedFallbackBytes, page.byteSize);
+					summary.embeddedFallbackBytes = AddSaturated(summary.embeddedFallbackBytes, page.byteSize);
+					contributor.embeddedFallbackBytes = AddSaturated(contributor.embeddedFallbackBytes, page.byteSize);
 				}
 				if (!IsVirtualGeometryPagePinnedFallback(page))
 				{
+					++summary.residentHighDetailPages;
+					++contributor.residentHighDetailPages;
+					summary.residentHighDetailBytes = AddSaturated(summary.residentHighDetailBytes, page.byteSize);
+					contributor.residentHighDetailBytes = AddSaturated(contributor.residentHighDetailBytes, page.byteSize);
 					summary.reclaimableBytes = AddSaturated(summary.reclaimableBytes, page.byteSize);
 					contributor.reclaimableBytes = AddSaturated(contributor.reclaimableBytes, page.byteSize);
 				}
@@ -791,6 +866,22 @@ namespace TerraEngine::Resource
 				++contributor.missingPages;
 				summary.evictingBytes = AddSaturated(summary.evictingBytes, page.byteSize);
 				contributor.evictingBytes = AddSaturated(contributor.evictingBytes, page.byteSize);
+				break;
+			case VirtualGeometryPageResidencyState::PendingRetirement:
+				++summary.residentPages;
+				++contributor.residentPages;
+				++summary.retiringPages;
+				++contributor.retiringPages;
+				summary.residentBytes = AddSaturated(summary.residentBytes, page.byteSize);
+				contributor.residentBytes = AddSaturated(contributor.residentBytes, page.byteSize);
+				summary.retiringBytes = AddSaturated(summary.retiringBytes, page.byteSize);
+				contributor.retiringBytes = AddSaturated(contributor.retiringBytes, page.byteSize);
+				break;
+			case VirtualGeometryPageResidencyState::Retired:
+				++summary.evictedPages;
+				++summary.missingPages;
+				++contributor.evictedPages;
+				++contributor.missingPages;
 				break;
 			case VirtualGeometryPageResidencyState::NotResident:
 				++summary.missingPages;

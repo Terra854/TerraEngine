@@ -86,6 +86,11 @@ struct PushConstants
 	uint selectedVirtualPageNeedCount;
 	uint virtualGeometryPacketBufferIndex;
 	uint virtualGeometryBatchBufferIndex;
+	uint virtualGeometryPagePayloadBufferIndex;
+	uint virtualGeometryPayloadSource;
+	uint virtualGeometryEmittedSource;
+	uint virtualGeometryPagePayloadByteOffset;
+	uint virtualGeometryPagePayloadByteSize;
 	float4 editorTint;
 };
 
@@ -128,6 +133,8 @@ uint LoadVirtualGeometryBufferWord(uint bufferIndex, uint wordOffset, uint fallb
 
 uint ResolveVirtualGeometryPacketRunDebugId()
 {
+	// Fold page-source identity into the visualizer seed so page/fallback
+	// transitions are visible without changing the accepted meshlet decode path.
 	const uint packetSeed = LoadVirtualGeometryBufferWord(
 		SceneUniforms.virtualGeometryPacketBufferIndex,
 		0u,
@@ -136,7 +143,15 @@ uint ResolveVirtualGeometryPacketRunDebugId()
 		SceneUniforms.virtualGeometryBatchBufferIndex,
 		0u,
 		SceneUniforms.selectedVirtualClusterCount);
-	return packetSeed ^ (batchSeed << 1u);
+	const uint pagePayloadSeed = LoadVirtualGeometryBufferWord(
+		SceneUniforms.virtualGeometryPagePayloadBufferIndex,
+		2u,
+		SceneUniforms.virtualGeometryPayloadSource);
+	return packetSeed
+		^ (batchSeed << 1u)
+		^ (pagePayloadSeed << 8u)
+		^ (SceneUniforms.virtualGeometryEmittedSource << 12u)
+		^ SceneUniforms.virtualGeometryPagePayloadByteSize;
 }
 
 bool IsFrustumCulled(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const float epsilon)

@@ -104,6 +104,25 @@ namespace TerraEngine::Renderer {
 		std::uint32_t failedPageReasons = 0u;
 	};
 
+	struct VirtualGeometryPageSourceDiagnostics
+	{
+		std::uint32_t residentPayloads = 0u;
+		std::uint32_t highDetailPayloads = 0u;
+		std::uint32_t fallbackPayloads = 0u;
+		std::uint32_t embeddedFallbackPayloads = 0u;
+		std::uint32_t emittedHighDetailSources = 0u;
+		std::uint32_t emittedFallbackSources = 0u;
+		std::uint32_t emittedEmbeddedFallbackSources = 0u;
+		std::uint32_t missingSources = 0u;
+		std::uint32_t emittedMaterialPagePairs = 0u;
+		std::uint32_t emittedMultiMaterialPages = 0u;
+		std::uint32_t pageRequests = 0u;
+		std::uint32_t pageRetirements = 0u;
+		std::uint64_t residentPayloadBytes = 0u;
+		std::uint64_t fallbackPayloadBytes = 0u;
+		std::uint64_t embeddedFallbackBytes = 0u;
+	};
+
 	struct VirtualGeometryHiZValidationDiagnostics
 	{
 		RenderViewType ownerViewType = RenderViewType::Game;
@@ -204,11 +223,17 @@ namespace TerraEngine::Renderer {
 		std::uint32_t gpuFallbackAffectedPackets = 0u;
 		std::uint32_t gpuFallbackAffectedBatches = 0u;
 		std::string gpuFallbackReason;
+		std::uint32_t residentPagePayloadCount = 0u;
+		std::uint32_t emittedPageSourceCount = 0u;
+		std::uint32_t embeddedFallbackPayloadCount = 0u;
+		std::uint32_t pageRequestCount = 0u;
+		std::uint32_t pageRetirementCount = 0u;
 		std::uint32_t shadowViewCount = 0u;
 		VirtualGeometryAdaptiveSettingsDiagnostics adaptiveSettings;
 		VirtualGeometryCookOutputDiagnostics cookOutput;
 		VirtualGeometryClusterSelectionDiagnostics clusterSelection;
 		VirtualGeometryPageResidencyDiagnostics pageResidency;
+		VirtualGeometryPageSourceDiagnostics pageSources;
 		VirtualGeometryHiZValidationDiagnostics hiZValidation;
 		std::vector<OcclusionDebugSample> occlusionDebugSamples;
 		std::vector<ShadowVisibilitySelection> shadowVisibilitySelections;
@@ -260,6 +285,28 @@ namespace TerraEngine::Renderer {
 		std::uint32_t culledByCone = 0u;
 		std::uint32_t culledByHiZ = 0u;
 		std::uint32_t falseOcclusionRiskWarnings = 0u;
+	};
+
+	enum class BackendResourceResidencyKind : std::uint8_t
+	{
+		Mesh,
+		Texture,
+		Other
+	};
+
+	struct BackendResourceResidencyRecord
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		BackendResourceResidencyKind kind = BackendResourceResidencyKind::Other;
+		std::uint64_t gpuBytes = 0u;
+		std::uint32_t subresourceCount = 0u;
+		std::string detail;
+	};
+
+	struct BackendResourceResidencySnapshot
+	{
+		std::uint64_t frameId = 0u;
+		std::vector<BackendResourceResidencyRecord> records;
 	};
 
 	struct RenderDiagnosticsSummary
@@ -325,6 +372,8 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API void PublishRenderDiagnostics(RenderDiagnosticsSummary summary);
 	TERRAENGINE_API RenderDiagnosticsSummary LatestRenderDiagnostics();
 	TERRAENGINE_API std::vector<VirtualGeometryViewDiagnosticsSnapshot> LatestVirtualGeometryDiagnosticsSnapshots();
+	TERRAENGINE_API void PublishBackendResourceResidencySnapshot(BackendResourceResidencySnapshot snapshot);
+	TERRAENGINE_API BackendResourceResidencySnapshot LatestBackendResourceResidencySnapshot();
 	TERRAENGINE_API RenderDiagnosticsSummary BuildRenderDiagnosticsSummary(
 		const RenderFrameSnapshot& snapshot,
 		const RenderWorkPacketPlan& packetPlan,

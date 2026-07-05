@@ -22,6 +22,15 @@ clear source attribution instead of committed as heavy binary files.
   resizes, and multi-view mismatch cases.
 - Streaming pressure scene: enough virtual geometry pages to exceed a small test
   budget while preserving visible fallback detail.
+- Page-sourced resident scene: selected clusters resolve to resident
+  page-local payload ranges so tests can prove rendering no longer requires the
+  fully resident owning meshlet stream.
+- Page fallback-only scene: high-detail pages are pending, failed, or evicted
+  while pinned fallback pages stay renderable without holes.
+- Page budget churn scene: camera motion requests, uploads, evicts, and
+  re-requests detail pages under a deliberately small geometry budget.
+- Page integrity scene: malformed page ranges, fallback links, material spans,
+  bounds, and byte costs are rejected before they become live render sources.
 - Mixed-distance cluster scene: one large object spanning near and far view
   regions so hierarchical cluster selection can refine only nearby regions.
 - Cluster batching scene: dense selected clusters that must collapse into
@@ -62,6 +71,10 @@ not enable rendering behavior. Current tags include:
   `material-coverage-review` for broad asset categories.
 - `streaming-pressure`, `pinned-fallback`, and `budget-pressure` for residency
   and eviction stress coverage.
+- `page-sourced-rendering`, `resident-page-payload`,
+  `no-owning-mesh-normal-path`, `fallback-page-pinned`,
+  `missing-detail-substitution`, `page-budget`, `page-rerequest`, and
+  `page-integrity` for feature `033` page-streamed geometry coverage.
 - `cluster-packet-batching`, `runtime-compaction`, `bounded-batches`, and
   `performance-gate` for feature `030` scaling coverage.
 - `gpu-packet-buffer`, `gpu-compaction`, `generated-submission`,
@@ -183,6 +196,24 @@ to far distance. Record meshlet selected/dispatched counts, pinned fallback page
 bytes, requested/missing page counts, cone eligible/disabled counts, disabled
 reasons, and whether the object stays visible when high-detail pages are
 missing.
+
+## Feature 033 Page Streaming Quickstart
+
+Use `specs/033-vg-page-streaming/quickstart.md` for the staged page-sourced
+geometry workflow. The clean-checkout pass should use this manifest and the
+focused CTest slices:
+
+```powershell
+ctest --test-dir out/build/Debug -R "VirtualGeometryPageStreaming|VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
+```
+
+The page-sourced resident fixture must emit resident page payloads as the normal
+source and report zero embedded full-mesh fallback uses. The fallback-only
+fixture must keep visible coverage when high-detail pages are missing, pending,
+failed, or evicted. The page budget fixture must keep resident page bytes within
+the configured budget while exposing requested, resident, evicted, and
+re-requested page counters. The malformed page fixture must fail integrity
+validation before corrupt page payloads become renderable.
 
 ## Stress Counter Thresholds
 

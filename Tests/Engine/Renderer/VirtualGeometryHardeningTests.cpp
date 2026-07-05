@@ -2,6 +2,7 @@
 
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/RHI/Vulkan/VulkanUploadPlanning.h"
 #include "Renderer/RHI/Vulkan/VulkanHiZ.h"
 #include "Renderer/RenderSystem.h"
 
@@ -62,6 +63,55 @@ namespace TerraEngine::Tests
 			context.Expect(!diagnostics.hiZActive, "Missing-pyramid diagnostics should fail open rather than cull.");
 			context.Expect(diagnostics.hiZValidation.failOpen, "Missing-pyramid diagnostics should publish fail-open state.");
 			context.Expect(!diagnostics.hiZInvalidReason.empty(), "Missing-pyramid diagnostics should explain why Hi-Z is unavailable.");
+		});
+
+		registry.Add("VirtualGeometry.Hardening.US5.PageSourceDiagnosticsNameHiZFailOpenReason", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 12u;
+			visibility.frameId = 2907u;
+			visibility.valid = true;
+			visibility.hiZValidationState.state = VirtualGeometryHiZState::MissingPyramid;
+			visibility.hiZValidationState.reason = "current view Hi-Z pyramid was unavailable";
+			visibility.hiZValidationState.failOpen = true;
+
+			VirtualGeometryPagePayloadRecord payload{};
+			payload.meshId = TerraEngine::GenerateUUID();
+			payload.pageId = 1u;
+			payload.fallbackPageId = 1u;
+			payload.source = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			payload.payloadByteSize = 1024u;
+			payload.resident = true;
+			payload.pinnedFallback = true;
+			payload.valid = true;
+			visibility.residentPagePayloads.push_back(payload);
+
+			VirtualGeometryEmittedPageSourceRecord emitted{};
+			emitted.viewId = visibility.outputId;
+			emitted.viewType = visibility.viewType;
+			emitted.frameId = visibility.frameId;
+			emitted.meshId = payload.meshId;
+			emitted.pageId = payload.pageId;
+			emitted.fallbackPageId = payload.fallbackPageId;
+			emitted.payloadSource = payload.source;
+			emitted.emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
+			emitted.fallbackSubstitution = true;
+			emitted.reason = "fallback page kept coverage while Hi-Z failed open";
+			visibility.emittedPageSources.push_back(emitted);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+			const bool foundCombinedWarning = std::any_of(
+				diagnostics.warnings.begin(),
+				diagnostics.warnings.end(),
+				[](const std::string& warning) {
+					return warning.find("page-source diagnostics observed while Hi-Z failed open") != std::string::npos
+						&& warning.find("current view Hi-Z pyramid was unavailable") != std::string::npos;
+				});
+
+			context.Expect(diagnostics.hiZValidation.failOpen, "The fixture should publish a fail-open Hi-Z state.");
+			context.ExpectEqual(1u, diagnostics.pageSources.fallbackPayloads, "The fixture should publish fallback page-source diagnostics.");
+			context.Expect(foundCombinedWarning, "Diagnostics should tie page-source state to the Hi-Z fail-open reason in one warning.");
 		});
 
 		registry.Add("VirtualGeometry.Hardening.DelayedCounterSourceIsExplicit", [](TestContext& context) {
@@ -368,6 +418,118 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.validGeneratedSubmissionCount, "Valid generated submission work should survive the Hi-Z recovery cycle.");
 		});
 
+		registry.Add("VirtualGeometry.Hardening.US5.PageResidencyRecoveryKeepsMovingOccluderHiZActive", [](TestContext& context) {
+			VulkanHiZHistoryMetadata history{};
+			history.viewId = 31u;
+			history.viewClass = VulkanHiZViewClass::Game;
+			history.targetId = 4u;
+			history.width = 1920u;
+			history.height = 1080u;
+			history.projectionSignature = 0x71050031u;
+			history.depthSceneSignature = 0x71050032u;
+			history.frameId = 90u;
+			history.warmupFrames = 4u;
+			history.valid = true;
+			history.invalidReason = VulkanHiZInvalidReason::None;
+
+			VulkanHiZValidationInput input{};
+			input.viewId = history.viewId;
+			input.viewClass = history.viewClass;
+			input.targetId = history.targetId;
+			input.width = history.width;
+			input.height = history.height;
+			input.projectionSignature = history.projectionSignature;
+			input.depthSceneSignature = history.depthSceneSignature + 1u;
+			input.pyramidReady = true;
+			input.qualityAllowsOcclusion = true;
+			input.viewSupported = true;
+			const VulkanHiZValidationResult unblocked = ValidateVulkanHiZHistory(history, input);
+
+			history.depthSceneSignature = input.depthSceneSignature;
+			history.warmupFrames = unblocked.warmupFrames;
+			input.depthSceneSignature += 1u;
+			const VulkanHiZValidationResult blockedAgain = ValidateVulkanHiZHistory(history, input);
+
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = history.targetId;
+			visibility.frameId = history.frameId + 2u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::GPUReadback;
+			visibility.hiZValidationState.state = blockedAgain.occlusionAllowed ? VirtualGeometryHiZState::Active : VirtualGeometryHiZState::FailOpen;
+			visibility.hiZValidationState.pyramidReady = blockedAgain.pyramidReady;
+			visibility.hiZValidationState.pyramidSize = glm::uvec2(history.width, history.height);
+			visibility.hiZValidationState.renderSize = visibility.hiZValidationState.pyramidSize;
+			visibility.hiZValidationState.depthSceneSignature = input.depthSceneSignature;
+			visibility.hiZValidationState.warmupFrames = blockedAgain.warmupFrames;
+			visibility.hiZValidationState.failOpen = blockedAgain.failOpen;
+
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			VirtualGeometryPagePayloadRecord fallbackPayload{};
+			fallbackPayload.meshId = meshId;
+			fallbackPayload.pageId = 1u;
+			fallbackPayload.fallbackPageId = 1u;
+			fallbackPayload.source = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			fallbackPayload.payloadByteSize = 1024u;
+			fallbackPayload.resident = true;
+			fallbackPayload.pinnedFallback = true;
+			fallbackPayload.valid = true;
+			visibility.residentPagePayloads.push_back(fallbackPayload);
+
+			VirtualGeometryPagePayloadRecord highDetailPayload = fallbackPayload;
+			highDetailPayload.pageId = 7u;
+			highDetailPayload.fallbackPageId = 1u;
+			highDetailPayload.source = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			highDetailPayload.payloadByteOffset = 8192u;
+			highDetailPayload.payloadByteSize = 4096u;
+			highDetailPayload.pinnedFallback = false;
+			visibility.residentPagePayloads.push_back(highDetailPayload);
+
+			VirtualGeometryEmittedPageSourceRecord fallbackEmission{};
+			fallbackEmission.viewId = visibility.outputId;
+			fallbackEmission.viewType = visibility.viewType;
+			fallbackEmission.frameId = visibility.frameId - 1u;
+			fallbackEmission.meshId = meshId;
+			fallbackEmission.pageId = fallbackPayload.pageId;
+			fallbackEmission.fallbackPageId = fallbackPayload.fallbackPageId;
+			fallbackEmission.payloadSource = fallbackPayload.source;
+			fallbackEmission.emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
+			fallbackEmission.fallbackSubstitution = true;
+			fallbackEmission.reason = "fallback page covered moving-wall recovery frame";
+			visibility.emittedPageSources.push_back(fallbackEmission);
+
+			VirtualGeometryEmittedPageSourceRecord highDetailEmission = fallbackEmission;
+			highDetailEmission.frameId = visibility.frameId;
+			highDetailEmission.pageId = highDetailPayload.pageId;
+			highDetailEmission.fallbackPageId = highDetailPayload.fallbackPageId;
+			highDetailEmission.payloadSource = highDetailPayload.source;
+			highDetailEmission.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			highDetailEmission.fallbackSubstitution = false;
+			highDetailEmission.reason.clear();
+			visibility.emittedPageSources.push_back(highDetailEmission);
+
+			HiZRegressionSnapshot baseline{};
+			baseline.viewId = visibility.outputId;
+			baseline.viewType = visibility.viewType;
+			baseline.frameIndex = visibility.frameId;
+			baseline.state = visibility.hiZValidationState.state;
+			baseline.testedMeshlets = 64u;
+			baseline.visibleMeshlets = 64u;
+			baseline.recoveryFrames = blockedAgain.warmupFrames;
+			baseline.baselineMatched = blockedAgain.occlusionAllowed;
+			visibility.hiZRegressionSnapshots.push_back(baseline);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.Expect(unblocked.occlusionAllowed, "Moving the occluder away should not latch Hi-Z off while fallback coverage is resident.");
+			context.Expect(blockedAgain.occlusionAllowed, "Moving the occluder back should not require an editor restart after a page-source transition.");
+			context.Expect(diagnostics.hiZActive, "Diagnostics should keep Hi-Z active after the moving-wall page residency transition.");
+			context.Expect(diagnostics.hiZBaselineMatched, "The page residency recovery frame should match the accepted Hi-Z baseline.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedFallbackSources, "Fallback page emission should remain visible for the recovery frame.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedHighDetailSources, "High-detail page emission should become visible after residency recovery.");
+		});
+
 		registry.Add("VirtualGeometry.Hardening.US4.InvalidGeneratedSubmissionPublishesFallbackDiagnostics", [](TestContext& context) {
 			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility;
 			visibility.valid = true;
@@ -401,6 +563,66 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.invalidGeneratedSubmissionCount, "Invalid generated submissions should be counted separately from valid generated work.");
 			context.ExpectEqual(1u, diagnostics.gpuFallbackRecordCount, "Invalid generated submissions should publish a fallback record.");
 			context.Expect(diagnostics.gpuFallbackReason.find("mismatch") != std::string::npos, "Fallback diagnostics should preserve the generated submission validation reason.");
+		});
+
+		registry.Add("VirtualGeometry.Hardening.US2.FailedPagePublicationKeepsFallbackSource", [](TestContext& context) {
+			GeometryPageRuntime failedPage{};
+			failedPage.pageId = 9u;
+			failedPage.fallbackPageId = 1u;
+			failedPage.state = GeometryPageState::Failed;
+			failedPage.byteSize = 4096u;
+			failedPage.failureReason = "payload checksum mismatch";
+
+			const TerraEngine::Renderer::Vulkan::VirtualGeometryPageUploadPublication publication =
+				TerraEngine::Renderer::Vulkan::PlanVirtualGeometryPageUploadPublication(failedPage);
+			context.Expect(!publication.accepted, "Failed high-detail pages must not be published to Vulkan page payload resources.");
+			context.Expect(publication.reason.find("not waiting") != std::string::npos, "Publication rejection should explain that the page is not uploadable.");
+
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility;
+			visibility.valid = true;
+			visibility.frameId = 10004u;
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 3u;
+
+			PageResidencyRecord failedResidency;
+			failedResidency.meshId = TerraEngine::GenerateUUID();
+			failedResidency.pageId = failedPage.pageId;
+			failedResidency.fallbackPageId = failedPage.fallbackPageId;
+			failedResidency.state = GeometryPageState::Failed;
+			failedResidency.byteCost = failedPage.byteSize;
+			failedResidency.failureReason = failedPage.failureReason;
+			visibility.pageResidency.push_back(failedResidency);
+
+			VirtualGeometryPagePayloadRecord fallbackPayload;
+			fallbackPayload.meshId = failedResidency.meshId;
+			fallbackPayload.pageId = failedPage.fallbackPageId;
+			fallbackPayload.fallbackPageId = failedPage.fallbackPageId;
+			fallbackPayload.source = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			fallbackPayload.payloadByteSize = 1024u;
+			fallbackPayload.resident = true;
+			fallbackPayload.pinnedFallback = true;
+			fallbackPayload.valid = true;
+			visibility.residentPagePayloads.push_back(fallbackPayload);
+
+			VirtualGeometryEmittedPageSourceRecord emitted;
+			emitted.viewType = visibility.viewType;
+			emitted.viewId = visibility.outputId;
+			emitted.frameId = visibility.frameId;
+			emitted.meshId = fallbackPayload.meshId;
+			emitted.pageId = failedPage.fallbackPageId;
+			emitted.fallbackPageId = failedPage.fallbackPageId;
+			emitted.payloadSource = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			emitted.emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
+			emitted.fallbackSubstitution = true;
+			emitted.reason = "failed high-detail page substituted by fallback coverage";
+			visibility.emittedPageSources.push_back(emitted);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+			context.ExpectEqual(1u, diagnostics.failedPages, "Failed high-detail pages should remain visible to diagnostics.");
+			context.ExpectEqual(1u, diagnostics.pageSources.fallbackPayloads, "Fallback payload coverage should be counted when publication fails.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedFallbackSources, "The emitted source should be the resident fallback page.");
+			context.Expect(!diagnostics.warnings.empty(), "Failure plus fallback substitution should publish a warning for tooling.");
 		});
 
 		registry.Add("VirtualGeometry.Hardening.ExplicitHiZStateTravelsWithVisibilitySnapshot", [](TestContext& context) {

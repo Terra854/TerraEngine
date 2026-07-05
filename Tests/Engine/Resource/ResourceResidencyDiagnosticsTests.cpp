@@ -1,5 +1,6 @@
 #include "TestHarness.h"
 
+#include "Resource/ResourceManager.h"
 #include "Resource/ResourceResidency.h"
 
 namespace TerraEngine::Tests {
@@ -55,6 +56,27 @@ namespace {
 			const Resource::ResidencyDiagnosticsSummary summary = Resource::BuildResidencyDiagnostics(snapshot, {}, policy.diagnosticsEnabled);
 
 			context.Expect(!summary.candidates.empty(), "Open diagnostics should include candidate explanations for developer inspection.");
+		});
+
+		registry.Add("Resource.Residency.Diagnostics.LiveGpuUploadBytesOverrideStaleSnapshot", [](TestContext& context) {
+			ResourceManager& resourceManager = ResourceManager::Instance();
+			resourceManager.SetResidencyDiagnosticsEnabled(true);
+
+			const Resource::ResidencyDiagnosticsSummary beforeUpload = resourceManager.GetResidencyDiagnosticsSummary();
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			resourceManager.MarkResourceUploadedToGpu(
+				meshId,
+				AssetType::Mesh,
+				84u,
+				8192u,
+				"test backend upload");
+
+			const Resource::ResidencyDiagnosticsSummary afterUpload = resourceManager.GetResidencyDiagnosticsSummary();
+			context.Expect(
+				afterUpload.estimatedResidentBytes >= beforeUpload.estimatedResidentBytes + 8192u,
+				"Residency diagnostics should include backend-published mesh GPU bytes without waiting for cleanup.");
+
+			resourceManager.DeleteResource(meshId, AssetType::Mesh);
 		});
 	}
 }

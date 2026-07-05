@@ -188,10 +188,13 @@ namespace
 		policy.visibleRetentionSeconds = JsonDoubleOr(object, "visibleRetentionSeconds", policy.visibleRetentionSeconds);
 		policy.neededRetentionSeconds = JsonDoubleOr(object, "neededRetentionSeconds", policy.neededRetentionSeconds);
 		policy.maxLoadsPerUpdate = JsonUIntOr(object, "maxLoadsPerUpdate", policy.maxLoadsPerUpdate);
-		policy.textureMipStreamingEnabled = JsonBoolOr(object, "textureMipStreamingEnabled", policy.textureMipStreamingEnabled);
-		policy.textureMinStreamMip = JsonUIntOr(object, "textureMinStreamMip", policy.textureMinStreamMip);
-		policy.textureMaxStreamMip = JsonUIntOr(object, "textureMaxStreamMip", policy.textureMaxStreamMip);
-		policy.memoryBudgetInteraction = MemoryBudgetInteractionFromString(JsonStringOr(object, "memoryBudgetInteraction", std::string(TerraEngine::Resource::ToString(policy.memoryBudgetInteraction))));
+			policy.textureMipStreamingEnabled = JsonBoolOr(object, "textureMipStreamingEnabled", policy.textureMipStreamingEnabled);
+			policy.textureMinStreamMip = JsonUIntOr(object, "textureMinStreamMip", policy.textureMinStreamMip);
+			policy.textureMaxStreamMip = JsonUIntOr(object, "textureMaxStreamMip", policy.textureMaxStreamMip);
+			policy.virtualGeometryPageMemoryBudgetBytes = JsonUInt64Or(object, "virtualGeometryPageMemoryBudgetBytes", policy.virtualGeometryPageMemoryBudgetBytes);
+			policy.virtualGeometryPageUploadBudgetBytes = JsonUInt64Or(object, "virtualGeometryPageUploadBudgetBytes", policy.virtualGeometryPageUploadBudgetBytes);
+			policy.virtualGeometryPageRetirementBudgetBytes = JsonUInt64Or(object, "virtualGeometryPageRetirementBudgetBytes", policy.virtualGeometryPageRetirementBudgetBytes);
+			policy.memoryBudgetInteraction = MemoryBudgetInteractionFromString(JsonStringOr(object, "memoryBudgetInteraction", std::string(TerraEngine::Resource::ToString(policy.memoryBudgetInteraction))));
 		policy.diagnosticsEnabled = JsonBoolOr(object, "diagnosticsEnabled", policy.diagnosticsEnabled);
 		return TerraEngine::Resource::SanitizeStreamingPolicy(policy);
 	}
@@ -1026,8 +1029,23 @@ void ResourceManager::SetResidencyDiagnosticsEnabled(bool enabled)
 
 TerraEngine::Resource::ResidencyDiagnosticsSummary ResourceManager::GetResidencyDiagnosticsSummary() const
 {
-	std::shared_lock lock(m_ResidencyMutex);
-	return m_ResidencyDiagnostics;
+	std::uint64_t frameId = 0u;
+	std::vector<TerraEngine::Resource::ReleaseRecord> releaseRecords;
+	{
+		std::shared_lock lock(m_ResidencyMutex);
+		frameId = m_ResidencyDiagnostics.frameId;
+		releaseRecords = m_ResidencyDiagnostics.records;
+	}
+
+	// Residency diagnostics are queried directly by editor UI. Rebuild from
+	// the live resident table so backend GPU uploads that happened after the
+	// last cleanup tick are visible immediately instead of looking like
+	// zero-byte VRAM residents until the next cleanup interval.
+	const TerraEngine::Resource::ResidencySnapshot snapshot = BuildResidencySnapshot(frameId);
+	return TerraEngine::Resource::BuildResidencyDiagnostics(
+		snapshot,
+		releaseRecords,
+		snapshot.policy.diagnosticsEnabled);
 }
 
 bool ResourceManager::IsResourceResident(const TerraEngine::UUID& id) const
@@ -1154,6 +1172,15 @@ void ResourceManager::MarkResourceUploadedToGpu(
 	const TerraEngine::Resource::StreamingAssetPolicy assetPolicy = ResolveStreamingAssetPolicy(id, type);
 	std::uint64_t cpuBytes = 0u;
 	std::string sourceKey;
+	std::string registeredSourceKey;
+	const std::string fallbackSourceKey = ToHexString(id);
+	{
+		std::shared_lock lock(m_StreamingMutex);
+		if (auto it = m_StreamableAssets.find(id); it != m_StreamableAssets.end())
+		{
+			registeredSourceKey = it->second.sourceKey;
+		}
+	}
 	{
 		std::unique_lock lock(m_ResidencyMutex);
 		TerraEngine::Resource::ResidentAsset& asset = m_ResidentAssets[id];
@@ -1169,9 +1196,17 @@ void ResourceManager::MarkResourceUploadedToGpu(
 		{
 			asset.state = TerraEngine::Resource::ResidencyState::Active;
 		}
-		if (asset.sourceKey.empty())
+		// Backend-only uploads for generated package meshes may reach here
+		// before a residency record has a path. Preserve the streamable
+		// compiled path so diagnostics can still relate package parent rows to
+		// generated child meshes that share the same TEMF payload.
+		if (!registeredSourceKey.empty() && (asset.sourceKey.empty() || asset.sourceKey == fallbackSourceKey))
 		{
-			asset.sourceKey = ToHexString(id);
+			asset.sourceKey = registeredSourceKey;
+		}
+		else if (asset.sourceKey.empty())
+		{
+			asset.sourceKey = fallbackSourceKey;
 		}
 		cpuBytes = asset.estimatedCpuBytes;
 		sourceKey = asset.sourceKey;
@@ -1186,6 +1221,10 @@ void ResourceManager::MarkResourceUploadedToGpu(
 		if (!record.assetPolicyExplicit)
 		{
 			record.assetPolicy = TerraEngine::Resource::MakeDefaultStreamingAssetPolicy(record.assetType);
+		}
+		if (!record.sourceKey.empty() && (sourceKey.empty() || sourceKey == fallbackSourceKey))
+		{
+			sourceKey = record.sourceKey;
 		}
 		if (!sourceKey.empty())
 		{
@@ -1676,7 +1715,11 @@ void ResourceManager::SetStreamingDiagnosticsEnabled(bool enabled)
 TerraEngine::Resource::StreamingDiagnosticsSummary ResourceManager::GetStreamingDiagnosticsSummary() const
 {
 	std::shared_lock lock(m_StreamingMutex);
-	return m_StreamingDiagnostics;
+	// The Resource Residency window can be drawn after the renderer uploads a
+	// mesh but before the next residency cleanup publishes a cached summary.
+	// Build the snapshot from the live streamable records so diagnostics report
+	// the current RAM/VRAM byte counts instead of a stale zero-byte cleanup view.
+	return BuildStreamingDiagnosticsLocked(m_StreamingDiagnostics.frameId);
 }
 
 TerraEngine::Resource::StreamableAssetRecord ResourceManager::RegisterStreamableAsset(
@@ -2079,6 +2122,7 @@ TerraEngine::Resource::StreamingDiagnosticsSummary ResourceManager::BuildStreami
 			TerraEngine::Resource::StreamingDiagnosticRecord diagnostic;
 			diagnostic.assetId = id;
 			diagnostic.assetType = record.assetType;
+			diagnostic.sourceKey = record.sourceKey;
 			diagnostic.payloadState = record.payloadState;
 			diagnostic.lastVisibleSeconds = record.lastVisibleSeconds;
 			diagnostic.lastNeededSeconds = record.lastNeededSeconds;

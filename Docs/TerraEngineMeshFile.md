@@ -209,6 +209,16 @@ Validation rules:
   non-zero byte sizes, and valid cluster-page link ranges.
 - Validation flags must include adaptive targets, fallback coverage, cluster
   hierarchy, and page links before export packaging can accept the mesh.
+- Page-streamed rendering is considered ready only when page records, page
+  byte sizes, cluster-page links, material sections, finite bounds, fallback
+  links, and the fallback/hierarchy/page-link validation bits are all present.
+  Missing or corrupt high-detail page metadata is rejected before render
+  publication; fallback coverage remains the required visible substitute.
+- Tiny or simple meshes may intentionally skip page streaming when the cooker
+  writes a skipped-detail reason such as `MeshTooSmall`, `TooFewTriangles`, or
+  `TooFewMeshlets`. These meshes remain renderable, but inspectors and
+  automation must report `smallMeshStreamingSkipped` and the skipped reason
+  instead of exposing page-streaming controls as if real pages existed.
 - `ClusterHierarchyValidated` only proves structural parent/child metadata.
   Runtime mixed-detail cluster rendering additionally requires
   `ClusterCoverageValidated`; without it the renderer must fail open to a

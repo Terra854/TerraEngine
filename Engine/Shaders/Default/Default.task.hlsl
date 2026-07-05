@@ -166,6 +166,11 @@ struct PushConstants
 	uint selectedVirtualPageNeedCount; // Number of desired pages that fell back to resident coverage.
 	uint virtualGeometryPacketBufferIndex; // Bindless storage-buffer slot for the current view's GPU packet table, or 0xFFFFFFFF when unavailable.
 	uint virtualGeometryBatchBufferIndex; // Bindless storage-buffer slot for the current view's GPU batch table, or 0xFFFFFFFF when unavailable.
+	uint virtualGeometryPagePayloadBufferIndex; // Bindless storage-buffer slot for page-source metadata, or 0xFFFFFFFF when unavailable.
+	uint virtualGeometryPayloadSource; // Page payload source label selected by RenderSystem for this draw.
+	uint virtualGeometryEmittedSource; // Emitted source label after fallback substitution.
+	uint virtualGeometryPagePayloadByteOffset; // Low 32 bits of the page-local payload byte offset.
+	uint virtualGeometryPagePayloadByteSize; // Low 32 bits of the page-local payload byte size.
 	float4 editorTint;
 };
 
@@ -202,7 +207,16 @@ uint LoadVirtualGeometryPacketRunSeed()
 		SceneUniforms.virtualGeometryBatchBufferIndex,
 		0u,
 		SceneUniforms.selectedVirtualClusterCount);
-	return packetSeed ^ (batchSeed << 1u);
+	const uint pagePayloadSeed = LoadVirtualGeometryBufferWord(
+		SceneUniforms.virtualGeometryPagePayloadBufferIndex,
+		2u,
+		SceneUniforms.virtualGeometryPayloadSource);
+	// Page payload identity is consumed for packet ownership/debug validation
+	// and does not alter the Hi-Z projection or accepted occlusion threshold.
+	return packetSeed
+		^ (batchSeed << 1u)
+		^ (pagePayloadSeed << 8u)
+		^ SceneUniforms.virtualGeometryPagePayloadByteSize;
 }
 
 bool IsFrustumCulled(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const float epsilon)

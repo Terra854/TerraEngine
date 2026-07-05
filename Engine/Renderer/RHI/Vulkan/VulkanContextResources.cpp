@@ -17,6 +17,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -80,6 +81,18 @@ namespace
 		vmaFlushAllocation(allocator, buffer.allocation, offset, size);
 		vmaUnmapMemory(allocator, buffer.allocation);
 		return true;
+	}
+
+	VkDeviceSize TotalMeshGpuBytes(const VulkanMesh& mesh)
+	{
+		return mesh.meshShaderVertexBuffer.size
+			+ mesh.meshletVertexRemapBuffer.size
+			+ mesh.meshSkinningBuffer.size
+			+ mesh.meshDecodeInfoBuffer.size
+			+ mesh.indexBuffer.size
+			+ mesh.meshletBuffer.size
+			+ mesh.meshletSectionBuffer.size
+			+ mesh.meshletBoundsBuffer.size;
 	}
 
 	// HashClusterRangeValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -453,6 +466,7 @@ void VulkanContext::Impl::DestroyVirtualGeometryGpuPacketResources(VirtualGeomet
 	DestroyBufferImmediate(resources.compactedPacketBuffer);
 	DestroyBufferImmediate(resources.generatedSubmissionBuffer);
 	DestroyBufferImmediate(resources.counterReadbackBuffer);
+	DestroyBufferImmediate(resources.pagePayloadBuffer);
 	if (resources.packetBufferIndex != INVALID_BINDLESS_BUFFER_INDEX)
 	{
 		freeBufferIndices.push_back(resources.packetBufferIndex);
@@ -473,6 +487,10 @@ void VulkanContext::Impl::DestroyVirtualGeometryGpuPacketResources(VirtualGeomet
 	{
 		freeBufferIndices.push_back(resources.counterReadbackBufferIndex);
 	}
+	if (resources.pagePayloadBufferIndex != INVALID_BINDLESS_BUFFER_INDEX)
+	{
+		freeBufferIndices.push_back(resources.pagePayloadBufferIndex);
+	}
 	resources = {};
 }
 
@@ -487,6 +505,7 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	activeVirtualGeometryCompactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeVirtualGeometryGeneratedSubmissionBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	activeVirtualGeometryCounterReadbackBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
+	activeVirtualGeometryPagePayloadBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 	if (currentFrame >= virtualGeometryGpuPacketResourcesByFrame.size())
 	{
 		return;
@@ -513,13 +532,37 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	VirtualGeometryGpuPacketFrameResources& resources = *resourceIt;
 	resources.frameId = frameId;
 	resources.viewType = viewType;
-	resources.viewId = viewId;
-	resources.live = !frameData.virtualGeometryGpuPackets.empty() || !frameData.virtualGeometryGpuBatches.empty();
-	resources.retireAfterFrameId = frameId + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
-	if (!resources.live)
-	{
-		return;
-	}
+		resources.viewId = viewId;
+		resources.live = !frameData.virtualGeometryGpuPackets.empty() || !frameData.virtualGeometryGpuBatches.empty();
+		resources.retireAfterFrameId = frameId + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
+		if (currentFrame < pendingVirtualGeometryPageRetirementsByFrame.size())
+		{
+			std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan>& pendingPageRetirements =
+				pendingVirtualGeometryPageRetirementsByFrame[currentFrame];
+			for (const VirtualGeometryPageRetirementRecord& retirement : frameData.virtualGeometryPageRetirements)
+			{
+				if (retirement.protectedFallback || retirement.retired)
+				{
+					continue;
+				}
+				// Page retirement is represented as a value plan first. Actual
+				// Vulkan buffer releases still go through the existing deferred
+				// RetireBuffer path after all frame fences that could sample the
+				// page payload have completed.
+				TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan plan;
+				plan.pageId = retirement.pageId;
+				plan.canRetire = true;
+				plan.retireAfterFrameId = std::max(retirement.frameId, frameId) + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
+				plan.reason = retirement.reason.empty()
+					? "virtual geometry page queued from frame retirement record"
+					: retirement.reason;
+				pendingPageRetirements.push_back(std::move(plan));
+			}
+		}
+		if (!resources.live)
+		{
+			return;
+		}
 
 	auto ensureAndWriteBuffer = [&](VulkanBuffer& buffer, std::size_t& capacity, std::size_t elementCount, std::size_t elementSize, const void* source, const char* name) {
 		if (elementCount == 0u || source == nullptr)
@@ -576,6 +619,23 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		counterReadbackWords.push_back(readback.rejectedPackets);
 		counterReadbackWords.push_back(readback.failOpenPackets);
 	}
+	std::vector<std::uint32_t> pagePayloadWords;
+	pagePayloadWords.reserve(frameData.virtualGeometryGpuPackets.size() * 8u);
+	for (const GpuVirtualGeometryPacketRecord& packet : frameData.virtualGeometryGpuPackets)
+	{
+		// The current GPU payload metadata table is a compact, shader-readable
+		// mirror of the CPU packet source labels. Later phases can replace the
+		// byte-range words with real page buffer offsets without changing
+		// descriptor lifetime rules.
+		pagePayloadWords.push_back(packet.pageId);
+		pagePayloadWords.push_back(packet.fallbackPageId);
+		pagePayloadWords.push_back(static_cast<std::uint32_t>(packet.payloadSource));
+		pagePayloadWords.push_back(static_cast<std::uint32_t>(packet.emittedSource));
+		pagePayloadWords.push_back(static_cast<std::uint32_t>(packet.pagePayloadByteOffset & 0xffffffffull));
+		pagePayloadWords.push_back(static_cast<std::uint32_t>((packet.pagePayloadByteOffset >> 32u) & 0xffffffffull));
+		pagePayloadWords.push_back(static_cast<std::uint32_t>(packet.pagePayloadByteSize & 0xffffffffull));
+		pagePayloadWords.push_back(static_cast<std::uint32_t>((packet.pagePayloadByteSize >> 32u) & 0xffffffffull));
+	}
 	ensureAndWriteBuffer(
 		resources.generatedSubmissionBuffer,
 		resources.generatedSubmissionCapacity,
@@ -590,6 +650,13 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		sizeof(std::uint32_t),
 		counterReadbackWords.data(),
 		"Virtual Geometry Counter Readback Buffer");
+	ensureAndWriteBuffer(
+		resources.pagePayloadBuffer,
+		resources.pagePayloadCapacity,
+		pagePayloadWords.size(),
+		sizeof(std::uint32_t),
+		pagePayloadWords.data(),
+		"Virtual Geometry Page Payload Source Buffer");
 
 	auto publishBindlessBufferForCurrentFrame = [&](std::uint32_t& bindlessIndex, const VulkanBuffer& buffer) -> std::uint32_t {
 		if (buffer.buffer == VK_NULL_HANDLE || buffer.size == 0u)
@@ -608,6 +675,10 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	activeVirtualGeometryCompactedPacketBufferIndex = publishBindlessBufferForCurrentFrame(resources.compactedPacketBufferIndex, resources.compactedPacketBuffer);
 	activeVirtualGeometryGeneratedSubmissionBufferIndex = publishBindlessBufferForCurrentFrame(resources.generatedSubmissionBufferIndex, resources.generatedSubmissionBuffer);
 	activeVirtualGeometryCounterReadbackBufferIndex = publishBindlessBufferForCurrentFrame(resources.counterReadbackBufferIndex, resources.counterReadbackBuffer);
+	// These page payload source buffers are owned by the current frame slot.
+	// They stay alive until the frame is safely retired, which prevents Scene
+	// View/Game View from sampling a buffer that another view already reused.
+	activeVirtualGeometryPagePayloadBufferIndex = publishBindlessBufferForCurrentFrame(resources.pagePayloadBufferIndex, resources.pagePayloadBuffer);
 
 	// The compaction compute path writes into the compacted/generated/counter
 	// buffers once a backend pipeline is available. Until then these buffers
@@ -1436,15 +1507,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	if (existingMeshIt != meshCache.end())
 	{
 		const VulkanMesh& mesh = existingMeshIt->second;
-		const VkDeviceSize totalGpuBytes =
-			mesh.meshShaderVertexBuffer.size
-			+ mesh.meshletVertexRemapBuffer.size
-			+ mesh.meshSkinningBuffer.size
-			+ mesh.meshDecodeInfoBuffer.size
-			+ mesh.indexBuffer.size
-			+ mesh.meshletBuffer.size
-			+ mesh.meshletSectionBuffer.size
-			+ mesh.meshletBoundsBuffer.size;
+		const VkDeviceSize totalGpuBytes = TotalMeshGpuBytes(mesh);
 		ResourceManager::Instance().MarkResourceUploadedToGpu(
 			meshId,
 			AssetType::Mesh,
@@ -1612,15 +1675,7 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	UpdateGlobalBuffer(vMesh.bindlessIndex, vMesh.meshDecodeInfoBuffer.buffer, 0, vMesh.meshDecodeInfoBuffer.size);
 
 	meshCache[meshId] = vMesh;
-	const VkDeviceSize totalGpuBytes =
-		packedVertexSize
-		+ vertexRemapSize
-		+ skinningDataSize
-		+ static_cast<VkDeviceSize>(sizeof(MeshDecodeInfo))
-		+ primitiveIndexSize
-		+ meshletTableSize
-		+ meshletSectionSize
-		+ boundsUploadSize;
+	const VkDeviceSize totalGpuBytes = TotalMeshGpuBytes(meshCache[meshId]);
 	const bool hasVirtualGeometryPageMetadata = cpuMesh->hasVirtualGeometry && !cpuMesh->virtualGeometryPages.empty();
 	// Virtual geometry pages are still uploaded as part of the owning mesh
 	// buffers in this milestone. Keep the publication reason distinct so
@@ -2268,13 +2323,25 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 	}
 
 	VkShaderStageFlags defaultPushConstantStages = 0;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+	bool hasCompatibleDefaultPushRange = false;
+	// vkCmdPushConstants validates every byte against every requested stage.
+	// Draw submission now pushes each reflected range separately; the full-range
+	// mask remains as conservative metadata for pipelines whose stages all share
+	// the complete default mesh PushConstants contract.
 	for (const VkPushConstantRange& range : pushConstants) {
-		defaultPushConstantStages |= range.stageFlags;
+		if (range.stageFlags != 0u
+			&& range.size > 0u
+			&& range.offset < sizeof(PushConstants)
+			&& range.size <= sizeof(PushConstants) - range.offset) {
+			hasCompatibleDefaultPushRange = true;
+		}
+		if (range.offset == 0u && range.size >= sizeof(PushConstants)) {
+			defaultPushConstantStages |= range.stageFlags;
+		}
 	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (defaultPushConstantStages == 0) {
-		defaultPushConstantStages = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
+	supportsDefaultPushConstants = hasCompatibleDefaultPushRange;
+	if (!supportsDefaultPushConstants) {
+		TERRAENGINE_LOG(LogLevel::Warning, "Graphics pipeline push constants do not overlap the default mesh push-constant contract; draw submission will skip default push ranges.");
 	}
 
 	VulkanPipeline pipeline{};
@@ -2464,10 +2531,10 @@ bool VulkanContext::Impl::CreateGlobalDescriptorResources() {
 		0, // 5
 		0, // 6
 		0, // 7
-		0, // 8
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 8: Point-shadow sampler can change when shadow resources are resized between editor views.
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 9: Bindless Buffers
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 10: Hi-Z Texture
-		0, // 11: Hi-Z Sampler
+		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 11: Hi-Z sampler can be republished while multi-view command buffers are still executable.
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 12: Depth Buffer
 		0, // 13: Cluster Depth
 		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, // 14: VRS Image
@@ -3927,8 +3994,55 @@ void VulkanContext::Impl::RecordPendingLightAnalysisCandidates(uint32_t statsSlo
 
 // VulkanContext::Impl::PublishCompletedFrameStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
+	TerraEngine::Renderer::BackendResourceResidencySnapshot backendResidency{};
+	backendResidency.frameId = frameIndex;
+	backendResidency.records.reserve(meshCache.size() + textureCache.size());
+	for (const auto& [meshId, mesh] : meshCache)
+	{
+		const VkDeviceSize gpuBytes = TotalMeshGpuBytes(mesh);
+		if (gpuBytes == 0u)
+		{
+			continue;
+		}
+
+		TerraEngine::Renderer::BackendResourceResidencyRecord record{};
+		record.assetId = meshId;
+		record.kind = TerraEngine::Renderer::BackendResourceResidencyKind::Mesh;
+		record.gpuBytes = static_cast<std::uint64_t>(gpuBytes);
+		record.subresourceCount = 8u;
+		record.detail = "vulkan mesh cache";
+		backendResidency.records.push_back(std::move(record));
+	}
+	for (const auto& [textureId, texture] : textureCache)
+	{
+		if (texture.size == 0u)
+		{
+			continue;
+		}
+
+		TerraEngine::Renderer::BackendResourceResidencyRecord record{};
+		record.assetId = textureId;
+		record.kind = TerraEngine::Renderer::BackendResourceResidencyKind::Texture;
+		record.gpuBytes = static_cast<std::uint64_t>(texture.size);
+		record.subresourceCount = texture.residentMipCount;
+		record.detail = "vulkan texture cache";
+		backendResidency.records.push_back(std::move(record));
+	}
+	TerraEngine::Renderer::PublishBackendResourceResidencySnapshot(std::move(backendResidency));
+
 	const uint32_t gameSlot = GetStatsSlotIndex(frameIndex, VulkanContext::ViewType::Game);
 	const uint32_t sceneSlot = GetStatsSlotIndex(frameIndex, VulkanContext::ViewType::Scene);
+	const auto hasReadableCompletedHiZ = [](const VulkanHiZ& hiZ, const RenderStatsSnapshot& stats) {
+		const bool sizeMatchesStats =
+			stats.renderSize.x == 0u
+			|| stats.renderSize.y == 0u
+			|| (hiZ.width == stats.renderSize.x && hiZ.height == stats.renderSize.y);
+		return hiZ.image != VK_NULL_HANDLE
+			&& hiZ.fullView != VK_NULL_HANDLE
+			&& hiZ.sampler != VK_NULL_HANDLE
+			&& hiZ.mipLevels > 0u
+			&& sizeMatchesStats;
+	};
 
 	RenderStatsSnapshot gameSnapshot = pendingStatsBySlot[gameSlot];
 	const MeshletCullingCountersGPU gameCounters = ReadMeshletCounters(gameSlot);
@@ -3962,7 +4076,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			gameSnapshot.meshletCounterLatencyFrames = 0u;
 			gameSnapshot.meshletCounterReason = "Task culling is inactive; counts are prepared CPU estimates.";
 		}
-		gameSnapshot.hiZActive = gameSnapshot.hiZActive && HiZForFrame(kHiZGameViewIndex, frameIndex).image != VK_NULL_HANDLE;
+		gameSnapshot.hiZActive = gameSnapshot.hiZActive && hasReadableCompletedHiZ(HiZForFrame(kHiZGameViewIndex, frameIndex), gameSnapshot);
 		gameSnapshot.vrsActive = gameSnapshot.vrsActive && UsesVrsAttachment();
 	}
 
@@ -3998,7 +4112,7 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 			sceneSnapshot.meshletCounterLatencyFrames = 0u;
 			sceneSnapshot.meshletCounterReason = "Task culling is inactive; counts are prepared CPU estimates.";
 		}
-		sceneSnapshot.hiZActive = sceneSnapshot.hiZActive && HiZForFrame(kHiZSceneViewIndex, frameIndex).image != VK_NULL_HANDLE;
+		sceneSnapshot.hiZActive = sceneSnapshot.hiZActive && hasReadableCompletedHiZ(HiZForFrame(kHiZSceneViewIndex, frameIndex), sceneSnapshot);
 		sceneSnapshot.vrsActive = sceneSnapshot.vrsActive && UsesVrsAttachment();
 	}
 
@@ -4659,24 +4773,40 @@ void VulkanContext::Impl::UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32
 // VulkanContext::Impl::UpdateGlobalHiZ is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalHiZ(uint32_t frameIndex) {
 	if (frameIndex >= globalDescriptorSets.size()) return;
-	WaitForDescriptorMutationIdle();
 
 	std::array<VkDescriptorImageInfo, kHiZViewCount> imageInfos{};
+	const auto isReadableHiZ = [](const VulkanHiZ& hiZ) {
+		return hiZ.fullView != VK_NULL_HANDLE && hiZ.sampler != VK_NULL_HANDLE;
+	};
+	const VulkanHiZ* fallbackHiZ = nullptr;
 	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < kHiZViewCount; ++hiZViewIndex) {
 		const VulkanHiZ& hiZ = HiZForFrame(hiZViewIndex, frameIndex);
-		if (hiZ.fullView == VK_NULL_HANDLE || hiZ.sampler == VK_NULL_HANDLE) return;
+		if (isReadableHiZ(hiZ)) {
+			fallbackHiZ = &hiZ;
+			break;
+		}
+	}
+	if (fallbackHiZ == nullptr) {
+		return;
+	}
 
+	WaitForDescriptorMutationIdle();
+
+	for (uint32_t hiZViewIndex = 0u; hiZViewIndex < kHiZViewCount; ++hiZViewIndex) {
+		const VulkanHiZ& hiZ = HiZForFrame(hiZViewIndex, frameIndex);
+		const VulkanHiZ& readableHiZ = isReadableHiZ(hiZ) ? hiZ : *fallbackHiZ;
 		// Binding 10 is an array so editor Scene/Game command buffers can be
 		// recorded once and submitted together without racing a descriptor
-		// mutation between views. The task shader indexes this array from the
-		// same stats slot that already selects per-view culling data.
+		// mutation between views. If one editor view has not produced a pyramid
+		// yet, keep its descriptor valid with the other view's image while that
+		// missing view's frame-data gate keeps Hi-Z sampling fail-open.
 		imageInfos[hiZViewIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		imageInfos[hiZViewIndex].imageView = hiZ.fullView;
+		imageInfos[hiZViewIndex].imageView = readableHiZ.fullView;
 		imageInfos[hiZViewIndex].sampler = VK_NULL_HANDLE;
 	}
 
 	VkDescriptorImageInfo samplerInfo{};
-	samplerInfo.sampler = HiZForFrame(kHiZGameViewIndex, frameIndex).sampler;
+	samplerInfo.sampler = fallbackHiZ->sampler;
 
 	VkWriteDescriptorSet writes[2]{};
 	writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;

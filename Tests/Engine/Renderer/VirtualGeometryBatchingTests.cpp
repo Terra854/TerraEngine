@@ -4,6 +4,7 @@
 #include "Renderer/Graph/RenderFrameSnapshot.h"
 #include "Renderer/RenderSystem.h"
 #include "Renderer/RHI/Vulkan/VulkanRendererWorkCache.h"
+#include "Renderer/RHI/Vulkan/VulkanUploadPlanning.h"
 
 namespace TerraEngine::Tests {
 namespace {
@@ -108,6 +109,10 @@ namespace {
 			packet.projectedBounds = glm::vec4(0.25f, 0.25f, 0.75f, 0.75f);
 			packet.pageId = 9u;
 			packet.fallbackPageId = 4u;
+			packet.payloadSource = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			packet.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			packet.pagePayloadByteOffset = 8192u;
+			packet.pagePayloadByteSize = 4096u;
 			packet.debugIdentity = 1234u;
 			packet.fallbackPacket = true;
 
@@ -124,8 +129,39 @@ namespace {
 			context.ExpectEqual(packet.clusterId, records.front().clusterId, "GPU packets should preserve selected cluster identity.");
 			context.ExpectEqual(packet.meshletOffset, records.front().meshletOffset, "GPU packets should preserve meshlet offset.");
 			context.ExpectEqual(packet.meshletCount, records.front().meshletCount, "GPU packets should preserve meshlet count.");
+			context.Expect(records.front().payloadSource == packet.payloadSource, "GPU packets should preserve page payload source labels.");
+			context.Expect(records.front().emittedSource == packet.emittedSource, "GPU packets should preserve emitted page source labels.");
+			context.ExpectEqual(packet.pagePayloadByteOffset, records.front().pagePayloadByteOffset, "GPU packets should preserve page-local payload byte offsets.");
+			context.ExpectEqual(packet.pagePayloadByteSize, records.front().pagePayloadByteSize, "GPU packets should preserve page-local payload byte sizes.");
 			context.Expect((records.front().flags & 1u) != 0u, "GPU packet flags should mark fail-open coverage.");
 			context.Expect(((records.front().flags >> 8u) & 0xffu) == static_cast<std::uint32_t>(VirtualGeometryDebugVisualizationMode::Cluster), "GPU packet flags should mirror the view debug mode.");
+		});
+
+		registry.Add("VirtualGeometry.Batching.US1.VulkanPageSourcePreparationUsesPageLocalRanges", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 3033u;
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState state = MakeBatchedSelectionState();
+			state.clusterPackets.front().payloadSource = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			state.clusterPackets.front().emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
+			state.clusterPackets.front().pagePayloadByteOffset = 16384u;
+			state.clusterPackets.front().pagePayloadByteSize = 2048u;
+			state.clusterPackets.front().fallbackPacket = true;
+			state.gpuPacketRecords = RenderSystem::BuildGpuVirtualGeometryPacketRecords(
+				state.clusterPackets,
+				snapshot.frameId,
+				VirtualGeometryDebugVisualizationMode::Residency);
+			snapshot.virtualGeometryViewSelections.push_back(state);
+
+			const std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPagePayloadUploadRecord> records =
+				TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadUploadPlan(snapshot, RenderViewType::Game, state.outputId);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "One page-local packet should produce one Vulkan payload upload record.");
+			context.Expect(records.front().accepted, "Resident fallback page payloads should be accepted by upload planning.");
+			context.Expect(records.front().payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload, "Upload planning should preserve fallback page payload source labels.");
+			context.Expect(records.front().emittedSource == VirtualGeometryEmittedPageSource::FallbackPage, "Upload planning should preserve emitted fallback source labels.");
+			context.ExpectEqual(16384ull, records.front().payloadByteOffset, "Upload planning should preserve page-local byte offset.");
+			context.ExpectEqual(2048ull, records.front().payloadByteSize, "Upload planning should preserve page-local byte size.");
+			context.Expect(records.front().pinnedFallback, "Fallback payload records should remain marked as protected.");
 		});
 
 		registry.Add("VirtualGeometry.Batching.US1.GpuBatchDescriptorsSplitOnCompatibilityKeys", [](TestContext& context) {

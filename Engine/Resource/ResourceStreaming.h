@@ -153,6 +153,12 @@ namespace TerraEngine::Resource
 		bool resident = false;
 		bool failed = false;
 		std::uint32_t clusterId = 0u;
+		std::uint64_t payloadByteOffset = 0u;
+		std::uint64_t payloadByteSize = 0u;
+		std::uint32_t meshletOffset = 0u;
+		std::uint32_t meshletCount = 0u;
+		bool pinnedFallback = false;
+		::VirtualGeometryPagePayloadSource payloadSource = ::VirtualGeometryPagePayloadSource::Unknown;
 	};
 
 	struct VirtualGeometryPageNeedInput
@@ -172,6 +178,8 @@ namespace TerraEngine::Resource
 		std::int32_t assetPriority = 0;
 		std::uint64_t budgetPressureBytes = 0u;
 		bool fallbackRequired = true;
+		::VirtualGeometryPagePayloadSource desiredPayloadSource = ::VirtualGeometryPagePayloadSource::Unknown;
+		::VirtualGeometryPagePayloadSource fallbackPayloadSource = ::VirtualGeometryPagePayloadSource::Unknown;
 		std::vector<VirtualGeometryStreamingPage> pages;
 	};
 
@@ -189,6 +197,10 @@ namespace TerraEngine::Resource
 		std::uint32_t packetCount = 0u;
 		std::int32_t priority = 0;
 		bool fallbackRequest = false;
+		::VirtualGeometryPagePayloadSource payloadSource = ::VirtualGeometryPagePayloadSource::Unknown;
+		::VirtualGeometryEmittedPageSource expectedEmission = ::VirtualGeometryEmittedPageSource::None;
+		std::uint64_t payloadByteOffset = 0u;
+		std::uint64_t payloadByteSize = 0u;
 		std::string reason;
 	};
 
@@ -267,9 +279,16 @@ namespace TerraEngine::Resource
 		// full-resolution image; larger indices are lower-detail tail mips.
 		// Near visible textures start at textureMinStreamMip, while far visible
 		// textures can start at textureMaxStreamMip.
-		std::uint32_t textureMinStreamMip = 0;
-		std::uint32_t textureMaxStreamMip = 0;
-		MemoryBudgetInteraction memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
+			std::uint32_t textureMinStreamMip = 0;
+			std::uint32_t textureMaxStreamMip = 0;
+			// Virtual geometry page budgets are policy inputs, not direct release
+			// commands. ResourceResidency and the renderer backend consume these
+			// byte caps at protected boundaries so worker planning never destroys
+			// page payloads while a frame can still read them.
+			std::uint64_t virtualGeometryPageMemoryBudgetBytes = 0u;
+			std::uint64_t virtualGeometryPageUploadBudgetBytes = 0u;
+			std::uint64_t virtualGeometryPageRetirementBudgetBytes = 0u;
+			MemoryBudgetInteraction memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
 		bool diagnosticsEnabled = false;
 		std::unordered_set<StreamingNeedType> protectedNeedTypes;
 	};
@@ -323,6 +342,7 @@ namespace TerraEngine::Resource
 	{
 		StreamableAssetId assetId = TerraEngine::EMPTY_UUID;
 		StreamableAssetType assetType = StreamableAssetType::Other;
+		std::string sourceKey;
 		StreamablePayloadState payloadState = StreamablePayloadState::Registered;
 		double lastVisibleSeconds = 0.0;
 		double lastNeededSeconds = 0.0;

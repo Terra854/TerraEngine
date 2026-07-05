@@ -372,7 +372,12 @@ namespace TerraEngine::Tests {
 				TerraEngine::Scheduling::kResourceVirtualGeometryGeneratedSubmissions,
 				TerraEngine::Scheduling::kResourceVirtualGeometryCounterReadbacks,
 				TerraEngine::Scheduling::kResourceVirtualGeometryCompactionResults,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPagePayloads,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageRequests,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPageNeedPackets,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageRetirements,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageDiagnostics,
 				TerraEngine::Scheduling::kResourceVirtualGeometryVisibilitySnapshots,
 				TerraEngine::Scheduling::kResourceVirtualGeometryCounterSnapshots,
 				TerraEngine::Scheduling::kResourceVirtualGeometryCullingDiagnostics,
@@ -399,9 +404,32 @@ namespace TerraEngine::Tests {
 			{
 				context.Expect(ContainsSchedulerResource(resources, resourceName), "Default scheduler resources should define RenderSystem write resource: " + resourceName);
 			}
+			const std::vector<std::string> pageStreamingReadResources = {
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageResidencySnapshots,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPagePayloads,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications
+			};
+			const std::vector<std::string> pageStreamingWriteResources = {
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageRequests,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageNeedPackets,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageRetirements,
+				TerraEngine::Scheduling::kResourceVirtualGeometryPageDiagnostics
+			};
+			for (const std::string& resourceName : pageStreamingReadResources)
+			{
+				context.Expect(Contains(declaration.reads, resourceName), "RenderSystem should declare page-streaming read resource: " + resourceName);
+			}
+			for (const std::string& resourceName : pageStreamingWriteResources)
+			{
+				context.Expect(Contains(declaration.writes, resourceName), "RenderSystem should declare page-streaming write resource: " + resourceName);
+			}
 
 			context.Expect(summary.valid, "Default scheduler resources should accept RenderSystem's virtual geometry read/write declarations.");
 			context.Expect(!HasDiagnostic(summary, TerraEngine::Scheduling::DiagnosticCategory::Resource), "Virtual geometry scheduler resources should not produce unknown-resource diagnostics.");
+			context.Expect(declaration.safeSubwork.find("page payload source planning") != std::string::npos, "RenderSystem worker-safe declaration should explain page payload source planning.");
+			context.Expect(declaration.safeSubwork.find("page request planning") != std::string::npos, "RenderSystem worker-safe declaration should explain page request planning.");
+			context.Expect(declaration.protectedCommit.find("page payload publication") != std::string::npos, "RenderSystem protected boundary should explain page payload publication.");
+			context.Expect(declaration.protectedCommit.find("page retirement draining") != std::string::npos, "RenderSystem protected boundary should explain page retirement draining.");
 		});
 
 		registry.Add("Engine.SystemScheduler.FrameWorkloadsConvertProtectedAndWorkerSystems", [](TestContext& context) {

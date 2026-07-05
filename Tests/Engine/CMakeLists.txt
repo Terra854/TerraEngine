@@ -49,10 +49,13 @@ add_executable(TerraEngine-EngineTests
 	Resource/ResourceResidencyDiagnosticsTests.cpp
 	Resource/ResourceResidencyPolicyTests.cpp
 	Resource/ResourceResidencyUsageTests.cpp
-	Resource/ResourceStreamingDiagnosticsTests.cpp
-	Resource/ResourceStreamingPolicyTests.cpp
-	Resource/ResourceStreamingPreloadTests.cpp
-	Resource/ResourceStreamingResidencyIntegrationTests.cpp
+	Resource/ResourceManagerMeshTests.cpp
+		Resource/ResourceStreamingDiagnosticsTests.cpp
+		Resource/ResourceStreamingPolicyTests.cpp
+		Resource/ResourceStreamingPreloadTests.cpp
+		Resource/ResourceStreamingTests.cpp
+		Resource/ResourceStreamingResidencyIntegrationTests.cpp
+	Resource/VirtualGeometryPageResidencyTests.cpp
 	Resource/VirtualGeometryPageStreamingHardeningTests.cpp
 	Resource/VirtualGeometryResourceTests.cpp
 	Resource/VirtualGeometryResidencyTests.cpp
@@ -93,6 +96,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHardeningTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryHiZTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryMultiViewTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryPageStreamingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryPerformanceGateTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryQualityTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VirtualGeometryRenderTests.cpp
@@ -248,7 +252,19 @@ set_tests_properties(Engine.VirtualGeometryShadow PROPERTIES
 add_test(NAME Engine.VirtualGeometryResource COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
 set_tests_properties(Engine.VirtualGeometryResource PROPERTIES
 	LABELS "Engine;VirtualGeometry;Resource;Streaming"
-	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Resource,Resource.Residency"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Resource,Resource.Residency,Resource.Streaming"
+)
+
+add_test(NAME Engine.VirtualGeometryPageStreaming COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryPageStreaming PROPERTIES
+	LABELS "Engine;VirtualGeometry;Streaming"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometryPageStreaming"
+)
+
+add_test(NAME Engine.VirtualGeometryPageResidency COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VirtualGeometryPageResidency PROPERTIES
+	LABELS "Engine;VirtualGeometry;Resource;Streaming"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometryPageResidency"
 )
 
 add_test(NAME Engine.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

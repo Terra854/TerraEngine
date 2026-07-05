@@ -242,6 +242,9 @@ static nlohmann::json BuildStreamingPolicyManifest()
 	policy["textureMipStreamingEnabled"] = profile.textureMipStreamingEnabled;
 	policy["textureMinStreamMip"] = profile.textureMinStreamMip;
 	policy["textureMaxStreamMip"] = profile.textureMaxStreamMip;
+	policy["virtualGeometryPageMemoryBudgetBytes"] = profile.virtualGeometryPageMemoryBudgetBytes;
+	policy["virtualGeometryPageUploadBudgetBytes"] = profile.virtualGeometryPageUploadBudgetBytes;
+	policy["virtualGeometryPageRetirementBudgetBytes"] = profile.virtualGeometryPageRetirementBudgetBytes;
 	policy["memoryBudgetInteraction"] = std::string(TerraEngine::Resource::ToString(profile.memoryBudgetInteraction));
 	return policy;
 }

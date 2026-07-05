@@ -215,6 +215,15 @@ serialization. These tests intentionally do not inspect persistent Vulkan or
 pipeline disk caches because those files are backend cache implementation
 details, not loaded resource residency.
 
+For virtual geometry page streaming, manual resource verification should confirm
+that fallback pages stay `Pinned` or `Resident`, high-detail pages can move
+through `Requested`, `PendingIO`, `PendingUpload`, `Resident`, `Evicting`, and
+`Evicted`, and failed detail pages keep a visible fallback page. The Resource
+Residency window and automation diagnostics should report resident payload bytes,
+pinned fallback bytes, requests, retirements, evictions, and failure reasons
+without showing missing coverage or embedded full-mesh fallback as the normal
+path.
+
 The visibility streaming checks extend the resource residency surface with
 deferred scene payload registration, streamable state transitions, preload rule
 evaluation, active render-view needs, editor workflow protection, active UI
@@ -316,6 +325,73 @@ do not match frame/view ownership, when Scene View and Game View share state
 across 300 frames, or when the Hi-Z false-occlusion count is non-zero.
 Unsupported prerequisites are reported as `Unsupported`, not as passing
 zero-valued metrics.
+
+Feature `specs/033-vg-page-streaming` turns virtual geometry residency into a
+true page-sourced render contract. Use the page-streaming slices while
+implementing that feature:
+
+```powershell
+ctest --test-dir out/build/Debug -R "VirtualGeometryPageStreaming|VirtualGeometryPageResidency|Engine.VirtualGeometryResource|Engine.VirtualGeometryHiZ|Engine.VirtualGeometryMultiView|Engine.VirtualGeometryPerformanceGate" --output-on-failure -C Debug
+```
+
+For the page request, budget pressure, eviction, and re-request lifecycle, run
+the resource-labeled slice after the engine test target builds:
+
+```powershell
+ctest --test-dir out/build/Debug -C Debug -L Resource --output-on-failure
+```
+
+For US6 page-source diagnostics, build both native test targets and run the
+registry filters that match the editor-facing contract names:
+
+```powershell
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Diagnostics.US6&& out\build\Debug\TerraEngine-EngineTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics.US6&& out\build\Debug\TerraEngine-EditorTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation.US6&& out\build\Debug\TerraEngine-EditorTests.exe"
+```
+
+The literal task checkpoint
+`ctest --test-dir out/build/Debug -C Debug -R VirtualGeometry.Editor --output-on-failure`
+currently matches no top-level CTest target. Treat the registry filters above
+as the authoritative US6 validation until CTest target names are expanded.
+
+For US7 asset cook/runtime integrity, run the inspector, runtime loader, and
+automation slices before the asset-pipeline CTest checkpoint:
+
+```powershell
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Inspector.US7&& out\build\Debug\TerraEngine-EditorTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=Resource.Manager.Mesh.US7&& out\build\Debug\TerraEngine-EngineTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Automation.US7&& out\build\Debug\TerraEngine-EditorTests.exe"
+ctest --test-dir out/build/Debug -C Debug -R AssetPipeline --output-on-failure
+```
+
+These checks protect the TEMF v1 page-integrity contract, tiny/simple mesh skip
+reasons, mesh-only Inspector controls, and automation fields for page readiness
+or integrity failure diagnostics.
+
+For US8 page-streaming performance and memory gates, run the page-gate filters
+before the broad VirtualGeometry label checkpoint:
+
+```powershell
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.PerformanceGate.US8&& out\build\Debug\TerraEngine-EngineTests.exe"
+cmd /c "set TERRAENGINE_TEST_FILTER=VirtualGeometry.Render.MultiView.US8&& out\build\Debug\TerraEngine-EngineTests.exe"
+ctest --test-dir out/build/Debug -C Debug -L VirtualGeometry --output-on-failure
+```
+
+The US8 gates fail when resident page payload bytes exceed the configured page
+budget, resident page payloads approach full owning-mesh residency, page-source
+coverage is missing, embedded full-mesh fallback is used as the normal path, or
+Scene View/Game View page-source counters lose their view/counter-source
+identity.
+
+The clean-checkout fixture names are `page-sourced-resident-payload`,
+`page-fallback-only-coverage`, `page-budget-churn`, and
+`page-integrity-malformed`; `dense-page-budget-streaming-gate` adds the US8
+resident-byte, full-owning-mesh, missing-coverage, and embedded-fallback gate
+coverage. These fixtures prove that normal rendering emits resident page
+payloads, fallback pages stay pinned and visible, resident bytes respect the
+configured budget, malformed page metadata fails before rendering, and Hi-Z
+behavior remains the accepted baseline.
 
 The broader virtual-geometry regression set covers renderer, resource,
 editor asset pipeline, automation, export, and debug visualizer behavior:
