@@ -532,37 +532,37 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	VirtualGeometryGpuPacketFrameResources& resources = *resourceIt;
 	resources.frameId = frameId;
 	resources.viewType = viewType;
-		resources.viewId = viewId;
-		resources.live = !frameData.virtualGeometryGpuPackets.empty() || !frameData.virtualGeometryGpuBatches.empty();
-		resources.retireAfterFrameId = frameId + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
-		if (currentFrame < pendingVirtualGeometryPageRetirementsByFrame.size())
+	resources.viewId = viewId;
+	resources.live = !frameData.virtualGeometryGpuPackets.empty() || !frameData.virtualGeometryGpuBatches.empty();
+	resources.retireAfterFrameId = frameId + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
+	if (currentFrame < pendingVirtualGeometryPageRetirementsByFrame.size())
+	{
+		std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan>& pendingPageRetirements =
+			pendingVirtualGeometryPageRetirementsByFrame[currentFrame];
+		for (const VirtualGeometryPageRetirementRecord& retirement : frameData.virtualGeometryPageRetirements)
 		{
-			std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan>& pendingPageRetirements =
-				pendingVirtualGeometryPageRetirementsByFrame[currentFrame];
-			for (const VirtualGeometryPageRetirementRecord& retirement : frameData.virtualGeometryPageRetirements)
+			if (retirement.protectedFallback || retirement.retired)
 			{
-				if (retirement.protectedFallback || retirement.retired)
-				{
-					continue;
-				}
-				// Page retirement is represented as a value plan first. Actual
-				// Vulkan buffer releases still go through the existing deferred
-				// RetireBuffer path after all frame fences that could sample the
-				// page payload have completed.
-				TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan plan;
-				plan.pageId = retirement.pageId;
-				plan.canRetire = true;
-				plan.retireAfterFrameId = std::max(retirement.frameId, frameId) + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
-				plan.reason = retirement.reason.empty()
-					? "virtual geometry page queued from frame retirement record"
-					: retirement.reason;
-				pendingPageRetirements.push_back(std::move(plan));
+				continue;
 			}
+			// Page retirement is represented as a value plan first. Actual
+			// Vulkan buffer releases still go through the existing deferred
+			// RetireBuffer path after all frame fences that could sample the
+			// page payload have completed.
+			TerraEngine::Renderer::Vulkan::VirtualGeometryPageRetirementPlan plan;
+			plan.pageId = retirement.pageId;
+			plan.canRetire = true;
+			plan.retireAfterFrameId = std::max(retirement.frameId, frameId) + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
+			plan.reason = retirement.reason.empty()
+				? "virtual geometry page queued from frame retirement record"
+				: retirement.reason;
+			pendingPageRetirements.push_back(std::move(plan));
 		}
-		if (!resources.live)
-		{
-			return;
-		}
+	}
+	if (!resources.live)
+	{
+		return;
+	}
 
 	auto ensureAndWriteBuffer = [&](VulkanBuffer& buffer, std::size_t& capacity, std::size_t elementCount, std::size_t elementSize, const void* source, const char* name) {
 		if (elementCount == 0u || source == nullptr)
@@ -2075,7 +2075,6 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 			if (stage.stage == ShaderStage::Fragment) {
 				stageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (stage.stage == ShaderStage::Mesh) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!meshShaderSupported) {
@@ -2086,7 +2085,6 @@ void VulkanContext::Impl::EnsurePipeline(TerraEngine::UUID shaderCollectionId, V
 				stageInfo.stage = VK_SHADER_STAGE_MESH_BIT_EXT;
 				hasMeshStage = true;
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (stage.stage == ShaderStage::Task) {
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 				if (!taskShaderSupported) {

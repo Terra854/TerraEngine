@@ -3339,16 +3339,13 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				light.shadowAndPadding.y = static_cast<float>(impl->directionalShadowTextureIndices[shadowSlotIndex]);
 				StoreShadowViewProjection(light, lightViewProjection);
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (lightType == 1u) {
 				light.shadowAndPadding.y = static_cast<float>(shadowSlotIndex);
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (lightType == 2u) {
 				light.shadowAndPadding.y = static_cast<float>(impl->spotShadowTextureIndices[shadowSlotIndex]);
 				StoreShadowViewProjection(light, BuildSpotShadowViewProjection(light));
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (lightType == 3u) {
 				light.shadowAndPadding.y = static_cast<float>(impl->areaShadowTextureIndices[shadowSlotIndex]);
 				StoreShadowViewProjection(light, BuildAreaShadowViewProjection(light));
@@ -3692,7 +3689,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			loggedClusteredLightingUnavailable = true;
 		}
 	}
-	// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	else if (clusteredLightingPipelineReady) {
 		loggedClusteredLightingUnavailable = false;
 	}
@@ -3865,8 +3861,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		impl->RestoreDepthForAttachment(cmd, activeDepthImage);
 	}
 
-	// Prepare draw data.
-	// struct PreparedDraw groups related state and operations so callers have one documented contract.
+	// Prepared draws keep resource validation and command recording separate:
+	// the expensive lookups happen once, then worker command buffers consume a
+	// compact list of already-resolved Vulkan handles.
 	struct PreparedDraw {
 		VulkanMesh* mesh = nullptr;
 		VulkanPipeline* pipeline = nullptr;
@@ -3881,7 +3878,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	prepared.reserve(frameData.commands.size());
 	std::vector<PreparedDraw> preparedShadow;
 	preparedShadow.reserve(frameData.commands.size());
-	// struct PreparedShadowList groups related state and operations so callers have one documented contract.
 	struct PreparedShadowList {
 		TerraEngine::UUID lightId = TerraEngine::EMPTY_UUID;
 		std::vector<PreparedDraw> draws;
@@ -3936,6 +3932,17 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		materialLookupCache.emplace(materialId, material);
 		return material;
 	};
+	const auto HasMeshletPayload = [](const VulkanMesh& mesh) {
+		// Mesh shaders need the packed vertex data, remap table, decode info,
+		// primitive indices, and meshlet records to agree. Treat any missing
+		// buffer as "not renderable yet" instead of recording a partial draw.
+		return mesh.meshShaderVertexBuffer.buffer != VK_NULL_HANDLE
+			&& mesh.meshletVertexRemapBuffer.buffer != VK_NULL_HANDLE
+			&& mesh.meshDecodeInfoBuffer.buffer != VK_NULL_HANDLE
+			&& mesh.indexBuffer.buffer != VK_NULL_HANDLE
+			&& mesh.meshletBuffer.buffer != VK_NULL_HANDLE
+			&& mesh.meshletCount != 0u;
+	};
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (const auto& command : frameData.commands) {
@@ -3954,13 +3961,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		uint32_t materialFlags = material->header.flags;
 		VulkanMesh& mesh = meshIt->second;
 
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (mesh.meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
-			|| mesh.meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
-			|| mesh.meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
-			|| mesh.indexBuffer.buffer == VK_NULL_HANDLE
-			|| mesh.meshletBuffer.buffer == VK_NULL_HANDLE
-			|| mesh.meshletCount == 0) {
+		if (!HasMeshletPayload(mesh)) {
 			TERRAENGINE_LOG(LogLevel::Warning, "Skipping draw because meshlet payload buffers are unavailable.");
 			continue;
 		}
@@ -4033,9 +4034,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.clusterDataOffset = renderSnapshot.clusterDataOffset;
 		push.lightIndexOffset = renderSnapshot.lightIndexOffset;
 		push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
-		// RenderSystem expands virtual geometry into one command per selected
-		// spatial cluster. Vulkan therefore binds the same mesh buffers but
-		// pushes the cluster's own meshlet range for each sparse dispatch.
+		// RenderSystem has already selected the packet/cluster meshlet range.
+		// Vulkan clamps that range to the resident mesh payload before pushing
+		// it into the task/mesh shader path.
 		const uint32_t selectedMeshletOffset = std::min(command.virtualMeshletOffset, mesh.meshletCount);
 		const uint32_t selectedMeshletCount = command.virtualMeshletCount == 0u
 			? (mesh.meshletCount - selectedMeshletOffset)
@@ -4449,15 +4450,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		if (lightType == 0u) {
 			slotIndex = FindShadowSlotFromTextureIndex(impl->directionalShadowTextureIndices, shadowPayloadIndex);
 		}
-		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (lightType == 1u) {
 			slotIndex = std::min(shadowPayloadIndex, VulkanContext::Impl::MAX_SHADOW_RESOURCE_SLOTS - 1u);
 		}
-		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (lightType == 2u) {
 			slotIndex = FindShadowSlotFromTextureIndex(impl->spotShadowTextureIndices, shadowPayloadIndex);
 		}
-		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (lightType == 3u) {
 			slotIndex = FindShadowSlotFromTextureIndex(impl->areaShadowTextureIndices, shadowPayloadIndex);
 		}
@@ -4658,20 +4656,17 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
 				recordedAnyShadowPass = RecordShadowPass(impl->directionalShadowFramebuffers[record.slot], record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (record.type == 1u) {
-				// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+				// Point lights render one atlas face per cubemap direction.
 				for (uint32_t faceIndex = 0u; faceIndex < 6u; ++faceIndex) {
 					const glm::mat4 lightViewProjection = BuildPointShadowViewProjection(*record.light, faceIndex);
 					recordedAnyShadowPass = RecordShadowPass(impl->pointShadowFaceFramebuffersBySlot[record.slot][faceIndex], pointShadowSize, pointShadowSize, record, lightViewProjection) || recordedAnyShadowPass;
 				}
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (record.type == 2u) {
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
 				recordedAnyShadowPass = RecordShadowPass(impl->spotShadowFramebuffers[record.slot], record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
 			}
-			// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 			else if (record.type == 3u) {
 				const glm::mat4 lightViewProjection = LoadShadowViewProjection(*record.light);
 				recordedAnyShadowPass = RecordShadowPass(impl->areaShadowFramebuffers[record.slot], record.regionWidth, record.regionHeight, record, lightViewProjection) || recordedAnyShadowPass;
@@ -4708,7 +4703,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		impl->EnsureWorkerPools(impl->currentFrame, workerCount);
 		std::vector<std::future<VkCommandBuffer>> futures;
 		futures.reserve(workerCount);
-		auto recordSecondaryRange = [this, &prepared](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
+		auto recordSecondaryRange = [this, &prepared, &HasMeshletPayload](VkCommandBuffer secondary, VkRenderPass renderPass, VkFramebuffer framebuffer, VkExtent2D renderExtent, size_t start, size_t end) -> VkCommandBuffer {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (secondary == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 			vkResetCommandBuffer(secondary, 0);
@@ -4753,13 +4748,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 					|| draw.mesh == nullptr) {
 					continue;
 				}
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (draw.mesh->meshShaderVertexBuffer.buffer == VK_NULL_HANDLE
-					|| draw.mesh->meshletVertexRemapBuffer.buffer == VK_NULL_HANDLE
-					|| draw.mesh->meshDecodeInfoBuffer.buffer == VK_NULL_HANDLE
-					|| draw.mesh->indexBuffer.buffer == VK_NULL_HANDLE
-					|| draw.mesh->meshletBuffer.buffer == VK_NULL_HANDLE
-					|| draw.mesh->meshletCount == 0) {
+				if (!HasMeshletPayload(*draw.mesh)) {
 					continue;
 				}
 
