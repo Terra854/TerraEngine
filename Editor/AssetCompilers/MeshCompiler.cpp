@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstddef>
 #include <cstring>
 #include <cmath>
 #include <cstdint>
@@ -39,7 +40,12 @@ namespace
 	// meshoptimizer stops simplifying once this error budget is reached. The
 	// adaptive cook then applies the user-facing maximumGeometricError gate so
 	// bad candidates are rejected without changing the renderer-facing fallback.
-	constexpr float kSimplificationTargetError = 0.02f;
+	constexpr float kSimplificationTargetError = 0.01f;
+	// Virtual geometry LODs are rendered directly at distance, so preserve open
+	// borders during simplification. GLB/FBX hard-surface assets often split UVs,
+	// materials, and thin parts into many seams; letting those borders collapse can
+	// pass the numeric error gate while visibly shredding silhouettes.
+	constexpr unsigned int kVirtualGeometrySimplifyOptions = meshopt_SimplifyLockBorder;
 	constexpr std::array<std::string_view, 4> kSupportedMeshSourceExtensions = {
 		".obj",
 		".dae",
@@ -109,6 +115,26 @@ namespace
 		std::array<float, 2> uv;
 		float tangentW = 1.0f; // Sign for bitangent calculation
 	};
+
+	// The VG simplifier must preserve more than position: hard-surface imports
+	// usually duplicate vertices at normal/UV seams, and ignoring those
+	// attributes lets a numerically "valid" LOD collapse visible panels or folds.
+	// These eight floats are contiguous inside VertexRaw: normal.xyz,
+	// tangent.xyz, and uv.xy. tangentW is intentionally omitted because a sign
+	// flip alone should not force a separate simplification island.
+	constexpr std::size_t kVirtualGeometrySimplifyAttributeCount = 8u;
+	constexpr std::array<float, kVirtualGeometrySimplifyAttributeCount> kVirtualGeometrySimplifyAttributeWeights = {
+		0.50f,
+		0.50f,
+		0.50f,
+		0.20f,
+		0.20f,
+		0.20f,
+		0.35f,
+		0.35f,
+	};
+	static_assert(offsetof(VertexRaw, tangent) == offsetof(VertexRaw, normal) + sizeof(float) * 3u);
+	static_assert(offsetof(VertexRaw, uv) == offsetof(VertexRaw, normal) + sizeof(float) * 6u);
 
 	// struct FaceInfo groups related state and operations so callers have one documented contract.
 	struct FaceInfo
@@ -1717,6 +1743,7 @@ namespace
 
 		std::vector<std::uint32_t> currentIndices = sourceIndices;
 		const float* positions = vertices.front().position.data();
+		const float* attributes = vertices.front().normal.data();
 		float maxError = 0.0f;
 		std::uint32_t previousTriangleCount = sourceTriangleCount;
 		std::uint32_t previousMeshletCount = sourceMeshletCount;
@@ -1764,16 +1791,21 @@ namespace
 
 			std::vector<std::uint32_t> simplified(currentIndices.size());
 			float resultError = 0.0f;
-			std::size_t simplifiedIndexCount = meshopt_simplify(
+			std::size_t simplifiedIndexCount = meshopt_simplifyWithAttributes(
 				simplified.data(),
 				currentIndices.data(),
 				currentIndices.size(),
 				positions,
 				vertices.size(),
 				sizeof(VertexRaw),
+				attributes,
+				sizeof(VertexRaw),
+				kVirtualGeometrySimplifyAttributeWeights.data(),
+				kVirtualGeometrySimplifyAttributeCount,
+				nullptr,
 				targetIndexCount,
 				kSimplificationTargetError,
-				0u,
+				kVirtualGeometrySimplifyOptions,
 				&resultError);
 			simplifiedIndexCount = (simplifiedIndexCount / 3u) * 3u;
 
@@ -2138,16 +2170,22 @@ namespace
 		std::vector<std::uint32_t> simplified(sourceIndices.size());
 		float resultError = 0.0f;
 		const float* positions = vertices.front().position.data();
-		std::size_t simplifiedIndexCount = meshopt_simplify(
+		const float* attributes = vertices.front().normal.data();
+		std::size_t simplifiedIndexCount = meshopt_simplifyWithAttributes(
 			simplified.data(),
 			sourceIndices.data(),
 			sourceIndices.size(),
 			positions,
 			vertices.size(),
 			sizeof(VertexRaw),
+			attributes,
+			sizeof(VertexRaw),
+			kVirtualGeometrySimplifyAttributeWeights.data(),
+			kVirtualGeometrySimplifyAttributeCount,
+			nullptr,
 			targetIndexCount,
 			kSimplificationTargetError,
-			0u,
+			kVirtualGeometrySimplifyOptions,
 			&resultError);
 		simplifiedIndexCount = (simplifiedIndexCount / 3u) * 3u;
 
