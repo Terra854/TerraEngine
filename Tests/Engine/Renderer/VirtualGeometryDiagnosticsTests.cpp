@@ -250,6 +250,10 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::uint64_t>(5632u), diagnostics.pageSources.residentPayloadBytes, "Diagnostics should sum resident page-source bytes.");
 			context.ExpectEqual(static_cast<std::uint64_t>(1024u), diagnostics.pageSources.fallbackPayloadBytes, "Diagnostics should sum fallback payload bytes.");
 			context.ExpectEqual(static_cast<std::uint64_t>(512u), diagnostics.pageSources.embeddedFallbackBytes, "Diagnostics should sum embedded fallback bytes.");
+			context.ExpectEqual(static_cast<std::uint64_t>(4096u), diagnostics.pageResidency.residentHighDetailBytes, "Payload-derived diagnostics should expose exact high-detail page bytes.");
+			context.ExpectEqual(static_cast<std::uint64_t>(1024u), diagnostics.pageResidency.residentFallbackBytes, "Payload-derived diagnostics should expose exact fallback page bytes.");
+			context.ExpectEqual(static_cast<std::uint64_t>(512u), diagnostics.pageResidency.embeddedFallbackBytes, "Payload-derived diagnostics should expose exact embedded fallback bytes.");
+			context.ExpectEqual(static_cast<std::uint64_t>(512u), diagnostics.pageResidency.owningMeshFallbackBytes, "Payload-derived diagnostics should label embedded fallback bytes as owning-mesh fallback coverage.");
 			context.Expect(!diagnostics.warnings.empty(), "Embedded fallback source use should leave a visible diagnostic warning.");
 		});
 
@@ -458,6 +462,94 @@ namespace TerraEngine::Tests
 				context.ExpectEqual(256ull, contributor->pinnedFallbackBytes, "Pinned fallback bytes should be attributed to the mesh asset.");
 				context.ExpectEqual(512ull, contributor->requestedBytes, "Pending upload pages should be reported as requested per-asset work.");
 				context.ExpectEqual(1u, contributor->missingPages, "Missing pages should be attributed to the mesh asset so editor diagnostics can explain fallback rendering.");
+			}
+		});
+
+		registry.Add("VirtualGeometry.Diagnostics.US4.ExactPageResidencyBucketsStaySeparate", [](TestContext& context) {
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 47u;
+			visibility.frameId = 8804u;
+			visibility.valid = true;
+
+			PageResidencyRecord highDetail{};
+			highDetail.meshId = meshId;
+			highDetail.pageId = 4u;
+			highDetail.state = GeometryPageState::Resident;
+			highDetail.byteCost = 4096u;
+			visibility.pageResidency.push_back(highDetail);
+
+			PageResidencyRecord fallback{};
+			fallback.meshId = meshId;
+			fallback.pageId = 1u;
+			fallback.state = GeometryPageState::Pinned;
+			fallback.isFallback = true;
+			fallback.protectedFallback = true;
+			fallback.byteCost = 1024u;
+			visibility.pageResidency.push_back(fallback);
+
+			PageResidencyRecord pendingIo{};
+			pendingIo.meshId = meshId;
+			pendingIo.pageId = 5u;
+			pendingIo.state = GeometryPageState::PendingIO;
+			pendingIo.byteCost = 256u;
+			visibility.pageResidency.push_back(pendingIo);
+
+			PageResidencyRecord pendingUpload = pendingIo;
+			pendingUpload.pageId = 6u;
+			pendingUpload.state = GeometryPageState::PendingUpload;
+			pendingUpload.byteCost = 512u;
+			visibility.pageResidency.push_back(pendingUpload);
+
+			PageResidencyRecord failed = pendingIo;
+			failed.pageId = 7u;
+			failed.state = GeometryPageState::Failed;
+			failed.byteCost = 128u;
+			failed.failureReason = "decode rejected page payload";
+			visibility.pageResidency.push_back(failed);
+
+			PageResidencyRecord evicting = pendingIo;
+			evicting.pageId = 8u;
+			evicting.state = GeometryPageState::Evicting;
+			evicting.byteCost = 2048u;
+			visibility.pageResidency.push_back(evicting);
+
+			PageResidencyRecord evicted = pendingIo;
+			evicted.pageId = 9u;
+			evicted.state = GeometryPageState::Evicted;
+			evicted.byteCost = 8192u;
+			visibility.pageResidency.push_back(evicted);
+
+			PageResidencyRecord retiring = pendingIo;
+			retiring.pageId = 10u;
+			retiring.state = GeometryPageState::PendingRetirement;
+			retiring.byteCost = 1536u;
+			visibility.pageResidency.push_back(retiring);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(4096ull, diagnostics.pageResidency.residentHighDetailBytes, "Resident high-detail page bytes should not be folded into fallback bytes.");
+			context.ExpectEqual(1024ull, diagnostics.pageResidency.residentFallbackBytes, "Pinned fallback page bytes should be reported separately from high detail.");
+			context.ExpectEqual(768ull, diagnostics.pageResidency.pendingIoBytes + diagnostics.pageResidency.pendingUploadBytes, "Pending IO/upload bytes should remain explanatory, not resident.");
+			context.ExpectEqual(128ull, diagnostics.pageResidency.failedBytes, "Failed page bytes should stay in the failed bucket.");
+			context.ExpectEqual(10240ull, diagnostics.pageResidency.evictingBytes + diagnostics.pageResidency.evictedBytes, "Evicting and evicted bytes should remain distinct from resident bytes.");
+			context.ExpectEqual(1536ull, diagnostics.pageResidency.retiringBytes, "Retiring bytes should stay visible until the safe frame boundary retires them.");
+			context.ExpectEqual(1u, diagnostics.pageResidency.failedPageReasons, "Failed page reasons should be counted for diagnostics.");
+
+			const auto contributor = std::find_if(
+				diagnostics.budgetContributors.begin(),
+				diagnostics.budgetContributors.end(),
+				[&meshId](const TerraEngine::Renderer::VirtualGeometryBudgetContributor& value) {
+					return value.assetId == meshId;
+				});
+			context.Expect(contributor != diagnostics.budgetContributors.end(), "Exact page buckets should still publish a per-asset contributor.");
+			if (contributor != diagnostics.budgetContributors.end())
+			{
+				context.ExpectEqual(4096ull, contributor->residentHighDetailBytes, "Per-asset high-detail bytes should match the view bucket.");
+				context.ExpectEqual(1024ull, contributor->residentFallbackBytes, "Per-asset fallback bytes should match the view bucket.");
+				context.ExpectEqual(1536ull, contributor->retiringBytes, "Per-asset retiring bytes should match the view bucket.");
 			}
 		});
 

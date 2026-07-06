@@ -4,12 +4,84 @@
 	"description": "Clean-checkout virtual geometry hardening and scaling fixture manifest. Entries use deterministic generated data or small committed fixtures; large meshes stay optional manual stress coverage.",
 	"scalingFeature": "030-vg-gpu-driven-batching",
 	"gpuCompactionFeature": "031-vg-gpu-compaction",
+	"truePageResidencyFeature": "034-vg-true-page-residency",
 	"packageFormats": [
 		"gltf",
 		"glb",
 		"fbx"
 	],
 	"requiredCategories": [
+		{
+			"id": "exact-residency-package-children",
+			"category": "exact-residency",
+			"fixtureRecipe": "Generated GLB/FBX package with child meshes, textures, and materials that own independent CPU/GPU payloads while the package parent owns no render allocation.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"exact-stream-cpu-bytes",
+				"exact-render-gpu-bytes",
+				"package-parent-hidden",
+				"generated-child-labels"
+			],
+			"expectedDiagnostics": [
+				"ExactCpuBytes",
+				"ExactGpuBytes",
+				"NoPackageParentBorrowing"
+			],
+			"expectedRenderOutcomes": [
+				"visible-child-mesh-attributed",
+				"parent-package-row-hidden"
+			]
+		},
+		{
+			"id": "exact-residency-unavailable-accounting",
+			"category": "exact-residency",
+			"fixtureRecipe": "Synthetic resource records covering pending upload, failed load, released payload, zero-by-state, and deliberately unavailable exact accounting.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"unavailable-not-zero",
+				"pending-bytes-excluded",
+				"failed-bytes-excluded",
+				"retired-bytes-excluded"
+			],
+			"expectedDiagnostics": [
+				"UnavailableExactAccounting",
+				"ZeroByState",
+				"NoEstimateFallback"
+			],
+			"expectedRenderOutcomes": [
+				"exact-columns-non-estimated",
+				"unavailable-values-labeled"
+			]
+		},
+		{
+			"id": "true-page-residency-owning-mesh-fallback",
+			"category": "page-streaming",
+			"fixtureRecipe": "Dense virtual geometry asset with resident high-detail pages, protected fallback pages, and one invalid page set that must explicitly fall back to the owning mesh path.",
+			"requiredForCleanCheckout": true,
+			"expectedCookStatus": "Cooked",
+			"coverageTags": [
+				"resident-page-payload",
+				"fallback-page-payload",
+				"owning-mesh-fallback-diagnostic",
+				"exact-page-gpu-bytes"
+			],
+			"expectedDiagnostics": [
+				"ResidentPagePayloadEmitted",
+				"FallbackPagePayloadEmitted",
+				"OwningMeshFallbackReason"
+			],
+			"expectedRenderOutcomes": [
+				"page-local-meshlets-render",
+				"fallback-visible-without-holes",
+				"owning-mesh-fallback-labeled"
+			],
+			"thresholds": {
+				"maxUnlabeledOwningMeshFallbacks": 0,
+				"maxPendingBytesCountedAsResident": 0
+			}
+		},
 		{
 			"id": "tiny-mesh-skip",
 			"category": "tiny",

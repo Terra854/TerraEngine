@@ -4,6 +4,7 @@
 #include "AssetDatabase.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "ModelPackageImporter.h"
+#include "Resource/ResourceManager.h"
 #include "Utilities/UUID.h"
 
 #include <algorithm>
@@ -494,10 +495,14 @@ namespace TerraEngine::EditorTests
 			const std::filesystem::path buildRoot = root / "Build" / "Assets";
 			const std::filesystem::path packageSource = "camera.glb";
 			const std::filesystem::path packageCompiled = "camera.temf";
+			const std::filesystem::path namedMeshCompiled = "camera_Generated/camera_uv.temf";
+			const std::filesystem::path fallbackMeshCompiled = "camera_Generated/tripod_head.temf";
 			const TerraEngine::UUID packageGuid = TerraEngine::GenerateUUID();
 
 			std::ofstream(assetRoot / packageSource, std::ios::binary | std::ios::trunc).put('\0');
 			WriteMeshHeader(buildRoot / packageCompiled, false);
+			WriteMeshHeader(buildRoot / namedMeshCompiled, true);
+			WriteMeshHeader(buildRoot / fallbackMeshCompiled, true);
 			WriteAssetMetadata(
 				assetRoot,
 				packageSource,
@@ -516,14 +521,14 @@ namespace TerraEngine::EditorTests
 			namedMesh.displayName = "camera_uv";
 			namedMesh.sourceNodePath = "Scene/Camera/camera_uv";
 			namedMesh.sourcePath = packageSource;
-			namedMesh.compiledPath = packageCompiled;
+			namedMesh.compiledPath = namedMeshCompiled;
 			result.generatedMeshes.push_back(namedMesh);
 
 			TerraEngine::AssetPipeline::GeneratedModelMeshAsset fallbackMesh{};
 			fallbackMesh.guid = TerraEngine::GenerateUUID();
 			fallbackMesh.sourceNodePath = "Scene/Tripod/tripod_head";
 			fallbackMesh.sourcePath = packageSource;
-			fallbackMesh.compiledPath = packageCompiled;
+			fallbackMesh.compiledPath = fallbackMeshCompiled;
 			result.generatedMeshes.push_back(fallbackMesh);
 
 			TerraEngine::AssetPipeline::GeneratedModelMaterialAsset material{};
@@ -542,6 +547,13 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(assetRoot / packageSource, result), "Fixture package sidecar should save child display names.");
 
+			ResourceManager::Instance().ClearCaches();
+			AssetDatabase::Instance().Initialize(root);
+			context.Expect(std::filesystem::exists(root / "Library" / "AssetIndex.json"), "Initial package scan should persist a startup asset index.");
+			AssetDatabase::Instance().Shutdown();
+
+			std::filesystem::remove(buildRoot / packageCompiled);
+			ResourceManager::Instance().ClearCaches();
 			AssetDatabase::Instance().Initialize(root);
 
 			std::string resolvedName;
@@ -574,7 +586,13 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(static_cast<std::size_t>(1u), childIds.size(), "Package texture child lookup should return the generated texture record.");
 			context.ExpectEqual(TerraEngine::ToHexString(texture.guid), TerraEngine::ToHexString(childIds.front()), "Package texture child lookup should return the sidecar texture GUID.");
 
+			const TerraEngine::UUID resolvedNamedMesh = ResourceManager::Instance().ResolveAssetReference((buildRoot / namedMeshCompiled).generic_string(), AssetType::Mesh);
+			context.ExpectEqual(TerraEngine::ToHexString(namedMesh.guid), TerraEngine::ToHexString(resolvedNamedMesh), "Fast startup should register generated mesh child TEMFs even when the obsolete parent package TEMF is missing.");
+			const TerraEngine::UUID resolvedPackageParent = ResourceManager::Instance().ResolveAssetReference((buildRoot / packageCompiled).generic_string(), AssetType::Mesh);
+			context.Expect(resolvedPackageParent != packageGuid, "Package parents should not be registered as renderable mesh resources; generated children own the runtime TEMFs.");
+
 			AssetDatabase::Instance().Shutdown();
+			ResourceManager::Instance().ClearCaches();
 			std::filesystem::remove_all(root);
 		});
 

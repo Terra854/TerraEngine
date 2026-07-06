@@ -111,20 +111,24 @@ namespace {
 
 			registry.Add("Resource.Streaming.Policy.TextureMipResidencyUsesSourceMipIndexRange", [](TestContext& context) {
 				Resource::StreamingPolicy policy = Resource::MakeDefaultStreamingPolicy();
-			Resource::TextureMipResidency full = Resource::ResolveTextureMipResidency(policy, 8u);
+				context.Expect(policy.textureMipStreamingEnabled, "New projects should enable texture mip streaming by default.");
+				context.ExpectEqual(std::uint32_t{0u}, policy.textureMinStreamMip, "Default near texture residency should keep mip 0.");
+				context.ExpectEqual(std::uint32_t{13u}, policy.textureMaxStreamMip, "Default far texture residency should allow streaming to source mip 13.");
+				policy.textureMipStreamingEnabled = false;
+				Resource::TextureMipResidency full = Resource::ResolveTextureMipResidency(policy, 8u);
 
-			context.ExpectEqual(std::uint32_t{0u}, full.sourceMipOffset, "Mip streaming disabled should keep the original base mip.");
-			context.ExpectEqual(std::uint32_t{8u}, full.residentMipCount, "Mip streaming disabled should keep the complete source chain.");
-			context.Expect(!full.partial, "Full-res residency should not be marked as partial.");
+				context.ExpectEqual(std::uint32_t{0u}, full.sourceMipOffset, "Mip streaming disabled should keep the original base mip.");
+				context.ExpectEqual(std::uint32_t{8u}, full.residentMipCount, "Mip streaming disabled should keep the complete source chain.");
+				context.Expect(!full.partial, "Full-res residency should not be marked as partial.");
 
-			policy.textureMipStreamingEnabled = true;
-			policy.textureMinStreamMip = 2u;
-			policy.textureMaxStreamMip = 3u;
-			const Resource::TextureMipResidency partial = Resource::ResolveTextureMipResidency(policy, 8u);
+				policy.textureMipStreamingEnabled = true;
+				policy.textureMinStreamMip = 2u;
+				policy.textureMaxStreamMip = 3u;
+				const Resource::TextureMipResidency partial = Resource::ResolveTextureMipResidency(policy, 8u);
 
-			context.ExpectEqual(std::uint32_t{2u}, partial.sourceMipOffset, "Partial residency should start at the configured minimum stream mip index.");
-			context.ExpectEqual(std::uint32_t{6u}, partial.residentMipCount, "Resident mip count should include the selected source mip and every lower-detail tail mip.");
-			context.ExpectEqual(std::uint32_t{8u}, partial.sourceMipCount, "Diagnostics should retain the authored mip count.");
+				context.ExpectEqual(std::uint32_t{2u}, partial.sourceMipOffset, "Partial residency should start at the configured minimum stream mip index.");
+				context.ExpectEqual(std::uint32_t{6u}, partial.residentMipCount, "Resident mip count should include the selected source mip and every lower-detail tail mip.");
+				context.ExpectEqual(std::uint32_t{8u}, partial.sourceMipCount, "Diagnostics should retain the authored mip count.");
 				context.Expect(partial.partial, "Capped texture residency should be marked as partial.");
 			});
 

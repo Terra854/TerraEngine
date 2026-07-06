@@ -47,6 +47,8 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, static_cast<std::uint64_t>(range.emittedSource));
 			HashCombine(hash, range.pagePayloadByteOffset);
 			HashCombine(hash, range.pagePayloadByteSize);
+			HashCombine(hash, range.payloadBufferIndex);
+			HashCombine(hash, range.payloadDescriptorIndex);
 		}
 
 		void HashVirtualGeometryCounters(std::uint64_t& hash, const VirtualGeometryCounterSnapshot& counters)
@@ -142,6 +144,9 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, static_cast<std::uint64_t>(packet.emittedSource));
 			HashCombine(hash, packet.pagePayloadByteOffset);
 			HashCombine(hash, packet.pagePayloadByteSize);
+			HashCombine(hash, packet.payloadBufferIndex);
+			HashCombine(hash, packet.payloadDescriptorIndex);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(packet.fallbackReason)));
 			HashCombine(hash, packet.debugIdentity);
 			HashCombine(hash, packet.fallbackPacket ? 1u : 0u);
 		}
@@ -199,6 +204,9 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, static_cast<std::uint64_t>(packet.emittedSource));
 			HashCombine(hash, packet.pagePayloadByteOffset);
 			HashCombine(hash, packet.pagePayloadByteSize);
+			HashCombine(hash, packet.payloadBufferIndex);
+			HashCombine(hash, packet.payloadDescriptorIndex);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(packet.fallbackReason)));
 			HashCombine(hash, packet.debugIdentity);
 			HashCombine(hash, packet.flags);
 		}
@@ -381,9 +389,13 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, payload.materialSectionId);
 			HashCombine(hash, payload.payloadByteOffset);
 			HashCombine(hash, payload.payloadByteSize);
+			HashCombine(hash, payload.payloadBufferIndex);
+			HashCombine(hash, payload.payloadDescriptorIndex);
+			HashCombine(hash, payload.allocationId);
 			HashCombine(hash, payload.resident ? 1u : 0u);
 			HashCombine(hash, payload.pinnedFallback ? 1u : 0u);
 			HashCombine(hash, payload.valid ? 1u : 0u);
+			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(payload.owningMeshFallbackReason)));
 			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(payload.diagnostic)));
 		}
 
@@ -405,6 +417,8 @@ namespace TerraEngine::Renderer {
 			HashCombine(hash, emitted.meshletCount);
 			HashCombine(hash, emitted.payloadByteOffset);
 			HashCombine(hash, emitted.payloadByteSize);
+			HashCombine(hash, emitted.payloadBufferIndex);
+			HashCombine(hash, emitted.payloadDescriptorIndex);
 			HashCombine(hash, emitted.fallbackSubstitution ? 1u : 0u);
 			HashCombine(hash, emitted.conservativeEmbeddedFallback ? 1u : 0u);
 			HashCombine(hash, static_cast<std::uint64_t>(std::hash<std::string>{}(emitted.reason)));

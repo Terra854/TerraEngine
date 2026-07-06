@@ -51,6 +51,9 @@ namespace TerraEngine::Renderer::Vulkan {
 		VirtualGeometryEmittedPageSource emittedSource = VirtualGeometryEmittedPageSource::None;
 		std::uint64_t payloadByteOffset = 0u;
 		std::uint64_t payloadByteSize = 0u;
+		std::uint32_t payloadBufferIndex = 0xffffffffu;
+		std::uint32_t payloadDescriptorIndex = 0xffffffffu;
+		std::uint64_t allocationId = 0u;
 		bool pinnedFallback = false;
 		bool accepted = false;
 		std::string reason;

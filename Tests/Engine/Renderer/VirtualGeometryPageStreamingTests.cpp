@@ -6,6 +6,7 @@
 #include "Resource/ResourceStreaming.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <utility>
 
@@ -328,6 +329,52 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(static_cast<std::size_t>(1u), packets.size(), "Fallback-substituted selection should remain renderable.");
 			context.Expect(packets.front().payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload, "The emitted packet should come from resident fallback coverage.");
 			context.Expect(packets.front().emittedSource == VirtualGeometryEmittedPageSource::FallbackPage, "Failed high-detail pages should emit fallback page geometry, not holes.");
+		});
+
+		registry.Add("VirtualGeometryPageStreaming.US2.MissingPendingFailedAndEvictedPagesKeepFallbackCoverage", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+
+			const std::array<GeometryPageState, 5u> unavailableStates = {
+				GeometryPageState::NotResident,
+				GeometryPageState::PendingIO,
+				GeometryPageState::PendingUpload,
+				GeometryPageState::Failed,
+				GeometryPageState::Evicted
+			};
+
+			for (GeometryPageState state : unavailableStates)
+			{
+				VirtualGeometryAssetRuntime asset = BuildFailedHighDetailWithFallbackAsset();
+				asset.pages[1].state = state;
+				asset.pages[0].payloadBufferIndex = 70u;
+				asset.pages[0].payloadDescriptorIndex = 1u;
+				const VirtualGeometryClusterSelectionResult selection = RenderSystem::SelectVirtualGeometryClusterCut(
+					asset,
+					asset.assetId,
+					MakeTestUuid(80u + static_cast<std::uint32_t>(state)),
+					MakeDefaultVirtualGeometryQualityProfile(),
+					512.0f,
+					glm::mat4(1.0f),
+					glm::vec3(0.0f, 0.0f, 5.0f),
+					glm::uvec2(1280u, 720u),
+					true,
+					true);
+
+				context.ExpectEqual(static_cast<std::size_t>(1u), selection.selectedClusters.size(), "Unavailable high-detail pages should pick one fallback coverage cluster.");
+				context.Expect(selection.selectedClusters.front().usingFallback, "Unavailable high-detail pages should report fallback substitution.");
+				context.ExpectEqual(0u, selection.selectedClusters.front().pageId, "Fallback coverage should use the resident fallback page.");
+				context.ExpectEqual(static_cast<std::size_t>(1u), selection.pageNeeds.size(), "Unavailable high-detail pages should still queue one detail page need.");
+
+				const std::vector<VirtualGeometryClusterPacket> packets =
+					RenderSystem::BuildVirtualGeometryClusterPackets(asset, selection.selectedClusters, MakeTestUuid(81u), RenderViewType::Game, 4u);
+				context.ExpectEqual(static_cast<std::size_t>(1u), packets.size(), "Fallback-selected clusters should remain renderable.");
+				if (!packets.empty())
+				{
+					context.Expect(packets.front().payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload, "Fallback-selected packets should use resident fallback payloads.");
+					context.ExpectEqual(70u, packets.front().payloadBufferIndex, "Fallback packets should preserve the physical fallback payload buffer binding.");
+					context.ExpectEqual(1u, packets.front().payloadDescriptorIndex, "Fallback packets should preserve the physical fallback payload descriptor index.");
+				}
+			}
 		});
 
 		registry.Add("VirtualGeometryPageStreaming.US3.EvictedHighDetailPageRequestsAgainWithFallbackVisible", [](TestContext& context) {

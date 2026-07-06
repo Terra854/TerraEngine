@@ -373,6 +373,9 @@ namespace TerraEngine::Tests {
 				TerraEngine::Scheduling::kResourceVirtualGeometryCounterReadbacks,
 				TerraEngine::Scheduling::kResourceVirtualGeometryCompactionResults,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPagePayloads,
+				TerraEngine::Scheduling::kResourcePhysicalVirtualGeometryPagePayloads,
+				TerraEngine::Scheduling::kResourceExactResidencySnapshots,
+				TerraEngine::Scheduling::kResourceBackendGpuAllocationSnapshots,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPageRequests,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPageNeedPackets,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications,
@@ -407,9 +410,15 @@ namespace TerraEngine::Tests {
 			const std::vector<std::string> pageStreamingReadResources = {
 				TerraEngine::Scheduling::kResourceVirtualGeometryPageResidencySnapshots,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPagePayloads,
+				TerraEngine::Scheduling::kResourcePhysicalVirtualGeometryPagePayloads,
+				TerraEngine::Scheduling::kResourceExactResidencySnapshots,
+				TerraEngine::Scheduling::kResourceBackendGpuAllocationSnapshots,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications
 			};
 			const std::vector<std::string> pageStreamingWriteResources = {
+				TerraEngine::Scheduling::kResourcePhysicalVirtualGeometryPagePayloads,
+				TerraEngine::Scheduling::kResourceExactResidencySnapshots,
+				TerraEngine::Scheduling::kResourceBackendGpuAllocationSnapshots,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPageRequests,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPageNeedPackets,
 				TerraEngine::Scheduling::kResourceVirtualGeometryPageRetirements,

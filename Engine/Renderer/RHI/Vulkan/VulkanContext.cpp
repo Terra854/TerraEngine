@@ -1395,6 +1395,31 @@ void VulkanContext::BeginFrame() {
 		{ TerraEngine::Renderer::BackendFrameCostCategory::FenceWait, TerraEngine::Renderer::BackendSubmitStage::FenceWait, RenderViewType::Game, 0u, impl->editorMode ? "In-flight fence wait" : "Shared attachment frame fence wait", true, false },
 		ElapsedMilliseconds(fenceStart),
 		0.25f);
+	if (impl->editorMode && impl->editorRenderSubmitted) {
+		// Editor rendering normally hands renderFinishedSemaphores[currentFrame]
+		// to PresentEditor, where the ImGui submit waits on it before the frame
+		// slot advances. If the editor UI path was skipped after EndFrame, the
+		// binary semaphore is still signaled even though the old frame fence is
+		// signaled from an earlier UI frame. Consume that stranded signal before
+		// clearing the bookkeeping flag or reusing the frame slot.
+		VkSemaphore waitSemaphore = impl->renderFinishedSemaphores[impl->currentFrame];
+		VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		VkSubmitInfo waitSubmitInfo{};
+		waitSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		waitSubmitInfo.waitSemaphoreCount = 1;
+		waitSubmitInfo.pWaitSemaphores = &waitSemaphore;
+		waitSubmitInfo.pWaitDstStageMask = &waitStage;
+		waitSubmitInfo.commandBufferCount = 0;
+
+		const VkResult drainResult = vkQueueSubmit(impl->graphicsQueue, 1, &waitSubmitInfo, VK_NULL_HANDLE);
+		if (drainResult == VK_SUCCESS) {
+			vkQueueWaitIdle(impl->graphicsQueue);
+		} else {
+			TERRAENGINE_LOG(LogLevel::Error, "BeginFrame failed to drain stranded editor render semaphore: " << drainResult);
+			vkQueueWaitIdle(impl->graphicsQueue);
+		}
+		impl->editorRenderSubmitted = false;
+	}
 	// The fence proves the previous write images for this frame slot are no
 	// longer in flight. Promote each view before descriptors are frozen so Scene
 	// and Game command buffers sample their own stable completed Hi-Z pyramids
@@ -4035,13 +4060,28 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.lightIndexOffset = renderSnapshot.lightIndexOffset;
 		push.indirectDrawOffset = renderSnapshot.indirectDrawOffset;
 		// RenderSystem has already selected the packet/cluster meshlet range.
-		// Vulkan clamps that range to the resident mesh payload before pushing
-		// it into the task/mesh shader path.
-		const uint32_t selectedMeshletOffset = std::min(command.virtualMeshletOffset, mesh.meshletCount);
-		const uint32_t selectedMeshletCount = command.virtualMeshletCount == 0u
-			? (mesh.meshletCount - selectedMeshletOffset)
-			: std::min(command.virtualMeshletCount, mesh.meshletCount - selectedMeshletOffset);
-		push.virtualMeshletOffset = selectedMeshletOffset;
+		// Owner-mesh draws use the baked global meshlet offset. Resident page and
+		// fallback draws may use a compact page-local stream, but the original
+		// owner offset is still pushed so invalid page descriptors can fail open
+		// to the correct owner range instead of restarting at meshlet zero.
+		const bool requestedPageLocalGeometry =
+			command.virtualGeometryPayloadSource == VirtualGeometryPagePayloadSource::ResidentPagePayload
+			|| command.virtualGeometryPayloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+		const bool pageLocalGeometry =
+			requestedPageLocalGeometry
+			&& impl->activeVirtualGeometryPagePayloadBufferIndex != VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+		const uint32_t ownerMeshletOffset = std::min(command.virtualMeshletOffset, mesh.meshletCount);
+		const uint32_t ownerMeshletCount = command.virtualMeshletCount == 0u
+			? (mesh.meshletCount - ownerMeshletOffset)
+			: std::min(command.virtualMeshletCount, mesh.meshletCount - ownerMeshletOffset);
+		const uint32_t selectedMeshletCount = pageLocalGeometry
+			? command.virtualMeshletCount
+			: ownerMeshletCount;
+		// Always push the owner-mesh offset. Task/mesh shaders ignore it when a
+		// page-local descriptor validates, but they need the original range when
+		// a descriptor is missing or rejected and the draw falls back to the
+		// owner mesh payload for correctness.
+		push.virtualMeshletOffset = ownerMeshletOffset;
 		push.virtualMeshletCount = selectedMeshletCount;
 		push.selectedVirtualLod = command.selectedVirtualLod;
 		push.virtualGeometryFlags = command.virtualGeometryFlags;
@@ -4056,6 +4096,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		push.virtualGeometryEmittedSource = static_cast<std::uint32_t>(command.virtualGeometryEmittedSource);
 		push.virtualGeometryPagePayloadByteOffset = static_cast<std::uint32_t>(command.virtualGeometryPagePayloadByteOffset & 0xffffffffull);
 		push.virtualGeometryPagePayloadByteSize = static_cast<std::uint32_t>(command.virtualGeometryPagePayloadByteSize & 0xffffffffull);
+		push.virtualGeometryPacketDescriptorIndex = command.virtualGeometryPacketDescriptorIndex;
 		push.editorTint = command.editorTint;
 
 		PreparedDraw draw{};
@@ -4138,7 +4179,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		pendingStats.triangleCount += EstimateSelectedPrimitiveCount(
 			command.meshId,
 			mesh.indexCount / 3u,
-			selectedMeshletOffset,
+			ownerMeshletOffset,
 			selectedMeshletCount);
 		pendingStats.meshletsTotal += selectedMeshletCount;
 		pendingStats.taskCullingActive = pendingStats.taskCullingActive || activeTaskCulling;
@@ -4257,6 +4298,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			shadowDraw.push.selectedVirtualPageNeedCount = command.selectedVirtualPageNeedCount;
 			shadowDraw.push.virtualGeometryPacketBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 			shadowDraw.push.virtualGeometryBatchBufferIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
+			shadowDraw.push.virtualGeometryPacketDescriptorIndex = VulkanContext::Impl::INVALID_BINDLESS_BUFFER_INDEX;
 			shadowDraw.push.editorTint = glm::vec4(0.0f);
 			shadowDraw.materialFlags = materialFlags;
 
@@ -6501,7 +6543,42 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		vkResetCommandPool(impl->device, impl->commandPools[impl->currentFrame], 0);
 	}
 
+	const auto drainSubmittedEditorRender = [&](const char* reason) -> bool {
+		if (!impl->editorRenderSubmitted) {
+			return true;
+		}
+
+		// Editor scene/game rendering is submitted before the ImGui swapchain
+		// pass, and that submit signals renderFinishedSemaphores[currentFrame].
+		// If resize or acquire recovery prevents the UI submit from waiting on
+		// that semaphore, Vulkan still considers it signaled. Submit a tiny
+		// wait-only operation and wait for it so the binary semaphore is
+		// consumed before this frame slot can be reused.
+		VkSemaphore waitSemaphore = impl->renderFinishedSemaphores[impl->currentFrame];
+		VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		VkSubmitInfo waitSubmitInfo{};
+		waitSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		waitSubmitInfo.waitSemaphoreCount = 1;
+		waitSubmitInfo.pWaitSemaphores = &waitSemaphore;
+		waitSubmitInfo.pWaitDstStageMask = &waitStage;
+		waitSubmitInfo.commandBufferCount = 0;
+
+		const VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &waitSubmitInfo, VK_NULL_HANDLE);
+		if (submitResult != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor failed to drain submitted render semaphore after " << reason << ": " << submitResult);
+			return false;
+		}
+
+		vkQueueWaitIdle(impl->graphicsQueue);
+		impl->editorRenderSubmitted = false;
+		return true;
+	};
+
 	if (impl->framebufferResized) {
+		if (!drainSubmittedEditorRender("resize")) {
+			vkQueueWaitIdle(impl->graphicsQueue);
+			impl->editorRenderSubmitted = false;
+		}
 		// Project hub and menu-only frames can resize without a preceding
 		// RenderSystem EndFrame. Rebuild before acquiring so the acquire
 		// semaphore and framebuffers belong to the current swapchain.
@@ -6515,10 +6592,18 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+		if (!drainSubmittedEditorRender("out-of-date acquire")) {
+			vkQueueWaitIdle(impl->graphicsQueue);
+			impl->editorRenderSubmitted = false;
+		}
 		impl->RecreateSwapChain();
 		impl->RecreateOffscreenResources();
 		return;
 	} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+		if (!drainSubmittedEditorRender("failed acquire")) {
+			vkQueueWaitIdle(impl->graphicsQueue);
+			impl->editorRenderSubmitted = false;
+		}
 		TERRAENGINE_LOG(LogLevel::Error, "failed to acquire swap chain image for Editor!");
 		return;
 	}
@@ -6594,7 +6679,15 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (uiSubmitResult != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor QueueSubmit failed: " << uiSubmitResult);
+		if (!drainSubmittedEditorRender("failed UI submit")) {
+			vkQueueWaitIdle(impl->graphicsQueue);
+			impl->editorRenderSubmitted = false;
+		}
 		vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], 1, &uiCmd);
+		if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
+			auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
+			extras.erase(std::remove(extras.begin(), extras.end(), uiCmd), extras.end());
+		}
 		impl->RecreateSwapChain();
 		return;
 	}

@@ -144,6 +144,11 @@ namespace TerraEngine::EditorTests {
 			context.Expect(source.find("\"pageSourceRequests\"") != std::string::npos, "Automation culling stats should expose compact page-source request counts.");
 			context.Expect(source.find("\"residentPayloadBytes\"") != std::string::npos, "Automation stats should expose resident payload bytes.");
 			context.Expect(source.find("\"embeddedFallbackBytes\"") != std::string::npos, "Automation stats should expose embedded fallback bytes.");
+			context.Expect(source.find("\"pageResidency\"") != std::string::npos, "Automation stats should expose exact page residency byte buckets.");
+			context.Expect(source.find("\"residentHighDetailBytes\"") != std::string::npos, "Automation stats should expose exact high-detail page bytes.");
+			context.Expect(source.find("\"residentFallbackBytes\"") != std::string::npos, "Automation stats should expose exact fallback page bytes.");
+			context.Expect(source.find("\"owningMeshFallbackBytes\"") != std::string::npos, "Automation stats should expose owning-mesh fallback byte diagnostics.");
+			context.Expect(source.find("\"retiringBytes\"") != std::string::npos, "Automation stats should expose safe-retirement byte diagnostics.");
 			context.ExpectEqual(3u, diagnostics.pageSources.residentPayloads, "Automation diagnostics should carry resident payload counts.");
 			context.ExpectEqual(static_cast<std::uint64_t>(4096u), diagnostics.pageSources.residentPayloadBytes, "Automation diagnostics should carry resident payload byte counts.");
 		});

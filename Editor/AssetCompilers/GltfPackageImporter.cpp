@@ -179,6 +179,37 @@ namespace TerraEngine::AssetPipeline
 			}
 		}
 
+		struct ExtractedGltfMeshGeometry
+		{
+			// Each generated mesh child owns the raw vertices and indices that
+			// will be cooked into its own TEMF. Keeping this per-child storage
+			// prevents package-level cluster cuts from being applied to a child
+			// GUID such as camera_uv or tripod_uv.
+			std::vector<RawMeshVertex> vertices;
+			std::vector<std::uint32_t> indices;
+
+			bool HasTriangles() const
+			{
+				return !vertices.empty() && !indices.empty() && (indices.size() % 3u) == 0u;
+			}
+		};
+
+		std::filesystem::path BuildGeneratedMeshCompiledPath(
+			const std::filesystem::path& importRoot,
+			std::string_view displayName,
+			std::size_t meshIndex,
+			std::vector<std::string>& usedFileNames)
+		{
+			const std::string sanitizedName = SanitizeAssetName(std::string(displayName), "Mesh_" + std::to_string(meshIndex));
+			std::string fileName = sanitizedName + ".temf";
+			if (std::find(usedFileNames.begin(), usedFileNames.end(), fileName) != usedFileNames.end())
+			{
+				fileName = sanitizedName + "_" + std::to_string(meshIndex) + ".temf";
+			}
+			usedFileNames.push_back(fileName);
+			return importRoot / fileName;
+		}
+
 		void PopulateVirtualGeometryCoverageTags(GeneratedModelMeshAsset& mesh, ModelPackageKind packageKind, std::uint32_t sourceMaterialAssignmentCount)
 		{
 			// These tags are coverage metadata for tests and tooling. They do not
@@ -931,8 +962,10 @@ namespace TerraEngine::AssetPipeline
 		}
 		ReportProgress(options, textureEnd, "Textures", "Package texture compilation finished.");
 
-		std::vector<RawMeshVertex> packageVertices;
-		std::vector<std::uint32_t> packageIndices;
+		std::vector<ExtractedGltfMeshGeometry> meshGeometries;
+		meshGeometries.reserve(asset.meshes.size());
+		std::vector<std::string> usedMeshOutputNames;
+		usedMeshOutputNames.reserve(asset.meshes.size());
 		const float meshStart = 0.56f;
 		const float meshEnd = 0.78f;
 		for (std::size_t meshIndex = 0; meshIndex < asset.meshes.size(); ++meshIndex)
@@ -948,10 +981,10 @@ namespace TerraEngine::AssetPipeline
 			mesh.guid = StableChildUuid(options.packageGuid, "gltf-mesh", meshIndex);
 			mesh.sourceMeshIndex = meshIndex;
 			mesh.sourcePath = options.sourceRelativePath;
-			mesh.compiledPath = options.sourceRelativePath;
-			mesh.compiledPath.replace_extension(".temf");
 			mesh.displayName = meshDisplayName;
+			mesh.compiledPath = BuildGeneratedMeshCompiledPath(result.package.importRoot, mesh.displayName, meshIndex, usedMeshOutputNames);
 			bool boundsInitialized = false;
+			ExtractedGltfMeshGeometry meshGeometry{};
 
 			for (std::size_t primitiveIndex = 0; primitiveIndex < sourceMesh.primitives.size(); ++primitiveIndex)
 			{
@@ -960,11 +993,11 @@ namespace TerraEngine::AssetPipeline
 				std::vector<std::uint32_t> primitiveIndices;
 				if (ExtractPrimitiveGeometry(asset, primitive, primitiveVertices, primitiveIndices))
 				{
-					const std::uint32_t vertexOffset = static_cast<std::uint32_t>(packageVertices.size());
-					packageVertices.insert(packageVertices.end(), primitiveVertices.begin(), primitiveVertices.end());
+					const std::uint32_t vertexOffset = static_cast<std::uint32_t>(meshGeometry.vertices.size());
+					meshGeometry.vertices.insert(meshGeometry.vertices.end(), primitiveVertices.begin(), primitiveVertices.end());
 					for (std::uint32_t index : primitiveIndices)
 					{
-						packageIndices.push_back(vertexOffset + index);
+						meshGeometry.indices.push_back(vertexOffset + index);
 					}
 					ExpandBounds(mesh, primitiveVertices, boundsInitialized);
 				}
@@ -989,6 +1022,7 @@ namespace TerraEngine::AssetPipeline
 				result.materialAssignments.push_back(std::move(assignment));
 			}
 			result.generatedMeshes.push_back(mesh);
+			meshGeometries.push_back(std::move(meshGeometry));
 		}
 		ReportProgress(options, meshEnd, "Meshes", "Static mesh geometry extracted.");
 
@@ -996,35 +1030,67 @@ namespace TerraEngine::AssetPipeline
 		{
 			AddDiagnostic(result, GltfDiagnosticSeverity::Error, "NoRenderableGeometry", options.sourceRelativePath.generic_string(), "No renderable static mesh geometry was found in the package.");
 		}
-		else if (packageVertices.empty() || packageIndices.empty())
+		else if (std::none_of(meshGeometries.begin(), meshGeometries.end(), [](const ExtractedGltfMeshGeometry& geometry) {
+			return geometry.HasTriangles();
+		}))
 		{
 			AddDiagnostic(result, GltfDiagnosticSeverity::Error, "NoRenderableGeometry", options.sourceRelativePath.generic_string(), "No compatible static triangle geometry was extracted from the package.");
 		}
 		else
 		{
-			std::filesystem::path compiledPackagePath = options.sourceRelativePath;
-			compiledPackagePath.replace_extension(".temf");
-			MeshCompileReport compileReport{};
 			const VirtualGeometryAdaptiveCompileSettings compileSettings = ToCompileSettings(options.virtualGeometrySettings);
 			const VirtualGeometryAdaptiveCompileSettings* compileSettingsPtr = options.hasVirtualGeometrySettings ? &compileSettings : nullptr;
 			VirtualGeometryConeSafetyCookSettings coneSafetySettings{};
 			coneSafetySettings.proveOneSidedOpaqueClusters = false;
-			coneSafetySettings.disabledReason = "glTF package meshes currently merge primitive material safety, so cone culling waits for per-cluster material proof.";
-			ReportProgress(options, 0.80f, "Compiling Mesh", "Building Terra mesh and virtual geometry data.");
-			if (!CompileMeshFromRaw(options.sourceRelativePath, options.buildRoot / compiledPackagePath, packageVertices, packageIndices, true, &compileReport, 60.0f, 1e-6f, compileSettingsPtr, MakeNestedProgress(options, 0.80f, 0.90f), &coneSafetySettings))
+			coneSafetySettings.disabledReason = "glTF generated meshes wait for per-cluster material sidedness proof before cone culling is enabled.";
+			const float compileStart = 0.80f;
+			const float compileEnd = 0.90f;
+			const std::size_t compileCount = result.generatedMeshes.size();
+			for (std::size_t meshIndex = 0u; meshIndex < result.generatedMeshes.size(); ++meshIndex)
 			{
-				AddDiagnostic(result, GltfDiagnosticSeverity::Error, "MeshCompileFailed", compiledPackagePath.generic_string(), "Extracted glTF geometry failed Terra mesh compilation.");
-			}
-			ReportProgress(options, 0.90f, "Mesh Metadata", "Reading compiled mesh metadata.");
-			for (GeneratedGltfMeshAsset& mesh : result.generatedMeshes)
-			{
+				GeneratedGltfMeshAsset& mesh = result.generatedMeshes[meshIndex];
+				const ExtractedGltfMeshGeometry& geometry = meshGeometries[meshIndex];
+				const float fraction = compileCount == 0u ? 1.0f : static_cast<float>(meshIndex) / static_cast<float>(compileCount);
+				const float nextFraction = compileCount == 0u ? 1.0f : static_cast<float>(meshIndex + 1u) / static_cast<float>(compileCount);
+				const float nestedStart = compileStart + (compileEnd - compileStart) * fraction;
+				const float nestedEnd = compileStart + (compileEnd - compileStart) * nextFraction;
+
+				ReportProgress(options,
+					nestedStart,
+					BuildIndexedStage("Mesh", meshIndex + 1u, compileCount, "Compiling"),
+					BuildIndexedMessage("Mesh", meshIndex + 1u, compileCount, mesh.displayName, "Building child TEMF and virtual geometry data."));
+				if (!geometry.HasTriangles())
+				{
+					AddDiagnostic(result, GltfDiagnosticSeverity::Warning, "GeneratedMeshGeometrySkipped", mesh.displayName, "Generated mesh child has no compatible static triangle geometry.", "Other generated meshes continue importing.");
+					continue;
+				}
+
+				MeshCompileReport compileReport{};
+				if (!CompileMeshFromRaw(
+					mesh.sourcePath,
+					options.buildRoot / mesh.compiledPath,
+					geometry.vertices,
+					geometry.indices,
+					true,
+					&compileReport,
+					60.0f,
+					1e-6f,
+					compileSettingsPtr,
+					MakeNestedProgress(options, nestedStart, nestedEnd),
+					&coneSafetySettings))
+				{
+					AddDiagnostic(result, GltfDiagnosticSeverity::Error, "MeshCompileFailed", mesh.compiledPath.generic_string(), "Extracted glTF mesh geometry failed Terra mesh compilation.");
+					continue;
+				}
+
 				mesh.virtualGeometrySettings = ToGeneratedSettings(compileReport.virtualGeometry.adaptiveSettings, options.hasVirtualGeometrySettings);
 				PopulateVirtualGeometryTargetDiagnostics(compileReport, mesh);
-				PopulateGeneratedMeshVirtualGeometryMetadata(options.buildRoot / compiledPackagePath, mesh, result.diagnostics);
+				PopulateGeneratedMeshVirtualGeometryMetadata(options.buildRoot / mesh.compiledPath, mesh, result.diagnostics);
 				const std::uint32_t materialAssignmentCount = CountMaterialAssignmentsForMesh(result, mesh.guid);
 				PopulatePackageMaterialCoverageDiagnostics(mesh, materialAssignmentCount);
 				PopulateVirtualGeometryCoverageTags(mesh, result.package.packageKind, materialAssignmentCount);
 			}
+			ReportProgress(options, compileEnd, "Mesh Metadata", "Generated mesh metadata updated.");
 		}
 
 		ReportProgress(options, 0.94f, "Diagnostics", "Finalizing package diagnostics.");

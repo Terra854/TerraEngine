@@ -453,6 +453,31 @@ inline const char* ToString(VirtualGeometryPagePayloadSource source)
 	}
 }
 
+// Page-local virtual-geometry descriptors are stored as 32-bit words because
+// the shaders read them from the existing bindless uint buffer table. Offsets
+// are word offsets into the same physical page payload buffer unless a future
+// backend publishes a different payload buffer index.
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorStrideWords = 32u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorSourceWord = 2u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorBufferIndexWord = 8u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorIndexWord = 9u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorVertexWordOffset = 16u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorVertexWordSize = 17u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorPrimitiveWordOffset = 18u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorPrimitiveByteSize = 19u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorRemapWordOffset = 20u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorRemapCount = 21u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorMeshletWordOffset = 22u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorMeshletCount = 23u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorBoundsWordOffset = 24u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorBoundsCount = 25u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorDecodeWordOffset = 26u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorMaterialWordOffset = 27u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorMaterialCount = 28u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorLocalVertexCount = 29u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorLocalPrimitiveByteCount = 30u;
+static constexpr std::uint32_t kVirtualGeometryPagePayloadDescriptorLocalRemapEncoding = 31u;
+
 // VirtualGeometryEmittedPageSource is the renderer-visible answer for a
 // selected cluster. It describes what actually reached the draw path after
 // fallback substitution and validation, which can differ from the desired page.
@@ -745,6 +770,9 @@ struct VirtualGeometryClusterPacket
 	VirtualGeometryEmittedPageSource emittedSource = VirtualGeometryEmittedPageSource::None;
 	std::uint64_t pagePayloadByteOffset = 0u;
 	std::uint64_t pagePayloadByteSize = 0u;
+	std::uint32_t payloadBufferIndex = 0xffffffffu;
+	std::uint32_t payloadDescriptorIndex = 0xffffffffu;
+	std::string fallbackReason;
 	std::uint32_t debugIdentity = 0u;
 	bool fallbackPacket = false;
 };
@@ -831,6 +859,9 @@ struct GpuVirtualGeometryPacketRecord
 	VirtualGeometryEmittedPageSource emittedSource = VirtualGeometryEmittedPageSource::None;
 	std::uint64_t pagePayloadByteOffset = 0u;
 	std::uint64_t pagePayloadByteSize = 0u;
+	std::uint32_t payloadBufferIndex = 0xffffffffu;
+	std::uint32_t payloadDescriptorIndex = 0xffffffffu;
+	std::string fallbackReason;
 	std::uint32_t debugIdentity = 0u;
 	std::uint32_t flags = 0u;
 };
@@ -985,9 +1016,13 @@ struct VirtualGeometryPagePayloadRecord
 	std::uint32_t materialSectionId = 0u;
 	std::uint64_t payloadByteOffset = 0u;
 	std::uint64_t payloadByteSize = 0u;
+	std::uint32_t payloadBufferIndex = 0xffffffffu;
+	std::uint32_t payloadDescriptorIndex = 0xffffffffu;
+	std::uint64_t allocationId = 0u;
 	bool resident = false;
 	bool pinnedFallback = false;
 	bool valid = false;
+	std::string owningMeshFallbackReason;
 	std::string diagnostic;
 };
 
@@ -1026,6 +1061,8 @@ struct VirtualGeometryEmittedPageSourceRecord
 	std::uint32_t meshletCount = 0u;
 	std::uint64_t payloadByteOffset = 0u;
 	std::uint64_t payloadByteSize = 0u;
+	std::uint32_t payloadBufferIndex = 0xffffffffu;
+	std::uint32_t payloadDescriptorIndex = 0xffffffffu;
 	bool fallbackSubstitution = false;
 	bool conservativeEmbeddedFallback = false;
 	std::string reason;
@@ -1645,6 +1682,12 @@ struct GeometryPageRuntime
 	std::uint32_t clusterCount = 0u;
 	std::uint64_t payloadByteOffset = 0u;
 	std::uint64_t payloadByteSize = 0u;
+	// These indices are assigned by the protected renderer/resource boundary
+	// once a page payload has a shader-visible storage-buffer binding. Keeping
+	// them with the page snapshot lets worker-safe cluster selection propagate
+	// physical payload identity without reading live Vulkan descriptor state.
+	std::uint32_t payloadBufferIndex = 0xffffffffu;
+	std::uint32_t payloadDescriptorIndex = 0xffffffffu;
 	float screenImportance = 0.0f;
 	std::string failureReason;
 };
@@ -1906,6 +1949,17 @@ struct DrawCommand
 	VirtualGeometryEmittedPageSource virtualGeometryEmittedSource = VirtualGeometryEmittedPageSource::None;
 	std::uint64_t virtualGeometryPagePayloadByteOffset = 0u;
 	std::uint64_t virtualGeometryPagePayloadByteSize = 0u;
+	// Draw commands carry the resolved page-payload binding from RenderSystem
+	// into the backend. Invalid values deliberately mean "no physical page
+	// descriptor was proven", which keeps diagnostics from confusing metadata
+	// with renderable GPU storage.
+	std::uint32_t virtualGeometryPayloadBufferIndex = 0xffffffffu;
+	std::uint32_t virtualGeometryPayloadDescriptorIndex = 0xffffffffu;
+	// Page-local payload descriptors are generated per submitted packet, not per
+	// selected-cluster row. Keeping the packet descriptor id separate prevents
+	// imported package meshes from decoding the wrong page-local stream when
+	// cluster selection and packet compaction no longer have identical offsets.
+	std::uint32_t virtualGeometryPacketDescriptorIndex = 0xffffffffu;
 	bool taskShaderCullingEnabled = true;
 };
 
@@ -1956,6 +2010,7 @@ struct PushConstants
 	std::uint32_t virtualGeometryEmittedSource = 0u;
 	std::uint32_t virtualGeometryPagePayloadByteOffset = 0u;
 	std::uint32_t virtualGeometryPagePayloadByteSize = 0u;
+	std::uint32_t virtualGeometryPacketDescriptorIndex = 0xffffffffu;
 	// rgb is the tint target color and a is blend strength. Runtime draws leave
 	// this at zero so authoring cues never leak into exported/game rendering.
 	alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);

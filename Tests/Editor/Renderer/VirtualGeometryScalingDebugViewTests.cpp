@@ -175,5 +175,18 @@ namespace TerraEngine::EditorTests {
 			context.Expect(profiler.find("VG Emitted Fallback Pages") != std::string::npos, "Profiler should include emitted fallback page rows.");
 			context.Expect(profiler.find("VG Embedded Fallback Uses") != std::string::npos, "Profiler should include embedded fallback rows.");
 		});
+
+		registry.Add("VirtualGeometry.Editor.Diagnostics.US3.ToolbarModeSwitchesPublishImmediately", [](TestContext& context) {
+			const std::string gameView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp");
+			const std::string sceneView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
+			const std::string renderSystem = ReadSourceForDebugViewContract("Engine/Renderer/RenderSystem.cpp");
+
+			context.Expect(gameView.find("ImGui::Selectable(ToString(mode), selected)") != std::string::npos, "Game View should let developers switch VG visualizer modes from the viewport toolbar.");
+			context.Expect(sceneView.find("ImGui::Selectable(ToString(mode), selected)") != std::string::npos, "Scene View should let developers switch VG visualizer modes from the viewport toolbar.");
+			context.Expect(gameView.find("RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Game") != std::string::npos, "Game View mode changes should publish directly to RenderSystem in the same GUI event.");
+			context.Expect(sceneView.find("RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Scene") != std::string::npos, "Scene View mode changes should publish directly to RenderSystem in the same GUI event.");
+			context.Expect(renderSystem.find("virtualGeometryDebugModes[BuildVirtualGeometryDebugModeKey(viewType, outputId)] = normalized") != std::string::npos, "RenderSystem should store view-local debug modes immediately instead of waiting for camera movement.");
+			context.Expect(renderSystem.find("viewVirtualGeometryQuality.debugVisualizationMode = GetVirtualGeometryDebugVisualizationMode(viewType, outputId)") != std::string::npos, "Visible-command preparation should read the latest view-local visualizer mode each frame.");
+		});
 	}
 }

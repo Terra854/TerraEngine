@@ -178,9 +178,16 @@ namespace
 			context.Expect(std::any_of(mesh->virtualGeometryValidationFlags.begin(), mesh->virtualGeometryValidationFlags.end(), [](const VirtualGeometryValidationFlagRecord& flag) {
 				return (flag.flags & kVirtualGeometryValidationFlagClusterCoverageValidated) != 0u;
 			}), "Validation records should mirror the cluster coverage proof bit.");
-			context.Expect(!mesh->virtualGeometryPages.empty() && mesh->virtualGeometryPages.front().fallbackPageId == mesh->virtualGeometryPages.front().pageId, "LOD0 page should be its own resident fallback.");
-			context.Expect(!mesh->virtualGeometryPages.empty() && mesh->virtualGeometryPages.front().clusterPageLinkCount >= 1u, "LOD0 fallback page should declare its spatial cluster-page links.");
-			context.Expect(mesh->virtualGeometryPages.front().byteSize > 0u, "Page metadata should carry a non-zero byte estimate for budget planning.");
+			const auto fallbackPage = std::find_if(mesh->virtualGeometryPages.begin(), mesh->virtualGeometryPages.end(), [](const VirtualGeometryPageRecord& page) {
+				return page.fallbackPageId == page.pageId;
+			});
+			context.Expect(fallbackPage != mesh->virtualGeometryPages.end(), "Cooked pages should declare one explicit resident fallback page.");
+			if (fallbackPage != mesh->virtualGeometryPages.end())
+			{
+				context.ExpectEqual(mesh->virtualGeometryDetailLevels.back().lodIndex, fallbackPage->firstLodIndex, "The coarsest generated detail should be the protected fallback page.");
+				context.Expect(fallbackPage->clusterPageLinkCount >= 1u, "Fallback page should declare its spatial cluster-page links.");
+				context.Expect(fallbackPage->byteSize > 0u, "Fallback page metadata should carry a non-zero byte estimate for budget planning.");
+			}
 
 			bool sawParentChildLink = false;
 			for (const VirtualGeometryClusterRecord& parent : mesh->virtualGeometryClusters)

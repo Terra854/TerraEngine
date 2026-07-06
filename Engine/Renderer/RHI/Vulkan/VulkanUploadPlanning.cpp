@@ -1,5 +1,6 @@
 #include "VulkanUploadPlanning.h"
 
+#include <limits>
 #include <utility>
 
 namespace
@@ -148,20 +149,25 @@ namespace TerraEngine::Renderer::Vulkan {
 				record.emittedSource = ResolveUploadPlanningEmittedSource(record.payloadSource);
 				record.payloadByteOffset = payload.payloadByteOffset;
 				record.payloadByteSize = payload.payloadByteSize;
+				record.payloadBufferIndex = payload.payloadBufferIndex;
+				record.payloadDescriptorIndex = payload.payloadDescriptorIndex;
+				record.allocationId = payload.allocationId;
 				record.pinnedFallback = payload.pinnedFallback;
+				const bool hasPhysicalBinding = payload.payloadBufferIndex != std::numeric_limits<std::uint32_t>::max()
+					&& payload.payloadDescriptorIndex != std::numeric_limits<std::uint32_t>::max();
 				switch (payload.source)
 				{
 				case VirtualGeometryPagePayloadSource::ResidentPagePayload:
-					record.accepted = payload.resident && payload.valid && payload.payloadByteSize > 0u;
+					record.accepted = payload.resident && payload.valid && payload.payloadByteSize > 0u && hasPhysicalBinding;
 					record.reason = record.accepted
 						? "resident high-detail virtual geometry page payload is ready for upload publication"
-						: "resident high-detail page payload is missing byte metadata";
+						: "resident high-detail page payload is missing byte metadata or a physical descriptor binding";
 					break;
 				case VirtualGeometryPagePayloadSource::ResidentFallbackPayload:
-					record.accepted = payload.resident && payload.valid && payload.payloadByteSize > 0u;
+					record.accepted = payload.resident && payload.valid && payload.payloadByteSize > 0u && hasPhysicalBinding;
 					record.reason = record.accepted
 						? "resident fallback virtual geometry page payload is ready and protected"
-						: "resident fallback page payload is missing byte metadata";
+						: "resident fallback page payload is missing byte metadata or a physical descriptor binding";
 					break;
 				case VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback:
 					record.accepted = payload.valid;
@@ -199,6 +205,9 @@ namespace TerraEngine::Renderer::Vulkan {
 				payload.meshletCount = packet.meshletCount;
 				payload.payloadByteOffset = packet.pagePayloadByteOffset;
 				payload.payloadByteSize = packet.pagePayloadByteSize;
+				payload.payloadBufferIndex = packet.payloadBufferIndex;
+				payload.payloadDescriptorIndex = packet.payloadDescriptorIndex;
+				payload.owningMeshFallbackReason = packet.fallbackReason;
 				payload.resident = packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentPagePayload
 					|| packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
 				payload.pinnedFallback = packet.fallbackPacket || packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;

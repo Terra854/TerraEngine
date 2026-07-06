@@ -7,6 +7,9 @@
 #include "File Formats/TerraEngineMeshFile.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
 namespace TerraEngine::Tests
 {
@@ -96,6 +99,25 @@ namespace TerraEngine::Tests
 			return std::any_of(result.selectedClusters.begin(), result.selectedClusters.end(), [clusterId](const TerraEngine::Renderer::VirtualGeometrySelectedClusterRecord& record) {
 				return record.clusterId == clusterId;
 			});
+		}
+
+		std::string ReadRendererSourceFile(const char* relativePath)
+		{
+			// These render tests need one source-level contract: resident page
+			// packets are only trustworthy once the Vulkan/shader code names the
+			// page-local decode path explicitly. Reading source keeps the test
+			// runnable on machines without a mesh-shader Vulkan device.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / relativePath;
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
+		bool SourceContains(const std::string& source, const std::string& token)
+		{
+			return source.find(token) != std::string::npos;
 		}
 
 		VirtualGeometryAssetRuntime MakeTwoRegionClusterAsset()
@@ -257,6 +279,13 @@ namespace TerraEngine::Tests
 				"GPU packet mirrors should validate when every record maps back to the CPU-selected cluster oracle.");
 			context.Expect(validationReason.empty(), "Successful GPU packet validation should not leave a stale reason string.");
 
+			std::vector<GpuVirtualGeometryPacketRecord> packetIdDrift = gpuPackets;
+			packetIdDrift[1].packetId += 100u;
+			context.Expect(
+				!RenderSystem::ValidateGpuVirtualGeometryPacketRecords(cpuPackets, selectedClusters, packetIdDrift, 8800u, VirtualGeometryDebugVisualizationMode::Cluster, &validationReason),
+				"Changing GPU packet id should fail validation before page-local descriptors can point at the wrong stream.");
+			context.Expect(validationReason.find("packet id") != std::string::npos, "Validation failure should explain that packet identity drifted.");
+
 			gpuPackets[1].clusterId += 100u;
 			context.Expect(
 				!RenderSystem::ValidateGpuVirtualGeometryPacketRecords(cpuPackets, selectedClusters, gpuPackets, 8800u, VirtualGeometryDebugVisualizationMode::Cluster, &validationReason),
@@ -318,6 +347,8 @@ namespace TerraEngine::Tests
 			asset.pages[1].payloadByteOffset = 4096u;
 			asset.pages[1].payloadByteSize = 2048u;
 			asset.pages[1].byteSize = 2048u;
+			asset.pages[1].payloadBufferIndex = 71u;
+			asset.pages[1].payloadDescriptorIndex = 9u;
 
 			VirtualGeometrySelectedClusterRecord selected;
 			selected.objectId = TerraEngine::GenerateUUID();
@@ -336,6 +367,8 @@ namespace TerraEngine::Tests
 			context.Expect(packets.front().emittedSource == VirtualGeometryEmittedPageSource::HighDetailPage, "High-detail resident pages should emit high-detail source records.");
 			context.ExpectEqual(4096ull, packets.front().pagePayloadByteOffset, "High-detail packet should preserve page-local byte offset.");
 			context.ExpectEqual(2048ull, packets.front().pagePayloadByteSize, "High-detail packet should preserve page-local byte size.");
+			context.ExpectEqual(71u, packets.front().payloadBufferIndex, "High-detail packet should preserve the physical page payload buffer binding.");
+			context.ExpectEqual(9u, packets.front().payloadDescriptorIndex, "High-detail packet should preserve the physical page payload descriptor index.");
 
 			RenderFrameSnapshot snapshot;
 			snapshot.frameId = 8802u;
@@ -351,6 +384,8 @@ namespace TerraEngine::Tests
 			payload.source = packets.front().payloadSource;
 			payload.payloadByteOffset = packets.front().pagePayloadByteOffset;
 			payload.payloadByteSize = packets.front().pagePayloadByteSize;
+			payload.payloadBufferIndex = packets.front().payloadBufferIndex;
+			payload.payloadDescriptorIndex = packets.front().payloadDescriptorIndex;
 			payload.resident = true;
 			payload.valid = true;
 			state.residentPagePayloads.push_back(payload);
@@ -379,6 +414,111 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.pageSources.highDetailPayloads, "Diagnostics should count the resident high-detail page payload.");
 			context.ExpectEqual(1u, diagnostics.pageSources.emittedHighDetailSources, "Diagnostics should report high-detail page emission.");
 			context.ExpectEqual(0u, diagnostics.embeddedFallbackPayloadCount, "High-detail page emission should not be reported as conservative embedded fallback.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US2.ResidentPagePacketsKeepPhysicalPayloadBindings", [](TestContext& context) {
+			using namespace TerraEngine::Renderer;
+
+			VirtualGeometryAssetRuntime asset = MakeMixedClusterAsset();
+			for (std::uint32_t index = 0u; index < static_cast<std::uint32_t>(asset.cullableGroups.size()); ++index)
+			{
+				asset.cullableGroups[index].meshletIndex = index;
+			}
+			asset.pages[1].payloadByteOffset = 8192u;
+			asset.pages[1].payloadByteSize = 4096u;
+			asset.pages[1].payloadBufferIndex = 55u;
+			asset.pages[1].payloadDescriptorIndex = 3u;
+
+			VirtualGeometrySelectedClusterRecord selected;
+			selected.objectId = TerraEngine::GenerateUUID();
+			selected.meshId = asset.assetId;
+			selected.clusterId = 1u;
+			selected.lodIndex = 0u;
+			selected.pageId = 1u;
+			selected.fallbackClusterId = 0u;
+			selected.usingFallback = false;
+
+			const std::vector<VirtualGeometryClusterPacket> packets =
+				RenderSystem::BuildVirtualGeometryClusterPackets(asset, { selected }, TerraEngine::GenerateUUID(), RenderViewType::Game, 6u);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), packets.size(), "One selected resident page cluster should create one page-backed packet.");
+			if (!packets.empty())
+			{
+				context.Expect(packets.front().payloadSource == VirtualGeometryPagePayloadSource::ResidentPagePayload, "Resident high-detail clusters should not be downgraded to owning-mesh payloads.");
+				context.Expect(packets.front().emittedSource == VirtualGeometryEmittedPageSource::HighDetailPage, "Resident high-detail clusters should emit high-detail page geometry.");
+				context.ExpectEqual(55u, packets.front().payloadBufferIndex, "Packets should carry the shader-visible page payload buffer binding.");
+				context.ExpectEqual(3u, packets.front().payloadDescriptorIndex, "Packets should carry the shader-visible page payload descriptor index.");
+				context.Expect(packets.front().payloadSource != VirtualGeometryPagePayloadSource::EmbeddedMeshPayload, "Resident page rendering must not be labeled as owning mesh payload use.");
+				context.Expect(packets.front().payloadSource != VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback, "Resident page rendering must not masquerade as conservative embedded fallback.");
+			}
+		});
+
+		registry.Add("VirtualGeometry.Render.US2.ResidentAndFallbackPacketsDoNotRequireOwnerDecodeStreams", [](TestContext& context) {
+			const std::string taskShader = ReadRendererSourceFile("Engine/Shaders/Default/Default.task.hlsl");
+			const std::string meshShader = ReadRendererSourceFile("Engine/Shaders/Default/Default.mesh.hlsl");
+			const std::string vulkanResources = ReadRendererSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp");
+
+			context.Expect(SourceContains(taskShader, "TryUsePageLocalGeometry"), "Resident page task culling should choose page-local geometry before consulting owner streams.");
+			context.Expect(SourceContains(taskShader, "ResolvePageLocalMeshletIndex"), "Resident page task dispatch should translate selected meshlets into page-local indices.");
+			context.Expect(SourceContains(meshShader, "TryUsePageLocalGeometry"), "Resident page mesh emission should choose page-local geometry before consulting owner streams.");
+			context.Expect(SourceContains(meshShader, "EmitPageLocalMeshlet"), "Resident page mesh emission should have a dedicated page-local emit path.");
+			context.Expect(SourceContains(vulkanResources, "page-local virtual geometry payload"), "Vulkan uploads should name page-local virtual geometry payloads instead of metadata-only descriptors.");
+			context.Expect(SourceContains(vulkanResources, "owner mesh buffers are skipped for page-local virtual geometry"), "Vulkan mesh-cache policy should document that resident pages no longer require full owner streams.");
+		});
+
+		registry.Add("VirtualGeometry.Render.US5.OwningMeshFallbackDiagnosticsCarryExactBytesAndReason", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.valid = true;
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 8u;
+			visibility.frameId = 4242u;
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const std::string fallbackReason = "explicit conservative embedded fallback selected for unavailable page payload";
+
+			VirtualGeometryPagePayloadRecord payload{};
+			payload.meshId = meshId;
+			payload.pageId = 11u;
+			payload.fallbackPageId = 0u;
+			payload.source = VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
+			payload.payloadByteOffset = 1024u;
+			payload.payloadByteSize = 2048u;
+			payload.resident = false;
+			payload.valid = true;
+			payload.owningMeshFallbackReason = fallbackReason;
+			visibility.residentPagePayloads.push_back(payload);
+
+			VirtualGeometryEmittedPageSourceRecord emitted{};
+			emitted.viewType = visibility.viewType;
+			emitted.viewId = visibility.outputId;
+			emitted.frameId = visibility.frameId;
+			emitted.meshId = meshId;
+			emitted.materialId = TerraEngine::GenerateUUID();
+			emitted.pageId = payload.pageId;
+			emitted.fallbackPageId = payload.fallbackPageId;
+			emitted.payloadSource = payload.source;
+			emitted.emittedSource = VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback;
+			emitted.payloadByteOffset = payload.payloadByteOffset;
+			emitted.payloadByteSize = payload.payloadByteSize;
+			emitted.conservativeEmbeddedFallback = true;
+			emitted.reason = fallbackReason;
+			visibility.emittedPageSources.push_back(emitted);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.ExpectEqual(1u, diagnostics.pageSources.embeddedFallbackPayloads, "Owning-mesh fallback payloads should be counted separately from resident pages.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedEmbeddedFallbackSources, "Emitted owner fallback should be visible to page-source diagnostics.");
+			context.ExpectEqual(2048ull, diagnostics.pageSources.embeddedFallbackBytes, "Embedded fallback byte diagnostics should use the exact payload size.");
+			context.ExpectEqual(2048ull, diagnostics.pageResidency.owningMeshFallbackBytes, "Owner fallback byte diagnostics should use exact live fallback bytes.");
+			context.ExpectEqual(static_cast<std::size_t>(1u), diagnostics.budgetContributors.size(), "Owning fallback diagnostics should still identify the affected mesh.");
+			if (!diagnostics.budgetContributors.empty())
+			{
+				context.Expect(diagnostics.budgetContributors.front().assetId == meshId, "The fallback contributor should be scoped to the generated mesh child.");
+				context.ExpectEqual(2048ull, diagnostics.budgetContributors.front().owningMeshFallbackBytes, "Per-mesh fallback contributor bytes should match the payload record.");
+			}
+			context.Expect(std::any_of(diagnostics.warnings.begin(), diagnostics.warnings.end(), [&fallbackReason](const std::string& warning) {
+				return warning.find(fallbackReason) != std::string::npos;
+			}), "Diagnostics should explain why owner mesh fallback was used.");
 		});
 
 		registry.Add("VirtualGeometry.Render.Diagnostics.ReportsLodTransitionPoppingRisk", [](TestContext& context) {
@@ -989,6 +1129,87 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(static_cast<std::size_t>(1u), result.pageNeeds.size(), "Desired non-resident child page should generate one page need request.");
 			context.ExpectEqual(1u, result.pageNeeds.front().clusterId, "Page need should name the desired child cluster.");
 			context.Expect(result.pageNeeds.front().fallbackRequired, "Page need should mark that fallback is currently preserving visibility.");
+		});
+
+		registry.Add("VirtualGeometry.Render.ClusterSelection.DoesNotSubstituteUnrelatedResidentCluster", [](TestContext& context) {
+			VirtualGeometryAssetRuntime asset{};
+			asset.assetId = TerraEngine::GenerateUUID();
+			asset.clusterCoverageValidated = true;
+			asset.detailLevels = {
+				{ 0u, 0u, 4u, 512u, 0.0f, 1.0f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 1u, 4u, 4u, 256u, 0.1f, 0.5f, glm::vec3(-1.0f), glm::vec3(1.0f) },
+				{ 2u, 8u, 4u, 128u, 0.2f, 0.25f, glm::vec3(-1.0f), glm::vec3(1.0f) }
+			};
+			asset.cullableGroups.resize(12u);
+			for (std::uint32_t index = 0u; index < static_cast<std::uint32_t>(asset.cullableGroups.size()); ++index)
+			{
+				asset.cullableGroups[index].meshletIndex = index;
+			}
+
+			GeometryPageRuntime missingRootPage{};
+			missingRootPage.pageId = 0u;
+			missingRootPage.firstLodIndex = 1u;
+			missingRootPage.lodCount = 1u;
+			missingRootPage.state = GeometryPageState::NotResident;
+			missingRootPage.fallbackPageId = 0u;
+			missingRootPage.fallbackPage = true;
+			GeometryPageRuntime failedChildPage{};
+			failedChildPage.pageId = 1u;
+			failedChildPage.firstLodIndex = 0u;
+			failedChildPage.lodCount = 1u;
+			failedChildPage.state = GeometryPageState::Failed;
+			failedChildPage.fallbackPageId = 0u;
+			GeometryPageRuntime unrelatedResidentPage{};
+			unrelatedResidentPage.pageId = 2u;
+			unrelatedResidentPage.firstLodIndex = 2u;
+			unrelatedResidentPage.lodCount = 1u;
+			unrelatedResidentPage.state = GeometryPageState::Resident;
+			unrelatedResidentPage.fallbackPageId = 2u;
+			asset.pages = { missingRootPage, failedChildPage, unrelatedResidentPage };
+
+			VirtualGeometryClusterRuntime root{};
+			root.clusterId = 0u;
+			root.parentClusterId = kVirtualGeometryInvalidIndex;
+			root.firstChildClusterId = 1u;
+			root.childCount = 1u;
+			root.lodIndex = 1u;
+			root.firstGroupIndex = 4u;
+			root.groupCount = 4u;
+			root.pageId = 0u;
+			root.fallbackClusterId = 0u;
+			root.geometricError = 1.0f;
+			root.boundsRadius = 1.0f;
+			VirtualGeometryClusterRuntime desiredChild{};
+			desiredChild.clusterId = 1u;
+			desiredChild.parentClusterId = 0u;
+			desiredChild.firstChildClusterId = kVirtualGeometryInvalidIndex;
+			desiredChild.childCount = 0u;
+			desiredChild.lodIndex = 0u;
+			desiredChild.firstGroupIndex = 0u;
+			desiredChild.groupCount = 4u;
+			desiredChild.pageId = 1u;
+			desiredChild.fallbackClusterId = 0u;
+			desiredChild.boundsRadius = 0.5f;
+			VirtualGeometryClusterRuntime unrelatedCluster{};
+			unrelatedCluster.clusterId = 9u;
+			unrelatedCluster.parentClusterId = 0u;
+			unrelatedCluster.firstChildClusterId = kVirtualGeometryInvalidIndex;
+			unrelatedCluster.childCount = 0u;
+			unrelatedCluster.lodIndex = 2u;
+			unrelatedCluster.firstGroupIndex = 8u;
+			unrelatedCluster.groupCount = 4u;
+			unrelatedCluster.pageId = 2u;
+			unrelatedCluster.fallbackClusterId = 9u;
+			unrelatedCluster.boundsRadius = 0.25f;
+			asset.clusters = { root, desiredChild, unrelatedCluster };
+
+			const TerraEngine::Renderer::VirtualGeometryClusterSelectionResult result =
+				RenderSystem::SelectVirtualGeometryClusterCut(asset, asset.assetId, TerraEngine::GenerateUUID(), MakeDefaultVirtualGeometryQualityProfile(), 512.0f, true, true);
+
+			context.Expect(result.selectedClusters.empty(), "A missing fallback chain should fail open to the owner range instead of selecting unrelated resident cluster coverage.");
+			context.Expect(!SelectionContainsCluster(result, 9u), "The unrelated resident cluster must never stand in for the missing desired coverage.");
+			context.Expect((result.invalidSelectionReasons & 2u) != 0u, "Selection diagnostics should record that no authored resident fallback was available.");
+			context.Expect(!result.pageNeeds.empty(), "The missing desired page should still be requested for streaming.");
 		});
 
 		registry.Add("VirtualGeometry.Render.ClusterSelection.UsesFallbackAncestorWhileChildPageIsEvicting", [](TestContext& context) {

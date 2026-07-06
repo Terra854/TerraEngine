@@ -411,6 +411,18 @@ private:
 	// per-format accounting is available.
 	template <typename Resource>
 	std::uint64_t EstimateLoadedResourceBytes(const std::unique_ptr<Resource>& resource) const;
+	// ComputeLoadedResourceBytes reports the exact CPU-owned payload bytes kept
+	// alive by each cache entry. The generic fallback is only for resource types
+	// that do not publish a dedicated payload structure yet; concrete formats
+	// below count their owned vectors so Resource Residency never displays an
+	// estimate in the Stream CPU Bytes column.
+	template <typename Resource>
+	std::uint64_t ComputeLoadedResourceBytes(const Resource& resource) const;
+	std::uint64_t ComputeLoadedResourceBytes(const Material& resource) const;
+	std::uint64_t ComputeLoadedResourceBytes(const Mesh& resource) const;
+	std::uint64_t ComputeLoadedResourceBytes(const Shader& resource) const;
+	std::uint64_t ComputeLoadedResourceBytes(const ShaderCollection& resource) const;
+	std::uint64_t ComputeLoadedResourceBytes(const Texture& resource) const;
 
 	bool ReleaseResidentResource(
 		const TerraEngine::UUID& id,
@@ -486,10 +498,17 @@ inline std::shared_future<TerraEngine::UUID> ResourceManager::MakeReadyFuture(co
 template <typename Resource>
 std::uint64_t ResourceManager::EstimateLoadedResourceBytes(const std::unique_ptr<Resource>& resource) const
 {
-	// This generic estimate intentionally avoids dereferencing backend-owned
-	// memory. Format-specific loaders can replace it later with exact payload
-	// accounting while cleanup ordering remains deterministic today.
-	return resource ? static_cast<std::uint64_t>(sizeof(Resource)) : 0u;
+	return resource ? ComputeLoadedResourceBytes(*resource) : 0u;
+}
+
+template <typename Resource>
+std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Resource&) const
+{
+	// Unknown resource kinds still need a deterministic value for cleanup
+	// ordering, but concrete TerraEngine asset formats override this so the
+	// editor-visible byte columns remain exact for meshes, textures, materials,
+	// and shader collections.
+	return static_cast<std::uint64_t>(sizeof(Resource));
 }
 
 template <typename Resource>

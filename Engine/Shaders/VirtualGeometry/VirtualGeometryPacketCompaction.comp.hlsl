@@ -30,6 +30,8 @@ struct GpuVirtualGeometryPacketRecord
 	uint emittedSource;
 	uint2 pagePayloadByteOffset;
 	uint2 pagePayloadByteSize;
+	uint payloadBufferIndex;
+	uint payloadDescriptorIndex;
 	uint debugIdentity;
 	uint flags;
 };

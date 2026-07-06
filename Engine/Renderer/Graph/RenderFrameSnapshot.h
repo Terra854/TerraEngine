@@ -62,6 +62,8 @@ namespace TerraEngine::Renderer {
 		VirtualGeometryEmittedPageSource emittedSource = VirtualGeometryEmittedPageSource::None;
 		std::uint64_t pagePayloadByteOffset = 0u;
 		std::uint64_t pagePayloadByteSize = 0u;
+		std::uint32_t payloadBufferIndex = 0xffffffffu;
+		std::uint32_t payloadDescriptorIndex = 0xffffffffu;
 	};
 
 	struct VirtualGeometrySelectedClusterRecord

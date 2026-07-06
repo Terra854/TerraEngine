@@ -1,5 +1,9 @@
 #include "TestHarness.h"
 
+#include "Resource/ResourceManager.h"
+
+#include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -8,11 +12,8 @@ namespace TerraEngine::Tests
 {
 	namespace
 	{
-		std::string ReadResourceManagerMeshSource()
+		std::string ReadSourceFile(const std::string& path)
 		{
-			// ResourceManagerMesh.cpp owns the runtime TEMF rejection path. This
-			// source-contract test keeps the page-integrity checks visible even
-			// when the binary TEMF fixture format changes during v1 development.
 			const auto read = [](const std::string& candidate) {
 				std::ifstream file(candidate, std::ios::binary);
 				if (!file)
@@ -24,7 +25,6 @@ namespace TerraEngine::Tests
 				return buffer.str();
 			};
 
-			const std::string path = "Engine/Resource/ResourceManagerMesh.cpp";
 			std::string text = read(path);
 			if (!text.empty())
 			{
@@ -57,6 +57,14 @@ namespace TerraEngine::Tests
 			}
 			return resolveFromMarker("Tests/Engine/Resource/ResourceManagerMeshTests.cpp");
 		}
+
+		std::string ReadResourceManagerMeshSource()
+		{
+			// ResourceManagerMesh.cpp owns the runtime TEMF rejection path. This
+			// source-contract test keeps the page-integrity checks visible even
+			// when the binary TEMF fixture format changes during v1 development.
+			return ReadSourceFile("Engine/Resource/ResourceManagerMesh.cpp");
+		}
 	}
 
 	void RegisterResourceManagerMeshTests(TestRegistry& registry)
@@ -68,9 +76,65 @@ namespace TerraEngine::Tests
 			context.Expect(source.find("TEMF virtual geometry page has invalid identity, fallback, or byte-size metadata") != std::string::npos, "Runtime loader should reject invalid page ids, fallback ids, or byte sizes.");
 			context.Expect(source.find("TEMF virtual geometry page does not declare cluster-page coverage metadata") != std::string::npos, "Runtime loader should reject pages without cluster-page links.");
 			context.Expect(source.find("TEMF virtual geometry page fallback points to a higher-detail page") != std::string::npos, "Runtime loader should reject fallback links that point to higher-detail pages.");
+			context.Expect(source.find("TEMF virtual geometry page payload byte range overruns payload") != std::string::npos, "Runtime loader should reject virtual geometry pages whose physical payload range is outside the TEMF payload.");
+			context.Expect(source.find("page.byteOffset > static_cast<std::uint64_t>(payloadSize)") != std::string::npos, "Runtime loader should validate page payload offsets against the loaded payload span.");
 			context.Expect(source.find("material section LOD range") != std::string::npos, "Runtime loader should validate material section metadata before publication.");
 			context.Expect(source.find("TEMF virtual geometry cullable group has invalid bounds") != std::string::npos, "Runtime loader should reject invalid page/cluster bounds before rendering.");
-			context.Expect(source.find("TEMF virtual geometry page table does not keep LOD0 tied to a resident fallback page") != std::string::npos, "Runtime loader should require resident fallback coverage for page-streamed assets.");
+			context.Expect(source.find("TEMF virtual geometry page table does not declare a resident fallback page") != std::string::npos, "Runtime loader should require explicit resident fallback coverage for page-streamed assets.");
+		});
+
+		registry.Add("Resource.Manager.Mesh.ExactResidencyGeneratedChildrenOwnGpuBytes", [](TestContext& context) {
+			ResourceManager& resourceManager = ResourceManager::Instance();
+			resourceManager.SetStreamingDiagnosticsEnabled(true);
+
+			const TerraEngine::UUID packageId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID generatedMeshId = TerraEngine::GenerateUUID();
+			const std::filesystem::path compiledPath = "Tests/Fixtures/generated-package-child.temf";
+			resourceManager.RegisterStreamableAsset(packageId, AssetType::Mesh, compiledPath);
+			resourceManager.RegisterStreamableAsset(generatedMeshId, AssetType::Mesh, compiledPath);
+			resourceManager.MarkResourceUploadedToGpu(
+				generatedMeshId,
+				AssetType::Mesh,
+				42u,
+				1234u,
+				"generated child upload");
+
+			const Resource::StreamingDiagnosticsSummary summary = resourceManager.GetStreamingDiagnosticsSummary();
+			const auto packageRecord = std::find_if(summary.records.begin(), summary.records.end(), [packageId](const Resource::StreamingDiagnosticRecord& record) {
+				return record.assetId == packageId;
+			});
+			const auto generatedRecord = std::find_if(summary.records.begin(), summary.records.end(), [generatedMeshId](const Resource::StreamingDiagnosticRecord& record) {
+				return record.assetId == generatedMeshId;
+			});
+			context.Expect(packageRecord != summary.records.end(), "The logical package parent should remain visible to diagnostics before the editor filters it.");
+			context.Expect(generatedRecord != summary.records.end(), "The generated child mesh should have its own diagnostics record.");
+			if (packageRecord != summary.records.end() && generatedRecord != summary.records.end())
+			{
+				context.Expect(packageRecord->exactGpuBytes.status == Resource::ExactResidencyByteStatus::ZeroByState, "Package parents must not inherit child render GPU bytes.");
+				context.ExpectEqual(0ull, packageRecord->exactGpuBytes.bytes, "Package parent exact GPU bytes should be zero unless it owns a backend allocation.");
+				context.Expect(generatedRecord->exactGpuBytes.status == Resource::ExactResidencyByteStatus::Exact, "Generated child mesh should own the backend GPU allocation.");
+				context.ExpectEqual(1234ull, generatedRecord->exactGpuBytes.bytes, "Generated child exact GPU bytes should equal the upload size.");
+			}
+
+			resourceManager.DeleteResource(packageId, AssetType::Mesh);
+			resourceManager.DeleteResource(generatedMeshId, AssetType::Mesh);
+		});
+
+		registry.Add("Resource.Manager.Mesh.US5.PageStreamingUploadPolicyUsesPageLocalPath", [](TestContext& context) {
+			const std::string meshSource = ReadResourceManagerMeshSource();
+			const std::string meshHeader = ReadSourceFile("Engine/File Formats/TerraEngineMeshFile.h");
+			const std::string vulkanSource = ReadSourceFile("Engine/Renderer/RHI/Vulkan/VulkanContextResources.cpp");
+
+			context.Expect(meshHeader.find("virtualGeometryPageStreamingReady") != std::string::npos, "Mesh metadata should expose whether physical page streaming is ready.");
+			context.Expect(meshHeader.find("virtualGeometryFullOwnerPayloadBytes") != std::string::npos, "Mesh metadata should expose the exact owner-stream byte cost.");
+			context.Expect(meshHeader.find("virtualGeometryResidentHighDetailPageBytes") != std::string::npos, "Mesh metadata should expose exact high-detail page bytes.");
+			context.Expect(meshHeader.find("virtualGeometryResidentFallbackPageBytes") != std::string::npos, "Mesh metadata should expose exact fallback page bytes.");
+			context.Expect(meshHeader.find("virtualGeometryOwnerFallbackReason") != std::string::npos, "Mesh metadata should explain any owner-stream fallback.");
+			context.Expect(meshSource.find("ResolveVirtualGeometryUploadPolicy") != std::string::npos, "The TEMF loader should derive virtual geometry upload policy from page tables.");
+			context.Expect(meshSource.find("ResolveFullOwnerMeshPayloadBytes") != std::string::npos, "The TEMF loader should measure exact owning stream payload bytes instead of estimating them.");
+			context.Expect(meshSource.find("current mesh-shader decode path still binds owner mesh streams") == std::string::npos, "The loader must not keep the old metadata-only shader fallback reason once page-local decode exists.");
+			context.Expect(vulkanSource.find("owner mesh buffers are skipped for page-local virtual geometry") != std::string::npos, "Vulkan uploads should skip full owner buffers for page-local virtual geometry.");
+			context.Expect(vulkanSource.find("vulkan mesh cache hit with page-local virtual geometry owner placeholders") != std::string::npos, "Vulkan cache hits should preserve the page-local placeholder diagnostic.");
 		});
 	}
 }

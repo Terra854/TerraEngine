@@ -451,6 +451,15 @@ struct Mesh
 	std::vector<VirtualGeometryValidationFlagRecord> virtualGeometryValidationFlags;
 	std::vector<VirtualGeometryDiagnosticRecord> virtualGeometryDiagnostics;
 	std::string virtualGeometryDiagnosticStrings;
+	// Runtime policy metadata derived from validated page tables. These values
+	// are exact byte facts for tooling; they do not imply the current mesh
+	// shader can decode page-local buffers until that shader path exists.
+	bool virtualGeometryPageStreamingReady = false;
+	std::uint64_t virtualGeometryFullOwnerPayloadBytes = 0u;
+	std::uint64_t virtualGeometryResidentHighDetailPageBytes = 0u;
+	std::uint64_t virtualGeometryResidentFallbackPageBytes = 0u;
+	std::uint64_t virtualGeometryProtectedFallbackBytes = 0u;
+	std::string virtualGeometryOwnerFallbackReason;
 	// Object-level culling needs one conservative mesh bound before the GPU
 	// sees individual meshlets. It is derived during load so render systems can
 	// cheaply transform it into world space without walking every meshlet.

@@ -6,6 +6,8 @@
 #include "Renderer/RHI/Vulkan/VulkanRendererWorkCache.h"
 #include "Renderer/RHI/Vulkan/VulkanUploadPlanning.h"
 
+#include <limits>
+
 namespace TerraEngine::Tests {
 namespace {
 	TerraEngine::Renderer::VirtualGeometryViewSelectionState MakeBatchedSelectionState()
@@ -113,6 +115,8 @@ namespace {
 			packet.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
 			packet.pagePayloadByteOffset = 8192u;
 			packet.pagePayloadByteSize = 4096u;
+			packet.payloadBufferIndex = 44u;
+			packet.payloadDescriptorIndex = 12u;
 			packet.debugIdentity = 1234u;
 			packet.fallbackPacket = true;
 
@@ -124,7 +128,7 @@ namespace {
 					100u);
 
 			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "One CPU packet should produce one GPU packet mirror.");
-			context.ExpectEqual(100u, records.front().packetId, "GPU packet ids should honor the caller-provided base.");
+			context.ExpectEqual(packet.packetId, records.front().packetId, "GPU packet ids should preserve the CPU packet id used by page-local descriptors.");
 			context.ExpectEqual(5000ull, records.front().frameId, "GPU packet records should carry frame ownership.");
 			context.ExpectEqual(packet.clusterId, records.front().clusterId, "GPU packets should preserve selected cluster identity.");
 			context.ExpectEqual(packet.meshletOffset, records.front().meshletOffset, "GPU packets should preserve meshlet offset.");
@@ -133,6 +137,8 @@ namespace {
 			context.Expect(records.front().emittedSource == packet.emittedSource, "GPU packets should preserve emitted page source labels.");
 			context.ExpectEqual(packet.pagePayloadByteOffset, records.front().pagePayloadByteOffset, "GPU packets should preserve page-local payload byte offsets.");
 			context.ExpectEqual(packet.pagePayloadByteSize, records.front().pagePayloadByteSize, "GPU packets should preserve page-local payload byte sizes.");
+			context.ExpectEqual(packet.payloadBufferIndex, records.front().payloadBufferIndex, "GPU packets should preserve physical page payload buffer bindings.");
+			context.ExpectEqual(packet.payloadDescriptorIndex, records.front().payloadDescriptorIndex, "GPU packets should preserve physical page payload descriptor indices.");
 			context.Expect((records.front().flags & 1u) != 0u, "GPU packet flags should mark fail-open coverage.");
 			context.Expect(((records.front().flags >> 8u) & 0xffu) == static_cast<std::uint32_t>(VirtualGeometryDebugVisualizationMode::Cluster), "GPU packet flags should mirror the view debug mode.");
 		});
@@ -145,6 +151,8 @@ namespace {
 			state.clusterPackets.front().emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
 			state.clusterPackets.front().pagePayloadByteOffset = 16384u;
 			state.clusterPackets.front().pagePayloadByteSize = 2048u;
+			state.clusterPackets.front().payloadBufferIndex = 81u;
+			state.clusterPackets.front().payloadDescriptorIndex = 2u;
 			state.clusterPackets.front().fallbackPacket = true;
 			state.gpuPacketRecords = RenderSystem::BuildGpuVirtualGeometryPacketRecords(
 				state.clusterPackets,
@@ -161,7 +169,33 @@ namespace {
 			context.Expect(records.front().emittedSource == VirtualGeometryEmittedPageSource::FallbackPage, "Upload planning should preserve emitted fallback source labels.");
 			context.ExpectEqual(16384ull, records.front().payloadByteOffset, "Upload planning should preserve page-local byte offset.");
 			context.ExpectEqual(2048ull, records.front().payloadByteSize, "Upload planning should preserve page-local byte size.");
+			context.ExpectEqual(81u, records.front().payloadBufferIndex, "Upload planning should preserve the physical page payload buffer binding.");
+			context.ExpectEqual(2u, records.front().payloadDescriptorIndex, "Upload planning should preserve the physical page payload descriptor index.");
 			context.Expect(records.front().pinnedFallback, "Fallback payload records should remain marked as protected.");
+		});
+
+		registry.Add("VirtualGeometry.Batching.US2.UploadPlanningRejectsIncompletePhysicalPayloadBindings", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 3034u;
+			TerraEngine::Renderer::VirtualGeometryViewSelectionState state = MakeBatchedSelectionState();
+			state.clusterPackets.front().payloadSource = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			state.clusterPackets.front().emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			state.clusterPackets.front().pagePayloadByteOffset = 4096u;
+			state.clusterPackets.front().pagePayloadByteSize = 1024u;
+			state.clusterPackets.front().payloadBufferIndex = std::numeric_limits<std::uint32_t>::max();
+			state.clusterPackets.front().payloadDescriptorIndex = std::numeric_limits<std::uint32_t>::max();
+			state.gpuPacketRecords = RenderSystem::BuildGpuVirtualGeometryPacketRecords(
+				state.clusterPackets,
+				snapshot.frameId,
+				VirtualGeometryDebugVisualizationMode::Residency);
+			snapshot.virtualGeometryViewSelections.push_back(state);
+
+			const std::vector<TerraEngine::Renderer::Vulkan::VirtualGeometryPagePayloadUploadRecord> records =
+				TerraEngine::Renderer::Vulkan::BuildVirtualGeometryPagePayloadUploadPlan(snapshot, RenderViewType::Game, state.outputId);
+
+			context.ExpectEqual(static_cast<std::size_t>(1u), records.size(), "Incomplete resident page metadata should still produce one diagnostic upload record.");
+			context.Expect(!records.front().accepted, "Resident page uploads must be rejected until a physical page descriptor binding exists.");
+			context.Expect(records.front().reason.find("physical descriptor binding") != std::string::npos, "Rejected resident page uploads should explain the missing physical binding.");
 		});
 
 		registry.Add("VirtualGeometry.Batching.US1.GpuBatchDescriptorsSplitOnCompatibilityKeys", [](TestContext& context) {

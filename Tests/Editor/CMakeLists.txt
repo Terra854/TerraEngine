@@ -60,6 +60,7 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/VirtualGeometryScalingAssetPipelineTests.cpp
 	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
 	AssetPipeline/VirtualGeometryPackageImportTests.cpp
+	Renderer/ResourceResidencyWindowTests.cpp
 	Renderer/VirtualGeometryDebugViewTests.cpp
 	Renderer/VirtualGeometryHardeningDebugViewTests.cpp
 	Renderer/VirtualGeometryScalingDebugViewTests.cpp

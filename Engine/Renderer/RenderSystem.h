@@ -87,7 +87,9 @@ public:
 	static std::vector<ClusterWorkBatch> BuildVirtualGeometryClusterBatches(const std::vector<VirtualGeometryClusterPacket>& packets, std::uint32_t packetOffsetBase = 0u, std::uint32_t batchIdBase = 0u);
 	// These helpers convert the proven CPU cluster cut into immutable GPU packet
 	// mirrors. The render thread can build them as worker-safe values, while the
-	// protected Vulkan boundary owns the actual buffer publication.
+	// protected Vulkan boundary owns the actual buffer publication. GPU packets
+	// preserve the CPU packet ids because page-local shader descriptors are
+	// addressed by that stable identity after packet culling/compaction.
 	static std::vector<GpuVirtualGeometryPacketRecord> BuildGpuVirtualGeometryPacketRecords(const std::vector<VirtualGeometryClusterPacket>& packets, std::uint64_t frameId, VirtualGeometryDebugVisualizationMode debugMode, std::uint32_t packetIdBase = 0u);
 	static std::vector<GpuVirtualGeometryBatchDescriptor> BuildGpuVirtualGeometryBatchDescriptors(const std::vector<GpuVirtualGeometryPacketRecord>& packets, std::uint64_t frameId, VirtualGeometryDebugVisualizationMode debugMode, std::uint32_t batchIdBase = 0u);
 	static GpuVirtualGeometryPacketFrameSet BuildGpuVirtualGeometryPacketFrameSet(RenderViewType viewType, std::uint32_t viewId, std::uint64_t frameId, const glm::uvec2& targetSize, VirtualGeometryDebugVisualizationMode debugMode, std::uint32_t packetOffset, std::uint32_t packetCount, std::uint32_t batchOffset, std::uint32_t batchCount);

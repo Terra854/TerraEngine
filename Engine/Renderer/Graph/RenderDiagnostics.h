@@ -53,6 +53,13 @@ namespace TerraEngine::Renderer {
 		std::uint64_t requestedBytes = 0u;
 		std::uint64_t reclaimableBytes = 0u;
 		std::uint64_t pinnedFallbackBytes = 0u;
+		// Per-asset buckets mirror the view summary so Resource Residency can
+		// explain which bytes are high-detail pages versus protected fallback.
+		std::uint64_t residentHighDetailBytes = 0u;
+		std::uint64_t residentFallbackBytes = 0u;
+		std::uint64_t embeddedFallbackBytes = 0u;
+		std::uint64_t retiringBytes = 0u;
+		std::uint64_t owningMeshFallbackBytes = 0u;
 		std::uint32_t residentPages = 0u;
 		std::uint32_t pinnedFallbackPages = 0u;
 		std::uint32_t missingPages = 0u;
@@ -90,6 +97,14 @@ namespace TerraEngine::Renderer {
 
 	struct VirtualGeometryPageResidencyDiagnostics
 	{
+		// These byte buckets are exact live-state labels for developer tools:
+		// resident bytes are renderable now, pending/failed/evicted bytes are
+		// explanatory only, and owningMeshFallbackBytes marks legacy coverage.
+		std::uint64_t residentHighDetailBytes = 0u;
+		std::uint64_t residentFallbackBytes = 0u;
+		std::uint64_t embeddedFallbackBytes = 0u;
+		std::uint64_t owningMeshFallbackBytes = 0u;
+		std::uint64_t metadataBytes = 0u;
 		std::uint64_t requestedBytes = 0u;
 		std::uint64_t pinnedFallbackBytes = 0u;
 		std::uint64_t pendingIoBytes = 0u;
@@ -97,9 +112,11 @@ namespace TerraEngine::Renderer {
 		std::uint64_t failedBytes = 0u;
 		std::uint64_t evictingBytes = 0u;
 		std::uint64_t evictedBytes = 0u;
+		std::uint64_t retiringBytes = 0u;
 		std::uint32_t pendingIoPages = 0u;
 		std::uint32_t pendingUploadPages = 0u;
 		std::uint32_t evictingPages = 0u;
+		std::uint32_t retiringPages = 0u;
 		std::uint32_t pinnedFallbackPages = 0u;
 		std::uint32_t failedPageReasons = 0u;
 	};
@@ -299,7 +316,13 @@ namespace TerraEngine::Renderer {
 		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
 		BackendResourceResidencyKind kind = BackendResourceResidencyKind::Other;
 		std::uint64_t gpuBytes = 0u;
+		std::uint64_t exactGpuBytes = 0u;
+		std::uint64_t allocationId = 0u;
+		std::uint32_t pageId = 0xffffffffu;
 		std::uint32_t subresourceCount = 0u;
+		std::string byteStatus = "unavailable";
+		std::string retirementState = "published";
+		std::string unavailableReason;
 		std::string detail;
 	};
 

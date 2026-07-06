@@ -106,6 +106,20 @@ namespace TerraEngine::Tests
 			return buffer.str();
 		}
 
+		std::string ReadRenderSystemSource()
+		{
+			// Virtual-geometry packet expansion owns the mapping from selected
+			// clusters to submitted packet descriptors. Tests read the source so
+			// package-import edge cases keep using packet ids instead of selection
+			// row offsets when addressing page-local payload streams.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RenderSystem.cpp";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
 		bool ShaderContains(const std::string& shader, const std::string& token)
 		{
 			return shader.find(token) != std::string::npos;
@@ -121,6 +135,7 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(offsetof(PushConstants, virtualGeometryFlags) + sizeof(std::uint32_t), offsetof(PushConstants, selectedVirtualClusterOffset), "Virtual cluster payload should begin immediately after virtual geometry flags.");
 			context.ExpectEqual(offsetof(PushConstants, selectedVirtualClusterOffset) + sizeof(std::uint32_t), offsetof(PushConstants, selectedVirtualClusterCount), "Selected cluster offset/count should be tightly packed for mesh shader decoding.");
 			context.ExpectEqual(offsetof(PushConstants, selectedVirtualPageNeedOffset) + sizeof(std::uint32_t), offsetof(PushConstants, selectedVirtualPageNeedCount), "Page need offset/count should be tightly packed for streaming diagnostics.");
+			context.ExpectEqual(offsetof(PushConstants, virtualGeometryPagePayloadByteSize) + sizeof(std::uint32_t), offsetof(PushConstants, virtualGeometryPacketDescriptorIndex), "Page-local packet descriptor id should occupy the final scalar slot before editor tint padding.");
 			context.Expect((offsetof(PushConstants, editorTint) % 16u) == 0u, "Editor tint should remain 16-byte aligned after virtual geometry push constants.");
 		});
 
@@ -187,12 +202,81 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(shader, "uint payloadSource;"), "Compaction shader packets should label the resident payload source.");
 			context.Expect(ShaderContains(shader, "uint emittedSource;"), "Compaction shader packets should label whether high detail or fallback coverage is emitted.");
 			context.Expect(ShaderContains(shader, "uint2 pagePayloadByteOffset;"), "Compaction shader packets should keep page-local payload byte offsets.");
+			context.Expect(ShaderContains(shader, "uint payloadBufferIndex;"), "Compaction shader packets should carry physical page payload buffer bindings.");
+			context.Expect(ShaderContains(shader, "uint payloadDescriptorIndex;"), "Compaction shader packets should carry physical page payload descriptor indices.");
 			context.Expect(ShaderContains(shader, "compactedPackets[compactedIndex] = packet;"), "Compaction shader should preserve material/page/payload identity when copying surviving packets.");
 			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPagePayloadBufferIndex;"), "Fragment push constants should keep the page payload buffer field so all default stages share the same range.");
 			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPayloadSource;"), "Fragment push constants should keep payload source identity even when fragment shading only reads common material/debug fields.");
 			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryEmittedSource;"), "Fragment push constants should keep emitted source identity so the default push range stays byte-compatible across stages.");
 			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPagePayloadByteOffset;"), "Fragment push constants should keep page-local payload byte offsets to preserve the default Vulkan push range.");
 			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPagePayloadByteSize;"), "Fragment push constants should keep page-local payload byte sizes to preserve the default Vulkan push range.");
+			context.Expect(ShaderContains(fragmentShader, "uint virtualGeometryPacketDescriptorIndex;"), "Fragment push constants should mirror the packet descriptor id so all default stages share one layout.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.US2.PhysicalPagePayloadDescriptorWordsAreStable", [](TestContext& context) {
+			const std::string taskShader = ReadDefaultTaskShader();
+			const std::string meshShader = ReadDefaultMeshShader();
+			const std::string vulkanResources = ReadVulkanContextResourcesSource();
+
+			context.Expect(ShaderContains(taskShader, "kVirtualGeometryPayloadDescriptorStrideWords = 32u"), "Task shader should know the physical page payload descriptor stride.");
+			context.Expect(ShaderContains(taskShader, "kVirtualGeometryPayloadDescriptorBufferIndexWord = 8u"), "Task shader should read the physical payload buffer binding word.");
+			context.Expect(ShaderContains(taskShader, "kVirtualGeometryPayloadDescriptorIndexWord = 9u"), "Task shader should read the physical payload descriptor index word.");
+			context.Expect(ShaderContains(taskShader, "LoadVirtualGeometryPagePayloadDescriptorWord"), "Task shader should read page payload descriptors through a single helper.");
+			context.Expect(ShaderContains(meshShader, "kVirtualGeometryPayloadDescriptorStrideWords = 32u"), "Mesh shader should share the physical page payload descriptor stride.");
+			context.Expect(ShaderContains(meshShader, "physicalPayloadBindingSeed"), "Mesh shader debug identity should include physical page payload bindings.");
+			context.Expect(!ShaderContains(meshShader, "Geometry emission continues to come from"), "Mesh shader source must not document resident page payloads as metadata-only owning-mesh rendering.");
+			context.Expect(ShaderContains(vulkanResources, "Virtual Geometry Physical Page Payload Descriptor Buffer"), "Vulkan should publish a physical page payload descriptor buffer, not a metadata-only source table.");
+			context.Expect(ShaderContains(vulkanResources, "packet.payloadBufferIndex"), "Vulkan descriptor publication should include packet payload buffer bindings.");
+			context.Expect(ShaderContains(vulkanResources, "packet.payloadDescriptorIndex"), "Vulkan descriptor publication should include packet payload descriptor indices.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalGeometryStreamsAreShaderDecodable", [](TestContext& context) {
+			const std::string taskShader = ReadDefaultTaskShader();
+			const std::string meshShader = ReadDefaultMeshShader();
+			const std::string vulkanResources = ReadVulkanContextResourcesSource();
+			const std::string renderSystem = ReadRenderSystemSource();
+
+			context.Expect(ShaderContains(taskShader, "TryLoadPageLocalPayloadDescriptor"), "Task shader should validate page-local stream descriptors before culling resident page packets.");
+			context.Expect(ShaderContains(taskShader, "LoadPageLocalMeshletRecord"), "Task shader should cull resident pages from page-local meshlet records.");
+			context.Expect(ShaderContains(taskShader, "LoadPageLocalMeshletBounds"), "Task shader should cull resident pages from page-local bounds.");
+			context.Expect(ShaderContains(taskShader, "DecodePageLocalMeshletPosition"), "Task shader Hi-Z projection should reconstruct positions from page-local vertex/remap streams.");
+			context.Expect(ShaderContains(taskShader, "SceneUniforms.virtualGeometryPacketDescriptorIndex"), "Task shader should address page-local descriptors by packet descriptor id, not selected cluster row.");
+			context.Expect(ShaderContains(taskShader, "kVirtualGeometryPayloadDescriptorMaterialWordOffset"), "Task shader descriptor layout should keep page-local material stream slots.");
+			context.Expect(ShaderContains(meshShader, "TryUsePageLocalGeometry"), "Mesh shader should choose page-local geometry for resident page and fallback packets.");
+			context.Expect(ShaderContains(meshShader, "LoadPageLocalPackedVertexWord"), "Mesh shader should emit resident pages from page-local packed vertices.");
+			context.Expect(ShaderContains(meshShader, "LoadPageLocalPrimitiveIndex"), "Mesh shader should emit resident pages from page-local primitive indices.");
+			context.Expect(ShaderContains(meshShader, "LoadPageLocalMeshletRecord"), "Mesh shader should emit resident pages from page-local meshlet records.");
+			context.Expect(ShaderContains(meshShader, "SceneUniforms.virtualGeometryPacketDescriptorIndex"), "Mesh shader should address page-local descriptors by packet descriptor id, not selected cluster row.");
+			context.Expect(ShaderContains(meshShader, "kVirtualGeometryPayloadDescriptorMaterialWordOffset"), "Mesh shader descriptor layout should keep page-local material stream slots.");
+			context.Expect(ShaderContains(vulkanResources, "BuildVirtualGeometryPageLocalPayloadWords"), "Vulkan should synthesize shader-readable page-local stream payload words.");
+			context.Expect(ShaderContains(vulkanResources, "AppendVirtualGeometryPageLocalPacketPayload"), "Vulkan should append page-local stream bytes for every resident page packet.");
+			context.Expect(ShaderContains(vulkanResources, "descriptorWordOffset"), "Vulkan should address page-local descriptor rows by index so payload appends cannot invalidate descriptor writes.");
+			context.Expect(ShaderContains(vulkanResources, "AppendVirtualGeometryPageLocalPacketPayload(result.words, descriptorIndex, packet, &appendedGpuBytes)"), "Page-local payload publication should pass descriptor indices instead of raw vector pointers.");
+			context.Expect(ShaderContains(vulkanResources, "AddVirtualGeometryPagePayloadBytes"), "Vulkan should attribute exact page-local payload bytes back to the owning mesh asset.");
+			context.Expect(ShaderContains(vulkanResources, "pagePayloadBytesByMesh"), "Per-view page-local payload resources should publish exact per-mesh byte ownership.");
+			context.Expect(ShaderContains(vulkanResources, "vulkan virtual geometry page-local payload"), "Backend residency snapshots should expose page-local VG payload bytes as mesh-owned Render GPU Bytes.");
+			context.Expect(ShaderContains(renderSystem, "batchCommand.virtualGeometryPacketDescriptorIndex = firstPacket.packetId"), "RenderSystem should bind each draw to the packet-local descriptor generated for that packet.");
+			context.Expect(ShaderContains(renderSystem, "record.packetId = packet.packetId"), "GPU packet publication should preserve CPU packet ids so page-local descriptors stay aligned after compaction.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalDrawsLaunchLocalMeshletRanges", [](TestContext& context) {
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			context.Expect(ShaderContains(vulkanSource, "const bool pageLocalGeometry ="), "Vulkan draw preparation should classify resident page/fallback payload draws before clamping meshlet ranges.");
+			context.Expect(ShaderContains(vulkanSource, "VirtualGeometryPagePayloadSource::ResidentPagePayload"), "Resident high-detail page packets should participate in the page-local launch path.");
+			context.Expect(ShaderContains(vulkanSource, "VirtualGeometryPagePayloadSource::ResidentFallbackPayload"), "Resident fallback page packets should participate in the page-local launch path.");
+			context.Expect(ShaderContains(vulkanSource, "push.virtualMeshletOffset = ownerMeshletOffset"), "Page-local draws should keep the owner meshlet offset available for descriptor fail-open rendering.");
+			context.Expect(ShaderContains(vulkanSource, "? command.virtualMeshletCount"), "Page-local draws should launch the packet-local meshlet count instead of clamping by the owner mesh offset.");
+			context.Expect(ShaderContains(vulkanSource, "std::min(command.virtualMeshletOffset, mesh.meshletCount)"), "Owner-mesh fallback draws should still clamp their global meshlet offset to the resident owner payload.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalDescriptorUpdatesDrainRecordedViews", [](TestContext& context) {
+			const std::string vulkanResources = ReadVulkanContextResourcesSource();
+
+			context.Expect(ShaderContains(vulkanResources, "publication.buffer == buffer.buffer"), "View-local VG bindless descriptors should skip redundant descriptor-set updates when the published buffer did not change.");
+			context.Expect(ShaderContains(vulkanResources, "pendingPrimaryCommandBuffers[frameIndex]"), "Changing a VG bindless descriptor should inspect already-recorded Scene/Game command buffers.");
+			context.Expect(ShaderContains(vulkanResources, "vkQueueSubmit(graphicsQueue, 1u, &pendingSubmitInfo, VK_NULL_HANDLE)"), "Recorded view command buffers should be submitted before a shared descriptor set is updated.");
+			context.Expect(ShaderContains(vulkanResources, "vkQueueWaitIdle(graphicsQueue);"), "The descriptor mutation path should drain the submitted view work before mutating the shared bindless set.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.US5.NoSelectableHiZQualityTierWasIntroduced", [](TestContext& context) {
@@ -222,6 +306,18 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanSource, "PushDefaultMeshConstants(cmd, *draw.pipeline, shadowPush);"), "Shadow draws should share the reflected push path without inventing a second contract.");
 			context.Expect(!ShaderContains(vulkanSource, "vkCmdPushConstants(secondary, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants)"), "Visible draws must not return to a single all-stage full-struct push; stale fragment ranges can make that skip task-stage Hi-Z constants.");
 			context.Expect(!ShaderContains(vulkanSource, "vkCmdPushConstants(cmd, draw.pipeline->layout, draw.pipeline->defaultPushConstantStages, 0, sizeof(PushConstants)"), "Shadow draws must not return to the stale defaultPushConstantStages full-struct path.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.EditorPresentDrainsSubmittedRenderSemaphoreOnRecovery", [](TestContext& context) {
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			context.Expect(ShaderContains(vulkanSource, "drainSubmittedEditorRender"), "Editor present recovery should keep a helper that consumes submitted scene/game render semaphores.");
+			context.Expect(ShaderContains(vulkanSource, "waitSubmitInfo.waitSemaphoreCount = 1;"), "The recovery submit must wait on the render-finished semaphore so the binary semaphore becomes reusable.");
+			context.Expect(ShaderContains(vulkanSource, "waitSubmitInfo.commandBufferCount"), "The recovery path should remain a wait-only submit instead of recording throwaway rendering work.");
+			context.Expect(ShaderContains(vulkanSource, "drainSubmittedEditorRender(\"resize\")"), "Resize recovery should drain a submitted render pass before rebuilding swapchain or offscreen resources.");
+			context.Expect(ShaderContains(vulkanSource, "drainSubmittedEditorRender(\"out-of-date acquire\")"), "Out-of-date image acquire should drain a submitted render pass before swapchain recovery.");
+			context.Expect(ShaderContains(vulkanSource, "drainSubmittedEditorRender(\"failed acquire\")"), "Failed image acquire should drain a submitted render pass instead of leaving renderFinished signaled.");
+			context.Expect(ShaderContains(vulkanSource, "BeginFrame failed to drain stranded editor render semaphore"), "BeginFrame should not clear a stranded editor render submission without consuming its binary semaphore.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.GlobalHiZDescriptorsPublishValidViewWhenPeerMissing", [](TestContext& context) {

@@ -5,6 +5,7 @@
 // only controls live loaded assets that can leave CPU/GPU memory.
 
 #include "ResourceResidencyWindow.h"
+#include "ResourceResidencyWindowModel.h"
 
 #include "AssetDatabase.h"
 #include "../Subsystems/MainEditorSubsystem.h"
@@ -19,6 +20,7 @@
 #include <filesystem>
 #include <imgui.h>
 #include <limits>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <cstdint>
@@ -30,6 +32,8 @@
 
 namespace
 {
+	constexpr double kDiagnosticsRefreshIntervalSeconds = 0.25;
+
 	const char* BoolText(bool value)
 	{
 		return value ? "yes" : "no";
@@ -38,6 +42,25 @@ namespace
 	void TextStringView(std::string_view value)
 	{
 		ImGui::TextUnformatted(value.data(), value.data() + value.size());
+	}
+
+	void DrawExactByteCell(const TerraEngine::Resource::ExactResidencyByteValue& value, std::string_view unavailableDomain)
+	{
+		const TerraEngine::Editor::ResourceResidencyByteDisplay display =
+			TerraEngine::Editor::MakeResourceResidencyByteDisplay(value, unavailableDomain);
+		ImGui::TextUnformatted(display.label.c_str());
+		if (!display.tooltip.empty() && ImGui::IsItemHovered())
+		{
+			ImGui::BeginTooltip();
+			ImGui::TextWrapped("%s", display.tooltip.c_str());
+			ImGui::EndTooltip();
+		}
+	}
+
+	std::uint64_t AddExactDisplayBytes(std::uint64_t left, std::uint64_t right)
+	{
+		constexpr std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
+		return left > max - right ? max : left + right;
 	}
 
 	std::optional<AssetType> AssetTypeFromStreamingType(TerraEngine::Resource::StreamableAssetType type)
@@ -91,6 +114,13 @@ namespace
 		}
 		return TerraEngine::ToHexString(id);
 	}
+
+	struct ResolvedAssetDisplay
+	{
+		std::string label;
+		std::filesystem::path displayPath;
+		bool generatedChildName = false;
+	};
 
 	bool IsUuidSourceKey(std::string_view sourceKey)
 	{
@@ -192,11 +222,6 @@ namespace
 		return displayPath;
 	}
 
-	std::string NormalizeDiagnosticSourceKey(const std::filesystem::path& sourceHint)
-	{
-		return sourceHint.lexically_normal().generic_string();
-	}
-
 	std::string LowercaseCopy(std::string_view text)
 	{
 		std::string lowered;
@@ -208,35 +233,45 @@ namespace
 		return lowered;
 	}
 
-	bool ContainsInsensitive(std::string_view haystack, std::string_view needle)
+	bool ContainsInsensitiveLoweredNeedle(std::string_view haystack, std::string_view loweredNeedle)
 	{
-		if (needle.empty())
+		if (loweredNeedle.empty())
 		{
 			return true;
 		}
-		return LowercaseCopy(haystack).find(LowercaseCopy(needle)) != std::string::npos;
+		return LowercaseCopy(haystack).find(loweredNeedle) != std::string::npos;
 	}
 
-	std::string DiagnosticAssetLabel(const TerraEngine::UUID& id, std::optional<AssetType> assetType, const std::filesystem::path& sourceHint = {})
+	ResolvedAssetDisplay ResolveAssetDisplay(
+		const TerraEngine::UUID& id,
+		std::optional<AssetType> assetType,
+		const std::filesystem::path& sourceHint = {})
 	{
 		std::string generatedChildName;
 		if (TryResolveGeneratedChildLabel(id, assetType, generatedChildName))
 		{
-			return generatedChildName;
+			ResolvedAssetDisplay display;
+			display.label = generatedChildName;
+			display.displayPath = EffectiveSourceHint(id, assetType, sourceHint);
+			display.generatedChildName = true;
+			return display;
 		}
+
 		const std::filesystem::path displayPath = EffectiveSourceHint(id, assetType, sourceHint);
-		return FriendlyAssetLabel(id, displayPath);
+		ResolvedAssetDisplay display;
+		display.label = FriendlyAssetLabel(id, displayPath);
+		display.displayPath = displayPath;
+		return display;
 	}
 
-	void DrawAssetCell(const TerraEngine::UUID& id, std::optional<AssetType> assetType, const std::filesystem::path& sourceHint = {})
+	std::string DiagnosticAssetLabel(const TerraEngine::UUID& id, std::optional<AssetType> assetType, const std::filesystem::path& sourceHint = {})
 	{
-		std::string generatedChildName;
-		const bool hasGeneratedChildName = TryResolveGeneratedChildLabel(id, assetType, generatedChildName);
-		const std::filesystem::path displayPath = EffectiveSourceHint(id, assetType, sourceHint);
-		const std::string label = hasGeneratedChildName
-			? generatedChildName
-			: FriendlyAssetLabel(id, displayPath);
-		ImGui::TextUnformatted(label.c_str());
+		return ResolveAssetDisplay(id, assetType, sourceHint).label;
+	}
+
+	void DrawResolvedAssetCell(const TerraEngine::UUID& id, const ResolvedAssetDisplay& display)
+	{
+		ImGui::TextUnformatted(display.label.c_str());
 		if (ImGui::IsItemHovered())
 		{
 			// The table is meant for quick scanning, so show a readable asset
@@ -246,43 +281,46 @@ namespace
 			const std::string idText = TerraEngine::ToHexString(id);
 			ImGui::BeginTooltip();
 			ImGui::Text("UUID: %s", idText.c_str());
-			if (hasGeneratedChildName)
+			if (display.generatedChildName)
 			{
-				ImGui::TextWrapped("Generated child: %s", generatedChildName.c_str());
+				ImGui::TextWrapped("Generated child: %s", display.label.c_str());
 			}
-			if (!displayPath.empty())
+			if (!display.displayPath.empty())
 			{
-				ImGui::TextWrapped("Path: %s", displayPath.string().c_str());
+				ImGui::TextWrapped("Path: %s", display.displayPath.string().c_str());
 			}
 			ImGui::EndTooltip();
 		}
 	}
 
-	std::string_view StreamingMemoryLocation(const TerraEngine::Resource::StreamingDiagnosticRecord& record)
+	void DrawAssetCell(const TerraEngine::UUID& id, std::optional<AssetType> assetType, const std::filesystem::path& sourceHint = {})
 	{
-		switch (record.payloadState)
-		{
-		case TerraEngine::Resource::StreamablePayloadState::Registered:
-		case TerraEngine::Resource::StreamablePayloadState::Deferred:
-		case TerraEngine::Resource::StreamablePayloadState::LoadingRam:
-		case TerraEngine::Resource::StreamablePayloadState::Released:
-			return "not loaded";
-		case TerraEngine::Resource::StreamablePayloadState::RamResident:
-			return "RAM";
-		case TerraEngine::Resource::StreamablePayloadState::UploadingVram:
-			return "RAM -> VRAM";
-		case TerraEngine::Resource::StreamablePayloadState::VramResident:
-			// A GPU-ready asset may still keep CPU-side metadata or decoded data
-			// alive. Show both locations when the estimates say both pools hold
-			// memory so the diagnostics do not imply a pure VRAM-only payload.
-			return record.estimatedCpuBytes > 0u ? "RAM + VRAM" : "VRAM";
-		case TerraEngine::Resource::StreamablePayloadState::PendingRelease:
-			return "pending unload";
-		case TerraEngine::Resource::StreamablePayloadState::Failed:
-			return "failed";
-		}
-		return "unknown";
+		DrawResolvedAssetCell(id, ResolveAssetDisplay(id, assetType, sourceHint));
 	}
+
+	struct StreamingDisplayRecord
+	{
+		TerraEngine::Resource::StreamingDiagnosticRecord record;
+		ResolvedAssetDisplay assetDisplay;
+		std::string sourceHintText;
+		std::string memory;
+		std::string mipLabel;
+		TerraEngine::Editor::ResourceResidencyByteDisplay cpuBytesDisplay;
+		TerraEngine::Editor::ResourceResidencyByteDisplay gpuBytesDisplay;
+		bool releaseEligible = false;
+	};
+
+	struct CandidateDisplayRecord
+	{
+		TerraEngine::Resource::ReleaseCandidate candidate;
+		ResolvedAssetDisplay assetDisplay;
+	};
+
+	struct ReleaseDisplayRecord
+	{
+		TerraEngine::Resource::ReleaseRecord record;
+		ResolvedAssetDisplay assetDisplay;
+	};
 
 	std::string_view StreamingLoadStateLabel(TerraEngine::Resource::StreamablePayloadState state)
 	{
@@ -385,19 +423,14 @@ namespace
 		std::uint64_t requestedBytes = 0u;
 		std::uint64_t reclaimableBytes = 0u;
 		std::uint64_t pinnedFallbackBytes = 0u;
+		std::uint64_t residentHighDetailBytes = 0u;
+		std::uint64_t residentFallbackBytes = 0u;
+		std::uint64_t embeddedFallbackBytes = 0u;
+		std::uint64_t retiringBytes = 0u;
+		std::uint64_t owningMeshFallbackBytes = 0u;
 		std::uint32_t residentPages = 0u;
 		std::uint32_t pinnedFallbackPages = 0u;
 		std::uint32_t missingPages = 0u;
-	};
-
-	struct SharedRenderableGpuBytes
-	{
-		std::uint64_t bytes = 0u;
-		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
-		bool includesVirtualGeometryPages = false;
-		bool fromGeneratedPackageChildren = false;
-		bool fromBackendCache = false;
-		std::string diagnosticKey;
 	};
 
 	bool HasRenderableVirtualGeometryPages(const VirtualGeometryAssetResidencySummary& summary)
@@ -424,6 +457,11 @@ namespace
 				summary.requestedBytes = std::max(summary.requestedBytes, contributor.requestedBytes);
 				summary.reclaimableBytes = std::max(summary.reclaimableBytes, contributor.reclaimableBytes);
 				summary.pinnedFallbackBytes = std::max(summary.pinnedFallbackBytes, contributor.pinnedFallbackBytes);
+				summary.residentHighDetailBytes = std::max(summary.residentHighDetailBytes, contributor.residentHighDetailBytes);
+				summary.residentFallbackBytes = std::max(summary.residentFallbackBytes, contributor.residentFallbackBytes);
+				summary.embeddedFallbackBytes = std::max(summary.embeddedFallbackBytes, contributor.embeddedFallbackBytes);
+				summary.retiringBytes = std::max(summary.retiringBytes, contributor.retiringBytes);
+				summary.owningMeshFallbackBytes = std::max(summary.owningMeshFallbackBytes, contributor.owningMeshFallbackBytes);
 				summary.residentPages = std::max(summary.residentPages, contributor.residentPages);
 				summary.pinnedFallbackPages = std::max(summary.pinnedFallbackPages, contributor.pinnedFallbackPages);
 				summary.missingPages = std::max(summary.missingPages, contributor.missingPages);
@@ -466,276 +504,55 @@ namespace
 		return "-";
 	}
 
-	const VirtualGeometryAssetResidencySummary* FindVirtualGeometrySummary(
-		const std::unordered_map<TerraEngine::UUID, VirtualGeometryAssetResidencySummary>& summaries,
-		const TerraEngine::Resource::StreamingDiagnosticRecord& record)
-	{
-		if (record.assetType != TerraEngine::Resource::StreamableAssetType::Mesh)
-		{
-			return nullptr;
-		}
-		const auto found = summaries.find(record.assetId);
-		if (found == summaries.end() || !HasRenderableVirtualGeometryPages(found->second))
-		{
-			return nullptr;
-		}
-		return &found->second;
-	}
-
-	std::uint64_t StreamingRenderableGpuBytes(
-		const TerraEngine::Resource::StreamingDiagnosticRecord& record,
-		const VirtualGeometryAssetResidencySummary* virtualGeometry,
-		const SharedRenderableGpuBytes* sharedRenderable = nullptr)
-	{
-		std::uint64_t bytes = record.estimatedGpuBytes;
-		if (virtualGeometry == nullptr)
-		{
-			if (sharedRenderable != nullptr)
-			{
-				bytes = std::max(bytes, sharedRenderable->bytes);
-			}
-			return bytes;
-		}
-
-		// Mesh stream records describe the coarse payload state. Virtual
-		// geometry pages describe the renderable mesh payload actually used by
-		// the viewport, so expose the larger value here instead of leaving
-		// visible VG meshes looking like zero-byte GPU residents.
-		bytes = std::max(bytes, virtualGeometry->residentBytes);
-		if (sharedRenderable != nullptr)
-		{
-			bytes = std::max(bytes, sharedRenderable->bytes);
-		}
-		return bytes;
-	}
-
-	std::unordered_map<std::string, SharedRenderableGpuBytes> BuildSharedRenderableGpuBytesBySource(
-		const std::vector<TerraEngine::Resource::StreamingDiagnosticRecord>& records,
-		const std::unordered_map<TerraEngine::UUID, VirtualGeometryAssetResidencySummary>& virtualGeometryByAsset)
-	{
-		std::unordered_map<std::string, SharedRenderableGpuBytes> bySource;
-		for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : records)
-		{
-			if (record.assetType != TerraEngine::Resource::StreamableAssetType::Mesh)
-			{
-				continue;
-			}
-			const std::filesystem::path sourceHint = EffectiveSourceHint(
-				record.assetId,
-				AssetTypeFromStreamingType(record.assetType),
-				std::filesystem::path(record.sourceKey));
-			if (sourceHint.empty())
-			{
-				continue;
-			}
-
-			const VirtualGeometryAssetResidencySummary* virtualGeometry =
-				FindVirtualGeometrySummary(virtualGeometryByAsset, record);
-			const std::uint64_t bytes = StreamingRenderableGpuBytes(record, virtualGeometry);
-			if (bytes == 0u)
-			{
-				continue;
-			}
-
-			SharedRenderableGpuBytes& shared = bySource[NormalizeDiagnosticSourceKey(sourceHint)];
-			// Package importers can expose both a wrapper asset and generated
-			// child mesh GUIDs for one compiled TEMF. Keep the largest observed
-			// renderable payload for that source so the wrapper row does not
-			// look like a zero-byte mesh while its child is visible on screen.
-			if (bytes > shared.bytes)
-			{
-				shared.bytes = bytes;
-				shared.assetId = record.assetId;
-				shared.includesVirtualGeometryPages = virtualGeometry != nullptr;
-				shared.fromGeneratedPackageChildren = false;
-				shared.fromBackendCache = false;
-				shared.diagnosticKey = NormalizeDiagnosticSourceKey(sourceHint);
-			}
-		}
-		return bySource;
-	}
-
-	std::unordered_map<TerraEngine::UUID, SharedRenderableGpuBytes> BuildBackendRenderableGpuBytesByAsset(
+	std::unordered_map<TerraEngine::UUID, TerraEngine::Resource::ExactResidencyByteValue> BuildBackendExactGpuBytesByAsset(
 		const TerraEngine::Renderer::BackendResourceResidencySnapshot& backendResidency)
 	{
-		std::unordered_map<TerraEngine::UUID, SharedRenderableGpuBytes> byAsset;
+		std::unordered_map<TerraEngine::UUID, TerraEngine::Resource::ExactResidencyByteValue> byAsset;
 		for (const TerraEngine::Renderer::BackendResourceResidencyRecord& record : backendResidency.records)
 		{
-			if (record.gpuBytes == 0u
-				|| (record.kind != TerraEngine::Renderer::BackendResourceResidencyKind::Mesh
-					&& record.kind != TerraEngine::Renderer::BackendResourceResidencyKind::Texture))
+			if (record.kind != TerraEngine::Renderer::BackendResourceResidencyKind::Mesh
+				&& record.kind != TerraEngine::Renderer::BackendResourceResidencyKind::Texture)
 			{
 				continue;
 			}
 
-			SharedRenderableGpuBytes& shared = byAsset[record.assetId];
-			if (record.gpuBytes <= shared.bytes)
+			const bool exactRecord =
+				record.byteStatus == "exact"
+				|| (record.byteStatus.empty() && (record.exactGpuBytes > 0u || record.gpuBytes > 0u));
+			if (!exactRecord)
 			{
+				byAsset[record.assetId] = TerraEngine::Resource::MakeUnavailableResidencyBytes(
+					record.unavailableReason.empty() ? "backend GPU allocation snapshot is unavailable" : record.unavailableReason);
 				continue;
 			}
 
-			shared.bytes = record.gpuBytes;
-			shared.assetId = record.assetId;
-			shared.includesVirtualGeometryPages = false;
-			shared.fromGeneratedPackageChildren = false;
-			shared.fromBackendCache = true;
-			shared.diagnosticKey = record.detail.empty() ? "backend cache" : record.detail;
+			const std::uint64_t recordBytes = record.exactGpuBytes > 0u
+				? record.exactGpuBytes
+				: record.gpuBytes;
+			TerraEngine::Resource::ExactResidencyByteValue& total = byAsset[record.assetId];
+			if (total.status == TerraEngine::Resource::ExactResidencyByteStatus::Unavailable)
+			{
+				total = TerraEngine::Resource::MakeExactResidencyBytes(recordBytes);
+			}
+			else
+			{
+				total.status = TerraEngine::Resource::ExactResidencyByteStatus::Exact;
+				total.bytes = AddExactDisplayBytes(total.bytes, recordBytes);
+				total.unavailableReason.clear();
+			}
 		}
 		return byAsset;
 	}
 
-	std::unordered_map<TerraEngine::UUID, SharedRenderableGpuBytes> BuildGeneratedPackageRenderableGpuBytesByAsset(
-		const std::vector<TerraEngine::Resource::StreamingDiagnosticRecord>& records,
-		const std::unordered_map<TerraEngine::UUID, VirtualGeometryAssetResidencySummary>& virtualGeometryByAsset,
-		const std::unordered_map<TerraEngine::UUID, SharedRenderableGpuBytes>& backendRenderableGpuBytesByAsset)
-	{
-		std::unordered_map<TerraEngine::UUID, const TerraEngine::Resource::StreamingDiagnosticRecord*> recordsByAsset;
-		recordsByAsset.reserve(records.size());
-		for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : records)
-		{
-			recordsByAsset[record.assetId] = &record;
-		}
-
-		std::unordered_map<TerraEngine::UUID, SharedRenderableGpuBytes> byPackage;
-		for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : records)
-		{
-			if (record.assetType != TerraEngine::Resource::StreamableAssetType::Mesh)
-			{
-				continue;
-			}
-
-			std::vector<TerraEngine::UUID> generatedMeshIds;
-			if (!AssetDatabase::Instance().TryGetGeneratedModelPackageChildIds(record.assetId, GeneratedModelPackageChildKind::Mesh, generatedMeshIds))
-			{
-				continue;
-			}
-
-			SharedRenderableGpuBytes shared{};
-			shared.fromGeneratedPackageChildren = true;
-			shared.diagnosticKey = "generated package children";
-			for (const TerraEngine::UUID& generatedMeshId : generatedMeshIds)
-			{
-				std::uint64_t childBytes = 0u;
-				const VirtualGeometryAssetResidencySummary* virtualGeometry = nullptr;
-				if (const auto virtualGeometryIt = virtualGeometryByAsset.find(generatedMeshId); virtualGeometryIt != virtualGeometryByAsset.end() && HasRenderableVirtualGeometryPages(virtualGeometryIt->second))
-				{
-					virtualGeometry = &virtualGeometryIt->second;
-				}
-				if (const auto backendIt = backendRenderableGpuBytesByAsset.find(generatedMeshId); backendIt != backendRenderableGpuBytesByAsset.end())
-				{
-					childBytes = backendIt->second.bytes;
-				}
-				else if (const auto recordIt = recordsByAsset.find(generatedMeshId); recordIt != recordsByAsset.end())
-				{
-					childBytes = StreamingRenderableGpuBytes(*recordIt->second, virtualGeometry);
-				}
-				else if (virtualGeometry != nullptr)
-				{
-					childBytes = virtualGeometry->residentBytes;
-				}
-				if (childBytes == 0u)
-				{
-					continue;
-				}
-
-				// The package wrapper is a logical asset; the GPU buffers are
-				// owned by generated child GUIDs. Sum child renderable bytes so
-				// the wrapper row reports the memory its visible children use.
-				shared.bytes += childBytes;
-				shared.assetId = generatedMeshId;
-				shared.includesVirtualGeometryPages = shared.includesVirtualGeometryPages || virtualGeometry != nullptr;
-				shared.fromBackendCache = shared.fromBackendCache || backendRenderableGpuBytesByAsset.find(generatedMeshId) != backendRenderableGpuBytesByAsset.end();
-			}
-
-			if (shared.bytes > 0u)
-			{
-				byPackage[record.assetId] = std::move(shared);
-			}
-		}
-		return byPackage;
-	}
-
-	const SharedRenderableGpuBytes* FindSharedRenderableGpuBytes(
-		const std::unordered_map<std::string, SharedRenderableGpuBytes>& sharedBySource,
-		const std::unordered_map<TerraEngine::UUID, SharedRenderableGpuBytes>& sharedByGeneratedPackage,
-		const std::unordered_map<TerraEngine::UUID, SharedRenderableGpuBytes>& backendByAsset,
+	TerraEngine::Resource::ExactResidencyByteValue ResolveExactRenderGpuBytes(
 		const TerraEngine::Resource::StreamingDiagnosticRecord& record,
-		const VirtualGeometryAssetResidencySummary* virtualGeometry)
+		const std::unordered_map<TerraEngine::UUID, TerraEngine::Resource::ExactResidencyByteValue>& backendGpuBytesByAsset)
 	{
-		const std::uint64_t directBytes = StreamingRenderableGpuBytes(record, virtualGeometry);
-		const SharedRenderableGpuBytes* bestShared = nullptr;
-		if (const auto backendIt = backendByAsset.find(record.assetId); backendIt != backendByAsset.end()
-			&& backendIt->second.bytes > directBytes)
+		if (const auto backendIt = backendGpuBytesByAsset.find(record.assetId); backendIt != backendGpuBytesByAsset.end())
 		{
-			bestShared = &backendIt->second;
+			return backendIt->second;
 		}
-		if (const auto generatedPackageIt = sharedByGeneratedPackage.find(record.assetId); generatedPackageIt != sharedByGeneratedPackage.end()
-			&& generatedPackageIt->second.bytes > (bestShared != nullptr ? bestShared->bytes : directBytes))
-		{
-			bestShared = &generatedPackageIt->second;
-		}
-
-		if (record.assetType != TerraEngine::Resource::StreamableAssetType::Mesh)
-		{
-			return bestShared;
-		}
-
-		const std::filesystem::path sourceHint = EffectiveSourceHint(
-			record.assetId,
-			AssetTypeFromStreamingType(record.assetType),
-			std::filesystem::path(record.sourceKey));
-		if (sourceHint.empty())
-		{
-			return bestShared;
-		}
-
-		const auto found = sharedBySource.find(NormalizeDiagnosticSourceKey(sourceHint));
-		if (found == sharedBySource.end())
-		{
-			return bestShared;
-		}
-
-		if (found->second.assetId == record.assetId || found->second.bytes <= directBytes)
-		{
-			return bestShared;
-		}
-		if (bestShared == nullptr || found->second.bytes > bestShared->bytes)
-		{
-			bestShared = &found->second;
-		}
-		return bestShared;
-	}
-
-	std::string StreamingDisplayMemoryLocation(
-		const TerraEngine::Resource::StreamingDiagnosticRecord& record,
-		const VirtualGeometryAssetResidencySummary* virtualGeometry,
-		const SharedRenderableGpuBytes* sharedRenderable = nullptr)
-	{
-		const bool hasSharedGpu = sharedRenderable != nullptr && sharedRenderable->bytes > record.estimatedGpuBytes;
-		if (virtualGeometry == nullptr)
-		{
-			if (hasSharedGpu)
-			{
-				return record.estimatedCpuBytes > 0u ? "RAM + shared VRAM" : "shared VRAM";
-			}
-			return std::string(StreamingMemoryLocation(record));
-		}
-
-		const bool hasStreamCpu = record.estimatedCpuBytes > 0u;
-		const bool hasStreamGpu = record.estimatedGpuBytes > 0u || hasSharedGpu;
-		if (hasStreamCpu && hasStreamGpu)
-		{
-			return "RAM + VRAM + VG";
-		}
-		if (hasStreamCpu)
-		{
-			return "RAM + VG";
-		}
-		if (hasStreamGpu)
-		{
-			return "VRAM + VG";
-		}
-		return "VG";
+		return record.exactGpuBytes;
 	}
 
 	bool OwnsStreamingResidentMemory(TerraEngine::Resource::StreamablePayloadState state)
@@ -753,7 +570,7 @@ namespace
 		visibleSummary.records.reserve(rawSummary.records.size());
 		for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : rawSummary.records)
 		{
-			if (IsGeneratedModelPackageParentRecord(record))
+			if (!TerraEngine::Editor::ShouldDisplayStreamingResidencyRecord(record, IsGeneratedModelPackageParentRecord(record)))
 			{
 				continue;
 			}
@@ -789,7 +606,9 @@ namespace
 			visibleSummary.activeNeedCount += record.needSources.size();
 			if (OwnsStreamingResidentMemory(record.payloadState))
 			{
-				visibleSummary.estimatedResidentBytes += record.estimatedCpuBytes + record.estimatedGpuBytes;
+				visibleSummary.estimatedResidentBytes +=
+					TerraEngine::Resource::ExactResidencyBytesOrZero(record.exactCpuBytes)
+					+ TerraEngine::Resource::ExactResidencyBytesOrZero(record.exactGpuBytes);
 			}
 			visibleSummary.records.push_back(record);
 		}
@@ -926,10 +745,26 @@ namespace
 	}
 }
 
+struct ResourceResidencyWindow::DiagnosticsCache
+{
+	TerraEngine::Resource::ResidencyDiagnosticsSummary residencySummary;
+	TerraEngine::Resource::StreamingDiagnosticsSummary rawStreamingSummary;
+	TerraEngine::Resource::StreamingDiagnosticsSummary visibleStreamingSummary;
+	std::unordered_map<TerraEngine::UUID, TerraEngine::Resource::ExactResidencyByteValue> backendGpuBytesByAsset;
+	std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> virtualGeometrySnapshots;
+	std::vector<StreamingDisplayRecord> streamingRows;
+	std::vector<CandidateDisplayRecord> candidateRows;
+	std::vector<ReleaseDisplayRecord> releaseRows;
+	double lastRefreshSeconds = -1.0;
+	bool valid = false;
+};
+
 ResourceResidencyWindow::ResourceResidencyWindow(MainEditorSubsystem* windowOwner)
-	: EditorWindow("Resource Residency", false), owner(windowOwner)
+	: EditorWindow("Resource Residency", false), owner(windowOwner), m_DiagnosticsCache(std::make_unique<DiagnosticsCache>())
 {
 }
+
+ResourceResidencyWindow::~ResourceResidencyWindow() = default;
 
 void ResourceResidencyWindow::OnGui()
 {
@@ -937,12 +772,14 @@ void ResourceResidencyWindow::OnGui()
 	{
 		ResourceManager::Instance().SetResidencyDiagnosticsEnabled(false);
 		ResourceManager::Instance().SetStreamingDiagnosticsEnabled(false);
+		InvalidateDiagnosticsCache();
 		return;
 	}
 
 	ResourceManager::Instance().SetResidencyDiagnosticsEnabled(true);
 	ResourceManager::Instance().SetStreamingDiagnosticsEnabled(true);
 	DrawPolicyControls();
+	RefreshDiagnosticsCacheIfNeeded(false);
 	ImGui::Spacing();
 	DrawDiagnosticsFilters();
 	ImGui::Spacing();
@@ -961,7 +798,110 @@ bool ResourceResidencyWindow::OnCloseRequested()
 {
 	ResourceManager::Instance().SetResidencyDiagnosticsEnabled(false);
 	ResourceManager::Instance().SetStreamingDiagnosticsEnabled(false);
+	InvalidateDiagnosticsCache();
 	return true;
+}
+
+void ResourceResidencyWindow::InvalidateDiagnosticsCache()
+{
+	if (!m_DiagnosticsCache)
+	{
+		return;
+	}
+	m_DiagnosticsCache->valid = false;
+	m_DiagnosticsCache->lastRefreshSeconds = -1.0;
+	m_DiagnosticsCache->streamingRows.clear();
+	m_DiagnosticsCache->candidateRows.clear();
+	m_DiagnosticsCache->releaseRows.clear();
+	m_DiagnosticsCache->backendGpuBytesByAsset.clear();
+	m_DiagnosticsCache->virtualGeometrySnapshots.clear();
+}
+
+void ResourceResidencyWindow::RefreshDiagnosticsCacheIfNeeded(bool forceRefresh)
+{
+	if (!m_DiagnosticsCache)
+	{
+		return;
+	}
+
+	const double nowSeconds = ImGui::GetTime();
+	if (!forceRefresh
+		&& m_DiagnosticsCache->valid
+		&& nowSeconds - m_DiagnosticsCache->lastRefreshSeconds < kDiagnosticsRefreshIntervalSeconds)
+	{
+		return;
+	}
+
+	ResourceManager& resourceManager = ResourceManager::Instance();
+	DiagnosticsCache& cache = *m_DiagnosticsCache;
+	cache.residencySummary = resourceManager.GetResidencyDiagnosticsSummary();
+	cache.rawStreamingSummary = resourceManager.GetStreamingDiagnosticsSummary();
+	cache.visibleStreamingSummary = cache.rawStreamingSummary.records.empty()
+		? cache.rawStreamingSummary
+		: BuildVisibleStreamingSummary(cache.rawStreamingSummary);
+	cache.backendGpuBytesByAsset =
+		BuildBackendExactGpuBytesByAsset(TerraEngine::Renderer::LatestBackendResourceResidencySnapshot());
+	cache.virtualGeometrySnapshots = TerraEngine::Renderer::LatestVirtualGeometryDiagnosticsSnapshots();
+
+	cache.streamingRows.clear();
+	cache.streamingRows.reserve(cache.visibleStreamingSummary.records.size());
+	for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : cache.visibleStreamingSummary.records)
+	{
+		if (!TerraEngine::Editor::ShouldDisplayStreamingResidencyRecord(record, IsGeneratedModelPackageParentRecord(record)))
+		{
+			continue;
+		}
+
+		StreamingDisplayRecord row;
+		row.record = record;
+		row.record.exactGpuBytes = ResolveExactRenderGpuBytes(record, cache.backendGpuBytesByAsset);
+		const std::optional<AssetType> assetType = AssetTypeFromStreamingType(record.assetType);
+		const std::filesystem::path sourceHint(record.sourceKey);
+		row.assetDisplay = ResolveAssetDisplay(record.assetId, assetType, sourceHint);
+		row.sourceHintText = sourceHint.string();
+		row.memory = TerraEngine::Editor::ExactStreamingMemoryLocation(row.record);
+		row.mipLabel = MipResidencyLabel(row.record);
+		row.cpuBytesDisplay = TerraEngine::Editor::MakeResourceResidencyByteDisplay(row.record.exactCpuBytes, "Stream CPU Bytes");
+		row.gpuBytesDisplay = TerraEngine::Editor::MakeResourceResidencyByteDisplay(row.record.exactGpuBytes, "Render GPU Bytes");
+		row.releaseEligible = record.needSources.empty()
+			&& record.protectionReason == TerraEngine::Resource::StreamingProtectionReason::None;
+		cache.streamingRows.push_back(std::move(row));
+	}
+
+	cache.candidateRows.clear();
+	cache.candidateRows.reserve(cache.residencySummary.candidates.size());
+	for (const TerraEngine::Resource::ReleaseCandidate& candidate : cache.residencySummary.candidates)
+	{
+		if (IsGeneratedModelPackageParentCandidate(candidate))
+		{
+			continue;
+		}
+		CandidateDisplayRecord row;
+		row.candidate = candidate;
+		row.assetDisplay = ResolveAssetDisplay(candidate.assetId, AssetTypeFromResidencyType(candidate.assetType), candidate.sourceKey);
+		cache.candidateRows.push_back(std::move(row));
+	}
+
+	cache.releaseRows.clear();
+	cache.releaseRows.reserve(cache.residencySummary.records.size());
+	for (const TerraEngine::Resource::ReleaseRecord& record : cache.residencySummary.records)
+	{
+		if (IsGeneratedModelPackageParentReleaseRecord(record))
+		{
+			continue;
+		}
+		ReleaseDisplayRecord row;
+		row.record = record;
+		row.assetDisplay = ResolveAssetDisplay(record.assetId, AssetTypeFromResidencyType(record.assetType));
+		cache.releaseRows.push_back(std::move(row));
+	}
+
+	// The Resource Residency window is a diagnostic dashboard, so a quarter
+	// second cache keeps the values live enough for humans while preventing the
+	// asset database and render backend from being queried dozens of times per
+	// second just because ImGui repaints.
+	cache.lastRefreshSeconds = nowSeconds;
+	cache.valid = true;
 }
 
 void ResourceResidencyWindow::DrawDiagnosticsFilters()
@@ -1128,11 +1068,11 @@ void ResourceResidencyWindow::DrawPolicyControls()
 		ImGui::TextDisabled("Fallback pages stay protected; page pressure targets high-detail pages first.");
 
 		int maxLoads = static_cast<int>(streamingPolicy.maxLoadsPerUpdate);
-	if (ImGui::InputInt("Max Streaming Loads (0=unlimited)", &maxLoads))
-	{
-		streamingPolicy.maxLoadsPerUpdate = static_cast<std::uint32_t>(std::max(0, maxLoads));
-		streamingChanged = true;
-	}
+		if (ImGui::InputInt("Max Streaming Loads (0=unlimited)", &maxLoads))
+		{
+			streamingPolicy.maxLoadsPerUpdate = static_cast<std::uint32_t>(std::max(0, maxLoads));
+			streamingChanged = true;
+		}
 
 	const char* streamingBudgetItems[] = { "Use Residency Policy", "Prefer Streaming Release", "Conservative" };
 	int streamingBudgetIndex = MemoryBudgetInteractionIndex(streamingPolicy.memoryBudgetInteraction);
@@ -1155,12 +1095,13 @@ void ResourceResidencyWindow::DrawPolicyControls()
 	if (residencyChanged || streamingChanged)
 	{
 		PersistResourcePoliciesToProjectManifest(resourceManager.GetResidencyPolicy(), resourceManager.GetStreamingPolicy());
+		InvalidateDiagnosticsCache();
 	}
 }
 
 void ResourceResidencyWindow::DrawSummary()
 {
-	const TerraEngine::Resource::ResidencyDiagnosticsSummary summary = ResourceManager::Instance().GetResidencyDiagnosticsSummary();
+	const TerraEngine::Resource::ResidencyDiagnosticsSummary& summary = m_DiagnosticsCache->residencySummary;
 	const TerraEngine::Resource::ResidencyPolicy policy = ResourceManager::Instance().GetResidencyPolicy();
 	ImGui::SeparatorText("Summary");
 	if (ImGui::BeginTable("ResourceResidencySummary", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
@@ -1191,18 +1132,7 @@ void ResourceResidencyWindow::DrawSummary()
 
 void ResourceResidencyWindow::DrawStreamingSummary()
 {
-	const TerraEngine::Resource::StreamingDiagnosticsSummary rawSummary = ResourceManager::Instance().GetStreamingDiagnosticsSummary();
-	const TerraEngine::Resource::StreamingDiagnosticsSummary summary = rawSummary.records.empty()
-		? rawSummary
-		: BuildVisibleStreamingSummary(rawSummary);
-	const std::unordered_map<TerraEngine::UUID, VirtualGeometryAssetResidencySummary> virtualGeometryByAsset =
-		BuildVirtualGeometryResidencyByAsset(TerraEngine::Renderer::LatestVirtualGeometryDiagnosticsSnapshots());
-	const std::unordered_map<TerraEngine::UUID, SharedRenderableGpuBytes> backendRenderableGpuBytesByAsset =
-		BuildBackendRenderableGpuBytesByAsset(TerraEngine::Renderer::LatestBackendResourceResidencySnapshot());
-	const std::unordered_map<std::string, SharedRenderableGpuBytes> sharedRenderableGpuBytesBySource =
-		BuildSharedRenderableGpuBytesBySource(summary.records, virtualGeometryByAsset);
-	const std::unordered_map<TerraEngine::UUID, SharedRenderableGpuBytes> sharedRenderableGpuBytesByGeneratedPackage =
-		BuildGeneratedPackageRenderableGpuBytesByAsset(summary.records, virtualGeometryByAsset, backendRenderableGpuBytesByAsset);
+	const TerraEngine::Resource::StreamingDiagnosticsSummary& summary = m_DiagnosticsCache->visibleStreamingSummary;
 	ImGui::SeparatorText("Streaming");
 	if (ImGui::BeginTable("ResourceStreamingSummary", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
@@ -1235,30 +1165,25 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 		ImGui::EndTable();
 	}
 
-	std::vector<TerraEngine::Resource::StreamingDiagnosticRecord> records;
-	records.reserve(summary.records.size());
-	for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : summary.records)
+	const std::string loweredFilter = LowercaseCopy(m_FilterText);
+	std::vector<const StreamingDisplayRecord*> records;
+	records.reserve(m_DiagnosticsCache->streamingRows.size());
+	for (const StreamingDisplayRecord& row : m_DiagnosticsCache->streamingRows)
 	{
-		const std::optional<AssetType> assetType = AssetTypeFromStreamingType(record.assetType);
-		const std::filesystem::path sourceHint(record.sourceKey);
-		const std::string label = DiagnosticAssetLabel(record.assetId, assetType, sourceHint);
-		const VirtualGeometryAssetResidencySummary* virtualGeometry = FindVirtualGeometrySummary(virtualGeometryByAsset, record);
-		const SharedRenderableGpuBytes* sharedRenderable = FindSharedRenderableGpuBytes(sharedRenderableGpuBytesBySource, sharedRenderableGpuBytesByGeneratedPackage, backendRenderableGpuBytesByAsset, record, virtualGeometry);
-		const std::string memory = StreamingDisplayMemoryLocation(record, virtualGeometry, sharedRenderable);
-		const bool releaseEligible = record.needSources.empty()
-			&& record.protectionReason == TerraEngine::Resource::StreamingProtectionReason::None;
-		if (!ContainsInsensitive(label, m_FilterText) && !ContainsInsensitive(sourceHint.string(), m_FilterText))
+		const TerraEngine::Resource::StreamingDiagnosticRecord& record = row.record;
+		if (!ContainsInsensitiveLoweredNeedle(row.assetDisplay.label, loweredFilter)
+			&& !ContainsInsensitiveLoweredNeedle(row.sourceHintText, loweredFilter))
 		{
 			continue;
 		}
 		if (!MatchesTypeFilter(record.assetType, m_TypeFilter)
-			|| !MatchesMemoryFilter(memory, m_MemoryFilter)
+			|| !MatchesMemoryFilter(row.memory, m_MemoryFilter)
 			|| !MatchesLoadStateFilter(record.payloadState, m_LoadStateFilter)
-			|| (m_ShowOnlyReleaseEligible && !releaseEligible))
+			|| (m_ShowOnlyReleaseEligible && !row.releaseEligible))
 		{
 			continue;
 		}
-		records.push_back(record);
+		records.push_back(&row);
 	}
 
 	if (records.empty())
@@ -1286,12 +1211,14 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 		{
 			const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
 			const bool ascending = spec.SortDirection == ImGuiSortDirection_Ascending;
-			std::sort(records.begin(), records.end(), [&](const auto& left, const auto& right) {
+			std::sort(records.begin(), records.end(), [&](const StreamingDisplayRecord* leftRow, const StreamingDisplayRecord* rightRow) {
+				const TerraEngine::Resource::StreamingDiagnosticRecord& left = leftRow->record;
+				const TerraEngine::Resource::StreamingDiagnosticRecord& right = rightRow->record;
 				int result = 0;
 				switch (spec.ColumnIndex)
 				{
 				case 0:
-					result = DiagnosticAssetLabel(left.assetId, AssetTypeFromStreamingType(left.assetType)).compare(DiagnosticAssetLabel(right.assetId, AssetTypeFromStreamingType(right.assetType)));
+					result = leftRow->assetDisplay.label.compare(rightRow->assetDisplay.label);
 					break;
 				case 1:
 					result = std::string(TerraEngine::Resource::ToString(left.assetType)).compare(std::string(TerraEngine::Resource::ToString(right.assetType)));
@@ -1304,11 +1231,7 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 					break;
 				case 4:
 				{
-					const VirtualGeometryAssetResidencySummary* leftVirtualGeometry = FindVirtualGeometrySummary(virtualGeometryByAsset, left);
-					const VirtualGeometryAssetResidencySummary* rightVirtualGeometry = FindVirtualGeometrySummary(virtualGeometryByAsset, right);
-					const SharedRenderableGpuBytes* leftShared = FindSharedRenderableGpuBytes(sharedRenderableGpuBytesBySource, sharedRenderableGpuBytesByGeneratedPackage, backendRenderableGpuBytesByAsset, left, leftVirtualGeometry);
-					const SharedRenderableGpuBytes* rightShared = FindSharedRenderableGpuBytes(sharedRenderableGpuBytesBySource, sharedRenderableGpuBytesByGeneratedPackage, backendRenderableGpuBytesByAsset, right, rightVirtualGeometry);
-					result = StreamingDisplayMemoryLocation(left, leftVirtualGeometry, leftShared).compare(StreamingDisplayMemoryLocation(right, rightVirtualGeometry, rightShared));
+					result = leftRow->memory.compare(rightRow->memory);
 					break;
 				}
 				case 5:
@@ -1318,16 +1241,16 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 					result = static_cast<int>(left.textureResidentMipCount) - static_cast<int>(right.textureResidentMipCount);
 					break;
 				case 7:
-					result = left.estimatedCpuBytes < right.estimatedCpuBytes ? -1 : (left.estimatedCpuBytes > right.estimatedCpuBytes ? 1 : 0);
+				{
+					const std::uint64_t leftBytes = leftRow->cpuBytesDisplay.sortKey;
+					const std::uint64_t rightBytes = rightRow->cpuBytesDisplay.sortKey;
+					result = leftBytes < rightBytes ? -1 : (leftBytes > rightBytes ? 1 : 0);
 					break;
+				}
 				case 8:
 				{
-					const VirtualGeometryAssetResidencySummary* leftVirtualGeometry = FindVirtualGeometrySummary(virtualGeometryByAsset, left);
-					const VirtualGeometryAssetResidencySummary* rightVirtualGeometry = FindVirtualGeometrySummary(virtualGeometryByAsset, right);
-					const SharedRenderableGpuBytes* leftShared = FindSharedRenderableGpuBytes(sharedRenderableGpuBytesBySource, sharedRenderableGpuBytesByGeneratedPackage, backendRenderableGpuBytesByAsset, left, leftVirtualGeometry);
-					const SharedRenderableGpuBytes* rightShared = FindSharedRenderableGpuBytes(sharedRenderableGpuBytesBySource, sharedRenderableGpuBytesByGeneratedPackage, backendRenderableGpuBytesByAsset, right, rightVirtualGeometry);
-					const std::uint64_t leftBytes = StreamingRenderableGpuBytes(left, leftVirtualGeometry, leftShared);
-					const std::uint64_t rightBytes = StreamingRenderableGpuBytes(right, rightVirtualGeometry, rightShared);
+					const std::uint64_t leftBytes = leftRow->gpuBytesDisplay.sortKey;
+					const std::uint64_t rightBytes = rightRow->gpuBytesDisplay.sortKey;
 					result = leftBytes < rightBytes ? -1 : (leftBytes > rightBytes ? 1 : 0);
 					break;
 				}
@@ -1344,38 +1267,50 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 				return ascending ? result < 0 : result > 0;
 			});
 		}
-		for (const TerraEngine::Resource::StreamingDiagnosticRecord& record : records)
+
+		// Diagnostic projects can contain many generated GLB/FBX children.
+		// Submit only the visible table rows so hovering or scrolling this
+		// window does not format every asset every editor frame.
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(records.size()));
+		while (clipper.Step())
 		{
-			ImGui::TableNextRow();
-			ImGui::TableSetColumnIndex(0);
-			const std::filesystem::path sourceHint(record.sourceKey);
-			DrawAssetCell(record.assetId, AssetTypeFromStreamingType(record.assetType), sourceHint);
-			ImGui::TableSetColumnIndex(1);
-			TextStringView(TerraEngine::Resource::ToString(record.assetType));
-			ImGui::TableSetColumnIndex(2);
-			TextStringView(TerraEngine::Resource::ToString(record.assetPolicy.priorityClass));
-			ImGui::TableSetColumnIndex(3);
-			TextStringView(TerraEngine::Resource::ToString(record.assetPolicy.residencyTier));
-			ImGui::TableSetColumnIndex(4);
-			const VirtualGeometryAssetResidencySummary* virtualGeometry = FindVirtualGeometrySummary(virtualGeometryByAsset, record);
-			const SharedRenderableGpuBytes* sharedRenderable = FindSharedRenderableGpuBytes(sharedRenderableGpuBytesBySource, sharedRenderableGpuBytesByGeneratedPackage, backendRenderableGpuBytesByAsset, record, virtualGeometry);
-			const std::string memory = StreamingDisplayMemoryLocation(record, virtualGeometry, sharedRenderable);
-			ImGui::TextUnformatted(memory.c_str());
-			ImGui::TableSetColumnIndex(5);
-			TextStringView(StreamingLoadStateLabel(record.payloadState));
-			ImGui::TableSetColumnIndex(6);
-			const std::string mipLabel = MipResidencyLabel(record);
-			ImGui::TextUnformatted(mipLabel.c_str());
-			ImGui::TableSetColumnIndex(7);
-			ImGui::Text("%llu", static_cast<unsigned long long>(record.estimatedCpuBytes));
-			ImGui::TableSetColumnIndex(8);
-			ImGui::Text("%llu", static_cast<unsigned long long>(StreamingRenderableGpuBytes(record, virtualGeometry, sharedRenderable)));
-			ImGui::TableSetColumnIndex(9);
-			TextStringView(TerraEngine::Resource::ToString(record.protectionReason));
-			ImGui::TableSetColumnIndex(10);
-			ImGui::Text("%zu", record.needSources.size());
-			ImGui::TableSetColumnIndex(11);
-			ImGui::TextWrapped("%s", record.releaseEligibility.c_str());
+			for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
+			{
+				const StreamingDisplayRecord& row = *records[static_cast<std::size_t>(rowIndex)];
+				const TerraEngine::Resource::StreamingDiagnosticRecord& record = row.record;
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				DrawResolvedAssetCell(record.assetId, row.assetDisplay);
+				ImGui::TableSetColumnIndex(1);
+				TextStringView(TerraEngine::Resource::ToString(record.assetType));
+				ImGui::TableSetColumnIndex(2);
+				TextStringView(TerraEngine::Resource::ToString(record.assetPolicy.priorityClass));
+				ImGui::TableSetColumnIndex(3);
+				TextStringView(TerraEngine::Resource::ToString(record.assetPolicy.residencyTier));
+				ImGui::TableSetColumnIndex(4);
+				ImGui::TextUnformatted(row.memory.c_str());
+				ImGui::TableSetColumnIndex(5);
+				TextStringView(StreamingLoadStateLabel(record.payloadState));
+				ImGui::TableSetColumnIndex(6);
+				ImGui::TextUnformatted(row.mipLabel.c_str());
+				ImGui::TableSetColumnIndex(7);
+				DrawExactByteCell(record.exactCpuBytes, "Stream CPU Bytes");
+				ImGui::TableSetColumnIndex(8);
+				DrawExactByteCell(record.exactGpuBytes, "Render GPU Bytes");
+				ImGui::TableSetColumnIndex(9);
+				TextStringView(TerraEngine::Resource::ToString(record.protectionReason));
+				ImGui::TableSetColumnIndex(10);
+				ImGui::Text("%zu", record.needSources.size());
+				ImGui::TableSetColumnIndex(11);
+				ImGui::TextUnformatted(record.releaseEligibility.c_str());
+				if (!record.releaseEligibility.empty() && ImGui::IsItemHovered())
+				{
+					ImGui::BeginTooltip();
+					ImGui::TextWrapped("%s", record.releaseEligibility.c_str());
+					ImGui::EndTooltip();
+				}
+			}
 		}
 		ImGui::EndTable();
 	}
@@ -1383,8 +1318,8 @@ void ResourceResidencyWindow::DrawStreamingSummary()
 
 void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 {
-	const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> snapshots =
-		TerraEngine::Renderer::LatestVirtualGeometryDiagnosticsSnapshots();
+	const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot>& snapshots =
+		m_DiagnosticsCache->virtualGeometrySnapshots;
 	ImGui::SeparatorText("Virtual Geometry");
 	if (snapshots.empty())
 	{
@@ -1392,7 +1327,7 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 		return;
 	}
 
-	if (ImGui::BeginTable("ResourceVirtualGeometrySummary", 12, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	if (ImGui::BeginTable("ResourceVirtualGeometrySummary", 14, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("View");
 		ImGui::TableSetupColumn("State");
@@ -1404,8 +1339,10 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 		ImGui::TableSetupColumn("Evict/Evicted");
 		ImGui::TableSetupColumn("Pinned");
 		ImGui::TableSetupColumn("Pinned Page Bytes");
+		ImGui::TableSetupColumn("Page Bytes H/F/E");
+		ImGui::TableSetupColumn("Pending/Fail/Evict/Retire Bytes");
+		ImGui::TableSetupColumn("Owner Fallback Bytes");
 		ImGui::TableSetupColumn("Budget/Pressure Bytes");
-		ImGui::TableSetupColumn("Estimated Geometry Bytes");
 		ImGui::TableHeadersRow();
 		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot : snapshots)
 		{
@@ -1431,11 +1368,22 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 			ImGui::TableSetColumnIndex(9);
 			ImGui::Text("%llu", static_cast<unsigned long long>(snapshot.pageResidency.pinnedFallbackBytes));
 			ImGui::TableSetColumnIndex(10);
+			ImGui::Text("%llu/%llu/%llu",
+				static_cast<unsigned long long>(snapshot.pageResidency.residentHighDetailBytes),
+				static_cast<unsigned long long>(snapshot.pageResidency.residentFallbackBytes),
+				static_cast<unsigned long long>(snapshot.pageResidency.embeddedFallbackBytes));
+			ImGui::TableSetColumnIndex(11);
+			ImGui::Text("%llu/%llu/%llu/%llu",
+				static_cast<unsigned long long>(snapshot.pageResidency.pendingIoBytes + snapshot.pageResidency.pendingUploadBytes),
+				static_cast<unsigned long long>(snapshot.pageResidency.failedBytes),
+				static_cast<unsigned long long>(snapshot.pageResidency.evictingBytes + snapshot.pageResidency.evictedBytes),
+				static_cast<unsigned long long>(snapshot.pageResidency.retiringBytes));
+			ImGui::TableSetColumnIndex(12);
+			ImGui::Text("%llu", static_cast<unsigned long long>(snapshot.pageResidency.owningMeshFallbackBytes));
+			ImGui::TableSetColumnIndex(13);
 			ImGui::Text("%llu/%llu",
 				static_cast<unsigned long long>(snapshot.geometryBudgetBytes),
 				static_cast<unsigned long long>(snapshot.budgetPressureBytes));
-			ImGui::TableSetColumnIndex(11);
-			ImGui::Text("%llu", static_cast<unsigned long long>(snapshot.estimatedGeometryBytes));
 		}
 		ImGui::EndTable();
 	}
@@ -1475,34 +1423,54 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 	});
 
 	if (!assetSummaries.empty()
-	&& ImGui::BeginTable("ResourceVirtualGeometryPressureAssets", 7, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	&& ImGui::BeginTable("ResourceVirtualGeometryPressureAssets", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
 	{
 		ImGui::TableSetupColumn("Mesh");
 		ImGui::TableSetupColumn("VG Page GPU Bytes");
+		ImGui::TableSetupColumn("High Detail Page Bytes");
+		ImGui::TableSetupColumn("Fallback Page Bytes");
+		ImGui::TableSetupColumn("Embedded/Owner Fallback Bytes");
 		ImGui::TableSetupColumn("Requested Page Bytes");
 		ImGui::TableSetupColumn("Reclaimable Page Bytes");
 		ImGui::TableSetupColumn("Pinned Fallback Bytes");
+		ImGui::TableSetupColumn("Retiring Page Bytes");
 		ImGui::TableSetupColumn("VG Pages");
 		ImGui::TableSetupColumn("Missing Pages");
 		ImGui::TableHeadersRow();
-		for (const auto& [assetId, summary] : assetSummaries)
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(assetSummaries.size()));
+		while (clipper.Step())
 		{
-			ImGui::TableNextRow();
-			ImGui::TableSetColumnIndex(0);
-			DrawAssetCell(assetId, AssetType::Mesh);
-			ImGui::TableSetColumnIndex(1);
-			ImGui::Text("%llu", static_cast<unsigned long long>(summary.residentBytes));
-			ImGui::TableSetColumnIndex(2);
-			ImGui::Text("%llu", static_cast<unsigned long long>(summary.requestedBytes));
-			ImGui::TableSetColumnIndex(3);
-			ImGui::Text("%llu", static_cast<unsigned long long>(summary.reclaimableBytes));
-			ImGui::TableSetColumnIndex(4);
-			ImGui::Text("%llu", static_cast<unsigned long long>(summary.pinnedFallbackBytes));
-			ImGui::TableSetColumnIndex(5);
-			const std::string pageLabel = VirtualGeometryPageResidencyLabel(&summary);
-			ImGui::TextUnformatted(pageLabel.c_str());
-			ImGui::TableSetColumnIndex(6);
-			ImGui::Text("%u", summary.missingPages);
+			for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
+			{
+				const auto& [assetId, summary] = assetSummaries[static_cast<std::size_t>(rowIndex)];
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				DrawAssetCell(assetId, AssetType::Mesh);
+				ImGui::TableSetColumnIndex(1);
+				ImGui::Text("%llu", static_cast<unsigned long long>(summary.residentBytes));
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%llu", static_cast<unsigned long long>(summary.residentHighDetailBytes));
+				ImGui::TableSetColumnIndex(3);
+				ImGui::Text("%llu", static_cast<unsigned long long>(summary.residentFallbackBytes));
+				ImGui::TableSetColumnIndex(4);
+				ImGui::Text("%llu/%llu",
+					static_cast<unsigned long long>(summary.embeddedFallbackBytes),
+					static_cast<unsigned long long>(summary.owningMeshFallbackBytes));
+				ImGui::TableSetColumnIndex(5);
+				ImGui::Text("%llu", static_cast<unsigned long long>(summary.requestedBytes));
+				ImGui::TableSetColumnIndex(6);
+				ImGui::Text("%llu", static_cast<unsigned long long>(summary.reclaimableBytes));
+				ImGui::TableSetColumnIndex(7);
+				ImGui::Text("%llu", static_cast<unsigned long long>(summary.pinnedFallbackBytes));
+				ImGui::TableSetColumnIndex(8);
+				ImGui::Text("%llu", static_cast<unsigned long long>(summary.retiringBytes));
+				ImGui::TableSetColumnIndex(9);
+				const std::string pageLabel = VirtualGeometryPageResidencyLabel(&summary);
+				ImGui::TextUnformatted(pageLabel.c_str());
+				ImGui::TableSetColumnIndex(10);
+				ImGui::Text("%u", summary.missingPages);
+			}
 		}
 		ImGui::EndTable();
 	}
@@ -1510,23 +1478,23 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 
 void ResourceResidencyWindow::DrawCandidates()
 {
-	const TerraEngine::Resource::ResidencyDiagnosticsSummary summary = ResourceManager::Instance().GetResidencyDiagnosticsSummary();
 	ImGui::SeparatorText("Release Candidates");
-	std::vector<TerraEngine::Resource::ReleaseCandidate> candidates;
-	candidates.reserve(summary.candidates.size());
-	for (const TerraEngine::Resource::ReleaseCandidate& candidate : summary.candidates)
+	const std::string loweredFilter = LowercaseCopy(m_FilterText);
+	std::vector<const CandidateDisplayRecord*> candidates;
+	candidates.reserve(m_DiagnosticsCache->candidateRows.size());
+	for (const CandidateDisplayRecord& row : m_DiagnosticsCache->candidateRows)
 	{
-		if (IsGeneratedModelPackageParentCandidate(candidate)
-			|| !MatchesResidencyTypeFilter(candidate.assetType, m_TypeFilter))
+		const TerraEngine::Resource::ReleaseCandidate& candidate = row.candidate;
+		if (!MatchesResidencyTypeFilter(candidate.assetType, m_TypeFilter))
 		{
 			continue;
 		}
-		const std::string label = DiagnosticAssetLabel(candidate.assetId, AssetTypeFromResidencyType(candidate.assetType), candidate.sourceKey);
-		if (!ContainsInsensitive(label, m_FilterText) && !ContainsInsensitive(candidate.sourceKey, m_FilterText))
+		if (!ContainsInsensitiveLoweredNeedle(row.assetDisplay.label, loweredFilter)
+			&& !ContainsInsensitiveLoweredNeedle(candidate.sourceKey, loweredFilter))
 		{
 			continue;
 		}
-		candidates.push_back(candidate);
+		candidates.push_back(&row);
 	}
 
 	if (candidates.empty())
@@ -1551,12 +1519,14 @@ void ResourceResidencyWindow::DrawCandidates()
 		{
 			const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
 			const bool ascending = spec.SortDirection == ImGuiSortDirection_Ascending;
-			std::sort(candidates.begin(), candidates.end(), [&](const auto& left, const auto& right) {
+			std::sort(candidates.begin(), candidates.end(), [&](const CandidateDisplayRecord* leftRow, const CandidateDisplayRecord* rightRow) {
+				const TerraEngine::Resource::ReleaseCandidate& left = leftRow->candidate;
+				const TerraEngine::Resource::ReleaseCandidate& right = rightRow->candidate;
 				int result = 0;
 				switch (spec.ColumnIndex)
 				{
 				case 0:
-					result = DiagnosticAssetLabel(left.assetId, AssetTypeFromResidencyType(left.assetType), left.sourceKey).compare(DiagnosticAssetLabel(right.assetId, AssetTypeFromResidencyType(right.assetType), right.sourceKey));
+					result = leftRow->assetDisplay.label.compare(rightRow->assetDisplay.label);
 					break;
 				case 1:
 					result = std::string(TerraEngine::Resource::ToString(left.assetType)).compare(std::string(TerraEngine::Resource::ToString(right.assetType)));
@@ -1583,27 +1553,35 @@ void ResourceResidencyWindow::DrawCandidates()
 				return ascending ? result < 0 : result > 0;
 			});
 		}
-		for (const TerraEngine::Resource::ReleaseCandidate& candidate : candidates)
+
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(candidates.size()));
+		while (clipper.Step())
 		{
-			ImGui::TableNextRow();
-			ImGui::TableSetColumnIndex(0);
-			DrawAssetCell(candidate.assetId, AssetTypeFromResidencyType(candidate.assetType), candidate.sourceKey);
-			ImGui::TableSetColumnIndex(1);
-			TextStringView(TerraEngine::Resource::ToString(candidate.assetType));
-			ImGui::TableSetColumnIndex(2);
-			TextStringView(TerraEngine::Resource::ToString(candidate.priorityClass));
-			ImGui::TableSetColumnIndex(3);
-			TextStringView(TerraEngine::Resource::ToString(candidate.residencyTier));
-			ImGui::TableSetColumnIndex(4);
-			TextStringView(TerraEngine::Resource::ToString(candidate.releaseDomain));
-			ImGui::TableSetColumnIndex(5);
-			ImGui::Text("%.2f", candidate.idleSeconds);
-			ImGui::TableSetColumnIndex(6);
-			ImGui::Text("%llu", static_cast<unsigned long long>(candidate.estimatedReclaimableBytes));
-			ImGui::TableSetColumnIndex(7);
-			TextStringView(TerraEngine::Resource::ToString(candidate.releaseReason));
-			ImGui::TableSetColumnIndex(8);
-			ImGui::TextWrapped("%s", candidate.sourceKey.c_str());
+			for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
+			{
+				const CandidateDisplayRecord& row = *candidates[static_cast<std::size_t>(rowIndex)];
+				const TerraEngine::Resource::ReleaseCandidate& candidate = row.candidate;
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				DrawResolvedAssetCell(candidate.assetId, row.assetDisplay);
+				ImGui::TableSetColumnIndex(1);
+				TextStringView(TerraEngine::Resource::ToString(candidate.assetType));
+				ImGui::TableSetColumnIndex(2);
+				TextStringView(TerraEngine::Resource::ToString(candidate.priorityClass));
+				ImGui::TableSetColumnIndex(3);
+				TextStringView(TerraEngine::Resource::ToString(candidate.residencyTier));
+				ImGui::TableSetColumnIndex(4);
+				TextStringView(TerraEngine::Resource::ToString(candidate.releaseDomain));
+				ImGui::TableSetColumnIndex(5);
+				ImGui::Text("%.2f", candidate.idleSeconds);
+				ImGui::TableSetColumnIndex(6);
+				ImGui::Text("%llu", static_cast<unsigned long long>(candidate.estimatedReclaimableBytes));
+				ImGui::TableSetColumnIndex(7);
+				TextStringView(TerraEngine::Resource::ToString(candidate.releaseReason));
+				ImGui::TableSetColumnIndex(8);
+				ImGui::TextUnformatted(candidate.sourceKey.c_str());
+			}
 		}
 		ImGui::EndTable();
 	}
@@ -1611,23 +1589,23 @@ void ResourceResidencyWindow::DrawCandidates()
 
 void ResourceResidencyWindow::DrawReleaseRecords()
 {
-	const TerraEngine::Resource::ResidencyDiagnosticsSummary summary = ResourceManager::Instance().GetResidencyDiagnosticsSummary();
 	ImGui::SeparatorText("Releases");
-	std::vector<TerraEngine::Resource::ReleaseRecord> records;
-	records.reserve(summary.records.size());
-	for (const TerraEngine::Resource::ReleaseRecord& record : summary.records)
+	const std::string loweredFilter = LowercaseCopy(m_FilterText);
+	std::vector<const ReleaseDisplayRecord*> records;
+	records.reserve(m_DiagnosticsCache->releaseRows.size());
+	for (const ReleaseDisplayRecord& row : m_DiagnosticsCache->releaseRows)
 	{
-		if (IsGeneratedModelPackageParentReleaseRecord(record)
-			|| !MatchesResidencyTypeFilter(record.assetType, m_TypeFilter))
+		const TerraEngine::Resource::ReleaseRecord& record = row.record;
+		if (!MatchesResidencyTypeFilter(record.assetType, m_TypeFilter))
 		{
 			continue;
 		}
-		const std::string label = DiagnosticAssetLabel(record.assetId, AssetTypeFromResidencyType(record.assetType));
-		if (!ContainsInsensitive(label, m_FilterText) && !ContainsInsensitive(record.explanation, m_FilterText))
+		if (!ContainsInsensitiveLoweredNeedle(row.assetDisplay.label, loweredFilter)
+			&& !ContainsInsensitiveLoweredNeedle(record.explanation, loweredFilter))
 		{
 			continue;
 		}
-		records.push_back(record);
+		records.push_back(&row);
 	}
 
 	if (records.empty())
@@ -1650,7 +1628,9 @@ void ResourceResidencyWindow::DrawReleaseRecords()
 		{
 			const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
 			const bool ascending = spec.SortDirection == ImGuiSortDirection_Ascending;
-			std::sort(records.begin(), records.end(), [&](const auto& left, const auto& right) {
+			std::sort(records.begin(), records.end(), [&](const ReleaseDisplayRecord* leftRow, const ReleaseDisplayRecord* rightRow) {
+				const TerraEngine::Resource::ReleaseRecord& left = leftRow->record;
+				const TerraEngine::Resource::ReleaseRecord& right = rightRow->record;
 				int result = 0;
 				switch (spec.ColumnIndex)
 				{
@@ -1658,7 +1638,7 @@ void ResourceResidencyWindow::DrawReleaseRecords()
 					result = left.frameId < right.frameId ? -1 : (left.frameId > right.frameId ? 1 : 0);
 					break;
 				case 1:
-					result = DiagnosticAssetLabel(left.assetId, AssetTypeFromResidencyType(left.assetType)).compare(DiagnosticAssetLabel(right.assetId, AssetTypeFromResidencyType(right.assetType)));
+					result = leftRow->assetDisplay.label.compare(rightRow->assetDisplay.label);
 					break;
 				case 2:
 					result = std::string(TerraEngine::Resource::ToString(left.assetType)).compare(std::string(TerraEngine::Resource::ToString(right.assetType)));
@@ -1679,23 +1659,37 @@ void ResourceResidencyWindow::DrawReleaseRecords()
 				return ascending ? result < 0 : result > 0;
 			});
 		}
-		for (const TerraEngine::Resource::ReleaseRecord& record : records)
+
+		ImGuiListClipper clipper;
+		clipper.Begin(static_cast<int>(records.size()));
+		while (clipper.Step())
 		{
-			ImGui::TableNextRow();
-			ImGui::TableSetColumnIndex(0);
-			ImGui::Text("%llu", static_cast<unsigned long long>(record.frameId));
-			ImGui::TableSetColumnIndex(1);
-			DrawAssetCell(record.assetId, AssetTypeFromResidencyType(record.assetType));
-			ImGui::TableSetColumnIndex(2);
-			TextStringView(TerraEngine::Resource::ToString(record.assetType));
-			ImGui::TableSetColumnIndex(3);
-			TextStringView(TerraEngine::Resource::ToString(record.releaseDomain));
-			ImGui::TableSetColumnIndex(4);
-			TextStringView(TerraEngine::Resource::ToString(record.result));
-			ImGui::TableSetColumnIndex(5);
-			ImGui::Text("%llu", static_cast<unsigned long long>(record.bytesReclaimed));
-			ImGui::TableSetColumnIndex(6);
-			ImGui::TextWrapped("%s", record.explanation.c_str());
+			for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
+			{
+				const ReleaseDisplayRecord& row = *records[static_cast<std::size_t>(rowIndex)];
+				const TerraEngine::Resource::ReleaseRecord& record = row.record;
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::Text("%llu", static_cast<unsigned long long>(record.frameId));
+				ImGui::TableSetColumnIndex(1);
+				DrawResolvedAssetCell(record.assetId, row.assetDisplay);
+				ImGui::TableSetColumnIndex(2);
+				TextStringView(TerraEngine::Resource::ToString(record.assetType));
+				ImGui::TableSetColumnIndex(3);
+				TextStringView(TerraEngine::Resource::ToString(record.releaseDomain));
+				ImGui::TableSetColumnIndex(4);
+				TextStringView(TerraEngine::Resource::ToString(record.result));
+				ImGui::TableSetColumnIndex(5);
+				ImGui::Text("%llu", static_cast<unsigned long long>(record.bytesReclaimed));
+				ImGui::TableSetColumnIndex(6);
+				ImGui::TextUnformatted(record.explanation.c_str());
+				if (!record.explanation.empty() && ImGui::IsItemHovered())
+				{
+					ImGui::BeginTooltip();
+					ImGui::TextWrapped("%s", record.explanation.c_str());
+					ImGui::EndTooltip();
+				}
+			}
 		}
 		ImGui::EndTable();
 	}

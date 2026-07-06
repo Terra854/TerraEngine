@@ -171,6 +171,7 @@ struct PushConstants
 	uint virtualGeometryEmittedSource; // Emitted source label after fallback substitution.
 	uint virtualGeometryPagePayloadByteOffset; // Low 32 bits of the page-local payload byte offset.
 	uint virtualGeometryPagePayloadByteSize; // Low 32 bits of the page-local payload byte size.
+	uint virtualGeometryPacketDescriptorIndex; // Packet-local page descriptor generated for this submitted draw.
 	float4 editorTint;
 };
 
@@ -182,6 +183,48 @@ static const uint kVirtualGeometryFlagConeCullingSafe = 0x20u;
 static const uint kVirtualGeometryDebugModeShift = 8u;
 static const uint kVirtualGeometryDebugModeMask = 0xFFu;
 static const uint kInvalidVirtualGeometryBufferIndex = 0xFFFFFFFFu;
+static const uint kVirtualGeometryPayloadDescriptorStrideWords = 32u;
+static const uint kVirtualGeometryPayloadDescriptorSourceWord = 2u;
+static const uint kVirtualGeometryPayloadDescriptorBufferIndexWord = 8u;
+static const uint kVirtualGeometryPayloadDescriptorIndexWord = 9u;
+static const uint kVirtualGeometryPayloadDescriptorVertexWordOffset = 16u;
+static const uint kVirtualGeometryPayloadDescriptorVertexWordSize = 17u;
+static const uint kVirtualGeometryPayloadDescriptorPrimitiveWordOffset = 18u;
+static const uint kVirtualGeometryPayloadDescriptorPrimitiveByteSize = 19u;
+static const uint kVirtualGeometryPayloadDescriptorRemapWordOffset = 20u;
+static const uint kVirtualGeometryPayloadDescriptorRemapCount = 21u;
+static const uint kVirtualGeometryPayloadDescriptorMeshletWordOffset = 22u;
+static const uint kVirtualGeometryPayloadDescriptorMeshletCount = 23u;
+static const uint kVirtualGeometryPayloadDescriptorBoundsWordOffset = 24u;
+static const uint kVirtualGeometryPayloadDescriptorBoundsCount = 25u;
+static const uint kVirtualGeometryPayloadDescriptorDecodeWordOffset = 26u;
+static const uint kVirtualGeometryPayloadDescriptorMaterialWordOffset = 27u;
+static const uint kVirtualGeometryPayloadDescriptorMaterialCount = 28u;
+static const uint kVirtualGeometryPayloadDescriptorLocalVertexCount = 29u;
+static const uint kVirtualGeometryPayloadDescriptorLocalPrimitiveByteCount = 30u;
+static const uint kVirtualGeometryPayloadDescriptorLocalRemapEncoding = 31u;
+static const uint kVirtualGeometrySourceResidentPagePayload = 1u;
+static const uint kVirtualGeometrySourceResidentFallbackPayload = 2u;
+
+struct PageLocalPayloadDescriptor
+{
+	uint vertexWordOffset;
+	uint vertexWordSize;
+	uint primitiveWordOffset;
+	uint primitiveByteSize;
+	uint remapWordOffset;
+	uint remapCount;
+	uint meshletWordOffset;
+	uint meshletCount;
+	uint boundsWordOffset;
+	uint boundsCount;
+	uint decodeWordOffset;
+	uint materialWordOffset;
+	uint materialCount;
+	uint localVertexCount;
+	uint localPrimitiveByteCount;
+	uint localRemapEncoding;
+};
 
 uint LoadVirtualGeometryBufferWord(uint bufferIndex, uint wordOffset, uint fallbackValue)
 {
@@ -190,11 +233,151 @@ uint LoadVirtualGeometryBufferWord(uint bufferIndex, uint wordOffset, uint fallb
 		return fallbackValue;
 	}
 
-	// Packet and batch tables are published as view-owned bindless storage
-	// buffers. The task shader only reads them for ownership/debug metadata in
-	// this milestone; all culling still uses the already-accepted meshlet bounds
-	// and Hi-Z path below.
 	return globalBuffers[NonUniformResourceIndex(bufferIndex)][wordOffset];
+}
+
+uint LoadVirtualGeometryPagePayloadDescriptorWord(uint descriptorWord, uint fallbackValue)
+{
+	const uint packetOffset = SceneUniforms.virtualGeometryPacketDescriptorIndex == kInvalidVirtualGeometryBufferIndex
+		? SceneUniforms.selectedVirtualClusterOffset
+		: SceneUniforms.virtualGeometryPacketDescriptorIndex;
+	const uint wordOffset = packetOffset * kVirtualGeometryPayloadDescriptorStrideWords + descriptorWord;
+	return LoadVirtualGeometryBufferWord(
+		SceneUniforms.virtualGeometryPagePayloadBufferIndex,
+		wordOffset,
+		fallbackValue);
+}
+
+bool IsVirtualGeometryPageLocalSource(uint payloadSource)
+{
+	return payloadSource == kVirtualGeometrySourceResidentPagePayload
+		|| payloadSource == kVirtualGeometrySourceResidentFallbackPayload;
+}
+
+uint LoadPageLocalPayloadWord(uint wordOffset, uint fallbackValue)
+{
+	return LoadVirtualGeometryBufferWord(
+		SceneUniforms.virtualGeometryPagePayloadBufferIndex,
+		wordOffset,
+		fallbackValue);
+}
+
+bool TryLoadPageLocalPayloadDescriptor(out PageLocalPayloadDescriptor descriptor)
+{
+	descriptor.vertexWordOffset = 0u;
+	descriptor.vertexWordSize = 0u;
+	descriptor.primitiveWordOffset = 0u;
+	descriptor.primitiveByteSize = 0u;
+	descriptor.remapWordOffset = 0u;
+	descriptor.remapCount = 0u;
+	descriptor.meshletWordOffset = 0u;
+	descriptor.meshletCount = 0u;
+	descriptor.boundsWordOffset = 0u;
+	descriptor.boundsCount = 0u;
+	descriptor.decodeWordOffset = 0u;
+	descriptor.materialWordOffset = 0u;
+	descriptor.materialCount = 0u;
+	descriptor.localVertexCount = 0u;
+	descriptor.localPrimitiveByteCount = 0u;
+	descriptor.localRemapEncoding = 0u;
+	if (SceneUniforms.virtualGeometryPagePayloadBufferIndex == kInvalidVirtualGeometryBufferIndex
+		|| !IsVirtualGeometryPageLocalSource(SceneUniforms.virtualGeometryPayloadSource))
+	{
+		return false;
+	}
+
+	descriptor.vertexWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorVertexWordOffset, 0u);
+	descriptor.vertexWordSize = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorVertexWordSize, 0u);
+	descriptor.primitiveWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorPrimitiveWordOffset, 0u);
+	descriptor.primitiveByteSize = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorPrimitiveByteSize, 0u);
+	descriptor.remapWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorRemapWordOffset, 0u);
+	descriptor.remapCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorRemapCount, 0u);
+	descriptor.meshletWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorMeshletWordOffset, 0u);
+	descriptor.meshletCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorMeshletCount, 0u);
+	descriptor.boundsWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorBoundsWordOffset, 0u);
+	descriptor.boundsCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorBoundsCount, 0u);
+	descriptor.decodeWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorDecodeWordOffset, 0u);
+	descriptor.materialWordOffset = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorMaterialWordOffset, 0u);
+	descriptor.materialCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorMaterialCount, 0u);
+	descriptor.localVertexCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorLocalVertexCount, 0u);
+	descriptor.localPrimitiveByteCount = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorLocalPrimitiveByteCount, 0u);
+	descriptor.localRemapEncoding = LoadVirtualGeometryPagePayloadDescriptorWord(kVirtualGeometryPayloadDescriptorLocalRemapEncoding, 0u);
+	return descriptor.vertexWordSize != 0u
+		&& descriptor.primitiveByteSize != 0u
+		&& descriptor.remapCount != 0u
+		&& descriptor.meshletCount != 0u
+		&& descriptor.boundsCount >= descriptor.meshletCount
+		&& descriptor.localVertexCount != 0u;
+}
+
+bool TryUsePageLocalGeometry(out PageLocalPayloadDescriptor descriptor)
+{
+	return TryLoadPageLocalPayloadDescriptor(descriptor);
+}
+
+uint ResolvePageLocalMeshletIndex(uint selectedMeshletOffset, uint groupMeshletOffset, uint localIndex, bool pageLocal)
+{
+	return pageLocal ? groupMeshletOffset + localIndex : selectedMeshletOffset + groupMeshletOffset + localIndex;
+}
+
+MeshletRecord LoadPageLocalMeshletRecord(PageLocalPayloadDescriptor descriptor, uint meshletIndex)
+{
+	MeshletRecord record;
+	const uint baseWord = descriptor.meshletWordOffset + meshletIndex * 4u;
+	record.vertexOffset = LoadPageLocalPayloadWord(baseWord + 0u, 0u);
+	record.vertexCount = LoadPageLocalPayloadWord(baseWord + 1u, 0u);
+	record.primitiveIndexOffset = LoadPageLocalPayloadWord(baseWord + 2u, 0u);
+	record.primitiveIndexCount = LoadPageLocalPayloadWord(baseWord + 3u, 0u);
+	return record;
+}
+
+MeshletBounds LoadPageLocalMeshletBounds(PageLocalPayloadDescriptor descriptor, uint meshletIndex)
+{
+	MeshletBounds bounds;
+	const uint baseWord = descriptor.boundsWordOffset + meshletIndex * 12u;
+	bounds.center = float3(
+		asfloat(LoadPageLocalPayloadWord(baseWord + 0u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 1u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 2u, 0u)));
+	bounds.radius = asfloat(LoadPageLocalPayloadWord(baseWord + 3u, 0u));
+	bounds.coneApex = float3(
+		asfloat(LoadPageLocalPayloadWord(baseWord + 4u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 5u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 6u, 0u)));
+	bounds.coneCutoff = asfloat(LoadPageLocalPayloadWord(baseWord + 7u, 0u));
+	bounds.coneAxis = float3(
+		asfloat(LoadPageLocalPayloadWord(baseWord + 8u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 9u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 10u, 0u)));
+	bounds.coneApexOffset = asfloat(LoadPageLocalPayloadWord(baseWord + 11u, 0u));
+	return bounds;
+}
+
+MeshDecodeInfo LoadPageLocalDecodeInfo(PageLocalPayloadDescriptor descriptor)
+{
+	MeshDecodeInfo decode;
+	const uint baseWord = descriptor.decodeWordOffset;
+	decode.positionOffset = float4(
+		asfloat(LoadPageLocalPayloadWord(baseWord + 0u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 1u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 2u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 3u, 0u)));
+	decode.positionScale = float4(
+		asfloat(LoadPageLocalPayloadWord(baseWord + 4u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 5u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 6u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 7u, 0u)));
+	decode.uvOffsetScale = float4(
+		asfloat(LoadPageLocalPayloadWord(baseWord + 8u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 9u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 10u, 0u)),
+		asfloat(LoadPageLocalPayloadWord(baseWord + 11u, 0u)));
+	decode.counts = uint4(
+		LoadPageLocalPayloadWord(baseWord + 12u, 0u),
+		LoadPageLocalPayloadWord(baseWord + 13u, 0u),
+		LoadPageLocalPayloadWord(baseWord + 14u, 0u),
+		LoadPageLocalPayloadWord(baseWord + 15u, 0u));
+	return decode;
 }
 
 uint LoadVirtualGeometryPacketRunSeed()
@@ -207,16 +390,23 @@ uint LoadVirtualGeometryPacketRunSeed()
 		SceneUniforms.virtualGeometryBatchBufferIndex,
 		0u,
 		SceneUniforms.selectedVirtualClusterCount);
-	const uint pagePayloadSeed = LoadVirtualGeometryBufferWord(
-		SceneUniforms.virtualGeometryPagePayloadBufferIndex,
-		2u,
+	const uint pagePayloadSeed = LoadVirtualGeometryPagePayloadDescriptorWord(
+		kVirtualGeometryPayloadDescriptorSourceWord,
 		SceneUniforms.virtualGeometryPayloadSource);
+	const uint physicalPayloadBindingSeed = LoadVirtualGeometryPagePayloadDescriptorWord(
+		kVirtualGeometryPayloadDescriptorBufferIndexWord,
+		kInvalidVirtualGeometryBufferIndex)
+		^ LoadVirtualGeometryPagePayloadDescriptorWord(
+			kVirtualGeometryPayloadDescriptorIndexWord,
+			kInvalidVirtualGeometryBufferIndex);
 	// Page payload identity is consumed for packet ownership/debug validation
 	// and does not alter the Hi-Z projection or accepted occlusion threshold.
 	return packetSeed
 		^ (batchSeed << 1u)
 		^ (pagePayloadSeed << 8u)
-		^ SceneUniforms.virtualGeometryPagePayloadByteSize;
+		^ (physicalPayloadBindingSeed << 4u)
+		^ SceneUniforms.virtualGeometryPagePayloadByteSize
+		^ SceneUniforms.virtualGeometryPacketDescriptorIndex;
 }
 
 bool IsFrustumCulled(const float3 centerWorld, const float radiusWorld, const FrameCullingData frameData, const float epsilon)
@@ -330,6 +520,34 @@ float3 DecodeMeshletPosition(const MeshDecodeInfo decode, const uint globalVerte
 	return decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
 }
 
+bool TryLoadPageLocalMeshletGlobalVertexIndex(PageLocalPayloadDescriptor descriptor, const MeshDecodeInfo decode, const MeshletRecord record, const uint vertexIndex, out uint globalVertexIndex)
+{
+	globalVertexIndex = 0u;
+	if (vertexIndex >= record.vertexCount)
+	{
+		return false;
+	}
+
+	const uint remapIndex = record.vertexOffset + vertexIndex;
+	if (remapIndex < record.vertexOffset || remapIndex >= decode.counts.y || remapIndex >= descriptor.remapCount)
+	{
+		return false;
+	}
+
+	globalVertexIndex = LoadPageLocalPayloadWord(descriptor.remapWordOffset + remapIndex, 0u);
+	return globalVertexIndex < decode.counts.x && globalVertexIndex < descriptor.localVertexCount;
+}
+
+float3 DecodePageLocalMeshletPosition(PageLocalPayloadDescriptor descriptor, const MeshDecodeInfo decode, const uint globalVertexIndex)
+{
+	const uint packedPosition = LoadPageLocalPayloadWord(descriptor.vertexWordOffset + globalVertexIndex * 4u + 0u, 0u);
+	const float3 qPosition = float3(
+		DecodeSnorm10(packedPosition, 0u),
+		DecodeSnorm10(packedPosition, 10u),
+		DecodeSnorm10(packedPosition, 20u));
+	return decode.positionOffset.xyz + qPosition * decode.positionScale.xyz;
+}
+
 bool TryProjectMeshletVertex(const MeshDecodeInfo decode, const MeshletRecord record, const uint vertexIndex, out float2 uv, out float depth)
 {
 	uv = float2(0.0f, 0.0f);
@@ -361,7 +579,48 @@ bool TryProjectMeshletVertex(const MeshDecodeInfo decode, const MeshletRecord re
 	return true;
 }
 
-bool TryBuildProjectedMeshletRect(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, out float2 uvMin, out float2 uvMax, out float meshletClosestDepth)
+bool TryProjectResolvedMeshletVertex(
+	const MeshDecodeInfo decode,
+	const MeshletRecord record,
+	const uint vertexIndex,
+	const PageLocalPayloadDescriptor pageDescriptor,
+	const bool pageLocal,
+	out float2 uv,
+	out float depth)
+{
+	if (!pageLocal)
+	{
+		return TryProjectMeshletVertex(decode, record, vertexIndex, uv, depth);
+	}
+
+	uv = float2(0.0f, 0.0f);
+	depth = 1.0f;
+	uint globalVertexIndex = 0u;
+	if (!TryLoadPageLocalMeshletGlobalVertexIndex(pageDescriptor, decode, record, vertexIndex, globalVertexIndex))
+	{
+		return false;
+	}
+
+	const float3 localPosition = DecodePageLocalMeshletPosition(pageDescriptor, decode, globalVertexIndex);
+	const float3 worldPosition = mul(SceneUniforms.model, float4(localPosition, 1.0f)).xyz;
+	const float4 clipPosition = mul(SceneUniforms.viewProj, float4(worldPosition, 1.0f));
+	if (clipPosition.w <= 0.0f)
+	{
+		return false;
+	}
+
+	const float3 ndcPosition = clipPosition.xyz / clipPosition.w;
+	if (!all(isfinite(ndcPosition)))
+	{
+		return false;
+	}
+
+	uv = ndcPosition.xy * 0.5f + 0.5f;
+	depth = saturate(ndcPosition.z);
+	return true;
+}
+
+bool TryBuildProjectedMeshletRect(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, const PageLocalPayloadDescriptor pageDescriptor, const bool pageLocal, out float2 uvMin, out float2 uvMax, out float meshletClosestDepth)
 {
 	uvMin = float2(1.0f, 1.0f);
 	uvMax = float2(0.0f, 0.0f);
@@ -371,7 +630,11 @@ bool TryBuildProjectedMeshletRect(const uint meshletIndex, const uint meshletCou
 		return false;
 	}
 
-	const MeshletRecord record = meshletRecords[meshletIndex];
+	MeshletRecord record = meshletRecords[meshletIndex];
+	if (pageLocal)
+	{
+		record = LoadPageLocalMeshletRecord(pageDescriptor, meshletIndex);
+	}
 	const uint vertexCount = min(record.vertexCount, kMaxMeshletVertices);
 	if (vertexCount == 0u || record.vertexOffset > decode.counts.y || vertexCount > (decode.counts.y - record.vertexOffset))
 	{
@@ -388,7 +651,7 @@ bool TryBuildProjectedMeshletRect(const uint meshletIndex, const uint meshletCou
 
 		float2 projectedUv = float2(0.0f, 0.0f);
 		float projectedDepth = 1.0f;
-		if (!TryProjectMeshletVertex(decode, record, vertexIndex, projectedUv, projectedDepth))
+		if (!TryProjectResolvedMeshletVertex(decode, record, vertexIndex, pageDescriptor, pageLocal, projectedUv, projectedDepth))
 		{
 			return false;
 		}
@@ -668,12 +931,12 @@ bool IsSmallMeshletCenterOccluded(
 	return meshletClosestDepth > (sampledDepth + occlusionBias);
 }
 
-bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, const uint hiZViewIndex, inout MeshletCullingCounters counters, const float epsilon)
+bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDecodeInfo decode, const FrameCullingData frameData, const uint hiZViewIndex, inout MeshletCullingCounters counters, const float epsilon, const PageLocalPayloadDescriptor pageDescriptor, const bool pageLocal)
 {
 	float2 uvMin = float2(0.0f, 0.0f);
 	float2 uvMax = float2(0.0f, 0.0f);
 	float meshletClosestDepth = 1.0f;
-	if (!TryBuildProjectedMeshletRect(meshletIndex, meshletCount, decode, frameData, uvMin, uvMax, meshletClosestDepth))
+	if (!TryBuildProjectedMeshletRect(meshletIndex, meshletCount, decode, frameData, pageDescriptor, pageLocal, uvMin, uvMax, meshletClosestDepth))
 	{
 		counters.hiZProjectionFailed += 1u;
 		return false;
@@ -813,10 +1076,23 @@ bool IsOccluded(const uint meshletIndex, const uint meshletCount, const MeshDeco
 [numthreads(1, 1, 1)]
 void main(uint3 groupId : SV_GroupID)
 {
-	const MeshDecodeInfo decode = meshDecodeInfo[0];
-	const uint meshletCount = decode.counts.w & 0x7FFFFFFFu;
+	PageLocalPayloadDescriptor pageDescriptor;
+	const bool pageLocalGeometry = TryUsePageLocalGeometry(pageDescriptor);
+	MeshDecodeInfo decode = meshDecodeInfo[0];
+	if (pageLocalGeometry)
+	{
+		// Resident page packets are self-contained. Their decode record describes
+		// only the local vertex/remap/primitive/meshlet streams in the page
+		// payload buffer, so task culling never has to read owner mesh buffers.
+		decode = LoadPageLocalDecodeInfo(pageDescriptor);
+	}
+	const uint meshletCount = pageLocalGeometry
+		? pageDescriptor.meshletCount
+		: (decode.counts.w & 0x7FFFFFFFu);
 	const uint packetRunSeed = LoadVirtualGeometryPacketRunSeed();
-	const uint selectedMeshletOffset = min(SceneUniforms.virtualMeshletOffset + (packetRunSeed & 0u), meshletCount);
+	const uint selectedMeshletOffset = pageLocalGeometry
+		? 0u
+		: min(SceneUniforms.virtualMeshletOffset + (packetRunSeed & 0u), meshletCount);
 	const uint selectedMeshletCount = SceneUniforms.virtualMeshletCount == 0u
 		? (meshletCount - selectedMeshletOffset)
 		: min(SceneUniforms.virtualMeshletCount, meshletCount - selectedMeshletOffset);
@@ -830,7 +1106,6 @@ void main(uint3 groupId : SV_GroupID)
 	const bool coneCullingSafe = (SceneUniforms.virtualGeometryFlags & kVirtualGeometryFlagConeCullingSafe) != 0u;
 	const uint hiZViewIndex = HiZViewIndexFromStatsSlot(statsIndex);
 
-	const uint meshletBase = selectedMeshletOffset + groupId.x * kTaskBatchSize;
 	uint visibleCount = 0u;
 	MeshletCullingCounters localCounters = MakeEmptyMeshletCullingCounters();
 
@@ -841,7 +1116,7 @@ void main(uint3 groupId : SV_GroupID)
 	for (uint localIndex = 0u; localIndex < kTaskBatchSize; ++localIndex)
 	{
 		const uint selectedLocalIndex = groupId.x * kTaskBatchSize + localIndex;
-		const uint meshletIndex = meshletBase + localIndex;
+		const uint meshletIndex = ResolvePageLocalMeshletIndex(selectedMeshletOffset, groupId.x * kTaskBatchSize, localIndex, pageLocalGeometry);
 		if (selectedLocalIndex >= selectedMeshletCount || meshletIndex >= meshletCount)
 		{
 			break;
@@ -852,7 +1127,11 @@ void main(uint3 groupId : SV_GroupID)
 		bool culled = false;
 		if (cullingEnabled)
 		{
-			const MeshletBounds bounds = meshletBounds[meshletIndex];
+			MeshletBounds bounds = meshletBounds[meshletIndex];
+			if (pageLocalGeometry)
+			{
+				bounds = LoadPageLocalMeshletBounds(pageDescriptor, meshletIndex);
+			}
 			const float3 worldCenter = mul(SceneUniforms.model, float4(bounds.center, 1.0f)).xyz;
 			const float3 worldAxisX = mul((float3x3)SceneUniforms.model, float3(1.0f, 0.0f, 0.0f));
 			const float3 worldAxisY = mul((float3x3)SceneUniforms.model, float3(0.0f, 1.0f, 0.0f));
@@ -879,7 +1158,7 @@ void main(uint3 groupId : SV_GroupID)
 			// camera Hi-Z cannot answer light visibility.
 			if (!culled && hiZPyramidAvailable)
 			{
-				if (IsOccluded(meshletIndex, meshletCount, decode, frameData, hiZViewIndex, localCounters, epsilon))
+				if (IsOccluded(meshletIndex, meshletCount, decode, frameData, hiZViewIndex, localCounters, epsilon, pageDescriptor, pageLocalGeometry))
 				{
 					localCounters.meshletsCulledHiZ += 1u;
 					culled = true;

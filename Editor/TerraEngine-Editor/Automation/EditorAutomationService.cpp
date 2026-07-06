@@ -36,6 +36,7 @@
 #include <map>
 #include <mutex>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <chrono>
 #include <unordered_set>
@@ -443,6 +444,152 @@ namespace TerraEngine::Editor::Automation
 			};
 		}
 
+		std::optional<nlohmann::json> LoadPackageImportResultJson(const std::filesystem::path& packagePath)
+		{
+			const std::filesystem::path resultPath = TerraEngine::AssetPipeline::GetImportResultPath(packagePath);
+			if (!std::filesystem::exists(resultPath))
+			{
+				return std::nullopt;
+			}
+
+			std::ifstream input(resultPath);
+			if (!input)
+			{
+				return std::nullopt;
+			}
+
+			try
+			{
+				nlohmann::json result = nlohmann::json::object();
+				input >> result;
+				return result.is_object() ? std::optional<nlohmann::json>(std::move(result)) : std::nullopt;
+			}
+			catch (const nlohmann::json::exception&)
+			{
+				return std::nullopt;
+			}
+		}
+
+		nlohmann::json BuildPackageVirtualGeometryInspectionAggregate(const nlohmann::json& importResult)
+		{
+			const nlohmann::json packageSummary = BuildPackageVirtualGeometryAutomationSummary(importResult);
+			const nlohmann::json generatedMeshes = packageSummary.value("generatedMeshes", nlohmann::json::array());
+			const std::uint32_t usableMeshCount = packageSummary.value("usableGeneratedMeshCount", 0u);
+			const std::uint32_t failedMeshCount = packageSummary.value("failedGeneratedMeshCount", 0u);
+			std::uint32_t detailLevelCount = 0u;
+			std::uint32_t sourceTriangleCount = 0u;
+			std::uint32_t meshletCount = 0u;
+			std::uint32_t requestedTargetCount = 0u;
+			std::uint32_t generatedLevelCount = 0u;
+			std::uint32_t skippedDetailCount = 0u;
+			std::uint32_t clusterCount = 0u;
+			std::uint32_t materialSectionCount = 0u;
+			std::uint32_t clusterMaterialSectionCount = 0u;
+			std::uint32_t pageCount = 0u;
+			bool fallbackCoverageValid = !generatedMeshes.empty();
+			bool materialCoverageValid = !generatedMeshes.empty();
+			nlohmann::json requestedTargets = nlohmann::json::array();
+			nlohmann::json warnings = nlohmann::json::array();
+			nlohmann::json settings = nlohmann::json::object();
+
+			for (const nlohmann::json& mesh : importResult.value("generatedMeshes", nlohmann::json::array()))
+			{
+				const nlohmann::json virtualGeometry = mesh.value("virtualGeometry", nlohmann::json::object());
+				detailLevelCount = std::max(detailLevelCount, virtualGeometry.value("detailLevels", 0u));
+				sourceTriangleCount += virtualGeometry.value("sourceTriangles", 0u);
+				meshletCount += virtualGeometry.value("meshlets", 0u);
+				if (settings.empty())
+				{
+					settings = virtualGeometry.value("settings", nlohmann::json::object());
+				}
+
+				for (const nlohmann::json& target : virtualGeometry.value("targets", nlohmann::json::array()))
+				{
+					nlohmann::json row = target;
+					row["meshGuid"] = mesh.value("guid", std::string());
+					row["meshName"] = mesh.value("name", mesh.value("displayName", std::string()));
+					const std::string status = target.value("status", std::string());
+					generatedLevelCount += status == "Generated" ? 1u : 0u;
+					skippedDetailCount += (status == "Skipped" || status == "Merged" || status == "Rejected") ? 1u : 0u;
+					requestedTargets.push_back(std::move(row));
+				}
+
+				const nlohmann::json clusterSummary = virtualGeometry.value("clusterSummary", nlohmann::json::object());
+				clusterCount += clusterSummary.value("clusterCount", 0u);
+				materialSectionCount += clusterSummary.value("materialSectionCount", 0u);
+				clusterMaterialSectionCount += clusterSummary.value("clusterMaterialSectionCount", 0u);
+				pageCount += clusterSummary.value("pageLinkCount", 0u);
+				fallbackCoverageValid = fallbackCoverageValid && clusterSummary.value("fallbackCoverageValid", false);
+				materialCoverageValid = materialCoverageValid && clusterSummary.value("materialCoverageValid", false);
+
+				for (const nlohmann::json& warning : virtualGeometry.value("warnings", nlohmann::json::array()))
+				{
+					warnings.push_back(warning);
+				}
+			}
+
+			requestedTargetCount = static_cast<std::uint32_t>(requestedTargets.size());
+			std::string status = "missing";
+			if (usableMeshCount > 0u)
+			{
+				status = failedMeshCount == 0u ? "cooked" : "partial";
+			}
+
+			return {
+				{"summary", packageSummary},
+				{"virtualGeometryStatus", status},
+				{"detailLevels", detailLevelCount},
+				{"sourceTriangleCount", sourceTriangleCount},
+				{"meshletCounts", {{"resident", meshletCount}}},
+				{"settings", settings},
+				{"cookDiagnostics", {
+					{"requestedTargetCount", requestedTargetCount},
+					{"generatedLevelCount", generatedLevelCount},
+					{"skippedDetailCount", skippedDetailCount},
+					{"mergedTargetCount", 0u},
+					{"rejectedTargetCount", 0u},
+					{"requestedTargets", requestedTargets}
+				}},
+				{"clusterSummary", {
+					{"clusterCount", clusterCount},
+					{"selectedClusterCount", 0u},
+					{"fallbackClusterCount", 0u},
+					{"materialSectionCount", materialSectionCount},
+					{"clusterMaterialSectionCount", clusterMaterialSectionCount},
+					{"fallbackCoverageValid", fallbackCoverageValid},
+					{"materialCoverageValid", materialCoverageValid}
+				}},
+				{"pageResidencySummary", {
+					{"pageCount", pageCount},
+					{"residentPageCount", pageCount},
+					{"pinnedFallbackPageCount", 0u},
+					{"estimatedBytes", 0u},
+					{"pageStreamingReady", pageCount > 0u && usableMeshCount > 0u},
+					{"smallMeshStreamingSkipped", false},
+					{"skippedStreamingReason", std::string()},
+					{"integrityErrors", nlohmann::json::array()}
+				}},
+				{"cookWarnings", warnings},
+				{"cookMetadata", {
+					{"readable", true},
+					{"hasVirtualGeometry", usableMeshCount > 0u},
+					{"needsRebuild", false},
+					{"virtualGeometryStatus", status},
+					{"payloadGeneration", 0u},
+					{"detailLevelCount", detailLevelCount},
+					{"sourceTriangleCount", sourceTriangleCount},
+					{"meshletCounts", {{"resident", meshletCount}}},
+					{"boundsStatus", meshletCount > 0u ? "available" : "unknown"},
+					{"pageStreamingReady", pageCount > 0u && usableMeshCount > 0u},
+					{"smallMeshStreamingSkipped", false},
+					{"skippedStreamingReason", std::string()},
+					{"pageIntegrityErrors", nlohmann::json::array()},
+					{"cookWarnings", warnings},
+					{"rebuildGuidance", std::string()}
+				}}
+			};
+		}
+
 		std::filesystem::path NormalizeAutomationAssetRelativePath(const AssetDatabase& database, const std::filesystem::path& input)
 		{
 			if (input.is_absolute())
@@ -598,6 +745,24 @@ namespace TerraEngine::Editor::Automation
 				{"missingPages", view.missingPages},
 				{"failedPages", view.failedPages},
 				{"evictedPages", view.evictedPages},
+				{"pageResidency", {
+					{"residentHighDetailBytes", view.pageResidency.residentHighDetailBytes},
+					{"residentFallbackBytes", view.pageResidency.residentFallbackBytes},
+					{"embeddedFallbackBytes", view.pageResidency.embeddedFallbackBytes},
+					{"owningMeshFallbackBytes", view.pageResidency.owningMeshFallbackBytes},
+					{"metadataBytes", view.pageResidency.metadataBytes},
+					{"requestedBytes", view.pageResidency.requestedBytes},
+					{"pinnedFallbackBytes", view.pageResidency.pinnedFallbackBytes},
+					{"pendingIoBytes", view.pageResidency.pendingIoBytes},
+					{"pendingUploadBytes", view.pageResidency.pendingUploadBytes},
+					{"failedBytes", view.pageResidency.failedBytes},
+					{"evictingBytes", view.pageResidency.evictingBytes},
+					{"evictedBytes", view.pageResidency.evictedBytes},
+					{"retiringBytes", view.pageResidency.retiringBytes},
+					{"pendingIoPages", view.pageResidency.pendingIoPages},
+					{"pendingUploadPages", view.pageResidency.pendingUploadPages},
+					{"retiringPages", view.pageResidency.retiringPages}
+				}},
 				{"pageSources", {
 					{"residentPagePayloads", view.pageSources.residentPayloads},
 					{"highDetailPagePayloads", view.pageSources.highDetailPayloads},
@@ -2243,6 +2408,54 @@ namespace TerraEngine::Editor::Automation
 				continue;
 			}
 
+			if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata->importerName))
+			{
+				const std::optional<nlohmann::json> importResult = LoadPackageImportResultJson(absolutePath);
+				if (!importResult)
+				{
+					failedAssets.push_back({{"path", relative.generic_string()}, {"reason", "package import sidecar was not published"}});
+					continue;
+				}
+
+				const nlohmann::json aggregate = BuildPackageVirtualGeometryInspectionAggregate(*importResult);
+				const nlohmann::json cookDiagnostics = aggregate.value("cookDiagnostics", nlohmann::json::object());
+				const nlohmann::json clusterSummary = aggregate.value("clusterSummary", nlohmann::json::object());
+				const nlohmann::json pageSummary = aggregate.value("pageResidencySummary", nlohmann::json::object());
+				nlohmann::json record = {
+					{"path", relative.generic_string()},
+					{"guid", TerraEngine::ToHexString(metadata->guid)},
+					{"importer", metadata->importerName},
+					{"compiledPath", metadata->compiledPath.generic_string()},
+					{"settingsSource", aggregate.value("settings", nlohmann::json::object()).value("settingsSource", std::string("ProjectDefaults"))},
+					{"requestedDetailCount", cookDiagnostics.value("requestedTargetCount", 0u)},
+					{"generatedDetailCount", cookDiagnostics.value("generatedLevelCount", 0u)},
+					{"skippedDetails", cookDiagnostics.value("skippedDetailCount", 0u)},
+					{"clusterCount", clusterSummary.value("clusterCount", 0u)},
+					{"pageCount", pageSummary.value("pageCount", 0u)},
+					{"fallbackCoverageValid", clusterSummary.value("fallbackCoverageValid", false)},
+					{"settings", aggregate.value("settings", nlohmann::json::object())},
+					{"clusterSummary", clusterSummary},
+					{"pageResidencySummary", pageSummary},
+					{"virtualGeometry", aggregate.value("cookMetadata", nlohmann::json::object())}
+				};
+				if (includePackageOutputs)
+				{
+					record["generatedMeshes"] = aggregate["summary"]["generatedMeshes"];
+				}
+
+				const std::string packageStatus = aggregate.value("virtualGeometryStatus", std::string("missing"));
+				if (packageStatus == "missing")
+				{
+					record["reason"] = "package generated no usable virtual geometry mesh children";
+					failedAssets.push_back(std::move(record));
+				}
+				else
+				{
+					rebuiltAssets.push_back(std::move(record));
+				}
+				continue;
+			}
+
 			VirtualGeometryAssetMetadata virtualGeometryMetadata{};
 			const bool readable = editorContext->assetDatabase->TryGetVirtualGeometryMetadata(*metadata, virtualGeometryMetadata);
 			VirtualGeometryAdaptiveSettingsMetadata settingsMetadata;
@@ -2435,13 +2648,24 @@ namespace TerraEngine::Editor::Automation
 		};
 		if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata->importerName))
 		{
-			const std::filesystem::path resultPath = TerraEngine::AssetPipeline::GetImportResultPath(absolutePath);
-			if (std::filesystem::exists(resultPath))
+			if (const std::optional<nlohmann::json> importResult = LoadPackageImportResultJson(absolutePath))
 			{
-				std::ifstream input(resultPath);
-				nlohmann::json importResult = nlohmann::json::object();
-				input >> importResult;
-				data["packageVirtualGeometry"] = BuildPackageVirtualGeometryAutomationSummary(importResult);
+				const nlohmann::json aggregate = BuildPackageVirtualGeometryInspectionAggregate(*importResult);
+				// Package parents do not own a renderable TEMF anymore. Surface
+				// their generated mesh children as the cooked package result so MCP
+				// and tests do not report the parent container as unreadable.
+				data["packageVirtualGeometry"] = aggregate["summary"];
+				data["virtualGeometryStatus"] = aggregate.value("virtualGeometryStatus", std::string("unreadable"));
+				data["detailLevels"] = aggregate.value("detailLevels", 0u);
+				data["sourceTriangleCount"] = aggregate.value("sourceTriangleCount", 0u);
+				data["meshletCounts"] = aggregate.value("meshletCounts", nlohmann::json{{"resident", 0u}});
+				data["boundsStatus"] = aggregate["cookMetadata"].value("boundsStatus", std::string("unknown"));
+				data["settings"] = aggregate.value("settings", nlohmann::json::object());
+				data["cookDiagnostics"] = aggregate.value("cookDiagnostics", nlohmann::json::object());
+				data["clusterSummary"] = aggregate.value("clusterSummary", nlohmann::json::object());
+				data["pageResidencySummary"] = aggregate.value("pageResidencySummary", nlohmann::json::object());
+				data["cookWarnings"] = aggregate.value("cookWarnings", nlohmann::json::array());
+				data["cookMetadata"] = aggregate.value("cookMetadata", nlohmann::json::object());
 			}
 		}
 		return BuildSuccess(requestId, "Inspected virtual geometry asset.", std::move(data));
@@ -2809,6 +3033,7 @@ namespace TerraEngine::Editor::Automation
 		// readback after the task shader has completed, so automation must not
 		// guess which path it is observing.
 		nlohmann::json performanceGates = nlohmann::json::array();
+		nlohmann::json pageResidency = nlohmann::json::object();
 		const TerraEngine::Renderer::RenderDiagnosticsSummary diagnostics = renderSystem->GetLatestRenderGraphDiagnostics();
 		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : diagnostics.virtualGeometryViews)
 		{
@@ -2820,6 +3045,21 @@ namespace TerraEngine::Editor::Automation
 			{
 				performanceGates.push_back(SerializeVirtualGeometryPerformanceGate(gate));
 			}
+			pageResidency = {
+				{"residentHighDetailBytes", view.pageResidency.residentHighDetailBytes},
+				{"residentFallbackBytes", view.pageResidency.residentFallbackBytes},
+				{"embeddedFallbackBytes", view.pageResidency.embeddedFallbackBytes},
+				{"owningMeshFallbackBytes", view.pageResidency.owningMeshFallbackBytes},
+				{"metadataBytes", view.pageResidency.metadataBytes},
+				{"requestedBytes", view.pageResidency.requestedBytes},
+				{"pinnedFallbackBytes", view.pageResidency.pinnedFallbackBytes},
+				{"pendingIoBytes", view.pageResidency.pendingIoBytes},
+				{"pendingUploadBytes", view.pageResidency.pendingUploadBytes},
+				{"failedBytes", view.pageResidency.failedBytes},
+				{"evictingBytes", view.pageResidency.evictingBytes},
+				{"evictedBytes", view.pageResidency.evictedBytes},
+				{"retiringBytes", view.pageResidency.retiringBytes}
+			};
 			break;
 		}
 		for (const PerformanceGateResult& gate : TerraEngine::Renderer::BuildVisibleCommandReusePerformanceGates(stats))
@@ -2893,6 +3133,7 @@ namespace TerraEngine::Editor::Automation
 			{"residentPayloadBytes", stats.virtualGeometryResidentPagePayloadBytes},
 			{"fallbackPayloadBytes", stats.virtualGeometryFallbackPagePayloadBytes},
 			{"embeddedFallbackBytes", stats.virtualGeometryEmbeddedFallbackBytes},
+			{"pageResidency", std::move(pageResidency)},
 			{"counterSource", ToString(stats.meshletCounterSource)},
 			{"counterFrameId", stats.meshletCounterFrameId},
 			{"counterLatencyFrames", stats.meshletCounterLatencyFrames},

@@ -126,6 +126,83 @@ namespace TerraEngine::Resource
 		MarkRetired
 	};
 
+	enum class CpuPayloadOwnershipKind : std::uint8_t
+	{
+		Unknown,
+		DecodedMesh,
+		TexturePixels,
+		MaterialMetadata,
+		ShaderCollection,
+		VirtualGeometryPage,
+		VirtualGeometryFallbackPage,
+		VirtualGeometryMetadata
+	};
+
+	enum class CpuPayloadOwnershipState : std::uint8_t
+	{
+		Loaded,
+		Retained,
+		PendingRelease,
+		Released,
+		Failed,
+		Unavailable
+	};
+
+	enum class GpuAllocationOwnershipKind : std::uint8_t
+	{
+		Unknown,
+		MeshBuffer,
+		TextureImage,
+		MaterialBuffer,
+		ShaderCollection,
+		VirtualGeometryPageBuffer,
+		VirtualGeometryFallbackPageBuffer,
+		VirtualGeometryMetadataBuffer,
+		DiagnosticBuffer
+	};
+
+	enum class GpuAllocationOwnershipState : std::uint8_t
+	{
+		Published,
+		InFlight,
+		PendingRetirement,
+		Retired,
+		Unavailable
+	};
+
+	struct CpuPayloadOwnershipRecord
+	{
+		TerraEngine::UUID ownerAssetId = TerraEngine::EMPTY_UUID;
+		CpuPayloadOwnershipKind payloadKind = CpuPayloadOwnershipKind::Unknown;
+		std::uint32_t pageId = 0xffffffffu;
+		std::uint64_t byteSize = 0u;
+		CpuPayloadOwnershipState state = CpuPayloadOwnershipState::Unavailable;
+		std::uint64_t publishFrame = 0u;
+		std::uint64_t releaseFrame = 0u;
+		std::string detail;
+	};
+
+	struct GpuAllocationOwnershipRecord
+	{
+		TerraEngine::UUID ownerAssetId = TerraEngine::EMPTY_UUID;
+		GpuAllocationOwnershipKind resourceKind = GpuAllocationOwnershipKind::Unknown;
+		std::uint64_t allocationId = 0u;
+		std::uint32_t pageId = 0xffffffffu;
+		std::uint64_t byteSize = 0u;
+		GpuAllocationOwnershipState state = GpuAllocationOwnershipState::Unavailable;
+		std::uint64_t firstVisibleFrame = 0u;
+		std::uint64_t safeRetireFrame = 0u;
+		std::string detail;
+	};
+
+	struct ExactResidencyUnavailableDiagnostic
+	{
+		TerraEngine::UUID assetId = TerraEngine::EMPTY_UUID;
+		std::string domain;
+		std::string missingProducer;
+		std::string reason;
+	};
+
 	struct ResidencyMemoryPolicy
 	{
 		double idleSecondsThreshold = 10.0;
@@ -159,6 +236,10 @@ namespace TerraEngine::Resource
 		std::string lastTouchedReason;
 		std::uint64_t estimatedCpuBytes = 0;
 		std::uint64_t estimatedGpuBytes = 0;
+		ExactResidencyByteValue exactCpuBytes;
+		ExactResidencyByteValue exactGpuBytes;
+		std::vector<CpuPayloadOwnershipRecord> cpuPayloads;
+		std::vector<GpuAllocationOwnershipRecord> gpuAllocations;
 		ResidencyPinReason pinReason = ResidencyPinReason::None;
 		bool reloadable = true;
 		bool inFlight = false;
@@ -333,6 +414,20 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::string_view ToString(ResidencyBlockedReason reason);
 	TERRAENGINE_API std::string_view ToString(ResidencyReleaseDomain domain);
 	TERRAENGINE_API std::string_view ToString(VirtualGeometryPageResidencyState state);
+	TERRAENGINE_API std::string_view ToString(CpuPayloadOwnershipKind kind);
+	TERRAENGINE_API std::string_view ToString(CpuPayloadOwnershipState state);
+	TERRAENGINE_API std::string_view ToString(GpuAllocationOwnershipKind kind);
+	TERRAENGINE_API std::string_view ToString(GpuAllocationOwnershipState state);
+	TERRAENGINE_API ExactResidencyByteValue MakeExactResidencyBytes(std::uint64_t bytes);
+	TERRAENGINE_API ExactResidencyByteValue MakeZeroByStateResidencyBytes();
+	TERRAENGINE_API ExactResidencyByteValue MakeUnavailableResidencyBytes(std::string_view reason);
+	TERRAENGINE_API bool IsExactResidencyNumeric(const ExactResidencyByteValue& value);
+	TERRAENGINE_API std::uint64_t ExactResidencyBytesOrZero(const ExactResidencyByteValue& value);
+	TERRAENGINE_API bool CpuPayloadContributesCurrentBytes(const CpuPayloadOwnershipRecord& record);
+	TERRAENGINE_API bool GpuAllocationContributesCurrentBytes(const GpuAllocationOwnershipRecord& record);
+	TERRAENGINE_API ExactResidencyByteValue AggregateCpuPayloadBytes(const std::vector<CpuPayloadOwnershipRecord>& records, const TerraEngine::UUID& assetId);
+	TERRAENGINE_API ExactResidencyByteValue AggregateGpuAllocationBytes(const std::vector<GpuAllocationOwnershipRecord>& records, const TerraEngine::UUID& assetId);
+	TERRAENGINE_API std::vector<ExactResidencyUnavailableDiagnostic> BuildExactResidencyUnavailableDiagnostics(const std::vector<ResidentAsset>& assets);
 	TERRAENGINE_API bool IsVirtualGeometryPagePinnedFallback(const VirtualGeometryResidentPage& page);
 	TERRAENGINE_API bool IsVirtualGeometryPageResidentForRendering(const VirtualGeometryResidentPage& page);
 	TERRAENGINE_API std::uint64_t EstimateResidentBytes(const ResidentAsset& asset);

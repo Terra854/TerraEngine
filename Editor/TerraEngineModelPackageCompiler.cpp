@@ -4,6 +4,7 @@
 // can terminate a child process instead of trying to kill an unsafe in-process
 // C++ worker thread.
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -205,9 +206,17 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	std::filesystem::path compiledPath = args.sourceRelativePath;
-	compiledPath.replace_extension(".temf");
-	const bool wroteCompiledMesh = std::filesystem::exists(args.buildRoot / compiledPath);
+	const bool wroteCompiledMesh =
+		!importResult.generatedMeshes.empty()
+		&& std::all_of(
+			importResult.generatedMeshes.begin(),
+			importResult.generatedMeshes.end(),
+			[&args](const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh) {
+				// Model packages now publish renderable child meshes. The compiler
+				// succeeds only when every generated child that appears in the
+				// sidecar has a matching compiled runtime mesh in Build/Assets.
+				return !mesh.compiledPath.empty() && std::filesystem::exists(args.buildRoot / mesh.compiledPath);
+			});
 	const bool succeeded = importResult.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed && wroteCompiledMesh;
 	EmitProgress(succeeded ? 1.0f : 0.99f, succeeded ? "Complete" : "Failed", succeeded ? "Model package compile finished." : "Model package compile failed.");
 	return succeeded ? 0 : 1;

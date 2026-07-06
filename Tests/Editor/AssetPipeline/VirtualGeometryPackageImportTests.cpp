@@ -3,6 +3,7 @@
 #include "AssetImportResult.h"
 #include "FbxTestHelpers.h"
 #include "ModelPackageImporter.h"
+#include "Resource/ResourceManager.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -138,8 +139,9 @@ namespace TerraEngine::EditorTests
 			nlohmann::json document = LoadBaseGltfFixture();
 
 			// Duplicate the fixture mesh through a second source mesh and node.
-			// The importer should keep both generated children while the package
-			// compiler produces one shared TEMF payload for the static package.
+			// Each generated child must now own a matching compiled TEMF so a
+			// component that references one child cannot accidentally select or
+			// render virtual-geometry clusters from a sibling mesh.
 			nlohmann::json secondMesh = document["meshes"][0];
 			document["meshes"][0]["name"] = "Triangle_A";
 			secondMesh["name"] = "Triangle_B";
@@ -157,8 +159,10 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(result.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed, "Multi-mesh package import should produce usable static geometry.");
 			context.ExpectEqual(static_cast<std::size_t>(2), result.generatedMeshes.size(), "Each source mesh should remain visible as a generated package mesh.");
+			context.Expect(result.generatedMeshes[0].compiledPath != result.generatedMeshes[1].compiledPath, "Generated mesh children should not share one compiled package TEMF.");
 			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : result.generatedMeshes)
 			{
+				context.Expect(mesh.compiledPath.parent_path().filename().string().find("_Generated") != std::string::npos, "Generated child TEMFs should live beside other package child artifacts.");
 				context.Expect(mesh.virtualGeometryRequested, "Package mesh records should state that virtual geometry was requested.");
 				context.Expect(mesh.virtualGeometryCooked, "Generated package mesh should validate a cooked virtual geometry payload.");
 				context.ExpectEqual(std::string("Cooked"), mesh.virtualGeometryStatus, "Generated package mesh should report a cooked virtual geometry status.");
@@ -217,6 +221,55 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(TerraEngine::ToHexString(first.generatedMaterials.front().guid), TerraEngine::ToHexString(second.generatedMaterials.front().guid), "Generated material GUID should remain stable across reimport.");
 			context.ExpectEqual(TerraEngine::ToHexString(first.materialAssignments.front().meshGuid), TerraEngine::ToHexString(second.materialAssignments.front().meshGuid), "Material slot mesh reference should remain stable across reimport.");
 			context.Expect(TerraEngine::ToHexString(first.generatedMeshes.front().guid) != TerraEngine::ToHexString(packageGuid), "Generated mesh should keep a package-child ID instead of being overwritten by the package GUID.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.PackageImport.GeneratedChildOwnsCurrentGpuBytes", [](TestContext& context) {
+			const std::filesystem::path tempRoot = MakeVirtualGeometryPackageTempRoot("GeneratedChildGpuBytes");
+			const nlohmann::json document = LoadBaseGltfFixture();
+			const std::filesystem::path fixturePath = WriteGltfFixture(tempRoot, "child-gpu-bytes.gltf", document);
+			const TerraEngine::UUID packageGuid = TerraEngine::GenerateUUID();
+			const auto options = BuildPackageOptions(tempRoot, fixturePath, "Models/child-gpu-bytes.gltf", packageGuid);
+			const auto result = TerraEngine::AssetPipeline::ImportModelPackage(options);
+
+			context.Expect(result.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed, "Package import should produce generated children for residency accounting.");
+			context.Expect(!result.generatedMeshes.empty(), "Package import should expose the generated mesh child id.");
+			if (result.generatedMeshes.empty())
+			{
+				return;
+			}
+
+			ResourceManager& resourceManager = ResourceManager::Instance();
+			resourceManager.SetStreamingDiagnosticsEnabled(true);
+			const TerraEngine::UUID childMeshId = result.generatedMeshes.front().guid;
+			const std::filesystem::path parentPath = tempRoot / "Assets/Models/child-gpu-bytes.gltf";
+			const std::filesystem::path childPath = tempRoot / "Build" / result.generatedMeshes.front().compiledPath;
+			resourceManager.RegisterStreamableAsset(packageGuid, AssetType::Mesh, parentPath);
+			resourceManager.RegisterStreamableAsset(childMeshId, AssetType::Mesh, childPath);
+			resourceManager.MarkResourceUploadedToGpu(childMeshId, AssetType::Mesh, 77u, 4096u, "generated package child upload");
+
+			const TerraEngine::Resource::StreamingDiagnosticsSummary summary = resourceManager.GetStreamingDiagnosticsSummary();
+			const auto parentRecord = std::find_if(summary.records.begin(), summary.records.end(), [packageGuid](const TerraEngine::Resource::StreamingDiagnosticRecord& record) {
+				return record.assetId == packageGuid;
+			});
+			const auto childRecord = std::find_if(summary.records.begin(), summary.records.end(), [childMeshId](const TerraEngine::Resource::StreamingDiagnosticRecord& record) {
+				return record.assetId == childMeshId;
+			});
+
+			context.Expect(parentRecord != summary.records.end(), "The package parent should exist only as a logical diagnostics row before UI filtering.");
+			context.Expect(childRecord != summary.records.end(), "The generated mesh child should own the current GPU-byte row.");
+			if (parentRecord != summary.records.end())
+			{
+				context.Expect(parentRecord->exactGpuBytes.status == TerraEngine::Resource::ExactResidencyByteStatus::ZeroByState, "Package parents must not borrow generated child GPU bytes.");
+				context.ExpectEqual(0ull, parentRecord->exactGpuBytes.bytes, "Package parent current GPU bytes should stay zero unless it owns an allocation.");
+			}
+			if (childRecord != summary.records.end())
+			{
+				context.Expect(childRecord->exactGpuBytes.status == TerraEngine::Resource::ExactResidencyByteStatus::Exact, "Generated child current GPU bytes should be exact.");
+				context.ExpectEqual(4096ull, childRecord->exactGpuBytes.bytes, "Generated child current GPU bytes should match the backend upload.");
+			}
+
+			resourceManager.DeleteResource(packageGuid, AssetType::Mesh);
+			resourceManager.DeleteResource(childMeshId, AssetType::Mesh);
 		});
 
 		registry.Add("VirtualGeometry.Editor.PackageImport.ReportsMultiMaterialClusterCoverage", [](TestContext& context) {

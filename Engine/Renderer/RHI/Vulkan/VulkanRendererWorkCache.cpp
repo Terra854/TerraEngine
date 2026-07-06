@@ -50,6 +50,14 @@ namespace {
 		HashCombine(signature, range.selectedClusterCount);
 		HashCombine(signature, range.pageNeedOffset);
 		HashCombine(signature, range.pageNeedCount);
+		HashCombine(signature, range.pageId);
+		HashCombine(signature, range.fallbackPageId);
+		HashCombine(signature, static_cast<std::uint64_t>(range.payloadSource));
+		HashCombine(signature, static_cast<std::uint64_t>(range.emittedSource));
+		HashCombine(signature, range.pagePayloadByteOffset);
+		HashCombine(signature, range.pagePayloadByteSize);
+		HashCombine(signature, range.payloadBufferIndex);
+		HashCombine(signature, range.payloadDescriptorIndex);
 		return signature;
 	}
 
@@ -74,6 +82,9 @@ namespace {
 			HashCombine(signature, static_cast<std::uint64_t>(packet.emittedSource));
 			HashCombine(signature, packet.pagePayloadByteOffset);
 			HashCombine(signature, packet.pagePayloadByteSize);
+			HashCombine(signature, packet.payloadBufferIndex);
+			HashCombine(signature, packet.payloadDescriptorIndex);
+			HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string>{}(packet.fallbackReason)));
 			HashCombine(signature, packet.debugIdentity);
 		}
 		for (const ClusterWorkBatch& batch : state.clusterBatches)
@@ -115,6 +126,9 @@ namespace {
 			HashCombine(signature, static_cast<std::uint64_t>(packet.emittedSource));
 			HashCombine(signature, packet.pagePayloadByteOffset);
 			HashCombine(signature, packet.pagePayloadByteSize);
+			HashCombine(signature, packet.payloadBufferIndex);
+			HashCombine(signature, packet.payloadDescriptorIndex);
+			HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string>{}(packet.fallbackReason)));
 			HashCombine(signature, packet.debugIdentity);
 			HashCombine(signature, packet.flags);
 		}

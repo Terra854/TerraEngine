@@ -116,6 +116,7 @@ struct PushConstants
 	uint virtualGeometryEmittedSource;
 	uint virtualGeometryPagePayloadByteOffset;
 	uint virtualGeometryPagePayloadByteSize;
+	uint virtualGeometryPacketDescriptorIndex;
 	float4 editorTint;
 };
 

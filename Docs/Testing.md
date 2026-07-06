@@ -427,6 +427,23 @@ and residency churn invariants lives in
 `Docs/Renderer/VirtualGeometry.md`, `Docs/TerraEngineMeshFile.md`,
 `Docs/Testing.md`, and that fixture README into the Debug install tree for QA.
 
+For feature `034` true page residency, run exact Resource Residency checks
+before renderer payload checks:
+
+```powershell
+ctest --test-dir out/build/Debug -C Debug -R "ResourceResidency|ResourceStreaming|ResourceManagerMesh|ResourceResidencyWindow" --output-on-failure
+ctest --test-dir out/build/Debug -C Debug -R "VirtualGeometry\\.(Render|PageStreaming|ShaderLayout|Batching|HiZ|Hardening|MultiView|Diagnostics|PageResidency)|VirtualGeometry.*DebugView" --output-on-failure
+```
+
+These tests must prove that `Stream CPU Bytes` and `Render GPU Bytes` are exact
+current live bytes for the row's asset, package parent rows do not borrow child
+bytes, unavailable accounting stays non-numeric, and page-source diagnostics do
+not silently treat owning mesh buffers as true page-owned rendering. Current
+feature `034` builds still decode shader geometry through owner mesh streams;
+until a page-local shader-decodable payload layout lands, the no-full-owner
+performance gate should expose owning-mesh fallback bytes with an explicit
+reason instead of passing as a page-streamed normal path.
+
 After virtual geometry code changes, always finish with the normal configure,
 compile, CTest, and install verification flow so the installed editor/runtime
 tree has the matching TEMF loader, shaders, diagnostics, and asset pipeline

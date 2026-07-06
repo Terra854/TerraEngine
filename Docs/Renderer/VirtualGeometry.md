@@ -299,6 +299,42 @@ At runtime, virtual geometry follows one view-local immutable path:
    immutable per-view page-source diagnostics instead of inferring residency
    from draw counts.
 
+## True Page Residency And Exact Memory Accounting
+
+Feature `specs/034-vg-true-page-residency` tightens the page-streaming contract
+from "page-aware diagnostics" to "page-owned rendering and exact residency."
+`Stream CPU Bytes` and `Render GPU Bytes` must describe current live ownership
+for the specific asset row only. They must not include estimates, desired load
+sizes, pending uploads, package-parent bytes, diagnostic-only metadata, or
+bytes owned by another generated child asset.
+
+When exact ownership cannot be proven, developer-facing surfaces must show a
+non-numeric unavailable state and a diagnostic reason. Showing `0` is valid
+only when the current load or allocation state proves that no bytes are resident
+in that domain.
+
+The renderer should bind resident high-detail page payloads or protected
+fallback page payloads for selected virtual geometry packets whenever valid
+streamable page data exists. The full owning mesh payload remains a legacy or
+diagnosed fail-open route, but normal page-streamed frames should not require
+all high-detail mesh bytes to be resident.
+
+Current implementation status: exact CPU/GPU byte ownership, per-view page
+source diagnostics, protected fallback accounting, and owning-mesh fallback
+reasons are implemented. The active task/mesh shader decode path still reads
+the owning mesh vertex, remap, primitive, meshlet, decode-info, and bounds
+buffers. Page payload descriptors are consumed for packet identity,
+diagnostics, upload planning, and performance gates, but they are not yet a
+standalone shader-decodable page-local geometry layout. Until that layout
+lands, page-streamed meshes that render through the owner buffers must be
+reported as owning-mesh fallback and must fail the no-full-owner residency
+performance gate instead of being counted as true page-owned rendering.
+
+This milestone preserves the accepted Hi-Z behavior. Page residency may change
+payload ownership, descriptor selection, and byte accounting, but it must not
+introduce Hi-Z quality tiers, soft disable paths, or shared mutable state
+between Scene View and Game View.
+
 ## Asset Rebuild Expectations
 
 The current plan breaks older compiled mesh payloads in place. Users must

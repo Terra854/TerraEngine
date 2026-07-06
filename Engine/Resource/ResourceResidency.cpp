@@ -310,6 +310,214 @@ namespace TerraEngine::Resource
 		return "not-resident";
 	}
 
+	std::string_view ToString(CpuPayloadOwnershipKind kind)
+	{
+		switch (kind)
+		{
+		case CpuPayloadOwnershipKind::DecodedMesh: return "decoded-mesh";
+		case CpuPayloadOwnershipKind::TexturePixels: return "texture-pixels";
+		case CpuPayloadOwnershipKind::MaterialMetadata: return "material-metadata";
+		case CpuPayloadOwnershipKind::ShaderCollection: return "shader-collection";
+		case CpuPayloadOwnershipKind::VirtualGeometryPage: return "virtual-geometry-page";
+		case CpuPayloadOwnershipKind::VirtualGeometryFallbackPage: return "virtual-geometry-fallback-page";
+		case CpuPayloadOwnershipKind::VirtualGeometryMetadata: return "virtual-geometry-metadata";
+		case CpuPayloadOwnershipKind::Unknown: return "unknown";
+		}
+		return "unknown";
+	}
+
+	std::string_view ToString(CpuPayloadOwnershipState state)
+	{
+		switch (state)
+		{
+		case CpuPayloadOwnershipState::Loaded: return "loaded";
+		case CpuPayloadOwnershipState::Retained: return "retained";
+		case CpuPayloadOwnershipState::PendingRelease: return "pending-release";
+		case CpuPayloadOwnershipState::Released: return "released";
+		case CpuPayloadOwnershipState::Failed: return "failed";
+		case CpuPayloadOwnershipState::Unavailable: return "unavailable";
+		}
+		return "unavailable";
+	}
+
+	std::string_view ToString(GpuAllocationOwnershipKind kind)
+	{
+		switch (kind)
+		{
+		case GpuAllocationOwnershipKind::MeshBuffer: return "mesh-buffer";
+		case GpuAllocationOwnershipKind::TextureImage: return "texture-image";
+		case GpuAllocationOwnershipKind::MaterialBuffer: return "material-buffer";
+		case GpuAllocationOwnershipKind::ShaderCollection: return "shader-collection";
+		case GpuAllocationOwnershipKind::VirtualGeometryPageBuffer: return "virtual-geometry-page-buffer";
+		case GpuAllocationOwnershipKind::VirtualGeometryFallbackPageBuffer: return "virtual-geometry-fallback-page-buffer";
+		case GpuAllocationOwnershipKind::VirtualGeometryMetadataBuffer: return "virtual-geometry-metadata-buffer";
+		case GpuAllocationOwnershipKind::DiagnosticBuffer: return "diagnostic-buffer";
+		case GpuAllocationOwnershipKind::Unknown: return "unknown";
+		}
+		return "unknown";
+	}
+
+	std::string_view ToString(GpuAllocationOwnershipState state)
+	{
+		switch (state)
+		{
+		case GpuAllocationOwnershipState::Published: return "published";
+		case GpuAllocationOwnershipState::InFlight: return "in-flight";
+		case GpuAllocationOwnershipState::PendingRetirement: return "pending-retirement";
+		case GpuAllocationOwnershipState::Retired: return "retired";
+		case GpuAllocationOwnershipState::Unavailable: return "unavailable";
+		}
+		return "unavailable";
+	}
+
+	ExactResidencyByteValue MakeExactResidencyBytes(std::uint64_t bytes)
+	{
+		ExactResidencyByteValue value;
+		value.bytes = bytes;
+		value.status = ExactResidencyByteStatus::Exact;
+		return value;
+	}
+
+	ExactResidencyByteValue MakeZeroByStateResidencyBytes()
+	{
+		ExactResidencyByteValue value;
+		value.bytes = 0u;
+		value.status = ExactResidencyByteStatus::ZeroByState;
+		return value;
+	}
+
+	ExactResidencyByteValue MakeUnavailableResidencyBytes(std::string_view reason)
+	{
+		ExactResidencyByteValue value;
+		value.bytes = 0u;
+		value.status = ExactResidencyByteStatus::Unavailable;
+		value.unavailableReason = reason.empty()
+			? "exact residency accounting is unavailable"
+			: std::string(reason);
+		return value;
+	}
+
+	bool IsExactResidencyNumeric(const ExactResidencyByteValue& value)
+	{
+		return value.status == ExactResidencyByteStatus::Exact
+			|| value.status == ExactResidencyByteStatus::ZeroByState;
+	}
+
+	std::uint64_t ExactResidencyBytesOrZero(const ExactResidencyByteValue& value)
+	{
+		return IsExactResidencyNumeric(value) ? value.bytes : 0u;
+	}
+
+	bool CpuPayloadContributesCurrentBytes(const CpuPayloadOwnershipRecord& record)
+	{
+		return record.byteSize > 0u
+			&& (record.state == CpuPayloadOwnershipState::Loaded
+				|| record.state == CpuPayloadOwnershipState::Retained);
+	}
+
+	bool GpuAllocationContributesCurrentBytes(const GpuAllocationOwnershipRecord& record)
+	{
+		return record.byteSize > 0u
+			&& (record.state == GpuAllocationOwnershipState::Published
+				|| record.state == GpuAllocationOwnershipState::InFlight
+				|| record.state == GpuAllocationOwnershipState::PendingRetirement);
+	}
+
+	ExactResidencyByteValue AggregateCpuPayloadBytes(const std::vector<CpuPayloadOwnershipRecord>& records, const TerraEngine::UUID& assetId)
+	{
+		bool sawMatchingRecord = false;
+		bool sawUnavailable = false;
+		std::uint64_t bytes = 0u;
+		for (const CpuPayloadOwnershipRecord& record : records)
+		{
+			if (record.ownerAssetId != assetId)
+			{
+				continue;
+			}
+			sawMatchingRecord = true;
+			if (record.state == CpuPayloadOwnershipState::Unavailable)
+			{
+				sawUnavailable = true;
+				continue;
+			}
+			if (CpuPayloadContributesCurrentBytes(record))
+			{
+				bytes = AddSaturated(bytes, record.byteSize);
+			}
+		}
+
+		if (bytes > 0u)
+		{
+			return MakeExactResidencyBytes(bytes);
+		}
+		if (sawUnavailable)
+		{
+			return MakeUnavailableResidencyBytes("CPU payload ownership producer did not prove exact bytes");
+		}
+		return sawMatchingRecord ? MakeZeroByStateResidencyBytes() : MakeUnavailableResidencyBytes("no CPU payload ownership records were published");
+	}
+
+	ExactResidencyByteValue AggregateGpuAllocationBytes(const std::vector<GpuAllocationOwnershipRecord>& records, const TerraEngine::UUID& assetId)
+	{
+		bool sawMatchingRecord = false;
+		bool sawUnavailable = false;
+		std::uint64_t bytes = 0u;
+		for (const GpuAllocationOwnershipRecord& record : records)
+		{
+			if (record.ownerAssetId != assetId)
+			{
+				continue;
+			}
+			sawMatchingRecord = true;
+			if (record.state == GpuAllocationOwnershipState::Unavailable)
+			{
+				sawUnavailable = true;
+				continue;
+			}
+			if (GpuAllocationContributesCurrentBytes(record))
+			{
+				bytes = AddSaturated(bytes, record.byteSize);
+			}
+		}
+
+		if (bytes > 0u)
+		{
+			return MakeExactResidencyBytes(bytes);
+		}
+		if (sawUnavailable)
+		{
+			return MakeUnavailableResidencyBytes("GPU allocation ownership producer did not prove exact bytes");
+		}
+		return sawMatchingRecord ? MakeZeroByStateResidencyBytes() : MakeUnavailableResidencyBytes("no GPU allocation ownership records were published");
+	}
+
+	std::vector<ExactResidencyUnavailableDiagnostic> BuildExactResidencyUnavailableDiagnostics(const std::vector<ResidentAsset>& assets)
+	{
+		std::vector<ExactResidencyUnavailableDiagnostic> diagnostics;
+		for (const ResidentAsset& asset : assets)
+		{
+			if (asset.exactCpuBytes.status == ExactResidencyByteStatus::Unavailable)
+			{
+				ExactResidencyUnavailableDiagnostic diagnostic;
+				diagnostic.assetId = asset.assetId;
+				diagnostic.domain = "cpu";
+				diagnostic.missingProducer = "ResourceManager CPU payload ownership";
+				diagnostic.reason = asset.exactCpuBytes.unavailableReason;
+				diagnostics.push_back(std::move(diagnostic));
+			}
+			if (asset.exactGpuBytes.status == ExactResidencyByteStatus::Unavailable)
+			{
+				ExactResidencyUnavailableDiagnostic diagnostic;
+				diagnostic.assetId = asset.assetId;
+				diagnostic.domain = "gpu";
+				diagnostic.missingProducer = "Renderer backend GPU allocation ownership";
+				diagnostic.reason = asset.exactGpuBytes.unavailableReason;
+				diagnostics.push_back(std::move(diagnostic));
+			}
+		}
+		return diagnostics;
+	}
+
 	bool IsVirtualGeometryPagePinnedFallback(const VirtualGeometryResidentPage& page)
 	{
 		return page.fallbackPage

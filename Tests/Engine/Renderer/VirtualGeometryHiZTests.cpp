@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace TerraEngine::Tests
 {
@@ -232,6 +233,98 @@ namespace TerraEngine::Tests
 			context.ExpectEqual(1u, diagnostics.pageSources.fallbackPayloads, "The fallback resident payload should remain visible to diagnostics.");
 			context.ExpectEqual(1u, diagnostics.pageSources.emittedHighDetailSources, "High-detail emission should be counted independently of fallback emission.");
 			context.ExpectEqual(1u, diagnostics.pageSources.emittedFallbackSources, "Fallback emission should be counted independently of high-detail emission.");
+		});
+
+		registry.Add("VirtualGeometry.HiZ.US3.PagePayloadSourcesDoNotChangeAcceptedBaseline", [](TestContext& context) {
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot visibility{};
+			visibility.viewType = RenderViewType::Game;
+			visibility.outputId = 12u;
+			visibility.frameId = 7303u;
+			visibility.valid = true;
+			visibility.source = VirtualGeometryCounterSource::GPUReadback;
+			visibility.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			visibility.hiZValidationState.pyramidReady = true;
+			visibility.hiZValidationState.pyramidSize = glm::uvec2(1920u, 1080u);
+			visibility.hiZValidationState.renderSize = glm::uvec2(1920u, 1080u);
+			visibility.hiZValidationState.cameraSignature = 0x73030010u;
+			visibility.hiZValidationState.depthSceneSignature = 0x73030020u;
+			visibility.hiZValidationState.warmupFrames = 6u;
+			visibility.hiZValidationState.failOpen = false;
+
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+			VirtualGeometryPagePayloadRecord highDetail{};
+			highDetail.meshId = meshId;
+			highDetail.pageId = 8u;
+			highDetail.fallbackPageId = 1u;
+			highDetail.source = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			highDetail.payloadByteOffset = 4096u;
+			highDetail.payloadByteSize = 3072u;
+			highDetail.resident = true;
+			highDetail.valid = true;
+			visibility.residentPagePayloads.push_back(highDetail);
+
+			VirtualGeometryPagePayloadRecord residentFallback = highDetail;
+			residentFallback.pageId = 1u;
+			residentFallback.fallbackPageId = 1u;
+			residentFallback.source = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			residentFallback.payloadByteOffset = 0u;
+			residentFallback.payloadByteSize = 1024u;
+			residentFallback.pinnedFallback = true;
+			visibility.residentPagePayloads.push_back(residentFallback);
+
+			VirtualGeometryPagePayloadRecord embeddedFallback = highDetail;
+			embeddedFallback.pageId = 0u;
+			embeddedFallback.fallbackPageId = 0u;
+			embeddedFallback.source = VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
+			embeddedFallback.payloadByteOffset = 0u;
+			embeddedFallback.payloadByteSize = 512u;
+			embeddedFallback.pinnedFallback = true;
+			visibility.residentPagePayloads.push_back(embeddedFallback);
+
+			auto makeEmission = [&](const VirtualGeometryPagePayloadRecord& payload, VirtualGeometryEmittedPageSource source, std::string reason) {
+				VirtualGeometryEmittedPageSourceRecord emission{};
+				emission.viewId = visibility.outputId;
+				emission.viewType = visibility.viewType;
+				emission.frameId = visibility.frameId;
+				emission.meshId = meshId;
+				emission.materialId = materialId;
+				emission.pageId = payload.pageId;
+				emission.fallbackPageId = payload.fallbackPageId;
+				emission.payloadSource = payload.source;
+				emission.emittedSource = source;
+				emission.payloadByteOffset = payload.payloadByteOffset;
+				emission.payloadByteSize = payload.payloadByteSize;
+				emission.fallbackSubstitution = source != VirtualGeometryEmittedPageSource::HighDetailPage;
+				emission.conservativeEmbeddedFallback = source == VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback;
+				emission.reason = std::move(reason);
+				return emission;
+			};
+			visibility.emittedPageSources.push_back(makeEmission(highDetail, VirtualGeometryEmittedPageSource::HighDetailPage, {}));
+			visibility.emittedPageSources.push_back(makeEmission(residentFallback, VirtualGeometryEmittedPageSource::FallbackPage, "resident fallback covered a missing detail page"));
+			visibility.emittedPageSources.push_back(makeEmission(embeddedFallback, VirtualGeometryEmittedPageSource::ConservativeEmbeddedFallback, "owning-mesh fallback remained conservative"));
+
+			HiZRegressionSnapshot baseline{};
+			baseline.viewId = visibility.outputId;
+			baseline.viewType = visibility.viewType;
+			baseline.frameIndex = visibility.frameId;
+			baseline.state = VirtualGeometryHiZState::Active;
+			baseline.testedMeshlets = 72u;
+			baseline.occludedMeshlets = 12u;
+			baseline.visibleMeshlets = 60u;
+			baseline.recoveryFrames = visibility.hiZValidationState.warmupFrames;
+			baseline.baselineMatched = true;
+			visibility.hiZRegressionSnapshots.push_back(baseline);
+
+			const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryDiagnosticsFromVisibilitySnapshot(visibility);
+
+			context.Expect(diagnostics.hiZActive, "Resident, fallback, and owning-mesh fallback payload sources should keep the accepted Hi-Z state active.");
+			context.Expect(diagnostics.hiZBaselineMatched, "Payload-source changes should not become a hidden Hi-Z baseline mismatch.");
+			context.ExpectEqual(0u, diagnostics.hiZFalseOcclusionRiskWarnings, "Matched payload-source transitions should not create false-occlusion risks.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedHighDetailSources, "High-detail page emission should stay visible beside fallback coverage.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedFallbackSources, "Resident fallback page emission should stay visible beside high-detail coverage.");
+			context.ExpectEqual(1u, diagnostics.pageSources.emittedEmbeddedFallbackSources, "Owning-mesh conservative fallback emission should be explicit instead of mutating Hi-Z policy.");
 		});
 
 		registry.Add("VirtualGeometry.HiZ.US5.PageIdentityIsHashedButTaskPathHasNoQualityTier", [](TestContext& context) {

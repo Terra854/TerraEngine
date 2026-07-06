@@ -15,6 +15,8 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <functional>
+#include <limits>
 #include <nlohmann/json.hpp>
 
 #include "Core/Logger/Logger.h"
@@ -68,6 +70,18 @@ namespace
 			return it->get<std::uint32_t>();
 		}
 		return fallback;
+	}
+
+	template <typename T>
+	std::uint64_t VectorPayloadBytes(const std::vector<T>& values)
+	{
+		return static_cast<std::uint64_t>(values.size()) * static_cast<std::uint64_t>(sizeof(T));
+	}
+
+	std::uint64_t AddPayloadBytes(std::uint64_t left, std::uint64_t right)
+	{
+		constexpr std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
+		return left > max - right ? max : left + right;
 	}
 
 	float JsonFloatOr(const nlohmann::json& object, std::string_view key, float fallback)
@@ -402,6 +416,66 @@ ResourceManager& ResourceManager::Instance()
 	return instance;
 }
 
+std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Material& resource) const
+{
+	std::uint64_t bytes = sizeof(Material);
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.storage));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.resolvedSlots));
+	for (const std::string& warning : resource.fallbackWarnings)
+	{
+		bytes = AddPayloadBytes(bytes, static_cast<std::uint64_t>(warning.size()));
+	}
+	return bytes;
+}
+
+std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Mesh& resource) const
+{
+	std::uint64_t bytes = sizeof(Mesh);
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.storage));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.meshletVertexRemapDecoded));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.meshletRecords));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.meshletSections));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.meshletBounds));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryDetailLevels));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryMaterialSections));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometrySectionRanges));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryCullableGroups));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryPages));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryRequestedTargets));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometrySkippedDetails));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryClusters));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryClusterPageLinks));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryConeSafety));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryValidationFlags));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.virtualGeometryDiagnostics));
+	bytes = AddPayloadBytes(bytes, static_cast<std::uint64_t>(resource.virtualGeometryDiagnosticStrings.size()));
+	return bytes;
+}
+
+std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Shader& resource) const
+{
+	std::uint64_t bytes = sizeof(Shader);
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.storage));
+	return bytes;
+}
+
+std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const ShaderCollection& resource) const
+{
+	std::uint64_t bytes = sizeof(ShaderCollection);
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.stages));
+	return bytes;
+}
+
+std::uint64_t ResourceManager::ComputeLoadedResourceBytes(const Texture& resource) const
+{
+	std::uint64_t bytes = sizeof(Texture);
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.levelTable));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.chunkTable));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.storage));
+	bytes = AddPayloadBytes(bytes, VectorPayloadBytes(resource.transcodedData));
+	return bytes;
+}
+
 // Out-of-line destructor ensures the concrete resource types are complete when
 // the cache members are destroyed, keeping unique_ptr deleters well-defined.
 ResourceManager::~ResourceManager() = default;
@@ -419,11 +493,10 @@ ResourceManager::ResourceManager()
 	meshCache.assetType = AssetType::Mesh;
 	meshCache.tracksResidency = true;
 	shaderCollectionCache.assetType = AssetType::ShaderCollection;
-	// Shader collections are part of pipeline creation state, not ordinary
-	// scene content. The renderer does not yet report shader-collection usage
-	// in its per-frame residency touches, so releasing them here can leave a
-	// valid pipeline key pointing at a missing CPU-side collection.
-	shaderCollectionCache.tracksResidency = false;
+	// Shader collections are part of pipeline creation state, so register them
+	// for exact CPU accounting and let RegisterResidencyResource pin them until
+	// pipeline lifetime can safely publish release candidates.
+	shaderCollectionCache.tracksResidency = true;
 	textureCache.assetType = AssetType::Texture;
 	textureCache.tracksResidency = true;
 
@@ -1077,6 +1150,63 @@ void ResourceManager::RegisterResidencyResource(
 	asset.lastUsedSeconds = ResidencyClockSeconds();
 	asset.estimatedCpuBytes = cpuBytes;
 	asset.estimatedGpuBytes = gpuBytes;
+	asset.cpuPayloads.clear();
+	asset.gpuAllocations.clear();
+	if (cpuBytes > 0u)
+	{
+		TerraEngine::Resource::CpuPayloadOwnershipRecord cpuRecord;
+		cpuRecord.ownerAssetId = id;
+		cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::DecodedMesh;
+		if (type == AssetType::Texture)
+		{
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::TexturePixels;
+		}
+		else if (type == AssetType::Material)
+		{
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::MaterialMetadata;
+		}
+		else if (type == AssetType::ShaderCollection)
+		{
+			cpuRecord.payloadKind = TerraEngine::Resource::CpuPayloadOwnershipKind::ShaderCollection;
+		}
+		cpuRecord.byteSize = cpuBytes;
+		cpuRecord.state = TerraEngine::Resource::CpuPayloadOwnershipState::Retained;
+		cpuRecord.detail = "ResourceManager retained CPU payload";
+		asset.cpuPayloads.push_back(std::move(cpuRecord));
+		asset.exactCpuBytes = TerraEngine::Resource::AggregateCpuPayloadBytes(asset.cpuPayloads, id);
+	}
+	else
+	{
+		asset.exactCpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+	}
+	if (gpuBytes > 0u)
+	{
+		TerraEngine::Resource::GpuAllocationOwnershipRecord gpuRecord;
+		gpuRecord.ownerAssetId = id;
+		gpuRecord.resourceKind = TerraEngine::Resource::GpuAllocationOwnershipKind::MeshBuffer;
+		if (type == AssetType::Texture)
+		{
+			gpuRecord.resourceKind = TerraEngine::Resource::GpuAllocationOwnershipKind::TextureImage;
+		}
+		else if (type == AssetType::Material)
+		{
+			gpuRecord.resourceKind = TerraEngine::Resource::GpuAllocationOwnershipKind::MaterialBuffer;
+		}
+		else if (type == AssetType::ShaderCollection)
+		{
+			gpuRecord.resourceKind = TerraEngine::Resource::GpuAllocationOwnershipKind::ShaderCollection;
+		}
+		gpuRecord.allocationId = std::hash<std::string>{}(TerraEngine::ToHexString(id) + ":resource-manager-registration");
+		gpuRecord.byteSize = gpuBytes;
+		gpuRecord.state = TerraEngine::Resource::GpuAllocationOwnershipState::Published;
+		gpuRecord.detail = "ResourceManager registered GPU payload";
+		asset.gpuAllocations.push_back(std::move(gpuRecord));
+		asset.exactGpuBytes = TerraEngine::Resource::AggregateGpuAllocationBytes(asset.gpuAllocations, id);
+	}
+	else
+	{
+		asset.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+	}
 	asset.reloadable = reloadable;
 	asset.inFlight = false;
 	asset.priorityClass = assetPolicy.priorityClass;
@@ -1190,6 +1320,36 @@ void ResourceManager::MarkResourceUploadedToGpu(
 		asset.lastUsedSeconds = nowSeconds;
 		asset.lastTouchedReason = detail.empty() ? "backend upload" : std::string(detail);
 		asset.estimatedGpuBytes = std::max(asset.estimatedGpuBytes, gpuBytes);
+		if (gpuBytes > 0u)
+		{
+			TerraEngine::Resource::GpuAllocationOwnershipRecord gpuRecord;
+			gpuRecord.ownerAssetId = id;
+			gpuRecord.resourceKind = TerraEngine::Resource::GpuAllocationOwnershipKind::MeshBuffer;
+			if (type == AssetType::Texture)
+			{
+				gpuRecord.resourceKind = TerraEngine::Resource::GpuAllocationOwnershipKind::TextureImage;
+			}
+			else if (type == AssetType::Material)
+			{
+				gpuRecord.resourceKind = TerraEngine::Resource::GpuAllocationOwnershipKind::MaterialBuffer;
+			}
+			else if (type == AssetType::ShaderCollection)
+			{
+				gpuRecord.resourceKind = TerraEngine::Resource::GpuAllocationOwnershipKind::ShaderCollection;
+			}
+			gpuRecord.allocationId = std::hash<std::string>{}(TerraEngine::ToHexString(id) + ":" + std::string(detail));
+			gpuRecord.byteSize = gpuBytes;
+			gpuRecord.state = TerraEngine::Resource::GpuAllocationOwnershipState::Published;
+			gpuRecord.firstVisibleFrame = frameId;
+			gpuRecord.detail = detail.empty() ? "backend upload" : std::string(detail);
+			asset.gpuAllocations.clear();
+			asset.gpuAllocations.push_back(std::move(gpuRecord));
+			asset.exactGpuBytes = TerraEngine::Resource::AggregateGpuAllocationBytes(asset.gpuAllocations, id);
+		}
+		else
+		{
+			asset.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+		}
 		asset.priorityClass = assetPolicy.priorityClass;
 		asset.residencyTier = assetPolicy.residencyTier;
 		if (asset.state != TerraEngine::Resource::ResidencyState::Pinned)
@@ -1233,6 +1393,12 @@ void ResourceManager::MarkResourceUploadedToGpu(
 		record.payloadState = TerraEngine::Resource::StreamablePayloadState::VramResident;
 		record.estimatedCpuBytes = std::max(record.estimatedCpuBytes, cpuBytes);
 		record.estimatedGpuBytes = std::max(record.estimatedGpuBytes, gpuBytes);
+		record.exactCpuBytes = cpuBytes > 0u
+			? TerraEngine::Resource::MakeExactResidencyBytes(cpuBytes)
+			: TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+		record.exactGpuBytes = gpuBytes > 0u
+			? TerraEngine::Resource::MakeExactResidencyBytes(gpuBytes)
+			: TerraEngine::Resource::MakeZeroByStateResidencyBytes();
 		if (type == AssetType::Texture)
 		{
 			record.textureResidentMipCount = textureResidentMipCount;
@@ -1441,10 +1607,14 @@ bool ResourceManager::ReleaseResidentResource(
 			if (releaseCpu)
 			{
 				it->second.estimatedCpuBytes = 0u;
+				it->second.cpuPayloads.clear();
+				it->second.exactCpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
 			}
 			if (releaseGpu)
 			{
 				it->second.estimatedGpuBytes = 0u;
+				it->second.gpuAllocations.clear();
+				it->second.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
 			}
 			remainingCpuBytes = it->second.estimatedCpuBytes;
 			remainingGpuBytes = it->second.estimatedGpuBytes;
@@ -1537,6 +1707,8 @@ void ResourceManager::SetStreamingPolicy(const TerraEngine::Resource::StreamingP
 			if (auto it = m_ResidentAssets.find(textureId); it != m_ResidentAssets.end())
 			{
 				it->second.estimatedGpuBytes = 0u;
+				it->second.gpuAllocations.clear();
+				it->second.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
 				if (it->second.state != TerraEngine::Resource::ResidencyState::Pinned)
 				{
 					it->second.state = it->second.estimatedCpuBytes > 0u
@@ -1559,6 +1731,11 @@ void ResourceManager::SetStreamingPolicy(const TerraEngine::Resource::StreamingP
 					? TerraEngine::Resource::StreamablePayloadState::RamResident
 					: TerraEngine::Resource::StreamablePayloadState::Released;
 				it->second.estimatedGpuBytes = 0u;
+				it->second.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+				if (it->second.estimatedCpuBytes == 0u)
+				{
+					it->second.exactCpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+				}
 				it->second.textureResidentMipCount = 0u;
 				it->second.textureSourceMipCount = 0u;
 				it->second.textureResidentMipOffset = 0u;
@@ -1634,6 +1811,23 @@ void ResourceManager::MarkTextureStreamingDistance(
 	if (mipResidencyChanged)
 	{
 		RenderSystem::Instance().RetireLoadedResource(id, frameId, "texture-mip-distance-changed");
+		{
+			std::unique_lock lock(m_ResidencyMutex);
+			if (auto it = m_ResidentAssets.find(id); it != m_ResidentAssets.end())
+			{
+				it->second.estimatedGpuBytes = 0u;
+				it->second.gpuAllocations.clear();
+				it->second.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+				if (it->second.state != TerraEngine::Resource::ResidencyState::Pinned)
+				{
+					it->second.state = it->second.estimatedCpuBytes > 0u
+						? TerraEngine::Resource::ResidencyState::Idle
+						: TerraEngine::Resource::ResidencyState::Released;
+				}
+				it->second.lastTouchedReason = "texture mip distance changed";
+				it->second.releaseGeneration += 1u;
+			}
+		}
 		std::unique_lock lock(m_StreamingMutex);
 		if (auto it = m_StreamableAssets.find(id); it != m_StreamableAssets.end())
 		{
@@ -1641,6 +1835,11 @@ void ResourceManager::MarkTextureStreamingDistance(
 				? TerraEngine::Resource::StreamablePayloadState::RamResident
 				: TerraEngine::Resource::StreamablePayloadState::Released;
 			it->second.estimatedGpuBytes = 0u;
+			it->second.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+			if (it->second.estimatedCpuBytes == 0u)
+			{
+				it->second.exactCpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+			}
 			it->second.textureResidentMipCount = 0u;
 			it->second.textureSourceMipCount = 0u;
 			it->second.textureResidentMipOffset = 0u;
@@ -2045,6 +2244,12 @@ void ResourceManager::UpdateStreamableLoadResult(
 	}
 	record.estimatedCpuBytes = success ? cpuBytes : 0u;
 	record.estimatedGpuBytes = success ? gpuBytes : 0u;
+	record.exactCpuBytes = success
+		? (cpuBytes > 0u ? TerraEngine::Resource::MakeExactResidencyBytes(cpuBytes) : TerraEngine::Resource::MakeZeroByStateResidencyBytes())
+		: TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+	record.exactGpuBytes = success
+		? (gpuBytes > 0u ? TerraEngine::Resource::MakeExactResidencyBytes(gpuBytes) : TerraEngine::Resource::MakeZeroByStateResidencyBytes())
+		: TerraEngine::Resource::MakeZeroByStateResidencyBytes();
 	if (!success || gpuBytes == 0u)
 	{
 		record.textureResidentMipCount = 0u;
@@ -2067,6 +2272,8 @@ void ResourceManager::MarkStreamableReleased(const TerraEngine::UUID& id, std::u
 		it->second.protectionReason = TerraEngine::Resource::StreamingProtectionReason::None;
 		it->second.estimatedCpuBytes = 0u;
 		it->second.estimatedGpuBytes = 0u;
+		it->second.exactCpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+		it->second.exactGpuBytes = TerraEngine::Resource::MakeZeroByStateResidencyBytes();
 		it->second.textureResidentMipCount = 0u;
 		it->second.textureSourceMipCount = 0u;
 		it->second.textureResidentMipOffset = 0u;
@@ -2137,6 +2344,8 @@ TerraEngine::Resource::StreamingDiagnosticsSummary ResourceManager::BuildStreami
 			diagnostic.failureReason = record.failureReason;
 			diagnostic.estimatedCpuBytes = diagnosticCpuBytes;
 			diagnostic.estimatedGpuBytes = diagnosticGpuBytes;
+			diagnostic.exactCpuBytes = ownsResidentMemory ? record.exactCpuBytes : TerraEngine::Resource::MakeZeroByStateResidencyBytes();
+			diagnostic.exactGpuBytes = ownsResidentMemory ? record.exactGpuBytes : TerraEngine::Resource::MakeZeroByStateResidencyBytes();
 			summary.records.push_back(std::move(diagnostic));
 		}
 	}

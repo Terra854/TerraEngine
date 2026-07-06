@@ -326,11 +326,13 @@ namespace
 			record.byteSize = page.byteSize;
 			record.priority = static_cast<float>(page.priority);
 			record.fallbackPageId = page.fallbackPageId;
-			record.fallbackPage = page.pageId == page.fallbackPageId || page.firstLodIndex == 0u;
+			record.fallbackPage = page.pageId == page.fallbackPageId;
 			record.clusterOffset = page.clusterPageLinkOffset;
 			record.clusterCount = page.clusterPageLinkCount;
 				record.payloadByteOffset = page.byteOffset;
 				record.payloadByteSize = page.byteSize;
+				record.payloadBufferIndex = 0xffffffffu;
+				record.payloadDescriptorIndex = 0xffffffffu;
 				record.pinnedFallback = record.fallbackPage;
 				record.protectedFallback = record.fallbackPage || record.pinnedFallback;
 				// TEMF v1 keeps the cooked virtual-geometry pages inside the loaded
@@ -502,6 +504,8 @@ namespace
 			HashVirtualGeometryPageSourceKey(key, static_cast<std::uint64_t>(packet.payloadSource));
 			HashVirtualGeometryPageSourceKey(key, packet.pagePayloadByteOffset);
 			HashVirtualGeometryPageSourceKey(key, packet.pagePayloadByteSize);
+			HashVirtualGeometryPageSourceKey(key, packet.payloadBufferIndex);
+			HashVirtualGeometryPageSourceKey(key, packet.payloadDescriptorIndex);
 			if (seenPayloads.insert(key).second)
 			{
 				VirtualGeometryPagePayloadRecord payload;
@@ -514,10 +518,13 @@ namespace
 				payload.meshletCount = packet.meshletCount;
 				payload.payloadByteOffset = packet.pagePayloadByteOffset;
 				payload.payloadByteSize = packet.pagePayloadByteSize;
+				payload.payloadBufferIndex = packet.payloadBufferIndex;
+				payload.payloadDescriptorIndex = packet.payloadDescriptorIndex;
 				payload.resident = packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentPagePayload
 					|| packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
 				payload.pinnedFallback = packet.fallbackPacket || packet.payloadSource == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
 				payload.valid = true;
+				payload.owningMeshFallbackReason = packet.fallbackReason;
 				payload.diagnostic = packet.payloadSource == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback
 					? "Virtual geometry emitted conservative embedded mesh payload instead of a resident streamed page."
 					: std::string();
@@ -541,9 +548,11 @@ namespace
 			emitted.meshletCount = packet.meshletCount;
 			emitted.payloadByteOffset = packet.pagePayloadByteOffset;
 			emitted.payloadByteSize = packet.pagePayloadByteSize;
+			emitted.payloadBufferIndex = packet.payloadBufferIndex;
+			emitted.payloadDescriptorIndex = packet.payloadDescriptorIndex;
 			emitted.fallbackSubstitution = packet.fallbackPacket;
 			emitted.conservativeEmbeddedFallback = packet.payloadSource == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
-			emitted.reason = ToString(packet.emittedSource);
+			emitted.reason = packet.fallbackReason.empty() ? ToString(packet.emittedSource) : packet.fallbackReason;
 			state.emittedPageSources.push_back(std::move(emitted));
 		}
 	}
@@ -1478,6 +1487,8 @@ std::vector<VirtualGeometryClusterPacket> RenderSystem::BuildVirtualGeometryClus
 		packet.emittedSource = ResolveVirtualGeometryEmittedSource(packet.payloadSource);
 		packet.pagePayloadByteOffset = page != nullptr ? page->payloadByteOffset : 0u;
 		packet.pagePayloadByteSize = ResolveVirtualGeometryPayloadBytes(page, meshlets);
+		packet.payloadBufferIndex = page != nullptr ? page->payloadBufferIndex : 0xffffffffu;
+		packet.payloadDescriptorIndex = page != nullptr ? page->payloadDescriptorIndex : 0xffffffffu;
 
 		// The debug identity is deliberately stable and source-data based. It
 		// lets visualizers distinguish packet/batch ownership without depending
@@ -1507,6 +1518,17 @@ std::vector<ClusterWorkBatch> RenderSystem::BuildVirtualGeometryClusterBatches(
 	}
 
 	auto canMergePacket = [](const VirtualGeometryClusterPacket& previous, const VirtualGeometryClusterPacket& next) {
+		const auto isPageLocalSource = [](VirtualGeometryPagePayloadSource source) {
+			return source == VirtualGeometryPagePayloadSource::ResidentPagePayload
+				|| source == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+		};
+		if (isPageLocalSource(previous.payloadSource) || isPageLocalSource(next.payloadSource))
+		{
+			// The first page-local shader path indexes one descriptor per draw.
+			// Keep resident page/fallback packets split until the task shader can
+			// iterate a packet run and switch stream descriptors per meshlet.
+			return false;
+		}
 		const bool compatibleOwner =
 			previous.viewId == next.viewId
 			&& previous.viewType == next.viewType
@@ -1519,6 +1541,8 @@ std::vector<ClusterWorkBatch> RenderSystem::BuildVirtualGeometryClusterBatches(
 			&& previous.emittedSource == next.emittedSource
 			&& previous.pagePayloadByteOffset == next.pagePayloadByteOffset
 			&& previous.pagePayloadByteSize == next.pagePayloadByteSize
+			&& previous.payloadBufferIndex == next.payloadBufferIndex
+			&& previous.payloadDescriptorIndex == next.payloadDescriptorIndex
 			&& previous.fallbackPacket == next.fallbackPacket
 			&& previous.packetId + 1u == next.packetId;
 		const bool contiguousMeshlets = previous.meshletOffset + previous.meshletCount == next.meshletOffset;
@@ -1575,12 +1599,17 @@ std::vector<GpuVirtualGeometryPacketRecord> RenderSystem::BuildGpuVirtualGeometr
 	VirtualGeometryDebugVisualizationMode debugMode,
 	std::uint32_t packetIdBase)
 {
+	(void)packetIdBase;
 	std::vector<GpuVirtualGeometryPacketRecord> records;
 	records.reserve(packets.size());
 	for (const VirtualGeometryClusterPacket& packet : packets)
 	{
 		GpuVirtualGeometryPacketRecord record;
-		record.packetId = packetIdBase + static_cast<std::uint32_t>(records.size());
+		// Page-local geometry payloads are keyed by the stable CPU packet id.
+		// Re-numbering compacted GPU records here would make the task/mesh
+		// shader decode a different packet's stream after culling removes a
+		// preceding packet from the submitted set.
+		record.packetId = packet.packetId;
 		record.viewId = packet.viewId;
 		record.viewType = packet.viewType;
 		record.frameId = frameId;
@@ -1600,6 +1629,9 @@ std::vector<GpuVirtualGeometryPacketRecord> RenderSystem::BuildGpuVirtualGeometr
 		record.emittedSource = packet.emittedSource;
 		record.pagePayloadByteOffset = packet.pagePayloadByteOffset;
 		record.pagePayloadByteSize = packet.pagePayloadByteSize;
+		record.payloadBufferIndex = packet.payloadBufferIndex;
+		record.payloadDescriptorIndex = packet.payloadDescriptorIndex;
+		record.fallbackReason = packet.fallbackReason;
 		record.debugIdentity = packet.debugIdentity;
 		// Bit 0 marks fail-open coverage; higher bits mirror the active debug
 		// mode so generated submissions can reject stale visualizer ownership.
@@ -1623,6 +1655,17 @@ std::vector<GpuVirtualGeometryBatchDescriptor> RenderSystem::BuildGpuVirtualGeom
 	}
 
 	auto canMergePacket = [](const GpuVirtualGeometryPacketRecord& previous, const GpuVirtualGeometryPacketRecord& next) {
+		const auto isPageLocalSource = [](VirtualGeometryPagePayloadSource source) {
+			return source == VirtualGeometryPagePayloadSource::ResidentPagePayload
+				|| source == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+		};
+		if (isPageLocalSource(previous.payloadSource) || isPageLocalSource(next.payloadSource))
+		{
+			// Keep GPU packet batches aligned with the CPU draw batches above.
+			// A resident page descriptor currently describes one selected packet,
+			// so merging packets would make the shader decode the wrong stream.
+			return false;
+		}
 		return previous.viewId == next.viewId
 			&& previous.viewType == next.viewType
 			&& previous.meshId == next.meshId
@@ -1634,6 +1677,8 @@ std::vector<GpuVirtualGeometryBatchDescriptor> RenderSystem::BuildGpuVirtualGeom
 			&& previous.emittedSource == next.emittedSource
 			&& previous.pagePayloadByteOffset == next.pagePayloadByteOffset
 			&& previous.pagePayloadByteSize == next.pagePayloadByteSize
+			&& previous.payloadBufferIndex == next.payloadBufferIndex
+			&& previous.payloadDescriptorIndex == next.payloadDescriptorIndex
 			&& previous.flags == next.flags
 			&& previous.packetId + 1u == next.packetId
 			&& previous.meshletOffset + previous.meshletCount == next.meshletOffset;
@@ -1743,6 +1788,10 @@ bool RenderSystem::ValidateGpuVirtualGeometryPacketRecords(
 		{
 			return reject("GPU packet frame ownership does not match the frame being published.");
 		}
+		if (gpu.packetId != cpu.packetId)
+		{
+			return reject("GPU packet id does not match the CPU packet id used by page-local descriptors.");
+		}
 		if (gpu.viewId != cpu.viewId || gpu.viewType != cpu.viewType)
 		{
 			return reject("GPU packet view ownership does not match the CPU cluster packet.");
@@ -1770,6 +1819,10 @@ bool RenderSystem::ValidateGpuVirtualGeometryPacketRecords(
 		if (gpu.pagePayloadByteOffset != cpu.pagePayloadByteOffset || gpu.pagePayloadByteSize != cpu.pagePayloadByteSize)
 		{
 			return reject("GPU packet page-local payload byte range does not match the CPU packet.");
+		}
+		if (gpu.payloadBufferIndex != cpu.payloadBufferIndex || gpu.payloadDescriptorIndex != cpu.payloadDescriptorIndex)
+		{
+			return reject("GPU packet physical page payload binding does not match the CPU packet.");
 		}
 		const bool expectedFallback = cpu.fallbackPacket;
 		const bool gpuFallback = (gpu.flags & 1u) != 0u;
@@ -2774,6 +2827,8 @@ void RenderSystem::Update(float deltaTime)
 			range.emittedSource = command.virtualGeometryEmittedSource;
 			range.pagePayloadByteOffset = command.virtualGeometryPagePayloadByteOffset;
 			range.pagePayloadByteSize = command.virtualGeometryPagePayloadByteSize;
+			range.payloadBufferIndex = command.virtualGeometryPayloadBufferIndex;
+			range.payloadDescriptorIndex = command.virtualGeometryPayloadDescriptorIndex;
 			state.hiZSelfOcclusionGuardPassed = state.hiZSelfOcclusionGuardPassed && range.hiZSelfOcclusionGuardPassed;
 			state.hiZNearPlaneGuardPassed = state.hiZNearPlaneGuardPassed && range.hiZNearPlaneGuardPassed;
 			state.hiZThinGeometryGuardPassed = state.hiZThinGeometryGuardPassed && range.hiZThinGeometryGuardPassed;
@@ -2856,6 +2911,8 @@ void RenderSystem::Update(float deltaTime)
 					: VirtualGeometryPagePayloadSource::EmbeddedMeshPayload;
 				packet.emittedSource = ResolveVirtualGeometryEmittedSource(packet.payloadSource);
 				packet.pagePayloadByteSize = static_cast<std::uint64_t>(packet.meshletCount);
+				packet.payloadBufferIndex = draw.range.payloadBufferIndex;
+				packet.payloadDescriptorIndex = draw.range.payloadDescriptorIndex;
 				packet.debugIdentity = packet.packetId ^ 0x5a5a0000u;
 				state.clusterPackets.push_back(packet);
 			}
@@ -3227,6 +3284,12 @@ void RenderSystem::Update(float deltaTime)
 					batchCommand.virtualGeometryEmittedSource = firstPacket.emittedSource;
 					batchCommand.virtualGeometryPagePayloadByteOffset = firstPacket.pagePayloadByteOffset;
 					batchCommand.virtualGeometryPagePayloadByteSize = firstPacket.pagePayloadByteSize;
+					batchCommand.virtualGeometryPayloadBufferIndex = firstPacket.payloadBufferIndex;
+					batchCommand.virtualGeometryPayloadDescriptorIndex = firstPacket.payloadDescriptorIndex;
+					// Page-local payload uploads are keyed by the submitted packet id.
+					// Do not reuse selected-cluster offsets here: package imports and
+					// fallback compaction can make selection rows and packet rows drift.
+					batchCommand.virtualGeometryPacketDescriptorIndex = firstPacket.packetId;
 					for (std::uint32_t packetIndex = localPacketOffset; packetIndex < localPacketOffset + batch.packetCount; ++packetIndex)
 					{
 						if (compactedPackets[packetIndex].fallbackPacket)
@@ -4682,6 +4745,9 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVirtualGeometryGeneratedSubmissions,
 		TerraEngine::Scheduling::kResourceVirtualGeometryCounterReadbacks,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPagePayloads,
+		TerraEngine::Scheduling::kResourcePhysicalVirtualGeometryPagePayloads,
+		TerraEngine::Scheduling::kResourceExactResidencySnapshots,
+		TerraEngine::Scheduling::kResourceBackendGpuAllocationSnapshots,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications,
 		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets
 	};
@@ -4694,6 +4760,9 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVirtualGeometryCompactionResults,
 		TerraEngine::Scheduling::kResourceVirtualGeometryGeneratedSubmissions,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPagePayloads,
+		TerraEngine::Scheduling::kResourcePhysicalVirtualGeometryPagePayloads,
+		TerraEngine::Scheduling::kResourceExactResidencySnapshots,
+		TerraEngine::Scheduling::kResourceBackendGpuAllocationSnapshots,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPageRequests,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPageNeedPackets,
 		TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications,
@@ -5069,14 +5138,10 @@ TerraEngine::Renderer::VirtualGeometryClusterSelectionResult RenderSystem::Selec
 			fallbackId = fallbackCluster->fallbackClusterId;
 		}
 
-		for (const VirtualGeometryClusterRuntime& cluster : asset.clusters)
-		{
-			if (VirtualGeometryClusterPageIsResident(asset, cluster))
-			{
-				return ResolvedCluster{ &cluster, true };
-			}
-		}
-
+		// Never substitute an arbitrary resident cluster from another coverage
+		// region. That keeps counters alive but renders the wrong island of the
+		// mesh, which is worse than failing open to the owner draw range. Only the
+		// authored fallback chain is allowed to answer a missing page.
 		return ResolvedCluster{};
 	};
 

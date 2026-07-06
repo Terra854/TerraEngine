@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstdlib>
 #include "Engine/Core/Logger/Logger.h"
+#include "Resource/ResourceStreaming.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -76,6 +77,30 @@ namespace
 	}
 
 	// EnsureProjectManifest is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+	nlohmann::json BuildDefaultStreamingPolicyManifest()
+	{
+		const TerraEngine::Resource::StreamingPolicy policy = TerraEngine::Resource::MakeDefaultStreamingPolicy();
+		nlohmann::json object;
+		object["enabled"] = policy.enabled;
+		object["deferScenePayloadsOnLoad"] = policy.deferScenePayloadsOnLoad;
+		object["preloadDistance"] = policy.preloadDistance;
+		object["visibleRetentionSeconds"] = policy.visibleRetentionSeconds;
+		object["neededRetentionSeconds"] = policy.neededRetentionSeconds;
+		object["maxLoadsPerUpdate"] = policy.maxLoadsPerUpdate;
+		// New projects should make the texture residency behavior explicit in
+		// game.json so editor previews and exported runtime builds start from
+		// the same mip-tail streaming defaults.
+		object["textureMipStreamingEnabled"] = policy.textureMipStreamingEnabled;
+		object["textureMinStreamMip"] = policy.textureMinStreamMip;
+		object["textureMaxStreamMip"] = policy.textureMaxStreamMip;
+		object["virtualGeometryPageMemoryBudgetBytes"] = policy.virtualGeometryPageMemoryBudgetBytes;
+		object["virtualGeometryPageUploadBudgetBytes"] = policy.virtualGeometryPageUploadBudgetBytes;
+		object["virtualGeometryPageRetirementBudgetBytes"] = policy.virtualGeometryPageRetirementBudgetBytes;
+		object["memoryBudgetInteraction"] = std::string(TerraEngine::Resource::ToString(policy.memoryBudgetInteraction));
+		object["diagnosticsEnabled"] = policy.diagnosticsEnabled;
+		return object;
+	}
+
 	bool EnsureProjectManifest(const fs::path& projectRoot, std::string_view requestedName, std::string* outError = nullptr)
 	{
 		const fs::path manifestPath = projectRoot / "game.json";
@@ -88,6 +113,7 @@ namespace
 		nlohmann::json manifest;
 		manifest["name"] = requestedName.empty() ? projectRoot.filename().string() : std::string(requestedName);
 		manifest["version"] = kDefaultProjectVersion;
+		manifest["streamingPolicy"] = BuildDefaultStreamingPolicyManifest();
 
 		std::ofstream manifestFile(manifestPath);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

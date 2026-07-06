@@ -47,6 +47,23 @@ namespace TerraEngine::Resource
 		Failed
 	};
 
+	enum class ExactResidencyByteStatus : std::uint8_t
+	{
+		Exact,
+		ZeroByState,
+		Unavailable
+	};
+
+	struct ExactResidencyByteValue
+	{
+		// A numeric value is valid only for Exact or ZeroByState. Unavailable
+		// rows keep bytes at zero and carry a reason so missing accounting never
+		// becomes a silent estimate in developer-facing tools.
+		std::uint64_t bytes = 0u;
+		ExactResidencyByteStatus status = ExactResidencyByteStatus::Unavailable;
+		std::string unavailableReason;
+	};
+
 	enum class StreamingNeedType : std::uint8_t
 	{
 		Visible,
@@ -157,6 +174,12 @@ namespace TerraEngine::Resource
 		std::uint64_t payloadByteSize = 0u;
 		std::uint32_t meshletOffset = 0u;
 		std::uint32_t meshletCount = 0u;
+		// Physical payload binding indices are only valid after the protected
+		// upload publication step has produced shader-visible storage-buffer
+		// descriptors for this page. Streaming workers copy the values but never
+		// mutate live backend descriptor tables.
+		std::uint32_t payloadBufferIndex = 0xffffffffu;
+		std::uint32_t payloadDescriptorIndex = 0xffffffffu;
 		bool pinnedFallback = false;
 		::VirtualGeometryPagePayloadSource payloadSource = ::VirtualGeometryPagePayloadSource::Unknown;
 	};
@@ -201,6 +224,8 @@ namespace TerraEngine::Resource
 		::VirtualGeometryEmittedPageSource expectedEmission = ::VirtualGeometryEmittedPageSource::None;
 		std::uint64_t payloadByteOffset = 0u;
 		std::uint64_t payloadByteSize = 0u;
+		std::uint32_t payloadBufferIndex = 0xffffffffu;
+		std::uint32_t payloadDescriptorIndex = 0xffffffffu;
 		std::string reason;
 	};
 
@@ -274,13 +299,13 @@ namespace TerraEngine::Resource
 		double visibleRetentionSeconds = 2.0;
 		double neededRetentionSeconds = 5.0;
 		std::uint32_t maxLoadsPerUpdate = 0;
-		bool textureMipStreamingEnabled = false;
+		bool textureMipStreamingEnabled = true;
 		// Texture streaming uses source mip indices. Mip 0 is the authored
 		// full-resolution image; larger indices are lower-detail tail mips.
 		// Near visible textures start at textureMinStreamMip, while far visible
 		// textures can start at textureMaxStreamMip.
 			std::uint32_t textureMinStreamMip = 0;
-			std::uint32_t textureMaxStreamMip = 0;
+			std::uint32_t textureMaxStreamMip = 13;
 			// Virtual geometry page budgets are policy inputs, not direct release
 			// commands. ResourceResidency and the renderer backend consume these
 			// byte caps at protected boundaries so worker planning never destroys
@@ -334,6 +359,8 @@ namespace TerraEngine::Resource
 		double textureDistanceUpdatedSeconds = 0.0;
 		std::uint64_t estimatedCpuBytes = 0;
 		std::uint64_t estimatedGpuBytes = 0;
+		ExactResidencyByteValue exactCpuBytes;
+		ExactResidencyByteValue exactGpuBytes;
 		std::string failureReason;
 		std::uint64_t residencyGeneration = 0;
 	};
@@ -357,6 +384,8 @@ namespace TerraEngine::Resource
 		std::string failureReason;
 		std::uint64_t estimatedCpuBytes = 0;
 		std::uint64_t estimatedGpuBytes = 0;
+		ExactResidencyByteValue exactCpuBytes;
+		ExactResidencyByteValue exactGpuBytes;
 	};
 
 	struct StreamingDiagnosticsSummary
@@ -405,4 +434,5 @@ namespace TerraEngine::Resource
 	TERRAENGINE_API std::string_view ToString(MemoryBudgetInteraction interaction);
 	TERRAENGINE_API std::string_view ToString(StreamingPriorityClass priorityClass);
 	TERRAENGINE_API std::string_view ToString(StreamingResidencyTier residencyTier);
+	TERRAENGINE_API std::string_view ToString(ExactResidencyByteStatus status);
 }

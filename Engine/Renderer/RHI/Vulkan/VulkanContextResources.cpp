@@ -17,6 +17,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -93,6 +94,312 @@ namespace
 			+ mesh.meshletBuffer.size
 			+ mesh.meshletSectionBuffer.size
 			+ mesh.meshletBoundsBuffer.size;
+	}
+
+	struct VirtualGeometryPageLocalMeshDecodeInfo
+	{
+		float positionOffset[4]{};
+		float positionScale[4]{};
+		float uvOffsetScale[4]{};
+		std::uint32_t counts[4]{};
+	};
+	static_assert(sizeof(VirtualGeometryPageLocalMeshDecodeInfo) == 64u, "Page-local decode info must match the default shader layout.");
+
+	struct VirtualGeometryPageLocalPayloadBuildResult
+	{
+		std::vector<std::uint32_t> words;
+		std::unordered_map<TerraEngine::UUID, std::uint64_t> bytesByMesh;
+	};
+
+	void AddVirtualGeometryPagePayloadBytes(
+		std::unordered_map<TerraEngine::UUID, std::uint64_t>& bytesByMesh,
+		const TerraEngine::UUID& meshId,
+		std::uint64_t byteCount)
+	{
+		if (meshId == TerraEngine::EMPTY_UUID || byteCount == 0u)
+		{
+			return;
+		}
+		std::uint64_t& total = bytesByMesh[meshId];
+		constexpr std::uint64_t maxBytes = std::numeric_limits<std::uint64_t>::max();
+		total = total > maxBytes - byteCount ? maxBytes : total + byteCount;
+	}
+
+	bool IsVirtualGeometryPageLocalSource(VirtualGeometryPagePayloadSource source)
+	{
+		return source == VirtualGeometryPagePayloadSource::ResidentPagePayload
+			|| source == VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+	}
+
+	std::uint32_t AppendVirtualGeometryPayloadBytesAsWords(std::vector<std::uint32_t>& words, const void* data, std::size_t byteSize)
+	{
+		const std::uint32_t wordOffset = static_cast<std::uint32_t>(words.size());
+		if (data == nullptr || byteSize == 0u)
+		{
+			return wordOffset;
+		}
+
+		const auto* bytes = static_cast<const std::uint8_t*>(data);
+		const std::size_t wordCount = (byteSize + sizeof(std::uint32_t) - 1u) / sizeof(std::uint32_t);
+		for (std::size_t wordIndex = 0u; wordIndex < wordCount; ++wordIndex)
+		{
+			std::uint32_t packed = 0u;
+			const std::size_t byteOffset = wordIndex * sizeof(std::uint32_t);
+			const std::size_t copySize = std::min<std::size_t>(sizeof(std::uint32_t), byteSize - byteOffset);
+			std::memcpy(&packed, bytes + byteOffset, copySize);
+			words.push_back(packed);
+		}
+		return wordOffset;
+	}
+
+	bool TryReadVirtualGeometryRemapIndex(const Mesh& mesh, std::uint32_t remapIndex, std::uint32_t& outGlobalVertexIndex)
+	{
+		outGlobalVertexIndex = 0u;
+		const MeshletRemapEncoding encoding = static_cast<MeshletRemapEncoding>(mesh.header.meshletVertexRemapEncoding);
+		if (encoding == MeshletRemapEncoding::Uint16)
+		{
+			const std::size_t byteOffset = static_cast<std::size_t>(remapIndex) * sizeof(std::uint16_t);
+			if (byteOffset + sizeof(std::uint16_t) > mesh.meshletVertexRemapData.size())
+			{
+				return false;
+			}
+			std::uint16_t value = 0u;
+			std::memcpy(&value, mesh.meshletVertexRemapData.data() + byteOffset, sizeof(value));
+			outGlobalVertexIndex = value;
+			return outGlobalVertexIndex < mesh.header.meshletVertexCount;
+		}
+		if (encoding == MeshletRemapEncoding::Uint32)
+		{
+			const std::size_t byteOffset = static_cast<std::size_t>(remapIndex) * sizeof(std::uint32_t);
+			if (byteOffset + sizeof(std::uint32_t) > mesh.meshletVertexRemapData.size())
+			{
+				return false;
+			}
+			std::memcpy(&outGlobalVertexIndex, mesh.meshletVertexRemapData.data() + byteOffset, sizeof(outGlobalVertexIndex));
+			return outGlobalVertexIndex < mesh.header.meshletVertexCount;
+		}
+		return false;
+	}
+
+	bool AppendVirtualGeometryPageLocalPacketPayload(
+		std::vector<std::uint32_t>& words,
+		std::uint32_t descriptorIndex,
+		const GpuVirtualGeometryPacketRecord& packet,
+		std::uint64_t* outAppendedGpuBytes = nullptr)
+	{
+		if (outAppendedGpuBytes != nullptr)
+		{
+			*outAppendedGpuBytes = 0u;
+		}
+		if (!IsVirtualGeometryPageLocalSource(packet.payloadSource))
+		{
+			return false;
+		}
+		const std::size_t descriptorWordOffset = static_cast<std::size_t>(descriptorIndex)
+			* kVirtualGeometryPagePayloadDescriptorStrideWords;
+		if (descriptorWordOffset + kVirtualGeometryPagePayloadDescriptorStrideWords > words.size())
+		{
+			return false;
+		}
+
+		const Mesh* cpuMesh = ResourceManager::Instance().GetMesh(packet.meshId);
+		if (cpuMesh == nullptr
+			|| cpuMesh->header.layout.strideBytes != kMeshletPackedVertexStrideBytes
+			|| packet.meshletCount == 0u
+			|| packet.meshletOffset >= cpuMesh->meshletRecords.size())
+		{
+			return false;
+		}
+
+		const std::uint32_t availableMeshlets = static_cast<std::uint32_t>(cpuMesh->meshletRecords.size()) - packet.meshletOffset;
+		const std::uint32_t selectedMeshlets = std::min(packet.meshletCount, availableMeshlets);
+		std::vector<std::uint8_t> localVertexBytes;
+		std::vector<std::uint8_t> localPrimitiveBytes;
+		std::vector<std::uint32_t> localRemap;
+		std::vector<MeshletRecord> localMeshletRecords;
+		std::vector<MeshletBounds> localBounds;
+		std::unordered_map<std::uint32_t, std::uint32_t> localVertexByOwnerIndex;
+
+		localMeshletRecords.reserve(selectedMeshlets);
+		localBounds.reserve(selectedMeshlets);
+		for (std::uint32_t localMeshlet = 0u; localMeshlet < selectedMeshlets; ++localMeshlet)
+		{
+			const std::uint32_t ownerMeshletIndex = packet.meshletOffset + localMeshlet;
+			const MeshletRecord& ownerRecord = cpuMesh->meshletRecords[ownerMeshletIndex];
+			if (ownerRecord.vertexCount == 0u
+				|| ownerRecord.primitiveIndexCount == 0u
+				|| ownerRecord.vertexCount > kMeshletMaxVertices
+				|| (ownerRecord.primitiveIndexCount % 3u) != 0u)
+			{
+				return false;
+			}
+
+			const std::size_t ownerPrimitiveOffset = static_cast<std::size_t>(ownerRecord.primitiveIndexOffset);
+			const std::size_t ownerPrimitiveSize = static_cast<std::size_t>(ownerRecord.primitiveIndexCount);
+			if (ownerPrimitiveOffset + ownerPrimitiveSize > cpuMesh->meshletPrimitiveIndexData.size())
+			{
+				return false;
+			}
+
+			MeshletRecord localRecord{};
+			localRecord.vertexOffset = static_cast<std::uint32_t>(localRemap.size());
+			localRecord.vertexCount = ownerRecord.vertexCount;
+			for (std::uint32_t vertexIndex = 0u; vertexIndex < ownerRecord.vertexCount; ++vertexIndex)
+			{
+				std::uint32_t ownerVertexIndex = 0u;
+				if (!TryReadVirtualGeometryRemapIndex(*cpuMesh, ownerRecord.vertexOffset + vertexIndex, ownerVertexIndex))
+				{
+					return false;
+				}
+
+				auto [it, inserted] = localVertexByOwnerIndex.emplace(ownerVertexIndex, static_cast<std::uint32_t>(localVertexBytes.size() / kMeshletPackedVertexStrideBytes));
+				if (inserted)
+				{
+					const std::size_t ownerVertexByteOffset = static_cast<std::size_t>(ownerVertexIndex) * kMeshletPackedVertexStrideBytes;
+					if (ownerVertexByteOffset + kMeshletPackedVertexStrideBytes > cpuMesh->meshletVertexData.size())
+					{
+						return false;
+					}
+					localVertexBytes.insert(
+						localVertexBytes.end(),
+						cpuMesh->meshletVertexData.begin() + static_cast<std::ptrdiff_t>(ownerVertexByteOffset),
+						cpuMesh->meshletVertexData.begin() + static_cast<std::ptrdiff_t>(ownerVertexByteOffset + kMeshletPackedVertexStrideBytes));
+				}
+				localRemap.push_back(it->second);
+			}
+
+			localRecord.primitiveIndexOffset = static_cast<std::uint32_t>(localPrimitiveBytes.size());
+			localRecord.primitiveIndexCount = ownerRecord.primitiveIndexCount;
+			localPrimitiveBytes.insert(
+				localPrimitiveBytes.end(),
+				cpuMesh->meshletPrimitiveIndexData.begin() + static_cast<std::ptrdiff_t>(ownerPrimitiveOffset),
+				cpuMesh->meshletPrimitiveIndexData.begin() + static_cast<std::ptrdiff_t>(ownerPrimitiveOffset + ownerPrimitiveSize));
+			localMeshletRecords.push_back(localRecord);
+
+			if (ownerMeshletIndex < cpuMesh->meshletBounds.size())
+			{
+				localBounds.push_back(cpuMesh->meshletBounds[ownerMeshletIndex]);
+			}
+			else
+			{
+				MeshletBounds fallbackBounds{};
+				fallbackBounds.coneCutoff = 2.0f;
+				localBounds.push_back(fallbackBounds);
+			}
+		}
+
+		if (localVertexBytes.empty() || localPrimitiveBytes.empty() || localRemap.empty() || localMeshletRecords.empty())
+		{
+			return false;
+		}
+
+		VirtualGeometryPageLocalMeshDecodeInfo decodeInfo{};
+		decodeInfo.positionOffset[0] = cpuMesh->header.quantization.positionOffset[0];
+		decodeInfo.positionOffset[1] = cpuMesh->header.quantization.positionOffset[1];
+		decodeInfo.positionOffset[2] = cpuMesh->header.quantization.positionOffset[2];
+		decodeInfo.positionScale[0] = cpuMesh->header.quantization.positionScale[0];
+		decodeInfo.positionScale[1] = cpuMesh->header.quantization.positionScale[1];
+		decodeInfo.positionScale[2] = cpuMesh->header.quantization.positionScale[2];
+		decodeInfo.uvOffsetScale[0] = cpuMesh->header.quantization.uvOffset[0];
+		decodeInfo.uvOffsetScale[1] = cpuMesh->header.quantization.uvOffset[1];
+		decodeInfo.uvOffsetScale[2] = cpuMesh->header.quantization.uvScale[0];
+		decodeInfo.uvOffsetScale[3] = cpuMesh->header.quantization.uvScale[1];
+		decodeInfo.counts[0] = static_cast<std::uint32_t>(localVertexBytes.size() / kMeshletPackedVertexStrideBytes);
+		decodeInfo.counts[1] = static_cast<std::uint32_t>(localRemap.size());
+		decodeInfo.counts[2] = static_cast<std::uint32_t>(localPrimitiveBytes.size());
+		decodeInfo.counts[3] = static_cast<std::uint32_t>(localMeshletRecords.size());
+
+		const std::size_t payloadStartWords = words.size();
+		const std::uint32_t vertexWordOffset = AppendVirtualGeometryPayloadBytesAsWords(words, localVertexBytes.data(), localVertexBytes.size());
+		const std::uint32_t primitiveWordOffset = AppendVirtualGeometryPayloadBytesAsWords(words, localPrimitiveBytes.data(), localPrimitiveBytes.size());
+		const std::uint32_t remapWordOffset = AppendVirtualGeometryPayloadBytesAsWords(words, localRemap.data(), localRemap.size() * sizeof(std::uint32_t));
+		const std::uint32_t meshletWordOffset = AppendVirtualGeometryPayloadBytesAsWords(words, localMeshletRecords.data(), localMeshletRecords.size() * sizeof(MeshletRecord));
+		const std::uint32_t boundsWordOffset = AppendVirtualGeometryPayloadBytesAsWords(words, localBounds.data(), localBounds.size() * sizeof(MeshletBounds));
+		const std::uint32_t decodeWordOffset = AppendVirtualGeometryPayloadBytesAsWords(words, &decodeInfo, sizeof(decodeInfo));
+
+		// Appending the variable-sized payload above can reallocate the vector.
+		// Reacquire the descriptor row by index so the shader-visible table is
+		// written into the live page-payload buffer, not a stale data pointer.
+		std::uint32_t* descriptor = words.data() + descriptorWordOffset;
+		descriptor[kVirtualGeometryPagePayloadDescriptorVertexWordOffset] = vertexWordOffset;
+		descriptor[kVirtualGeometryPagePayloadDescriptorVertexWordSize] = static_cast<std::uint32_t>((localVertexBytes.size() + sizeof(std::uint32_t) - 1u) / sizeof(std::uint32_t));
+		descriptor[kVirtualGeometryPagePayloadDescriptorPrimitiveWordOffset] = primitiveWordOffset;
+		descriptor[kVirtualGeometryPagePayloadDescriptorPrimitiveByteSize] = static_cast<std::uint32_t>(localPrimitiveBytes.size());
+		descriptor[kVirtualGeometryPagePayloadDescriptorRemapWordOffset] = remapWordOffset;
+		descriptor[kVirtualGeometryPagePayloadDescriptorRemapCount] = static_cast<std::uint32_t>(localRemap.size());
+		descriptor[kVirtualGeometryPagePayloadDescriptorMeshletWordOffset] = meshletWordOffset;
+		descriptor[kVirtualGeometryPagePayloadDescriptorMeshletCount] = static_cast<std::uint32_t>(localMeshletRecords.size());
+		descriptor[kVirtualGeometryPagePayloadDescriptorBoundsWordOffset] = boundsWordOffset;
+		descriptor[kVirtualGeometryPagePayloadDescriptorBoundsCount] = static_cast<std::uint32_t>(localBounds.size());
+		descriptor[kVirtualGeometryPagePayloadDescriptorDecodeWordOffset] = decodeWordOffset;
+		descriptor[kVirtualGeometryPagePayloadDescriptorMaterialWordOffset] = 0u;
+		descriptor[kVirtualGeometryPagePayloadDescriptorMaterialCount] = 0u;
+		descriptor[kVirtualGeometryPagePayloadDescriptorLocalVertexCount] = decodeInfo.counts[0];
+		descriptor[kVirtualGeometryPagePayloadDescriptorLocalPrimitiveByteCount] = decodeInfo.counts[2];
+		descriptor[kVirtualGeometryPagePayloadDescriptorLocalRemapEncoding] = 0u;
+		if (outAppendedGpuBytes != nullptr)
+		{
+			*outAppendedGpuBytes = static_cast<std::uint64_t>(words.size() - payloadStartWords)
+				* static_cast<std::uint64_t>(sizeof(std::uint32_t));
+		}
+		return true;
+	}
+
+	VirtualGeometryPageLocalPayloadBuildResult BuildVirtualGeometryPageLocalPayloadWords(const std::vector<GpuVirtualGeometryPacketRecord>& packets)
+	{
+		std::uint32_t descriptorCount = static_cast<std::uint32_t>(packets.size());
+		for (const GpuVirtualGeometryPacketRecord& packet : packets)
+		{
+			descriptorCount = std::max(descriptorCount, packet.packetId + 1u);
+		}
+
+		VirtualGeometryPageLocalPayloadBuildResult result;
+		result.words.assign(
+			static_cast<std::size_t>(descriptorCount) * kVirtualGeometryPagePayloadDescriptorStrideWords,
+			0u);
+		std::vector<bool> descriptorBytesAttributed(descriptorCount, false);
+		for (const GpuVirtualGeometryPacketRecord& packet : packets)
+		{
+			const std::uint32_t descriptorIndex = std::min(packet.packetId, descriptorCount - 1u);
+			std::uint32_t* descriptor = result.words.data()
+				+ static_cast<std::size_t>(descriptorIndex) * kVirtualGeometryPagePayloadDescriptorStrideWords;
+			descriptor[0] = packet.pageId;
+			descriptor[1] = packet.fallbackPageId;
+			descriptor[2] = static_cast<std::uint32_t>(packet.payloadSource);
+			descriptor[3] = static_cast<std::uint32_t>(packet.emittedSource);
+			descriptor[4] = static_cast<std::uint32_t>(packet.pagePayloadByteOffset & 0xffffffffull);
+			descriptor[5] = static_cast<std::uint32_t>((packet.pagePayloadByteOffset >> 32u) & 0xffffffffull);
+			descriptor[6] = static_cast<std::uint32_t>(packet.pagePayloadByteSize & 0xffffffffull);
+			descriptor[7] = static_cast<std::uint32_t>((packet.pagePayloadByteSize >> 32u) & 0xffffffffull);
+			descriptor[8] = packet.payloadBufferIndex;
+			descriptor[9] = packet.payloadDescriptorIndex != std::numeric_limits<std::uint32_t>::max()
+				? packet.payloadDescriptorIndex
+				: descriptorIndex;
+			descriptor[10] = packet.meshletOffset;
+			descriptor[11] = packet.meshletCount;
+			descriptor[12] = packet.selectedLod;
+			descriptor[13] = packet.clusterId;
+			descriptor[14] = packet.packetId;
+			descriptor[15] = packet.flags;
+			if (!descriptorBytesAttributed[descriptorIndex])
+			{
+				// The descriptor row is uploaded into the same physical payload
+				// buffer as the stream bytes, so attribute that exact GPU cost
+				// to the mesh that owns the packet.
+				AddVirtualGeometryPagePayloadBytes(
+					result.bytesByMesh,
+					packet.meshId,
+					static_cast<std::uint64_t>(kVirtualGeometryPagePayloadDescriptorStrideWords)
+						* static_cast<std::uint64_t>(sizeof(std::uint32_t)));
+				descriptorBytesAttributed[descriptorIndex] = true;
+			}
+			std::uint64_t appendedGpuBytes = 0u;
+			if (AppendVirtualGeometryPageLocalPacketPayload(result.words, descriptorIndex, packet, &appendedGpuBytes))
+			{
+				AddVirtualGeometryPagePayloadBytes(result.bytesByMesh, packet.meshId, appendedGpuBytes);
+			}
+		}
+		return result;
 	}
 
 	// HashClusterRangeValue is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -534,6 +841,7 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 	resources.viewType = viewType;
 	resources.viewId = viewId;
 	resources.live = !frameData.virtualGeometryGpuPackets.empty() || !frameData.virtualGeometryGpuBatches.empty();
+	resources.pagePayloadBytesByMesh.clear();
 	resources.retireAfterFrameId = frameId + static_cast<std::uint64_t>(MAX_FRAMES_IN_FLIGHT);
 	if (currentFrame < pendingVirtualGeometryPageRetirementsByFrame.size())
 	{
@@ -619,23 +927,15 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		counterReadbackWords.push_back(readback.rejectedPackets);
 		counterReadbackWords.push_back(readback.failOpenPackets);
 	}
-	std::vector<std::uint32_t> pagePayloadWords;
-	pagePayloadWords.reserve(frameData.virtualGeometryGpuPackets.size() * 8u);
-	for (const GpuVirtualGeometryPacketRecord& packet : frameData.virtualGeometryGpuPackets)
-	{
-		// The current GPU payload metadata table is a compact, shader-readable
-		// mirror of the CPU packet source labels. Later phases can replace the
-		// byte-range words with real page buffer offsets without changing
-		// descriptor lifetime rules.
-		pagePayloadWords.push_back(packet.pageId);
-		pagePayloadWords.push_back(packet.fallbackPageId);
-		pagePayloadWords.push_back(static_cast<std::uint32_t>(packet.payloadSource));
-		pagePayloadWords.push_back(static_cast<std::uint32_t>(packet.emittedSource));
-		pagePayloadWords.push_back(static_cast<std::uint32_t>(packet.pagePayloadByteOffset & 0xffffffffull));
-		pagePayloadWords.push_back(static_cast<std::uint32_t>((packet.pagePayloadByteOffset >> 32u) & 0xffffffffull));
-		pagePayloadWords.push_back(static_cast<std::uint32_t>(packet.pagePayloadByteSize & 0xffffffffull));
-		pagePayloadWords.push_back(static_cast<std::uint32_t>((packet.pagePayloadByteSize >> 32u) & 0xffffffffull));
-	}
+	// Resident page/fallback packets now append a shader-decodable page-local
+	// virtual geometry payload after the descriptor table. Legacy and
+	// conservative fallback packets keep descriptor metadata only and continue
+	// through the owner mesh path.
+	// The page-local virtual geometry payload is the renderable stream source.
+	VirtualGeometryPageLocalPayloadBuildResult pagePayloadBuild =
+		BuildVirtualGeometryPageLocalPayloadWords(frameData.virtualGeometryGpuPackets);
+	std::vector<std::uint32_t>& pagePayloadWords = pagePayloadBuild.words;
+	resources.pagePayloadBytesByMesh = std::move(pagePayloadBuild.bytesByMesh);
 	ensureAndWriteBuffer(
 		resources.generatedSubmissionBuffer,
 		resources.generatedSubmissionCapacity,
@@ -656,9 +956,12 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		pagePayloadWords.size(),
 		sizeof(std::uint32_t),
 		pagePayloadWords.data(),
-		"Virtual Geometry Page Payload Source Buffer");
+		"Virtual Geometry Physical Page Payload Descriptor Buffer");
 
-	auto publishBindlessBufferForCurrentFrame = [&](std::uint32_t& bindlessIndex, const VulkanBuffer& buffer) -> std::uint32_t {
+	auto publishBindlessBufferForCurrentFrame = [&](
+		std::uint32_t& bindlessIndex,
+		VirtualGeometryGpuPacketFrameResources::BindlessBufferPublication& publication,
+		const VulkanBuffer& buffer) -> std::uint32_t {
 		if (buffer.buffer == VK_NULL_HANDLE || buffer.size == 0u)
 		{
 			return INVALID_BINDLESS_BUFFER_INDEX;
@@ -666,19 +969,32 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 		if (bindlessIndex == INVALID_BINDLESS_BUFFER_INDEX)
 		{
 			bindlessIndex = AllocateBufferIndex();
+			publication = {};
 		}
-		UpdateGlobalBufferForFrame(currentFrame, bindlessIndex, buffer.buffer, 0u, buffer.size);
+		const bool alreadyPublished =
+			publication.buffer == buffer.buffer
+			&& publication.range == buffer.size;
+		if (!alreadyPublished)
+		{
+			// The global bindless descriptor set is shared by every editor view
+			// in this frame slot. Only publish when the handle or range changes;
+			// otherwise an unnecessary descriptor update can invalidate a Scene
+			// View command buffer that was recorded before Game View submission.
+			UpdateGlobalBufferForFrame(currentFrame, bindlessIndex, buffer.buffer, 0u, buffer.size);
+			publication.buffer = buffer.buffer;
+			publication.range = buffer.size;
+		}
 		return bindlessIndex;
 	};
-	activeVirtualGeometryPacketBufferIndex = publishBindlessBufferForCurrentFrame(resources.packetBufferIndex, resources.packetBuffer);
-	activeVirtualGeometryBatchBufferIndex = publishBindlessBufferForCurrentFrame(resources.batchBufferIndex, resources.batchBuffer);
-	activeVirtualGeometryCompactedPacketBufferIndex = publishBindlessBufferForCurrentFrame(resources.compactedPacketBufferIndex, resources.compactedPacketBuffer);
-	activeVirtualGeometryGeneratedSubmissionBufferIndex = publishBindlessBufferForCurrentFrame(resources.generatedSubmissionBufferIndex, resources.generatedSubmissionBuffer);
-	activeVirtualGeometryCounterReadbackBufferIndex = publishBindlessBufferForCurrentFrame(resources.counterReadbackBufferIndex, resources.counterReadbackBuffer);
+	activeVirtualGeometryPacketBufferIndex = publishBindlessBufferForCurrentFrame(resources.packetBufferIndex, resources.packetPublication, resources.packetBuffer);
+	activeVirtualGeometryBatchBufferIndex = publishBindlessBufferForCurrentFrame(resources.batchBufferIndex, resources.batchPublication, resources.batchBuffer);
+	activeVirtualGeometryCompactedPacketBufferIndex = publishBindlessBufferForCurrentFrame(resources.compactedPacketBufferIndex, resources.compactedPacketPublication, resources.compactedPacketBuffer);
+	activeVirtualGeometryGeneratedSubmissionBufferIndex = publishBindlessBufferForCurrentFrame(resources.generatedSubmissionBufferIndex, resources.generatedSubmissionPublication, resources.generatedSubmissionBuffer);
+	activeVirtualGeometryCounterReadbackBufferIndex = publishBindlessBufferForCurrentFrame(resources.counterReadbackBufferIndex, resources.counterReadbackPublication, resources.counterReadbackBuffer);
 	// These page payload source buffers are owned by the current frame slot.
 	// They stay alive until the frame is safely retired, which prevents Scene
 	// View/Game View from sampling a buffer that another view already reused.
-	activeVirtualGeometryPagePayloadBufferIndex = publishBindlessBufferForCurrentFrame(resources.pagePayloadBufferIndex, resources.pagePayloadBuffer);
+	activeVirtualGeometryPagePayloadBufferIndex = publishBindlessBufferForCurrentFrame(resources.pagePayloadBufferIndex, resources.pagePayloadPublication, resources.pagePayloadBuffer);
 
 	// The compaction compute path writes into the compacted/generated/counter
 	// buffers once a backend pipeline is available. Until then these buffers
@@ -1508,12 +1824,20 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	{
 		const VulkanMesh& mesh = existingMeshIt->second;
 		const VkDeviceSize totalGpuBytes = TotalMeshGpuBytes(mesh);
+		const Mesh* cpuMesh = ResourceManager::Instance().GetMesh(meshId);
+		std::string uploadDetail = "vulkan mesh cache hit";
+		if (cpuMesh != nullptr && cpuMesh->hasVirtualGeometry && cpuMesh->virtualGeometryPageStreamingReady)
+		{
+			uploadDetail = cpuMesh->virtualGeometryOwnerFallbackReason.empty()
+				? "vulkan mesh cache hit with page-local virtual geometry owner placeholders"
+				: "vulkan mesh cache hit with owning-mesh virtual geometry fallback: " + cpuMesh->virtualGeometryOwnerFallbackReason;
+		}
 		ResourceManager::Instance().MarkResourceUploadedToGpu(
 			meshId,
 			AssetType::Mesh,
 			static_cast<std::uint64_t>(currentFrame),
 			static_cast<std::uint64_t>(totalGpuBytes),
-			"vulkan mesh cache hit");
+			uploadDetail);
 		return;
 	}
 	
@@ -1584,92 +1908,122 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	// counts.w: bits [0:30] = meshletCount, bit 31 = remapEncoding (0=u32, 1=u16)
 	decodeInfo.counts[3] = (cpuMesh->header.meshletCount & 0x7FFFFFFFu) | (cpuMesh->header.meshletVertexRemapEncoding << 31u);
 
-	VulkanBuffer stagingPackedVertex = CreateBuffer(packedVertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	WriteMappedBuffer(allocator, stagingPackedVertex, cpuMesh->meshletVertexData.data(), packedVertexSize);
-
-	VulkanBuffer stagingVertexRemap = CreateBuffer(vertexRemapSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	// Zero-copy: upload raw on-disk bytes (u16 or u32) without CPU expansion.
-	WriteMappedBuffer(allocator, stagingVertexRemap, cpuMesh->meshletVertexRemapData.data(), vertexRemapSize);
-
-	VulkanBuffer stagingSkinning = { VK_NULL_HANDLE, VK_NULL_HANDLE, 0 };
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (skinningDataSize > 0)
-	{
-		stagingSkinning = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-		WriteMappedBuffer(allocator, stagingSkinning, cpuMesh->meshletSkinningData.data(), skinningDataSize);
-	}
-
-	VulkanBuffer stagingIndex = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	WriteMappedBuffer(allocator, stagingIndex, cpuMesh->meshletPrimitiveIndexData.data(), primitiveIndexSize);
-
-	VulkanBuffer stagingMeshletTable = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	WriteMappedBuffer(allocator, stagingMeshletTable, cpuMesh->meshletRecords.data(), meshletTableSize);
-
-	VulkanBuffer stagingMeshletSection = CreateBuffer(meshletSectionSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	// Virtual geometry stores one meshlet section range per emitted LOD in the MVP.
-	// Upload it with the other resident streams now; later stories bind it when
-	// shaders start selecting LOD ranges directly.
-	WriteMappedBuffer(allocator, stagingMeshletSection, cpuMesh->meshletSections.data(), meshletSectionSize);
-
-	VulkanBuffer stagingMeshletBounds = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (hasBoundsPayload)
-	{
-		WriteMappedBuffer(allocator, stagingMeshletBounds, cpuMesh->meshletBounds.data(), meshletBoundsSize);
-	}
-	else
-	{
-		MeshletBounds fallbackBounds{};
-		fallbackBounds.coneCutoff = 2.0f;
-		WriteMappedBuffer(allocator, stagingMeshletBounds, &fallbackBounds, sizeof(fallbackBounds));
-	}
-
-	VulkanBuffer stagingDecodeInfo = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-	WriteMappedBuffer(allocator, stagingDecodeInfo, &decodeInfo, sizeof(MeshDecodeInfo));
-
 	VulkanMesh vMesh{};
-	// No CPU repack path: mesh shader reads the packed payload directly from storage buffers.
-	vMesh.meshShaderVertexBuffer = CreateBuffer(packedVertexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	vMesh.meshletVertexRemapBuffer = CreateBuffer(vertexRemapSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	if (skinningDataSize > 0)
-	{
-		vMesh.meshSkinningBuffer = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	}
-	vMesh.meshDecodeInfoBuffer = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	vMesh.indexBuffer = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	vMesh.meshletBuffer = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	vMesh.meshletSectionBuffer = CreateBuffer(meshletSectionSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	vMesh.meshletBoundsBuffer = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
-	vMesh.hasMeshletBounds = hasBoundsPayload;
 	vMesh.indexCount = cpuMesh->header.meshletPrimitiveIndexCount;
 	vMesh.indexType = VK_INDEX_TYPE_UINT16;
 	vMesh.meshletCount = cpuMesh->header.meshletCount;
-
-	CopyBuffer(stagingPackedVertex.buffer, vMesh.meshShaderVertexBuffer.buffer, packedVertexSize);
-	CopyBuffer(stagingVertexRemap.buffer, vMesh.meshletVertexRemapBuffer.buffer, vertexRemapSize);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (skinningDataSize > 0)
+	const bool usePageLocalVirtualGeometry =
+		cpuMesh->hasVirtualGeometry
+		&& cpuMesh->virtualGeometryPageStreamingReady
+		&& cpuMesh->virtualGeometryOwnerFallbackReason.empty();
+	if (usePageLocalVirtualGeometry)
 	{
-		CopyBuffer(stagingSkinning.buffer, vMesh.meshSkinningBuffer.buffer, skinningDataSize);
-	}
-	CopyBuffer(stagingDecodeInfo.buffer, vMesh.meshDecodeInfoBuffer.buffer, sizeof(MeshDecodeInfo));
-	CopyBuffer(stagingIndex.buffer, vMesh.indexBuffer.buffer, primitiveIndexSize);
-	CopyBuffer(stagingMeshletTable.buffer, vMesh.meshletBuffer.buffer, meshletTableSize);
-	CopyBuffer(stagingMeshletSection.buffer, vMesh.meshletSectionBuffer.buffer, meshletSectionSize);
-	CopyBuffer(stagingMeshletBounds.buffer, vMesh.meshletBoundsBuffer.buffer, boundsUploadSize);
+		auto createPlaceholderStorageBuffer = [&](VkDeviceSize byteSize, const char* name) -> VulkanBuffer {
+			const VkDeviceSize safeSize = std::max<VkDeviceSize>(byteSize, 4u);
+			VulkanBuffer buffer = CreateBuffer(safeSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, name);
+			std::vector<std::uint8_t> zeros(static_cast<std::size_t>(safeSize), 0u);
+			WriteMappedBuffer(allocator, buffer, zeros.data(), safeSize);
+			return buffer;
+		};
 
-	vmaDestroyBuffer(allocator, stagingPackedVertex.buffer, stagingPackedVertex.allocation);
-	vmaDestroyBuffer(allocator, stagingVertexRemap.buffer, stagingVertexRemap.allocation);
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (skinningDataSize > 0)
-	{
-		vmaDestroyBuffer(allocator, stagingSkinning.buffer, stagingSkinning.allocation);
+		// Page-streamed virtual geometry uses the per-frame page-local payload
+		// buffer for real vertices, remaps, primitive indices, records, bounds,
+		// and decode constants. These tiny owner buffers keep the existing mesh
+		// descriptor set valid for legacy shader layouts without uploading the
+		// full high-detail owning mesh as a hidden residency cost.
+		vMesh.meshShaderVertexBuffer = createPlaceholderStorageBuffer(kMeshletPackedVertexStrideBytes, "Virtual Geometry Owner Placeholder Vertex Buffer");
+		vMesh.meshletVertexRemapBuffer = createPlaceholderStorageBuffer(sizeof(std::uint32_t), "Virtual Geometry Owner Placeholder Remap Buffer");
+		vMesh.meshDecodeInfoBuffer = createPlaceholderStorageBuffer(sizeof(MeshDecodeInfo), "Virtual Geometry Owner Placeholder Decode Buffer");
+		vMesh.indexBuffer = createPlaceholderStorageBuffer(sizeof(std::uint32_t), "Virtual Geometry Owner Placeholder Primitive Buffer");
+		vMesh.meshletBuffer = createPlaceholderStorageBuffer(sizeof(MeshletRecord), "Virtual Geometry Owner Placeholder Meshlet Buffer");
+		vMesh.meshletBoundsBuffer = createPlaceholderStorageBuffer(sizeof(MeshletBounds), "Virtual Geometry Owner Placeholder Bounds Buffer");
+		vMesh.hasMeshletBounds = true;
 	}
-	vmaDestroyBuffer(allocator, stagingDecodeInfo.buffer, stagingDecodeInfo.allocation);
-	vmaDestroyBuffer(allocator, stagingIndex.buffer, stagingIndex.allocation);
-	vmaDestroyBuffer(allocator, stagingMeshletTable.buffer, stagingMeshletTable.allocation);
-	vmaDestroyBuffer(allocator, stagingMeshletSection.buffer, stagingMeshletSection.allocation);
-	vmaDestroyBuffer(allocator, stagingMeshletBounds.buffer, stagingMeshletBounds.allocation);
+	else
+	{
+		VulkanBuffer stagingPackedVertex = CreateBuffer(packedVertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		WriteMappedBuffer(allocator, stagingPackedVertex, cpuMesh->meshletVertexData.data(), packedVertexSize);
+
+		VulkanBuffer stagingVertexRemap = CreateBuffer(vertexRemapSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		// Zero-copy: upload raw on-disk bytes (u16 or u32) without CPU expansion.
+		WriteMappedBuffer(allocator, stagingVertexRemap, cpuMesh->meshletVertexRemapData.data(), vertexRemapSize);
+
+		VulkanBuffer stagingSkinning = { VK_NULL_HANDLE, VK_NULL_HANDLE, 0 };
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (skinningDataSize > 0)
+		{
+			stagingSkinning = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+			WriteMappedBuffer(allocator, stagingSkinning, cpuMesh->meshletSkinningData.data(), skinningDataSize);
+		}
+
+		VulkanBuffer stagingIndex = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		WriteMappedBuffer(allocator, stagingIndex, cpuMesh->meshletPrimitiveIndexData.data(), primitiveIndexSize);
+
+		VulkanBuffer stagingMeshletTable = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		WriteMappedBuffer(allocator, stagingMeshletTable, cpuMesh->meshletRecords.data(), meshletTableSize);
+
+		VulkanBuffer stagingMeshletSection = CreateBuffer(meshletSectionSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		// Virtual geometry stores one meshlet section range per emitted LOD in the MVP.
+		// Upload it with the other resident streams now; later stories bind it when
+		// shaders start selecting LOD ranges directly.
+		WriteMappedBuffer(allocator, stagingMeshletSection, cpuMesh->meshletSections.data(), meshletSectionSize);
+
+		VulkanBuffer stagingMeshletBounds = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (hasBoundsPayload)
+		{
+			WriteMappedBuffer(allocator, stagingMeshletBounds, cpuMesh->meshletBounds.data(), meshletBoundsSize);
+		}
+		else
+		{
+			MeshletBounds fallbackBounds{};
+			fallbackBounds.coneCutoff = 2.0f;
+			WriteMappedBuffer(allocator, stagingMeshletBounds, &fallbackBounds, sizeof(fallbackBounds));
+		}
+
+		VulkanBuffer stagingDecodeInfo = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+		WriteMappedBuffer(allocator, stagingDecodeInfo, &decodeInfo, sizeof(MeshDecodeInfo));
+
+		// No CPU repack path: mesh shader reads the packed payload directly from storage buffers.
+		vMesh.meshShaderVertexBuffer = CreateBuffer(packedVertexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+		vMesh.meshletVertexRemapBuffer = CreateBuffer(vertexRemapSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+		if (skinningDataSize > 0)
+		{
+			vMesh.meshSkinningBuffer = CreateBuffer(skinningDataSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+		}
+		vMesh.meshDecodeInfoBuffer = CreateBuffer(sizeof(MeshDecodeInfo), VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+		vMesh.indexBuffer = CreateBuffer(primitiveIndexSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+		vMesh.meshletBuffer = CreateBuffer(meshletTableSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+		vMesh.meshletSectionBuffer = CreateBuffer(meshletSectionSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+		vMesh.meshletBoundsBuffer = CreateBuffer(boundsUploadSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+		vMesh.hasMeshletBounds = hasBoundsPayload;
+
+		CopyBuffer(stagingPackedVertex.buffer, vMesh.meshShaderVertexBuffer.buffer, packedVertexSize);
+		CopyBuffer(stagingVertexRemap.buffer, vMesh.meshletVertexRemapBuffer.buffer, vertexRemapSize);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (skinningDataSize > 0)
+		{
+			CopyBuffer(stagingSkinning.buffer, vMesh.meshSkinningBuffer.buffer, skinningDataSize);
+		}
+		CopyBuffer(stagingDecodeInfo.buffer, vMesh.meshDecodeInfoBuffer.buffer, sizeof(MeshDecodeInfo));
+		CopyBuffer(stagingIndex.buffer, vMesh.indexBuffer.buffer, primitiveIndexSize);
+		CopyBuffer(stagingMeshletTable.buffer, vMesh.meshletBuffer.buffer, meshletTableSize);
+		CopyBuffer(stagingMeshletSection.buffer, vMesh.meshletSectionBuffer.buffer, meshletSectionSize);
+		CopyBuffer(stagingMeshletBounds.buffer, vMesh.meshletBoundsBuffer.buffer, boundsUploadSize);
+
+		vmaDestroyBuffer(allocator, stagingPackedVertex.buffer, stagingPackedVertex.allocation);
+		vmaDestroyBuffer(allocator, stagingVertexRemap.buffer, stagingVertexRemap.allocation);
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (skinningDataSize > 0)
+		{
+			vmaDestroyBuffer(allocator, stagingSkinning.buffer, stagingSkinning.allocation);
+		}
+		vmaDestroyBuffer(allocator, stagingDecodeInfo.buffer, stagingDecodeInfo.allocation);
+		vmaDestroyBuffer(allocator, stagingIndex.buffer, stagingIndex.allocation);
+		vmaDestroyBuffer(allocator, stagingMeshletTable.buffer, stagingMeshletTable.allocation);
+		vmaDestroyBuffer(allocator, stagingMeshletSection.buffer, stagingMeshletSection.allocation);
+		vmaDestroyBuffer(allocator, stagingMeshletBounds.buffer, stagingMeshletBounds.allocation);
+	}
 
 	vMesh.bindlessIndex = AllocateBufferIndex();
 	UpdateGlobalBuffer(vMesh.bindlessIndex, vMesh.meshDecodeInfoBuffer.buffer, 0, vMesh.meshDecodeInfoBuffer.size);
@@ -1677,16 +2031,26 @@ void VulkanContext::Impl::EnsureMesh(TerraEngine::UUID meshId) {
 	meshCache[meshId] = vMesh;
 	const VkDeviceSize totalGpuBytes = TotalMeshGpuBytes(meshCache[meshId]);
 	const bool hasVirtualGeometryPageMetadata = cpuMesh->hasVirtualGeometry && !cpuMesh->virtualGeometryPages.empty();
-	// Virtual geometry pages are still uploaded as part of the owning mesh
-	// buffers in this milestone. Keep the publication reason distinct so
-	// ResourceManager diagnostics can later split page-resident publication
-	// without changing the protected Vulkan upload boundary.
+	std::string uploadDetail = "vulkan mesh buffer upload";
+	if (usePageLocalVirtualGeometry)
+	{
+		uploadDetail = "vulkan page-local virtual geometry placeholder owner descriptors; owner mesh buffers are skipped for page-local virtual geometry";
+	}
+	else if (hasVirtualGeometryPageMetadata)
+	{
+		// The current shader path still binds owner mesh buffers for decoding.
+		// Label that allocation as an owning-mesh fallback so exact residency
+		// tools do not mistake it for a page-local physical payload.
+		uploadDetail = cpuMesh->virtualGeometryPageStreamingReady
+			? "vulkan owning-mesh virtual geometry fallback upload: " + cpuMesh->virtualGeometryOwnerFallbackReason
+			: "vulkan mesh buffer upload with virtual geometry metadata that is not page-streaming ready";
+	}
 	ResourceManager::Instance().MarkResourceUploadedToGpu(
 		meshId,
 		AssetType::Mesh,
 		static_cast<std::uint64_t>(currentFrame),
 		static_cast<std::uint64_t>(totalGpuBytes),
-		hasVirtualGeometryPageMetadata ? "vulkan mesh buffer upload with virtual geometry page metadata" : "vulkan mesh buffer upload");
+		uploadDetail);
 }
 
 // VulkanContext::Impl::EnsureMeshDescriptorSet is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -4007,9 +4371,47 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 		record.assetId = meshId;
 		record.kind = TerraEngine::Renderer::BackendResourceResidencyKind::Mesh;
 		record.gpuBytes = static_cast<std::uint64_t>(gpuBytes);
+		record.exactGpuBytes = static_cast<std::uint64_t>(gpuBytes);
+		record.allocationId = static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(meshId));
+		record.byteStatus = "exact";
+		record.retirementState = "published";
 		record.subresourceCount = 8u;
 		record.detail = "vulkan mesh cache";
 		backendResidency.records.push_back(std::move(record));
+	}
+	if (frameIndex < virtualGeometryGpuPacketResourcesByFrame.size())
+	{
+		for (const VirtualGeometryGpuPacketFrameResources& resources : virtualGeometryGpuPacketResourcesByFrame[frameIndex])
+		{
+			if (!resources.live || resources.pagePayloadBytesByMesh.empty())
+			{
+				continue;
+			}
+			for (const auto& [meshId, gpuBytes] : resources.pagePayloadBytesByMesh)
+			{
+				if (meshId == TerraEngine::EMPTY_UUID || gpuBytes == 0u)
+				{
+					continue;
+				}
+
+				TerraEngine::Renderer::BackendResourceResidencyRecord record{};
+				record.assetId = meshId;
+				record.kind = TerraEngine::Renderer::BackendResourceResidencyKind::Mesh;
+				record.gpuBytes = gpuBytes;
+				record.exactGpuBytes = gpuBytes;
+				record.allocationId = static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(meshId))
+					^ (resources.resourceSerial + 0x9e3779b97f4a7c15ull);
+				record.byteStatus = "exact";
+				record.retirementState = "published";
+				record.subresourceCount = 1u;
+				// Page-local VG geometry is packed into a per-view physical
+				// payload buffer instead of the owner mesh cache. Publishing a
+				// second asset-owned record keeps Resource Residency exact while
+				// still allowing the renderer to batch those page bytes together.
+				record.detail = "vulkan virtual geometry page-local payload";
+				backendResidency.records.push_back(std::move(record));
+			}
+		}
 	}
 	for (const auto& [textureId, texture] : textureCache)
 	{
@@ -4022,6 +4424,10 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 		record.assetId = textureId;
 		record.kind = TerraEngine::Renderer::BackendResourceResidencyKind::Texture;
 		record.gpuBytes = static_cast<std::uint64_t>(texture.size);
+		record.exactGpuBytes = static_cast<std::uint64_t>(texture.size);
+		record.allocationId = static_cast<std::uint64_t>(std::hash<TerraEngine::UUID>{}(textureId));
+		record.byteStatus = "exact";
+		record.retirementState = "published";
 		record.subresourceCount = texture.residentMipCount;
 		record.detail = "vulkan texture cache";
 		backendResidency.records.push_back(std::move(record));
@@ -4748,6 +5154,32 @@ void VulkanContext::Impl::UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32
 		return;
 	}
 
+	if (frameIndex == currentFrame && frameIndex < pendingPrimaryCommandBuffers.size())
+	{
+		std::vector<VkCommandBuffer>& pendingCommandBuffers = pendingPrimaryCommandBuffers[frameIndex];
+		if (!pendingCommandBuffers.empty())
+		{
+			VkSubmitInfo pendingSubmitInfo{};
+			pendingSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+			pendingSubmitInfo.commandBufferCount = static_cast<std::uint32_t>(pendingCommandBuffers.size());
+			pendingSubmitInfo.pCommandBuffers = pendingCommandBuffers.data();
+			// Descriptor-set updates are illegal once a recorded command buffer has
+			// bound the set, even if the command buffer has not reached EndFrame yet.
+			// Submit and drain those editor view command buffers before publishing a
+			// new bindless buffer slot for the next view.
+			if (vkQueueSubmit(graphicsQueue, 1u, &pendingSubmitInfo, VK_NULL_HANDLE) == VK_SUCCESS)
+			{
+				vkQueueWaitIdle(graphicsQueue);
+				pendingCommandBuffers.clear();
+			}
+			else
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "failed to submit pending command buffers before descriptor update");
+				return;
+			}
+		}
+	}
+
 	VkDescriptorBufferInfo bufferInfo{};
 	bufferInfo.buffer = buffer;
 	bufferInfo.offset = offset;
@@ -4762,9 +5194,6 @@ void VulkanContext::Impl::UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32
 	descriptorWrite.descriptorCount = 1;
 	descriptorWrite.pBufferInfo = &bufferInfo;
 
-	// The current frame slot has already passed its fence wait in BeginFrame, so
-	// this view-local packet descriptor update does not need the heavyweight
-	// queue idle used by persistent asset descriptor mutations.
 	vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
 }
 

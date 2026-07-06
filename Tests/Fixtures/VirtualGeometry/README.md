@@ -187,6 +187,23 @@ use `maxInvalidGeneratedSubmissions == 0` and
 `maxCompactionOverflowPackets == 0`. Unsupported or unavailable counter sources
 must publish unsupported gates instead of passing as zero-valued metrics.
 
+## Feature 034 True Page Residency Quickstart
+
+Use `specs/034-vg-true-page-residency/quickstart.md` for exact-memory and
+true-page-payload validation. The clean-checkout pass should include package
+children, unavailable accounting, resident page payloads, protected fallback
+payloads, and explicit owning-mesh fallback diagnostics.
+
+```powershell
+ctest --test-dir out/build/Debug -C Debug -R "ResourceResidency|ResourceStreaming|ResourceManagerMesh|ResourceResidencyWindow" --output-on-failure
+ctest --test-dir out/build/Debug -C Debug -R "VirtualGeometry\\.(Render|PageStreaming|ShaderLayout|Batching|HiZ|Hardening|MultiView|Diagnostics|PageResidency)" --output-on-failure
+```
+
+Manual validation should open Resource Residency while a dense page-budget
+scene is visible. `Stream CPU Bytes` and `Render GPU Bytes` must be exact live
+bytes or `unavailable`; package parent rows and pending page requests must not
+contribute numeric current bytes unless they own live allocations.
+
 For manual large-asset passes, import one dense scan-style mesh, one
 hard-surface multi-material mesh, one one-sided opaque cone-safe mesh, and one
 thin/foliage-like or double-sided occlusion mesh into a local scratch project.
@@ -214,6 +231,13 @@ failed, or evicted. The page budget fixture must keep resident page bytes within
 the configured budget while exposing requested, resident, evicted, and
 re-requested page counters. The malformed page fixture must fail integrity
 validation before corrupt page payloads become renderable.
+
+For feature `034`, exact residency and fallback diagnostics are active before
+the shader path has a standalone page-local decode layout. If a fixture renders
+through the owning mesh vertex/remap/primitive streams, diagnostics must label
+that as owning-mesh fallback and the no-full-owner residency gate must fail.
+Do not mark such a run as true resident-page rendering until the shader consumes
+page-local geometry buffers for actual vertex and primitive decode.
 
 ## Stress Counter Thresholds
 

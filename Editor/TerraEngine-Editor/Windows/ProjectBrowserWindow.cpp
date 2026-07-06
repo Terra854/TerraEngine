@@ -780,8 +780,11 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 					const std::string& importer = it->second.importerName;
 					const char* payloadType = "ASSET_GUID";
 
-					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (importer == "MeshImporter" || TerraEngine::AssetPipeline::IsModelPackageImporterName(importer)) payloadType = "ASSET_MESH";
+					// Only standalone mesh assets can fill a single MeshRenderComponent
+					// slot. GLB/FBX package parents are containers for generated
+					// mesh children, so dragging the parent as ASSET_MESH would assign
+					// a GUID that no renderable mesh resource owns.
+					if (importer == "MeshImporter") payloadType = "ASSET_MESH";
 					else if (importer == "TextureImporter") payloadType = "ASSET_TEXTURE";
 					else if (importer == "ShaderImporter") payloadType = "ASSET_SHADER";
 					else if (importer == "MaterialImporter") payloadType = "ASSET_MATERIAL";

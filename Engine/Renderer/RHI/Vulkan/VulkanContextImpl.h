@@ -351,6 +351,12 @@ struct VulkanContext::Impl {
 				// must retire an allocation.
 				struct VirtualGeometryGpuPacketFrameResources
 				{
+					struct BindlessBufferPublication
+					{
+						VkBuffer buffer = VK_NULL_HANDLE;
+						VkDeviceSize range = 0u;
+					};
+
 					std::uint64_t resourceSerial = 0u;
 					std::uint64_t frameId = 0u;
 					std::uint32_t viewId = 0u;
@@ -361,6 +367,12 @@ struct VulkanContext::Impl {
 					VulkanBuffer generatedSubmissionBuffer{};
 					VulkanBuffer counterReadbackBuffer{};
 					VulkanBuffer pagePayloadBuffer{};
+					BindlessBufferPublication packetPublication{};
+					BindlessBufferPublication batchPublication{};
+					BindlessBufferPublication compactedPacketPublication{};
+					BindlessBufferPublication generatedSubmissionPublication{};
+					BindlessBufferPublication counterReadbackPublication{};
+					BindlessBufferPublication pagePayloadPublication{};
 					std::uint32_t packetBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::uint32_t batchBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
 					std::uint32_t compactedPacketBufferIndex = INVALID_BINDLESS_BUFFER_INDEX;
@@ -373,6 +385,11 @@ struct VulkanContext::Impl {
 					std::size_t generatedSubmissionCapacity = 0u;
 					std::size_t counterReadbackCapacity = 0u;
 					std::size_t pagePayloadCapacity = 0u;
+					// Resource Residency needs asset-owned byte counts even
+					// though page-local virtual geometry streams are packed into
+					// one per-view Vulkan buffer. This map records the exact
+					// byte slices uploaded for each mesh in this frame resource.
+					std::unordered_map<TerraEngine::UUID, std::uint64_t> pagePayloadBytesByMesh;
 					std::uint64_t retireAfterFrameId = 0u;
 					bool live = false;
 				};
@@ -710,6 +727,7 @@ struct VulkanContext::Impl {
 		uint32_t virtualGeometryEmittedSource;
 		uint32_t virtualGeometryPagePayloadByteOffset;
 		uint32_t virtualGeometryPagePayloadByteSize;
+		uint32_t virtualGeometryPacketDescriptorIndex;
 		// Editor-only tint is part of the default mesh push-constant contract so
 		// every default shader stage observes the same byte layout.
 		alignas(16) glm::vec4 editorTint = glm::vec4(0.0f);

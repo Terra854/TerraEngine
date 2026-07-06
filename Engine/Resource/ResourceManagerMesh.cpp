@@ -626,19 +626,19 @@ namespace
 				return false;
 			}
 			const VirtualGeometryPageRecord& fallbackPage = mesh.virtualGeometryPages[page.fallbackPageId];
-			if (fallbackPage.firstLodIndex > page.firstLodIndex)
+			if (fallbackPage.firstLodIndex < page.firstLodIndex)
 			{
 				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page fallback points to a higher-detail page in " << resolvedPath);
 				return false;
 			}
-			if (page.firstLodIndex == 0u && page.fallbackPageId == page.pageId)
+			if (page.fallbackPageId == page.pageId)
 			{
 				hasRenderableFallbackPage = true;
 			}
 		}
 		if (!hasRenderableFallbackPage)
 		{
-			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page table does not keep LOD0 tied to a resident fallback page in " << resolvedPath);
+			TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page table does not declare a resident fallback page in " << resolvedPath);
 			return false;
 		}
 
@@ -659,6 +659,81 @@ namespace
 		}
 
 		return true;
+	}
+
+	std::uint64_t AddVirtualGeometryByteCount(std::uint64_t left, std::uint64_t right)
+	{
+		constexpr std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
+		return left > max - right ? max : left + right;
+	}
+
+	std::uint64_t ResolveFullOwnerMeshPayloadBytes(const Mesh& mesh)
+	{
+		// The current mesh shader decodes the owner mesh buffers: packed
+		// vertices, remap entries, optional skinning, primitive indices,
+		// meshlet records, sections, and bounds. This helper keeps the exact
+		// byte count beside the page-policy derivation so diagnostics do not
+		// confuse page-budget metadata with the actual owner upload.
+		std::uint64_t bytes = 0u;
+		bytes = AddVirtualGeometryByteCount(bytes, static_cast<std::uint64_t>(mesh.meshletVertexData.size()));
+		bytes = AddVirtualGeometryByteCount(bytes, static_cast<std::uint64_t>(mesh.meshletVertexRemapData.size()));
+		bytes = AddVirtualGeometryByteCount(bytes, static_cast<std::uint64_t>(mesh.meshletSkinningData.size()));
+		bytes = AddVirtualGeometryByteCount(bytes, static_cast<std::uint64_t>(mesh.meshletPrimitiveIndexData.size()));
+		bytes = AddVirtualGeometryByteCount(bytes, static_cast<std::uint64_t>(mesh.meshletRecords.size()) * sizeof(MeshletRecord));
+		bytes = AddVirtualGeometryByteCount(bytes, static_cast<std::uint64_t>(mesh.meshletSections.size()) * sizeof(MeshletSection));
+		bytes = AddVirtualGeometryByteCount(bytes, static_cast<std::uint64_t>(mesh.meshletBounds.size()) * sizeof(MeshletBounds));
+		return bytes;
+	}
+
+	void ResolveVirtualGeometryUploadPolicy(Mesh& mesh)
+	{
+		mesh.virtualGeometryPageStreamingReady = false;
+		mesh.virtualGeometryFullOwnerPayloadBytes = 0u;
+		mesh.virtualGeometryResidentHighDetailPageBytes = 0u;
+		mesh.virtualGeometryResidentFallbackPageBytes = 0u;
+		mesh.virtualGeometryProtectedFallbackBytes = 0u;
+		mesh.virtualGeometryOwnerFallbackReason.clear();
+		if (!mesh.hasVirtualGeometry || mesh.virtualGeometryPages.empty())
+		{
+			return;
+		}
+
+		mesh.virtualGeometryFullOwnerPayloadBytes = ResolveFullOwnerMeshPayloadBytes(mesh);
+		for (const VirtualGeometryPageRecord& page : mesh.virtualGeometryPages)
+		{
+			const bool fallbackPage = page.pageId == page.fallbackPageId;
+			if (fallbackPage)
+			{
+				mesh.virtualGeometryResidentFallbackPageBytes = AddVirtualGeometryByteCount(
+					mesh.virtualGeometryResidentFallbackPageBytes,
+					page.byteSize);
+				mesh.virtualGeometryProtectedFallbackBytes = AddVirtualGeometryByteCount(
+					mesh.virtualGeometryProtectedFallbackBytes,
+					page.byteSize);
+			}
+			else
+			{
+				mesh.virtualGeometryResidentHighDetailPageBytes = AddVirtualGeometryByteCount(
+					mesh.virtualGeometryResidentHighDetailPageBytes,
+					page.byteSize);
+			}
+		}
+
+		mesh.virtualGeometryPageStreamingReady =
+			!mesh.virtualGeometryClusters.empty()
+			&& !mesh.virtualGeometryClusterPageLinks.empty()
+			&& mesh.virtualGeometryProtectedFallbackBytes > 0u;
+		if (!mesh.virtualGeometryPageStreamingReady)
+		{
+			mesh.virtualGeometryOwnerFallbackReason = "virtual geometry page tables do not prove protected fallback coverage";
+			return;
+		}
+
+		// A valid protected fallback page table is now enough to enter the
+		// normal page-local rendering path. Any later owning-mesh upload must be
+		// caused by a real page-policy failure, not by the old metadata-only
+		// shader limitation.
+		mesh.virtualGeometryOwnerFallbackReason.clear();
 	}
 
 	bool ParseVirtualGeometryPayload(
@@ -745,6 +820,22 @@ namespace
 			return false;
 		}
 
+		for (const VirtualGeometryPageRecord& page : pages)
+		{
+			const bool offsetFits = page.byteOffset <= static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
+			const bool sizeFits = page.byteSize <= static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
+			std::size_t rangeEnd = 0u;
+			if (!offsetFits
+				|| !sizeFits
+				|| page.byteOffset > static_cast<std::uint64_t>(payloadSize)
+				|| !TryAdd(static_cast<std::size_t>(page.byteOffset), static_cast<std::size_t>(page.byteSize), rangeEnd)
+				|| rangeEnd > payloadSize)
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "TEMF virtual geometry page payload byte range overruns payload in " << resolvedPath);
+				return false;
+			}
+		}
+
 		std::string stringTable;
 		if (virtualHeader.diagnosticStringSize != 0u)
 		{
@@ -773,7 +864,12 @@ namespace
 		mesh.virtualGeometryDiagnostics = std::move(diagnostics);
 		mesh.virtualGeometryDiagnosticStrings = std::move(stringTable);
 
-		return ValidateVirtualGeometryPayloadTables(header, mesh, resolvedPath);
+		const bool validPayload = ValidateVirtualGeometryPayloadTables(header, mesh, resolvedPath);
+		if (validPayload)
+		{
+			ResolveVirtualGeometryUploadPolicy(mesh);
+		}
+		return validPayload;
 	}
 
 	// IsCompiledMeshPath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

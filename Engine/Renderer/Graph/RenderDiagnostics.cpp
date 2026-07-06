@@ -161,6 +161,16 @@ namespace TerraEngine::Renderer {
 				}
 			}
 		};
+		const std::uint64_t exactResidentPageBytes =
+			snapshot.pageResidency.residentHighDetailBytes
+			+ snapshot.pageResidency.residentFallbackBytes;
+		const std::uint64_t residentPageBytesForGates =
+			exactResidentPageBytes > 0u
+				? exactResidentPageBytes
+				: snapshot.pageSources.residentPayloadBytes;
+		const std::uint64_t owningMeshFallbackBytes =
+			snapshot.pageResidency.owningMeshFallbackBytes
+			+ snapshot.pageSources.embeddedFallbackBytes;
 
 		if (snapshot.counterSource == VirtualGeometryCounterSource::Unsupported
 			|| snapshot.counterSource == VirtualGeometryCounterSource::Unavailable)
@@ -256,10 +266,10 @@ namespace TerraEngine::Renderer {
 				"Page-pressure gate requires a configured virtual geometry byte budget.");
 		}
 
-		if (snapshot.geometryBudgetBytes > 0u && snapshot.pageSources.residentPayloadBytes > 0u)
+		if (snapshot.geometryBudgetBytes > 0u && residentPageBytesForGates > 0u)
 		{
 			const float residentBudgetRatio =
-				static_cast<float>(snapshot.pageSources.residentPayloadBytes)
+				static_cast<float>(residentPageBytesForGates)
 				/ static_cast<float>(snapshot.geometryBudgetBytes);
 			addGate(
 				"virtual-geometry-resident-page-budget-ratio",
@@ -280,10 +290,10 @@ namespace TerraEngine::Renderer {
 				"Resident page-budget gate requires resident payload bytes and a configured page budget.");
 		}
 
-		if (snapshot.estimatedGeometryBytes > 0u && snapshot.pageSources.residentPayloadBytes > 0u)
+		if (snapshot.estimatedGeometryBytes > 0u && residentPageBytesForGates > 0u)
 		{
 			const float owningMeshResidencyRatio =
-				static_cast<float>(snapshot.pageSources.residentPayloadBytes)
+				static_cast<float>(residentPageBytesForGates)
 				/ static_cast<float>(snapshot.estimatedGeometryBytes);
 			addGate(
 				"virtual-geometry-full-owning-mesh-residency",
@@ -303,6 +313,15 @@ namespace TerraEngine::Renderer {
 				"ratio",
 				"Full-owning-mesh regression gate requires estimated full geometry bytes and resident payload bytes.");
 		}
+
+		addGate(
+			"virtual-geometry-owning-mesh-fallback-bytes",
+			"virtual-geometry-page-streaming-resident",
+			"owningMeshFallbackBytes",
+			0.0f,
+			static_cast<float>(owningMeshFallbackBytes),
+			"bytes",
+			true);
 
 		// True page streaming must not hide holes or the legacy embedded mesh
 		// path behind normal-looking counters. These gates intentionally read
@@ -611,17 +630,27 @@ namespace TerraEngine::Renderer {
 					++snapshot.residentPages;
 					++contributor.residentPages;
 					contributor.residentBytes += page.byteSize;
+					if (page.state == GeometryPageState::PendingRetirement)
+					{
+						++snapshot.pageResidency.retiringPages;
+						snapshot.pageResidency.retiringBytes += page.byteSize;
+						contributor.retiringBytes += page.byteSize;
+					}
 					if (page.fallbackPage || page.pinnedFallback || page.state == GeometryPageState::Pinned)
 					{
 						++snapshot.pinnedFallbackPages;
 						++snapshot.pageResidency.pinnedFallbackPages;
 						++contributor.pinnedFallbackPages;
 						snapshot.pageResidency.pinnedFallbackBytes += page.byteSize;
+						snapshot.pageResidency.residentFallbackBytes += page.byteSize;
 						contributor.pinnedFallbackBytes += page.byteSize;
+						contributor.residentFallbackBytes += page.byteSize;
 					}
 					if (!page.fallbackPage && !page.pinnedFallback && page.state != GeometryPageState::Pinned)
 					{
+						snapshot.pageResidency.residentHighDetailBytes += page.byteSize;
 						contributor.reclaimableBytes += page.byteSize;
+						contributor.residentHighDetailBytes += page.byteSize;
 					}
 					break;
 				case GeometryPageState::Requested:
@@ -893,24 +922,41 @@ namespace TerraEngine::Renderer {
 		{
 			snapshot.warnings.push_back("Virtual geometry GPU packet path used fallback: " + snapshot.gpuFallbackReason);
 		}
+		const bool deriveResidencyBytesFromPayloads = visibility.pageResidency.empty();
 		for (const VirtualGeometryPagePayloadRecord& payload : visibility.residentPagePayloads)
 		{
+			const bool embeddedFallbackPayload =
+				payload.source == VirtualGeometryPagePayloadSource::EmbeddedMeshPayload
+				|| payload.source == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback;
 			if (payload.source == VirtualGeometryPagePayloadSource::ResidentPagePayload)
 			{
 				++snapshot.pageSources.highDetailPayloads;
+				if (deriveResidencyBytesFromPayloads)
+				{
+					snapshot.pageResidency.residentHighDetailBytes += payload.payloadByteSize;
+				}
 			}
 			if (payload.source == VirtualGeometryPagePayloadSource::ResidentFallbackPayload || payload.pinnedFallback)
 			{
 				++snapshot.pageSources.fallbackPayloads;
 				snapshot.pageSources.fallbackPayloadBytes += payload.payloadByteSize;
+				if (deriveResidencyBytesFromPayloads)
+				{
+					snapshot.pageResidency.residentFallbackBytes += payload.payloadByteSize;
+				}
 			}
-			if (payload.source == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback)
+			if (embeddedFallbackPayload)
 			{
 				++snapshot.pageSources.embeddedFallbackPayloads;
 				++snapshot.embeddedFallbackPayloadCount;
 				snapshot.pageSources.embeddedFallbackBytes += payload.payloadByteSize;
+				if (deriveResidencyBytesFromPayloads)
+				{
+					snapshot.pageResidency.embeddedFallbackBytes += payload.payloadByteSize;
+					snapshot.pageResidency.owningMeshFallbackBytes += payload.payloadByteSize;
+				}
 			}
-			if (payload.resident || payload.source == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback)
+			if (payload.resident || embeddedFallbackPayload)
 			{
 				++snapshot.pageSources.residentPayloads;
 				snapshot.pageSources.residentPayloadBytes += payload.payloadByteSize;
@@ -1024,10 +1070,18 @@ namespace TerraEngine::Renderer {
 					snapshot.pageResidency.pinnedFallbackBytes += payloadBytes;
 					++contributor->pinnedFallbackPages;
 					contributor->pinnedFallbackBytes += payloadBytes;
+					contributor->residentFallbackBytes += payloadBytes;
 				}
 				else
 				{
 					contributor->reclaimableBytes += payloadBytes;
+					contributor->residentHighDetailBytes += payloadBytes;
+				}
+				if (payload.source == VirtualGeometryPagePayloadSource::EmbeddedMeshPayload
+					|| payload.source == VirtualGeometryPagePayloadSource::ConservativeEmbeddedFallback)
+				{
+					contributor->embeddedFallbackBytes += payloadBytes;
+					contributor->owningMeshFallbackBytes += payloadBytes;
 				}
 			}
 		}
@@ -1048,10 +1102,14 @@ namespace TerraEngine::Renderer {
 					{
 						++contributor->pinnedFallbackPages;
 						contributor->pinnedFallbackBytes += pageBytes;
+						contributor->residentFallbackBytes += pageBytes;
+						snapshot.pageResidency.residentFallbackBytes += pageBytes;
 					}
 					else
 					{
 						contributor->reclaimableBytes += pageBytes;
+						contributor->residentHighDetailBytes += pageBytes;
+						snapshot.pageResidency.residentHighDetailBytes += pageBytes;
 					}
 				}
 				break;
@@ -1060,21 +1118,26 @@ namespace TerraEngine::Renderer {
 				++snapshot.pinnedFallbackPages;
 				++snapshot.pageResidency.pinnedFallbackPages;
 				snapshot.pageResidency.pinnedFallbackBytes += pageBytes;
+				snapshot.pageResidency.residentFallbackBytes += pageBytes;
 				if (contributor != nullptr)
 				{
 					++contributor->residentPages;
 					++contributor->pinnedFallbackPages;
 					contributor->residentBytes += pageBytes;
 					contributor->pinnedFallbackBytes += pageBytes;
+					contributor->residentFallbackBytes += pageBytes;
 				}
 				break;
 			case GeometryPageState::PendingRetirement:
 				++snapshot.residentPages;
+				++snapshot.pageResidency.retiringPages;
+				snapshot.pageResidency.retiringBytes += pageBytes;
 				if (contributor != nullptr)
 				{
 					++contributor->residentPages;
 					contributor->residentBytes += pageBytes;
 					contributor->reclaimableBytes += pageBytes;
+					contributor->retiringBytes += pageBytes;
 				}
 				break;
 			case GeometryPageState::Requested:

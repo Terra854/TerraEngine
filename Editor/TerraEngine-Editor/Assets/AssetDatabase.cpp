@@ -1119,7 +1119,7 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 		AssetType type;
 		bool known = false;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (metadata.importerName == "MeshImporter" || TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)) { type = AssetType::Mesh; known = true; }
+		if (metadata.importerName == "MeshImporter") { type = AssetType::Mesh; known = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 		else if (metadata.importerName == "TextureImporter") { type = AssetType::Texture; known = true; }
 		// if is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1135,22 +1135,25 @@ void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const s
 			std::filesystem::path fullCompiled = buildRoot / metadata.compiledPath;
 			ResourceManager::Instance().RegisterAssetPath(metadata.guid, fullCompiled, type);
 
-			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (needsImport) {
-				if (type == AssetType::Material) {
-					RenderSystem::Instance().ReloadMaterial(metadata.guid);
-				} else if (type == AssetType::Mesh) {
-					RenderSystem::Instance().ReloadMesh(metadata.guid);
-				} else if (type == AssetType::Texture) {
-					RenderSystem::Instance().ReloadTexture(metadata.guid);
-				}
-			}
+			(void)needsImport;
+			// Import registration is allowed to update the asset database and
+			// ResourceManager path aliases, but it must not synchronously destroy
+			// or rewrite Vulkan descriptors. The editor can import while a view
+			// has already recorded command buffers for the current frame; tearing
+			// down mesh/material/texture GPU objects here would make those command
+			// buffers invalid before submit. The renderer/resource residency path
+			// owns descriptor-safe retirement once a later frame observes the new
+			// asset revision.
 		}
 	}
 
 	if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
 	{
 		RegisterGeneratedModelPackageMaterialMetadata(absSourcePath);
+		// Generated child resources only publish GUID-to-path aliases here. Live
+		// GPU descriptor invalidation must happen through the renderer's normal
+		// retirement path, otherwise already-recorded command buffers may still
+		// reference descriptor sets that a package reimport just updated or freed.
 		RegisterGeneratedModelPackageResources(absSourcePath, buildRoot);
 	}
 }
@@ -1194,7 +1197,9 @@ bool AssetDatabase::LoadAssetIndex() {
 			if (!std::filesystem::exists(absSourcePath)) {
 				continue;
 			}
-			if (!metadata.compiledPath.empty() && !std::filesystem::exists(buildRoot / metadata.compiledPath)) {
+			if (!metadata.compiledPath.empty()
+				&& !TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName)
+				&& !std::filesystem::exists(buildRoot / metadata.compiledPath)) {
 				continue;
 			}
 
@@ -1683,7 +1688,7 @@ bool AssetDatabase::SaveMetadata(const AssetMetadata& metadata) {
 
 bool AssetDatabase::CompileModelPackageWithProcess(const AssetMetadata& metadata, const std::shared_ptr<AsyncImportProgressState>& progressState) {
 	const std::filesystem::path fullSourcePath = assetRoot / metadata.sourcePath;
-	const std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
+	const std::filesystem::path expectedPackageSidecarPath = TerraEngine::AssetPipeline::GetImportResultPath(fullSourcePath);
 
 #ifdef _WIN32
 	const std::filesystem::path compilerPath = GetEditorExecutableDirectory() / kModelPackageCompilerName;
@@ -1699,7 +1704,7 @@ bool AssetDatabase::CompileModelPackageWithProcess(const AssetMetadata& metadata
 		+ L" --source-relative " + QuoteCommandLineArgument(metadata.sourcePath)
 		+ L" --package-guid " + QuoteCommandLineArgument(UuidToString(metadata.guid))
 		+ L" --shader-guid " + QuoteCommandLineArgument(UuidToString(ResourceManager::Instance().GetDefaultShaderCollectionID()));
-	return RunCompilerProcess(compilerPath, commandLine, progressState, "Model package compiler", fullCompiledPath);
+	return RunCompilerProcess(compilerPath, commandLine, progressState, "Model package compiler", expectedPackageSidecarPath);
 #else
 	TerraEngine::AssetPipeline::ModelPackageImportOptions options{};
 	options.sourcePath = fullSourcePath;
@@ -1718,7 +1723,7 @@ bool AssetDatabase::CompileModelPackageWithProcess(const AssetMetadata& metadata
 	if (!TerraEngine::AssetPipeline::SaveModelPackageImportResult(fullSourcePath, importResult)) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Failed to save model package import result sidecar for " << fullSourcePath);
 	}
-	return importResult.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed && std::filesystem::exists(fullCompiledPath);
+	return importResult.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed && std::filesystem::exists(expectedPackageSidecarPath);
 #endif
 }
 
@@ -2289,8 +2294,11 @@ bool AssetDatabase::TryGetGeneratedModelPackageChildIds(
 }
 
 bool AssetDatabase::IsMeshAsset(const AssetMetadata& metadata) const {
-	return metadata.importerName == "MeshImporter"
-		|| TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName);
+	// Model-package parents are logical containers. Their generated child
+	// meshes own the renderable TEMF payloads and are queried through the
+	// package sidecar, so generic mesh-only editor controls must ignore the
+	// parent source asset.
+	return metadata.importerName == "MeshImporter";
 }
 
 bool AssetDatabase::TryGetVirtualGeometryMetadata(const AssetMetadata& metadata, VirtualGeometryAssetMetadata& outMetadata) const {

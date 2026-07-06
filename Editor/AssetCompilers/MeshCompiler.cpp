@@ -1687,9 +1687,10 @@ namespace
 		AppendRequestedTargetReport(report, 0u, 1.0f, sourceTriangleCount, sourceMeshletCount, VirtualGeometryDetailTargetRecordStatus::Generated);
 		report.virtualGeometry.generatedLevels.push_back({ 0u, 0u, 0u, 1.0f, sourceTriangleCount, sourceMeshletCount, 0.0f });
 
-		// LOD0 is always accepted before optional simplification starts. That
-		// gives the renderer a known-good resident fallback even when every
-		// lower target is skipped, merged, or rejected by the adaptive gates.
+		// LOD0 is always accepted before optional simplification starts so the
+		// virtual-geometry chain has a complete source-detail reference. If no
+		// lower-detail level survives the adaptive gates, this same page becomes
+		// the explicit fallback when fallback ids are assigned after cooking.
 		// Very small meshes keep a one-detail virtual-geometry payload. That is
 		// cheaper and safer than forcing simplification that cannot remove enough
 		// triangles to pay for the extra LOD switch.
@@ -2448,7 +2449,9 @@ namespace
 		page.lodCount = 1u;
 		page.groupOffset = groupOffset;
 		page.groupCount = static_cast<std::uint32_t>(output.cullableGroups.size()) - groupOffset;
-		page.fallbackPageId = 0u;
+		// The final fallback page is assigned after all detail levels are known.
+		// Until then, point at self so partially-built diagnostics stay valid.
+		page.fallbackPageId = page.pageId;
 		page.clusterPageLinkOffset = clusterLinkOffset;
 		page.clusterPageLinkCount = static_cast<std::uint32_t>(output.clusterPageLinks.size()) - clusterLinkOffset;
 		page.priority = lodIndex == 0u ? 1000u : std::max<std::uint32_t>(1u, 1000u - (lodIndex * 100u));
@@ -2741,6 +2744,19 @@ namespace
 			}
 		}
 
+		if (!output.pages.empty())
+		{
+			const std::uint32_t fallbackPageId = output.pages.back().pageId;
+			for (VirtualGeometryPageRecord& page : output.pages)
+			{
+				// LOD indices increase as the cook moves toward coarser detail.
+				// The last emitted page is therefore the cheapest complete
+				// coverage fallback; high-detail pages reference it instead of
+				// pretending LOD0 is fallback geometry.
+				page.fallbackPageId = fallbackPageId;
+			}
+		}
+
 		const bool hierarchyLinked = LinkVirtualGeometryClusterHierarchy(output.clusters, output.clusterCoverage);
 		const bool coverageValidated = hierarchyLinked && ValidateVirtualGeometryClusterCoverage(output.clusters, output.clusterCoverage);
 		if (!coverageValidated)
@@ -2862,7 +2878,7 @@ namespace
 				page.lodCount,
 				page.fallbackPageId,
 				page.byteSize,
-				page.pageId == page.fallbackPageId || page.firstLodIndex == 0u
+				page.pageId == page.fallbackPageId
 			});
 		}
 		return true;

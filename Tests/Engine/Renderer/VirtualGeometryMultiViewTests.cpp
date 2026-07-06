@@ -704,6 +704,122 @@ namespace TerraEngine::Tests
 			}
 		});
 
+		registry.Add("VirtualGeometry.Render.MultiView.US3.ResizePageSourcesAndCullingStayPerView", [](TestContext& context) {
+			TerraEngine::Renderer::RenderFrameSnapshot snapshot;
+			snapshot.frameId = 903u;
+
+			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
+
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot gameState;
+			gameState.outputKind = RenderOutputKind::GameView;
+			gameState.viewType = RenderViewType::Game;
+			gameState.outputId = 2u;
+			gameState.frameId = snapshot.frameId;
+			gameState.renderSize = glm::uvec2(1920u, 1080u);
+			gameState.valid = true;
+			gameState.source = VirtualGeometryCounterSource::GPUReadback;
+			gameState.hiZValidationState.state = VirtualGeometryHiZState::Active;
+			gameState.hiZValidationState.pyramidReady = true;
+			gameState.hiZValidationState.pyramidSize = gameState.renderSize;
+			gameState.hiZValidationState.renderSize = gameState.renderSize;
+			gameState.hiZValidationState.cameraSignature = 0x90320001u;
+			gameState.hiZValidationState.depthSceneSignature = 0x90320002u;
+			gameState.counters.source = gameState.source;
+			gameState.counters.selectedMeshlets = 96u;
+			gameState.counters.dispatchedMeshlets = 64u;
+			gameState.counters.culledMeshlets = 32u;
+			gameState.counters.culledByHiZ = 24u;
+			gameState.counters.culledByFrustum = 8u;
+			gameState.counters.authoritative = true;
+
+			VirtualGeometryPagePayloadRecord gamePayload{};
+			gamePayload.meshId = meshId;
+			gamePayload.pageId = 6u;
+			gamePayload.fallbackPageId = 1u;
+			gamePayload.source = VirtualGeometryPagePayloadSource::ResidentPagePayload;
+			gamePayload.payloadByteSize = 2048u;
+			gamePayload.resident = true;
+			gamePayload.valid = true;
+			gameState.residentPagePayloads.push_back(gamePayload);
+
+			VirtualGeometryEmittedPageSourceRecord gameEmission{};
+			gameEmission.viewId = gameState.outputId;
+			gameEmission.viewType = gameState.viewType;
+			gameEmission.frameId = snapshot.frameId;
+			gameEmission.meshId = meshId;
+			gameEmission.materialId = materialId;
+			gameEmission.pageId = gamePayload.pageId;
+			gameEmission.fallbackPageId = gamePayload.fallbackPageId;
+			gameEmission.payloadSource = gamePayload.source;
+			gameEmission.emittedSource = VirtualGeometryEmittedPageSource::HighDetailPage;
+			gameState.emittedPageSources.push_back(gameEmission);
+
+			TerraEngine::Renderer::VirtualGeometryViewVisibilitySnapshot sceneState = gameState;
+			sceneState.outputKind = RenderOutputKind::SceneView;
+			sceneState.viewType = RenderViewType::Scene;
+			sceneState.outputId = 1u;
+			sceneState.renderSize = glm::uvec2(1024u, 576u);
+			sceneState.source = VirtualGeometryCounterSource::DelayedGPUReadback;
+			sceneState.hiZValidationState.pyramidSize = sceneState.renderSize;
+			sceneState.hiZValidationState.renderSize = sceneState.renderSize;
+			sceneState.hiZValidationState.cameraSignature = 0x90310001u;
+			sceneState.hiZValidationState.depthSceneSignature = 0x90310002u;
+			sceneState.counters.source = sceneState.source;
+			sceneState.counters.selectedMeshlets = 40u;
+			sceneState.counters.dispatchedMeshlets = 30u;
+			sceneState.counters.culledMeshlets = 10u;
+			sceneState.counters.culledByHiZ = 6u;
+			sceneState.counters.culledByFrustum = 4u;
+			sceneState.counters.authoritative = false;
+			sceneState.counters.unavailableReason = "scene readback pending after resize";
+			sceneState.residentPagePayloads.clear();
+			VirtualGeometryPagePayloadRecord scenePayload = gamePayload;
+			scenePayload.pageId = 1u;
+			scenePayload.fallbackPageId = 1u;
+			scenePayload.source = VirtualGeometryPagePayloadSource::ResidentFallbackPayload;
+			scenePayload.payloadByteSize = 1024u;
+			scenePayload.pinnedFallback = true;
+			sceneState.residentPagePayloads.push_back(scenePayload);
+			sceneState.emittedPageSources.clear();
+			VirtualGeometryEmittedPageSourceRecord sceneEmission = gameEmission;
+			sceneEmission.viewId = sceneState.outputId;
+			sceneEmission.viewType = sceneState.viewType;
+			sceneEmission.pageId = scenePayload.pageId;
+			sceneEmission.fallbackPageId = scenePayload.fallbackPageId;
+			sceneEmission.payloadSource = scenePayload.source;
+			sceneEmission.emittedSource = VirtualGeometryEmittedPageSource::FallbackPage;
+			sceneEmission.fallbackSubstitution = true;
+			sceneEmission.reason = "Scene View resized while fallback coverage remained resident.";
+			sceneState.emittedPageSources.push_back(sceneEmission);
+
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(gameState);
+			snapshot.virtualGeometryVisibilitySnapshots.push_back(sceneState);
+
+			const std::vector<TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot> diagnostics =
+				TerraEngine::Renderer::BuildVirtualGeometryViewDiagnosticsFromSnapshot(
+					snapshot,
+					MakeDefaultVirtualGeometryQualityProfile(),
+					VirtualGeometryInactiveReason::None);
+			const auto gameIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Game;
+			});
+			const auto sceneIt = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto& view) {
+				return view.viewType == RenderViewType::Scene;
+			});
+
+			context.Expect(gameIt != diagnostics.end(), "Game View diagnostics should be present after a resize-isolation frame.");
+			context.Expect(sceneIt != diagnostics.end(), "Scene View diagnostics should be present after a resize-isolation frame.");
+			context.ExpectEqual(1920u, gameIt->hiZRenderSize.x, "Game View should retain its resized render width.");
+			context.ExpectEqual(1024u, sceneIt->hiZRenderSize.x, "Scene View should retain its resized render width.");
+			context.ExpectEqual(24u, gameIt->culledByHiZ, "Game View should keep its own Hi-Z cull counters.");
+			context.ExpectEqual(6u, sceneIt->culledByHiZ, "Scene View should keep its own Hi-Z cull counters.");
+			context.ExpectEqual(1u, gameIt->pageSources.emittedHighDetailSources, "Game View should keep its high-detail page emission.");
+			context.ExpectEqual(1u, sceneIt->pageSources.emittedFallbackSources, "Scene View should keep its fallback page emission.");
+			context.Expect(gameIt->counterSource == VirtualGeometryCounterSource::GPUReadback, "Game View should keep authoritative readback counters.");
+			context.Expect(sceneIt->counterSource == VirtualGeometryCounterSource::DelayedGPUReadback, "Scene View should keep delayed counters after resize.");
+		});
+
 		registry.Add("VirtualGeometry.Render.MultiView.ModeSwitchResetsLodTransitionState", [](TestContext& context) {
 			VirtualGeometryAssetRuntime asset = MakeModeSwitchTransitionAsset();
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();

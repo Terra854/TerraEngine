@@ -226,7 +226,9 @@ namespace TerraEngine::Tests {
 			diagnostics.counterSource = VirtualGeometryCounterSource::GPUReadback;
 			diagnostics.geometryBudgetBytes = 4u * 1024u * 1024u;
 			diagnostics.estimatedGeometryBytes = 16u * 1024u * 1024u;
-			diagnostics.pageSources.residentPayloadBytes = 3u * 1024u * 1024u;
+			diagnostics.pageResidency.residentHighDetailBytes = 2u * 1024u * 1024u;
+			diagnostics.pageResidency.residentFallbackBytes = 1u * 1024u * 1024u;
+			diagnostics.pageSources.residentPayloads = 6u;
 			diagnostics.pageSources.emittedHighDetailSources = 5u;
 			diagnostics.pageSources.emittedFallbackSources = 1u;
 			diagnostics.pageSources.missingSources = 0u;
@@ -238,34 +240,45 @@ namespace TerraEngine::Tests {
 			const std::vector<PerformanceGateResult> gates = TerraEngine::Renderer::BuildVirtualGeometryPerformanceGates(diagnostics);
 			const auto budgetGate = FindGate(gates, "virtual-geometry-resident-page-budget-ratio");
 			const auto fullMeshGate = FindGate(gates, "virtual-geometry-full-owning-mesh-residency");
+			const auto owningFallbackGate = FindGate(gates, "virtual-geometry-owning-mesh-fallback-bytes");
 			const auto missingGate = FindGate(gates, "virtual-geometry-missing-page-coverage");
 			const auto embeddedGate = FindGate(gates, "virtual-geometry-embedded-fallback-uses");
 
-			context.Expect(budgetGate != gates.end(), "Dense page-budget gate should be generated from resident payload bytes.");
-			context.Expect(fullMeshGate != gates.end(), "Full-owning-mesh residency gate should be generated from resident/full byte estimates.");
+			context.Expect(budgetGate != gates.end(), "Dense page-budget gate should be generated from exact resident page bytes.");
+			context.Expect(fullMeshGate != gates.end(), "Full-owning-mesh residency gate should be generated from exact resident/full byte facts.");
+			context.Expect(owningFallbackGate != gates.end(), "Owning-mesh fallback bytes should be reported as an explicit gate.");
 			context.Expect(missingGate != gates.end(), "Missing coverage gate should be generated from page-source diagnostics.");
 			context.Expect(embeddedGate != gates.end(), "Embedded fallback gate should be generated from page-source diagnostics.");
 			context.Expect(budgetGate->status == VirtualGeometryPerformanceGateStatus::Pass, "Resident bytes below the page budget should pass.");
 			context.Expect(fullMeshGate->status == VirtualGeometryPerformanceGateStatus::Pass, "Resident bytes far below full mesh size should pass.");
+			context.Expect(owningFallbackGate->status == VirtualGeometryPerformanceGateStatus::Pass, "Zero owning-mesh fallback bytes should pass the page-streaming gate.");
 			context.Expect(missingGate->status == VirtualGeometryPerformanceGateStatus::Pass, "No missing page sources should pass coverage gates.");
 			context.Expect(embeddedGate->status == VirtualGeometryPerformanceGateStatus::Pass, "No embedded fallback sources should pass page-source gates.");
 			context.Expect(budgetGate->assetId == contributor.assetId, "Page-budget gate should identify the asset family that contributed resident bytes.");
 			context.ExpectEqual(0u, budgetGate->pageId, "Aggregate page-source gates should carry a page-scope marker when page data exists.");
 			context.Expect(budgetGate->source == VirtualGeometryPerformanceGateSource::GPUReadback, "Page-budget gate should preserve the counter source.");
 
-			diagnostics.pageSources.residentPayloadBytes = 5u * 1024u * 1024u;
+			diagnostics.pageResidency.residentHighDetailBytes = 4u * 1024u * 1024u;
+			diagnostics.pageResidency.residentFallbackBytes = 1u * 1024u * 1024u;
+			diagnostics.pageResidency.owningMeshFallbackBytes = 256u;
 			diagnostics.pageSources.missingSources = 1u;
 			diagnostics.pageSources.emittedEmbeddedFallbackSources = 1u;
 			const std::vector<PerformanceGateResult> failingGates = TerraEngine::Renderer::BuildVirtualGeometryPerformanceGates(diagnostics);
 			const auto failingBudgetGate = FindGate(failingGates, "virtual-geometry-resident-page-budget-ratio");
+			const auto failingOwningFallbackGate = FindGate(failingGates, "virtual-geometry-owning-mesh-fallback-bytes");
 			const auto failingMissingGate = FindGate(failingGates, "virtual-geometry-missing-page-coverage");
 			const auto failingEmbeddedGate = FindGate(failingGates, "virtual-geometry-embedded-fallback-uses");
 			context.Expect(failingBudgetGate != failingGates.end(), "Failing resident page-budget gate should still be reported.");
+			context.Expect(failingOwningFallbackGate != failingGates.end(), "Failing owning-mesh fallback gate should still be reported.");
 			context.Expect(failingMissingGate != failingGates.end(), "Failing missing coverage gate should still be reported.");
 			context.Expect(failingEmbeddedGate != failingGates.end(), "Failing embedded fallback gate should still be reported.");
 			if (failingBudgetGate != failingGates.end())
 			{
 				context.Expect(failingBudgetGate->status == VirtualGeometryPerformanceGateStatus::Fail, "Resident bytes above budget should fail.");
+			}
+			if (failingOwningFallbackGate != failingGates.end())
+			{
+				context.Expect(failingOwningFallbackGate->status == VirtualGeometryPerformanceGateStatus::Fail, "Any owning-mesh fallback bytes should fail the true page-streaming gate.");
 			}
 			if (failingMissingGate != failingGates.end())
 			{
@@ -284,14 +297,19 @@ namespace TerraEngine::Tests {
 			diagnostics.counterSource = VirtualGeometryCounterSource::GPUReadback;
 			diagnostics.geometryBudgetBytes = 4u * 1024u * 1024u;
 			diagnostics.estimatedGeometryBytes = 12u * 1024u * 1024u;
-			diagnostics.pageSources.residentPayloadBytes = 12u * 1024u * 1024u;
+			diagnostics.pageResidency.residentHighDetailBytes = 10u * 1024u * 1024u;
+			diagnostics.pageResidency.residentFallbackBytes = 2u * 1024u * 1024u;
+			diagnostics.pageResidency.owningMeshFallbackBytes = 12u * 1024u * 1024u;
 			diagnostics.pageSources.residentPayloads = 4u;
 
 			const std::vector<PerformanceGateResult> gates = TerraEngine::Renderer::BuildVirtualGeometryPerformanceGates(diagnostics);
 			const auto fullMeshGate = FindGate(gates, "virtual-geometry-full-owning-mesh-residency");
+			const auto owningFallbackGate = FindGate(gates, "virtual-geometry-owning-mesh-fallback-bytes");
 
 			context.Expect(fullMeshGate != gates.end(), "Full-owning-mesh regression gate should be generated for dense page-streamed assets.");
+			context.Expect(owningFallbackGate != gates.end(), "Owning-mesh fallback regression gate should be generated for dense page-streamed assets.");
 			context.Expect(fullMeshGate->status == VirtualGeometryPerformanceGateStatus::Fail, "Resident bytes equal to full mesh bytes should fail the page-streaming gate.");
+			context.Expect(owningFallbackGate->status == VirtualGeometryPerformanceGateStatus::Fail, "Owning mesh fallback bytes should fail until physical page decode is active.");
 			context.ExpectEqual(4u, fullMeshGate->viewId, "Full-owning-mesh gate should identify the failing view.");
 			context.Expect(fullMeshGate->diagnostic.find("actual") != std::string::npos, "Full-owning-mesh gate should include actual metric detail.");
 		});

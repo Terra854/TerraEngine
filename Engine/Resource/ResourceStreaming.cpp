@@ -141,6 +141,8 @@ namespace TerraEngine::Resource
 				: ::VirtualGeometryEmittedPageSource::HighDetailPage;
 			packet.payloadByteOffset = page.payloadByteOffset;
 			packet.payloadByteSize = page.payloadByteSize == 0u ? page.byteSize : page.payloadByteSize;
+			packet.payloadBufferIndex = page.payloadBufferIndex;
+			packet.payloadDescriptorIndex = page.payloadDescriptorIndex;
 			packet.reason = std::move(reason);
 			packets.push_back(std::move(packet));
 		}
@@ -227,6 +229,18 @@ namespace TerraEngine::Resource
 					existing->packetOffset = std::min(existing->packetOffset, packet.packetOffset);
 					existing->packetCount = std::max(existing->packetCount, packet.packetCount);
 					existing->payloadByteSize = std::max(existing->payloadByteSize, packet.payloadByteSize);
+					// Preserve a concrete shader-visible binding when any
+					// coalesced request already reached the protected upload
+					// publication boundary. Invalid values remain invalid so a
+					// queued request cannot pretend that metadata is renderable.
+					if (existing->payloadBufferIndex == 0xffffffffu)
+					{
+						existing->payloadBufferIndex = packet.payloadBufferIndex;
+					}
+					if (existing->payloadDescriptorIndex == 0xffffffffu)
+					{
+						existing->payloadDescriptorIndex = packet.payloadDescriptorIndex;
+					}
 					if (existing->reason.find(packet.reason) == std::string::npos)
 					{
 						existing->reason += "; " + packet.reason;
@@ -280,9 +294,9 @@ namespace TerraEngine::Resource
 		policy.visibleRetentionSeconds = kDefaultVisibleRetentionSeconds;
 		policy.neededRetentionSeconds = kDefaultNeededRetentionSeconds;
 		policy.maxLoadsPerUpdate = 0u;
-			policy.textureMipStreamingEnabled = false;
+			policy.textureMipStreamingEnabled = true;
 			policy.textureMinStreamMip = 0u;
-			policy.textureMaxStreamMip = 0u;
+			policy.textureMaxStreamMip = 13u;
 			policy.virtualGeometryPageMemoryBudgetBytes = 0u;
 			policy.virtualGeometryPageUploadBudgetBytes = 0u;
 			policy.virtualGeometryPageRetirementBudgetBytes = 0u;
@@ -987,5 +1001,16 @@ namespace TerraEngine::Resource
 		case StreamingResidencyTier::Persistent: return "persistent";
 		}
 		return "streamed";
+	}
+
+	std::string_view ToString(ExactResidencyByteStatus status)
+	{
+		switch (status)
+		{
+		case ExactResidencyByteStatus::Exact: return "exact";
+		case ExactResidencyByteStatus::ZeroByState: return "zero-by-state";
+		case ExactResidencyByteStatus::Unavailable: return "unavailable";
+		}
+		return "unavailable";
 	}
 }
