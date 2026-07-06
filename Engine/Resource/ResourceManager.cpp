@@ -198,17 +198,17 @@ namespace
 		TerraEngine::Resource::StreamingPolicy policy = TerraEngine::Resource::MakeDefaultStreamingPolicy();
 		policy.enabled = JsonBoolOr(object, "enabled", policy.enabled);
 		policy.deferScenePayloadsOnLoad = JsonBoolOr(object, "deferScenePayloadsOnLoad", policy.deferScenePayloadsOnLoad);
-		policy.preloadDistance = JsonDoubleOr(object, "preloadDistance", policy.preloadDistance);
+		policy.streamingDistance = JsonDoubleOr(object, "streamingDistance", policy.streamingDistance);
 		policy.visibleRetentionSeconds = JsonDoubleOr(object, "visibleRetentionSeconds", policy.visibleRetentionSeconds);
 		policy.neededRetentionSeconds = JsonDoubleOr(object, "neededRetentionSeconds", policy.neededRetentionSeconds);
 		policy.maxLoadsPerUpdate = JsonUIntOr(object, "maxLoadsPerUpdate", policy.maxLoadsPerUpdate);
-			policy.textureMipStreamingEnabled = JsonBoolOr(object, "textureMipStreamingEnabled", policy.textureMipStreamingEnabled);
-			policy.textureMinStreamMip = JsonUIntOr(object, "textureMinStreamMip", policy.textureMinStreamMip);
-			policy.textureMaxStreamMip = JsonUIntOr(object, "textureMaxStreamMip", policy.textureMaxStreamMip);
-			policy.virtualGeometryPageMemoryBudgetBytes = JsonUInt64Or(object, "virtualGeometryPageMemoryBudgetBytes", policy.virtualGeometryPageMemoryBudgetBytes);
-			policy.virtualGeometryPageUploadBudgetBytes = JsonUInt64Or(object, "virtualGeometryPageUploadBudgetBytes", policy.virtualGeometryPageUploadBudgetBytes);
-			policy.virtualGeometryPageRetirementBudgetBytes = JsonUInt64Or(object, "virtualGeometryPageRetirementBudgetBytes", policy.virtualGeometryPageRetirementBudgetBytes);
-			policy.memoryBudgetInteraction = MemoryBudgetInteractionFromString(JsonStringOr(object, "memoryBudgetInteraction", std::string(TerraEngine::Resource::ToString(policy.memoryBudgetInteraction))));
+		policy.textureMipStreamingEnabled = JsonBoolOr(object, "textureMipStreamingEnabled", policy.textureMipStreamingEnabled);
+		policy.textureMinStreamMip = JsonUIntOr(object, "textureMinStreamMip", policy.textureMinStreamMip);
+		policy.textureMaxStreamMip = JsonUIntOr(object, "textureMaxStreamMip", policy.textureMaxStreamMip);
+		policy.virtualGeometryPageMemoryBudgetBytes = JsonUInt64Or(object, "virtualGeometryPageMemoryBudgetBytes", policy.virtualGeometryPageMemoryBudgetBytes);
+		policy.virtualGeometryPageUploadBudgetBytes = JsonUInt64Or(object, "virtualGeometryPageUploadBudgetBytes", policy.virtualGeometryPageUploadBudgetBytes);
+		policy.virtualGeometryPageRetirementBudgetBytes = JsonUInt64Or(object, "virtualGeometryPageRetirementBudgetBytes", policy.virtualGeometryPageRetirementBudgetBytes);
+		policy.memoryBudgetInteraction = MemoryBudgetInteractionFromString(JsonStringOr(object, "memoryBudgetInteraction", std::string(TerraEngine::Resource::ToString(policy.memoryBudgetInteraction))));
 		policy.diagnosticsEnabled = JsonBoolOr(object, "diagnosticsEnabled", policy.diagnosticsEnabled);
 		return TerraEngine::Resource::SanitizeStreamingPolicy(policy);
 	}
@@ -1791,7 +1791,7 @@ void ResourceManager::MarkTextureStreamingDistance(
 				const std::uint32_t maxStreamMip = std::clamp(m_StreamingPolicy.textureMaxStreamMip, minStreamMip, maxSourceMip);
 				if (maxStreamMip > minStreamMip)
 				{
-					const double fadeDistance = std::max(1.0, m_StreamingPolicy.preloadDistance);
+					const double fadeDistance = std::max(1.0, m_StreamingPolicy.streamingDistance);
 					const double normalized = std::clamp(record.textureClosestViewDistance / fadeDistance, 0.0, 1.0);
 					const double mipSpan = static_cast<double>(maxStreamMip - minStreamMip);
 					desired.sourceMipOffset = minStreamMip
@@ -1883,11 +1883,11 @@ TerraEngine::Resource::TextureMipResidency ResourceManager::ResolveTextureMipRes
 		return residency;
 	}
 
-	// Distance mip residency deliberately uses the same preload distance knob
+	// Distance mip residency deliberately uses the same streaming distance knob
 	// as visibility streaming. Near assets start at the configured minimum
-	// source mip index, and assets near or beyond the preload edge start at
+	// source mip index, and assets near or beyond the streaming edge start at
 	// the configured maximum source mip index.
-	const double fadeDistance = std::max(1.0, policy.preloadDistance);
+	const double fadeDistance = std::max(1.0, policy.streamingDistance);
 	const double normalized = std::clamp(closestDistance / fadeDistance, 0.0, 1.0);
 	const double mipSpan = static_cast<double>(maxStreamMip - minStreamMip);
 	residency.sourceMipOffset = minStreamMip

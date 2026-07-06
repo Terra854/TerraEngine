@@ -327,6 +327,21 @@ void ProjectSettingsWindow::DrawGraphicsCategory()
 	}
 	ShowOptionTooltip("Variable Rate Shading affects the next backend initialization or export package.");
 
+	if (ImGui::CollapsingHeader("Virtual Geometry", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		// This is a runtime selection scale, not an import/cook ratio. The
+		// renderer multiplies cooked geometric error by this value before
+		// accepting lower-detail clusters, so larger values preserve sharper
+		// mesh detail at distance and smaller values allow earlier LOD drops.
+		float vgLodScale = settings.virtualGeometry.lodErrorScale;
+		if (ImGui::DragFloat("VG Mesh LOD Scale", &vgLodScale, 0.05f, 0.05f, 64.0f, "%.2f"))
+		{
+			settings.virtualGeometry.lodErrorScale = vgLodScale;
+			changed = true;
+		}
+		ShowOptionTooltip("Runtime virtual geometry LOD scale. Higher values keep higher-detail mesh clusters longer; lower values switch to coarser clusters sooner.");
+	}
+
 	if (changed)
 	{
 		renderSystem.SetRenderSettings(settings);

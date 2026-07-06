@@ -17,14 +17,14 @@ namespace {
 	{
 		registry.Add("Resource.Streaming.Policy.SanitizesNegativeValues", [](TestContext& context) {
 			Resource::StreamingPolicy policy = Resource::MakeDefaultStreamingPolicy();
-			policy.preloadDistance = -1.0;
+			policy.streamingDistance = -1.0;
 			policy.visibleRetentionSeconds = -2.0;
 			policy.neededRetentionSeconds = -3.0;
 			policy.protectedNeedTypes.clear();
 
 			policy = Resource::SanitizeStreamingPolicy(policy);
 
-			context.Expect(policy.preloadDistance >= 0.0, "Preload distance must sanitize to a non-negative value.");
+			context.Expect(policy.streamingDistance >= 0.0, "Streaming distance must sanitize to a non-negative value.");
 			context.Expect(policy.visibleRetentionSeconds >= 0.0, "Visible retention must sanitize to a non-negative value.");
 			context.Expect(policy.neededRetentionSeconds >= 0.0, "Needed retention must sanitize to a non-negative value.");
 			context.Expect(!policy.protectedNeedTypes.empty(), "Protected need types should never sanitize to an empty set.");
@@ -112,8 +112,9 @@ namespace {
 			registry.Add("Resource.Streaming.Policy.TextureMipResidencyUsesSourceMipIndexRange", [](TestContext& context) {
 				Resource::StreamingPolicy policy = Resource::MakeDefaultStreamingPolicy();
 				context.Expect(policy.textureMipStreamingEnabled, "New projects should enable texture mip streaming by default.");
+				context.ExpectEqual(300.0, policy.streamingDistance, "Default texture streaming distance should keep full-detail mips longer.");
 				context.ExpectEqual(std::uint32_t{0u}, policy.textureMinStreamMip, "Default near texture residency should keep mip 0.");
-				context.ExpectEqual(std::uint32_t{13u}, policy.textureMaxStreamMip, "Default far texture residency should allow streaming to source mip 13.");
+				context.ExpectEqual(std::uint32_t{8u}, policy.textureMaxStreamMip, "Default far texture residency should avoid extremely tiny mips.");
 				policy.textureMipStreamingEnabled = false;
 				Resource::TextureMipResidency full = Resource::ResolveTextureMipResidency(policy, 8u);
 

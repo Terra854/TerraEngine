@@ -53,8 +53,8 @@ namespace TerraEngine::Editor::ProjectSettings
 			ProjectSettingsCategoryId::Graphics,
 			"graphics",
 			"Graphics",
-			"Renderer quality, lighting, shadow, and texture options.",
-			{ "graphics", "render", "quality", "shadow", "lighting", "texture", "vrs", "ambient" }
+			"Renderer quality, lighting, shadow, texture, and virtual geometry options.",
+			{ "graphics", "render", "quality", "shadow", "lighting", "texture", "lod", "virtual geometry" }
 		}
 	}};
 

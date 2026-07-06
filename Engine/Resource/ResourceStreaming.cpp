@@ -15,7 +15,7 @@ namespace TerraEngine::Resource
 {
 	namespace
 	{
-		constexpr double kDefaultPreloadDistance = 75.0;
+		constexpr double kDefaultStreamingDistance = 300.0;
 		constexpr double kDefaultVisibleRetentionSeconds = 2.0;
 		constexpr double kDefaultNeededRetentionSeconds = 5.0;
 
@@ -290,17 +290,17 @@ namespace TerraEngine::Resource
 		StreamingPolicy policy;
 		policy.enabled = true;
 		policy.deferScenePayloadsOnLoad = true;
-		policy.preloadDistance = kDefaultPreloadDistance;
+		policy.streamingDistance = kDefaultStreamingDistance;
 		policy.visibleRetentionSeconds = kDefaultVisibleRetentionSeconds;
 		policy.neededRetentionSeconds = kDefaultNeededRetentionSeconds;
 		policy.maxLoadsPerUpdate = 0u;
-			policy.textureMipStreamingEnabled = true;
-			policy.textureMinStreamMip = 0u;
-			policy.textureMaxStreamMip = 13u;
-			policy.virtualGeometryPageMemoryBudgetBytes = 0u;
-			policy.virtualGeometryPageUploadBudgetBytes = 0u;
-			policy.virtualGeometryPageRetirementBudgetBytes = 0u;
-			policy.memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
+		policy.textureMipStreamingEnabled = true;
+		policy.textureMinStreamMip = 0u;
+		policy.textureMaxStreamMip = 8u;
+		policy.virtualGeometryPageMemoryBudgetBytes = 0u;
+		policy.virtualGeometryPageUploadBudgetBytes = 0u;
+		policy.virtualGeometryPageRetirementBudgetBytes = 0u;
+		policy.memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
 		policy.diagnosticsEnabled = false;
 		policy.protectedNeedTypes = {
 			StreamingNeedType::Visible,
@@ -319,9 +319,9 @@ namespace TerraEngine::Resource
 	StreamingPolicy SanitizeStreamingPolicy(const StreamingPolicy& policy)
 	{
 		StreamingPolicy sanitized = policy;
-		if (sanitized.preloadDistance < 0.0)
+		if (sanitized.streamingDistance < 0.0)
 		{
-			sanitized.preloadDistance = kDefaultPreloadDistance;
+			sanitized.streamingDistance = kDefaultStreamingDistance;
 		}
 		if (sanitized.visibleRetentionSeconds < 0.0)
 		{

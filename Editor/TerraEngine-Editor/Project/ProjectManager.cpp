@@ -83,7 +83,7 @@ namespace
 		nlohmann::json object;
 		object["enabled"] = policy.enabled;
 		object["deferScenePayloadsOnLoad"] = policy.deferScenePayloadsOnLoad;
-		object["preloadDistance"] = policy.preloadDistance;
+		object["streamingDistance"] = policy.streamingDistance;
 		object["visibleRetentionSeconds"] = policy.visibleRetentionSeconds;
 		object["neededRetentionSeconds"] = policy.neededRetentionSeconds;
 		object["maxLoadsPerUpdate"] = policy.maxLoadsPerUpdate;

@@ -51,8 +51,9 @@ namespace TerraEngine::EditorTests
 				context.Expect(manifest.contains("streamingPolicy"), "New project manifests should persist explicit streaming defaults.");
 				const nlohmann::json& streamingPolicy = manifest["streamingPolicy"];
 				context.Expect(streamingPolicy.value("textureMipStreamingEnabled", false), "New project manifests should enable texture mip streaming.");
+				context.ExpectEqual(300.0, streamingPolicy.value("streamingDistance", 0.0), "New project manifests should use conservative texture streaming distance.");
 				context.ExpectEqual(std::uint32_t{0u}, streamingPolicy.value("textureMinStreamMip", 99u), "New project near texture mip should default to full resolution.");
-				context.ExpectEqual(std::uint32_t{13u}, streamingPolicy.value("textureMaxStreamMip", 0u), "New project far texture mip should default to mip 13.");
+				context.ExpectEqual(std::uint32_t{8u}, streamingPolicy.value("textureMaxStreamMip", 0u), "New project far texture mip should default to mip 8.");
 			}
 
 			std::filesystem::remove_all(root, ignored);

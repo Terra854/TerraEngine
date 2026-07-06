@@ -31,6 +31,13 @@ namespace TerraEngine::EditorTests
 				std::string(shadowMatches.front().stableId),
 				"Shadow search should route to the graphics category.");
 
+			const auto lodMatches = TerraEngine::Editor::ProjectSettings::FilterProjectSettingsCategories("lod");
+			context.ExpectEqual(static_cast<std::size_t>(1), lodMatches.size(), "LOD search should find the graphics category for virtual geometry runtime controls.");
+			context.ExpectEqual(
+				std::string("graphics"),
+				std::string(lodMatches.front().stableId),
+				"LOD search should route to the graphics category.");
+
 			const auto skyMatches = TerraEngine::Editor::ProjectSettings::FilterProjectSettingsCategories("directional");
 			context.ExpectEqual(static_cast<std::size_t>(0), skyMatches.size(), "Directional sky search should not expose removed scene-level sky settings.");
 		});

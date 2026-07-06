@@ -235,7 +235,7 @@ static nlohmann::json BuildStreamingPolicyManifest()
 	nlohmann::json policy;
 	policy["enabled"] = profile.enabled;
 	policy["deferScenePayloadsOnLoad"] = profile.deferScenePayloadsOnLoad;
-	policy["preloadDistance"] = profile.preloadDistance;
+	policy["streamingDistance"] = profile.streamingDistance;
 	policy["visibleRetentionSeconds"] = profile.visibleRetentionSeconds;
 	policy["neededRetentionSeconds"] = profile.neededRetentionSeconds;
 	policy["maxLoadsPerUpdate"] = profile.maxLoadsPerUpdate;

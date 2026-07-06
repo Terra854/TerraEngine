@@ -287,7 +287,7 @@ namespace TerraEngine::Resource
 		std::string viewId;
 		StreamingViewType viewType = StreamingViewType::Scene;
 		glm::vec3 position{ 0.0f };
-		float preloadDistance = 0.0f;
+		float streamingDistance = 0.0f;
 		bool active = true;
 	};
 
@@ -295,7 +295,9 @@ namespace TerraEngine::Resource
 	{
 		bool enabled = true;
 		bool deferScenePayloadsOnLoad = true;
-		double preloadDistance = 75.0;
+		// Distance, in world units, over which visible streamed resources move
+		// from their near/full-detail policy toward their far/low-detail policy.
+		double streamingDistance = 300.0;
 		double visibleRetentionSeconds = 2.0;
 		double neededRetentionSeconds = 5.0;
 		std::uint32_t maxLoadsPerUpdate = 0;
@@ -304,16 +306,16 @@ namespace TerraEngine::Resource
 		// full-resolution image; larger indices are lower-detail tail mips.
 		// Near visible textures start at textureMinStreamMip, while far visible
 		// textures can start at textureMaxStreamMip.
-			std::uint32_t textureMinStreamMip = 0;
-			std::uint32_t textureMaxStreamMip = 13;
-			// Virtual geometry page budgets are policy inputs, not direct release
-			// commands. ResourceResidency and the renderer backend consume these
-			// byte caps at protected boundaries so worker planning never destroys
-			// page payloads while a frame can still read them.
-			std::uint64_t virtualGeometryPageMemoryBudgetBytes = 0u;
-			std::uint64_t virtualGeometryPageUploadBudgetBytes = 0u;
-			std::uint64_t virtualGeometryPageRetirementBudgetBytes = 0u;
-			MemoryBudgetInteraction memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
+		std::uint32_t textureMinStreamMip = 0;
+		std::uint32_t textureMaxStreamMip = 8;
+		// Virtual geometry page budgets are policy inputs, not direct release
+		// commands. ResourceResidency and the renderer backend consume these
+		// byte caps at protected boundaries so worker planning never destroys
+		// page payloads while a frame can still read them.
+		std::uint64_t virtualGeometryPageMemoryBudgetBytes = 0u;
+		std::uint64_t virtualGeometryPageUploadBudgetBytes = 0u;
+		std::uint64_t virtualGeometryPageRetirementBudgetBytes = 0u;
+		MemoryBudgetInteraction memoryBudgetInteraction = MemoryBudgetInteraction::UseResidencyPolicy;
 		bool diagnosticsEnabled = false;
 		std::unordered_set<StreamingNeedType> protectedNeedTypes;
 	};

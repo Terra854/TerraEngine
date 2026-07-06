@@ -655,7 +655,7 @@ namespace
 		nlohmann::json object;
 		object["enabled"] = policy.enabled;
 		object["deferScenePayloadsOnLoad"] = policy.deferScenePayloadsOnLoad;
-		object["preloadDistance"] = policy.preloadDistance;
+		object["streamingDistance"] = policy.streamingDistance;
 		object["visibleRetentionSeconds"] = policy.visibleRetentionSeconds;
 		object["neededRetentionSeconds"] = policy.neededRetentionSeconds;
 		object["maxLoadsPerUpdate"] = policy.maxLoadsPerUpdate;
@@ -1001,10 +1001,10 @@ void ResourceResidencyWindow::DrawPolicyControls()
 		streamingChanged = true;
 	}
 
-	float preloadDistance = static_cast<float>(streamingPolicy.preloadDistance);
-	if (ImGui::InputFloat("Preload Distance", &preloadDistance, 1.0f, 10.0f, "%.2f"))
+	float streamingDistance = static_cast<float>(streamingPolicy.streamingDistance);
+	if (ImGui::InputFloat("Streaming Distance", &streamingDistance, 1.0f, 10.0f, "%.2f"))
 	{
-		streamingPolicy.preloadDistance = static_cast<double>(std::max(0.0f, preloadDistance));
+		streamingPolicy.streamingDistance = static_cast<double>(std::max(0.0f, streamingDistance));
 		streamingChanged = true;
 	}
 

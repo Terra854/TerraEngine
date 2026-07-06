@@ -25,7 +25,7 @@ namespace TerraEngine::EditorTests {
 
 			context.Expect(!savedProfile.contains("streamingEnabled"), "Build profiles should not own visibility streaming enablement.");
 			context.Expect(!savedProfile.contains("streamingDeferScenePayloadsOnLoad"), "Build profiles should not own scene payload deferral.");
-			context.Expect(!savedProfile.contains("streamingPreloadDistance"), "Build profiles should not own preload distance.");
+			context.Expect(!savedProfile.contains("streamingDistance"), "Build profiles should not own streaming distance.");
 			context.Expect(!savedProfile.contains("streamingVisibleRetentionSeconds"), "Build profiles should not own visible retention.");
 			context.Expect(!savedProfile.contains("streamingNeededRetentionSeconds"), "Build profiles should not own needed retention.");
 			context.Expect(!savedProfile.contains("streamingMaxLoadsPerUpdate"), "Build profiles should not own streaming load budgets.");
