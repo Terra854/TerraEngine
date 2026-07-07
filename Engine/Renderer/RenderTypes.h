@@ -2547,6 +2547,14 @@ struct RenderStatsSnapshot
 	std::uint64_t meshletCounterFrameId = 0u;
 	std::uint32_t meshletCounterLatencyFrames = 0u;
 	std::string meshletCounterReason;
+	// GPU timestamps are resolved only after the owning Vulkan frame-slot fence
+	// completes. The renderer publishes the measured duration here so editor
+	// profiler UI can show real GPU execution time instead of CPU submit cost.
+	bool gpuTimestampValid = false;
+	float gpuTimestampMs = 0.0f;
+	std::uint64_t gpuTimestampFrameId = 0u;
+	std::uint32_t gpuTimestampLatencyFrames = 0u;
+	std::string gpuTimestampReason;
 	std::uint32_t spatialIndexedObjectCount = 0u;
 	std::uint32_t spatialVisibleCandidateCount = 0u;
 	std::uint32_t spatialRejectedObjectCount = 0u;

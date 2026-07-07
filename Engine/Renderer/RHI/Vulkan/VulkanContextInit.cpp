@@ -76,6 +76,7 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	if (!CreateRenderPass()) return false;
 	if (!CreateFramebuffers()) return false;
 	if (!CreateSyncObjects()) return false;
+	if (!CreateGpuTimestampQueries()) return false;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!CreateDescriptorPool()) return false;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -114,6 +115,7 @@ void VulkanContext::Impl::Cleanup() {
 
 	DestroyAmbientOcclusionResources();
 	DestroyEnvironmentLightingResources();
+	DestroyGpuTimestampQueries();
 	if (hiZDescriptorPool != VK_NULL_HANDLE) {
 		vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
 		hiZDescriptorPool = VK_NULL_HANDLE;

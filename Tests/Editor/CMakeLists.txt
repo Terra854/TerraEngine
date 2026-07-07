@@ -22,6 +22,7 @@ add_executable(TerraEngine-EditorTests
 	Export/VirtualGeometryExportTests.cpp
 	Export/VirtualGeometryScalingExportTests.cpp
 	Profiling/ProfilerCaptureStoreTests.cpp
+	Profiling/ProfilerWindowTests.cpp
 	Project/LinuxScriptCompilationTests.cpp
 	Project/LinuxScriptEditorLaunchTests.cpp
 	Project/LinuxScriptWorkspaceTests.cpp
@@ -38,6 +39,7 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorMcpTransportTests.cpp
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp
+	Automation/ProfilerDiagnosticsAutomationTests.cpp
 	Automation/VirtualGeometryAutomationTests.cpp
 	Automation/VirtualGeometryScalingAutomationTests.cpp
 	AssetPipeline/ModelPackageImportResultTests.cpp
@@ -60,6 +62,7 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/VirtualGeometryScalingAssetPipelineTests.cpp
 	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
 	AssetPipeline/VirtualGeometryPackageImportTests.cpp
+	Renderer/GameViewStatsOverlayTests.cpp
 	Renderer/ResourceResidencyWindowTests.cpp
 	Renderer/VirtualGeometryDebugViewTests.cpp
 	Renderer/VirtualGeometryHardeningDebugViewTests.cpp

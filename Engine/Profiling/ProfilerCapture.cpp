@@ -4,11 +4,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <nlohmann/json.hpp>
+#include <numeric>
 #include <optional>
 #include <sstream>
+#include <vector>
 
 namespace TerraEngine::Profiling
 {
@@ -42,6 +45,132 @@ std::optional<ProfilerModuleId> TryModuleIdFromStableName(const std::string& val
 		return ProfilerModuleId::TaskExecution;
 	}
 	return std::nullopt;
+}
+
+std::string TimingStatusToStableName(ProfilerTimingStreamStatus status)
+{
+	switch (status)
+	{
+	case ProfilerTimingStreamStatus::Valid:
+		return "valid";
+	case ProfilerTimingStreamStatus::Unavailable:
+		return "unavailable";
+	case ProfilerTimingStreamStatus::Stale:
+		return "stale";
+	case ProfilerTimingStreamStatus::Delayed:
+		return "delayed";
+	case ProfilerTimingStreamStatus::Invalid:
+		return "invalid";
+	}
+	return "unavailable";
+}
+
+ProfilerTimingStreamStatus TimingStatusFromStableName(const std::string& value)
+{
+	if (value == "valid")
+	{
+		return ProfilerTimingStreamStatus::Valid;
+	}
+	if (value == "stale")
+	{
+		return ProfilerTimingStreamStatus::Stale;
+	}
+	if (value == "delayed")
+	{
+		return ProfilerTimingStreamStatus::Delayed;
+	}
+	if (value == "invalid")
+	{
+		return ProfilerTimingStreamStatus::Invalid;
+	}
+	return ProfilerTimingStreamStatus::Unavailable;
+}
+
+std::string TimingScopeToStableName(ProfilerTimingStreamScope scope)
+{
+	switch (scope)
+	{
+	case ProfilerTimingStreamScope::EngineCpu:
+		return "engine_cpu";
+	case ProfilerTimingStreamScope::EditorWall:
+		return "editor_wall";
+	case ProfilerTimingStreamScope::ViewportCpu:
+		return "viewport_cpu";
+	case ProfilerTimingStreamScope::ViewportGpu:
+		return "viewport_gpu";
+	}
+	return "engine_cpu";
+}
+
+std::optional<ProfilerTimingStreamScope> TryTimingScopeFromStableName(const std::string& value)
+{
+	if (value == "engine_cpu")
+	{
+		return ProfilerTimingStreamScope::EngineCpu;
+	}
+	if (value == "editor_wall")
+	{
+		return ProfilerTimingStreamScope::EditorWall;
+	}
+	if (value == "viewport_cpu")
+	{
+		return ProfilerTimingStreamScope::ViewportCpu;
+	}
+	if (value == "viewport_gpu")
+	{
+		return ProfilerTimingStreamScope::ViewportGpu;
+	}
+	return std::nullopt;
+}
+
+std::string TimingSourceToStableName(ProfilerTimingStreamSource source)
+{
+	switch (source)
+	{
+	case ProfilerTimingStreamSource::ProfilerClock:
+		return "profiler_clock";
+	case ProfilerTimingStreamSource::RenderStats:
+		return "render_stats";
+	case ProfilerTimingStreamSource::BackendGpuTimestamp:
+		return "backend_gpu_timestamp";
+	case ProfilerTimingStreamSource::Unavailable:
+		return "unavailable";
+	}
+	return "unavailable";
+}
+
+ProfilerTimingStreamSource TimingSourceFromStableName(const std::string& value)
+{
+	if (value == "profiler_clock")
+	{
+		return ProfilerTimingStreamSource::ProfilerClock;
+	}
+	if (value == "render_stats")
+	{
+		return ProfilerTimingStreamSource::RenderStats;
+	}
+	if (value == "backend_gpu_timestamp")
+	{
+		return ProfilerTimingStreamSource::BackendGpuTimestamp;
+	}
+	return ProfilerTimingStreamSource::Unavailable;
+}
+
+double PercentileFromSortedValues(const std::vector<double>& sortedValues, double percentile)
+{
+	if (sortedValues.empty())
+	{
+		return 0.0;
+	}
+	if (sortedValues.size() == 1u)
+	{
+		return sortedValues.front();
+	}
+	const double scaledIndex = std::clamp(percentile, 0.0, 1.0) * static_cast<double>(sortedValues.size() - 1u);
+	const std::size_t lowerIndex = static_cast<std::size_t>(std::floor(scaledIndex));
+	const std::size_t upperIndex = std::min(lowerIndex + 1u, sortedValues.size() - 1u);
+	const double blend = scaledIndex - static_cast<double>(lowerIndex);
+	return sortedValues[lowerIndex] + (sortedValues[upperIndex] - sortedValues[lowerIndex]) * blend;
 }
 
 // ToLocalTime is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -440,6 +569,56 @@ const char* ToString(ProfilerModuleId moduleId)
 	return "CPU/Engine";
 }
 
+const char* ToString(ProfilerTimingStreamStatus status)
+{
+	switch (status)
+	{
+	case ProfilerTimingStreamStatus::Valid:
+		return "valid";
+	case ProfilerTimingStreamStatus::Unavailable:
+		return "unavailable";
+	case ProfilerTimingStreamStatus::Stale:
+		return "stale";
+	case ProfilerTimingStreamStatus::Delayed:
+		return "delayed";
+	case ProfilerTimingStreamStatus::Invalid:
+		return "invalid";
+	}
+	return "unavailable";
+}
+
+const char* ToString(ProfilerTimingStreamScope scope)
+{
+	switch (scope)
+	{
+	case ProfilerTimingStreamScope::EngineCpu:
+		return "Engine CPU";
+	case ProfilerTimingStreamScope::EditorWall:
+		return "Editor Wall";
+	case ProfilerTimingStreamScope::ViewportCpu:
+		return "Viewport CPU";
+	case ProfilerTimingStreamScope::ViewportGpu:
+		return "Viewport GPU";
+	}
+	return "Engine CPU";
+}
+
+const char* ToString(ProfilerTimingStreamSource source)
+{
+	switch (source)
+	{
+	case ProfilerTimingStreamSource::ProfilerClock:
+		return "profiler clock";
+	case ProfilerTimingStreamSource::RenderStats:
+		return "render stats";
+	case ProfilerTimingStreamSource::BackendGpuTimestamp:
+		return "GPU timestamp";
+	case ProfilerTimingStreamSource::Unavailable:
+		return "unavailable";
+	}
+	return "unavailable";
+}
+
 // MakeTimestampForFileName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 std::string MakeTimestampForFileName()
 {
@@ -509,6 +688,122 @@ void TrimFrameBuffer(std::vector<ProfilerFrameRecord>& frames, const ProfilerCap
 	}
 }
 
+void AddOrReplaceTimingStreamSample(ProfilerFrameRecord& frame, ProfilerTimingStreamSample sample)
+{
+	if (sample.id.empty())
+	{
+		sample.id = TimingScopeToStableName(sample.scope);
+	}
+	if (sample.label.empty())
+	{
+		sample.label = ToString(sample.scope);
+	}
+
+	const auto found = std::find_if(frame.timingStreams.begin(), frame.timingStreams.end(), [&sample](const ProfilerTimingStreamSample& existing) {
+		return existing.id == sample.id;
+	});
+	if (found == frame.timingStreams.end())
+	{
+		frame.timingStreams.push_back(std::move(sample));
+		return;
+	}
+	*found = std::move(sample);
+}
+
+std::vector<ProfilerTimingStreamAggregate> BuildTimingStreamAggregates(const std::vector<ProfilerFrameRecord>& frames, const std::optional<ProfilerFrameRecord>& selectedFrame)
+{
+	std::vector<ProfilerTimingStreamAggregate> aggregates;
+	const auto findAggregate = [&aggregates](const ProfilerTimingStreamSample& sample) -> ProfilerTimingStreamAggregate& {
+		const auto found = std::find_if(aggregates.begin(), aggregates.end(), [&sample](const ProfilerTimingStreamAggregate& aggregate) {
+			return aggregate.id == sample.id;
+		});
+		if (found != aggregates.end())
+		{
+			return *found;
+		}
+
+		ProfilerTimingStreamAggregate aggregate;
+		aggregate.id = sample.id;
+		aggregate.label = sample.label.empty() ? ToString(sample.scope) : sample.label;
+		aggregate.scope = sample.scope;
+		aggregate.source = sample.source;
+		aggregates.push_back(std::move(aggregate));
+		return aggregates.back();
+	};
+
+	for (const ProfilerFrameRecord& frame : frames)
+	{
+		for (const ProfilerTimingStreamSample& sample : frame.timingStreams)
+		{
+			findAggregate(sample);
+		}
+	}
+
+	for (ProfilerTimingStreamAggregate& aggregate : aggregates)
+	{
+		std::vector<double> values;
+		values.reserve(frames.size());
+		for (const ProfilerFrameRecord& frame : frames)
+		{
+			const auto sample = std::find_if(frame.timingStreams.begin(), frame.timingStreams.end(), [&aggregate](const ProfilerTimingStreamSample& candidate) {
+				return candidate.id == aggregate.id;
+			});
+			if (sample == frame.timingStreams.end())
+			{
+				++aggregate.missingCount;
+				continue;
+			}
+			if (sample->status == ProfilerTimingStreamStatus::Valid && std::isfinite(sample->milliseconds))
+			{
+				values.push_back(sample->milliseconds);
+			}
+			else
+			{
+				++aggregate.missingCount;
+			}
+		}
+
+		aggregate.sampleCount = values.size();
+		if (!values.empty())
+		{
+			const double sum = std::accumulate(values.begin(), values.end(), 0.0);
+			aggregate.meanMs = sum / static_cast<double>(values.size());
+			double varianceSum = 0.0;
+			for (double value : values)
+			{
+				const double delta = value - aggregate.meanMs;
+				varianceSum += delta * delta;
+			}
+			aggregate.stdDevMs = std::sqrt(varianceSum / static_cast<double>(values.size()));
+			std::sort(values.begin(), values.end());
+			aggregate.minMs = values.front();
+			aggregate.maxMs = values.back();
+			aggregate.medianMs = PercentileFromSortedValues(values, 0.50);
+			aggregate.p90Ms = PercentileFromSortedValues(values, 0.90);
+			aggregate.p95Ms = PercentileFromSortedValues(values, 0.95);
+			aggregate.p99Ms = PercentileFromSortedValues(values, 0.99);
+		}
+
+		if (selectedFrame.has_value())
+		{
+			const auto selectedSample = std::find_if(selectedFrame->timingStreams.begin(), selectedFrame->timingStreams.end(), [&aggregate](const ProfilerTimingStreamSample& sample) {
+				return sample.id == aggregate.id;
+			});
+			if (selectedSample != selectedFrame->timingStreams.end())
+			{
+				aggregate.selectedStatus = selectedSample->status;
+				aggregate.selectedMilliseconds = selectedSample->milliseconds;
+				aggregate.selectedStatusReason = selectedSample->statusReason;
+			}
+		}
+	}
+
+	std::sort(aggregates.begin(), aggregates.end(), [](const ProfilerTimingStreamAggregate& left, const ProfilerTimingStreamAggregate& right) {
+		return static_cast<std::uint8_t>(left.scope) < static_cast<std::uint8_t>(right.scope);
+	});
+	return aggregates;
+}
+
 // SaveCaptureDocument is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::filesystem::path& path, std::string& outError)
 {
@@ -537,6 +832,22 @@ bool SaveCaptureDocument(const ProfilerCaptureDocument& document, const std::fil
 			frameJson["frameStartMs"] = frame.frameStartMs;
 			frameJson["durationMs"] = frame.durationMs;
 			frameJson["complete"] = frame.complete;
+			frameJson["timingStreams"] = nlohmann::json::array();
+			// Timing streams are stored beside modules because they answer a
+			// different question: "which clock measured this frame?" rather than
+			// "which profiler module owned these samples?"
+			for (const ProfilerTimingStreamSample& stream : frame.timingStreams)
+			{
+				frameJson["timingStreams"].push_back({
+					{"id", stream.id},
+					{"label", stream.label},
+					{"scope", TimingScopeToStableName(stream.scope)},
+					{"source", TimingSourceToStableName(stream.source)},
+					{"status", TimingStatusToStableName(stream.status)},
+					{"milliseconds", stream.milliseconds},
+					{"statusReason", stream.statusReason}
+				});
+			}
 			frameJson["modules"] = nlohmann::json::array();
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const ProfilerModuleSummary& module : frame.moduleSummaries)
@@ -639,6 +950,25 @@ bool LoadCaptureDocument(const std::filesystem::path& path, ProfilerCaptureDocum
 			frame.frameStartMs = frameJson.value("frameStartMs", 0.0);
 			frame.durationMs = frameJson.value("durationMs", 0.0);
 			frame.complete = frameJson.value("complete", true);
+			for (const nlohmann::json& streamJson : frameJson.value("timingStreams", nlohmann::json::array()))
+			{
+				ProfilerTimingStreamSample stream;
+				stream.id = streamJson.value("id", "");
+				stream.label = streamJson.value("label", "");
+				const std::string scopeName = streamJson.value("scope", "");
+				const std::optional<ProfilerTimingStreamScope> scope = TryTimingScopeFromStableName(scopeName);
+				if (!scope.has_value())
+				{
+					outError = "Profiler capture contains an unknown timing stream scope: " + scopeName;
+					return false;
+				}
+				stream.scope = *scope;
+				stream.source = TimingSourceFromStableName(streamJson.value("source", ""));
+				stream.status = TimingStatusFromStableName(streamJson.value("status", ""));
+				stream.milliseconds = streamJson.value("milliseconds", 0.0);
+				stream.statusReason = streamJson.value("statusReason", "");
+				AddOrReplaceTimingStreamSample(frame, std::move(stream));
+			}
 			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 			for (const nlohmann::json& moduleJson : frameJson.value("modules", nlohmann::json::array()))
 			{

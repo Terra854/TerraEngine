@@ -20,6 +20,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterPackagingRequestValidationTests(TestRegistry& registry);
 	void RegisterPrefabAuthoringWorkflowTests(TestRegistry& registry);
 	void RegisterProfilerCaptureStoreTests(TestRegistry& registry);
+	void RegisterProfilerWindowTests(TestRegistry& registry);
 	void RegisterResidencyPolicyExportTests(TestRegistry& registry);
 	void RegisterStreamingPolicyExportTests(TestRegistry& registry);
 	void RegisterVirtualGeometryExportTests(TestRegistry& registry);
@@ -41,6 +42,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterEditorMcpTransportTests(TestRegistry& registry);
 	void RegisterEditorMcpAssetImportTests(TestRegistry& registry);
 	void RegisterEditorMcpAssetImportSafetyTests(TestRegistry& registry);
+	void RegisterProfilerDiagnosticsAutomationTests(TestRegistry& registry);
 	void RegisterVirtualGeometryAutomationTests(TestRegistry& registry);
 	void RegisterVirtualGeometryScalingAutomationTests(TestRegistry& registry);
 	void RegisterModelPackageImportResultTests(TestRegistry& registry);
@@ -64,6 +66,7 @@ namespace TerraEngine::EditorTests {
 	void RegisterVirtualGeometryMeshCompilerTests(TestRegistry& registry);
 	void RegisterVirtualGeometryPackageImportTests(TestRegistry& registry);
 	void RegisterResourceResidencyWindowTests(TestRegistry& registry);
+	void RegisterGameViewStatsOverlayTests(TestRegistry& registry);
 	void RegisterVirtualGeometryDebugViewTests(TestRegistry& registry);
 	void RegisterVirtualGeometryHardeningDebugViewTests(TestRegistry& registry);
 	void RegisterVirtualGeometryScalingDebugViewTests(TestRegistry& registry);
@@ -100,6 +103,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterPackagingRequestValidationTests(registry);
 	TerraEngine::EditorTests::RegisterPrefabAuthoringWorkflowTests(registry);
 	TerraEngine::EditorTests::RegisterProfilerCaptureStoreTests(registry);
+	TerraEngine::EditorTests::RegisterProfilerWindowTests(registry);
 	TerraEngine::EditorTests::RegisterResidencyPolicyExportTests(registry);
 	TerraEngine::EditorTests::RegisterStreamingPolicyExportTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryExportTests(registry);
@@ -121,6 +125,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterEditorMcpTransportTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpAssetImportTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpAssetImportSafetyTests(registry);
+	TerraEngine::EditorTests::RegisterProfilerDiagnosticsAutomationTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryAutomationTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryScalingAutomationTests(registry);
 	TerraEngine::EditorTests::RegisterModelPackageImportResultTests(registry);
@@ -143,6 +148,7 @@ int main() {
 	TerraEngine::EditorTests::RegisterVirtualGeometryScalingAssetPipelineTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryMeshCompilerTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryPackageImportTests(registry);
+	TerraEngine::EditorTests::RegisterGameViewStatsOverlayTests(registry);
 	TerraEngine::EditorTests::RegisterResourceResidencyWindowTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryDebugViewTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryHardeningDebugViewTests(registry);

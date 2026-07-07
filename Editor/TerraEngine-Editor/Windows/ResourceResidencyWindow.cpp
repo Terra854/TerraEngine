@@ -13,6 +13,7 @@
 #include "Engine/Resource/ResourceResidency.h"
 #include "Engine/Resource/ResourceStreaming.h"
 #include "Engine/Renderer/Graph/RenderDiagnostics.h"
+#include "Engine/Renderer/RenderSystem.h"
 
 #include <algorithm>
 #include <cctype>
@@ -772,12 +773,14 @@ void ResourceResidencyWindow::OnGui()
 	{
 		ResourceManager::Instance().SetResidencyDiagnosticsEnabled(false);
 		ResourceManager::Instance().SetStreamingDiagnosticsEnabled(false);
+		RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false);
 		InvalidateDiagnosticsCache();
 		return;
 	}
 
 	ResourceManager::Instance().SetResidencyDiagnosticsEnabled(true);
 	ResourceManager::Instance().SetStreamingDiagnosticsEnabled(true);
+	RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(true);
 	DrawPolicyControls();
 	RefreshDiagnosticsCacheIfNeeded(false);
 	ImGui::Spacing();
@@ -798,6 +801,7 @@ bool ResourceResidencyWindow::OnCloseRequested()
 {
 	ResourceManager::Instance().SetResidencyDiagnosticsEnabled(false);
 	ResourceManager::Instance().SetStreamingDiagnosticsEnabled(false);
+	RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false);
 	InvalidateDiagnosticsCache();
 	return true;
 }
@@ -1384,6 +1388,105 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 			ImGui::Text("%llu/%llu",
 				static_cast<unsigned long long>(snapshot.geometryBudgetBytes),
 				static_cast<unsigned long long>(snapshot.budgetPressureBytes));
+		}
+		ImGui::EndTable();
+	}
+
+	if (ImGui::BeginTable("ResourceVirtualGeometryRuntimeCounters", 11, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("View");
+		ImGui::TableSetupColumn("Source");
+		ImGui::TableSetupColumn("Meshlets S/D/C");
+		ImGui::TableSetupColumn("Hi-Z");
+		ImGui::TableSetupColumn("Clusters Cmp/Rej/Open");
+		ImGui::TableSetupColumn("Batches");
+		ImGui::TableSetupColumn("GPU Packets");
+		ImGui::TableSetupColumn("Generated");
+		ImGui::TableSetupColumn("Compaction");
+		ImGui::TableSetupColumn("Fallback");
+		ImGui::TableSetupColumn("Warnings");
+		ImGui::TableHeadersRow();
+		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot : snapshots)
+		{
+			// Runtime counters are displayed here instead of in the Game View so
+			// developers can inspect VG submission, Hi-Z, and readback state
+			// without covering the rendered camera output.
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(ToString(snapshot.viewType));
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(ToString(snapshot.counterSource));
+			ImGui::TableSetColumnIndex(2);
+			ImGui::Text("%u/%u/%u", snapshot.selectedMeshlets, snapshot.dispatchedMeshlets, snapshot.culledMeshlets);
+			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%s  %u culled  %s",
+				snapshot.hiZActive ? "active" : "off",
+				snapshot.culledByHiZ,
+				snapshot.hiZBaselineMatched ? "baseline ok" : "baseline risk");
+			if (!snapshot.hiZInvalidReason.empty() && ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", snapshot.hiZInvalidReason.c_str());
+			}
+			ImGui::TableSetColumnIndex(4);
+			ImGui::Text("%u/%u/%u", snapshot.compactedClusterCount, snapshot.rejectedClusterCount, snapshot.failOpenClusterCount);
+			ImGui::TableSetColumnIndex(5);
+			ImGui::Text("%u submitted, %u fallback", snapshot.submittedBatchCount, snapshot.legacyFallbackBatchCount);
+			ImGui::TableSetColumnIndex(6);
+			ImGui::Text("%u packets, %u descriptors", snapshot.gpuPacketRecordCount, snapshot.gpuBatchDescriptorCount);
+			ImGui::TableSetColumnIndex(7);
+			ImGui::Text("%u valid / %u invalid", snapshot.validGeneratedSubmissionCount, snapshot.invalidGeneratedSubmissionCount);
+			ImGui::TableSetColumnIndex(8);
+			ImGui::Text("%u dispatches, %u readbacks", snapshot.gpuCompactionDispatchCount, snapshot.gpuCounterReadbackCount);
+			ImGui::TableSetColumnIndex(9);
+			ImGui::Text("%u packets, %u batches", snapshot.gpuFallbackAffectedPackets, snapshot.gpuFallbackAffectedBatches);
+			if (!snapshot.gpuFallbackReason.empty() && ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", snapshot.gpuFallbackReason.c_str());
+			}
+			ImGui::TableSetColumnIndex(10);
+			ImGui::Text("%zu", snapshot.warnings.size());
+		}
+		ImGui::EndTable();
+	}
+
+	if (ImGui::BeginTable("ResourceVirtualGeometryPageSources", 9, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("View");
+		ImGui::TableSetupColumn("Payloads H/F/E");
+		ImGui::TableSetupColumn("Emitted H/F/E");
+		ImGui::TableSetupColumn("Missing Sources");
+		ImGui::TableSetupColumn("Material Pages");
+		ImGui::TableSetupColumn("Requests/Retires");
+		ImGui::TableSetupColumn("Payload Bytes R/F/E");
+		ImGui::TableSetupColumn("Counter Frames");
+		ImGui::TableSetupColumn("Latency");
+		ImGui::TableHeadersRow();
+		for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& snapshot : snapshots)
+		{
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(ToString(snapshot.viewType));
+			ImGui::TableSetColumnIndex(1);
+			ImGui::Text("%u/%u/%u", snapshot.pageSources.highDetailPayloads, snapshot.pageSources.fallbackPayloads, snapshot.pageSources.embeddedFallbackPayloads);
+			ImGui::TableSetColumnIndex(2);
+			ImGui::Text("%u/%u/%u", snapshot.pageSources.emittedHighDetailSources, snapshot.pageSources.emittedFallbackSources, snapshot.pageSources.emittedEmbeddedFallbackSources);
+			ImGui::TableSetColumnIndex(3);
+			ImGui::Text("%u", snapshot.pageSources.missingSources);
+			ImGui::TableSetColumnIndex(4);
+			ImGui::Text("%u pairs, %u multi", snapshot.pageSources.emittedMaterialPagePairs, snapshot.pageSources.emittedMultiMaterialPages);
+			ImGui::TableSetColumnIndex(5);
+			ImGui::Text("%u/%u", snapshot.pageSources.pageRequests, snapshot.pageSources.pageRetirements);
+			ImGui::TableSetColumnIndex(6);
+			ImGui::Text("%llu/%llu/%llu",
+				static_cast<unsigned long long>(snapshot.pageSources.residentPayloadBytes),
+				static_cast<unsigned long long>(snapshot.pageSources.fallbackPayloadBytes),
+				static_cast<unsigned long long>(snapshot.pageSources.embeddedFallbackBytes));
+			ImGui::TableSetColumnIndex(7);
+			ImGui::Text("%llu/%llu",
+				static_cast<unsigned long long>(snapshot.counterPreparedFrameId),
+				static_cast<unsigned long long>(snapshot.counterReadbackFrameId));
+			ImGui::TableSetColumnIndex(8);
+			ImGui::Text("%u frames", snapshot.counterReadbackLatencyFrames);
 		}
 		ImGui::EndTable();
 	}

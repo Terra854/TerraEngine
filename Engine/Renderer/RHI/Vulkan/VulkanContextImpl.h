@@ -27,6 +27,7 @@
 #include <set>
 #include <array>
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <deque>
 #include <optional>
@@ -600,6 +601,22 @@ struct VulkanContext::Impl {
 	std::array<FrameBudgetDiagnosticsSnapshot, kStatsViewCount> latestBudgetDiagnosticsByView{};
 	std::array<FrameBudgetDiagnosticsSnapshot, kStatsSlotCount> pendingBudgetDiagnosticsBySlot{};
 	std::array<LightingDiagnosticsSnapshot, kStatsViewCount> latestLightingDiagnosticsByView{};
+	struct GpuTimestampViewSample
+	{
+		bool valid = false;
+		float milliseconds = 0.0f;
+		std::uint64_t frameId = 0u;
+		std::uint32_t latencyFrames = 0u;
+		std::string reason;
+	};
+	static constexpr uint32_t kGpuTimestampQueriesPerView = 2u;
+	static constexpr uint32_t kGpuTimestampQueriesPerFrame = kStatsViewCount * kGpuTimestampQueriesPerView;
+	VkQueryPool gpuTimestampQueryPool = VK_NULL_HANDLE;
+	float gpuTimestampPeriodNanoseconds = 0.0f;
+	bool gpuTimestampQueriesSupported = false;
+	std::array<std::array<bool, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> pendingGpuTimestampWritesByFrame{};
+	std::array<std::array<std::uint64_t, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> pendingGpuTimestampFrameIdsByFrame{};
+	std::array<std::array<GpuTimestampViewSample, kStatsViewCount>, MAX_FRAMES_IN_FLIGHT> completedGpuTimestampSamplesByFrame{};
 	std::array<std::vector<FrameLightCandidate>, kStatsSlotCount> pendingLightAnalysisCandidatesBySlot{};
 	std::array<GpuLightAnalysisViewSnapshot, kStatsViewCount> latestGpuLightAnalysisByView{};
 	std::array<ViewLightingTemporalState, kStatsViewCount> lightingTemporalStateByView{};
@@ -850,6 +867,11 @@ struct VulkanContext::Impl {
 	bool CreateFramebuffers();
 	bool CreateCommandPool();
 	bool CreateSyncObjects();
+	bool CreateGpuTimestampQueries();
+	void DestroyGpuTimestampQueries();
+	void ResolveCompletedGpuTimestamps(uint32_t frameIndex);
+	void MarkGpuTimestampBegin(VkCommandBuffer cmd, uint32_t frameIndex, VulkanContext::ViewType view, std::uint64_t frameId);
+	void MarkGpuTimestampEnd(VkCommandBuffer cmd, uint32_t frameIndex, VulkanContext::ViewType view);
 
 	bool CreateDescriptorPool();
 

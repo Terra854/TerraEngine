@@ -59,6 +59,56 @@ void AddOrReplaceMetric(ProfilerModuleSummary& module, std::string name, double 
 	}
 	module.metrics.push_back({std::move(name), value, std::move(unit)});
 }
+
+ProfilerTimingStreamSample MakeTimingSample(
+	std::string id,
+	std::string label,
+	ProfilerTimingStreamScope scope,
+	ProfilerTimingStreamSource source,
+	ProfilerTimingStreamStatus status,
+	double milliseconds,
+	std::string reason = {})
+{
+	ProfilerTimingStreamSample sample;
+	sample.id = std::move(id);
+	sample.label = std::move(label);
+	sample.scope = scope;
+	sample.source = source;
+	sample.status = status;
+	sample.milliseconds = status == ProfilerTimingStreamStatus::Valid ? milliseconds : 0.0;
+	sample.statusReason = std::move(reason);
+	return sample;
+}
+
+// Viewport CPU timing must come from profiler scopes instead of renderer frame
+// stats. RenderStatsSnapshot::frameTimeMs mirrors the view's frame delta and can
+// be much larger than the CPU work done by the viewport submission itself.
+bool IsViewportCpuSubmitSample(const ProfilerSample& sample)
+{
+	if (sample.moduleId != ProfilerModuleId::CpuEngine)
+	{
+		return false;
+	}
+	return sample.name == "RenderSystem: Submit Scene View"
+		|| sample.name == "RenderSystem: Submit Game View Cameras"
+		|| sample.name == "RenderSystem: Submit Blank Game View";
+}
+
+bool TryMeasureViewportCpuMilliseconds(const ProfilerFrameRecord& frame, double& viewportCpuMs)
+{
+	viewportCpuMs = 0.0;
+	bool foundViewportSubmit = false;
+	for (const ProfilerSample& sample : frame.samples)
+	{
+		if (!IsViewportCpuSubmitSample(sample))
+		{
+			continue;
+		}
+		foundViewportSubmit = true;
+		viewportCpuMs += std::max(0.0, sample.durationMs);
+	}
+	return foundViewportSubmit;
+}
 }
 
 // Profiler::Instance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -217,6 +267,20 @@ void Profiler::EndFrame()
 	}
 
 	currentFrame->durationMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - currentFrameStart).count();
+	AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
+		"engine_cpu",
+		"Engine CPU",
+		ProfilerTimingStreamScope::EngineCpu,
+		ProfilerTimingStreamSource::ProfilerClock,
+		ProfilerTimingStreamStatus::Valid,
+		currentFrame->durationMs));
+	AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
+		"editor_wall",
+		"Editor Wall",
+		ProfilerTimingStreamScope::EditorWall,
+		ProfilerTimingStreamSource::ProfilerClock,
+		ProfilerTimingStreamStatus::Valid,
+		currentFrame->durationMs));
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	while (!t_sampleState.openSamples.empty())
 	{
@@ -225,6 +289,17 @@ void Profiler::EndFrame()
 		sample.complete = false;
 		sample.durationMs = std::max(0.0, currentFrame->durationMs - sample.startMs);
 		currentFrame->samples.push_back(std::move(sample));
+	}
+	double viewportCpuMs = 0.0;
+	if (TryMeasureViewportCpuMilliseconds(*currentFrame, viewportCpuMs))
+	{
+		AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
+			"viewport_cpu",
+			"Viewport CPU",
+			ProfilerTimingStreamScope::ViewportCpu,
+			ProfilerTimingStreamSource::ProfilerClock,
+			ProfilerTimingStreamStatus::Valid,
+			viewportCpuMs));
 	}
 	AggregateSamplesForFrame(*currentFrame);
 	document.frames.push_back(*currentFrame);
@@ -309,6 +384,42 @@ void Profiler::RecordRenderStats(const RenderStatsSnapshot& gameStats, const Ren
 	AddOrReplaceMetric(*engineCpu, "Scene draw calls", static_cast<double>(sceneStats.drawCalls), "count");
 	AddOrReplaceMetric(*engineCpu, "Game triangles", static_cast<double>(gameStats.triangleCount), "count");
 	AddOrReplaceMetric(*engineCpu, "Scene triangles", static_cast<double>(sceneStats.triangleCount), "count");
+
+	const bool gameGpuValid = gameStats.valid && gameStats.gpuTimestampValid;
+	const bool sceneGpuValid = sceneStats.valid && sceneStats.gpuTimestampValid;
+	const bool viewportGpuValid = gameGpuValid || sceneGpuValid;
+	const double viewportGpuMs =
+		(gameGpuValid ? static_cast<double>(gameStats.gpuTimestampMs) : 0.0)
+		+ (sceneGpuValid ? static_cast<double>(sceneStats.gpuTimestampMs) : 0.0);
+	std::string viewportGpuReason;
+	if (!viewportGpuValid)
+	{
+		const auto appendReason = [&viewportGpuReason](const std::string& reason) {
+			if (reason.empty())
+			{
+				return;
+			}
+			if (!viewportGpuReason.empty())
+			{
+				viewportGpuReason += " ";
+			}
+			viewportGpuReason += reason;
+		};
+		appendReason(gameStats.valid ? gameStats.gpuTimestampReason : std::string{});
+		appendReason(sceneStats.valid ? sceneStats.gpuTimestampReason : std::string{});
+		if (viewportGpuReason.empty())
+		{
+			viewportGpuReason = "No viewport GPU timestamp was published for this frame.";
+		}
+	}
+	AddOrReplaceTimingStreamSample(*currentFrame, MakeTimingSample(
+		"viewport_gpu",
+		"Viewport GPU",
+		ProfilerTimingStreamScope::ViewportGpu,
+		viewportGpuValid ? ProfilerTimingStreamSource::BackendGpuTimestamp : ProfilerTimingStreamSource::Unavailable,
+		viewportGpuValid ? ProfilerTimingStreamStatus::Valid : ProfilerTimingStreamStatus::Unavailable,
+		viewportGpuMs,
+		viewportGpuReason));
 }
 
 // Profiler::RecordTaskQueued is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

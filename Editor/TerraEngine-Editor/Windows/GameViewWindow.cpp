@@ -13,10 +13,12 @@
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
+#include <string>
 
 GameViewWindow::GameViewWindow(MainEditorSubsystem* owner)
 	: EditorWindow("Game View"), m_Owner(owner) {
@@ -287,194 +289,43 @@ void GameViewWindow::OnGui() {
 		RenderStatsSnapshot stats{};
 		const bool statsReady = (m_Owner != nullptr) && m_Owner->TryGetGameViewRenderStats(stats) && texID != nullptr && hasCameras;
 
-		char line0[96];
-		char line1[96];
-		char line2[96];
-		char line3[96];
-		char line4[192];
-		char line5[192];
-		char line6[192];
-		char line7[192];
-		char line8[96];
-		char line9[192];
-		char line10[96];
-		char line11[160];
-		char line12[160];
-		char line13[160];
-		char line14[160];
-		char line15[160];
-		char line16[160];
-		char line17[160];
-		char line18[192];
-		char line19[192];
-		char line20[160];
-		char line21[192];
-		char line22[192];
-		char line23[192];
-		char line24[192];
-		char line25[192];
-		char line26[192];
-		char line27[192];
-		char line28[192];
-
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		std::array<std::string, 5> lines;
 		if (statsReady) {
-			const std::uint32_t displayedCulled = stats.taskCullingActive ? stats.meshletsCulled : 0u;
-			const std::uint32_t displayedDispatched = stats.taskCullingActive ? stats.meshletsDispatched : stats.meshletsTotal;
-
-			std::snprintf(line0, sizeof(line0), "FPS: %.1f", stats.fps);
-			std::snprintf(line1, sizeof(line1), "Frame: %.2f ms", stats.frameTimeMs);
-			std::snprintf(line2, sizeof(line2), "Draw Calls: %u", stats.drawCalls);
-			std::snprintf(line3, sizeof(line3), "Triangles: %u", stats.triangleCount);
-			const std::string selectedMeshletText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
-				"Meshlets Selected",
-				stats.meshletsTotal,
-				stats.meshletCounterSource,
-				stats.meshletCounterReason);
-			std::snprintf(line4, sizeof(line4), "%s", selectedMeshletText.c_str());
-			// Task-culling debug overlays can intentionally keep culled meshlets
-			// visible so users can inspect them. When the selected and dispatched
-			// counts match, printing both rows looks like duplicated/conflicting
-			// data, so show the dispatch row only when it adds information.
-			if (displayedDispatched != stats.meshletsTotal)
-			{
-				const std::string dispatchedMeshletText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
-					"Meshlets Dispatched",
-					displayedDispatched,
-					stats.meshletCounterSource,
-					stats.meshletCounterReason);
-				std::snprintf(line5, sizeof(line5), "%s", dispatchedMeshletText.c_str());
-			}
-			else
-			{
-				line5[0] = '\0';
-			}
-			const std::string culledMeshletText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
-				"Meshlets Culled",
-				displayedCulled,
-				stats.meshletCounterSource,
-				stats.meshletCounterReason);
-			std::snprintf(line6, sizeof(line6), "%s", culledMeshletText.c_str());
-			const std::string hiZCulledText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
-				"  - Culled by Hi-Z",
-				stats.meshletsCulledHiZ,
-				stats.meshletCounterSource,
-				stats.meshletCounterReason);
-			std::snprintf(line7, sizeof(line7), "%s", hiZCulledText.c_str());
-			std::snprintf(line8, sizeof(line8), "Task Culling: %s", stats.taskCullingActive ? "On" : "Off");
-			const std::string hiZStatusText = TerraEngine::Renderer::FormatVirtualGeometryHiZOverlayStatus(
-				stats.hiZState,
-				stats.hiZActive,
-				stats.hiZStatusReason);
-			std::snprintf(line9, sizeof(line9), "Hi-Z Occlusion: %s", hiZStatusText.c_str());
-			std::snprintf(line10, sizeof(line10), "Variable Rate Shading: %s", stats.vrsActive ? "Active" : "Off");
-			const std::string packetText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
-				"VG Cluster Packets",
-				stats.virtualGeometryClusterPackets,
-				stats.meshletCounterSource,
-				stats.meshletCounterReason);
-			std::snprintf(line11, sizeof(line11), "%s", packetText.c_str());
-			const std::string batchText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
-				"VG Submitted Batches",
-				stats.virtualGeometrySubmittedBatches,
-				stats.meshletCounterSource,
-				stats.meshletCounterReason);
-			std::snprintf(line12, sizeof(line12), "%s", batchText.c_str());
-			std::snprintf(line13, sizeof(line13), "VG Legacy Fallback Batches: %u", stats.virtualGeometryLegacyFallbackBatches);
-			std::snprintf(line14, sizeof(line14), "VG Candidate Packets: %u", stats.virtualGeometryCandidatePackets);
-			std::snprintf(line15, sizeof(line15), "VG Compacted Packets: %u", stats.virtualGeometryCompactedPackets);
-			std::snprintf(line16, sizeof(line16), "VG Rejected Packets: %u", stats.virtualGeometryRejectedPackets);
-			std::snprintf(line17, sizeof(line17), "VG Fail-Open Packets: %u", stats.virtualGeometryFailOpenPackets);
-			std::snprintf(line18, sizeof(line18), "VG Pages R/Q/M/F: %u/%u/%u/%u",
-				stats.virtualGeometryResidentPages,
-				stats.virtualGeometryRequestedPages,
-				stats.virtualGeometryMissingPages,
-				stats.virtualGeometryFailedPages);
-			std::snprintf(line19, sizeof(line19), "VG Evicted/Pinned Fallback: %u/%u",
-				stats.virtualGeometryEvictedPages,
-				stats.virtualGeometryPinnedFallbackPages);
-			std::snprintf(line20, sizeof(line20), "Hi-Z Baseline: %s, risks %u",
-				stats.hiZBaselineMatched ? "Matched" : "Mismatch",
-				stats.hiZFalseOcclusionRiskWarnings);
-			const std::string gpuPacketText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
-				"VG GPU Packet Records",
-				stats.virtualGeometryGpuPacketRecords,
-				stats.meshletCounterSource,
-				stats.meshletCounterReason);
-			std::snprintf(line21, sizeof(line21), "%s", gpuPacketText.c_str());
-			std::snprintf(line22, sizeof(line22), "VG Generated Submissions: %u valid, %u invalid",
-				stats.virtualGeometryValidGeneratedSubmissions,
-				stats.virtualGeometryInvalidGeneratedSubmissions);
-			std::snprintf(line23, sizeof(line23), "VG Compaction Dispatches/Readbacks: %u/%u",
-				stats.virtualGeometryGpuCompactionDispatches,
-				stats.virtualGeometryGpuCounterReadbacks);
-			std::snprintf(line24, sizeof(line24), "VG GPU Fallbacks: %u packets, %u batches",
-				stats.virtualGeometryGpuFallbackAffectedPackets,
-				stats.virtualGeometryGpuFallbackAffectedBatches);
-			std::snprintf(line25, sizeof(line25), "Visible Cache: %s, unique touches %u, deduped %u",
-				stats.visibleCommandCacheHit ? "hit" : "miss",
-				stats.visibleStreamingUniqueMeshes + stats.visibleStreamingUniqueMaterials + stats.visibleStreamingUniqueTextures,
-				stats.visibleStreamingDuplicateTouchesEliminated);
-			std::snprintf(line26, sizeof(line26), "VG Page Sources H/F/E/M: %u/%u/%u/%u",
-				stats.virtualGeometryEmittedHighDetailPages,
-				stats.virtualGeometryEmittedFallbackPages,
-				stats.virtualGeometryEmittedEmbeddedFallbackPages,
-				stats.virtualGeometryMissingPageSources);
-			std::snprintf(line27, sizeof(line27), "VG Page Payload Bytes R/F/E: %llu/%llu/%llu",
-				static_cast<unsigned long long>(stats.virtualGeometryResidentPagePayloadBytes),
-				static_cast<unsigned long long>(stats.virtualGeometryFallbackPagePayloadBytes),
-				static_cast<unsigned long long>(stats.virtualGeometryEmbeddedFallbackBytes));
-			std::snprintf(line28, sizeof(line28), "VG Page Requests/Retires: %u/%u",
-				stats.virtualGeometryPageSourceRequests,
-				stats.virtualGeometryPageSourceRetirements);
+			char buffer[96];
+			std::snprintf(buffer, sizeof(buffer), "FPS: %.1f", stats.fps);
+			lines[0] = buffer;
+			std::snprintf(buffer, sizeof(buffer), "Frame: %.2f ms", stats.frameTimeMs);
+			lines[1] = buffer;
+			std::snprintf(buffer, sizeof(buffer), "Draw Calls: %u", stats.drawCalls);
+			lines[2] = buffer;
+			std::snprintf(buffer, sizeof(buffer), "Triangles: %u", stats.triangleCount);
+			lines[3] = buffer;
+			// Keep the Game View focused on whether the frame is healthy. The
+			// detailed meshlet, page, Hi-Z, and packet readbacks now live in the
+			// Resource Residency window where they can be grouped without
+			// covering the running game.
+			lines[4] = stats.detailedRenderDiagnosticsRequested ? "Diagnostics: detailed" : "Diagnostics: compact";
 		} else {
-			std::snprintf(line0, sizeof(line0), "Stats unavailable");
-			std::snprintf(line1, sizeof(line1), "No active camera/render stats");
-			line2[0] = '\0';
-			line3[0] = '\0';
-			line4[0] = '\0';
-			line5[0] = '\0';
-			line6[0] = '\0';
-			line7[0] = '\0';
-			line8[0] = '\0';
-			line9[0] = '\0';
-			line10[0] = '\0';
-			line11[0] = '\0';
-			line12[0] = '\0';
-			line13[0] = '\0';
-			line14[0] = '\0';
-			line15[0] = '\0';
-			line16[0] = '\0';
-			line17[0] = '\0';
-			line18[0] = '\0';
-			line19[0] = '\0';
-			line20[0] = '\0';
-			line21[0] = '\0';
-			line22[0] = '\0';
-			line23[0] = '\0';
-			line24[0] = '\0';
-			line25[0] = '\0';
-			line26[0] = '\0';
-			line27[0] = '\0';
-			line28[0] = '\0';
+			lines[0] = "Stats unavailable";
+			lines[1] = "No active camera/render stats";
 		}
 
-		const char* lines[] = {line0, line1, line2, line3, line4, line5, line6, line7, line11, line12, line21, line22, line23, line24, line13, line14, line15, line16, line17, line18, line19, line26, line27, line28, line25, line20, line8, line9, line10};
 		float textWidth = 0.0f;
 		int lineCount = 0;
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const char* line : lines) {
+		for (const std::string& line : lines) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (line == nullptr || line[0] == '\0') {
+			if (line.empty()) {
 				continue;
 			}
-			textWidth = std::max(textWidth, ImGui::CalcTextSize(line).x);
+			textWidth = std::max(textWidth, ImGui::CalcTextSize(line.c_str()).x);
 			++lineCount;
 		}
 
 		const float panelPadding = 8.0f;
 		const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
-		const float panelWidth = textWidth + panelPadding * 2.0f;
+		const float availablePanelWidth = std::max(96.0f, imageSize.x - 20.0f);
+		const float panelWidth = std::min(textWidth + panelPadding * 2.0f, availablePanelWidth);
 		const float panelHeight = panelPadding * 2.0f + lineHeight * static_cast<float>(lineCount);
 		const ImVec2 panelMax = ImVec2(imageMax.x - 10.0f, imageMin.y + 10.0f + panelHeight);
 		const ImVec2 panelMin = ImVec2(panelMax.x - panelWidth, imageMin.y + 10.0f);
@@ -482,12 +333,12 @@ void GameViewWindow::OnGui() {
 		drawList->AddRectFilled(panelMin, panelMax, IM_COL32(35, 35, 35, 195), 4.0f);
 		float textY = panelMin.y + panelPadding;
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-		for (const char* line : lines) {
+		for (const std::string& line : lines) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-			if (line == nullptr || line[0] == '\0') {
+			if (line.empty()) {
 				continue;
 			}
-			drawList->AddText(ImVec2(panelMin.x + panelPadding, textY), IM_COL32(232, 232, 232, 255), line);
+			drawList->AddText(ImVec2(panelMin.x + panelPadding, textY), IM_COL32(232, 232, 232, 255), line.c_str());
 			textY += lineHeight;
 		}
 	}

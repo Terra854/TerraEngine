@@ -20,6 +20,7 @@
 #include <imgui.h>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -30,6 +31,8 @@ using TerraEngine::Profiling::ProfilerFrameRecord;
 using TerraEngine::Profiling::ProfilerModuleId;
 using TerraEngine::Profiling::ProfilerSample;
 using TerraEngine::Profiling::ProfilerSessionState;
+using TerraEngine::Profiling::ProfilerTimingStreamAggregate;
+using TerraEngine::Profiling::ProfilerTimingStreamStatus;
 
 namespace
 {
@@ -187,6 +190,58 @@ void DrawMetricCell(const char* label, double valueMs, const ImVec4& valueColor)
 	ImGui::TableNextColumn();
 	ImGui::TextDisabled("%s", label);
 	ImGui::TextColored(valueColor, "%.3f ms", valueMs);
+}
+
+void DrawDisabledReasonTooltip(const char* reason)
+{
+	if (reason != nullptr && reason[0] != '\0' && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+	{
+		ImGui::SetTooltip("%s", reason);
+	}
+}
+
+bool ToolbarButton(const char* label, bool enabled, const char* disabledReason)
+{
+	if (!enabled)
+	{
+		ImGui::BeginDisabled();
+	}
+	const bool pressed = ImGui::Button(label);
+	if (!enabled)
+	{
+		ImGui::EndDisabled();
+		DrawDisabledReasonTooltip(disabledReason);
+	}
+	return enabled && pressed;
+}
+
+void DrawToolbarGroupLabel(const char* label)
+{
+	ImGui::TextDisabled("%s", label);
+	ImGui::SameLine();
+}
+
+const char* TimingDisplayValue(const ProfilerTimingStreamAggregate& aggregate, char* buffer, std::size_t bufferSize)
+{
+	if (aggregate.selectedStatus == ProfilerTimingStreamStatus::Valid)
+	{
+		std::snprintf(buffer, bufferSize, "%.3f ms", aggregate.selectedMilliseconds);
+		return buffer;
+	}
+	return TerraEngine::Profiling::ToString(aggregate.selectedStatus);
+}
+
+const char* TimingAggregateValue(const ProfilerTimingStreamAggregate& aggregate, double value, char* buffer, std::size_t bufferSize)
+{
+	// Aggregate columns are only meaningful when at least one valid sample
+	// contributed to the stream. Unavailable GPU timing must not look like a
+	// measured zero-millisecond result.
+	if (aggregate.sampleCount == 0u)
+	{
+		return "n/a";
+	}
+	std::snprintf(buffer, bufferSize, "%.3f", value);
+	return buffer;
 }
 
 // BuildSampleTree is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -448,43 +503,51 @@ void ProfilerWindow::DrawToolbar()
 	const bool hasProject = hasService && service->HasActiveProject();
 	const bool busy = hasService && service->IsBusy();
 	const ProfilerSessionState state = Profiler::Instance().GetState();
+	const bool canUseProject = hasProject && !busy;
+	const bool recording = state == ProfilerSessionState::Recording;
+	const bool paused = state == ProfilerSessionState::Paused;
+	const bool hasFrames = !Profiler::Instance().GetFrameListSnapshot().empty();
+	const char* unavailableReason = !hasService
+		? "Profiler service is not available."
+		: (!hasProject ? "Open a project before recording profiler captures." : (busy ? "Profiler service is finishing another action." : ""));
 
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::Button("Record") && hasProject && !busy)
+	DrawToolbarGroupLabel("Live");
+	if (ToolbarButton(recording ? "Recording" : "Record", canUseProject && !recording, unavailableReason))
 	{
 		service->StartRecording();
 	}
 	ImGui::SameLine();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::Button("Pause") && hasProject && !busy)
+	if (ToolbarButton("Pause", canUseProject && recording, recording ? "" : "Pause is available only while recording."))
 	{
 		service->PauseRecording();
 	}
 	ImGui::SameLine();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::Button("Resume") && hasProject && !busy)
+	if (ToolbarButton("Resume", canUseProject && paused, paused ? "" : "Resume is available only while paused."))
 	{
 		service->ResumeRecording();
 	}
 	ImGui::SameLine();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::Button("Finish Capture") && hasProject && !busy)
+	if (ToolbarButton("Finish", canUseProject && (recording || paused), (recording || paused) ? "" : "Start or resume a capture before finishing it."))
 	{
 		service->FinishCapture();
 	}
 	ImGui::SameLine();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::Button("Clear") && hasProject && !busy)
-	{
-		service->Clear();
-	}
+	ImGui::TextDisabled("|");
 	ImGui::SameLine();
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::Button("Refresh List") && hasProject && !busy)
+	DrawToolbarGroupLabel("Captures");
+	if (ToolbarButton("Refresh", canUseProject, unavailableReason))
 	{
 		service->RefreshCaptureList();
 	}
 	ImGui::SameLine();
+	if (ToolbarButton("Clear", canUseProject && hasFrames, hasFrames ? "" : "No captured frames are available to clear."))
+	{
+		service->Clear();
+	}
+	ImGui::SameLine();
+	ImGui::TextDisabled("|");
+	ImGui::SameLine();
+	DrawToolbarGroupLabel("Status");
 	ImGui::TextDisabled("%s", TerraEngine::Profiling::ToString(state));
 }
 
@@ -629,78 +692,6 @@ void ProfilerWindow::DrawFrameDetails()
 		ImGui::TreePop();
 	}
 	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
-	if (!renderDiagnostics.virtualGeometryViews.empty() && ImGui::TreeNode("Virtual Geometry Packet Diagnostics"))
-	{
-		if (ImGui::BeginTable("ProfilerVirtualGeometryPacketRows", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
-		{
-			ImGui::TableSetupColumn("View");
-			ImGui::TableSetupColumn("Source");
-			ImGui::TableSetupColumn("GPU Packets");
-			ImGui::TableSetupColumn("Generated");
-			ImGui::TableSetupColumn("Compaction");
-			ImGui::TableSetupColumn("Fallback");
-			ImGui::TableHeadersRow();
-			for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : renderDiagnostics.virtualGeometryViews)
-			{
-				// The profiler reads immutable diagnostics rows here. It never
-				// queries live Vulkan buffers, so inspecting packet state cannot
-				// perturb the renderer while a capture is open.
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::TextUnformatted(ToString(view.viewType));
-				ImGui::TableSetColumnIndex(1);
-				ImGui::TextUnformatted(ToString(view.counterSource));
-				ImGui::TableSetColumnIndex(2);
-				ImGui::Text("%u packets / %u batches", view.gpuPacketRecordCount, view.gpuBatchDescriptorCount);
-				ImGui::TableSetColumnIndex(3);
-				ImGui::Text("%u total, %u valid", view.generatedSubmissionCount, view.validGeneratedSubmissionCount);
-				ImGui::TableSetColumnIndex(4);
-				ImGui::Text("%u dispatches, %u readbacks", view.gpuCompactionDispatchCount, view.gpuCounterReadbackCount);
-				ImGui::TableSetColumnIndex(5);
-				ImGui::Text("%u records", view.gpuFallbackRecordCount);
-				if (!view.gpuFallbackReason.empty() && ImGui::IsItemHovered())
-				{
-					ImGui::SetTooltip("%s", view.gpuFallbackReason.c_str());
-				}
-			}
-			ImGui::EndTable();
-		}
-		ImGui::TreePop();
-	}
-	if (!renderDiagnostics.virtualGeometryViews.empty() && ImGui::TreeNode("Virtual Geometry Page Source Diagnostics"))
-	{
-		if (ImGui::BeginTable("ProfilerVirtualGeometryPageSourceRows", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
-		{
-			ImGui::TableSetupColumn("View");
-			ImGui::TableSetupColumn("Source");
-			ImGui::TableSetupColumn("VG Page Requests");
-			ImGui::TableSetupColumn("VG Resident Payload Bytes");
-			ImGui::TableSetupColumn("VG Emitted Fallback Pages");
-			ImGui::TableSetupColumn("VG Embedded Fallback Uses");
-			ImGui::TableHeadersRow();
-			for (const TerraEngine::Renderer::VirtualGeometryViewDiagnosticsSnapshot& view : renderDiagnostics.virtualGeometryViews)
-			{
-				// Page-source diagnostics come from the same immutable per-view
-				// snapshot as packet diagnostics. Keeping this table read-only
-				// lets users inspect streaming behavior without poking residency.
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::TextUnformatted(ToString(view.viewType));
-				ImGui::TableSetColumnIndex(1);
-				ImGui::TextUnformatted(ToString(view.counterSource));
-				ImGui::TableSetColumnIndex(2);
-				ImGui::Text("%u", view.pageSources.pageRequests);
-				ImGui::TableSetColumnIndex(3);
-				ImGui::Text("%llu", static_cast<unsigned long long>(view.pageSources.residentPayloadBytes));
-				ImGui::TableSetColumnIndex(4);
-				ImGui::Text("%u", view.pageSources.emittedFallbackSources);
-				ImGui::TableSetColumnIndex(5);
-				ImGui::Text("%u", view.pageSources.emittedEmbeddedFallbackSources);
-			}
-			ImGui::EndTable();
-		}
-		ImGui::TreePop();
-	}
 	if (ImGui::TreeNode("Visible Command Reuse"))
 	{
 		const RenderStatsSnapshot gameStats = RenderSystem::Instance().GetLatestRenderStats(RenderViewType::Game);
@@ -802,6 +793,55 @@ void ProfilerWindow::DrawFrameOverview(const ProfilerFrameRecord& frame)
 	{
 		ImGui::TextDisabled("No complete timing window is available yet.");
 		return;
+	}
+
+	const std::vector<ProfilerFrameRecord> fullFrames = Profiler::Instance().GetFramesSnapshot();
+	const std::vector<ProfilerTimingStreamAggregate> timingStreams =
+		TerraEngine::Profiling::BuildTimingStreamAggregates(fullFrames, std::optional<ProfilerFrameRecord>(frame));
+	if (!timingStreams.empty() && ImGui::BeginTable("ProfilerTimingStreams", 10, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Timing");
+		ImGui::TableSetupColumn("Selected");
+		ImGui::TableSetupColumn("Mean");
+		ImGui::TableSetupColumn("Median");
+		ImGui::TableSetupColumn("P95");
+		ImGui::TableSetupColumn("P99");
+		ImGui::TableSetupColumn("Min");
+		ImGui::TableSetupColumn("Max");
+		ImGui::TableSetupColumn("Samples");
+		ImGui::TableSetupColumn("Source");
+		ImGui::TableHeadersRow();
+		for (const ProfilerTimingStreamAggregate& stream : timingStreams)
+		{
+			char selectedValue[64];
+			char aggregateValue[64];
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(stream.label.c_str());
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(TimingDisplayValue(stream, selectedValue, sizeof(selectedValue)));
+			if (!stream.selectedStatusReason.empty() && ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", stream.selectedStatusReason.c_str());
+			}
+			ImGui::TableSetColumnIndex(2);
+			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.meanMs, aggregateValue, sizeof(aggregateValue)));
+			ImGui::TableSetColumnIndex(3);
+			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.medianMs, aggregateValue, sizeof(aggregateValue)));
+			ImGui::TableSetColumnIndex(4);
+			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.p95Ms, aggregateValue, sizeof(aggregateValue)));
+			ImGui::TableSetColumnIndex(5);
+			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.p99Ms, aggregateValue, sizeof(aggregateValue)));
+			ImGui::TableSetColumnIndex(6);
+			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.minMs, aggregateValue, sizeof(aggregateValue)));
+			ImGui::TableSetColumnIndex(7);
+			ImGui::TextUnformatted(TimingAggregateValue(stream, stream.maxMs, aggregateValue, sizeof(aggregateValue)));
+			ImGui::TableSetColumnIndex(8);
+			ImGui::Text("%zu / %zu missing", stream.sampleCount, stream.missingCount);
+			ImGui::TableSetColumnIndex(9);
+			ImGui::TextUnformatted(TerraEngine::Profiling::ToString(stream.source));
+		}
+		ImGui::EndTable();
 	}
 
 	if (ImGui::BeginTable("ProfilerFrameStats", 5, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV))

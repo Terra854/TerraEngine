@@ -144,15 +144,18 @@ namespace TerraEngine::EditorTests {
 			const std::string profiler = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
 			const std::string gameView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp");
 			const std::string sceneView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
+			const std::string residency = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp");
 
 			context.Expect(renderSystem.find("RenderSystem: VG Packet Upload Planning") != std::string::npos, "Profiler scopes should name VG packet upload planning.");
 			context.Expect(renderSystem.find("RenderSystem: VG Compaction Dispatch Planning") != std::string::npos, "Profiler scopes should name VG compaction dispatch planning.");
 			context.Expect(renderSystem.find("RenderSystem: VG Generated Submission Validation") != std::string::npos, "Profiler scopes should name generated submission validation.");
 			context.Expect(renderSystem.find("RenderSystem: VG Fallback Submission") != std::string::npos, "Profiler scopes should name fail-open fallback submission work.");
-			context.Expect(profiler.find("ProfilerVirtualGeometryPacketRows") != std::string::npos, "Profiler details should include a VG packet diagnostic table.");
-			context.Expect(profiler.find("Virtual Geometry Packet Diagnostics") != std::string::npos, "Profiler details should label the VG packet diagnostic tree.");
-			context.Expect(gameView.find("VG GPU Packet Records") != std::string::npos, "Game View overlay should expose GPU packet records.");
-			context.Expect(gameView.find("VG Generated Submissions") != std::string::npos, "Game View overlay should expose generated submission counters.");
+			context.Expect(profiler.find("ProfilerVirtualGeometryPacketRows") == std::string::npos, "Profiler should no longer duplicate VG packet diagnostics.");
+			context.Expect(gameView.find("VG GPU Packet Records") == std::string::npos, "Game View stats should stay compact and omit GPU packet records.");
+			context.Expect(gameView.find("VG Generated Submissions") == std::string::npos, "Game View stats should stay compact and omit generated submission counters.");
+			context.Expect(residency.find("ResourceVirtualGeometryRuntimeCounters") != std::string::npos, "Resource Residency should own the VG packet diagnostic table.");
+			context.Expect(residency.find("GPU Packets") != std::string::npos, "Resource Residency should expose GPU packet records.");
+			context.Expect(residency.find("Generated") != std::string::npos, "Resource Residency should expose generated submission counters.");
 			context.Expect(sceneView.find("VG GPU Packet Records") != std::string::npos, "Scene View overlay should expose GPU packet records.");
 			context.Expect(sceneView.find("VG Generated Submissions") != std::string::npos, "Scene View overlay should expose generated submission counters.");
 		});
@@ -161,19 +164,18 @@ namespace TerraEngine::EditorTests {
 			const std::string profiler = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp");
 			const std::string gameView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp");
 			const std::string sceneView = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp");
+			const std::string residency = ReadSourceForDebugViewContract("Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp");
 
-			context.Expect(gameView.find("VG Page Sources H/F/E/M") != std::string::npos, "Game View stats should label high-detail, fallback, embedded, and missing page sources.");
-			context.Expect(gameView.find("VG Page Payload Bytes R/F/E") != std::string::npos, "Game View stats should show resident, fallback, and embedded payload bytes.");
-			context.Expect(gameView.find("VG Page Requests/Retires") != std::string::npos, "Game View stats should show page request and retirement counts.");
+			context.Expect(gameView.find("VG Page Sources H/F/E/M") == std::string::npos, "Game View stats should omit page-source diagnostics.");
+			context.Expect(gameView.find("VG Page Payload Bytes R/F/E") == std::string::npos, "Game View stats should omit page payload byte diagnostics.");
+			context.Expect(gameView.find("VG Page Requests/Retires") == std::string::npos, "Game View stats should omit page request and retirement diagnostics.");
 			context.Expect(sceneView.find("VG Page Sources H/F/E/M") != std::string::npos, "Scene View VG diagnostics should label page source splits.");
 			context.Expect(sceneView.find("VG Page Payload Bytes R/F/E") != std::string::npos, "Scene View VG diagnostics should expose payload byte splits.");
 			context.Expect(sceneView.find("VG Page Requests/Retires") != std::string::npos, "Scene View VG diagnostics should expose request and retirement counts.");
-			context.Expect(profiler.find("Virtual Geometry Page Source Diagnostics") != std::string::npos, "Profiler should include a page-source diagnostics tree.");
-			context.Expect(profiler.find("ProfilerVirtualGeometryPageSourceRows") != std::string::npos, "Profiler should include a page-source diagnostics table.");
-			context.Expect(profiler.find("VG Page Requests") != std::string::npos, "Profiler should include page request rows.");
-			context.Expect(profiler.find("VG Resident Payload Bytes") != std::string::npos, "Profiler should include resident payload byte rows.");
-			context.Expect(profiler.find("VG Emitted Fallback Pages") != std::string::npos, "Profiler should include emitted fallback page rows.");
-			context.Expect(profiler.find("VG Embedded Fallback Uses") != std::string::npos, "Profiler should include embedded fallback rows.");
+			context.Expect(profiler.find("ProfilerVirtualGeometryPageSourceRows") == std::string::npos, "Profiler should no longer duplicate page-source diagnostics.");
+			context.Expect(residency.find("ResourceVirtualGeometryPageSources") != std::string::npos, "Resource Residency should own page-source diagnostics.");
+			context.Expect(residency.find("Payloads H/F/E") != std::string::npos, "Resource Residency should expose page payload splits.");
+			context.Expect(residency.find("Requests/Retires") != std::string::npos, "Resource Residency should expose page request and retirement counts.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.Diagnostics.US3.ToolbarModeSwitchesPublishImmediately", [](TestContext& context) {

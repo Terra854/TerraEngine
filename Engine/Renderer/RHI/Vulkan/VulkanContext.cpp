@@ -3042,6 +3042,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
 		return;
 	}
+	impl->MarkGpuTimestampBegin(cmd, impl->currentFrame, view, impl->backendFrameSerial);
 
 	uint32_t imageIndex = impl->acquiredImageIndex;
 	VkRenderPassBeginInfo renderPassInfo{};
@@ -4970,7 +4971,8 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			impl->MarkHiZWritePending(hiZViewIndex, impl->currentFrame);
 		}
 	}
-			
+	impl->MarkGpuTimestampEnd(cmd, impl->currentFrame, view);
+
 	vkEndCommandBuffer(cmd);
 	const float commandRecordingMs = ElapsedMilliseconds(commandRecordingStart);
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameStage(

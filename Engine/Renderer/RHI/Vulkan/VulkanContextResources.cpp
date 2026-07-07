@@ -4330,6 +4330,183 @@ uint32_t VulkanContext::Impl::GetStatsSlotIndex(uint32_t frameIndex, VulkanConte
 	return clampedFrameIndex * kStatsViewCount + viewIndex;
 }
 
+// VulkanContext::Impl::CreateGpuTimestampQueries is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool VulkanContext::Impl::CreateGpuTimestampQueries() {
+	gpuTimestampQueriesSupported = false;
+	gpuTimestampPeriodNanoseconds = 0.0f;
+	for (auto& frameSamples : completedGpuTimestampSamplesByFrame) {
+		for (GpuTimestampViewSample& sample : frameSamples) {
+			sample = {};
+			sample.reason = "GPU timestamp queries have not produced a completed sample yet.";
+		}
+	}
+	for (auto& frameWrites : pendingGpuTimestampWritesByFrame) {
+		frameWrites.fill(false);
+	}
+	for (auto& frameIds : pendingGpuTimestampFrameIdsByFrame) {
+		frameIds.fill(0u);
+	}
+
+	if (physicalDevice == VK_NULL_HANDLE || device == VK_NULL_HANDLE) {
+		return true;
+	}
+
+	VkPhysicalDeviceProperties deviceProperties{};
+	vkGetPhysicalDeviceProperties(physicalDevice, &deviceProperties);
+	gpuTimestampPeriodNanoseconds = deviceProperties.limits.timestampPeriod;
+
+	const QueueFamilyIndices indices = FindQueueFamilies(physicalDevice);
+	std::uint32_t queueFamilyCount = 0u;
+	vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+	std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+	if (queueFamilyCount > 0u) {
+		vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+	}
+
+	const bool graphicsQueueHasTimestampBits = indices.graphicsFamily.has_value()
+		&& *indices.graphicsFamily < queueFamilies.size()
+		&& queueFamilies[*indices.graphicsFamily].timestampValidBits > 0u;
+	if (!deviceProperties.limits.timestampComputeAndGraphics
+		|| !graphicsQueueHasTimestampBits
+		|| gpuTimestampPeriodNanoseconds <= 0.0f) {
+		for (auto& frameSamples : completedGpuTimestampSamplesByFrame) {
+			for (GpuTimestampViewSample& sample : frameSamples) {
+				sample = {};
+				sample.reason = "The selected Vulkan graphics queue does not expose timestamp queries.";
+			}
+		}
+		TERRAENGINE_LOG(LogLevel::Warning, "Vulkan GPU profiler timestamps are unavailable on the selected graphics queue.");
+		return true;
+	}
+
+	VkQueryPoolCreateInfo poolInfo{};
+	poolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+	poolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+	poolInfo.queryCount = static_cast<std::uint32_t>(MAX_FRAMES_IN_FLIGHT) * kGpuTimestampQueriesPerFrame;
+	if (vkCreateQueryPool(device, &poolInfo, nullptr, &gpuTimestampQueryPool) != VK_SUCCESS) {
+		for (auto& frameSamples : completedGpuTimestampSamplesByFrame) {
+			for (GpuTimestampViewSample& sample : frameSamples) {
+				sample = {};
+				sample.reason = "Vulkan failed to create the GPU timestamp query pool.";
+			}
+		}
+		TERRAENGINE_LOG(LogLevel::Warning, "Failed to create Vulkan GPU timestamp query pool; profiler GPU rows will stay unavailable.");
+		gpuTimestampQueryPool = VK_NULL_HANDLE;
+		return true;
+	}
+
+	gpuTimestampQueriesSupported = true;
+	return true;
+}
+
+// VulkanContext::Impl::DestroyGpuTimestampQueries is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void VulkanContext::Impl::DestroyGpuTimestampQueries() {
+	if (device != VK_NULL_HANDLE && gpuTimestampQueryPool != VK_NULL_HANDLE) {
+		vkDestroyQueryPool(device, gpuTimestampQueryPool, nullptr);
+	}
+	gpuTimestampQueryPool = VK_NULL_HANDLE;
+	gpuTimestampQueriesSupported = false;
+	gpuTimestampPeriodNanoseconds = 0.0f;
+	for (auto& frameWrites : pendingGpuTimestampWritesByFrame) {
+		frameWrites.fill(false);
+	}
+}
+
+// VulkanContext::Impl::MarkGpuTimestampBegin is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void VulkanContext::Impl::MarkGpuTimestampBegin(VkCommandBuffer cmd, uint32_t frameIndex, VulkanContext::ViewType view, std::uint64_t frameId) {
+	if (!gpuTimestampQueriesSupported
+		|| gpuTimestampQueryPool == VK_NULL_HANDLE
+		|| cmd == VK_NULL_HANDLE
+		|| frameIndex >= MAX_FRAMES_IN_FLIGHT) {
+		return;
+	}
+
+	const uint32_t viewIndex = (view == VulkanContext::ViewType::Game) ? 0u : 1u;
+	const uint32_t firstQuery = frameIndex * kGpuTimestampQueriesPerFrame + viewIndex * kGpuTimestampQueriesPerView;
+	// Reset immediately before writing so reused frame-slot queries never carry
+	// an old availability bit into the next profiler sample.
+	vkCmdResetQueryPool(cmd, gpuTimestampQueryPool, firstQuery, kGpuTimestampQueriesPerView);
+	vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpuTimestampQueryPool, firstQuery);
+	pendingGpuTimestampWritesByFrame[frameIndex][viewIndex] = true;
+	pendingGpuTimestampFrameIdsByFrame[frameIndex][viewIndex] = frameId;
+	completedGpuTimestampSamplesByFrame[frameIndex][viewIndex] = {
+		false,
+		0.0f,
+		frameId,
+		0u,
+		"GPU timestamp query is pending until this frame slot completes."
+	};
+}
+
+// VulkanContext::Impl::MarkGpuTimestampEnd is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void VulkanContext::Impl::MarkGpuTimestampEnd(VkCommandBuffer cmd, uint32_t frameIndex, VulkanContext::ViewType view) {
+	if (!gpuTimestampQueriesSupported
+		|| gpuTimestampQueryPool == VK_NULL_HANDLE
+		|| cmd == VK_NULL_HANDLE
+		|| frameIndex >= MAX_FRAMES_IN_FLIGHT) {
+		return;
+	}
+
+	const uint32_t viewIndex = (view == VulkanContext::ViewType::Game) ? 0u : 1u;
+	const uint32_t firstQuery = frameIndex * kGpuTimestampQueriesPerFrame + viewIndex * kGpuTimestampQueriesPerView;
+	vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpuTimestampQueryPool, firstQuery + 1u);
+}
+
+// VulkanContext::Impl::ResolveCompletedGpuTimestamps is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+void VulkanContext::Impl::ResolveCompletedGpuTimestamps(uint32_t frameIndex) {
+	if (!gpuTimestampQueriesSupported
+		|| gpuTimestampQueryPool == VK_NULL_HANDLE
+		|| frameIndex >= MAX_FRAMES_IN_FLIGHT) {
+		return;
+	}
+
+	struct TimestampQueryResult
+	{
+		std::uint64_t value = 0u;
+		std::uint64_t available = 0u;
+	};
+
+	for (uint32_t viewIndex = 0u; viewIndex < kStatsViewCount; ++viewIndex) {
+		GpuTimestampViewSample& sample = completedGpuTimestampSamplesByFrame[frameIndex][viewIndex];
+		if (!pendingGpuTimestampWritesByFrame[frameIndex][viewIndex]) {
+			sample = {};
+			sample.reason = "No GPU timestamp query was written for this view in the completed frame slot.";
+			continue;
+		}
+
+		std::array<TimestampQueryResult, kGpuTimestampQueriesPerView> queryResults{};
+		const uint32_t firstQuery = frameIndex * kGpuTimestampQueriesPerFrame + viewIndex * kGpuTimestampQueriesPerView;
+		const VkResult result = vkGetQueryPoolResults(
+			device,
+			gpuTimestampQueryPool,
+			firstQuery,
+			kGpuTimestampQueriesPerView,
+			sizeof(TimestampQueryResult) * queryResults.size(),
+			queryResults.data(),
+			sizeof(TimestampQueryResult),
+			VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+
+		pendingGpuTimestampWritesByFrame[frameIndex][viewIndex] = false;
+		if (result != VK_SUCCESS
+			|| queryResults[0].available == 0u
+			|| queryResults[1].available == 0u
+			|| queryResults[1].value < queryResults[0].value) {
+			sample = {};
+			sample.frameId = pendingGpuTimestampFrameIdsByFrame[frameIndex][viewIndex];
+			sample.reason = "GPU timestamp query result was not available after the frame-slot fence.";
+			continue;
+		}
+
+		const std::uint64_t tickDelta = queryResults[1].value - queryResults[0].value;
+		const double milliseconds = static_cast<double>(tickDelta) * static_cast<double>(gpuTimestampPeriodNanoseconds) / 1000000.0;
+		sample.valid = true;
+		sample.milliseconds = static_cast<float>(std::max(0.0, milliseconds));
+		sample.frameId = pendingGpuTimestampFrameIdsByFrame[frameIndex][viewIndex];
+		sample.latencyFrames = 1u;
+		sample.reason.clear();
+	}
+}
+
 // VulkanContext::Impl::RecordPendingStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RecordPendingStats(uint32_t statsSlotIndex, const RenderStatsSnapshot& snapshot) {
 	if (statsSlotIndex >= kStatsSlotCount) {
@@ -4356,6 +4533,8 @@ void VulkanContext::Impl::RecordPendingLightAnalysisCandidates(uint32_t statsSlo
 
 // VulkanContext::Impl::PublishCompletedFrameStats is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
+	ResolveCompletedGpuTimestamps(frameIndex);
+
 	TerraEngine::Renderer::BackendResourceResidencySnapshot backendResidency{};
 	backendResidency.frameId = frameIndex;
 	backendResidency.records.reserve(meshCache.size() + textureCache.size());
@@ -4449,9 +4628,15 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	};
 
 	RenderStatsSnapshot gameSnapshot = pendingStatsBySlot[gameSlot];
+	const GpuTimestampViewSample gameGpuTimestamp = completedGpuTimestampSamplesByFrame[std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1))][0u];
 	const MeshletCullingCountersGPU gameCounters = ReadMeshletCounters(gameSlot);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (gameSnapshot.valid) {
+		gameSnapshot.gpuTimestampValid = gameGpuTimestamp.valid;
+		gameSnapshot.gpuTimestampMs = gameGpuTimestamp.milliseconds;
+		gameSnapshot.gpuTimestampFrameId = gameGpuTimestamp.frameId;
+		gameSnapshot.gpuTimestampLatencyFrames = gameGpuTimestamp.latencyFrames;
+		gameSnapshot.gpuTimestampReason = gameGpuTimestamp.reason;
 		const bool useGpuCounters = (gameCounters.meshletsTotal > 0u) || (gameSnapshot.meshletsTotal == 0u);
 		if (useGpuCounters) {
 			gameSnapshot.meshletsTotal = gameCounters.meshletsTotal;
@@ -4485,9 +4670,15 @@ void VulkanContext::Impl::PublishCompletedFrameStats(uint32_t frameIndex) {
 	}
 
 	RenderStatsSnapshot sceneSnapshot = pendingStatsBySlot[sceneSlot];
+	const GpuTimestampViewSample sceneGpuTimestamp = completedGpuTimestampSamplesByFrame[std::min(frameIndex, static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT - 1))][1u];
 	const MeshletCullingCountersGPU sceneCounters = ReadMeshletCounters(sceneSlot);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (sceneSnapshot.valid) {
+		sceneSnapshot.gpuTimestampValid = sceneGpuTimestamp.valid;
+		sceneSnapshot.gpuTimestampMs = sceneGpuTimestamp.milliseconds;
+		sceneSnapshot.gpuTimestampFrameId = sceneGpuTimestamp.frameId;
+		sceneSnapshot.gpuTimestampLatencyFrames = sceneGpuTimestamp.latencyFrames;
+		sceneSnapshot.gpuTimestampReason = sceneGpuTimestamp.reason;
 		const bool useGpuCounters = (sceneCounters.meshletsTotal > 0u) || (sceneSnapshot.meshletsTotal == 0u);
 		if (useGpuCounters) {
 			sceneSnapshot.meshletsTotal = sceneCounters.meshletsTotal;

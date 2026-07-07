@@ -979,6 +979,28 @@ next phase. Any milestone that changes C++ or shaders must also compile the
 affected targets and run the install target so the installed editor/runtime tree
 contains the matching binaries and shader assets.
 
+## Runtime Diagnostic Ownership
+
+Game View `Stats` is intentionally compact. It should only report immediate
+frame-health rows such as FPS, frame time, draw calls, triangles, and whether
+detailed renderer diagnostics are compact or expanded elsewhere. It must not
+grow back into a long virtual geometry packet/page/cache/Hi-Z list because that
+list covers renderer internals rather than the rendered scene being inspected.
+
+Detailed virtual geometry diagnostics belong in Resource Residency under the
+Virtual Geometry section. That section owns meshlet selected/dispatched/culled
+counts, Hi-Z culled counts, cluster packet counts, generated submission state,
+GPU packet records, page source buckets, page payload bytes, request/retire
+counts, and visible command cache counters. Keeping them grouped there makes it
+clear that the numbers describe residency and renderer diagnostic state instead
+of gameplay HUD data.
+
+The Profiler owns timing interpretation. CPU and editor wall timing are valid
+profiler streams when captured. Game View and Scene View GPU timing streams must
+carry an explicit status; until the Vulkan backend records timestamp-query
+samples for those views, they are reported as unavailable rather than as valid
+zero-millisecond timings.
+
 ## Clean-Checkout Validation
 
 Configure from a clean checkout with the checked-in Debug preset and bundled

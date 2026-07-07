@@ -148,6 +148,10 @@ namespace TerraEngine::EditorTests
 			context.Expect(source.find("Page Bytes H/F/E") != std::string::npos, "The view summary should expose high-detail, fallback, and embedded byte buckets.");
 			context.Expect(source.find("Pending/Fail/Evict/Retire Bytes") != std::string::npos, "The view summary should expose pending, failed, evicted, and retiring byte buckets.");
 			context.Expect(source.find("Owner Fallback Bytes") != std::string::npos, "The view summary should expose owning-mesh fallback bytes.");
+			context.Expect(source.find("ResourceVirtualGeometryRuntimeCounters") != std::string::npos, "The VG section should own runtime meshlet, cluster, packet, and Hi-Z counters.");
+			context.Expect(source.find("ResourceVirtualGeometryPageSources") != std::string::npos, "The VG section should own detailed page-source counters.");
+			context.Expect(source.find("Meshlets S/D/C") != std::string::npos, "Runtime counters should expose selected, dispatched, and culled meshlets.");
+			context.Expect(source.find("GPU Packets") != std::string::npos, "Runtime counters should expose GPU packet readback state.");
 			context.Expect(source.find("High Detail Page Bytes") != std::string::npos, "The per-asset VG table should expose high-detail page bytes.");
 			context.Expect(source.find("Fallback Page Bytes") != std::string::npos, "The per-asset VG table should expose fallback page bytes.");
 			context.Expect(source.find("Embedded/Owner Fallback Bytes") != std::string::npos, "The per-asset VG table should expose embedded and owning fallback byte buckets.");
@@ -165,6 +169,14 @@ namespace TerraEngine::EditorTests
 			context.ExpectEqual(1ull, static_cast<unsigned long long>(CountOccurrences(source, "LatestVirtualGeometryDiagnosticsSnapshots()")), "Virtual geometry diagnostics should be fetched once per cache refresh.");
 			context.Expect(source.find("std::vector<const StreamingDisplayRecord*>") != std::string::npos, "Streaming rows should sort/filter cached display rows instead of copying and re-resolving asset labels.");
 			context.Expect(CountOccurrences(source, "ImGuiListClipper clipper") >= 3u, "Large Resource Residency tables should clip visible rows before drawing.");
+		});
+
+		registry.Add("ResourceResidencyWindow.VirtualGeometrySection.RequestsRenderDiagnostics", [](TestContext& context) {
+			const std::string source = ReadResourceResidencyWindowSource();
+
+			context.Expect(source.find("SetRenderGraphDiagnosticsRequested(true)") != std::string::npos, "Resource Residency must request render diagnostics while visible so VG snapshots are published.");
+			context.Expect(CountOccurrences(source, "SetRenderGraphDiagnosticsRequested(false)") >= 2u, "Resource Residency should release render diagnostics when hidden or closed.");
+			context.Expect(source.find("LatestVirtualGeometryDiagnosticsSnapshots()") != std::string::npos, "Resource Residency should read the published VG snapshots after requesting render diagnostics.");
 		});
 	}
 }

@@ -215,6 +215,22 @@ serialization. These tests intentionally do not inspect persistent Vulkan or
 pipeline disk caches because those files are backend cache implementation
 details, not loaded resource residency.
 
+Profiler stats and render-diagnostic relocation coverage for
+`specs/035-gpu-profiler-stats` lives in the existing engine/editor harnesses.
+Use this pass when changing the Game View stats overlay, Profiler timing stream
+presentation, Profiler toolbar, Resource Residency virtual geometry diagnostic
+tables, or automation diagnostics contracts:
+
+```powershell
+ctest --test-dir out/build/Debug -R "Profiler|RenderDiagnostics|VulkanFrameDiagnostics|ResourceResidencyWindow|GameViewStatsOverlay|ProfilerDiagnosticsAutomation|VirtualGeometryDiagnostics" --output-on-failure
+ctest --test-dir out/build/Debug -R "Engine\.SpatialUnitTests|Editor\.ExportUnitTests" --output-on-failure
+```
+
+Expected coverage includes compact Game View stats, explicit unavailable GPU
+timing status instead of fake zeroes, profiler timing aggregates, grouped
+Resource Residency virtual geometry runtime/page diagnostics, and structured
+automation diagnostics that do not scrape viewport overlay text.
+
 For virtual geometry page streaming, manual resource verification should confirm
 that fallback pages stay `Pinned` or `Resident`, high-detail pages can move
 through `Requested`, `PendingIO`, `PendingUpload`, `Resident`, `Evicting`, and

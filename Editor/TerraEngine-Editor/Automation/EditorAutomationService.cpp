@@ -24,6 +24,7 @@
 #include "Engine/Scene/RuntimeLayout.h"
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Core/Scheduling/FrameWorkload.h"
+#include "Engine/Profiling/Profiler.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Utilities/UUID.h"
@@ -788,6 +789,42 @@ namespace TerraEngine::Editor::Automation
 			};
 		}
 
+		nlohmann::json SerializeProfilerTimingStreams()
+		{
+			const std::vector<TerraEngine::Profiling::ProfilerFrameRecord> frames =
+				TerraEngine::Profiling::Profiler::Instance().GetFramesSnapshot();
+			const std::optional<TerraEngine::Profiling::ProfilerFrameRecord> selectedFrame =
+				TerraEngine::Profiling::Profiler::Instance().GetSelectedFrameSnapshot();
+			nlohmann::json streams = nlohmann::json::array();
+			for (const TerraEngine::Profiling::ProfilerTimingStreamAggregate& stream :
+				TerraEngine::Profiling::BuildTimingStreamAggregates(frames, selectedFrame))
+			{
+				// Automation receives the same status-aware timing contract as
+				// the Profiler UI, so agents do not scrape overlay text or treat
+				// unavailable GPU timing as a real zero.
+				streams.push_back({
+					{"id", stream.id},
+					{"label", stream.label},
+					{"scope", TerraEngine::Profiling::ToString(stream.scope)},
+					{"source", TerraEngine::Profiling::ToString(stream.source)},
+					{"selectedStatus", TerraEngine::Profiling::ToString(stream.selectedStatus)},
+					{"selectedMilliseconds", stream.selectedMilliseconds},
+					{"selectedStatusReason", stream.selectedStatusReason},
+					{"samples", stream.sampleCount},
+					{"missing", stream.missingCount},
+					{"meanMs", stream.meanMs},
+					{"medianMs", stream.medianMs},
+					{"p90Ms", stream.p90Ms},
+					{"p95Ms", stream.p95Ms},
+					{"p99Ms", stream.p99Ms},
+					{"minMs", stream.minMs},
+					{"maxMs", stream.maxMs},
+					{"stdDevMs", stream.stdDevMs}
+				});
+			}
+			return streams;
+		}
+
 		nlohmann::json SerializeVirtualGeometryClusterSummary(const VirtualGeometryClusterSummaryMetadata& summary)
 		{
 			return {
@@ -1376,6 +1413,7 @@ namespace TerraEngine::Editor::Automation
 		const nlohmann::json parallelFrame = SerializeParallelFrameDiagnostics(engine);
 		const nlohmann::json mutationDiagnostics = SerializeMutationDiagnostics();
 		const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+		const nlohmann::json profilerTimingStreams = includeDetails ? SerializeProfilerTimingStreams() : nlohmann::json::array();
 		nlohmann::json virtualGeometryGateJson = nlohmann::json::array();
 		std::uint32_t virtualGeometryGateFailures = 0u;
 		std::uint32_t virtualGeometryGateUnsupported = 0u;
@@ -1422,7 +1460,7 @@ namespace TerraEngine::Editor::Automation
 			}
 		}
 		data["surfaces"] = nlohmann::json::array({
-			{{"surface", "render"}, {"state", "available"}, {"details", includeDetails ? nlohmann::json{{"note", "Render diagnostics are available through the profiler/resource windows."}, {"virtualGeometryPerformanceGates", virtualGeometryGateJson}, {"virtualGeometryGateFailures", virtualGeometryGateFailures}, {"virtualGeometryUnsupportedGates", virtualGeometryGateUnsupported}} : nlohmann::json::object()}},
+			{{"surface", "render"}, {"state", "available"}, {"details", includeDetails ? nlohmann::json{{"note", "Render diagnostics are available through the profiler/resource windows."}, {"timingStreams", profilerTimingStreams}, {"virtualGeometryPerformanceGates", virtualGeometryGateJson}, {"virtualGeometryGateFailures", virtualGeometryGateFailures}, {"virtualGeometryUnsupportedGates", virtualGeometryGateUnsupported}} : nlohmann::json::object()}},
 			{{"surface", "runtimeLayout"}, {"state", "available"}, {"details", nlohmann::json{{"authoredObjectCount", runtimeMembership.size()}, {"activeRuntimeObjectCount", activeRuntimeObjects}, {"membershipRevision", ObjectManager::instance().GetRuntimeActiveMembershipRevision()}}}},
 			{{"surface", "resources"}, {"state", assetJobCount > 0 ? "compiling" : "available"}, {"details", nlohmann::json{{"assetCompileJobs", assetJobCount}}}},
 			{{"surface", "streaming"}, {"state", "available"}, {"details", nlohmann::json::object()}},
@@ -1432,6 +1470,7 @@ namespace TerraEngine::Editor::Automation
 			{{"surface", "export"}, {"state", exportJobs.empty() ? "idle" : exportJobs.front().state}, {"details", nlohmann::json{{"jobs", exportJobJson}}}}
 		});
 		data["parallelFrame"] = parallelFrame;
+		data["profilerTimingStreams"] = profilerTimingStreams;
 		data["hardBoundaries"] = boundaryFindings;
 		data["mutationDiagnostics"] = mutationDiagnostics;
 		data["virtualGeometryPerformanceGates"] = includeDetails ? virtualGeometryGateJson : nlohmann::json::array();

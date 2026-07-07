@@ -2,6 +2,7 @@
 
 #include "Profiling/Profiler.h"
 #include "Profiling/ProfilerCapture.h"
+#include "Renderer/RenderTypes.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -98,6 +99,24 @@ namespace TerraEngine::Tests {
 			frame.frameStartMs = 12.5;
 			frame.durationMs = 4.5;
 			frame.complete = true;
+			frame.timingStreams.push_back({
+				"engine_cpu",
+				"Engine CPU",
+				ProfilerTimingStreamScope::EngineCpu,
+				ProfilerTimingStreamSource::ProfilerClock,
+				ProfilerTimingStreamStatus::Valid,
+				4.5,
+				{}
+			});
+			frame.timingStreams.push_back({
+				"viewport_gpu",
+				"Viewport GPU",
+				ProfilerTimingStreamScope::ViewportGpu,
+				ProfilerTimingStreamSource::Unavailable,
+				ProfilerTimingStreamStatus::Unavailable,
+				0.0,
+				"GPU timestamp queries are not captured by this fixture."
+			});
 			frame.moduleSummaries = {cpuModule, taskModule};
 			frame.samples.push_back({1U, 0U, ProfilerModuleId::CpuEngine, "Frame", "main", "", 0.0, 4.5, 0U, 1U, true});
 			frame.samples.push_back({2U, 1U, ProfilerModuleId::TaskExecution, "ThreadPool Task", "worker", "Physics", 1.0, 1.25, 1U, 1U, true});
@@ -158,6 +177,7 @@ namespace TerraEngine::Tests {
 			context.ExpectEqual(3ULL, loaded.frames.front().frameIndex, "Profiler frame indices should round-trip through JSON.");
 			context.Expect(HasSampleNamed(loaded.frames.front(), "Frame"), "Profiler samples should round-trip through JSON.");
 			context.Expect(HasSampleNamed(loaded.frames.front(), "ThreadPool Task"), "Task profiler samples should round-trip through JSON.");
+			context.ExpectEqual(2u, static_cast<unsigned int>(loaded.frames.front().timingStreams.size()), "Profiler timing streams should round-trip through JSON.");
 
 			const ProfilerModuleSummary* taskModule = FindModule(loaded.frames.front().moduleSummaries, ProfilerModuleId::TaskExecution);
 			context.Expect(taskModule != nullptr, "Loaded captures should preserve task module summaries.");
@@ -213,6 +233,118 @@ namespace TerraEngine::Tests {
 			})");
 			context.Expect(!LoadCaptureDocument(workspace.Path("unknown-module.teprof"), loaded, error), "Profiler loading should reject unknown module identifiers.");
 			context.Expect(error.find("unknown module id") != std::string::npos, "Unknown module failures should report the unsupported module id.");
+		});
+
+		registry.Add("Engine.ProfilerCapture.TimingStreamsAggregateValidAndMissingSamples", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			ProfilerFrameRecord first;
+			first.frameIndex = 1u;
+			AddOrReplaceTimingStreamSample(first, {"engine_cpu", "Engine CPU", ProfilerTimingStreamScope::EngineCpu, ProfilerTimingStreamSource::ProfilerClock, ProfilerTimingStreamStatus::Valid, 1.0, {}});
+			AddOrReplaceTimingStreamSample(first, {"viewport_gpu", "Viewport GPU", ProfilerTimingStreamScope::ViewportGpu, ProfilerTimingStreamSource::Unavailable, ProfilerTimingStreamStatus::Unavailable, 0.0, "not captured"});
+
+			ProfilerFrameRecord second;
+			second.frameIndex = 2u;
+			AddOrReplaceTimingStreamSample(second, {"engine_cpu", "Engine CPU", ProfilerTimingStreamScope::EngineCpu, ProfilerTimingStreamSource::ProfilerClock, ProfilerTimingStreamStatus::Valid, 3.0, {}});
+			AddOrReplaceTimingStreamSample(second, {"viewport_gpu", "Viewport GPU", ProfilerTimingStreamScope::ViewportGpu, ProfilerTimingStreamSource::Unavailable, ProfilerTimingStreamStatus::Unavailable, 0.0, "not captured"});
+
+			const std::vector<ProfilerTimingStreamAggregate> aggregates = BuildTimingStreamAggregates({first, second}, second);
+			const auto engine = std::find_if(aggregates.begin(), aggregates.end(), [](const ProfilerTimingStreamAggregate& aggregate) {
+				return aggregate.id == "engine_cpu";
+			});
+			const auto gpu = std::find_if(aggregates.begin(), aggregates.end(), [](const ProfilerTimingStreamAggregate& aggregate) {
+				return aggregate.id == "viewport_gpu";
+			});
+
+			context.Expect(engine != aggregates.end(), "Engine CPU timing aggregate should be present.");
+			context.Expect(engine != aggregates.end() && engine->sampleCount == 2u, "Valid timing streams should count measured samples.");
+			context.Expect(engine != aggregates.end() && engine->meanMs == 2.0, "Timing aggregates should compute means from valid samples.");
+			context.Expect(engine != aggregates.end() && engine->medianMs == 2.0, "Timing aggregates should compute medians from valid samples.");
+			context.Expect(gpu != aggregates.end(), "GPU timing aggregate should be present even when unavailable.");
+			context.Expect(gpu != aggregates.end() && gpu->sampleCount == 0u, "Unavailable GPU samples should not count as valid measurements.");
+			context.Expect(gpu != aggregates.end() && gpu->missingCount == 2u, "Unavailable GPU samples should be counted as missing.");
+			context.Expect(gpu != aggregates.end() && gpu->selectedStatus == ProfilerTimingStreamStatus::Unavailable, "Selected unavailable GPU timing should preserve status instead of showing 0 ms.");
+		});
+
+		registry.Add("Engine.Profiler.RecordRenderStatsPublishesGpuTimestampStreams", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "GPU Timing";
+			ProfilerCaptureSettings settings;
+			settings.maxFrames = 2U;
+
+			RenderStatsSnapshot gameStats;
+			gameStats.valid = true;
+			gameStats.frameTimeMs = 4.0f;
+			gameStats.gpuTimestampValid = true;
+			gameStats.gpuTimestampMs = 2.5f;
+
+			RenderStatsSnapshot sceneStats;
+			sceneStats.valid = true;
+			sceneStats.frameTimeMs = 6.0f;
+			sceneStats.gpuTimestampValid = false;
+			sceneStats.gpuTimestampReason = "No Scene View timestamp was written.";
+
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame();
+			profiler.RecordRenderStats(gameStats, sceneStats);
+			profiler.EndFrame();
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.Expect(!frames.empty(), "Render stats should publish timing streams into the active profiler frame.");
+			if (!frames.empty()) {
+				const auto gameGpu = std::find_if(frames.front().timingStreams.begin(), frames.front().timingStreams.end(), [](const ProfilerTimingStreamSample& sample) {
+					return sample.id == "viewport_gpu";
+				});
+				context.Expect(gameGpu != frames.front().timingStreams.end(), "Consolidated Viewport GPU timing stream should be present.");
+				context.Expect(gameGpu != frames.front().timingStreams.end() && gameGpu->source == ProfilerTimingStreamSource::BackendGpuTimestamp, "Valid renderer GPU timestamps should be marked as backend GPU timestamp samples.");
+				context.Expect(gameGpu != frames.front().timingStreams.end() && gameGpu->status == ProfilerTimingStreamStatus::Valid && gameGpu->milliseconds == 2.5, "Valid renderer GPU timestamps should preserve the measured duration.");
+			}
+
+			profiler.Clear();
+		});
+
+		registry.Add("Engine.Profiler.ViewportCpuUsesMeasuredProfilerScopes", [](TestContext& context) {
+			using namespace TerraEngine::Profiling;
+
+			Profiler& profiler = Profiler::Instance();
+			profiler.Clear();
+
+			ProfilerCaptureMetadata metadata;
+			metadata.projectName = "Viewport CPU";
+			ProfilerCaptureSettings settings;
+			settings.maxFrames = 2U;
+
+			RenderStatsSnapshot gameStats;
+			gameStats.valid = true;
+			gameStats.frameTimeMs = 40.0f;
+			RenderStatsSnapshot sceneStats;
+			sceneStats.valid = true;
+			sceneStats.frameTimeMs = 50.0f;
+
+			profiler.StartRecording(metadata, settings);
+			profiler.BeginFrame();
+			context.Expect(profiler.BeginSample("RenderSystem: Submit Game View Cameras", ProfilerModuleId::CpuEngine), "RenderSystem view submit scopes should be captured while recording.");
+			profiler.EndSample();
+			profiler.RecordRenderStats(gameStats, sceneStats);
+			profiler.EndFrame();
+
+			const std::vector<ProfilerFrameRecord> frames = profiler.GetFramesSnapshot();
+			context.Expect(!frames.empty(), "Viewport CPU timing should be written into the completed profiler frame.");
+			if (!frames.empty()) {
+				const auto viewportCpu = std::find_if(frames.front().timingStreams.begin(), frames.front().timingStreams.end(), [](const ProfilerTimingStreamSample& sample) {
+					return sample.id == "viewport_cpu";
+				});
+				context.Expect(viewportCpu != frames.front().timingStreams.end(), "Viewport CPU timing should be present when a viewport submit scope was measured.");
+				context.Expect(viewportCpu != frames.front().timingStreams.end() && viewportCpu->source == ProfilerTimingStreamSource::ProfilerClock, "Viewport CPU timing should come from profiler scopes, not renderer frame stats.");
+				context.Expect(viewportCpu != frames.front().timingStreams.end() && viewportCpu->milliseconds < 90.0, "Viewport CPU timing should not copy RenderStatsSnapshot frameTimeMs.");
+			}
+
+			profiler.Clear();
 		});
 
 		registry.Add("Engine.Profiler.RecordingAggregatesSamplesAndTaskCounters", [](TestContext& context) {
