@@ -5,6 +5,7 @@
 #include "ExportPipeline.h"
 #include "ExportPackageValidator.h"
 #include "ExportScriptBindingRewriter.h"
+#include "AssetImportResult.h"
 #include "Resource/ResourceResidency.h"
 #include "Resource/ResourceStreaming.h"
 
@@ -14,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
@@ -119,12 +121,24 @@ static nlohmann::json BuildVirtualGeometryExportManifest(const BuildProfile& pro
 	virtualGeometry["maxLodDrop"] = profile.virtualGeometryMaxLodDrop;
 	virtualGeometry["hiZOcclusionEnabled"] = profile.virtualGeometryHiZOcclusionEnabled;
 	virtualGeometry["preloadBias"] = profile.virtualGeometryPreloadBias;
+	// Keep this declaration in lockstep with ExportPackageValidator so an
+	// exported package advertises every TEMF metadata table required by the
+	// virtual-geometry renderer before validation scans the packaged meshes.
 	virtualGeometry["requiredMetadata"] = nlohmann::json::array({
 		"adaptiveTargets",
 		"fallbackCoverage",
 		"clusterHierarchy",
-		"pageLinks"
+		"pageLinks",
+		"coneSafety"
 	});
+	// Export validation also records the fixture coverage assumptions that made
+	// the current virtual-geometry package format safe enough to run. The
+	// runtime does not load these fixtures; the fields are an audit trail for
+	// developers and for package validation before the build is accepted.
+	virtualGeometry["coverage"] = {
+		{ "fixtureManifest", "Tests/Fixtures/VirtualGeometry/hardening-fixtures.json" },
+		{ "requiredCategories", nlohmann::json::array({ "export", "streaming-pressure", "multi-view" }) }
+	};
 	virtualGeometry["requiredShaders"] = nlohmann::json::array({
 		"Shaders/Default.task.tspf",
 		"Shaders/Default.mesh.tspf",
@@ -134,7 +148,7 @@ static nlohmann::json BuildVirtualGeometryExportManifest(const BuildProfile& pro
 	return virtualGeometry;
 }
 
-static nlohmann::json ResolveRenderProfileManifest(const std::filesystem::path& projectRoot)
+static nlohmann::json ResolveRenderProfileManifest(const BuildProfile& profile, const std::filesystem::path& projectRoot)
 {
 	nlohmann::json renderProfile;
 	renderProfile["profileName"] = "Project Render Settings";
@@ -143,7 +157,7 @@ static nlohmann::json ResolveRenderProfileManifest(const std::filesystem::path& 
 	renderProfile["variableRateShading"] = "disabled";
 	renderProfile["textureBudgetMb"] = 512u;
 	renderProfile["resolutionScale"] = 1.0f;
-	renderProfile["validationEnabled"] = false;
+	renderProfile["validationEnabled"] = profile.enableVulkanValidationLayers;
 	renderProfile["debugEnabled"] = false;
 
 	const std::filesystem::path settingsPath = projectRoot / "ProjectSettings" / "RenderSettings.json";
@@ -164,7 +178,6 @@ static nlohmann::json ResolveRenderProfileManifest(const std::filesystem::path& 
 			renderProfile["textureBudgetMb"] = settingsIt->value("textureBudgetMb", 512u);
 			renderProfile["resolutionScale"] = settingsIt->value("resolutionScale", 1.0f);
 			renderProfile["variableRateShading"] = settingsIt->value("variableRateShading", 0u) > 0u ? "enabled" : "disabled";
-			renderProfile["validationEnabled"] = savedSettings.value("validationEnabled", false);
 			renderProfile["debugEnabled"] = savedSettings.value("debugEnabled", false);
 		}
 	}
@@ -661,6 +674,65 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 		// 3. Scan metadata to build the GUID map for the export manifest.
 		// In an exported build, the engine uses this map to resolve the UUIDs found
 		// in scene/prefab files back to the logical paths inside the TEPAK archive.
+		std::unordered_set<std::string> stagedAssetGuids;
+		auto addStagedAsset = [this, &stagedAssetGuids](std::string guid, AssetType type, const std::filesystem::path& path) -> bool {
+			if (guid.empty() || path.empty()) {
+				return false;
+			}
+			if (!stagedAssetGuids.insert(guid).second) {
+				return false;
+			}
+
+			StagedAsset asset;
+			asset.guid = std::move(guid);
+			asset.path = path.generic_string();
+			asset.type = type;
+			asset.virtualGeometryRequired = asset.type == AssetType::Mesh
+				&& IsCompiledVirtualGeometryMeshPath(asset.path);
+			m_StagedAssets.push_back(std::move(asset));
+			return true;
+		};
+		auto resolveSourceAssetPath = [&rawAssets](const std::filesystem::path& metaPath, const std::string& sourcePathText) {
+			if (!sourcePathText.empty()) {
+				const std::filesystem::path sourcePath(sourcePathText);
+				return sourcePath.is_absolute() ? sourcePath : rawAssets / sourcePath;
+			}
+
+			std::filesystem::path inferredSourcePath = metaPath;
+			inferredSourcePath.replace_extension();
+			return inferredSourcePath;
+		};
+		auto stageModelPackageChildren = [&addStagedAsset](const std::filesystem::path& sourceAssetPath) -> bool {
+			TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+			if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourceAssetPath, importResult)
+				|| importResult.status == TerraEngine::AssetPipeline::ModelImportStatus::Failed) {
+				return false;
+			}
+
+			bool addedAny = false;
+			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes) {
+				// Package parents are containers; only generated child TEMFs are
+				// renderable at runtime. Skip stale failed child cooks so the
+				// manifest never references missing or unusable package output.
+				if (mesh.compiledPath.empty()
+					|| mesh.virtualGeometryStatus == "Failed"
+					|| mesh.virtualGeometryStatus == "NeedsRebuild") {
+					continue;
+				}
+				addedAny = addStagedAsset(TerraEngine::ToHexString(mesh.guid), AssetType::Mesh, mesh.compiledPath) || addedAny;
+			}
+			for (const TerraEngine::AssetPipeline::GeneratedModelMaterialAsset& material : importResult.generatedMaterials) {
+				if (!material.compiledPath.empty()) {
+					addedAny = addStagedAsset(TerraEngine::ToHexString(material.guid), AssetType::Material, material.compiledPath) || addedAny;
+				}
+			}
+			for (const TerraEngine::AssetPipeline::GeneratedModelTextureAsset& texture : importResult.generatedTextures) {
+				if (!texture.compiledPath.empty()) {
+					addedAny = addStagedAsset(TerraEngine::ToHexString(texture.guid), AssetType::Texture, texture.compiledPath) || addedAny;
+				}
+			}
+			return addedAny;
+		};
 		if (std::filesystem::exists(rawAssets)) {
 			for (const auto& entry : std::filesystem::recursive_directory_iterator(rawAssets)) {
 				if (!entry.is_regular_file()) continue;
@@ -681,32 +753,44 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 					AssetType type;
 					bool supported = true;
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-					if (importer == "MeshImporter" || IsModelPackageImporterName(importer)) type = AssetType::Mesh;
+					if (importer == "MeshImporter") type = AssetType::Mesh;
+					else if (IsModelPackageImporterName(importer)) {
+						const std::filesystem::path sourceAssetPath = resolveSourceAssetPath(entry.path(), meta.value("sourcePath", std::string{}));
+						if (stageModelPackageChildren(sourceAssetPath)) {
+							continue;
+						}
+
+						// Older package imports may still have a parent compiled
+						// mesh. Use it only when the actual compiled payload exists;
+						// otherwise skip the container so package validation does not
+						// fail on a manifest entry like AntiqueCamera.temf.
+						if (!compiledPath.empty() && std::filesystem::exists(compiledAssets / compiledPath)) {
+							type = AssetType::Mesh;
+						}
+						else {
+							continue;
+						}
+					}
 					else if (importer == "TextureImporter") type = AssetType::Texture;
 					else if (importer == "MaterialImporter") type = AssetType::Material;
 					else supported = false;
 
 					// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 					if (supported) {
-						StagedAsset asset;
-						asset.guid = guid;
-						asset.type = type;
-
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+						std::filesystem::path manifestPath;
 						if (!compiledPath.empty()) {
 							// The compiled path is relative to the Build/Assets/ directory,
 							// which matches our stagingDir layout.
-							asset.path = compiledPath;
+							manifestPath = compiledPath;
 						}
 						else {
 							// If the asset isn't compiled (like a .tescene), use its 
 							// relative path within the Assets/ folder.
 							auto rel = std::filesystem::relative(entry.path().parent_path() / meta.value("sourcePath", ""), rawAssets);
-							asset.path = rel.generic_string();
+							manifestPath = rel;
 						}
-						asset.virtualGeometryRequired = asset.type == AssetType::Mesh
-							&& IsCompiledVirtualGeometryMeshPath(asset.path);
-						m_StagedAssets.push_back(std::move(asset));
+						addStagedAsset(std::move(guid), type, manifestPath);
 					}
 				}
 				catch (...) {
@@ -907,8 +991,12 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 			manifest["scenes"] = profile.includedScenes;
 		}
 
-		manifest["renderProfile"] = ResolveRenderProfileManifest(projectRoot);
+		manifest["renderProfile"] = ResolveRenderProfileManifest(profile, projectRoot);
 		if (std::optional<nlohmann::json> renderSettings = LoadProjectRenderSettingsManifest(projectRoot)) {
+			// Export validation layers are a build-profile decision, not the
+			// editor's project-runtime setting. Mirror the profile value into the
+			// exact render settings payload so every packaged metadata path agrees.
+			(*renderSettings)["validationEnabled"] = profile.enableVulkanValidationLayers;
 			manifest["renderSettings"] = *renderSettings;
 		}
 		manifest["residencyPolicy"] = BuildResidencyPolicyManifest();

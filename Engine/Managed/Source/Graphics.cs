@@ -59,6 +59,10 @@ namespace TerraEngine
         public uint AnisotropicFiltering;
         /// <summary> Startup-only Variable Rate Shading toggle. 1 = Enabled, 0 = Disabled. </summary>
         public uint VariableRateShading;
+        /// <summary> Startup-only Vulkan validation layer request. 1 = request validation, 0 = run normally. </summary>
+        public uint ValidationEnabled;
+        /// <summary> Startup-only render debug diagnostics request. 1 = enabled, 0 = disabled. </summary>
+        public uint DebugEnabled;
     }
 
     // LightingDiagnosticCategory is the managed-facing contract for this subsystem; keep it predictable for scripts.

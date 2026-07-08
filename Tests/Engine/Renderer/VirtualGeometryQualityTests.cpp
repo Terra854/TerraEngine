@@ -1,6 +1,7 @@
 #include "TestHarness.h"
 
 #include "File Formats/TerraEngineMeshFile.h"
+#include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/RenderSystem.h"
 #include "Resource/ResourceManager.h"
 
@@ -228,6 +229,11 @@ namespace
 			const std::filesystem::path root = MakeVirtualGeometryQualityTestRoot("TerraEngineVirtualGeometryQualitySaveTests");
 			ResourceManager::Instance().SetAssetRoot(root / "Assets");
 
+			RenderSettings diagnosticSettings = RenderSystem::Instance().GetRenderSettings();
+			diagnosticSettings.validationEnabled = 1u;
+			diagnosticSettings.debugEnabled = 1u;
+			RenderSystem::Instance().SetRenderSettings(diagnosticSettings);
+
 			VirtualGeometryQualityProfile profile = MakeDefaultVirtualGeometryQualityProfile();
 			profile.lodErrorScale = 2.5f;
 			profile.maxLodDrop = 3u;
@@ -246,6 +252,8 @@ namespace
 			input.close();
 			const nlohmann::json& virtualGeometry = document["settings"]["virtualGeometry"];
 
+			context.Expect(document.value("validationEnabled", false), "Saved render settings should expose Vulkan validation as a top-level startup flag.");
+			context.Expect(document.value("debugEnabled", false), "Saved render settings should expose render debug diagnostics as a top-level startup flag.");
 			context.Expect(!virtualGeometry.contains("enabled"), "Saved render settings should not include a virtual geometry enable toggle.");
 			context.Expect(NearlyEqual(2.5f, virtualGeometry.value("lodErrorScale", 0.0f)), "Saved render settings should include LOD error scale.");
 			context.ExpectEqual(3u, virtualGeometry.value("maxLodDrop", 0u), "Saved render settings should include max LOD drop.");
@@ -264,6 +272,43 @@ namespace
 			std::filesystem::remove_all(root);
 		});
 
+		registry.Add("VirtualGeometry.Quality.RenderDebugDiagnosticsApplyLive", [](TestContext& context) {
+			const std::filesystem::path previousAssetRoot = ResourceManager::Instance().GetAssetRoot();
+			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
+			const bool previousDiagnosticsRequested = TerraEngine::Renderer::RenderDiagnosticsRequested();
+			const std::filesystem::path root = MakeVirtualGeometryQualityTestRoot("TerraEngineVirtualGeometryQualityLiveDebugTests");
+			ResourceManager::Instance().SetAssetRoot(root / "Assets");
+
+			// The debug flag is user-authored project state, but the editor also
+			// needs the running renderer to honor it immediately. These checks
+			// prove both the saved setting and temporary diagnostics windows feed
+			// the same runtime request without overriding each other.
+			RenderSettings settings = previousSettings;
+			settings.debugEnabled = 0u;
+			RenderSystem::Instance().SetRenderSettings(settings);
+			RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false);
+			context.Expect(!ResourceManager::Instance().IsRenderDebugEnabled(), "Disabling render debug diagnostics should update ResourceManager immediately.");
+			context.Expect(!TerraEngine::Renderer::RenderDiagnosticsRequested(), "Disabling render debug diagnostics should clear the runtime request when no editor window needs it.");
+
+			settings.debugEnabled = 1u;
+			RenderSystem::Instance().SetRenderSettings(settings);
+			context.Expect(ResourceManager::Instance().IsRenderDebugEnabled(), "Enabling render debug diagnostics should update ResourceManager immediately.");
+			context.Expect(TerraEngine::Renderer::RenderDiagnosticsRequested(), "Enabling render debug diagnostics should request detailed render diagnostics without restarting.");
+
+			settings.debugEnabled = 0u;
+			RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(true);
+			RenderSystem::Instance().SetRenderSettings(settings);
+			context.Expect(!ResourceManager::Instance().IsRenderDebugEnabled(), "Project debug state should still turn off while a diagnostics window is open.");
+			context.Expect(TerraEngine::Renderer::RenderDiagnosticsRequested(), "Temporary diagnostics windows should keep diagnostics active after the project toggle is disabled.");
+
+			RenderSystem::Instance().SetRenderGraphDiagnosticsRequested(false);
+			context.Expect(!TerraEngine::Renderer::RenderDiagnosticsRequested(), "Closing the last diagnostics window should clear diagnostics when the project toggle is off.");
+
+			RestoreRenderSettings(previousAssetRoot, previousSettings);
+			TerraEngine::Renderer::SetRenderDiagnosticsRequested(previousDiagnosticsRequested);
+			std::filesystem::remove_all(root);
+		});
+
 		registry.Add("VirtualGeometry.Quality.LoadsProjectRenderSettings", [](TestContext& context) {
 			const std::filesystem::path previousAssetRoot = ResourceManager::Instance().GetAssetRoot();
 			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
@@ -273,6 +318,8 @@ namespace
 
 			nlohmann::json document;
 			document["preset"] = static_cast<std::uint32_t>(QualityPreset::Custom);
+			document["validationEnabled"] = true;
+			document["debugEnabled"] = true;
 			document["settings"] = {
 				{ "shadowResolution", 1024u },
 				{ "shadowFilteringSize", 3u },
@@ -304,7 +351,12 @@ namespace
 			output.close();
 
 			RenderSystem::Instance().LoadSettings();
+			const RenderSettings loadedSettings = RenderSystem::Instance().GetRenderSettings();
 			const VirtualGeometryQualityProfile loaded = RenderSystem::Instance().GetVirtualGeometryQualityProfile();
+			context.ExpectEqual(1u, loadedSettings.validationEnabled, "Loaded render settings should restore Vulkan validation startup flag.");
+			context.ExpectEqual(1u, loadedSettings.debugEnabled, "Loaded render settings should restore render debug startup flag.");
+			context.Expect(ResourceManager::Instance().IsRenderDebugEnabled(), "Loaded render debug diagnostics should apply to the live ResourceManager flag.");
+			context.Expect(TerraEngine::Renderer::RenderDiagnosticsRequested(), "Loaded render debug diagnostics should request detailed diagnostics without requiring another restart.");
 			context.Expect(NearlyEqual(3.0f, loaded.lodErrorScale), "Loaded render settings should restore LOD error scale.");
 			context.ExpectEqual(2u, loaded.maxLodDrop, "Loaded render settings should restore max LOD drop.");
 			context.Expect(loaded.hiZOcclusionEnabled, "Loaded render settings should restore legacy Hi-Z metadata.");

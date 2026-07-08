@@ -20,11 +20,10 @@ enum class RHIBackend
 struct RHIConfig
 {
 	RHIBackend backend = RHIBackend::Vulkan;
-#ifdef NDEBUG
+	// Validation is a runtime policy, not a compile-mode capability. Keep the
+	// portable RHI default off so standalone builds do not require SDK layers,
+	// while individual launch profiles can request validation in any build type.
 	bool enableValidationLayers = false;
-#else
-	bool enableValidationLayers = true;
-#endif
 };
 
 namespace TerraEngine::Renderer {

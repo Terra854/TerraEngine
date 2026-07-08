@@ -627,6 +627,7 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/Engine/Managed PREFIX "Engine/Mana
 # Custom target to build the C# project
 # We use 'dotnet build' directly to avoid CMake C# generator limitations (VS only)
 set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Binaries/Managed/$<CONFIG>")
+set(EXPORT_GENERATOR_OUTPUT_DIR "${CMAKE_BINARY_DIR}/Build/Intermediate/Managed/TerraEngine.Export.Generator/$<CONFIG>")
 add_custom_target(TerraEngine.Managed.Output
 	COMMAND ${CMAKE_COMMAND} -E rm -rf "${MANAGED_OUTPUT_DIR}"
 	COMMAND ${CMAKE_COMMAND} -E make_directory "${MANAGED_OUTPUT_DIR}"
@@ -644,9 +645,11 @@ add_dependencies(TerraEngine TerraEngine.Managed.Output)
 # script workspace so Roslyn can emit the export bootstrap code during project builds.
 add_custom_target(TerraEngine.Export.Generator ALL
 	COMMAND ${CMAKE_COMMAND} -E make_directory "${MANAGED_OUTPUT_DIR}/Analyzers"
-	COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/TerraEngine.Export.Generator.csproj" -c $<CONFIG> -nologo
+	# Send the analyzer output to a CMake-owned directory so Debug, Release, and
+	# platform-qualified MSBuild layouts all stage the same DLL path.
+	COMMAND dotnet build "${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/TerraEngine.Export.Generator.csproj" -c $<CONFIG> -nologo -p:OutDir="${EXPORT_GENERATOR_OUTPUT_DIR}/"
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
-		"${CMAKE_CURRENT_SOURCE_DIR}/Editor/Managed/TerraEngine.Export.Generator/bin/$<CONFIG>/netstandard2.0/TerraEngine.Export.Generator.dll"
+		"${EXPORT_GENERATOR_OUTPUT_DIR}/TerraEngine.Export.Generator.dll"
 		"${MANAGED_OUTPUT_DIR}/Analyzers/TerraEngine.Export.Generator.dll"
 	COMMENT "Building Managed Analyzer: TerraEngine.Export.Generator"
 	SOURCES

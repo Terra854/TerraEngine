@@ -175,11 +175,13 @@ public:
 
 private:
 	RenderSystem();
+	void ApplyRenderDiagnosticsRequest();
 	std::unique_ptr<RHIContext> rhi;
 	ObjectManager& objManager = ObjectManager::instance();
 	bool initialized = false;
 	bool taskShaderCullingEnabled = true;
 	bool editorModeEnabled = false;
+	bool renderGraphDiagnosticsRequestedByUi = false;
 
 	bool hasSceneViewCamera = false;
 	OverrideCameraData sceneViewCamera;

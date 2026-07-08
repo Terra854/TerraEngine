@@ -643,7 +643,10 @@ void VulkanContext::Impl::Cleanup() {
 // VulkanContext::Impl::CreateInstance is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateInstance() {
 	// Build the instance and verify that requested validation layers are present.
-	validationLayersEnabled = enableValidationLayers;
+	// This request comes from editor/export render settings in every compile
+	// mode. If the Vulkan SDK layer manifest is absent, keep booting without
+	// validation so packaged games and non-SDK machines still run.
+	validationLayersEnabled = validationLayersRequested;
 	if (validationLayersEnabled && !CheckValidationLayerSupport()) {
 		// Linux developer machines may not expose the SDK layer manifest unless VK_LAYER_PATH is set.
 		TERRAENGINE_LOG(LogLevel::Warning, "validation layers requested, but not available; continuing without validation layers.");

@@ -56,6 +56,16 @@ namespace
 		ImGui::Spacing();
 	}
 
+	void DrawHoverTooltip(const char* text)
+	{
+		// Build profile controls are dense, so short hover text keeps rarely
+		// used export-only switches discoverable without adding permanent copy.
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("%s", text);
+		}
+	}
+
 }
 
 BuildProfilesWindow::BuildProfilesWindow(MainEditorSubsystem* owner)
@@ -233,6 +243,11 @@ void BuildProfilesWindow::DrawProfileEditor() {
 	if (ImGui::Checkbox("Strip NativeAOT Output", &profile.stripNativeAotOutput)) {
 		profile.isDirty = true;
 	}
+	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+	if (ImGui::Checkbox("Export Vulkan Validation Layers", &profile.enableVulkanValidationLayers)) {
+		profile.isDirty = true;
+	}
+	DrawHoverTooltip("Requests Vulkan validation layers when this exported build starts. Editor validation remains controlled by Project Settings.");
 
 	ImGui::Spacing();
 

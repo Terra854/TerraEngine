@@ -44,6 +44,7 @@ namespace TerraEngine::EditorTests {
 			profile.enableManagedCompilation = false;
 			profile.includeDebugSymbols = true;
 			profile.stripNativeAotOutput = true;
+			profile.enableVulkanValidationLayers = true;
 			profile.additionalPublishArgs = "--self-contained true";
 			profile.virtualGeometryQualityLevel = 3u;
 			profile.virtualGeometryDiagnosticsEnabled = true;
@@ -67,6 +68,7 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(profile.enableManagedCompilation, loaded.enableManagedCompilation, "The managed compilation toggle should round-trip through JSON.");
 			context.ExpectEqual(profile.includeDebugSymbols, loaded.includeDebugSymbols, "The debug symbol toggle should round-trip through JSON.");
 			context.ExpectEqual(profile.stripNativeAotOutput, loaded.stripNativeAotOutput, "The NativeAOT strip toggle should round-trip through JSON.");
+			context.ExpectEqual(profile.enableVulkanValidationLayers, loaded.enableVulkanValidationLayers, "The export Vulkan validation toggle should round-trip through JSON.");
 			context.ExpectEqual(profile.additionalPublishArgs, loaded.additionalPublishArgs, "Additional publish arguments should round-trip through JSON.");
 			context.ExpectEqual(profile.virtualGeometryQualityLevel, loaded.virtualGeometryQualityLevel, "Virtual geometry export quality should round-trip through JSON.");
 			context.ExpectEqual(profile.virtualGeometryDiagnosticsEnabled, loaded.virtualGeometryDiagnosticsEnabled, "Virtual geometry diagnostics should round-trip through JSON.");

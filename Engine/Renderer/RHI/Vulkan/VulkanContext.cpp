@@ -1332,6 +1332,23 @@ VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {
 }
 VulkanContext::~VulkanContext() = default;
 
+void VulkanContext::SetValidationLayersRequested(bool enabled)
+{
+	// Validation layers must be decided before vkCreateInstance because the
+	// layer list and debug-utils extension are instance creation inputs. Export
+	// and editor settings call this during RenderSystem startup.
+	if (impl->initialized || impl->instance != VK_NULL_HANDLE)
+	{
+		if (impl->validationLayersRequested != enabled)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Ignoring Vulkan validation-layer change after instance creation. Restart the renderer to apply the new validation setting.");
+		}
+		return;
+	}
+	impl->validationLayersRequested = enabled;
+	impl->validationLayersEnabled = enabled;
+}
+
 void VulkanContext::SetVariableRateShadingEnabled(bool enabled)
 {
 	// The VRS attachment is baked into render passes and framebuffers. Allow
@@ -3748,6 +3765,22 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	analysisCullingData.clusteredLightingValid = clusteredLightingAvailable ? 1u : 0u;
 	analysisCullingData.clusteredLightingOverflowed = 0u;
 
+	// Publish and transition the pre-scene depth input before any compute pass
+	// binds the global descriptor set. Updating the depth descriptor after a
+	// global-set bind can invalidate optimized/export command buffers even when
+	// the draw command itself has not reached submission yet.
+	const bool needsPreSceneDepthCompute = clusteredLightingAvailable;
+	const bool depthPreparedForPreSceneCompute = needsPreSceneDepthCompute
+		&& impl->PrepareDepthForCompute(cmd, activeDepthImage, activeDepthView, true);
+	if (needsPreSceneDepthCompute && !depthPreparedForPreSceneCompute) {
+		// Fail open when the shared depth image cannot be borrowed. The draw
+		// pass must not sample AO or cluster metadata that depends on a depth
+		// transition which did not happen.
+		cullingData.renderSettings2.z = 0.0f;
+		cullingData.clusteredLightingValid = 0u;
+		impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
+	}
+
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (gpuLightAnalysisAvailable && !analysisLightingPayload.empty()) {
 		struct AnalysisPushConstants
@@ -3821,20 +3854,6 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	// per-light culling does not thrash the indirect-command buffer on CPU.
 	indirectCommands.reserve(frameData.commands.size() + shadowCommandSourceCount);
 
-	// Only clustered lighting borrows the live depth image before the scene
-	// pass. GTAO reads its own depth-history image, so it does not need to move
-	// the shared depth attachment out of the layout expected by vkCmdBeginRenderPass.
-	const bool needsPreSceneDepthCompute = clusteredLightingAvailable;
-	const bool depthPreparedForPreSceneCompute = needsPreSceneDepthCompute
-		&& impl->PrepareDepthForCompute(cmd, activeDepthImage, activeDepthView, true);
-	if (needsPreSceneDepthCompute && !depthPreparedForPreSceneCompute) {
-		// Fail open when the shared depth image cannot be borrowed. The draw
-		// pass must not sample AO or cluster metadata that depends on a depth
-		// transition which did not happen.
-		cullingData.renderSettings2.z = 0.0f;
-		cullingData.clusteredLightingValid = 0u;
-		impl->UpdateFrameCullingData(statsSlotIndex, cullingData);
-	}
 	if (screenSpaceAoActive) {
 		const bool generatedAmbientOcclusion = impl->GenerateAmbientOcclusion(cmd, cullingData, snapshotSlotIndex, aoDepthHistoryView);
 		if (!generatedAmbientOcclusion) {
@@ -5115,6 +5134,12 @@ bool VulkanContext::Impl::PrepareDepthForCompute(VkCommandBuffer cmd, VkImage so
 		return false;
 	}
 
+	// Binding 12 lives in the persistent global descriptor set. Even though the
+	// binding is update-after-bind, exported builds can still have a submitted
+	// runtime command buffer tracked for this frame slot, so drain that work
+	// before changing which depth view clustered lighting samples.
+	WaitForDescriptorMutationIdle();
+
 	VkDescriptorImageInfo sampledDepthInfo{};
 	sampledDepthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 	sampledDepthInfo.imageView = depthView;
@@ -5579,7 +5604,14 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	const uint32_t width = std::max(ambientOcclusionWidth, 1u);
 	const uint32_t height = std::max(ambientOcclusionHeight, 1u);
 	const uint32_t clampedSnapshotSlot = std::min(snapshotSlotIndex, MAX_RENDER_SNAPSHOTS_PER_FRAME - 1u);
-	const std::size_t descriptorSetCount = static_cast<std::size_t>(MAX_FRAMES_IN_FLIGHT) * static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME);
+	// GTAO and blur run back-to-back inside one command buffer. Give each pass
+	// its own descriptor set so the blur descriptor update never mutates the
+	// GTAO set after that set has already been bound for dispatch.
+	constexpr uint32_t kAoDescriptorSetsPerSnapshot = 2u;
+	const std::size_t descriptorSetCount =
+		static_cast<std::size_t>(MAX_FRAMES_IN_FLIGHT)
+		* static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME)
+		* static_cast<std::size_t>(kAoDescriptorSetsPerSnapshot);
 	if (aoDescriptorPool == VK_NULL_HANDLE || aoDescriptorSets.size() != descriptorSetCount) {
 		if (aoDescriptorPool != VK_NULL_HANDLE) {
 			// AO descriptors are recorded into primary command buffers. Wait
@@ -5624,12 +5656,16 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	}
 
 	const std::size_t descriptorIndex =
-		static_cast<std::size_t>(currentFrame) * static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME)
-		+ static_cast<std::size_t>(clampedSnapshotSlot);
-	if (descriptorIndex >= aoDescriptorSets.size() || aoDescriptorSets[descriptorIndex] == VK_NULL_HANDLE) {
+		(static_cast<std::size_t>(currentFrame) * static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME)
+			+ static_cast<std::size_t>(clampedSnapshotSlot))
+		* static_cast<std::size_t>(kAoDescriptorSetsPerSnapshot);
+	if (descriptorIndex + 1u >= aoDescriptorSets.size()
+		|| aoDescriptorSets[descriptorIndex] == VK_NULL_HANDLE
+		|| aoDescriptorSets[descriptorIndex + 1u] == VK_NULL_HANDLE) {
 		return false;
 	}
-	VkDescriptorSet aoDescriptorSet = aoDescriptorSets[descriptorIndex];
+	VkDescriptorSet gtaoDescriptorSet = aoDescriptorSets[descriptorIndex];
+	VkDescriptorSet blurDescriptorSet = aoDescriptorSets[descriptorIndex + 1u];
 
 	auto TransitionAoImage = [&](VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
 		VkImageMemoryBarrier barrier{};
@@ -5673,14 +5709,14 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 
 	std::array<VkWriteDescriptorSet, 2> gtaoWrites{};
 	gtaoWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	gtaoWrites[0].dstSet = aoDescriptorSet;
+	gtaoWrites[0].dstSet = gtaoDescriptorSet;
 	gtaoWrites[0].dstBinding = 12;
 	gtaoWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	gtaoWrites[0].descriptorCount = 1;
 	gtaoWrites[0].pImageInfo = &depthInfo;
 
 	gtaoWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	gtaoWrites[1].dstSet = aoDescriptorSet;
+	gtaoWrites[1].dstSet = gtaoDescriptorSet;
 	gtaoWrites[1].dstBinding = 23;
 	gtaoWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	gtaoWrites[1].descriptorCount = 1;
@@ -5701,7 +5737,7 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	gtaoPush.radiusPixels = 1.0f + quality * 1.5f;
 	gtaoPush.strength = std::clamp(frameData.renderSettings2.y, 0.0f, 4.0f);
 
-	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipelineLayout, 0, 1, &aoDescriptorSet, 0, nullptr);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipelineLayout, 0, 1, &gtaoDescriptorSet, 0, nullptr);
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtaoComputePipeline);
 	vkCmdPushConstants(cmd, aoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gtaoPush), &gtaoPush);
 	vkCmdDispatch(cmd, (width + 7u) / 8u, (height + 7u) / 8u, 1u);
@@ -5738,27 +5774,37 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	historyInputInfo.imageView = ambientOcclusionHistory.view;
 	historyInputInfo.sampler = VK_NULL_HANDLE;
 
-	std::array<VkWriteDescriptorSet, 3> blurWrites{};
+	// The blur shader also samples depth for bilateral edge preservation. The
+	// descriptor set is separate from GTAO, so it needs its own binding 12 write
+	// even though both passes sample the same depth-history image.
+	std::array<VkWriteDescriptorSet, 4> blurWrites{};
 	blurWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	blurWrites[0].dstSet = aoDescriptorSet;
-	blurWrites[0].dstBinding = 22;
+	blurWrites[0].dstSet = blurDescriptorSet;
+	blurWrites[0].dstBinding = 12;
 	blurWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	blurWrites[0].descriptorCount = 1;
-	blurWrites[0].pImageInfo = &rawInputInfo;
+	blurWrites[0].pImageInfo = &depthInfo;
 
 	blurWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	blurWrites[1].dstSet = aoDescriptorSet;
-	blurWrites[1].dstBinding = 24;
-	blurWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	blurWrites[1].dstSet = blurDescriptorSet;
+	blurWrites[1].dstBinding = 22;
+	blurWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 	blurWrites[1].descriptorCount = 1;
-	blurWrites[1].pImageInfo = &blurredOutputInfo;
+	blurWrites[1].pImageInfo = &rawInputInfo;
 
 	blurWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	blurWrites[2].dstSet = aoDescriptorSet;
-	blurWrites[2].dstBinding = 21;
-	blurWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	blurWrites[2].dstSet = blurDescriptorSet;
+	blurWrites[2].dstBinding = 24;
+	blurWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	blurWrites[2].descriptorCount = 1;
-	blurWrites[2].pImageInfo = &historyInputInfo;
+	blurWrites[2].pImageInfo = &blurredOutputInfo;
+
+	blurWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	blurWrites[3].dstSet = blurDescriptorSet;
+	blurWrites[3].dstBinding = 21;
+	blurWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	blurWrites[3].descriptorCount = 1;
+	blurWrites[3].pImageInfo = &historyInputInfo;
 	vkUpdateDescriptorSets(device, static_cast<uint32_t>(blurWrites.size()), blurWrites.data(), 0, nullptr);
 
 	// struct GTAOBlurPushConstants groups related state and operations so callers have one documented contract.
@@ -5778,6 +5824,7 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 	blurPush.historyBlend = 0.0f;
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtaoBlurComputePipeline);
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipelineLayout, 0, 1, &blurDescriptorSet, 0, nullptr);
 	vkCmdPushConstants(cmd, aoPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(blurPush), &blurPush);
 	vkCmdDispatch(cmd, (width + 7u) / 8u, (height + 7u) / 8u, 1u);
 

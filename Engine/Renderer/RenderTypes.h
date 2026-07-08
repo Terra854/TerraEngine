@@ -1833,6 +1833,11 @@ struct RenderSettings
 	// Variable-rate shading changes the render-pass attachment layout, so it
 	// is treated as a startup/render-profile option rather than a hot toggle.
 	std::uint32_t variableRateShading = 0u;
+	// Vulkan validation is startup-only because layer selection happens during
+	// instance creation. Render debug diagnostics share the same saved profile
+	// but can be mirrored into the running renderer when the editor toggles it.
+	std::uint32_t validationEnabled = 0u;
+	std::uint32_t debugEnabled = 0u;
 	// Virtual geometry defaults disabled until the cooked TEMF payload, shader
 	// path, and diagnostics have been implemented and validated story by story.
 	VirtualGeometryQualityProfile virtualGeometry = MakeDefaultVirtualGeometryQualityProfile();

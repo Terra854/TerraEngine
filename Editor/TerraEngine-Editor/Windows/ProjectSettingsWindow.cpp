@@ -327,6 +327,25 @@ void ProjectSettingsWindow::DrawGraphicsCategory()
 	}
 	ShowOptionTooltip("Variable Rate Shading affects the next backend initialization or export package.");
 
+	if (ImGui::CollapsingHeader("Renderer Diagnostics"))
+	{
+		bool enableValidation = settings.validationEnabled > 0u;
+		if (ImGui::Checkbox("Vulkan Validation Layers", &enableValidation))
+		{
+			settings.validationEnabled = enableValidation ? 1u : 0u;
+			changed = true;
+		}
+		ShowOptionTooltip("Requests Vulkan validation layers on the next editor/project-runtime launch. Export builds use the selected Build Profile toggle.");
+
+		bool enableDebug = settings.debugEnabled > 0u;
+		if (ImGui::Checkbox("Render Debug Diagnostics", &enableDebug))
+		{
+			settings.debugEnabled = enableDebug ? 1u : 0u;
+			changed = true;
+		}
+		ShowOptionTooltip("Applies TerraEngine render debug diagnostics immediately and saves the same state for the next editor or export launch.");
+	}
+
 	if (ImGui::CollapsingHeader("Virtual Geometry", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		// This is a runtime selection scale, not an import/cook ratio. The

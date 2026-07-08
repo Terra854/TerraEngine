@@ -38,12 +38,6 @@
 #include <stdexcept>
 #include <filesystem>
 
-#ifdef NDEBUG
-inline const bool enableValidationLayers = false;
-#else
-inline const bool enableValidationLayers = true;
-#endif
-
 inline const std::vector<const char*> validationLayers = {
 	"VK_LAYER_KHRONOS_validation"
 };
@@ -175,7 +169,11 @@ struct PipelineKeyHash {
 struct VulkanContext::Impl {
 	VkInstance instance = VK_NULL_HANDLE;
 	VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
-	bool validationLayersEnabled = enableValidationLayers;
+	// Validation is requested by project/export settings before instance
+	// creation. Missing SDK layers only disable this flag at startup; they must
+	// never keep the engine from booting.
+	bool validationLayersRequested = false;
+	bool validationLayersEnabled = false;
 	VkSurfaceKHR surface = VK_NULL_HANDLE;
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 	VkDevice device = VK_NULL_HANDLE;

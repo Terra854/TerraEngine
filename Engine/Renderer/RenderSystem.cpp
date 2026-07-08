@@ -1257,6 +1257,8 @@ namespace
 		sanitized.ambientOcclusionQuality = std::min(sanitized.ambientOcclusionQuality, 3u);
 		sanitized.enableIBL = sanitized.enableIBL > 0u ? 1u : 0u;
 		sanitized.variableRateShading = sanitized.variableRateShading > 0u ? 1u : 0u;
+		sanitized.validationEnabled = sanitized.validationEnabled > 0u ? 1u : 0u;
+		sanitized.debugEnabled = sanitized.debugEnabled > 0u ? 1u : 0u;
 		sanitized.virtualGeometry = SanitizeVirtualGeometryQualityProfile(sanitized.virtualGeometry);
 		return sanitized;
 	}
@@ -2179,6 +2181,11 @@ void RenderSystem::Initialize()
 	LoadSettings();
 	
 	auto vulkanContext = std::make_unique<VulkanContext>();
+	// Vulkan validation is controlled by project/export render settings rather
+	// than by the compiler configuration. Request it before instance creation so
+	// Release and packaged builds can use validation layers when developers turn
+	// the profile flag on, while machines without the SDK still fall back cleanly.
+	vulkanContext->SetValidationLayersRequested(ResourceManager::Instance().IsRenderValidationEnabled());
 	// VRS is a render-pass attachment decision in Vulkan. Apply the startup
 	// render profile before backend initialization so exported builds that
 	// declare VRS disabled never create or load a shading-rate attachment.
@@ -5876,6 +5883,16 @@ TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const Terr
 
 void RenderSystem::SetRenderGraphDiagnosticsRequested(bool requested)
 {
+	renderGraphDiagnosticsRequestedByUi = requested;
+	ApplyRenderDiagnosticsRequest();
+}
+
+void RenderSystem::ApplyRenderDiagnosticsRequest()
+{
+	// Diagnostics can be requested persistently by project settings or
+	// temporarily by editor windows. Keeping the OR here prevents one source
+	// from accidentally disabling the other while the editor is open.
+	const bool requested = renderGraphDiagnosticsRequestedByUi || currentSettings.debugEnabled > 0u;
 	TerraEngine::Renderer::SetRenderDiagnosticsRequested(requested);
 	if (!requested)
 	{
@@ -5982,6 +5999,8 @@ void RenderSystem::SetRenderSettings(const RenderSettings& settings)
 {
 	currentSettings = SanitizeRenderSettings(settings);
 	currentPreset = QualityPreset::Custom;
+	ResourceManager::Instance().SetRenderDebugEnabled(currentSettings.debugEnabled > 0u);
+	ApplyRenderDiagnosticsRequest();
 	if (auto* vulkanContext = dynamic_cast<VulkanContext*>(rhi.get()))
 	{
 		vulkanContext->SetVariableRateShadingEnabled(currentSettings.variableRateShading > 0u);
@@ -6078,6 +6097,11 @@ void RenderSystem::LoadSettings()
 		currentSettings.ambientOcclusionQuality = s.value("ambientOcclusionQuality", 2u);
 		currentSettings.anisotropicFiltering = s.value("anisotropicFiltering", 4u);
 		currentSettings.variableRateShading = s.value("variableRateShading", 0u);
+		// Vulkan validation and render-debug diagnostics are startup-owned
+		// profile flags. Keep them beside the render settings file so the editor
+		// can expose them without requiring manual JSON edits.
+		currentSettings.validationEnabled = j.value("validationEnabled", s.value("validationEnabled", false)) ? 1u : 0u;
+		currentSettings.debugEnabled = j.value("debugEnabled", s.value("debugEnabled", false)) ? 1u : 0u;
 		if (s.contains("virtualGeometry") && s["virtualGeometry"].is_object())
 		{
 			const auto& virtualGeometry = s["virtualGeometry"];
@@ -6098,6 +6122,8 @@ void RenderSystem::LoadSettings()
 			currentSettings.virtualGeometry.lodTransitionStableFrames = virtualGeometry.value("lodTransitionStableFrames", 3u);
 		}
 		currentSettings = SanitizeRenderSettings(currentSettings);
+		ResourceManager::Instance().SetRenderDebugEnabled(currentSettings.debugEnabled > 0u);
+		ApplyRenderDiagnosticsRequest();
 	}
 	catch (const std::exception& e)
 	{
@@ -6123,6 +6149,8 @@ void RenderSystem::SaveSettings()
 	{
 		nlohmann::json j;
 		j["preset"] = static_cast<uint32_t>(currentPreset);
+		j["validationEnabled"] = currentSettings.validationEnabled > 0u;
+		j["debugEnabled"] = currentSettings.debugEnabled > 0u;
 		
 		nlohmann::json s;
 		s["shadowResolution"] = currentSettings.shadowResolution;

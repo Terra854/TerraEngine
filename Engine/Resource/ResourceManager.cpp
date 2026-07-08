@@ -125,6 +125,8 @@ namespace
 		settings.ambientOcclusionStrength = aoRank == 0u ? 0.0f : 1.0f;
 		settings.ambientOcclusionQuality = aoRank;
 		settings.variableRateShading = vrs == "disabled" ? 0u : 1u;
+		settings.validationEnabled = JsonBoolOr(renderProfile, "validationEnabled", false) ? 1u : 0u;
+		settings.debugEnabled = JsonBoolOr(renderProfile, "debugEnabled", false) ? 1u : 0u;
 		return settings;
 	}
 
@@ -330,6 +332,18 @@ namespace
 		settings.ambientOcclusionQuality = JsonUIntOr(*settingsObject, "ambientOcclusionQuality", 2u);
 		settings.anisotropicFiltering = JsonUIntOr(*settingsObject, "anisotropicFiltering", 4u);
 		settings.variableRateShading = JsonUIntOr(*settingsObject, "variableRateShading", 0u);
+		// Diagnostic startup flags are canonical at the top level of
+		// RenderSettings.json so export manifests can mirror them without
+		// interpreting the nested settings payload. Accept nested values as a
+		// compatibility fallback for hand-authored files.
+		settings.validationEnabled = JsonBoolOr(
+			renderSettingsDocument,
+			"validationEnabled",
+			JsonBoolOr(*settingsObject, "validationEnabled", false)) ? 1u : 0u;
+		settings.debugEnabled = JsonBoolOr(
+			renderSettingsDocument,
+			"debugEnabled",
+			JsonBoolOr(*settingsObject, "debugEnabled", false)) ? 1u : 0u;
 		return settings;
 	}
 
@@ -346,6 +360,35 @@ namespace
 			<< " validation=" << (JsonBoolOr(renderProfile, "validationEnabled", false) ? "on" : "off")
 			<< " debug=" << (JsonBoolOr(renderProfile, "debugEnabled", false) ? "on" : "off");
 		return stream.str();
+	}
+
+	void ApplyRenderDiagnosticFlagsFromSettingsFile(
+		const std::filesystem::path& settingsPath,
+		bool& validationEnabled,
+		bool& debugEnabled)
+	{
+		// The renderer must be able to request Vulkan validation in any compile
+		// mode, but normal project sessions do not have an export manifest.
+		// Read only the tiny diagnostic flags here; RenderSystem still owns the
+		// full render-quality settings load so there is one authority for frame
+		// behavior.
+		if (settingsPath.empty() || !std::filesystem::exists(settingsPath))
+		{
+			return;
+		}
+
+		try
+		{
+			std::ifstream file(settingsPath);
+			nlohmann::json document;
+			file >> document;
+			validationEnabled = JsonBoolOr(document, "validationEnabled", validationEnabled);
+			debugEnabled = JsonBoolOr(document, "debugEnabled", debugEnabled);
+		}
+		catch (const std::exception& exception)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Failed to read render diagnostic flags from " << settingsPath << ": " << exception.what());
+		}
 	}
 
 	// AssetReferenceLooksLikePath is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -519,6 +562,17 @@ void ResourceManager::Initialize()
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!m_ConfiguredExportArchivePath.has_value()) {
+		ApplyRenderDiagnosticFlagsFromSettingsFile(
+			GetProjectRoot() / "ProjectSettings" / "RenderSettings.json",
+			m_RenderValidationEnabled,
+			m_RenderDebugEnabled);
+		if (!m_RenderValidationEnabled && !m_RenderDebugEnabled)
+		{
+			ApplyRenderDiagnosticFlagsFromSettingsFile(
+				assetRoot / "ProjectSettings" / "RenderSettings.json",
+				m_RenderValidationEnabled,
+				m_RenderDebugEnabled);
+		}
 		return;
 	}
 
@@ -762,6 +816,14 @@ bool ResourceManager::IsRenderValidationEnabled() const
 bool ResourceManager::IsRenderDebugEnabled() const
 {
 	return m_RenderDebugEnabled;
+}
+
+void ResourceManager::SetRenderDebugEnabled(bool enabled)
+{
+	// Render debug diagnostics are a TerraEngine runtime switch, so the editor
+	// can apply them immediately. Vulkan validation is intentionally excluded
+	// because layers must be requested before the Vulkan instance is created.
+	m_RenderDebugEnabled = enabled;
 }
 
 std::optional<RenderSettings> ResourceManager::GetConfiguredRenderSettings() const

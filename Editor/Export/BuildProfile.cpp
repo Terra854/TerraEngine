@@ -156,6 +156,7 @@ bool SaveBuildProfile(const BuildProfile& profile, const std::filesystem::path& 
 		j["enableManagedCompilation"] = profile.enableManagedCompilation;
 		j["includeDebugSymbols"] = profile.includeDebugSymbols;
 		j["stripNativeAotOutput"] = profile.stripNativeAotOutput;
+		j["enableVulkanValidationLayers"] = profile.enableVulkanValidationLayers;
 		j["additionalPublishArgs"] = profile.additionalPublishArgs;
 		j["virtualGeometry"] = {
 			{ "qualityLevel", profile.virtualGeometryQualityLevel },
@@ -214,6 +215,8 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path) {
 		if (j.contains("includeDebugSymbols"))     profile.includeDebugSymbols = j["includeDebugSymbols"].get<bool>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("stripNativeAotOutput"))    profile.stripNativeAotOutput = j["stripNativeAotOutput"].get<bool>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (j.contains("enableVulkanValidationLayers")) profile.enableVulkanValidationLayers = j["enableVulkanValidationLayers"].get<bool>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("additionalPublishArgs"))   profile.additionalPublishArgs = j["additionalPublishArgs"].get<std::string>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

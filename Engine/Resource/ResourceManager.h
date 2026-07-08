@@ -134,6 +134,7 @@ public:
 	std::string GetRenderProfileSummary() const;
 	bool IsRenderValidationEnabled() const;
 	bool IsRenderDebugEnabled() const;
+	void SetRenderDebugEnabled(bool enabled);
 	std::optional<RenderSettings> GetConfiguredRenderSettings() const;
 
 	// Lets runtime systems distinguish packaged export sessions from editor

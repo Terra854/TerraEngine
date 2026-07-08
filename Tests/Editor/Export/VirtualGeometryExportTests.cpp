@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -111,6 +112,17 @@ namespace TerraEngine::EditorTests
 			{
 				workspace.WriteText(file, "required runtime payload");
 			}
+		}
+
+		std::string ReadTextFile(const std::filesystem::path& path)
+		{
+			// This regression test checks the production exporter writer rather
+			// than the hand-authored test fixture, so read the source file as a
+			// plain text contract and assert the required metadata is present.
+			std::ifstream stream(path, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << stream.rdbuf();
+			return buffer.str();
 		}
 
 		enum class VirtualGeometryTemfVariant
@@ -303,6 +315,53 @@ namespace TerraEngine::EditorTests
 
 	void RegisterVirtualGeometryExportTests(TestRegistry& registry)
 	{
+		registry.Add("VirtualGeometry.Editor.Export.PipelineDeclaresConeSafetyMetadata", [](TestContext& context) {
+			const std::filesystem::path pipelinePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Editor" / "Export" / "ExportPipeline.cpp";
+			const std::string pipelineSource = ReadTextFile(pipelinePath);
+			const std::size_t metadataIndex = pipelineSource.find("\"requiredMetadata\"");
+			const std::size_t coneSafetyIndex = metadataIndex == std::string::npos ? std::string::npos : pipelineSource.find("\"coneSafety\"", metadataIndex);
+			const std::size_t coverageIndex = pipelineSource.find("\"coverage\"");
+			const std::size_t fixtureManifestIndex = coverageIndex == std::string::npos ? std::string::npos : pipelineSource.find("\"fixtureManifest\"", coverageIndex);
+			const std::size_t requiredCategoriesIndex = coverageIndex == std::string::npos ? std::string::npos : pipelineSource.find("\"requiredCategories\"", coverageIndex);
+			const std::size_t exportCategoryIndex = requiredCategoriesIndex == std::string::npos ? std::string::npos : pipelineSource.find("\"export\"", requiredCategoriesIndex);
+
+			context.Expect(!pipelineSource.empty(), "The export pipeline source should be readable by the editor test target.");
+			context.Expect(metadataIndex != std::string::npos, "The export pipeline should still write virtual geometry requiredMetadata.");
+			context.Expect(coneSafetyIndex != std::string::npos, "The export pipeline must declare coneSafety so runtime export validation accepts current virtual geometry packages.");
+			context.Expect(coverageIndex != std::string::npos, "The export pipeline must declare virtual geometry hardening coverage metadata.");
+			context.Expect(fixtureManifestIndex != std::string::npos, "The export pipeline coverage metadata must include the hardening fixture manifest.");
+			context.Expect(requiredCategoriesIndex != std::string::npos, "The export pipeline coverage metadata must include requiredCategories.");
+			context.Expect(exportCategoryIndex != std::string::npos, "The export pipeline coverage metadata must include the export category required by package validation.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.Export.PipelineStagesModelPackageChildren", [](TestContext& context) {
+			const std::filesystem::path pipelinePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Editor" / "Export" / "ExportPipeline.cpp";
+			const std::string pipelineSource = ReadTextFile(pipelinePath);
+			const bool readsPackageSidecar = pipelineSource.find("LoadModelPackageImportResult") != std::string::npos;
+			const bool stagesPackageChildren = pipelineSource.find("stageModelPackageChildren") != std::string::npos;
+			const bool treatsPackageParentAsLooseMesh = pipelineSource.find("importer == \"MeshImporter\" || IsModelPackageImporterName(importer)") != std::string::npos;
+
+			context.Expect(!pipelineSource.empty(), "The export pipeline source should be readable by the editor test target.");
+			context.Expect(readsPackageSidecar, "The export pipeline must read GLTF/FBX package sidecars before writing runtime asset paths.");
+			context.Expect(stagesPackageChildren, "The export pipeline must stage generated model-package children instead of package parent containers.");
+			context.Expect(!treatsPackageParentAsLooseMesh, "The export pipeline must not classify GLTF/FBX package parents as loose compiled mesh assets.");
+		});
+
+		registry.Add("VirtualGeometry.Editor.Export.ValidationLayersComeFromBuildProfile", [](TestContext& context) {
+			const std::filesystem::path pipelinePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Editor" / "Export" / "ExportPipeline.cpp";
+			const std::string pipelineSource = ReadTextFile(pipelinePath);
+			const std::size_t resolverIndex = pipelineSource.find("ResolveRenderProfileManifest(const BuildProfile& profile");
+			const std::size_t profileFlagIndex = resolverIndex == std::string::npos ? std::string::npos : pipelineSource.find("profile.enableVulkanValidationLayers", resolverIndex);
+			const std::size_t renderSettingsOverrideIndex = pipelineSource.find("(*renderSettings)[\"validationEnabled\"] = profile.enableVulkanValidationLayers");
+			const std::size_t editorSettingIndex = resolverIndex == std::string::npos ? std::string::npos : pipelineSource.find("savedSettings.value(\"validationEnabled\"", resolverIndex);
+
+			context.Expect(!pipelineSource.empty(), "The export pipeline source should be readable by the editor test target.");
+			context.Expect(resolverIndex != std::string::npos, "Export render-profile manifest creation should receive the selected build profile.");
+			context.Expect(profileFlagIndex != std::string::npos, "Exported Vulkan validation must be controlled by the selected build profile.");
+			context.Expect(renderSettingsOverrideIndex != std::string::npos, "Exported exact render settings must mirror the build profile validation toggle.");
+			context.Expect(editorSettingIndex == std::string::npos, "Exported Vulkan validation must not inherit the editor Project Settings toggle.");
+		});
+
 		registry.Add("VirtualGeometry.Editor.Export.ValidatesPackagedTemfPayloads", [](TestContext& context) {
 			TempVirtualGeometryExportWorkspace workspace;
 			WriteRequiredRuntimeEntries(workspace);

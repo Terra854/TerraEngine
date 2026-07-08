@@ -119,6 +119,19 @@ namespace TerraEngine::Tests
 			return buffer.str();
 		}
 
+		std::string ReadRhiDefinitionsSource()
+		{
+			// RHI defaults are source-level policy because validation must remain
+			// selectable in Release/export builds without requiring a Vulkan SDK
+			// on every end-user machine.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RHI/RHIDefinitions.h";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
 		std::string ReadRenderSystemSource()
 		{
 			// Virtual-geometry packet expansion owns the mapping from selected
@@ -127,6 +140,19 @@ namespace TerraEngine::Tests
 			// row offsets when addressing page-local payload streams.
 			const std::filesystem::path sourcePath =
 				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RenderSystem.cpp";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
+		std::string ReadResourceManagerSource()
+		{
+			// ResourceManager is the startup authority for project/export profile
+			// flags that must be known before RenderSystem creates a Vulkan
+			// instance.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Resource/ResourceManager.cpp";
 			std::ifstream input(sourcePath, std::ios::binary);
 			std::ostringstream buffer;
 			buffer << input.rdbuf();
@@ -290,11 +316,82 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(vulkanResources, "WaitForDescriptorMutationIdle();"), "Changing a VG bindless descriptor should route through the shared descriptor-idle helper.");
 			context.Expect(ShaderContains(vulkanResources, "pendingCommandBuffers.clear();"), "Unsubmitted recorded editor views should be discarded before a shared descriptor set is updated.");
 			context.Expect(ShaderContains(vulkanResources, "vkQueueWaitIdle(graphicsQueue);"), "The descriptor mutation path should still drain already-submitted view work before mutating the shared bindless set.");
-			context.Expect(ShaderContains(vulkanResources, "editorMode && currentFrame < pendingPrimaryCommandBuffers.size()"), "The central descriptor mutation idle helper should also drain recorded editor view command buffers before any descriptor set can be updated or freed.");
-			context.Expect(ShaderContains(vulkanResources, "pendingPrimaryCommandBuffersSubmitted[currentFrame] != 0u"), "Already-submitted editor view command buffers should be tracked independently from the UI semaphore state.");
-			context.Expect(ShaderContains(vulkanResources, "if (alreadySubmitted)"), "Already-submitted editor view command buffers should be waited on, not submitted a second time.");
-			context.Expect(ShaderContains(vulkanResources, "failed to wait for submitted editor view command buffers before descriptor mutation"), "The submitted-view branch should report queue-idle failures before mutating descriptors.");
-			context.Expect(ShaderContains(vulkanResources, "activeRenderSnapshot.state = RenderSnapshotState::Fallback"), "Dropped editor view command buffers should mark their render snapshot as a fallback instead of reporting submitted work.");
+			context.Expect(ShaderContains(vulkanResources, "if (currentFrame < pendingPrimaryCommandBuffers.size())"), "The central descriptor mutation idle helper should drain recorded view command buffers in editor and exported runtime builds.");
+			context.Expect(ShaderContains(vulkanResources, "pendingPrimaryCommandBuffersSubmitted[currentFrame] != 0u"), "Already-submitted view command buffers should be tracked independently from the UI semaphore state.");
+			context.Expect(ShaderContains(vulkanResources, "if (alreadySubmitted)"), "Already-submitted view command buffers should be waited on, not submitted a second time.");
+			context.Expect(ShaderContains(vulkanResources, "failed to wait for submitted render command buffers before descriptor mutation"), "The submitted-view branch should report queue-idle failures before mutating descriptors.");
+			context.Expect(ShaderContains(vulkanResources, "activeRenderSnapshot.state = RenderSnapshotState::Fallback"), "Dropped view command buffers should mark their render snapshot as a fallback instead of reporting submitted work.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.ClusterDepthDescriptorPublishesBeforeComputeBind", [](TestContext& context) {
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			const std::size_t depthPreparePosition = vulkanSource.find("const bool depthPreparedForPreSceneCompute = needsPreSceneDepthCompute");
+			const std::size_t lightAnalysisBindPosition = vulkanSource.find("vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, impl->lightingComputePipelineLayout");
+			context.Expect(depthPreparePosition != std::string::npos, "Runtime clustered lighting should prepare depth before compute commands consume it.");
+			context.Expect(lightAnalysisBindPosition != std::string::npos, "Light-analysis compute should still bind the global descriptor set.");
+			context.Expect(
+				depthPreparePosition != std::string::npos
+					&& lightAnalysisBindPosition != std::string::npos
+					&& depthPreparePosition < lightAnalysisBindPosition,
+				"Depth descriptor publication must happen before the first global compute descriptor bind.");
+			const std::size_t prepareFunctionPosition = vulkanSource.find("bool VulkanContext::Impl::PrepareDepthForCompute");
+			const std::size_t depthIdlePosition = prepareFunctionPosition == std::string::npos
+				? std::string::npos
+				: vulkanSource.find("WaitForDescriptorMutationIdle();", prepareFunctionPosition);
+			const std::size_t depthWritePosition = prepareFunctionPosition == std::string::npos
+				? std::string::npos
+				: vulkanSource.find("VkDescriptorImageInfo sampledDepthInfo{};", prepareFunctionPosition);
+			context.Expect(
+				prepareFunctionPosition != std::string::npos
+					&& depthIdlePosition != std::string::npos
+					&& depthWritePosition != std::string::npos
+					&& depthIdlePosition < depthWritePosition,
+				"Binding 12 depth descriptor updates should drain submitted runtime/editor command buffers before mutation.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.AoBlurUsesDescriptorSetAfterGtaoBind", [](TestContext& context) {
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			context.Expect(ShaderContains(vulkanSource, "constexpr uint32_t kAoDescriptorSetsPerSnapshot = 2u"), "GTAO and blur should own separate per-snapshot descriptor sets.");
+			context.Expect(ShaderContains(vulkanSource, "VkDescriptorSet gtaoDescriptorSet = aoDescriptorSets[descriptorIndex];"), "The raw GTAO pass should bind the first AO descriptor set.");
+			context.Expect(ShaderContains(vulkanSource, "VkDescriptorSet blurDescriptorSet = aoDescriptorSets[descriptorIndex + 1u];"), "The blur pass should bind a second AO descriptor set instead of mutating the bound GTAO set.");
+			context.Expect(ShaderContains(vulkanSource, "gtaoWrites[0].dstSet = gtaoDescriptorSet;"), "Depth input writes should target the GTAO descriptor set.");
+			context.Expect(ShaderContains(vulkanSource, "blurWrites[0].dstSet = blurDescriptorSet;"), "Blur input writes should target the blur descriptor set.");
+			context.Expect(ShaderContains(vulkanSource, "blurWrites[0].dstBinding = 12;"), "The blur descriptor set should publish its own depth input because GTAO blur statically samples binding 12.");
+			context.Expect(ShaderContains(vulkanSource, "blurWrites[0].pImageInfo = &depthInfo;"), "The blur depth binding should reuse the validated AO depth-history image.");
+			context.Expect(ShaderContains(vulkanSource, "blurWrites[1].dstBinding = 22;"), "The blur raw-AO input should remain on binding 22 after the depth write is added.");
+			context.Expect(ShaderContains(vulkanSource, "vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipelineLayout, 0, 1, &gtaoDescriptorSet"), "The GTAO dispatch should bind the GTAO descriptor set.");
+			context.Expect(ShaderContains(vulkanSource, "vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipelineLayout, 0, 1, &blurDescriptorSet"), "The blur dispatch should bind the blur descriptor set.");
+			const std::size_t gtaoBindPosition = vulkanSource.find("&gtaoDescriptorSet");
+			const std::size_t blurWritePosition = vulkanSource.find("blurWrites[0].dstSet = blurDescriptorSet;");
+			const std::size_t blurBindPosition = vulkanSource.find("&blurDescriptorSet");
+			context.Expect(
+				gtaoBindPosition != std::string::npos
+					&& blurWritePosition != std::string::npos
+					&& blurBindPosition != std::string::npos
+					&& gtaoBindPosition < blurWritePosition
+					&& blurWritePosition < blurBindPosition,
+				"Blur descriptors may be updated after the GTAO bind only because they are a different descriptor set.");
+		});
+
+		registry.Add("Renderer.VulkanValidation.RuntimeSettingSurvivesReleaseBuilds", [](TestContext& context) {
+			const std::string rhiDefinitions = ReadRhiDefinitionsSource();
+			const std::string vulkanHeader = ReadVulkanContextImplSource();
+			const std::string vulkanSource = ReadVulkanContextSource();
+			const std::string vulkanInit = ReadVulkanContextInitSource();
+			const std::string renderSystem = ReadRenderSystemSource();
+			const std::string resourceManager = ReadResourceManagerSource();
+
+			context.Expect(!ShaderContains(rhiDefinitions, "#ifdef NDEBUG"), "RHI validation defaults should not change only because the binary is a Release build.");
+			context.Expect(!ShaderContains(vulkanHeader, "inline const bool enableValidationLayers"), "Vulkan validation should be requested by runtime settings, not a compile-mode constant.");
+			context.Expect(ShaderContains(vulkanHeader, "bool validationLayersRequested = false;"), "The Vulkan backend should track the startup validation request explicitly.");
+			context.Expect(ShaderContains(vulkanSource, "void VulkanContext::SetValidationLayersRequested(bool enabled)"), "RenderSystem needs a pre-instance hook for validation policy.");
+			context.Expect(ShaderContains(renderSystem, "SetValidationLayersRequested(ResourceManager::Instance().IsRenderValidationEnabled())"), "Editor and export render profiles should drive validation in every compile mode.");
+			context.Expect(ShaderContains(resourceManager, "ApplyRenderDiagnosticFlagsFromSettingsFile"), "Project sessions should read validation/debug flags before RenderSystem initializes Vulkan.");
+			context.Expect(ShaderContains(resourceManager, "GetProjectRoot() / \"ProjectSettings\" / \"RenderSettings.json\""), "Project-level RenderSettings should be the primary source for editor validation flags.");
+			context.Expect(ShaderContains(vulkanInit, "validationLayersEnabled = validationLayersRequested;"), "Instance creation should consume the runtime validation request.");
+			context.Expect(ShaderContains(vulkanInit, "validation layers requested, but not available; continuing without validation layers."), "Missing Vulkan SDK validation layers should warn and continue booting.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.TextureUploadsUseDedicatedImmediateCommands", [](TestContext& context) {

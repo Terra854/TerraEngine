@@ -5612,13 +5612,11 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 	}
 
 	// Global bindless sets and mesh-local descriptor sets are persistent across
-	// frame slots. Editor project open/reload can update or free them after
-	// Scene/Game views have recorded command buffers but before EndFrame submits
-	// those buffers. Queue idle does not cover unsubmitted command buffers, and
-	// submitting them here can render through descriptors or images that are
-	// about to be replaced. Already-submitted views are waited on; unsubmitted
-	// views are dropped so their command buffers can be reset safely later.
-	if (editorMode && currentFrame < pendingPrimaryCommandBuffers.size())
+	// frame slots. Asset reloads and export-runtime streaming can update or free
+	// them after a view command buffer has recorded/bound descriptors. Queue
+	// idle covers already-submitted work; unsubmitted buffers must be dropped
+	// because they can no longer be submitted safely after descriptor mutation.
+	if (currentFrame < pendingPrimaryCommandBuffers.size())
 	{
 		std::vector<VkCommandBuffer>& pendingCommandBuffers = pendingPrimaryCommandBuffers[currentFrame];
 		if (!pendingCommandBuffers.empty())
@@ -5630,12 +5628,13 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 				// EndFrame already submitted these command buffers and left them
 				// tracked only so the frame slot knows what is still in flight.
 				// The editor render semaphore may already be consumed/cleared by
-				// UI recovery, so use the per-frame command-buffer state instead
+				// UI recovery, and export/runtime builds use the same tracking for
+				// swapchain submits. Use the per-frame command-buffer state instead
 				// of editorRenderSubmitted when deciding whether submit is legal.
 				const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
 				if (idleResult != VK_SUCCESS)
 				{
-					TERRAENGINE_LOG(LogLevel::Error, "failed to wait for submitted editor view command buffers before descriptor mutation: " << idleResult);
+					TERRAENGINE_LOG(LogLevel::Error, "failed to wait for submitted render command buffers before descriptor mutation: " << idleResult);
 					return;
 				}
 				pendingCommandBuffers.clear();
@@ -5644,8 +5643,8 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 			else
 			{
 				// These command buffers have recorded descriptor bindings but have
-				// not entered the queue. Treat them as stale editor snapshots and
-				// skip them instead of submitting one-time command buffers from a
+				// not entered the queue. Treat them as stale snapshots and skip
+				// them instead of submitting one-time command buffers from a
 				// descriptor update path. The next RenderFrame/BeginFrame reset can
 				// reuse the pool because the buffers were never pending on the GPU.
 				pendingCommandBuffers.clear();

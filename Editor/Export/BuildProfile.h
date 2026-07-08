@@ -60,6 +60,11 @@ struct BuildProfile {
 	/// Whether to strip the output NativeAOT library to minimize size.
 	bool stripNativeAotOutput = false;
 
+	/// Whether the exported runtime should request Vulkan validation layers on
+	/// startup. This is separate from the editor render setting so developers can
+	/// keep editor validation on without shipping exports that request layers.
+	bool enableVulkanValidationLayers = false;
+
 	/// Additional NativeAOT publish arguments passed verbatim to dotnet publish.
 	std::string additionalPublishArgs;
 

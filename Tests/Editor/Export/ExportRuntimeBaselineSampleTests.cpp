@@ -29,6 +29,7 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(std::string("Export Runtime Baseline"), project.value("name", ""), "Sample project should have stable product metadata.");
 			context.ExpectEqual(std::string("Scenes/Startup.tescene"), project.value("startupScene", ""), "Sample project should identify its startup scene.");
 			context.Expect(project.contains("buildProfiles"), "Sample project should carry a baseline build profile.");
+			context.Expect(project["buildProfiles"].front().value("enableVulkanValidationLayers", false), "Sample export profile should explicitly opt into export Vulkan validation.");
 
 			const std::filesystem::path renderSettingsPath = SampleRoot() / "ProjectSettings" / "RenderSettings.json";
 			context.Expect(std::filesystem::exists(renderSettingsPath), "Baseline sample should keep render settings in ProjectSettings.");

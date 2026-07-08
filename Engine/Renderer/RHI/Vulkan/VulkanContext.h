@@ -52,6 +52,7 @@ public:
 	void WaitIdle() override;
 	void Shutdown() override;
 	void ClearResources() override;
+	void SetValidationLayersRequested(bool enabled);
 	void SetVariableRateShadingEnabled(bool enabled);
 
 	// ViewType names the supported states explicitly so serialization and switches stay readable.
