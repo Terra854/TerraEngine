@@ -232,10 +232,10 @@ namespace {
 			context.Expect(materialA == batches[0].materialId, "The first batch should preserve material A.");
 			context.Expect(materialB == batches[1].materialId, "The second batch should preserve material B.");
 			context.ExpectEqual(1u, batches[2].packetCount, "Fallback packet state should not merge with a non-fallback neighbor.");
-			context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryBatchFallbackMode::LegacyClusterDraw), static_cast<std::uint32_t>(batches[2].fallbackMode), "Single-packet fallback batches should stay explicitly labeled.");
+			context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryBatchFallbackMode::SinglePacketDraw), static_cast<std::uint32_t>(batches[2].fallbackMode), "Single-packet fallback batches should stay explicitly labeled.");
 		});
 
-		registry.Add("VirtualGeometry.Batching.US1.SparsePacketsKeepExplicitLegacyFallback", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Batching.US1.SparsePacketsKeepExplicitSinglePacketFallback", [](TestContext& context) {
 			const TerraEngine::UUID meshId = TerraEngine::GenerateUUID();
 			const TerraEngine::UUID materialId = TerraEngine::GenerateUUID();
 			std::vector<VirtualGeometryClusterPacket> packets;
@@ -258,8 +258,8 @@ namespace {
 			for (const ClusterWorkBatch& batch : batches)
 			{
 				context.ExpectEqual(1u, batch.packetCount, "Sparse packet fallback should stay one exact packet per draw.");
-				context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryBatchFallbackMode::LegacyClusterDraw), static_cast<std::uint32_t>(batch.fallbackMode), "Sparse packet fallback should be explicitly labeled for diagnostics.");
-				context.Expect(!batch.fallbackReason.empty(), "Legacy fallback batches should explain why they did not merge.");
+				context.ExpectEqual(static_cast<std::uint32_t>(VirtualGeometryBatchFallbackMode::SinglePacketDraw), static_cast<std::uint32_t>(batch.fallbackMode), "Sparse packet fallback should be explicitly labeled for diagnostics.");
+				context.Expect(!batch.fallbackReason.empty(), "Single-packet fallback batches should explain why they did not merge.");
 			}
 		});
 

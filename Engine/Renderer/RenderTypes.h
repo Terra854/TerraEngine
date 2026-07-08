@@ -602,7 +602,7 @@ struct VirtualGeometryHiZValidationState
 enum class VirtualGeometryBatchFallbackMode : std::uint32_t
 {
 	None = 0u,
-	LegacyClusterDraw = 1u,
+	SinglePacketDraw = 1u,
 	UnsupportedBackend = 2u,
 	MissingResource = 3u,
 	ValidationFallback = 4u
@@ -779,7 +779,8 @@ struct VirtualGeometryClusterPacket
 
 // ClusterWorkBatch groups compatible packet ranges into fewer submitted work
 // items. It carries fallback details so tests can distinguish intentional
-// correctness fallback from accidentally exploding into one draw per cluster.
+// single-packet correctness draws from accidentally exploding every cluster
+// into separate work.
 struct ClusterWorkBatch
 {
 	std::uint32_t batchId = 0u;
@@ -2473,7 +2474,7 @@ struct RenderStatsSnapshot
 	std::uint32_t meshletsCulledHiZ = 0u;
 	std::uint32_t virtualGeometryClusterPackets = 0u;
 	std::uint32_t virtualGeometrySubmittedBatches = 0u;
-	std::uint32_t virtualGeometryLegacyFallbackBatches = 0u;
+	std::uint32_t virtualGeometrySinglePacketFallbackBatches = 0u;
 	std::uint32_t virtualGeometryCandidatePackets = 0u;
 	std::uint32_t virtualGeometryCompactedPackets = 0u;
 	std::uint32_t virtualGeometryRejectedPackets = 0u;

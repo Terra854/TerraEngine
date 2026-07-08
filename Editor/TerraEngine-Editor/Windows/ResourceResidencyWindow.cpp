@@ -1433,7 +1433,7 @@ void ResourceResidencyWindow::DrawVirtualGeometrySummary()
 			ImGui::TableSetColumnIndex(4);
 			ImGui::Text("%u/%u/%u", snapshot.compactedClusterCount, snapshot.rejectedClusterCount, snapshot.failOpenClusterCount);
 			ImGui::TableSetColumnIndex(5);
-			ImGui::Text("%u submitted, %u fallback", snapshot.submittedBatchCount, snapshot.legacyFallbackBatchCount);
+			ImGui::Text("%u submitted, %u single-packet", snapshot.submittedBatchCount, snapshot.singlePacketFallbackBatchCount);
 			ImGui::TableSetColumnIndex(6);
 			ImGui::Text("%u packets, %u descriptors", snapshot.gpuPacketRecordCount, snapshot.gpuBatchDescriptorCount);
 			ImGui::TableSetColumnIndex(7);

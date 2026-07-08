@@ -3118,7 +3118,7 @@ namespace TerraEngine::Editor::Automation
 			{"meshletsCulledHiZ", stats.meshletsCulledHiZ},
 			{"clusterPackets", stats.virtualGeometryClusterPackets},
 			{"submittedBatches", stats.virtualGeometrySubmittedBatches},
-			{"legacyFallbackBatches", stats.virtualGeometryLegacyFallbackBatches},
+			{"singlePacketFallbackBatches", stats.virtualGeometrySinglePacketFallbackBatches},
 			{"candidatePackets", stats.virtualGeometryCandidatePackets},
 			{"compactedPackets", stats.virtualGeometryCompactedPackets},
 			{"rejectedPackets", stats.virtualGeometryRejectedPackets},

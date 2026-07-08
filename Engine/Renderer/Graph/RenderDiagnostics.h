@@ -218,7 +218,7 @@ namespace TerraEngine::Renderer {
 		std::uint32_t rejectedClusterCount = 0u;
 		std::uint32_t failOpenClusterCount = 0u;
 		std::uint32_t submittedBatchCount = 0u;
-		std::uint32_t legacyFallbackBatchCount = 0u;
+		std::uint32_t singlePacketFallbackBatchCount = 0u;
 		// GPU packet fields are copied from immutable frame snapshots. They let
 		// tooling explain whether a frame used prepared CPU estimates, delayed
 		// readback, generated submissions, or a fail-open fallback.

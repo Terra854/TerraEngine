@@ -1586,8 +1586,8 @@ std::vector<ClusterWorkBatch> RenderSystem::BuildVirtualGeometryClusterBatches(
 	{
 		if (batch.packetCount == 1u)
 		{
-			batch.fallbackMode = VirtualGeometryBatchFallbackMode::LegacyClusterDraw;
-			batch.fallbackReason = "Packet could not merge with a compatible contiguous neighbor, so it keeps the legacy exact one-cluster draw.";
+			batch.fallbackMode = VirtualGeometryBatchFallbackMode::SinglePacketDraw;
+			batch.fallbackReason = "Packet could not merge with a compatible contiguous neighbor, so it keeps the exact single-packet draw.";
 		}
 	}
 	return batches;
@@ -1720,7 +1720,7 @@ std::vector<GpuVirtualGeometryBatchDescriptor> RenderSystem::BuildGpuVirtualGeom
 	{
 		if (batch.packetCount == 1u)
 		{
-			batch.fallbackMode = VirtualGeometryBatchFallbackMode::LegacyClusterDraw;
+			batch.fallbackMode = VirtualGeometryBatchFallbackMode::SinglePacketDraw;
 		}
 	}
 	return batches;
@@ -4449,7 +4449,7 @@ void RenderSystem::Update(float deltaTime)
 				target.rejectedClusterCount = selection.rejectedClusterCount;
 				target.failOpenClusterCount = selection.failOpenClusterCount;
 				target.submittedBatchCount = selection.submittedBatchCount;
-				target.legacyFallbackBatchCount = selection.legacyFallbackBatchCount;
+				target.singlePacketFallbackBatchCount = selection.singlePacketFallbackBatchCount;
 				target.hiZActive = selection.hiZActive;
 				target.hiZHistoryValid = selection.hiZHistoryValid;
 				target.hiZInvalidReason = selection.hiZInvalidReason;
@@ -4566,7 +4566,7 @@ void RenderSystem::Update(float deltaTime)
 				stats.hiZFalseOcclusionRiskWarnings = view.hiZFalseOcclusionRiskWarnings;
 				stats.virtualGeometryClusterPackets = view.clusterPacketCount;
 				stats.virtualGeometrySubmittedBatches = view.submittedBatchCount;
-				stats.virtualGeometryLegacyFallbackBatches = view.legacyFallbackBatchCount;
+				stats.virtualGeometrySinglePacketFallbackBatches = view.singlePacketFallbackBatchCount;
 				stats.virtualGeometryCandidatePackets = view.candidateClusterCount;
 				stats.virtualGeometryCompactedPackets = view.compactedClusterCount;
 				stats.virtualGeometryRejectedPackets = view.rejectedClusterCount;

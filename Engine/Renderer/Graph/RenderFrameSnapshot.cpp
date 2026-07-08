@@ -1521,9 +1521,9 @@ namespace TerraEngine::Renderer {
 			{
 				++viewDiagnostics.submittedBatchCount;
 				viewDiagnostics.submittedMeshlets += batch.submittedMeshlets;
-				if (batch.fallbackMode == VirtualGeometryBatchFallbackMode::LegacyClusterDraw)
+				if (batch.fallbackMode == VirtualGeometryBatchFallbackMode::SinglePacketDraw)
 				{
-					++viewDiagnostics.legacyFallbackBatchCount;
+					++viewDiagnostics.singlePacketFallbackBatchCount;
 				}
 			}
 			for (const CompactedVisibilitySet& compaction : state.compactionResults)

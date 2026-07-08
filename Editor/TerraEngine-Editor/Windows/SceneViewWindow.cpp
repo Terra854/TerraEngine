@@ -319,7 +319,7 @@ void SceneViewWindow::OnGui() {
 			sceneStats.meshletCounterReason);
 		const std::string compactText = "VG Compacted Packets: " + std::to_string(sceneStats.virtualGeometryCompactedPackets);
 		const std::string rejectedText = "VG Rejected Packets: " + std::to_string(sceneStats.virtualGeometryRejectedPackets);
-		const std::string fallbackText = "VG Legacy Fallback Batches: " + std::to_string(sceneStats.virtualGeometryLegacyFallbackBatches);
+		const std::string fallbackText = "VG Single-Packet Fallback Batches: " + std::to_string(sceneStats.virtualGeometrySinglePacketFallbackBatches);
 		const std::string gpuPacketText = TerraEngine::Renderer::FormatVirtualGeometryCounterOverlayValue(
 			"VG GPU Packet Records",
 			sceneStats.virtualGeometryGpuPacketRecords,
