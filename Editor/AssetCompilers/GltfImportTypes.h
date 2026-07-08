@@ -20,6 +20,7 @@ namespace TerraEngine::AssetPipeline
 	using GeneratedGltfTextureAsset = GeneratedModelTextureAsset;
 	using GeneratedGltfMaterialAsset = GeneratedModelMaterialAsset;
 	using GeneratedGltfMeshAsset = GeneratedModelMeshAsset;
+	using GeneratedGltfPrefabAsset = GeneratedModelPrefabAsset;
 	using GltfMaterialAssignment = ModelMaterialAssignment;
 	using GltfImportResult = ModelPackageImportResult;
 }

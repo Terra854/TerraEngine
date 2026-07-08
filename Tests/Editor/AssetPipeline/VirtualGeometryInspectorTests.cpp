@@ -34,6 +34,8 @@ namespace TerraEngine::EditorTests
 
 		void WriteMeshHeader(const std::filesystem::path& path, bool cookedVirtualGeometry)
 		{
+			std::filesystem::create_directories(path.parent_path());
+
 			MeshHeader header{};
 			std::memcpy(header.magic, "TEMF", 4);
 			header.version = kMeshCurrentVersion;
@@ -178,6 +180,21 @@ namespace TerraEngine::EditorTests
 			std::ofstream output(fullSourcePath.string() + ".meta", std::ios::trunc);
 			output << metadata.dump(4);
 		}
+
+		template <typename Predicate>
+		bool PumpAssetDatabaseUntil(Predicate predicate, int attempts = 160)
+		{
+			for (int attempt = 0; attempt < attempts; ++attempt)
+			{
+				AssetDatabase::Instance().Update();
+				if (predicate())
+				{
+					return true;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}
+			return false;
+		}
 	}
 
 	void RegisterVirtualGeometryInspectorTests(TestRegistry& registry)
@@ -195,7 +212,10 @@ namespace TerraEngine::EditorTests
 			WriteAssetMetadata(assetRoot, "CachedMaterial.tmat", "CachedMaterial.tmat", guid, "MaterialImporter");
 
 			AssetDatabase::Instance().Initialize(root);
-			context.Expect(std::filesystem::exists(root / "Library" / "AssetIndex.json"), "Initial scan should persist a startup asset index.");
+			const bool indexCreated = PumpAssetDatabaseUntil([&]() {
+				return std::filesystem::exists(root / "Library" / "AssetIndex.json");
+			});
+			context.Expect(indexCreated, "Background startup reconcile should persist a startup asset index.");
 			AssetDatabase::Instance().Shutdown();
 
 			std::filesystem::remove(sourcePath.string() + ".meta");
@@ -218,6 +238,9 @@ namespace TerraEngine::EditorTests
 			WriteMaterialAsset(buildRoot / "Indexed.tmat", "IndexedCompiled");
 			WriteAssetMetadata(assetRoot, "Indexed.tmat", "Indexed.tmat", indexedGuid, "MaterialImporter");
 			AssetDatabase::Instance().Initialize(root);
+			context.Expect(PumpAssetDatabaseUntil([&]() {
+				return std::filesystem::exists(root / "Library" / "AssetIndex.json");
+			}), "Initial background reconcile should publish an asset index before the indexed startup pass.");
 			AssetDatabase::Instance().Shutdown();
 
 			WriteMaterialAsset(assetRoot / "DiscoveredLater.tmat", "DiscoveredLater");
@@ -225,23 +248,70 @@ namespace TerraEngine::EditorTests
 			AssetDatabase::Instance().Initialize(root);
 
 			bool discovered = false;
-			for (int attempt = 0; attempt < 80 && !discovered; ++attempt) {
-				AssetDatabase::Instance().Update();
+			discovered = PumpAssetDatabaseUntil([&]() {
 				for (const auto& [path, metadata] : AssetDatabase::Instance().GetAssets()) {
 					if (metadata.sourcePath == std::filesystem::path("DiscoveredLater.tmat")) {
-						discovered = true;
-						break;
+						return true;
 					}
 				}
-				if (!discovered) {
-					std::this_thread::sleep_for(std::chrono::milliseconds(10));
-				}
-			}
+				return false;
+			});
 
 			context.Expect(discovered, "Background reconcile should import new files that were not present in the startup index.");
 			context.Expect(AssetDatabase::Instance().FindAssetByGuid(indexedGuid) != nullptr, "Indexed assets should remain registered while reconcile catches up.");
 
 			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Editor.AssetDatabase.ModelPackageReconcileUsesSidecarChildrenInsteadOfParentTemf", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			const std::filesystem::path assetRoot = root / "Assets";
+			const std::filesystem::path buildRoot = root / "Build" / "Assets";
+			const std::filesystem::path packageSource = "camera.glb";
+			const std::filesystem::path obsoleteParentCompiled = "camera.temf";
+			const std::filesystem::path generatedMeshCompiled = "camera_Generated/camera_uv.temf";
+			const TerraEngine::UUID packageGuid = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID meshGuid = TerraEngine::GenerateUUID();
+
+			std::ofstream(assetRoot / packageSource, std::ios::binary | std::ios::trunc).put('\0');
+			WriteMeshHeader(buildRoot / generatedMeshCompiled, true);
+			WriteAssetMetadata(
+				assetRoot,
+				packageSource,
+				obsoleteParentCompiled,
+				packageGuid,
+				TerraEngine::AssetPipeline::GetModelPackageImporterName(assetRoot / packageSource));
+
+			TerraEngine::AssetPipeline::ModelPackageImportResult result{};
+			result.status = TerraEngine::AssetPipeline::ModelImportStatus::Succeeded;
+			result.packageGuid = packageGuid;
+			result.package.sourcePath = packageSource;
+			result.package.importRoot = "camera_Generated";
+
+			TerraEngine::AssetPipeline::GeneratedModelMeshAsset mesh{};
+			mesh.guid = meshGuid;
+			mesh.displayName = "camera_uv";
+			mesh.sourcePath = packageSource;
+			mesh.compiledPath = generatedMeshCompiled;
+			result.generatedMeshes.push_back(mesh);
+
+			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(assetRoot / packageSource, result), "Fixture package sidecar should save generated child outputs.");
+
+			ResourceManager::Instance().ClearCaches();
+			AssetDatabase::Instance().Initialize(root);
+			const bool packageRegistered = PumpAssetDatabaseUntil([&]() {
+				return AssetDatabase::Instance().FindAssetByGuid(packageGuid) != nullptr;
+			});
+
+			context.Expect(packageRegistered, "Package reconcile should register the package from metadata and sidecar data.");
+			context.Expect(!AssetDatabase::Instance().IsCompiling(), "Unchanged package with valid sidecar children should not launch a compiler job.");
+			context.Expect(!std::filesystem::exists(buildRoot / obsoleteParentCompiled), "Missing obsolete parent package TEMF should not make the package dirty.");
+			const TerraEngine::UUID resolvedMesh = ResourceManager::Instance().ResolveAssetReference((buildRoot / generatedMeshCompiled).generic_string(), AssetType::Mesh);
+			context.ExpectEqual(TerraEngine::ToHexString(meshGuid), TerraEngine::ToHexString(resolvedMesh), "Generated child mesh should stay registered as the renderable package output.");
+
+			AssetDatabase::Instance().Shutdown();
+			ResourceManager::Instance().ClearCaches();
 			std::filesystem::remove_all(root);
 		});
 
@@ -549,7 +619,9 @@ namespace TerraEngine::EditorTests
 
 			ResourceManager::Instance().ClearCaches();
 			AssetDatabase::Instance().Initialize(root);
-			context.Expect(std::filesystem::exists(root / "Library" / "AssetIndex.json"), "Initial package scan should persist a startup asset index.");
+			context.Expect(PumpAssetDatabaseUntil([&]() {
+				return std::filesystem::exists(root / "Library" / "AssetIndex.json");
+			}), "Initial package reconcile should persist a startup asset index.");
 			AssetDatabase::Instance().Shutdown();
 
 			std::filesystem::remove(buildRoot / packageCompiled);
@@ -669,9 +741,13 @@ namespace TerraEngine::EditorTests
 			WriteAssetMetadata(assetRoot, textureSource, textureCompiled, texture.guid, "TextureImporter");
 
 			AssetDatabase::Instance().Initialize(root);
-			context.Expect(AssetDatabase::Instance().GetAssets().contains(std::filesystem::absolute(assetRoot / packageSource)), "Package should be registered before delete.");
-			context.Expect(AssetDatabase::Instance().GetAssets().contains(std::filesystem::absolute(assetRoot / materialSource)), "Generated material should be registered before delete.");
-			context.Expect(AssetDatabase::Instance().GetAssets().contains(std::filesystem::absolute(assetRoot / textureSource)), "Generated texture should be registered before delete.");
+			const bool generatedAssetsRegistered = PumpAssetDatabaseUntil([&]() {
+				const auto& assets = AssetDatabase::Instance().GetAssets();
+				return assets.contains(std::filesystem::absolute(assetRoot / packageSource))
+					&& assets.contains(std::filesystem::absolute(assetRoot / materialSource))
+					&& assets.contains(std::filesystem::absolute(assetRoot / textureSource));
+			});
+			context.Expect(generatedAssetsRegistered, "Package and generated child assets should be registered before delete.");
 
 			AssetDatabase::Instance().DeleteAsset(assetRoot / packageSource);
 

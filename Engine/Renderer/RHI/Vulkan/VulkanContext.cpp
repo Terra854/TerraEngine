@@ -1419,6 +1419,12 @@ void VulkanContext::BeginFrame() {
 			vkQueueWaitIdle(impl->graphicsQueue);
 		}
 		impl->editorRenderSubmitted = false;
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+		}
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+		}
 	}
 	// The fence proves the previous write images for this frame slot are no
 	// longer in flight. Promote each view before descriptors are frozen so Scene
@@ -1521,6 +1527,9 @@ void VulkanContext::BeginFrame() {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+		}
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
 		}
 		impl->activeRenderSnapshot = {};
 		impl->pendingRenderSnapshotDiagnostics = {};
@@ -2775,6 +2784,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {
 		impl->pendingPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
 	}
+	if (currentFrame >= impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+		impl->pendingPrimaryCommandBuffersSubmitted.resize(impl->MAX_FRAMES_IN_FLIGHT, 0u);
+	}
 	auto& pendingCmdsForSnapshot = impl->pendingPrimaryCommandBuffers[currentFrame];
 	uint32_t snapshotSlotIndex = static_cast<uint32_t>(pendingCmdsForSnapshot.size());
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -2812,15 +2824,26 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			TERRAENGINE_LOG(LogLevel::Error, "failed to submit intermediate editor view command buffers after snapshot budget exhaustion");
 			return;
 		}
+		if (currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+			impl->pendingPrimaryCommandBuffersSubmitted[currentFrame] = 1u;
+		}
 		const auto forcedIdleStart = BackendClock::now();
-		vkQueueWaitIdle(impl->graphicsQueue);
+		const VkResult forcedIdleResult = vkQueueWaitIdle(impl->graphicsQueue);
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::QueueIdleWait, TerraEngine::Renderer::BackendSubmitStage::ForcedIdle, renderViewType, diagnosticViewId, "Queue idle after snapshot budget exhaustion", false, true },
 			ElapsedMilliseconds(forcedIdleStart),
 			0.25f,
 			"Snapshot budget exhaustion forced serialization; increase snapshot capacity or reduce required editor outputs.");
+		if (forcedIdleResult != VK_SUCCESS)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "failed to wait for intermediate editor view command buffers after snapshot budget exhaustion: " << forcedIdleResult);
+			return;
+		}
 		pendingCmdsForSnapshot.clear();
+		if (currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+			impl->pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
+		}
 		fallback.result = RenderSnapshotFallbackResult::SerializedSafely;
 		impl->pendingRenderSnapshotDiagnostics.fallbackEvents.push_back(fallback);
 		snapshotSlotIndex = 0u;
@@ -5034,6 +5057,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	if (impl->currentFrame >= impl->pendingPrimaryCommandBuffers.size()) {
 		impl->pendingPrimaryCommandBuffers.resize(impl->MAX_FRAMES_IN_FLIGHT);
 	}
+	if (impl->currentFrame >= impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+		impl->pendingPrimaryCommandBuffersSubmitted.resize(impl->MAX_FRAMES_IN_FLIGHT, 0u);
+	}
 	impl->pendingPrimaryCommandBuffers[impl->currentFrame].push_back(cmd);
 	impl->activeRenderSnapshot.state = RenderSnapshotState::Recorded;
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -5918,6 +5944,9 @@ void VulkanContext::EndFrame() {
 		// the editor UI pass acquires the next swapchain image.
 		impl->framebufferResized = false;
 		cmds.clear();
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+		}
 		impl->editorRenderSubmitted = false;
 		const auto recoveryStart = BackendClock::now();
 		impl->RecreateSwapChain();
@@ -6042,6 +6071,16 @@ void VulkanContext::EndFrame() {
 			0.25f);
 		if (submitResult != VK_SUCCESS) {
 			TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
+			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			if (idleResult != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Error, "Skipping editor render recovery because the graphics queue did not prove idle: " << idleResult);
+				return;
+			}
+			cmds.clear();
+			if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+				impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+			}
+			impl->editorRenderSubmitted = false;
 			const auto recoveryStart = BackendClock::now();
 			impl->RecreateSwapChain();
 			TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
@@ -6053,6 +6092,9 @@ void VulkanContext::EndFrame() {
 			return;
 		}
 		impl->editorRenderSubmitted = true;
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 1u;
+		}
 	} else {
 		const auto resetFenceStart = BackendClock::now();
 		vkResetFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame]);
@@ -6079,6 +6121,9 @@ void VulkanContext::EndFrame() {
 				0.25f,
 				"Queue submit failed during runtime rendering; swapchain recovery was required.");
 			return;
+		}
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 1u;
 		}
 	}
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
@@ -6327,6 +6372,12 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 	};
 
 	VkCommandBuffer commandBuffer = impl->BeginSingleTimeCommands();
+	if (commandBuffer == VK_NULL_HANDLE)
+	{
+		destroyStagingBuffer();
+		result.message = "Vulkan capture readback could not allocate an immediate command buffer.";
+		return result;
+	}
 	RecordCaptureImageBarrier(commandBuffer, target.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	VkBufferImageCopy copyRegion{};
 	copyRegion.bufferOffset = 0u;
@@ -6532,6 +6583,15 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	// binary semaphores, command buffers, and the fence itself.
 	vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
 	if (!impl->editorRenderSubmitted) {
+		// Some recovery paths can submit editor view command buffers outside the
+		// normal EndFrame -> PresentEditor semaphore chain. The frame fence only
+		// tracks UI submits, so prove the graphics queue is idle before resetting
+		// or freeing from the shared per-frame command pool.
+		const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+		if (idleResult != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor could not prove the command pool idle before reset: " << idleResult);
+			return;
+		}
 		if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
 			auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
 			if (!extras.empty()) {
@@ -6541,6 +6601,9 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		}
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+		}
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
 		}
 		vkResetCommandPool(impl->device, impl->commandPools[impl->currentFrame], 0);
 	}
@@ -6573,12 +6636,25 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 
 		vkQueueWaitIdle(impl->graphicsQueue);
 		impl->editorRenderSubmitted = false;
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+		}
+		if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+			impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+		}
 		return true;
 	};
 
 	if (impl->framebufferResized) {
 		if (!drainSubmittedEditorRender("resize")) {
-			vkQueueWaitIdle(impl->graphicsQueue);
+			if (vkQueueWaitIdle(impl->graphicsQueue) == VK_SUCCESS) {
+				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+				}
+				if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+					impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+				}
+			}
 			impl->editorRenderSubmitted = false;
 		}
 		// Project hub and menu-only frames can resize without a preceding
@@ -6595,7 +6671,14 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
 		if (!drainSubmittedEditorRender("out-of-date acquire")) {
-			vkQueueWaitIdle(impl->graphicsQueue);
+			if (vkQueueWaitIdle(impl->graphicsQueue) == VK_SUCCESS) {
+				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+				}
+				if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+					impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+				}
+			}
 			impl->editorRenderSubmitted = false;
 		}
 		impl->RecreateSwapChain();
@@ -6603,7 +6686,14 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		return;
 	} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
 		if (!drainSubmittedEditorRender("failed acquire")) {
-			vkQueueWaitIdle(impl->graphicsQueue);
+			if (vkQueueWaitIdle(impl->graphicsQueue) == VK_SUCCESS) {
+				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+				}
+				if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+					impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+				}
+			}
 			impl->editorRenderSubmitted = false;
 		}
 		TERRAENGINE_LOG(LogLevel::Error, "failed to acquire swap chain image for Editor!");
@@ -6682,13 +6772,39 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	if (uiSubmitResult != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor QueueSubmit failed: " << uiSubmitResult);
 		if (!drainSubmittedEditorRender("failed UI submit")) {
-			vkQueueWaitIdle(impl->graphicsQueue);
+			if (vkQueueWaitIdle(impl->graphicsQueue) == VK_SUCCESS) {
+				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
+					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
+				}
+				if (impl->currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
+					impl->pendingPrimaryCommandBuffersSubmitted[impl->currentFrame] = 0u;
+				}
+			}
 			impl->editorRenderSubmitted = false;
 		}
-		vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], 1, &uiCmd);
-		if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
-			auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
-			extras.erase(std::remove(extras.begin(), extras.end(), uiCmd), extras.end());
+		const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+		if (idleResult == VK_SUCCESS) {
+			vkFreeCommandBuffers(impl->device, impl->commandPools[impl->currentFrame], 1, &uiCmd);
+			if (impl->currentFrame < impl->extraPrimaryCommandBuffers.size()) {
+				auto& extras = impl->extraPrimaryCommandBuffers[impl->currentFrame];
+				extras.erase(std::remove(extras.begin(), extras.end(), uiCmd), extras.end());
+			}
+			// The UI submit path reset this fence immediately before vkQueueSubmit.
+			// If submission fails, no queue operation will signal it, so replace it
+			// with a signaled fence to keep the editor from deadlocking on the next
+			// BeginFrame/PresentEditor wait for the same frame slot.
+			VkFenceCreateInfo fenceInfo{};
+			fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+			fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+			VkFence replacementFence = VK_NULL_HANDLE;
+			if (vkCreateFence(impl->device, &fenceInfo, nullptr, &replacementFence) == VK_SUCCESS) {
+				vkDestroyFence(impl->device, impl->inFlightFences[impl->currentFrame], nullptr);
+				impl->inFlightFences[impl->currentFrame] = replacementFence;
+			}
+		}
+		else {
+			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor kept failed UI command buffer alive because the queue did not prove idle: " << idleResult);
+			return;
 		}
 		impl->RecreateSwapChain();
 		return;

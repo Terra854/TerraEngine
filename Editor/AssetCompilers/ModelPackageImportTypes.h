@@ -188,6 +188,15 @@ namespace TerraEngine::AssetPipeline
 		std::vector<std::string> virtualGeometryWarnings;
 	};
 
+	struct GeneratedModelPrefabAsset
+	{
+		TerraEngine::UUID guid = TerraEngine::EMPTY_UUID;
+		std::filesystem::path sourcePath;
+		std::string displayName;
+		std::vector<TerraEngine::UUID> meshGuids;
+		std::vector<TerraEngine::UUID> materialGuids;
+	};
+
 	struct ModelMaterialAssignment
 	{
 		TerraEngine::UUID meshGuid = TerraEngine::EMPTY_UUID;
@@ -205,6 +214,7 @@ namespace TerraEngine::AssetPipeline
 		std::vector<GeneratedModelMeshAsset> generatedMeshes;
 		std::vector<GeneratedModelMaterialAsset> generatedMaterials;
 		std::vector<GeneratedModelTextureAsset> generatedTextures;
+		std::vector<GeneratedModelPrefabAsset> generatedPrefabs;
 		std::vector<ModelMaterialAssignment> materialAssignments;
 		std::vector<ModelImportDiagnostic> diagnostics;
 	};
@@ -225,6 +235,7 @@ namespace TerraEngine::AssetPipeline
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryClusterSummary& value);
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshVirtualGeometryConeSafetySummary& value);
 	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelMeshAsset& value);
+	[[nodiscard]] nlohmann::json ToJson(const GeneratedModelPrefabAsset& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelMaterialAssignment& value);
 	[[nodiscard]] nlohmann::json ToJson(const ModelPackageImportResult& value);
 	void PopulateGeneratedMeshVirtualGeometryMetadata(const std::filesystem::path& compiledMeshPath, GeneratedModelMeshAsset& mesh, std::vector<ModelImportDiagnostic>& diagnostics);

@@ -159,6 +159,7 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(result.status != TerraEngine::AssetPipeline::ModelImportStatus::Failed, "Multi-mesh package import should produce usable static geometry.");
 			context.ExpectEqual(static_cast<std::size_t>(2), result.generatedMeshes.size(), "Each source mesh should remain visible as a generated package mesh.");
+			context.ExpectEqual(static_cast<std::size_t>(1), result.generatedPrefabs.size(), "Package import should generate one configured prefab for the imported object.");
 			context.Expect(result.generatedMeshes[0].compiledPath != result.generatedMeshes[1].compiledPath, "Generated mesh children should not share one compiled package TEMF.");
 			for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : result.generatedMeshes)
 			{
@@ -172,8 +173,22 @@ namespace TerraEngine::EditorTests
 				context.Expect(mesh.virtualGeometryConeSafetySummary.metadataValid, "Package mesh should preserve cone safety metadata from the compiled TEMF.");
 				context.Expect(mesh.virtualGeometryConeSafetySummary.disabledClusterCount > 0u, "Merged package mesh cone culling should stay disabled until per-cluster material proof exists.");
 			}
+			const std::filesystem::path generatedPrefabPath = options.assetRoot / result.generatedPrefabs.front().sourcePath;
+			context.Expect(std::filesystem::exists(generatedPrefabPath), "Generated package prefab should be written beside package child assets.");
+			const nlohmann::json prefabJson = nlohmann::json::parse(ReadTextFile(generatedPrefabPath));
+			const nlohmann::json prefabObjects = prefabJson.value("objects", nlohmann::json::array());
+			context.ExpectEqual(static_cast<std::size_t>(1), prefabObjects.size(), "Generated prefab should contain one import root object.");
+			const nlohmann::json prefabChildren = prefabObjects.empty() ? nlohmann::json::array() : prefabObjects.front().value("children", nlohmann::json::array());
+			context.ExpectEqual(result.generatedMeshes.size(), prefabChildren.size(), "Generated prefab should create one render child per generated mesh.");
+			if (!prefabChildren.empty())
+			{
+				const nlohmann::json meshRender = prefabChildren.front().value("components", nlohmann::json::object()).value("MeshRenderComponent", nlohmann::json::object());
+				context.ExpectEqual(TerraEngine::ToHexString(result.generatedMeshes.front().guid), meshRender.value("meshId", std::string()), "Generated prefab child should reference the generated mesh GUID.");
+				context.Expect(!meshRender.value("materialId", std::string()).empty(), "Generated prefab child should preserve available material assignment data.");
+			}
 
 			const nlohmann::json sidecar = TerraEngine::AssetPipeline::ToJson(result);
+			context.ExpectEqual(static_cast<std::size_t>(1), sidecar.value("generatedPrefabs", nlohmann::json::array()).size(), "Sidecar JSON should include generated prefab records.");
 			context.Expect(sidecar["generatedMeshes"][0]["virtualGeometry"].is_object(), "Sidecar JSON should persist virtual geometry metadata for generated meshes.");
 			context.ExpectEqual(std::string("Cooked"), sidecar["generatedMeshes"][0]["virtualGeometry"].value("status", std::string()), "Sidecar JSON should expose the cooked status.");
 			const nlohmann::json targets = sidecar["generatedMeshes"][0]["virtualGeometry"].value("targets", nlohmann::json::array());
@@ -189,6 +204,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(sourceAssetPath, result), "Virtual geometry package sidecar should save.");
 			TerraEngine::AssetPipeline::ModelPackageImportResult loaded;
 			context.Expect(TerraEngine::AssetPipeline::LoadModelPackageImportResult(sourceAssetPath, loaded), "Virtual geometry package sidecar should reload.");
+			context.ExpectEqual(static_cast<std::size_t>(1), loaded.generatedPrefabs.size(), "Generated prefab records should round-trip through the sidecar loader.");
 			context.ExpectEqual(std::string("Cooked"), loaded.generatedMeshes.front().virtualGeometryStatus, "Virtual geometry status should round-trip through the sidecar loader.");
 			context.Expect(loaded.generatedMeshes.front().virtualGeometryCooked, "Virtual geometry cooked flag should round-trip through the sidecar loader.");
 			context.Expect(loaded.generatedMeshes.front().virtualGeometryClusterSummary.clusterCount > 0u, "Virtual geometry cluster summary should round-trip through the sidecar loader.");

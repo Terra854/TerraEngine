@@ -69,6 +69,10 @@ public:
 	// Opens a prefab asset in an isolated hierarchy so the existing scene is
 	// protected while authoring prefab defaults.
 	bool OpenPrefabAsset(const std::filesystem::path& path);
+	// Instantiates a prefab asset into the live hierarchy. The payload is a
+	// prefab asset GUID rather than a filesystem path so Project Browser drag
+	// sources can also be reused by future prefab-aware property fields.
+	bool InstantiatePrefabAsset(const TerraEngine::UUID& prefabGuid, std::optional<entt::entity> parent = std::nullopt);
 	bool OpenPrefabFromObject(entt::entity object);
 	bool ResetPrefabInstanceToDefaults(entt::entity object);
 	bool SaveOpenPrefab();

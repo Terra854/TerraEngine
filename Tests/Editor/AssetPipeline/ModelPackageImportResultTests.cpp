@@ -31,6 +31,13 @@ namespace TerraEngine::EditorTests
 			mesh.localBoundsMax = { 1.0f, 2.0f, 3.0f };
 			result.generatedMeshes.push_back(mesh);
 
+			TerraEngine::AssetPipeline::GeneratedModelPrefabAsset prefab{};
+			prefab.guid = TerraEngine::GenerateUUID();
+			prefab.sourcePath = "Models/RoundTrip_Generated/RoundTrip.teprefab";
+			prefab.displayName = "RoundTrip";
+			prefab.meshGuids.push_back(mesh.guid);
+			result.generatedPrefabs.push_back(prefab);
+
 			TerraEngine::AssetPipeline::ModelImportDiagnostic diagnostic{};
 			diagnostic.severity = TerraEngine::AssetPipeline::ModelDiagnosticSeverity::Warning;
 			diagnostic.code = "UnsupportedAnimationIgnored";
@@ -43,6 +50,9 @@ namespace TerraEngine::EditorTests
 			context.Expect(TerraEngine::AssetPipeline::LoadModelPackageImportResult(tempSource, loaded), "Sidecar load should succeed.");
 			context.Expect(loaded.package.packageKind == TerraEngine::AssetPipeline::ModelPackageKind::Fbx, "Package kind should round-trip as FBX.");
 			context.ExpectEqual(std::string("Root/Node"), loaded.generatedMeshes.front().sourceNodePath, "Mesh node path should round-trip.");
+			context.ExpectEqual(static_cast<std::size_t>(1), loaded.generatedPrefabs.size(), "Generated prefab records should round-trip.");
+			context.ExpectEqual(std::string("Models/RoundTrip_Generated/RoundTrip.teprefab"), loaded.generatedPrefabs.front().sourcePath.generic_string(), "Generated prefab source path should round-trip.");
+			context.ExpectEqual(static_cast<std::size_t>(1), loaded.generatedPrefabs.front().meshGuids.size(), "Generated prefab mesh references should round-trip.");
 			context.ExpectEqual(static_cast<std::size_t>(1), loaded.diagnostics.size(), "Diagnostics should round-trip.");
 		});
 	}

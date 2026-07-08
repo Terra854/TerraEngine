@@ -198,6 +198,8 @@ struct VulkanContext::Impl {
 
 	std::vector<VkCommandPool> commandPools;
 	std::vector<VkCommandBuffer> commandBuffers;
+	VkCommandPool immediateCommandPool = VK_NULL_HANDLE;
+	std::mutex immediateCommandMutex;
 
 	VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
 
@@ -791,6 +793,10 @@ struct VulkanContext::Impl {
 	// cameras per frame so they can be freed after the frame fence completes.
 	std::vector<std::vector<VkCommandBuffer>> extraPrimaryCommandBuffers;
 	std::vector<std::vector<VkCommandBuffer>> pendingPrimaryCommandBuffers;
+	// Tracks whether the per-frame pending primary list has already been
+	// submitted to the graphics queue. This is separate from editorRenderSubmitted,
+	// which only describes the UI wait-semaphore chain.
+	std::vector<std::uint8_t> pendingPrimaryCommandBuffersSubmitted;
 	std::vector<std::vector<VulkanBuffer>> retiredBuffersByFrame;
 	std::vector<std::vector<size_t>> workerBufferUsage; // Tracks next available secondary buffer index per worker per frame
 	bool swapchainImageAcquired = false;
@@ -881,9 +887,9 @@ struct VulkanContext::Impl {
 	void RetireBuffer(VulkanBuffer& buffer);
 	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 	VkCommandBuffer BeginSingleTimeCommands();
-	void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
-	void TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout);
-	void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
+	bool EndSingleTimeCommands(VkCommandBuffer commandBuffer);
+	bool TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels = VK_REMAINING_MIP_LEVELS);
+	bool CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
 	VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels = 1u);
 
 	VkFormat MapTextureFormat(uint32_t vkFormat);

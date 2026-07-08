@@ -106,6 +106,19 @@ namespace TerraEngine::Tests
 			return buffer.str();
 		}
 
+		std::string ReadVulkanContextInitSource()
+		{
+			// Vulkan lifetime rules are split between backend initialization and
+			// resource upload helpers, so tests read this file when validating
+			// command-pool ownership contracts.
+			const std::filesystem::path sourcePath =
+				std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine/Renderer/RHI/Vulkan/VulkanContextInit.cpp";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream buffer;
+			buffer << input.rdbuf();
+			return buffer.str();
+		}
+
 		std::string ReadRenderSystemSource()
 		{
 			// Virtual-geometry packet expansion owns the mapping from selected
@@ -274,9 +287,44 @@ namespace TerraEngine::Tests
 			const std::string vulkanResources = ReadVulkanContextResourcesSource();
 
 			context.Expect(ShaderContains(vulkanResources, "publication.buffer == buffer.buffer"), "View-local VG bindless descriptors should skip redundant descriptor-set updates when the published buffer did not change.");
-			context.Expect(ShaderContains(vulkanResources, "pendingPrimaryCommandBuffers[frameIndex]"), "Changing a VG bindless descriptor should inspect already-recorded Scene/Game command buffers.");
-			context.Expect(ShaderContains(vulkanResources, "vkQueueSubmit(graphicsQueue, 1u, &pendingSubmitInfo, VK_NULL_HANDLE)"), "Recorded view command buffers should be submitted before a shared descriptor set is updated.");
-			context.Expect(ShaderContains(vulkanResources, "vkQueueWaitIdle(graphicsQueue);"), "The descriptor mutation path should drain the submitted view work before mutating the shared bindless set.");
+			context.Expect(ShaderContains(vulkanResources, "WaitForDescriptorMutationIdle();"), "Changing a VG bindless descriptor should route through the shared descriptor-idle helper.");
+			context.Expect(ShaderContains(vulkanResources, "pendingCommandBuffers.clear();"), "Unsubmitted recorded editor views should be discarded before a shared descriptor set is updated.");
+			context.Expect(ShaderContains(vulkanResources, "vkQueueWaitIdle(graphicsQueue);"), "The descriptor mutation path should still drain already-submitted view work before mutating the shared bindless set.");
+			context.Expect(ShaderContains(vulkanResources, "editorMode && currentFrame < pendingPrimaryCommandBuffers.size()"), "The central descriptor mutation idle helper should also drain recorded editor view command buffers before any descriptor set can be updated or freed.");
+			context.Expect(ShaderContains(vulkanResources, "pendingPrimaryCommandBuffersSubmitted[currentFrame] != 0u"), "Already-submitted editor view command buffers should be tracked independently from the UI semaphore state.");
+			context.Expect(ShaderContains(vulkanResources, "if (alreadySubmitted)"), "Already-submitted editor view command buffers should be waited on, not submitted a second time.");
+			context.Expect(ShaderContains(vulkanResources, "failed to wait for submitted editor view command buffers before descriptor mutation"), "The submitted-view branch should report queue-idle failures before mutating descriptors.");
+			context.Expect(ShaderContains(vulkanResources, "activeRenderSnapshot.state = RenderSnapshotState::Fallback"), "Dropped editor view command buffers should mark their render snapshot as a fallback instead of reporting submitted work.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.TextureUploadsUseDedicatedImmediateCommands", [](TestContext& context) {
+			const std::string vulkanImpl = ReadVulkanContextImplSource();
+			const std::string vulkanInit = ReadVulkanContextInitSource();
+			const std::string vulkanResources = ReadVulkanContextResourcesSource();
+
+			context.Expect(ShaderContains(vulkanImpl, "VkCommandPool immediateCommandPool"), "Single-time texture/layout uploads should own a command pool separate from per-frame Scene/Game/UI pools.");
+			context.Expect(ShaderContains(vulkanImpl, "std::mutex immediateCommandMutex"), "Immediate command submission should be serialized because VkQueue and VkCommandPool operations are externally synchronized.");
+			context.Expect(ShaderContains(vulkanInit, "VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT"), "The immediate command pool should be marked transient/resettable for short upload command buffers.");
+			context.Expect(ShaderContains(vulkanInit, "vkDestroyCommandPool(device, immediateCommandPool"), "The dedicated immediate command pool should be destroyed during Vulkan cleanup.");
+			context.Expect(ShaderContains(vulkanResources, "allocInfo.commandPool = immediateCommandPool != VK_NULL_HANDLE ? immediateCommandPool : commandPools[currentFrame]"), "BeginSingleTimeCommands should allocate from the immediate pool instead of the current frame pool.");
+			context.Expect(ShaderContains(vulkanResources, "vkCreateFence(device, &fenceInfo, nullptr, &immediateFence)"), "EndSingleTimeCommands should use a fence so command buffers are complete before they are freed.");
+			context.Expect(ShaderContains(vulkanResources, "vkWaitForFences(device, 1, &immediateFence, VK_TRUE, UINT64_MAX)"), "Immediate command buffers must wait on their own submit fence before vkFreeCommandBuffers.");
+			context.Expect(ShaderContains(vulkanResources, "bool VulkanContext::Impl::EndSingleTimeCommands"), "Immediate submits should return success so callers can stop after failed layout/copy work.");
+			context.Expect(ShaderContains(vulkanResources, "const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);"), "Failed immediate submits should check whether the queue proved idle before freeing the command buffer.");
+			context.Expect(ShaderContains(vulkanResources, "vkDestroyFence(device, immediateFence, nullptr);\n\t\tif (idleResult == VK_SUCCESS)"), "Temporary immediate fences must be destroyed even when command-buffer freeing remains gated by queue-idle success.");
+			context.Expect(ShaderContains(vulkanResources, "uploadBarrier.subresourceRange.levelCount = residentMipCount"), "Texture upload should transition every resident mip in the same command buffer as the copy.");
+			context.Expect(ShaderContains(vulkanResources, "vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, vImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL"), "Texture upload should copy all resident mip regions after the in-buffer transfer transition.");
+			context.Expect(ShaderContains(vulkanResources, "shaderReadBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL"), "Texture upload should transition resident mips to shader-read before publishing descriptors.");
+			context.Expect(ShaderContains(vulkanResources, "if (!EndSingleTimeCommands(commandBuffer))"), "Texture upload should not cache or publish an image whose immediate command did not finish.");
+		});
+
+		registry.Add("VirtualGeometry.ShaderLayout.EditorCommandPoolsResetOnlyAfterQueueIdle", [](TestContext& context) {
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			context.Expect(ShaderContains(vulkanSource, "PresentEditor could not prove the command pool idle before reset"), "PresentEditor should prove queue idle before resetting a frame command pool outside the normal render-submit path.");
+			context.Expect(ShaderContains(vulkanSource, "PresentEditor kept failed UI command buffer alive because the queue did not prove idle"), "Failed UI submits should not free command buffers unless the graphics queue is known idle.");
+			context.Expect(ShaderContains(vulkanSource, "Skipping editor render recovery because the graphics queue did not prove idle"), "Editor render recovery should not recreate swapchain resources while submitted work may still reference them.");
+			context.Expect(ShaderContains(vulkanSource, "fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT"), "Failed UI submits should restore a signaled frame fence after the pre-submit reset.");
 		});
 
 		registry.Add("VirtualGeometry.ShaderLayout.US5.NoSelectableHiZQualityTierWasIntroduced", [](TestContext& context) {

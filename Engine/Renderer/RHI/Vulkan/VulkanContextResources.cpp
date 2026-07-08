@@ -1005,52 +1005,125 @@ void VulkanContext::Impl::PublishVirtualGeometryGpuPacketResources(
 // VulkanContext::Impl::CopyBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+	if (commandBuffer == VK_NULL_HANDLE)
+	{
+		return;
+	}
 
 	VkBufferCopy copyRegion{};
 	copyRegion.size = size;
 	vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
 
-	EndSingleTimeCommands(commandBuffer);
+	(void)EndSingleTimeCommands(commandBuffer);
 }
 
 // VulkanContext::Impl::BeginSingleTimeCommands is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 VkCommandBuffer VulkanContext::Impl::BeginSingleTimeCommands() {
+	std::lock_guard<std::mutex> lock(immediateCommandMutex);
 	VkCommandBufferAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandPool = commandPools[currentFrame];
+	allocInfo.commandPool = immediateCommandPool != VK_NULL_HANDLE ? immediateCommandPool : commandPools[currentFrame];
 	allocInfo.commandBufferCount = 1;
 
-	VkCommandBuffer commandBuffer;
-	vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+	if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer) != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "failed to allocate immediate command buffer");
+		return VK_NULL_HANDLE;
+	}
 
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-	vkBeginCommandBuffer(commandBuffer, &beginInfo);
+	if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "failed to begin immediate command buffer");
+		vkFreeCommandBuffers(device, allocInfo.commandPool, 1, &commandBuffer);
+		return VK_NULL_HANDLE;
+	}
 
 	return commandBuffer;
 }
 
 // VulkanContext::Impl::EndSingleTimeCommands is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
-	vkEndCommandBuffer(commandBuffer);
+bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
+	if (commandBuffer == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+
+	std::lock_guard<std::mutex> lock(immediateCommandMutex);
+	const VkCommandPool owningPool = immediateCommandPool != VK_NULL_HANDLE ? immediateCommandPool : commandPools[currentFrame];
+	if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "failed to end immediate command buffer");
+		vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
+		return false;
+	}
 
 	VkSubmitInfo submitInfo{};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &commandBuffer;
 
-	vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-	vkQueueWaitIdle(graphicsQueue);
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	VkFence immediateFence = VK_NULL_HANDLE;
+	if (vkCreateFence(device, &fenceInfo, nullptr, &immediateFence) != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create immediate command fence");
+		vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
+		return false;
+	}
 
-	vkFreeCommandBuffers(device, commandPools[currentFrame], 1, &commandBuffer);
+	const VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, immediateFence);
+	if (submitResult != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "failed to submit immediate command buffer: " << submitResult);
+		// A failed submit can leave ownership ambiguous on validation/device-loss
+		// paths. Do not free the command buffer unless the queue proves idle;
+		// freeing a possibly-pending upload buffer creates the secondary
+		// vkFreeCommandBuffers validation error seen after editor asset removal.
+		const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
+		vkDestroyFence(device, immediateFence, nullptr);
+		if (idleResult == VK_SUCCESS)
+		{
+			vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
+		}
+		return false;
+	}
+
+	const VkResult waitResult = vkWaitForFences(device, 1, &immediateFence, VK_TRUE, UINT64_MAX);
+	if (waitResult != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "failed to wait for immediate command fence: " << waitResult);
+		// The fence is a temporary ownership marker for this helper. Destroy it
+		// even on a wait failure so shutdown does not leak child objects; command
+		// buffer freeing still stays gated on the queue proving idle/completed.
+		const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
+		vkDestroyFence(device, immediateFence, nullptr);
+		if (idleResult == VK_SUCCESS)
+		{
+			vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
+		}
+		return false;
+	}
+
+	vkDestroyFence(device, immediateFence, nullptr);
+
+	vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
+	return true;
 }
 
 // VulkanContext::Impl::TransitionImageLayout is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+bool VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+	if (commandBuffer == VK_NULL_HANDLE)
+	{
+		return false;
+	}
 
 	VkImageMemoryBarrier barrier{};
 	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1075,7 +1148,7 @@ void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 	}
 
 	barrier.subresourceRange.baseMipLevel = 0;
-	barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+	barrier.subresourceRange.levelCount = mipLevels == 0u ? VK_REMAINING_MIP_LEVELS : mipLevels;
 	barrier.subresourceRange.baseArrayLayer = 0;
 	barrier.subresourceRange.layerCount = 1;
 
@@ -1126,7 +1199,7 @@ void VulkanContext::Impl::TransitionImageLayout(VkImage image, VkFormat format, 
 		1, &barrier
 	);
 
-	EndSingleTimeCommands(commandBuffer);
+	return EndSingleTimeCommands(commandBuffer);
 }
 
 // VulkanContext::Impl::InitializeHiZPyramidToFarDepth prepares a new Hi-Z image for always-on sampling.
@@ -1140,9 +1213,16 @@ void VulkanContext::Impl::InitializeHiZPyramidToFarDepth(VulkanHiZ& hiZ)
 	// Clear all mips to standard-Z far depth. A freshly created pyramid can then
 	// be sampled immediately without false occlusion; every meshlet fails open
 	// until GenerateHiZPyramid writes real scene depth.
-	TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	if (!TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, hiZ.mipLevels))
+	{
+		return;
+	}
 
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+	if (commandBuffer == VK_NULL_HANDLE)
+	{
+		return;
+	}
 	VkClearColorValue clearValue{};
 	clearValue.float32[0] = 1.0f;
 	clearValue.float32[1] = 1.0f;
@@ -1156,9 +1236,15 @@ void VulkanContext::Impl::InitializeHiZPyramidToFarDepth(VulkanHiZ& hiZ)
 	clearRange.baseArrayLayer = 0u;
 	clearRange.layerCount = 1u;
 	vkCmdClearColorImage(commandBuffer, hiZ.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1u, &clearRange);
-	EndSingleTimeCommands(commandBuffer);
+	if (!EndSingleTimeCommands(commandBuffer))
+	{
+		return;
+	}
 
-	TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	if (!TransitionImageLayout(hiZ.image, VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, hiZ.mipLevels))
+	{
+		return;
+	}
 
 	hiZ.history.valid = true;
 	hiZ.history.width = hiZ.width;
@@ -1179,8 +1265,12 @@ void VulkanContext::Impl::InitializeHiZPyramidToFarDepth(VulkanHiZ& hiZ)
 }
 
 // VulkanContext::Impl::CopyBufferToImage is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+bool VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+	if (commandBuffer == VK_NULL_HANDLE)
+	{
+		return false;
+	}
 
 	VkBufferImageCopy region{};
 	region.bufferOffset = 0;
@@ -1199,7 +1289,7 @@ void VulkanContext::Impl::CopyBufferToImage(VkBuffer buffer, VkImage image, uint
 
 	vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-	EndSingleTimeCommands(commandBuffer);
+	return EndSingleTimeCommands(commandBuffer);
 }
 
 // VulkanContext::Impl::CreateImageView is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1529,13 +1619,59 @@ void VulkanContext::Impl::EnsureTexture(TerraEngine::UUID textureId) {
 		return;
 	}
 
-	TransitionImageLayout(vImage.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, vImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()), regions.data());
-	EndSingleTimeCommands(commandBuffer);
+	if (commandBuffer == VK_NULL_HANDLE)
+	{
+		vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+		vmaDestroyImage(allocator, vImage.image, vImage.allocation);
+		return;
+	}
+	VkImageMemoryBarrier uploadBarrier{};
+	uploadBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	uploadBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	uploadBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	uploadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	uploadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	uploadBarrier.image = vImage.image;
+	uploadBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	uploadBarrier.subresourceRange.baseMipLevel = 0u;
+	uploadBarrier.subresourceRange.levelCount = residentMipCount;
+	uploadBarrier.subresourceRange.baseArrayLayer = 0u;
+	uploadBarrier.subresourceRange.layerCount = 1u;
+	uploadBarrier.srcAccessMask = 0u;
+	uploadBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(
+		commandBuffer,
+		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0u,
+		0u, nullptr,
+		0u, nullptr,
+		1u, &uploadBarrier);
 
-	TransitionImageLayout(vImage.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	vkCmdCopyBufferToImage(commandBuffer, stagingBuffer.buffer, vImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()), regions.data());
+
+	VkImageMemoryBarrier shaderReadBarrier = uploadBarrier;
+	shaderReadBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	shaderReadBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	shaderReadBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	shaderReadBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier(
+		commandBuffer,
+		VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
+		0u,
+		0u, nullptr,
+		0u, nullptr,
+		1u, &shaderReadBarrier);
+
+	if (!EndSingleTimeCommands(commandBuffer))
+	{
+		// If the queue did not prove completion, leave the upload allocations
+		// alone instead of destroying resources a possibly-pending command
+		// buffer may still reference. The texture is not cached or published.
+		return;
+	}
 
 	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
@@ -1669,15 +1805,18 @@ std::vector<VkDescriptorSet> VulkanContext::Impl::EnsureMaterialDescriptorSets(T
 	WriteMappedBuffer(allocator, stagingBuffer, &data, bufferSize);
 	
 	VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-	VkBufferCopy copyRegion{};
-	copyRegion.srcOffset = 0;
-	copyRegion.dstOffset = materialIndex * sizeof(MaterialData);
-	copyRegion.size = bufferSize;
-	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-	for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-		vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
+	if (commandBuffer != VK_NULL_HANDLE)
+	{
+		VkBufferCopy copyRegion{};
+		copyRegion.srcOffset = 0;
+		copyRegion.dstOffset = materialIndex * sizeof(MaterialData);
+		copyRegion.size = bufferSize;
+		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
+		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+			vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
+		}
+		EndSingleTimeCommands(commandBuffer);
 	}
-	EndSingleTimeCommands(commandBuffer);
 	
 	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.allocation);
 
@@ -1711,9 +1850,14 @@ void VulkanContext::Impl::InvalidateMesh(TerraEngine::UUID meshId) {
 		// resources. Wait once before mutating or freeing any descriptor-backed
 		// state owned by this mesh.
 		WaitForDescriptorMutationIdle();
-		// Clear bindless buffer slot
-		UpdateGlobalBuffer(it->second.bindlessIndex, VK_NULL_HANDLE, 0, 0);
-		freeBufferIndices.push_back(it->second.bindlessIndex);
+		if (it->second.bindlessIndex != INVALID_BINDLESS_BUFFER_INDEX) {
+			// The descriptor still contains the old buffer handle until the slot
+			// is reused, but no live draw should index this mesh after the cache
+			// entry is erased. Writing VK_NULL_HANDLE would require the Vulkan
+			// nullDescriptor feature, so recycle only the CPU-side slot owner.
+			freeBufferIndices.push_back(it->second.bindlessIndex);
+			it->second.bindlessIndex = INVALID_BINDLESS_BUFFER_INDEX;
+		}
 
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (!it->second.descriptorSetsByLayout.empty() && descriptorPool != VK_NULL_HANDLE) {
@@ -3049,14 +3193,17 @@ void VulkanContext::Impl::CreateMaterialBufferResources() {
 		vmaUnmapMemory(allocator, stagingBuffer.allocation);
 
 		VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-		VkBufferCopy copyRegion{};
-		copyRegion.srcOffset = 0u;
-		copyRegion.dstOffset = 0u;
-		copyRegion.size = bufferSize;
-		for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-			vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
+		if (commandBuffer != VK_NULL_HANDLE)
+		{
+			VkBufferCopy copyRegion{};
+			copyRegion.srcOffset = 0u;
+			copyRegion.dstOffset = 0u;
+			copyRegion.size = bufferSize;
+			for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+				vkCmdCopyBuffer(commandBuffer, stagingBuffer.buffer, globalMaterialSSBOs[i].buffer, 1, &copyRegion);
+			}
+			EndSingleTimeCommands(commandBuffer);
 		}
-		EndSingleTimeCommands(commandBuffer);
 	}
 	else {
 		TERRAENGINE_LOG(LogLevel::Error, "Failed to map fallback material staging buffer.");
@@ -3553,19 +3700,22 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		// compute pass writes real occlusion.
 		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 		VkCommandBuffer clearCommandBuffer = BeginSingleTimeCommands();
-		VkImageSubresourceRange clearRange{};
-		clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		clearRange.baseMipLevel = 0u;
-		clearRange.levelCount = 1u;
-		clearRange.baseArrayLayer = 0u;
-		clearRange.layerCount = 1u;
-		VkClearColorValue clearValue{};
-		clearValue.float32[0] = 1.0f;
-		clearValue.float32[1] = 1.0f;
-		clearValue.float32[2] = 1.0f;
-		clearValue.float32[3] = 1.0f;
-		vkCmdClearColorImage(clearCommandBuffer, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1u, &clearRange);
-		EndSingleTimeCommands(clearCommandBuffer);
+		if (clearCommandBuffer != VK_NULL_HANDLE)
+		{
+			VkImageSubresourceRange clearRange{};
+			clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			clearRange.baseMipLevel = 0u;
+			clearRange.levelCount = 1u;
+			clearRange.baseArrayLayer = 0u;
+			clearRange.layerCount = 1u;
+			VkClearColorValue clearValue{};
+			clearValue.float32[0] = 1.0f;
+			clearValue.float32[1] = 1.0f;
+			clearValue.float32[2] = 1.0f;
+			clearValue.float32[3] = 1.0f;
+			vkCmdClearColorImage(clearCommandBuffer, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearValue, 1u, &clearRange);
+			EndSingleTimeCommands(clearCommandBuffer);
+		}
 		TransitionImageLayout(image.image, imageInfo.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	};
 
@@ -3603,6 +3753,10 @@ void VulkanContext::Impl::CreateAmbientOcclusionResources()
 		// immediately; it is sampled like a texture, not used as a depth
 		// attachment, so keep it in shader-read layout between transfer writes.
 		VkCommandBuffer transitionCommandBuffer = BeginSingleTimeCommands();
+		if (transitionCommandBuffer == VK_NULL_HANDLE)
+		{
+			return;
+		}
 		VkImageMemoryBarrier barrier{};
 		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
 		barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -4379,10 +4533,11 @@ bool VulkanContext::Impl::CreateGpuTimestampQueries() {
 		return true;
 	}
 
+	const std::uint32_t queryCount = static_cast<std::uint32_t>(MAX_FRAMES_IN_FLIGHT) * kGpuTimestampQueriesPerFrame;
 	VkQueryPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
 	poolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-	poolInfo.queryCount = static_cast<std::uint32_t>(MAX_FRAMES_IN_FLIGHT) * kGpuTimestampQueriesPerFrame;
+	poolInfo.queryCount = queryCount;
 	if (vkCreateQueryPool(device, &poolInfo, nullptr, &gpuTimestampQueryPool) != VK_SUCCESS) {
 		for (auto& frameSamples : completedGpuTimestampSamplesByFrame) {
 			for (GpuTimestampViewSample& sample : frameSamples) {
@@ -4395,6 +4550,23 @@ bool VulkanContext::Impl::CreateGpuTimestampQueries() {
 		return true;
 	}
 
+	// A new query pool starts with uninitialized queries. Reset every slot once
+	// through a command buffer so startup does not require the optional
+	// hostQueryReset feature; the per-view reset below still handles reuse.
+	VkCommandBuffer resetCommandBuffer = BeginSingleTimeCommands();
+	if (resetCommandBuffer == VK_NULL_HANDLE)
+	{
+		vkDestroyQueryPool(device, gpuTimestampQueryPool, nullptr);
+		gpuTimestampQueryPool = VK_NULL_HANDLE;
+		return true;
+	}
+	vkCmdResetQueryPool(resetCommandBuffer, gpuTimestampQueryPool, 0u, queryCount);
+	if (!EndSingleTimeCommands(resetCommandBuffer))
+	{
+		vkDestroyQueryPool(device, gpuTimestampQueryPool, nullptr);
+		gpuTimestampQueryPool = VK_NULL_HANDLE;
+		return true;
+	}
 	gpuTimestampQueriesSupported = true;
 	return true;
 }
@@ -5312,6 +5484,13 @@ uint32_t VulkanContext::Impl::AllocateBufferIndex() {
 
 // VulkanContext::Impl::UpdateGlobalBuffer is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::UpdateGlobalBuffer(uint32_t index, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize range) {
+	if (index >= MAX_BINDLESS_BUFFERS
+		|| buffer == VK_NULL_HANDLE
+		|| range == 0u)
+	{
+		return;
+	}
+
 	WaitForDescriptorMutationIdle();
 
 	VkDescriptorBufferInfo bufferInfo{};
@@ -5345,30 +5524,13 @@ void VulkanContext::Impl::UpdateGlobalBufferForFrame(uint32_t frameIndex, uint32
 		return;
 	}
 
-	if (frameIndex == currentFrame && frameIndex < pendingPrimaryCommandBuffers.size())
+	if (frameIndex == currentFrame)
 	{
-		std::vector<VkCommandBuffer>& pendingCommandBuffers = pendingPrimaryCommandBuffers[frameIndex];
-		if (!pendingCommandBuffers.empty())
-		{
-			VkSubmitInfo pendingSubmitInfo{};
-			pendingSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-			pendingSubmitInfo.commandBufferCount = static_cast<std::uint32_t>(pendingCommandBuffers.size());
-			pendingSubmitInfo.pCommandBuffers = pendingCommandBuffers.data();
-			// Descriptor-set updates are illegal once a recorded command buffer has
-			// bound the set, even if the command buffer has not reached EndFrame yet.
-			// Submit and drain those editor view command buffers before publishing a
-			// new bindless buffer slot for the next view.
-			if (vkQueueSubmit(graphicsQueue, 1u, &pendingSubmitInfo, VK_NULL_HANDLE) == VK_SUCCESS)
-			{
-				vkQueueWaitIdle(graphicsQueue);
-				pendingCommandBuffers.clear();
-			}
-			else
-			{
-				TERRAENGINE_LOG(LogLevel::Error, "failed to submit pending command buffers before descriptor update");
-				return;
-			}
-		}
+		// Updating a bindless buffer slot mutates the shared global descriptor
+		// set. Reuse the central descriptor-idle path so already-submitted editor
+		// view command buffers are waited on instead of accidentally submitted a
+		// second time.
+		WaitForDescriptorMutationIdle();
 	}
 
 	VkDescriptorBufferInfo bufferInfo{};
@@ -5450,9 +5612,61 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 	}
 
 	// Global bindless sets and mesh-local descriptor sets are persistent across
-	// frame slots. Project open/reload can update or free them outside the
-	// normal BeginFrame fence cadence, so wait for submitted graphics work
-	// before mutating descriptors that already-recorded command buffers may
-	// reference.
+	// frame slots. Editor project open/reload can update or free them after
+	// Scene/Game views have recorded command buffers but before EndFrame submits
+	// those buffers. Queue idle does not cover unsubmitted command buffers, and
+	// submitting them here can render through descriptors or images that are
+	// about to be replaced. Already-submitted views are waited on; unsubmitted
+	// views are dropped so their command buffers can be reset safely later.
+	if (editorMode && currentFrame < pendingPrimaryCommandBuffers.size())
+	{
+		std::vector<VkCommandBuffer>& pendingCommandBuffers = pendingPrimaryCommandBuffers[currentFrame];
+		if (!pendingCommandBuffers.empty())
+		{
+			const bool alreadySubmitted = currentFrame < pendingPrimaryCommandBuffersSubmitted.size()
+				&& pendingPrimaryCommandBuffersSubmitted[currentFrame] != 0u;
+			if (alreadySubmitted)
+			{
+				// EndFrame already submitted these command buffers and left them
+				// tracked only so the frame slot knows what is still in flight.
+				// The editor render semaphore may already be consumed/cleared by
+				// UI recovery, so use the per-frame command-buffer state instead
+				// of editorRenderSubmitted when deciding whether submit is legal.
+				const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
+				if (idleResult != VK_SUCCESS)
+				{
+					TERRAENGINE_LOG(LogLevel::Error, "failed to wait for submitted editor view command buffers before descriptor mutation: " << idleResult);
+					return;
+				}
+				pendingCommandBuffers.clear();
+				pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
+			}
+			else
+			{
+				// These command buffers have recorded descriptor bindings but have
+				// not entered the queue. Treat them as stale editor snapshots and
+				// skip them instead of submitting one-time command buffers from a
+				// descriptor update path. The next RenderFrame/BeginFrame reset can
+				// reuse the pool because the buffers were never pending on the GPU.
+				pendingCommandBuffers.clear();
+				if (currentFrame < pendingPrimaryCommandBuffersSubmitted.size())
+				{
+					pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
+				}
+				if (activeRenderSnapshot.state == RenderSnapshotState::Recorded)
+				{
+					activeRenderSnapshot.state = RenderSnapshotState::Fallback;
+				}
+				for (RenderSnapshotOwnerSummary& owner : pendingRenderSnapshotDiagnostics.ownerSummaries)
+				{
+					if (owner.state == RenderSnapshotState::Recorded)
+					{
+						owner.state = RenderSnapshotState::Fallback;
+					}
+				}
+			}
+		}
+	}
+
 	vkQueueWaitIdle(graphicsQueue);
 }

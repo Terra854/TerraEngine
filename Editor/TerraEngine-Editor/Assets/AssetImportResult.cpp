@@ -337,6 +337,35 @@ namespace TerraEngine::AssetPipeline
 				result.generatedTextures.push_back(std::move(record));
 			}
 
+			for (const nlohmann::json& prefab : document.value("generatedPrefabs", nlohmann::json::array()))
+			{
+				GeneratedModelPrefabAsset record;
+				record.guid = ReadUuid(prefab, "guid");
+				record.sourcePath = prefab.value("sourcePath", std::string());
+				record.displayName = prefab.value("name", std::string());
+				for (const nlohmann::json& meshGuid : prefab.value("meshGuids", nlohmann::json::array()))
+				{
+					if (meshGuid.is_string())
+					{
+						if (const std::optional<TerraEngine::UUID> parsed = TerraEngine::ParseUUID(meshGuid.get<std::string>()))
+						{
+							record.meshGuids.push_back(*parsed);
+						}
+					}
+				}
+				for (const nlohmann::json& materialGuid : prefab.value("materialGuids", nlohmann::json::array()))
+				{
+					if (materialGuid.is_string())
+					{
+						if (const std::optional<TerraEngine::UUID> parsed = TerraEngine::ParseUUID(materialGuid.get<std::string>()))
+						{
+							record.materialGuids.push_back(*parsed);
+						}
+					}
+				}
+				result.generatedPrefabs.push_back(std::move(record));
+			}
+
 			for (const nlohmann::json& assignment : document.value("materialAssignments", nlohmann::json::array()))
 			{
 				ModelMaterialAssignment record;

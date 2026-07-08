@@ -138,6 +138,68 @@ namespace {
 		return path.extension() != ".meta" && !IsIgnoredAssetDatabasePath(path);
 	}
 
+	bool IsModelPackageCompileOutputReady(
+		const AssetMetadata& metadata,
+		const std::filesystem::path& absSourcePath,
+		const std::filesystem::path& assetRoot,
+		const std::filesystem::path& buildRoot)
+	{
+		TerraEngine::AssetPipeline::ModelPackageImportResult importResult;
+		if (!TerraEngine::AssetPipeline::LoadModelPackageImportResult(absSourcePath, importResult))
+		{
+			return false;
+		}
+		if (importResult.status == TerraEngine::AssetPipeline::ModelImportStatus::Failed || importResult.generatedMeshes.empty())
+		{
+			return false;
+		}
+		if (importResult.packageGuid != metadata.guid)
+		{
+			return false;
+		}
+
+		// Model-package parents are containers. The package compiler publishes a
+		// sidecar plus generated child meshes instead of the obsolete parent TEMF,
+		// so startup dirtiness must be based on the child render outputs.
+		for (const TerraEngine::AssetPipeline::GeneratedModelMeshAsset& mesh : importResult.generatedMeshes)
+		{
+			if (mesh.compiledPath.empty() || !std::filesystem::exists(buildRoot / mesh.compiledPath))
+			{
+				return false;
+			}
+		}
+
+		// Generated prefabs are source documents under Assets. If the sidecar says
+		// one exists, keep the package dirty until the document is present so the
+		// Project Browser never advertises a missing drag source.
+		for (const TerraEngine::AssetPipeline::GeneratedModelPrefabAsset& prefab : importResult.generatedPrefabs)
+		{
+			if (!prefab.sourcePath.empty() && !std::filesystem::exists(assetRoot / prefab.sourcePath))
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	bool IsAssetCompileOutputReady(
+		const AssetMetadata& metadata,
+		const std::filesystem::path& absSourcePath,
+		const std::filesystem::path& assetRoot,
+		const std::filesystem::path& buildRoot)
+	{
+		if (TerraEngine::AssetPipeline::IsModelPackageImporterName(metadata.importerName))
+		{
+			return IsModelPackageCompileOutputReady(metadata, absSourcePath, assetRoot, buildRoot);
+		}
+		if (metadata.compiledPath.empty())
+		{
+			return true;
+		}
+		return std::filesystem::exists(buildRoot / metadata.compiledPath);
+	}
+
 	bool PublishCompiledAssetAtomically(const std::filesystem::path& stagedPath, const std::filesystem::path& finalPath)
 	{
 		std::error_code ec;
@@ -621,13 +683,13 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	
 	// Load the last known asset table first so large projects can open with
 	// usable browser/resource state before the slower filesystem reconciliation
-	// walks every source file. First-time projects still use the legacy full scan
-	// so metadata and compiled outputs are created immediately.
+	// walks every source file. Projects without an index also reconcile in the
+	// background; the browser can show filesystem tiles immediately while compile
+	// jobs publish per-asset progress instead of holding the user on the hub.
 	if (LoadAssetIndex()) {
 		StartBackgroundProjectReconcile();
 	} else {
-		ScanProject();
-		SaveAssetIndex();
+		StartBackgroundProjectReconcile();
 	}
 	
 	// Start Watcher
@@ -1037,7 +1099,8 @@ void AssetDatabase::ImportAssetInternal(const std::filesystem::path& sourcePath,
 		// Use buildRoot to ensure path includes Assets/
 		std::filesystem::path fullCompiledPath = buildRoot / metadata.compiledPath;
 
-		if (needsImport || !std::filesystem::exists(fullCompiledPath)) {
+		const bool compileOutputReady = IsAssetCompileOutputReady(metadata, absSourcePath, assetRoot, buildRoot);
+		if (needsImport || !compileOutputReady) {
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!std::filesystem::exists(fullCompiledPath.parent_path())) {
 				std::filesystem::create_directories(fullCompiledPath.parent_path());
@@ -1340,7 +1403,10 @@ void AssetDatabase::ProcessPendingProjectReconcile() {
 		const std::filesystem::path sourcePath = pendingReconcileImports.front();
 		pendingReconcileImports.pop_front();
 		if (std::filesystem::exists(sourcePath)) {
-			ImportAsset(sourcePath);
+			// Startup and reconcile imports use the progress-aware path so heavy
+			// compilers run after the editor is visible and asset tiles can show
+			// which files are still cooking.
+			ImportAssetWithProgress(sourcePath);
 		}
 		++processedCount;
 	}
@@ -1371,6 +1437,27 @@ void AssetDatabase::RegisterGeneratedModelPackageMaterialMetadata(const std::fil
 		// material files. Register the generated material metadata here on the
 		// main thread so background model import never mutates the live database.
 		FinishImport(materialMetadata, std::filesystem::absolute(materialSourcePath), false);
+	}
+
+	for (const TerraEngine::AssetPipeline::GeneratedModelPrefabAsset& prefab : importResult.generatedPrefabs)
+	{
+		const std::filesystem::path prefabSourcePath = assetRoot / prefab.sourcePath;
+		if (!std::filesystem::exists(prefabSourcePath))
+		{
+			continue;
+		}
+
+		AssetMetadata prefabMetadata;
+		prefabMetadata.guid = prefab.guid;
+		prefabMetadata.importerName = "PrefabImporter";
+		prefabMetadata.sourcePath = prefab.sourcePath;
+		prefabMetadata.compiledPath.clear();
+		prefabMetadata.lastModified = std::filesystem::last_write_time(prefabSourcePath);
+		prefabMetadata.settings = json::object();
+		// Generated prefabs are editor documents, not render resources. Register
+		// metadata only so Project Browser, prefab editing, and AssetIndex can
+		// open the configured package object without polluting GPU residency.
+		FinishImport(prefabMetadata, std::filesystem::absolute(prefabSourcePath), false);
 	}
 }
 
@@ -1411,6 +1498,14 @@ void AssetDatabase::CleanupModelPackageGeneratedAssets(const AssetMetadata& meta
 			}
 			std::error_code removeMetaError;
 			std::filesystem::remove(materialSourcePath.string() + ".meta", removeMetaError);
+		}
+		for (const TerraEngine::AssetPipeline::GeneratedModelPrefabAsset& prefab : importResult.generatedPrefabs) {
+			const std::filesystem::path prefabSourcePath = std::filesystem::absolute(assetRoot / prefab.sourcePath);
+			if (auto prefabIt = assets.find(prefabSourcePath); prefabIt != assets.end()) {
+				assets.erase(prefabIt);
+			}
+			std::error_code removeMetaError;
+			std::filesystem::remove(prefabSourcePath.string() + ".meta", removeMetaError);
 		}
 	}
 
@@ -1551,6 +1646,7 @@ std::string AssetDatabase::GetImporterName(const std::filesystem::path& filePath
 	if (ext == ".tuiml") return "UIImporter";
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (ext == ".tuss") return "StyleImporter";
+	if (ext == ".teprefab") return "PrefabImporter";
 	return "GenericImporter";
 }
 

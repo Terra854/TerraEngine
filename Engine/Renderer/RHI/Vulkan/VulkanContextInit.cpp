@@ -602,6 +602,10 @@ void VulkanContext::Impl::Cleanup() {
 		}
 	}
 	commandPools.clear();
+	if (device && immediateCommandPool != VK_NULL_HANDLE) {
+		vkDestroyCommandPool(device, immediateCommandPool, nullptr);
+		immediateCommandPool = VK_NULL_HANDLE;
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device) {
@@ -1223,13 +1227,23 @@ bool VulkanContext::Impl::CreateFramebuffers() {
 
 // VulkanContext::Impl::CreateCommandPool is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 bool VulkanContext::Impl::CreateCommandPool() {
-	// Create a command pool that allows buffer resets for per-frame recording.
+	// Create command pools that separate per-frame rendering from immediate
+	// uploads. Texture imports and layout transitions can happen while the
+	// editor has recorded Scene/Game/UI command buffers, so single-time upload
+	// commands must not share the frame pools that BeginFrame resets.
 	QueueFamilyIndices queueFamilyIndices = FindQueueFamilies(physicalDevice);
 
 	VkCommandPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 	poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 	poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
+
+	VkCommandPoolCreateInfo immediatePoolInfo = poolInfo;
+	immediatePoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+	if (vkCreateCommandPool(device, &immediatePoolInfo, nullptr, &immediateCommandPool) != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "failed to create immediate upload command pool!");
+		return false;
+	}
 
 	commandPools.resize(MAX_FRAMES_IN_FLIGHT);
 	commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1267,6 +1281,8 @@ bool VulkanContext::Impl::CreateSyncObjects() {
 	extraPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 	pendingPrimaryCommandBuffers.clear();
 	pendingPrimaryCommandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+	pendingPrimaryCommandBuffersSubmitted.clear();
+	pendingPrimaryCommandBuffersSubmitted.resize(MAX_FRAMES_IN_FLIGHT, 0u);
 	retiredBuffersByFrame.clear();
 	retiredBuffersByFrame.resize(MAX_FRAMES_IN_FLIGHT);
 

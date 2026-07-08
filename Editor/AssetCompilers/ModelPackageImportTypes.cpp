@@ -352,6 +352,29 @@ namespace TerraEngine::AssetPipeline
 		};
 	}
 
+	nlohmann::json ToJson(const GeneratedModelPrefabAsset& value)
+	{
+		nlohmann::json meshGuids = nlohmann::json::array();
+		for (const TerraEngine::UUID& guid : value.meshGuids)
+		{
+			meshGuids.push_back(TerraEngine::ToHexString(guid));
+		}
+
+		nlohmann::json materialGuids = nlohmann::json::array();
+		for (const TerraEngine::UUID& guid : value.materialGuids)
+		{
+			materialGuids.push_back(TerraEngine::ToHexString(guid));
+		}
+
+		return {
+			{ "guid", TerraEngine::ToHexString(value.guid) },
+			{ "sourcePath", value.sourcePath.generic_string() },
+			{ "name", value.displayName },
+			{ "meshGuids", meshGuids },
+			{ "materialGuids", materialGuids }
+		};
+	}
+
 	nlohmann::json ToJson(const ModelMaterialAssignment& value)
 	{
 		return {
@@ -383,6 +406,12 @@ namespace TerraEngine::AssetPipeline
 			textures.push_back(ToJson(texture));
 		}
 
+		nlohmann::json prefabs = nlohmann::json::array();
+		for (const GeneratedModelPrefabAsset& prefab : value.generatedPrefabs)
+		{
+			prefabs.push_back(ToJson(prefab));
+		}
+
 		nlohmann::json assignments = nlohmann::json::array();
 		for (const ModelMaterialAssignment& assignment : value.materialAssignments)
 		{
@@ -402,6 +431,7 @@ namespace TerraEngine::AssetPipeline
 			{ "generatedMeshes", meshes },
 			{ "generatedMaterials", materials },
 			{ "generatedTextures", textures },
+			{ "generatedPrefabs", prefabs },
 			{ "materialAssignments", assignments },
 			{ "diagnostics", diagnostics }
 		};

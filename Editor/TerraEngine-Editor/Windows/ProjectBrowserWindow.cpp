@@ -171,7 +171,8 @@ enum class PackageChildKind
 {
 	Mesh,
 	Material,
-	Texture
+	Texture,
+	Prefab
 };
 
 struct PackageChildTile
@@ -197,18 +198,6 @@ bool MatchesSearchText(const std::string& text, const std::string& searchFilter)
 		return true;
 	}
 	return ToLowerText(text).find(ToLowerText(searchFilter)) != std::string::npos;
-}
-
-std::string EllipsizeMiddle(const std::string& text, std::size_t maxCharacters)
-{
-	if (text.size() <= maxCharacters || maxCharacters < 5u)
-	{
-		return text;
-	}
-
-	const std::size_t frontCount = (maxCharacters - 3u) / 2u;
-	const std::size_t backCount = maxCharacters - 3u - frontCount;
-	return text.substr(0u, frontCount) + "..." + text.substr(text.size() - backCount);
 }
 
 void AppendPackageChildren(std::vector<PackageChildTile>& outChildren, const nlohmann::json& items, PackageChildKind kind)
@@ -238,6 +227,9 @@ std::vector<PackageChildTile> BuildPackageChildTiles(const std::filesystem::path
 		return children;
 	}
 
+	// Generated prefabs are the primary thing users drag into scenes, so show
+	// them before the implementation-detail mesh/material/texture children.
+	AppendPackageChildren(children, document.value("generatedPrefabs", nlohmann::json::array()), PackageChildKind::Prefab);
 	AppendPackageChildren(children, document.value("generatedMeshes", nlohmann::json::array()), PackageChildKind::Mesh);
 	AppendPackageChildren(children, document.value("generatedMaterials", nlohmann::json::array()), PackageChildKind::Material);
 	AppendPackageChildren(children, document.value("generatedTextures", nlohmann::json::array()), PackageChildKind::Texture);
@@ -266,6 +258,8 @@ const char* PackageChildIcon(PackageChildKind kind)
 		return "[MAT]";
 	case PackageChildKind::Texture:
 		return "[TEX]";
+	case PackageChildKind::Prefab:
+		return "[PFB]";
 	default:
 		return "[SUB]";
 	}
@@ -281,6 +275,8 @@ const char* PackageChildPayload(PackageChildKind kind)
 		return "ASSET_MATERIAL";
 	case PackageChildKind::Texture:
 		return "ASSET_TEXTURE";
+	case PackageChildKind::Prefab:
+		return "ASSET_PREFAB";
 	default:
 		return "ASSET_GUID";
 	}
@@ -296,16 +292,47 @@ const char* PackageChildKindName(PackageChildKind kind)
 		return "Material";
 	case PackageChildKind::Texture:
 		return "Texture";
+	case PackageChildKind::Prefab:
+		return "Prefab";
 	default:
 		return "SubAsset";
 	}
 }
 
-bool DrawPackageChildTile(const PackageChildTile& child, float thumbnailSize, bool isSelected)
+void DrawTileLabel(const std::string& label, float width, const std::string& tooltip = {})
 {
-	// Generated package children are virtual sub-assets. They can be dragged by
-	// GUID for assignment, but the browser intentionally gives them no delete,
-	// rename, or open action because the source package owns their lifecycle.
+	const ImGuiStyle& style = ImGui::GetStyle();
+	const float labelHeight = (ImGui::GetTextLineHeight() * 2.0f) + (style.ItemSpacing.y * 0.25f);
+	const ImVec2 labelMin = ImGui::GetCursorScreenPos();
+	const ImVec2 labelMax(labelMin.x + width, labelMin.y + labelHeight);
+
+	// Project Browser rows should be stable even when names wrap differently.
+	// Draw the text into a fixed two-line box, then reserve that exact box with
+	// an invisible item so every tile contributes the same row height.
+	ImDrawList* drawList = ImGui::GetWindowDrawList();
+	ImGui::PushClipRect(labelMin, labelMax, true);
+	drawList->AddText(
+		ImGui::GetFont(),
+		ImGui::GetFontSize(),
+		labelMin,
+		ImGui::GetColorU32(ImGuiCol_Text),
+		label.c_str(),
+		nullptr,
+		width);
+	ImGui::PopClipRect();
+
+	ImGui::InvisibleButton("##TileLabel", ImVec2(width, labelHeight));
+	if (!tooltip.empty() && ImGui::IsItemHovered())
+	{
+		ImGui::SetTooltip("%s", tooltip.c_str());
+	}
+}
+
+bool DrawPackageChildTile(const PackageChildTile& child, float thumbnailSize, float labelWidth, bool isSelected)
+{
+	// Generated package children are package-owned. Mesh/material/texture
+	// children drag by GUID for assignment; prefab children point at a real
+	// .teprefab file that can be opened through the normal prefab editor.
 	if (isSelected)
 	{
 		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
@@ -329,11 +356,10 @@ bool DrawPackageChildTile(const PackageChildTile& child, float thumbnailSize, bo
 		ImGui::EndDragDropSource();
 	}
 
-	ImGui::TextDisabled("%s", EllipsizeMiddle(child.name, 14u).c_str());
-	if (ImGui::IsItemHovered())
-	{
-		ImGui::SetTooltip("%s\n%s", child.name.c_str(), child.sourcePath.c_str());
-	}
+	const std::string tooltip = child.sourcePath.empty()
+		? child.name
+		: child.name + "\n" + child.sourcePath;
+	DrawTileLabel(child.name, labelWidth, tooltip);
 	return clicked;
 }
 
@@ -363,10 +389,6 @@ void DrawPackageFoldoutControl(bool packageExpanded, const std::string& packageG
 	ImGui::SetCursorScreenPos(restoreCursor);
 }
 
-void DrawTileLabel(const std::string& label)
-{
-	ImGui::TextWrapped("%s", label.c_str());
-}
 }
 
 ProjectBrowserWindow::ProjectBrowserWindow(MainEditorSubsystem* owner)
@@ -697,7 +719,12 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 	});
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (ImGui::BeginTable("ContentTable", columnCount)) {
+	if (ImGui::BeginTable("ContentTable", columnCount, ImGuiTableFlags_SizingFixedFit)) {
+		for (int columnIndex = 0; columnIndex < columnCount; ++columnIndex)
+		{
+			ImGui::TableSetupColumn(nullptr, ImGuiTableColumnFlags_WidthFixed, cellSize);
+		}
+
 		for (const auto& entry : entries) {
 			std::string filename = entry.path().filename().string();
 			const bool isPackage = !entry.is_directory() && IsModelPackagePath(entry.path());
@@ -747,7 +774,8 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
 			}
 
-			const float packageChildThumbnailSize = std::max(36.0f, m_ThumbnailSize * 0.72f);
+			const float tileLabelWidth = cellSize;
+			const float packageChildThumbnailSize = m_ThumbnailSize;
 			bool assetIconHovered = false;
 			const std::optional<AssetImportProgress> importProgress = !entry.is_directory()
 				? AssetDatabase::Instance().GetImportProgress(absoluteEntryPath)
@@ -791,6 +819,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 					else if (importer == "ScriptImporter") payloadType = "ASSET_SCRIPT";
 					else if (importer == "UIImporter") payloadType = "ASSET_TUIML";
 					else if (importer == "StyleImporter") payloadType = "ASSET_TUSS";
+					else if (importer == "PrefabImporter") payloadType = "ASSET_PREFAB";
 
 					ImGui::SetDragDropPayload(payloadType, &guid, sizeof(TerraEngine::UUID));
 					ImGui::Text("%s", filename.c_str());
@@ -842,7 +871,7 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				}
 			}
 
-			DrawTileLabel(filename);
+			DrawTileLabel(filename, tileLabelWidth, filename);
 			if (ImGui::BeginPopupContextItem("AssetNameContextMenu")) {
 				if (ImGui::MenuItem("Delete")) {
 					m_AssetToDelete = absoluteEntryPath;
@@ -854,14 +883,21 @@ void ProjectBrowserWindow::DrawDirectoryContent(const std::filesystem::path& pat
 				for (const PackageChildTile& child : packageChildren) {
 					ImGui::TableNextColumn();
 					ImGui::PushID(child.guidHex.c_str());
-					ImGui::Dummy(ImVec2(1.0f, ImGui::GetFrameHeight()));
-					if (DrawPackageChildTile(child, packageChildThumbnailSize, child.guidHex == m_SelectedPackageChildGuid))
+					if (DrawPackageChildTile(child, packageChildThumbnailSize, tileLabelWidth, child.guidHex == m_SelectedPackageChildGuid))
 					{
 						m_SelectedPackageChildGuid = child.guidHex;
 						const std::filesystem::path childSourcePath = AssetDatabase::Instance().GetAssetRoot() / child.sourcePath;
 						if (child.kind == PackageChildKind::Material && !child.sourcePath.empty() && std::filesystem::exists(childSourcePath))
 						{
 							m_Owner->SetSelectedAsset(std::filesystem::absolute(childSourcePath));
+						}
+						else if (child.kind == PackageChildKind::Prefab && !child.sourcePath.empty() && std::filesystem::exists(childSourcePath))
+						{
+							m_Owner->SetSelectedAsset(std::filesystem::absolute(childSourcePath));
+							if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+							{
+								m_Owner->OpenPrefabAsset(std::filesystem::absolute(childSourcePath));
+							}
 						}
 						else if (const std::optional<TerraEngine::UUID> childGuid = TerraEngine::ParseUUID(child.guidHex))
 						{

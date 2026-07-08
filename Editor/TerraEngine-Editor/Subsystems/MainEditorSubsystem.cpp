@@ -32,6 +32,7 @@
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <fstream>
+#include <unordered_map>
 #include <nlohmann/json.hpp>
 
 // Include Window Headers
@@ -194,6 +195,106 @@ namespace
 		{
 			resources.MarkStreamingNeed(assetId, assetType, TerraEngine::Resource::StreamingNeedType::AssetPreview, 0u, "selected prefab asset preview", 70);
 		}
+	}
+
+	std::optional<TerraEngine::UUID> ReadSerializedObjectUuid(const nlohmann::json& objectJson)
+	{
+		if (const auto uuidIt = objectJson.find("uuid"); uuidIt != objectJson.end() && uuidIt->is_string())
+		{
+			return TerraEngine::ParseUUID(uuidIt->get<std::string>());
+		}
+		return std::nullopt;
+	}
+
+	void CollectPrefabInstanceUuidRemap(nlohmann::json& objectJson, std::unordered_map<TerraEngine::UUID, TerraEngine::UUID>& uuidRemap)
+	{
+		if (std::optional<TerraEngine::UUID> sourceUuid = ReadSerializedObjectUuid(objectJson))
+		{
+			const TerraEngine::UUID instanceUuid = TerraEngine::GenerateUUID();
+			uuidRemap[*sourceUuid] = instanceUuid;
+			objectJson["uuid"] = TerraEngine::ToHexString(instanceUuid);
+		}
+
+		if (auto childrenIt = objectJson.find("children"); childrenIt != objectJson.end() && childrenIt->is_array())
+		{
+			for (nlohmann::json& childJson : *childrenIt)
+			{
+				CollectPrefabInstanceUuidRemap(childJson, uuidRemap);
+			}
+		}
+	}
+
+	void RewritePrefabInstanceUuidReferences(nlohmann::json& value, const std::unordered_map<TerraEngine::UUID, TerraEngine::UUID>& uuidRemap)
+	{
+		if (value.is_string())
+		{
+			if (const std::optional<TerraEngine::UUID> parsedUuid = TerraEngine::ParseUUID(value.get<std::string>()))
+			{
+				if (const auto replacement = uuidRemap.find(*parsedUuid); replacement != uuidRemap.end())
+				{
+					// Object references inside the prefab should target the new
+					// instance IDs, while asset GUIDs stay unchanged because they
+					// are not present in this source-object remap.
+					value = TerraEngine::ToHexString(replacement->second);
+				}
+			}
+			return;
+		}
+
+		if (value.is_array())
+		{
+			for (nlohmann::json& childValue : value)
+			{
+				RewritePrefabInstanceUuidReferences(childValue, uuidRemap);
+			}
+			return;
+		}
+
+		if (value.is_object())
+		{
+			for (auto& [name, childValue] : value.items())
+			{
+				(void)name;
+				RewritePrefabInstanceUuidReferences(childValue, uuidRemap);
+			}
+		}
+	}
+
+	std::filesystem::path ResolvePrefabAssetPath(const AssetMetadata& metadata)
+	{
+		std::filesystem::path prefabPath = metadata.sourcePath;
+		if (!prefabPath.is_absolute())
+		{
+			prefabPath = AssetDatabase::Instance().GetAssetRoot() / prefabPath;
+		}
+		return std::filesystem::absolute(prefabPath).lexically_normal();
+	}
+
+	void AttachPrefabLink(entt::entity entity, const TerraEngine::UUID& prefabSourceId, const std::optional<TerraEngine::UUID>& sourceObjectId, const std::filesystem::path& prefabPath)
+	{
+		std::optional<Object> object = ObjectManager::instance().getObject(entity);
+		if (!object)
+		{
+			return;
+		}
+
+		PrefabLinkComponent* existingLink = ObjectManager::instance().GetComponent<PrefabLinkComponent>(*object);
+		PrefabLinkComponent* ensuredLink = existingLink != nullptr ? existingLink : ObjectManager::instance().AddComponent<PrefabLinkComponent>(*object);
+		if (ensuredLink == nullptr)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Failed to attach prefab link metadata to dropped prefab instance.");
+			return;
+		}
+
+		PrefabLinkComponent& link = *ensuredLink;
+		link.prefabSourceId = prefabSourceId;
+		link.sourceObjectId = sourceObjectId.value_or(ObjectManager::instance().getUUID(*object));
+		link.prefabName = prefabPath.stem().string();
+
+		std::error_code relativeError;
+		const std::filesystem::path relativePrefabPath = std::filesystem::relative(prefabPath, SceneManager::Instance().GetSceneRoot(), relativeError);
+		link.prefabPath = relativeError ? prefabPath.generic_string() : relativePrefabPath.generic_string();
+		link.overriddenProperties.clear();
 	}
 }
 
@@ -811,6 +912,91 @@ void MainEditorSubsystem::OpenScene(const std::filesystem::path& path) {
 bool MainEditorSubsystem::OpenPrefabAsset(const std::filesystem::path& path)
 {
 	return OpenPrefabAssetInternal(path, false);
+}
+
+bool MainEditorSubsystem::InstantiatePrefabAsset(const TerraEngine::UUID& prefabGuid, std::optional<entt::entity> parent)
+{
+	const AssetMetadata* metadata = AssetDatabase::Instance().FindAssetByGuid(prefabGuid);
+	if (metadata == nullptr || metadata->importerName != "PrefabImporter")
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Dropped prefab payload does not reference a registered prefab asset.");
+		return false;
+	}
+
+	const std::filesystem::path prefabPath = ResolvePrefabAssetPath(*metadata);
+	std::ifstream prefabInput(prefabPath, std::ios::binary);
+	if (!prefabInput)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Failed to instantiate prefab because the prefab file could not be opened: " << prefabPath);
+		return false;
+	}
+
+	nlohmann::json prefabJson;
+	try
+	{
+		prefabInput >> prefabJson;
+	}
+	catch (const nlohmann::json::parse_error& parseError)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Dropped prefab failed JSON parse at byte " << parseError.byte << ": " << parseError.what() << " Path: " << prefabPath);
+		return false;
+	}
+
+	if (!prefabJson.contains("objects") || !prefabJson["objects"].is_array() || prefabJson["objects"].empty())
+	{
+		TERRAENGINE_LOG(LogLevel::Warning, "Dropped prefab has no root objects: " << prefabPath);
+		return false;
+	}
+
+	std::optional<TerraEngine::UUID> parentUuid;
+	if (parent.has_value())
+	{
+		if (std::optional<Object> parentObject = ObjectManager::instance().getObject(*parent))
+		{
+			parentUuid = ObjectManager::instance().getUUID(*parentObject);
+		}
+		else
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Dropped prefab parent no longer exists in the hierarchy.");
+			return false;
+		}
+	}
+
+	const TerraEngine::UUID prefabSourceId = SceneManager::Instance().LoadPrefab(prefabPath);
+	const TerraEngine::UUID linkSourceId = prefabSourceId == TerraEngine::EMPTY_UUID ? prefabGuid : prefabSourceId;
+	std::vector<entt::entity> instantiatedRoots;
+	std::vector<std::unique_ptr<ICommand>> undoCommands;
+
+	for (nlohmann::json objectJson : prefabJson["objects"])
+	{
+		const std::optional<TerraEngine::UUID> sourceRootObjectId = ReadSerializedObjectUuid(objectJson);
+		std::unordered_map<TerraEngine::UUID, TerraEngine::UUID> uuidRemap;
+		CollectPrefabInstanceUuidRemap(objectJson, uuidRemap);
+		RewritePrefabInstanceUuidReferences(objectJson, uuidRemap);
+
+		// Deserialize on the protected editor path so ObjectManager, component
+		// reflection, hierarchy, and render invalidation all see one normal
+		// authored scene mutation.
+		const entt::entity rootEntity = Serializer::DeserializeObjectEntity(objectJson, parent);
+		AttachPrefabLink(rootEntity, linkSourceId, sourceRootObjectId, prefabPath);
+		instantiatedRoots.push_back(rootEntity);
+		undoCommands.push_back(std::make_unique<CreateObjectCommand>(rootEntity));
+		if (parentUuid.has_value())
+		{
+			undoCommands.push_back(std::make_unique<SetParentCommand>(rootEntity, std::nullopt, parentUuid));
+		}
+	}
+
+	if (instantiatedRoots.empty())
+	{
+		return false;
+	}
+
+	UndoRedoSystem::Instance().PushTransactionGroup("Instantiate Prefab", std::move(undoCommands));
+	SetSelectedEntity(instantiatedRoots.front());
+	SceneManager::Instance().ForceMarkActiveSceneDirty();
+	TERRAENGINE_LOG(LogLevel::Info, "Instantiated prefab into hierarchy: " << prefabPath);
+	return true;
 }
 
 bool MainEditorSubsystem::OpenPrefabAssetInternal(const std::filesystem::path& path, bool openedFromSceneObject)

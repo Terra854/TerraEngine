@@ -114,6 +114,25 @@ std::unordered_set<TerraEngine::UUID> LoadPrefabSourceObjectIds(const PrefabLink
 }
 }
 
+bool HierarchyWindow::AcceptPrefabAssetDrop(std::optional<entt::entity> parent)
+{
+	if (m_Owner == nullptr)
+	{
+		return false;
+	}
+
+	if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_PREFAB"))
+	{
+		IM_ASSERT(payload->DataSize == sizeof(TerraEngine::UUID));
+		const TerraEngine::UUID prefabGuid = *static_cast<const TerraEngine::UUID*>(payload->Data);
+		// Keep hierarchy creation behind MainEditorSubsystem so the same
+		// prefab GUID payload can later feed inspector/script fields without
+		// every target reimplementing path lookup and prefab link setup.
+		return m_Owner->InstantiatePrefabAsset(prefabGuid, parent);
+	}
+	return false;
+}
+
 HierarchyWindow::HierarchyWindow(MainEditorSubsystem* owner)
 	: EditorWindow("Scene Hierarchy"), m_Owner(owner) {
 }
@@ -209,6 +228,7 @@ void HierarchyWindow::OnGui() {
 					objManager.setParent(*payloadObject, std::nullopt);
 				}
 			}
+			AcceptPrefabAssetDrop(std::nullopt);
 			ImGui::EndDragDropTarget();
 		}
 
@@ -465,6 +485,7 @@ void HierarchyWindow::DrawEntityNode(entt::entity obj, const std::unordered_set<
 				}
 			}
 		}
+		AcceptPrefabAssetDrop(obj);
 		ImGui::EndDragDropTarget();
 	}
 	

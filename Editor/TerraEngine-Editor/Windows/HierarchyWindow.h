@@ -6,6 +6,7 @@
 #pragma once
 #include "../Framework/EditorWindow.h"
 #include <string>
+#include <optional>
 #include <unordered_set>
 #include <entt/entity/entity.hpp>
 #include "Engine/Utilities/UUID.h"
@@ -23,6 +24,7 @@ protected:
 private:
 	void DrawEntityNode(entt::entity obj, const std::unordered_set<TerraEngine::UUID>* prefabSourceObjectIds = nullptr);
 	void CreatePrefabFromSelection(entt::entity obj);
+	bool AcceptPrefabAssetDrop(std::optional<entt::entity> parent);
 	
 	MainEditorSubsystem* m_Owner;
 	std::string m_SearchFilter;
