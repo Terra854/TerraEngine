@@ -1081,6 +1081,11 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 	const VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, immediateFence);
 	if (submitResult != VK_SUCCESS)
 	{
+		if (MarkDeviceLost(submitResult, "immediate command buffer submit"))
+		{
+			vkDestroyFence(device, immediateFence, nullptr);
+			return false;
+		}
 		TERRAENGINE_LOG(LogLevel::Error, "failed to submit immediate command buffer: " << submitResult);
 		// A failed submit can leave ownership ambiguous on validation/device-loss
 		// paths. Do not free the command buffer unless the queue proves idle;
@@ -1088,6 +1093,10 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 		// vkFreeCommandBuffers validation error seen after editor asset removal.
 		const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
 		vkDestroyFence(device, immediateFence, nullptr);
+		if (MarkDeviceLost(idleResult, "immediate command failed-submit queue idle"))
+		{
+			return false;
+		}
 		if (idleResult == VK_SUCCESS)
 		{
 			vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
@@ -1098,12 +1107,21 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 	const VkResult waitResult = vkWaitForFences(device, 1, &immediateFence, VK_TRUE, UINT64_MAX);
 	if (waitResult != VK_SUCCESS)
 	{
+		if (MarkDeviceLost(waitResult, "immediate command fence wait"))
+		{
+			vkDestroyFence(device, immediateFence, nullptr);
+			return false;
+		}
 		TERRAENGINE_LOG(LogLevel::Error, "failed to wait for immediate command fence: " << waitResult);
 		// The fence is a temporary ownership marker for this helper. Destroy it
 		// even on a wait failure so shutdown does not leak child objects; command
 		// buffer freeing still stays gated on the queue proving idle/completed.
 		const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
 		vkDestroyFence(device, immediateFence, nullptr);
+		if (MarkDeviceLost(idleResult, "immediate command failed-wait queue idle"))
+		{
+			return false;
+		}
 		if (idleResult == VK_SUCCESS)
 		{
 			vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
@@ -3835,7 +3853,14 @@ bool VulkanContext::Impl::EnsureShadowRenderResources(const ShadowResourceReques
 	targetRequest.spotCount = std::min(request.spotCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.areaCount = std::min(request.areaCount, MAX_SHADOW_RESOURCE_SLOTS);
 	targetRequest.pointCount = std::min(request.pointCount, MAX_SHADOW_RESOURCE_SLOTS);
-	vkDeviceWaitIdle(device);
+	const VkResult idleResult = vkDeviceWaitIdle(device);
+	if (MarkDeviceLost(idleResult, "shadow render resource rebuild device idle")) {
+		return false;
+	}
+	if (idleResult != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Skipping shadow render resource rebuild because the device did not become idle: " << idleResult);
+		return false;
+	}
 	// Rebuilding this block (for example after swapchain recreation) must tear
 	// down stale views/framebuffers before allocating replacement images.
 	auto DestroyFramebuffer = [&](VkFramebuffer& framebuffer) {
@@ -5634,6 +5659,10 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 				const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
 				if (idleResult != VK_SUCCESS)
 				{
+					if (MarkDeviceLost(idleResult, "submitted render command buffer idle before descriptor mutation"))
+					{
+						return;
+					}
 					TERRAENGINE_LOG(LogLevel::Error, "failed to wait for submitted render command buffers before descriptor mutation: " << idleResult);
 					return;
 				}
@@ -5667,5 +5696,13 @@ void VulkanContext::Impl::WaitForDescriptorMutationIdle() {
 		}
 	}
 
-	vkQueueWaitIdle(graphicsQueue);
+	const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
+	if (MarkDeviceLost(idleResult, "descriptor mutation queue idle"))
+	{
+		return;
+	}
+	if (idleResult != VK_SUCCESS)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "failed to wait for descriptor mutation queue idle: " << idleResult);
+	}
 }

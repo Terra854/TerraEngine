@@ -1322,6 +1322,30 @@ VulkanContext::Impl::LightBudgetApplicationResult VulkanContext::Impl::ApplyFram
 	return result;
 }
 
+// VulkanContext::Impl::MarkDeviceLost is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
+bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view operation)
+{
+	if (result != VK_ERROR_DEVICE_LOST)
+	{
+		return false;
+	}
+
+	deviceLost = true;
+	skipFrame = true;
+	editorRenderSubmitted = false;
+	swapchainImageAcquired = false;
+	if (currentFrame < pendingPrimaryCommandBuffersSubmitted.size())
+	{
+		pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
+	}
+	if (!deviceLostLogged)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Vulkan device lost during " << operation << ". Rendering is disabled for this Vulkan context to avoid a submit/reset recovery loop.");
+		deviceLostLogged = true;
+	}
+	return true;
+}
+
 VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {
 	impl->latestStatsByView[0].viewType = RenderViewType::Game;
 	impl->latestStatsByView[1].viewType = RenderViewType::Scene;
@@ -1381,7 +1405,7 @@ void VulkanContext::Resize(int width, int height, ViewType view) {
 // VulkanContext::BeginFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::BeginFrame() {
 	// Wait until the GPU is done with the resources for this frame before reusing them.
-	if (!impl->initialized) return;
+	if (!impl->initialized || impl->deviceLost) return;
 
 	const auto beginFrameStart = BackendClock::now();
 	{
@@ -1391,21 +1415,30 @@ void VulkanContext::BeginFrame() {
 	}
 
 	const auto fenceStart = BackendClock::now();
+	VkResult fenceWaitResult = VK_SUCCESS;
 	{
 		TERRAENGINE_PROFILE_SCOPE("Vulkan: BeginFrame Wait Frame Fence", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
 		if (!impl->editorMode && !impl->inFlightFences.empty()) {
 			// Runtime rendering still shares several GPU images across frame slots
 			// (depth, shadows, Hi-Z, and AO). Until those resources are per-frame,
 			// the backend must not overlap GPU frames in standalone runtime.
-			vkWaitForFences(
+			fenceWaitResult = vkWaitForFences(
 				impl->device,
 				static_cast<std::uint32_t>(impl->inFlightFences.size()),
 				impl->inFlightFences.data(),
 				VK_TRUE,
 				UINT64_MAX);
 		} else {
-			vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+			fenceWaitResult = vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
 		}
+	}
+	if (impl->MarkDeviceLost(fenceWaitResult, "begin frame fence wait")) {
+		return;
+	}
+	if (fenceWaitResult != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "BeginFrame failed while waiting for frame fence: " << fenceWaitResult);
+		impl->skipFrame = true;
+		return;
 	}
 	TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 		impl->pendingBackendFrameBreakdown,
@@ -1429,11 +1462,20 @@ void VulkanContext::BeginFrame() {
 		waitSubmitInfo.commandBufferCount = 0;
 
 		const VkResult drainResult = vkQueueSubmit(impl->graphicsQueue, 1, &waitSubmitInfo, VK_NULL_HANDLE);
+		if (impl->MarkDeviceLost(drainResult, "stranded editor render semaphore drain submit")) {
+			return;
+		}
 		if (drainResult == VK_SUCCESS) {
-			vkQueueWaitIdle(impl->graphicsQueue);
+			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			if (impl->MarkDeviceLost(idleResult, "stranded editor render semaphore drain idle")) {
+				return;
+			}
 		} else {
 			TERRAENGINE_LOG(LogLevel::Error, "BeginFrame failed to drain stranded editor render semaphore: " << drainResult);
-			vkQueueWaitIdle(impl->graphicsQueue);
+			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			if (impl->MarkDeviceLost(idleResult, "stranded editor render semaphore failure idle")) {
+				return;
+			}
 		}
 		impl->editorRenderSubmitted = false;
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
@@ -1621,6 +1663,13 @@ void VulkanContext::BeginFrame() {
 			{ TerraEngine::Renderer::BackendFrameCostCategory::FenceWait, TerraEngine::Renderer::BackendSubmitStage::ImageAcquire, RenderViewType::Game, 0u, "Swapchain image acquire", true, false },
 			ElapsedMilliseconds(acquireStart),
 			0.25f);
+		if (impl->MarkDeviceLost(result, "runtime swapchain image acquire")) {
+			TerraEngine::Renderer::Vulkan::RecordVulkanFrameCost(
+				impl->pendingBackendFrameBreakdown,
+				{ TerraEngine::Renderer::BackendFrameCostCategory::RhiBeginFrame, TerraEngine::Renderer::BackendSubmitStage::Other, RenderViewType::Game, 0u, "RHI Begin Frame", true, false },
+				ElapsedMilliseconds(beginFrameStart));
+			return;
+		}
 		if (result == VK_ERROR_OUT_OF_DATE_KHR) {
 			const auto recoveryStart = BackendClock::now();
 			impl->RecreateSwapChain();
@@ -2790,7 +2839,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view)
 // VulkanContext::RenderFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view, const RenderOutputRequest& outputRequest) {
 	// Skip rendering if initialization failed so we do not spam validation errors.
-	if (!impl->initialized || impl->skipFrame) return;
+	if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;
 
 	const auto renderFrameStart = BackendClock::now();
 	const uint32_t currentFrame = impl->currentFrame;
@@ -2837,8 +2886,12 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 		pendingSubmitInfo.commandBufferCount = static_cast<uint32_t>(pendingCmdsForSnapshot.size());
 		pendingSubmitInfo.pCommandBuffers = pendingCmdsForSnapshot.data();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (vkQueueSubmit(impl->graphicsQueue, 1, &pendingSubmitInfo, VK_NULL_HANDLE) != VK_SUCCESS) {
-			TERRAENGINE_LOG(LogLevel::Error, "failed to submit intermediate editor view command buffers after snapshot budget exhaustion");
+		const VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &pendingSubmitInfo, VK_NULL_HANDLE);
+		if (impl->MarkDeviceLost(submitResult, "intermediate editor view submit after snapshot budget exhaustion")) {
+			return;
+		}
+		if (submitResult != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "failed to submit intermediate editor view command buffers after snapshot budget exhaustion: " << submitResult);
 			return;
 		}
 		if (currentFrame < impl->pendingPrimaryCommandBuffersSubmitted.size()) {
@@ -2854,6 +2907,9 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			"Snapshot budget exhaustion forced serialization; increase snapshot capacity or reduce required editor outputs.");
 		if (forcedIdleResult != VK_SUCCESS)
 		{
+			if (impl->MarkDeviceLost(forcedIdleResult, "intermediate editor view queue idle after snapshot budget exhaustion")) {
+				return;
+			}
 			TERRAENGINE_LOG(LogLevel::Error, "failed to wait for intermediate editor view command buffers after snapshot budget exhaustion: " << forcedIdleResult);
 			return;
 		}
@@ -2915,7 +2971,16 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 				// an image that was still referenced by the previous frame.
 				if (hasResources && extentMismatch)
 				{
-					vkDeviceWaitIdle(impl->device);
+					const VkResult idleResult = vkDeviceWaitIdle(impl->device);
+					if (impl->MarkDeviceLost(idleResult, "editor offscreen resize device idle"))
+					{
+						return;
+					}
+					if (idleResult != VK_SUCCESS)
+					{
+						TERRAENGINE_LOG(LogLevel::Error, "Skipping editor offscreen resize because the device did not become idle: " << idleResult);
+						return;
+					}
 				}
 				impl->CreateOffscreenResources(resources, targetExtent);
 			}
@@ -2930,6 +2995,10 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 			{
 				ensureOffscreenResources(impl->gameView, requestedEditorExtent);
 			}
+		}
+		if (impl->deviceLost)
+		{
+			return;
 		}
 		if (renderingDedicatedCaptureTarget
 			&& (impl->captureView.framebuffer == VK_NULL_HANDLE
@@ -5339,7 +5408,14 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 			// This path is normally hit only after a resize. Wait before
 			// destroying the old per-frame sets so no pending frame can still
 			// reference them.
-			vkDeviceWaitIdle(device);
+			const VkResult idleResult = vkDeviceWaitIdle(device);
+			if (MarkDeviceLost(idleResult, "Hi-Z descriptor pool resize device idle")) {
+				return false;
+			}
+			if (idleResult != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Error, "Skipping Hi-Z descriptor pool resize because the device did not become idle: " << idleResult);
+				return false;
+			}
 			vkDestroyDescriptorPool(device, hiZDescriptorPool, nullptr);
 			hiZDescriptorPool = VK_NULL_HANDLE;
 			hiZDescriptorSets.clear();
@@ -5617,7 +5693,14 @@ bool VulkanContext::Impl::GenerateAmbientOcclusion(VkCommandBuffer cmd, const Fr
 			// AO descriptors are recorded into primary command buffers. Wait
 			// before recreating the pool during resize so no pending frame can
 			// still reference sets from the old pool.
-			vkDeviceWaitIdle(device);
+			const VkResult idleResult = vkDeviceWaitIdle(device);
+			if (MarkDeviceLost(idleResult, "ambient occlusion descriptor pool resize device idle")) {
+				return false;
+			}
+			if (idleResult != VK_SUCCESS) {
+				TERRAENGINE_LOG(LogLevel::Error, "Skipping ambient occlusion descriptor pool resize because the device did not become idle: " << idleResult);
+				return false;
+			}
 			vkDestroyDescriptorPool(device, aoDescriptorPool, nullptr);
 			aoDescriptorPool = VK_NULL_HANDLE;
 			aoDescriptorSets.clear();
@@ -5972,7 +6055,7 @@ void VulkanContext::Impl::GenerateVRSImage(VkCommandBuffer cmd, VkImageView colo
 
 // VulkanContext::EndFrame is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::EndFrame() {
-	if (!impl->initialized || impl->skipFrame) return;
+	if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;
 
 	const auto endFrameStart = BackendClock::now();
 	// Submit all recorded camera command buffers together so the swapchain is
@@ -6041,6 +6124,9 @@ void VulkanContext::EndFrame() {
 				ElapsedMilliseconds(submitStart),
 				0.25f);
 			if (submitResult != VK_SUCCESS) {
+				if (impl->MarkDeviceLost(submitResult, "empty runtime queue submit")) {
+					return;
+				}
 				TERRAENGINE_LOG(LogLevel::Error, "[Vulkan] Empty QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.");
 				impl->RecreateSwapChain();
 				return;
@@ -6067,6 +6153,9 @@ void VulkanContext::EndFrame() {
 				impl->framebufferResized = false;
 				impl->RecreateSwapChain();
 			} else if (presentResult != VK_SUCCESS) {
+				if (impl->MarkDeviceLost(presentResult, "empty runtime queue present")) {
+					return;
+				}
 				TERRAENGINE_LOG(LogLevel::Error, "failed to present empty swap chain image! Result: " << presentResult);
 			}
 
@@ -6117,9 +6206,16 @@ void VulkanContext::EndFrame() {
 			ElapsedMilliseconds(submitStart),
 			0.25f);
 		if (submitResult != VK_SUCCESS) {
+			if (impl->MarkDeviceLost(submitResult, "editor render queue submit")) {
+				cmds.clear();
+				return;
+			}
 			TERRAENGINE_LOG(LogLevel::Error, "failed to submit draw command buffers! Result: " << submitResult);
 			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
 			if (idleResult != VK_SUCCESS) {
+				if (impl->MarkDeviceLost(idleResult, "editor render recovery queue idle")) {
+					return;
+				}
 				TERRAENGINE_LOG(LogLevel::Error, "Skipping editor render recovery because the graphics queue did not prove idle: " << idleResult);
 				return;
 			}
@@ -6158,6 +6254,9 @@ void VulkanContext::EndFrame() {
 			0.25f);
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (submitResult != VK_SUCCESS) {
+			if (impl->MarkDeviceLost(submitResult, "runtime render queue submit")) {
+				return;
+			}
 			TERRAENGINE_LOG(LogLevel::Error, "[Vulkan] QueueSubmit failed! Result: " << submitResult << ". Recreating swapchain to recover state.");
 			const auto recoveryStart = BackendClock::now();
 			impl->RecreateSwapChain();
@@ -6212,6 +6311,9 @@ void VulkanContext::EndFrame() {
 				0.25f,
 				"Present reported resize or suboptimal swapchain state.");
 		} else if (result != VK_SUCCESS) {
+			if (impl->MarkDeviceLost(result, "runtime queue present")) {
+				return;
+			}
 			TERRAENGINE_LOG(LogLevel::Error, "failed to present swap chain image! Result: " << result);
 		}
 
@@ -6577,7 +6679,14 @@ void VulkanContext::RetireLoadedResource(const TerraEngine::UUID& id, std::uint6
 void VulkanContext::WaitIdle() {
 	if (impl && impl->device) {
 		const auto waitStart = BackendClock::now();
-		vkDeviceWaitIdle(impl->device);
+		const VkResult idleResult = vkDeviceWaitIdle(impl->device);
+		if (impl->MarkDeviceLost(idleResult, "explicit Vulkan WaitIdle")) {
+			return;
+		}
+		if (idleResult != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "Explicit Vulkan WaitIdle failed: " << idleResult);
+			return;
+		}
 		TerraEngine::Renderer::Vulkan::RecordVulkanFrameStall(
 			impl->pendingBackendFrameBreakdown,
 			{ TerraEngine::Renderer::BackendFrameCostCategory::DeviceIdleWait, TerraEngine::Renderer::BackendSubmitStage::ForcedIdle, RenderViewType::Game, 0u, "Explicit Vulkan WaitIdle", true, false },
@@ -6622,13 +6731,20 @@ void VulkanContext::EnableEditorMode() {
 
 // VulkanContext::PresentEditor is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
-	if (!impl->editorMode || !impl->initialized) return;
+	if (!impl->editorMode || !impl->initialized || impl->deviceLost) return;
 
 	// The editor can present UI on the project hub before RenderSystem has any
 	// scene/game output to drive BeginFrame. In that mode PresentEditor owns the
 	// frame slot lifecycle, so it must wait for the slot fence before reusing
 	// binary semaphores, command buffers, and the fence itself.
-	vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+	const VkResult waitResult = vkWaitForFences(impl->device, 1, &impl->inFlightFences[impl->currentFrame], VK_TRUE, UINT64_MAX);
+	if (impl->MarkDeviceLost(waitResult, "editor frame fence wait")) {
+		return;
+	}
+	if (waitResult != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor failed while waiting for frame fence: " << waitResult);
+		return;
+	}
 	if (!impl->editorRenderSubmitted) {
 		// Some recovery paths can submit editor view command buffers outside the
 		// normal EndFrame -> PresentEditor semaphore chain. The frame fence only
@@ -6636,6 +6752,9 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		// or freeing from the shared per-frame command pool.
 		const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
 		if (idleResult != VK_SUCCESS) {
+			if (impl->MarkDeviceLost(idleResult, "editor command pool idle before reset")) {
+				return;
+			}
 			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor could not prove the command pool idle before reset: " << idleResult);
 			return;
 		}
@@ -6677,11 +6796,21 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 
 		const VkResult submitResult = vkQueueSubmit(impl->graphicsQueue, 1, &waitSubmitInfo, VK_NULL_HANDLE);
 		if (submitResult != VK_SUCCESS) {
+			if (impl->MarkDeviceLost(submitResult, "editor render semaphore drain submit")) {
+				return false;
+			}
 			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor failed to drain submitted render semaphore after " << reason << ": " << submitResult);
 			return false;
 		}
 
-		vkQueueWaitIdle(impl->graphicsQueue);
+		const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+		if (impl->MarkDeviceLost(idleResult, "editor render semaphore drain idle")) {
+			return false;
+		}
+		if (idleResult != VK_SUCCESS) {
+			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor could not prove drained render semaphore idle after " << reason << ": " << idleResult);
+			return false;
+		}
 		impl->editorRenderSubmitted = false;
 		if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 			impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
@@ -6694,7 +6823,11 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 
 	if (impl->framebufferResized) {
 		if (!drainSubmittedEditorRender("resize")) {
-			if (vkQueueWaitIdle(impl->graphicsQueue) == VK_SUCCESS) {
+			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			if (impl->MarkDeviceLost(idleResult, "editor resize fallback queue idle")) {
+				return;
+			}
+			if (idleResult == VK_SUCCESS) {
 				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 				}
@@ -6718,7 +6851,11 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
 		if (!drainSubmittedEditorRender("out-of-date acquire")) {
-			if (vkQueueWaitIdle(impl->graphicsQueue) == VK_SUCCESS) {
+			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			if (impl->MarkDeviceLost(idleResult, "editor out-of-date acquire fallback queue idle")) {
+				return;
+			}
+			if (idleResult == VK_SUCCESS) {
 				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 				}
@@ -6732,8 +6869,15 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		impl->RecreateOffscreenResources();
 		return;
 	} else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+		if (impl->MarkDeviceLost(result, "editor swapchain image acquire")) {
+			return;
+		}
 		if (!drainSubmittedEditorRender("failed acquire")) {
-			if (vkQueueWaitIdle(impl->graphicsQueue) == VK_SUCCESS) {
+			const VkResult idleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			if (impl->MarkDeviceLost(idleResult, "editor failed acquire fallback queue idle")) {
+				return;
+			}
+			if (idleResult == VK_SUCCESS) {
 				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 				}
@@ -6817,9 +6961,16 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 	VkResult uiSubmitResult = vkQueueSubmit(impl->graphicsQueue, 1, &submitInfo, impl->inFlightFences[impl->currentFrame]);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (uiSubmitResult != VK_SUCCESS) {
+		if (impl->MarkDeviceLost(uiSubmitResult, "editor UI queue submit")) {
+			return;
+		}
 		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor QueueSubmit failed: " << uiSubmitResult);
 		if (!drainSubmittedEditorRender("failed UI submit")) {
-			if (vkQueueWaitIdle(impl->graphicsQueue) == VK_SUCCESS) {
+			const VkResult fallbackIdleResult = vkQueueWaitIdle(impl->graphicsQueue);
+			if (impl->MarkDeviceLost(fallbackIdleResult, "editor failed UI submit fallback queue idle")) {
+				return;
+			}
+			if (fallbackIdleResult == VK_SUCCESS) {
 				if (impl->currentFrame < impl->pendingPrimaryCommandBuffers.size()) {
 					impl->pendingPrimaryCommandBuffers[impl->currentFrame].clear();
 				}
@@ -6850,6 +7001,9 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 			}
 		}
 		else {
+			if (impl->MarkDeviceLost(idleResult, "editor failed UI submit queue idle")) {
+				return;
+			}
 			TERRAENGINE_LOG(LogLevel::Error, "PresentEditor kept failed UI command buffer alive because the queue did not prove idle: " << idleResult);
 			return;
 		}
@@ -6873,6 +7027,11 @@ void VulkanContext::PresentEditor(std::function<void(void*)> renderUI) {
 		impl->framebufferResized = false;
 		impl->RecreateSwapChain();
 		impl->RecreateOffscreenResources();
+	} else if (presentResult != VK_SUCCESS) {
+		if (impl->MarkDeviceLost(presentResult, "editor queue present")) {
+			return;
+		}
+		TERRAENGINE_LOG(LogLevel::Error, "PresentEditor failed to present swap chain image: " << presentResult);
 	}
 
 	// Removed End-of-Frame Block. We proceed optimistically.
@@ -7244,7 +7403,17 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 
 // VulkanContext::Impl::RecreateOffscreenResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RecreateOffscreenResources() {
-	vkDeviceWaitIdle(device);
+	if (deviceLost) {
+		return;
+	}
+	const VkResult idleResult = vkDeviceWaitIdle(device);
+	if (MarkDeviceLost(idleResult, "editor offscreen recreation device idle")) {
+		return;
+	}
+	if (idleResult != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Skipping editor offscreen recreation because the device did not become idle: " << idleResult);
+		return;
+	}
 	CreateOffscreenResources(sceneView);
 	CreateOffscreenResources(gameView);
 	if (captureView.image != VK_NULL_HANDLE || captureView.framebuffer != VK_NULL_HANDLE)
@@ -7258,7 +7427,14 @@ void VulkanContext::Impl::RecreateOffscreenResources() {
 // VulkanContext::Impl::ClearResources is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::ClearResources() {
 	if (!device) return;
-	vkDeviceWaitIdle(device);
+	const VkResult idleResult = vkDeviceWaitIdle(device);
+	if (MarkDeviceLost(idleResult, "clear Vulkan resources device idle")) {
+		return;
+	}
+	if (idleResult != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Skipping Vulkan resource clear because the device did not become idle: " << idleResult);
+		return;
+	}
 
 	// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 	for (auto& [id, mesh] : meshCache) {

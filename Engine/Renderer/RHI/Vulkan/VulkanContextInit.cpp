@@ -13,6 +13,10 @@
 bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	// Spin up instance, device, swapchain, and default resources so rendering can begin.
 	this->windowSystem = &windowSystem;
+	deviceLost = false;
+	deviceLostLogged = false;
+	skipFrame = false;
+	editorRenderSubmitted = false;
 	volkInitialize();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -1575,6 +1579,9 @@ void VulkanContext::Impl::CleanupSwapChain() {
 
 // VulkanContext::Impl::RecreateSwapChain is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void VulkanContext::Impl::RecreateSwapChain() {
+	if (deviceLost) {
+		return;
+	}
 	// Block until a valid framebuffer size is available (e.g., when resizing).
 	int width = 0, height = 0;
 	auto* window = static_cast<GLFWwindow*>(windowSystem->GetNativeHandle());
@@ -1584,7 +1591,14 @@ void VulkanContext::Impl::RecreateSwapChain() {
 		glfwGetFramebufferSize(window, &width, &height);
 		glfwWaitEvents();
 	}
-	vkDeviceWaitIdle(device);
+	const VkResult idleResult = vkDeviceWaitIdle(device);
+	if (MarkDeviceLost(idleResult, "swapchain recreation device idle")) {
+		return;
+	}
+	if (idleResult != VK_SUCCESS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Skipping swapchain recreation because the device did not become idle: " << idleResult);
+		return;
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device) {

@@ -37,6 +37,7 @@
 #include <limits>
 #include <stdexcept>
 #include <filesystem>
+#include <string_view>
 
 inline const std::vector<const char*> validationLayers = {
 	"VK_LAYER_KHRONOS_validation"
@@ -799,6 +800,11 @@ struct VulkanContext::Impl {
 	std::vector<std::vector<size_t>> workerBufferUsage; // Tracks next available secondary buffer index per worker per frame
 	bool swapchainImageAcquired = false;
 	bool skipFrame = false;
+	// Vulkan device loss invalidates the live device and its queues. Swapchain
+	// recreation cannot repair that state, so latch it once and make frame
+	// entry points return quietly instead of retrying failed queue work.
+	bool deviceLost = false;
+	bool deviceLostLogged = false;
 	bool editorRenderSubmitted = false;
 	uint32_t acquiredImageIndex = 0;
 
@@ -809,6 +815,7 @@ struct VulkanContext::Impl {
 	void CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent = {});
 	void RecreateOffscreenResources(); // Handle resize
 	void ClearResources();
+	bool MarkDeviceLost(VkResult result, std::string_view operation);
 
 	// Grid Renderer
 	VkPipeline sceneViewGridPipeline = VK_NULL_HANDLE;
