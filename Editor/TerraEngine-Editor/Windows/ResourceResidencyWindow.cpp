@@ -994,89 +994,92 @@ void ResourceResidencyWindow::DrawPolicyControls()
 	}
 
 	ImGui::Spacing();
-	ImGui::SeparatorText("Visibility Streaming");
-	if (ImGui::Checkbox("Enable Visibility Streaming", &streamingPolicy.enabled))
+	ImGui::SeparatorText("Visibility Residency");
+	if (ImGui::Checkbox("Track Visible Resource Needs##EnableVisibilityStreaming", &streamingPolicy.enabled))
 	{
 		streamingChanged = true;
 	}
 
-	if (ImGui::Checkbox("Defer Scene Payloads On Load", &streamingPolicy.deferScenePayloadsOnLoad))
+	if (ImGui::Checkbox("Defer Scene Payloads Until Visible##DeferScenePayloadsOnLoad", &streamingPolicy.deferScenePayloadsOnLoad))
 	{
-		streamingChanged = true;
-	}
-
-	float streamingDistance = static_cast<float>(streamingPolicy.streamingDistance);
-	if (ImGui::InputFloat("Streaming Distance", &streamingDistance, 1.0f, 10.0f, "%.2f"))
-	{
-		streamingPolicy.streamingDistance = static_cast<double>(std::max(0.0f, streamingDistance));
 		streamingChanged = true;
 	}
 
 	float visibleRetention = static_cast<float>(streamingPolicy.visibleRetentionSeconds);
-	if (ImGui::InputFloat("Visible Retention Seconds", &visibleRetention, 0.25f, 1.0f, "%.2f"))
+	if (ImGui::InputFloat("Visible Resource Retention Seconds##VisibleRetentionSeconds", &visibleRetention, 0.25f, 1.0f, "%.2f"))
 	{
 		streamingPolicy.visibleRetentionSeconds = static_cast<double>(std::max(0.0f, visibleRetention));
 		streamingChanged = true;
 	}
 
 	float neededRetention = static_cast<float>(streamingPolicy.neededRetentionSeconds);
-	if (ImGui::InputFloat("Needed Retention Seconds", &neededRetention, 0.25f, 1.0f, "%.2f"))
+	if (ImGui::InputFloat("Requested Resource Retention Seconds##NeededRetentionSeconds", &neededRetention, 0.25f, 1.0f, "%.2f"))
 	{
 		streamingPolicy.neededRetentionSeconds = static_cast<double>(std::max(0.0f, neededRetention));
 		streamingChanged = true;
 	}
 
+	ImGui::SeparatorText("Texture Mip Streaming");
 	if (ImGui::Checkbox("Enable Texture Mip Streaming", &streamingPolicy.textureMipStreamingEnabled))
 	{
 		streamingChanged = true;
 	}
 
+	float streamingDistance = static_cast<float>(streamingPolicy.streamingDistance);
+	if (ImGui::InputFloat("Texture Mip Fade Distance##TextureMipFadeDistance", &streamingDistance, 1.0f, 10.0f, "%.2f"))
+	{
+		// Save/load still owns the underlying policy key name. The visible
+		// editor label names the actual runtime effect: texture mip fading.
+		streamingPolicy.streamingDistance = static_cast<double>(std::max(0.0f, streamingDistance));
+		streamingChanged = true;
+	}
+
 	int minStreamMip = static_cast<int>(streamingPolicy.textureMinStreamMip);
-	if (ImGui::InputInt("Texture Min Stream Mip (near)", &minStreamMip))
+	if (ImGui::InputInt("Near Texture Mip##TextureMinStreamMip", &minStreamMip))
 	{
 		streamingPolicy.textureMinStreamMip = static_cast<std::uint32_t>(std::max(0, minStreamMip));
 		streamingChanged = true;
 	}
 
 	int maxStreamMip = static_cast<int>(streamingPolicy.textureMaxStreamMip);
-		if (ImGui::InputInt("Texture Max Stream Mip (far)", &maxStreamMip))
-		{
-			streamingPolicy.textureMaxStreamMip = static_cast<std::uint32_t>(std::max(0, maxStreamMip));
-			streamingChanged = true;
-		}
-		ImGui::TextDisabled("Mip 0 is full resolution; larger mip indices stream lower-detail texture tails.");
+	if (ImGui::InputInt("Far Texture Mip##TextureMaxStreamMip", &maxStreamMip))
+	{
+		streamingPolicy.textureMaxStreamMip = static_cast<std::uint32_t>(std::max(0, maxStreamMip));
+		streamingChanged = true;
+	}
+	ImGui::TextDisabled("Texture mips only: mip 0 is full resolution; larger mips are lower detail.");
 
-		ImGui::SeparatorText("Virtual Geometry Page Budgets");
-		const auto bytesToMbInput = [](std::uint64_t bytes) {
-			const std::uint64_t mb = bytes / (1024ull * 1024ull);
-			return static_cast<int>(std::min<std::uint64_t>(mb, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
-		};
-		int vgPageBudgetMb = bytesToMbInput(streamingPolicy.virtualGeometryPageMemoryBudgetBytes);
-		if (ImGui::InputInt("VG Page Memory Budget MB (0=off)", &vgPageBudgetMb))
-		{
-			streamingPolicy.virtualGeometryPageMemoryBudgetBytes = static_cast<std::uint64_t>(std::max(0, vgPageBudgetMb)) * 1024ull * 1024ull;
-			streamingChanged = true;
-		}
-		int vgUploadBudgetMb = bytesToMbInput(streamingPolicy.virtualGeometryPageUploadBudgetBytes);
-		if (ImGui::InputInt("VG Page Upload Budget MB/frame (0=off)", &vgUploadBudgetMb))
-		{
-			streamingPolicy.virtualGeometryPageUploadBudgetBytes = static_cast<std::uint64_t>(std::max(0, vgUploadBudgetMb)) * 1024ull * 1024ull;
-			streamingChanged = true;
-		}
-		int vgRetirementBudgetMb = bytesToMbInput(streamingPolicy.virtualGeometryPageRetirementBudgetBytes);
-		if (ImGui::InputInt("VG Page Retirement Budget MB/frame (0=off)", &vgRetirementBudgetMb))
-		{
-			streamingPolicy.virtualGeometryPageRetirementBudgetBytes = static_cast<std::uint64_t>(std::max(0, vgRetirementBudgetMb)) * 1024ull * 1024ull;
-			streamingChanged = true;
-		}
-		ImGui::TextDisabled("Fallback pages stay protected; page pressure targets high-detail pages first.");
+	ImGui::SeparatorText("Virtual Geometry Page Budgets");
+	const auto bytesToMbInput = [](std::uint64_t bytes) {
+		const std::uint64_t mb = bytes / (1024ull * 1024ull);
+		return static_cast<int>(std::min<std::uint64_t>(mb, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
+	};
+	int vgPageBudgetMb = bytesToMbInput(streamingPolicy.virtualGeometryPageMemoryBudgetBytes);
+	if (ImGui::InputInt("VG Page Memory Budget MB (0=off)", &vgPageBudgetMb))
+	{
+		streamingPolicy.virtualGeometryPageMemoryBudgetBytes = static_cast<std::uint64_t>(std::max(0, vgPageBudgetMb)) * 1024ull * 1024ull;
+		streamingChanged = true;
+	}
+	int vgUploadBudgetMb = bytesToMbInput(streamingPolicy.virtualGeometryPageUploadBudgetBytes);
+	if (ImGui::InputInt("VG Page Upload Budget MB/frame (0=off)", &vgUploadBudgetMb))
+	{
+		streamingPolicy.virtualGeometryPageUploadBudgetBytes = static_cast<std::uint64_t>(std::max(0, vgUploadBudgetMb)) * 1024ull * 1024ull;
+		streamingChanged = true;
+	}
+	int vgRetirementBudgetMb = bytesToMbInput(streamingPolicy.virtualGeometryPageRetirementBudgetBytes);
+	if (ImGui::InputInt("VG Page Retirement Budget MB/frame (0=off)", &vgRetirementBudgetMb))
+	{
+		streamingPolicy.virtualGeometryPageRetirementBudgetBytes = static_cast<std::uint64_t>(std::max(0, vgRetirementBudgetMb)) * 1024ull * 1024ull;
+		streamingChanged = true;
+	}
+	ImGui::TextDisabled("Fallback pages stay protected; page pressure targets high-detail pages first.");
 
-		int maxLoads = static_cast<int>(streamingPolicy.maxLoadsPerUpdate);
-		if (ImGui::InputInt("Max Streaming Loads (0=unlimited)", &maxLoads))
-		{
-			streamingPolicy.maxLoadsPerUpdate = static_cast<std::uint32_t>(std::max(0, maxLoads));
-			streamingChanged = true;
-		}
+	int maxLoads = static_cast<int>(streamingPolicy.maxLoadsPerUpdate);
+	if (ImGui::InputInt("Max Streaming Loads (0=unlimited)", &maxLoads))
+	{
+		streamingPolicy.maxLoadsPerUpdate = static_cast<std::uint32_t>(std::max(0, maxLoads));
+		streamingChanged = true;
+	}
 
 	const char* streamingBudgetItems[] = { "Use Residency Policy", "Prefer Streaming Release", "Conservative" };
 	int streamingBudgetIndex = MemoryBudgetInteractionIndex(streamingPolicy.memoryBudgetInteraction);
