@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <optional>
 #include <set>
+#include <string>
 #include "Engine/Core/Logger/Logger.h"
 #include "Resource/ResourceStreaming.h"
 #include "Utilities/PlatformUtils.h"
@@ -79,6 +80,105 @@ namespace
 	fs::path ResolveLegacyEditorPreferencesPath()
 	{
 		return fs::current_path() / kEditorPreferencesFileName;
+	}
+
+	std::string NormalizePathForRecentComparison(const fs::path& path)
+	{
+		std::error_code errorCode;
+		fs::path normalized = fs::weakly_canonical(path, errorCode);
+		if (errorCode)
+		{
+			normalized = fs::absolute(path, errorCode).lexically_normal();
+			if (errorCode)
+			{
+				normalized = path.lexically_normal();
+			}
+		}
+
+		std::string value = normalized.make_preferred().string();
+#ifdef _WIN32
+		std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+			return static_cast<char>(std::tolower(character));
+		});
+#endif
+		while (value.size() > 1 && (value.back() == '\\' || value.back() == '/'))
+		{
+			value.pop_back();
+		}
+		return value;
+	}
+
+	bool IsSameOrChildPath(const fs::path& candidatePath, const fs::path& rootPath)
+	{
+		const std::string candidate = NormalizePathForRecentComparison(candidatePath);
+		const std::string root = NormalizePathForRecentComparison(rootPath);
+		if (candidate.empty() || root.empty())
+		{
+			return false;
+		}
+		if (candidate == root)
+		{
+			return true;
+		}
+
+		std::string rootWithSeparator = root;
+		if (rootWithSeparator.back() != '\\' && rootWithSeparator.back() != '/')
+		{
+			rootWithSeparator.push_back(fs::path::preferred_separator);
+		}
+		return candidate.rfind(rootWithSeparator, 0) == 0;
+	}
+
+	bool IsRecentProjectSuppressedByEnvironment()
+	{
+		if (const char* value = std::getenv("TERRAENGINE_SUPPRESS_PROJECT_RECENTS"))
+		{
+			std::string text = value;
+			std::transform(text.begin(), text.end(), text.begin(), [](unsigned char character) {
+				return static_cast<char>(std::tolower(character));
+			});
+			return text == "1" || text == "true" || text == "yes" || text == "on";
+		}
+		return false;
+	}
+
+	bool IsTemporaryProjectPath(const fs::path& projectPath)
+	{
+		if (projectPath.empty())
+		{
+			return true;
+		}
+
+		std::error_code errorCode;
+		const fs::path tempRoot = fs::temp_directory_path(errorCode);
+		if (!errorCode && !tempRoot.empty() && IsSameOrChildPath(projectPath, tempRoot))
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	bool ShouldTrackRecentProjectPath(const fs::path& projectPath)
+	{
+		return !IsRecentProjectSuppressedByEnvironment() && !IsTemporaryProjectPath(projectPath);
+	}
+
+	bool PruneTransientRecentProjects(std::vector<RecentProjectEntry>& recentProjects)
+	{
+		const auto originalSize = recentProjects.size();
+		recentProjects.erase(
+			std::remove_if(
+				recentProjects.begin(),
+				recentProjects.end(),
+				[](const RecentProjectEntry& entry) {
+					// Automation and unit tests create disposable projects under the
+					// OS temp directory. Those paths are useful for the current test
+					// process, but they should never occupy the user's project hub.
+					return IsTemporaryProjectPath(fs::path(entry.path));
+				}),
+			recentProjects.end());
+		return recentProjects.size() != originalSize;
 	}
 
 	// EnsureProjectManifest is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -608,7 +708,12 @@ void ProjectManager::LoadEditorPreferences() {
 			nlohmann::json j;
 			file >> j;
 			editorPrefs = j.get<EditorPreferences>();
+			const bool prunedTransientRecents = PruneTransientRecentProjects(editorPrefs.recentProjects);
 			if (pathToLoad != preferencesPath) {
+				SaveEditorPreferences();
+			}
+			else if (prunedTransientRecents)
+			{
 				SaveEditorPreferences();
 			}
 		} catch (...) {
@@ -622,10 +727,17 @@ void ProjectManager::AddToRecentProjects(const fs::path& path, const std::string
 	auto& list = editorPrefs.recentProjects;
 	std::string pathStr = fs::absolute(path).string();
 
-	// Remove existing
+	// Remove existing entries first so a disposable automation project that was
+	// saved by an older editor build is cleaned up as soon as it is opened again.
 	list.erase(std::remove_if(list.begin(), list.end(), [&](const RecentProjectEntry& e) {
 		return e.path == pathStr;
 	}), list.end());
+
+	if (!ShouldTrackRecentProjectPath(path))
+	{
+		SaveEditorPreferences();
+		return;
+	}
 
 	// Add to front
 	RecentProjectEntry entry;
