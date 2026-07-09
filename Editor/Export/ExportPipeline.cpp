@@ -171,7 +171,7 @@ static nlohmann::json ResolveRenderProfileManifest(const BuildProfile& profile, 
 	renderProfile["textureBudgetMb"] = 512u;
 	renderProfile["resolutionScale"] = 1.0f;
 	renderProfile["validationEnabled"] = profile.enableVulkanValidationLayers;
-	renderProfile["debugEnabled"] = false;
+	renderProfile["debugEnabled"] = profile.enableRenderDebugDiagnostics;
 
 	const std::filesystem::path settingsPath = projectRoot / "ProjectSettings" / "RenderSettings.json";
 	if (!std::filesystem::exists(settingsPath)) {
@@ -191,7 +191,6 @@ static nlohmann::json ResolveRenderProfileManifest(const BuildProfile& profile, 
 			renderProfile["textureBudgetMb"] = settingsIt->value("textureBudgetMb", 512u);
 			renderProfile["resolutionScale"] = settingsIt->value("resolutionScale", 1.0f);
 			renderProfile["variableRateShading"] = settingsIt->value("variableRateShading", 0u) > 0u ? "enabled" : "disabled";
-			renderProfile["debugEnabled"] = savedSettings.value("debugEnabled", false);
 		}
 	}
 	catch (...) {
@@ -1006,10 +1005,11 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 
 		manifest["renderProfile"] = ResolveRenderProfileManifest(profile, projectRoot);
 		if (std::optional<nlohmann::json> renderSettings = LoadProjectRenderSettingsManifest(projectRoot)) {
-			// Export validation layers are a build-profile decision, not the
-			// editor's project-runtime setting. Mirror the profile value into the
+			// Export renderer diagnostics are build-profile decisions, not the
+			// editor's local Preferences state. Mirror the profile values into the
 			// exact render settings payload so every packaged metadata path agrees.
 			(*renderSettings)["validationEnabled"] = profile.enableVulkanValidationLayers;
+			(*renderSettings)["debugEnabled"] = profile.enableRenderDebugDiagnostics;
 			manifest["renderSettings"] = *renderSettings;
 		}
 		manifest["residencyPolicy"] = BuildResidencyPolicyManifest();

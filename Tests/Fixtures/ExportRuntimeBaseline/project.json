@@ -15,6 +15,7 @@
 			"includeDebugSymbols": true,
 			"stripNativeAotOutput": false,
 			"enableVulkanValidationLayers": true,
+			"enableRenderDebugDiagnostics": true,
 			"additionalPublishArgs": "",
 			"includedScenes": []
 		}

@@ -6104,12 +6104,20 @@ void RenderSystem::SetRenderGraphDiagnosticsRequested(bool requested)
 	ApplyRenderDiagnosticsRequest();
 }
 
+bool RenderSystem::ResolveRenderDebugDiagnosticsEnabled() const
+{
+	// Editor Preferences are per-user state, so they override project-authored
+	// debug diagnostics while the editor is running without changing the saved
+	// RenderSettings.json value.
+	return transientRenderDebugDiagnosticsOverride.value_or(currentSettings.debugEnabled > 0u);
+}
+
 void RenderSystem::ApplyRenderDiagnosticsRequest()
 {
-	// Diagnostics can be requested persistently by project settings or
-	// temporarily by editor windows. Keeping the OR here prevents one source
-	// from accidentally disabling the other while the editor is open.
-	const bool requested = renderGraphDiagnosticsRequestedByUi || currentSettings.debugEnabled > 0u;
+	// Diagnostics can come from a user preference override, project render
+	// settings, or a temporary diagnostics window. Resolve the saved/project
+	// side first, then OR in windows that only need capture data while open.
+	const bool requested = renderGraphDiagnosticsRequestedByUi || ResolveRenderDebugDiagnosticsEnabled();
 	TerraEngine::Renderer::SetRenderDiagnosticsRequested(requested);
 	if (!requested)
 	{
@@ -6216,13 +6224,61 @@ void RenderSystem::SetRenderSettings(const RenderSettings& settings)
 {
 	currentSettings = SanitizeRenderSettings(settings);
 	currentPreset = QualityPreset::Custom;
-	ResourceManager::Instance().SetRenderDebugEnabled(currentSettings.debugEnabled > 0u);
+	ResourceManager::Instance().SetRenderDebugEnabled(ResolveRenderDebugDiagnosticsEnabled());
 	ApplyRenderDiagnosticsRequest();
 	if (auto* vulkanContext = dynamic_cast<VulkanContext*>(rhi.get()))
 	{
 		vulkanContext->SetVariableRateShadingEnabled(currentSettings.variableRateShading > 0u);
 	}
 	SaveSettings();
+}
+
+void RenderSystem::ApplyTransientRenderDiagnostics(bool validationEnabled, bool debugEnabled)
+{
+	const bool validationChanged = !transientRenderValidationOverride.has_value()
+		|| transientRenderValidationOverride.value() != validationEnabled;
+	const bool debugChanged = !transientRenderDebugDiagnosticsOverride.has_value()
+		|| transientRenderDebugDiagnosticsOverride.value() != debugEnabled;
+	if (!validationChanged && !debugChanged)
+	{
+		return;
+	}
+
+	// Preferences are user/editor state, so this path deliberately updates only
+	// live runtime flags. It does not call SetRenderSettings or SaveSettings,
+	// because those APIs own project-authored RenderSettings.json data.
+	transientRenderValidationOverride = validationEnabled;
+	transientRenderDebugDiagnosticsOverride = debugEnabled;
+	ResourceManager::Instance().SetRenderValidationEnabled(validationEnabled);
+	ResourceManager::Instance().SetRenderDebugEnabled(debugEnabled);
+	ApplyRenderDiagnosticsRequest();
+
+	if (auto* vulkanContext = dynamic_cast<VulkanContext*>(rhi.get()))
+	{
+		// Existing Vulkan instances cannot gain layers after creation, but
+		// recording the request keeps renderer rebuild/recovery paths aligned
+		// with the editor preference without modifying project settings.
+		vulkanContext->SetValidationLayersRequested(validationEnabled);
+	}
+}
+
+void RenderSystem::ClearTransientRenderDiagnosticsOverride()
+{
+	if (!transientRenderValidationOverride.has_value() && !transientRenderDebugDiagnosticsOverride.has_value())
+	{
+		return;
+	}
+
+	transientRenderValidationOverride.reset();
+	transientRenderDebugDiagnosticsOverride.reset();
+	ResourceManager::Instance().SetRenderValidationEnabled(currentSettings.validationEnabled > 0u);
+	ResourceManager::Instance().SetRenderDebugEnabled(currentSettings.debugEnabled > 0u);
+	ApplyRenderDiagnosticsRequest();
+
+	if (auto* vulkanContext = dynamic_cast<VulkanContext*>(rhi.get()))
+	{
+		vulkanContext->SetValidationLayersRequested(currentSettings.validationEnabled > 0u);
+	}
 }
 
 void RenderSystem::SetVirtualGeometryQualityProfile(const VirtualGeometryQualityProfile& profile)
@@ -6339,7 +6395,11 @@ void RenderSystem::LoadSettings()
 			currentSettings.virtualGeometry.lodTransitionStableFrames = virtualGeometry.value("lodTransitionStableFrames", 3u);
 		}
 		currentSettings = SanitizeRenderSettings(currentSettings);
-		ResourceManager::Instance().SetRenderDebugEnabled(currentSettings.debugEnabled > 0u);
+		if (!transientRenderValidationOverride.has_value())
+		{
+			ResourceManager::Instance().SetRenderValidationEnabled(currentSettings.validationEnabled > 0u);
+		}
+		ResourceManager::Instance().SetRenderDebugEnabled(ResolveRenderDebugDiagnosticsEnabled());
 		ApplyRenderDiagnosticsRequest();
 	}
 	catch (const std::exception& e)

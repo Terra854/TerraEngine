@@ -31,6 +31,7 @@
 #include <imgui_internal.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <fstream>
 #include <unordered_map>
 #include <nlohmann/json.hpp>
@@ -47,6 +48,7 @@
 #include "../Windows/ResourceResidencyWindow.h"
 #include "../Windows/UIBuilderWindow.h"
 #include "../Windows/ProjectSettingsWindow.h"
+#include "../Windows/PreferencesWindow.h"
 #include "../Windows/EditorMcpBridgeWindow.h"
 
 namespace
@@ -76,6 +78,118 @@ namespace
 		{
 			g_ActiveMainEditorSubsystem->StopPlayMode();
 		}
+	}
+
+	enum class PlayModeToolbarIcon
+	{
+		Play,
+		Stop,
+		Pause,
+		Next
+	};
+
+	void DrawPlayModeToolbarIconShape(ImDrawList* drawList, PlayModeToolbarIcon icon, const ImVec2& min, const ImVec2& max, ImU32 iconColor)
+	{
+		const float width = max.x - min.x;
+		const float height = max.y - min.y;
+		const float unit = std::min(width, height);
+		const ImVec2 center(min.x + width * 0.5f, min.y + height * 0.5f);
+		const float radius = unit * 0.28f;
+		const float thickness = std::max(1.2f, unit * 0.08f);
+
+		switch (icon)
+		{
+		case PlayModeToolbarIcon::Play:
+			drawList->AddTriangleFilled(
+				ImVec2(center.x - radius * 0.55f, center.y - radius),
+				ImVec2(center.x - radius * 0.55f, center.y + radius),
+				ImVec2(center.x + radius * 0.9f, center.y),
+				iconColor);
+			break;
+		case PlayModeToolbarIcon::Stop:
+			drawList->AddRectFilled(
+				ImVec2(center.x - radius * 0.72f, center.y - radius * 0.72f),
+				ImVec2(center.x + radius * 0.72f, center.y + radius * 0.72f),
+				iconColor,
+				2.0f);
+			break;
+		case PlayModeToolbarIcon::Pause:
+			drawList->AddRectFilled(
+				ImVec2(center.x - radius * 0.72f, center.y - radius),
+				ImVec2(center.x - radius * 0.18f, center.y + radius),
+				iconColor,
+				1.5f);
+			drawList->AddRectFilled(
+				ImVec2(center.x + radius * 0.18f, center.y - radius),
+				ImVec2(center.x + radius * 0.72f, center.y + radius),
+				iconColor,
+				1.5f);
+			break;
+		case PlayModeToolbarIcon::Next:
+			drawList->AddTriangleFilled(
+				ImVec2(center.x - radius * 0.9f, center.y - radius),
+				ImVec2(center.x - radius * 0.9f, center.y + radius),
+				ImVec2(center.x + radius * 0.28f, center.y),
+				iconColor);
+			drawList->AddLine(
+				ImVec2(center.x + radius * 0.72f, center.y - radius),
+				ImVec2(center.x + radius * 0.72f, center.y + radius),
+				iconColor,
+				thickness);
+			break;
+		}
+	}
+
+	void DrawPlayModeToolbarTooltip(const char* tooltip)
+	{
+		if (tooltip == nullptr)
+		{
+			return;
+		}
+
+		// The main toolbar deliberately removes most window padding so the
+		// transport icons can sit tightly together. Tooltips are their own
+		// windows, so restore a readable frame padding before drawing the text.
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 4.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+		ImGui::BeginTooltip();
+		ImGui::TextUnformatted(tooltip);
+		ImGui::EndTooltip();
+		ImGui::PopStyleVar(3);
+	}
+
+	bool DrawPlayModeToolbarIconButton(const char* id, PlayModeToolbarIcon icon, bool active, const char* tooltip, float size)
+	{
+		ImGui::PushID(id);
+		const bool pressed = ImGui::InvisibleButton("##play_mode_toolbar_icon", ImVec2(size, size));
+		const bool hovered = ImGui::IsItemHovered();
+		const bool held = ImGui::IsItemActive();
+		const ImVec2 min = ImGui::GetItemRectMin();
+		const ImVec2 max = ImGui::GetItemRectMax();
+
+		const ImU32 background = active
+			? IM_COL32(84, 128, 164, 210)
+			: (held ? IM_COL32(76, 80, 84, 210) : (hovered ? IM_COL32(70, 74, 78, 190) : IM_COL32(0, 0, 0, 0)));
+		const ImU32 border = active ? IM_COL32(138, 188, 226, 230) : (hovered ? IM_COL32(100, 106, 112, 190) : IM_COL32(0, 0, 0, 0));
+		const ImU32 iconColor = active ? IM_COL32(245, 251, 255, 255) : IM_COL32(230, 234, 238, 255);
+
+		// Keep the global Play Mode controls icon-only like a standard editor
+		// transport bar; the tooltip below carries the readable command name.
+		ImDrawList* drawList = ImGui::GetWindowDrawList();
+		drawList->AddRectFilled(min, max, background, 3.0f);
+		if (active || hovered)
+		{
+			drawList->AddRect(min, max, border, 3.0f, 0, active ? 1.4f : 1.0f);
+		}
+		DrawPlayModeToolbarIconShape(drawList, icon, min, max, iconColor);
+
+		if (hovered)
+		{
+			DrawPlayModeToolbarTooltip(tooltip);
+		}
+		ImGui::PopID();
+		return pressed;
 	}
 
 	std::optional<AssetType> AssetTypeFromImporter(std::string_view importerName)
@@ -315,6 +429,7 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<GameViewWindow>(this));
 	m_Windows.push_back(std::make_shared<SceneViewWindow>(this));
 	m_Windows.push_back(std::make_shared<ProjectSettingsWindow>(this));
+	m_Windows.push_back(std::make_shared<PreferencesWindow>(this));
 	m_Windows.push_back(std::make_shared<BuildProfilesWindow>(this));
 	m_Windows.push_back(std::make_shared<ProfilerWindow>(this));
 	m_Windows.push_back(std::make_shared<SchedulerDiagnosticsWindow>(this));
@@ -389,6 +504,10 @@ void MainEditorSubsystem::OnProjectOpened() {
 	SceneManager::Instance().SetSceneRoot(assetRoot.string());
 	ResourceManager::Instance().SetAssetRoot(assetRoot);
 	RenderSystem::Instance().LoadSettings();
+	if (auto preferences = GetWindow<PreferencesWindow>())
+	{
+		preferences->ApplyStoredPreferencesToRenderSystem();
+	}
 	
 	// Check for last opened scene
 	std::filesystem::path lastScenePath = projectRoot / "Library" / "LastScene.txt";
@@ -1510,12 +1629,20 @@ void MainEditorSubsystem::OpenProjectSettings(TerraEngine::Editor::ProjectSettin
 	}
 }
 
+void MainEditorSubsystem::OpenPreferences(TerraEngine::Editor::Preferences::PreferencesCategoryId categoryId)
+{
+	if (auto preferences = GetWindow<PreferencesWindow>())
+	{
+		preferences->OpenToCategory(categoryId);
+	}
+}
+
 std::vector<std::string> MainEditorSubsystem::GetWindowMenuTitlesForTests() const
 {
 	std::vector<std::string> titles;
 	for (const auto& window : m_Windows)
 	{
-		if (window && TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(window->GetTitle()))
+		if (window && ShouldShowWindowInWindowMenuForTests(window->GetTitle()))
 		{
 			titles.push_back(window->GetTitle());
 		}
@@ -1525,7 +1652,8 @@ std::vector<std::string> MainEditorSubsystem::GetWindowMenuTitlesForTests() cons
 
 bool MainEditorSubsystem::ShouldShowWindowInWindowMenuForTests(std::string_view title)
 {
-	return TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(title);
+	return TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(title)
+		&& TerraEngine::Editor::Preferences::ShouldShowWindowInWindowMenu(title);
 }
 
 // MainEditorSubsystem::DrawUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -1597,42 +1725,24 @@ void MainEditorSubsystem::DrawUI() {
 	{
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 2));
 		ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(0, 0));
-		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-		auto& colors = ImGui::GetStyle().Colors;
-		const auto& buttonHovered = colors[ImGuiCol_ButtonHovered];
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(buttonHovered.x, buttonHovered.y, buttonHovered.z, 0.5f));
-		const auto& buttonActive = colors[ImGuiCol_ButtonActive];
-		ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(buttonActive.x, buttonActive.y, buttonActive.z, 0.5f));
 
-		float size = ImGui::GetWindowHeight() - 4.0f; // Constrain to not take too much space? No, this is the main window.
-		// We want a small toolbar strip.
-		// Since we are inside the DockSpace window, but before DockSpace node, we are just drawing at the top.
-		
-		// Let's use a fixed height for the toolbar area to ensure DockSpace doesn't overlap weirdly or just let flow handle it.
-		// But we want to center the buttons.
-		
-		float availWidth = ImGui::GetContentRegionAvail().x;
-		// Buttons: Play/Stop, Pause, Step
-		float buttonSize = 20.0f; // Approx height
-		const char* playLabel = ScriptingSystem::Instance().IsRunning() ? "Stop" : "Play";
-		const char* pauseLabel = "Pause";
-		const char* stepLabel = "Next";
-		
-		// Calculate width
-		ImVec2 playSize = ImGui::CalcTextSize(playLabel);
-		ImVec2 pauseSize = ImGui::CalcTextSize(pauseLabel);
-		ImVec2 stepSize = ImGui::CalcTextSize(stepLabel);
-		
-		float padding = 10.0f;
-		float totalWidth = playSize.x + pauseSize.x + stepSize.x + (padding * 2) + (ImGui::GetStyle().ItemSpacing.x * 2);
-		
-		ImGui::SetCursorPosX((availWidth - totalWidth) * 0.5f);
-		
-		// Play/Stop
+		const float availWidth = ImGui::GetContentRegionAvail().x;
+		const float buttonSize = 20.0f;
+		const float buttonSpacing = ImGui::GetStyle().ItemSpacing.x;
+		const float totalWidth = (buttonSize * 3.0f) + (buttonSpacing * 2.0f);
+		ImGui::SetCursorPosX(std::max(0.0f, (availWidth - totalWidth) * 0.5f));
+
+		const bool isRunning = ScriptingSystem::Instance().IsRunning();
+		const bool isPaused = ScriptingSystem::Instance().IsPaused();
+
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (ImGui::Button(playLabel)) {
-			bool running = ScriptingSystem::Instance().IsRunning();
-			if (!running) {
+		if (DrawPlayModeToolbarIconButton(
+			"play_mode_play_stop",
+			isRunning ? PlayModeToolbarIcon::Stop : PlayModeToolbarIcon::Play,
+			isRunning,
+			isRunning ? "Stop" : "Play",
+			buttonSize)) {
+			if (!isRunning) {
 				CapturePlayModeSceneState();
 				if (ctx != nullptr && ctx->engine != nullptr) {
 					ctx->engine->ResetFrameTimer();
@@ -1644,27 +1754,24 @@ void MainEditorSubsystem::DrawUI() {
 			}
 		}
 		ImGui::SameLine();
-		
-		// Pause
-		// Highlight if paused
-		bool isPaused = ScriptingSystem::Instance().IsPaused();
-		if (isPaused) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 0.0f, 1.0f));
-		if (ImGui::Button(pauseLabel)) {
+
+		if (DrawPlayModeToolbarIconButton(
+			"play_mode_pause",
+			PlayModeToolbarIcon::Pause,
+			isPaused,
+			isPaused ? "Resume" : "Pause",
+			buttonSize)) {
 			ScriptingSystem::Instance().SetPaused(!isPaused);
 		}
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (isPaused) ImGui::PopStyleColor();
 		ImGui::SameLine();
-		
-		// Step
+
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (ImGui::Button(stepLabel)) {
+		if (DrawPlayModeToolbarIconButton("play_mode_next", PlayModeToolbarIcon::Next, false, "Next", buttonSize)) {
 			if (ScriptingSystem::Instance().IsRunning() && ScriptingSystem::Instance().IsPaused()) {
 				ScriptingSystem::Instance().Step(1);
 			}
 		}
 
-		ImGui::PopStyleColor(3);
 		ImGui::PopStyleVar(2);
 	}
 
@@ -1772,6 +1879,11 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 			// project configuration rather than opening another transient tool.
 			if (ImGui::MenuItem(TerraEngine::Editor::ProjectSettings::kProjectSettingsMenuLabel.data())) {
 				OpenProjectSettings();
+			}
+			// Preferences also lives under Edit, but it changes editor-wide user
+			// defaults rather than project/runtime configuration.
+			if (ImGui::MenuItem(TerraEngine::Editor::Preferences::kPreferencesMenuLabel.data())) {
+				OpenPreferences();
 			}
 			ImGui::EndMenu();
 		}

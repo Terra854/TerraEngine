@@ -154,6 +154,7 @@ namespace
 		// Restore the in-memory renderer settings before returning the shared
 		// ResourceManager to its earlier root. The write goes to the temporary
 		// test project rather than the developer's active project settings.
+		RenderSystem::Instance().ClearTransientRenderDiagnosticsOverride();
 		RenderSystem::Instance().SetRenderSettings(previousSettings);
 		ResourceManager::Instance().SetAssetRoot(previousAssetRoot);
 	}
@@ -269,6 +270,46 @@ namespace
 			context.ExpectEqual(4u, virtualGeometry.value("lodTransitionStableFrames", 0u), "Saved render settings should include transition stable frames.");
 
 			RestoreRenderSettings(previousAssetRoot, previousSettings);
+			std::filesystem::remove_all(root);
+		});
+
+		registry.Add("VirtualGeometry.Quality.TransientRenderDiagnosticsDoNotSaveProjectSettings", [](TestContext& context) {
+			const std::filesystem::path previousAssetRoot = ResourceManager::Instance().GetAssetRoot();
+			const RenderSettings previousSettings = RenderSystem::Instance().GetRenderSettings();
+			const bool previousDiagnosticsRequested = TerraEngine::Renderer::RenderDiagnosticsRequested();
+			const std::filesystem::path root = MakeVirtualGeometryQualityTestRoot("TerraEngineVirtualGeometryQualityTransientDiagnosticsTests");
+			ResourceManager::Instance().SetAssetRoot(root / "Assets");
+			RenderSystem::Instance().ClearTransientRenderDiagnosticsOverride();
+
+			RenderSettings savedSettings = previousSettings;
+			savedSettings.validationEnabled = 0u;
+			savedSettings.debugEnabled = 0u;
+			RenderSystem::Instance().SetRenderSettings(savedSettings);
+			RenderSystem::Instance().ApplyTransientRenderDiagnostics(true, true);
+
+			const std::filesystem::path settingsPath = root / "ProjectSettings" / "RenderSettings.json";
+			std::ifstream transientInput(settingsPath);
+			nlohmann::json transientDocument;
+			transientInput >> transientDocument;
+			transientInput.close();
+
+			context.Expect(ResourceManager::Instance().IsRenderValidationEnabled(), "Transient editor validation should update the live validation request.");
+			context.Expect(ResourceManager::Instance().IsRenderDebugEnabled(), "Transient editor diagnostics should update the live debug flag.");
+			context.Expect(TerraEngine::Renderer::RenderDiagnosticsRequested(), "Transient editor diagnostics should request render diagnostics immediately.");
+			context.Expect(!transientDocument.value("validationEnabled", true), "Transient editor validation must not rewrite project RenderSettings.json.");
+			context.Expect(!transientDocument.value("debugEnabled", true), "Transient editor diagnostics must not rewrite project RenderSettings.json.");
+
+			savedSettings.shadowResolution += 128u;
+			RenderSystem::Instance().SetRenderSettings(savedSettings);
+			std::ifstream projectSaveInput(settingsPath);
+			nlohmann::json projectSaveDocument;
+			projectSaveInput >> projectSaveDocument;
+			projectSaveInput.close();
+			context.Expect(!projectSaveDocument.value("validationEnabled", true), "Later project graphics saves should not inherit transient validation preferences.");
+			context.Expect(!projectSaveDocument.value("debugEnabled", true), "Later project graphics saves should not inherit transient debug preferences.");
+
+			RestoreRenderSettings(previousAssetRoot, previousSettings);
+			TerraEngine::Renderer::SetRenderDiagnosticsRequested(previousDiagnosticsRequested);
 			std::filesystem::remove_all(root);
 		});
 

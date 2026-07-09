@@ -836,6 +836,14 @@ bool ResourceManager::IsRenderDebugEnabled() const
 	return m_RenderDebugEnabled;
 }
 
+void ResourceManager::SetRenderValidationEnabled(bool enabled)
+{
+	// Validation layers are a startup/backend request rather than a render-pass
+	// toggle. Editor preferences still store the user's intent here so the next
+	// backend creation can read the preference without writing project files.
+	m_RenderValidationEnabled = enabled;
+}
+
 void ResourceManager::SetRenderDebugEnabled(bool enabled)
 {
 	// Render debug diagnostics are a TerraEngine runtime switch, so the editor

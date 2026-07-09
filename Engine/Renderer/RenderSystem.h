@@ -110,6 +110,12 @@ public:
 	// GetQualityPreset is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	QualityPreset GetQualityPreset() const { return currentPreset; }
 	void SetRenderSettings(const RenderSettings& settings);
+	// Applies editor/user diagnostic preferences to the running renderer without
+	// saving RenderSettings.json, keeping Preferences separate from project data.
+	void ApplyTransientRenderDiagnostics(bool validationEnabled, bool debugEnabled);
+	// Clears the editor override so tests and project-only flows fall back to
+	// the diagnostics authored in RenderSettings.json.
+	void ClearTransientRenderDiagnosticsOverride();
 	const RenderSettings& GetRenderSettings() const { return currentSettings; }
 	void SetVirtualGeometryQualityProfile(const VirtualGeometryQualityProfile& profile);
 	VirtualGeometryQualityProfile GetVirtualGeometryQualityProfile() const;
@@ -184,6 +190,7 @@ public:
 
 private:
 	RenderSystem();
+	bool ResolveRenderDebugDiagnosticsEnabled() const;
 	void ApplyRenderDiagnosticsRequest();
 	TerraEngine::Renderer::ResourceRestorationPlan BuildRendererRecoveryRestorationPlan(const TerraEngine::Renderer::RenderFrameSnapshot& snapshot) const;
 	bool TryRecoverRendererAfterDeviceLoss(TerraEngine::Renderer::RenderDiagnosticsSummary& diagnostics);
@@ -195,6 +202,8 @@ private:
 	bool editorModeEnabled = false;
 	bool sceneViewGridVisible = true;
 	bool renderGraphDiagnosticsRequestedByUi = false;
+	std::optional<bool> transientRenderValidationOverride;
+	std::optional<bool> transientRenderDebugDiagnosticsOverride;
 
 	bool hasSceneViewCamera = false;
 	OverrideCameraData sceneViewCamera;

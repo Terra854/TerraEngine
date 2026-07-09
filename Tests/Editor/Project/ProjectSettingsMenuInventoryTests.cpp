@@ -8,6 +8,9 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.ProjectSettings.RemovedWindowsAreHiddenFromWindowMenu", [](TestContext& context) {
 			const std::vector<std::string> visibleTitles = ProjectSettings::BuildWindowMenuTitlesForContractTest();
 			context.Expect(
+				!ProjectSettings::ContainsTitle(visibleTitles, TerraEngine::Editor::Preferences::kPreferencesWindowTitle),
+				"Preferences should be opened from Edit instead of appearing as an individual Window menu entry.");
+			context.Expect(
 				!ProjectSettings::ContainsTitle(visibleTitles, TerraEngine::Editor::ProjectSettings::kSkySettingsWindowTitle),
 				"Sky Settings should be removed as an individual Window menu entry after consolidation.");
 			context.Expect(
@@ -31,6 +34,10 @@ namespace TerraEngine::EditorTests
 				TerraEngine::Editor::ProjectSettings::FindProjectSettingsCategory(
 					TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Graphics) != nullptr,
 				"Graphics settings should be available as a Project Settings category.");
+			context.Expect(
+				TerraEngine::Editor::ProjectSettings::FindProjectSettingsCategory(
+					TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Resources) != nullptr,
+				"Resource residency and streaming policy should be available as a Project Settings category.");
 			context.Expect(
 				TerraEngine::Editor::ProjectSettings::FindProjectSettingsCategory(
 					TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Sky) == nullptr,

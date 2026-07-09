@@ -157,6 +157,7 @@ bool SaveBuildProfile(const BuildProfile& profile, const std::filesystem::path& 
 		j["includeDebugSymbols"] = profile.includeDebugSymbols;
 		j["stripNativeAotOutput"] = profile.stripNativeAotOutput;
 		j["enableVulkanValidationLayers"] = profile.enableVulkanValidationLayers;
+		j["enableRenderDebugDiagnostics"] = profile.enableRenderDebugDiagnostics;
 		j["rendererRecovery"] = {
 			{ "diagnosticsEnabled", profile.rendererRecoveryDiagnosticsEnabled },
 			{ "maxRendererRebuildAttemptsPerIncident", profile.rendererRecoveryMaxRebuildAttempts },
@@ -222,6 +223,8 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path) {
 		if (j.contains("stripNativeAotOutput"))    profile.stripNativeAotOutput = j["stripNativeAotOutput"].get<bool>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("enableVulkanValidationLayers")) profile.enableVulkanValidationLayers = j["enableVulkanValidationLayers"].get<bool>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (j.contains("enableRenderDebugDiagnostics")) profile.enableRenderDebugDiagnostics = j["enableRenderDebugDiagnostics"].get<bool>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto recoveryIt = j.find("rendererRecovery"); recoveryIt != j.end() && recoveryIt->is_object()) {
 			profile.rendererRecoveryDiagnosticsEnabled = recoveryIt->value("diagnosticsEnabled", profile.rendererRecoveryDiagnosticsEnabled);

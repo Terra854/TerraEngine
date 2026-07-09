@@ -29,6 +29,7 @@ namespace TerraEngine::Editor::ProjectSettings
 	{
 		Project,
 		Graphics,
+		Resources,
 		Sky
 	};
 
@@ -41,7 +42,7 @@ namespace TerraEngine::Editor::ProjectSettings
 		std::array<std::string_view, 8> keywords;
 	};
 
-	inline constexpr std::array<ProjectSettingsCategoryDescriptor, 2> kProjectSettingsCategories = {{
+	inline constexpr std::array<ProjectSettingsCategoryDescriptor, 3> kProjectSettingsCategories = {{
 		{
 			ProjectSettingsCategoryId::Project,
 			"project",
@@ -53,8 +54,15 @@ namespace TerraEngine::Editor::ProjectSettings
 			ProjectSettingsCategoryId::Graphics,
 			"graphics",
 			"Graphics",
-			"Renderer quality, lighting, shadow, texture, and virtual geometry options.",
-			{ "graphics", "render", "quality", "shadow", "lighting", "texture", "lod", "virtual geometry" }
+			"Renderer quality, lighting, shadow, and virtual geometry detail options.",
+			{ "graphics", "render", "quality", "shadow", "lighting", "lod", "virtual geometry", "detail" }
+		},
+		{
+			ProjectSettingsCategoryId::Resources,
+			"resources",
+			"Resources",
+			"Loaded resource cleanup, RAM/VRAM residency, texture mip streaming, and virtual geometry page budgets.",
+			{ "resources", "residency", "memory", "ram", "vram", "streaming", "mip", "virtual geometry" }
 		}
 	}};
 

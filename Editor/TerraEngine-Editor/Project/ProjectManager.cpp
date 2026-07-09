@@ -633,6 +633,16 @@ void ProjectManager::SetEditorMcpPreferences(bool enabled, const std::string& wr
 	SaveEditorPreferences();
 }
 
+void ProjectManager::SetRendererDiagnosticPreferences(bool vulkanValidationLayers, bool renderDebugDiagnostics) {
+	// Vulkan validation and render debug overlays are local editor diagnostics.
+	// Store them with user preferences so toggling them does not dirty project
+	// configuration or silently affect teammate/export defaults.
+	editorPrefs.vulkanValidationLayers = vulkanValidationLayers;
+	editorPrefs.renderDebugDiagnostics = renderDebugDiagnostics;
+	editorPrefs.rendererDiagnosticsPreferencesInitialized = true;
+	SaveEditorPreferences();
+}
+
 void ProjectManager::SetSceneViewOverlayPreference(const TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference& preference) {
 	// Scene View overlay options are editor preferences, not scene data, so
 	// changing gizmo/icon visibility never dirties the active project or export.

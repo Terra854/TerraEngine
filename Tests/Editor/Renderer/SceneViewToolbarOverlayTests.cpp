@@ -29,6 +29,8 @@ namespace TerraEngine::EditorTests
 			context.Expect(sceneViewSource.find("ImGuiMouseButton_Middle") != std::string::npos, "Scene View should support middle-mouse panning.");
 			context.Expect(sceneViewSource.find("HandleSceneViewScrollZoom") != std::string::npos, "Scene View should support mouse-wheel zoom in both projection modes.");
 			context.Expect(sceneViewSource.find("Perspective wheel input dollies") != std::string::npos, "Perspective scroll zoom should move the editor camera instead of changing gameplay FOV.");
+			context.Expect(sceneViewSource.find("sceneViewAcceptsViewportInput") != std::string::npos, "Scene View scroll zoom should require topmost hover ownership before consuming wheel input.");
+			context.Expect(sceneViewSource.find("viewportOwnsPointer && !orientationWidgetBusy") != std::string::npos, "Scene View should not zoom from raw viewport coordinates when another editor window covers it.");
 			context.Expect(sceneViewSource.find("DrawOverlayIconButton") != std::string::npos, "Scene View toolbar should use icon-only buttons.");
 			context.Expect(sceneViewSource.find("DrawOverlayToggleButton") == std::string::npos, "Scene View toolbar should not draw text-first debug buttons.");
 		});

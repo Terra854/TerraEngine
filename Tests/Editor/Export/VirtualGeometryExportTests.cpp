@@ -354,19 +354,25 @@ namespace TerraEngine::EditorTests
 			context.Expect(!treatsPackageParentAsLooseMesh, "The export pipeline must not classify GLTF/FBX package parents as loose compiled mesh assets.");
 		});
 
-		registry.Add("VirtualGeometry.Editor.Export.ValidationLayersComeFromBuildProfile", [](TestContext& context) {
+		registry.Add("VirtualGeometry.Editor.Export.RenderDiagnosticsComeFromBuildProfile", [](TestContext& context) {
 			const std::filesystem::path pipelinePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Editor" / "Export" / "ExportPipeline.cpp";
 			const std::string pipelineSource = ReadTextFile(pipelinePath);
 			const std::size_t resolverIndex = pipelineSource.find("ResolveRenderProfileManifest(const BuildProfile& profile");
-			const std::size_t profileFlagIndex = resolverIndex == std::string::npos ? std::string::npos : pipelineSource.find("profile.enableVulkanValidationLayers", resolverIndex);
-			const std::size_t renderSettingsOverrideIndex = pipelineSource.find("(*renderSettings)[\"validationEnabled\"] = profile.enableVulkanValidationLayers");
-			const std::size_t editorSettingIndex = resolverIndex == std::string::npos ? std::string::npos : pipelineSource.find("savedSettings.value(\"validationEnabled\"", resolverIndex);
+			const std::size_t validationProfileFlagIndex = resolverIndex == std::string::npos ? std::string::npos : pipelineSource.find("profile.enableVulkanValidationLayers", resolverIndex);
+			const std::size_t debugProfileFlagIndex = resolverIndex == std::string::npos ? std::string::npos : pipelineSource.find("profile.enableRenderDebugDiagnostics", resolverIndex);
+			const std::size_t validationRenderSettingsOverrideIndex = pipelineSource.find("(*renderSettings)[\"validationEnabled\"] = profile.enableVulkanValidationLayers");
+			const std::size_t debugRenderSettingsOverrideIndex = pipelineSource.find("(*renderSettings)[\"debugEnabled\"] = profile.enableRenderDebugDiagnostics");
+			const std::size_t editorValidationSettingIndex = resolverIndex == std::string::npos ? std::string::npos : pipelineSource.find("savedSettings.value(\"validationEnabled\"", resolverIndex);
+			const std::size_t editorDebugSettingIndex = resolverIndex == std::string::npos ? std::string::npos : pipelineSource.find("savedSettings.value(\"debugEnabled\"", resolverIndex);
 
 			context.Expect(!pipelineSource.empty(), "The export pipeline source should be readable by the editor test target.");
 			context.Expect(resolverIndex != std::string::npos, "Export render-profile manifest creation should receive the selected build profile.");
-			context.Expect(profileFlagIndex != std::string::npos, "Exported Vulkan validation must be controlled by the selected build profile.");
-			context.Expect(renderSettingsOverrideIndex != std::string::npos, "Exported exact render settings must mirror the build profile validation toggle.");
-			context.Expect(editorSettingIndex == std::string::npos, "Exported Vulkan validation must not inherit the editor Project Settings toggle.");
+			context.Expect(validationProfileFlagIndex != std::string::npos, "Exported Vulkan validation must be controlled by the selected build profile.");
+			context.Expect(debugProfileFlagIndex != std::string::npos, "Exported render debug diagnostics must be controlled by the selected build profile.");
+			context.Expect(validationRenderSettingsOverrideIndex != std::string::npos, "Exported exact render settings must mirror the build profile validation toggle.");
+			context.Expect(debugRenderSettingsOverrideIndex != std::string::npos, "Exported exact render settings must mirror the build profile debug diagnostics toggle.");
+			context.Expect(editorValidationSettingIndex == std::string::npos, "Exported Vulkan validation must not inherit the editor Preferences toggle.");
+			context.Expect(editorDebugSettingIndex == std::string::npos, "Exported render debug diagnostics must not inherit the editor Preferences toggle.");
 		});
 
 		registry.Add("VirtualGeometry.Editor.Export.ValidatesPackagedTemfPayloads", [](TestContext& context) {

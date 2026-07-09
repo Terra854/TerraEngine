@@ -31,10 +31,12 @@ namespace TerraEngine::EditorTests {
 	void RegisterLinuxScriptCompilationTests(TestRegistry& registry);
 	void RegisterLinuxScriptEditorLaunchTests(TestRegistry& registry);
 	void RegisterLinuxScriptWorkspaceTests(TestRegistry& registry);
+	void RegisterPreferencesWindowTests(TestRegistry& registry);
 	void RegisterProjectSettingsWindowTests(TestRegistry& registry);
 	void RegisterProjectSettingsMenuInventoryTests(TestRegistry& registry);
 	void RegisterProjectSettingsPersistenceTests(TestRegistry& registry);
 	void RegisterEditorCommandLineTests(TestRegistry& registry);
+	void RegisterMainEditorToolbarTests(TestRegistry& registry);
 	void RegisterEditorAutomationServiceTests(TestRegistry& registry);
 	void RegisterEditorReflectionWorkerBoundaryTests(TestRegistry& registry);
 	void RegisterEditorMcpBridgeContractTests(TestRegistry& registry);
@@ -131,10 +133,12 @@ int main() {
 	TerraEngine::EditorTests::RegisterLinuxScriptCompilationTests(registry);
 	TerraEngine::EditorTests::RegisterLinuxScriptEditorLaunchTests(registry);
 	TerraEngine::EditorTests::RegisterLinuxScriptWorkspaceTests(registry);
+	TerraEngine::EditorTests::RegisterPreferencesWindowTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsWindowTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsMenuInventoryTests(registry);
 	TerraEngine::EditorTests::RegisterProjectSettingsPersistenceTests(registry);
 	TerraEngine::EditorTests::RegisterEditorCommandLineTests(registry);
+	TerraEngine::EditorTests::RegisterMainEditorToolbarTests(registry);
 	TerraEngine::EditorTests::RegisterEditorAutomationServiceTests(registry);
 	TerraEngine::EditorTests::RegisterEditorReflectionWorkerBoundaryTests(registry);
 	TerraEngine::EditorTests::RegisterEditorMcpBridgeContractTests(registry);

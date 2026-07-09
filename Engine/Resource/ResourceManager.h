@@ -135,6 +135,7 @@ public:
 	std::string GetRenderProfileSummary() const;
 	bool IsRenderValidationEnabled() const;
 	bool IsRenderDebugEnabled() const;
+	void SetRenderValidationEnabled(bool enabled);
 	void SetRenderDebugEnabled(bool enabled);
 	TerraEngine::Renderer::RendererRecoveryPolicy GetRendererRecoveryPolicy() const;
 	std::optional<RenderSettings> GetConfiguredRenderSettings() const;

@@ -65,6 +65,10 @@ struct BuildProfile {
 	/// keep editor validation on without shipping exports that request layers.
 	bool enableVulkanValidationLayers = false;
 
+	/// Whether the exported runtime should collect renderer debug diagnostics.
+	/// This is runtime diagnostic data, not managed/native debug symbol output.
+	bool enableRenderDebugDiagnostics = false;
+
 	/// Whether exported builds should keep renderer recovery diagnostics in
 	/// logs and manifest metadata. This is CPU-only data, so it remains useful
 	/// even when the renderer cannot draw a diagnostics overlay.

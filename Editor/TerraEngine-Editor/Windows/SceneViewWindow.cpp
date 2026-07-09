@@ -1344,23 +1344,28 @@ void SceneViewWindow::OnGui() {
 
 	const bool isFocused = ImGui::IsWindowFocused();
 	const bool isHovered = ImGui::IsWindowHovered();
+	const bool sceneViewAcceptsViewportInput = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
 	const ImVec2 mousePos = ImGui::GetMousePos();
 	const bool pointerInsideViewport =
 		mousePos.x >= cursorPos.x && mousePos.x <= cursorPos.x + contentSize.x
 		&& mousePos.y >= cursorPos.y && mousePos.y <= cursorPos.y + contentSize.y;
-	const bool orientationWidgetHovered = pointerInsideViewport && IsPointerInsideOrientationWidget(cursorPos, contentSize);
+	const bool viewportOwnsPointer = sceneViewAcceptsViewportInput && pointerInsideViewport;
+	const bool orientationWidgetHovered = viewportOwnsPointer && IsPointerInsideOrientationWidget(cursorPos, contentSize);
 	const bool orientationWidgetBusy = orientationWidgetHovered || ImGuizmo::IsUsingViewManipulate();
 	if (orientationWidgetHovered)
 	{
 		m_InteractionContext.hoveredRegion = SceneOverlay::InteractionRegion::OrientationWidget;
 	}
-	if (pointerInsideViewport && !orientationWidgetBusy)
+	if (viewportOwnsPointer && !orientationWidgetBusy)
 	{
+		// Pixel bounds alone are not enough here: docked editor panels can cover
+		// the Scene View while the cursor is still inside its old rectangle, and
+		// wheel input should belong to the topmost hovered window.
 		HandleSceneViewScrollZoom();
 	}
 	// Apply editor camera input before deriving matrices so the submitted view
 	// matrix and camera world position describe the same camera state.
-	if (!orientationWidgetBusy && (isFocused || isHovered) && (pointerInsideViewport || m_IsFlyCamActive || m_IsSceneViewPanning)) {
+	if (!orientationWidgetBusy && (isFocused || isHovered) && (viewportOwnsPointer || m_IsFlyCamActive || m_IsSceneViewPanning)) {
 		HandleCameraInput(ImGui::GetIO().DeltaTime, contentSize);
 	}
 

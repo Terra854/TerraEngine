@@ -387,9 +387,9 @@ namespace TerraEngine::Tests
 			context.Expect(!ShaderContains(vulkanHeader, "inline const bool enableValidationLayers"), "Vulkan validation should be requested by runtime settings, not a compile-mode constant.");
 			context.Expect(ShaderContains(vulkanHeader, "bool validationLayersRequested = false;"), "The Vulkan backend should track the startup validation request explicitly.");
 			context.Expect(ShaderContains(vulkanSource, "void VulkanContext::SetValidationLayersRequested(bool enabled)"), "RenderSystem needs a pre-instance hook for validation policy.");
-			context.Expect(ShaderContains(renderSystem, "SetValidationLayersRequested(ResourceManager::Instance().IsRenderValidationEnabled())"), "Editor and export render profiles should drive validation in every compile mode.");
+			context.Expect(ShaderContains(renderSystem, "SetValidationLayersRequested(ResourceManager::Instance().IsRenderValidationEnabled())"), "Runtime render profiles and editor preferences should drive validation in every compile mode.");
 			context.Expect(ShaderContains(resourceManager, "ApplyRenderDiagnosticFlagsFromSettingsFile"), "Project sessions should read validation/debug flags before RenderSystem initializes Vulkan.");
-			context.Expect(ShaderContains(resourceManager, "GetProjectRoot() / \"ProjectSettings\" / \"RenderSettings.json\""), "Project-level RenderSettings should be the primary source for editor validation flags.");
+			context.Expect(ShaderContains(resourceManager, "GetProjectRoot() / \"ProjectSettings\" / \"RenderSettings.json\""), "Project-level RenderSettings should remain available for runtime render profile startup flags.");
 			context.Expect(ShaderContains(vulkanInit, "validationLayersEnabled = validationLayersRequested;"), "Instance creation should consume the runtime validation request.");
 			context.Expect(ShaderContains(vulkanInit, "validation layers requested, but not available; continuing without validation layers."), "Missing Vulkan SDK validation layers should warn and continue booting.");
 		});

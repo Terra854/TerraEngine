@@ -17,6 +17,7 @@
 #include <glm/vec3.hpp>
 #include "IEditorSubsystem.h"
 #include "../Framework/EditorWindow.h"
+#include "../Project/EditorPreferencesMetadata.h"
 #include "../Project/ProjectSettingsMetadata.h"
 #include "Engine/Renderer/RenderTypes.h"
 #include "Engine/Utilities/UUID.h"
@@ -112,6 +113,8 @@ public:
 	const std::vector<std::shared_ptr<EditorWindow>>& GetWindows() const { return m_Windows; }
 	void OpenProjectSettings(TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId categoryId =
 		TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Project);
+	void OpenPreferences(TerraEngine::Editor::Preferences::PreferencesCategoryId categoryId =
+		TerraEngine::Editor::Preferences::PreferencesCategoryId::Diagnostics);
 	std::vector<std::string> GetWindowMenuTitlesForTests() const;
 	static bool ShouldShowWindowInWindowMenuForTests(std::string_view title);
 

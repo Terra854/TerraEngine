@@ -29,6 +29,11 @@ struct EditorPreferences {
 	bool editorMcpEnabled = false;
 	std::string editorMcpWriteModeDefault = "read_only";
 	std::string editorMcpRecentSession;
+	// Renderer diagnostics are editor-wide preferences because they affect the
+	// local developer session and should not force project/runtime defaults.
+	bool vulkanValidationLayers = false;
+	bool renderDebugDiagnostics = false;
+	bool rendererDiagnosticsPreferencesInitialized = false;
 	TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference sceneViewOverlay;
 
 	friend void to_json(nlohmann::json& json, const EditorPreferences& preferences)
@@ -41,6 +46,9 @@ struct EditorPreferences {
 			{"editorMcpEnabled", preferences.editorMcpEnabled},
 			{"editorMcpWriteModeDefault", preferences.editorMcpWriteModeDefault},
 			{"editorMcpRecentSession", preferences.editorMcpRecentSession},
+			{"vulkanValidationLayers", preferences.vulkanValidationLayers},
+			{"renderDebugDiagnostics", preferences.renderDebugDiagnostics},
+			{"rendererDiagnosticsPreferencesInitialized", preferences.rendererDiagnosticsPreferencesInitialized},
 			{"sceneViewOverlay", preferences.sceneViewOverlay}
 		};
 	}
@@ -56,6 +64,12 @@ struct EditorPreferences {
 		preferences.editorMcpEnabled = json.value("editorMcpEnabled", json.value("editorMcpEnabledByDefault", preferences.editorMcpEnabled));
 		preferences.editorMcpWriteModeDefault = json.value("editorMcpWriteModeDefault", preferences.editorMcpWriteModeDefault);
 		preferences.editorMcpRecentSession = json.value("editorMcpRecentSession", preferences.editorMcpRecentSession);
+		preferences.vulkanValidationLayers = json.value("vulkanValidationLayers", preferences.vulkanValidationLayers);
+		preferences.renderDebugDiagnostics = json.value("renderDebugDiagnostics", preferences.renderDebugDiagnostics);
+		preferences.rendererDiagnosticsPreferencesInitialized =
+			json.value("rendererDiagnosticsPreferencesInitialized", false)
+			|| json.contains("vulkanValidationLayers")
+			|| json.contains("renderDebugDiagnostics");
 		if (json.contains("sceneViewOverlay") && json["sceneViewOverlay"].is_object())
 		{
 			preferences.sceneViewOverlay = json["sceneViewOverlay"].get<TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference>();

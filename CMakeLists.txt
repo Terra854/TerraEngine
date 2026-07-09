@@ -907,6 +907,7 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/ResourceResidencyWindow.cpp
 	Editor/TerraEngine-Editor/Windows/UIBuilderWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProjectSettingsWindow.cpp
+	Editor/TerraEngine-Editor/Windows/PreferencesWindow.cpp
 	Editor/TerraEngine-Editor/Windows/EditorMcpBridgeWindow.cpp
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp

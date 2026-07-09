@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Editor/TerraEngine-Editor/Project/EditorPreferencesMetadata.h"
 #include "Editor/TerraEngine-Editor/Project/ProjectSettingsMetadata.h"
 
 #include <algorithm>
@@ -22,6 +23,7 @@ namespace TerraEngine::EditorTests::ProjectSettings
 			"Game View",
 			"Scene View",
 			std::string(TerraEngine::Editor::ProjectSettings::kProjectSettingsWindowTitle),
+			std::string(TerraEngine::Editor::Preferences::kPreferencesWindowTitle),
 			std::string(TerraEngine::Editor::ProjectSettings::kBuildProfilesWindowTitle),
 			std::string(TerraEngine::Editor::ProjectSettings::kSkySettingsWindowTitle),
 			std::string(TerraEngine::Editor::ProjectSettings::kRenderSettingsWindowTitle)
@@ -30,7 +32,8 @@ namespace TerraEngine::EditorTests::ProjectSettings
 		std::vector<std::string> visibleTitles;
 		for (const std::string& title : allWindows)
 		{
-			if (TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(title))
+			if (TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(title)
+				&& TerraEngine::Editor::Preferences::ShouldShowWindowInWindowMenu(title))
 			{
 				visibleTitles.push_back(title);
 			}

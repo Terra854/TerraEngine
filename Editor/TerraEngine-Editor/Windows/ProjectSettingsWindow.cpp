@@ -10,11 +10,19 @@
 #include "../Project/ProjectManager.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Resource/ResourceManager.h"
+#include "Engine/Resource/ResourceResidency.h"
+#include "Engine/Resource/ResourceStreaming.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <imgui.h>
+#include <limits>
+#include <nlohmann/json.hpp>
 #include <string>
 
 namespace
@@ -65,6 +73,130 @@ namespace
 		if (ImGui::IsItemHovered())
 		{
 			ImGui::SetTooltip("%s", description);
+		}
+	}
+
+	nlohmann::json BuildResidencyPolicyJson(const TerraEngine::Resource::ResidencyPolicy& policy)
+	{
+		nlohmann::json object;
+		object["enabled"] = policy.enabled;
+		object["cleanupIntervalSeconds"] = policy.cleanupIntervalSeconds;
+		object["cpu"] = {
+			{ "idleSecondsThreshold", policy.cpu.idleSecondsThreshold },
+			{ "memoryBudgetBytes", policy.cpu.memoryBudgetBytes },
+			{ "reloadGraceSeconds", policy.cpu.reloadGraceSeconds }
+		};
+		object["gpu"] = {
+			{ "idleSecondsThreshold", policy.gpu.idleSecondsThreshold },
+			{ "memoryBudgetBytes", policy.gpu.memoryBudgetBytes },
+			{ "reloadGraceSeconds", policy.gpu.reloadGraceSeconds },
+			{ "strictBudgetMode", policy.gpu.strictBudgetMode }
+		};
+		return object;
+	}
+
+	nlohmann::json BuildStreamingPolicyJson(const TerraEngine::Resource::StreamingPolicy& policy)
+	{
+		nlohmann::json object;
+		object["enabled"] = policy.enabled;
+		object["deferScenePayloadsOnLoad"] = policy.deferScenePayloadsOnLoad;
+		object["streamingDistance"] = policy.streamingDistance;
+		object["visibleRetentionSeconds"] = policy.visibleRetentionSeconds;
+		object["neededRetentionSeconds"] = policy.neededRetentionSeconds;
+		object["maxLoadsPerUpdate"] = policy.maxLoadsPerUpdate;
+		object["textureMipStreamingEnabled"] = policy.textureMipStreamingEnabled;
+		object["textureMinStreamMip"] = policy.textureMinStreamMip;
+		object["textureMaxStreamMip"] = policy.textureMaxStreamMip;
+		object["virtualGeometryPageMemoryBudgetBytes"] = policy.virtualGeometryPageMemoryBudgetBytes;
+		object["virtualGeometryPageUploadBudgetBytes"] = policy.virtualGeometryPageUploadBudgetBytes;
+		object["virtualGeometryPageRetirementBudgetBytes"] = policy.virtualGeometryPageRetirementBudgetBytes;
+		object["memoryBudgetInteraction"] = std::string(TerraEngine::Resource::ToString(policy.memoryBudgetInteraction));
+		return object;
+	}
+
+	int MemoryBudgetInteractionIndex(TerraEngine::Resource::MemoryBudgetInteraction interaction)
+	{
+		switch (interaction)
+		{
+		case TerraEngine::Resource::MemoryBudgetInteraction::PreferStreamingRelease:
+			return 1;
+		case TerraEngine::Resource::MemoryBudgetInteraction::Conservative:
+			return 2;
+		case TerraEngine::Resource::MemoryBudgetInteraction::UseResidencyPolicy:
+			return 0;
+		}
+		return 0;
+	}
+
+	TerraEngine::Resource::MemoryBudgetInteraction MemoryBudgetInteractionFromIndex(int index)
+	{
+		switch (index)
+		{
+		case 1:
+			return TerraEngine::Resource::MemoryBudgetInteraction::PreferStreamingRelease;
+		case 2:
+			return TerraEngine::Resource::MemoryBudgetInteraction::Conservative;
+		default:
+			return TerraEngine::Resource::MemoryBudgetInteraction::UseResidencyPolicy;
+		}
+	}
+
+	int BytesToMbInput(std::uint64_t bytes)
+	{
+		const std::uint64_t mb = bytes / (1024ull * 1024ull);
+		return static_cast<int>(std::min<std::uint64_t>(mb, static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
+	}
+
+	std::uint64_t MbInputToBytes(int value)
+	{
+		return static_cast<std::uint64_t>(std::max(0, value)) * 1024ull * 1024ull;
+	}
+
+	void PersistResourcePoliciesToProjectManifest(const TerraEngine::Resource::ResidencyPolicy& residencyPolicy,
+		const TerraEngine::Resource::StreamingPolicy& streamingPolicy)
+	{
+		const std::filesystem::path projectRoot = ResourceManager::Instance().GetProjectRoot();
+		if (projectRoot.empty())
+		{
+			return;
+		}
+
+		const std::filesystem::path manifestPath = projectRoot / "game.json";
+		nlohmann::json manifest = nlohmann::json::object();
+		if (std::filesystem::exists(manifestPath))
+		{
+			std::ifstream input(manifestPath);
+			if (input)
+			{
+				try
+				{
+					input >> manifest;
+				}
+				catch (...)
+				{
+					// A malformed manifest should not crash Project Settings.
+					// Replacing it with policy-only JSON would discard product
+					// metadata, so leave the file untouched instead.
+					return;
+				}
+			}
+		}
+
+		if (!manifest.is_object())
+		{
+			return;
+		}
+
+		// These policies are project/runtime settings. Persisting them beside
+		// product metadata lets exports copy the same runtime contract without
+		// hiding resource behavior inside a build profile.
+		manifest["residencyPolicy"] = BuildResidencyPolicyJson(residencyPolicy);
+		manifest["streamingPolicy"] = BuildStreamingPolicyJson(streamingPolicy);
+
+		std::ofstream output(manifestPath);
+		if (output)
+		{
+			output << manifest.dump(4);
 		}
 	}
 }
@@ -155,6 +287,9 @@ void ProjectSettingsWindow::DrawSelectedCategory()
 		break;
 	case TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Graphics:
 		DrawGraphicsCategory();
+		break;
+	case TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Resources:
+		DrawResourcesCategory();
 		break;
 	default:
 		DrawUnavailableState("This Project Settings category is no longer available.");
@@ -327,25 +462,6 @@ void ProjectSettingsWindow::DrawGraphicsCategory()
 	}
 	ShowOptionTooltip("Variable Rate Shading affects the next backend initialization or export package.");
 
-	if (ImGui::CollapsingHeader("Renderer Diagnostics"))
-	{
-		bool enableValidation = settings.validationEnabled > 0u;
-		if (ImGui::Checkbox("Vulkan Validation Layers", &enableValidation))
-		{
-			settings.validationEnabled = enableValidation ? 1u : 0u;
-			changed = true;
-		}
-		ShowOptionTooltip("Requests Vulkan validation layers on the next editor/project-runtime launch. Export builds use the selected Build Profile toggle.");
-
-		bool enableDebug = settings.debugEnabled > 0u;
-		if (ImGui::Checkbox("Render Debug Diagnostics", &enableDebug))
-		{
-			settings.debugEnabled = enableDebug ? 1u : 0u;
-			changed = true;
-		}
-		ShowOptionTooltip("Applies TerraEngine render debug diagnostics immediately and saves the same state for the next editor or export launch.");
-	}
-
 	if (ImGui::CollapsingHeader("Virtual Geometry", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		// This is a runtime selection scale, not an import/cook ratio. The
@@ -364,6 +480,202 @@ void ProjectSettingsWindow::DrawGraphicsCategory()
 	if (changed)
 	{
 		renderSystem.SetRenderSettings(settings);
+	}
+}
+
+void ProjectSettingsWindow::DrawResourcesCategory()
+{
+	ImGui::TextUnformatted("Resources");
+	ImGui::Separator();
+
+	if (m_Owner == nullptr || m_Owner->GetContext() == nullptr || m_Owner->GetContext()->projectManager == nullptr)
+	{
+		DrawUnavailableState("Resource settings are unavailable until the editor project manager is ready.");
+		return;
+	}
+
+	ProjectManager* projectManager = m_Owner->GetContext()->projectManager.get();
+	if (!projectManager->HasActiveProject())
+	{
+		DrawUnavailableState("Open a project to edit resource residency settings.");
+		return;
+	}
+
+	ResourceManager& resourceManager = ResourceManager::Instance();
+	TerraEngine::Resource::ResidencyPolicy residencyPolicy = resourceManager.GetResidencyPolicy();
+	TerraEngine::Resource::StreamingPolicy streamingPolicy = resourceManager.GetStreamingPolicy();
+	bool residencyChanged = false;
+	bool streamingChanged = false;
+
+	ImGui::SeparatorText("Loaded Resource Cleanup");
+	if (ImGui::Checkbox("Enable Loaded Resource Cleanup", &residencyPolicy.enabled))
+	{
+		residencyChanged = true;
+	}
+	ShowOptionTooltip("Lets the resource manager unload idle loaded assets according to the RAM and VRAM residency policies below.");
+
+	float cleanupInterval = static_cast<float>(residencyPolicy.cleanupIntervalSeconds);
+	if (ImGui::InputFloat("Cleanup Interval Seconds", &cleanupInterval, 0.25f, 1.0f, "%.2f"))
+	{
+		residencyPolicy.cleanupIntervalSeconds = static_cast<double>(std::max(0.01f, cleanupInterval));
+		residencyChanged = true;
+	}
+
+	ImGui::SeparatorText("RAM Residency");
+	float cpuIdleSeconds = static_cast<float>(residencyPolicy.cpu.idleSecondsThreshold);
+	if (ImGui::InputFloat("RAM Idle Seconds", &cpuIdleSeconds, 0.5f, 1.0f, "%.2f"))
+	{
+		residencyPolicy.cpu.idleSecondsThreshold = static_cast<double>(std::max(0.0f, cpuIdleSeconds));
+		residencyChanged = true;
+	}
+
+	int cpuBudgetMb = BytesToMbInput(residencyPolicy.cpu.memoryBudgetBytes);
+	if (ImGui::InputInt("RAM Budget MB (0=off)", &cpuBudgetMb))
+	{
+		residencyPolicy.cpu.memoryBudgetBytes = MbInputToBytes(cpuBudgetMb);
+		residencyChanged = true;
+	}
+
+	float cpuReloadGrace = static_cast<float>(residencyPolicy.cpu.reloadGraceSeconds);
+	if (ImGui::InputFloat("RAM Reload Grace Seconds", &cpuReloadGrace, 0.1f, 0.5f, "%.2f"))
+	{
+		residencyPolicy.cpu.reloadGraceSeconds = static_cast<double>(std::max(0.0f, cpuReloadGrace));
+		residencyChanged = true;
+	}
+
+	ImGui::SeparatorText("VRAM Residency");
+	float gpuIdleSeconds = static_cast<float>(residencyPolicy.gpu.idleSecondsThreshold);
+	if (ImGui::InputFloat("VRAM Idle Seconds", &gpuIdleSeconds, 0.5f, 1.0f, "%.2f"))
+	{
+		residencyPolicy.gpu.idleSecondsThreshold = static_cast<double>(std::max(0.0f, gpuIdleSeconds));
+		residencyChanged = true;
+	}
+
+	int gpuBudgetMb = BytesToMbInput(residencyPolicy.gpu.memoryBudgetBytes);
+	if (ImGui::InputInt("VRAM Budget MB (0=off)", &gpuBudgetMb))
+	{
+		residencyPolicy.gpu.memoryBudgetBytes = MbInputToBytes(gpuBudgetMb);
+		residencyChanged = true;
+	}
+
+	float gpuReloadGrace = static_cast<float>(residencyPolicy.gpu.reloadGraceSeconds);
+	if (ImGui::InputFloat("VRAM Reload Grace Seconds", &gpuReloadGrace, 0.1f, 0.5f, "%.2f"))
+	{
+		residencyPolicy.gpu.reloadGraceSeconds = static_cast<double>(std::max(0.0f, gpuReloadGrace));
+		residencyChanged = true;
+	}
+
+	if (ImGui::Checkbox("Strict VRAM Budget Mode", &residencyPolicy.gpu.strictBudgetMode))
+	{
+		residencyChanged = true;
+	}
+	ShowOptionTooltip("When enabled, VRAM budget pressure can release otherwise idle GPU payloads more aggressively.");
+
+	ImGui::SeparatorText("Visibility Residency");
+	if (ImGui::Checkbox("Track Visible Resource Needs##EnableVisibilityStreaming", &streamingPolicy.enabled))
+	{
+		streamingChanged = true;
+	}
+	ShowOptionTooltip("Tracks assets needed by visible editor/runtime content so streaming can prioritize them.");
+
+	if (ImGui::Checkbox("Defer Scene Payloads Until Visible##DeferScenePayloadsOnLoad", &streamingPolicy.deferScenePayloadsOnLoad))
+	{
+		streamingChanged = true;
+	}
+
+	float visibleRetention = static_cast<float>(streamingPolicy.visibleRetentionSeconds);
+	if (ImGui::InputFloat("Visible Resource Retention Seconds##VisibleRetentionSeconds", &visibleRetention, 0.25f, 1.0f, "%.2f"))
+	{
+		streamingPolicy.visibleRetentionSeconds = static_cast<double>(std::max(0.0f, visibleRetention));
+		streamingChanged = true;
+	}
+
+	float neededRetention = static_cast<float>(streamingPolicy.neededRetentionSeconds);
+	if (ImGui::InputFloat("Requested Resource Retention Seconds##NeededRetentionSeconds", &neededRetention, 0.25f, 1.0f, "%.2f"))
+	{
+		streamingPolicy.neededRetentionSeconds = static_cast<double>(std::max(0.0f, neededRetention));
+		streamingChanged = true;
+	}
+
+	ImGui::SeparatorText("Texture Mip Streaming");
+	if (ImGui::Checkbox("Enable Texture Mip Streaming", &streamingPolicy.textureMipStreamingEnabled))
+	{
+		streamingChanged = true;
+	}
+
+	float streamingDistance = static_cast<float>(streamingPolicy.streamingDistance);
+	if (ImGui::InputFloat("Texture Mip Fade Distance##TextureMipFadeDistance", &streamingDistance, 1.0f, 10.0f, "%.2f"))
+	{
+		// Save/load still owns the underlying policy key name. The visible
+		// editor label names the actual runtime effect: texture mip fading.
+		streamingPolicy.streamingDistance = static_cast<double>(std::max(0.0f, streamingDistance));
+		streamingChanged = true;
+	}
+
+	int minStreamMip = static_cast<int>(streamingPolicy.textureMinStreamMip);
+	if (ImGui::InputInt("Near Texture Mip##TextureMinStreamMip", &minStreamMip))
+	{
+		streamingPolicy.textureMinStreamMip = static_cast<std::uint32_t>(std::max(0, minStreamMip));
+		streamingChanged = true;
+	}
+
+	int maxStreamMip = static_cast<int>(streamingPolicy.textureMaxStreamMip);
+	if (ImGui::InputInt("Far Texture Mip##TextureMaxStreamMip", &maxStreamMip))
+	{
+		streamingPolicy.textureMaxStreamMip = static_cast<std::uint32_t>(std::max(0, maxStreamMip));
+		streamingChanged = true;
+	}
+	ImGui::TextDisabled("Texture mips only: mip 0 is full resolution; larger mips are lower detail.");
+
+	ImGui::SeparatorText("Virtual Geometry Page Budgets");
+	int vgPageBudgetMb = BytesToMbInput(streamingPolicy.virtualGeometryPageMemoryBudgetBytes);
+	if (ImGui::InputInt("VG Page Memory Budget MB (0=off)", &vgPageBudgetMb))
+	{
+		streamingPolicy.virtualGeometryPageMemoryBudgetBytes = MbInputToBytes(vgPageBudgetMb);
+		streamingChanged = true;
+	}
+	int vgUploadBudgetMb = BytesToMbInput(streamingPolicy.virtualGeometryPageUploadBudgetBytes);
+	if (ImGui::InputInt("VG Page Upload Budget MB/frame (0=off)", &vgUploadBudgetMb))
+	{
+		streamingPolicy.virtualGeometryPageUploadBudgetBytes = MbInputToBytes(vgUploadBudgetMb);
+		streamingChanged = true;
+	}
+	int vgRetirementBudgetMb = BytesToMbInput(streamingPolicy.virtualGeometryPageRetirementBudgetBytes);
+	if (ImGui::InputInt("VG Page Retirement Budget MB/frame (0=off)", &vgRetirementBudgetMb))
+	{
+		streamingPolicy.virtualGeometryPageRetirementBudgetBytes = MbInputToBytes(vgRetirementBudgetMb);
+		streamingChanged = true;
+	}
+	ImGui::TextDisabled("Fallback pages stay protected; page pressure targets high-detail pages first.");
+
+	int maxLoads = static_cast<int>(streamingPolicy.maxLoadsPerUpdate);
+	if (ImGui::InputInt("Max Streaming Loads (0=unlimited)", &maxLoads))
+	{
+		streamingPolicy.maxLoadsPerUpdate = static_cast<std::uint32_t>(std::max(0, maxLoads));
+		streamingChanged = true;
+	}
+
+	const char* streamingBudgetItems[] = { "Use Residency Policy", "Prefer Streaming Release", "Conservative" };
+	int streamingBudgetIndex = MemoryBudgetInteractionIndex(streamingPolicy.memoryBudgetInteraction);
+	if (ImGui::Combo("Streaming Memory Interaction", &streamingBudgetIndex, streamingBudgetItems, IM_ARRAYSIZE(streamingBudgetItems)))
+	{
+		streamingPolicy.memoryBudgetInteraction = MemoryBudgetInteractionFromIndex(streamingBudgetIndex);
+		streamingChanged = true;
+	}
+
+	if (residencyChanged)
+	{
+		resourceManager.SetResidencyPolicy(residencyPolicy);
+	}
+
+	if (streamingChanged)
+	{
+		resourceManager.SetStreamingPolicy(streamingPolicy);
+	}
+
+	if (residencyChanged || streamingChanged)
+	{
+		PersistResourcePoliciesToProjectManifest(resourceManager.GetResidencyPolicy(), resourceManager.GetStreamingPolicy());
 	}
 }
 

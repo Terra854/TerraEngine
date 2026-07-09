@@ -247,7 +247,13 @@ void BuildProfilesWindow::DrawProfileEditor() {
 	if (ImGui::Checkbox("Export Vulkan Validation Layers", &profile.enableVulkanValidationLayers)) {
 		profile.isDirty = true;
 	}
-	DrawHoverTooltip("Requests Vulkan validation layers when this exported build starts. Editor validation remains controlled by Project Settings.");
+	DrawHoverTooltip("Requests Vulkan validation layers when this exported build starts. Editor validation remains controlled by Preferences.");
+	// Renderer diagnostics are runtime debug data. Keep this separate from
+	// Include Debug Symbols, which only controls NativeAOT/debug-symbol files.
+	if (ImGui::Checkbox("Export Render Debug Diagnostics", &profile.enableRenderDebugDiagnostics)) {
+		profile.isDirty = true;
+	}
+	DrawHoverTooltip("Enables renderer debug diagnostics when this exported build starts. Debug symbol files remain controlled by Include Debug Symbols.");
 
 	ImGui::Spacing();
 

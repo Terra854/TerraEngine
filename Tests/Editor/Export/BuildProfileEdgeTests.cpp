@@ -78,6 +78,7 @@ R"({
 			context.Expect(loaded.outputDirectory.empty(), "Missing output directory should keep the default empty path.");
 			context.Expect(loaded.enableManagedCompilation, "Missing managed compilation flag should keep the default enabled value.");
 			context.Expect(!loaded.includeDebugSymbols, "Missing debug symbol flag should keep the default disabled value.");
+			context.Expect(!loaded.enableRenderDebugDiagnostics, "Missing render debug diagnostics flag should keep the default disabled value.");
 			context.ExpectEqual(profilePath.string(), loaded.filePath.string(), "Successfully loaded partial profiles should remember their source path.");
 		});
 

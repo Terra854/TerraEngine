@@ -27,10 +27,12 @@ add_executable(TerraEngine-EditorTests
 	Project/LinuxScriptCompilationTests.cpp
 	Project/LinuxScriptEditorLaunchTests.cpp
 	Project/LinuxScriptWorkspaceTests.cpp
+	Project/PreferencesWindowTests.cpp
 	Project/ProjectSettingsWindowTests.cpp
 	Project/ProjectSettingsMenuInventoryTests.cpp
 	Project/ProjectSettingsPersistenceTests.cpp
 	Core/EditorCommandLineTests.cpp
+	Core/MainEditorToolbarTests.cpp
 	Automation/EditorAutomationServiceTests.cpp
 	Automation/EditorReflectionWorkerBoundaryTests.cpp
 	Automation/EditorMcpBridgeContractTests.cpp
