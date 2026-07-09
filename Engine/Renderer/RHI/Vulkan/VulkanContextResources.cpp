@@ -1093,13 +1093,13 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 		// vkFreeCommandBuffers validation error seen after editor asset removal.
 		const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
 		vkDestroyFence(device, immediateFence, nullptr);
-		if (MarkDeviceLost(idleResult, "immediate command failed-submit queue idle"))
-		{
-			return false;
-		}
 		if (idleResult == VK_SUCCESS)
 		{
 			vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
+		}
+		if (MarkDeviceLost(idleResult, "immediate command failed-submit queue idle"))
+		{
+			return false;
 		}
 		return false;
 	}
@@ -1118,13 +1118,13 @@ bool VulkanContext::Impl::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 		// buffer freeing still stays gated on the queue proving idle/completed.
 		const VkResult idleResult = vkQueueWaitIdle(graphicsQueue);
 		vkDestroyFence(device, immediateFence, nullptr);
-		if (MarkDeviceLost(idleResult, "immediate command failed-wait queue idle"))
-		{
-			return false;
-		}
 		if (idleResult == VK_SUCCESS)
 		{
 			vkFreeCommandBuffers(device, owningPool, 1, &commandBuffer);
+		}
+		if (MarkDeviceLost(idleResult, "immediate command failed-wait queue idle"))
+		{
+			return false;
 		}
 		return false;
 	}

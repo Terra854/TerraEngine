@@ -26,6 +26,7 @@ private:
 	struct DiagnosticsCache;
 
 	void DrawPolicyControls();
+	void DrawRendererRecoverySummary();
 	void DrawSummary();
 	void DrawStreamingSummary();
 	void DrawVirtualGeometrySummary();

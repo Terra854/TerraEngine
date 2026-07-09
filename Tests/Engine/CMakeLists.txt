@@ -9,6 +9,7 @@ add_executable(TerraEngine-EngineTests
 	Runtime/ContentMountPathNormalizerTests.cpp
 	Runtime/ContentMountPublicApiTests.cpp
 	Runtime/ExportRuntimeBaselineLaunchTests.cpp
+	Runtime/ExportRendererRecoveryTests.cpp
 	Runtime/ExportRuntimeSmokeTests.cpp
 	Runtime/ExportScriptingRuntimeTests.cpp
 	Runtime/ExportStartupFlowTests.cpp
@@ -44,12 +45,14 @@ add_executable(TerraEngine-EngineTests
 	Input/InputSystemTests.cpp
 	Input/WindowInputWorkerBoundaryTests.cpp
 	Platform/PlatformUtilsTests.cpp
+	Platform/FatalErrorDialogTests.cpp
 	Profiling/ProfilerCaptureTests.cpp
 	Resource/ResourceResidencyBudgetTests.cpp
 	Resource/ResourceResidencyDiagnosticsTests.cpp
 	Resource/ResourceResidencyPolicyTests.cpp
 	Resource/ResourceResidencyUsageTests.cpp
 	Resource/ResourceManagerMeshTests.cpp
+	Resource/RendererRecoveryResourceRestorationTests.cpp
 		Resource/ResourceStreamingDiagnosticsTests.cpp
 		Resource/ResourceStreamingPolicyTests.cpp
 		Resource/ResourceStreamingPreloadTests.cpp
@@ -73,6 +76,9 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderDiagnosticsTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderRuntimeLayoutTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFailureContainmentTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererDeviceLossLatchTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererRecoveryDiagnosticsTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererRecoveryRebuildTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFrameBreakdownTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFrameSnapshotTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderGraphContractTests.cpp
@@ -265,6 +271,12 @@ add_test(NAME Engine.VirtualGeometryPageResidency COMMAND $<TARGET_FILE:TerraEng
 set_tests_properties(Engine.VirtualGeometryPageResidency PROPERTIES
 	LABELS "Engine;VirtualGeometry;Resource;Streaming"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometryPageResidency"
+)
+
+add_test(NAME Engine.RendererRecovery COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.RendererRecovery PROPERTIES
+	LABELS "Engine;RendererRecovery;DeviceLoss"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=RendererRecovery,DeviceLoss,RenderFailureContainment,PlatformUtils,SystemScheduler,ExportRuntime"
 )
 
 add_test(NAME Engine.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

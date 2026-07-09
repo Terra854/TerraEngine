@@ -7,6 +7,7 @@
 #include "RenderSubmissionPlan.h"
 #include "Core/Export.h"
 #include "Renderer/RenderTypes.h"
+#include "Renderer/RendererRecovery.h"
 
 #include <atomic>
 #include <cstdint>
@@ -366,6 +367,14 @@ namespace TerraEngine::Renderer {
 		std::vector<std::string> delayedWork;
 		std::vector<std::string> cancelledWork;
 		std::vector<std::string> degradedWork;
+		// recentRendererPhases is a bounded CPU-side ring summary of backend
+		// stages. Recovery diagnostics use it after device loss, when querying
+		// live Vulkan state would be unsafe.
+		std::vector<std::string> recentRendererPhases;
+		// Renderer recovery is stored as plain CPU data so editor tooling can
+		// keep explaining failures after Vulkan handles are no longer usable.
+		RendererRecoverySnapshot rendererRecovery;
+		RecoveryDiagnosticSnapshot rendererRecoveryDiagnostics;
 		bool valid = true;
 		bool detailed = false;
 	};
@@ -389,6 +398,7 @@ namespace TerraEngine::Renderer {
 	TERRAENGINE_API void ApplyVirtualGeometryDiagnostics(RenderDiagnosticsSummary& summary, std::vector<VirtualGeometryViewDiagnosticsSnapshot> viewSnapshots, std::vector<VirtualGeometrySchedulerDiagnostics> schedulerSnapshots);
 	TERRAENGINE_API RenderCaptureSchedulerDiagnostics BuildRenderCaptureSchedulerDiagnostics(std::string owningSystem, std::string schedulerPhase, std::string sourceKind, bool backendReadback, bool deterministicFallback);
 	TERRAENGINE_API void ApplyBackendBreakdownToRenderDiagnostics(RenderDiagnosticsSummary& summary, const BackendFrameBreakdown& breakdown);
+	TERRAENGINE_API void ApplyRendererRecoveryDiagnostics(RenderDiagnosticsSummary& summary, RendererRecoverySnapshot snapshot);
 	TERRAENGINE_API bool RenderDiagnosticsRequested();
 	TERRAENGINE_API void SetRenderDiagnosticsRequested(bool requested);
 	TERRAENGINE_API void ClearPublishedRenderDiagnostics();

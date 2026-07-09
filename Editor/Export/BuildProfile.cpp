@@ -157,6 +157,11 @@ bool SaveBuildProfile(const BuildProfile& profile, const std::filesystem::path& 
 		j["includeDebugSymbols"] = profile.includeDebugSymbols;
 		j["stripNativeAotOutput"] = profile.stripNativeAotOutput;
 		j["enableVulkanValidationLayers"] = profile.enableVulkanValidationLayers;
+		j["rendererRecovery"] = {
+			{ "diagnosticsEnabled", profile.rendererRecoveryDiagnosticsEnabled },
+			{ "maxRendererRebuildAttemptsPerIncident", profile.rendererRecoveryMaxRebuildAttempts },
+			{ "fatalMessage", profile.rendererRecoveryFatalMessage }
+		};
 		j["additionalPublishArgs"] = profile.additionalPublishArgs;
 		j["virtualGeometry"] = {
 			{ "qualityLevel", profile.virtualGeometryQualityLevel },
@@ -217,6 +222,12 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path) {
 		if (j.contains("stripNativeAotOutput"))    profile.stripNativeAotOutput = j["stripNativeAotOutput"].get<bool>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("enableVulkanValidationLayers")) profile.enableVulkanValidationLayers = j["enableVulkanValidationLayers"].get<bool>();
+		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+		if (auto recoveryIt = j.find("rendererRecovery"); recoveryIt != j.end() && recoveryIt->is_object()) {
+			profile.rendererRecoveryDiagnosticsEnabled = recoveryIt->value("diagnosticsEnabled", profile.rendererRecoveryDiagnosticsEnabled);
+			profile.rendererRecoveryMaxRebuildAttempts = recoveryIt->value("maxRendererRebuildAttemptsPerIncident", profile.rendererRecoveryMaxRebuildAttempts);
+			profile.rendererRecoveryFatalMessage = recoveryIt->value("fatalMessage", profile.rendererRecoveryFatalMessage);
+		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (j.contains("additionalPublishArgs"))   profile.additionalPublishArgs = j["additionalPublishArgs"].get<std::string>();
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

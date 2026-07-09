@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "Core/FatalErrorReport.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <string_view>
@@ -40,6 +42,20 @@ namespace TerraEngine
 		// Resolves the per-product writable save-data directory and creates it if
 		// possible so gameplay code can write files immediately.
 		std::filesystem::path GetPersistentDataPath(std::string_view productName);
+
+		// Resolves the per-product diagnostics directory. Crash dumps and fatal
+		// sidecars live here instead of SaveData so game/editor data remains
+		// clean and user backups do not pick up heavy diagnostic artifacts.
+		std::filesystem::path GetDiagnosticsDataPath(std::string_view productName);
+
+		// Returns the crash dump folder under Diagnostics/CrashDumps and creates
+		// it when possible. Callers receive an empty path only if no safe
+		// writable diagnostics location can be resolved.
+		std::filesystem::path GetCrashDumpDirectory(std::string_view productName);
+
+		// Writes a native crash dump when the host platform supports it and
+		// always attempts to write a small text sidecar with the same report.
+		FatalErrorDialogReport WriteCrashDumpForReport(FatalErrorDialogReport report, std::string_view productName);
 
 		// Asks the host operating system to open the URL with the user's default
 		// handler. Invalid input is rejected with a warning instead of crashing.

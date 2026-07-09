@@ -557,6 +557,7 @@ void ResourceManager::Initialize()
 	m_RenderProfileSummary = "profile=Default";
 	m_RenderValidationEnabled = false;
 	m_RenderDebugEnabled = false;
+	m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	m_LastStartupError.reset();
 	ResetManifestMetadata();
 
@@ -625,6 +626,22 @@ void ResourceManager::Initialize()
 			m_RenderDebugEnabled = JsonBoolOr(*renderIt, "debugEnabled", false);
 		}
 
+		if (auto recoveryIt = manifest.find("rendererRecovery"); recoveryIt != manifest.end() && recoveryIt->is_object()) {
+			m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeExportRendererRecoveryPolicy(
+				m_RenderValidationEnabled,
+				JsonBoolOr(*recoveryIt, "diagnosticsEnabled", true),
+				recoveryIt->value("maxRendererRebuildAttemptsPerIncident", 1u),
+				recoveryIt->value("fatalMessage", std::string("Graphics device lost and renderer recovery failed.")));
+		}
+		else
+		{
+			m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeExportRendererRecoveryPolicy(
+				m_RenderValidationEnabled,
+				m_RenderDebugEnabled,
+				1u,
+				"Graphics device lost and renderer recovery failed.");
+		}
+
 		if (auto residencyIt = manifest.find("residencyPolicy"); residencyIt != manifest.end() && residencyIt->is_object()) {
 			SetResidencyPolicy(ResidencyPolicyFromJson(*residencyIt));
 		}
@@ -688,6 +705,7 @@ void ResourceManager::Shutdown()
 	m_RenderProfileSummary = "profile=Default";
 	m_RenderValidationEnabled = false;
 	m_RenderDebugEnabled = false;
+	m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	ResetManifestMetadata();
 	ClearCaches();
 
@@ -824,6 +842,11 @@ void ResourceManager::SetRenderDebugEnabled(bool enabled)
 	// can apply them immediately. Vulkan validation is intentionally excluded
 	// because layers must be requested before the Vulkan instance is created.
 	m_RenderDebugEnabled = enabled;
+}
+
+TerraEngine::Renderer::RendererRecoveryPolicy ResourceManager::GetRendererRecoveryPolicy() const
+{
+	return m_RendererRecoveryPolicy;
 }
 
 std::optional<RenderSettings> ResourceManager::GetConfiguredRenderSettings() const

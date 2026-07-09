@@ -11,6 +11,7 @@ namespace TerraEngine::Tests {
 	void RegisterContentMountPublicApiTests(TestRegistry& registry);
 	void RegisterExportRuntimeSmokeTests(TestRegistry& registry);
 	void RegisterExportRuntimeBaselineLaunchTests(TestRegistry& registry);
+	void RegisterExportRendererRecoveryTests(TestRegistry& registry);
 	void RegisterExportStartupFlowTests(TestRegistry& registry);
 	void RegisterExportScriptingRuntimeTests(TestRegistry& registry);
 	void RegisterLinuxStartupSmokeTests(TestRegistry& registry);
@@ -35,6 +36,7 @@ namespace TerraEngine::Tests {
 	void RegisterWindowInputWorkerBoundaryTests(TestRegistry& registry);
 	void RegisterJobGraphTests(TestRegistry& registry);
 	void RegisterPlatformUtilsTests(TestRegistry& registry);
+	void RegisterFatalErrorDialogTests(TestRegistry& registry);
 	void RegisterPrefabCompositionTests(TestRegistry& registry);
 	void RegisterProfilerCaptureTests(TestRegistry& registry);
 	void RegisterResourceResidencyBudgetTests(TestRegistry& registry);
@@ -42,6 +44,7 @@ namespace TerraEngine::Tests {
 	void RegisterResourceResidencyPolicyTests(TestRegistry& registry);
 	void RegisterResourceResidencyUsageTests(TestRegistry& registry);
 	void RegisterResourceManagerMeshTests(TestRegistry& registry);
+	void RegisterRendererRecoveryResourceRestorationTests(TestRegistry& registry);
 	void RegisterResourceStreamingDiagnosticsTests(TestRegistry& registry);
 	void RegisterResourceStreamingPolicyTests(TestRegistry& registry);
 	void RegisterResourceStreamingPreloadTests(TestRegistry& registry);
@@ -77,6 +80,9 @@ namespace TerraEngine::Tests {
 	void RegisterRenderCaptureQueueTests(TestRegistry& registry);
 	void RegisterRenderDeferredRetirementTests(TestRegistry& registry);
 	void RegisterRenderFailureContainmentTests(TestRegistry& registry);
+	void RegisterRendererDeviceLossLatchTests(TestRegistry& registry);
+	void RegisterRendererRecoveryDiagnosticsTests(TestRegistry& registry);
+	void RegisterRendererRecoveryRebuildTests(TestRegistry& registry);
 	void RegisterRenderGraphThreadingContractTests(TestRegistry& registry);
 	void RegisterRenderPassValidationStressTests(TestRegistry& registry);
 	void RegisterRenderPerformanceGateTests(TestRegistry& registry);
@@ -161,6 +167,7 @@ int main() {
 	TerraEngine::Tests::RegisterContentMountPublicApiTests(registry);
 	TerraEngine::Tests::RegisterExportRuntimeSmokeTests(registry);
 	TerraEngine::Tests::RegisterExportRuntimeBaselineLaunchTests(registry);
+	TerraEngine::Tests::RegisterExportRendererRecoveryTests(registry);
 	TerraEngine::Tests::RegisterExportStartupFlowTests(registry);
 	TerraEngine::Tests::RegisterExportScriptingRuntimeTests(registry);
 	TerraEngine::Tests::RegisterLinuxStartupSmokeTests(registry);
@@ -187,6 +194,7 @@ int main() {
 	TerraEngine::Tests::RegisterWindowInputWorkerBoundaryTests(registry);
 	TerraEngine::Tests::RegisterJobGraphTests(registry);
 	TerraEngine::Tests::RegisterPlatformUtilsTests(registry);
+	TerraEngine::Tests::RegisterFatalErrorDialogTests(registry);
 	TerraEngine::Tests::RegisterPrefabCompositionTests(registry);
 	TerraEngine::Tests::RegisterProfilerCaptureTests(registry);
 	TerraEngine::Tests::RegisterResourceResidencyBudgetTests(registry);
@@ -194,6 +202,7 @@ int main() {
 	TerraEngine::Tests::RegisterResourceResidencyPolicyTests(registry);
 	TerraEngine::Tests::RegisterResourceResidencyUsageTests(registry);
 	TerraEngine::Tests::RegisterResourceManagerMeshTests(registry);
+	TerraEngine::Tests::RegisterRendererRecoveryResourceRestorationTests(registry);
 	TerraEngine::Tests::RegisterResourceStreamingDiagnosticsTests(registry);
 	TerraEngine::Tests::RegisterResourceStreamingPolicyTests(registry);
 	TerraEngine::Tests::RegisterResourceStreamingPreloadTests(registry);
@@ -249,6 +258,9 @@ int main() {
 	TerraEngine::Tests::RegisterRenderRandomizedSchedulingTests(registry);
 	TerraEngine::Tests::RegisterRenderQueueReadinessTests(registry);
 	TerraEngine::Tests::RegisterRenderFailureContainmentTests(registry);
+	TerraEngine::Tests::RegisterRendererDeviceLossLatchTests(registry);
+	TerraEngine::Tests::RegisterRendererRecoveryDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterRendererRecoveryRebuildTests(registry);
 	TerraEngine::Tests::RegisterRenderWorkerSafetyTests(registry);
 	TerraEngine::Tests::RegisterRenderViewSubmitReuseTests(registry);
 	TerraEngine::Tests::RegisterRenderSubmissionPlanTests(registry);

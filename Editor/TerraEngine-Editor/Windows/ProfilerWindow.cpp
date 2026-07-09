@@ -673,6 +673,8 @@ void ProfilerWindow::DrawFrameList()
 // ProfilerWindow::DrawFrameDetails is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProfilerWindow::DrawFrameDetails()
 {
+	DrawRendererRecoverySummary();
+
 	const auto selectedFrame = Profiler::Instance().GetSelectedFrameSnapshot();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!selectedFrame.has_value())
@@ -770,6 +772,41 @@ void ProfilerWindow::DrawFrameDetails()
 			}
 		}
 		ImGui::EndTabBar();
+	}
+}
+
+void ProfilerWindow::DrawRendererRecoverySummary()
+{
+	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+	const TerraEngine::Renderer::RendererRecoverySnapshot& recovery = renderDiagnostics.rendererRecovery;
+	if (!TerraEngine::Renderer::IsRendererRecoveryActive(recovery.state)
+		&& recovery.finalOutcome == TerraEngine::Renderer::RendererRecoveryOutcome::None)
+	{
+		return;
+	}
+
+	ImGui::SeparatorText("Renderer Recovery");
+	ImGui::Text("%s: %s", TerraEngine::Renderer::ToString(recovery.state), recovery.message.c_str());
+	if (ImGui::BeginTable("ProfilerRendererRecovery", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("Incident");
+		ImGui::TableSetupColumn("Stage");
+		ImGui::TableSetupColumn("Duplicates");
+		ImGui::TableSetupColumn("Outcome");
+		ImGui::TableSetupColumn("Dump");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::TextUnformatted(recovery.incidentId.empty() ? "-" : recovery.incidentId.c_str());
+		ImGui::TableSetColumnIndex(1);
+		ImGui::Text("%s  %s", TerraEngine::Renderer::ToString(recovery.firstFailureStage), recovery.firstFailureResult.c_str());
+		ImGui::TableSetColumnIndex(2);
+		ImGui::Text("%u", recovery.duplicateFailureCount);
+		ImGui::TableSetColumnIndex(3);
+		ImGui::TextUnformatted(TerraEngine::Renderer::ToString(recovery.finalOutcome));
+		ImGui::TableSetColumnIndex(4);
+		ImGui::TextUnformatted(recovery.crashDumpStatus.empty() ? "n/a" : recovery.crashDumpStatus.c_str());
+		ImGui::EndTable();
 	}
 }
 

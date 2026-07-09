@@ -6,6 +6,7 @@
 #include "GameViewWindow.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Components/CameraComponent.h"
 #include "Engine/Components/Transform.h"
 #include "Engine/Core/Object/ObjectManager.h"
@@ -229,6 +230,25 @@ void GameViewWindow::OnGui() {
 
 	ImVec2 imageMin = cursorPos;
 	ImVec2 imageMax = ImVec2(cursorPos.x + availableSize.x, cursorPos.y + availableSize.y);
+	const TerraEngine::Renderer::RendererRecoverySnapshot recoverySnapshot =
+		RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
+	if (TerraEngine::Renderer::IsRendererRecoveryActive(recoverySnapshot.state))
+	{
+		// Keep Game View usable during device-loss recovery without presenting
+		// a stale render target or feeding bogus pointer input to runtime UI.
+		UISystem::Instance().SetEditorGameViewPointer(glm::vec2(-1.0f, -1.0f), false, false);
+		const std::string status = std::string("Renderer unavailable: ")
+			+ TerraEngine::Renderer::ToString(recoverySnapshot.state)
+			+ (recoverySnapshot.message.empty() ? std::string{} : " - " + recoverySnapshot.message);
+		const ImVec2 textSize = ImGui::CalcTextSize(status.c_str(), nullptr, false, availableSize.x - 32.0f);
+		ImGui::SetCursorScreenPos(ImVec2(
+			cursorPos.x + std::max(16.0f, (availableSize.x - textSize.x) * 0.5f),
+			cursorPos.y + std::max(16.0f, (availableSize.y - textSize.y) * 0.5f)));
+		ImGui::PushTextWrapPos(cursorPos.x + availableSize.x - 16.0f);
+		ImGui::TextUnformatted(status.c_str());
+		ImGui::PopTextWrapPos();
+		return;
+	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (texID && hasCameras) {
 		float xOffset = (availableSize.x - imageSize.x) * 0.5f;

@@ -40,6 +40,18 @@ namespace TerraEngine::Tests {
 			context.Expect(std::filesystem::exists(dataPath), "Persistent data path should be created before it is returned.");
 		});
 
+		registry.Add("Engine.PlatformUtils.DiagnosticsPathAvoidsSaveData", [](TestContext& context) {
+			const std::filesystem::path diagnosticsPath = PlatformUtils::GetDiagnosticsDataPath("Terra/Engine:Renderer*Recovery?");
+			const std::filesystem::path crashDumpPath = PlatformUtils::GetCrashDumpDirectory("Terra/Engine:Renderer*Recovery?");
+			const std::string diagnosticsGenericPath = diagnosticsPath.generic_string();
+			const std::string crashDumpGenericPath = crashDumpPath.generic_string();
+
+			context.Expect(!diagnosticsGenericPath.empty(), "Diagnostics path should resolve to a non-empty path.");
+			context.Expect(diagnosticsGenericPath.find("Diagnostics") != std::string::npos, "Diagnostics path should use a Diagnostics folder.");
+			context.Expect(diagnosticsGenericPath.find("SaveData") == std::string::npos, "Diagnostics path must not be stored under SaveData.");
+			context.Expect(crashDumpGenericPath.find("CrashDumps") != std::string::npos, "Crash dumps should use a CrashDumps child folder.");
+		});
+
 		registry.Add("Engine.PlatformUtils.OpenUrlRejectsMalformedInput", [](TestContext& context) {
 			context.Expect(!PlatformUtils::OpenUrl("not a url"), "OpenUrl should reject strings without a URL scheme.");
 			context.Expect(!PlatformUtils::OpenUrl(""), "OpenUrl should reject empty strings without launching platform handlers.");

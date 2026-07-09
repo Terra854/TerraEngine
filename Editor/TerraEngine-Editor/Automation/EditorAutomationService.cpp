@@ -25,6 +25,7 @@
 #include "Engine/Scene/Serializer.h"
 #include "Engine/Core/Scheduling/FrameWorkload.h"
 #include "Engine/Profiling/Profiler.h"
+#include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Renderer/RenderSystem.h"
 #include "Engine/Scripting/ScriptingSystem.h"
 #include "Utilities/UUID.h"
@@ -68,6 +69,39 @@ namespace TerraEngine::Editor::Automation
 			result["status"] = ToString(status);
 			result["message"] = message;
 			return result;
+		}
+
+		nlohmann::json SerializeRendererRecoverySnapshot(const TerraEngine::Renderer::RendererRecoverySnapshot& snapshot)
+		{
+			// Automation clients should not depend on rendered overlays. Keep the
+			// recovery contract as plain JSON strings and counters that stay valid
+			// even when Vulkan/ImGui output is unavailable.
+			return {
+				{"renderSessionGeneration", snapshot.renderSessionGeneration},
+				{"state", TerraEngine::Renderer::ToString(snapshot.state)},
+				{"incidentId", snapshot.incidentId},
+				{"sessionId", snapshot.sessionId},
+				{"message", snapshot.message},
+				{"firstFailureStage", TerraEngine::Renderer::ToString(snapshot.firstFailureStage)},
+				{"firstFailureResult", snapshot.firstFailureResult},
+				{"affectedView", TerraEngine::Renderer::ToString(snapshot.affectedView)},
+				{"affectedResourceId", snapshot.affectedResourceId},
+				{"affectedResourceName", snapshot.affectedResourceName},
+				{"hardwareName", snapshot.hardwareName},
+				{"driverVersion", snapshot.driverVersion},
+				{"apiVersion", snapshot.apiVersion},
+				{"frameId", snapshot.frameId},
+				{"duplicateFailureCount", snapshot.duplicateFailureCount},
+				{"canSaveProjectData", snapshot.canSaveProjectData},
+				{"canAttemptRebuild", snapshot.canAttemptRebuild},
+				{"canRetryRendererRebuild", snapshot.canRetryRendererRebuild},
+				{"finalOutcome", TerraEngine::Renderer::ToString(snapshot.finalOutcome)},
+				{"lastError", snapshot.lastError},
+				{"fatalDialogReportId", snapshot.fatalDialogReportId},
+				{"crashDumpPath", snapshot.crashDumpPath},
+				{"crashSummarySidecarPath", snapshot.crashSummarySidecarPath},
+				{"crashDumpStatus", snapshot.crashDumpStatus}
+			};
 		}
 
 		bool ContainsCaseInsensitive(std::string value, std::string query)
@@ -1071,9 +1105,10 @@ namespace TerraEngine::Editor::Automation
 
 	const char* ToString(MutationMode value)
 	{
-		switch (value)
-		{
+			switch (value)
+			{
 			case MutationMode::ReadOnly: return "read_only";
+			case MutationMode::ProjectMutation: return "project_mutation";
 			case MutationMode::EditorSelection: return "editor_selection";
 			case MutationMode::SceneMutation: return "scene_mutation";
 			case MutationMode::AssetMutation: return "asset_mutation";
@@ -1221,6 +1256,7 @@ namespace TerraEngine::Editor::Automation
 		add("camera.capture_object", "capture", MutationMode::ReadOnly, false, true, false, "object|camera|target: uuid|entity|name, includeDisabled?: bool, width?: integer, height?: integer, format?: image/png");
 		add("camera.capture_custom", "capture", MutationMode::ReadOnly, false, false, false, "position: [x,y,z], target?: [x,y,z], forward?: [x,y,z], up?: [x,y,z], projection?: perspective|orthographic, width?: integer, height?: integer");
 		add("renderer.virtualGeometry.stats", "renderer", MutationMode::ReadOnly, false, false, false, "viewType?: Game|Scene");
+		add("renderer.recovery.safe_save_project", "renderer", MutationMode::ProjectMutation, true, false, false, "reason?: string");
 		add("diagnostics.get_summary", "diagnostics", MutationMode::ReadOnly, false, false, false, "includeDetails?: bool, surface?: string");
 	}
 
@@ -1322,6 +1358,21 @@ namespace TerraEngine::Editor::Automation
 		if (toolName == "camera.capture_object") return HandleCameraObjectCapture(arguments, requestId);
 		if (toolName == "camera.capture_custom") return HandleCustomCameraCapture(arguments, requestId);
 		if (toolName == "renderer.virtualGeometry.stats") return HandleRendererVirtualGeometryStats(arguments, requestId);
+		if (toolName == "renderer.recovery.safe_save_project")
+		{
+			std::string error;
+			if (editorContext == nullptr || editorContext->projectManager == nullptr
+				|| !editorContext->projectManager->SaveProjectDataForRendererRecovery(&error))
+			{
+				return BuildError(requestId, ErrorCategory::Internal, error.empty() ? "Renderer-recovery project save failed." : error);
+			}
+			const RendererRecoveryProjectActionState& state = editorContext->projectManager->GetRendererRecoveryActionState();
+			return BuildSuccess(requestId, "Saved renderer-independent project data.", {
+				{"projectRoot", state.lastSafeSaveRoot.generic_string()},
+				{"message", state.lastSafeSaveMessage},
+				{"rendererStateUsed", false}
+			});
+		}
 		if (toolName == "diagnostics.get_summary") return HandleDiagnosticsGetSummary(arguments, requestId);
 		return BuildError(requestId, ErrorCategory::UnsupportedCapability, "Capability metadata exists but no handler is registered.");
 	}
@@ -1470,6 +1521,7 @@ namespace TerraEngine::Editor::Automation
 			{{"surface", "export"}, {"state", exportJobs.empty() ? "idle" : exportJobs.front().state}, {"details", nlohmann::json{{"jobs", exportJobJson}}}}
 		});
 		data["parallelFrame"] = parallelFrame;
+		data["rendererRecovery"] = SerializeRendererRecoverySnapshot(renderDiagnostics.rendererRecovery);
 		data["profilerTimingStreams"] = profilerTimingStreams;
 		data["hardBoundaries"] = boundaryFindings;
 		data["mutationDiagnostics"] = mutationDiagnostics;

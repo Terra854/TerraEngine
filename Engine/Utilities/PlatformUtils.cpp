@@ -9,7 +9,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -27,6 +31,7 @@
 #	include <ShlObj.h>
 #	include <shellapi.h>
 #	include <Windows.h>
+#	include <DbgHelp.h>
 #elif defined(__APPLE__)
 #	include <mach-o/dyld.h>
 #	include <unistd.h>
@@ -41,6 +46,8 @@ namespace
 {
 	constexpr std::string_view kDefaultProductName = "TerraEngine";
 	constexpr std::string_view kDefaultProductVersionFolder = "SaveData";
+	constexpr std::string_view kDiagnosticsFolderName = "Diagnostics";
+	constexpr std::string_view kCrashDumpsFolderName = "CrashDumps";
 
 	// SanitizeProductName is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::string SanitizeProductName(std::string_view productName)
@@ -91,6 +98,75 @@ namespace
 		return true;
 	}
 
+	std::string MakeCrashTimestamp()
+	{
+		const auto now = std::chrono::system_clock::now();
+		const std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+		std::tm utcTime{};
+#ifdef _WIN32
+		gmtime_s(&utcTime, &nowTime);
+#else
+		gmtime_r(&nowTime, &utcTime);
+#endif
+		std::ostringstream stream;
+		stream << std::put_time(&utcTime, "%Y%m%d-%H%M%S");
+		return stream.str();
+	}
+
+	std::filesystem::path ResolveLocalAppDataRoot(std::string_view sanitizedProductName)
+	{
+		std::filesystem::path basePath;
+#ifdef _WIN32
+		PWSTR localAppDataPath = nullptr;
+		const HRESULT result = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppDataPath);
+		if (FAILED(result) || localAppDataPath == nullptr)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Could not resolve FOLDERID_LocalAppData for product '" << sanitizedProductName << "'.");
+			return {};
+		}
+
+		basePath = std::filesystem::path(localAppDataPath);
+		CoTaskMemFree(localAppDataPath);
+#else
+		const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
+		if (xdgDataHome != nullptr && xdgDataHome[0] != '\0')
+		{
+			basePath = std::filesystem::path(xdgDataHome);
+		}
+		else
+		{
+			const char* homeDirectory = std::getenv("HOME");
+			if (homeDirectory == nullptr || homeDirectory[0] == '\0')
+			{
+				TERRAENGINE_LOG(LogLevel::Error, "Could not resolve HOME or XDG_DATA_HOME for product '" << sanitizedProductName << "'.");
+				return {};
+			}
+
+			basePath = std::filesystem::path(homeDirectory) / ".local" / "share";
+		}
+#endif
+		return (basePath / std::string(sanitizedProductName)).lexically_normal();
+	}
+
+	std::filesystem::path CreateDirectoryOrFallback(std::filesystem::path requestedPath, std::string_view fallbackLeafName)
+	{
+		std::error_code errorCode;
+		std::filesystem::create_directories(requestedPath, errorCode);
+		if (!errorCode)
+		{
+			return requestedPath;
+		}
+
+		TERRAENGINE_LOG(LogLevel::Error, "Could not create diagnostics path '" << requestedPath << "': " << errorCode.message());
+		std::filesystem::path fallbackPath = std::filesystem::temp_directory_path(errorCode) / "TerraEngine" / fallbackLeafName;
+		if (errorCode)
+		{
+			return {};
+		}
+		std::filesystem::create_directories(fallbackPath, errorCode);
+		return errorCode ? std::filesystem::path{} : fallbackPath.lexically_normal();
+	}
+
 #ifdef _WIN32
 	// Utf8ToWide is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::wstring Utf8ToWide(std::string_view text)
@@ -118,6 +194,59 @@ namespace
 		return wideText;
 	}
 #endif
+
+	bool WriteNativeCrashDump(const std::filesystem::path& dumpPath, std::string* errorMessage)
+	{
+#ifdef _WIN32
+		const std::wstring wideDumpPath = dumpPath.wstring();
+		HANDLE file = CreateFileW(
+			wideDumpPath.c_str(),
+			GENERIC_WRITE,
+			0,
+			nullptr,
+			CREATE_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL,
+			nullptr);
+		if (file == INVALID_HANDLE_VALUE)
+		{
+			if (errorMessage != nullptr)
+			{
+				*errorMessage = "CreateFileW failed for crash dump.";
+			}
+			return false;
+		}
+
+		// MiniDumpWriteDump is intentionally called without exception pointers
+		// for controlled fatal paths. The dump still captures process/module and
+		// thread state, which is enough for renderer recovery failures that are
+		// not raised from an SEH exception handler.
+		const BOOL written = MiniDumpWriteDump(
+			GetCurrentProcess(),
+			GetCurrentProcessId(),
+			file,
+			MiniDumpNormal,
+			nullptr,
+			nullptr,
+			nullptr);
+		CloseHandle(file);
+		if (written == FALSE)
+		{
+			if (errorMessage != nullptr)
+			{
+				*errorMessage = "MiniDumpWriteDump failed.";
+			}
+			return false;
+		}
+		return true;
+#else
+		if (errorMessage != nullptr)
+		{
+			*errorMessage = "Native crash dump writing is unsupported on this platform.";
+		}
+		(void)dumpPath;
+		return false;
+#endif
+	}
 }
 
 TerraEngine::RuntimePlatform TerraEngine::PlatformUtils::GetRuntimePlatform()
@@ -199,41 +328,13 @@ std::filesystem::path TerraEngine::PlatformUtils::GetExecutableDirectory()
 std::filesystem::path TerraEngine::PlatformUtils::GetPersistentDataPath(std::string_view productName)
 {
 	const std::string sanitizedProductName = SanitizeProductName(productName);
-	std::filesystem::path basePath;
-
-#ifdef _WIN32
-	PWSTR localAppDataPath = nullptr;
-	const HRESULT result = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppDataPath);
-	if (FAILED(result) || localAppDataPath == nullptr)
+	const std::filesystem::path productRoot = ResolveLocalAppDataRoot(sanitizedProductName);
+	if (productRoot.empty())
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "PersistentDataPath could not resolve FOLDERID_LocalAppData for product '" << sanitizedProductName << "'.");
 		return {};
 	}
 
-	basePath = std::filesystem::path(localAppDataPath);
-	CoTaskMemFree(localAppDataPath);
-#else
-	const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (xdgDataHome != nullptr && xdgDataHome[0] != '\0')
-	{
-		basePath = std::filesystem::path(xdgDataHome);
-	}
-	else
-	{
-		const char* homeDirectory = std::getenv("HOME");
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (homeDirectory == nullptr || homeDirectory[0] == '\0')
-		{
-			TERRAENGINE_LOG(LogLevel::Error, "PersistentDataPath could not resolve HOME or XDG_DATA_HOME for product '" << sanitizedProductName << "'.");
-			return {};
-		}
-
-		basePath = std::filesystem::path(homeDirectory) / ".local" / "share";
-	}
-#endif
-
-	std::filesystem::path persistentDataPath = (basePath / sanitizedProductName / kDefaultProductVersionFolder).lexically_normal();
+	std::filesystem::path persistentDataPath = (productRoot / kDefaultProductVersionFolder).lexically_normal();
 	std::error_code errorCode;
 	std::filesystem::create_directories(persistentDataPath, errorCode);
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -243,6 +344,78 @@ std::filesystem::path TerraEngine::PlatformUtils::GetPersistentDataPath(std::str
 	}
 
 	return persistentDataPath;
+}
+
+std::filesystem::path TerraEngine::PlatformUtils::GetDiagnosticsDataPath(std::string_view productName)
+{
+	const std::string sanitizedProductName = SanitizeProductName(productName);
+	const std::filesystem::path productRoot = ResolveLocalAppDataRoot(sanitizedProductName);
+	if (productRoot.empty())
+	{
+		return {};
+	}
+
+	return CreateDirectoryOrFallback(productRoot / kDiagnosticsFolderName, "Diagnostics");
+}
+
+std::filesystem::path TerraEngine::PlatformUtils::GetCrashDumpDirectory(std::string_view productName)
+{
+	const std::filesystem::path diagnosticsPath = GetDiagnosticsDataPath(productName);
+	if (diagnosticsPath.empty())
+	{
+		return {};
+	}
+
+	return CreateDirectoryOrFallback(diagnosticsPath / kCrashDumpsFolderName, "CrashDumps");
+}
+
+TerraEngine::FatalErrorDialogReport TerraEngine::PlatformUtils::WriteCrashDumpForReport(FatalErrorDialogReport report, std::string_view productName)
+{
+	report.crashDumpDirectory = GetCrashDumpDirectory(productName);
+	if (report.crashDumpDirectory.empty())
+	{
+		report.crashDumpStatus = CrashDumpStatus::Failed;
+		report.crashDumpFailureReason = "Could not resolve a writable diagnostics crash dump directory.";
+		return report;
+	}
+
+	const std::string sanitizedCategory = SanitizeProductName(ToString(report.category));
+#ifdef _WIN32
+	const std::uint32_t processId = GetCurrentProcessId();
+#else
+	const std::uint32_t processId = static_cast<std::uint32_t>(getpid());
+#endif
+	const std::string fileStem =
+		"TerraEngineCrash-"
+		+ MakeCrashTimestamp()
+		+ "-"
+		+ std::to_string(processId)
+		+ "-"
+		+ sanitizedCategory;
+	report.crashDumpPath = report.crashDumpDirectory / (fileStem + ".dmp");
+	report.crashSummaryPath = report.crashDumpDirectory / (fileStem + ".txt");
+
+	std::string dumpError;
+	if (WriteNativeCrashDump(report.crashDumpPath, &dumpError))
+	{
+		report.crashDumpStatus = CrashDumpStatus::Written;
+	}
+	else
+	{
+#ifdef _WIN32
+		report.crashDumpStatus = CrashDumpStatus::Failed;
+#else
+		report.crashDumpStatus = CrashDumpStatus::Unsupported;
+#endif
+		report.crashDumpFailureReason = dumpError;
+	}
+
+	std::string sidecarError;
+	if (!SaveFatalErrorSummarySidecar(report, report.crashSummaryPath, &sidecarError) && report.crashDumpFailureReason.empty())
+	{
+		report.crashDumpFailureReason = "Crash summary sidecar write failed: " + sidecarError;
+	}
+	return report;
 }
 
 // TerraEngine::PlatformUtils::OpenUrl is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

@@ -59,6 +59,7 @@ endif()
 
 set(ENGINE_SOURCES
 	Engine/Core/MainEngine.cpp
+	Engine/Core/FatalErrorReport.cpp
 	Engine/Core/Timer.cpp
 	Engine/Core/Scheduling/ComponentAccess.cpp
 	Engine/Core/Scheduling/EcsQueryTaskGraph.cpp
@@ -101,6 +102,8 @@ set(ENGINE_SOURCES
 	Engine/Profiling/Profiler.cpp
 	Engine/Profiling/ProfilerCapture.cpp
 	Engine/Renderer/RenderCaptureEncoding.cpp
+	Engine/Renderer/RendererRecovery.cpp
+	Engine/Renderer/RendererRecoveryPolicy.cpp
 	Engine/Renderer/RenderSystem.cpp
 	Engine/Renderer/Graph/RenderDiagnostics.cpp
 	Engine/Renderer/Graph/RenderFrameBreakdown.cpp
@@ -143,6 +146,7 @@ set(ENGINE_SOURCES
 
 set(ENGINE_HEADERS
 	Engine/Core/MainEngine.h
+	Engine/Core/FatalErrorReport.h
 	Engine/Core/Logger/Logger.h
 	Engine/Core/SystemBase.h
 	Engine/Core/Timer.h
@@ -193,6 +197,8 @@ set(ENGINE_HEADERS
 	Engine/Profiling/ProfilerCapture.h
 	Engine/Profiling/ProfilerScope.h
 	Engine/Renderer/RenderCaptureEncoding.h
+	Engine/Renderer/RendererRecovery.h
+	Engine/Renderer/RendererRecoveryPolicy.h
 	Engine/Renderer/RenderSystem.h
 	Engine/Renderer/RenderTypes.h
 	Engine/Renderer/Graph/RenderDiagnostics.h
@@ -469,10 +475,10 @@ target_link_libraries(TerraEngine-Engine
 
 # Configure-time guard: select platform or option behavior before generating build files.
 if(WIN32)
-	# PlatformUtils uses ShellExecuteW/SHGetKnownFolderPath so the engine must
+	# PlatformUtils uses ShellExecuteW/SHGetKnownFolderPath/MiniDumpWriteDump so the engine must
 	# link the corresponding Windows SDK libraries explicitly.
 	# Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.
-	target_link_libraries(TerraEngine-Engine PRIVATE shell32 ole32)
+	target_link_libraries(TerraEngine-Engine PRIVATE shell32 ole32 dbghelp)
 endif()
 
 # Target setting: keep include paths, compile options, and linked libraries local to the target that needs them.

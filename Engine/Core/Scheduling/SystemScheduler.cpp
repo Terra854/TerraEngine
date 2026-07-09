@@ -222,6 +222,10 @@ namespace TerraEngine::Scheduling {
 			{ kResourceVirtualGeometryDiagnostics, "Per-view virtual geometry counters, scheduler boundary metadata, and fail-open warnings.", "Written after protected render/RHI work so editor diagnostics and automation read a stable snapshot." },
 			{ kResourceVisibleCommandReuseDiagnostics, "Per-view visible-command cache hit, conservative refresh, copy, and diagnostic demand telemetry.", "Written by render preparation and read by profiler, overlays, automation, and performance gates." },
 			{ kResourceVisibleStreamingTouchSets, "Deduplicated visible mesh, material, and texture touch sets derived from cached visible commands.", "Written by render preparation and published through protected ResourceManager streaming boundaries." },
+			{ kResourceRendererRecoveryStateSnapshot, "Immutable renderer recovery state for the current graphics session.", "Written by protected renderer/RHI boundaries and read by editor UI, automation, diagnostics, and export policy without touching live GPU handles." },
+			{ kResourceRendererDeviceIncidentLog, "First-root-cause device-loss incident metadata plus suppressed duplicate failure counts.", "Written once per incident so later submit/present/upload errors group under the original failure." },
+			{ kResourceRendererRecoveryPlan, "Bounded renderer rebuild policy decision and CPU-side resource restoration plan.", "Prepared from project/resource state before the protected renderer rebuild boundary runs." },
+			{ kResourceRendererRecoverySession, "Current renderer rebuild attempt, phase, result, and fresh render-session generation.", "Written by the protected rebuild path and read by diagnostics after publication." },
 			{ "Resources", "Runtime asset and content mount state.", "" },
 			{ "Profiler", "CPU/GPU profiling capture state.", "" },
 			{ "Editor", "Editor-only systems and tooling state.", "" }

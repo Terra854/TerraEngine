@@ -148,6 +148,19 @@ static nlohmann::json BuildVirtualGeometryExportManifest(const BuildProfile& pro
 	return virtualGeometry;
 }
 
+static nlohmann::json BuildRendererRecoveryManifest(const BuildProfile& profile)
+{
+	nlohmann::json recovery;
+	recovery["validationEnabled"] = profile.enableVulkanValidationLayers;
+	recovery["diagnosticsEnabled"] = profile.rendererRecoveryDiagnosticsEnabled;
+	recovery["maxRendererRebuildAttemptsPerIncident"] = std::max<std::uint32_t>(1u, profile.rendererRecoveryMaxRebuildAttempts);
+	recovery["fatalMessage"] = profile.rendererRecoveryFatalMessage.empty()
+		? "Graphics device lost and renderer recovery failed."
+		: profile.rendererRecoveryFatalMessage;
+	recovery["fullApplicationRestart"] = false;
+	return recovery;
+}
+
 static nlohmann::json ResolveRenderProfileManifest(const BuildProfile& profile, const std::filesystem::path& projectRoot)
 {
 	nlohmann::json renderProfile;
@@ -1001,6 +1014,7 @@ bool ExportPipeline::WriteExportManifest(const BuildProfile& profile,
 		}
 		manifest["residencyPolicy"] = BuildResidencyPolicyManifest();
 		manifest["streamingPolicy"] = BuildStreamingPolicyManifest();
+		manifest["rendererRecovery"] = BuildRendererRecoveryManifest(profile);
 		manifest["virtualGeometry"] = BuildVirtualGeometryExportManifest(profile);
 
 		// Include the asset GUID map so the engine runtime can resolve 

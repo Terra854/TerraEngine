@@ -8,12 +8,26 @@
 #include "EditorPreferences.h"
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <vector>
 
 enum class ProjectTemplate {
 	Blank,
 	TwoD,
 	ThreeD
+};
+
+// RendererRecoveryProjectActionState is CPU-only editor state. It exists so
+// device-loss recovery UI and MCP can offer a project-data save without asking
+// the renderer, ResourceManager, or any Vulkan object whether saving is safe.
+struct RendererRecoveryProjectActionState
+{
+	bool canSaveProjectData = false;
+	std::filesystem::path lastSafeSaveRoot;
+	std::string lastSafeSaveMessage;
+	bool previousCrashSummaryShown = false;
+	std::filesystem::path previousCrashSummaryPath;
+	std::string previousCrashSummaryMessage;
 };
 
 // class ProjectManager groups related state and operations so callers have one documented contract.
@@ -34,6 +48,7 @@ public:
 	std::filesystem::path GetProjectRoot() const;
 	const std::vector<RecentProjectEntry>& GetRecentProjects() const;
 	const EditorPreferences& GetEditorPreferences() const;
+	const RendererRecoveryProjectActionState& GetRendererRecoveryActionState() const;
 	std::string GetExternalScriptEditorCommand() const;
 	bool ShouldAutoBuildScripts() const;
 	void SetExternalScriptEditorCommand(const std::string& commandTemplate);
@@ -43,6 +58,7 @@ public:
 	// Persist changes
 	void SaveProjectSettings();
 	void SaveEditorPreferences();
+	bool SaveProjectDataForRendererRecovery(std::string* outError = nullptr);
 
 private:
 	void LoadEditorPreferences();
@@ -51,5 +67,6 @@ private:
 	std::filesystem::path projectRoot;
 	std::optional<ProjectSettings> currentSettings;
 	EditorPreferences editorPrefs;
+	RendererRecoveryProjectActionState rendererRecoveryActionState;
 	bool isProjectLoaded = false;
 };

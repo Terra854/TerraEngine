@@ -1,5 +1,7 @@
 #include "VulkanFrameDiagnostics.h"
+#include "VulkanCommonIncludes.h"
 
+#include <sstream>
 #include <utility>
 
 namespace TerraEngine::Renderer::Vulkan {
@@ -71,6 +73,62 @@ namespace TerraEngine::Renderer::Vulkan {
 			recordingMilliseconds,
 			submitMilliseconds,
 			std::move(sharedWorkKey));
+	}
+
+	std::string FormatVulkanVersion(std::uint32_t version)
+	{
+		std::ostringstream stream;
+		stream
+			<< VK_API_VERSION_MAJOR(version)
+			<< "."
+			<< VK_API_VERSION_MINOR(version)
+			<< "."
+			<< VK_API_VERSION_PATCH(version);
+		return stream.str();
+	}
+
+	VulkanFirstFailureDiagnostics BuildVulkanFirstFailureDiagnostics(
+		const RendererRecoverySnapshot& snapshot,
+		std::string operation,
+		std::string hardwareName,
+		std::string driverVersion,
+		std::string apiVersion)
+	{
+		VulkanFirstFailureDiagnostics diagnostics;
+		diagnostics.stage = snapshot.firstFailureStage;
+		diagnostics.affectedView = snapshot.affectedView;
+		diagnostics.result = snapshot.firstFailureResult;
+		diagnostics.operation = std::move(operation);
+		diagnostics.affectedResourceId = snapshot.affectedResourceId;
+		diagnostics.affectedResourceName = snapshot.affectedResourceName;
+		diagnostics.hardwareName = std::move(hardwareName);
+		diagnostics.driverVersion = std::move(driverVersion);
+		diagnostics.apiVersion = std::move(apiVersion);
+		diagnostics.frameId = snapshot.frameId;
+		diagnostics.renderSessionGeneration = snapshot.renderSessionGeneration;
+		diagnostics.duplicateFailureCount = snapshot.duplicateFailureCount;
+		return diagnostics;
+	}
+
+	void ApplyVulkanFirstFailureDiagnostics(
+		RendererRecoverySnapshot& snapshot,
+		const VulkanFirstFailureDiagnostics& diagnostics)
+	{
+		// Preserve the first root-cause fields. Duplicate Vulkan failures are
+		// already counted by RendererRecovery, so this function only enriches
+		// the same incident with stable hardware/session identity.
+		if (!diagnostics.hardwareName.empty() && snapshot.hardwareName.empty())
+		{
+			snapshot.hardwareName = diagnostics.hardwareName;
+		}
+		if (!diagnostics.driverVersion.empty() && snapshot.driverVersion.empty())
+		{
+			snapshot.driverVersion = diagnostics.driverVersion;
+		}
+		if (!diagnostics.apiVersion.empty() && snapshot.apiVersion.empty())
+		{
+			snapshot.apiVersion = diagnostics.apiVersion;
+		}
 	}
 
 }

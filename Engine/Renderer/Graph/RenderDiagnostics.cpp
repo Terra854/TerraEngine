@@ -12,11 +12,38 @@
 namespace TerraEngine::Renderer {
 
 	namespace {
+		constexpr std::size_t kRecoveryRecentPhaseLimit = 8u;
+
 		std::atomic<bool> g_renderDiagnosticsRequested = false;
 		std::mutex g_renderDiagnosticsMutex;
 		RenderDiagnosticsSummary g_latestRenderDiagnostics;
 		std::mutex g_backendResourceResidencyMutex;
 		BackendResourceResidencySnapshot g_latestBackendResourceResidency;
+
+		std::vector<std::string> BuildRecentRendererPhaseRing(const BackendFrameBreakdown& breakdown)
+		{
+			std::vector<std::string> phases;
+			const std::size_t begin = breakdown.stageTimings.size() > kRecoveryRecentPhaseLimit
+				? breakdown.stageTimings.size() - kRecoveryRecentPhaseLimit
+				: 0u;
+			for (std::size_t index = begin; index < breakdown.stageTimings.size(); ++index)
+			{
+				const BackendStageTiming& timing = breakdown.stageTimings[index];
+				const std::string label = timing.label.empty()
+					? std::string(ToString(timing.stage))
+					: timing.label;
+				phases.push_back(
+					std::to_string(timing.frameId)
+					+ ": "
+					+ ToString(timing.stage)
+					+ " "
+					+ label
+					+ " "
+					+ std::to_string(timing.milliseconds)
+					+ "ms");
+			}
+			return phases;
+		}
 
 		std::uint64_t ResolvePageResidencyBytes(const PageResidencyRecord& page)
 		{
@@ -1527,6 +1554,7 @@ namespace TerraEngine::Renderer {
 		summary.queuedBackgroundMilliseconds = SumQueuedBackendFrameCost(summary.backendFrameBreakdown);
 		summary.backendStalls = CollectBackendStallDiagnostics(summary.backendFrameBreakdown, 0.25f);
 		summary.viewSubmitWork = summary.backendFrameBreakdown.viewSubmitWork;
+		summary.recentRendererPhases = BuildRecentRendererPhaseRing(summary.backendFrameBreakdown);
 		if (summary.detailed && !summary.backendFrameBreakdown.stageTimings.empty())
 		{
 			const float coverage = CalculateBackendStageAttributionPercent(summary.backendFrameBreakdown);
@@ -1564,6 +1592,84 @@ namespace TerraEngine::Renderer {
 					+ ": "
 					+ item.reuseReason);
 			}
+		}
+	}
+
+	void ApplyRendererRecoveryDiagnostics(RenderDiagnosticsSummary& summary, RendererRecoverySnapshot snapshot)
+	{
+		const bool recoveryActive = IsRendererRecoveryActive(snapshot.state);
+		// Keep both the compact snapshot and expanded diagnostic form together.
+		// Tooling can show the compact fields in tables and still drill into
+		// incident/session details when a renderer failure is under inspection.
+		summary.rendererRecovery = snapshot;
+		summary.rendererRecoveryDiagnostics = BuildRecoveryDiagnosticSnapshot(
+			summary.rendererRecovery,
+			summary.recentRendererPhases,
+			summary.resourceWarnings);
+		if (!recoveryActive)
+		{
+			return;
+		}
+
+		summary.degradedWork.push_back(
+			std::string("Renderer recovery state: ")
+			+ ToString(summary.rendererRecovery.state)
+			+ " (incident "
+			+ summary.rendererRecovery.incidentId
+			+ ").");
+		if (!summary.rendererRecovery.firstFailureResult.empty())
+		{
+			std::string firstFailure =
+				std::string("First renderer failure: ")
+				+ ToString(summary.rendererRecovery.firstFailureStage)
+				+ " returned "
+				+ summary.rendererRecovery.firstFailureResult
+				+ ".";
+			if (!summary.rendererRecovery.hardwareName.empty())
+			{
+				firstFailure += " GPU=" + summary.rendererRecovery.hardwareName;
+			}
+			if (!summary.rendererRecovery.driverVersion.empty())
+			{
+				firstFailure += " driver=" + summary.rendererRecovery.driverVersion;
+			}
+			if (!summary.rendererRecovery.apiVersion.empty())
+			{
+				firstFailure += " api=" + summary.rendererRecovery.apiVersion;
+			}
+			summary.backendFallbacks.push_back(std::move(firstFailure));
+		}
+		if (summary.rendererRecovery.duplicateFailureCount > 0u)
+		{
+			summary.backendFallbacks.push_back(
+				"Suppressed "
+				+ std::to_string(summary.rendererRecovery.duplicateFailureCount)
+				+ " duplicate renderer failures after the first root cause.");
+		}
+		if (!summary.rendererRecovery.sessionId.empty()
+			|| summary.rendererRecovery.finalOutcome != RendererRecoveryOutcome::None
+			|| !summary.rendererRecovery.fatalDialogReportId.empty())
+		{
+			std::string recoveryResult =
+				std::string("Renderer recovery outcome=")
+				+ ToString(summary.rendererRecovery.finalOutcome)
+				+ " action="
+				+ ToString(summary.rendererRecovery.selectedAction)
+				+ " session="
+				+ summary.rendererRecovery.sessionId;
+			if (!summary.rendererRecovery.fatalDialogReportId.empty())
+			{
+				recoveryResult += " fatalReport=" + summary.rendererRecovery.fatalDialogReportId;
+			}
+			if (!summary.rendererRecovery.crashDumpPath.empty())
+			{
+				recoveryResult += " crashDump=" + summary.rendererRecovery.crashDumpPath;
+			}
+			if (!summary.rendererRecovery.crashDumpStatus.empty())
+			{
+				recoveryResult += " crashDumpStatus=" + summary.rendererRecovery.crashDumpStatus;
+			}
+			summary.backendFallbacks.push_back(std::move(recoveryResult));
 		}
 	}
 

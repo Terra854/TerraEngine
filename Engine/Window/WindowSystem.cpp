@@ -2,17 +2,56 @@
 
 #include "WindowSystem.h"
 
+#include <sstream>
 #include <stdexcept>
 
 #include "Debug.h"
 #include "Core/Logger/Logger.h"
 #include "Profiling/ProfilerScope.h"
 
+#ifdef _WIN32
+#	ifndef WIN32_LEAN_AND_MEAN
+#		define WIN32_LEAN_AND_MEAN
+#	endif
+#	ifndef NOMINMAX
+#		define NOMINMAX
+#	endif
+#	include <Windows.h>
+#endif
+
 namespace
 {
 	constexpr const char* kWindowPollingClassification = "protected";
 	constexpr const char* kWindowPollingProtectedReason = "Platform event polling, close/resize callbacks, cursor state, and swap-buffer calls remain owned by the coordinator thread.";
 	constexpr const char* kWindowPollingWorkerSafeSubwork = "Workers may consume immutable input/window snapshots after polling.";
+
+	std::string FormatFatalDialogMessage(const TerraEngine::FatalErrorDialogReport& report)
+	{
+		std::ostringstream stream;
+		stream << report.shortReason;
+		if (!report.details.empty())
+		{
+			stream << "\n\n" << report.details;
+		}
+		if (!report.crashDumpPath.empty())
+		{
+			stream << "\n\nCrash dump: " << report.crashDumpPath.string();
+		}
+		if (!report.crashSummaryPath.empty())
+		{
+			stream << "\nReport: " << report.crashSummaryPath.string();
+		}
+		if (!report.logPath.empty())
+		{
+			stream << "\nLog: " << report.logPath.string();
+		}
+		if (!report.crashDumpFailureReason.empty())
+		{
+			stream << "\nDump status: " << TerraEngine::ToString(report.crashDumpStatus)
+				<< " (" << report.crashDumpFailureReason << ")";
+		}
+		return stream.str();
+	}
 }
 
 WindowSystem& WindowSystem::Instance()
@@ -164,4 +203,22 @@ WindowSystem::WindowPollingBoundaryDiagnostics WindowSystem::GetPollingBoundaryD
 WindowSystem::WindowWorkerSnapshot WindowSystem::GetLatestWorkerSnapshot() const
 {
 	return latestWorkerSnapshot;
+}
+
+bool WindowSystem::ShowFatalErrorDialog(const TerraEngine::FatalErrorDialogReport& report) const
+{
+	const std::string message = FormatFatalDialogMessage(report);
+	TERRAENGINE_LOG(LogLevel::Error, "Fatal error dialog: " << report.title << " - " << message);
+#ifdef _WIN32
+	const std::wstring wideTitle(report.title.begin(), report.title.end());
+	const std::wstring wideMessage(message.begin(), message.end());
+	// MessageBoxW is intentionally independent of the engine renderer. The
+	// owner handle may be null when the graphics backend failed during startup,
+	// which still gives Windows a process-modal crash reason dialog.
+	MessageBoxW(nullptr, wideMessage.c_str(), wideTitle.c_str(), MB_OK | MB_ICONERROR | MB_TASKMODAL);
+	return true;
+#else
+	(void)report;
+	return false;
+#endif
 }

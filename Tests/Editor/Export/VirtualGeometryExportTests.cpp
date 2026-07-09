@@ -288,6 +288,13 @@ namespace TerraEngine::EditorTests
 			const std::string manifest =
 				std::string("{\n") +
 				"\t\"name\": \"Virtual Geometry Export Test\",\n"
+				"\t\"rendererRecovery\": {\n"
+				"\t\t\"validationEnabled\": false,\n"
+				"\t\t\"diagnosticsEnabled\": true,\n"
+				"\t\t\"maxRendererRebuildAttemptsPerIncident\": 1,\n"
+				"\t\t\"fatalMessage\": \"Graphics device lost and renderer recovery failed.\",\n"
+				"\t\t\"fullApplicationRestart\": false\n"
+				"\t},\n"
 				"\t\"virtualGeometry\": {\n"
 				"\t\t\"quality\": \"medium\",\n"
 				"\t\t\"diagnosticsEnabled\": true,\n"

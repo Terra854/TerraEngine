@@ -5,6 +5,7 @@
 // This module ensures that the Vulkan environment is correctly initialized and safely destroyed during the engine lifecycle.
 
 #include "VulkanContextImpl.h"
+#include "VulkanFrameDiagnostics.h"
 
 #include <algorithm>
 #include <cstring>
@@ -15,24 +16,42 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 	this->windowSystem = &windowSystem;
 	deviceLost = false;
 	deviceLostLogged = false;
+	++renderSessionGeneration;
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestRendererRecoverySnapshot = TerraEngine::Renderer::MakeActiveRecoverySnapshot(renderSessionGeneration);
+	}
 	skipFrame = false;
 	editorRenderSubmitted = false;
 	volkInitialize();
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!CreateInstance()) return false;
-	if (!SetupDebugMessenger()) return false;
+	if (!CreateInstance()) {
+		RecordInitializationFailure("VK_ERROR_INITIALIZATION_FAILED", "Vulkan instance creation");
+		return false;
+	}
+	if (!SetupDebugMessenger()) {
+		RecordInitializationFailure("VK_ERROR_INITIALIZATION_FAILED", "Vulkan debug messenger setup");
+		return false;
+	}
 	
 	auto* window = static_cast<GLFWwindow*>(windowSystem.GetNativeHandle());
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
 		TERRAENGINE_LOG(LogLevel::Error, "failed to create window surface!");
+		RecordInitializationFailure("VK_ERROR_SURFACE_LOST_KHR", "Vulkan window surface creation");
 		return false;
 	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (!PickPhysicalDevice()) return false;
-	if (!CreateLogicalDevice()) return false;
+	if (!PickPhysicalDevice()) {
+		RecordInitializationFailure("VK_ERROR_INCOMPATIBLE_DRIVER", "Vulkan physical device selection");
+		return false;
+	}
+	if (!CreateLogicalDevice()) {
+		RecordInitializationFailure("VK_ERROR_INITIALIZATION_FAILED", "Vulkan logical device creation");
+		return false;
+	}
 
 	VmaVulkanFunctions vulkanFunctions = {};
 	vulkanFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
@@ -112,9 +131,13 @@ bool VulkanContext::Impl::InitVulkan(WindowSystem& windowSystem) {
 }
 
 // VulkanContext::Impl::Cleanup is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void VulkanContext::Impl::Cleanup() {
-	if (device) {
-		vkDeviceWaitIdle(device);
+void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
+	if (device && !skipDeviceIdle) {
+		const VkResult idleResult = vkDeviceWaitIdle(device);
+		if (idleResult != VK_SUCCESS)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "Vulkan cleanup could not prove the device idle before teardown: " << idleResult);
+		}
 	}
 
 	DestroyAmbientOcclusionResources();
@@ -627,20 +650,26 @@ void VulkanContext::Impl::Cleanup() {
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (allocator) vmaDestroyAllocator(allocator);
+	allocator = VK_NULL_HANDLE;
 
 	DestroyWorkerPools();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (device) vkDestroyDevice(device, nullptr);
+	device = VK_NULL_HANDLE;
+	physicalDevice = VK_NULL_HANDLE;
 
 	if (validationLayersEnabled && instance) {
 		DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
 	}
+	debugMessenger = VK_NULL_HANDLE;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (instance) {
 		vkDestroySurfaceKHR(instance, surface, nullptr);
 		vkDestroyInstance(instance, nullptr);
 	}
+	surface = VK_NULL_HANDLE;
+	instance = VK_NULL_HANDLE;
 	initialized = false;
 }
 
@@ -765,12 +794,15 @@ bool VulkanContext::Impl::PickPhysicalDevice() {
 		
 		uint32_t driverVersion = deviceProperties.driverVersion;
 		uint32_t apiVersion = deviceProperties.apiVersion;
+		selectedPhysicalDeviceName = deviceProperties.deviceName;
+		selectedDriverVersionString = std::to_string(driverVersion);
+		selectedApiVersionString = TerraEngine::Renderer::Vulkan::FormatVulkanVersion(apiVersion);
 		
 		TERRAENGINE_LOG(LogLevel::Debug, "Selected GPU: " << deviceProperties.deviceName);
 		TERRAENGINE_LOG(LogLevel::Debug, "  Vendor ID: " << deviceProperties.vendorID);
 		TERRAENGINE_LOG(LogLevel::Debug, "  Device Type: " << deviceProperties.deviceType);
 		TERRAENGINE_LOG(LogLevel::Debug, "  Driver Version: " << driverVersion);
-		TERRAENGINE_LOG(LogLevel::Debug, "  API Version: " << VK_API_VERSION_MAJOR(apiVersion) << "." << VK_API_VERSION_MINOR(apiVersion) << "." << VK_API_VERSION_PATCH(apiVersion));
+		TERRAENGINE_LOG(LogLevel::Debug, "  API Version: " << selectedApiVersionString);
 		TERRAENGINE_LOG(LogLevel::Debug, "  Mesh Shader Support: " << (meshShaderSupported ? "yes" : "no"));
 		TERRAENGINE_LOG(LogLevel::Debug, "  Task Shader Support: " << (taskShaderSupported ? "yes" : "no"));
 	} else {

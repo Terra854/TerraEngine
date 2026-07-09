@@ -388,7 +388,11 @@ namespace TerraEngine::Tests {
 				TerraEngine::Scheduling::kResourceVirtualGeometryShadowVisibilitySnapshots,
 				TerraEngine::Scheduling::kResourceVirtualGeometryDiagnostics,
 				TerraEngine::Scheduling::kResourceVisibleCommandReuseDiagnostics,
-				TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets
+				TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets,
+				TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
+				TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
+				TerraEngine::Scheduling::kResourceRendererRecoveryPlan,
+				TerraEngine::Scheduling::kResourceRendererRecoverySession
 			};
 
 			// RenderSystem is registered during engine startup before any frame
@@ -432,6 +436,18 @@ namespace TerraEngine::Tests {
 			{
 				context.Expect(Contains(declaration.writes, resourceName), "RenderSystem should declare page-streaming write resource: " + resourceName);
 			}
+			const std::vector<std::string> recoveryResources = {
+				TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
+				TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
+				TerraEngine::Scheduling::kResourceRendererRecoveryPlan,
+				TerraEngine::Scheduling::kResourceRendererRecoverySession
+			};
+			for (const std::string& resourceName : recoveryResources)
+			{
+				context.Expect(ContainsSchedulerResource(resources, resourceName), "Default scheduler resources should define renderer recovery resource: " + resourceName);
+				context.Expect(Contains(declaration.reads, resourceName), "RenderSystem should declare renderer recovery read resource: " + resourceName);
+				context.Expect(Contains(declaration.writes, resourceName), "RenderSystem should declare renderer recovery write resource: " + resourceName);
+			}
 
 			context.Expect(summary.valid, "Default scheduler resources should accept RenderSystem's virtual geometry read/write declarations.");
 			context.Expect(!HasDiagnostic(summary, TerraEngine::Scheduling::DiagnosticCategory::Resource), "Virtual geometry scheduler resources should not produce unknown-resource diagnostics.");
@@ -439,6 +455,8 @@ namespace TerraEngine::Tests {
 			context.Expect(declaration.safeSubwork.find("page request planning") != std::string::npos, "RenderSystem worker-safe declaration should explain page request planning.");
 			context.Expect(declaration.protectedCommit.find("page payload publication") != std::string::npos, "RenderSystem protected boundary should explain page payload publication.");
 			context.Expect(declaration.protectedCommit.find("page retirement draining") != std::string::npos, "RenderSystem protected boundary should explain page retirement draining.");
+			context.Expect(declaration.safeSubwork.find("renderer recovery plan preparation") != std::string::npos, "RenderSystem worker-safe declaration should explain recovery planning.");
+			context.Expect(declaration.protectedCommit.find("renderer recovery state/session publication") != std::string::npos, "RenderSystem protected boundary should explain recovery publication.");
 		});
 
 		registry.Add("Engine.SystemScheduler.FrameWorkloadsConvertProtectedAndWorkerSystems", [](TestContext& context) {

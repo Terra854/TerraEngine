@@ -179,6 +179,25 @@ categories, render worker task group planning, Vulkan recording-batch planning,
 thread-local recording context ownership, and stale backend batch rejection. The
 complete renderer-threading checks also cover worker-owned render preparation,
 
+Renderer device-recovery coverage lives in `Tests/Engine/Renderer`,
+`Tests/Engine/Platform`, `Tests/Engine/Runtime`, and the editor automation,
+profiler, project, and renderer-window suites. These tests validate the
+CPU-only recovery snapshot model, scheduler resource declarations, one-incident
+device-loss latching, duplicate suppression, no normal GPU submission after the
+latch, renderer-independent editor status panels, export recovery manifest
+validation, diagnostics/crash-dump paths outside SaveData, and deterministic
+device-loss injection helpers. Use this focused pass when changing renderer
+failure handling or diagnostics:
+
+```powershell
+ctest --test-dir out/build/Debug -C Debug -R "RendererRecovery|DeviceLoss|ExportRuntime|RenderDiagnostics|SystemScheduler|PlatformUtils" --output-on-failure
+```
+
+This pass currently proves fail-closed containment and diagnostics. Full
+loss-safe Vulkan device teardown/recreation is intentionally tracked separately
+because a real `VK_ERROR_DEVICE_LOST` cannot safely reuse the ordinary
+device-idle cleanup path.
+
 Visible-command reuse coverage validates static-view cache-hit telemetry,
 deduplicated streaming touch publication, scheduler resource declarations,
 automation stats, profiler rows, and repeated-resource performance gates. Use

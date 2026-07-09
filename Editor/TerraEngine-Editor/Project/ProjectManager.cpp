@@ -3,13 +3,18 @@
 // Implements the project management logic, including project creation from templates and project loading from disk. It manages the cleanup of legacy interop scripts and ensures that project manifests are correctly synchronized with the active editor state.
 
 #include "ProjectManager.h"
+#include "Core/FatalErrorReport.h"
 #include <fstream>
 #include <chrono>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <optional>
+#include <set>
 #include "Engine/Core/Logger/Logger.h"
 #include "Resource/ResourceStreaming.h"
+#include "Utilities/PlatformUtils.h"
+#include "Window/WindowSystem.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -153,6 +158,121 @@ namespace
 			return std::isspace(character) != 0;
 		});
 	}
+
+	std::vector<std::string> BuildCrashSummaryProductCandidates(const fs::path& projectDir)
+	{
+		std::vector<std::string> candidates;
+		std::set<std::string> uniqueCandidates;
+		const auto addCandidate = [&](std::string value) {
+			if (!value.empty() && uniqueCandidates.insert(value).second)
+			{
+				candidates.push_back(std::move(value));
+			}
+		};
+
+		addCandidate("TerraEngine");
+		addCandidate(projectDir.filename().string());
+
+		const fs::path manifestPath = projectDir / "game.json";
+		if (fs::exists(manifestPath))
+		{
+			try
+			{
+				std::ifstream manifestFile(manifestPath);
+				nlohmann::json manifest;
+				manifestFile >> manifest;
+				if (auto nameIt = manifest.find("name"); nameIt != manifest.end() && nameIt->is_string())
+				{
+					addCandidate(nameIt->get<std::string>());
+				}
+			}
+			catch (const std::exception& exception)
+			{
+				TERRAENGINE_LOG(LogLevel::Warning, "[ProjectManager] Could not read game.json while checking previous crash summaries: " << exception.what());
+			}
+		}
+		return candidates;
+	}
+
+	std::optional<fs::path> FindLatestUnshownCrashSummary(const std::vector<std::string>& productCandidates)
+	{
+		std::optional<fs::path> latestSummary;
+		fs::file_time_type latestWriteTime = (fs::file_time_type::min)();
+		for (const std::string& productName : productCandidates)
+		{
+			const fs::path crashDirectory = TerraEngine::PlatformUtils::GetCrashDumpDirectory(productName);
+			std::error_code directoryError;
+			if (crashDirectory.empty() || !fs::exists(crashDirectory, directoryError))
+			{
+				continue;
+			}
+
+			std::error_code iteratorError;
+			for (const fs::directory_entry& entry : fs::directory_iterator(crashDirectory, iteratorError))
+			{
+				std::error_code entryError;
+				if (!entry.is_regular_file(entryError) || entry.path().extension() != ".txt")
+				{
+					continue;
+				}
+				const std::string filename = entry.path().filename().string();
+				if (filename.find(".shown") != std::string::npos)
+				{
+					continue;
+				}
+
+				const fs::file_time_type writeTime = fs::last_write_time(entry.path(), entryError);
+				if (!entryError && (!latestSummary || writeTime > latestWriteTime))
+				{
+					latestSummary = entry.path();
+					latestWriteTime = writeTime;
+				}
+			}
+		}
+		return latestSummary;
+	}
+
+	void MarkCrashSummaryShown(const fs::path& summaryPath)
+	{
+		const fs::path shownPath = summaryPath.parent_path() / (summaryPath.stem().string() + ".shown" + summaryPath.extension().string());
+		std::error_code removeError;
+		fs::remove(shownPath, removeError);
+		std::error_code renameError;
+		fs::rename(summaryPath, shownPath, renameError);
+		if (renameError)
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "[ProjectManager] Could not mark previous crash summary as shown: " << renameError.message());
+		}
+	}
+
+	void ShowPreviousHardCrashSummaryIfPresent(const fs::path& projectDir, RendererRecoveryProjectActionState& actionState)
+	{
+		actionState.previousCrashSummaryShown = false;
+		actionState.previousCrashSummaryPath.clear();
+		actionState.previousCrashSummaryMessage.clear();
+
+		const std::optional<fs::path> summaryPath = FindLatestUnshownCrashSummary(BuildCrashSummaryProductCandidates(projectDir));
+		if (!summaryPath)
+		{
+			return;
+		}
+
+		TerraEngine::FatalErrorDialogReport report;
+		std::string error;
+		if (!TerraEngine::LoadFatalErrorSummarySidecar(*summaryPath, report, &error))
+		{
+			TERRAENGINE_LOG(LogLevel::Warning, "[ProjectManager] Previous crash summary could not be loaded: " << error);
+			return;
+		}
+
+		MarkCrashSummaryShown(*summaryPath);
+		report.category = TerraEngine::FatalErrorCategory::PreviousHardCrash;
+		report.title = "Previous TerraEngine crash detected";
+		report.canContinue = true;
+		actionState.previousCrashSummaryShown = WindowSystem::Instance().ShowFatalErrorDialog(report);
+		actionState.previousCrashSummaryPath = report.crashSummaryPath;
+		actionState.previousCrashSummaryMessage = report.shortReason;
+	}
 }
 
 ProjectManager::ProjectManager() {
@@ -284,6 +404,10 @@ bool ProjectManager::LoadProject(const fs::path& location, std::string* outError
 		currentSettings = j.get<ProjectSettings>();
 		projectRoot = projectDir;
 		isProjectLoaded = true;
+		rendererRecoveryActionState.canSaveProjectData = true;
+		rendererRecoveryActionState.lastSafeSaveRoot = projectRoot;
+		rendererRecoveryActionState.lastSafeSaveMessage.clear();
+		ShowPreviousHardCrashSummaryIfPresent(projectDir, rendererRecoveryActionState);
 
 		// Derive name from directory
 		std::string projectName = projectDir.filename().string();
@@ -328,6 +452,11 @@ void ProjectManager::CloseProject() {
 		isProjectLoaded = false;
 		currentSettings.reset();
 		projectRoot.clear();
+		rendererRecoveryActionState.canSaveProjectData = false;
+		rendererRecoveryActionState.lastSafeSaveMessage = "No active project is available for renderer-recovery save.";
+		rendererRecoveryActionState.previousCrashSummaryShown = false;
+		rendererRecoveryActionState.previousCrashSummaryPath.clear();
+		rendererRecoveryActionState.previousCrashSummaryMessage.clear();
 	}
 }
 
@@ -368,6 +497,10 @@ const std::vector<RecentProjectEntry>& ProjectManager::GetRecentProjects() const
 // ProjectManager::GetEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 const EditorPreferences& ProjectManager::GetEditorPreferences() const {
 	return editorPrefs;
+}
+
+const RendererRecoveryProjectActionState& ProjectManager::GetRendererRecoveryActionState() const {
+	return rendererRecoveryActionState;
 }
 
 // ProjectManager::GetExternalScriptEditorCommand is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -424,6 +557,38 @@ void ProjectManager::SaveEditorPreferences() {
 	std::ofstream file(preferencesPath);
 	nlohmann::json j = editorPrefs;
 	file << j.dump(4);
+}
+
+bool ProjectManager::SaveProjectDataForRendererRecovery(std::string* outError) {
+	// Device-loss recovery may run while Vulkan objects are invalid, so this
+	// path intentionally writes only CPU-owned project/editor metadata through
+	// the existing save functions. Scene documents, imports, cooks, and asset
+	// database rewrites remain outside this emergency save to avoid hidden work.
+	if (!isProjectLoaded || !currentSettings.has_value() || projectRoot.empty()) {
+		const std::string message = "No active project data is available for renderer recovery.";
+		rendererRecoveryActionState.canSaveProjectData = false;
+		rendererRecoveryActionState.lastSafeSaveMessage = message;
+		if (outError != nullptr) {
+			*outError = message;
+		}
+		return false;
+	}
+
+	try {
+		SaveProjectSettings();
+		SaveEditorPreferences();
+		rendererRecoveryActionState.canSaveProjectData = true;
+		rendererRecoveryActionState.lastSafeSaveRoot = projectRoot;
+		rendererRecoveryActionState.lastSafeSaveMessage = "Project settings and editor preferences saved without renderer state.";
+		return true;
+	} catch (const std::exception& exception) {
+		const std::string message = std::string("Renderer-recovery project save failed: ") + exception.what();
+		rendererRecoveryActionState.lastSafeSaveMessage = message;
+		if (outError != nullptr) {
+			*outError = message;
+		}
+		return false;
+	}
 }
 
 // ProjectManager::LoadEditorPreferences is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

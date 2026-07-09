@@ -48,6 +48,7 @@ namespace TerraEngine::Editor::Automation
 	enum class MutationMode
 	{
 		ReadOnly,
+		ProjectMutation,
 		EditorSelection,
 		SceneMutation,
 		AssetMutation,

@@ -786,6 +786,8 @@ void ResourceResidencyWindow::OnGui()
 	ImGui::Spacing();
 	DrawDiagnosticsFilters();
 	ImGui::Spacing();
+	DrawRendererRecoverySummary();
+	ImGui::Spacing();
 	DrawSummary();
 	ImGui::Spacing();
 	DrawStreamingSummary();
@@ -1134,6 +1136,48 @@ void ResourceResidencyWindow::DrawSummary()
 		ImGui::TableSetColumnIndex(5);
 		TextStringView(TerraEngine::Resource::ToString(summary.cleanupReason));
 		ImGui::EndTable();
+	}
+}
+
+void ResourceResidencyWindow::DrawRendererRecoverySummary()
+{
+	const TerraEngine::Renderer::RenderDiagnosticsSummary renderDiagnostics = RenderSystem::Instance().GetLatestRenderGraphDiagnostics();
+	const TerraEngine::Renderer::RendererRecoverySnapshot& recovery = renderDiagnostics.rendererRecovery;
+	if (!TerraEngine::Renderer::IsRendererRecoveryActive(recovery.state)
+		&& recovery.finalOutcome == TerraEngine::Renderer::RendererRecoveryOutcome::None)
+	{
+		return;
+	}
+
+	ImGui::SeparatorText("Renderer Recovery");
+	if (ImGui::BeginTable("ResourceResidencyRendererRecovery", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+	{
+		ImGui::TableSetupColumn("State");
+		ImGui::TableSetupColumn("Incident");
+		ImGui::TableSetupColumn("Failure");
+		ImGui::TableSetupColumn("Safe Actions");
+		ImGui::TableHeadersRow();
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+		ImGui::Text("%s", TerraEngine::Renderer::ToString(recovery.state));
+		ImGui::TableSetColumnIndex(1);
+		ImGui::TextUnformatted(recovery.incidentId.empty() ? "-" : recovery.incidentId.c_str());
+		ImGui::TableSetColumnIndex(2);
+		ImGui::Text("%s  %s", TerraEngine::Renderer::ToString(recovery.firstFailureStage), recovery.firstFailureResult.c_str());
+		ImGui::TableSetColumnIndex(3);
+		ImGui::Text("save=%s rebuild=%s retry=%s",
+			BoolText(recovery.canSaveProjectData),
+			BoolText(recovery.canAttemptRebuild),
+			BoolText(recovery.canRetryRendererRebuild));
+		ImGui::EndTable();
+	}
+	if (!recovery.message.empty())
+	{
+		ImGui::TextWrapped("%s", recovery.message.c_str());
+	}
+	if (!recovery.crashDumpPath.empty())
+	{
+		ImGui::TextWrapped("Crash dump: %s", recovery.crashDumpPath.c_str());
 	}
 }
 

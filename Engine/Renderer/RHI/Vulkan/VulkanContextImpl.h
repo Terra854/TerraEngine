@@ -180,6 +180,12 @@ struct VulkanContext::Impl {
 	VkDevice device = VK_NULL_HANDLE;
 	VkQueue graphicsQueue = VK_NULL_HANDLE;
 	VkQueue presentQueue = VK_NULL_HANDLE;
+	// These strings are copied into recovery snapshots when the backend first
+	// fails. Keeping them CPU-side means diagnostics can still name the GPU
+	// after Vulkan handles have become unsafe to query.
+	std::string selectedPhysicalDeviceName;
+	std::string selectedDriverVersionString;
+	std::string selectedApiVersionString;
 
 	VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 	std::vector<VkImage> swapchainImages;
@@ -628,7 +634,10 @@ struct VulkanContext::Impl {
 	RenderSnapshotDiagnosticsSnapshot latestRenderSnapshotDiagnostics{};
 	TerraEngine::Renderer::BackendFrameBreakdown pendingBackendFrameBreakdown{};
 	TerraEngine::Renderer::BackendFrameBreakdown latestBackendFrameBreakdown{};
+	TerraEngine::Renderer::RendererRecoverySnapshot latestRendererRecoverySnapshot{};
 	std::uint64_t backendFrameSerial = 0u;
+	std::uint64_t rendererRecoveryFrameSerial = 0u;
+	std::uint64_t renderSessionGeneration = 1u;
 	ClusterValidationSnapshot previousClusterValidationSnapshot{};
 	bool previousClusterValidationSnapshotValid = false;
 	std::filesystem::path clusterValidationCapturePath = std::filesystem::path("Tools") / "LightingValidation" / "results" / "latest-cluster-validation.json";
@@ -809,13 +818,14 @@ struct VulkanContext::Impl {
 	uint32_t acquiredImageIndex = 0;
 
 	bool InitVulkan(WindowSystem& windowSystem);
-	void Cleanup();
+	void Cleanup(bool skipDeviceIdle = false);
 
 	void InitEditorMode();
 	void CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent = {});
 	void RecreateOffscreenResources(); // Handle resize
 	void ClearResources();
 	bool MarkDeviceLost(VkResult result, std::string_view operation);
+	void RecordInitializationFailure(std::string_view result, std::string_view operation);
 
 	// Grid Renderer
 	VkPipeline sceneViewGridPipeline = VK_NULL_HANDLE;

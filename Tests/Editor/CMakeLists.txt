@@ -18,6 +18,7 @@ add_executable(TerraEngine-EditorTests
 	Export/PackRoundTripTests.cpp
 	Export/PackagingRequestValidationTests.cpp
 	Export/ResidencyPolicyExportTests.cpp
+	Export/RendererRecoveryExportPolicyTests.cpp
 	Export/StreamingPolicyExportTests.cpp
 	Export/VirtualGeometryExportTests.cpp
 	Export/VirtualGeometryScalingExportTests.cpp
@@ -40,6 +41,7 @@ add_executable(TerraEngine-EditorTests
 	Automation/EditorMcpAssetImportTests.cpp
 	Automation/EditorMcpAssetImportSafetyTests.cpp
 	Automation/ProfilerDiagnosticsAutomationTests.cpp
+	Automation/RendererRecoveryAutomationTests.cpp
 	Automation/VirtualGeometryAutomationTests.cpp
 	Automation/VirtualGeometryScalingAutomationTests.cpp
 	AssetPipeline/ModelPackageImportResultTests.cpp
@@ -63,6 +65,8 @@ add_executable(TerraEngine-EditorTests
 	AssetPipeline/VirtualGeometryMeshCompilerTests.cpp
 	AssetPipeline/VirtualGeometryPackageImportTests.cpp
 	Renderer/GameViewStatsOverlayTests.cpp
+	Renderer/RendererRecoveryEditorTests.cpp
+	Renderer/RendererRecoveryWindowTests.cpp
 	Renderer/ResourceResidencyWindowTests.cpp
 	Renderer/VirtualGeometryDebugViewTests.cpp
 	Renderer/VirtualGeometryHardeningDebugViewTests.cpp
@@ -75,6 +79,9 @@ add_executable(TerraEngine-EditorTests
 	Scene/TransactionalMutationDiagnosticsWindowTests.cpp
 	Scene/TransactionalMutationUndoTests.cpp
 	Scene/PrefabAuthoringWorkflowTests.cpp
+	Project/RendererRecoveryCrashSummaryTests.cpp
+	Project/RendererRecoveryProjectSaveTests.cpp
+	Profiling/RendererRecoveryProfilerTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
 	Scene/StreamingEditorWorkflowTests.cpp
@@ -218,6 +225,12 @@ add_test(NAME Editor.VirtualGeometryDiagnostics COMMAND $<TARGET_FILE:TerraEngin
 set_tests_properties(Editor.VirtualGeometryDiagnostics PROPERTIES
 	LABELS "Editor;VirtualGeometry;Diagnostics"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=VirtualGeometry.Editor.Diagnostics"
+)
+
+add_test(NAME Editor.RendererRecovery COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.RendererRecovery PROPERTIES
+	LABELS "Editor;RendererRecovery;DeviceLoss"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=RendererRecovery,ExportPackageValidator,VirtualGeometry.Editor.Export,LinuxPlatformExport"
 )
 
 add_test(NAME Editor.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)

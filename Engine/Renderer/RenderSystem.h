@@ -27,6 +27,7 @@
 #include "Components/LightComponent.h"
 #include "Renderer/Graph/RenderDiagnostics.h"
 #include "Renderer/Graph/RenderFrameSnapshot.h"
+#include "Renderer/RendererRecoveryPolicy.h"
 #include "Scene/RuntimeLayout.h"
 #include "Scene/SpatialDiagnostics.h"
 #include "Scene/SpatialIndex.h"
@@ -64,6 +65,9 @@ public:
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const;
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const;
+	TerraEngine::Renderer::RendererRecoverySnapshot GetLatestRendererRecoverySnapshot() const;
+	void SetRendererRecoveryPolicy(const TerraEngine::Renderer::RendererRecoveryPolicy& policy);
+	TerraEngine::Renderer::RendererRecoveryPolicy GetRendererRecoveryPolicy() const;
 	std::vector<TerraEngine::Renderer::OcclusionDebugSample> GetLatestVirtualGeometryOcclusionDebugSamples(RenderViewType viewType, std::size_t maxCount = TerraEngine::Renderer::kVirtualGeometryOcclusionDebugSampleCapacity) const;
 	TerraEngine::Renderer::RenderDiagnosticsSummary GetLatestRenderGraphDiagnostics() const;
 	TerraEngine::Renderer::RenderCaptureAvailability GetCaptureAvailability() const;
@@ -176,6 +180,9 @@ public:
 private:
 	RenderSystem();
 	void ApplyRenderDiagnosticsRequest();
+	TerraEngine::Renderer::ResourceRestorationPlan BuildRendererRecoveryRestorationPlan(const TerraEngine::Renderer::RenderFrameSnapshot& snapshot) const;
+	bool TryRecoverRendererAfterDeviceLoss(TerraEngine::Renderer::RenderDiagnosticsSummary& diagnostics);
+	void ReportFatalRendererRecoveryFailure(TerraEngine::Renderer::RendererRecoverySnapshot snapshot);
 	std::unique_ptr<RHIContext> rhi;
 	ObjectManager& objManager = ObjectManager::instance();
 	bool initialized = false;
@@ -232,6 +239,11 @@ private:
 	LightingDiagnosticsSnapshot latestGameLightingDiagnostics{};
 	LightingDiagnosticsSnapshot latestSceneLightingDiagnostics{};
 	RenderSnapshotDiagnosticsSnapshot latestRenderSnapshotDiagnostics{};
+	TerraEngine::Renderer::RendererRecoverySnapshot latestRendererRecoverySnapshot{};
+	TerraEngine::Renderer::RendererRecoveryPolicy rendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
+	TerraEngine::Renderer::ResourceRestorationPlan latestRendererRecoveryPlan{};
+	std::string rendererRecoveryAttemptIncidentId;
+	std::uint32_t rendererRecoveryCompletedAttemptsForIncident = 0u;
 	TerraEngine::Renderer::RenderDiagnosticsSummary latestRenderGraphDiagnostics{};
 	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
 	TerraEngine::Renderer::RenderCaptureLimits captureLimits{};

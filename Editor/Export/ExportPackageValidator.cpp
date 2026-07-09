@@ -136,6 +136,31 @@ bool ValidateVirtualGeometryManifestBlock(const nlohmann::json& virtualGeometry,
 	return true;
 }
 
+bool ValidateRendererRecoveryManifestBlock(const nlohmann::json& rendererRecovery, std::string& outError)
+{
+	if (!rendererRecovery.is_object()) {
+		outError = "Renderer recovery export manifest must be an object.";
+		return false;
+	}
+	if (!rendererRecovery.contains("maxRendererRebuildAttemptsPerIncident")
+		|| !rendererRecovery["maxRendererRebuildAttemptsPerIncident"].is_number_unsigned()
+		|| rendererRecovery["maxRendererRebuildAttemptsPerIncident"].get<std::uint32_t>() == 0u) {
+		outError = "Renderer recovery export manifest is missing a positive rebuild attempt budget.";
+		return false;
+	}
+	if (!rendererRecovery.contains("fatalMessage")
+		|| !rendererRecovery["fatalMessage"].is_string()
+		|| rendererRecovery["fatalMessage"].get<std::string>().empty()) {
+		outError = "Renderer recovery export manifest is missing a fatal message.";
+		return false;
+	}
+	if (rendererRecovery.value("fullApplicationRestart", false)) {
+		outError = "Renderer recovery export manifest must not enable full application restart.";
+		return false;
+	}
+	return true;
+}
+
 bool ValidateVirtualGeometryTemfPayload(const tepak::ByteBuffer& bytes, std::string_view path, std::string& outError)
 {
 	const std::string normalizedPath = NormalizePackagePath(path);
@@ -305,6 +330,11 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 					return false;
 				}
 			}
+		}
+
+		if (!manifest.contains("rendererRecovery")
+			|| !ValidateRendererRecoveryManifestBlock(manifest["rendererRecovery"], outError)) {
+			return false;
 		}
 
 		if (auto startupIt = manifest.find("startupScene"); startupIt != manifest.end() && startupIt->is_string()) {

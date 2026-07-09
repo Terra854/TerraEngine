@@ -7,7 +7,11 @@
 #pragma once
 
 #include "Renderer/Graph/RenderFrameBreakdown.h"
+#include "Renderer/RendererRecovery.h"
 #include "Core/Export.h"
+
+#include <cstdint>
+#include <string>
 
 namespace TerraEngine::Renderer::Vulkan {
 
@@ -27,6 +31,24 @@ namespace TerraEngine::Renderer::Vulkan {
 		// viewScoped is false for frame-wide work such as acquire/present and
 		// true for work owned by a single scene or game view submission.
 		bool viewScoped = false;
+	};
+
+	struct VulkanFirstFailureDiagnostics
+	{
+		// This payload is plain CPU data so recovery reporting can survive after
+		// the Vulkan device is lost and backend handles are no longer safe.
+		RendererDeviceFailureStage stage = RendererDeviceFailureStage::Unknown;
+		RendererRecoveryAffectedView affectedView = RendererRecoveryAffectedView::None;
+		std::string result;
+		std::string operation;
+		std::string affectedResourceId;
+		std::string affectedResourceName;
+		std::string hardwareName;
+		std::string driverVersion;
+		std::string apiVersion;
+		std::uint64_t frameId = 0u;
+		std::uint64_t renderSessionGeneration = 0u;
+		std::uint32_t duplicateFailureCount = 0u;
 	};
 
 	TERRAENGINE_API BackendFrameBreakdown CreateVulkanFrameBreakdown(std::uint64_t frameId);
@@ -54,5 +76,15 @@ namespace TerraEngine::Renderer::Vulkan {
 		float recordingMilliseconds,
 		float submitMilliseconds,
 		std::string sharedWorkKey = {});
+	TERRAENGINE_API std::string FormatVulkanVersion(std::uint32_t version);
+	TERRAENGINE_API VulkanFirstFailureDiagnostics BuildVulkanFirstFailureDiagnostics(
+		const RendererRecoverySnapshot& snapshot,
+		std::string operation,
+		std::string hardwareName,
+		std::string driverVersion,
+		std::string apiVersion);
+	TERRAENGINE_API void ApplyVulkanFirstFailureDiagnostics(
+		RendererRecoverySnapshot& snapshot,
+		const VulkanFirstFailureDiagnostics& diagnostics);
 
 }

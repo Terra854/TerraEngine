@@ -27,6 +27,7 @@
 #include "Core/Logger/Logger.h"
 #include "File Formats/TerraEngineShaderFile.h"
 #include "Renderer/RenderTypes.h"
+#include "Renderer/RendererRecoveryPolicy.h"
 #include "Scene/SpatialBounds.h"
 #include "ThreadPool/ThreadPool.h"
 #include "Utilities/UUID.h"
@@ -135,6 +136,7 @@ public:
 	bool IsRenderValidationEnabled() const;
 	bool IsRenderDebugEnabled() const;
 	void SetRenderDebugEnabled(bool enabled);
+	TerraEngine::Renderer::RendererRecoveryPolicy GetRendererRecoveryPolicy() const;
 	std::optional<RenderSettings> GetConfiguredRenderSettings() const;
 
 	// Lets runtime systems distinguish packaged export sessions from editor
@@ -456,6 +458,7 @@ private:
 	std::string m_RenderProfileSummary = "profile=Default";
 	bool m_RenderValidationEnabled = false;
 	bool m_RenderDebugEnabled = false;
+	TerraEngine::Renderer::RendererRecoveryPolicy m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
 	std::string m_ProductName = "TerraEngine";
 	std::string m_Version = "1.0.0";
 	TerraEngine::Resource::ResidencyPolicy m_ResidencyPolicy;

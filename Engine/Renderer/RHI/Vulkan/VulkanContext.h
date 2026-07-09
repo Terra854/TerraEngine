@@ -37,6 +37,18 @@ public:
 	FrameBudgetDiagnosticsSnapshot GetLatestFrameBudgetDiagnostics(RenderViewType viewType) const override;
 	LightingDiagnosticsSnapshot GetLatestLightingDiagnostics(RenderViewType viewType) const override;
 	RenderSnapshotDiagnosticsSnapshot GetLatestRenderSnapshotDiagnostics() const override;
+	TerraEngine::Renderer::RendererRecoverySnapshot GetLatestRendererRecoverySnapshot() const override;
+	bool SupportsRendererRecoveryRebuild() const override;
+	TerraEngine::Renderer::RendererRecoverySnapshot BeginRendererRecoverySession(
+		std::uint32_t attemptNumber,
+		std::uint32_t maxAttempts,
+		TerraEngine::Renderer::RendererRecoveryAction requestedBy) override;
+	bool RebuildRendererSession(
+		WindowSystem& windowSystem,
+		const TerraEngine::Renderer::ResourceRestorationPlan& restorationPlan,
+		TerraEngine::Renderer::RendererRecoverySnapshot* outSnapshot,
+		std::string* outError) override;
+	void PublishRendererRecoverySnapshot(TerraEngine::Renderer::RendererRecoverySnapshot snapshot) override;
 	struct LiveGpuSubmissionBoundary
 	{
 		std::string classification;

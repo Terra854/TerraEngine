@@ -13,6 +13,7 @@
 #include "Input/InputSystem.h"
 #include "Scene/SceneManager.h"
 #include "Renderer/RenderSystem.h"
+#include "Core/FatalErrorReport.h"
 #include "Window/GLFW/GlfwWindowBackend.h"
 #include "Window/WindowSystem.h"
 #include "Object/ComponentRegistry.h"
@@ -29,6 +30,7 @@
 #include "Scripting/ScriptingSystem.h"
 #include "Scripting/ScriptGlue.h"
 #include "UI/UISystem.h"
+#include "Utilities/PlatformUtils.h"
 
 #include <chrono>
 #include <memory>
@@ -78,19 +80,54 @@ namespace {
 		scheduler.RegisterSystem(system, std::move(declaration));
 	}
 
+	void ShowControlledFatalEngineDialog(std::string reason, std::string details, bool exportRuntime)
+	{
+		// This path deliberately avoids renderer/ImGui dependencies. It is used
+		// after startup, scheduler, or renderer-recovery failures when Vulkan
+		// output may already be unavailable.
+		TerraEngine::FatalErrorDialogReport report = TerraEngine::BuildFatalErrorDialogReport(
+			exportRuntime ? TerraEngine::FatalErrorCategory::ExportFatal : TerraEngine::FatalErrorCategory::ControlledEngineFatal,
+			std::move(reason),
+			std::move(details));
+		report.canContinue = false;
+		report = TerraEngine::PlatformUtils::WriteCrashDumpForReport(report, ResourceManager::Instance().GetProductName());
+		WindowSystem::Instance().ShowFatalErrorDialog(report);
+	}
+
 }
 
 void Engine::Run()
 {
-	Initialize();
-	
-	while(true) {
-		const double deltaSeconds = frameTimer.Tick();
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!Update((float)deltaSeconds)) break;
+	bool initializedForRun = false;
+	try
+	{
+		Initialize();
+		initializedForRun = true;
+		
+		while(true) {
+			const double deltaSeconds = frameTimer.Tick();
+			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
+			if (!Update((float)deltaSeconds)) break;
+		}
+		
+		Shutdown();
 	}
-	
-	Shutdown();
+	catch (const std::exception& exception)
+	{
+		ShowControlledFatalEngineDialog(
+			exception.what(),
+			initializedForRun ? "Engine runtime stopped after a controlled fatal error." : "Engine startup stopped before normal runtime entry.",
+			ResourceManager::Instance().IsExportRuntime());
+		throw;
+	}
+	catch (...)
+	{
+		ShowControlledFatalEngineDialog(
+			"Unknown fatal engine error.",
+			initializedForRun ? "Engine runtime stopped after an unknown fatal error." : "Engine startup stopped before normal runtime entry.",
+			ResourceManager::Instance().IsExportRuntime());
+		throw;
+	}
 }
 
 // Engine::SignalShutdown is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -214,6 +251,10 @@ void Engine::Initialize()
 		resourceManagerInitialized = true;
 		sceneManager.SetSceneRoot(resourceManager.GetAssetRoot());
 		sceneManager.SetStartupScene(resourceManager.GetConfiguredStartupScene().value_or(std::filesystem::path{}));
+		if (const auto configuredRenderSettings = resourceManager.GetConfiguredRenderSettings()) {
+			renderSystem.SetRenderSettings(*configuredRenderSettings);
+		}
+		renderSystem.SetRendererRecoveryPolicy(resourceManager.GetRendererRecoveryPolicy());
 
 		// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
 		for (auto* system : systems) {
@@ -356,6 +397,21 @@ bool Engine::Update(float deltaTime)
 		}
 	}
 	TerraEngine::Profiling::Profiler::Instance().EndFrame();
+
+	if (ResourceManager::Instance().IsExportRuntime()) {
+		const TerraEngine::Renderer::RendererRecoverySnapshot recovery = RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
+		if (recovery.state == TerraEngine::Renderer::RendererRecoveryStateKind::FatalExportFailure
+			|| recovery.state == TerraEngine::Renderer::RendererRecoveryStateKind::RendererRecoveryFailed) {
+			TERRAENGINE_LOG(LogLevel::Error, "Export runtime stopping after renderer recovery failure. incident="
+				<< recovery.incidentId
+				<< " report="
+				<< recovery.fatalDialogReportId
+				<< " dump="
+				<< recovery.crashDumpPath);
+			running = false;
+			return false;
+		}
+	}
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (editorMode) {

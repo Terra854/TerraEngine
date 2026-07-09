@@ -31,6 +31,7 @@
 #include <cstring>
 #include <fstream>
 #include <thread>
+#include <utility>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -1334,6 +1335,23 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 	skipFrame = true;
 	editorRenderSubmitted = false;
 	swapchainImageAcquired = false;
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestRendererRecoverySnapshot = TerraEngine::Renderer::RecordDeviceLossIncident(
+			latestRendererRecoverySnapshot,
+			"VK_ERROR_DEVICE_LOST",
+			operation,
+			++rendererRecoveryFrameSerial,
+			renderSessionGeneration);
+		TerraEngine::Renderer::Vulkan::ApplyVulkanFirstFailureDiagnostics(
+			latestRendererRecoverySnapshot,
+			TerraEngine::Renderer::Vulkan::BuildVulkanFirstFailureDiagnostics(
+				latestRendererRecoverySnapshot,
+				std::string(operation),
+				selectedPhysicalDeviceName,
+				selectedDriverVersionString,
+				selectedApiVersionString));
+	}
 	if (currentFrame < pendingPrimaryCommandBuffersSubmitted.size())
 	{
 		pendingPrimaryCommandBuffersSubmitted[currentFrame] = 0u;
@@ -1346,6 +1364,35 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 	return true;
 }
 
+void VulkanContext::Impl::RecordInitializationFailure(std::string_view result, std::string_view operation)
+{
+	deviceLost = true;
+	skipFrame = true;
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestRendererRecoverySnapshot = TerraEngine::Renderer::RecordDeviceLossIncident(
+			latestRendererRecoverySnapshot,
+			result,
+			operation,
+			++rendererRecoveryFrameSerial,
+			renderSessionGeneration);
+		TerraEngine::Renderer::Vulkan::ApplyVulkanFirstFailureDiagnostics(
+			latestRendererRecoverySnapshot,
+			TerraEngine::Renderer::Vulkan::BuildVulkanFirstFailureDiagnostics(
+				latestRendererRecoverySnapshot,
+				std::string(operation),
+				selectedPhysicalDeviceName,
+				selectedDriverVersionString,
+				selectedApiVersionString));
+		latestRendererRecoverySnapshot.message = "Renderer initialization failed before a usable Vulkan session was available.";
+	}
+	if (!deviceLostLogged)
+	{
+		TERRAENGINE_LOG(LogLevel::Error, "Vulkan renderer initialization failed during " << operation << " (" << result << "). Rendering is disabled until recovery can create a fresh renderer session.");
+		deviceLostLogged = true;
+	}
+}
+
 VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {
 	impl->latestStatsByView[0].viewType = RenderViewType::Game;
 	impl->latestStatsByView[1].viewType = RenderViewType::Scene;
@@ -1353,6 +1400,7 @@ VulkanContext::VulkanContext() : impl(std::make_unique<Impl>()) {
 	impl->latestBudgetDiagnosticsByView[1].viewType = RenderViewType::Scene;
 	impl->latestLightingDiagnosticsByView[0].viewType = RenderViewType::Game;
 	impl->latestLightingDiagnosticsByView[1].viewType = RenderViewType::Scene;
+	impl->latestRendererRecoverySnapshot = TerraEngine::Renderer::MakeActiveRecoverySnapshot(impl->renderSessionGeneration);
 }
 VulkanContext::~VulkanContext() = default;
 
@@ -6625,6 +6673,123 @@ RenderSnapshotDiagnosticsSnapshot VulkanContext::GetLatestRenderSnapshotDiagnost
 	}
 	std::lock_guard<std::mutex> lock(impl->statsMutex);
 	return impl->latestRenderSnapshotDiagnostics;
+}
+
+TerraEngine::Renderer::RendererRecoverySnapshot VulkanContext::GetLatestRendererRecoverySnapshot() const
+{
+	if (!impl)
+	{
+		return TerraEngine::Renderer::MakeActiveRecoverySnapshot();
+	}
+	std::lock_guard<std::mutex> lock(impl->statsMutex);
+	return impl->latestRendererRecoverySnapshot;
+}
+
+bool VulkanContext::SupportsRendererRecoveryRebuild() const
+{
+	return impl != nullptr;
+}
+
+TerraEngine::Renderer::RendererRecoverySnapshot VulkanContext::BeginRendererRecoverySession(
+	std::uint32_t attemptNumber,
+	std::uint32_t maxAttempts,
+	TerraEngine::Renderer::RendererRecoveryAction requestedBy)
+{
+	if (!impl)
+	{
+		return TerraEngine::Renderer::MakeActiveRecoverySnapshot();
+	}
+
+	std::lock_guard<std::mutex> lock(impl->statsMutex);
+	impl->latestRendererRecoverySnapshot = TerraEngine::Renderer::BeginRecoveryRebuild(
+		impl->latestRendererRecoverySnapshot,
+		attemptNumber,
+		maxAttempts,
+		requestedBy);
+	return impl->latestRendererRecoverySnapshot;
+}
+
+void VulkanContext::PublishRendererRecoverySnapshot(TerraEngine::Renderer::RendererRecoverySnapshot snapshot)
+{
+	if (!impl)
+	{
+		return;
+	}
+	std::lock_guard<std::mutex> lock(impl->statsMutex);
+	impl->latestRendererRecoverySnapshot = std::move(snapshot);
+}
+
+bool VulkanContext::RebuildRendererSession(
+	WindowSystem& windowSystem,
+	const TerraEngine::Renderer::ResourceRestorationPlan& restorationPlan,
+	TerraEngine::Renderer::RendererRecoverySnapshot* outSnapshot,
+	std::string* outError)
+{
+	if (!impl)
+	{
+		if (outError != nullptr)
+		{
+			*outError = "Vulkan context implementation is unavailable.";
+		}
+		return false;
+	}
+
+	(void)restorationPlan;
+	TerraEngine::Renderer::RendererRecoverySnapshot rebuilding;
+	{
+		std::lock_guard<std::mutex> lock(impl->statsMutex);
+		rebuilding = impl->latestRendererRecoverySnapshot;
+	}
+
+	auto publishFailure = [&](std::string reason) {
+		impl->deviceLost = true;
+		impl->skipFrame = true;
+		TerraEngine::Renderer::RendererRecoverySnapshot failed = TerraEngine::Renderer::CompleteRecoveryRebuild(
+			rebuilding,
+			false,
+			impl->renderSessionGeneration,
+			reason);
+		{
+			std::lock_guard<std::mutex> lock(impl->statsMutex);
+			impl->latestRendererRecoverySnapshot = failed;
+		}
+		if (outSnapshot != nullptr)
+		{
+			*outSnapshot = failed;
+		}
+		if (outError != nullptr)
+		{
+			*outError = std::move(reason);
+		}
+		return false;
+	};
+
+	const bool restoreEditorMode = impl->editorMode;
+	impl->Cleanup(true);
+	impl->editorMode = false;
+	if (!impl->InitVulkan(windowSystem))
+	{
+		return publishFailure("Vulkan renderer rebuild could not create a fresh session.");
+	}
+
+	if (restoreEditorMode)
+	{
+		impl->InitEditorMode();
+	}
+
+	TerraEngine::Renderer::RendererRecoverySnapshot completed = TerraEngine::Renderer::CompleteRecoveryRebuild(
+		rebuilding,
+		true,
+		impl->renderSessionGeneration);
+	{
+		std::lock_guard<std::mutex> lock(impl->statsMutex);
+		impl->latestRendererRecoverySnapshot = completed;
+	}
+	if (outSnapshot != nullptr)
+	{
+		*outSnapshot = completed;
+	}
+	return true;
 }
 
 VulkanContext::LiveGpuSubmissionBoundary VulkanContext::GetLiveGpuSubmissionBoundary() const

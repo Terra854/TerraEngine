@@ -7,6 +7,7 @@
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/UndoRedoSystem.h"
 #include "Engine/Renderer/RenderSystem.h"
+#include "Engine/Renderer/RendererRecovery.h"
 #include "Engine/Resource/ResourceManager.h"
 #include "Engine/File Formats/TerraEngineMeshFile.h"
 #include "Engine/Components/MeshRenderComponent.h"
@@ -297,6 +298,27 @@ void SceneViewWindow::OnGui() {
 		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(contentSize.x))),
 		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(contentSize.y))));
 	RenderSystem::Instance().SetSceneViewTargetSize(sceneTargetSize);
+
+	const TerraEngine::Renderer::RendererRecoverySnapshot recoverySnapshot =
+		RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
+	if (TerraEngine::Renderer::IsRendererRecoveryActive(recoverySnapshot.state))
+	{
+		// Device-loss recovery must remain readable without sampling the last
+		// scene texture. Draw a CPU-only panel and leave scene/object state alone.
+		ImDrawList* drawList = ImGui::GetWindowDrawList();
+		drawList->AddRectFilled(cursorPos, ImVec2(cursorPos.x + contentSize.x, cursorPos.y + contentSize.y), ImGui::GetColorU32(ImGuiCol_WindowBg));
+		const std::string status = std::string("Renderer unavailable: ")
+			+ TerraEngine::Renderer::ToString(recoverySnapshot.state)
+			+ (recoverySnapshot.message.empty() ? std::string{} : " - " + recoverySnapshot.message);
+		const ImVec2 textSize = ImGui::CalcTextSize(status.c_str(), nullptr, false, contentSize.x - 32.0f);
+		ImGui::SetCursorScreenPos(ImVec2(
+			cursorPos.x + std::max(16.0f, (contentSize.x - textSize.x) * 0.5f),
+			cursorPos.y + std::max(16.0f, (contentSize.y - textSize.y) * 0.5f)));
+		ImGui::PushTextWrapPos(cursorPos.x + contentSize.x - 16.0f);
+		ImGui::TextUnformatted(status.c_str());
+		ImGui::PopTextWrapPos();
+		return;
+	}
 	
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (texID) {

@@ -304,6 +304,15 @@ namespace TerraEngine::Editor::Automation
 		if (resource == "terraengine://project/state") return service.BuildProjectState();
 		if (resource == "terraengine://scene/summary") return service.BuildSceneSummary();
 		if (resource == "terraengine://diagnostics/summary") return service.BuildDiagnosticsSummary(false);
+		if (resource == "terraengine://renderer/recovery")
+		{
+			nlohmann::json summary = service.BuildDiagnosticsSummary(true);
+			return {
+				{"ok", true},
+				{"rendererRecovery", summary.value("rendererRecovery", nlohmann::json::object())},
+				{"safeSaveTool", "renderer.recovery.safe_save_project"}
+			};
+		}
 		if (resource == "terraengine://capture/availability") return BuildCaptureAvailabilityJson();
 		if (resource == "terraengine://activity/recent") return service.BuildActivityList(GetRecentActivity());
 		return {{"ok", false}, {"error", {{"category", ToString(ErrorCategory::UnsupportedCapability)}, {"details", "Unknown resource URI."}}}};
@@ -317,6 +326,7 @@ namespace TerraEngine::Editor::Automation
 			{{"uri", "terraengine://project/state"}, {"name", "Project State"}},
 			{{"uri", "terraengine://scene/summary"}, {"name", "Scene Summary"}},
 			{{"uri", "terraengine://diagnostics/summary"}, {"name", "Diagnostics Summary"}},
+			{{"uri", "terraengine://renderer/recovery"}, {"name", "Renderer Recovery"}},
 			{{"uri", "terraengine://capture/availability"}, {"name", "Capture Availability"}},
 			{{"uri", "terraengine://activity/recent"}, {"name", "Recent Activity"}}
 		});

@@ -89,7 +89,9 @@ namespace TerraEngine::EditorTests {
 			};
 
 			for (const std::string& file : requiredFiles) {
-				workspace.WriteText(file, file == "game.json" ? "{ \"name\": \"Linux Export\" }" : "payload");
+				workspace.WriteText(file, file == "game.json"
+					? "{ \"name\": \"Linux Export\", \"rendererRecovery\": { \"validationEnabled\": false, \"diagnosticsEnabled\": true, \"maxRendererRebuildAttemptsPerIncident\": 1, \"fatalMessage\": \"Graphics device lost and renderer recovery failed.\", \"fullApplicationRestart\": false } }"
+					: "payload");
 			}
 		}
 	}
