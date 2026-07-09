@@ -31,6 +31,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -301,25 +302,249 @@ void DrawSpotLightGizmo(
 	}
 }
 
-bool DrawOverlayToggleButton(const char* id, const char* glyph, bool active, const char* tooltip, float size)
+ImVec2 AddIconVec2(const ImVec2& left, const ImVec2& right)
+{
+	return ImVec2(left.x + right.x, left.y + right.y);
+}
+
+ImVec2 SubtractIconVec2(const ImVec2& left, const ImVec2& right)
+{
+	return ImVec2(left.x - right.x, left.y - right.y);
+}
+
+ImVec2 ScaleIconVec2(const ImVec2& value, float scale)
+{
+	return ImVec2(value.x * scale, value.y * scale);
+}
+
+ImVec2 NormalizeIconVec2(const ImVec2& value)
+{
+	const float length = std::sqrt((value.x * value.x) + (value.y * value.y));
+	if (length <= 0.0001f)
+	{
+		return ImVec2(1.0f, 0.0f);
+	}
+	return ImVec2(value.x / length, value.y / length);
+}
+
+void DrawIconArrow(ImDrawList* drawList, const ImVec2& start, const ImVec2& end, ImU32 color, float thickness)
+{
+	const ImVec2 direction = NormalizeIconVec2(SubtractIconVec2(end, start));
+	const ImVec2 perpendicular(-direction.y, direction.x);
+	const float headLength = thickness * 2.8f;
+	drawList->AddLine(start, end, color, thickness);
+	drawList->AddTriangleFilled(
+		end,
+		AddIconVec2(SubtractIconVec2(end, ScaleIconVec2(direction, headLength)), ScaleIconVec2(perpendicular, headLength * 0.55f)),
+		SubtractIconVec2(SubtractIconVec2(end, ScaleIconVec2(direction, headLength)), ScaleIconVec2(perpendicular, headLength * 0.55f)),
+		color);
+}
+
+void DrawToolbarIconShape(ImDrawList* drawList, std::string_view shapeKind, const ImVec2& min, const ImVec2& max, ImU32 iconColor, ImU32 accentColor)
+{
+	const float width = max.x - min.x;
+	const float height = max.y - min.y;
+	const float unit = std::min(width, height);
+	const ImVec2 center(min.x + width * 0.5f, min.y + height * 0.5f);
+	const float radius = unit * 0.28f;
+	const float thickness = std::max(1.4f, unit * 0.075f);
+
+	if (shapeKind == "hand-pan")
+	{
+		// A small palm and four fingers read as the familiar hand-pan tool even
+		// without an icon font, keeping the toolbar self-contained.
+		const ImVec2 palmMin(center.x - unit * 0.14f, center.y - unit * 0.02f);
+		const ImVec2 palmMax(center.x + unit * 0.16f, center.y + unit * 0.24f);
+		drawList->AddRect(palmMin, palmMax, iconColor, unit * 0.06f, 0, thickness);
+		for (int finger = 0; finger < 4; ++finger)
+		{
+			const float x = center.x - unit * 0.18f + static_cast<float>(finger) * unit * 0.11f;
+			drawList->AddLine(ImVec2(x, center.y + unit * 0.02f), ImVec2(x, center.y - unit * 0.26f), iconColor, thickness);
+		}
+		drawList->AddLine(ImVec2(center.x - unit * 0.14f, center.y + unit * 0.12f), ImVec2(center.x - unit * 0.34f, center.y - unit * 0.04f), iconColor, thickness);
+		return;
+	}
+
+	if (shapeKind == "axis-arrows")
+	{
+		DrawIconArrow(drawList, center, ImVec2(center.x, min.y + unit * 0.18f), iconColor, thickness);
+		DrawIconArrow(drawList, center, ImVec2(center.x, max.y - unit * 0.18f), iconColor, thickness);
+		DrawIconArrow(drawList, center, ImVec2(min.x + unit * 0.18f, center.y), iconColor, thickness);
+		DrawIconArrow(drawList, center, ImVec2(max.x - unit * 0.18f, center.y), iconColor, thickness);
+		drawList->AddCircleFilled(center, unit * 0.045f, accentColor, 12);
+		return;
+	}
+
+	if (shapeKind == "orbit-ring")
+	{
+		drawList->AddCircle(center, radius, iconColor, 36, thickness);
+		DrawIconArrow(drawList, ImVec2(center.x + radius * 0.35f, center.y - radius * 0.94f), ImVec2(center.x + radius * 0.78f, center.y - radius * 0.55f), iconColor, thickness);
+		return;
+	}
+
+	if (shapeKind == "corner-scale")
+	{
+		const ImVec2 topLeft(center.x - radius, center.y - radius);
+		const ImVec2 bottomRight(center.x + radius, center.y + radius);
+		drawList->AddLine(ImVec2(topLeft.x, topLeft.y + radius * 0.55f), topLeft, iconColor, thickness);
+		drawList->AddLine(topLeft, ImVec2(topLeft.x + radius * 0.55f, topLeft.y), iconColor, thickness);
+		drawList->AddLine(ImVec2(bottomRight.x - radius * 0.55f, bottomRight.y), bottomRight, iconColor, thickness);
+		drawList->AddLine(bottomRight, ImVec2(bottomRight.x, bottomRight.y - radius * 0.55f), iconColor, thickness);
+		DrawIconArrow(drawList, ImVec2(center.x - radius * 0.35f, center.y - radius * 0.35f), bottomRight, iconColor, thickness);
+		return;
+	}
+
+	if (shapeKind == "center-dot" || shapeKind == "pivot-dot")
+	{
+		const bool centerMode = shapeKind == "center-dot";
+		drawList->AddCircle(center, radius, iconColor, 28, thickness);
+		drawList->AddLine(ImVec2(center.x - radius * 1.2f, center.y), ImVec2(center.x + radius * 1.2f, center.y), iconColor, thickness);
+		drawList->AddLine(ImVec2(center.x, center.y - radius * 1.2f), ImVec2(center.x, center.y + radius * 1.2f), iconColor, thickness);
+		drawList->AddCircleFilled(centerMode ? center : ImVec2(center.x + radius * 0.55f, center.y - radius * 0.35f), unit * 0.065f, accentColor, 14);
+		return;
+	}
+
+	if (shapeKind == "space-cube" || shapeKind == "space-world")
+	{
+		if (shapeKind == "space-world")
+		{
+			drawList->AddCircle(center, radius, iconColor, 30, thickness);
+			drawList->AddLine(ImVec2(center.x - radius, center.y), ImVec2(center.x + radius, center.y), iconColor, thickness * 0.75f);
+			drawList->AddLine(ImVec2(center.x, center.y - radius), ImVec2(center.x, center.y + radius), iconColor, thickness * 0.75f);
+			return;
+		}
+		const ImVec2 frontMin(center.x - radius * 0.8f, center.y - radius * 0.55f);
+		const ImVec2 frontMax(center.x + radius * 0.45f, center.y + radius * 0.7f);
+		const ImVec2 offset(radius * 0.38f, -radius * 0.34f);
+		drawList->AddRect(frontMin, frontMax, iconColor, 0.0f, 0, thickness);
+		drawList->AddRect(AddIconVec2(frontMin, offset), AddIconVec2(frontMax, offset), iconColor, 0.0f, 0, thickness);
+		drawList->AddLine(frontMin, AddIconVec2(frontMin, offset), iconColor, thickness);
+		drawList->AddLine(ImVec2(frontMax.x, frontMin.y), AddIconVec2(ImVec2(frontMax.x, frontMin.y), offset), iconColor, thickness);
+		drawList->AddLine(frontMax, AddIconVec2(frontMax, offset), iconColor, thickness);
+		return;
+	}
+
+	if (shapeKind == "magnet-grid")
+	{
+		drawList->PathArcTo(ImVec2(center.x - radius * 0.35f, center.y), radius * 0.55f, 3.14159265f * 0.5f, 3.14159265f * 1.5f, 18);
+		drawList->PathStroke(iconColor, 0, thickness);
+		drawList->AddLine(ImVec2(center.x - radius * 0.35f, center.y - radius * 0.55f), ImVec2(center.x + radius * 0.52f, center.y - radius * 0.55f), iconColor, thickness);
+		drawList->AddLine(ImVec2(center.x - radius * 0.35f, center.y + radius * 0.55f), ImVec2(center.x + radius * 0.52f, center.y + radius * 0.55f), iconColor, thickness);
+		drawList->AddLine(ImVec2(center.x + radius * 0.72f, center.y - radius * 0.65f), ImVec2(center.x + radius * 0.72f, center.y + radius * 0.65f), accentColor, thickness * 0.8f);
+		return;
+	}
+
+	if (shapeKind == "grid-lines")
+	{
+		const ImVec2 gridMin(center.x - radius, center.y - radius);
+		const ImVec2 gridMax(center.x + radius, center.y + radius);
+		for (int line = 0; line < 3; ++line)
+		{
+			const float t = static_cast<float>(line) / 2.0f;
+			const float x = gridMin.x + (gridMax.x - gridMin.x) * t;
+			const float y = gridMin.y + (gridMax.y - gridMin.y) * t;
+			drawList->AddLine(ImVec2(x, gridMin.y), ImVec2(x, gridMax.y), iconColor, thickness * 0.75f);
+			drawList->AddLine(ImVec2(gridMin.x, y), ImVec2(gridMax.x, y), iconColor, thickness * 0.75f);
+		}
+		return;
+	}
+
+	if (shapeKind == "marker-dots")
+	{
+		drawList->AddCircleFilled(ImVec2(center.x - radius * 0.7f, center.y - radius * 0.1f), unit * 0.075f, iconColor, 14);
+		drawList->AddCircleFilled(ImVec2(center.x, center.y - radius * 0.6f), unit * 0.075f, accentColor, 14);
+		drawList->AddCircleFilled(ImVec2(center.x + radius * 0.72f, center.y + radius * 0.32f), unit * 0.075f, iconColor, 14);
+		drawList->AddLine(ImVec2(center.x - radius * 0.7f, center.y - radius * 0.1f), ImVec2(center.x, center.y - radius * 0.6f), iconColor, thickness * 0.65f);
+		drawList->AddLine(ImVec2(center.x, center.y - radius * 0.6f), ImVec2(center.x + radius * 0.72f, center.y + radius * 0.32f), iconColor, thickness * 0.65f);
+		return;
+	}
+
+	if (shapeKind == "transform-gizmo")
+	{
+		DrawIconArrow(drawList, center, ImVec2(center.x, center.y - radius * 1.05f), IM_COL32(108, 225, 130, 255), thickness);
+		DrawIconArrow(drawList, center, ImVec2(center.x + radius * 1.0f, center.y + radius * 0.56f), IM_COL32(106, 158, 255, 255), thickness);
+		DrawIconArrow(drawList, center, ImVec2(center.x - radius * 1.0f, center.y + radius * 0.56f), IM_COL32(255, 108, 108, 255), thickness);
+		return;
+	}
+
+	if (shapeKind == "projection-persp")
+	{
+		const ImVec2 nearA(center.x - radius * 0.35f, center.y - radius * 0.25f);
+		const ImVec2 nearB(center.x + radius * 0.35f, center.y - radius * 0.25f);
+		const ImVec2 farA(center.x - radius, center.y + radius * 0.7f);
+		const ImVec2 farB(center.x + radius, center.y + radius * 0.7f);
+		drawList->AddLine(nearA, farA, iconColor, thickness);
+		drawList->AddLine(nearB, farB, iconColor, thickness);
+		drawList->AddLine(farA, farB, iconColor, thickness);
+		drawList->AddLine(nearA, nearB, accentColor, thickness);
+		return;
+	}
+
+	if (shapeKind == "projection-ortho")
+	{
+		drawList->AddRect(ImVec2(center.x - radius * 0.8f, center.y - radius * 0.8f), ImVec2(center.x + radius * 0.8f, center.y + radius * 0.8f), iconColor, unit * 0.03f, 0, thickness);
+		drawList->AddLine(ImVec2(center.x - radius * 0.45f, center.y - radius * 0.8f), ImVec2(center.x - radius * 0.45f, center.y + radius * 0.8f), accentColor, thickness * 0.8f);
+		drawList->AddLine(ImVec2(center.x + radius * 0.45f, center.y - radius * 0.8f), ImVec2(center.x + radius * 0.45f, center.y + radius * 0.8f), accentColor, thickness * 0.8f);
+		return;
+	}
+
+	if (shapeKind == "pulse-bars")
+	{
+		for (int bar = 0; bar < 4; ++bar)
+		{
+			const float x = center.x - radius + static_cast<float>(bar) * radius * 0.55f;
+			const float barHeight = radius * (0.45f + static_cast<float>((bar + 1) % 3) * 0.28f);
+			drawList->AddRectFilled(ImVec2(x, center.y + radius), ImVec2(x + radius * 0.26f, center.y + radius - barHeight), bar == 2 ? accentColor : iconColor, unit * 0.03f);
+		}
+		return;
+	}
+
+	drawList->AddCircle(center, radius * 0.8f, iconColor, 24, thickness);
+}
+
+bool DrawOverlayIconButton(const char* id, std::string_view shapeKind, bool active, const char* tooltip, float size)
 {
 	ImGui::PushID(id);
-	if (active)
-	{
-		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.38f, 0.58f, 1.0f));
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.48f, 0.72f, 1.0f));
-	}
-	const bool pressed = ImGui::Button(glyph, ImVec2(size, size));
-	if (ImGui::IsItemHovered() && tooltip != nullptr)
+	const bool pressed = ImGui::InvisibleButton("##scene_toolbar_icon", ImVec2(size, size));
+	const bool hovered = ImGui::IsItemHovered();
+	const bool held = ImGui::IsItemActive();
+	const ImVec2 min = ImGui::GetItemRectMin();
+	const ImVec2 max = ImGui::GetItemRectMax();
+	ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+	const ImU32 background = active
+		? IM_COL32(81, 128, 166, 255)
+		: (held ? IM_COL32(76, 82, 88, 255) : (hovered ? IM_COL32(62, 68, 74, 255) : IM_COL32(48, 52, 56, 255)));
+	const ImU32 border = active ? IM_COL32(124, 180, 218, 255) : IM_COL32(76, 82, 88, 255);
+	const ImU32 icon = active ? IM_COL32(245, 250, 255, 255) : IM_COL32(205, 214, 222, 255);
+	const ImU32 accent = active ? IM_COL32(255, 222, 126, 255) : IM_COL32(137, 185, 225, 255);
+
+	// The button face is drawn manually so every toolbar command can be an icon
+	// without depending on a bundled icon font or visible text labels.
+	drawList->AddRectFilled(min, max, background, 3.0f);
+	drawList->AddRect(min, max, border, 3.0f, 0, active ? 1.6f : 1.0f);
+	DrawToolbarIconShape(drawList, shapeKind, min, max, icon, accent);
+
+	if (hovered && tooltip != nullptr)
 	{
 		ImGui::SetTooltip("%s", tooltip);
 	}
-	if (active)
-	{
-		ImGui::PopStyleColor(2);
-	}
 	ImGui::PopID();
 	return pressed;
+}
+
+void DrawToolbarSeparator()
+{
+	ImGui::SameLine(0.0f, 6.0f);
+	const ImVec2 min = ImGui::GetCursorScreenPos();
+	const float height = ImGui::GetFrameHeight();
+	ImGui::Dummy(ImVec2(1.0f, height));
+	ImGui::GetWindowDrawList()->AddLine(
+		ImVec2(min.x, min.y + 3.0f),
+		ImVec2(min.x, min.y + height - 3.0f),
+		IM_COL32(95, 101, 106, 180),
+		1.0f);
+	ImGui::SameLine(0.0f, 6.0f);
 }
 
 ImU32 MarkerColor(SceneOverlay::MarkerCategory category, bool selected, bool hovered)
@@ -565,7 +790,7 @@ void SceneViewWindow::PersistOverlayPreferences()
 
 void SceneViewWindow::DrawSceneToolbar()
 {
-	const float buttonSize = std::max(24.0f, ImGui::GetFrameHeight());
+	const float buttonSize = std::max(26.0f, ImGui::GetFrameHeight());
 	m_InteractionContext.hoveredRegion = ImGui::IsWindowHovered() ? SceneOverlay::InteractionRegion::Viewport : SceneOverlay::InteractionRegion::None;
 
 	auto setTool = [&](SceneOverlay::SceneViewTool tool, int operation) {
@@ -574,69 +799,74 @@ void SceneViewWindow::DrawSceneToolbar()
 		m_CurrentGizmoOperation = operation;
 	};
 
-	if (DrawOverlayToggleButton("scene_tool_hand", SceneOverlay::ToolbarGlyph(SceneOverlay::SceneViewTool::Hand), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Hand, "Hand: navigate the Scene View camera", buttonSize))
+	if (DrawOverlayIconButton("scene_tool_hand", SceneOverlay::ToolbarIconShape(SceneOverlay::SceneViewTool::Hand), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Hand, "Hand Tool\nPan the Scene View with left drag, or use middle mouse from any tool.", buttonSize))
 	{
 		setTool(SceneOverlay::SceneViewTool::Hand, -1);
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_tool_move", SceneOverlay::ToolbarGlyph(SceneOverlay::SceneViewTool::Move), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Move, "Move selected objects", buttonSize))
+	ImGui::SameLine(0.0f, 2.0f);
+	if (DrawOverlayIconButton("scene_tool_move", SceneOverlay::ToolbarIconShape(SceneOverlay::SceneViewTool::Move), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Move, "Move Tool\nMove selected objects.", buttonSize))
 	{
 		setTool(SceneOverlay::SceneViewTool::Move, ImGuizmo::TRANSLATE);
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_tool_rotate", SceneOverlay::ToolbarGlyph(SceneOverlay::SceneViewTool::Rotate), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Rotate, "Rotate selected objects", buttonSize))
+	ImGui::SameLine(0.0f, 2.0f);
+	if (DrawOverlayIconButton("scene_tool_rotate", SceneOverlay::ToolbarIconShape(SceneOverlay::SceneViewTool::Rotate), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Rotate, "Rotate Tool\nRotate selected objects.", buttonSize))
 	{
 		setTool(SceneOverlay::SceneViewTool::Rotate, ImGuizmo::ROTATE);
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_tool_scale", SceneOverlay::ToolbarGlyph(SceneOverlay::SceneViewTool::Scale), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Scale, "Scale selected objects", buttonSize))
+	ImGui::SameLine(0.0f, 2.0f);
+	if (DrawOverlayIconButton("scene_tool_scale", SceneOverlay::ToolbarIconShape(SceneOverlay::SceneViewTool::Scale), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Scale, "Scale Tool\nScale selected objects.", buttonSize))
 	{
 		setTool(SceneOverlay::SceneViewTool::Scale, ImGuizmo::SCALE);
 	}
 
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_pivot", m_ToolState.pivotMode == SceneOverlay::PivotMode::Center ? "Ctr" : "Piv", true, "Switch center/pivot handle placement", buttonSize + 8.0f))
+	DrawToolbarSeparator();
+	const bool centerPivotMode = m_ToolState.pivotMode == SceneOverlay::PivotMode::Center;
+	if (DrawOverlayIconButton("scene_pivot", centerPivotMode ? "center-dot" : "pivot-dot", false, centerPivotMode ? "Center Mode\nPlace handles at the selection center." : "Pivot Mode\nPlace handles at object pivots.", buttonSize))
 	{
 		m_ToolState.pivotMode = m_ToolState.pivotMode == SceneOverlay::PivotMode::Center ? SceneOverlay::PivotMode::Pivot : SceneOverlay::PivotMode::Center;
 		m_ToolState.lastChangedBy = SceneOverlay::LastChangedBy::User;
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_orientation", m_ToolState.orientationMode == SceneOverlay::OrientationMode::Local ? "Loc" : "Glo", true, "Switch local/global gizmo orientation", buttonSize + 8.0f))
+	ImGui::SameLine(0.0f, 2.0f);
+	const bool localOrientation = m_ToolState.orientationMode == SceneOverlay::OrientationMode::Local;
+	if (DrawOverlayIconButton("scene_orientation", localOrientation ? "space-cube" : "space-world", false, localOrientation ? "Local Orientation\nAlign transform handles to the selected object." : "Global Orientation\nAlign transform handles to world axes.", buttonSize))
 	{
 		m_ToolState.orientationMode = m_ToolState.orientationMode == SceneOverlay::OrientationMode::Local ? SceneOverlay::OrientationMode::Global : SceneOverlay::OrientationMode::Local;
 		m_ToolState.lastChangedBy = SceneOverlay::LastChangedBy::User;
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_snap", "Snap", m_ToolState.snapEnabled, "Enable transform snapping", buttonSize + 18.0f))
+	ImGui::SameLine(0.0f, 2.0f);
+	if (DrawOverlayIconButton("scene_snap", "magnet-grid", m_ToolState.snapEnabled, m_ToolState.snapEnabled ? "Snapping On\nClick to disable transform snapping." : "Snapping Off\nClick to enable transform snapping.", buttonSize))
 	{
 		m_ToolState.snapEnabled = !m_ToolState.snapEnabled;
 		m_OverlayPreference.snapEnabled = m_ToolState.snapEnabled;
 		m_UsingSnap = m_ToolState.snapEnabled;
 		m_OverlayPreferenceDirty = true;
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_grid", "Grid", m_ToolState.gridVisible, "Show Scene View grid overlay", buttonSize + 16.0f))
+
+	DrawToolbarSeparator();
+	if (DrawOverlayIconButton("scene_grid", "grid-lines", m_ToolState.gridVisible, m_ToolState.gridVisible ? "Grid Visible\nClick to hide the Scene View grid." : "Grid Hidden\nClick to show the Scene View grid.", buttonSize))
 	{
 		m_ToolState.gridVisible = !m_ToolState.gridVisible;
 		m_OverlayPreference.gridVisible = m_ToolState.gridVisible;
 		m_OverlayPreferenceDirty = true;
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_icons", "Icon", m_ToolState.iconsVisible, "Show object markers", buttonSize + 16.0f))
+	ImGui::SameLine(0.0f, 2.0f);
+	if (DrawOverlayIconButton("scene_icons", "marker-dots", m_ToolState.iconsVisible, m_ToolState.iconsVisible ? "Scene Icons Visible\nClick to hide object markers." : "Scene Icons Hidden\nClick to show object markers.", buttonSize))
 	{
 		m_ToolState.iconsVisible = !m_ToolState.iconsVisible;
 		m_OverlayPreference.iconsVisible = m_ToolState.iconsVisible;
 		m_OverlayPreferenceDirty = true;
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_gizmos", "Giz", m_ToolState.gizmosVisible, "Show selection gizmos", buttonSize + 12.0f))
+	ImGui::SameLine(0.0f, 2.0f);
+	if (DrawOverlayIconButton("scene_gizmos", "transform-gizmo", m_ToolState.gizmosVisible, m_ToolState.gizmosVisible ? "Gizmos Visible\nClick to hide selection gizmos." : "Gizmos Hidden\nClick to show selection gizmos.", buttonSize))
 	{
 		m_ToolState.gizmosVisible = !m_ToolState.gizmosVisible;
 		m_OverlayPreference.gizmosVisible = m_ToolState.gizmosVisible;
 		m_OverlayPreferenceDirty = true;
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_projection", m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Perspective ? "Persp" : "Ortho", true, "Switch perspective/orthographic Scene View projection", buttonSize + 28.0f))
+
+	DrawToolbarSeparator();
+	const bool perspectiveProjection = m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Perspective;
+	if (DrawOverlayIconButton("scene_projection", perspectiveProjection ? "projection-persp" : "projection-ortho", false, perspectiveProjection ? "Perspective Projection\nClick to switch to orthographic Scene View." : "Orthographic Projection\nClick to switch to perspective Scene View.", buttonSize))
 	{
 		const bool switchingToOrthographic = m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Perspective;
 		m_ToolState.projectionMode = switchingToOrthographic ? SceneOverlay::ProjectionMode::Orthographic : SceneOverlay::ProjectionMode::Perspective;
@@ -655,8 +885,8 @@ void SceneViewWindow::DrawSceneToolbar()
 		m_OverlayPreference.projectionMode = m_ToolState.projectionMode;
 		m_OverlayPreferenceDirty = true;
 	}
-	ImGui::SameLine();
-	if (DrawOverlayToggleButton("scene_diagnostics", "Diag", m_ShowVirtualGeometryDiagnostics, "Show Scene View diagnostics", buttonSize + 18.0f))
+	ImGui::SameLine(0.0f, 2.0f);
+	if (DrawOverlayIconButton("scene_diagnostics", "pulse-bars", m_ShowVirtualGeometryDiagnostics, m_ShowVirtualGeometryDiagnostics ? "Diagnostics Visible\nClick to hide Scene View diagnostics." : "Diagnostics Hidden\nClick to show Scene View diagnostics.", buttonSize))
 	{
 		m_ShowVirtualGeometryDiagnostics = !m_ShowVirtualGeometryDiagnostics;
 		m_OverlayPreference.diagnosticsVisible = m_ShowVirtualGeometryDiagnostics;
@@ -947,10 +1177,10 @@ void SceneViewWindow::OnGui() {
 		RenderSystem::Instance().SetVirtualGeometryDebugVisualizationMode(RenderViewType::Scene, kSceneViewVirtualGeometryOutputId, m_VirtualGeometryDebugMode);
 	}
 	int virtualGeometryDebugMode = static_cast<int>(m_VirtualGeometryDebugMode);
-	ImGui::SetNextItemWidth(115.0f);
+	ImGui::SetNextItemWidth(96.0f);
 	const VirtualGeometryDebugVisualizationMode currentVirtualGeometryDebugMode =
 		static_cast<VirtualGeometryDebugVisualizationMode>(virtualGeometryDebugMode);
-	const bool virtualGeometryComboOpen = ImGui::BeginCombo("VG", ToString(currentVirtualGeometryDebugMode));
+	const bool virtualGeometryComboOpen = ImGui::BeginCombo("##scene_vg_visualizer", ToString(currentVirtualGeometryDebugMode));
 	if (ImGui::IsItemHovered())
 	{
 		// Scene View uses the same compact toolbar as Game View; the hover text

@@ -10,7 +10,8 @@ namespace TerraEngine::EditorTests
 			std::string error;
 			context.Expect(TerraEngine::Editor::SceneViewOverlay::ValidateIconDefinitions(icons, &error), error);
 			context.Expect(TerraEngine::Editor::SceneViewOverlay::FindIconDefinition(icons, "tool.move") != nullptr, "Move tool icon should be available.");
-			context.ExpectEqual(std::string("M"), std::string(TerraEngine::Editor::SceneViewOverlay::ToolbarGlyph(TerraEngine::Editor::SceneViewOverlay::SceneViewTool::Move)), "Move tool should have a compact glyph.");
+			context.Expect(TerraEngine::Editor::SceneViewOverlay::FindIconDefinition(icons, "toolbar.projection") != nullptr, "Projection mode should have icon metadata.");
+			context.ExpectEqual(std::string("axis-arrows"), std::string(TerraEngine::Editor::SceneViewOverlay::ToolbarIconShape(TerraEngine::Editor::SceneViewOverlay::SceneViewTool::Move)), "Move tool should render as an icon instead of a text button.");
 
 			TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference preference;
 			preference.gridVisible = false;
@@ -28,6 +29,8 @@ namespace TerraEngine::EditorTests
 			context.Expect(sceneViewSource.find("ImGuiMouseButton_Middle") != std::string::npos, "Scene View should support middle-mouse panning.");
 			context.Expect(sceneViewSource.find("HandleSceneViewScrollZoom") != std::string::npos, "Scene View should support mouse-wheel zoom in both projection modes.");
 			context.Expect(sceneViewSource.find("Perspective wheel input dollies") != std::string::npos, "Perspective scroll zoom should move the editor camera instead of changing gameplay FOV.");
+			context.Expect(sceneViewSource.find("DrawOverlayIconButton") != std::string::npos, "Scene View toolbar should use icon-only buttons.");
+			context.Expect(sceneViewSource.find("DrawOverlayToggleButton") == std::string::npos, "Scene View toolbar should not draw text-first debug buttons.");
 		});
 	}
 }

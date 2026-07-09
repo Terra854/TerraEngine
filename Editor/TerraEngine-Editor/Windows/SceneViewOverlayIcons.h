@@ -12,5 +12,6 @@ namespace TerraEngine::Editor::SceneViewOverlay
 	[[nodiscard]] std::vector<OverlayIconDefinition> BuildDefaultIconDefinitions();
 	[[nodiscard]] const OverlayIconDefinition* FindIconDefinition(const std::vector<OverlayIconDefinition>& icons, std::string_view iconId);
 	[[nodiscard]] bool ValidateIconDefinitions(const std::vector<OverlayIconDefinition>& icons, std::string* outError = nullptr);
+	[[nodiscard]] const char* ToolbarIconShape(SceneViewTool tool);
 	[[nodiscard]] const char* ToolbarGlyph(SceneViewTool tool);
 }

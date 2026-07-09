@@ -18,6 +18,9 @@ namespace TerraEngine::Editor::SceneViewOverlay
 			{"toolbar.orientation", "Local/Global", IconCategory::Toolbar, "space-cube", true, 26.0f, 90u, "Switch between local and global orientation", "Local Global Toggle", "outlined"},
 			{"toolbar.snap", "Snap", IconCategory::Toolbar, "magnet-grid", true, 26.0f, 80u, "Enable transform snapping", "Snap Toggle", "outlined"},
 			{"toolbar.grid", "Grid", IconCategory::Grid, "grid-lines", true, 26.0f, 70u, "Show or hide the Scene View grid", "Grid Toggle", "outlined"},
+			{"toolbar.icons", "Object Icons", IconCategory::Toolbar, "marker-dots", true, 26.0f, 70u, "Show or hide Scene View object markers", "Object Icon Toggle", "outlined"},
+			{"toolbar.gizmos", "Gizmos", IconCategory::Toolbar, "transform-gizmo", true, 26.0f, 75u, "Show or hide selection gizmos", "Gizmo Toggle", "outlined"},
+			{"toolbar.projection", "Projection", IconCategory::Toolbar, "projection-toggle", true, 26.0f, 80u, "Switch between perspective and orthographic projection", "Projection Toggle", "outlined"},
 			{"marker.camera", "Camera", IconCategory::Camera, "camera-frustum", true, 22.0f, 70u, "Camera object", "Camera Marker", "outlined"},
 			{"marker.directionalLight", "Directional Light", IconCategory::DirectionalLight, "sun-rays", true, 22.0f, 65u, "Directional light object", "Directional Light Marker", "outlined"},
 			{"marker.pointLight", "Point Light", IconCategory::PointLight, "light-bulb", true, 22.0f, 60u, "Point light object", "Point Light Marker", "outlined"},
@@ -68,6 +71,19 @@ namespace TerraEngine::Editor::SceneViewOverlay
 			}
 		}
 		return true;
+	}
+
+	const char* ToolbarIconShape(SceneViewTool tool)
+	{
+		switch (tool)
+		{
+		case SceneViewTool::Hand: return "hand-pan";
+		case SceneViewTool::Move: return "axis-arrows";
+		case SceneViewTool::Rotate: return "orbit-ring";
+		case SceneViewTool::Scale: return "corner-scale";
+		case SceneViewTool::None: return "disabled-dot";
+		default: return "unknown";
+		}
 	}
 
 	const char* ToolbarGlyph(SceneViewTool tool)
