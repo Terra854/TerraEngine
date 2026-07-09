@@ -4,6 +4,8 @@
 // It handles editor-specific rendering features like the grid, selection outlines, and camera movement controls.
 
 #include "SceneViewWindow.h"
+#include "../Core/EditorContext.h"
+#include "../Project/ProjectManager.h"
 #include "../Subsystems/MainEditorSubsystem.h"
 #include "../Subsystems/UndoRedoSystem.h"
 #include "Engine/Renderer/RenderSystem.h"
@@ -25,12 +27,19 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <cstdio>
+#include <limits>
+#include <optional>
 #include <string>
+#include <utility>
+#include <glm/ext/matrix_clip_space.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/constants.hpp>
+
+namespace SceneOverlay = TerraEngine::Editor::SceneViewOverlay;
 
 namespace
 {
@@ -60,6 +69,78 @@ void BuildBasisFromDirection(const glm::vec3& direction, glm::vec3& outRight, gl
 		: glm::vec3(0.0f, 1.0f, 0.0f);
 	outRight = SafeNormalize(glm::cross(direction, fallbackUp), glm::vec3(1.0f, 0.0f, 0.0f));
 	outUp = SafeNormalize(glm::cross(outRight, direction), glm::vec3(0.0f, 1.0f, 0.0f));
+}
+
+glm::vec3 CameraForwardFromEuler(const glm::vec3& rotation)
+{
+	// Scene View stores camera rotation as pitch/yaw; convert it once so view,
+	// input, and orientation-widget code all agree on the forward direction.
+	const glm::quat orientation = glm::quat(glm::vec3(rotation.x, rotation.y, 0.0f));
+	return SafeNormalize(orientation * glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+}
+
+glm::vec2 CameraEulerFromForward(const glm::vec3& forward)
+{
+	const glm::vec3 normalizedForward = SafeNormalize(forward, glm::vec3(0.0f, 0.0f, -1.0f));
+	const float pitch = std::asin(std::clamp(normalizedForward.y, -0.999f, 0.999f));
+	const float yaw = std::atan2(-normalizedForward.x, -normalizedForward.z);
+	return glm::vec2(pitch, yaw);
+}
+
+glm::vec3 CameraUpFromEuler(const glm::vec3& rotation)
+{
+	// The up vector comes from the same orientation as forward so snapped top
+	// and side views do not accidentally use a stale world-up basis.
+	const glm::quat orientation = glm::quat(glm::vec3(rotation.x, rotation.y, 0.0f));
+	return SafeNormalize(orientation * glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+}
+
+std::optional<glm::vec3> ComputeEntityWorldPosition(entt::entity entity)
+{
+	// Walk parent transforms from the selected object to the root so Scene View
+	// focus uses the same world-space position that markers and gizmos display.
+	auto& objectManager = ObjectManager::instance();
+	auto& registry = objectManager.getRegistry();
+	if (!registry.valid(entity))
+	{
+		return std::nullopt;
+	}
+
+	glm::mat4 world(1.0f);
+	entt::entity current = entity;
+	while (current != entt::null && registry.valid(current))
+	{
+		if (const Transform* transform = registry.try_get<Transform>(current))
+		{
+			glm::mat4 local(1.0f);
+			local = glm::translate(local, transform->position);
+			local = local * glm::mat4_cast(transform->rotation);
+			local = glm::scale(local, transform->scale);
+			world = local * world;
+		}
+		if (const std::optional<Object> object = objectManager.getObject(current))
+		{
+			const std::optional<Object> parent = objectManager.getParent(*object);
+			current = parent ? parent->EntityId() : entt::null;
+		}
+		else
+		{
+			current = entt::null;
+		}
+	}
+	return glm::vec3(world[3]);
+}
+
+bool IsPointerInsideRect(const ImVec2& pointer, const ImVec2& min, const ImVec2& max)
+{
+	return pointer.x >= min.x && pointer.x <= max.x && pointer.y >= min.y && pointer.y <= max.y;
+}
+
+float PerspectiveVisibleHeight(float fovDegrees, float distance)
+{
+	const float clampedDistance = std::max(distance, 1.0f);
+	const float clampedFov = std::clamp(fovDegrees, 1.0f, 120.0f);
+	return 2.0f * clampedDistance * std::tan(glm::radians(clampedFov) * 0.5f);
 }
 
 bool ProjectWorldPoint(
@@ -219,17 +300,637 @@ void DrawSpotLightGizmo(
 		DrawWorldLine(drawList, position, outerPoint, viewProjection, viewportPos, viewportSize, color, 1.2f);
 	}
 }
+
+bool DrawOverlayToggleButton(const char* id, const char* glyph, bool active, const char* tooltip, float size)
+{
+	ImGui::PushID(id);
+	if (active)
+	{
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.38f, 0.58f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.48f, 0.72f, 1.0f));
+	}
+	const bool pressed = ImGui::Button(glyph, ImVec2(size, size));
+	if (ImGui::IsItemHovered() && tooltip != nullptr)
+	{
+		ImGui::SetTooltip("%s", tooltip);
+	}
+	if (active)
+	{
+		ImGui::PopStyleColor(2);
+	}
+	ImGui::PopID();
+	return pressed;
+}
+
+ImU32 MarkerColor(SceneOverlay::MarkerCategory category, bool selected, bool hovered)
+{
+	if (selected)
+	{
+		return IM_COL32(255, 213, 91, 255);
+	}
+	if (hovered)
+	{
+		return IM_COL32(116, 196, 255, 255);
+	}
+	switch (category)
+	{
+	case SceneOverlay::MarkerCategory::Camera: return IM_COL32(210, 232, 255, 235);
+	case SceneOverlay::MarkerCategory::DirectionalLight: return IM_COL32(255, 240, 145, 235);
+	case SceneOverlay::MarkerCategory::PointLight: return IM_COL32(255, 222, 119, 235);
+	case SceneOverlay::MarkerCategory::SpotLight: return IM_COL32(255, 197, 109, 235);
+	case SceneOverlay::MarkerCategory::EmptyObject: return IM_COL32(218, 224, 230, 215);
+	default: return IM_COL32(210, 210, 210, 215);
+	}
+}
+
+const char* MarkerGlyph(SceneOverlay::MarkerCategory category)
+{
+	switch (category)
+	{
+	case SceneOverlay::MarkerCategory::Camera: return "C";
+	case SceneOverlay::MarkerCategory::DirectionalLight: return "D";
+	case SceneOverlay::MarkerCategory::PointLight: return "P";
+	case SceneOverlay::MarkerCategory::SpotLight: return "S";
+	case SceneOverlay::MarkerCategory::EmptyObject: return "E";
+	case SceneOverlay::MarkerCategory::SelectedObject: return "*";
+	default: return "?";
+	}
+}
 }
 
 SceneViewWindow::SceneViewWindow(MainEditorSubsystem* owner)
 	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	: EditorWindow("Scene View"), m_Owner(owner) {
 	m_CurrentGizmoOperation = ImGuizmo::TRANSLATE;
+	m_IconDefinitions = SceneOverlay::BuildDefaultIconDefinitions();
+}
+
+glm::vec3 SceneViewWindow::GetCameraForward() const
+{
+	return CameraForwardFromEuler(m_CameraRot);
+}
+
+glm::vec3 SceneViewWindow::GetCameraUp() const
+{
+	return CameraUpFromEuler(m_CameraRot);
+}
+
+glm::vec3 SceneViewWindow::ResolveSceneViewFocus(float fallbackDistance) const
+{
+	if (m_Owner != nullptr)
+	{
+		const std::optional<entt::entity> selectedEntity = m_Owner->GetSelectedEntity();
+		if (selectedEntity.has_value())
+		{
+			if (const std::optional<glm::vec3> selectedWorldPosition = ComputeEntityWorldPosition(*selectedEntity))
+			{
+				return *selectedWorldPosition;
+			}
+		}
+	}
+
+	const glm::vec3 forward = GetCameraForward();
+	if (std::abs(forward.y) > 0.0001f)
+	{
+		const float groundDistance = -m_CameraPos.y / forward.y;
+		if (std::isfinite(groundDistance) && groundDistance > 1.0f)
+		{
+			// When nothing is selected, the ground-plane intersection gives the
+			// artist a predictable Scene View pivot near the visible grid.
+			return m_CameraPos + forward * groundDistance;
+		}
+	}
+
+	if (m_CameraFocusInitialized)
+	{
+		return m_CameraFocus;
+	}
+
+	return m_CameraPos + forward * std::max(fallbackDistance, 1.0f);
+}
+
+float SceneViewWindow::ResolveSceneViewFocusDistance(const glm::vec3& focus, float fallbackDistance) const
+{
+	const glm::vec3 forward = GetCameraForward();
+	const float alongView = glm::dot(focus - m_CameraPos, forward);
+	const float directDistance = glm::distance(m_CameraPos, focus);
+	const float resolvedDistance = alongView > 1.0f ? alongView : directDistance;
+	if (!std::isfinite(resolvedDistance) || resolvedDistance <= 1.0f)
+	{
+		return std::clamp(fallbackDistance, 1.0f, 1000.0f);
+	}
+	return std::clamp(resolvedDistance, 1.0f, 1000.0f);
+}
+
+void SceneViewWindow::RepositionCameraAroundFocus(const glm::vec3& focus, float distance)
+{
+	m_CameraFocus = focus;
+	m_CameraFocusDistance = std::clamp(distance, 1.0f, 1000.0f);
+	m_CameraFocusInitialized = true;
+	m_CameraPos = m_CameraFocus - GetCameraForward() * m_CameraFocusDistance;
+}
+
+bool SceneViewWindow::IsPointerInsideOrientationWidget(const ImVec2& viewportPos, const ImVec2& viewportSize) const
+{
+	if (!m_OverlayPreference.orientationWidgetVisible)
+	{
+		return false;
+	}
+
+	const float size = 88.0f;
+	const ImVec2 min(viewportPos.x + viewportSize.x - size - 14.0f, viewportPos.y + 14.0f);
+	const ImVec2 max(min.x + size, min.y + size);
+	const ImVec2 mouse = ImGui::GetMousePos();
+	return IsPointerInsideRect(mouse, min, max);
+}
+
+bool SceneViewWindow::HandleSceneViewScrollZoom()
+{
+	const float wheel = ImGui::GetIO().MouseWheel;
+	if (std::abs(wheel) <= 0.0001f || ImGuizmo::IsUsing() || ImGuizmo::IsUsingViewManipulate())
+	{
+		return false;
+	}
+
+	if (m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic)
+	{
+		// Orthographic cameras do not get larger by moving forward, so wheel
+		// input changes the projected height directly like common editors.
+		m_OrthographicHeight = std::clamp(m_OrthographicHeight * std::pow(0.88f, wheel), 1.0f, 500.0f);
+		return true;
+	}
+
+	if (m_IsFlyCamActive)
+	{
+		return false;
+	}
+
+	const float fallbackDistance = m_CameraFocusInitialized ? m_CameraFocusDistance : 18.0f;
+	const glm::vec3 focus = ResolveSceneViewFocus(fallbackDistance);
+	const float focusDistance = ResolveSceneViewFocusDistance(focus, fallbackDistance);
+	const float newDistance = std::clamp(focusDistance * std::pow(0.86f, wheel), 0.5f, 1000.0f);
+	// Perspective wheel input dollies around the same focus used by panning and
+	// the view manipulator, so scroll zoom feels like moving the Scene View
+	// camera through the current composition instead of only changing FOV.
+	RepositionCameraAroundFocus(focus, newDistance);
+	return true;
+}
+
+bool SceneViewWindow::HandleSceneViewPan(const ImVec2& viewportSize)
+{
+	const bool handToolPan = m_ToolState.activeTool == SceneOverlay::SceneViewTool::Hand
+		&& ImGui::IsMouseDown(ImGuiMouseButton_Left);
+	const bool middleMousePan = ImGui::IsMouseDown(ImGuiMouseButton_Middle);
+	const bool wantsPan = (handToolPan || middleMousePan) && !ImGuizmo::IsUsing() && !ImGuizmo::IsUsingViewManipulate();
+	if (!wantsPan)
+	{
+		m_IsSceneViewPanning = false;
+		return false;
+	}
+
+	m_IsSceneViewPanning = true;
+	m_InteractionContext.activeRegion = SceneOverlay::InteractionRegion::Viewport;
+	const ImVec2 mouseDelta = ImGui::GetIO().MouseDelta;
+	if (std::abs(mouseDelta.x) <= 0.0001f && std::abs(mouseDelta.y) <= 0.0001f)
+	{
+		return true;
+	}
+
+	const float fallbackDistance = m_CameraFocusInitialized ? m_CameraFocusDistance : 18.0f;
+	const glm::vec3 focus = ResolveSceneViewFocus(fallbackDistance);
+	const float focusDistance = ResolveSceneViewFocusDistance(focus, fallbackDistance);
+	const float visibleHeight = m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic
+		? std::max(1.0f, m_OrthographicHeight)
+		: PerspectiveVisibleHeight(m_Fov, focusDistance);
+	const float pixelsHigh = std::max(viewportSize.y, 1.0f);
+	const float worldUnitsPerPixel = visibleHeight / pixelsHigh;
+	const glm::vec3 right = SafeNormalize(glm::cross(GetCameraForward(), GetCameraUp()), glm::vec3(1.0f, 0.0f, 0.0f));
+	const glm::vec3 up = GetCameraUp();
+	// Pan like a drafting canvas: dragging right/down pulls the scene right/down
+	// on screen, which means the camera moves left/up in world space.
+	const glm::vec3 panWorldDelta =
+		-right * (mouseDelta.x * worldUnitsPerPixel)
+		+ up * (mouseDelta.y * worldUnitsPerPixel);
+	m_CameraPos += panWorldDelta;
+	if (m_CameraFocusInitialized)
+	{
+		m_CameraFocus += panWorldDelta;
+	}
+	else
+	{
+		m_CameraFocus = focus + panWorldDelta;
+		m_CameraFocusDistance = focusDistance;
+		m_CameraFocusInitialized = true;
+	}
+	return true;
+}
+
+void SceneViewWindow::LoadOverlayPreferencesIfNeeded()
+{
+	if (m_OverlayPreferencesLoaded)
+	{
+		return;
+	}
+
+	m_OverlayPreferencesLoaded = true;
+	if (m_Owner != nullptr && m_Owner->GetContext() != nullptr && m_Owner->GetContext()->projectManager != nullptr)
+	{
+		m_OverlayPreference = SceneOverlay::SanitizePreference(m_Owner->GetContext()->projectManager->GetEditorPreferences().sceneViewOverlay);
+	}
+	else
+	{
+		m_OverlayPreference = SceneOverlay::SanitizePreference(m_OverlayPreference);
+	}
+	m_ToolState = SceneOverlay::BuildToolStateFromPreference(m_OverlayPreference, SceneOverlay::SceneViewTool::Move, SceneOverlay::PivotMode::Center, SceneOverlay::OrientationMode::Local);
+	m_ShowVirtualGeometryDiagnostics = m_OverlayPreference.diagnosticsVisible;
+	m_UsingSnap = m_ToolState.snapEnabled;
+	m_SnapValue[0] = m_SnapValue[1] = m_SnapValue[2] = m_OverlayPreference.translationSnap;
+	m_RotationSnapValue[0] = m_RotationSnapValue[1] = m_RotationSnapValue[2] = m_OverlayPreference.rotationSnapDegrees;
+	m_ScaleSnapValue[0] = m_ScaleSnapValue[1] = m_ScaleSnapValue[2] = m_OverlayPreference.scaleSnap;
+}
+
+void SceneViewWindow::PersistOverlayPreferences()
+{
+	if (!m_OverlayPreferenceDirty)
+	{
+		return;
+	}
+	m_OverlayPreferenceDirty = false;
+	m_OverlayPreference = SceneOverlay::SanitizePreference(m_OverlayPreference);
+	if (m_Owner != nullptr && m_Owner->GetContext() != nullptr && m_Owner->GetContext()->projectManager != nullptr)
+	{
+		m_Owner->GetContext()->projectManager->SetSceneViewOverlayPreference(m_OverlayPreference);
+	}
+}
+
+void SceneViewWindow::DrawSceneToolbar()
+{
+	const float buttonSize = std::max(24.0f, ImGui::GetFrameHeight());
+	m_InteractionContext.hoveredRegion = ImGui::IsWindowHovered() ? SceneOverlay::InteractionRegion::Viewport : SceneOverlay::InteractionRegion::None;
+
+	auto setTool = [&](SceneOverlay::SceneViewTool tool, int operation) {
+		m_ToolState.activeTool = tool;
+		m_ToolState.lastChangedBy = SceneOverlay::LastChangedBy::User;
+		m_CurrentGizmoOperation = operation;
+	};
+
+	if (DrawOverlayToggleButton("scene_tool_hand", SceneOverlay::ToolbarGlyph(SceneOverlay::SceneViewTool::Hand), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Hand, "Hand: navigate the Scene View camera", buttonSize))
+	{
+		setTool(SceneOverlay::SceneViewTool::Hand, -1);
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_tool_move", SceneOverlay::ToolbarGlyph(SceneOverlay::SceneViewTool::Move), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Move, "Move selected objects", buttonSize))
+	{
+		setTool(SceneOverlay::SceneViewTool::Move, ImGuizmo::TRANSLATE);
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_tool_rotate", SceneOverlay::ToolbarGlyph(SceneOverlay::SceneViewTool::Rotate), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Rotate, "Rotate selected objects", buttonSize))
+	{
+		setTool(SceneOverlay::SceneViewTool::Rotate, ImGuizmo::ROTATE);
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_tool_scale", SceneOverlay::ToolbarGlyph(SceneOverlay::SceneViewTool::Scale), m_ToolState.activeTool == SceneOverlay::SceneViewTool::Scale, "Scale selected objects", buttonSize))
+	{
+		setTool(SceneOverlay::SceneViewTool::Scale, ImGuizmo::SCALE);
+	}
+
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_pivot", m_ToolState.pivotMode == SceneOverlay::PivotMode::Center ? "Ctr" : "Piv", true, "Switch center/pivot handle placement", buttonSize + 8.0f))
+	{
+		m_ToolState.pivotMode = m_ToolState.pivotMode == SceneOverlay::PivotMode::Center ? SceneOverlay::PivotMode::Pivot : SceneOverlay::PivotMode::Center;
+		m_ToolState.lastChangedBy = SceneOverlay::LastChangedBy::User;
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_orientation", m_ToolState.orientationMode == SceneOverlay::OrientationMode::Local ? "Loc" : "Glo", true, "Switch local/global gizmo orientation", buttonSize + 8.0f))
+	{
+		m_ToolState.orientationMode = m_ToolState.orientationMode == SceneOverlay::OrientationMode::Local ? SceneOverlay::OrientationMode::Global : SceneOverlay::OrientationMode::Local;
+		m_ToolState.lastChangedBy = SceneOverlay::LastChangedBy::User;
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_snap", "Snap", m_ToolState.snapEnabled, "Enable transform snapping", buttonSize + 18.0f))
+	{
+		m_ToolState.snapEnabled = !m_ToolState.snapEnabled;
+		m_OverlayPreference.snapEnabled = m_ToolState.snapEnabled;
+		m_UsingSnap = m_ToolState.snapEnabled;
+		m_OverlayPreferenceDirty = true;
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_grid", "Grid", m_ToolState.gridVisible, "Show Scene View grid overlay", buttonSize + 16.0f))
+	{
+		m_ToolState.gridVisible = !m_ToolState.gridVisible;
+		m_OverlayPreference.gridVisible = m_ToolState.gridVisible;
+		m_OverlayPreferenceDirty = true;
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_icons", "Icon", m_ToolState.iconsVisible, "Show object markers", buttonSize + 16.0f))
+	{
+		m_ToolState.iconsVisible = !m_ToolState.iconsVisible;
+		m_OverlayPreference.iconsVisible = m_ToolState.iconsVisible;
+		m_OverlayPreferenceDirty = true;
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_gizmos", "Giz", m_ToolState.gizmosVisible, "Show selection gizmos", buttonSize + 12.0f))
+	{
+		m_ToolState.gizmosVisible = !m_ToolState.gizmosVisible;
+		m_OverlayPreference.gizmosVisible = m_ToolState.gizmosVisible;
+		m_OverlayPreferenceDirty = true;
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_projection", m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Perspective ? "Persp" : "Ortho", true, "Switch perspective/orthographic Scene View projection", buttonSize + 28.0f))
+	{
+		const bool switchingToOrthographic = m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Perspective;
+		m_ToolState.projectionMode = switchingToOrthographic ? SceneOverlay::ProjectionMode::Orthographic : SceneOverlay::ProjectionMode::Perspective;
+		if (switchingToOrthographic)
+		{
+			const glm::vec3 focus = ResolveSceneViewFocus(m_CameraFocusDistance);
+			const float focusDistance = ResolveSceneViewFocusDistance(focus, m_CameraFocusDistance);
+			// Enter orthographic mode at a readable isometric editor angle. A
+			// shallow flycam pitch technically works with an ortho projection, but
+			// it still feels like a perspective horizon view to artists.
+			m_CameraRot.x = glm::radians(-35.264f);
+			m_CameraRot.y = glm::radians(-45.0f);
+			m_OrthographicHeight = std::clamp(PerspectiveVisibleHeight(m_Fov, focusDistance) * 0.65f, 2.0f, 160.0f);
+			RepositionCameraAroundFocus(focus, focusDistance);
+		}
+		m_OverlayPreference.projectionMode = m_ToolState.projectionMode;
+		m_OverlayPreferenceDirty = true;
+	}
+	ImGui::SameLine();
+	if (DrawOverlayToggleButton("scene_diagnostics", "Diag", m_ShowVirtualGeometryDiagnostics, "Show Scene View diagnostics", buttonSize + 18.0f))
+	{
+		m_ShowVirtualGeometryDiagnostics = !m_ShowVirtualGeometryDiagnostics;
+		m_OverlayPreference.diagnosticsVisible = m_ShowVirtualGeometryDiagnostics;
+		m_OverlayPreferenceDirty = true;
+	}
+	PersistOverlayPreferences();
+}
+
+void SceneViewWindow::BuildSceneObjectMarkers(const glm::mat4& viewProjection, const ImVec2& viewportPos, const ImVec2& viewportSize)
+{
+	m_ObjectMarkers.clear();
+	if (!m_ToolState.iconsVisible)
+	{
+		return;
+	}
+
+	auto& objectManager = ObjectManager::instance();
+	auto& registry = objectManager.getRegistry();
+	const std::optional<entt::entity> selectedEntity = m_Owner != nullptr ? m_Owner->GetSelectedEntity() : std::nullopt;
+	auto computeWorldMatrix = [&](entt::entity entity) -> glm::mat4 {
+		glm::mat4 world(1.0f);
+		entt::entity current = entity;
+		// Markers read an immutable transform snapshot for this UI frame. They
+		// never mutate hierarchy or component storage while walking parents.
+		while (current != entt::null && registry.valid(current))
+		{
+			if (const Transform* transform = registry.try_get<Transform>(current))
+			{
+				glm::mat4 local(1.0f);
+				local = glm::translate(local, transform->position);
+				local = local * glm::mat4_cast(transform->rotation);
+				local = glm::scale(local, transform->scale);
+				world = local * world;
+			}
+			if (const std::optional<Object> object = objectManager.getObject(current))
+			{
+				const std::optional<Object> parent = objectManager.getParent(*object);
+				current = parent ? parent->EntityId() : entt::null;
+			}
+			else
+			{
+				current = entt::null;
+			}
+		}
+		return world;
+	};
+
+	auto transforms = registry.view<Transform>();
+	for (entt::entity entity : transforms)
+	{
+		const bool hasCamera = registry.any_of<CameraComponent>(entity);
+		const LightComponent* light = registry.try_get<LightComponent>(entity);
+		const bool hasMesh = registry.any_of<MeshRenderComponent>(entity);
+		const bool selected = selectedEntity.has_value() && *selectedEntity == entity;
+
+		SceneOverlay::MarkerCategory category = SceneOverlay::MarkerCategory::Unsupported;
+		if (selected)
+		{
+			category = SceneOverlay::MarkerCategory::SelectedObject;
+		}
+		else if (hasCamera)
+		{
+			category = SceneOverlay::MarkerCategory::Camera;
+		}
+		else if (light != nullptr && light->type == LightType::Directional)
+		{
+			category = SceneOverlay::MarkerCategory::DirectionalLight;
+		}
+		else if (light != nullptr && light->type == LightType::Spot)
+		{
+			category = SceneOverlay::MarkerCategory::SpotLight;
+		}
+		else if (light != nullptr)
+		{
+			category = SceneOverlay::MarkerCategory::PointLight;
+		}
+		else if (!hasMesh)
+		{
+			category = SceneOverlay::MarkerCategory::EmptyObject;
+		}
+
+		const bool lightVisible = category == SceneOverlay::MarkerCategory::DirectionalLight || category == SceneOverlay::MarkerCategory::PointLight || category == SceneOverlay::MarkerCategory::SpotLight;
+		if (category == SceneOverlay::MarkerCategory::Unsupported
+			|| (category == SceneOverlay::MarkerCategory::Camera && !m_OverlayPreference.cameraIconsVisible)
+			|| (lightVisible && !m_OverlayPreference.lightIconsVisible)
+			|| (category == SceneOverlay::MarkerCategory::EmptyObject && !m_OverlayPreference.emptyObjectIconsVisible))
+		{
+			continue;
+		}
+
+		SceneOverlay::SceneObjectMarker marker;
+		marker.entity = entity;
+		marker.category = category;
+		marker.selected = selected;
+		marker.worldPosition = glm::vec3(computeWorldMatrix(entity)[3]);
+		if (const std::optional<Object> object = objectManager.getObject(entity))
+		{
+			marker.objectId = objectManager.getUUID(*object);
+			marker.displayName = objectManager.getObjectName(*object);
+			marker.markerId = TerraEngine::ToHexString(marker.objectId);
+		}
+		else
+		{
+			marker.displayName = "Entity " + std::to_string(static_cast<std::uint32_t>(entity));
+			marker.markerId = marker.displayName;
+		}
+		marker.tooltip = marker.displayName + " (" + SceneOverlay::ToString(marker.category) + ")";
+		// Projection marks offscreen/behind-camera markers as hidden; we still
+		// keep the marker in the snapshot so diagnostics can reason from one list.
+		const bool projected = SceneOverlay::ProjectMarkerToScreen(marker, viewProjection, glm::vec2(viewportPos.x, viewportPos.y), glm::vec2(viewportSize.x, viewportSize.y));
+		(void)projected;
+		m_ObjectMarkers.push_back(std::move(marker));
+	}
+	SceneOverlay::ResolveMarkerOverlapGroups(m_ObjectMarkers, 18.0f);
+}
+
+void SceneViewWindow::DrawSceneObjectMarkers()
+{
+	if (!m_ToolState.iconsVisible)
+	{
+		return;
+	}
+
+	ImDrawList* drawList = ImGui::GetWindowDrawList();
+	const ImVec2 mouse = ImGui::GetMousePos();
+	const glm::vec2 pointer(mouse.x, mouse.y);
+	// The orientation widget is drawn over the viewport. When the pointer is in
+	// that box, markers underneath it should not steal hover or click ownership.
+	const bool orientationWidgetOwnsPointer =
+		m_InteractionContext.hoveredRegion == SceneOverlay::InteractionRegion::OrientationWidget
+		|| m_InteractionContext.activeRegion == SceneOverlay::InteractionRegion::OrientationWidget;
+	const std::optional<std::size_t> hovered = orientationWidgetOwnsPointer
+		? std::nullopt
+		: SceneOverlay::HitTestMarkers(m_ObjectMarkers, pointer, 13.0f);
+	m_InteractionContext.candidateMarkers.clear();
+	m_InteractionContext.hoveredRegion = hovered.has_value() ? SceneOverlay::InteractionRegion::Marker : m_InteractionContext.hoveredRegion;
+
+	for (std::size_t index = 0u; index < m_ObjectMarkers.size(); ++index)
+	{
+		SceneOverlay::SceneObjectMarker& marker = m_ObjectMarkers[index];
+		if (!marker.visible)
+		{
+			continue;
+		}
+		marker.hovered = hovered.has_value() && *hovered == index;
+		if (marker.hovered)
+		{
+			m_InteractionContext.candidateMarkers.push_back(marker.markerId);
+			m_InteractionContext.activeObjectId = marker.markerId;
+		}
+		const ImVec2 center(marker.screenPosition.x, marker.screenPosition.y);
+		const ImU32 color = MarkerColor(marker.category, marker.selected, marker.hovered);
+		drawList->AddCircleFilled(center, marker.selected ? 10.0f : 8.0f, IM_COL32(20, 24, 28, 210), 24);
+		drawList->AddCircle(center, marker.selected ? 10.0f : 8.0f, color, 24, 2.0f);
+		const char* glyph = MarkerGlyph(marker.category);
+		const ImVec2 glyphSize = ImGui::CalcTextSize(glyph);
+		drawList->AddText(ImVec2(center.x - glyphSize.x * 0.5f, center.y - glyphSize.y * 0.5f), color, glyph);
+	}
+
+	if (hovered.has_value())
+	{
+		const SceneOverlay::SceneObjectMarker& marker = m_ObjectMarkers[*hovered];
+		ImGui::SetTooltip("%s", marker.tooltip.c_str());
+		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && m_Owner != nullptr)
+		{
+			m_Owner->SetSelectedEntity(marker.entity);
+			m_InteractionContext.activeRegion = SceneOverlay::InteractionRegion::Marker;
+			m_InteractionContext.selectionChangePending = true;
+		}
+	}
+}
+
+bool SceneViewWindow::DrawOrientationWidget(glm::mat4& view, const glm::mat4& projection, const ImVec2& viewportPos, const ImVec2& viewportSize)
+{
+	if (!m_OverlayPreference.orientationWidgetVisible)
+	{
+		m_OrientationWidgetState.visible = false;
+		return false;
+	}
+
+	const float size = 88.0f;
+	const ImVec2 min(viewportPos.x + viewportSize.x - size - 14.0f, viewportPos.y + 14.0f);
+	const ImVec2 max(min.x + size, min.y + size);
+	m_OrientationWidgetState = SceneOverlay::BuildOrientationWidgetState(
+		GetCameraForward(),
+		GetCameraUp(),
+		m_ToolState.projectionMode,
+		glm::vec4(min.x, min.y, max.x, max.y));
+
+	ImGui::PushID("scene_orientation_widget");
+	glm::mat4 widgetModel(1.0f);
+	const float fallbackDistance = m_CameraFocusInitialized ? m_CameraFocusDistance : 18.0f;
+	const glm::vec3 focus = ResolveSceneViewFocus(fallbackDistance);
+	const float focusDistance = ResolveSceneViewFocusDistance(focus, fallbackDistance);
+	// ImGuizmo already ships a view-manipulation cube with face picking,
+	// interpolation, and drag orbiting. Feed it the same view/projection pair as
+	// the editor gizmos, then convert the edited view matrix back to our compact
+	// pitch/yaw camera state below.
+	ImGuizmo::ViewManipulate(
+		glm::value_ptr(view),
+		glm::value_ptr(projection),
+		ImGuizmo::TRANSLATE,
+		ImGuizmo::WORLD,
+		glm::value_ptr(widgetModel),
+		focusDistance,
+		min,
+		ImVec2(size, size),
+		IM_COL32(24, 28, 32, 150));
+
+	const bool widgetHovered = ImGuizmo::IsViewManipulateHovered();
+	const bool widgetUsing = ImGuizmo::IsUsingViewManipulate();
+	m_OrientationWidgetState.hoveredAxis = widgetHovered ? "view-manipulate" : "none";
+	ImDrawList* drawList = ImGui::GetWindowDrawList();
+	drawList->AddRect(min, max, IM_COL32(170, 184, 198, 170), 4.0f);
+	drawList->AddText(ImVec2(min.x + 8.0f, max.y - 20.0f), IM_COL32(232, 238, 244, 255), m_OrientationWidgetState.label.c_str());
+
+	if (widgetHovered)
+	{
+		m_InteractionContext.hoveredRegion = SceneOverlay::InteractionRegion::OrientationWidget;
+	}
+	if (widgetUsing)
+	{
+		m_InteractionContext.activeRegion = SceneOverlay::InteractionRegion::OrientationWidget;
+		const glm::mat4 inverseView = glm::inverse(view);
+		const glm::vec3 editedForward = SafeNormalize(glm::vec3(inverseView * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)), GetCameraForward());
+		const glm::vec2 editedEuler = CameraEulerFromForward(editedForward);
+		m_CameraRot.x = std::clamp(editedEuler.x, glm::radians(-89.0f), glm::radians(89.0f));
+		m_CameraRot.y = editedEuler.y;
+		// Keep the selected scene focus stable while the widget rotates the view,
+		// matching how editor view cubes orbit content instead of drifting away.
+		RepositionCameraAroundFocus(focus, focusDistance);
+		view = glm::lookAt(m_CameraPos, m_CameraPos + GetCameraForward(), GetCameraUp());
+		m_OrientationWidgetState.activeAxis = "view-manipulate";
+	}
+	ImGui::PopID();
+	return widgetUsing;
+}
+
+void SceneViewWindow::PublishSceneViewDiagnostics(bool rendererAvailable, const std::string& disabledOverlayReason)
+{
+	SceneOverlay::SceneViewDiagnosticsSnapshot snapshot;
+	snapshot.toolState = m_ToolState;
+	snapshot.overlayPreferences = m_OverlayPreference;
+	snapshot.orientationWidget = m_OrientationWidgetState;
+	snapshot.projectionMode = m_ToolState.projectionMode;
+	snapshot.lastInteractionOwner = m_InteractionContext.activeRegion != SceneOverlay::InteractionRegion::None
+		? m_InteractionContext.activeRegion
+		: m_InteractionContext.hoveredRegion;
+	snapshot.rendererAvailable = rendererAvailable;
+	snapshot.disabledOverlayReason = disabledOverlayReason;
+	snapshot.gameViewAffected = false;
+	for (const SceneOverlay::SceneObjectMarker& marker : m_ObjectMarkers)
+	{
+		if (marker.hovered)
+		{
+			snapshot.hoveredMarkerId = marker.markerId;
+		}
+		if (marker.selected)
+		{
+			snapshot.selectedMarkerId = marker.markerId;
+		}
+	}
+	snapshot = SceneOverlay::CountMarkersIntoSnapshot(snapshot, m_ObjectMarkers);
+	SceneOverlay::PublishLatestDiagnosticsSnapshot(snapshot);
 }
 
 // SceneViewWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::OnGui() {
 	ImGuizmo::BeginFrame();
+	LoadOverlayPreferencesIfNeeded();
+	m_InteractionContext = SceneOverlay::ViewportInteractionContext{};
+	m_InteractionContext.hoveredRegion = ImGui::IsWindowHovered() ? SceneOverlay::InteractionRegion::Viewport : SceneOverlay::InteractionRegion::None;
+	DrawSceneToolbar();
+	ImGui::SameLine();
 
 	void* texID = m_Owner->GetSceneTextureID();
 
@@ -281,13 +982,6 @@ void SceneViewWindow::OnGui() {
 		}
 		ImGui::EndCombo();
 	}
-	ImGui::SameLine();
-	ImGui::Checkbox("VG Stats", &m_ShowVirtualGeometryDiagnostics);
-	if (ImGui::IsItemHovered())
-	{
-		ImGui::SetTooltip("Show virtual-geometry packet and Hi-Z baseline diagnostics in the Scene View.");
-	}
-	
 	// We draw the image filling the content region
 	ImVec2 contentSize = ImGui::GetContentRegionAvail();
 	contentSize.x = std::max(contentSize.x, 1.0f);
@@ -298,6 +992,7 @@ void SceneViewWindow::OnGui() {
 		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(contentSize.x))),
 		static_cast<std::uint32_t>(std::max(1.0f, std::ceil(contentSize.y))));
 	RenderSystem::Instance().SetSceneViewTargetSize(sceneTargetSize);
+	RenderSystem::Instance().SetSceneViewGridVisible(m_ToolState.gridVisible);
 
 	const TerraEngine::Renderer::RendererRecoverySnapshot recoverySnapshot =
 		RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
@@ -317,6 +1012,8 @@ void SceneViewWindow::OnGui() {
 		ImGui::PushTextWrapPos(cursorPos.x + contentSize.x - 16.0f);
 		ImGui::TextUnformatted(status.c_str());
 		ImGui::PopTextWrapPos();
+		m_OrientationWidgetState.visible = false;
+		PublishSceneViewDiagnostics(false, status);
 		return;
 	}
 	
@@ -411,26 +1108,39 @@ void SceneViewWindow::OnGui() {
 	}
 
 	// Prepare for Gizmos
-	ImGuizmo::SetOrthographic(false);
+	ImGuizmo::SetOrthographic(m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic);
 	ImGuizmo::SetDrawlist();
 	ImGuizmo::SetRect(cursorPos.x, cursorPos.y, contentSize.x, contentSize.y);
 
 	const bool isFocused = ImGui::IsWindowFocused();
 	const bool isHovered = ImGui::IsWindowHovered();
+	const ImVec2 mousePos = ImGui::GetMousePos();
+	const bool pointerInsideViewport =
+		mousePos.x >= cursorPos.x && mousePos.x <= cursorPos.x + contentSize.x
+		&& mousePos.y >= cursorPos.y && mousePos.y <= cursorPos.y + contentSize.y;
+	const bool orientationWidgetHovered = pointerInsideViewport && IsPointerInsideOrientationWidget(cursorPos, contentSize);
+	const bool orientationWidgetBusy = orientationWidgetHovered || ImGuizmo::IsUsingViewManipulate();
+	if (orientationWidgetHovered)
+	{
+		m_InteractionContext.hoveredRegion = SceneOverlay::InteractionRegion::OrientationWidget;
+	}
+	if (pointerInsideViewport && !orientationWidgetBusy)
+	{
+		HandleSceneViewScrollZoom();
+	}
 	// Apply editor camera input before deriving matrices so the submitted view
 	// matrix and camera world position describe the same camera state.
-	if (isFocused || isHovered) {
-		HandleCameraInput(ImGui::GetIO().DeltaTime);
+	if (!orientationWidgetBusy && (isFocused || isHovered) && (pointerInsideViewport || m_IsFlyCamActive || m_IsSceneViewPanning)) {
+		HandleCameraInput(ImGui::GetIO().DeltaTime, contentSize);
 	}
 
 	// Calculate Camera Matrices
 	glm::mat4 view = glm::mat4(1.0f);
 	glm::mat4 proj = glm::mat4(1.0f);
 	
-	// m_CameraRot.x = pitch, .y = yaw
-	glm::quat orientation = glm::quat(glm::vec3(m_CameraRot.x, m_CameraRot.y, 0.0f));
-	glm::vec3 forward = orientation * glm::vec3(0, 0, -1);
-	glm::vec3 up = orientation * glm::vec3(0, 1, 0);
+	// m_CameraRot.x = pitch, .y = yaw.
+	glm::vec3 forward = GetCameraForward();
+	glm::vec3 up = GetCameraUp();
 	view = glm::lookAt(m_CameraPos, m_CameraPos + forward, up);
 	
 	float aspect = (contentSize.y > 0.0001f) ? (contentSize.x / contentSize.y) : 1.0f;
@@ -439,17 +1149,42 @@ void SceneViewWindow::OnGui() {
 	// Scene View feeds the same projection into picking, gizmos, rendering, and
 	// Hi-Z validation. Make the depth convention explicit so all those users
 	// agree on Vulkan's 0..1 clip-space depth.
-	glm::mat4 projNoFlip = glm::perspectiveRH_ZO(glm::radians(std::max(m_Fov, 0.1f)), aspect, 0.1f, 1000.0f);
+	glm::mat4 projNoFlip = glm::mat4(1.0f);
+	if (m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic)
+	{
+		const float halfHeight = std::max(1.0f, m_OrthographicHeight) * 0.5f;
+		const float halfWidth = halfHeight * aspect;
+		projNoFlip = glm::orthoRH_ZO(-halfWidth, halfWidth, -halfHeight, halfHeight, 0.1f, 1000.0f);
+	}
+	else
+	{
+		projNoFlip = glm::perspectiveRH_ZO(glm::radians(std::max(m_Fov, 0.1f)), aspect, 0.1f, 1000.0f);
+	}
 	proj = projNoFlip;
 	proj[1][1] *= -1; // Vulkan flip
 
-	// Set Scene View Camera for next render
-	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPos);
+	BuildSceneObjectMarkers(projNoFlip * view, cursorPos, contentSize);
+	DrawSceneObjectMarkers();
+	const bool orientationChanged = DrawOrientationWidget(view, projNoFlip, cursorPos, contentSize);
+	if (orientationChanged)
+	{
+		// Submit the manipulated camera to the renderer immediately so the next
+		// Scene View texture reflects the view-cube drag/click without an extra
+		// frame of stale camera state.
+		forward = GetCameraForward();
+		up = GetCameraUp();
+		view = glm::lookAt(m_CameraPos, m_CameraPos + forward, up);
+	}
+
+	// Set Scene View Camera for next render after overlay input has had a chance
+	// to adjust the editor camera.
+	RenderSystem::Instance().SetSceneViewCamera(view, proj, m_CameraPos, m_ToolState.projectionMode == SceneOverlay::ProjectionMode::Orthographic);
 	ApplyPrefabContextTintForNextRender();
 
 	HandlePicking(view, projNoFlip, cursorPos, contentSize);
 
 	DrawGizmos(view, projNoFlip, cursorPos, contentSize);
+	PublishSceneViewDiagnostics(true);
 }
 
 // RayAABB is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
@@ -490,6 +1225,17 @@ bool RayAABB(const glm::vec3& rayOrigin, const glm::vec3& rayDir, const glm::vec
 // SceneViewWindow::HandlePicking is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
 	if (!ImGui::IsMouseClicked(0) || ImGuizmo::IsOver() || m_IsFlyCamActive || !ImGui::IsWindowHovered()) return;
+	if (m_ToolState.activeTool == SceneOverlay::SceneViewTool::Hand || m_IsSceneViewPanning)
+	{
+		return;
+	}
+	if (m_InteractionContext.activeRegion == SceneOverlay::InteractionRegion::Marker
+		|| m_InteractionContext.activeRegion == SceneOverlay::InteractionRegion::OrientationWidget
+		|| m_InteractionContext.hoveredRegion == SceneOverlay::InteractionRegion::OrientationWidget
+		|| m_InteractionContext.activeRegion == SceneOverlay::InteractionRegion::Toolbar)
+	{
+		return;
+	}
 
 	ImVec2 mousePos = ImGui::GetMousePos();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -608,9 +1354,13 @@ void SceneViewWindow::HandlePicking(const glm::mat4& view, const glm::mat4& proj
 }
 
 // SceneViewWindow::HandleCameraInput is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-void SceneViewWindow::HandleCameraInput(float deltaTime) {
+void SceneViewWindow::HandleCameraInput(float deltaTime, const ImVec2& viewportSize) {
 	// Need to include WindowSystem and GLFW for this
 	auto* window = static_cast<GLFWwindow*>(WindowSystem::Instance().GetNativeHandle());
+	if (HandleSceneViewPan(viewportSize))
+	{
+		return;
+	}
 
 	if (m_IsFlyCamActive) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -677,10 +1427,10 @@ void SceneViewWindow::HandleCameraInput(float deltaTime) {
 	// Gizmo Shortcuts
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-		if (ImGui::IsKeyPressed(ImGuiKey_W)) m_CurrentGizmoOperation = ImGuizmo::TRANSLATE;
-		if (ImGui::IsKeyPressed(ImGuiKey_E)) m_CurrentGizmoOperation = ImGuizmo::ROTATE;
+		if (ImGui::IsKeyPressed(ImGuiKey_W)) { m_CurrentGizmoOperation = ImGuizmo::TRANSLATE; m_ToolState.activeTool = SceneOverlay::SceneViewTool::Move; }
+		if (ImGui::IsKeyPressed(ImGuiKey_E)) { m_CurrentGizmoOperation = ImGuizmo::ROTATE; m_ToolState.activeTool = SceneOverlay::SceneViewTool::Rotate; }
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (ImGui::IsKeyPressed(ImGuiKey_R)) m_CurrentGizmoOperation = ImGuizmo::SCALE;
+		if (ImGui::IsKeyPressed(ImGuiKey_R)) { m_CurrentGizmoOperation = ImGuizmo::SCALE; m_ToolState.activeTool = SceneOverlay::SceneViewTool::Scale; }
 	}
 }
 
@@ -739,6 +1489,10 @@ void SceneViewWindow::ApplyPrefabContextTintForNextRender()
 
 // SceneViewWindow::DrawGizmos is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize) {
+	if (!m_ToolState.gizmosVisible || m_CurrentGizmoOperation < 0)
+	{
+		return;
+	}
 	// Selection
 	auto selectedEntity = m_Owner->GetSelectedEntity();
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -786,10 +1540,10 @@ void SceneViewWindow::DrawGizmos(const glm::mat4& view, const glm::mat4& proj, c
 						glm::value_ptr(view), 
 						glm::value_ptr(proj), 
 						(ImGuizmo::OPERATION)m_CurrentGizmoOperation, 
-						ImGuizmo::LOCAL, 
+						m_ToolState.orientationMode == SceneOverlay::OrientationMode::Local ? ImGuizmo::LOCAL : ImGuizmo::WORLD, 
 						glm::value_ptr(model),
 						nullptr, 
-						m_UsingSnap ? m_SnapValue : nullptr)) 
+						m_UsingSnap ? (m_CurrentGizmoOperation == ImGuizmo::ROTATE ? m_RotationSnapValue : (m_CurrentGizmoOperation == ImGuizmo::SCALE ? m_ScaleSnapValue : m_SnapValue)) : nullptr)) 
 					{
 						// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 						if (!m_WasUsingGizmo) {

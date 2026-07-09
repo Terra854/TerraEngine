@@ -68,6 +68,13 @@ add_executable(TerraEngine-EditorTests
 	Renderer/RendererRecoveryEditorTests.cpp
 	Renderer/RendererRecoveryWindowTests.cpp
 	Renderer/ResourceResidencyWindowTests.cpp
+	Renderer/SceneViewDisplayToggleTests.cpp
+	Renderer/SceneViewMarkerOverlayTests.cpp
+	Renderer/SceneViewOrientationWidgetTests.cpp
+	Renderer/SceneViewOverlayAccessibilityTests.cpp
+	Renderer/SceneViewOverlayRendererUnavailableTests.cpp
+	Renderer/SceneViewToolbarOverlayTests.cpp
+	Renderer/SceneViewToolbarSnapTests.cpp
 	Renderer/VirtualGeometryDebugViewTests.cpp
 	Renderer/VirtualGeometryHardeningDebugViewTests.cpp
 	Renderer/VirtualGeometryScalingDebugViewTests.cpp
@@ -76,11 +83,14 @@ add_executable(TerraEngine-EditorTests
 	Scene/ArchitectureHardeningPlayModeTests.cpp
 	Scene/FullParallelFrameDiagnosticsTests.cpp
 	Scene/RuntimeLayoutDiagnosticsTests.cpp
+	Scene/SceneViewMarkerSelectionTests.cpp
+	Scene/SceneViewOverlaySchedulerTests.cpp
 	Scene/TransactionalMutationDiagnosticsWindowTests.cpp
 	Scene/TransactionalMutationUndoTests.cpp
 	Scene/PrefabAuthoringWorkflowTests.cpp
 	Project/RendererRecoveryCrashSummaryTests.cpp
 	Project/RendererRecoveryProjectSaveTests.cpp
+	Project/SceneViewOverlayPreferenceTests.cpp
 	Profiling/RendererRecoveryProfilerTests.cpp
 	Scene/SchedulerPlayModeGraphTests.cpp
 	Scene/SceneRuntimeParityTests.cpp
@@ -96,6 +106,10 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorAutomationService.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorMcpBridge.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation/EditorMcpTransport.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
+	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MeshCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/TextureCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ShaderCompiler.cpp

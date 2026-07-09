@@ -2327,6 +2327,13 @@ struct FrameRenderData
 	// such as sky and grid while individual DrawCommand tint preserves the
 	// focused prefab branch at normal color.
 	glm::vec4 editorContextTint = glm::vec4(0.0f);
+	// Scene View overlays can hide the editor grid without changing authored
+	// scene data or Game View output. The flag is carried per frame so Vulkan
+	// records or skips the grid pass from immutable render data.
+	bool sceneViewGridVisible = true;
+	// Scene View orthographic mode uses a flat editor background so the
+	// procedural sky horizon does not read as perspective depth in an ortho view.
+	bool sceneViewOrthographic = false;
 	// Per-light shadow lists are separate from the main camera-visible list so
 	// shadow passes can cull against each light instead of the active camera.
 	std::vector<ShadowDrawList> shadowDrawLists;

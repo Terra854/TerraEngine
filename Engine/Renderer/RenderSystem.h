@@ -130,10 +130,11 @@ public:
 		glm::mat4 view;
 		glm::mat4 proj;
 		glm::vec3 pos;
+		bool orthographic = false;
 	};
 	// SetSceneViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
-		sceneViewCamera = OverrideCameraData{view, proj, pos};
+	void SetSceneViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos, bool orthographic = false) {
+		sceneViewCamera = OverrideCameraData{view, proj, pos, orthographic};
 		hasSceneViewCamera = true;
 	}
 	// Record the editor panel dimensions before rendering so Vulkan allocates
@@ -142,12 +143,15 @@ public:
 	void SetSceneViewTargetSize(const glm::uvec2& size) {
 		sceneViewTargetSize = size;
 	}
+	void SetSceneViewGridVisible(bool visible) {
+		sceneViewGridVisible = visible;
+	}
 	void SetSceneViewContextTint(const std::unordered_set<TerraEngine::UUID>& focusedObjectIds);
 	// SetEditorModeEnabled is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetEditorModeEnabled(bool enabled) { editorModeEnabled = enabled; }
 	// SetGameViewCamera is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	void SetGameViewCamera(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& pos) {
-		OverrideCameraData camera{view, proj, pos};
+		OverrideCameraData camera{view, proj, pos, false};
 		gameViewCameras.push_back(camera);
 		// Store a descriptor copy for MCP capture requests. This is read-only
 		// metadata, not gameplay camera ownership, so capture can inspect the
@@ -173,6 +177,7 @@ public:
 		gameViewSuppressed = false;
 		sceneViewTargetSize = glm::uvec2(0u);
 		gameViewTargetSize = glm::uvec2(0u);
+		sceneViewGridVisible = true;
 		sceneViewContextTintEnabled = false;
 		sceneViewContextFocusedObjectIds.clear();
 	}
@@ -188,6 +193,7 @@ private:
 	bool initialized = false;
 	bool taskShaderCullingEnabled = true;
 	bool editorModeEnabled = false;
+	bool sceneViewGridVisible = true;
 	bool renderGraphDiagnosticsRequestedByUi = false;
 
 	bool hasSceneViewCamera = false;

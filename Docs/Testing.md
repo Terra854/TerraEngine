@@ -158,6 +158,19 @@ ctest --test-dir out\build\CodexDebug --output-on-failure -C Debug
 cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"" >nul && cmake --build out\build\CodexDebug --target install --config Debug"
 ```
 
+Scene View overlay coverage for `specs/037-scene-view-overlays` lives in the
+editor harness. It validates the toolbar tool state, snap fallback, marker
+projection and deterministic overlap selection, orientation widget labels,
+renderer-unavailable diagnostics, preference JSON fallback, icon accessibility
+metadata, and Game View independence. Use this focused pass while iterating on
+Scene View-only overlay behavior:
+
+```powershell
+$env:TERRAENGINE_TEST_FILTER="SceneViewOverlay;SceneViewMarker;SceneViewOrientation;SceneViewPreference;SceneViewInteraction;GameViewIndependence"
+.\out\build\CodexDebug\TerraEngine-EditorTests.exe
+Remove-Item Env:TERRAENGINE_TEST_FILTER
+```
+
 The scripting scheduler checks live under `Tests/Engine/Scripting`. They verify
 workload snapshots, worker batch planning, thread-local dispatch context,
 diagnostics gating, and deferred script-origin scene mutations. Export scripting

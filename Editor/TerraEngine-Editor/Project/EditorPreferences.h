@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "../Windows/SceneViewOverlayTypes.h"
+
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>
@@ -27,6 +29,7 @@ struct EditorPreferences {
 	bool editorMcpEnabled = false;
 	std::string editorMcpWriteModeDefault = "read_only";
 	std::string editorMcpRecentSession;
+	TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference sceneViewOverlay;
 
 	friend void to_json(nlohmann::json& json, const EditorPreferences& preferences)
 	{
@@ -37,7 +40,8 @@ struct EditorPreferences {
 			{"autoBuildScripts", preferences.autoBuildScripts},
 			{"editorMcpEnabled", preferences.editorMcpEnabled},
 			{"editorMcpWriteModeDefault", preferences.editorMcpWriteModeDefault},
-			{"editorMcpRecentSession", preferences.editorMcpRecentSession}
+			{"editorMcpRecentSession", preferences.editorMcpRecentSession},
+			{"sceneViewOverlay", preferences.sceneViewOverlay}
 		};
 	}
 
@@ -52,5 +56,10 @@ struct EditorPreferences {
 		preferences.editorMcpEnabled = json.value("editorMcpEnabled", json.value("editorMcpEnabledByDefault", preferences.editorMcpEnabled));
 		preferences.editorMcpWriteModeDefault = json.value("editorMcpWriteModeDefault", preferences.editorMcpWriteModeDefault);
 		preferences.editorMcpRecentSession = json.value("editorMcpRecentSession", preferences.editorMcpRecentSession);
+		if (json.contains("sceneViewOverlay") && json["sceneViewOverlay"].is_object())
+		{
+			preferences.sceneViewOverlay = json["sceneViewOverlay"].get<TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference>();
+		}
+		preferences.sceneViewOverlay = TerraEngine::Editor::SceneViewOverlay::SanitizePreference(preferences.sceneViewOverlay);
 	}
 };

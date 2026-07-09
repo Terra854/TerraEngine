@@ -633,6 +633,13 @@ void ProjectManager::SetEditorMcpPreferences(bool enabled, const std::string& wr
 	SaveEditorPreferences();
 }
 
+void ProjectManager::SetSceneViewOverlayPreference(const TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference& preference) {
+	// Scene View overlay options are editor preferences, not scene data, so
+	// changing gizmo/icon visibility never dirties the active project or export.
+	editorPrefs.sceneViewOverlay = TerraEngine::Editor::SceneViewOverlay::SanitizePreference(preference);
+	SaveEditorPreferences();
+}
+
 // ProjectManager::SaveProjectSettings is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void ProjectManager::SaveProjectSettings() {
 	if (!currentSettings.has_value() || projectRoot.empty()) return;

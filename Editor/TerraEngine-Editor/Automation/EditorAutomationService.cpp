@@ -11,6 +11,7 @@
 #include "../Core/EditorContext.h"
 #include "../Project/ProjectManager.h"
 #include "../Subsystems/UndoRedoSystem.h"
+#include "../Windows/SceneViewOverlayTypes.h"
 #include "../../Export/BuildProfile.h"
 #include "../../Export/ExportValidator.h"
 #include "../../AssetCompilers/ModelPackageImporter.h"
@@ -1510,8 +1511,11 @@ namespace TerraEngine::Editor::Automation
 				++activeRuntimeObjects;
 			}
 		}
+		const nlohmann::json sceneViewDiagnostics = TerraEngine::Editor::SceneViewOverlay::SerializeDiagnosticsSnapshot(
+			TerraEngine::Editor::SceneViewOverlay::GetLatestDiagnosticsSnapshot());
 		data["surfaces"] = nlohmann::json::array({
 			{{"surface", "render"}, {"state", "available"}, {"details", includeDetails ? nlohmann::json{{"note", "Render diagnostics are available through the profiler/resource windows."}, {"timingStreams", profilerTimingStreams}, {"virtualGeometryPerformanceGates", virtualGeometryGateJson}, {"virtualGeometryGateFailures", virtualGeometryGateFailures}, {"virtualGeometryUnsupportedGates", virtualGeometryGateUnsupported}} : nlohmann::json::object()}},
+			{{"surface", "sceneView"}, {"state", sceneViewDiagnostics.value("rendererAvailable", true) ? "available" : "rendererUnavailable"}, {"details", includeDetails ? sceneViewDiagnostics : nlohmann::json{{"activeTool", sceneViewDiagnostics.value("activeTool", "move")}, {"projectionMode", sceneViewDiagnostics.value("projectionMode", "perspective")}, {"iconsVisible", sceneViewDiagnostics.value("iconsVisible", true)}}}},
 			{{"surface", "runtimeLayout"}, {"state", "available"}, {"details", nlohmann::json{{"authoredObjectCount", runtimeMembership.size()}, {"activeRuntimeObjectCount", activeRuntimeObjects}, {"membershipRevision", ObjectManager::instance().GetRuntimeActiveMembershipRevision()}}}},
 			{{"surface", "resources"}, {"state", assetJobCount > 0 ? "compiling" : "available"}, {"details", nlohmann::json{{"assetCompileJobs", assetJobCount}}}},
 			{{"surface", "streaming"}, {"state", "available"}, {"details", nlohmann::json::object()}},
@@ -1521,6 +1525,7 @@ namespace TerraEngine::Editor::Automation
 			{{"surface", "export"}, {"state", exportJobs.empty() ? "idle" : exportJobs.front().state}, {"details", nlohmann::json{{"jobs", exportJobJson}}}}
 		});
 		data["parallelFrame"] = parallelFrame;
+		data["sceneView"] = sceneViewDiagnostics;
 		data["rendererRecovery"] = SerializeRendererRecoverySnapshot(renderDiagnostics.rendererRecovery);
 		data["profilerTimingStreams"] = profilerTimingStreams;
 		data["hardBoundaries"] = boundaryFindings;

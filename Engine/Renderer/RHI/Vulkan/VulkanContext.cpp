@@ -2184,8 +2184,11 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRe
 
 	const glm::mat4 inverseViewMatrix = glm::inverse(frameData.viewMatrix);
 	const glm::quat cameraOrientation = glm::normalize(glm::quat_cast(glm::mat3(inverseViewMatrix)));
-	const float tanHalfFovX = 1.0f / std::max(std::abs(frameData.projectionMatrix[0][0]), 0.0001f);
-	const float tanHalfFovY = 1.0f / std::max(std::abs(frameData.projectionMatrix[1][1]), 0.0001f);
+	const bool orthographicProjection = std::abs(frameData.projectionMatrix[3][3]) > 0.5f;
+	// Orthographic projection scale is a zoom value, not a perspective FOV.
+	// Keep the procedural sky from stretching as the Scene View ortho size changes.
+	const float tanHalfFovX = orthographicProjection ? 1.0f : 1.0f / std::max(std::abs(frameData.projectionMatrix[0][0]), 0.0001f);
+	const float tanHalfFovY = orthographicProjection ? 1.0f : 1.0f / std::max(std::abs(frameData.projectionMatrix[1][1]), 0.0001f);
 
 	SkyPushConstants push{};
 	push.cameraOrientation = glm::vec4(cameraOrientation.x, cameraOrientation.y, cameraOrientation.z, cameraOrientation.w);
@@ -2203,6 +2206,12 @@ void VulkanContext::Impl::RenderSkyBackground(VkCommandBuffer cmd, const FrameRe
 	if (frameData.sky.forceBlack)
 	{
 		skyFlags |= 2u;
+	}
+	if (frameData.sceneViewOrthographic)
+	{
+		// Scene View orthographic mode still uses the sky pipeline, but the
+		// shader switches to a screen-space editor gradient instead of world sky.
+		skyFlags |= 4u;
 	}
 	push.skyParams = glm::vec4(tanHalfFovX, tanHalfFovY, glm::radians(frameData.sky.rotationOffsetDegrees), static_cast<float>(skyFlags));
 	push.editorTint = frameData.editorContextTint;
@@ -3221,7 +3230,14 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 	renderPassInfo.renderArea.extent = activeRenderExtent;
 
 	std::array<VkClearValue, 3> clearValues{};
-	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+	if (view == ViewType::Scene && frameData.sceneViewOrthographic)
+	{
+		clearValues[0].color = {{0.36f, 0.43f, 0.50f, 1.0f}};
+	}
+	else
+	{
+		clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+	}
 	clearValues[1].depthStencil = {1.0f, 0};
 	clearValues[2].color = {{0, 0, 0, 0}};
 	renderPassInfo.clearValueCount = impl->UsesVrsAttachment() ? 3 : 2;
@@ -3229,7 +3245,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	// Create Grid Pipeline if needed (lazy init).
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (view == ViewType::Scene) {
+	if (view == ViewType::Scene && frameData.sceneViewGridVisible) {
 		impl->CreateSceneViewGridPipeline(renderPassInfo.renderPass);
 	}
 	impl->CreateSkyBackgroundPipeline(renderPassInfo.renderPass);
@@ -5032,7 +5048,7 @@ void VulkanContext::RenderFrame(const FrameRenderData& frameData, ViewType view,
 
 	// Render grid (Scene View only).
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (view == ViewType::Scene) {
+	if (view == ViewType::Scene && frameData.sceneViewGridVisible) {
 		const size_t workerIndex = secondaryBuffers.size();
 		impl->EnsureWorkerPools(impl->currentFrame, workerIndex + 1);
 

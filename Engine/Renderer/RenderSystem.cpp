@@ -4382,6 +4382,8 @@ void RenderSystem::Update(float deltaTime)
 		frameData.viewMatrix = sceneViewCamera.view;
 		frameData.projectionMatrix = sceneViewCamera.proj;
 		frameData.cameraWorldPosition = sceneViewCamera.pos;
+		frameData.sceneViewGridVisible = sceneViewGridVisible;
+		frameData.sceneViewOrthographic = sceneViewCamera.orthographic;
 		VisibleCommandBuildResult visibleCommands;
 		{
 			TERRAENGINE_PROFILE_SCOPE("RenderSystem: Scene View Visible Commands", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);

@@ -896,6 +896,10 @@ add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Windows/InspectorWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProjectBrowserWindow.cpp
 	Editor/TerraEngine-Editor/Windows/GameViewWindow.cpp
+	Editor/TerraEngine-Editor/Windows/SceneViewOrientationWidget.cpp
+	Editor/TerraEngine-Editor/Windows/SceneViewOverlayIcons.cpp
+	Editor/TerraEngine-Editor/Windows/SceneViewOverlayMarkers.cpp
+	Editor/TerraEngine-Editor/Windows/SceneViewOverlayTypes.cpp
 	Editor/TerraEngine-Editor/Windows/SceneViewWindow.cpp
 	Editor/TerraEngine-Editor/Windows/BuildProfilesWindow.cpp
 	Editor/TerraEngine-Editor/Windows/ProfilerWindow.cpp

@@ -5,12 +5,17 @@
 
 #pragma once
 #include "../Framework/EditorWindow.h"
+#include "SceneViewOrientationWidget.h"
+#include "SceneViewOverlayIcons.h"
+#include "SceneViewOverlayMarkers.h"
 #include "Engine/Renderer/RenderTypes.h"
 #include "Engine/Utilities/UUID.h"
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <string>
 #include <unordered_set>
+#include <vector>
 
 class MainEditorSubsystem;
 
@@ -23,7 +28,22 @@ protected:
 	virtual void OnGui() override;
 
 private:
-	void HandleCameraInput(float deltaTime);
+	void LoadOverlayPreferencesIfNeeded();
+	void PersistOverlayPreferences();
+	void DrawSceneToolbar();
+	void BuildSceneObjectMarkers(const glm::mat4& viewProjection, const ImVec2& viewportPos, const ImVec2& viewportSize);
+	void DrawSceneObjectMarkers();
+	bool DrawOrientationWidget(glm::mat4& view, const glm::mat4& projection, const ImVec2& viewportPos, const ImVec2& viewportSize);
+	void PublishSceneViewDiagnostics(bool rendererAvailable, const std::string& disabledOverlayReason = std::string());
+	glm::vec3 GetCameraForward() const;
+	glm::vec3 GetCameraUp() const;
+	glm::vec3 ResolveSceneViewFocus(float fallbackDistance) const;
+	float ResolveSceneViewFocusDistance(const glm::vec3& focus, float fallbackDistance) const;
+	void RepositionCameraAroundFocus(const glm::vec3& focus, float distance);
+	bool IsPointerInsideOrientationWidget(const ImVec2& viewportPos, const ImVec2& viewportSize) const;
+	bool HandleSceneViewScrollZoom();
+	bool HandleSceneViewPan(const ImVec2& viewportSize);
+	void HandleCameraInput(float deltaTime, const ImVec2& viewportSize);
 	void DrawGizmos(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 	void ApplyPrefabContextTintForNextRender();
 	void CollectFocusedPrefabObjectIds(entt::entity entity, std::unordered_set<TerraEngine::UUID>& objectIds);
@@ -37,12 +57,20 @@ private:
 	float m_CameraSpeed = 10.0f;
 	float m_MouseSensitivity = 0.1f;
 	bool m_IsFlyCamActive = false;
+	bool m_IsSceneViewPanning = false;
 	std::pair<double, double> m_StoredCursorPos;
+	// Scene View camera snaps orbit around this authoring focus so orthographic
+	// axis clicks rotate the scene instead of spinning the camera in place.
+	glm::vec3 m_CameraFocus{ 0.0f, 0.0f, 0.0f };
+	float m_CameraFocusDistance = 18.0f;
+	bool m_CameraFocusInitialized = false;
 
 	// Gizmo State
 	int m_CurrentGizmoOperation = -1; // -1 for none, or ImGuizmo::TRANSLATE etc.
 	bool m_UsingSnap = false;
 	float m_SnapValue[3] = { 0.5f, 0.5f, 0.5f };
+	float m_RotationSnapValue[3] = { 15.0f, 15.0f, 15.0f };
+	float m_ScaleSnapValue[3] = { 0.1f, 0.1f, 0.1f };
 
 	bool m_WasUsingGizmo = false;
 	glm::vec3 m_GizmoStartPos;
@@ -55,6 +83,15 @@ private:
 	// Keep the temporary virtual-geometry counter panel opt-in until Scene View
 	// gets a fuller diagnostics toolbar that can present this data cleanly.
 	bool m_ShowVirtualGeometryDiagnostics = false;
+	bool m_OverlayPreferencesLoaded = false;
+	bool m_OverlayPreferenceDirty = false;
+	float m_OrthographicHeight = 10.0f;
+	TerraEngine::Editor::SceneViewOverlay::SceneViewToolState m_ToolState;
+	TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference m_OverlayPreference;
+	TerraEngine::Editor::SceneViewOverlay::ViewportInteractionContext m_InteractionContext;
+	TerraEngine::Editor::SceneViewOverlay::OrientationWidgetState m_OrientationWidgetState;
+	std::vector<TerraEngine::Editor::SceneViewOverlay::OverlayIconDefinition> m_IconDefinitions;
+	std::vector<TerraEngine::Editor::SceneViewOverlay::SceneObjectMarker> m_ObjectMarkers;
 
 	void HandlePicking(const glm::mat4& view, const glm::mat4& proj, const ImVec2& viewportPos, const ImVec2& viewportSize);
 };

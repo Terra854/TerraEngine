@@ -7,6 +7,9 @@ static const float kSunFullyHiddenHeight = -0.18f;
 static const float kSunDiskVisibleHeight = 0.0f;
 static const float kSunTwilightStartHeight = -0.16f;
 static const float kSunDaylightHeight = 0.22f;
+static const uint kSkyFlagTextured = 1u;
+static const uint kSkyFlagForceBlack = 2u;
+static const uint kSkyFlagSceneViewOrthographic = 4u;
 
 [[vk::binding(0, 0)]] Texture2D globalTextures[];
 [[vk::binding(0, 0)]] SamplerState globalSamplers[];
@@ -180,6 +183,19 @@ float3 ApplyEditorTint(float3 color)
 	return lerp(color, SkyData.editorTint.rgb, saturate(SkyData.editorTint.a));
 }
 
+float3 BuildSceneViewOrthographicBackground(float2 ndc)
+{
+	// Orthographic editor views should read as a flat drafting surface. Use a
+	// screen-space gradient rather than world-space sky so no false horizon or
+	// perspective depth appears behind the grid.
+	float verticalBlend = smoothstep(0.0f, 1.0f, saturate(ndc.y * 0.5f + 0.5f));
+	float3 lowerColor = float3(0.58f, 0.64f, 0.69f);
+	float3 upperColor = float3(0.43f, 0.51f, 0.59f);
+	float3 color = lerp(lowerColor, upperColor, verticalBlend);
+	float vignette = saturate(dot(ndc, ndc) * 0.18f);
+	return color - vignette * 0.035f;
+}
+
 float4 PSMain(PSInput input) : SV_Target0
 {
 	// The renderer provides the horizontal and vertical tangent of the half-FOV
@@ -192,7 +208,12 @@ float4 PSMain(PSInput input) : SV_Target0
 	float3 skySampleDirection = RotateAroundY(worldDirection, SkyData.skyParams.z);
 
 	uint flags = (uint)(SkyData.skyParams.w + 0.5f);
-	if ((flags & 2u) != 0u)
+	if ((flags & kSkyFlagSceneViewOrthographic) != 0u)
+	{
+		return float4(ApplyEditorTint(BuildSceneViewOrthographicBackground(input.ndc)), 1.0f);
+	}
+
+	if ((flags & kSkyFlagForceBlack) != 0u)
 	{
 		return float4(ApplyEditorTint(float3(0.0f, 0.0f, 0.0f)), 1.0f);
 	}
@@ -200,7 +221,7 @@ float4 PSMain(PSInput input) : SV_Target0
 	float3 sunDirection = normalize(SkyData.sunDirectionTextureIndex.xyz);
 	float skyVisibility = GetSkyVisibility(sunDirection.y);
 	float3 color = BuildFallbackGradient(worldDirection, sunDirection);
-	if ((flags & 1u) != 0u)
+	if ((flags & kSkyFlagTextured) != 0u)
 	{
 		uint textureIndex = NonUniformResourceIndex((uint)(SkyData.sunDirectionTextureIndex.w + 0.5f));
 		float2 uv = DirectionToLatLongUv(skySampleDirection);

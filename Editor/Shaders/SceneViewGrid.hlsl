@@ -26,8 +26,6 @@ struct VSOutput {
     float4 Pos : SV_POSITION;
     float3 NearPoint : TEXCOORD0;
     float3 FarPoint : TEXCOORD1;
-    float4 GridView : TEXCOORD2; // view matrix
-    float4 GridProj : TEXCOORD3; // proj matrix
 };
 
 // Helper to inverse a 4x4 matrix (if needed, but better passed from CPU)
@@ -67,40 +65,130 @@ VSOutput VSMain(VSInput input) {
     return output;
 }
 
+bool IsOrthographicGrid()
+{
+	// The Scene View passes its final projection matrix to this shader. In the
+	// standard perspective matrix _44 is zero, while the orthographic matrix
+	// keeps it at one, so this is a cheap per-pixel branch selector.
+	return abs(PC.proj._44) > 0.5;
+}
+
+bool TryResolveGridWorldPosition(VSOutput input, out float3 worldPos)
+{
+	const float denominator = input.FarPoint.y - input.NearPoint.y;
+	if (abs(denominator) <= 0.00001)
+	{
+		worldPos = float3(0.0, 0.0, 0.0);
+		return false;
+	}
+
+	const float t = -input.NearPoint.y / denominator;
+	if (!IsOrthographicGrid() && t < 0.0)
+	{
+		worldPos = float3(0.0, 0.0, 0.0);
+		return false;
+	}
+
+	// Orthographic zoom can place part of the near plane below the ground grid.
+	// Keep treating the grid as an infinite editor construction plane instead
+	// of clipping it at that arbitrary near-plane slice.
+	worldPos = input.NearPoint + t * (input.FarPoint - input.NearPoint);
+	return true;
+}
+
+float ComputeGridDepth(float3 worldPos)
+{
+	float4 clipPos = mul(PC.proj, mul(PC.view, float4(worldPos, 1.0)));
+	float depth = clipPos.z / clipPos.w;
+	return IsOrthographicGrid() ? saturate(depth) : depth;
+}
+
+float GridLineAlpha(float2 worldCoord, float spacing, float pixelThickness)
+{
+	const float safeSpacing = max(spacing, 0.0001);
+	float2 scaledCoord = worldCoord / safeSpacing;
+	float2 derivative = max(fwidth(scaledCoord), float2(0.0001, 0.0001));
+	float2 grid = abs(frac(scaledCoord - 0.5) - 0.5) / derivative;
+	float lineVal = min(grid.x, grid.y);
+	return saturate(pixelThickness - lineVal);
+}
+
+float ChooseOrthographicGridSpacing(float2 worldCoord)
+{
+	float2 dx = ddx(worldCoord);
+	float2 dy = ddy(worldCoord);
+	float worldUnitsPerPixel = max(length(dx), length(dy));
+	// Keep roughly editor-sized grid cells on screen. A fixed one-unit grid is
+	// useful up close but turns into dense visual noise when orthographic zoom
+	// shows a large slice of the world.
+	float desiredSpacing = max(worldUnitsPerPixel * 28.0, 0.001);
+	float decade = pow(10.0, floor(log(desiredSpacing) / 2.302585093));
+	float mantissa = desiredSpacing / max(decade, 0.0001);
+	float multiplier = mantissa > 5.0 ? 10.0 : (mantissa > 2.0 ? 5.0 : (mantissa > 1.0 ? 2.0 : 1.0));
+	return decade * multiplier;
+}
+
+float4 BuildPerspectiveGridColor(float3 worldPos)
+{
+	float2 coord = worldPos.xz;
+	float2 derivative = fwidth(coord);
+	float2 grid = abs(frac(coord - 0.5) - 0.5) / derivative;
+	float lineVal = min(grid.x, grid.y);
+	float minimumz = min(derivative.y, 1.0);
+	float minimumx = min(derivative.x, 1.0);
+
+	float4 color = float4(0.2, 0.2, 0.2, 1.0 - min(lineVal, 1.0));
+
+	// Z Axis (Blue)
+	if(abs(worldPos.x) < minimumx)
+		color.xyz = float3(0.0, 0.0, 1.0);
+
+	// X Axis (Red)
+	if(abs(worldPos.z) < minimumz)
+		color.xyz = float3(1.0, 0.0, 0.0);
+
+	float dist = distance(mul(PC.inverseView, float4(0,0,0,1)).xyz, worldPos);
+	float fade = max(0.0, 1.0 - (dist / 100.0));
+	color.a *= fade;
+	return color;
+}
+
+float4 BuildOrthographicGridColor(float3 worldPos)
+{
+	float2 coord = worldPos.xz;
+	float spacing = ChooseOrthographicGridSpacing(coord);
+	float minorAlpha = GridLineAlpha(coord, spacing, 0.92);
+	float majorAlpha = GridLineAlpha(coord, spacing * 5.0, 1.25);
+
+	// Orthographic mode uses a pale drafting background, so the grid needs more
+	// contrast than the perspective grid while still staying behind authored
+	// geometry. Keep minor lines readable and let every fifth line anchor scale.
+	float4 color = float4(0.20, 0.24, 0.27, max(minorAlpha * 0.52, majorAlpha * 0.82));
+	color.rgb = lerp(color.rgb, float3(0.13, 0.16, 0.18), majorAlpha);
+
+	// Draw world axes at a stable screen thickness. They remain useful in ortho
+	// even when the regular grid steps up to larger spacing.
+	float zAxisAlpha = saturate(1.4 - abs(worldPos.x) / max(fwidth(worldPos.x), 0.0001));
+	float xAxisAlpha = saturate(1.4 - abs(worldPos.z) / max(fwidth(worldPos.z), 0.0001));
+	color.rgb = lerp(color.rgb, float3(0.25, 0.35, 0.95), zAxisAlpha);
+	color.rgb = lerp(color.rgb, float3(0.95, 0.24, 0.24), xAxisAlpha);
+	color.a = max(color.a, max(zAxisAlpha, xAxisAlpha) * 0.9);
+
+	// Orthographic zoom is a projection scale, not a movement through space, so
+	// avoid camera-distance or screen-edge fades that make the grid look cut off.
+	return color;
+}
+
 float4 PSMain(VSOutput input) : SV_TARGET {
-    float t = -input.NearPoint.y / (input.FarPoint.y - input.NearPoint.y);
-    
-    if (t < 0.0) discard; // Sky
-    
-    float3 worldPos = input.NearPoint + t * (input.FarPoint - input.NearPoint);
+    float3 worldPos;
+    if (!TryResolveGridWorldPosition(input, worldPos)) discard;
     
     // Compute depth
-    float4 clipPos = mul(PC.proj, mul(PC.view, float4(worldPos, 1.0)));
-    float depth = clipPos.z / clipPos.w;
+    float depth = ComputeGridDepth(worldPos);
     
-    // Draw grid
-    float2 coord = worldPos.xz;
-    float2 derivative = fwidth(coord);
-    float2 grid = abs(frac(coord - 0.5) - 0.5) / derivative;
-    float lineVal = min(grid.x, grid.y);
-    float minimumz = min(derivative.y, 1.0);
-    float minimumx = min(derivative.x, 1.0);
-    
-    float4 color = float4(0.2, 0.2, 0.2, 1.0 - min(lineVal, 1.0));
-    
-    // Z Axis (Blue)
-    if(abs(worldPos.x) < minimumx)
-        color = float4(0.0, 0.0, 1.0, 1.0);
-        
-    // X Axis (Red)
-    if(abs(worldPos.z) < minimumz)
-        color = float4(1.0, 0.0, 0.0, 1.0);
-
-    // Fade out
-    float dist = distance(mul(PC.inverseView, float4(0,0,0,1)).xyz, worldPos);
-    float fade = max(0.0, 1.0 - (dist / 100.0)); // 100m grid radius
-    
-    color.a *= fade;
+    float4 color = IsOrthographicGrid()
+		? BuildOrthographicGridColor(worldPos)
+		: BuildPerspectiveGridColor(worldPos);
     
     if (color.a <= 0.0) discard;
     
@@ -119,36 +207,14 @@ struct PSOutput {
 PSOutput PSMainWithDepth(VSOutput input) {
     PSOutput output;
     
-    float t = -input.NearPoint.y / (input.FarPoint.y - input.NearPoint.y);
+    float3 worldPos;
+    if (!TryResolveGridWorldPosition(input, worldPos)) discard;
     
-    if (t < 0.0) discard;
+    float depth = ComputeGridDepth(worldPos);
     
-    float3 worldPos = input.NearPoint + t * (input.FarPoint - input.NearPoint);
-    
-    float4 clipPos = mul(PC.proj, mul(PC.view, float4(worldPos, 1.0)));
-    float depth = clipPos.z / clipPos.w;
-    
-    float2 coord = worldPos.xz;
-    float2 derivative = fwidth(coord);
-    float2 grid = abs(frac(coord - 0.5) - 0.5) / derivative;
-    float lineVal = min(grid.x, grid.y);
-    float minimumz = min(derivative.y, 1.0);
-    float minimumx = min(derivative.x, 1.0);
-    
-    float4 color = float4(0.2, 0.2, 0.2, 1.0 - min(lineVal, 1.0));
-    
-    // Z Axis (Blue)
-    if(abs(worldPos.x) < minimumx)
-        color.xyz = float3(0.0, 0.0, 1.0);
-        
-    // X Axis (Red)
-    if(abs(worldPos.z) < minimumz)
-        color.xyz = float3(1.0, 0.0, 0.0);
-
-    float dist = distance(mul(PC.inverseView, float4(0,0,0,1)).xyz, worldPos);
-    float fade = max(0.0, 1.0 - (dist / 100.0));
-    
-    color.a *= fade;
+    float4 color = IsOrthographicGrid()
+		? BuildOrthographicGridColor(worldPos)
+		: BuildPerspectiveGridColor(worldPos);
     
     if (color.a <= 0.0) discard;
     
