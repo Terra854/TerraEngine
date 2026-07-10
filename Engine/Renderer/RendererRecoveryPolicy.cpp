@@ -11,7 +11,7 @@ namespace TerraEngine::Renderer
 		RendererRecoveryPolicy policy;
 		policy.diagnosticsEnabled = true;
 		policy.validationEnabled = false;
-		policy.fatalMessage = "Graphics device lost. Save project data and restart the editor to restore rendering.";
+		policy.fatalMessage = "Graphics device lost. The editor will now close.";
 		return policy;
 	}
 

@@ -64,9 +64,10 @@ public:
 
 	[[nodiscard]] WindowPollingBoundaryDiagnostics GetPollingBoundaryDiagnostics() const;
 	[[nodiscard]] WindowWorkerSnapshot GetLatestWorkerSnapshot() const;
-	// Shows a renderer-independent fatal error dialog. This must not rely on
-	// ImGui or Vulkan because it is used precisely when the renderer may be gone.
-	bool ShowFatalErrorDialog(const TerraEngine::FatalErrorDialogReport& report) const;
+	// Shows a renderer-independent fatal error dialog and terminates with a
+	// failure code after acknowledgement. This must not rely on ImGui or Vulkan
+	// because it is used precisely when the renderer may be gone.
+	[[noreturn]] void ShowFatalErrorDialog(const TerraEngine::FatalErrorDialogReport& report) const;
 
 	void Initialize() override;
 	void Update(float deltaTime) override;

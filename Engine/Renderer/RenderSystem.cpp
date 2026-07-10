@@ -1476,9 +1476,10 @@ void RenderSystem::ReportFatalRendererRecoveryFailure(TerraEngine::Renderer::Ren
 			+ snapshot.lastError);
 	report.incidentId = snapshot.incidentId;
 	report.recoverySessionId = snapshot.sessionId;
-	report.canContinue = !exportRuntime;
-	report = TerraEngine::PlatformUtils::WriteCrashDumpForReport(report, ResourceManager::Instance().GetProductName());
-	WindowSystem::Instance().ShowFatalErrorDialog(report);
+	const std::string crashProductName = exportRuntime
+		? ResourceManager::Instance().GetProductName()
+		: std::string(TerraEngine::kEditorFatalErrorProductName);
+	report = TerraEngine::PlatformUtils::WriteCrashDumpForReport(report, crashProductName);
 
 	TerraEngine::Renderer::RendererRecoverySnapshot reported = TerraEngine::Renderer::AttachFatalDialogReport(
 		snapshot,
@@ -1493,8 +1494,13 @@ void RenderSystem::ReportFatalRendererRecoveryFailure(TerraEngine::Renderer::Ren
 		reported.finalOutcome = TerraEngine::Renderer::RendererRecoveryOutcome::FatalExportFailure;
 	}
 	rhi->PublishRendererRecoverySnapshot(reported);
-	std::lock_guard<std::mutex> lock(statsMutex);
-	latestRendererRecoverySnapshot = reported;
+	{
+		std::lock_guard<std::mutex> lock(statsMutex);
+		latestRendererRecoverySnapshot = reported;
+	}
+	// The platform dialog returns only after OK is acknowledged, then exits with
+	// a failure code without entering Vulkan's ordinary wait-idle teardown.
+	WindowSystem::Instance().ShowFatalErrorDialog(report);
 }
 
 std::vector<VirtualGeometryClusterPacket> RenderSystem::BuildVirtualGeometryClusterPackets(

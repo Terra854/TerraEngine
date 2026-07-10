@@ -17,17 +17,14 @@ enum class ProjectTemplate {
 	ThreeD
 };
 
-// RendererRecoveryProjectActionState is CPU-only editor state. It exists so
-// device-loss recovery UI and MCP can offer a project-data save without asking
-// the renderer, ResourceManager, or any Vulkan object whether saving is safe.
+// RendererRecoveryProjectActionState is CPU-only editor state used by explicit
+// automation requests. The terminal device-loss dialog does not expose this as
+// a user action because acknowledging that dialog immediately ends the process.
 struct RendererRecoveryProjectActionState
 {
 	bool canSaveProjectData = false;
 	std::filesystem::path lastSafeSaveRoot;
 	std::string lastSafeSaveMessage;
-	bool previousCrashSummaryShown = false;
-	std::filesystem::path previousCrashSummaryPath;
-	std::string previousCrashSummaryMessage;
 };
 
 // class ProjectManager groups related state and operations so callers have one documented contract.

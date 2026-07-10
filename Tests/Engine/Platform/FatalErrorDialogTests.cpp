@@ -3,12 +3,14 @@
 #include "Utilities/PlatformUtils.h"
 
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 
 namespace TerraEngine::Tests
 {
 	void RegisterFatalErrorDialogTests(TestRegistry& registry)
 	{
-		registry.Add("Platform.FatalErrorReport.SidecarRoundTrips", [](TestContext& context) {
+		registry.Add("Platform.FatalErrorReport.SidecarRemainsInspectable", [](TestContext& context) {
 			TerraEngine::FatalErrorDialogReport report = TerraEngine::BuildFatalErrorDialogReport(
 				TerraEngine::FatalErrorCategory::RendererRecoveryFailed,
 				"Renderer recovery failed in test.",
@@ -20,11 +22,28 @@ namespace TerraEngine::Tests
 			std::string error;
 
 			context.Expect(TerraEngine::SaveFatalErrorSummarySidecar(report, path, &error), "Fatal sidecar should write to a temporary test path.");
-			TerraEngine::FatalErrorDialogReport loaded;
-			context.Expect(TerraEngine::LoadFatalErrorSummarySidecar(path, loaded, &error), "Fatal sidecar should load from a temporary test path.");
-			context.ExpectEqual(report.shortReason, loaded.shortReason, "Fatal sidecar should preserve the short reason.");
-			context.ExpectEqual(report.crashDumpPath.generic_string(), loaded.crashDumpPath.generic_string(), "Fatal sidecar should preserve the dump path.");
-			context.Expect(loaded.crashDumpStatus == TerraEngine::CrashDumpStatus::Failed, "Fatal sidecar should preserve the dump status.");
+			std::ifstream input(path, std::ios::binary);
+			std::ostringstream contents;
+			contents << input.rdbuf();
+			context.Expect(contents.str().find("reason=Renderer recovery failed in test.") != std::string::npos, "Fatal sidecar should preserve the human-readable reason.");
+			context.Expect(contents.str().find("dump=C:/Temp/TerraEngineCrash-test.dmp") != std::string::npos, "Fatal sidecar should preserve the dump path for manual inspection.");
+		});
+
+		registry.Add("Platform.FatalErrorReport.EditorCrashDumpsUseEditorRoot", [](TestContext& context) {
+			const std::filesystem::path crashDumpDirectory = TerraEngine::PlatformUtils::GetCrashDumpDirectory(TerraEngine::kEditorFatalErrorProductName);
+			const std::string path = crashDumpDirectory.generic_string();
+
+			context.Expect(path.find("TerraEngine Editor/Diagnostics/CrashDumps") != std::string::npos, "Editor crash dumps should use the stable TerraEngine Editor diagnostics root.");
+			context.Expect(path.find("SaveData") == std::string::npos, "Editor crash dumps must remain outside persistent project or game save data.");
+		});
+
+		registry.Add("Platform.FatalErrorReport.CrashLogUsesCriticalSeverity", [](TestContext& context) {
+			const std::filesystem::path sourcePath = std::filesystem::path(TERRAENGINE_SOURCE_DIR) / "Engine" / "Window" / "WindowSystem.cpp";
+			std::ifstream input(sourcePath, std::ios::binary);
+			std::ostringstream source;
+			source << input.rdbuf();
+
+			context.Expect(source.str().find("LogLevel::Critical, \"Fatal error dialog:") != std::string::npos, "The terminal crash report should be emitted as CRITICAL instead of ERROR.");
 		});
 
 		registry.Add("Platform.FatalErrorReport.CrashDumpsStayOutOfSaveData", [](TestContext& context) {

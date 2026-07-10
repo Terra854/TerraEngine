@@ -8,10 +8,10 @@ namespace TerraEngine::EditorTests
 {
 	void RegisterRendererRecoveryProjectSaveTests(TestRegistry& registry)
 	{
-		registry.Add("Editor.RendererRecovery.SafeSaveDoesNotNeedRenderer", [](TestContext& context) {
+		registry.Add("Editor.RendererRecovery.TerminalDialogDoesNotOfferSave", [](TestContext& context) {
 			const TerraEngine::Renderer::RendererRecoverySnapshot snapshot = MakeEditorRendererRecoverySnapshot();
 
-			context.Expect(snapshot.canSaveProjectData, "Device-loss recovery should keep renderer-independent project saves available.");
+			context.Expect(!snapshot.canSaveProjectData, "Terminal device loss should not advertise project saving after the fatal dialog takes control.");
 			context.Expect(snapshot.affectedResourceName.find("Scene View") != std::string::npos, "The safe-save diagnostic should preserve affected renderer context without requiring GPU handles.");
 		});
 

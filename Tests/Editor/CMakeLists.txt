@@ -97,7 +97,6 @@ add_executable(TerraEngine-EditorTests
 	Scene/TransactionalMutationDiagnosticsWindowTests.cpp
 	Scene/TransactionalMutationUndoTests.cpp
 	Scene/PrefabAuthoringWorkflowTests.cpp
-	Project/RendererRecoveryCrashSummaryTests.cpp
 	Project/RendererRecoveryProjectSaveTests.cpp
 	Project/SceneViewOverlayPreferenceTests.cpp
 	Profiling/RendererRecoveryProfilerTests.cpp

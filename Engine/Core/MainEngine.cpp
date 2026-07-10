@@ -80,7 +80,7 @@ namespace {
 		scheduler.RegisterSystem(system, std::move(declaration));
 	}
 
-	void ShowControlledFatalEngineDialog(std::string reason, std::string details, bool exportRuntime)
+	[[noreturn]] void ShowControlledFatalEngineDialog(std::string reason, std::string details, bool exportRuntime)
 	{
 		// This path deliberately avoids renderer/ImGui dependencies. It is used
 		// after startup, scheduler, or renderer-recovery failures when Vulkan
@@ -89,8 +89,10 @@ namespace {
 			exportRuntime ? TerraEngine::FatalErrorCategory::ExportFatal : TerraEngine::FatalErrorCategory::ControlledEngineFatal,
 			std::move(reason),
 			std::move(details));
-		report.canContinue = false;
-		report = TerraEngine::PlatformUtils::WriteCrashDumpForReport(report, ResourceManager::Instance().GetProductName());
+		const std::string crashProductName = exportRuntime
+			? ResourceManager::Instance().GetProductName()
+			: std::string(TerraEngine::kEditorFatalErrorProductName);
+		report = TerraEngine::PlatformUtils::WriteCrashDumpForReport(report, crashProductName);
 		WindowSystem::Instance().ShowFatalErrorDialog(report);
 	}
 
@@ -118,7 +120,6 @@ void Engine::Run()
 			exception.what(),
 			initializedForRun ? "Engine runtime stopped after a controlled fatal error." : "Engine startup stopped before normal runtime entry.",
 			ResourceManager::Instance().IsExportRuntime());
-		throw;
 	}
 	catch (...)
 	{
@@ -126,7 +127,6 @@ void Engine::Run()
 			"Unknown fatal engine error.",
 			initializedForRun ? "Engine runtime stopped after an unknown fatal error." : "Engine startup stopped before normal runtime entry.",
 			ResourceManager::Instance().IsExportRuntime());
-		throw;
 	}
 }
 
@@ -401,7 +401,7 @@ bool Engine::Update(float deltaTime)
 	if (ResourceManager::Instance().IsExportRuntime()) {
 		const TerraEngine::Renderer::RendererRecoverySnapshot recovery = RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
 		if (recovery.state == TerraEngine::Renderer::RendererRecoveryStateKind::FatalExportFailure) {
-			TERRAENGINE_LOG(LogLevel::Error, "Export runtime stopping after graphics device loss. incident="
+			TERRAENGINE_LOG(LogLevel::Critical, "Export runtime stopping after graphics device loss. incident="
 				<< recovery.incidentId
 				<< " report="
 				<< recovery.fatalDialogReportId

@@ -3,27 +3,10 @@
 #include "Core/FatalErrorReport.h"
 
 #include <fstream>
-#include <sstream>
 #include <utility>
 
 namespace TerraEngine
 {
-	namespace
-	{
-		CrashDumpStatus CrashDumpStatusFromString(std::string_view value)
-		{
-			if (value == "Written")
-			{
-				return CrashDumpStatus::Written;
-			}
-			if (value == "Failed")
-			{
-				return CrashDumpStatus::Failed;
-			}
-			return CrashDumpStatus::Unsupported;
-		}
-	}
-
 	const char* ToString(FatalErrorCategory category)
 	{
 		switch (category)
@@ -33,7 +16,6 @@ namespace TerraEngine
 		case FatalErrorCategory::StartupFatal: return "StartupFatal";
 		case FatalErrorCategory::ExportFatal: return "ExportFatal";
 		case FatalErrorCategory::ControlledEngineFatal: return "ControlledEngineFatal";
-		case FatalErrorCategory::PreviousHardCrash: return "PreviousHardCrash";
 		}
 		return "ControlledEngineFatal";
 	}
@@ -57,7 +39,6 @@ namespace TerraEngine
 		report.title = "TerraEngine encountered a fatal error";
 		report.shortReason = std::move(shortReason);
 		report.details = std::move(details);
-		report.canContinue = false;
 		return report;
 	}
 
@@ -84,8 +65,8 @@ namespace TerraEngine
 			return false;
 		}
 
-		// The sidecar is intentionally line-based so the previous-crash dialog
-		// path can parse it with minimal dependencies during early startup.
+		// Keep the sidecar line-based so it remains human-readable beside the
+		// native dump and can be inspected without editor-specific tooling.
 		output << "category=" << ToString(report.category) << '\n';
 		output << "reason=" << report.shortReason << '\n';
 		output << "details=" << report.details << '\n';
@@ -96,57 +77,4 @@ namespace TerraEngine
 		return true;
 	}
 
-	bool LoadFatalErrorSummarySidecar(const std::filesystem::path& path, FatalErrorDialogReport& report, std::string* errorMessage)
-	{
-		std::ifstream input(path, std::ios::binary);
-		if (!input)
-		{
-			if (errorMessage != nullptr)
-			{
-				*errorMessage = "Could not open fatal error sidecar for reading.";
-			}
-			return false;
-		}
-
-		report = BuildFatalErrorDialogReport(FatalErrorCategory::PreviousHardCrash, "Previous TerraEngine crash detected.");
-		report.crashSummaryPath = path;
-		report.shownOnNextLaunch = true;
-
-		std::string line;
-		while (std::getline(input, line))
-		{
-			const std::size_t separator = line.find('=');
-			if (separator == std::string::npos)
-			{
-				continue;
-			}
-			const std::string key = line.substr(0u, separator);
-			const std::string value = line.substr(separator + 1u);
-			if (key == "reason")
-			{
-				report.shortReason = value;
-			}
-			else if (key == "details")
-			{
-				report.details = value;
-			}
-			else if (key == "dump")
-			{
-				report.crashDumpPath = value;
-			}
-			else if (key == "dumpStatus")
-			{
-				report.crashDumpStatus = CrashDumpStatusFromString(value);
-			}
-			else if (key == "dumpFailure")
-			{
-				report.crashDumpFailureReason = value;
-			}
-			else if (key == "log")
-			{
-				report.logPath = value;
-			}
-		}
-		return true;
-	}
 }

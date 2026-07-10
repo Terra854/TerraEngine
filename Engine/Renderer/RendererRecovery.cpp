@@ -174,7 +174,9 @@ namespace TerraEngine::Renderer
 		snapshot.affectedResourceId = std::move(affectedResourceId);
 		snapshot.affectedResourceName = std::move(affectedResourceName);
 		snapshot.duplicateFailureCount = 0u;
-		snapshot.canSaveProjectData = true;
+		// The fatal dialog is process-modal and terminates after acknowledgement,
+		// so no project-save action is reachable once device loss is reported.
+		snapshot.canSaveProjectData = false;
 		snapshot.selectedAction = RendererRecoveryAction::RecordIncident;
 		snapshot.finalOutcome = RendererRecoveryOutcome::DeviceLostLatched;
 		snapshot.lastError.clear();
@@ -219,10 +221,6 @@ namespace TerraEngine::Renderer
 		diagnostics.incident.finalOutcome = snapshot.finalOutcome;
 		diagnostics.recentRenderPhases = std::move(recentRenderPhases);
 		diagnostics.suppressedFailures = snapshot.duplicateFailureCount;
-		if (snapshot.canSaveProjectData)
-		{
-			diagnostics.safeActions.push_back("Save safe project data");
-		}
 		return diagnostics;
 	}
 }

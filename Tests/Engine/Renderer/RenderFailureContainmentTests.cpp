@@ -55,6 +55,7 @@ namespace TerraEngine::Tests {
 			context.Expect(implHeader.find("bool MarkDeviceLost(VkResult result, std::string_view operation);") != std::string::npos, "Vulkan backend should expose one helper for detecting device-loss results.");
 			context.Expect(contextSource.find("result != VK_ERROR_DEVICE_LOST") != std::string::npos, "Device-loss helper should test the Vulkan device-lost result explicitly.");
 			context.Expect(contextSource.find("Rendering is disabled for this Vulkan context") != std::string::npos, "Device-loss helper should log a clear one-time disabled-rendering message.");
+			context.Expect(contextSource.find("LogLevel::Critical, \"Vulkan device lost during \"") != std::string::npos, "Terminal Vulkan device loss should be logged at critical severity.");
 			context.Expect(contextSource.find("latestRendererRecoverySnapshot = TerraEngine::Renderer::RecordDeviceLossIncident") != std::string::npos, "Device-loss helper should publish a structured recovery snapshot.");
 			context.Expect(contextSource.find("if (!impl->initialized || impl->deviceLost) return;") != std::string::npos, "BeginFrame should stop immediately after device loss.");
 			context.Expect(contextSource.find("if (!impl->initialized || impl->skipFrame || impl->deviceLost) return;") != std::string::npos, "RenderFrame and EndFrame should stop immediately after device loss.");

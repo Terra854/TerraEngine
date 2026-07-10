@@ -2,6 +2,8 @@
 
 #include "WindowSystem.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <sstream>
 #include <stdexcept>
 
@@ -205,10 +207,10 @@ WindowSystem::WindowWorkerSnapshot WindowSystem::GetLatestWorkerSnapshot() const
 	return latestWorkerSnapshot;
 }
 
-bool WindowSystem::ShowFatalErrorDialog(const TerraEngine::FatalErrorDialogReport& report) const
+[[noreturn]] void WindowSystem::ShowFatalErrorDialog(const TerraEngine::FatalErrorDialogReport& report) const
 {
 	const std::string message = FormatFatalDialogMessage(report);
-	TERRAENGINE_LOG(LogLevel::Error, "Fatal error dialog: " << report.title << " - " << message);
+	TERRAENGINE_LOG(LogLevel::Critical, "Fatal error dialog: " << report.title << " - " << message);
 #ifdef _WIN32
 	const std::wstring wideTitle(report.title.begin(), report.title.end());
 	const std::wstring wideMessage(message.begin(), message.end());
@@ -216,9 +218,12 @@ bool WindowSystem::ShowFatalErrorDialog(const TerraEngine::FatalErrorDialogRepor
 	// owner handle may be null when the graphics backend failed during startup,
 	// which still gives Windows a process-modal crash reason dialog.
 	MessageBoxW(nullptr, wideMessage.c_str(), wideTitle.c_str(), MB_OK | MB_ICONERROR | MB_TASKMODAL);
-	return true;
 #else
 	(void)report;
-	return false;
 #endif
+	// Fatal graphics state cannot be cleaned up through the ordinary shutdown
+	// path because that path may wait on the lost Vulkan device. Flush standard
+	// streams, then terminate immediately with a portable non-zero exit code.
+	std::fflush(nullptr);
+	std::_Exit(EXIT_FAILURE);
 }

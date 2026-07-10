@@ -100,6 +100,8 @@ namespace TerraEngine::Renderer
 		std::string apiVersion;
 		std::uint64_t frameId = 0u;
 		std::uint32_t duplicateFailureCount = 0u;
+		// Terminal device loss keeps this false because the process-modal fatal
+		// dialog leaves no reachable editor action before termination.
 		bool canSaveProjectData = false;
 		RendererRecoveryAction selectedAction = RendererRecoveryAction::None;
 		RendererRecoveryOutcome finalOutcome = RendererRecoveryOutcome::None;

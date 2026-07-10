@@ -1,5 +1,6 @@
 #include "TestHarness.h"
 #include "Renderer/RendererRecovery.h"
+#include "Renderer/RendererRecoveryPolicy.h"
 #include "Renderer/RendererRecoveryTestFixtures.h"
 
 namespace TerraEngine::Tests
@@ -12,8 +13,15 @@ namespace TerraEngine::Tests
 			context.Expect(snapshot.state == TerraEngine::Renderer::RendererRecoveryStateKind::DeviceLost, "A device-loss failure should move the renderer into DeviceLost.");
 			context.Expect(snapshot.firstFailureStage == TerraEngine::Renderer::RendererDeviceFailureStage::Submit, "The first failure stage should classify the submit site.");
 			context.Expect(!snapshot.incidentId.empty(), "The first device-loss failure should create an incident id.");
-			context.Expect(snapshot.canSaveProjectData, "Device-loss state should allow renderer-independent project data saving.");
+			context.Expect(!snapshot.canSaveProjectData, "Terminal device loss should not advertise an unreachable project-save action.");
 			context.Expect(!TerraEngine::Renderer::CanSubmitNormalGpuWork(snapshot), "Normal GPU work should be blocked after a latched incident.");
+		});
+
+		registry.Add("RendererRecovery.DeviceLoss.EditorPolicyClosesWithoutSaveInstruction", [](TestContext& context) {
+			const TerraEngine::Renderer::RendererRecoveryPolicy policy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
+
+			context.Expect(policy.fatalMessage.find("Save") == std::string::npos, "The editor fatal message should not tell users to perform an unavailable save action.");
+			context.Expect(policy.fatalMessage.find("close") != std::string::npos, "The editor fatal message should state that acknowledgement closes the editor.");
 		});
 
 		registry.Add("RendererRecovery.DeviceLoss.SuppressDuplicateFailures", [](TestContext& context) {

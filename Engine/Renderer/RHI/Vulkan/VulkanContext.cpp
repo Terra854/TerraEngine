@@ -1246,7 +1246,7 @@ bool VulkanContext::Impl::MarkDeviceLost(VkResult result, std::string_view opera
 	}
 	if (!deviceLostLogged)
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Vulkan device lost during " << operation << ". Rendering is disabled for this Vulkan context to avoid a submit/reset recovery loop.");
+		TERRAENGINE_LOG(LogLevel::Critical, "Vulkan device lost during " << operation << ". Rendering is disabled for this Vulkan context to avoid a submit/reset recovery loop.");
 		deviceLostLogged = true;
 	}
 	return true;
@@ -1276,7 +1276,7 @@ void VulkanContext::Impl::RecordInitializationFailure(std::string_view result, s
 	}
 	if (!deviceLostLogged)
 	{
-		TERRAENGINE_LOG(LogLevel::Error, "Vulkan renderer initialization failed during " << operation << " (" << result << "). Rendering is disabled until recovery can create a fresh renderer session.");
+		TERRAENGINE_LOG(LogLevel::Critical, "Vulkan renderer initialization failed during " << operation << " (" << result << "). Rendering is disabled until recovery can create a fresh renderer session.");
 		deviceLostLogged = true;
 	}
 }

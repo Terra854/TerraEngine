@@ -8,7 +8,7 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.RendererRecovery.ProjectOpenSnapshotRemainsCpuReadable", [](TestContext& context) {
 			const TerraEngine::Renderer::RendererRecoverySnapshot snapshot = MakeEditorRendererRecoverySnapshot();
 
-			context.Expect(snapshot.canSaveProjectData, "Editor recovery snapshots should advertise safe project-data saving.");
+			context.Expect(!snapshot.canSaveProjectData, "Editor recovery snapshots should not advertise an action hidden behind the terminal fatal dialog.");
 			context.Expect(snapshot.affectedView == TerraEngine::Renderer::RendererRecoveryAffectedView::SceneView, "Editor fixture should identify the affected view.");
 			context.Expect(!TerraEngine::Renderer::CanSubmitNormalGpuWork(snapshot), "Editor recovery snapshots should block normal GPU work until rebuild.");
 		});

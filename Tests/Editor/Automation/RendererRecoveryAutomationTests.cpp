@@ -11,7 +11,7 @@ namespace TerraEngine::EditorTests
 			TerraEngine::Renderer::ApplyRendererRecoveryDiagnostics(summary, MakeEditorRendererRecoverySnapshot());
 
 			context.Expect(!summary.rendererRecovery.incidentId.empty(), "Automation should receive a stable recovery incident id.");
-			context.Expect(!summary.rendererRecoveryDiagnostics.safeActions.empty(), "Automation should receive safe recovery actions.");
+			context.Expect(summary.rendererRecoveryDiagnostics.safeActions.empty(), "Terminal device loss should not expose unreachable recovery actions to automation.");
 			context.ExpectEqual(summary.rendererRecovery.incidentId, summary.rendererRecoveryDiagnostics.incident.incidentId, "Automation compact and expanded recovery ids should match.");
 		});
 	}
