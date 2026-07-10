@@ -13,8 +13,7 @@
 	"enableRenderDebugDiagnostics": true,
 	"rendererRecovery": {
 		"diagnosticsEnabled": true,
-		"maxRendererRebuildAttemptsPerIncident": 1,
-		"fatalMessage": "Graphics device lost and renderer recovery failed."
+		"fatalMessage": "Graphics device lost. Restart the application to restore rendering."
 	},
 	"additionalPublishArgs": "",
 	"virtualGeometry": {

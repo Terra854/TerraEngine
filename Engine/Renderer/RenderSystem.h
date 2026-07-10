@@ -196,8 +196,6 @@ private:
 	void DrainCaptureReadbacks();
 	bool ResolveRenderDebugDiagnosticsEnabled() const;
 	void ApplyRenderDiagnosticsRequest();
-	TerraEngine::Renderer::ResourceRestorationPlan BuildRendererRecoveryRestorationPlan(const TerraEngine::Renderer::RenderFrameSnapshot& snapshot) const;
-	bool TryRecoverRendererAfterDeviceLoss(TerraEngine::Renderer::RenderDiagnosticsSummary& diagnostics);
 	void ReportFatalRendererRecoveryFailure(TerraEngine::Renderer::RendererRecoverySnapshot snapshot);
 	std::unique_ptr<RHIContext> rhi;
 	ObjectManager& objManager = ObjectManager::instance();
@@ -260,9 +258,6 @@ private:
 	RenderSnapshotDiagnosticsSnapshot latestRenderSnapshotDiagnostics{};
 	TerraEngine::Renderer::RendererRecoverySnapshot latestRendererRecoverySnapshot{};
 	TerraEngine::Renderer::RendererRecoveryPolicy rendererRecoveryPolicy = TerraEngine::Renderer::MakeEditorRendererRecoveryPolicy();
-	TerraEngine::Renderer::ResourceRestorationPlan latestRendererRecoveryPlan{};
-	std::string rendererRecoveryAttemptIncidentId;
-	std::uint32_t rendererRecoveryCompletedAttemptsForIncident = 0u;
 	TerraEngine::Renderer::RenderDiagnosticsSummary latestRenderGraphDiagnostics{};
 	TerraEngine::Renderer::RenderFrameSnapshot latestRenderFrameSnapshot{};
 	TerraEngine::Renderer::RenderCaptureLimits captureLimits{};

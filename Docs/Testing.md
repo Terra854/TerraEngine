@@ -219,10 +219,10 @@ failure handling or diagnostics:
 ctest --test-dir out/build/Debug -C Debug -R "RendererRecovery|DeviceLoss|ExportRuntime|RenderDiagnostics|SystemScheduler|PlatformUtils" --output-on-failure
 ```
 
-This pass currently proves fail-closed containment and diagnostics. Full
-loss-safe Vulkan device teardown/recreation is intentionally tracked separately
-because a real `VK_ERROR_DEVICE_LOST` cannot safely reuse the ordinary
-device-idle cleanup path.
+This pass proves fail-closed containment and diagnostics. TerraEngine does not
+attempt in-process Vulkan device recreation after `VK_ERROR_DEVICE_LOST`;
+rendering remains unavailable and the user must restart the editor or exported
+application.
 
 Visible-command reuse coverage validates static-view cache-hit telemetry,
 deduplicated streaming touch publication, scheduler resource declarations,

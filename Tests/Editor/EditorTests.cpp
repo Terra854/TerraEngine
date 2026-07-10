@@ -31,7 +31,6 @@ namespace TerraEngine::EditorTests {
 	void RegisterRendererRecoveryProfilerTests(TestRegistry& registry);
 	void RegisterProfilerWindowTests(TestRegistry& registry);
 	void RegisterResidencyPolicyExportTests(TestRegistry& registry);
-	void RegisterRendererRecoveryExportPolicyTests(TestRegistry& registry);
 	void RegisterStreamingPolicyExportTests(TestRegistry& registry);
 	void RegisterVirtualGeometryExportTests(TestRegistry& registry);
 	void RegisterVirtualGeometryScalingExportTests(TestRegistry& registry);
@@ -141,7 +140,6 @@ int main() {
 	TerraEngine::EditorTests::RegisterRendererRecoveryProfilerTests(registry);
 	TerraEngine::EditorTests::RegisterProfilerWindowTests(registry);
 	TerraEngine::EditorTests::RegisterResidencyPolicyExportTests(registry);
-	TerraEngine::EditorTests::RegisterRendererRecoveryExportPolicyTests(registry);
 	TerraEngine::EditorTests::RegisterStreamingPolicyExportTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryExportTests(registry);
 	TerraEngine::EditorTests::RegisterVirtualGeometryScalingExportTests(registry);

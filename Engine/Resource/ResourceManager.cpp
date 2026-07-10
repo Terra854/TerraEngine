@@ -630,16 +630,14 @@ void ResourceManager::Initialize()
 			m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeExportRendererRecoveryPolicy(
 				m_RenderValidationEnabled,
 				JsonBoolOr(*recoveryIt, "diagnosticsEnabled", true),
-				recoveryIt->value("maxRendererRebuildAttemptsPerIncident", 1u),
-				recoveryIt->value("fatalMessage", std::string("Graphics device lost and renderer recovery failed.")));
+				recoveryIt->value("fatalMessage", std::string("Graphics device lost. Restart the application to restore rendering.")));
 		}
 		else
 		{
 			m_RendererRecoveryPolicy = TerraEngine::Renderer::MakeExportRendererRecoveryPolicy(
 				m_RenderValidationEnabled,
 				m_RenderDebugEnabled,
-				1u,
-				"Graphics device lost and renderer recovery failed.");
+				"Graphics device lost. Restart the application to restore rendering.");
 		}
 
 		if (auto residencyIt = manifest.find("residencyPolicy"); residencyIt != manifest.end() && residencyIt->is_object()) {

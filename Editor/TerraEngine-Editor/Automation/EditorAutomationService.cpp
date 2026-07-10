@@ -94,8 +94,6 @@ namespace TerraEngine::Editor::Automation
 				{"frameId", snapshot.frameId},
 				{"duplicateFailureCount", snapshot.duplicateFailureCount},
 				{"canSaveProjectData", snapshot.canSaveProjectData},
-				{"canAttemptRebuild", snapshot.canAttemptRebuild},
-				{"canRetryRendererRebuild", snapshot.canRetryRendererRebuild},
 				{"finalOutcome", TerraEngine::Renderer::ToString(snapshot.finalOutcome)},
 				{"lastError", snapshot.lastError},
 				{"fatalDialogReportId", snapshot.fatalDialogReportId},

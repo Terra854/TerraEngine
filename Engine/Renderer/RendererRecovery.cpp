@@ -1,9 +1,8 @@
-// RendererRecovery.cpp - CPU-only renderer recovery state helpers.
+// RendererRecovery.cpp - CPU-only renderer failure state helpers.
 
 #include "Renderer/RendererRecovery.h"
 
 #include <algorithm>
-#include <sstream>
 #include <utility>
 
 namespace TerraEngine::Renderer
@@ -13,11 +12,6 @@ namespace TerraEngine::Renderer
 		std::string MakeIncidentId(std::uint64_t generation, std::uint64_t frameId)
 		{
 			return "renderer-incident-" + std::to_string(generation) + "-" + std::to_string(frameId);
-		}
-
-		std::string MakeSessionId(std::string_view incidentId, std::uint32_t attemptNumber)
-		{
-			return std::string(incidentId) + "-rebuild-" + std::to_string(attemptNumber);
 		}
 
 		bool ContainsToken(std::string_view text, std::string_view token)
@@ -32,12 +26,6 @@ namespace TerraEngine::Renderer
 		{
 		case RendererRecoveryStateKind::Active: return "Active";
 		case RendererRecoveryStateKind::DeviceLost: return "DeviceLost";
-		case RendererRecoveryStateKind::SavingSafeData: return "SavingSafeData";
-		case RendererRecoveryStateKind::RebuildPending: return "RebuildPending";
-		case RendererRecoveryStateKind::RebuildInProgress: return "RebuildInProgress";
-		case RendererRecoveryStateKind::RebuildSucceeded: return "RebuildSucceeded";
-		case RendererRecoveryStateKind::RebuildFailed: return "RebuildFailed";
-		case RendererRecoveryStateKind::RendererRecoveryFailed: return "RendererRecoveryFailed";
 		case RendererRecoveryStateKind::FatalExportFailure: return "FatalExportFailure";
 		}
 		return "Unknown";
@@ -59,10 +47,6 @@ namespace TerraEngine::Renderer
 		case RendererDeviceFailureStage::Resize: return "Resize";
 		case RendererDeviceFailureStage::SwapchainRecovery: return "SwapchainRecovery";
 		case RendererDeviceFailureStage::RenderTargetRecreation: return "RenderTargetRecreation";
-		case RendererDeviceFailureStage::RebuildCreateDevice: return "RebuildCreateDevice";
-		case RendererDeviceFailureStage::RebuildRestoreDefaults: return "RebuildRestoreDefaults";
-		case RendererDeviceFailureStage::RebuildRestoreResources: return "RebuildRestoreResources";
-		case RendererDeviceFailureStage::RebuildPublishSession: return "RebuildPublishSession";
 		}
 		return "Unknown";
 	}
@@ -87,10 +71,6 @@ namespace TerraEngine::Renderer
 		{
 		case RendererRecoveryAction::None: return "None";
 		case RendererRecoveryAction::RecordIncident: return "RecordIncident";
-		case RendererRecoveryAction::SaveSafeData: return "SaveSafeData";
-		case RendererRecoveryAction::AutomaticRebuild: return "AutomaticRebuild";
-		case RendererRecoveryAction::UserRequestedRebuild: return "UserRequestedRebuild";
-		case RendererRecoveryAction::ExportPolicyRebuild: return "ExportPolicyRebuild";
 		case RendererRecoveryAction::FatalDialog: return "FatalDialog";
 		}
 		return "None";
@@ -102,65 +82,26 @@ namespace TerraEngine::Renderer
 		{
 		case RendererRecoveryOutcome::None: return "None";
 		case RendererRecoveryOutcome::DeviceLostLatched: return "DeviceLostLatched";
-		case RendererRecoveryOutcome::RebuildStarted: return "RebuildStarted";
-		case RendererRecoveryOutcome::RebuildSucceeded: return "RebuildSucceeded";
-		case RendererRecoveryOutcome::RebuildFailed: return "RebuildFailed";
-		case RendererRecoveryOutcome::RecoveryFailed: return "RecoveryFailed";
 		case RendererRecoveryOutcome::FatalExportFailure: return "FatalExportFailure";
-		}
-		return "None";
-	}
-
-	const char* ToString(RendererRecoverySessionPhase phase)
-	{
-		switch (phase)
-		{
-		case RendererRecoverySessionPhase::None: return "None";
-		case RendererRecoverySessionPhase::Plan: return "Plan";
-		case RendererRecoverySessionPhase::Teardown: return "Teardown";
-		case RendererRecoverySessionPhase::CreateDevice: return "CreateDevice";
-		case RendererRecoverySessionPhase::RestoreDefaults: return "RestoreDefaults";
-		case RendererRecoverySessionPhase::RestoreResources: return "RestoreResources";
-		case RendererRecoverySessionPhase::RestoreViews: return "RestoreViews";
-		case RendererRecoverySessionPhase::Publish: return "Publish";
-		case RendererRecoverySessionPhase::Failed: return "Failed";
-		case RendererRecoverySessionPhase::Complete: return "Complete";
 		}
 		return "None";
 	}
 
 	bool IsRendererRecoveryActive(RendererRecoveryStateKind state)
 	{
-		return state != RendererRecoveryStateKind::Active
-			&& state != RendererRecoveryStateKind::RebuildSucceeded;
+		return state != RendererRecoveryStateKind::Active;
 	}
 
 	bool CanSubmitNormalGpuWork(const RendererRecoverySnapshot& snapshot)
 	{
-		return snapshot.state == RendererRecoveryStateKind::Active
-			|| snapshot.state == RendererRecoveryStateKind::RebuildSucceeded;
+		return snapshot.state == RendererRecoveryStateKind::Active;
 	}
 
 	std::string ValidateRecoverySnapshot(const RendererRecoverySnapshot& snapshot)
 	{
 		if (snapshot.state == RendererRecoveryStateKind::Active && !snapshot.incidentId.empty())
 		{
-			return "Active recovery snapshots must not retain an incident id.";
-		}
-		if (snapshot.state == RendererRecoveryStateKind::RebuildInProgress
-			&& (snapshot.incidentId.empty() || snapshot.sessionId.empty()))
-		{
-			return "RebuildInProgress requires both incident id and session id.";
-		}
-		if (snapshot.state == RendererRecoveryStateKind::RebuildSucceeded
-			&& snapshot.renderSessionGeneration == 0u)
-		{
-			return "RebuildSucceeded requires a fresh render session generation.";
-		}
-		if (snapshot.state == RendererRecoveryStateKind::RebuildFailed
-			&& snapshot.lastError.empty())
-		{
-			return "RebuildFailed requires a failure reason.";
+			return "Active renderer snapshots must not retain a device-loss incident id.";
 		}
 		return {};
 	}
@@ -212,8 +153,8 @@ namespace TerraEngine::Renderer
 		RendererRecoverySnapshot snapshot = previous;
 		snapshot.renderSessionGeneration = std::max<std::uint64_t>(1u, renderSessionGeneration);
 		snapshot.frameId = frameId;
-		// Once the first incident exists, later Vulkan errors are symptoms. We
-		// count them for diagnostics while preserving the original root cause.
+		// Later Vulkan failures are symptoms of the first lost device. Preserve the
+		// root cause and aggregate duplicates so logs do not flood every frame.
 		if (!snapshot.incidentId.empty() && snapshot.state != RendererRecoveryStateKind::Active)
 		{
 			++snapshot.duplicateFailureCount;
@@ -224,7 +165,7 @@ namespace TerraEngine::Renderer
 		snapshot.state = RendererRecoveryStateKind::DeviceLost;
 		snapshot.incidentId = MakeIncidentId(snapshot.renderSessionGeneration, frameId);
 		snapshot.sessionId.clear();
-		snapshot.message = "Graphics device lost; rendering is paused while renderer recovery is prepared.";
+		snapshot.message = "Graphics device lost; rendering is unavailable and the current process cannot rebuild the Vulkan device.";
 		snapshot.firstFailureStage = ClassifyFailureStage(operation);
 		snapshot.firstFailureResult = std::string(result);
 		snapshot.affectedView = affectedView == RendererRecoveryAffectedView::None
@@ -234,58 +175,9 @@ namespace TerraEngine::Renderer
 		snapshot.affectedResourceName = std::move(affectedResourceName);
 		snapshot.duplicateFailureCount = 0u;
 		snapshot.canSaveProjectData = true;
-		snapshot.canAttemptRebuild = true;
-		snapshot.canRetryRendererRebuild = true;
 		snapshot.selectedAction = RendererRecoveryAction::RecordIncident;
 		snapshot.finalOutcome = RendererRecoveryOutcome::DeviceLostLatched;
 		snapshot.lastError.clear();
-		return snapshot;
-	}
-
-	RendererRecoverySnapshot BeginRecoveryRebuild(
-		const RendererRecoverySnapshot& previous,
-		std::uint32_t attemptNumber,
-		std::uint32_t maxAttempts,
-		RendererRecoveryAction requestedBy)
-	{
-		RendererRecoverySnapshot snapshot = previous;
-		snapshot.state = RendererRecoveryStateKind::RebuildInProgress;
-		snapshot.sessionId = MakeSessionId(snapshot.incidentId, attemptNumber);
-		snapshot.message = "Renderer rebuild in progress.";
-		snapshot.canAttemptRebuild = false;
-		snapshot.canRetryRendererRebuild = attemptNumber < maxAttempts;
-		snapshot.selectedAction = requestedBy;
-		snapshot.finalOutcome = RendererRecoveryOutcome::RebuildStarted;
-		return snapshot;
-	}
-
-	RendererRecoverySnapshot CompleteRecoveryRebuild(
-		const RendererRecoverySnapshot& previous,
-		bool success,
-		std::uint64_t restoredRenderSessionGeneration,
-		std::string_view failureReason)
-	{
-		RendererRecoverySnapshot snapshot = previous;
-		if (success)
-		{
-			snapshot = MakeActiveRecoverySnapshot(restoredRenderSessionGeneration);
-			snapshot.state = RendererRecoveryStateKind::RebuildSucceeded;
-			snapshot.message = "Renderer rebuild succeeded; normal rendering may resume.";
-			snapshot.finalOutcome = RendererRecoveryOutcome::RebuildSucceeded;
-			return snapshot;
-		}
-
-		snapshot.state = snapshot.canRetryRendererRebuild
-			? RendererRecoveryStateKind::RebuildFailed
-			: RendererRecoveryStateKind::RendererRecoveryFailed;
-		snapshot.message = snapshot.canRetryRendererRebuild
-			? "Renderer rebuild failed; another bounded attempt is available."
-			: "Renderer recovery failed after the bounded rebuild budget was exhausted.";
-		snapshot.lastError = failureReason.empty() ? "Renderer rebuild failed." : std::string(failureReason);
-		snapshot.canAttemptRebuild = snapshot.canRetryRendererRebuild;
-		snapshot.finalOutcome = snapshot.canRetryRendererRebuild
-			? RendererRecoveryOutcome::RebuildFailed
-			: RendererRecoveryOutcome::RecoveryFailed;
 		return snapshot;
 	}
 
@@ -306,31 +198,9 @@ namespace TerraEngine::Renderer
 		return snapshot;
 	}
 
-	ResourceRestorationPlan BuildResourceRestorationPlan(ResourceRestorationPlanInput input)
-	{
-		ResourceRestorationPlan plan;
-		// The restoration plan is a CPU-side checklist for a future protected
-		// renderer rebuild. It intentionally contains only stable resource names
-		// and policy labels, never Vulkan handles from the lost device.
-		plan.renderSessionGeneration = input.renderSessionGeneration;
-		plan.requiredShaders = std::move(input.requiredShaders);
-		plan.defaultResources = std::move(input.defaultResources);
-		plan.visibleMeshes = std::move(input.visibleMeshes);
-		plan.visibleMaterials = std::move(input.visibleMaterials);
-		plan.visibleTextures = std::move(input.visibleTextures);
-		plan.virtualGeometryResidency = std::move(input.virtualGeometryResidency);
-		plan.textureResidency = std::move(input.textureResidency);
-		plan.viewTargets = std::move(input.viewTargets);
-		plan.profilerAndDiagnosticResources = std::move(input.profilerAndDiagnosticResources);
-		plan.deferredUploads = std::move(input.deferredUploads);
-		plan.missingOrDeferredResources = std::move(input.missingOrDeferredResources);
-		return plan;
-	}
-
 	RecoveryDiagnosticSnapshot BuildRecoveryDiagnosticSnapshot(
 		const RendererRecoverySnapshot& snapshot,
-		std::vector<std::string> recentRenderPhases,
-		std::vector<std::string> resourceRestorationSummary)
+		std::vector<std::string> recentRenderPhases)
 	{
 		RecoveryDiagnosticSnapshot diagnostics;
 		diagnostics.recoveryState = snapshot;
@@ -347,18 +217,11 @@ namespace TerraEngine::Renderer
 		diagnostics.incident.renderSessionGeneration = snapshot.renderSessionGeneration;
 		diagnostics.incident.duplicateFailureCount = snapshot.duplicateFailureCount;
 		diagnostics.incident.finalOutcome = snapshot.finalOutcome;
-		diagnostics.activeSession.sessionId = snapshot.sessionId;
-		diagnostics.activeSession.incidentId = snapshot.incidentId;
 		diagnostics.recentRenderPhases = std::move(recentRenderPhases);
-		diagnostics.resourceRestorationSummary = std::move(resourceRestorationSummary);
 		diagnostics.suppressedFailures = snapshot.duplicateFailureCount;
 		if (snapshot.canSaveProjectData)
 		{
 			diagnostics.safeActions.push_back("Save safe project data");
-		}
-		if (snapshot.canAttemptRebuild || snapshot.canRetryRendererRebuild)
-		{
-			diagnostics.safeActions.push_back("Request renderer rebuild");
 		}
 		return diagnostics;
 	}

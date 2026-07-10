@@ -74,13 +74,8 @@ struct BuildProfile {
 	/// even when the renderer cannot draw a diagnostics overlay.
 	bool rendererRecoveryDiagnosticsEnabled = true;
 
-	/// Maximum renderer-side rebuild attempts per graphics device-loss incident
-	/// before the export build reports a fatal graphics failure.
-	uint32_t rendererRecoveryMaxRebuildAttempts = 1;
-
-	/// User-facing fatal reason used when export renderer recovery exhausts its
-	/// bounded rebuild budget.
-	std::string rendererRecoveryFatalMessage = "Graphics device lost and renderer recovery failed.";
+	/// User-facing fatal reason shown when graphics device loss stops an export.
+	std::string rendererRecoveryFatalMessage = "Graphics device lost. Restart the application to restore rendering.";
 
 	/// Additional NativeAOT publish arguments passed verbatim to dotnet publish.
 	std::string additionalPublishArgs;

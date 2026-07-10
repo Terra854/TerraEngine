@@ -131,38 +131,6 @@ public:
 	{
 		return TerraEngine::Renderer::MakeActiveRecoverySnapshot();
 	}
-	// Renderer recovery is a protected backend boundary. High-level systems
-	// own the policy and CPU restoration plan, while the RHI owns teardown,
-	// fresh device/session creation, and publication of the resulting state.
-	virtual bool SupportsRendererRecoveryRebuild() const { return false; }
-	virtual TerraEngine::Renderer::RendererRecoverySnapshot BeginRendererRecoverySession(
-		std::uint32_t attemptNumber,
-		std::uint32_t maxAttempts,
-		TerraEngine::Renderer::RendererRecoveryAction requestedBy)
-	{
-		(void)attemptNumber;
-		(void)maxAttempts;
-		(void)requestedBy;
-		return GetLatestRendererRecoverySnapshot();
-	}
-	virtual bool RebuildRendererSession(
-		WindowSystem& windowSystem,
-		const TerraEngine::Renderer::ResourceRestorationPlan& restorationPlan,
-		TerraEngine::Renderer::RendererRecoverySnapshot* outSnapshot,
-		std::string* outError)
-	{
-		(void)windowSystem;
-		(void)restorationPlan;
-		if (outSnapshot != nullptr)
-		{
-			*outSnapshot = GetLatestRendererRecoverySnapshot();
-		}
-		if (outError != nullptr)
-		{
-			*outError = "The active RHI backend does not support renderer rebuild.";
-		}
-		return false;
-	}
 	virtual void PublishRendererRecoverySnapshot(TerraEngine::Renderer::RendererRecoverySnapshot snapshot) { (void)snapshot; }
 	// InvalidateMaterial is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual void InvalidateMaterial(const TerraEngine::UUID& materialId) {}

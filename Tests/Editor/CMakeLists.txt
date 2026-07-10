@@ -26,7 +26,6 @@ add_executable(TerraEngine-EditorTests
 	Export/PackRoundTripTests.cpp
 	Export/PackagingRequestValidationTests.cpp
 	Export/ResidencyPolicyExportTests.cpp
-	Export/RendererRecoveryExportPolicyTests.cpp
 	Export/StreamingPolicyExportTests.cpp
 	Export/VirtualGeometryExportTests.cpp
 	Export/VirtualGeometryScalingExportTests.cpp

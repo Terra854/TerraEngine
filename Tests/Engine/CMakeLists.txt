@@ -9,7 +9,6 @@ add_executable(TerraEngine-EngineTests
 	Runtime/ContentMountPathNormalizerTests.cpp
 	Runtime/ContentMountPublicApiTests.cpp
 	Runtime/ExportRuntimeBaselineLaunchTests.cpp
-	Runtime/ExportRendererRecoveryTests.cpp
 	Runtime/ExportRuntimeSmokeTests.cpp
 	Runtime/ExportScriptingRuntimeTests.cpp
 	Runtime/ExportStartupFlowTests.cpp
@@ -52,7 +51,6 @@ add_executable(TerraEngine-EngineTests
 	Resource/ResourceResidencyPolicyTests.cpp
 	Resource/ResourceResidencyUsageTests.cpp
 	Resource/ResourceManagerMeshTests.cpp
-	Resource/RendererRecoveryResourceRestorationTests.cpp
 		Resource/ResourceStreamingDiagnosticsTests.cpp
 		Resource/ResourceStreamingPolicyTests.cpp
 		Resource/ResourceStreamingPreloadTests.cpp
@@ -78,7 +76,6 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFailureContainmentTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererDeviceLossLatchTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererRecoveryDiagnosticsTests.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RendererRecoveryRebuildTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFrameBreakdownTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderFrameSnapshotTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderGraphContractTests.cpp

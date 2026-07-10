@@ -173,7 +173,6 @@ namespace TerraEngine::EditorTests {
 			profile.enableVulkanValidationLayers = true;
 			profile.enableRenderDebugDiagnostics = true;
 			profile.rendererRecoveryDiagnosticsEnabled = true;
-			profile.rendererRecoveryMaxRebuildAttempts = 2;
 			profile.virtualGeometryQualityLevel = 3;
 			profile.virtualGeometryBudgetBytes = 128u * 1024u * 1024u;
 			return profile;
@@ -193,7 +192,7 @@ namespace TerraEngine::EditorTests {
 				+ "\"renderProfile\":{\"shadows\":\"high\",\"resolutionScale\":1.0},"
 				+ "\"residencyPolicy\":{\"enabled\":true,\"cleanupIntervalSeconds\":1.0},"
 				+ "\"virtualGeometry\":{\"quality\":\"high\",\"geometryBudgetBytes\":134217728},"
-				+ "\"rendererRecovery\":{\"diagnosticsEnabled\":true,\"maxRendererRebuildAttemptsPerIncident\":2}"
+				+ "\"rendererRecovery\":{\"diagnosticsEnabled\":true,\"mode\":\"failClosed\"}"
 				+ "}";
 		}
 	}
@@ -348,7 +347,6 @@ namespace TerraEngine::EditorTests {
 			}
 			context.ExpectEqual(std::string("medium"), editorManifest.at("renderProfile").at("shadows").get<std::string>(), "Project render settings should drive the shared resolved render profile.");
 			context.ExpectEqual(3u, editorManifest.at("virtualGeometry").at("qualityLevel").get<unsigned int>(), "Profile virtual-geometry settings should survive both entry points.");
-			context.ExpectEqual(2u, editorManifest.at("rendererRecovery").at("maxRendererRebuildAttemptsPerIncident").get<unsigned int>(), "Renderer recovery policy should survive both entry points.");
 
 			const std::vector<ExportContentInventoryEntry> editorInventory = ReadParityInventory(editorRequest.evidenceDirectory);
 			const std::vector<ExportContentInventoryEntry> headlessInventory = ReadParityInventory(headlessRequest.evidenceDirectory);

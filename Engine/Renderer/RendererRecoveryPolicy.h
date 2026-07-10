@@ -1,11 +1,9 @@
-// RendererRecoveryPolicy.h - bounded attempt rules for renderer recovery.
+// RendererRecoveryPolicy.h - terminal renderer failure reporting policy.
 
 #pragma once
 
 #include "Core/Export.h"
-#include "Renderer/RendererRecovery.h"
 
-#include <cstdint>
 #include <string>
 
 namespace TerraEngine::Renderer
@@ -14,20 +12,12 @@ namespace TerraEngine::Renderer
 	{
 		bool diagnosticsEnabled = true;
 		bool validationEnabled = false;
-		std::uint32_t maxRendererRebuildAttemptsPerIncident = 1u;
-		bool fatalOnExhaustedAttempts = false;
-		std::string fatalMessage = "Graphics device lost and renderer recovery failed.";
-	};
-
-	struct RendererRecoveryPolicyDecision
-	{
-		bool canAttempt = false;
-		bool budgetExhausted = false;
-		std::uint32_t nextAttemptNumber = 0u;
-		std::string reason;
+		std::string fatalMessage = "Graphics device lost. Restart the application to restore rendering.";
 	};
 
 	TERRAENGINE_API RendererRecoveryPolicy MakeEditorRendererRecoveryPolicy();
-	TERRAENGINE_API RendererRecoveryPolicy MakeExportRendererRecoveryPolicy(bool validationEnabled, bool diagnosticsEnabled, std::uint32_t maxAttempts, std::string fatalMessage);
-	TERRAENGINE_API RendererRecoveryPolicyDecision EvaluateRendererRecoveryPolicy(const RendererRecoverySnapshot& snapshot, const RendererRecoveryPolicy& policy, std::uint32_t completedAttemptsForIncident);
+	TERRAENGINE_API RendererRecoveryPolicy MakeExportRendererRecoveryPolicy(
+		bool validationEnabled,
+		bool diagnosticsEnabled,
+		std::string fatalMessage);
 }

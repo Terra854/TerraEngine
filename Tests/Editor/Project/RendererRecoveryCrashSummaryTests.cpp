@@ -10,8 +10,8 @@ namespace TerraEngine::EditorTests
 		registry.Add("Editor.Project.RendererRecoveryCrashSummaryLoadsPreviousReport", [](TestContext& context) {
 			TerraEngine::FatalErrorDialogReport report = TerraEngine::BuildFatalErrorDialogReport(
 				TerraEngine::FatalErrorCategory::RendererRecoveryFailed,
-				"Previous renderer recovery failure.",
-				"Renderer rebuild budget exhausted.");
+				"Previous graphics device-loss failure.",
+				"Rendering stopped after the Vulkan device was lost.");
 			const std::filesystem::path path = std::filesystem::temp_directory_path() / "TerraEngineRendererRecoveryCrashSummaryTests" / "previous.txt";
 			std::string error;
 

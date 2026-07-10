@@ -167,7 +167,6 @@ bool SaveBuildProfile(const BuildProfile& profile, const std::filesystem::path& 
 		j["enableRenderDebugDiagnostics"] = profile.enableRenderDebugDiagnostics;
 		j["rendererRecovery"] = {
 			{ "diagnosticsEnabled", profile.rendererRecoveryDiagnosticsEnabled },
-			{ "maxRendererRebuildAttemptsPerIncident", profile.rendererRecoveryMaxRebuildAttempts },
 			{ "fatalMessage", profile.rendererRecoveryFatalMessage }
 		};
 		j["additionalPublishArgs"] = profile.additionalPublishArgs;
@@ -235,7 +234,6 @@ BuildProfile LoadBuildProfile(const std::filesystem::path& path) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (auto recoveryIt = j.find("rendererRecovery"); recoveryIt != j.end() && recoveryIt->is_object()) {
 			profile.rendererRecoveryDiagnosticsEnabled = recoveryIt->value("diagnosticsEnabled", profile.rendererRecoveryDiagnosticsEnabled);
-			profile.rendererRecoveryMaxRebuildAttempts = recoveryIt->value("maxRendererRebuildAttemptsPerIncident", profile.rendererRecoveryMaxRebuildAttempts);
 			profile.rendererRecoveryFatalMessage = recoveryIt->value("fatalMessage", profile.rendererRecoveryFatalMessage);
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

@@ -179,9 +179,9 @@ static nlohmann::json BuildRendererRecoveryManifest(const BuildProfile& profile)
 	nlohmann::json recovery;
 	recovery["validationEnabled"] = profile.enableVulkanValidationLayers;
 	recovery["diagnosticsEnabled"] = profile.rendererRecoveryDiagnosticsEnabled;
-	recovery["maxRendererRebuildAttemptsPerIncident"] = std::max<std::uint32_t>(1u, profile.rendererRecoveryMaxRebuildAttempts);
+	recovery["mode"] = "failClosed";
 	recovery["fatalMessage"] = profile.rendererRecoveryFatalMessage.empty()
-		? "Graphics device lost and renderer recovery failed."
+		? "Graphics device lost. Restart the application to restore rendering."
 		: profile.rendererRecoveryFatalMessage;
 	recovery["fullApplicationRestart"] = false;
 	return recovery;

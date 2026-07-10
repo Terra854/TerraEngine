@@ -1604,8 +1604,7 @@ namespace TerraEngine::Renderer {
 		summary.rendererRecovery = snapshot;
 		summary.rendererRecoveryDiagnostics = BuildRecoveryDiagnosticSnapshot(
 			summary.rendererRecovery,
-			summary.recentRendererPhases,
-			summary.resourceWarnings);
+			summary.recentRendererPhases);
 		if (!recoveryActive)
 		{
 			return;

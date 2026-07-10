@@ -1447,72 +1447,6 @@ void RenderSystem::SetSceneViewContextTint(const std::unordered_set<TerraEngine:
 	sceneViewContextTintEnabled = !sceneViewContextFocusedObjectIds.empty();
 }
 
-TerraEngine::Renderer::ResourceRestorationPlan RenderSystem::BuildRendererRecoveryRestorationPlan(const TerraEngine::Renderer::RenderFrameSnapshot& snapshot) const
-{
-	TerraEngine::Renderer::ResourceRestorationPlanInput input;
-	input.renderSessionGeneration = latestRendererRecoverySnapshot.renderSessionGeneration;
-	input.requiredShaders = {
-		"Default task/mesh/fragment shader collection",
-		"UI static/instanced/SDF shader collection",
-		"Lighting, Hi-Z, VRS, ambient-occlusion compute shaders"
-	};
-	input.defaultResources = {
-		"Default texture",
-		"Default normal texture",
-		"Default material-mask texture",
-		"Global descriptor sets",
-		"Per-frame sync objects",
-		"Hi-Z pyramids"
-	};
-	input.profilerAndDiagnosticResources = {
-		"Render stats snapshots",
-		"Backend frame breakdown",
-		"Renderer recovery diagnostics"
-	};
-
-	std::set<std::string> meshes;
-	std::set<std::string> materials;
-	std::set<std::string> textures;
-	std::set<std::string> virtualGeometry;
-	for (const TerraEngine::Renderer::RenderFrameResourceRecord& mesh : snapshot.meshes)
-	{
-		meshes.insert(TerraEngine::ToHexString(mesh.resourceId));
-	}
-	for (const TerraEngine::Renderer::RenderFrameResourceRecord& material : snapshot.materials)
-	{
-		materials.insert(TerraEngine::ToHexString(material.resourceId));
-	}
-	for (const TerraEngine::Renderer::RenderFrameResourceRecord& texture : snapshot.textures)
-	{
-		textures.insert(TerraEngine::ToHexString(texture.resourceId));
-	}
-	for (const TerraEngine::Renderer::VirtualGeometryViewSelectionState& view : snapshot.virtualGeometryViewSelections)
-	{
-		for (const TerraEngine::Renderer::VirtualGeometryResidentPageSetRecord& pages : view.residentPageSets)
-		{
-			virtualGeometry.insert(TerraEngine::ToHexString(pages.meshId) + ":resident-pages=" + std::to_string(pages.residentPageCount));
-		}
-		for (const TerraEngine::Renderer::VirtualGeometryPageNeedRecord& need : view.pageNeeds)
-		{
-			input.deferredUploads.push_back(TerraEngine::ToHexString(need.meshId) + ":page=" + std::to_string(need.pageId));
-		}
-	}
-	input.visibleMeshes.assign(meshes.begin(), meshes.end());
-	input.visibleMaterials.assign(materials.begin(), materials.end());
-	input.visibleTextures.assign(textures.begin(), textures.end());
-	input.virtualGeometryResidency.assign(virtualGeometry.begin(), virtualGeometry.end());
-	input.textureResidency.push_back("Restore texture mip residency from ResourceManager streaming records.");
-	for (const TerraEngine::Renderer::RenderFrameViewRequest& view : snapshot.viewRequests)
-	{
-		input.viewTargets.push_back(std::string(ToString(view.viewType)) + "#" + std::to_string(view.outputId));
-	}
-	if (snapshot.valid && snapshot.renderables.empty())
-	{
-		input.missingOrDeferredResources.push_back("No visible renderables were present in the last CPU frame snapshot.");
-	}
-	return TerraEngine::Renderer::BuildResourceRestorationPlan(std::move(input));
-}
-
 void RenderSystem::SetRendererRecoveryPolicy(const TerraEngine::Renderer::RendererRecoveryPolicy& policy)
 {
 	rendererRecoveryPolicy = policy;
@@ -1534,9 +1468,7 @@ void RenderSystem::ReportFatalRendererRecoveryFailure(TerraEngine::Renderer::Ren
 	TerraEngine::FatalErrorDialogReport report = TerraEngine::BuildFatalErrorDialogReport(
 		exportRuntime ? TerraEngine::FatalErrorCategory::ExportFatal : TerraEngine::FatalErrorCategory::RendererRecoveryFailed,
 		rendererRecoveryPolicy.fatalMessage,
-		std::string("Renderer recovery exhausted after ")
-			+ std::to_string(rendererRecoveryCompletedAttemptsForIncident)
-			+ " attempt(s). First failure stage="
+		std::string("In-process Vulkan device recreation is unavailable after graphics device loss. First failure stage=")
 			+ TerraEngine::Renderer::ToString(snapshot.firstFailureStage)
 			+ ", result="
 			+ snapshot.firstFailureResult
@@ -1563,64 +1495,6 @@ void RenderSystem::ReportFatalRendererRecoveryFailure(TerraEngine::Renderer::Ren
 	rhi->PublishRendererRecoverySnapshot(reported);
 	std::lock_guard<std::mutex> lock(statsMutex);
 	latestRendererRecoverySnapshot = reported;
-}
-
-bool RenderSystem::TryRecoverRendererAfterDeviceLoss(TerraEngine::Renderer::RenderDiagnosticsSummary& diagnostics)
-{
-	if (!rhi || !rhi->SupportsRendererRecoveryRebuild())
-	{
-		return false;
-	}
-
-	TerraEngine::Renderer::RendererRecoverySnapshot snapshot = rhi->GetLatestRendererRecoverySnapshot();
-	if (TerraEngine::Renderer::CanSubmitNormalGpuWork(snapshot)
-		|| snapshot.state == TerraEngine::Renderer::RendererRecoveryStateKind::RebuildInProgress)
-	{
-		return false;
-	}
-	if (rendererRecoveryAttemptIncidentId != snapshot.incidentId)
-	{
-		rendererRecoveryAttemptIncidentId = snapshot.incidentId;
-		rendererRecoveryCompletedAttemptsForIncident = 0u;
-	}
-
-	const TerraEngine::Renderer::RendererRecoveryPolicyDecision decision =
-		TerraEngine::Renderer::EvaluateRendererRecoveryPolicy(snapshot, rendererRecoveryPolicy, rendererRecoveryCompletedAttemptsForIncident);
-	diagnostics.rendererRecoveryDiagnostics.exportPolicyDecision = decision.reason;
-	diagnostics.backendFallbacks.push_back("Renderer recovery policy: " + decision.reason);
-	if (!decision.canAttempt)
-	{
-		ReportFatalRendererRecoveryFailure(snapshot);
-		return false;
-	}
-
-	const TerraEngine::Renderer::RendererRecoveryAction action = ResourceManager::Instance().IsExportRuntime()
-		? TerraEngine::Renderer::RendererRecoveryAction::ExportPolicyRebuild
-		: TerraEngine::Renderer::RendererRecoveryAction::AutomaticRebuild;
-	rhi->BeginRendererRecoverySession(
-		decision.nextAttemptNumber,
-		rendererRecoveryPolicy.maxRendererRebuildAttemptsPerIncident,
-		action);
-	latestRendererRecoveryPlan = BuildRendererRecoveryRestorationPlan(latestRenderFrameSnapshot);
-	++rendererRecoveryCompletedAttemptsForIncident;
-
-	TerraEngine::Renderer::RendererRecoverySnapshot rebuiltSnapshot;
-	std::string rebuildError;
-	const bool rebuilt = rhi->RebuildRendererSession(WindowSystem::Instance(), latestRendererRecoveryPlan, &rebuiltSnapshot, &rebuildError);
-	diagnostics.backendFallbacks.push_back(
-		std::string("Renderer rebuild attempt ")
-		+ std::to_string(decision.nextAttemptNumber)
-		+ (rebuilt ? " succeeded." : " failed: " + rebuildError));
-	TerraEngine::Renderer::ApplyRendererRecoveryDiagnostics(diagnostics, rebuiltSnapshot);
-	{
-		std::lock_guard<std::mutex> lock(statsMutex);
-		latestRendererRecoverySnapshot = rebuiltSnapshot;
-	}
-	if (!rebuilt && !rebuiltSnapshot.canRetryRendererRebuild)
-	{
-		ReportFatalRendererRecoveryFailure(rebuiltSnapshot);
-	}
-	return rebuilt;
 }
 
 std::vector<VirtualGeometryClusterPacket> RenderSystem::BuildVirtualGeometryClusterPackets(
@@ -2685,7 +2559,10 @@ void RenderSystem::Update(float deltaTime)
 			? rhi->GetLatestRendererRecoverySnapshot()
 			: latestRendererRecoverySnapshot;
 		TerraEngine::Renderer::ApplyRendererRecoveryDiagnostics(noViewDiagnostics, recoverySnapshot);
-		TryRecoverRendererAfterDeviceLoss(noViewDiagnostics);
+		if (!TerraEngine::Renderer::CanSubmitNormalGpuWork(recoverySnapshot))
+		{
+			ReportFatalRendererRecoveryFailure(recoverySnapshot);
+		}
 		const TerraEngine::Renderer::RendererRecoverySnapshot finalRecoverySnapshot = rhi
 			? rhi->GetLatestRendererRecoverySnapshot()
 			: latestRendererRecoverySnapshot;
@@ -2793,7 +2670,10 @@ void RenderSystem::Update(float deltaTime)
 		? rhi->GetLatestRendererRecoverySnapshot()
 		: latestRendererRecoverySnapshot;
 	TerraEngine::Renderer::ApplyRendererRecoveryDiagnostics(renderGraphDiagnostics, recoverySnapshot);
-	TryRecoverRendererAfterDeviceLoss(renderGraphDiagnostics);
+	if (!TerraEngine::Renderer::CanSubmitNormalGpuWork(recoverySnapshot))
+	{
+		ReportFatalRendererRecoveryFailure(recoverySnapshot);
+	}
 	const size_t renderGraphWorkerCount = std::max<size_t>(1u, backendCapabilities.maxRecordingWorkers);
 	static VisibleCommandCacheState visibleCommandCache;
 	static ShadowDrawListCacheState shadowDrawListCache;
@@ -4960,9 +4840,7 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVirtualGeometryPagePublications,
 		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets,
 		TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
-		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
-		TerraEngine::Scheduling::kResourceRendererRecoveryPlan,
-		TerraEngine::Scheduling::kResourceRendererRecoverySession
+		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog
 	};
 	declaration.writes = {
 		"Renderer",
@@ -4991,9 +4869,7 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 		TerraEngine::Scheduling::kResourceVisibleCommandReuseDiagnostics,
 		TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets,
 		TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
-		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
-		TerraEngine::Scheduling::kResourceRendererRecoveryPlan,
-		TerraEngine::Scheduling::kResourceRendererRecoverySession
+		TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog
 	};
 	// Live ECS collection still runs protected inside RenderSystem, while draw,
 	// light, upload, adaptive virtual geometry LOD/cluster/page intent, and
@@ -5006,8 +4882,8 @@ TerraEngine::Scheduling::SystemDeclaration RenderSystem::SchedulerDeclaration()
 	declaration.phaseKind = TerraEngine::Scheduling::WorkerSystemPhaseKind::WorkerPrepare;
 	declaration.boundaryClassification = TerraEngine::Scheduling::HardBoundaryClassification::PartiallyWorkerSafe;
 	declaration.hardBoundary = true;
-	declaration.safeSubwork = "Render snapshots, visible-command cache lookup, deduplicated visible streaming touch-set preparation, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, page payload source planning, page request planning, GPU packet frame set planning, GPU compaction dispatch planning, generated-submission validation labels, per-view Hi-Z validation labels, renderer recovery plan preparation, page need packets, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
-	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU packet buffer publication, generated submission publication, visibility/counter snapshot publication, virtual geometry page diagnostics publication, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, renderer recovery state/session publication, editor present, and recovery.";
+	declaration.safeSubwork = "Render snapshots, visible-command cache lookup, deduplicated visible streaming touch-set preparation, virtual geometry LOD/page preparation, adaptive virtual geometry cluster/page need preparation, page payload source planning, page request planning, GPU packet frame set planning, GPU compaction dispatch planning, generated-submission validation labels, per-view Hi-Z validation labels, page need packets, resource readiness, draw packets, secondary command buffers, and submit descriptions.";
+	declaration.protectedCommit = "Swapchain acquire, queue submit, present, frame fence/semaphore ownership, ResourceManager visible streaming touch publication, virtual geometry page payload publication, page retirement draining, virtual geometry GPU packet buffer publication, generated submission publication, visibility/counter snapshot publication, virtual geometry page diagnostics publication, virtual geometry diagnostics publication, adaptive virtual geometry diagnostics publication, renderer device-loss incident publication, editor present, and recovery containment.";
 	declaration.protectedReason = "Live GPU queue and presentation ownership remain protected after worker preparation.";
 	declaration.profilingLabel = declaration.name;
 	declaration.usesDefaultMetadata = false;
@@ -5695,7 +5571,6 @@ void RenderSystem::Clear()
 		latestSceneLightingDiagnostics = {};
 		latestRenderSnapshotDiagnostics = {};
 		latestRendererRecoverySnapshot = TerraEngine::Renderer::MakeActiveRecoverySnapshot();
-		latestRendererRecoveryPlan = {};
 		latestRenderGraphDiagnostics = {};
 		latestRenderFrameSnapshot = {};
 		latestGameStats.viewType = RenderViewType::Game;
@@ -5716,8 +5591,6 @@ void RenderSystem::Clear()
 	latestGameViewTargetSize = glm::uvec2(0u);
 	latestGameViewFrameId = 0u;
 	virtualGeometryTransitionCache.clear();
-	rendererRecoveryAttemptIncidentId.clear();
-	rendererRecoveryCompletedAttemptsForIncident = 0u;
 	skyStateDirty = true;
 	lastLoggedSkyIssueKey.clear();
 	ClearOverrideCameras();
@@ -6306,8 +6179,8 @@ void RenderSystem::ApplyTransientRenderDiagnostics(bool validationEnabled, bool 
 	if (auto* vulkanContext = dynamic_cast<VulkanContext*>(rhi.get()))
 	{
 		// Existing Vulkan instances cannot gain layers after creation, but
-		// recording the request keeps renderer rebuild/recovery paths aligned
-		// with the editor preference without modifying project settings.
+		// retaining the requested value keeps diagnostics accurate without
+		// modifying project settings. A restart applies the new layer request.
 		vulkanContext->SetValidationLayersRequested(validationEnabled);
 	}
 }

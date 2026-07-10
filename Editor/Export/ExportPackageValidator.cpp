@@ -152,10 +152,13 @@ bool ValidateRendererRecoveryManifestBlock(const nlohmann::json& rendererRecover
 		outError = "Renderer recovery export manifest must be an object.";
 		return false;
 	}
-	if (!rendererRecovery.contains("maxRendererRebuildAttemptsPerIncident")
-		|| !rendererRecovery["maxRendererRebuildAttemptsPerIncident"].is_number_unsigned()
-		|| rendererRecovery["maxRendererRebuildAttemptsPerIncident"].get<std::uint32_t>() == 0u) {
-		outError = "Renderer recovery export manifest is missing a positive rebuild attempt budget.";
+	// Older packages did not declare a mode. Continue accepting them as
+	// fail-closed packages, but reject any new manifest that claims a different
+	// runtime recovery behavior.
+	if (rendererRecovery.contains("mode")
+		&& (!rendererRecovery["mode"].is_string()
+			|| rendererRecovery["mode"].get<std::string>() != "failClosed")) {
+		outError = "Renderer failure export manifest must use failClosed mode.";
 		return false;
 	}
 	if (!rendererRecovery.contains("fatalMessage")

@@ -865,10 +865,7 @@ void ResourceResidencyWindow::DrawRendererRecoverySummary()
 		ImGui::TableSetColumnIndex(2);
 		ImGui::Text("%s  %s", TerraEngine::Renderer::ToString(recovery.firstFailureStage), recovery.firstFailureResult.c_str());
 		ImGui::TableSetColumnIndex(3);
-		ImGui::Text("save=%s rebuild=%s retry=%s",
-			BoolText(recovery.canSaveProjectData),
-			BoolText(recovery.canAttemptRebuild),
-			BoolText(recovery.canRetryRendererRebuild));
+		ImGui::Text("save=%s", BoolText(recovery.canSaveProjectData));
 		ImGui::EndTable();
 	}
 	if (!recovery.message.empty())

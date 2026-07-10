@@ -10,7 +10,6 @@ namespace TerraEngine::EditorTests
 
 			context.Expect(snapshot.state == TerraEngine::Renderer::RendererRecoveryStateKind::DeviceLost, "Recovery windows should receive the unavailable renderer state.");
 			context.Expect(!snapshot.message.empty(), "Recovery windows should have a user-facing status message.");
-			context.Expect(snapshot.canAttemptRebuild, "Recovery windows should be able to expose a rebuild action when policy allows it.");
 		});
 	}
 }

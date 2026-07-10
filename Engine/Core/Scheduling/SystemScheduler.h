@@ -86,8 +86,6 @@ namespace TerraEngine::Scheduling {
 	inline constexpr const char kResourceVisibleStreamingTouchSets[] = "VisibleStreamingTouchSets";
 	inline constexpr const char kResourceRendererRecoveryStateSnapshot[] = "RendererRecoveryStateSnapshot";
 	inline constexpr const char kResourceRendererDeviceIncidentLog[] = "RendererDeviceIncidentLog";
-	inline constexpr const char kResourceRendererRecoveryPlan[] = "RendererRecoveryPlan";
-	inline constexpr const char kResourceRendererRecoverySession[] = "RendererRecoverySession";
 
 	struct SystemDeclaration {
 		std::string name;

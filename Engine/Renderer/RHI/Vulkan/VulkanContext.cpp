@@ -6893,30 +6893,6 @@ TerraEngine::Renderer::RendererRecoverySnapshot VulkanContext::GetLatestRenderer
 	return impl->latestRendererRecoverySnapshot;
 }
 
-bool VulkanContext::SupportsRendererRecoveryRebuild() const
-{
-	return impl != nullptr;
-}
-
-TerraEngine::Renderer::RendererRecoverySnapshot VulkanContext::BeginRendererRecoverySession(
-	std::uint32_t attemptNumber,
-	std::uint32_t maxAttempts,
-	TerraEngine::Renderer::RendererRecoveryAction requestedBy)
-{
-	if (!impl)
-	{
-		return TerraEngine::Renderer::MakeActiveRecoverySnapshot();
-	}
-
-	std::lock_guard<std::mutex> lock(impl->statsMutex);
-	impl->latestRendererRecoverySnapshot = TerraEngine::Renderer::BeginRecoveryRebuild(
-		impl->latestRendererRecoverySnapshot,
-		attemptNumber,
-		maxAttempts,
-		requestedBy);
-	return impl->latestRendererRecoverySnapshot;
-}
-
 void VulkanContext::PublishRendererRecoverySnapshot(TerraEngine::Renderer::RendererRecoverySnapshot snapshot)
 {
 	if (!impl)
@@ -6925,79 +6901,6 @@ void VulkanContext::PublishRendererRecoverySnapshot(TerraEngine::Renderer::Rende
 	}
 	std::lock_guard<std::mutex> lock(impl->statsMutex);
 	impl->latestRendererRecoverySnapshot = std::move(snapshot);
-}
-
-bool VulkanContext::RebuildRendererSession(
-	WindowSystem& windowSystem,
-	const TerraEngine::Renderer::ResourceRestorationPlan& restorationPlan,
-	TerraEngine::Renderer::RendererRecoverySnapshot* outSnapshot,
-	std::string* outError)
-{
-	if (!impl)
-	{
-		if (outError != nullptr)
-		{
-			*outError = "Vulkan context implementation is unavailable.";
-		}
-		return false;
-	}
-
-	(void)restorationPlan;
-	TerraEngine::Renderer::RendererRecoverySnapshot rebuilding;
-	{
-		std::lock_guard<std::mutex> lock(impl->statsMutex);
-		rebuilding = impl->latestRendererRecoverySnapshot;
-	}
-
-	auto publishFailure = [&](std::string reason) {
-		impl->deviceLost = true;
-		impl->skipFrame = true;
-		TerraEngine::Renderer::RendererRecoverySnapshot failed = TerraEngine::Renderer::CompleteRecoveryRebuild(
-			rebuilding,
-			false,
-			impl->renderSessionGeneration,
-			reason);
-		{
-			std::lock_guard<std::mutex> lock(impl->statsMutex);
-			impl->latestRendererRecoverySnapshot = failed;
-		}
-		if (outSnapshot != nullptr)
-		{
-			*outSnapshot = failed;
-		}
-		if (outError != nullptr)
-		{
-			*outError = std::move(reason);
-		}
-		return false;
-	};
-
-	const bool restoreEditorMode = impl->editorMode;
-	impl->Cleanup(true);
-	impl->editorMode = false;
-	if (!impl->InitVulkan(windowSystem))
-	{
-		return publishFailure("Vulkan renderer rebuild could not create a fresh session.");
-	}
-
-	if (restoreEditorMode)
-	{
-		impl->InitEditorMode();
-	}
-
-	TerraEngine::Renderer::RendererRecoverySnapshot completed = TerraEngine::Renderer::CompleteRecoveryRebuild(
-		rebuilding,
-		true,
-		impl->renderSessionGeneration);
-	{
-		std::lock_guard<std::mutex> lock(impl->statsMutex);
-		impl->latestRendererRecoverySnapshot = completed;
-	}
-	if (outSnapshot != nullptr)
-	{
-		*outSnapshot = completed;
-	}
-	return true;
 }
 
 VulkanContext::LiveGpuSubmissionBoundary VulkanContext::GetLiveGpuSubmissionBoundary() const

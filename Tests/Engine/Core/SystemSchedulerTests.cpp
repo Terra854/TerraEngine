@@ -390,9 +390,7 @@ namespace TerraEngine::Tests {
 				TerraEngine::Scheduling::kResourceVisibleCommandReuseDiagnostics,
 				TerraEngine::Scheduling::kResourceVisibleStreamingTouchSets,
 				TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
-				TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
-				TerraEngine::Scheduling::kResourceRendererRecoveryPlan,
-				TerraEngine::Scheduling::kResourceRendererRecoverySession
+				TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog
 			};
 
 			// RenderSystem is registered during engine startup before any frame
@@ -438,9 +436,7 @@ namespace TerraEngine::Tests {
 			}
 			const std::vector<std::string> recoveryResources = {
 				TerraEngine::Scheduling::kResourceRendererRecoveryStateSnapshot,
-				TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog,
-				TerraEngine::Scheduling::kResourceRendererRecoveryPlan,
-				TerraEngine::Scheduling::kResourceRendererRecoverySession
+				TerraEngine::Scheduling::kResourceRendererDeviceIncidentLog
 			};
 			for (const std::string& resourceName : recoveryResources)
 			{

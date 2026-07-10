@@ -400,9 +400,8 @@ bool Engine::Update(float deltaTime)
 
 	if (ResourceManager::Instance().IsExportRuntime()) {
 		const TerraEngine::Renderer::RendererRecoverySnapshot recovery = RenderSystem::Instance().GetLatestRendererRecoverySnapshot();
-		if (recovery.state == TerraEngine::Renderer::RendererRecoveryStateKind::FatalExportFailure
-			|| recovery.state == TerraEngine::Renderer::RendererRecoveryStateKind::RendererRecoveryFailed) {
-			TERRAENGINE_LOG(LogLevel::Error, "Export runtime stopping after renderer recovery failure. incident="
+		if (recovery.state == TerraEngine::Renderer::RendererRecoveryStateKind::FatalExportFailure) {
+			TERRAENGINE_LOG(LogLevel::Error, "Export runtime stopping after graphics device loss. incident="
 				<< recovery.incidentId
 				<< " report="
 				<< recovery.fatalDialogReportId
