@@ -232,12 +232,13 @@ the configured budget while exposing requested, resident, evicted, and
 re-requested page counters. The malformed page fixture must fail integrity
 validation before corrupt page payloads become renderable.
 
-For feature `034`, exact residency and fallback diagnostics are active before
-the shader path has a standalone page-local decode layout. If a fixture renders
-through the owning mesh vertex/remap/primitive streams, diagnostics must label
-that as owning-mesh fallback and the no-full-owner residency gate must fail.
-Do not mark such a run as true resident-page rendering until the shader consumes
-page-local geometry buffers for actual vertex and primitive decode.
+For feature `034`, resident high-detail and fallback fixtures must exercise the
+standalone page-local decode layout. The task and mesh shaders consume local
+vertex, primitive, remap, meshlet, bounds, decode-info, and material streams
+without first reading owner geometry. A fixture that reaches the owner path must
+represent a diagnosed page-policy failure, label the result as owning-mesh
+fallback, report the exact owner bytes and reason, and fail the no-full-owner
+residency gate instead of being counted as true resident-page rendering.
 
 ## Stress Counter Thresholds
 

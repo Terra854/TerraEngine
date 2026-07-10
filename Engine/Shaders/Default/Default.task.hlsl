@@ -630,10 +630,17 @@ bool TryBuildProjectedMeshletRect(const uint meshletIndex, const uint meshletCou
 		return false;
 	}
 
-	MeshletRecord record = meshletRecords[meshletIndex];
+	// Select the backing stream before loading the record. An eager owner-stream
+	// read would make an otherwise self-contained resident page depend on the
+	// placeholder owner bindings that page-streamed meshes deliberately keep tiny.
+	MeshletRecord record;
 	if (pageLocal)
 	{
 		record = LoadPageLocalMeshletRecord(pageDescriptor, meshletIndex);
+	}
+	else
+	{
+		record = meshletRecords[meshletIndex];
 	}
 	const uint vertexCount = min(record.vertexCount, kMaxMeshletVertices);
 	if (vertexCount == 0u || record.vertexOffset > decode.counts.y || vertexCount > (decode.counts.y - record.vertexOffset))
@@ -1078,13 +1085,20 @@ void main(uint3 groupId : SV_GroupID)
 {
 	PageLocalPayloadDescriptor pageDescriptor;
 	const bool pageLocalGeometry = TryUsePageLocalGeometry(pageDescriptor);
-	MeshDecodeInfo decode = meshDecodeInfo[0];
+	// Do not touch the owner decode buffer for resident page packets. Page-local
+	// descriptors carry a complete decode record and must remain independently
+	// usable when the full owner geometry allocation is intentionally skipped.
+	MeshDecodeInfo decode;
 	if (pageLocalGeometry)
 	{
 		// Resident page packets are self-contained. Their decode record describes
 		// only the local vertex/remap/primitive/meshlet streams in the page
 		// payload buffer, so task culling never has to read owner mesh buffers.
 		decode = LoadPageLocalDecodeInfo(pageDescriptor);
+	}
+	else
+	{
+		decode = meshDecodeInfo[0];
 	}
 	const uint meshletCount = pageLocalGeometry
 		? pageDescriptor.meshletCount
@@ -1127,10 +1141,16 @@ void main(uint3 groupId : SV_GroupID)
 		bool culled = false;
 		if (cullingEnabled)
 		{
-			MeshletBounds bounds = meshletBounds[meshletIndex];
+			// Load bounds from exactly one source so a page-local culling pass does
+			// not issue a speculative read through the owner mesh descriptor.
+			MeshletBounds bounds;
 			if (pageLocalGeometry)
 			{
 				bounds = LoadPageLocalMeshletBounds(pageDescriptor, meshletIndex);
+			}
+			else
+			{
+				bounds = meshletBounds[meshletIndex];
 			}
 			const float3 worldCenter = mul(SceneUniforms.model, float4(bounds.center, 1.0f)).xyz;
 			const float3 worldAxisX = mul((float3x3)SceneUniforms.model, float3(1.0f, 0.0f, 0.0f));

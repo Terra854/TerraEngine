@@ -298,6 +298,65 @@ namespace TerraEngine::Tests
 			context.Expect(ShaderContains(renderSystem, "record.packetId = packet.packetId"), "GPU packet publication should preserve CPU packet ids so page-local descriptors stay aligned after compaction.");
 		});
 
+		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalBranchesDoNotEagerlyReadOwnerStreams", [](TestContext& context) {
+			const std::string taskShader = ReadDefaultTaskShader();
+			const std::string meshShader = ReadDefaultMeshShader();
+
+			// Resident page packets deliberately skip the full owner allocation. These
+			// source-level guards prevent a convenient default initializer from issuing
+			// an owner-buffer read before the shader selects the page-local branch.
+			const std::size_t taskDecodeDeclaration = taskShader.find("MeshDecodeInfo decode;", taskShader.find("void main(uint3 groupId"));
+			const std::size_t taskPageDecode = taskShader.find("decode = LoadPageLocalDecodeInfo(pageDescriptor);", taskDecodeDeclaration);
+			const std::size_t taskDecodeElse = taskShader.find("else", taskPageDecode);
+			const std::size_t taskOwnerDecode = taskShader.find("decode = meshDecodeInfo[0];", taskPageDecode);
+			context.Expect(
+				taskDecodeDeclaration != std::string::npos
+					&& taskPageDecode < taskDecodeElse
+					&& taskDecodeElse < taskOwnerDecode,
+				"Task shader should confine owner decode metadata to the non-page-local branch.");
+
+			const std::size_t taskRecordDeclaration = taskShader.find("MeshletRecord record;", taskShader.find("bool TryBuildProjectedMeshletRect"));
+			const std::size_t taskPageRecord = taskShader.find("record = LoadPageLocalMeshletRecord(pageDescriptor, meshletIndex);", taskRecordDeclaration);
+			const std::size_t taskRecordElse = taskShader.find("else", taskPageRecord);
+			const std::size_t taskOwnerRecord = taskShader.find("record = meshletRecords[meshletIndex];", taskPageRecord);
+			context.Expect(
+				taskRecordDeclaration != std::string::npos
+					&& taskPageRecord < taskRecordElse
+					&& taskRecordElse < taskOwnerRecord,
+				"Task shader should confine owner meshlet records to the non-page-local branch.");
+
+			const std::size_t taskBoundsDeclaration = taskShader.find("MeshletBounds bounds;", taskShader.find("void main(uint3 groupId"));
+			const std::size_t taskPageBounds = taskShader.find("bounds = LoadPageLocalMeshletBounds(pageDescriptor, meshletIndex);", taskBoundsDeclaration);
+			const std::size_t taskBoundsElse = taskShader.find("else", taskPageBounds);
+			const std::size_t taskOwnerBounds = taskShader.find("bounds = meshletBounds[meshletIndex];", taskPageBounds);
+			context.Expect(
+				taskBoundsDeclaration != std::string::npos
+					&& taskPageBounds < taskBoundsElse
+					&& taskBoundsElse < taskOwnerBounds,
+				"Task shader should confine owner bounds to the non-page-local branch.");
+
+			const std::size_t meshDecodeDeclaration = meshShader.find("MeshDecodeInfo decode;", meshShader.find("void main("));
+			const std::size_t meshPageDecode = meshShader.find("decode = LoadPageLocalDecodeInfo(pageDescriptor);", meshDecodeDeclaration);
+			const std::size_t meshDecodeElse = meshShader.find("else", meshPageDecode);
+			const std::size_t meshOwnerDecode = meshShader.find("decode = meshDecodeInfo[0];", meshPageDecode);
+			context.Expect(
+				meshDecodeDeclaration != std::string::npos
+					&& meshPageDecode < meshDecodeElse
+					&& meshDecodeElse < meshOwnerDecode,
+				"Mesh shader should confine owner decode metadata to the non-page-local branch.");
+
+			const std::size_t pageEmit = meshShader.find("EmitPageLocalMeshlet(pageDescriptor, meshletIndex, outputVertices, outputTriangles);");
+			const std::size_t branchReturn = pageEmit == std::string::npos ? std::string::npos : meshShader.find("return;", pageEmit);
+			const std::size_t ownerEmit = meshShader.find("EmitMeshlet(meshletIndex, outputVertices, outputTriangles);", pageEmit);
+			context.Expect(
+				pageEmit != std::string::npos
+					&& branchReturn != std::string::npos
+					&& ownerEmit != std::string::npos
+					&& pageEmit < branchReturn
+					&& branchReturn < ownerEmit,
+				"Page-local mesh emission should return before the owner-mesh emission path can execute.");
+		});
+
 		registry.Add("VirtualGeometry.ShaderLayout.US2.PageLocalDrawsLaunchLocalMeshletRanges", [](TestContext& context) {
 			const std::string vulkanSource = ReadVulkanContextSource();
 

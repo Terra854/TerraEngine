@@ -486,11 +486,13 @@ ctest --test-dir out/build/Debug -C Debug -R "VirtualGeometry\\.(Render|PageStre
 These tests must prove that `Stream CPU Bytes` and `Render GPU Bytes` are exact
 current live bytes for the row's asset, package parent rows do not borrow child
 bytes, unavailable accounting stays non-numeric, and page-source diagnostics do
-not silently treat owning mesh buffers as true page-owned rendering. Current
-feature `034` builds still decode shader geometry through owner mesh streams;
-until a page-local shader-decodable payload layout lands, the no-full-owner
-performance gate should expose owning-mesh fallback bytes with an explicit
-reason instead of passing as a page-streamed normal path.
+not silently treat owning mesh buffers as true page-owned rendering. Feature
+`034` now publishes shader-decodable page-local vertex, primitive, remap,
+meshlet, bounds, decode-info, and material streams for resident high-detail and
+fallback packets. The shader-layout regression slice also proves that these
+branches select page-local records before any owner-stream read. Owning-mesh
+fallback remains valid only for a diagnosed page-policy failure, where the
+no-full-owner performance gate must expose the exact owner bytes and reason.
 
 After virtual geometry code changes, always finish with the normal configure,
 compile, CTest, and install verification flow so the installed editor/runtime

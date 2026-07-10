@@ -777,10 +777,17 @@ void main(
 	const uint visibleIndex = groupId.x;
 	PageLocalPayloadDescriptor pageDescriptor;
 	const bool pageLocalGeometry = TryUsePageLocalGeometry(pageDescriptor);
-	MeshDecodeInfo decode = meshDecodeInfo[0];
+	// Choose the payload source before reading decode metadata. Resident page
+	// packets are self-contained and must not require a valid full-owner decode
+	// buffer merely because the shader also supports legacy owner-mesh draws.
+	MeshDecodeInfo decode;
 	if (pageLocalGeometry)
 	{
 		decode = LoadPageLocalDecodeInfo(pageDescriptor);
+	}
+	else
+	{
+		decode = meshDecodeInfo[0];
 	}
 	const uint meshletCount = pageLocalGeometry
 		? pageDescriptor.meshletCount

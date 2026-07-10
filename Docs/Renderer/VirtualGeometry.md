@@ -320,15 +320,15 @@ diagnosed fail-open route, but normal page-streamed frames should not require
 all high-detail mesh bytes to be resident.
 
 Current implementation status: exact CPU/GPU byte ownership, per-view page
-source diagnostics, protected fallback accounting, and owning-mesh fallback
-reasons are implemented. The active task/mesh shader decode path still reads
-the owning mesh vertex, remap, primitive, meshlet, decode-info, and bounds
-buffers. Page payload descriptors are consumed for packet identity,
-diagnostics, upload planning, and performance gates, but they are not yet a
-standalone shader-decodable page-local geometry layout. Until that layout
-lands, page-streamed meshes that render through the owner buffers must be
-reported as owning-mesh fallback and must fail the no-full-owner residency
-performance gate instead of being counted as true page-owned rendering.
+source diagnostics, protected fallback accounting, owning-mesh fallback
+reasons, and page-local shader decoding are implemented. Resident high-detail
+and fallback packets publish standalone vertex, primitive, remap, meshlet,
+bounds, decode-info, and material streams. The task and mesh shaders select
+those streams before reading decode records or bounds, so the normal
+page-streamed path does not require full owner geometry buffers. The owner path
+remains a diagnosed fail-open route for real page-policy failures and must
+report exact owner bytes and a reason instead of being counted as page-owned
+rendering.
 
 This milestone preserves the accepted Hi-Z behavior. Page residency may change
 payload ownership, descriptor selection, and byte accounting, but it must not
