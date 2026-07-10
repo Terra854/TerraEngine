@@ -393,7 +393,7 @@ void DrawPackageFoldoutControl(bool packageExpanded, const std::string& packageG
 
 ProjectBrowserWindow::ProjectBrowserWindow(MainEditorSubsystem* owner)
 	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	: EditorWindow("Project Browser"), m_Owner(owner) {
+	: EditorWindow("Project Browser", true, "General"), m_Owner(owner) {
 	std::fill(m_NewAssetName.begin(), m_NewAssetName.end(), '\0');
 	std::fill(m_NewScriptName.begin(), m_NewScriptName.end(), '\0');
 }

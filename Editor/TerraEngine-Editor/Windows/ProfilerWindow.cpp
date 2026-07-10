@@ -444,7 +444,7 @@ void DrawSampleTreeRow(const SampleTree& tree, std::size_t nodeIndex, std::uint6
 
 ProfilerWindow::ProfilerWindow(MainEditorSubsystem* windowOwner)
 	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	: EditorWindow("Profiler", false), owner(windowOwner)
+	: EditorWindow("Profiler", false, "Rendering"), owner(windowOwner)
 {
 }
 

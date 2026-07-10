@@ -4,9 +4,16 @@
 
 #include "EditorWindow.h"
 #include <imgui_internal.h>
+#include <utility>
 
 EditorWindow::EditorWindow(const std::string& title, bool startVisible, ImGuiWindowFlags flags)
 	: m_Title(title), m_IsVisible(startVisible), m_Flags(flags) {
+}
+
+EditorWindow::EditorWindow(const std::string& title, bool startVisible, std::string windowMenuCategoryPath, ImGuiWindowFlags flags)
+	: m_Title(title), m_WindowMenuCategoryPath(std::move(windowMenuCategoryPath)), m_IsVisible(startVisible), m_Flags(flags) {
+	// The base stores the declaration only. MainEditorSubsystem interprets the
+	// path generically, so categories remain owned by each concrete window.
 }
 
 // EditorWindow::Draw is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

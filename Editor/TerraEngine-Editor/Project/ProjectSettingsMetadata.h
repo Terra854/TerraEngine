@@ -114,16 +114,6 @@ namespace TerraEngine::Editor::ProjectSettings
 		return results;
 	}
 
-	inline bool IsConsolidatedSettingsWindowTitle(std::string_view title)
-	{
-		return title == kSkySettingsWindowTitle || title == kRenderSettingsWindowTitle;
-	}
-
-	inline bool ShouldShowWindowInWindowMenu(std::string_view title)
-	{
-		return title != kBuildProfilesWindowTitle && !IsConsolidatedSettingsWindowTitle(title);
-	}
-
 	inline const ProjectSettingsCategoryDescriptor* FindProjectSettingsCategory(ProjectSettingsCategoryId id)
 	{
 		for (const ProjectSettingsCategoryDescriptor& category : kProjectSettingsCategories)

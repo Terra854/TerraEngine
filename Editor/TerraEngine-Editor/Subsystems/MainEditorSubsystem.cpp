@@ -33,6 +33,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <fstream>
+#include <string_view>
 #include <unordered_map>
 #include <nlohmann/json.hpp>
 
@@ -53,6 +54,104 @@
 namespace
 {
 	MainEditorSubsystem* g_ActiveMainEditorSubsystem = nullptr;
+
+	struct WindowMenuNode
+	{
+		std::string label;
+		std::shared_ptr<EditorWindow> window;
+		std::vector<WindowMenuNode> children;
+	};
+
+	std::vector<std::string> SplitWindowMenuPath(std::string_view path)
+	{
+		std::vector<std::string> segments;
+		std::size_t segmentStart = 0;
+		while (segmentStart < path.size())
+		{
+			const std::size_t separator = path.find('/', segmentStart);
+			const std::size_t segmentEnd = separator == std::string_view::npos ? path.size() : separator;
+			if (segmentEnd > segmentStart)
+			{
+				segments.emplace_back(path.substr(segmentStart, segmentEnd - segmentStart));
+			}
+			if (separator == std::string_view::npos)
+			{
+				break;
+			}
+			segmentStart = separator + 1;
+		}
+		return segments;
+	}
+
+	void AddWindowMenuPath(std::vector<WindowMenuNode>& roots, const std::shared_ptr<EditorWindow>& window)
+	{
+		if (!window || window->GetWindowMenuCategoryPath().empty())
+		{
+			// Menu participation is opt-in. Merely registering a drawable window
+			// never makes it part of the global Windows menu.
+			return;
+		}
+
+		const std::vector<std::string> segments = SplitWindowMenuPath(window->GetWindowMenuCategoryPath());
+		std::vector<WindowMenuNode>* siblings = &roots;
+		WindowMenuNode* currentNode = nullptr;
+		for (const std::string& segment : segments)
+		{
+			auto existing = std::find_if(siblings->begin(), siblings->end(), [&segment](const WindowMenuNode& node) {
+				return node.label == segment;
+			});
+			if (existing == siblings->end())
+			{
+				siblings->push_back(WindowMenuNode{segment});
+				currentNode = &siblings->back();
+			}
+			else
+			{
+				currentNode = &*existing;
+			}
+			siblings = &currentNode->children;
+		}
+
+		if (currentNode != nullptr)
+		{
+			// The category path never repeats the window label. Its registered title
+			// becomes the leaf entry beneath the declared category hierarchy.
+			currentNode->children.push_back(WindowMenuNode{window->GetTitle(), window});
+		}
+	}
+
+	void DrawWindowMenuNodes(const std::vector<WindowMenuNode>& nodes)
+	{
+		for (const WindowMenuNode& node : nodes)
+		{
+			if (!node.children.empty())
+			{
+				if (ImGui::BeginMenu(node.label.c_str()))
+				{
+					DrawWindowMenuNodes(node.children);
+					ImGui::EndMenu();
+				}
+				continue;
+			}
+
+			if (node.window && ImGui::MenuItem(node.label.c_str(), nullptr, node.window->IsVisible()))
+			{
+				// Preserve the previous native menu behavior: selecting an entry opens
+				// or focuses its window rather than using the menu as a close action.
+				node.window->SetVisible(true);
+			}
+		}
+	}
+
+	std::vector<WindowMenuNode> BuildWindowMenuTree(const std::vector<std::shared_ptr<EditorWindow>>& windows)
+	{
+		std::vector<WindowMenuNode> roots;
+		for (const std::shared_ptr<EditorWindow>& window : windows)
+		{
+			AddWindowMenuPath(roots, window);
+		}
+		return roots;
+	}
 
 	// ResolveEditorRuntimeRoot returns the directory that contains the running
 	// editor executable. Renderer-owned shaders and managed binaries are staged
@@ -1635,25 +1734,6 @@ void MainEditorSubsystem::OpenPreferences(TerraEngine::Editor::Preferences::Pref
 	}
 }
 
-std::vector<std::string> MainEditorSubsystem::GetWindowMenuTitlesForTests() const
-{
-	std::vector<std::string> titles;
-	for (const auto& window : m_Windows)
-	{
-		if (window && ShouldShowWindowInWindowMenuForTests(window->GetTitle()))
-		{
-			titles.push_back(window->GetTitle());
-		}
-	}
-	return titles;
-}
-
-bool MainEditorSubsystem::ShouldShowWindowInWindowMenuForTests(std::string_view title)
-{
-	return TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(title)
-		&& TerraEngine::Editor::Preferences::ShouldShowWindowInWindowMenu(title);
-}
-
 // MainEditorSubsystem::DrawUI is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 void MainEditorSubsystem::DrawUI() {
 	EnsurePrefabObjectsLoadedForEditor();
@@ -1910,18 +1990,14 @@ void MainEditorSubsystem::DrawMainMenuBar() {
 		}
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (ImGui::BeginMenu("Windows")) {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (auto& win : m_Windows) {
-				if (!TerraEngine::Editor::ProjectSettings::ShouldShowWindowInWindowMenu(win->GetTitle())) {
-					continue;
-				}
-				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-				if (ImGui::MenuItem(win->GetTitle().c_str())) {
-					win->SetVisible(true);
-				}
-			}
+			// Categories and nesting come entirely from each window's declared
+			// menu path. This renderer contains no list of category names.
+			const std::vector<WindowMenuNode> nativeMenuTree = BuildWindowMenuTree(m_Windows);
+			DrawWindowMenuNodes(nativeMenuTree);
 			
-			ImGui::Separator();
+			if (!nativeMenuTree.empty()) {
+				ImGui::Separator();
+			}
 
 			EditorSystem* editorSystem = nullptr;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

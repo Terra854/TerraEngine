@@ -115,8 +115,6 @@ public:
 		TerraEngine::Editor::ProjectSettings::ProjectSettingsCategoryId::Project);
 	void OpenPreferences(TerraEngine::Editor::Preferences::PreferencesCategoryId categoryId =
 		TerraEngine::Editor::Preferences::PreferencesCategoryId::Diagnostics);
-	std::vector<std::string> GetWindowMenuTitlesForTests() const;
-	static bool ShouldShowWindowInWindowMenuForTests(std::string_view title);
 
 private:
 	void CapturePlayModeSceneState();

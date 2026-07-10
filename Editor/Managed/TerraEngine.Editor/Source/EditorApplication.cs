@@ -37,6 +37,18 @@ namespace TerraEngine.Editor
         private static bool _initialized = false;
         private static StatusWindow _statusWindow = null!;
 
+		private sealed class WindowMenuNode
+		{
+			public WindowMenuNode(string label)
+			{
+				Label = label;
+			}
+
+			public string Label { get; }
+			public EditorWindow? Window { get; set; }
+			public List<WindowMenuNode> Children { get; } = new();
+		}
+
         // Initialize bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void Initialize(IntPtr imguiContext)
         {
@@ -98,6 +110,68 @@ namespace TerraEngine.Editor
             }
         }
 
+		private static void AddWindowMenuPath(List<WindowMenuNode> roots, EditorWindow window)
+		{
+			string? categoryPath = window.WindowMenuCategoryPath;
+			if (string.IsNullOrWhiteSpace(categoryPath))
+			{
+				// Registration controls drawing and workspace persistence only. Menu
+				// visibility requires an explicit path owned by the window class.
+				return;
+			}
+
+			List<WindowMenuNode> siblings = roots;
+			WindowMenuNode? current = null;
+			foreach (string rawSegment in categoryPath.Split('/', StringSplitOptions.RemoveEmptyEntries))
+			{
+				string segment = rawSegment.Trim();
+				if (segment.Length == 0)
+				{
+					continue;
+				}
+
+				current = siblings.Find(node => node.Label == segment);
+				if (current == null)
+				{
+					current = new WindowMenuNode(segment);
+					siblings.Add(current);
+				}
+				siblings = current.Children;
+			}
+
+			if (current != null)
+			{
+				// The window title is always the leaf label beneath its declared
+				// category path, so category names never need to repeat that title.
+				current.Children.Add(new WindowMenuNode(window.Title) { Window = window });
+			}
+		}
+
+		private static void DrawWindowMenuNodes(IEnumerable<WindowMenuNode> nodes)
+		{
+			foreach (WindowMenuNode node in nodes)
+			{
+				if (node.Children.Count > 0)
+				{
+					if (ImGui.BeginMenu(node.Label))
+					{
+						DrawWindowMenuNodes(node.Children);
+						ImGui.EndMenu();
+					}
+					continue;
+				}
+
+				if (node.Window != null)
+				{
+					bool visible = node.Window.IsVisible;
+					if (ImGui.MenuItem(node.Label, "", ref visible))
+					{
+						node.Window.IsVisible = visible;
+					}
+				}
+			}
+		}
+
         // DrawWindowMenu bridges managed callers to engine state; validate arguments before forwarding to native code.
         public static void DrawWindowMenu()
         {
@@ -105,21 +179,15 @@ namespace TerraEngine.Editor
             {
                 EnsureWindowsRegistered();
 
-                var windows = WindowManager.GetWindows();
-                int count = 0;
-                foreach (var window in windows)
-                {
-                    count++;
-                    bool visible = window.IsVisible;
-                    // Validate this condition before crossing into native or editor state that may outlive the managed object.
-                    if (ImGui.MenuItem(window.Title, "", ref visible))
-                    {
-                        window.IsVisible = visible;
-                    }
-                }
+				List<WindowMenuNode> roots = new();
+				foreach (EditorWindow window in WindowManager.GetWindows())
+				{
+					AddWindowMenuPath(roots, window);
+				}
+				DrawWindowMenuNodes(roots);
 
-                // Validate this condition before crossing into native or editor state that may outlive the managed object.
-                if (count == 0)
+				// Validate this condition before crossing into native or editor state that may outlive the managed object.
+				if (roots.Count == 0)
                 {
                     ImGui.TextDisabled("No registered C# windows");
                 }

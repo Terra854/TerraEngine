@@ -1091,7 +1091,7 @@ private:
 
 InspectorWindow::InspectorWindow(MainEditorSubsystem* owner)
 	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	: EditorWindow("Inspector"), m_Owner(owner) {
+	: EditorWindow("Inspector", true, "General"), m_Owner(owner) {
 }
 
 bool InspectorWindow::IsPrefabOverride(entt::entity obj, const std::string& compName, const std::string& propertyName) const

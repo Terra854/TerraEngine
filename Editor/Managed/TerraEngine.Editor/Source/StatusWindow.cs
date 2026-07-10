@@ -14,7 +14,7 @@ namespace TerraEngine.Editor
     {
         private float _deltaTime;
 
-        public StatusWindow() : base("Engine Status")
+		public StatusWindow() : base("Engine Status", "Managed/Diagnostics")
         {
             IsVisible = false;
         }

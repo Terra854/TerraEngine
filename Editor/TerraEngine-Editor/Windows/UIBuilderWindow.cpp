@@ -434,7 +434,7 @@ int AlignItemsToIndex(const std::optional<UIAlignItems>& value)
 
 UIBuilderWindow::UIBuilderWindow(MainEditorSubsystem* owner)
 	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	: EditorWindow("UI Builder")
+	: EditorWindow("UI Builder", true, "Tools")
 	, m_Owner(owner)
 {
 	CreateNewDocumentInternal();

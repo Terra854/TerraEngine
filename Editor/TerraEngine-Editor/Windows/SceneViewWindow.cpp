@@ -585,7 +585,7 @@ const char* MarkerGlyph(SceneOverlay::MarkerCategory category)
 
 SceneViewWindow::SceneViewWindow(MainEditorSubsystem* owner)
 	// EditorWindow is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
-	: EditorWindow("Scene View"), m_Owner(owner) {
+	: EditorWindow("Scene View", true, "Rendering"), m_Owner(owner) {
 	m_CurrentGizmoOperation = ImGuizmo::TRANSLATE;
 	m_IconDefinitions = SceneOverlay::BuildDefaultIconDefinitions();
 }

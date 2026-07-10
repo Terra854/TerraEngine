@@ -9,6 +9,7 @@
 class EditorWindow {
 public:
 	EditorWindow(const std::string& title, bool startVisible = true, ImGuiWindowFlags flags = 0);
+	EditorWindow(const std::string& title, bool startVisible, std::string windowMenuCategoryPath, ImGuiWindowFlags flags = 0);
 	virtual ~EditorWindow() = default;
 
 	void Draw();
@@ -17,6 +18,10 @@ public:
 	bool IsVisible() const { return m_IsVisible; }
 	void SetVisible(bool visible) { m_IsVisible = visible; }
 	const std::string& GetTitle() const { return m_Title; }
+	// WindowMenuCategoryPath is an explicit opt-in location relative to the
+	// Windows menu. Slash-separated segments create nested subcategories, and
+	// the window title becomes the leaf item. An empty path omits the window.
+	const std::string& GetWindowMenuCategoryPath() const { return m_WindowMenuCategoryPath; }
 
 protected:
 	virtual void OnGui() = 0;
@@ -26,6 +31,7 @@ protected:
 	virtual bool OnCloseRequested() { return true; }
 
 	std::string m_Title;
+	std::string m_WindowMenuCategoryPath;
 	bool m_IsVisible;
 	ImGuiWindowFlags m_Flags;
 };

@@ -647,7 +647,7 @@ struct ResourceResidencyWindow::DiagnosticsCache
 };
 
 ResourceResidencyWindow::ResourceResidencyWindow(MainEditorSubsystem* windowOwner)
-	: EditorWindow("Resource Residency", false), owner(windowOwner), m_DiagnosticsCache(std::make_unique<DiagnosticsCache>())
+	: EditorWindow("Resource Residency", false, "Rendering"), owner(windowOwner), m_DiagnosticsCache(std::make_unique<DiagnosticsCache>())
 {
 }
 

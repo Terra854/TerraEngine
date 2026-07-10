@@ -134,7 +134,7 @@ bool HierarchyWindow::AcceptPrefabAssetDrop(std::optional<entt::entity> parent)
 }
 
 HierarchyWindow::HierarchyWindow(MainEditorSubsystem* owner)
-	: EditorWindow("Scene Hierarchy"), m_Owner(owner) {
+	: EditorWindow("Scene Hierarchy", true, "General"), m_Owner(owner) {
 }
 
 // HierarchyWindow::OnGui is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.

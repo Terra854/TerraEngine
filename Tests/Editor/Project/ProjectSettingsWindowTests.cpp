@@ -1,6 +1,5 @@
 #include "TestHarness.h"
-#include "ProjectSettingsTestHelpers.h"
-
+#include "Editor/TerraEngine-Editor/Project/ProjectSettingsMetadata.h"
 #include <filesystem>
 #include <fstream>
 #include <sstream>

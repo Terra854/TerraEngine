@@ -1,5 +1,4 @@
 #include "TestHarness.h"
-#include "ProjectSettingsTestHelpers.h"
 #include "Editor/TerraEngine-Editor/Project/EditorPreferences.h"
 #include "Editor/TerraEngine-Editor/Project/EditorPreferencesMetadata.h"
 

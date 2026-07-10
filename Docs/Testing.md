@@ -31,6 +31,16 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 The editor harness currently runs the full editor test binary; the sky migration
 coverage is reported by the Project Settings tests inside that run.
 
+Native and managed editor windows opt into the `Windows` menu from their own
+window class. A native constructor supplies an optional category path, such as
+`EditorWindow("Inspector", true, "General")`; managed windows pass the same kind
+of path to their base constructor. Slash-separated values create deeper
+subcategories, so a future window may choose `Audio/Mixing` without adding that
+category to the main menu renderer. Omitting the category keeps the window
+registered and drawable but removes it from the menu. The focused
+`Editor.WindowMenu` tests verify these declarations, arbitrary path splitting,
+and the absence of the old centralized title blacklist.
+
 The scheduler checks cover the phase scheduler, general job graph, and ECS query
 task graph layers. The engine suite validates component read/write declarations,
 deterministic chunking, deferred scene mutation flushes, transform dependency

@@ -12,10 +12,15 @@ namespace TerraEngine.Editor.Framework
         public string Title { get; set; } = "Window";
         public bool IsVisible { get; set; } = true;
         public ImGuiWindowFlags Flags { get; set; } = ImGuiWindowFlags.None;
+		// WindowMenuCategoryPath opts a managed window into the Windows menu. Each
+		// slash-separated segment is a window-owned subcategory; the window title
+		// becomes its leaf item. Null or empty keeps the window out of the menu.
+		public string? WindowMenuCategoryPath { get; }
 
-        protected EditorWindow(string title)
+		protected EditorWindow(string title, string? windowMenuCategoryPath = null)
         {
             Title = title;
+			WindowMenuCategoryPath = windowMenuCategoryPath;
         }
 
         // Draw bridges managed callers to engine state; validate arguments before forwarding to native code.

@@ -98,11 +98,6 @@ namespace TerraEngine::Editor::Preferences
 		return results;
 	}
 
-	inline bool ShouldShowWindowInWindowMenu(std::string_view title)
-	{
-		return title != kPreferencesWindowTitle;
-	}
-
 	inline const PreferencesCategoryDescriptor* FindPreferencesCategory(PreferencesCategoryId id)
 	{
 		for (const PreferencesCategoryDescriptor& category : kPreferencesCategories)

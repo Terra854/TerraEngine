@@ -141,7 +141,7 @@ namespace
 }
 
 SchedulerDiagnosticsWindow::SchedulerDiagnosticsWindow(MainEditorSubsystem* windowOwner)
-	: EditorWindow("Scheduler Diagnostics", false), owner(windowOwner)
+	: EditorWindow("Scheduler Diagnostics", false, "Diagnostics"), owner(windowOwner)
 {
 }
 

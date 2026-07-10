@@ -22,7 +22,7 @@
 #include <string>
 
 GameViewWindow::GameViewWindow(MainEditorSubsystem* owner)
-	: EditorWindow("Game View"), m_Owner(owner) {
+	: EditorWindow("Game View", true, "Rendering"), m_Owner(owner) {
 	m_AspectRatios.push_back({ "Free Aspect", 0.0f, 0.0f, false });
 	m_AspectRatios.push_back({ "16:9 Aspect", 16.0f, 9.0f, false });
 	m_AspectRatios.push_back({ "16:10 Aspect", 16.0f, 10.0f, false });
