@@ -114,6 +114,46 @@ namespace TerraEngine::EditorTests
 			context.Expect(!EditorMcpTransport::IsLocalAddress("10.0.0.25"), "Non-local address should be rejected.");
 		});
 
+		registry.Add("Editor.MCP.Transport.ConfiguredPortBindsExactly", [](TestContext& context) {
+			// Ask the OS for an available test port, release it, then prove the
+			// bridge binds that exact configured value rather than another port.
+			EditorMcpBridge probeBridge;
+			probeBridge.Initialize(nullptr);
+			EditorMcpTransport probeTransport(probeBridge);
+			context.Expect(probeTransport.StartListening(0), "Test port probe should start an ephemeral listener.");
+			const std::uint16_t selectedPort = probeTransport.GetListenPort();
+			probeTransport.StopListening();
+
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			context.Expect(bridge.SetListenPort(selectedPort), "Bridge should accept the available configured port.");
+			bridge.SetEnabled(true);
+			context.Expect(bridge.IsEnabled(), "Bridge should enable on the configured port.");
+			context.ExpectEqual(selectedPort, bridge.GetConfiguredListenPort(), "Bridge should retain the configured port.");
+			context.ExpectEqual(selectedPort, bridge.GetListenPort(), "Live listener should bind the exact configured port.");
+			bridge.Shutdown();
+		});
+
+		registry.Add("Editor.MCP.Transport.OccupiedConfiguredPortDoesNotRandomize", [](TestContext& context) {
+			EditorMcpBridge blockerBridge;
+			blockerBridge.Initialize(nullptr);
+			EditorMcpTransport blocker(blockerBridge);
+			context.Expect(blocker.StartListening(0), "Port blocker should acquire an available loopback port.");
+			const std::uint16_t occupiedPort = blocker.GetListenPort();
+
+			EditorMcpBridge bridge;
+			bridge.Initialize(nullptr);
+			context.Expect(bridge.SetListenPort(occupiedPort), "Bridge should save the requested occupied port before listening.");
+			bridge.SetEnabled(true);
+			context.Expect(!bridge.IsEnabled(), "Bridge should remain disabled when its configured port is occupied.");
+			context.ExpectEqual(occupiedPort, bridge.GetConfiguredListenPort(), "Bind failure should not replace the configured port.");
+			context.ExpectEqual(static_cast<std::uint16_t>(0), bridge.GetListenPort(), "Bind failure should not fall back to an ephemeral listener.");
+			context.Expect(bridge.GetTransportLastError().find(std::to_string(occupiedPort)) != std::string::npos, "Bind error should identify the occupied configured port.");
+
+			bridge.Shutdown();
+			blocker.StopListening();
+		});
+
 		registry.Add("Editor.MCP.Transport.AcceptRejectsByBridgeStateAndPeer", [](TestContext& context) {
 			EditorMcpBridge bridge;
 			bridge.Initialize(nullptr);

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "EditorMcpPreferences.h"
 #include "../Windows/SceneViewOverlayTypes.h"
 
 #include <string>
@@ -29,6 +30,7 @@ struct EditorPreferences {
 	bool editorMcpEnabled = false;
 	std::string editorMcpWriteModeDefault = "read_only";
 	std::string editorMcpRecentSession;
+	std::uint16_t editorMcpListenPort = TerraEngine::Editor::Preferences::kDefaultEditorMcpListenPort;
 	// Renderer diagnostics are editor-wide preferences because they affect the
 	// local developer session and should not force project/runtime defaults.
 	bool vulkanValidationLayers = false;
@@ -46,6 +48,7 @@ struct EditorPreferences {
 			{"editorMcpEnabled", preferences.editorMcpEnabled},
 			{"editorMcpWriteModeDefault", preferences.editorMcpWriteModeDefault},
 			{"editorMcpRecentSession", preferences.editorMcpRecentSession},
+			{"editorMcpListenPort", preferences.editorMcpListenPort},
 			{"vulkanValidationLayers", preferences.vulkanValidationLayers},
 			{"renderDebugDiagnostics", preferences.renderDebugDiagnostics},
 			{"rendererDiagnosticsPreferencesInitialized", preferences.rendererDiagnosticsPreferencesInitialized},
@@ -64,6 +67,28 @@ struct EditorPreferences {
 		preferences.editorMcpEnabled = json.value("editorMcpEnabled", json.value("editorMcpEnabledByDefault", preferences.editorMcpEnabled));
 		preferences.editorMcpWriteModeDefault = json.value("editorMcpWriteModeDefault", preferences.editorMcpWriteModeDefault);
 		preferences.editorMcpRecentSession = json.value("editorMcpRecentSession", preferences.editorMcpRecentSession);
+		if (const auto portIt = json.find("editorMcpListenPort"); portIt != json.end())
+		{
+			// Preference files are user-editable, so reject negative, privileged,
+			// oversized, or ephemeral values without throwing during editor startup.
+			if (portIt->is_number_unsigned())
+			{
+				const std::uint64_t port = portIt->get<std::uint64_t>();
+				if (port <= TerraEngine::Editor::Preferences::kMaximumEditorMcpListenPort
+					&& TerraEngine::Editor::Preferences::IsValidEditorMcpListenPort(static_cast<std::int64_t>(port)))
+				{
+					preferences.editorMcpListenPort = static_cast<std::uint16_t>(port);
+				}
+			}
+			else if (portIt->is_number_integer())
+			{
+				const std::int64_t port = portIt->get<std::int64_t>();
+				if (TerraEngine::Editor::Preferences::IsValidEditorMcpListenPort(port))
+				{
+					preferences.editorMcpListenPort = static_cast<std::uint16_t>(port);
+				}
+			}
+		}
 		preferences.vulkanValidationLayers = json.value("vulkanValidationLayers", preferences.vulkanValidationLayers);
 		preferences.renderDebugDiagnostics = json.value("renderDebugDiagnostics", preferences.renderDebugDiagnostics);
 		preferences.rendererDiagnosticsPreferencesInitialized =

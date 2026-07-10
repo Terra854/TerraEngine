@@ -626,10 +626,16 @@ void ProjectManager::SetAutoBuildScripts(bool enabled) {
 }
 
 // ProjectManager::SetEditorMcpPreferences stores the bridge defaults that the editor reapplies during startup.
-void ProjectManager::SetEditorMcpPreferences(bool enabled, const std::string& writeModeDefault, const std::string& recentSession) {
+void ProjectManager::SetEditorMcpPreferences(bool enabled, const std::string& writeModeDefault, const std::string& recentSession, std::uint16_t listenPort) {
 	editorPrefs.editorMcpEnabled = enabled;
 	editorPrefs.editorMcpWriteModeDefault = writeModeDefault;
 	editorPrefs.editorMcpRecentSession = recentSession;
+	// The bridge validates this value before calling ProjectManager. Keep the
+	// persistence layer defensive so no other caller can save an ephemeral or
+	// privileged endpoint accidentally.
+	if (TerraEngine::Editor::Preferences::IsValidEditorMcpListenPort(listenPort)) {
+		editorPrefs.editorMcpListenPort = listenPort;
+	}
 	SaveEditorPreferences();
 }
 

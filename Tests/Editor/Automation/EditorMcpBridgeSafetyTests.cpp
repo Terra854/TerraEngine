@@ -249,7 +249,7 @@ namespace TerraEngine::EditorTests
 			context.Expect(bridge.GetQueuedRequests().empty(), "Canceled request should drain on update.");
 		});
 
-		registry.Add("Editor.MCP.Safety.EnablementAndWriteModePersist", [](TestContext& context) {
+		registry.Add("Editor.MCP.Safety.EnablementWriteModeAndPortPersist", [](TestContext& context) {
 			ScopedPreferenceDirectory preferences("McpBridgePreferences");
 			EditorContext editorContext;
 			editorContext.projectManager = std::make_shared<ProjectManager>();
@@ -263,10 +263,20 @@ namespace TerraEngine::EditorTests
 			context.Expect(json.value("editorMcpEnabled", false), "Enabled MCP bridge should persist as a global editor preference.");
 			context.ExpectEqual(std::string("writes_enabled"), json.value("editorMcpWriteModeDefault", std::string()), "Write mode should persist for the next editor launch.");
 			context.Expect(!json.value("editorMcpRecentSession", std::string()).empty(), "Recent MCP endpoint should be written when the bridge is listening.");
+			context.ExpectEqual(
+				TerraEngine::Editor::Preferences::kDefaultEditorMcpListenPort,
+				static_cast<std::uint16_t>(json.value("editorMcpListenPort", 0u)),
+				"The default fixed MCP port should persist while listening.");
 
 			bridge.SetEnabled(false);
+			constexpr std::uint16_t savedPort = 43127;
+			context.Expect(bridge.SetListenPort(savedPort), "A valid MCP port should be configurable while the bridge is disabled.");
 			json = ReadPreferenceJson(preferences.PreferencesPath());
 			context.Expect(!json.value("editorMcpEnabled", true), "Disabled MCP bridge should persist when the user turns it off.");
+			context.ExpectEqual(savedPort, static_cast<std::uint16_t>(json.value("editorMcpListenPort", 0u)), "Configured MCP port should persist for the next editor launch.");
+
+			ProjectManager reloadedPreferences;
+			context.ExpectEqual(savedPort, reloadedPreferences.GetEditorPreferences().editorMcpListenPort, "A new editor preference owner should reload the configured MCP port.");
 			bridge.Shutdown();
 		});
 	}

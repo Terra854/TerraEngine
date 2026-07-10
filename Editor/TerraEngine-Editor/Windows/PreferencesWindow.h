@@ -28,10 +28,13 @@ private:
 	void DrawCategorySidebar();
 	void DrawSelectedCategory();
 	void DrawRendererDiagnosticsCategory();
+	void DrawMcpBridgeCategory();
 	void DrawUnavailableState(const char* message);
 
 	MainEditorSubsystem* m_Owner = nullptr;
 	TerraEngine::Editor::Preferences::PreferencesCategoryId m_SelectedCategory =
 		TerraEngine::Editor::Preferences::PreferencesCategoryId::Diagnostics;
 	std::string m_SearchText;
+	int m_McpListenPortDraft = 0;
+	bool m_McpListenPortDraftInitialized = false;
 };

@@ -20,11 +20,19 @@ code never edits scene or project state directly.
 - Activity history is bounded to the newest 256 records so long sessions do not
   grow memory indefinitely.
 
-## Editor Window
+## Preferences
 
-Open `Windows > MCP Bridge` from the native editor menu. The window exposes
+Open `Edit > Preferences...` and select `MCP Bridge`. The category exposes
 enablement, write mode, current state, pending request/approval counts, approval
-buttons, and recent activity.
+buttons, export activity, resources, and recent activity. The bridge no longer
+uses a separate editor window.
+
+The listen port is also configured in this category and defaults to `8765`.
+Disable the bridge before changing the port, enter a value from `1024` through
+`65535`, then enable the bridge again. Valid edits save automatically. The
+selected port is stored in the global editor preferences and reused on every
+launch. If another process owns that port, the bridge remains disabled and
+reports the bind error instead of choosing a random port.
 
 ## Resources
 
@@ -71,13 +79,13 @@ ctest --test-dir out\build\Debug --output-on-failure
 cmd /c "C:\PROGRA~1\MIB055~1\18\COMMUN~1\Common7\Tools\VsDevCmd.bat -arch=x64 -host_arch=x64 && cmake --build --preset Debug --target install"
 ```
 
-Manual validation should use the installed editor tree. Open a project, show the
-MCP Bridge window, confirm disabled/read-only startup, enable the bridge, switch
-write mode from the editor window, inspect status/capabilities/resources,
+Manual validation should use the installed editor tree. Open a project, open
+`Edit > Preferences... > MCP Bridge`, confirm disabled/read-only startup, enable
+the bridge, switch write mode from Preferences, inspect status/resources,
 confirm no `bridge.set_write_mode` MCP tool is advertised, exercise
 object/component tools, import a glTF or FBX package with `asset.import`, verify
 the returned generated asset identifiers and diagnostics, then disable the
-bridge from the editor window and confirm local client requests are rejected.
+bridge from Preferences and confirm local client requests are rejected.
 
 ## Limitations
 

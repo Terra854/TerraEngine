@@ -159,6 +159,7 @@ void EditorSystem::Setup(Engine* enginePtr) {
 	const EditorPreferences& preferences = context.projectManager->GetEditorPreferences();
 	const std::string editorMcpWriteModeDefault = preferences.editorMcpWriteModeDefault;
 	const bool editorMcpEnabled = preferences.editorMcpEnabled;
+	context.editorMcpBridge->SetListenPort(preferences.editorMcpListenPort);
 	if (const auto parsedWriteMode = TerraEngine::Editor::Automation::ParseWriteMode(editorMcpWriteModeDefault)) {
 		context.editorMcpBridge->SetWriteMode(*parsedWriteMode);
 	}

@@ -48,7 +48,7 @@ namespace TerraEngine::EditorTests
 
 		registry.Add("Editor.Preferences.CategorySearchContract", [](TestContext& context) {
 			const auto allCategories = TerraEngine::Editor::Preferences::FilterPreferencesCategories("");
-			context.ExpectEqual(static_cast<std::size_t>(1), allCategories.size(), "Empty search should show the current Preferences categories.");
+			context.ExpectEqual(static_cast<std::size_t>(2), allCategories.size(), "Empty search should show the current Preferences categories.");
 
 			const auto validationMatches = TerraEngine::Editor::Preferences::FilterPreferencesCategories("validation");
 			context.ExpectEqual(static_cast<std::size_t>(1), validationMatches.size(), "Validation search should find the diagnostics category.");
@@ -56,6 +56,38 @@ namespace TerraEngine::EditorTests
 				std::string("diagnostics"),
 				std::string(validationMatches.front().stableId),
 				"Validation search should route to diagnostics.");
+
+			const auto mcpMatches = TerraEngine::Editor::Preferences::FilterPreferencesCategories("assistant");
+			context.ExpectEqual(static_cast<std::size_t>(1), mcpMatches.size(), "Assistant search should find the MCP Bridge category.");
+			context.ExpectEqual(
+				std::string("mcp-bridge"),
+				std::string(mcpMatches.front().stableId),
+				"Assistant search should route to the MCP Bridge category.");
+		});
+
+		registry.Add("Editor.Preferences.McpBridgeMovedFromStandaloneWindow", [](TestContext& context) {
+			const std::filesystem::path sourceRoot = std::filesystem::path(TERRAENGINE_SOURCE_DIR);
+			const std::string preferencesSource =
+				ReadPreferencesSourceFile("Editor/TerraEngine-Editor/Windows/PreferencesWindow.cpp");
+			const std::string mainEditorSource =
+				ReadPreferencesSourceFile("Editor/TerraEngine-Editor/Subsystems/MainEditorSubsystem.cpp");
+			const std::string cmakeSource = ReadPreferencesSourceFile("CMakeLists.txt");
+
+			context.Expect(!preferencesSource.empty(), "Preferences source should be readable for MCP Bridge ownership checks.");
+			context.Expect(preferencesSource.find("DrawMcpBridgeCategory") != std::string::npos, "Preferences should own the MCP Bridge category UI.");
+			context.Expect(preferencesSource.find("bridge->SetEnabled") != std::string::npos, "Preferences should expose MCP Bridge enablement.");
+			context.Expect(preferencesSource.find("bridge->SetWriteMode") != std::string::npos, "Preferences should expose MCP Bridge write permissions.");
+			context.Expect(preferencesSource.find("Listen port") != std::string::npos, "Preferences should expose the fixed MCP listen port.");
+			context.Expect(preferencesSource.find("bridge->SetListenPort") != std::string::npos, "Preferences should apply MCP listen-port changes through the bridge.");
+			context.Expect(preferencesSource.find("Apply port") == std::string::npos, "MCP listen-port edits should save without a separate apply button.");
+			context.Expect(preferencesSource.find("bridge->GetPendingApprovals") != std::string::npos, "Preferences should expose pending MCP approvals.");
+			context.Expect(preferencesSource.find("bridge->GetRecentActivity") != std::string::npos, "Preferences should expose recent MCP activity.");
+			context.Expect(mainEditorSource.find("EditorMcpBridgeWindow") == std::string::npos, "The editor should not register a standalone MCP Bridge window.");
+			context.Expect(cmakeSource.find("EditorMcpBridgeWindow.cpp") == std::string::npos, "The editor target should not compile a standalone MCP Bridge window.");
+			context.Expect(
+				!std::filesystem::exists(sourceRoot / "Editor/TerraEngine-Editor/Windows/EditorMcpBridgeWindow.cpp") &&
+				!std::filesystem::exists(sourceRoot / "Editor/TerraEngine-Editor/Windows/EditorMcpBridgeWindow.h"),
+				"Standalone MCP Bridge window source files should be removed.");
 		});
 
 		registry.Add("Editor.Preferences.RendererDiagnosticsMovedFromProjectSettings", [](TestContext& context) {
@@ -98,6 +130,30 @@ namespace TerraEngine::EditorTests
 
 			const EditorPreferences legacy = nlohmann::json::object().get<EditorPreferences>();
 			context.Expect(!legacy.rendererDiagnosticsPreferencesInitialized, "Legacy preference files should let Project Settings render flags seed the first editor preference value.");
+		});
+
+		registry.Add("Editor.Preferences.McpListenPortRoundTripAndFallback", [](TestContext& context) {
+			EditorPreferences preferences;
+			preferences.editorMcpListenPort = 43127;
+
+			const nlohmann::json json = preferences;
+			const EditorPreferences restored = json.get<EditorPreferences>();
+			context.ExpectEqual(static_cast<std::uint16_t>(43127), restored.editorMcpListenPort, "MCP listen port should round-trip through editor preferences.");
+
+			const EditorPreferences legacy = nlohmann::json::object().get<EditorPreferences>();
+			context.ExpectEqual(
+				TerraEngine::Editor::Preferences::kDefaultEditorMcpListenPort,
+				legacy.editorMcpListenPort,
+				"Preference files without a port should migrate to the stable default.");
+
+			for (const nlohmann::json invalidPort : {nlohmann::json(0), nlohmann::json(1023), nlohmann::json(70000), nlohmann::json(-1), nlohmann::json("8765")})
+			{
+				const EditorPreferences sanitized = nlohmann::json{{"editorMcpListenPort", invalidPort}}.get<EditorPreferences>();
+				context.ExpectEqual(
+					TerraEngine::Editor::Preferences::kDefaultEditorMcpListenPort,
+					sanitized.editorMcpListenPort,
+					"Invalid MCP listen ports should fall back to the stable default.");
+			}
 		});
 	}
 }

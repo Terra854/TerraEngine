@@ -7,6 +7,7 @@
 #pragma once
 
 #include "EditorAutomationService.h"
+#include "../Project/EditorMcpPreferences.h"
 
 #include <deque>
 #include <functional>
@@ -41,6 +42,8 @@ namespace TerraEngine::Editor::Automation
 		bool IsEnabled() const;
 		void SetWriteMode(WriteMode mode);
 		WriteMode GetWriteMode() const;
+		bool SetListenPort(std::uint16_t port);
+		std::uint16_t GetConfiguredListenPort() const;
 		BridgeState GetState() const;
 
 		void OnLocalClientConnected(std::string clientName, std::string peerAddress);
@@ -95,6 +98,8 @@ namespace TerraEngine::Editor::Automation
 		EditorAutomationService service;
 		BridgeSession session;
 		WriteMode writeMode = WriteMode::ReadOnly;
+		std::uint16_t configuredListenPort = TerraEngine::Editor::Preferences::kDefaultEditorMcpListenPort;
+		std::string listenPortConfigurationError;
 		std::deque<ActivityRecord> activityHistory;
 		std::deque<AssistantRequest> requestQueue;
 		std::deque<std::shared_ptr<PendingToolCall>> pendingToolCalls;

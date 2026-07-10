@@ -128,10 +128,13 @@ namespace TerraEngine::Editor::Automation
 	{
 		if (enabled)
 		{
+			listenPortConfigurationError.clear();
 			session.state = session.connectedClientCount > 0 ? BridgeState::Connected : BridgeState::Listening;
 			if (transport && !transport->IsListening())
 			{
-				if (!transport->StartListening())
+				// Always bind the saved port. Falling back to port zero would create a
+				// random endpoint and break external MCP client configuration.
+				if (!transport->StartListening(configuredListenPort))
 				{
 					session.state = BridgeState::Disabled;
 					RecordActivity(ActivityEventType::Rejection, {}, "transport.listen", transport->GetLastError(), "failed");
@@ -170,6 +173,33 @@ namespace TerraEngine::Editor::Automation
 	WriteMode EditorMcpBridge::GetWriteMode() const
 	{
 		return writeMode;
+	}
+
+	bool EditorMcpBridge::SetListenPort(std::uint16_t port)
+	{
+		if (!TerraEngine::Editor::Preferences::IsValidEditorMcpListenPort(port))
+		{
+			listenPortConfigurationError = "MCP listen port must be between 1024 and 65535.";
+			return false;
+		}
+		if (IsEnabled())
+		{
+			// Rebinding would disconnect the active client. Requiring an explicit
+			// disable makes that disruption visible and intentional in Preferences.
+			listenPortConfigurationError = "Disable the MCP bridge before changing its listen port.";
+			return false;
+		}
+
+		configuredListenPort = port;
+		listenPortConfigurationError.clear();
+		RecordActivity(ActivityEventType::Configuration, {}, "bridge.set_listen_port", "Changed MCP listen port to " + std::to_string(port) + ".", "completed");
+		PersistPreferences();
+		return true;
+	}
+
+	std::uint16_t EditorMcpBridge::GetConfiguredListenPort() const
+	{
+		return configuredListenPort;
 	}
 
 	BridgeState EditorMcpBridge::GetState() const
@@ -364,6 +394,7 @@ namespace TerraEngine::Editor::Automation
 			{"writeMode", ToString(writeMode)},
 			{"endpoint", GetListenEndpoint()},
 			{"port", GetListenPort()},
+			{"configuredPort", GetConfiguredListenPort()},
 			{"connectedClientCount", session.connectedClientCount},
 			{"clientName", session.clientName},
 			{"pendingRequestCount", requestQueue.size()},
@@ -385,6 +416,10 @@ namespace TerraEngine::Editor::Automation
 
 	std::string EditorMcpBridge::GetTransportLastError() const
 	{
+		if (!listenPortConfigurationError.empty())
+		{
+			return listenPortConfigurationError;
+		}
 		return transport ? transport->GetLastError() : std::string();
 	}
 
@@ -483,7 +518,7 @@ namespace TerraEngine::Editor::Automation
 		{
 			return;
 		}
-		editorContext->projectManager->SetEditorMcpPreferences(IsEnabled(), std::string(ToString(writeMode)), GetListenEndpoint());
+		editorContext->projectManager->SetEditorMcpPreferences(IsEnabled(), std::string(ToString(writeMode)), GetListenEndpoint(), configuredListenPort);
 	}
 
 	nlohmann::json EditorMcpBridge::BuildApprovalResponse(const AssistantCapability& capability, const nlohmann::json& arguments, const std::string& requestId)

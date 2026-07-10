@@ -49,7 +49,6 @@
 #include "../Windows/UIBuilderWindow.h"
 #include "../Windows/ProjectSettingsWindow.h"
 #include "../Windows/PreferencesWindow.h"
-#include "../Windows/EditorMcpBridgeWindow.h"
 
 namespace
 {
@@ -435,7 +434,6 @@ void MainEditorSubsystem::Initialize(EditorContext& context) {
 	m_Windows.push_back(std::make_shared<SchedulerDiagnosticsWindow>(this));
 	m_Windows.push_back(std::make_shared<ResourceResidencyWindow>(this));
 	m_Windows.push_back(std::make_shared<UIBuilderWindow>(this));
-	m_Windows.push_back(std::make_shared<EditorMcpBridgeWindow>(this));
 
 	UndoRedoSystem::Instance().Initialize(context);
 	ScriptCompilationSubsystem::Instance().Initialize(context);

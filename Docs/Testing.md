@@ -559,9 +559,11 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
 After installation, open the installed editor, load a project, and use
-`Windows > MCP Bridge` to confirm disabled/read-only startup, local-only
-connection behavior, capability/resource listing, write-mode blocking, approval
-prompts, and activity history.
+`Edit > Preferences... > MCP Bridge` to confirm disabled/read-only startup,
+local-only connection behavior, capability/resource listing, write-mode
+blocking, approval prompts, activity history, and fixed-port persistence. Change
+the listen port while disabled, restart the editor, and confirm the endpoint
+uses the same port instead of an ephemeral one.
 
 For Linux-specific prerequisites and troubleshooting, see
 `Docs/LinuxSupport.md`.

@@ -53,7 +53,7 @@ public:
 	bool ShouldAutoBuildScripts() const;
 	void SetExternalScriptEditorCommand(const std::string& commandTemplate);
 	void SetAutoBuildScripts(bool enabled);
-	void SetEditorMcpPreferences(bool enabled, const std::string& writeModeDefault, const std::string& recentSession);
+	void SetEditorMcpPreferences(bool enabled, const std::string& writeModeDefault, const std::string& recentSession, std::uint16_t listenPort);
 	void SetRendererDiagnosticPreferences(bool vulkanValidationLayers, bool renderDebugDiagnostics);
 	void SetSceneViewOverlayPreference(const TerraEngine::Editor::SceneViewOverlay::SceneOverlayPreference& preference);
 

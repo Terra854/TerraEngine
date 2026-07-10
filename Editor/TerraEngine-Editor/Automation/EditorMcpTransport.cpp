@@ -233,8 +233,16 @@ namespace TerraEngine::Editor::Automation
 			return false;
 		}
 
+#if defined(_WIN32)
+		// A local automation listener must own its port exclusively. Windows
+		// SO_REUSEADDR can allow another process to bind the same endpoint, which
+		// would make client routing ambiguous and weaken the loopback boundary.
+		int exclusive = 1;
+		setsockopt(socketHandle, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof(exclusive));
+#else
 		int reuse = 1;
 		setsockopt(socketHandle, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+#endif
 
 		sockaddr_in address{};
 		address.sin_family = AF_INET;
@@ -242,7 +250,7 @@ namespace TerraEngine::Editor::Automation
 		address.sin_port = htons(preferredPort);
 		if (bind(socketHandle, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0)
 		{
-			lastError = LastSocketError();
+			lastError = "Could not bind MCP bridge to 127.0.0.1:" + std::to_string(preferredPort) + ": " + LastSocketError();
 			CloseSocket(socketHandle);
 			ShutdownSocketRuntime();
 			return false;

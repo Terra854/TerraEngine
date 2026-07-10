@@ -20,7 +20,8 @@ namespace TerraEngine::Editor::Preferences
 
 	enum class PreferencesCategoryId
 	{
-		Diagnostics
+		Diagnostics,
+		McpBridge
 	};
 
 	struct PreferencesCategoryDescriptor
@@ -32,13 +33,20 @@ namespace TerraEngine::Editor::Preferences
 		std::array<std::string_view, 8> keywords;
 	};
 
-	inline constexpr std::array<PreferencesCategoryDescriptor, 1> kPreferencesCategories = {{
+	inline constexpr std::array<PreferencesCategoryDescriptor, 2> kPreferencesCategories = {{
 		{
 			PreferencesCategoryId::Diagnostics,
 			"diagnostics",
 			"Diagnostics",
 			"Local editor renderer diagnostics and validation preferences.",
 			{ "diagnostics", "renderer", "render", "vulkan", "validation", "debug", "layers", "preferences" }
+		},
+		{
+			PreferencesCategoryId::McpBridge,
+			"mcp-bridge",
+			"MCP Bridge",
+			"Local assistant connection, permissions, approvals, and activity.",
+			{ "mcp", "bridge", "assistant", "automation", "connection", "port", "permissions", "approvals" }
 		}
 	}};
 
