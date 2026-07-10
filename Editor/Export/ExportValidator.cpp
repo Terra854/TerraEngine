@@ -28,12 +28,23 @@ static void AddDiagnostic(ExportValidationResult& result,
 	const std::string& filePath = {},
 	int line = 0)
 {
+	std::string categoryCode;
+	categoryCode.reserve(category.size());
+	for(unsigned char character : category) {
+		if(std::isalnum(character) != 0) categoryCode.push_back(static_cast<char>(std::tolower(character)));
+		else if(categoryCode.empty() || categoryCode.back() != '_') categoryCode.push_back('_');
+	}
+	while(!categoryCode.empty() && categoryCode.back() == '_') categoryCode.pop_back();
+	if(categoryCode.empty()) categoryCode = "general";
+
 	ExportDiagnostic diag;
 	diag.severity = severity;
 	diag.category = category;
 	diag.message = message;
 	diag.filePath = filePath;
 	diag.line = line;
+	diag.stage = "validation";
+	diag.code = "export.validation." + categoryCode;
 	result.diagnostics.push_back(std::move(diag));
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -62,6 +73,8 @@ static bool ShouldScanManagedSourceFile(const std::filesystem::path& projectRoot
 	return normalized.rfind("Build/", 0) != 0
 		&& normalized.rfind("Library/", 0) != 0
 		&& normalized.rfind("Temp/", 0) != 0
+		&& normalized.rfind("obj/", 0) != 0
+		&& normalized.rfind("bin/", 0) != 0
 		&& normalized.rfind("ProjectSettings/", 0) != 0
 		&& normalized.rfind("UserSettings/", 0) != 0;
 }
@@ -561,7 +574,14 @@ ExportValidationResult ExportValidator::ValidateManagedSource(const std::filesys
 // Searches for the directory containing compiled shaders relative to the project root and current path.
 // Input: The project's root path.
 // Output: The path to the shaders directory, or an empty path if not found.
-static std::filesystem::path FindShadersDirectory(const std::filesystem::path& projectRoot) {
+static std::filesystem::path FindShadersDirectory(
+	const std::filesystem::path& projectRoot,
+	const std::filesystem::path& runtimeShaderDirectory) {
+	if(!runtimeShaderDirectory.empty()
+		&& std::filesystem::exists(runtimeShaderDirectory)
+		&& std::filesystem::is_directory(runtimeShaderDirectory)) {
+		return std::filesystem::canonical(runtimeShaderDirectory);
+	}
 	if (!projectRoot.empty()) {
 		if (std::filesystem::exists(projectRoot / "Shaders") && std::filesystem::is_directory(projectRoot / "Shaders")) {
 			return projectRoot / "Shaders";
@@ -600,7 +620,9 @@ static std::filesystem::path FindShadersDirectory(const std::filesystem::path& p
 // Validates all compiled shader outputs, missing compiled asset outputs, and stale .meta/compiled path mismatches.
 // Input: The project's root path.
 // Output: An ExportValidationResult containing the diagnosed errors/warnings.
-static ExportValidationResult ValidateAssetsAndShaders(const std::filesystem::path& projectRoot) {
+static ExportValidationResult ValidateAssetsAndShaders(
+	const std::filesystem::path& projectRoot,
+	const std::filesystem::path& runtimeShaderDirectory) {
 	ExportValidationResult result;
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -610,7 +632,7 @@ static ExportValidationResult ValidateAssetsAndShaders(const std::filesystem::pa
 	}
 
 	// 1. Missing Compiled Shader Outputs Check
-	const std::filesystem::path shadersDir = FindShadersDirectory(projectRoot);
+	const std::filesystem::path shadersDir = FindShadersDirectory(projectRoot, runtimeShaderDirectory);
 	
 	static constexpr std::array<std::string_view, 24> kRequiredShaders = {
 		"default.task.tspf",
@@ -744,7 +766,10 @@ static ExportValidationResult ValidateAssetsAndShaders(const std::filesystem::pa
 
 // --- Combined validation ---
 
-ExportValidationResult ExportValidator::ValidateAll(const BuildProfile& profile, const std::filesystem::path& projectRoot) const {
+ExportValidationResult ExportValidator::ValidateAll(
+	const BuildProfile& profile,
+	const std::filesystem::path& projectRoot,
+	const std::filesystem::path& runtimeShaderDirectory) const {
 	ExportValidationResult result = ValidateProfile(profile);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
@@ -776,7 +801,7 @@ ExportValidationResult ExportValidator::ValidateAll(const BuildProfile& profile,
 		materialResult.diagnostics.end());
 
 	// Run shader, asset and .meta mismatch validations
-	auto additionalResult = ValidateAssetsAndShaders(projectRoot);
+	auto additionalResult = ValidateAssetsAndShaders(projectRoot, runtimeShaderDirectory);
 	result.errorCount += additionalResult.errorCount;
 	result.warningCount += additionalResult.warningCount;
 	if (!additionalResult.passed) {

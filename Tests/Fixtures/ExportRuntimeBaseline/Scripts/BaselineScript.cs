@@ -1,9 +1,11 @@
-using System;
+using TerraEngine;
 
-public static class BaselineScript
+// The export generator discovers partial Script subclasses and emits the
+// NativeAOT registry used by the standalone runtime.
+public sealed partial class BaselineScript : Script
 {
-	public static void OnStart()
+	public override void OnStart()
 	{
-		Console.WriteLine("ExportRuntimeBaseline.ScriptStarted");
+		Log.Info("ExportRuntimeBaseline.ScriptStarted");
 	}
 }

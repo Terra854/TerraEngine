@@ -873,6 +873,84 @@ set_target_properties(glfw PROPERTIES DEBUG_POSTFIX "")
 # --- Editor ------------------------------------------------------------------
 set(IMGUI_FILE_DIALOG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/External/ImGuiFileDialog)
 
+# The editor, headless command, and editor tests share exactly one export
+# implementation. Keeping filesystem publication and validation in this
+# UI-independent library prevents entry-point drift.
+add_library(TerraEngine-ExportSupport STATIC
+	Editor/AssetCompilers/ModelPackageImportTypes.cpp
+	Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
+	Editor/Export/BuildProfile.cpp
+	Editor/Export/ExportEvidence.cpp
+	Editor/Export/ExportOutputTransaction.cpp
+	Editor/Export/ExportPackageValidator.cpp
+	Editor/Export/ExportPipeline.cpp
+	Editor/Export/ExportRuntimeLayout.cpp
+	Editor/Export/ExportScriptBindingRewriter.cpp
+	Editor/Export/ExportTypes.cpp
+	Editor/Export/ExportValidator.cpp
+	Editor/Export/TepakPackager.cpp
+	Editor/Export/archive/ArchiveSerialization.cpp
+	Editor/Export/archive/ExtentReader.cpp
+	Editor/Export/archive/PackagingRequest.cpp
+	Editor/Export/archive/PackPlanner.cpp
+	Editor/Export/archive/PackReader.cpp
+	Editor/Export/archive/PackWriter.cpp
+	Editor/Export/codec/CodecProvider.cpp
+	Editor/Export/io/PathNormalizer.cpp
+	Editor/Export/util/WorkerPool.cpp
+	Editor/Export/validation/PackValidator.cpp
+)
+target_include_directories(TerraEngine-ExportSupport
+	PUBLIC
+		${CMAKE_CURRENT_SOURCE_DIR}
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/AssetCompilers
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/Export
+		${CMAKE_CURRENT_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets
+)
+target_compile_features(TerraEngine-ExportSupport PUBLIC cxx_std_20)
+target_compile_definitions(TerraEngine-ExportSupport
+	PRIVATE
+		XXH_STATIC_LINKING_ONLY
+		ZSTD_STATIC_LINKING_ONLY
+)
+if(MSVC)
+	target_compile_options(TerraEngine-ExportSupport PRIVATE /FS)
+endif()
+target_link_libraries(TerraEngine-ExportSupport
+	PUBLIC
+		TerraEngine-Engine
+	PRIVATE
+		libzstd_static
+		xxhash
+)
+
+add_executable(TerraEngine-Export
+	Tools/HeadlessExport/HeadlessExportCommandLine.cpp
+	Tools/HeadlessExport/Main.cpp
+)
+target_include_directories(TerraEngine-Export PRIVATE
+	${CMAKE_CURRENT_SOURCE_DIR}/Tools/HeadlessExport
+)
+target_compile_features(TerraEngine-Export PRIVATE cxx_std_20)
+target_link_libraries(TerraEngine-Export PRIVATE TerraEngine-ExportSupport)
+set_target_properties(TerraEngine-Export PROPERTIES
+	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+	BUILD_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+	INSTALL_RPATH "${TERRAENGINE_LOCAL_RPATH}"
+)
+if(MSVC)
+	target_compile_options(TerraEngine-Export PRIVATE /FS)
+endif()
+if(WIN32)
+	add_custom_command(TARGET TerraEngine-Export POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			$<TARGET_RUNTIME_DLLS:TerraEngine-Export>
+			$<TARGET_FILE_DIR:TerraEngine-Export>
+		COMMAND_EXPAND_LISTS
+	)
+endif()
+add_dependencies(TerraEngine-Export TerraEngineModelPackageCompiler TerraEngine-Launcher)
+
 add_executable(TerraEngine-Editor
 	Editor/TerraEngine-Editor/Core/EditorMain.cpp
 	Editor/TerraEngine-Editor/Core/EditorCommandLine.cpp
@@ -912,31 +990,11 @@ add_executable(TerraEngine-Editor
 	Editor/AssetCompilers/MeshCompiler.cpp
 	Editor/AssetCompilers/TextureCompiler.cpp
 	Editor/AssetCompilers/ShaderCompiler.cpp
-	Editor/AssetCompilers/ModelPackageImportTypes.cpp
 	Editor/AssetCompilers/ModelPackageImporter.cpp
 	Editor/AssetCompilers/FbxPackageImporter.cpp
 	Editor/AssetCompilers/GltfImportTypes.cpp
 	Editor/AssetCompilers/GltfPackageImporter.cpp
 	Editor/AssetCompilers/MaterialAssetWriter.cpp
-	Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
-	# --- Export pipeline (BuildProfile, Validator, Packager, Pipeline) ---
-	Editor/Export/BuildProfile.cpp
-	Editor/Export/ExportPackageValidator.cpp
-	Editor/Export/ExportValidator.cpp
-	Editor/Export/ExportScriptBindingRewriter.cpp
-	Editor/Export/TepakPackager.cpp
-	Editor/Export/ExportPipeline.cpp
-	# --- Copied TEPAK writer sources for asset packaging ---
-	Editor/Export/archive/PackWriter.cpp
-	Editor/Export/archive/PackPlanner.cpp
-	Editor/Export/archive/PackagingRequest.cpp
-	Editor/Export/archive/PackReader.cpp
-	Editor/Export/archive/ExtentReader.cpp
-	Editor/Export/archive/ArchiveSerialization.cpp
-	Editor/Export/codec/CodecProvider.cpp
-	Editor/Export/io/PathNormalizer.cpp
-	Editor/Export/util/WorkerPool.cpp
-	Editor/Export/validation/PackValidator.cpp
 	${IMGUI_FILE_DIALOG_DIR}/ImGuiFileDialog.cpp
 )
 set_target_properties(TerraEngine-Editor PROPERTIES
@@ -988,6 +1046,7 @@ endif()
 target_link_libraries(TerraEngine-Editor
 	PRIVATE
 		TerraEngine-Engine
+		TerraEngine-ExportSupport
 		cimgui
 		glfw
 		Vulkan::Headers
@@ -1420,6 +1479,12 @@ endif()
 	# --- Editor Install ---
 	# Install rule: every code change must keep the install tree reproducible for downstream users.
 	install(TARGETS TerraEngine-Editor
+		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
+	)
+	# Install the non-interactive exporter beside the editor tools so it can
+	# derive Engine, Launcher, shader, font, and managed paths from argv[0].
+	install(TARGETS TerraEngine-Export
 		RUNTIME DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 		BUNDLE DESTINATION ${ENGINE_INSTALL_DESTINATION}/Editor
 	)

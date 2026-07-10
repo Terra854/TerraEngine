@@ -449,3 +449,6 @@ obj/
 *.dll
 *.so
 *.a
+
+# The export baseline's package recipe is authored source, not an editor cache.
+!Tests/Fixtures/ExportRuntimeBaseline/Assets/Models/Baseline.gltf.meta

@@ -1,22 +1,16 @@
 param(
-	[string]$BuildDir = "build",
-	[string]$Profile = "baseline"
+	[string]$BuildDir = "out/build/Debug",
+	[string]$Profile = "baseline",
+	[string]$WorkRoot = "out/ci/export-runtime-baseline"
 )
 
-# Runs the known-good export baseline from a configured TerraEngine build tree.
-# Prerequisites:
-# - Configure CMake before calling this script.
-# - Build the editor/export tooling target for the selected configuration.
-# - Replace placeholder TEMF/TETF/TMAT fixtures with compiler-produced binaries
-#   when using this script for a runnable manual export.
-
 $ErrorActionPreference = "Stop"
+if ($Profile -ne "baseline") {
+	throw "Only the standalone 'baseline' build profile is supported by this compatibility helper."
+}
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$projectRoot = Join-Path $repoRoot "Tests\Fixtures\ExportRuntimeBaseline"
-$buildRoot = Join-Path $repoRoot $BuildDir
-
-Write-Host "Export baseline project: $projectRoot"
-Write-Host "Build tree: $buildRoot"
-Write-Host "Profile: $Profile"
-Write-Host "Run the editor export command or CI wrapper against this project/profile."
+# This historical path remains callable for downstream scripts, but all real
+# preparation, export, inspection, and failure propagation live in one tool.
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../../.."))
+$runner = Join-Path $repoRoot "Tools/ExportRuntimeBaseline/RunBaseline.ps1"
+& $runner -BuildDir $BuildDir -WorkRoot $WorkRoot

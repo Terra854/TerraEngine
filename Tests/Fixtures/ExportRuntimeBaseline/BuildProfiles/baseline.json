@@ -1,0 +1,30 @@
+{
+	"name": "Baseline Windows",
+	"id": "baseline",
+	"platform": "windows",
+	"outputDirectory": "Builds/Baseline",
+	"startupScene": "Scenes/Startup.tescene",
+	"compressionPreset": "normal",
+	"tepakWorkerCount": 0,
+	"enableManagedCompilation": true,
+	"includeDebugSymbols": true,
+	"stripNativeAotOutput": false,
+	"enableVulkanValidationLayers": true,
+	"enableRenderDebugDiagnostics": true,
+	"rendererRecovery": {
+		"diagnosticsEnabled": true,
+		"maxRendererRebuildAttemptsPerIncident": 1,
+		"fatalMessage": "Graphics device lost and renderer recovery failed."
+	},
+	"additionalPublishArgs": "",
+	"virtualGeometry": {
+		"qualityLevel": 2,
+		"diagnosticsEnabled": true,
+		"geometryBudgetBytes": 67108864,
+		"lodErrorScale": 1.0,
+		"maxLodDrop": 1,
+		"hiZOcclusionEnabled": true,
+		"preloadBias": 1.0
+	},
+	"includedScenes": []
+}

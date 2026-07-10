@@ -13,6 +13,13 @@
 #include <random>
 #include <sstream>
 
+namespace {
+	std::string PathToUtf8(const std::filesystem::path& path) {
+		const std::u8string encoded = path.generic_u8string();
+		return std::string(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+	}
+}
+
 // --- ID generation ---
 
 std::string GenerateBuildProfileId() {
@@ -89,12 +96,12 @@ std::string BuildNativeAotPublishCommand(
 	// toggle maps to the intended dotnet NativeAOT property.
 	std::ostringstream command;
 	command << "dotnet publish"
-		<< " \"" << managedProject.string() << "\""
+		<< " \"" << PathToUtf8(managedProject) << "\""
 		<< " -c Release"
 		<< " -r " << GetExportRuntimeIdentifier(profile.platform)
 		<< " -p:PublishAot=true"
 		<< " -p:DefineConstants=TERRAENGINE_EXPORT"
-		<< " -o \"" << managedOutputDir.string() << "\"";
+		<< " -o \"" << PathToUtf8(managedOutputDir) << "\"";
 
 	if (profile.stripNativeAotOutput) {
 		command << " -p:StripSymbols=true";

@@ -6,7 +6,11 @@
 #include "TEPAK/PackReader.h"
 
 #include <array>
+#include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <filesystem>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_set>
@@ -16,6 +20,12 @@
 
 namespace
 {
+std::string PathToUtf8(const std::filesystem::path& path)
+{
+	const std::u8string encoded = path.generic_u8string();
+	return std::string(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+}
+
 std::string NormalizePackagePath(std::string_view path)
 {
 	std::string normalized(path);
@@ -384,4 +394,75 @@ bool ValidateExportPackage(const std::filesystem::path& packagePath, ExportPlatf
 bool ValidateExportPackage(const std::filesystem::path& packagePath, std::string& outError)
 {
 	return ValidateExportPackage(packagePath, ExportPlatform::Windows, outError);
+}
+
+ExportPackageValidationReport InspectExportPackage(
+	const std::filesystem::path& packagePath,
+	ExportPlatform platform)
+{
+	ExportPackageValidationReport report;
+	report.archivePath = packagePath;
+	std::error_code errorCode;
+	report.archiveSize = std::filesystem::file_size(packagePath, errorCode);
+	if(errorCode) report.archiveSize = 0;
+
+	std::string validationError;
+	report.passed = ValidateExportPackage(packagePath, platform, validationError);
+	if(!report.passed) {
+		ExportPackageValidationFinding finding;
+		finding.code = "export.package.runtime_contract";
+		finding.message = validationError;
+		finding.required = true;
+		report.findings.push_back(std::move(finding));
+	}
+
+	try {
+		const tepak::PackReader reader = tepak::PackReader::Open(packagePath);
+		report.entryCount = static_cast<std::uint32_t>(reader.GetEntries().size());
+		const tepak::ByteBuffer manifestBytes = reader.ReadAll("game.json");
+		report.archivedManifestJson.assign(
+			reinterpret_cast<const char*>(manifestBytes.data()), manifestBytes.size());
+		for(const tepak::PackEntry& entry : reader.GetEntries()) {
+			const tepak::ByteBuffer bytes = reader.ReadAll(entry.normalizedPath);
+			static constexpr std::string_view marker = "placeholder";
+			const bool hasPlaceholder = std::search(
+				bytes.begin(), bytes.end(), marker.begin(), marker.end(),
+				[](std::uint8_t left, char right) {
+					return static_cast<char>(std::tolower(static_cast<unsigned char>(left))) == right;
+				}) != bytes.end();
+			if(hasPlaceholder) {
+				report.passed = false;
+				report.findings.push_back({
+					"export.package.placeholder_payload",
+					entry.normalizedPath,
+					"Packaged entry contains the forbidden placeholder marker.",
+					true,
+					true
+				});
+			}
+		}
+	} catch(const std::exception& exception) {
+		if(report.findings.empty()) {
+			report.findings.push_back({
+				"export.package.read_failed", PathToUtf8(packagePath), exception.what(), true, false
+			});
+		}
+		report.passed = false;
+	}
+
+	std::ostringstream summary;
+	summary << "Archive: " << PathToUtf8(packagePath) << '\n';
+	summary << "Archive size: " << report.archiveSize << " bytes\n";
+	summary << "Entry count: " << report.entryCount << '\n';
+	summary << "Startup scene: " << (report.passed ? "PASS" : "see findings") << '\n';
+	summary << "Required runtime entries: " << (report.passed ? "PASS" : "see findings") << '\n';
+	summary << "Manifest asset references: " << (report.passed ? "PASS" : "see findings") << '\n';
+	summary << "Placeholder scan: "
+		<< (std::none_of(report.findings.begin(), report.findings.end(), [](const auto& finding) { return finding.placeholderDetected; }) ? "PASS" : "FAIL") << '\n';
+	for(const ExportPackageValidationFinding& finding : report.findings) {
+		summary << "[" << finding.code << "] " << finding.path << " " << finding.message << '\n';
+	}
+	summary << "Final: " << (report.passed ? "PASS" : "FAIL") << '\n';
+	report.summaryText = summary.str();
+	return report;
 }

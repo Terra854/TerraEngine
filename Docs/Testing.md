@@ -601,11 +601,60 @@ Remove-Item Env:TERRAENGINE_TEST_FILTER
 
 ## Export Runtime Baseline
 
-The baseline sample lives at `Tests/Fixtures/ExportRuntimeBaseline`. Its checked-in
-TEMF/TETF/TMAT files are placeholders for compiled binary assets; regenerate
-them through the asset compilers before using the project as a runnable manual
-export. The automated tests still guard the manifest, scene references, UI
-signal, script signal, and startup coordinator decision.
+The source-only sample lives at `Tests/Fixtures/ExportRuntimeBaseline`. Its
+textual glTF model is the source of truth for the mesh, material, and texture;
+the installed model package compiler creates real TEMF, TMAT, and TETF child
+assets only inside a disposable copy below `out/`. Placeholder compiled assets
+are rejected by both the helper and export evidence inventory.
+
+Run the same ordered gate locally that
+`.github/workflows/export-baseline.yml` runs on a clean Windows x64 hosted
+runner:
+
+```powershell
+cmake --preset Debug
+cmake --build --preset Debug --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEngine-Export TerraEngine-Editor
+ctest --test-dir out/build/Debug -R "Editor.ExportUnitTests|Editor.HeadlessExport" --output-on-failure
+ctest --test-dir out/build/Debug --output-on-failure
+cmake --build --preset Debug --target install
+pwsh -NoProfile -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/Debug/Build -WorkRoot out/ci/export-runtime-baseline
+```
+
+The installed tools are read from `out/build/Debug/Build`; callers do not run
+an executable from the intermediate target directory. The direct headless CLI
+contract is:
+
+```powershell
+& out/build/Debug/Build/Editor/TerraEngine-Export.exe `
+  --project out/ci/export-runtime-baseline/project `
+  --profile out/ci/export-runtime-baseline/project/BuildProfiles/baseline.json `
+  --output out/ci/export-runtime-baseline/project/Builds/Baseline `
+  --evidence out/ci/export-runtime-baseline/evidence
+```
+
+A successful invocation exits with code 0 and writes exactly one final result
+record plus these six durable files: `export-result.json`,
+`resolved-manifest.json`, `content-inventory.json`,
+`validation-report.json`, `progress.jsonl`, and `package-validation.txt`.
+Required inventory entries must be nonempty and set
+`placeholderDetected=false`. The archived `game.json` must match
+`resolved-manifest.json`.
+
+Failure exit codes are stable: 2 covers `invalid_arguments` or
+`invalid_runtime_layout`, 3 `output_conflict`, 4 `validation_failed`, 5
+`managed_compilation_failed`, 6 `asset_staging_failed`, 7 `packaging_failed` or
+`package_validation_failed`, 8 `runtime_staging_failed` or
+`evidence_write_failed`, 9 `publication_failed`, and 10
+`unexpected_failure`. Inspect the final result's `stage`, `failureCategory`,
+and ordered diagnostics before using the associated validation, inventory, or
+package report. See `Docs/ExportRuntimeBaseline.md` for the complete diagnostic
+table.
+
+CI and local commands deliberately share the same preset, targets, CTest
+filters, install tree, baseline helper, and disposable work-root layout. The
+always-run `headless-export-evidence-windows-debug` workflow artifact retains
+configure, build, focused/full test, install, and baseline logs plus any partial
+or complete evidence after failure.
 
 ## Renderer Performance Baseline
 

@@ -1,61 +1,158 @@
 # Export Runtime Baseline
 
-This document tracks the manual and CI workflow for the minimal exported
-runtime baseline. The baseline is intentionally small: it should prove that one
-project can export and launch with render settings, a startup scene, a mesh, a
-material, a texture, UI content, and script behavior.
+The export runtime baseline is the smallest project that exercises TerraEngine's
+installed asset compiler, shared export pipeline, transactional publication,
+TEPAK validation, and machine-readable evidence. The gate is intentionally
+headless: it must not create a window, initialize a graphics device, or depend
+on editor preferences.
 
-## Expected Workflow
+## Source of truth
+
+The reviewable project source lives in
+`Tests/Fixtures/ExportRuntimeBaseline`. Its textual glTF model contains the
+baseline mesh, material, and texture inputs. Compiled TEMF, TMAT, and TETF files
+are generated in a disposable project below `out/`; they are not checked-in
+source artifacts and must never be replaced by marker or placeholder text.
+
+The baseline helper performs the complete preparation flow:
+
+1. Copy the fixture into a clean disposable project.
+2. Stage managed references from the installed editor tree.
+3. Compile the glTF package with the installed model package compiler.
+4. Reject missing, empty, stale, or placeholder-generated child assets.
+5. Run the installed `TerraEngine-Export` executable with explicit paths.
+6. Inspect the TEPAK archive and compare the archived manifest with evidence.
+
+## Local reproduction
+
+Run these commands from the repository root in an x64 Visual Studio developer
+environment. They are the authoritative local equivalent of
+`.github/workflows/export-baseline.yml`.
 
 ```powershell
 cmake --preset Debug
-cmake --build out/build/Debug --target TerraEngine-EngineTests
-cmake --build out/build/Debug --target TerraEngine-EditorTests
+cmake --build --preset Debug --target TerraEngine-EngineTests TerraEngine-EditorTests TerraEngineModelPackageCompiler TerraEngine-Export TerraEngine-Editor
+ctest --test-dir out/build/Debug -R "Editor.ExportUnitTests|Editor.HeadlessExport" --output-on-failure
 ctest --test-dir out/build/Debug --output-on-failure
-cmake --build out/build/Debug --target install
+cmake --build --preset Debug --target install
+pwsh -NoProfile -File Tools/ExportRuntimeBaseline/RunBaseline.ps1 -InstallRoot out/build/Debug/Build -WorkRoot out/ci/export-runtime-baseline
 ```
 
-## Manual Baseline
+The compatibility script at
+`Tests/Tools/ExportRuntimeBaseline/ExportSample.ps1` forwards to the same
+authoritative helper. It does not contain a second export implementation.
 
-1. Use `Tests/Fixtures/ExportRuntimeBaseline` as the sample project.
-2. Export the project with its baseline build profile.
-3. Launch the exported runtime from the installed tree or run launcher
-   validation with `--validate-export-bootstrap`.
-4. Confirm the boot summary reports the startup scene, resolved project render
-   settings, required systems, material fallback warnings, and runtime entry
-   result.
-5. Confirm the scene displays the sample mesh, material, texture, UI, and script
-   signal.
+After installation, the gate requires these files:
 
-Current executable helper:
+```text
+out/build/Debug/Build/Editor/TerraEngine-Export.exe
+out/build/Debug/Build/Editor/TerraEngineModelPackageCompiler.exe
+out/build/Debug/Build/Editor/Managed/TerraEngine.CSharp.dll
+out/build/Debug/Build/Editor/Managed/Analyzers/TerraEngine.Export.Generator.dll
+out/build/Debug/Build/Launcher/TerraEngine-Launcher.exe
+```
+
+To invoke the installed CLI directly after the disposable project has been
+prepared, use explicit project, profile, output, and evidence paths:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File Tests/Tools/ExportRuntimeBaseline/ExportSample.ps1 -BuildDir out/build/Debug -Profile baseline
+& out/build/Debug/Build/Editor/TerraEngine-Export.exe `
+  --project out/ci/export-runtime-baseline/project `
+  --profile out/ci/export-runtime-baseline/project/BuildProfiles/baseline.json `
+  --output out/ci/export-runtime-baseline/project/Builds/Baseline `
+  --evidence out/ci/export-runtime-baseline/evidence
 ```
 
-The helper reports the sample project, build tree, and profile. The actual
-export remains editor-driven through the Build Profiles window until a headless
-CI export wrapper is added.
+The executable resolves every installed runtime dependency relative to its own
+canonical path. Changing the current working directory must not change export
+behavior.
 
-## Sample Paths
+## Evidence contract
 
-- Project manifest: `Tests/Fixtures/ExportRuntimeBaseline/project.json`
-- Startup scene: `Tests/Fixtures/ExportRuntimeBaseline/Scenes/Startup.tescene`
-- Mesh fixture: `Tests/Fixtures/ExportRuntimeBaseline/Assets/Meshes/Baseline.temf`
-- Material fixture: `Tests/Fixtures/ExportRuntimeBaseline/Assets/Materials/Baseline.tmat`
-- Texture fixture: `Tests/Fixtures/ExportRuntimeBaseline/Assets/Textures/Baseline.tetf`
-- UI fixture: `Tests/Fixtures/ExportRuntimeBaseline/UI/Baseline.ui`
-- Script fixture: `Tests/Fixtures/ExportRuntimeBaseline/Scripts/BaselineScript.cs`
-- Helper script: `Tests/Tools/ExportRuntimeBaseline/ExportSample.ps1`
+A successful prepared baseline writes the runtime to
+`out/ci/export-runtime-baseline/project/Builds/Baseline` and writes these six
+files to `out/ci/export-runtime-baseline/evidence`:
 
-The checked-in `*.temf`, `*.tetf`, and `*.tmat` files are placeholders that
-identify the required compiled assets. Before a runnable manual export, rebuild
-those fixtures through the project asset compilers so the export archive
-contains binary TEMF/TETF/TMAT payloads.
+```text
+export-result.json
+resolved-manifest.json
+content-inventory.json
+validation-report.json
+progress.jsonl
+package-validation.txt
+```
 
-## Expected Signals
+`export-result.json` is the primary automation result. A successful run has
+schema version 1, `success=true`, `failureCategory=none`, and exit code 0.
+`resolved-manifest.json` must match the `game.json` bytes stored in the archive.
+`content-inventory.json` is sorted by normalized path and no required entry may
+set `placeholderDetected=true`. `progress.jsonl` contains independently
+parseable records in emission order, including exactly one final result record.
 
-- Boot summary includes `startupScene=Scenes/Startup.tescene`
-- Boot summary includes `renderProfile={profile=Project Render Settings`
-- UI text includes `Export Runtime Baseline Ready`
-- Script output includes `ExportRuntimeBaseline.ScriptStarted`
+## GitHub Actions gate
+
+`.github/workflows/export-baseline.yml` runs for pull requests targeting
+`main`, pushes to `main`, and manual dispatch. The job uses a clean
+`windows-latest` runner, recursive submodules, x64 MSVC, the .NET 10 SDK,
+read-only repository permission, no build cache, and a 30-minute timeout.
+
+The ordered stages are checkout, toolchain initialization, Debug configure,
+targeted build, focused export tests, full CTest, install, installed-path
+verification, clean baseline preparation and export, evidence validation, and
+artifact upload. Commands retain their native exit codes; no failed stage is
+converted into a successful result.
+
+The always-run artifact is named
+`headless-export-evidence-windows-debug`. It contains:
+
+```text
+configure.log
+build.log
+focused-ctest.log
+ctest.log
+install.log
+baseline-prepare.log
+headless-export/
+|-- export-result.json
+|-- resolved-manifest.json
+|-- content-inventory.json
+|-- validation-report.json
+|-- progress.jsonl
+`-- package-validation.txt
+```
+
+The supported automated gate is Windows x64. The export implementation may
+contain Linux behavior, but this workflow does not claim Linux hosted-runner
+coverage or GPU/runtime launch coverage.
+
+## Failure diagnosis
+
+Start with `export-result.json`, using `stage`, `failureCategory`, `message`,
+and the ordered diagnostics to choose the corresponding log. The CLI exit code
+is stable and can be used without parsing human text:
+
+| Exit code | Failure category | First evidence to inspect |
+|---:|---|---|
+| 2 | `invalid_arguments` or `invalid_runtime_layout` | CLI result and installed-path checks |
+| 3 | `output_conflict` | Result path and competing export process |
+| 4 | `validation_failed` | `validation-report.json` |
+| 5 | `managed_compilation_failed` | `baseline-prepare.log` and validation report |
+| 6 | `asset_staging_failed` | Compiler output and `content-inventory.json` |
+| 7 | `packaging_failed` or `package_validation_failed` | `package-validation.txt` |
+| 8 | `runtime_staging_failed` or `evidence_write_failed` | Result diagnostics and evidence directory |
+| 9 | `publication_failed` | Final, staging, and backup paths in the result |
+| 10 | `unexpected_failure` | Final result and the complete baseline log |
+
+If the job fails before `export-result.json` exists, inspect the earliest
+available configure, build, test, install, or baseline log in the artifact.
+Because artifact staging always runs, partial evidence remains available after
+early failures. Re-run the local command sequence above from a clean
+`out/ci/export-runtime-baseline` work root; opening the editor is not required.
+
+## Expected runtime signals
+
+The archive manifest names `Scenes/Startup.tescene` as the startup scene. The
+fixture UI includes `Export Runtime Baseline Ready`, and the managed script
+contains the `ExportRuntimeBaseline.ScriptStarted` signal. These small signals
+make source, package, and runtime-bootstrap regressions distinguishable without
+requiring a rendered screenshot.

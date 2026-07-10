@@ -133,5 +133,27 @@ namespace TerraEngine::EditorTests {
 			context.ExpectEqual(std::string("TerraEngine.dll"), GetExportEngineLibraryName(ExportPlatform::Windows), "Windows engine runtime should keep the original DLL name.");
 			context.ExpectEqual(std::string("glfw3.dll"), GetExportGlfwLibraryName(ExportPlatform::Windows), "Windows GLFW runtime should keep the original DLL name.");
 		});
+
+		registry.Add("Editor.BuildProfile.RequestLocalOutputOverrideDoesNotPersist", [](TestContext& context) {
+			TempProfileDirectory tempDirectory;
+			const std::filesystem::path profilePath = MakeTempProfilePath();
+			BuildProfile storedProfile{};
+			storedProfile.name = "Stored Output Profile";
+			storedProfile.id = "stored-output";
+			storedProfile.outputDirectory = "Builds/StoredOutput";
+			storedProfile.startupScene = "Scenes/Startup.tescene";
+			storedProfile.enableManagedCompilation = false;
+			context.Expect(SaveBuildProfile(storedProfile, profilePath), "The source profile should be saved before applying an invocation-local override.");
+
+			const BuildProfile loadedProfile = LoadBuildProfile(profilePath);
+			BuildProfile requestProfile = loadedProfile;
+			requestProfile.outputDirectory = "D:/Automation/OneOffOutput";
+			const BuildProfile reloadedProfile = LoadBuildProfile(profilePath);
+
+			context.ExpectEqual(std::filesystem::path("D:/Automation/OneOffOutput").string(), requestProfile.outputDirectory.string(), "The request copy should use its explicit output override.");
+			context.ExpectEqual(std::filesystem::path("Builds/StoredOutput").string(), loadedProfile.outputDirectory.string(), "The loaded source value should remain immutable while the request is constructed.");
+			context.ExpectEqual(std::filesystem::path("Builds/StoredOutput").string(), reloadedProfile.outputDirectory.string(), "Reloading should prove the output override was never persisted to disk.");
+			context.ExpectEqual(profilePath.string(), reloadedProfile.filePath.string(), "The standalone profile should remain the source of truth after a one-off export.");
+		});
 	}
 }

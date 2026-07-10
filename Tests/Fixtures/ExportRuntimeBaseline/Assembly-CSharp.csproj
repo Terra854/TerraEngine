@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+		<OutputPath>Build/Assembly-CSharp/</OutputPath>
+		<BaseOutputPath>Build/Assembly-CSharp/</BaseOutputPath>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<!-- The baseline helper stages both installed inputs into this disposable path. -->
+		<Reference Include="TerraEngine.CSharp">
+			<HintPath>$(MSBuildProjectDirectory)/Build/Assembly-CSharp/References/TerraEngine.CSharp.dll</HintPath>
+			<Private>true</Private>
+		</Reference>
+		<Analyzer Include="$(MSBuildProjectDirectory)/Build/Assembly-CSharp/References/TerraEngine.Export.Generator.dll" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<!-- Generated build state is never an input to the checked-in project. -->
+		<Compile Remove="Build\**\*.cs" />
+		<Compile Remove="Library\**\*.cs" />
+		<Compile Remove="Temp\**\*.cs" />
+	</ItemGroup>
+</Project>

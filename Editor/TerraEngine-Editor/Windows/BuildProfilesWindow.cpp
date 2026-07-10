@@ -16,10 +16,44 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
+#include <array>
+#include <chrono>
+
+#ifdef _WIN32
+	#ifndef NOMINMAX
+		#define NOMINMAX
+	#endif
+	#define WIN32_LEAN_AND_MEAN
+	#include <Windows.h>
+#elif defined(__linux__)
+	#include <unistd.h>
+#endif
 
 namespace
 {
 	constexpr float kProfileListWidth = 220.0f;
+
+	std::filesystem::path ResolveRunningEditorExecutable() {
+#ifdef _WIN32
+		std::wstring buffer(32768, L'\0');
+		const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+		if(length > 0 && length < buffer.size()) {
+			buffer.resize(length);
+			return std::filesystem::path(buffer);
+		}
+#elif defined(__linux__)
+		std::array<char, 4096> buffer{};
+		const ssize_t length = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+		if(length > 0) return std::filesystem::path(std::string(buffer.data(), static_cast<std::size_t>(length)));
+#endif
+		return std::filesystem::absolute("TerraEngine-Editor");
+	}
+
+	std::string GenerateEditorExportRunId() {
+		const auto ticks = std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::system_clock::now().time_since_epoch()).count();
+		return "editor-" + std::to_string(ticks);
+	}
 
 	// CollectProjectScenePaths is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	std::vector<std::string> CollectProjectScenePaths(const std::filesystem::path& projectRoot)
@@ -525,7 +559,11 @@ void BuildProfilesWindow::RunValidation() {
 
 	std::filesystem::path projectRoot = m_Owner->GetContext()->projectManager->GetProjectRoot();
 	ExportValidator validator;
-	m_LastValidationResult = validator.ValidateAll(m_Profiles[m_SelectedProfileIndex], projectRoot);
+	ExportRuntimeLayout runtimeLayout;
+	std::string layoutError;
+	DiscoverExportRuntimeLayout(ResolveRunningEditorExecutable(), runtimeLayout, layoutError);
+	m_LastValidationResult = validator.ValidateAll(
+		m_Profiles[m_SelectedProfileIndex], projectRoot, runtimeLayout.shaderDirectory);
 	m_HasValidationResult = true;
 }
 
@@ -559,8 +597,25 @@ void BuildProfilesWindow::StartExport() {
 			ScriptingSystem::Instance().ClearGameplayAssembly();
 		}
 
+		ExportRequest request;
+		request.projectRoot = std::filesystem::weakly_canonical(projectRoot);
+		request.profile = profile;
+		request.profilePath = profile.filePath.empty()
+			? std::filesystem::path{}
+			: std::filesystem::weakly_canonical(profile.filePath);
+		const std::filesystem::path configuredOutput = profile.outputDirectory.empty()
+			? projectRoot / "Builds" / profile.name
+			: (profile.outputDirectory.is_absolute() ? profile.outputDirectory : projectRoot / profile.outputDirectory);
+		request.finalOutputDirectory = std::filesystem::weakly_canonical(configuredOutput);
+		request.runId = GenerateEditorExportRunId();
+		request.evidenceDirectory = request.finalOutputDirectory.parent_path()
+			/ "ExportEvidence" / request.runId;
+		request.invocationKind = ExportInvocationKind::Editor;
+		std::string layoutError;
+		DiscoverExportRuntimeLayout(ResolveRunningEditorExecutable(), request.runtimeLayout, layoutError);
+
 		ExportPipeline pipeline;
-		m_LastExportResult = pipeline.Execute(profile, projectRoot,
+		m_LastExportResult = pipeline.Execute(request,
 			[this](const ExportProgress& progress) {
 				m_CurrentProgress = progress;
 				// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.

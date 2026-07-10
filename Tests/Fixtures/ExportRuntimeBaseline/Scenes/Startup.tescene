@@ -20,8 +20,12 @@
 				{ "type": "Transform", "position": [0.0, 0.0, 0.0], "rotation": [0.0, 25.0, 0.0], "scale": [1.0, 1.0, 1.0] },
 				{
 					"type": "MeshRender",
-					"mesh": "Assets/Meshes/Baseline.temf",
-					"material": "Assets/Materials/Baseline.tmat"
+					"mesh": "Models/Baseline_Generated/BaselineTriangle.temf",
+					"meshId": "c8ff317261139cf962f2cedc60952f64",
+					"material": "Models/Baseline_Generated/BaselineMaterial.tmat",
+					"materialId": "5cb8d797dc72ae521a7dd2fa784b0f9f",
+					"texture": "Models/Baseline_Generated/BaselineTexture.tetf",
+					"textureId": "803d94e355222334826da82c660ecda8"
 				},
 				{ "type": "Script", "class": "BaselineScript" }
 			]

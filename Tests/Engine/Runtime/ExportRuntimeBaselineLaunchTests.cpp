@@ -32,12 +32,13 @@ namespace TerraEngine::Tests {
 		});
 
 		registry.Add("Engine.ExportRuntimeBaseline.WindowsProfileRemainsDocumented", [](TestContext& context) {
-			// The baseline fixture documents the legacy Windows export path that
-			// must continue to load while Linux profiles are added alongside it.
-			const std::string project = ReadText(SampleRoot() / "project.json");
+			// The standalone profile is the one source shared by editor and CLI;
+			// project.json deliberately no longer embeds a duplicate profile copy.
+			const std::string profile = ReadText(
+				SampleRoot() / "BuildProfiles" / "baseline.json");
 
-			context.Expect(project.find("\"platform\": \"windows\"") != std::string::npos, "Baseline project should keep its Windows export profile.");
-			context.Expect(project.find("\"outputDirectory\": \"Builds/Baseline\"") != std::string::npos, "Baseline project should keep its staged Windows output path.");
+			context.Expect(profile.find("\"platform\": \"windows\"") != std::string::npos, "Standalone baseline profile should keep its Windows target.");
+			context.Expect(profile.find("\"outputDirectory\": \"Builds/Baseline\"") != std::string::npos, "Standalone baseline profile should keep its staged Windows output path.");
 		});
 
 		registry.Add("Engine.ExportRuntimeBaseline.CoordinatorAcceptsSampleFacts", [](TestContext& context) {

@@ -1,0 +1,10 @@
+{
+	"guid": "11111111222222223333333344444444",
+	"importerName": "GltfPackageImporter",
+	"lastModified": 0,
+	"sourcePath": "Models/Baseline.gltf",
+	"compiledPath": "Models/Baseline.temf",
+	"settings": {
+		"baselineRecipe": true
+	}
+}

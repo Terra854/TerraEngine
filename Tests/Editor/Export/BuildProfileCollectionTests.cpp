@@ -73,5 +73,24 @@ namespace TerraEngine::EditorTests {
 
 			context.Expect(profiles.empty(), "Loading profiles from a missing directory should return an empty collection.");
 		});
+
+		registry.Add("Editor.BuildProfile.StandaloneProfileIsSharedSourceOfTruth", [](TestContext& context) {
+			TempProfileCollectionDirectory tempDirectory;
+			const std::filesystem::path profilePath = tempDirectory.Root() / "shared-headless.json";
+			BuildProfile source = MakeProfile("Shared Editor And Headless", "sharedprofile");
+			source.platform = GetHostExportPlatform();
+			source.includedScenes = {"Scenes/Test.tescene", "Scenes/Secondary.tescene"};
+			context.Expect(SaveBuildProfile(source, profilePath), "The standalone profile should be written once for both entry points.");
+
+			const std::vector<BuildProfile> editorProfiles = LoadAllBuildProfiles(tempDirectory.Root());
+			const BuildProfile headlessProfile = LoadBuildProfile(profilePath);
+
+			context.ExpectEqual(1u, static_cast<unsigned int>(editorProfiles.size()), "Editor collection discovery should find the standalone profile exactly once.");
+			context.ExpectEqual(headlessProfile.id, editorProfiles.front().id, "Editor and headless loading should retain the same profile id.");
+			context.ExpectEqual(headlessProfile.outputDirectory.string(), editorProfiles.front().outputDirectory.string(), "Editor and headless loading should retain the same stored output value.");
+			context.ExpectEqual(headlessProfile.startupScene, editorProfiles.front().startupScene, "Editor and headless loading should retain the same startup scene.");
+			context.Expect(headlessProfile.includedScenes == editorProfiles.front().includedScenes, "Editor and headless loading should retain the same included-scene order.");
+			context.ExpectEqual(profilePath.string(), editorProfiles.front().filePath.string(), "Collection entries should remember the same standalone source file used by automation.");
+		});
 	}
 }

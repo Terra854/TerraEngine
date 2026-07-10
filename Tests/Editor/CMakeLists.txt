@@ -6,12 +6,20 @@ add_executable(TerraEngine-EditorTests
 	Export/BuildProfileCollectionTests.cpp
 	Export/BuildProfileEdgeTests.cpp
 	Export/BuildProfileRoundTripTests.cpp
+	Export/ExportEvidenceTests.cpp
+	Export/ExportOutputTransactionTests.cpp
 	Export/ExportPathNormalizerTests.cpp
 	Export/ExportPackageValidatorTests.cpp
 	Export/ExportRuntimeBaselineSampleTests.cpp
 	Export/ExportScriptBindingRewriterTests.cpp
 	Export/ExportValidatorManagedSourceTests.cpp
 	Export/ExportValidatorTests.cpp
+	Export/ExportParityTests.cpp
+	Export/HeadlessExportBaselineTests.cpp
+	Export/HeadlessExportCiContractTests.cpp
+	Export/HeadlessExportContractTests.cpp
+	Export/HeadlessExportDocumentationTests.cpp
+	Export/HeadlessExportPipelineTests.cpp
 	Export/LinuxPlatformExportTests.cpp
 	Export/MaterialExportValidationTests.cpp
 	Export/MaterialPreviewContractTests.cpp
@@ -115,28 +123,13 @@ add_executable(TerraEngine-EditorTests
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MeshCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/TextureCompiler.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ShaderCompiler.cpp
-	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ModelPackageImportTypes.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/ModelPackageImporter.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/FbxPackageImporter.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/GltfImportTypes.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/GltfPackageImporter.cpp
 	${CMAKE_SOURCE_DIR}/Editor/AssetCompilers/MaterialAssetWriter.cpp
-	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Assets/AssetImportResult.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/archive/ArchiveSerialization.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/archive/ExtentReader.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackagingRequest.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackPlanner.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackReader.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/archive/PackWriter.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/BuildProfile.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/codec/CodecProvider.cpp
 	${CMAKE_SOURCE_DIR}/Engine/Resource/MaterialRuntimeContract.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/ExportPackageValidator.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/ExportScriptBindingRewriter.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/ExportValidator.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/io/PathNormalizer.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/util/WorkerPool.cpp
-	${CMAKE_SOURCE_DIR}/Editor/Export/validation/PackValidator.cpp
+	${CMAKE_SOURCE_DIR}/Tools/HeadlessExport/HeadlessExportCommandLine.cpp
 	${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling/ProfilerCaptureStore.cpp
 	${CMAKE_SOURCE_DIR}/Engine/Profiling/ProfilerCapture.cpp
 )
@@ -153,6 +146,7 @@ target_include_directories(TerraEngine-EditorTests
 		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Automation
 		${CMAKE_SOURCE_DIR}/Editor/AssetCompilers
 		${CMAKE_SOURCE_DIR}/Editor/Export
+		${CMAKE_SOURCE_DIR}/Tools/HeadlessExport
 		${CMAKE_SOURCE_DIR}/Editor/TerraEngine-Editor/Profiling
 		${CMAKE_SOURCE_DIR}/External/basisu/encoder
 		${CMAKE_SOURCE_DIR}/External/basisu/transcoder
@@ -179,6 +173,7 @@ target_compile_definitions(TerraEngine-EditorTests
 target_link_libraries(TerraEngine-EditorTests
 	PRIVATE
 		TerraEngine-Engine
+		TerraEngine-ExportSupport
 		Threads::Threads
 		assimp::assimp
 		fastgltf::fastgltf
@@ -206,6 +201,36 @@ endif()
 
 add_test(NAME Editor.ExportUnitTests COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.ExportUnitTests PROPERTIES LABELS "Editor")
+
+add_test(NAME Editor.HeadlessExport COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.HeadlessExport PROPERTIES
+	LABELS "Editor;Export;HeadlessExport"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=HeadlessExport,ExportEvidence,ExportOutputTransaction,ExportParity"
+)
+
+add_test(NAME Editor.ExportTransaction COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.ExportTransaction PROPERTIES
+	LABELS "Editor;Export;HeadlessExport;Transaction"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=ExportOutputTransaction"
+)
+
+add_test(NAME Editor.ExportParity COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.ExportParity PROPERTIES
+	LABELS "Editor;Export;HeadlessExport;Parity"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=ExportParity"
+)
+
+add_test(NAME Editor.ExportBaseline COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.ExportBaseline PROPERTIES
+	LABELS "Editor;Export;HeadlessExport;Baseline"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=ExportRuntimeBaseline,HeadlessExport.Baseline"
+)
+
+add_test(NAME Editor.ExportCiContracts COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
+set_tests_properties(Editor.ExportCiContracts PROPERTIES
+	LABELS "Editor;Export;HeadlessExport;CI"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=HeadlessExport.CI,HeadlessExport.Documentation"
+)
 
 add_test(NAME Editor.VirtualGeometryFoundation COMMAND $<TARGET_FILE:TerraEngine-EditorTests>)
 set_tests_properties(Editor.VirtualGeometryFoundation PROPERTIES

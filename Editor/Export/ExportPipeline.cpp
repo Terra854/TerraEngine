@@ -3,17 +3,22 @@
 // Implements the detailed steps of the export pipeline, including project manifest generation, script binding rewrites for NativeAOT, and output directory staging. It manages the execution of external tools like the dotnet CLI and handles progress reporting throughout the build process.
 
 #include "ExportPipeline.h"
+#include "ExportEvidence.h"
+#include "ExportOutputTransaction.h"
 #include "ExportPackageValidator.h"
 #include "ExportScriptBindingRewriter.h"
 #include "AssetImportResult.h"
 #include "Resource/ResourceResidency.h"
 #include "Resource/ResourceStreaming.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
@@ -25,10 +30,16 @@
 
 // --- Helpers ---
 
+static std::string PathToUtf8(const std::filesystem::path& path) {
+	const std::u8string encoded = path.generic_u8string();
+	return std::string(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+}
+
 static void EmitProgress(ExportProgressCallback& cb, ExportPhase phase, float progress, const std::string& message, bool finished = false) {
 	if (!cb) return;
 	ExportProgress p;
 	p.phase = phase;
+	p.stage = StageForPhase(phase);
 	p.overallProgress = progress;
 	p.statusMessage = message;
 	p.finished = finished;
@@ -50,7 +61,7 @@ static std::string ResolveProjectExportName(const std::filesystem::path& project
 	// deterministically resolve "<ProjectName>.tepak" back to the matching
 	// executable at runtime. If the directory name is somehow empty, fall back
 	// to the profile name instead of producing an empty filename.
-	std::string projectName = projectRoot.filename().string();
+	std::string projectName = PathToUtf8(projectRoot.filename());
 	if (projectName.empty()) {
 		projectName = profile.name.empty() ? "TerraEngine" : profile.name;
 	}
@@ -146,6 +157,21 @@ static nlohmann::json BuildVirtualGeometryExportManifest(const BuildProfile& pro
 		"Shaders/PostProcess/HiZGenerate.comp.spv"
 	});
 	return virtualGeometry;
+}
+
+static int ExecuteUtf8ShellCommand(const std::string& commandLine) {
+#ifdef _WIN32
+	const int wideLength = MultiByteToWideChar(
+		CP_UTF8, MB_ERR_INVALID_CHARS, commandLine.data(), static_cast<int>(commandLine.size()), nullptr, 0);
+	if(wideLength <= 0) return -1;
+	std::wstring wideCommand(static_cast<std::size_t>(wideLength), L'\0');
+	if(MultiByteToWideChar(
+		CP_UTF8, MB_ERR_INVALID_CHARS, commandLine.data(), static_cast<int>(commandLine.size()),
+		wideCommand.data(), wideLength) != wideLength) return -1;
+	return _wsystem(wideCommand.c_str());
+#else
+	return std::system(commandLine.c_str());
+#endif
 }
 
 static nlohmann::json BuildRendererRecoveryManifest(const BuildProfile& profile)
@@ -279,7 +305,7 @@ static nlohmann::json BuildStreamingPolicyManifest()
 // folders, so the export package keeps the complete installed shader layout.
 static bool CopyRuntimeShaderTree(const std::filesystem::path& shadersSrc, const std::filesystem::path& shadersDest, std::string& outError) {
 	if (!std::filesystem::exists(shadersSrc)) {
-		outError = "Runtime shader directory not found: " + shadersSrc.string();
+		outError = "Runtime shader directory not found: " + PathToUtf8(shadersSrc);
 		return false;
 	}
 
@@ -304,7 +330,7 @@ static bool CopyRuntimeShaderTree(const std::filesystem::path& shadersSrc, const
 // loose sidecar files or system-installed fonts.
 static bool CopyRuntimeAssetTree(const std::filesystem::path& sourceRoot, const std::filesystem::path& destinationRoot, const std::string& description, std::string& outError) {
 	if (!std::filesystem::exists(sourceRoot)) {
-		outError = description + " directory not found: " + sourceRoot.string();
+		outError = description + " directory not found: " + PathToUtf8(sourceRoot);
 		return false;
 	}
 
@@ -354,8 +380,8 @@ struct ProjectManifestMetadata {
 // LoadProjectManifestMetadata is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem::path& projectRoot) {
 	ProjectManifestMetadata metadata;
-	if (!projectRoot.filename().string().empty()) {
-		metadata.name = projectRoot.filename().string();
+	if (!projectRoot.filename().empty()) {
+		metadata.name = PathToUtf8(projectRoot.filename());
 	}
 
 	const std::filesystem::path manifestPath = projectRoot / "game.json";
@@ -399,102 +425,298 @@ static ProjectManifestMetadata LoadProjectManifestMetadata(const std::filesystem
 // --- Public API ---
 
 ExportResult ExportPipeline::Execute(
-	const BuildProfile& profile,
-	const std::filesystem::path& projectRoot,
+	const ExportRequest& request,
 	ExportProgressCallback progressCallback)
 {
-	ExportResult result;
 	const auto startTime = std::chrono::steady_clock::now();
-
+	ExportResult result;
+	result.runId = request.runId;
+	result.invocationKind = request.invocationKind;
+	result.profileId = request.profile.id;
+	result.projectRoot = request.projectRoot;
+	result.outputDirectory = request.finalOutputDirectory;
+	result.evidenceDirectory = request.evidenceDirectory;
 	m_StagedAssets.clear();
 
-	// Use a temporary staging directory for asset merging and packing.
-	// This ensures the raw and compiled content is unified before being TEPAKed.
-	std::filesystem::path stagingDir = projectRoot / "Temp" / "ExportStaging";
+	std::vector<std::string> progressRecords;
+	ExportProgressCallback capturedProgress = [&](const ExportProgress& progress) {
+		progressRecords.push_back(SerializeExportProgressRecord(request.runId, progress));
+		if(progressCallback) progressCallback(progress);
+	};
+	std::string resolvedManifest;
+	std::vector<ExportContentInventoryEntry> inventory;
+	std::string packageValidationReport;
+	ExportOutputTransaction transaction(request.finalOutputDirectory, request.runId);
 
-	try {
-		// Phase 1: Validation
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!RunValidation(profile, projectRoot, result, progressCallback)) {
-			result.totalElapsedSeconds = std::chrono::duration<double>(
-				std::chrono::steady_clock::now() - startTime).count();
-			EmitProgress(progressCallback, ExportPhase::Failed, 1.0f,
-				"Export failed during validation.", true);
-			return result;
+	auto writeEvidence = [&](std::string& outError) {
+		ExportEvidenceInputs evidenceInputs;
+		evidenceInputs.resolvedManifestJson = resolvedManifest;
+		evidenceInputs.inventory = inventory;
+		evidenceInputs.progressJsonLines = progressRecords;
+		evidenceInputs.packageValidationReport = packageValidationReport;
+		return WriteExportEvidenceBundle(request, result, evidenceInputs, outError);
+	};
+
+	auto finish = [&](ExportFailureCategory category, ExportStage stage, std::string message) {
+		result.success = category == ExportFailureCategory::None;
+		result.failureCategory = category;
+		result.stage = stage;
+		result.exitCode = ExitCodeForFailure(category);
+		result.message = std::move(message);
+		result.errorMessage = result.success ? std::string{} : result.message;
+		std::vector<ExportDiagnostic> stageDiagnostics = std::move(result.diagnostics);
+		result.diagnostics = result.validationResult.diagnostics;
+		result.diagnostics.insert(result.diagnostics.end(),
+			std::make_move_iterator(stageDiagnostics.begin()),
+			std::make_move_iterator(stageDiagnostics.end()));
+		if(category != ExportFailureCategory::None) {
+			ExportDiagnostic diagnostic;
+			diagnostic.severity = ExportDiagnosticSeverity::Error;
+			diagnostic.category = std::string(ToString(category));
+			diagnostic.stage = std::string(ToString(stage));
+			diagnostic.code = "export." + std::string(ToString(category));
+			diagnostic.message = result.message;
+			diagnostic.filePath = PathToUtf8(result.affectedPath);
+			result.diagnostics.push_back(std::move(diagnostic));
 		}
+		result.totalElapsedSeconds = std::chrono::duration<double>(
+			std::chrono::steady_clock::now() - startTime).count();
 
-		// Phase 2: Managed compilation
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (profile.enableManagedCompilation) {
-			if (!RunManagedCompilation(profile, projectRoot, result, progressCallback)) {
-				result.totalElapsedSeconds = std::chrono::duration<double>(
-					std::chrono::steady_clock::now() - startTime).count();
-				EmitProgress(progressCallback, ExportPhase::Failed, 1.0f,
-					"Export failed during managed compilation.", true);
-				return result;
+		if(!result.success) {
+			std::string rollbackError;
+			if(!transaction.Rollback(rollbackError)) {
+				result.failureCategory = ExportFailureCategory::PublicationFailed;
+				result.stage = ExportStage::Publication;
+				result.exitCode = ExitCodeForFailure(result.failureCategory);
+				result.message += " Rollback failed: " + rollbackError;
+				result.errorMessage = result.message;
 			}
 		}
 
-		// Phase 3: Asset staging
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!RunAssetStaging(profile, projectRoot, stagingDir, result, progressCallback)) {
-			std::filesystem::remove_all(stagingDir);
-			result.totalElapsedSeconds = std::chrono::duration<double>(
-				std::chrono::steady_clock::now() - startTime).count();
-			EmitProgress(progressCallback, ExportPhase::Failed, 1.0f,
-				"Export failed during asset staging.", true);
-			return result;
+		std::string evidenceError;
+		if(!writeEvidence(evidenceError)) {
+			result.success = false;
+			result.failureCategory = ExportFailureCategory::EvidenceWriteFailed;
+			result.stage = ExportStage::Evidence;
+			result.exitCode = ExitCodeForFailure(result.failureCategory);
+			result.message = evidenceError;
+			result.errorMessage = evidenceError;
+			// A second best-effort write updates export-result.json when the first
+			// attempt failed after creating only part of the evidence directory.
+			std::string ignoredError;
+			writeEvidence(ignoredError);
+		}
+		return result;
+	};
+
+	try {
+		std::string transactionError;
+		if(!transaction.Begin(transactionError)) {
+			result.affectedPath = transaction.LockPath();
+			return finish(ExportFailureCategory::OutputConflict, ExportStage::Lock, transactionError);
 		}
 
-		// Phase 4: Asset packaging
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!RunAssetPackaging(profile, stagingDir, result, progressCallback)) {
-			std::filesystem::remove_all(stagingDir);
-			result.totalElapsedSeconds = std::chrono::duration<double>(
-				std::chrono::steady_clock::now() - startTime).count();
-			EmitProgress(progressCallback, ExportPhase::Failed, 1.0f,
-				"Export failed during asset packaging.", true);
-			return result;
+		std::string runtimeError;
+		if(!ValidateExportRuntimeLayout(request.runtimeLayout, request.profile.platform, runtimeError)) {
+			result.affectedPath = request.runtimeLayout.installRoot;
+			return finish(ExportFailureCategory::InvalidRuntimeLayout, ExportStage::Arguments, runtimeError);
 		}
 
-		// Cleanup staging directory after packaging.
-		std::filesystem::remove_all(stagingDir);
+		BuildProfile executionProfile = request.profile;
+		executionProfile.outputDirectory = transaction.StagingDirectory();
+		const std::filesystem::path packageInputDirectory = transaction.ScratchDirectory() / "PackageInput";
 
-		// Phase 5: Output staging
-		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-		if (!RunOutputStaging(profile, projectRoot, result, progressCallback)) {
-			result.totalElapsedSeconds = std::chrono::duration<double>(
-				std::chrono::steady_clock::now() - startTime).count();
-			EmitProgress(progressCallback, ExportPhase::Failed, 1.0f,
-				"Export failed during output staging.", true);
-			return result;
+		result.stage = ExportStage::Validation;
+		if(!RunValidation(executionProfile, request.projectRoot, request.runtimeLayout, result, capturedProgress)) {
+			result.affectedPath = request.profilePath.empty() ? request.projectRoot : request.profilePath;
+			return finish(ExportFailureCategory::ValidationFailed, result.stage, result.errorMessage);
 		}
 
+		if(executionProfile.enableManagedCompilation) {
+			result.stage = ExportStage::ManagedCompilation;
+			if(!RunManagedCompilation(executionProfile, request.projectRoot, result, capturedProgress)) {
+				result.affectedPath = request.projectRoot / "Assembly-CSharp.csproj";
+				return finish(ExportFailureCategory::ManagedCompilationFailed, result.stage, result.errorMessage);
+			}
+		}
+
+		result.stage = ExportStage::AssetStaging;
+		if(!RunAssetStaging(executionProfile, request.projectRoot, request.runtimeLayout,
+			packageInputDirectory, result, capturedProgress)) {
+			result.affectedPath = packageInputDirectory;
+			return finish(ExportFailureCategory::AssetStagingFailed, result.stage, result.errorMessage);
+		}
+
+		const std::filesystem::path manifestPath = packageInputDirectory / "game.json";
+		{
+			// Close the manifest handle before Commit removes the scratch tree on
+			// Windows; an open stream would otherwise leave an orphan directory.
+			std::ifstream manifestInput(manifestPath, std::ios::binary);
+			resolvedManifest.assign(
+				std::istreambuf_iterator<char>(manifestInput), std::istreambuf_iterator<char>());
+		}
+		std::string inventoryError;
+		if(!BuildExportContentInventory(packageInputDirectory, inventory, inventoryError)) {
+			return finish(ExportFailureCategory::AssetStagingFailed, result.stage, inventoryError);
+		}
+		const auto placeholderEntry = std::find_if(inventory.begin(), inventory.end(), [](const auto& entry) {
+			return entry.required && entry.placeholderDetected;
+		});
+		if(placeholderEntry != inventory.end()) {
+			return finish(ExportFailureCategory::AssetStagingFailed, result.stage,
+				"Required staged entry contains a placeholder marker: " + placeholderEntry->logicalPath);
+		}
+
+		result.stage = ExportStage::Packaging;
+		if(!RunAssetPackaging(executionProfile, request.projectRoot, packageInputDirectory, result, capturedProgress)) {
+			result.affectedPath = transaction.StagingDirectory();
+			return finish(ExportFailureCategory::PackagingFailed, result.stage, result.errorMessage);
+		}
+
+		result.stage = ExportStage::PackageValidation;
+		ExportPackageValidationReport inspection = InspectExportPackage(
+			result.packageResult.outputPath, executionProfile.platform);
+		const bool manifestMatchesEvidence = inspection.archivedManifestJson == resolvedManifest;
+		inspection.passed = inspection.passed && manifestMatchesEvidence;
+		const std::size_t finalLine = inspection.summaryText.rfind("Final: ");
+		if(finalLine != std::string::npos) inspection.summaryText.erase(finalLine);
+		inspection.summaryText += std::string("Manifest evidence match: ")
+			+ (manifestMatchesEvidence ? "PASS\n" : "FAIL\n")
+			+ "Final: " + (inspection.passed ? "PASS\n" : "FAIL\n");
+		packageValidationReport = inspection.summaryText;
+		if(!inspection.passed || !manifestMatchesEvidence) {
+			result.affectedPath = result.packageResult.outputPath;
+			for(const ExportPackageValidationFinding& finding : inspection.findings) {
+				ExportDiagnostic diagnostic;
+				diagnostic.severity = ExportDiagnosticSeverity::Error;
+				diagnostic.category = "Package";
+				diagnostic.stage = "package_validation";
+				diagnostic.code = finding.code;
+				diagnostic.message = finding.message;
+				diagnostic.filePath = finding.path;
+				result.diagnostics.push_back(std::move(diagnostic));
+			}
+			const std::string error = inspection.findings.empty()
+				? "Export package manifest does not match resolved-manifest evidence."
+				: inspection.findings.front().message;
+			return finish(ExportFailureCategory::PackageValidationFailed, result.stage, error);
+		}
+
+		result.stage = ExportStage::RuntimeStaging;
+		if(!RunOutputStaging(executionProfile, request.projectRoot, request.runtimeLayout, result, capturedProgress)) {
+			result.affectedPath = transaction.StagingDirectory();
+			return finish(ExportFailureCategory::RuntimeStagingFailed, result.stage, result.errorMessage);
+		}
+
+		std::error_code scratchCleanupError;
+		std::filesystem::remove_all(transaction.ScratchDirectory(), scratchCleanupError);
+		if(scratchCleanupError) {
+			result.affectedPath = transaction.ScratchDirectory();
+			return finish(ExportFailureCategory::PublicationFailed, ExportStage::Publication,
+				"Could not clean validated export scratch data: " + scratchCleanupError.message());
+		}
+		if(!transaction.MarkStagedAndValidated(transactionError)) {
+			return finish(ExportFailureCategory::PublicationFailed, ExportStage::Publication, transactionError);
+		}
+		const std::filesystem::path stagedArchivePath = result.packageResult.outputPath;
+		const std::filesystem::path archiveFileName = stagedArchivePath.filename();
+		result.packageResult.outputPath = request.finalOutputDirectory / archiveFileName;
+		const std::string stagedArchiveText = PathToUtf8(stagedArchivePath);
+		const std::size_t archiveSummaryOffset = packageValidationReport.find(stagedArchiveText);
+		if(archiveSummaryOffset != std::string::npos) {
+			packageValidationReport.replace(
+				archiveSummaryOffset, stagedArchiveText.size(), PathToUtf8(result.packageResult.outputPath));
+		}
+		result.outputDirectory = request.finalOutputDirectory;
 		result.success = true;
+		result.failureCategory = ExportFailureCategory::None;
+		result.stage = ExportStage::Complete;
+		result.exitCode = 0;
+		result.message = "Export completed successfully.";
+		result.errorMessage.clear();
+		result.diagnostics = result.validationResult.diagnostics;
 		result.totalElapsedSeconds = std::chrono::duration<double>(
 			std::chrono::steady_clock::now() - startTime).count();
-		EmitProgress(progressCallback, ExportPhase::Complete, 1.0f,
-			"Export completed successfully in " +
-			std::to_string(static_cast<int>(result.totalElapsedSeconds)) + "s.", true);
+		ExportProgress completeProgress;
+		completeProgress.phase = ExportPhase::Complete;
+		completeProgress.stage = ExportStage::Complete;
+		completeProgress.overallProgress = 1.0f;
+		completeProgress.statusMessage = result.message;
+		completeProgress.finished = true;
+		// Store the eventual stdout record before evidence publication, while the
+		// external callback remains deferred until the output swap succeeds.
+		progressRecords.push_back(SerializeExportProgressRecord(request.runId, completeProgress));
+		std::string evidenceError;
+		if(!writeEvidence(evidenceError)) {
+			result.affectedPath = request.evidenceDirectory;
+			return finish(ExportFailureCategory::EvidenceWriteFailed, ExportStage::Evidence, evidenceError);
+		}
+		if(!transaction.Commit(transactionError)) {
+			result.affectedPath = request.finalOutputDirectory;
+			return finish(ExportFailureCategory::PublicationFailed, ExportStage::Publication, transactionError);
+		}
+		// The evidence bundle is already durable. Publish the completion callback
+		// only after the validated directory swap succeeds, without reopening the
+		// evidence files after the protected boundary.
+		if(progressCallback) {
+			try {
+				progressCallback(completeProgress);
+			} catch(...) {
+				// Publication has completed and must never be reclassified as a
+				// failure because a presentation-only callback threw an exception.
+			}
+		}
 		return result;
+	} catch(const std::exception& exception) {
+		return finish(ExportFailureCategory::UnexpectedFailure, result.stage,
+			std::string("Contained export failure: ") + exception.what());
+	} catch(...) {
+		return finish(ExportFailureCategory::UnexpectedFailure, result.stage,
+			"Contained export failure with no diagnostic text.");
 	}
-	catch (const std::exception& e) {
-		std::filesystem::remove_all(stagingDir);
-		result.success = false;
-		result.errorMessage = std::string("Unhandled exception: ") + e.what();
-		return result;
+}
+
+static bool ValidateManagedRuntimeOutput(
+	const std::filesystem::path& managedLibrary,
+	std::string& outError)
+{
+	std::error_code errorCode;
+	if(!std::filesystem::is_regular_file(managedLibrary, errorCode)) {
+		outError = "NativeAOT publish did not produce the required gameplay library: " + PathToUtf8(managedLibrary);
+		return false;
 	}
+	const std::uintmax_t byteSize = std::filesystem::file_size(managedLibrary, errorCode);
+	if(errorCode || byteSize == 0) {
+		outError = "NativeAOT gameplay library is empty or unreadable: " + PathToUtf8(managedLibrary);
+		return false;
+	}
+
+	std::ifstream input(managedLibrary, std::ios::binary);
+	const std::vector<unsigned char> bytes{
+		std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+	static constexpr std::string_view marker = "placeholder";
+	const bool containsPlaceholder = std::search(
+		bytes.begin(), bytes.end(), marker.begin(), marker.end(),
+		[](unsigned char left, char right) {
+			return static_cast<char>(std::tolower(left)) == right;
+		}) != bytes.end();
+	if(containsPlaceholder) {
+		outError = "NativeAOT gameplay library contains the forbidden placeholder marker: " + PathToUtf8(managedLibrary);
+		return false;
+	}
+	return true;
 }
 
 // --- Phase implementations ---
 
-bool ExportPipeline::RunValidation(const BuildProfile& profile, const std::filesystem::path& projectRoot, ExportResult& result,
+bool ExportPipeline::RunValidation(const BuildProfile& profile, const std::filesystem::path& projectRoot,
+	const ExportRuntimeLayout& runtimeLayout, ExportResult& result,
 	ExportProgressCallback progressCallback)
 {
 	EmitProgress(progressCallback, ExportPhase::Validating, 0.0f,
 		"Validating build profile...");
 
-	result.validationResult = m_Validator.ValidateAll(profile, projectRoot);
+	result.validationResult = m_Validator.ValidateAll(profile, projectRoot, runtimeLayout.shaderDirectory);
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!result.validationResult.passed) {
@@ -520,7 +742,7 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 	std::filesystem::path managedProject = projectRoot / "Assembly-CSharp.csproj";
 
 	if (!std::filesystem::exists(managedProject)) {
-		result.errorMessage = "Managed project not found: " + managedProject.string();
+		result.errorMessage = "Managed project not found: " + PathToUtf8(managedProject);
 		return false;
 	}
 
@@ -556,35 +778,24 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 		try { std::filesystem::remove_all(oldObjDir); } catch (...) {}
 	}
 
-	// WIPE OBSOLETE INTEROP FOLDER:
-	// Previously, we copied ExportBootstrap.cs to the user's project. This is now
-	// handled entirely by the Source Generator. We forcefully delete the old folder
-	// here to guarantee the compiler doesn't pick up stale, conflicting files.
+	// Old projects may still contain interop sources that conflict with the source
+	// generator. Export reports the problem but never deletes project source; the
+	// user remains in control of their checked-in content.
 	std::filesystem::path obsoleteExportDir = projectRoot / "Project" / "Internal" / "Export";
 	if (std::filesystem::exists(obsoleteExportDir)) {
-		try {
-			// Iterate over the current data snapshot; avoid changing ownership rules inside the loop body.
-			for (const auto& entry : std::filesystem::recursive_directory_iterator(obsoleteExportDir)) {
-				std::filesystem::permissions(entry, std::filesystem::perms::all);
-			}
-			std::filesystem::remove_all(obsoleteExportDir);
-		} catch (const std::exception& e) {
-			result.errorMessage = std::string("CRITICAL: Failed to delete obsolete folder. Please manually delete 'Project/Internal/Export' from your project before exporting! Error: ") + e.what();
-			return false;
-		}
-	}
-	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
-	if (std::filesystem::exists(obsoleteExportDir)) {
-		result.errorMessage = "CRITICAL: Obsolete 'Project/Internal/Export' folder still exists. Please manually delete it to prevent C# compiler conflicts.";
+		result.errorMessage = "Obsolete 'Project/Internal/Export' source exists. Remove it manually before exporting so the source generator has one interop definition.";
 		return false;
 	}
 
 	// Build the dotnet publish command in the shared build-profile helper so
 	// profile toggles are tested without launching a real NativeAOT publish.
-	const std::string commandLine = BuildNativeAotPublishCommand(profile, managedProject, managedOutputDir);
+	// The CLI reserves stdout for one-JSON-object-per-line automation records.
+	// Both cmd.exe and POSIX shells accept this redirection, so verbose MSBuild
+	// output remains human-readable on stderr without corrupting JSONL output.
+	const std::string commandLine = BuildNativeAotPublishCommand(profile, managedProject, managedOutputDir) + " 1>&2";
 
 	// Execute the dotnet publish command.
-	const int exitCode = std::system(commandLine.c_str());
+	const int exitCode = ExecuteUtf8ShellCommand(commandLine);
 	if (exitCode != 0) {
 		result.errorMessage = "NativeAOT compilation failed (exit code " +
 			std::to_string(exitCode) + ").";
@@ -595,6 +806,12 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 	if (!profile.includeDebugSymbols) {
 		RemoveDebugSymbolFiles(managedOutputDir);
 	}
+	std::string managedOutputError;
+	if(!ValidateManagedRuntimeOutput(
+		managedOutputDir / GetExportManagedRuntimeLibraryName(profile.platform), managedOutputError)) {
+		result.errorMessage = managedOutputError;
+		return false;
+	}
 
 	EmitProgress(progressCallback, ExportPhase::Compiling, 0.45f,
 		"Managed compilation completed.");
@@ -603,11 +820,12 @@ bool ExportPipeline::RunManagedCompilation(const BuildProfile& profile,
 
 bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 	const std::filesystem::path& projectRoot,
+	const ExportRuntimeLayout& runtimeLayout,
 	const std::filesystem::path& stagingDir,
 	ExportResult& result,
 	ExportProgressCallback progressCallback)
 {
-	EmitProgress(progressCallback, ExportPhase::Packaging, 0.45f,
+	EmitProgress(progressCallback, ExportPhase::AssetStaging, 0.45f,
 		"Staging assets for packaging...");
 
 	try {
@@ -664,13 +882,12 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 
 		// Engine-owned runtime payloads are packed with project content so the
 		// standalone launcher can resolve them entirely through ContentMount.
-		const std::filesystem::path editorDir = std::filesystem::current_path();
 		std::string runtimeAssetError;
-		if (!CopyRuntimeShaderTree(editorDir / "Shaders", stagingDir / "Shaders", runtimeAssetError)) {
+		if (!CopyRuntimeShaderTree(runtimeLayout.shaderDirectory, stagingDir / "Shaders", runtimeAssetError)) {
 			result.errorMessage = runtimeAssetError;
 			return false;
 		}
-		if (!CopyRuntimeAssetTree(editorDir / "Fonts", stagingDir / "Fonts", "Runtime font", runtimeAssetError)) {
+		if (!CopyRuntimeAssetTree(runtimeLayout.fontDirectory, stagingDir / "Fonts", "Runtime font", runtimeAssetError)) {
 			result.errorMessage = runtimeAssetError;
 			return false;
 		}
@@ -828,6 +1045,7 @@ bool ExportPipeline::RunAssetStaging(const BuildProfile& profile,
 }
 
 bool ExportPipeline::RunAssetPackaging(const BuildProfile& profile,
+	const std::filesystem::path& projectRoot,
 	const std::filesystem::path& stagingDir,
 	ExportResult& result,
 	ExportProgressCallback progressCallback)
@@ -837,18 +1055,14 @@ bool ExportPipeline::RunAssetPackaging(const BuildProfile& profile,
 
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (!std::filesystem::exists(stagingDir)) {
-		result.errorMessage = "Asset staging directory not found: " + stagingDir.string();
+		result.errorMessage = "Asset staging directory not found: " + PathToUtf8(stagingDir);
 		return false;
 	}
-
-	// Resolve the project root for default output path resolution.
-	// We can deduce the project root from the staging directory (Project/Temp/ExportStaging).
-	const auto projectRoot = stagingDir.parent_path().parent_path();
 
 	// Resolve the output path for the TEPAK archive.
 	const std::filesystem::path outputDir = ResolveOutputDirectory(profile, projectRoot);
 	const std::string projectName = ResolveProjectExportName(projectRoot, profile);
-	const auto tepakPath = outputDir / ResolveArchiveFileName(projectName);
+	const auto tepakPath = outputDir / std::filesystem::u8path(ResolveArchiveFileName(projectName));
 
 	// Package progress is forwarded to the pipeline progress callback.
 	PackageProgressCallback packageCallback;
@@ -875,12 +1089,6 @@ bool ExportPipeline::RunAssetPackaging(const BuildProfile& profile,
 		return false;
 	}
 
-	std::string packageValidationError;
-	if (!ValidateExportPackage(tepakPath, profile.platform, packageValidationError)) {
-		result.errorMessage = packageValidationError;
-		return false;
-	}
-
 	EmitProgress(progressCallback, ExportPhase::Packaging, 0.80f,
 		"Asset packaging completed (" +
 		std::to_string(result.packageResult.entryCount) + " entries).");
@@ -889,6 +1097,7 @@ bool ExportPipeline::RunAssetPackaging(const BuildProfile& profile,
 
 bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 	const std::filesystem::path& projectRoot,
+	const ExportRuntimeLayout& runtimeLayout,
 	ExportResult& result,
 	ExportProgressCallback progressCallback)
 {
@@ -912,23 +1121,19 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 	}
 	// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 	if (legacyLauncherFileName != launcherFileName) {
-		RemoveIfExists(outputDir / legacyLauncherFileName);
+		RemoveIfExists(outputDir / std::filesystem::u8path(legacyLauncherFileName));
 	}
 
-	// Copy engine binaries and shaders from the editor's build directory.
-	// By convention, the editor runs from <EngineBuild>/Editor/ and
-	// engine binaries are in <EngineBuild>/Launcher/ or <EngineBuild>/Engine/.
+	// Copy runtime binaries from the explicitly validated installed layout. This
+	// keeps export independent of the caller's current working directory.
 	try {
-		std::filesystem::path editorDir = std::filesystem::current_path();
-		std::filesystem::path engineBuildDir = editorDir.parent_path();
-		
 		const std::filesystem::path launcherSourceName = GetExportLauncherFileName("TerraEngine-Launcher", profile.platform);
-		std::filesystem::path launcherSrc = engineBuildDir / "Launcher" / launcherSourceName;
+		std::filesystem::path launcherSrc = runtimeLayout.launcherDirectory / launcherSourceName;
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(launcherSrc)) {
-			std::filesystem::copy_file(launcherSrc, outputDir / launcherFileName, std::filesystem::copy_options::overwrite_existing);
+			std::filesystem::copy_file(launcherSrc, outputDir / std::filesystem::u8path(launcherFileName), std::filesystem::copy_options::overwrite_existing);
 		} else {
-			result.errorMessage = "Required launcher binary not found: " + launcherSrc.string();
+			result.errorMessage = "Required launcher binary not found: " + PathToUtf8(launcherSrc);
 			return false;
 		}
 
@@ -940,10 +1145,10 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 			GetExportGlfwLibraryName(profile.platform)
 		};
 		for (const auto& libraryName : engineLibraries) {
-			std::filesystem::path librarySrc = engineBuildDir / "Launcher" / libraryName;
+			std::filesystem::path librarySrc = runtimeLayout.launcherDirectory / libraryName;
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (!std::filesystem::exists(librarySrc)) {
-				librarySrc = engineBuildDir / "Engine" / libraryName;
+				librarySrc = runtimeLayout.engineDirectory / libraryName;
 			}
 			// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 			if (std::filesystem::exists(librarySrc)) {
@@ -956,7 +1161,7 @@ bool ExportPipeline::RunOutputStaging(const BuildProfile& profile,
 					return false;
 				}
 			} else {
-				result.errorMessage = "Required engine runtime library not found: " + librarySrc.string();
+				result.errorMessage = "Required engine runtime library not found: " + PathToUtf8(librarySrc);
 				return false;
 			}
 		}

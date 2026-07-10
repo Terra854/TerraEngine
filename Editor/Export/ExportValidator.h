@@ -24,6 +24,11 @@ struct ExportDiagnostic {
 	std::string message;    // Human-readable description
 	std::string filePath;   // Optional: source file or asset path
 	int line = 0;           // Optional: source line number
+	// These stable automation fields augment the existing editor-facing text.
+	// Empty values are normalized by the evidence writer for legacy findings.
+	std::string stage;
+	std::string code;
+	std::string suggestion;
 };
 
 /// Aggregated result of one validation pass.
@@ -52,5 +57,8 @@ public:
 	ExportValidationResult ValidateManagedSource(const std::filesystem::path& projectRoot) const;
 
 	/// Runs both profile and managed source validation.
-	ExportValidationResult ValidateAll(const BuildProfile& profile, const std::filesystem::path& projectRoot) const;
+	ExportValidationResult ValidateAll(
+		const BuildProfile& profile,
+		const std::filesystem::path& projectRoot,
+		const std::filesystem::path& runtimeShaderDirectory = {}) const;
 };
