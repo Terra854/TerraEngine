@@ -114,6 +114,7 @@ namespace TerraEngine::Tests {
 	void RegisterRenderViewSubmitReuseTests(TestRegistry& registry);
 	void RegisterRenderWorkerSafetyTests(TestRegistry& registry);
 	void RegisterVulkanFrameDiagnosticsTests(TestRegistry& registry);
+	void RegisterVulkanImageReadbackTests(TestRegistry& registry);
 	void RegisterRenderProfileBootSummaryTests(TestRegistry& registry);
 	void RegisterSceneRuntimeParityTests(TestRegistry& registry);
 	void RegisterHierarchySnapshotTests(TestRegistry& registry);
@@ -269,6 +270,7 @@ int main() {
 	TerraEngine::Tests::RegisterRenderWorkSchedulingTests(registry);
 	TerraEngine::Tests::RegisterVulkanRecordingSchedulingTests(registry);
 	TerraEngine::Tests::RegisterVulkanFrameDiagnosticsTests(registry);
+	TerraEngine::Tests::RegisterVulkanImageReadbackTests(registry);
 	TerraEngine::Tests::RegisterVulkanThreadLocalContextTests(registry);
 	TerraEngine::Tests::RegisterVulkanStaleBatchTests(registry);
 	TerraEngine::Tests::RegisterMockRenderBackendTests(registry);

@@ -1,9 +1,8 @@
 // ExportOutputTransaction.h - Filesystem publication boundary for exported builds.
 //
-// An export is assembled in private sibling directories and becomes visible only
-// after validation. This class owns the output lock and restores an older build
-// when publication cannot complete, so callers never need to coordinate raw
-// filesystem operations themselves.
+// An export is assembled in private sibling directories and published only after
+// validation. This class owns the output lock and overlays validated files without
+// replacing the destination directory or deleting unrelated destination content.
 
 #pragma once
 
@@ -69,8 +68,8 @@ public:
 	/// Records the validation boundary that callers must cross before Commit().
 	[[nodiscard]] bool MarkStagedAndValidated(std::string& error);
 
-	/// Atomically replaces the visible directory by sibling renames. When the
-	/// second rename fails, the previous directory is restored before returning.
+	/// Overwrites matching destination files from validated staging while keeping
+	/// the destination directory identity and every unmentioned path intact.
 	[[nodiscard]] bool Commit(std::string& error);
 
 	/// Removes this run's private files and restores any backed-up prior output.

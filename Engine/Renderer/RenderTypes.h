@@ -81,6 +81,9 @@ namespace TerraEngine::Renderer {
 		bool transparentBackground = false;
 		bool allowBackendFallback = true;
 		std::uint32_t timeoutMs = 2000u;
+		// The render coordinator stamps the frame whose output the backend copies.
+		// Callers leave this zero; it is read-only correlation metadata.
+		std::uint64_t submittedFrameId = 0u;
 	};
 
 	struct RenderCaptureResult
@@ -99,6 +102,7 @@ namespace TerraEngine::Renderer {
 		bool overlaysIncluded = false;
 		bool backendReadback = false;
 		bool deterministicFallback = false;
+		bool pendingAsync = false;
 		std::vector<std::string> warnings;
 	};
 

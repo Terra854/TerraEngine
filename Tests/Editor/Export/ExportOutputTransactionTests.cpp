@@ -105,13 +105,15 @@ namespace TerraEngine::EditorTests {
 			context.Expect(transaction.Rollback(error), error.empty() ? "Rejected staging should roll back cleanly." : error);
 		});
 
-		registry.Add("Editor.ExportOutputTransaction.PublishesValidatedOutputAndCleansPrivatePaths", [](TestContext& context) {
+		registry.Add("Editor.ExportOutputTransaction.OverlaysValidatedOutputAndPreservesUnmentionedFiles", [](TestContext& context) {
 			TempExportOutputWorkspace workspace;
 			workspace.WriteFinalFile("previous.txt", "previous output");
+			workspace.WriteFinalFile("shared.txt", "older shared output");
 			ExportOutputTransaction transaction(workspace.FinalDirectory(), "successful-publish");
 			std::string error;
 			context.Expect(transaction.Begin(error), error.empty() ? "The replacement transaction should begin." : error);
 			TempExportOutputWorkspace::WriteText(transaction.StagingDirectory() / "current.txt", "current output");
+			TempExportOutputWorkspace::WriteText(transaction.StagingDirectory() / "shared.txt", "new shared output");
 			context.Expect(transaction.MarkStagedAndValidated(error), error.empty() ? "The staging directory should be marked validated." : error);
 			context.Expect(transaction.Commit(error), error.empty() ? "Validated staging should publish." : error);
 
@@ -119,7 +121,8 @@ namespace TerraEngine::EditorTests {
 			context.Expect(transaction.HadPreviousOutput(), "The transaction should record that an older output was replaced.");
 			context.Expect(transaction.State() == ExportOutputTransactionState::Cleaned, "A committed transaction should finish in the cleaned state.");
 			context.ExpectEqual(std::string("current output"), TempExportOutputWorkspace::ReadText(workspace.FinalDirectory() / "current.txt"), "The staged payload should become the visible output.");
-			context.Expect(!std::filesystem::exists(workspace.FinalDirectory() / "previous.txt"), "The older payload should not remain in the new output.");
+			context.ExpectEqual(std::string("new shared output"), TempExportOutputWorkspace::ReadText(workspace.FinalDirectory() / "shared.txt"), "A staged file should overwrite the older destination version.");
+			context.ExpectEqual(std::string("previous output"), TempExportOutputWorkspace::ReadText(workspace.FinalDirectory() / "previous.txt"), "Files absent from staging should remain untouched.");
 			context.Expect(!std::filesystem::exists(transaction.BackupDirectory()), "A successful commit should remove its temporary backup.");
 			context.Expect(!std::filesystem::exists(transaction.ScratchDirectory()), "A successful commit should remove scratch work.");
 			context.Expect(!std::filesystem::exists(transaction.LockPath()), "A successful commit should release the output lock.");

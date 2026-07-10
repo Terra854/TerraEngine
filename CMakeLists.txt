@@ -117,6 +117,7 @@ set(ENGINE_SOURCES
 	Engine/Renderer/RHI/Vulkan/VulkanDescriptorPlanning.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanFrameDiagnostics.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanPipelineStateKeys.cpp
+	Engine/Renderer/RHI/Vulkan/VulkanReadbackConversion.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanRecordingContext.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanRendererWorkCache.cpp
 	Engine/Renderer/RHI/Vulkan/VulkanTransitionPlanning.cpp

@@ -434,6 +434,17 @@ namespace TerraEngine::Tests
 				"Blur descriptors may be updated after the GTAO bind only because they are a different descriptor set.");
 		});
 
+		registry.Add("VirtualGeometry.ShaderLayout.HiZDescriptorPoolHasViewportIndependentCapacity", [](TestContext& context) {
+			const std::string vulkanSource = ReadVulkanContextSource();
+
+			// Multiple editor views are recorded before one queue submit. The fixed
+			// mip stride keeps a differently-sized later view from rebuilding the
+			// descriptor pool referenced by an earlier command buffer.
+			context.Expect(ShaderContains(vulkanSource, "MAX_HIZ_DESCRIPTOR_MIP_LEVELS"), "Hi-Z descriptor allocation should use a viewport-independent mip capacity.");
+			context.Expect(ShaderContains(vulkanSource, "* static_cast<std::size_t>(MAX_HIZ_DESCRIPTOR_MIP_LEVELS);"), "Hi-Z descriptor slices should use the fixed mip capacity as their stride.");
+			context.Expect(!ShaderContains(vulkanSource, "* static_cast<std::size_t>(hiZ.mipLevels);"), "Hi-Z descriptor pool capacity must not change with one view's mip count.");
+		});
+
 		registry.Add("Renderer.VulkanValidation.RuntimeSettingSurvivesReleaseBuilds", [](TestContext& context) {
 			const std::string rhiDefinitions = ReadRhiDefinitionsSource();
 			const std::string vulkanHeader = ReadVulkanContextImplSource();

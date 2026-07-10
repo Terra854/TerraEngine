@@ -2404,6 +2404,7 @@ void RenderSystem::Update(float deltaTime)
 		return;
 	}
 	TERRAENGINE_PROFILE_SCOPE("RenderSystem::Update", TerraEngine::Profiling::ProfilerModuleId::CpuEngine);
+	DrainCaptureReadbacks();
 
 	// Standalone runtime UI should track the real framebuffer size. In the
 	// editor, however, the Game View is letterboxed inside an ImGui window and
@@ -2705,6 +2706,7 @@ void RenderSystem::Update(float deltaTime)
 		// on a previous Scene/Game View frame stay marked as active-view after
 		// the user hides those views or disables every camera.
 		ProcessQueuedCaptureRequests();
+		DrainCaptureReadbacks();
 		ResourceManager::Instance().RunResidencyCleanup(activeRenderFrameId);
 		ClearOverrideCameras();
 		return;
@@ -4912,6 +4914,7 @@ void RenderSystem::Update(float deltaTime)
 
 	ResourceManager::Instance().RunResidencyCleanup(activeRenderFrameId);
 	ProcessQueuedCaptureRequests();
+	DrainCaptureReadbacks();
 
 	ClearOverrideCameras();
 }
@@ -5993,7 +5996,12 @@ void RenderSystem::ProcessQueuedCaptureRequests()
 		}
 			else if (rhi && rhi->GetBackendCapabilityProfile().supportsImageReadback)
 			{
-				result = rhi->ReadbackCapture(request);
+				// Stamp the immutable request copy with the exact frame whose output
+				// the backend is about to copy. The caller-owned descriptor remains
+				// unchanged and can be reused safely.
+				TerraEngine::Renderer::RenderCaptureRequest backendRequest = request;
+				backendRequest.submittedFrameId = captureFrameId;
+				result = rhi->ReadbackCapture(backendRequest);
 				result.requestId = request.requestId;
 				result.sourceKind = request.sourceKind;
 				result.sourceName = request.sourceName;
@@ -6008,7 +6016,10 @@ void RenderSystem::ProcessQueuedCaptureRequests()
 				result.freshness = request.freshness;
 			}
 
-		if (!result.ok && result.errorCategory != "missing_target" && result.errorCategory != "unsupported_readback" && request.allowBackendFallback)
+		const bool backendFallbackEligible = result.errorCategory == "internal"
+			|| result.errorCategory == "backend_readback_unavailable"
+			|| result.errorCategory == "backend_error";
+		if (!result.ok && backendFallbackEligible && request.allowBackendFallback)
 		{
 			result.ok = true;
 			result.message = "Captured deterministic fallback image because backend readback is not available.";
@@ -6027,28 +6038,50 @@ void RenderSystem::ProcessQueuedCaptureRequests()
 			result.warnings.push_back("Deterministic fallback image does not contain live GPU pixels.");
 		}
 
-		std::lock_guard<std::mutex> lock(statsMutex);
-		completedCaptureResults.push_back(result);
-		while (completedCaptureResults.size() > captureLimits.maxQueuedCaptures)
+		if (!result.pendingAsync)
 		{
-			completedCaptureResults.pop_front();
+			CompleteCapture(result);
 		}
-		if (captureQueueState.activeCaptureCount > 0u)
-		{
-			--captureQueueState.activeCaptureCount;
-		}
-		captureQueueState.completedResultCount = static_cast<std::uint32_t>(completedCaptureResults.size());
-		latestRenderGraphDiagnostics.captureSchedulers.push_back(
-			TerraEngine::Renderer::BuildRenderCaptureSchedulerDiagnostics(
-				"RenderSystem",
-				"Render",
-				TerraEngine::Renderer::ToString(request.sourceKind),
-				result.backendReadback,
-				result.deterministicFallback));
-		if (latestRenderGraphDiagnostics.captureSchedulers.size() > 16u)
-		{
-			latestRenderGraphDiagnostics.captureSchedulers.erase(latestRenderGraphDiagnostics.captureSchedulers.begin());
-		}
+	}
+}
+
+void RenderSystem::CompleteCapture(TerraEngine::Renderer::RenderCaptureResult result)
+{
+	std::lock_guard<std::mutex> lock(statsMutex);
+	completedCaptureResults.push_back(result);
+	while (completedCaptureResults.size() > captureLimits.maxQueuedCaptures)
+	{
+		completedCaptureResults.pop_front();
+	}
+	if (captureQueueState.activeCaptureCount > 0u)
+	{
+		--captureQueueState.activeCaptureCount;
+	}
+	captureQueueState.completedResultCount = static_cast<std::uint32_t>(completedCaptureResults.size());
+	latestRenderGraphDiagnostics.captureSchedulers.push_back(
+		TerraEngine::Renderer::BuildRenderCaptureSchedulerDiagnostics(
+			"RenderSystem",
+			"Render",
+			TerraEngine::Renderer::ToString(result.sourceKind),
+			result.backendReadback,
+			result.deterministicFallback));
+	if (latestRenderGraphDiagnostics.captureSchedulers.size() > 16u)
+	{
+		latestRenderGraphDiagnostics.captureSchedulers.erase(latestRenderGraphDiagnostics.captureSchedulers.begin());
+	}
+}
+
+void RenderSystem::DrainCaptureReadbacks()
+{
+	if (!rhi)
+	{
+		return;
+	}
+	// PollCaptureReadbacks never waits for the GPU. Each completed item is
+	// committed through the same bounded queue path as synchronous fallbacks.
+	for (TerraEngine::Renderer::RenderCaptureResult& result : rhi->PollCaptureReadbacks())
+	{
+		CompleteCapture(std::move(result));
 	}
 }
 
@@ -6074,18 +6107,35 @@ TerraEngine::Renderer::RenderCaptureResult RenderSystem::CaptureImage(const Terr
 		&& request.format == "image/png";
 	if (shouldRenderDedicatedCaptureImmediately)
 	{
-		// MCP tool calls are synchronous. Running one render update here lets
-		// object/custom captures submit their dedicated offscreen pass and then
-		// publish the readback before the tool response is serialized.
+		// MCP tool calls are synchronous. One render update submits the dedicated
+		// object/custom offscreen pass; subsequent iterations poll only its fence
+		// instead of recursively rendering many frames.
 		Update(0.0f);
 	}
 	else
 	{
 		ProcessQueuedCaptureRequests();
 	}
-	if (std::optional<TerraEngine::Renderer::RenderCaptureResult> result = PollCaptureResult(requestId))
+
+	const std::chrono::milliseconds timeout(request.timeoutMs > 0u ? request.timeoutMs : captureLimits.defaultTimeoutMs);
+	const auto deadline = std::chrono::steady_clock::now() + timeout;
+	do
 	{
-		return *result;
+		DrainCaptureReadbacks();
+		if (std::optional<TerraEngine::Renderer::RenderCaptureResult> result = PollCaptureResult(requestId))
+		{
+			return *result;
+		}
+		std::this_thread::yield();
+	} while (std::chrono::steady_clock::now() < deadline);
+
+	// Give the backend one final poll at the exact deadline so its own timeout
+	// result wins over a synthetic facade timeout and queue accounting remains
+	// consistent.
+	DrainCaptureReadbacks();
+	if (std::optional<TerraEngine::Renderer::RenderCaptureResult> completed = PollCaptureResult(requestId))
+	{
+		return *completed;
 	}
 
 	TerraEngine::Renderer::RenderCaptureResult result;

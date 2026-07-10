@@ -142,11 +142,24 @@ $env:TERRAENGINE_TEST_FILTER="Editor.MCP.Contract"
 Remove-Item Env:TERRAENGINE_TEST_FILTER
 ```
 
-The current Vulkan backend advertises native image readback as unavailable, so
-MCP capture tools return a deterministic PNG fallback plus metadata and
-diagnostics. This proves the MCP image transport, disabled-camera resolution,
-custom-camera validation, and protected-boundary diagnostics without claiming
-live GPU pixels until a backend readback implementation lands.
+The Vulkan editor backend now advertises native image readback. It submits
+render-target copies to host-visible staging buffers, polls completion fences
+without blocking normal frame updates, converts RGBA8/BGRA8/HDR half-float
+pixels, and publishes the resulting PNG through the bounded MCP capture queue.
+Headless tests still exercise the deterministic fallback because they do not
+create a Vulkan device. Run the focused CPU/lifecycle regression slice with:
+
+```powershell
+ctest --test-dir out/build/Debug -C Debug -R "Engine.VulkanImageReadback|Engine.RendererRecovery" --output-on-failure
+```
+
+Live validation must use the installed editor and a real Vulkan adapter. Enable
+Vulkan validation layers and the local MCP bridge in isolated editor
+preferences, open a project containing an active camera, call
+`game_view.capture` and `camera.capture_custom`, and verify each response carries
+non-empty `image/png` content with `backendReadback=true` and
+`deterministicFallback=false`. Resize a view between requests and confirm the
+editor log has no Vulkan lifetime/layout validation errors.
 
 After code changes, rebuild the Visual Studio-compatible targets and run the
 install target so native, managed, editor, launcher, and shader-tool outputs are
@@ -631,6 +644,12 @@ contract is:
   --output out/ci/export-runtime-baseline/project/Builds/Baseline `
   --evidence out/ci/export-runtime-baseline/evidence
 ```
+
+Publication is an in-place overlay after validation. A staged file overwrites a
+matching destination file, but the exporter does not rename the destination
+directory and does not delete destination paths absent from staging. This keeps
+open terminals and unrelated user files intact. Use a dedicated or disposable
+output directory when a completely clean export tree is required.
 
 A successful invocation exits with code 0 and writes exactly one final result
 record plus these six durable files: `export-result.json`,

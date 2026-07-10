@@ -190,6 +190,10 @@ public:
 
 private:
 	RenderSystem();
+	void CompleteCapture(TerraEngine::Renderer::RenderCaptureResult result);
+	// Moves non-blocking backend fence completions into the bounded public
+	// result queue. This runs only at the protected render boundary.
+	void DrainCaptureReadbacks();
 	bool ResolveRenderDebugDiagnosticsEnabled() const;
 	void ApplyRenderDiagnosticsRequest();
 	TerraEngine::Renderer::ResourceRestorationPlan BuildRendererRecoveryRestorationPlan(const TerraEngine::Renderer::RenderFrameSnapshot& snapshot) const;

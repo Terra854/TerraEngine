@@ -1,4 +1,4 @@
-// ExportOutputTransaction.cpp - Same-volume staging and atomic output publication.
+// ExportOutputTransaction.cpp - Validated staging and conservative output overlay.
 
 #include "ExportOutputTransaction.h"
 
@@ -363,8 +363,16 @@ bool ExportOutputTransaction::Commit(std::string& error) {
 		return false;
 	}
 
+	// Publish as an in-place overlay so shells, debuggers, and other tools can
+	// keep the destination directory open. Matching files receive the staged
+	// version, while paths absent from staging remain entirely user-owned and are
+	// never deleted as an implicit side effect of export.
 	std::error_code publishError;
-	std::filesystem::copy(m_StagingDirectory, m_FinalDirectory, std::filesystem::copy_options::overwrite_existing | std::filesystem::copy_options::recursive, publishError);
+	std::filesystem::copy(
+		m_StagingDirectory,
+		m_FinalDirectory,
+		std::filesystem::copy_options::overwrite_existing | std::filesystem::copy_options::recursive,
+		publishError);
 	if(publishError) {
 		error = "output_publication_failed: Could not publish the validated staging directory: " + publishError.message();
 		return false;
@@ -377,7 +385,7 @@ bool ExportOutputTransaction::Commit(std::string& error) {
 		AppendCleanupWarning(std::move(metadataWarning));
 	}
 
-	// Publication is already complete. Scratch, staging, and lock cleanup failures
+	// Publication is already complete. Staging, scratch, and lock cleanup failures
 	// are retained as warnings instead of incorrectly claiming the output failed.
 	std::string cleanupWarning;
 	if(!CleanupPath(m_StagingDirectory, cleanupWarning)) {

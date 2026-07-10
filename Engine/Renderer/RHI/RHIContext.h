@@ -15,6 +15,7 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
 
 class WindowSystem;
 
@@ -76,6 +77,12 @@ public:
 		result.errorCategory = "unsupported_readback";
 		result.message = "The active RHI backend does not expose image readback.";
 		return result;
+	}
+	// Backends publish completed readbacks at the protected render boundary.
+	// Polling is non-blocking: an empty vector means GPU work is still pending.
+	virtual std::vector<TerraEngine::Renderer::RenderCaptureResult> PollCaptureReadbacks()
+	{
+		return {};
 	}
 	// IsTaskShaderSupported is an implementation entry point; keep its inputs, side effects, and ownership expectations aligned with callers.
 	virtual bool IsTaskShaderSupported() const { return false; }

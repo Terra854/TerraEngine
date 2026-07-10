@@ -17,5 +17,6 @@ tests so the suite stays headless and deterministic.
   planes, and zero-length direction vectors before any renderer boundary work.
 
 Native backend pixel readback is intentionally separate from these authored
-state fixtures. Until Vulkan readback is implemented, MCP responses use the
-deterministic PNG fallback and report that state in capture metadata.
+state fixtures. Headless automation tests use the deterministic PNG fallback,
+while installed-editor smoke tests exercise live Vulkan pixels and require the
+response metadata to report backend readback instead of fallback content.

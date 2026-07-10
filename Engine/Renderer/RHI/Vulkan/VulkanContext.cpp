@@ -21,6 +21,7 @@
 #include "VulkanCommonIncludes.h"
 #include "VulkanContextImpl.h"
 #include "VulkanFrameDiagnostics.h"
+#include "VulkanReadbackConversion.h"
 #include "Renderer/RenderCaptureEncoding.h"
 #include "Profiling/ProfilerScope.h"
 #include "ThreadPool/ThreadPool.h"
@@ -48,120 +49,7 @@ namespace
 	constexpr float kDepthHistoryMatrixEpsilon = 0.0005f;
 	constexpr std::uint64_t kTemporalStateHistoryFrames = 240u;
 	constexpr std::size_t kVulkanParallelRecordingThreshold = 64u;
-
-	std::uint32_t GetVulkanCaptureBytesPerPixel(VkFormat format)
-	{
-		switch (format)
-		{
-		case VK_FORMAT_R8G8B8A8_UNORM:
-		case VK_FORMAT_R8G8B8A8_SRGB:
-			return 4u;
-		case VK_FORMAT_R16G16B16A16_SFLOAT:
-			return 8u;
-		default:
-			return 0u;
-		}
-	}
-
-	float HalfFloatToFloat(std::uint16_t value)
-	{
-		const std::uint32_t sign = (static_cast<std::uint32_t>(value) & 0x8000u) << 16u;
-		const std::uint32_t exponent = (static_cast<std::uint32_t>(value) >> 10u) & 0x1fu;
-		std::uint32_t mantissa = static_cast<std::uint32_t>(value) & 0x03ffu;
-		std::uint32_t bits = sign;
-
-		if (exponent == 0u)
-		{
-			if (mantissa != 0u)
-			{
-				int adjustedExponent = -14;
-				while ((mantissa & 0x0400u) == 0u)
-				{
-					mantissa <<= 1u;
-					--adjustedExponent;
-				}
-				mantissa &= 0x03ffu;
-				bits = sign
-					| (static_cast<std::uint32_t>(adjustedExponent + 127) << 23u)
-					| (mantissa << 13u);
-			}
-		}
-		else if (exponent == 0x1fu)
-		{
-			bits = sign | 0x7f800000u | (mantissa << 13u);
-		}
-		else
-		{
-			bits = sign
-				| ((exponent + 112u) << 23u)
-				| (mantissa << 13u);
-		}
-
-		float decoded = 0.0f;
-		std::memcpy(&decoded, &bits, sizeof(decoded));
-		return decoded;
-	}
-
-	std::uint8_t LinearFloatToDisplayByte(float value)
-	{
-		if (!std::isfinite(value))
-		{
-			return 0u;
-		}
-
-		const float clamped = std::clamp(value, 0.0f, 1.0f);
-		const float gammaEncoded = std::pow(clamped, 1.0f / 2.2f);
-		return static_cast<std::uint8_t>(std::clamp(gammaEncoded * 255.0f + 0.5f, 0.0f, 255.0f));
-	}
-
-	std::uint8_t LinearAlphaToByte(float value)
-	{
-		if (!std::isfinite(value))
-		{
-			return 255u;
-		}
-
-		const float clamped = std::clamp(value, 0.0f, 1.0f);
-		return static_cast<std::uint8_t>(std::clamp(clamped * 255.0f + 0.5f, 0.0f, 255.0f));
-	}
-
-	std::vector<std::uint8_t> ConvertVulkanReadbackToRgba8(
-		const std::vector<std::uint8_t>& readbackBytes,
-		std::uint32_t width,
-		std::uint32_t height,
-		VkFormat format)
-	{
-		const std::uint64_t pixelCount64 = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
-		const std::size_t pixelCount = static_cast<std::size_t>(pixelCount64);
-		std::vector<std::uint8_t> rgba(pixelCount * 4u);
-
-		if (format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB)
-		{
-			rgba = readbackBytes;
-			return rgba;
-		}
-
-		if (format == VK_FORMAT_R16G16B16A16_SFLOAT)
-		{
-			for (std::size_t pixelIndex = 0u; pixelIndex < pixelCount; ++pixelIndex)
-			{
-				const std::size_t sourceOffset = pixelIndex * 8u;
-				const std::size_t targetOffset = pixelIndex * 4u;
-				const auto readHalf = [&](std::size_t byteOffset) {
-					return static_cast<std::uint16_t>(
-						static_cast<std::uint16_t>(readbackBytes[sourceOffset + byteOffset])
-						| (static_cast<std::uint16_t>(readbackBytes[sourceOffset + byteOffset + 1u]) << 8u));
-				};
-
-				rgba[targetOffset + 0u] = LinearFloatToDisplayByte(HalfFloatToFloat(readHalf(0u)));
-				rgba[targetOffset + 1u] = LinearFloatToDisplayByte(HalfFloatToFloat(readHalf(2u)));
-				rgba[targetOffset + 2u] = LinearFloatToDisplayByte(HalfFloatToFloat(readHalf(4u)));
-				rgba[targetOffset + 3u] = LinearAlphaToByte(HalfFloatToFloat(readHalf(6u)));
-			}
-		}
-
-		return rgba;
-	}
+	constexpr std::size_t kMaxVulkanCaptureReadbacks = 4u;
 
 	void RecordCaptureImageBarrier(
 		VkCommandBuffer commandBuffer,
@@ -5463,10 +5351,18 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 	}
 
 	const uint32_t clampedSnapshotSlot = std::min(snapshotSlotIndex, MAX_RENDER_SNAPSHOTS_PER_FRAME - 1u);
+	if (hiZ.mipLevels > MAX_HIZ_DESCRIPTOR_MIP_LEVELS) {
+		TERRAENGINE_LOG(LogLevel::Error, "Skipping Hi-Z generation because the pyramid exceeds descriptor capacity.");
+		return false;
+	}
+	// Allocate a viewport-independent descriptor range. Scene and Game views may
+	// have different mip counts while their command buffers wait for one batched
+	// submit, so sizing this pool from the active view would destroy descriptor
+	// sets already bound by the earlier view.
 	const std::size_t descriptorSetCount =
 		static_cast<std::size_t>(MAX_FRAMES_IN_FLIGHT)
 		* static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME)
-		* static_cast<std::size_t>(hiZ.mipLevels);
+		* static_cast<std::size_t>(MAX_HIZ_DESCRIPTOR_MIP_LEVELS);
 	if (hiZDescriptorPool == VK_NULL_HANDLE || hiZDescriptorSets.size() != descriptorSetCount) {
 		if (hiZDescriptorPool != VK_NULL_HANDLE) {
 			// This path is normally hit only after a resize. Wait before
@@ -5524,7 +5420,7 @@ bool VulkanContext::Impl::GenerateHiZPyramid(VulkanHiZ& hiZ, VkCommandBuffer cmd
 	const std::size_t frameDescriptorBase =
 		(static_cast<std::size_t>(currentFrame) * static_cast<std::size_t>(MAX_RENDER_SNAPSHOTS_PER_FRAME)
 			+ static_cast<std::size_t>(clampedSnapshotSlot))
-		* static_cast<std::size_t>(hiZ.mipLevels);
+		* static_cast<std::size_t>(MAX_HIZ_DESCRIPTOR_MIP_LEVELS);
 	if (frameDescriptorBase + hiZ.mipLevels > hiZDescriptorSets.size()) {
 		return false;
 	}
@@ -6507,13 +6403,25 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 	result.sourceKind = request.sourceKind;
 	result.sourceName = request.sourceName;
 	result.size = request.targetSize;
-	result.frameId = 0u;
+	result.frameId = request.submittedFrameId;
 	result.freshness = request.freshness;
 	result.overlaysIncluded = false;
 	result.errorCategory = "backend_readback_unavailable";
 	if (!impl || impl->device == VK_NULL_HANDLE || impl->allocator == VK_NULL_HANDLE)
 	{
 		result.message = "Vulkan capture readback cannot run before the backend is initialized.";
+		return result;
+	}
+	if (impl->deviceLost)
+	{
+		result.errorCategory = "device_lost";
+		result.message = "Vulkan capture readback cannot run while renderer recovery is pending.";
+		return result;
+	}
+	if (impl->inFlightReadbacks.size() >= kMaxVulkanCaptureReadbacks)
+	{
+		result.errorCategory = "queue_full";
+		result.message = "Vulkan capture readback has reached its bounded in-flight limit.";
 		return result;
 	}
 
@@ -6547,7 +6455,7 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 		return result;
 	}
 
-	const std::uint32_t bytesPerPixel = GetVulkanCaptureBytesPerPixel(impl->offscreenColorFormat);
+	const std::uint32_t bytesPerPixel = TerraEngine::Renderer::VulkanReadback::BytesPerPixel(impl->offscreenColorFormat);
 	if (bytesPerPixel == 0u)
 	{
 		result.errorCategory = "unsupported_readback";
@@ -6555,7 +6463,13 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 		return result;
 	}
 
-	const std::uint64_t copyBytes64 = static_cast<std::uint64_t>(sourceWidth) * static_cast<std::uint64_t>(sourceHeight) * bytesPerPixel;
+	const std::uint64_t pixelCount64 = static_cast<std::uint64_t>(sourceWidth) * static_cast<std::uint64_t>(sourceHeight);
+	if (pixelCount64 > std::numeric_limits<std::uint64_t>::max() / bytesPerPixel)
+	{
+		result.message = "Vulkan readback skipped because the source render target byte count overflowed.";
+		return result;
+	}
+	const std::uint64_t copyBytes64 = pixelCount64 * bytesPerPixel;
 	if (copyBytes64 > std::numeric_limits<VkDeviceSize>::max() || copyBytes64 > std::numeric_limits<std::size_t>::max())
 	{
 		result.message = "Vulkan readback skipped because the source render target is too large to stage.";
@@ -6591,6 +6505,17 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 		result.message = "Vulkan capture readback could not allocate an immediate command buffer.";
 		return result;
 	}
+	const VkCommandPool commandPool = impl->immediateCommandPool != VK_NULL_HANDLE
+		? impl->immediateCommandPool
+		: impl->commandPools[impl->currentFrame];
+	auto freeCommandBuffer = [&]() {
+		if (commandBuffer != VK_NULL_HANDLE)
+		{
+			std::lock_guard<std::mutex> lock(impl->immediateCommandMutex);
+			vkFreeCommandBuffers(impl->device, commandPool, 1u, &commandBuffer);
+			commandBuffer = VK_NULL_HANDLE;
+		}
+	};
 	RecordCaptureImageBarrier(commandBuffer, target.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	VkBufferImageCopy copyRegion{};
 	copyRegion.bufferOffset = 0u;
@@ -6610,66 +6535,333 @@ TerraEngine::Renderer::RenderCaptureResult VulkanContext::ReadbackCapture(const 
 		1u,
 		&copyRegion);
 	RecordCaptureImageBarrier(commandBuffer, target.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	impl->EndSingleTimeCommands(commandBuffer);
-
-	std::vector<std::uint8_t> readbackBytes(static_cast<std::size_t>(copyBytes64));
-	void* mapped = nullptr;
-	if (vmaMapMemory(impl->allocator, stagingBuffer.allocation, &mapped) != VK_SUCCESS || mapped == nullptr)
+	const VkResult endResult = vkEndCommandBuffer(commandBuffer);
+	if (endResult != VK_SUCCESS)
 	{
+		freeCommandBuffer();
 		destroyStagingBuffer();
-		result.message = "Vulkan capture readback could not map staging memory.";
+		result.message = "Vulkan capture readback could not finish recording its copy command.";
 		return result;
 	}
-	vmaInvalidateAllocation(impl->allocator, stagingBuffer.allocation, 0u, static_cast<VkDeviceSize>(copyBytes64));
-	std::memcpy(readbackBytes.data(), mapped, readbackBytes.size());
-	vmaUnmapMemory(impl->allocator, stagingBuffer.allocation);
-	destroyStagingBuffer();
 
-	try
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	VkFence readbackFence = VK_NULL_HANDLE;
+	const VkResult fenceResult = vkCreateFence(impl->device, &fenceInfo, nullptr, &readbackFence);
+	if (fenceResult != VK_SUCCESS)
 	{
-		std::vector<std::uint8_t> rgbaPixels = ConvertVulkanReadbackToRgba8(readbackBytes, sourceWidth, sourceHeight, impl->offscreenColorFormat);
-		const std::uint32_t outputWidth = sourceWidth;
-		const std::uint32_t outputHeight = sourceHeight;
-		if (request.targetSize.x > 0u
-			&& request.targetSize.y > 0u
-			&& (request.targetSize.x != sourceWidth || request.targetSize.y != sourceHeight))
-		{
-			result.warnings.push_back("Capture returned the native Vulkan render target dimensions without post-readback resizing.");
-		}
-		if (impl->offscreenColorFormat == VK_FORMAT_R16G16B16A16_SFLOAT)
-		{
-			result.warnings.push_back("HDR render target pixels were tone-clamped and gamma encoded into an 8-bit PNG.");
-		}
-		if (request.includeOverlays)
-		{
-			result.warnings.push_back("Vulkan render-target readback captures the renderer color target before editor overlay composition.");
-		}
+		destroyStagingBuffer();
+		freeCommandBuffer();
+		result.message = "Vulkan capture readback could not create a fence.";
+		return result;
+	}
 
-		const std::vector<std::uint8_t> pngBytes = TerraEngine::Renderer::EncodeRgba8ToPng(rgbaPixels, outputWidth, outputHeight);
-		result.base64Data = TerraEngine::Renderer::EncodeBase64(pngBytes);
-		result.size = glm::uvec2(outputWidth, outputHeight);
-		result.ok = true;
-		result.errorCategory.clear();
-		result.mimeType = "image/png";
-		result.backendReadback = true;
-		result.deterministicFallback = false;
-		// Report the actual backing target so MCP clients can distinguish normal
-		// viewport readback from ad-hoc/object camera captures rendered offscreen.
-		result.message = captureDedicatedView
-			? "Captured live Vulkan dedicated capture render target."
-			: (captureSceneView
-			? "Captured live Vulkan Scene View render target."
-			: "Captured live Vulkan Game View render target.");
-	}
-	catch (const std::exception& exception)
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &commandBuffer;
+
+	VkResult submitResult = VK_SUCCESS;
 	{
-		result.ok = false;
-		result.errorCategory = "backend_readback_unavailable";
-		result.base64Data.clear();
-		result.message = std::string("Vulkan capture readback failed while encoding PNG data: ") + exception.what();
+		std::lock_guard<std::mutex> lock(impl->immediateCommandMutex);
+		submitResult = vkQueueSubmit(impl->graphicsQueue, 1u, &submitInfo, readbackFence);
 	}
+	if (submitResult != VK_SUCCESS)
+	{
+		const bool lost = impl->MarkDeviceLost(submitResult, "asynchronous capture readback submit");
+		vkDestroyFence(impl->device, readbackFence, nullptr);
+		freeCommandBuffer();
+		destroyStagingBuffer();
+		result.errorCategory = lost ? "device_lost" : "backend_readback_unavailable";
+		result.message = lost
+			? "Vulkan device was lost while submitting capture readback."
+			: "Vulkan capture readback could not submit its copy command.";
+		return result;
+	}
+
+	Impl::VulkanReadbackRequest readbackRequest{};
+	readbackRequest.completion = result;
+	readbackRequest.completion.size = glm::uvec2(sourceWidth, sourceHeight);
+	readbackRequest.completion.mimeType = "image/png";
+	readbackRequest.completion.backendReadback = true;
+	readbackRequest.completion.deterministicFallback = false;
+	readbackRequest.completion.pendingAsync = false;
+	readbackRequest.completion.overlaysIncluded = false;
+	readbackRequest.viewType = request.viewType;
+	readbackRequest.sourceImage = target.image;
+	readbackRequest.stagingBuffer = stagingBuffer.buffer;
+	readbackRequest.stagingAllocation = stagingBuffer.allocation;
+	readbackRequest.fence = readbackFence;
+	readbackRequest.commandBuffer = commandBuffer;
+	readbackRequest.commandPool = commandPool;
+	readbackRequest.width = sourceWidth;
+	readbackRequest.height = sourceHeight;
+	readbackRequest.sourceFormat = impl->offscreenColorFormat;
+	readbackRequest.submittedAt = std::chrono::steady_clock::now();
+	readbackRequest.timeout = std::chrono::milliseconds(request.timeoutMs > 0u ? request.timeoutMs : 2000u);
+	if (request.targetSize.x > 0u
+		&& request.targetSize.y > 0u
+		&& (request.targetSize.x != sourceWidth || request.targetSize.y != sourceHeight))
+	{
+		readbackRequest.completion.warnings.push_back("Capture returned the native Vulkan render target dimensions without post-readback resizing.");
+	}
+	if (impl->offscreenColorFormat == VK_FORMAT_R16G16B16A16_SFLOAT)
+	{
+		readbackRequest.completion.warnings.push_back("HDR render target pixels were tone-clamped and gamma encoded into an 8-bit PNG.");
+	}
+	if (request.includeOverlays)
+	{
+		readbackRequest.completion.warnings.push_back("Vulkan render-target readback captures the renderer color target before editor overlay composition.");
+	}
+
+	impl->inFlightReadbacks.push_back(std::move(readbackRequest));
+
+	result.ok = true;
+	result.pendingAsync = true;
+	result.errorCategory.clear();
+	result.mimeType = "image/png";
+	result.backendReadback = true;
+	result.deterministicFallback = false;
+	result.message = captureDedicatedView
+		? "Queued live Vulkan dedicated capture render target for async readback."
+		: (captureSceneView
+		? "Queued live Vulkan Scene View render target for async readback."
+		: "Queued live Vulkan Game View render target for async readback.");
 
 	return result;
+}
+
+void VulkanContext::Impl::DestroyReadbackRequestResources(VulkanReadbackRequest& request)
+{
+	// This helper is called only after fence completion, failed submission, or
+	// device teardown. Command-pool operations need the same external lock used
+	// by immediate allocation and submission.
+	if (request.fence != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
+	{
+		vkDestroyFence(device, request.fence, nullptr);
+		request.fence = VK_NULL_HANDLE;
+	}
+	if (request.commandBuffer != VK_NULL_HANDLE && request.commandPool != VK_NULL_HANDLE && device != VK_NULL_HANDLE)
+	{
+		std::lock_guard<std::mutex> lock(immediateCommandMutex);
+		vkFreeCommandBuffers(device, request.commandPool, 1u, &request.commandBuffer);
+		request.commandBuffer = VK_NULL_HANDLE;
+	}
+	if (request.stagingBuffer != VK_NULL_HANDLE && request.stagingAllocation != VK_NULL_HANDLE && allocator != VK_NULL_HANDLE)
+	{
+		VulkanBuffer stagingBuffer{ request.stagingBuffer, request.stagingAllocation, 0u };
+		DestroyBufferImmediate(stagingBuffer);
+		request.stagingBuffer = VK_NULL_HANDLE;
+		request.stagingAllocation = VK_NULL_HANDLE;
+	}
+}
+
+bool VulkanContext::Impl::HasInFlightReadbackForImage(VkImage image) const
+{
+	if (image == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	return std::any_of(inFlightReadbacks.begin(), inFlightReadbacks.end(), [image](const VulkanReadbackRequest& request) {
+		return request.sourceImage == image;
+	});
+}
+
+void VulkanContext::Impl::CancelReadbackRequests(std::string_view errorCategory, std::string_view message, bool publishResults)
+{
+	for (VulkanReadbackRequest& request : inFlightReadbacks)
+	{
+		if (publishResults && !request.completionPublished)
+		{
+			request.completion.ok = false;
+			request.completion.pendingAsync = false;
+			request.completion.base64Data.clear();
+			request.completion.errorCategory = std::string(errorCategory);
+			request.completion.message = std::string(message);
+			completedReadbacks.push_back(std::move(request.completion));
+			request.completionPublished = true;
+		}
+		DestroyReadbackRequestResources(request);
+	}
+	inFlightReadbacks.clear();
+}
+
+void VulkanContext::Impl::ProcessReadbackRequests()
+{
+	const auto now = std::chrono::steady_clock::now();
+	for (auto iterator = inFlightReadbacks.begin(); iterator != inFlightReadbacks.end();)
+	{
+		VulkanReadbackRequest& request = *iterator;
+		VkResult status = vkGetFenceStatus(device, request.fence);
+		if (status == VK_NOT_READY)
+		{
+			if (!request.completionPublished && now - request.submittedAt >= request.timeout)
+			{
+				request.completion.ok = false;
+				request.completion.pendingAsync = false;
+				request.completion.base64Data.clear();
+				request.completion.errorCategory = "timeout";
+				request.completion.message = "Vulkan async capture readback timed out waiting for the GPU.";
+				completedReadbacks.push_back(request.completion);
+				request.completionPublished = true;
+			}
+			// A timeout is a client-visible cancellation, not proof that Vulkan
+			// released the submission. Keep all GPU objects until a later poll sees
+			// the fence signal or device loss.
+			++iterator;
+			continue;
+		}
+		if (status == VK_ERROR_DEVICE_LOST)
+		{
+			MarkDeviceLost(status, "async readback fence polling");
+			if (!request.completionPublished)
+			{
+				request.completion.ok = false;
+				request.completion.errorCategory = "device_lost";
+				request.completion.message = "Vulkan device was lost during async capture readback.";
+				completedReadbacks.push_back(std::move(request.completion));
+			}
+			DestroyReadbackRequestResources(request);
+			iterator = inFlightReadbacks.erase(iterator);
+			continue;
+		}
+		if (status != VK_SUCCESS)
+		{
+			if (!request.completionPublished)
+			{
+				request.completion.ok = false;
+				request.completion.errorCategory = "backend_readback_unavailable";
+				request.completion.message = "Vulkan async capture readback fence polling failed.";
+				completedReadbacks.push_back(request.completion);
+				request.completionPublished = true;
+			}
+			// Query errors such as host/device memory exhaustion do not prove the
+			// submitted command stopped using its resources. Retain ownership just
+			// like the timeout path and retry on a later protected poll.
+			++iterator;
+			continue;
+		}
+
+		// A previously published timeout only needs deferred resource cleanup once
+		// the fence signals; it must never publish a second terminal result.
+		if (request.completionPublished)
+		{
+			DestroyReadbackRequestResources(request);
+			iterator = inFlightReadbacks.erase(iterator);
+			continue;
+		}
+
+		const std::uint32_t bytesPerPixel = TerraEngine::Renderer::VulkanReadback::BytesPerPixel(request.sourceFormat);
+		const std::uint64_t copyBytes64 = static_cast<std::uint64_t>(request.width) * static_cast<std::uint64_t>(request.height) * bytesPerPixel;
+
+		const bool captureSceneView = request.completion.sourceKind == TerraEngine::Renderer::RenderCaptureSourceKind::GameView
+			&& request.viewType == RenderViewType::Scene;
+		const bool captureDedicatedView = request.completion.sourceKind != TerraEngine::Renderer::RenderCaptureSourceKind::GameView;
+		const OffscreenResources& target = captureDedicatedView
+			? captureView
+			: (captureSceneView ? sceneView : gameView);
+
+		if (request.sourceImage != target.image
+			|| request.width != target.extent.width
+			|| request.height != target.extent.height)
+		{
+			request.completion.ok = false;
+			request.completion.errorCategory = "resize_aborted";
+			request.completion.message = "Vulkan capture readback aborted because its source viewport was recreated before completion.";
+			completedReadbacks.push_back(std::move(request.completion));
+			DestroyReadbackRequestResources(request);
+			iterator = inFlightReadbacks.erase(iterator);
+			continue;
+		}
+
+		std::vector<std::uint8_t> readbackBytes(static_cast<std::size_t>(copyBytes64));
+		void* mapped = nullptr;
+		const VkResult mapResult = vmaMapMemory(allocator, request.stagingAllocation, &mapped);
+		if (mapResult == VK_ERROR_DEVICE_LOST)
+		{
+			MarkDeviceLost(mapResult, "async readback memory mapping");
+			request.completion.ok = false;
+			request.completion.errorCategory = "device_lost";
+			request.completion.message = "Vulkan device was lost while mapping capture staging memory.";
+			completedReadbacks.push_back(std::move(request.completion));
+		}
+		else if (mapResult != VK_SUCCESS || mapped == nullptr)
+		{
+			request.completion.ok = false;
+			request.completion.errorCategory = "backend_readback_unavailable";
+			request.completion.message = "Vulkan capture readback could not map staging memory.";
+			completedReadbacks.push_back(std::move(request.completion));
+		}
+		else
+		{
+			const VkResult invalidateResult = vmaInvalidateAllocation(allocator, request.stagingAllocation, 0u, static_cast<VkDeviceSize>(copyBytes64));
+			if (invalidateResult == VK_SUCCESS)
+			{
+				std::memcpy(readbackBytes.data(), mapped, readbackBytes.size());
+			}
+			vmaUnmapMemory(allocator, request.stagingAllocation);
+
+			if (invalidateResult != VK_SUCCESS)
+			{
+				if (invalidateResult == VK_ERROR_DEVICE_LOST)
+				{
+					MarkDeviceLost(invalidateResult, "async readback memory invalidation");
+				}
+				request.completion.ok = false;
+				request.completion.errorCategory = invalidateResult == VK_ERROR_DEVICE_LOST ? "device_lost" : "backend_readback_unavailable";
+				request.completion.message = "Vulkan capture readback could not invalidate staging memory for host access.";
+				completedReadbacks.push_back(std::move(request.completion));
+			}
+			else
+			{
+				try
+				{
+					std::vector<std::uint8_t> rgbaPixels = TerraEngine::Renderer::VulkanReadback::ConvertToRgba8(
+						readbackBytes,
+						request.width,
+						request.height,
+						request.sourceFormat);
+					const std::vector<std::uint8_t> pngBytes = TerraEngine::Renderer::EncodeRgba8ToPng(rgbaPixels, request.width, request.height);
+					request.completion.base64Data = TerraEngine::Renderer::EncodeBase64(pngBytes);
+					request.completion.ok = true;
+					request.completion.errorCategory.clear();
+					request.completion.message = captureDedicatedView
+						? "Captured live Vulkan dedicated capture render target."
+						: (captureSceneView
+						? "Captured live Vulkan Scene View render target."
+						: "Captured live Vulkan Game View render target.");
+				}
+				catch (const std::exception& exception)
+				{
+					request.completion.ok = false;
+					request.completion.errorCategory = "backend_readback_unavailable";
+					request.completion.base64Data.clear();
+					request.completion.message = std::string("Vulkan capture readback failed while encoding PNG data: ") + exception.what();
+				}
+				completedReadbacks.push_back(std::move(request.completion));
+			}
+		}
+
+		DestroyReadbackRequestResources(request);
+		iterator = inFlightReadbacks.erase(iterator);
+	}
+}
+
+std::vector<TerraEngine::Renderer::RenderCaptureResult> VulkanContext::PollCaptureReadbacks()
+{
+	std::vector<TerraEngine::Renderer::RenderCaptureResult> results;
+	if (!impl || !impl->initialized || impl->device == VK_NULL_HANDLE)
+	{
+		return results;
+	}
+	impl->ProcessReadbackRequests();
+	results.reserve(impl->completedReadbacks.size());
+	while (!impl->completedReadbacks.empty())
+	{
+		results.push_back(std::move(impl->completedReadbacks.front()));
+		impl->completedReadbacks.pop_front();
+	}
+	return results;
 }
 
 TerraEngine::Renderer::BackendFrameBreakdown VulkanContext::GetLatestBackendFrameBreakdown() const
@@ -7246,6 +7438,23 @@ void VulkanContext::Impl::CreateOffscreenResources(OffscreenResources& res, VkEx
 		res = {};
 	};
 
+	if (HasInFlightReadbackForImage(res.image))
+	{
+		// A resize may replace the exact image referenced by an asynchronous copy.
+		// Wait only on this rare resize boundary so the old image is never
+		// destroyed while the graphics queue still owns it. The next poll detects
+		// the image identity change and reports a resize cancellation.
+		const VkResult idleResult = vkDeviceWaitIdle(device);
+		if (MarkDeviceLost(idleResult, "capture source resize device idle"))
+		{
+			return;
+		}
+		if (idleResult != VK_SUCCESS)
+		{
+			TERRAENGINE_LOG(LogLevel::Error, "Skipping offscreen resize because pending capture work could not become idle: " << idleResult);
+			return;
+		}
+	}
 	if (res.image != VK_NULL_HANDLE || res.depthImage != VK_NULL_HANDLE || res.framebuffer != VK_NULL_HANDLE) {
 		DestroyOffscreenResourceSet();
 	}

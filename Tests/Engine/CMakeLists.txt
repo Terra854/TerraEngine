@@ -122,6 +122,7 @@ add_executable(TerraEngine-EngineTests
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkerSafetyTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/RenderWorkSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanFrameDiagnosticsTests.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanImageReadbackTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanRecordingSchedulingTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanThreadLocalContextTests.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/Renderer/VulkanStaleBatchTests.cpp
@@ -277,6 +278,12 @@ add_test(NAME Engine.RendererRecovery COMMAND $<TARGET_FILE:TerraEngine-EngineTe
 set_tests_properties(Engine.RendererRecovery PROPERTIES
 	LABELS "Engine;RendererRecovery;DeviceLoss"
 	ENVIRONMENT "TERRAENGINE_TEST_FILTER=RendererRecovery,DeviceLoss,RenderFailureContainment,PlatformUtils,SystemScheduler,ExportRuntime"
+)
+
+add_test(NAME Engine.VulkanImageReadback COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)
+set_tests_properties(Engine.VulkanImageReadback PROPERTIES
+	LABELS "Engine;Renderer;Vulkan;ImageReadback"
+	ENVIRONMENT "TERRAENGINE_TEST_FILTER=Renderer.VulkanImageReadback"
 )
 
 add_test(NAME Engine.AdaptiveVirtualGeometry COMMAND $<TARGET_FILE:TerraEngine-EngineTests>)

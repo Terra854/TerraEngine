@@ -140,6 +140,17 @@ void VulkanContext::Impl::Cleanup(bool skipDeviceIdle) {
 		}
 	}
 
+	// Readback objects are not part of the normal frame arrays. Drain them
+	// explicitly while the allocator, command pools, and device still exist.
+	// Device-loss teardown is terminal for submitted work, while normal cleanup
+	// has already waited for device idle above.
+	CancelReadbackRequests(
+		deviceLost ? "device_lost" : "canceled",
+		deviceLost
+			? "Vulkan image readback was canceled because the device was lost."
+			: "Vulkan image readback was canceled during renderer shutdown.",
+		true);
+
 	DestroyAmbientOcclusionResources();
 	DestroyEnvironmentLightingResources();
 	DestroyGpuTimestampQueries();

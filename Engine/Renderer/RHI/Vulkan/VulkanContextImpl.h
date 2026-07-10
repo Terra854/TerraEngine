@@ -38,6 +38,7 @@
 #include <stdexcept>
 #include <filesystem>
 #include <string_view>
+#include <chrono>
 
 inline const std::vector<const char*> validationLayers = {
 	"VK_LAYER_KHRONOS_validation"
@@ -257,6 +258,11 @@ struct VulkanContext::Impl {
 	// buffers. The fixed cap bounds VRAM use while covering editor scene/game
 	// rendering plus several future offscreen camera targets.
 	static constexpr uint32_t MAX_RENDER_SNAPSHOTS_PER_FRAME = 8u;
+	// VkImage extents use 32-bit dimensions, so no valid 2D image can require
+	// more than 32 pyramid levels. Reserving that fixed stride prevents a Scene
+	// View with one mip count from rebuilding descriptor storage still referenced
+	// by an unsubmitted Game View command buffer (or vice versa).
+	static constexpr uint32_t MAX_HIZ_DESCRIPTOR_MIP_LEVELS = std::numeric_limits<uint32_t>::digits;
 	static constexpr uint32_t MAX_SHADOW_RESOURCE_SLOTS = kMaxShadowResourceSlots;
 	static constexpr uint32_t SHADOW_MAP_RESOLUTION = 1024u;
 	static constexpr uint32_t POINT_SHADOW_MAP_RESOLUTION = 1024u;
@@ -817,8 +823,34 @@ struct VulkanContext::Impl {
 	bool editorRenderSubmitted = false;
 	uint32_t acquiredImageIndex = 0;
 
+	// Each record owns every Vulkan object needed by one asynchronous copy. GPU
+	// resources remain alive after a client timeout until its fence proves that
+	// the queue has stopped using them.
+	struct VulkanReadbackRequest {
+		TerraEngine::Renderer::RenderCaptureResult completion;
+		RenderViewType viewType = RenderViewType::Game;
+		VkImage sourceImage = VK_NULL_HANDLE;
+		VkBuffer stagingBuffer = VK_NULL_HANDLE;
+		VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+		VkFence fence = VK_NULL_HANDLE;
+		VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+		VkCommandPool commandPool = VK_NULL_HANDLE;
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+		VkFormat sourceFormat = VK_FORMAT_UNDEFINED;
+		std::chrono::steady_clock::time_point submittedAt{};
+		std::chrono::milliseconds timeout = std::chrono::milliseconds(2000);
+		bool completionPublished = false;
+	};
+	std::deque<VulkanReadbackRequest> inFlightReadbacks;
+	std::deque<TerraEngine::Renderer::RenderCaptureResult> completedReadbacks;
+
 	bool InitVulkan(WindowSystem& windowSystem);
 	void Cleanup(bool skipDeviceIdle = false);
+	void ProcessReadbackRequests();
+	void DestroyReadbackRequestResources(VulkanReadbackRequest& request);
+	void CancelReadbackRequests(std::string_view errorCategory, std::string_view message, bool publishResults);
+	[[nodiscard]] bool HasInFlightReadbackForImage(VkImage image) const;
 
 	void InitEditorMode();
 	void CreateOffscreenResources(OffscreenResources& res, VkExtent2D requestedExtent = {});
