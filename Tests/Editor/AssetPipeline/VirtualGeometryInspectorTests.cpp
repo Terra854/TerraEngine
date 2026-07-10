@@ -228,6 +228,85 @@ namespace TerraEngine::EditorTests
 			std::filesystem::remove_all(root);
 		});
 
+		registry.Add("VirtualGeometry.Editor.AssetDatabase.StartupPackageChildrenPublishOneCompleteIndex", [](TestContext& context) {
+			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
+			const std::filesystem::path assetRoot = root / "Assets";
+			const std::filesystem::path buildRoot = root / "Build" / "Assets";
+			const std::filesystem::path packageSource = "camera.glb";
+			const std::filesystem::path materialSource = "camera_Generated/camera.tmat";
+			const std::filesystem::path prefabSource = "camera_Generated/camera.teprefab";
+			const std::filesystem::path trailingSource = "Trailing.tmat";
+			const TerraEngine::UUID packageGuid = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID materialGuid = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID prefabGuid = TerraEngine::GenerateUUID();
+			const TerraEngine::UUID trailingGuid = TerraEngine::GenerateUUID();
+
+			std::ofstream(assetRoot / packageSource, std::ios::binary | std::ios::trunc).put('\0');
+			WriteMaterialAsset(assetRoot / materialSource, "GeneratedCameraMaterial");
+			WriteMaterialAsset(buildRoot / materialSource, "GeneratedCameraMaterialCompiled");
+			std::ofstream(assetRoot / prefabSource, std::ios::trunc) << "{}";
+			WriteMaterialAsset(assetRoot / trailingSource, "Trailing");
+			WriteMaterialAsset(buildRoot / trailingSource, "TrailingCompiled");
+
+			TerraEngine::AssetPipeline::ModelPackageImportResult importResult{};
+			importResult.status = TerraEngine::AssetPipeline::ModelImportStatus::Succeeded;
+			importResult.packageGuid = packageGuid;
+			importResult.package.sourcePath = packageSource;
+			importResult.package.importRoot = "camera_Generated";
+			TerraEngine::AssetPipeline::GeneratedModelMaterialAsset material{};
+			material.guid = materialGuid;
+			material.sourcePath = materialSource;
+			material.compiledPath = materialSource;
+			material.displayName = "GeneratedCameraMaterial";
+			importResult.generatedMaterials.push_back(material);
+			TerraEngine::AssetPipeline::GeneratedModelPrefabAsset prefab{};
+			prefab.guid = prefabGuid;
+			prefab.sourcePath = prefabSource;
+			prefab.displayName = "GeneratedCameraPrefab";
+			importResult.generatedPrefabs.push_back(prefab);
+			context.Expect(TerraEngine::AssetPipeline::SaveModelPackageImportResult(assetRoot / packageSource, importResult), "Package sidecar should save generated startup children.");
+
+			const auto BuildIndexEntry = [&](const std::filesystem::path& sourcePath, const std::filesystem::path& compiledPath, const TerraEngine::UUID& guid, const std::string& importerName) {
+				nlohmann::json entry;
+				entry["guid"] = TerraEngine::ToHexString(guid);
+				entry["importerName"] = importerName;
+				entry["lastModified"] = std::filesystem::last_write_time(assetRoot / sourcePath).time_since_epoch().count();
+				entry["sourcePath"] = sourcePath.generic_string();
+				entry["compiledPath"] = compiledPath.generic_string();
+				entry["settings"] = nlohmann::json::object();
+				return entry;
+			};
+
+			nlohmann::json startupIndex;
+			startupIndex["version"] = 1;
+			startupIndex["assets"] = nlohmann::json::array({
+				BuildIndexEntry(packageSource, "camera.temf", packageGuid, TerraEngine::AssetPipeline::GetModelPackageImporterName(assetRoot / packageSource)),
+				BuildIndexEntry(trailingSource, trailingSource, trailingGuid, "MaterialImporter")
+			});
+			std::filesystem::create_directories(root / "Library");
+			std::ofstream(root / "Library" / "AssetIndex.json", std::ios::trunc) << startupIndex.dump(4);
+
+			AssetDatabase::Instance().Initialize(root);
+			nlohmann::json publishedIndex;
+			std::ifstream(root / "Library" / "AssetIndex.json") >> publishedIndex;
+			std::vector<std::string> publishedSources;
+			for (const nlohmann::json& entry : publishedIndex["assets"]) {
+				publishedSources.push_back(entry.value("sourcePath", std::string()));
+			}
+
+			const auto HasPublishedSource = [&](const std::filesystem::path& sourcePath) {
+				return std::find(publishedSources.begin(), publishedSources.end(), sourcePath.generic_string()) != publishedSources.end();
+			};
+			context.Expect(HasPublishedSource(packageSource), "Consolidated startup publication should retain the package parent.");
+			context.Expect(HasPublishedSource(materialSource), "Consolidated startup publication should add the generated material.");
+			context.Expect(HasPublishedSource(prefabSource), "Consolidated startup publication should add the generated prefab.");
+			context.Expect(HasPublishedSource(trailingSource), "Consolidated startup publication should retain entries loaded after the package parent.");
+			context.Expect(!std::filesystem::exists(root / "Library" / "AssetIndex.json.tmp"), "Consolidated startup publication should not leave a shared temporary index file.");
+
+			AssetDatabase::Instance().Shutdown();
+			std::filesystem::remove_all(root);
+		});
+
 		registry.Add("VirtualGeometry.Editor.AssetDatabase.BackgroundReconcileFindsNewFilesAfterIndexedStartup", [](TestContext& context) {
 			const std::filesystem::path root = MakeVirtualGeometryInspectorProjectRoot();
 			const std::filesystem::path assetRoot = root / "Assets";

@@ -220,6 +220,7 @@ private:
 	void RemoveAsset(const std::filesystem::path& sourcePath);
 	bool LoadAssetIndex();
 	bool SaveAssetIndex() const;
+	void RequestAssetIndexSave();
 	void StartBackgroundProjectReconcile();
 	void PublishBackgroundProjectReconcile();
 	void ProcessPendingProjectReconcile();
@@ -233,6 +234,11 @@ private:
 
 	std::map<std::filesystem::path, AssetMetadata> assets;
 	std::filesystem::path assetIndexPath;
+	// Startup index registration can discover generated package children. Their
+	// normal FinishImport path requests persistence, but those requests must be
+	// batched until the original index has closed and every entry is registered.
+	bool loadingAssetIndex = false;
+	bool assetIndexSaveDeferred = false;
 	
 	// File Watcher
 	FileWatcher fileWatcher;

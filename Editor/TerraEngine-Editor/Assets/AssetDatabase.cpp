@@ -672,6 +672,8 @@ void AssetDatabase::Initialize(const std::filesystem::path& projectRootPath) {
 	if (!std::filesystem::exists(assetIndexPath.parent_path())) std::filesystem::create_directories(assetIndexPath.parent_path());
 
 	assets.clear();
+	loadingAssetIndex = false;
+	assetIndexSaveDeferred = false;
 	recentlyRemovedAssets.clear();
 	pendingReconcileImports.clear();
 	pendingReconcileOrphanedMetas.clear();
@@ -1158,7 +1160,7 @@ void AssetDatabase::FinishImport(const AssetMetadata& metadata, const std::files
 	// Always save metadata
 	SaveMetadata(metadata);
 	RegisterImportedAsset(metadata, absSourcePath, needsImport);
-	SaveAssetIndex();
+	RequestAssetIndexSave();
 }
 
 void AssetDatabase::RegisterImportedAsset(const AssetMetadata& metadata, const std::filesystem::path& absSourcePath, bool needsImport) {
@@ -1238,12 +1240,19 @@ bool AssetDatabase::LoadAssetIndex() {
 		TERRAENGINE_LOG(LogLevel::Warning, "Asset index is malformed and will be rebuilt: " << assetIndexPath << " (" << exception.what() << ")");
 		return false;
 	}
+	// Generated package children use the normal registration path, which may
+	// request an index save. Close the Windows file handle before registration
+	// and defer those requests so no save attempts to replace the file currently
+	// being loaded and no partial prefix of the index is published.
+	file.close();
 
 	if (index.value("version", 0) != 1 || !index.contains("assets") || !index["assets"].is_array()) {
 		TERRAENGINE_LOG(LogLevel::Warning, "Asset index version is unsupported and will be rebuilt: " << assetIndexPath);
 		return false;
 	}
 
+	loadingAssetIndex = true;
+	assetIndexSaveDeferred = false;
 	std::size_t loadedCount = 0u;
 	for (const json& entry : index["assets"]) {
 		try {
@@ -1272,9 +1281,25 @@ bool AssetDatabase::LoadAssetIndex() {
 			TERRAENGINE_LOG(LogLevel::Warning, "Skipping invalid asset index entry in " << assetIndexPath << ": " << exception.what());
 		}
 	}
+	loadingAssetIndex = false;
+	if (assetIndexSaveDeferred) {
+		assetIndexSaveDeferred = false;
+		RequestAssetIndexSave();
+	}
 
 	TERRAENGINE_LOG(LogLevel::Info, "Loaded " << loadedCount << " assets from startup asset index: " << assetIndexPath);
 	return loadedCount > 0u || std::filesystem::exists(assetIndexPath);
+}
+
+void AssetDatabase::RequestAssetIndexSave() {
+	if (loadingAssetIndex) {
+		// Multiple generated materials and prefabs may be registered from one
+		// package entry. One final save publishes the complete database after the
+		// outer load finishes instead of racing a shared temporary file per child.
+		assetIndexSaveDeferred = true;
+		return;
+	}
+	(void)SaveAssetIndex();
 }
 
 bool AssetDatabase::SaveAssetIndex() const {
@@ -1394,7 +1419,7 @@ void AssetDatabase::ProcessPendingProjectReconcile() {
 			std::filesystem::remove(metaPath, removeMetaError);
 		}
 		pendingReconcileOrphanedMetas.clear();
-		SaveAssetIndex();
+		RequestAssetIndexSave();
 	}
 
 	constexpr std::size_t kMaxReconcileImportsPerFrame = 16u;
@@ -2249,7 +2274,7 @@ void AssetDatabase::RemoveAsset(const std::filesystem::path& sourcePath) {
 		// Guard this branch so invalid input or unavailable runtime state exits before touching shared engine data.
 		if (std::filesystem::exists(meta)) std::filesystem::remove(meta, ec);
 		assets.erase(it);
-		SaveAssetIndex();
+		RequestAssetIndexSave();
 	}
 }
 
@@ -2668,7 +2693,7 @@ bool AssetDatabase::SaveVirtualGeometryPerMeshOverride(const TerraEngine::UUID& 
 			}
 			return false;
 		}
-		SaveAssetIndex();
+		RequestAssetIndexSave();
 		return true;
 	}
 
@@ -2698,7 +2723,7 @@ bool AssetDatabase::ClearVirtualGeometryPerMeshOverride(const TerraEngine::UUID&
 			}
 			return false;
 		}
-		SaveAssetIndex();
+		RequestAssetIndexSave();
 		return true;
 	}
 
